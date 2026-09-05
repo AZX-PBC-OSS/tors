@@ -1,0 +1,36 @@
+version: 2
+
+updates:
+  # Keeps the SHA pins in publish.yml (and tag refs in ci.yml) current — SHA-pinning
+  # actions without this entry means never receiving upstream security fixes.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps-ci)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps-rust)"
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # `uv` is a first-class Dependabot ecosystem (understands pyproject.toml and uv.lock
+  # natively) — not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps-py)"
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]

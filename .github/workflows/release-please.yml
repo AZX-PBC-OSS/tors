@@ -1,0 +1,66 @@
+# release-type is `python`: it bumps pyproject.toml's [project].version and CHANGELOG.md
+# from Conventional Commits — never hand-edit either. It does NOT touch Cargo.toml's
+# [package].version; that field is cosmetic (the crate has `publish = false` and is never
+# pushed to crates.io under this name, see Cargo.toml's own comment) and drifting from
+# pyproject.toml's version is harmless. If tors ever does publish the crate separately,
+# add Cargo.toml to a release-please-config.json `extra-files` entry at that point.
+#
+# No release-please-config.json/.release-please-manifest.json: a single-package repo needs
+# neither — release-type is passed directly (same house pattern as cennan).
+#
+# GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
+# a tag released this way will NOT auto-trigger publish.yml's `push: tags` step — see that
+# workflow's header. The App path below is optional; without it, run publish.yml manually
+# (workflow_dispatch) after a release PR merges. Set both or neither:
+#   vars.RELEASE_PLEASE_APP_ID              App ID of the installed GitHub App
+#   secrets.RELEASE_PLEASE_APP_PRIVATE_KEY  its PEM private key
+# The App needs `contents: write` and `pull_requests: write` on this repo.
+
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Mint a GitHub App token (optional)
+        id: app-token
+        if: ${{ vars.RELEASE_PLEASE_APP_ID != '' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          release-type: python
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Warn that publish.yml cannot auto-trigger
+        if: ${{ steps.release.outputs.release_created == 'true' && steps.app-token.outputs.token == '' }}
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          echo "::warning::Release ${TAG_NAME} was published with GITHUB_TOKEN, which cannot start workflow runs. publish.yml's tag-push trigger did NOT fire. Run it manually: Actions -> publish -> Run workflow, using tag ${TAG_NAME}."
+          {
+            echo "### Release ${TAG_NAME} published — PyPI publish NOT triggered automatically"
+            echo
+            echo "**Action required:** Actions -> publish -> Run workflow (workflow_dispatch)."
+            echo
+            echo "To make this automatic, install a GitHub App with \`contents: write\` and"
+            echo "\`pull_requests: write\`, then set \`RELEASE_PLEASE_APP_ID\` (variable) and"
+            echo "\`RELEASE_PLEASE_APP_PRIVATE_KEY\` (secret)."
+          } >> "$GITHUB_STEP_SUMMARY"
