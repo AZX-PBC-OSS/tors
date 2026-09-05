@@ -128,6 +128,67 @@ mod tests {
     }
 
     #[test]
+    fn entirely_decomposed_string_fully_composes() {
+        let decomposed: String = "e\u{0301}".repeat(20);
+        let composed: String = "\u{e9}".repeat(20);
+        assert_eq!(normalize(&decomposed), composed);
+    }
+
+    #[test]
+    fn all_whitespace_variants_collapse_to_empty() {
+        for text in ["\n", "\n\n", "\n\n\n", " ", "\t", "\r", "\r\n", &" \t\r\n".repeat(10)] {
+            assert_eq!(normalize(text), "", "mismatch for {text:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_crlf_cr_lf_every_line_ending_kind_in_one_string() {
+        // \r\n, bare \r, and bare \n all appear, several times each, interleaved with
+        // blank runs only visible once every ending is folded to \n.
+        assert_eq!(
+            normalize("a\r\nb\rc\nd\r\ne\r\rf\n\ng\r\n\r\n\r\nh"),
+            "a\nb\nc\nd\ne\n\nf\n\ng\n\nh"
+        );
+    }
+
+    #[test]
+    fn multiple_consecutive_blank_run_collapses_stay_independent() {
+        let text = (0..6)
+            .map(|i| format!("para{i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n\n");
+        let expected = (0..6)
+            .map(|i| format!("para{i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(normalize(&text), expected);
+    }
+
+    #[test]
+    fn very_long_single_whitespace_run_before_newline() {
+        let text = format!("a{}\nb", " \t".repeat(50_000));
+        assert_eq!(normalize(&text), "a\nb");
+    }
+
+    #[test]
+    fn very_long_single_newline_run() {
+        let text = format!("a{}b", "\n".repeat(100_000));
+        assert_eq!(normalize(&text), "a\n\nb");
+    }
+
+    #[test]
+    fn very_long_whitespace_run_at_end_of_string() {
+        let text = format!("leading text{}", " \t\n".repeat(40_000));
+        assert_eq!(normalize(&text), "leading text");
+    }
+
+    #[test]
+    fn very_long_whitespace_run_from_start_of_string() {
+        let text = format!("{}trailing text", " \t\n".repeat(40_000));
+        assert_eq!(normalize(&text), "trailing text");
+    }
+
+    #[test]
     fn trailing_whitespace_with_no_final_newline_is_stripped() {
         assert_eq!(normalize("hello   "), "hello");
     }
