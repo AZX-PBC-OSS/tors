@@ -1,0 +1,24 @@
+[package]
+name = "tors"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "Fast, GIL-free text normalization for Python, backed by Rust"
+repository = "https://github.com/AZX-PBC-OSS/tors"
+publish = false
+
+[lib]
+name = "tors"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = "0.29"
+unicode-normalization = "0.1"
+
+[features]
+default = ["extension-module"]
+# Kept optional (not baked into the pyo3 dependency directly) because `extension-module`
+# does not link libpython, which breaks a plain `cargo test`/`cargo build` binary target;
+# maturin enables the default feature set, `cargo test --no-default-features` skips it.
+extension-module = ["pyo3/extension-module"]

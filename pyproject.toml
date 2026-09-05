@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tors"
+version = "0.1.0"
+description = "Fast, GIL-free text normalization for Python, backed by Rust"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.167.1",
+    "maturin>=1.15.0",
+    "pytest>=9.1.1",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "tors._tors"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
