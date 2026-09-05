@@ -8,6 +8,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -19,12 +23,15 @@ jobs:
 
       - name: Cargo test
         # extension-module doesn't link libpython, so plain `cargo test` needs it off.
+        # Rust-only; the crate isn't Python-version-specific, so this runs once per job
+        # rather than once per matrix entry.
+        if: matrix.python-version == '3.12'
         run: cargo test --no-default-features
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies and build the extension
         run: uv sync
