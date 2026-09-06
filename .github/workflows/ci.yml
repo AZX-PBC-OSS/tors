@@ -34,7 +34,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies and build the extension
-        run: uv sync
+        # --locked: fail if uv.lock is out of date with pyproject.toml, rather than silently
+        # rewriting it — same house convention as cennan/OperatingPlan's CI.
+        run: uv sync --locked
 
       - name: Pytest
         run: uv run --no-sync pytest -q

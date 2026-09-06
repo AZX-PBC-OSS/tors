@@ -1,0 +1,51 @@
+# Builds the mkdocs site and deploys it to GitHub Pages via the modern OIDC-based deploy
+# flow (actions/deploy-pages), not the legacy push-to-a-gh-pages-branch approach. Runs
+# `mkdocs build --strict` so a broken nav entry or bad link fails CI instead of silently
+# publishing a broken page.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Sync docs dependencies
+        # --locked: fail if uv.lock is out of date, rather than silently rewriting it.
+        run: uv sync --locked --group docs --no-install-project --no-default-groups
+      - name: Build
+        run: uv run --no-sync mkdocs build --strict
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write # Required by actions/deploy-pages to verify the deployment source.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
