@@ -13,6 +13,12 @@
 # `push: tags` trigger will not fire automatically unless release-please.yml is given a
 # GitHub App token (see that workflow's header). Until one is configured, run this via
 # `workflow_dispatch` against the new tag after a release PR merges.
+#
+# Job order is deliberately cheapest-first: wheels-linux (and sdist) run on ubuntu-22.04,
+# by far the cheapest and fastest GitHub-hosted runner. wheels-other (macOS, Windows —
+# both several times the per-minute cost of Linux, and macOS/Windows arm64 runners are
+# scarcer capacity) only starts once every Linux leg has passed, via `needs`. A correctness
+# bug that fails on Linux therefore never burns the expensive runners at all.
 
 name: publish
 
@@ -25,23 +31,56 @@ permissions:
   contents: read
 
 jobs:
-  wheels:
+  wheels-linux:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
-            target: x86_64
+          - target: x86_64
             manylinux: auto
-          - os: ubuntu-22.04
-            target: aarch64
+          - target: aarch64
             manylinux: auto
-          - os: ubuntu-22.04
-            target: x86_64
+          - target: x86_64
             manylinux: musllinux_1_2
-          - os: ubuntu-22.04
-            target: aarch64
+          - target: aarch64
             manylinux: musllinux_1_2
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.13"
+      - name: Build wheel
+        uses: PyO3/maturin-action@2ad5fc99675e1d27f8136dedcf842601722b4e68 # v1.49.3
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: ${{ matrix.manylinux }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-linux-${{ matrix.target }}-${{ matrix.manylinux }}
+          path: dist
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - name: Build sdist
+        uses: PyO3/maturin-action@2ad5fc99675e1d27f8136dedcf842601722b4e68 # v1.49.3
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdist
+          path: dist
+
+  wheels-other:
+    needs: wheels-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - os: macos-15-intel
             target: x86_64
           - os: macos-latest
@@ -64,29 +103,14 @@ jobs:
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
-          manylinux: ${{ matrix.manylinux || 'auto' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'native' }}
-          path: dist
-
-  sdist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-      - name: Build sdist
-        uses: PyO3/maturin-action@2ad5fc99675e1d27f8136dedcf842601722b4e68 # v1.49.3
-        with:
-          command: sdist
-          args: --out dist
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: sdist
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: dist
 
   publish:
     name: Publish to PyPI
-    needs: [wheels, sdist]
+    needs: [wheels-linux, wheels-other, sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
