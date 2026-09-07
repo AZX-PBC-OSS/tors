@@ -26,7 +26,7 @@ unicode-normalization = "0.1"
 # finalize's content hash: sha256 over the normalize result's UTF-8 bytes, lowercase hex:
 # byte-identical to hashlib.sha256(...).hexdigest(), the expression a normalize-then-hash
 # dedupe gate computes.
-sha2 = "0.10"
+sha2 = "0.11"
 # hex-encoding of that digest: const-hex is the maintained drop-in for the `hex` crate
 # (no release since 2020, open "Unmaintained?" issue), same `encode(bytes) -> String`
 # call shape.
