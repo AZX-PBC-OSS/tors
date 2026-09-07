@@ -181,7 +181,14 @@ class TestAwaitCorrectness:
         starve the heartbeat for the whole wall instead."""
 
         async def run() -> tuple[float, float, int]:
-            a = prose(2 * 1024 * 1024)
+            # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
+            # loaded CI runner, right at the razor's edge of the "must cost
+            # something" floor below and prone to landing under it on a
+            # faster or differently-loaded box — exactly what happened here.
+            # 16 MiB gives real margin toward the docstring's own "tens of
+            # milliseconds or more" claim rather than a threshold this test
+            # can trip on jitter alone.
+            a = prose(16 * 1024 * 1024)
             b = a[: len(a) // 2] + "X" + a[len(a) // 2 :]
             ticks: list[float] = []
 
@@ -204,7 +211,7 @@ class TestAwaitCorrectness:
             return wall, max(ticks), len(ticks)
 
         wall, worst_gap, tick_count = asyncio.run(run())
-        assert wall > 0.005, "the corpus must actually cost something"
+        assert wall > 0.010, "the corpus must actually cost something"
         assert tick_count >= 4, "the heartbeat must have ticked during the call"
         assert worst_gap < 0.015, (
             f"worst heartbeat gap {worst_gap * 1000:.1f} ms during a "
