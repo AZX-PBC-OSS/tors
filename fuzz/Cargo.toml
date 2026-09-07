@@ -1,0 +1,68 @@
+[package]
+name = "tors-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+
+[dependencies.tors]
+path = ".."
+# The library target only: pulling in `extension-module` would try to link
+# libpython, which a bare fuzz binary neither has nor needs (the same reason
+# `cargo test`/`cargo build` on this crate run --no-default-features).
+default-features = false
+
+[[bin]]
+name = "decode_utf8"
+path = "fuzz_targets/decode_utf8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_utf16"
+path = "fuzz_targets/decode_utf16.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "b64_decode"
+path = "fuzz_targets/b64_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html_unescape"
+path = "fuzz_targets/html_unescape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fence"
+path = "fuzz_targets/fence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_hierarchical"
+path = "fuzz_targets/chunk_hierarchical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "normalize"
+path = "fuzz_targets/normalize.rs"
+test = false
+doc = false
+bench = false

@@ -22,7 +22,7 @@ endif
 
 .DEFAULT_GOAL := check
 
-.PHONY: check install dev lint test bench fmt deny gen-html-table gen-documents
+.PHONY: check install dev lint test bench fmt deny gen-html-table gen-documents fuzz fuzz-quick
 
 # The full CONTRIBUTING.md "Before you open a PR" gate (the standard
 # aggregate-target pattern: one `check` target wrapping the whole list).
@@ -90,6 +90,30 @@ deny:
 gen-html-table:
 	uv run --no-sync python tools/gen_html_table.py
 	cargo fmt
+
+# cargo-fuzz (libFuzzer): raw adversarial byte/string input straight into the
+# *_impl.rs cores, no pyo3 boundary — a different bug class than the
+# hypothesis-based Python tests (panics, cross-function invariant breaks) over
+# an input space they don't shape. Requires nightly (`rustup install nightly`)
+# and `cargo install cargo-fuzz --locked`; the fuzz/ crate is intentionally
+# NOT a workspace member (see fuzz/Cargo.toml's own header), so it never
+# affects `cargo build`/`cargo test` at the repo root. `fuzz-quick` is the
+# 30s-per-target smoke run suitable before a PR; a real fuzzing campaign
+# (hours, one target, targeted at a specific area of suspicion) is
+# `cargo +nightly fuzz run <target>` run directly, not through this target.
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize
+
+fuzz-quick:
+	@for t in $(FUZZ_TARGETS); do \
+		echo "=== $$t (30s) ==="; \
+		cargo +nightly fuzz run $$t -- -max_total_time=30 -close_fd_mask=3 || exit 1; \
+	done
+
+fuzz:
+	@for t in $(FUZZ_TARGETS); do \
+		echo "=== $$t ==="; \
+		cargo +nightly fuzz run $$t || exit 1; \
+	done
 
 # Regenerate the deterministic document corpus (tests/corpus/): the five
 # real-format files (md/rtf/docx/xlsx/pdf) are byte-deterministic, so this

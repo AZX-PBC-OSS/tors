@@ -18,6 +18,13 @@ build/
 # mkdocs
 /site
 
+# cargo-fuzz: corpus and crash artifacts are local fuzzing state, never
+# shipped or committed (standard cargo-fuzz convention — a maintainer
+# regenerates a corpus by running the targets, not by checking one in).
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/target/
+
 # local agent tooling state, never shipped. This rule is ALSO the sdist
 # exclusion: maturin's sdist skips gitignored paths (verified by building
 # one — a `maturin sdist` from this tree carries no .serena/ entry; before

@@ -44,6 +44,34 @@ HTML entity tables): `make gen-html-table`, and update the pinned counts in
 Also update `README.md` and `docs/` if your change affects behavior or the public API: a
 stale doc is treated as a defect, the same severity as a stale test.
 
+## Fuzzing
+
+`fuzz/` holds `cargo-fuzz` (libFuzzer) targets for the parsing/decoding cores
+most exposed to raw adversarial input — `decode_utf8`, `decode_utf16`,
+`b64_decode`, `html_unescape`, the fence-extraction family, `chunk_hierarchical`,
+and `normalize`/`finalize`. These call the `*_impl.rs` cores directly (no pyo3
+boundary, no Python interpreter needed) and check crash-freedom plus a few
+cross-function invariants (`utf8_is_valid` must never disagree with
+`decode_utf8`'s own success/failure; a zero-cost identity return must never be
+a false positive). This is a different bug class than the hypothesis-based
+Python tests, which shape input around documented contracts rather than raw
+adversarial bytes.
+
+Requires nightly and `cargo-fuzz`:
+
+```sh
+rustup install nightly
+cargo install cargo-fuzz --locked
+```
+
+`make fuzz-quick` runs every target for 30 seconds each (a smoke pass, worth
+running before a PR that touches any of the covered functions); `make fuzz`
+runs them without a time limit (stop with Ctrl-C). The `fuzz/` crate is
+deliberately not a Cargo workspace member, so it never affects the main
+`cargo build`/`cargo test` at the repo root. A crash writes a repro case to
+`fuzz/artifacts/<target>/` (gitignored, local-only) — reproduce it directly
+with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`.
+
 ## Commit style
 
 PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/)

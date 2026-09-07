@@ -149,3 +149,38 @@ jobs:
         # a timing failure never masks the fast lane's results.
         if: matrix.python-version == '3.12'
         run: uv run --no-sync pytest -q -rP -m timing
+
+  fuzz-smoke:
+    # A cheap regression net, not a real fuzzing campaign: 15s per target
+    # (CONTRIBUTING.md's `make fuzz-quick` runs the same targets for 30s
+    # locally) — enough to catch a reintroduced panic on every push without
+    # meaningfully lengthening CI. A real multi-hour campaign against one
+    # target of active suspicion is a local `cargo +nightly fuzz run
+    # <target>`, not something this job runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust (nightly)
+        # cargo-fuzz's instrumented builds need nightly's -Z sanitizer flags;
+        # the rest of CI stays on stable (see the lint job's own note).
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target\nfuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz (15s per target)
+        working-directory: fuzz
+        run: |
+          set -e
+          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize; do
+            echo "=== $t ==="
+            cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
+          done
