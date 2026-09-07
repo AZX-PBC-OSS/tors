@@ -14,15 +14,20 @@ runs.
 
 ## Install
 
-Not yet published to PyPI. For now, build from source with a Rust toolchain and
-[maturin](https://www.maturin.rs/):
+```sh
+pip install tors
+```
+
+Building from source (a Rust toolchain and [maturin](https://www.maturin.rs/)):
 
 ```sh
 pip install maturin
 maturin develop --release
 ```
 
-Once published: `pip install tors`.
+The underlying Rust crate is also on crates.io as `tors-core` (`cargo add tors-core`,
+then `use tors::...` — see the [README's Install section](https://github.com/AZX-PBC-OSS/tors#install)
+for why the crate and package names differ).
 
 ## Quickstart
 

@@ -26,14 +26,21 @@ way.
 
 ## Install
 
-Not yet published to PyPI. For now, build from source:
+```sh
+pip install tors
+```
+
+Building from source (a Rust toolchain and [maturin](https://www.maturin.rs/)):
 
 ```sh
 pip install maturin
 maturin develop --release
 ```
 
-Once published: `pip install tors`.
+The underlying Rust crate is also on crates.io, published separately as `tors-core`
+(the plain `tors` name belongs to an unrelated, dormant crate). `cargo add tors-core`,
+then `use tors::...` in code — `[lib] name` in `Cargo.toml` keeps the importable crate
+name `tors` regardless of the published package name.
 
 ### Pyodide / WebAssembly
 
