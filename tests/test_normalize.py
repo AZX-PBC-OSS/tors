@@ -1,52 +1,36 @@
-"""Correctness gate for ``tors.normalize``, ported from cennan's
-``tests/unit/test_normalize.py`` behavioral cases plus an independent, self-contained
-differential proof against a pure-Python reimplementation of the same pipeline.
+"""Correctness gate for ``tors.normalize``: behavioral cases from the original
+specification plus an independent, self-contained differential proof against a
+pure-Python reimplementation of the same pipeline.
 
-cennan's ``normalize_text`` chunks its two ``re.sub`` passes into ~1MiB seam-safe pieces
-purely to bound GIL-hold time; ``tors.normalize`` does the same transform as a single
-native Rust pass under ``py.detach`` instead, so cennan's seam/chunking-specific tests
-(``TestSeamSafety``, ``TestWhitespaceRunLongerThanTheWindow``, ``TestSeamRuleInvariant``,
-``TestSubChunkContract``, ...) do not apply here and are intentionally not ported.
+The pipeline's original pure-Python spelling chunks its two ``re.sub`` passes into
+~1MiB seam-safe pieces purely to bound GIL-hold time; ``tors.normalize`` does the same
+transform as a single native Rust pass under ``py.detach`` instead, so that spelling's
+seam/chunking-specific tests do not apply here and are intentionally not ported.
 """
 
 from __future__ import annotations
 
 import itertools
 import random
-import re
 import string
-import unicodedata
 
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
+    _COMBINING_ACUTE,
+    _E_ACUTE_PRECOMPOSED,
+    _IDEOGRAPHIC_SPACE,
+    _NBSP,
+    pathological_text,
+    reference_normalize,
+)
 from tors import normalize
-
-_BLANK_RUN = re.compile(r"\n{3,}")
-_TRAILING_WS = re.compile(r"[ \t]+\n")
-
-# Explicit escapes throughout this file (never a literal typed "é") because a
-# combining-mark sequence and its precomposed form are visually identical in an editor but
-# byte-distinct, and this file's own test cases depend on that distinction.
-_E_ACUTE_PRECOMPOSED = "é"  # "é"
-_COMBINING_ACUTE = "́"
-_NBSP = " "
-_IDEOGRAPHIC_SPACE = "　"
-
-
-def reference_normalize(text: str) -> str:
-    """Pure-Python reimplementation of cennan's ``normalize_text``, unchunked. The
-    self-contained correctness oracle: equivalence with this holds independent of cennan
-    ever being checked out."""
-    normalized = unicodedata.normalize("NFC", text)
-    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = _TRAILING_WS.sub("\n", normalized)
-    normalized = _BLANK_RUN.sub("\n\n", normalized)
-    return normalized.strip()
 
 
 class TestBehavioralCases:
-    """Ported from cennan's TestNormalizeTextEndToEnd and general normalize_text usage."""
+    """Behavioral cases from the original specification's end-to-end normalize usage."""
 
     def test_empty_string(self) -> None:
         assert normalize("") == ""
@@ -143,7 +127,7 @@ class TestBehavioralCases:
 
     def test_long_mixed_corpus_matches_reference(self) -> None:
         # A large (~500K char) corpus mixing prose, CRLF/CR/LF, trailing whitespace, and
-        # blank runs — no chunking exists in tors, but this guards against any
+        # blank runs; no chunking exists in tors, but this guards against any
         # length-dependent bug (e.g. an off-by-one that only a long buffer exposes).
         rng = random.Random(42)
         units = []
@@ -184,7 +168,7 @@ class TestExhaustiveSmallAlphabet:
 
     def test_all_strings_up_to_length_including_precomposed_and_exotic_spaces(self) -> None:
         # A second, smaller sweep (length <= 3) over an alphabet that also includes the
-        # precomposed accented letter directly, NBSP, and the ideographic space — distinct
+        # precomposed accented letter directly, NBSP, and the ideographic space, distinct
         # Unicode whitespace/NFC classes the first sweep's alphabet doesn't cover.
         alphabet = [" ", "\n", "a", _E_ACUTE_PRECOMPOSED, _NBSP, _IDEOGRAPHIC_SPACE]
         for length in range(4):
@@ -193,23 +177,61 @@ class TestExhaustiveSmallAlphabet:
                 assert normalize(text) == reference_normalize(text), repr(text)
 
 
-@st.composite
-def _pathological_text(draw: st.DrawFn) -> str:
-    """Strings built from whitespace-heavy, line-ending-heavy, and NFC-sensitive pieces —
-    biased toward exactly the content classes that stress this pipeline, rather than
-    uniform random unicode (covered separately below)."""
-    pieces = st.one_of(
-        st.just(""),
-        st.text(alphabet="ab" + _E_ACUTE_PRECOMPOSED, min_size=0, max_size=10),
-        st.text(alphabet="e" + _COMBINING_ACUTE, min_size=0, max_size=6),
-        st.text(alphabet=" \t", min_size=1, max_size=30),
-        st.text(alphabet="\n", min_size=1, max_size=10),
-        st.text(alphabet="\r", min_size=1, max_size=10),
-        st.sampled_from(["\r\n", "\r\n\r\n", " \n", "\t\n", " \t\n", "\n\n\n", "\r\r\r"]),
-        st.sampled_from([_NBSP, _IDEOGRAPHIC_SPACE, " ", " "]),
+class TestIdentityReturnContract:
+    """The identity-return contract for ``tors.normalize``: when the
+    COMPLETE pipeline is a no-op: NFC quick-check Yes AND no CR AND no
+    ``[ \\t]`` run before a newline AND no 3+ newline run AND no strip delta,
+    the ORIGINAL object comes back (``normalize(s) is s``): the identity probe
+    is a handful of SIMD sentinel scans, no allocation at all. Inputs the
+    probe cannot prove clean still run the scan, and an output==input
+    comparison after it extends the same guarantee to them, so the complete
+    property is: ``normalize(s) is s`` whenever ``normalize(s) == s``."""
+
+    def test_already_clean_inputs_return_the_same_object(self) -> None:
+        clean = "plain text\n\nwith paragraphs\n\ncaf\u00e9 na\u00efve"
+        assert normalize(clean) == clean  # the precondition, checked
+        assert normalize(clean) is clean
+
+    @pytest.mark.parametrize(
+        "dirty",
+        [
+            "a\r\nb",  # CR folds
+            "a\rb",  # lone CR folds
+            "a \nb",  # [ \t] before a newline is dropped
+            "a\t\nb",
+            "a\n\n\nb",  # blank run collapses
+            "  leading",  # strip delta
+            "trailing  ",
+            "trailing\n",
+            "\u00a0x",  # NBSP is Python whitespace: leading strip fires
+            "x\u00a0",
+            "cafe\u0301",  # QC-Maybe: NFC composes, value changes
+        ],
+        ids=[
+            "crlf",
+            "lone-cr",
+            "space-before-nl",
+            "tab-before-nl",
+            "blank-run",
+            "leading-ws",
+            "trailing-ws",
+            "trailing-nl",
+            "nbsp-lead",
+            "nbsp-trail",
+            "decomposed",
+        ],
     )
-    parts = draw(st.lists(pieces, min_size=0, max_size=25))
-    return "".join(parts)
+    def test_dirty_inputs_return_a_new_object(self, dirty: str) -> None:
+        result = normalize(dirty)
+        assert result == reference_normalize(dirty)  # the value stays pinned
+        assert result is not dirty
+
+    @given(pathological_text())
+    @settings(max_examples=500)
+    def test_value_identity_implies_object_identity(self, text: str) -> None:
+        result = normalize(text)
+        if result == text:
+            assert result is text
 
 
 class TestRandomizedProperty:
@@ -228,7 +250,7 @@ class TestRandomizedProperty:
     def test_matches_reference_pipeline_over_arbitrary_unicode(self, text: str) -> None:
         assert normalize(text) == reference_normalize(text)
 
-    @given(_pathological_text())
+    @given(pathological_text())
     @settings(max_examples=500)
     def test_matches_reference_over_pathological_whitespace_and_line_endings(
         self, text: str
@@ -241,7 +263,9 @@ class TestSeededRandomGenerator:
     independent of hypothesis being installed/available."""
 
     def test_matches_reference_over_seeded_random_corpora(self) -> None:
-        alphabet = list(" \t\n\r" + string.ascii_letters + _E_ACUTE_PRECOMPOSED + "  " + _IDEOGRAPHIC_SPACE)
+        alphabet = list(
+            " \t\n\r" + string.ascii_letters + _E_ACUTE_PRECOMPOSED + "  " + _IDEOGRAPHIC_SPACE
+        )
         rng = random.Random(1234567)
         for _ in range(500):
             length = rng.randint(0, 120)

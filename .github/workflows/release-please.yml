@@ -6,7 +6,7 @@
 # add Cargo.toml to a release-please-config.json `extra-files` entry at that point.
 #
 # No release-please-config.json/.release-please-manifest.json: a single-package repo needs
-# neither — release-type is passed directly (same house pattern as cennan).
+# neither — release-type is passed directly.
 #
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
 # a tag released this way will NOT auto-trigger publish.yml's `push: tags` step — see that

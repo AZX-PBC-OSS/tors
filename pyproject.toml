@@ -5,9 +5,24 @@ build-backend = "maturin"
 [project]
 name = "tors"
 version = "0.1.0"
-description = "Fast, GIL-free text normalization for Python, backed by Rust"
+description = "Fast, GIL-free text and document operations for Python — normalization, Unicode segmentation, diffing, fuzzy matching, chunking, encoding/near-dup detection, Merkle integrity, and URL/redaction utilities, backed by Rust."
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "AZX, PBC." }]
+maintainers = [{ name = "AZX, PBC." }]
+keywords = [
+    "text",
+    "unicode",
+    "gil-free",
+    "free-threading",
+    "rust",
+    "normalization",
+    "chunking",
+    "diff",
+    "fuzzy-matching",
+    "tokenization",
+]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -16,13 +31,24 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Text Processing",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AZX-PBC-OSS/tors"
+Repository = "https://github.com/AZX-PBC-OSS/tors"
+Changelog = "https://github.com/AZX-PBC-OSS/tors/releases"
 
 [dependency-groups]
 dev = [
     "hypothesis>=6.167.1",
     "maturin>=1.15.0",
     "pytest>=9.1.1",
+    "ruff>=0.16.6",
 ]
 docs = [
     "mkdocs>=1.6.1",
@@ -38,3 +64,34 @@ module-name = "tors._tors"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/test_aio.py imports tools/gen_aio_stub.py directly (to check the
+# committed aio.pyi against the generator's own current output), so tools/
+# needs to be importable the same way tests/ already is via testpaths.
+pythonpath = ["tools"]
+markers = [
+    # The timing lane: the measurement cells of tests/test_gil_release.py and
+    # tests/test_performance.py (asyncio heartbeat-gap bands and wall-time
+    # bands) — slow and load-sensitive. CI's matrix legs run
+    # `-m "not timing"` and ONE dedicated step on the 3.12 leg runs
+    # `-m timing`, so the GIL/perf contracts still gate every push without
+    # paying the lane five times; locally `pytest` (and `make test`) run
+    # everything, marker or not.
+    "timing: measurement cell (GIL heartbeat-gap / wall-time band) — the slow, load-sensitive lane; CI runs it once on the 3.12 leg",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# E/W/F (pycodestyle/pyflakes), I (import order — the suite's `noqa: I001`
+# comments cite it), B (bugbear), UP (pyupgrade), BLE (blind-except — the
+# `noqa: BLE001` comments in test_b64_decode.py cite it): the codes the
+# existing noqa comments cite are all enforced, so those suppressions stay
+# meaningful.
+select = ["E", "W", "F", "I", "B", "UP", "BLE"]
+
+[tool.ruff.lint.isort]
+# tors (the package under test) and reference (the tests' shared oracle
+# module) are first-party, so their imports keep their own section after the
+# third-party block — the layout every test file already uses.
+known-first-party = ["tors", "reference", "documents"]

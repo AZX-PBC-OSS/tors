@@ -1,0 +1,507 @@
+"""Contract gate for the text-chunking family: ``tors.chunk_text`` (with its
+``overlap`` parameter) and the segment-count-windowed ``tors.chunk_by_words``
+/ ``tors.chunk_by_sentences`` / ``tors.chunk_by_paragraphs``.
+
+``chunk_text`` with ``overlap=0`` (the default) is a LOSSLESS COVERING
+PARTITION: chunks are non-empty, contiguous, strictly increasing, cover the
+whole text, and joining them reproduces the input exactly; the properties
+pinned below must hold for every case, matching the Rust-side contract this
+was unchanged from. ``overlap > 0`` trades that lossless-join guarantee for
+genuine overlap between consecutive chunks (the RAG-retrieval shape: a fact
+split across a cut is still whole in at least one chunk), snapped to a real
+word/sentence boundary, never mid-word/mid-sentence.
+
+``chunk_by_words``/``chunk_by_sentences`` measure chunks in UAX #29 segment
+COUNT rather than a character budget: each chunk spans exactly N consecutive
+word/sentence segments (the last chunk may hold fewer), with Y segments of
+overlap repeated at the start of the next chunk.
+
+Forward progress (no infinite loop) is the one invariant enforced most
+aggressively here: every property test below either bounds the chunk count
+by the input length, or asserts strictly-increasing chunk starts directly,
+a regression to a stalled/looping start fails fast rather than hanging.
+"""
+
+from __future__ import annotations
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from tors import (
+    chunk_by_paragraphs,
+    chunk_by_sentences,
+    chunk_by_sentences_iter,
+    chunk_by_words,
+    chunk_by_words_iter,
+    chunk_text,
+    chunk_text_iter,
+)
+
+# ---------------------------------------------------------------------------
+# chunk_text: overlap=0, the original lossless-partition contract
+# ---------------------------------------------------------------------------
+
+
+class TestChunkTextNoOverlap:
+    def test_empty_text_is_no_chunks(self) -> None:
+        assert chunk_text("", 5) == []
+
+    def test_text_within_budget_is_one_chunk(self) -> None:
+        assert chunk_text("hello", 100) == [(0, 5)]
+
+    def test_worked_example(self) -> None:
+        # word_bounds("cats are cute and cats are fun") lands a budget-12 cut
+        # at "cats are" (8) with the trailing space trimmed onto the next
+        # chunk's head.
+        text = "cats are cute and cats are fun"
+        chunks = chunk_text(text, 12)
+        assert chunks == [(0, 8), (8, 17), (17, 26), (26, 30)]
+        joined = "".join(text[a:b] for a, b in chunks)
+        assert joined == text
+
+    def test_sentence_boundary(self) -> None:
+        text = "One. Two. Three."
+        chunks = chunk_text(text, 10, boundary="sentence")
+        assert chunks == [(0, 9), (9, 16)]
+
+    def test_hard_cut_when_no_boundary_fits(self) -> None:
+        text = "Supercalifragilisticexpialidocious"
+        chunks = chunk_text(text, 10)
+        assert chunks == [(0, 10), (10, 20), (20, 30), (30, 34)]
+        for a, b in chunks:
+            assert b - a <= 10
+
+    @given(
+        text=st.text(alphabet="ab .", max_size=40),
+        max_chars=st.integers(min_value=1, max_value=10),
+        boundary=st.sampled_from(["word", "sentence"]),
+    )
+    @settings(max_examples=300)
+    def test_covering_partition_contract(
+        self, text: str, max_chars: int, boundary: str
+    ) -> None:
+        chunks = chunk_text(text, max_chars, boundary=boundary)
+        prev_end = 0
+        for a, b in chunks:
+            assert a == prev_end, "contiguity broke"
+            assert b > a, "empty chunk"
+            assert b - a <= max_chars, "budget exceeded"
+            prev_end = b
+        assert prev_end == len(text), "coverage broke"
+        joined = "".join(text[a:b] for a, b in chunks)
+        assert joined == text, "join-back broke"
+
+    def test_never_splits_a_thai_sara_am_cluster_across_two_chunks(self) -> None:
+        # "0" + SARA AM (U+0E33) is ONE grapheme cluster, but the UAX #29
+        # word segmenter scores it as TWO word segments; the same edge
+        # tors.truncate_to_bounds guards against. A boundary-aware chunker
+        # must never split the base character from its combining mark
+        # into two different chunks, even when that means backing the cut
+        # off before the character budget is fully used.
+        text = "ab 0ำ cd"
+        chunks = chunk_text(text, 4)
+        pieces = [text[a:b] for a, b in chunks]
+        assert "".join(pieces) == text
+        cluster = "0ำ"
+        containing = [p for p in pieces if cluster in p]
+        assert len(containing) == 1, f"cluster split across chunks: {pieces!r}"
+        for p in pieces:
+            assert p != "ำ", f"a lone combining mark escaped as its own chunk: {pieces!r}"
+
+
+# ---------------------------------------------------------------------------
+# chunk_text: overlap > 0
+# ---------------------------------------------------------------------------
+
+
+class TestChunkTextOverlap:
+    def test_worked_example(self) -> None:
+        text = "cats are cute and cats are fun"
+        chunks = chunk_text(text, 12, overlap=3)
+        assert chunks[0] == (0, 8)
+        for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+            assert next_start < prev_end, "no actual overlap"
+
+    def test_overlap_zero_matches_no_overlap_path_exactly(self) -> None:
+        text = "cats are cute and cats are fun"
+        for max_chars in range(1, 15):
+            for boundary in ("word", "sentence"):
+                assert chunk_text(text, max_chars, overlap=0, boundary=boundary) == chunk_text(
+                    text, max_chars, boundary=boundary
+                )
+
+    def test_overlap_equal_to_or_above_max_chars_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be < max_chars"):
+            chunk_text("hello world", 5, overlap=5)
+        with pytest.raises(ValueError, match="overlap must be < max_chars"):
+            chunk_text("hello world", 5, overlap=6)
+
+    def test_negative_overlap_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_text("hello world", 5, overlap=-1)
+
+    def test_shared_content_between_consecutive_chunks_is_real(self) -> None:
+        text = "the cat sat on the mat today near the door"
+        chunks = chunk_text(text, 12, overlap=4)
+        assert len(chunks) >= 2
+        for (prev_start, prev_end), (next_start, _next_end) in zip(
+            chunks, chunks[1:], strict=False
+        ):
+            assert next_start > prev_start, "no forward progress"
+            assert next_start < prev_end, "overlap produced no actual overlap"
+            shared = text[next_start:prev_end]
+            assert shared == text[next_start:prev_end]
+            assert shared, "shared span must be non-empty"
+
+    @given(
+        text=st.text(alphabet="ab .", max_size=40),
+        max_chars=st.integers(min_value=2, max_value=10),
+        boundary=st.sampled_from(["word", "sentence"]),
+        data=st.data(),
+    )
+    @settings(max_examples=300)
+    def test_forward_progress_and_per_chunk_budget(
+        self, text: str, max_chars: int, boundary: str, data: st.DataObject
+    ) -> None:
+        overlap = data.draw(st.integers(min_value=1, max_value=max_chars - 1))
+        chunks = chunk_text(text, max_chars, overlap=overlap, boundary=boundary)
+        # Forward-progress-as-a-hard-bound: strictly more chunks than the
+        # text has codepoints would mean a stalled/looping start; this
+        # fails fast instead of hanging the test runner.
+        assert len(chunks) <= len(text) + 1
+        prev_start = -1
+        for a, b in chunks:
+            assert b > a
+            assert b - a <= max_chars
+            assert a > prev_start, "no forward progress"
+            prev_start = a
+
+    def test_short_trailing_chunk_degrades_overlap_rather_than_stalling(self) -> None:
+        # A short final chunk (shorter than the requested overlap) forces
+        # the documented snap-collapse fallback: the transition into it
+        # loses its overlap rather than violating forward progress.
+        text = "aaaaaaaaaa b"  # a 10-char run, a space, one more char
+        chunks = chunk_text(text, 10, overlap=8)
+        prev_start = -1
+        for a, _b in chunks:
+            assert a > prev_start
+            prev_start = a
+        assert chunks[-1][1] == len(text)
+
+
+# ---------------------------------------------------------------------------
+# chunk_by_words
+# ---------------------------------------------------------------------------
+
+
+class TestChunkByWords:
+    def test_empty_text_is_no_chunks(self) -> None:
+        assert chunk_by_words("", 3) == []
+
+    def test_worked_example_no_overlap(self) -> None:
+        # "the cat sat on the mat" -> 6 real word tokens, 2 per chunk ->
+        # 3 chunks. Chunks are NOT necessarily contiguous (the space
+        # between "cat" and "sat" belongs to neither chunk), so chunk_by_words
+        # makes no covering-partition claim, unlike chunk_text.
+        text = "the cat sat on the mat"
+        chunks = chunk_by_words(text, 2)
+        assert [text[a:b] for a, b in chunks] == ["the cat", "sat on", "the mat"]
+
+    def test_counts_real_word_tokens_not_raw_word_bounds_segments(self) -> None:
+        # The regression this pins: word_bounds gives an inter-word space
+        # run its OWN segment, so a naive "group N raw segments" reading
+        # of words_per_chunk would silently deliver roughly HALF as many
+        # real words per chunk as requested on ordinary prose.
+        text = "one two three four five six seven"
+        chunks = chunk_by_words(text, 3)
+        assert [text[a:b] for a, b in chunks] == [
+            "one two three",
+            "four five six",
+            "seven",
+        ]
+
+    def test_worked_example_with_overlap(self) -> None:
+        text = "one two three four five six seven"
+        chunks = chunk_by_words(text, 3, overlap=1)
+        assert len(chunks) >= 2
+        for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+            assert next_start < prev_end
+
+    def test_fewer_words_than_per_chunk_is_one_chunk(self) -> None:
+        text = "hi there"
+        chunks = chunk_by_words(text, 100)
+        assert chunks == [(0, len(text))]
+
+    def test_last_chunk_may_be_partial(self) -> None:
+        text = "alpha beta gamma"
+        chunks = chunk_by_words(text, 2)
+        assert chunks[-1][1] == len(text)
+
+    def test_words_per_chunk_zero_or_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="words_per_chunk must be >= 1"):
+            chunk_by_words("hello world", 0)
+        with pytest.raises(ValueError, match="words_per_chunk must be >= 1"):
+            chunk_by_words("hello world", -1)
+
+    def test_overlap_equal_to_or_above_words_per_chunk_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be < words_per_chunk"):
+            chunk_by_words("one two three", 2, overlap=2)
+
+    def test_negative_overlap_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_words("one two three", 2, overlap=-1)
+
+    @given(
+        text=st.text(alphabet="ab ", max_size=40),
+        per_chunk=st.integers(min_value=1, max_value=6),
+        data=st.data(),
+    )
+    @settings(max_examples=200)
+    def test_forward_progress_over_a_battery(
+        self, text: str, per_chunk: int, data: st.DataObject
+    ) -> None:
+        overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))
+        chunks = chunk_by_words(text, per_chunk, overlap=overlap)
+        assert len(chunks) <= len(text) + 1
+        prev_start = -1
+        for a, b in chunks:
+            assert b > a
+            assert a > prev_start
+            assert b <= len(text)
+            prev_start = a
+        # NOT a covering-partition contract (unlike chunk_text): trailing
+        # whitespace, or text with no word tokens at all, means the last
+        # chunk's end can legitimately fall short of len(text), or there
+        # can be no chunks at all; only forward progress and in-bounds
+        # spans are guaranteed here.
+
+    def test_never_splits_a_thai_sara_am_cluster_across_two_words(self) -> None:
+        # Raw word segmentation of "x0ำy0ำz" splits each "0" + SARA AM
+        # (U+0E33) combining sequence into a base-segment and a lone
+        # combining-mark segment (neither is whitespace), so the
+        # word-token filter alone would NOT catch this: without the
+        # grapheme-cluster merge, chunk_by_words(text, 1) would silently
+        # return a chunk containing only the bare combining mark.
+        text = "x0ำy0ำz"
+        chunks = chunk_by_words(text, 1)
+        pieces = [text[a:b] for a, b in chunks]
+        assert pieces == ["x0ำ", "y0ำ", "z"]
+        assert "ำ" not in pieces
+
+
+# ---------------------------------------------------------------------------
+# chunk_by_sentences
+# ---------------------------------------------------------------------------
+
+
+class TestChunkBySentences:
+    def test_empty_text_is_no_chunks(self) -> None:
+        assert chunk_by_sentences("", 2) == []
+
+    def test_worked_example_no_overlap(self) -> None:
+        text = "One. Two. Three. Four. Five."
+        chunks = chunk_by_sentences(text, 2)
+        assert len(chunks) == 3
+        prev_end = 0
+        for a, b in chunks:
+            assert a == prev_end
+            prev_end = b
+        assert prev_end == len(text)
+
+    def test_worked_example_with_overlap(self) -> None:
+        text = "One. Two. Three. Four. Five. Six."
+        chunks = chunk_by_sentences(text, 3, overlap=1)
+        assert len(chunks) >= 2
+        for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+            assert next_start < prev_end
+
+    def test_fewer_sentences_than_per_chunk_is_one_chunk(self) -> None:
+        text = "Only one sentence here."
+        chunks = chunk_by_sentences(text, 100)
+        assert chunks == [(0, len(text))]
+
+    def test_sentences_per_chunk_zero_or_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="sentences_per_chunk must be >= 1"):
+            chunk_by_sentences("One. Two.", 0)
+
+    def test_overlap_equal_to_or_above_sentences_per_chunk_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be < sentences_per_chunk"):
+            chunk_by_sentences("One. Two. Three.", 2, overlap=2)
+
+    def test_negative_overlap_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_sentences("One. Two.", 2, overlap=-1)
+
+
+# ---------------------------------------------------------------------------
+# chunk_by_paragraphs: a HEURISTIC boundary (no Unicode Standard for
+# paragraphs), stated plainly: a run of 2+ consecutive newlines (\r\n
+# counts as one unit) is a paragraph break, matching tors.normalize's own
+# "2+ newlines survive as the paragraph gap" convention. A single \n is
+# ordinary content, not a break.
+# ---------------------------------------------------------------------------
+
+
+class TestChunkByParagraphs:
+    def test_empty_text_is_no_chunks(self) -> None:
+        assert chunk_by_paragraphs("", 2) == []
+
+    def test_worked_example_no_overlap(self) -> None:
+        text = "First para.\n\nSecond para.\n\nThird para."
+        chunks = chunk_by_paragraphs(text, 2)
+        pieces = [text[a:b] for a, b in chunks]
+        assert pieces == ["First para.\n\nSecond para.", "Third para."]
+
+    def test_worked_example_with_overlap(self) -> None:
+        text = "P1.\n\nP2.\n\nP3.\n\nP4.\n\nP5.\n\nP6."
+        chunks = chunk_by_paragraphs(text, 3, overlap=1)
+        assert len(chunks) >= 2
+        for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+            assert next_start < prev_end
+
+    def test_fewer_paragraphs_than_per_chunk_is_one_chunk(self) -> None:
+        text = "Only one paragraph here."
+        assert chunk_by_paragraphs(text, 100) == [(0, len(text))]
+
+    def test_a_single_newline_is_not_a_paragraph_break(self) -> None:
+        text = "line one\nline two"
+        assert chunk_by_paragraphs(text, 100) == [(0, len(text))]
+
+    def test_three_or_more_newlines_are_still_one_break(self) -> None:
+        text = "First.\n\n\n\nSecond."
+        chunks = chunk_by_paragraphs(text, 1)
+        pieces = [text[a:b] for a, b in chunks]
+        assert pieces == ["First.", "Second."]
+
+    def test_crlf_separators_are_recognized(self) -> None:
+        text = "First.\r\n\r\nSecond."
+        chunks = chunk_by_paragraphs(text, 1)
+        pieces = [text[a:b] for a, b in chunks]
+        assert pieces == ["First.", "Second."]
+
+    def test_leading_and_trailing_blank_runs_are_trimmed_not_emitted(self) -> None:
+        text = "\n\n\nHello\n\n\n"
+        chunks = chunk_by_paragraphs(text, 100)
+        assert chunks == [(3, 8)]
+        assert text[3:8] == "Hello"
+
+    def test_paragraphs_per_chunk_zero_or_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="paragraphs_per_chunk must be >= 1"):
+            chunk_by_paragraphs("a\n\nb", 0)
+
+    def test_overlap_equal_to_or_above_paragraphs_per_chunk_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be < paragraphs_per_chunk"):
+            chunk_by_paragraphs("a\n\nb\n\nc", 2, overlap=2)
+
+    def test_negative_overlap_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_paragraphs("a\n\nb", 2, overlap=-1)
+
+    @given(st.text(alphabet="ab \n\r", max_size=60), st.integers(min_value=1, max_value=5))
+    @settings(max_examples=300)
+    def test_forward_progress_never_stalls(self, text: str, per_chunk: int) -> None:
+        """No stalled/looping start over arbitrary newline-heavy input,
+        for every valid overlap below ``per_chunk``, the fast-failing
+        guarantee this whole module docstring names as the top priority."""
+        for overlap in range(per_chunk):
+            chunks = chunk_by_paragraphs(text, per_chunk, overlap=overlap)
+            starts = [a for a, _ in chunks]
+            assert all(b > a for a, b in zip(starts, starts[1:], strict=False))
+
+
+# ---------------------------------------------------------------------------
+# Composition sanity: pipeline shape these primitives exist to serve
+# ---------------------------------------------------------------------------
+
+
+class TestComposesAsDocumented:
+    def test_chunk_text_slices_are_directly_usable_with_python_slicing(self) -> None:
+        text = "The quick brown fox jumps over the lazy dog and keeps running."
+        chunks = chunk_text(text, 20, overlap=5)
+        pieces = [text[a:b] for a, b in chunks]
+        assert all(pieces)
+        assert all(len(p) <= 20 for p in pieces)
+
+    def test_chunk_by_words_and_chunk_by_sentences_agree_on_a_single_segment_input(
+        self,
+    ) -> None:
+        text = "Solo."
+        assert chunk_by_words(text, 10) == [(0, len(text))]
+        assert chunk_by_sentences(text, 10) == [(0, len(text))]
+
+
+# ---------------------------------------------------------------------------
+# Streaming twins: chunk_text_iter / chunk_by_words_iter / chunk_by_sentences_iter
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingIterParity:
+    """Each `_iter` twin must yield exactly the same sequence, in the same
+    order, as its list-returning counterpart, the same guarantee
+    word_bounds/word_bounds_iter and find_patterns/find_patterns_iter
+    already hold. The iterator is eager at construction (the whole scan
+    runs once, up front), so this is a marshalling-shape change, not a
+    computation-shape change: the two APIs must never disagree."""
+
+    def test_chunk_text_iter_matches_the_list(self) -> None:
+        text = "abc def ghi jkl mno pqr"
+        assert list(chunk_text_iter(text, 8)) == chunk_text(text, 8)
+
+    def test_chunk_by_words_iter_matches_the_list(self) -> None:
+        text = "one two three four five six seven"
+        assert list(chunk_by_words_iter(text, 3, overlap=1)) == chunk_by_words(
+            text, 3, overlap=1
+        )
+
+    def test_chunk_by_sentences_iter_matches_the_list(self) -> None:
+        text = "One. Two. Three. Four."
+        assert list(chunk_by_sentences_iter(text, 2)) == chunk_by_sentences(text, 2)
+
+    def test_empty_text_is_an_empty_iterator_not_an_error(self) -> None:
+        assert list(chunk_text_iter("", 5)) == []
+        assert list(chunk_by_words_iter("", 3)) == []
+        assert list(chunk_by_sentences_iter("", 3)) == []
+
+    def test_length_hint_counts_down_as_the_iterator_drains(self) -> None:
+        it = chunk_text_iter("abc def ghi jkl mno", 8)
+        remaining = it.__length_hint__()
+        drained = 0
+        for _ in it:
+            drained += 1
+            assert it.__length_hint__() == remaining - drained
+
+    @given(
+        text=st.text(alphabet="ab .", max_size=40),
+        max_chars=st.integers(min_value=1, max_value=10),
+        boundary=st.sampled_from(["word", "sentence"]),
+    )
+    @settings(max_examples=200)
+    def test_chunk_text_iter_matches_the_list_property(
+        self, text: str, max_chars: int, boundary: str
+    ) -> None:
+        assert list(chunk_text_iter(text, max_chars, boundary=boundary)) == chunk_text(
+            text, max_chars, boundary=boundary
+        )
+
+    @given(
+        text=st.text(alphabet="ab ", max_size=40),
+        per_chunk=st.integers(min_value=1, max_value=6),
+        data=st.data(),
+    )
+    @settings(max_examples=200)
+    def test_chunk_by_words_iter_matches_the_list_property(
+        self, text: str, per_chunk: int, data: object
+    ) -> None:
+        overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))  # type: ignore[attr-defined]
+        assert list(chunk_by_words_iter(text, per_chunk, overlap=overlap)) == chunk_by_words(
+            text, per_chunk, overlap=overlap
+        )
+
+    def test_raises_the_same_value_errors_as_the_list_functions(self) -> None:
+        with pytest.raises(ValueError, match="max_chars must be >= 1"):
+            chunk_text_iter("abc", 0)
+        with pytest.raises(ValueError, match="words_per_chunk must be >= 1"):
+            chunk_by_words_iter("abc", 0)
+        with pytest.raises(ValueError, match="sentences_per_chunk must be >= 1"):
+            chunk_by_sentences_iter("abc", 0)

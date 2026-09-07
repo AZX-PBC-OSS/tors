@@ -17,3 +17,9 @@ build/
 
 # mkdocs
 /site
+
+# local agent tooling state, never shipped. This rule is ALSO the sdist
+# exclusion: maturin's sdist skips gitignored paths (verified by building
+# one — a `maturin sdist` from this tree carries no .serena/ entry; before
+# the rule, untracked-and-unignored directories leaked into it).
+/.serena/

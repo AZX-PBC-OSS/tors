@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-description = "Fast, GIL-free text normalization for Python, backed by Rust"
+description = "Fast, GIL-free text and document operations for Python: normalization, Unicode segmentation, diffing, fuzzy matching, chunking, encoding/near-dup detection, Merkle integrity, and URL/redaction utilities, backed by Rust."
+readme = "README.md"
 repository = "https://github.com/AZX-PBC-OSS/tors"
-# crates.io already has an unrelated `tors` crate (a dormant multidimensional-array lib) —
+keywords = ["text", "unicode", "pyo3", "gil-free", "normalization"]
+categories = ["text-processing", "encoding"]
+# crates.io already has an unrelated `tors` crate (a dormant multidimensional-array lib);
 # this crate is bundled into the PyPI wheel via maturin, not published to crates.io itself.
 publish = false
 
@@ -20,6 +23,64 @@ crate-type = ["cdylib", "rlib"]
 # needing a wheel built per minor version.
 pyo3 = { version = "0.29", features = ["abi3-py310"] }
 unicode-normalization = "0.1"
+# finalize's content hash: sha256 over the normalize result's UTF-8 bytes, lowercase hex:
+# byte-identical to hashlib.sha256(...).hexdigest(), the expression a normalize-then-hash
+# dedupe gate computes.
+sha2 = "0.10"
+# hex-encoding of that digest: const-hex is the maintained drop-in for the `hex` crate
+# (no release since 2020, open "Unmaintained?" issue), same `encode(bytes) -> String`
+# call shape.
+const-hex = "1.19"
+# "simd-unsafe": the crate's own AVX2/NEON encode+decode kernels (Wojciech
+# Mula's vectorized algorithms), runtime-detected with a scalar fallback:
+# already-shipped, widely-exercised unsafe code in a 100M+-download crate,
+# not anything tors writes itself, matching the "lean on a mature crate for
+# the hard platform-specific part" pattern the rest of the tree already
+# follows (simdutf8, memchr, aho-corasick's Teddy prefilter). The feature's
+# name states its own tradeoff: it is unsafe, upstream, and opted into.
+base64 = { version = "0.23.1", features = ["simd-unsafe"] }
+unicode-segmentation = "1.13.3"
+memchr = "2.8.3"
+# utf8_is_valid's SIMD validity scan: "0.1" is the caret floor
+# (>= 0.1.0, < 0.2), so a hypothetical 0.2 with new semantics cannot arrive
+# through a plain `cargo update`. Maintenance (the spec's
+# module decision): the crate is MIT OR Apache-2.0, zero dependencies, and
+# its release line has been quiet since 2024-09-22 (0.1.5) while the repo
+# itself stays active (commits into 2026-06): a mature, stable algorithm
+# (UTF-8 validation does not churn), not an abandoned one.
+simdutf8 = "0.1"
+similar = "3.2.0"
+# find_patterns' multi-pattern search engine (v0.7). Dual-licensed "Unlicense OR
+# MIT": MIT is the elected branch (recorded in the README's dependency table;
+# cargo-deny's SPDX expression evaluation accepts the election, the same way
+# memchr's MIT OR UNLICENSE passes). By BurntSushi, and the Aho-Corasick
+# automaton inside Rust's own `regex` crate, the most battle-tested engine
+# available for exactly this job; it was already in the lock as regex's
+# transitive (via criterion), so making it direct added no new package.
+# "1" is the caret floor (>= 1.0.0, < 2.0.0). Match semantics pinned at
+# MatchKind::LeftmostLongest, the documented behavior the Python contract
+# tests differential against.
+aho-corasick = "1"
+# merkle_root/merkle_diff's tree structure. MIT/Apache-2.0 dual-licensed,
+# generic over a `Hasher` trait: tors supplies its own domain-separated
+# SHA-256 `Hasher` (src/merkle_impl.rs) rather than the crate's built-in
+# `algorithms::Sha256`, whose default hashing does NOT domain-separate leaf
+# and internal-node hashes (verified against the vendored source, not just
+# the docs); see merkle_impl.rs's module doc for the full reasoning.
+# Default features are just `std` (pulls `sha2`, already a dependency via
+# `finalize`'s hashing: no new transitive crate); the `keccak256` feature
+# (an optional `tiny-keccak` dependency) is left disabled, unused.
+rs_merkle = "1.5"
+fastcdc = "5.0.0"
+# detect_encoding's guesser (the engine Firefox ships) plus the crate whose
+# `&'static Encoding` it returns: chardetng doesn't re-export it, so calling
+# `.name()` on the guess needs encoding_rs named directly; already pulled in
+# transitively by chardetng, so this adds no new package to the tree, only a
+# direct edge to one already resolved.
+chardetng = "1.0.0"
+encoding_rs = "0.8"
+rust-stemmers = "1.2.0"
+rphonetic = "4.0.0"
 
 [features]
 default = ["extension-module"]
@@ -27,3 +88,55 @@ default = ["extension-module"]
 # does not link libpython, which breaks a plain `cargo test`/`cargo build` binary target;
 # maturin enables the default feature set, `cargo test --no-default-features` skips it.
 extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+criterion = "0.5"
+strsim = "0.11.1"
+
+[[bench]]
+name = "normalize"
+harness = false
+
+[[bench]]
+name = "bytes"
+harness = false
+
+[[bench]]
+name = "text"
+harness = false
+
+[[bench]]
+name = "utf8"
+harness = false
+
+[[bench]]
+name = "diff"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "fence"
+harness = false
+
+[[bench]]
+name = "chunking"
+harness = false
+
+[[bench]]
+name = "integrity"
+harness = false
+
+[[bench]]
+name = "redaction"
+harness = false
+
+[[bench]]
+name = "encoding"
+harness = false
+
+[[bench]]
+name = "retrieval"
+harness = false

@@ -4,22 +4,98 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual trigger for debugging a workflow change without pushing a commit.
+  workflow_dispatch:
+
+# Cancel the superseded run for the same branch when a new push lands:
+# rapid follow-up commits stop burning runner minutes on an already-outdated run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  lint:
+    # Runs once, not per matrix leg: Rust fmt/clippy is Python-version-agnostic, so the
+    # 3.10–3.14 matrix would buy five identical copies of the same signal.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        # The action installs with rustup's `--profile minimal`, which ships neither
+        # rustfmt nor clippy — this input is what makes the two steps below runnable.
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        # rust-cache, not sccache, in CI: every strategy pays its warm-up per job, and a
+        # ~10s clean build never amortizes sccache's install + cache-restore overhead on
+        # top of it. rust-cache already keys per job on the lockfile. sccache is wired
+        # where it does pay — the local edit/compile loop, via the Makefile (which does
+        # the same: sccache locally, no compiler cache in CI).
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo clippy (no default features)
+        # Second pass in the configuration `Cargo test` / `Compile benches` below actually
+        # build (--no-default-features): pyo3's cfg flags differ between the two configs,
+        # so each pass can surface lints in code the other never compiles.
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Cargo deny (licenses, advisories, bans)
+        # The repo-wide, permanent licensing gate (spec v0.4 item 6): the
+        # permissive-only allowlist and the advisory/ban policy live in
+        # deny.toml; `make deny` runs the same three checks locally. The
+        # action ships a prebuilt cargo-deny binary, so the gate costs
+        # seconds, not the minutes a `cargo install cargo-deny --locked`
+        # would add to every run.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command-arguments: licenses advisories bans
+
+      - name: Install uv
+        # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
+        # so the lockfile — not this workflow — owns its version.
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Ruff
+        # The Python-side lint gate (config in pyproject.toml [tool.ruff];
+        # `make lint` runs the same check locally). --no-install-project keeps
+        # this a pure lint step: only the dev deps are installed, never the
+        # tors wheel (whose maturin build is the test job's business — the
+        # Rust gates above already compile the code it would wrap).
+        run: |
+          uv sync --locked --no-install-project
+          uv run --no-sync ruff check .
+
   test:
+    # Cheap signals first: a fmt or clippy
+    # failure surfaces from `lint` in one fast job instead of after five matrix legs have
+    # each spent a uv sync + extension build on the same break.
+    needs: [lint]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        # Same choice as the lint job's cache step (rationale there).
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Cargo test
         # extension-module doesn't link libpython, so plain `cargo test` needs it off.
@@ -28,15 +104,48 @@ jobs:
         if: matrix.python-version == '3.12'
         run: cargo test --no-default-features
 
+      - name: Compile benches
+        # Compile-guard only: the bench docstring (benches/normalize.rs) and the design
+        # spec both promise that CI compiles the criterion benches; `--no-run` keeps that
+        # promise without spending runner time executing them. `--no-default-features`:
+        # same libpython-linking reason as `Cargo test` above — a bench binary links the rlib.
+        if: matrix.python-version == '3.12'
+        run: cargo bench --no-run --no-default-features
+
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Sync dependencies and build the extension
         # --locked: fail if uv.lock is out of date with pyproject.toml, rather than silently
-        # rewriting it — same house convention as cennan/OperatingPlan's CI.
+        # rewriting it.
         run: uv sync --locked
 
       - name: Pytest
-        run: uv run --no-sync pytest -q
+        # -m "not timing": the timing lane (tests/test_gil_release.py and
+        # tests/test_performance.py — the asyncio heartbeat-gap and wall-band
+        # measurement cells, marked `timing` in pyproject.toml) is slow and
+        # load-sensitive, so the matrix legs deselect it and ONE dedicated
+        # step on this 3.12 leg runs it right after: the GIL/perf contracts
+        # still gate every push, once, instead of being paid on all five
+        # legs. The marker split is exact (both lane files carry a module-level
+        # pytestmark, nothing else does), so no test loses its lane — verified
+        # by `pytest --collect-only -m timing` + `-m "not timing"` summing to
+        # the unfiltered count.
+        # -rP: also show the captured stdout of PASSING tests. The suite's
+        # print-only measurement cells (deliberately unasserted bands, e.g.
+        # b64_decode's wall parity) record their numbers via print, which the
+        # default -q report swallows — -rP surfaces them in the CI log for
+        # the record.
+        run: uv run --no-sync pytest -q -rP -m "not timing"
+
+      - name: Pytest (timing lane)
+        # The lane the matrix legs above deselect, run ONCE (the 3.12 leg,
+        # after the main pytest step): the GIL-release and wall-time
+        # measurement cells. -rP so the print-only recorded bands (and the
+        # b64 battery's recorded gh-145264 divergences, should this leg's
+        # stdlib predate the fix) surface in the log. Runs last on the leg so
+        # a timing failure never masks the fast lane's results.
+        if: matrix.python-version == '3.12'
+        run: uv run --no-sync pytest -q -rP -m timing

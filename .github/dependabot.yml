@@ -1,8 +1,8 @@
 version: 2
 
 updates:
-  # Keeps the SHA pins in publish.yml (and tag refs in ci.yml) current — SHA-pinning
-  # actions without this entry means never receiving upstream security fixes.
+  # Keeps the SHA pins in every workflow (ci.yml, publish.yml, docs.yml) current —
+  # SHA-pinning actions without this entry means never receiving upstream security fixes.
   - package-ecosystem: github-actions
     directory: /
     schedule:

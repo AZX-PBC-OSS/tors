@@ -1,0 +1,697 @@
+//! Unit-count chunking: [`chunk_by_words`], [`chunk_by_sentences`], and
+//! [`chunk_by_paragraphs`], the `tors.chunk_text`/`tors.chunk_cdc` family's
+//! third shape: instead of a character budget ([`crate::chunk_impl::chunk_text`])
+//! or byte-content anchoring (`chunk_cdc`), each chunk spans a fixed COUNT of
+//! consecutive segments from one of the crate's three segmenters: real word
+//! tokens ([`crate::segmentation_impl::word_bounds`], filtered), UAX #29
+//! sentences ([`crate::segmentation_impl::sentence_bounds`]), or
+//! newline-run-delimited paragraphs ([`paragraph_bounds`], a heuristic: no
+//! UAX exists for paragraphs). Split from `chunk_impl.rs` per the crate's
+//! own "one concern per file" rule: [`chunk_text`] and
+//! `chunk_cdc` are CHARACTER/BYTE-budget chunkers, these three are
+//! UNIT-COUNT chunkers, a different windowing shape sharing only the
+//! `Boundary`-safety discipline, not the cut logic.
+//!
+//! [`chunk_by_segments`] is the one windowing walk behind all three unit
+//! chunkers: "N segments per chunk, Y segments of overlap" over whatever
+//! `(start, end)` segment list the caller already produced: the DRY point
+//! this file exists to keep in one place rather than copied per unit.
+//!
+//! [`crate::chunk_impl`]
+
+use std::collections::HashSet;
+
+use crate::segmentation_impl;
+use crate::truncate_impl::grapheme_boundary_chars;
+
+/// Merge adjacent CONTIGUOUS segments (`bounds[i].1 == bounds[i + 1].0`:
+/// the `word_bounds`/`sentence_bounds` covering-partition contract) whose
+/// shared boundary is NOT a grapheme-cluster boundary, the same
+/// SARA-AM-shaped edge `crate::chunk_impl`'s hard-cut fallback guards
+/// against: UAX #29 word boundaries occasionally score a combining
+/// sequence (e.g. Thai SARA AM, U+0E33) as its own word-segment even
+/// though `unicode-segmentation`'s grapheme rules join it to the
+/// preceding base character into one cluster. [`chunk_by_segments`]
+/// windows over segment EDGES directly, so a chunk boundary landing
+/// exactly on such a split would silently divide the cluster between two
+/// returned chunks; merging the two segments before windowing removes the
+/// cut point rather than special-casing it per chunk. One forward pass,
+/// O(n).
+fn merge_mid_cluster_boundaries(
+    bounds: Vec<(usize, usize)>,
+    grapheme_set: &HashSet<usize>,
+) -> Vec<(usize, usize)> {
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(bounds.len());
+    for (start, end) in bounds {
+        match merged.last_mut() {
+            Some(last) if last.1 == start && !grapheme_set.contains(&start) => {
+                last.1 = end;
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// The shared "N segments per chunk, Y segments of overlap" walk behind
+/// [`chunk_by_words`] and [`chunk_by_sentences`]: the only difference
+/// between them is which segmenter produced `bounds`
+/// (`segmentation_impl::word_bounds`/`sentence_bounds`), so the windowing
+/// logic itself is factored here once rather than duplicated per unit
+/// (the `elapsed_exceeds` precedent: factor a second consumer, don't copy
+/// it). `bounds` is an ascending, contiguous, non-overlapping segment list
+/// (word_bounds'/sentence_bounds' own contract): this function trusts
+/// that contract and does not re-validate it.
+///
+/// Each chunk spans `per_chunk` consecutive segments, `[bounds[i].0,
+/// bounds[i + per_chunk - 1].1)`, except possibly the LAST chunk, which
+/// takes whatever remains when the segment count doesn't divide evenly.
+/// Consecutive chunks advance by `stride = per_chunk - overlap` segments
+/// (`overlap < per_chunk` is the caller's precondition, so
+/// `stride >= 1` always: unconditional forward progress by construction,
+/// no runtime check needed the way `chunk_text_overlapping`'s
+/// character-granularity snapping needs one). Empty `bounds` (empty text)
+/// yields `[]`.
+fn chunk_by_segments(
+    bounds: &[(usize, usize)],
+    per_chunk: usize,
+    overlap: usize,
+) -> Vec<(usize, usize)> {
+    if bounds.is_empty() {
+        return Vec::new();
+    }
+    // `assert!`, not `debug_assert!`: this function is `pub` Rust API in its
+    // own right (reachable without going through the pyo3 validation these
+    // three callers' Python bindings apply), and both preconditions are
+    // load-bearing for `stride`'s arithmetic below: with overflow checks
+    // off in a release build (the crate's default profile), a violated
+    // `overlap < per_chunk` would underflow `per_chunk - overlap` into a
+    // huge `usize` silently rather than panic, corrupting the walk instead
+    // of failing loudly. The same discipline `chunk_text`/
+    // `chunk_text_overlapping`'s own `assert!`s already apply.
+    assert!(per_chunk > 0, "per_chunk must be at least 1, got 0");
+    assert!(
+        overlap < per_chunk,
+        "overlap must be less than per_chunk (no forward progress otherwise), \
+         got overlap={overlap}, per_chunk={per_chunk}"
+    );
+    let stride = per_chunk - overlap;
+    let n = bounds.len();
+    let mut chunks = Vec::with_capacity(n.div_ceil(stride));
+    let mut i = 0usize;
+    loop {
+        let j = (i + per_chunk).min(n);
+        chunks.push((bounds[i].0, bounds[j - 1].1));
+        if j >= n {
+            break;
+        }
+        i += stride;
+    }
+    chunks
+}
+
+/// Word-count-windowed chunking: each chunk spans `words_per_chunk`
+/// consecutive WORD TOKENS, not `word_bounds`' raw segment
+/// count. `word_bounds` itself follows UAX #29 exactly, which gives an
+/// inter-word space run its OWN segment (`"one two"` is three segments:
+/// `"one"`, `" "`, `"two"`), the established convention `word_count`
+/// already carries. Grouping RAW segments here would silently mean
+/// "`words_per_chunk` roughly halved" for ordinary space-separated
+/// prose, the opposite of what a caller reaching for
+/// `words_per_chunk=100` (a "~100 word chunk" for an embedding budget)
+/// actually wants. So this filters `word_bounds`' output to segments
+/// that carry at least one non-whitespace codepoint FIRST, and only
+/// then windows over what remains: a "word" here is a real token, and
+/// the whitespace between two tokens in one chunk still rides along
+/// naturally (the span is a contiguous slice of the ORIGINAL text
+/// between two real absolute offsets, not a re-assembly of kept
+/// segments), exactly as it would if nothing had been filtered.
+///
+/// `(start, end)` are codepoint offsets spanning the first included
+/// word token's start through the last included token's end (NOT
+/// through any trailing whitespace after it: that whitespace belongs
+/// to neither this chunk nor the next one's word tokens, so
+/// non-overlapping chunks are no longer necessarily contiguous, unlike
+/// `chunk_text`'s covering-partition contract; this function makes no
+/// such claim). The final chunk may hold fewer than `words_per_chunk`
+/// tokens when the total doesn't divide evenly. Empty text, or text
+/// with no word tokens at all (pure whitespace), yields `[]`.
+/// `words_per_chunk == 0` or `overlap >= words_per_chunk` are the pyo3
+/// layer's `ValueError`s (this core trusts its precondition, matching
+/// [`chunk_by_segments`]'s own contract).
+///
+/// Grapheme-cluster-safe at every window edge, the same fix
+/// `crate::chunk_impl::chunk_text` applies: `word_bounds` occasionally
+/// scores a combining sequence (e.g. Thai SARA AM) as its own
+/// word-segment even though it's one grapheme cluster, and a chunk
+/// boundary landing there would silently split it:
+/// [`merge_mid_cluster_boundaries`] closes this before windowing starts.
+pub fn chunk_by_words(text: &str, words_per_chunk: usize, overlap: usize) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    // Merge any word_bounds segment edge that would split a grapheme
+    // cluster (the SARA AM edge, see `merge_mid_cluster_boundaries`)
+    // BEFORE filtering out whitespace-only segments: the merge relies on
+    // `word_bounds`' raw covering-partition contiguity, which the
+    // whitespace filter below would otherwise break (it opens gaps).
+    let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+    let merged = merge_mid_cluster_boundaries(segmentation_impl::word_bounds(text), &grapheme_set);
+    let bounds: Vec<(usize, usize)> = merged
+        .into_iter()
+        .filter(|&(start, end)| chars[start..end].iter().any(|c| !c.is_whitespace()))
+        .collect();
+    chunk_by_segments(&bounds, words_per_chunk, overlap)
+}
+
+/// [`chunk_by_words`]'s sentence-count twin: each chunk spans
+/// `sentences_per_chunk` consecutive UAX #29 sentence segments
+/// (`sentence_bounds`), `overlap` sentences repeated. Same contract,
+/// same preconditions, same empty-input answer, same
+/// grapheme-cluster-safe window edges (see [`chunk_by_words`]'s docs).
+pub fn chunk_by_sentences(
+    text: &str,
+    sentences_per_chunk: usize,
+    overlap: usize,
+) -> Vec<(usize, usize)> {
+    // Same grapheme-cluster merge as chunk_by_words, applied to
+    // sentence_bounds' segments (also a covering, contiguous partition,
+    // so the merge's contiguity assumption holds directly: no
+    // whitespace-filter step exists here to reorder around).
+    let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+    let bounds =
+        merge_mid_cluster_boundaries(segmentation_impl::sentence_bounds(text), &grapheme_set);
+    chunk_by_segments(&bounds, sentences_per_chunk, overlap)
+}
+
+/// Paragraph boundaries: `text` split on maximal runs of 2+ NEWLINE
+/// UNITS: `\r\n` counts as ONE unit (matching `normalize`'s own
+/// CR/CRLF folding), a lone `\r` or `\n` also one unit each. This is
+/// the same "2+ newlines is the surviving paragraph gap" convention
+/// `normalize`'s own pipeline already establishes (it collapses 3+
+/// consecutive newlines down to exactly 2, never below: see
+/// `normalize_impl::flush`). There is NO Unicode Standard segmentation
+/// for paragraphs (unlike UAX #29 for words/sentences), so this is a
+/// heuristic, stated plainly, not a spec-backed segmenter: a single `\n`
+/// is ordinary content here, not a break (`"A\nB"` is one paragraph),
+/// and a "blank-looking" line that holds only spaces/tabs between two
+/// LONE newlines does NOT qualify: only an actual run of 2+ newline
+/// characters does. This operates on `text` as given, not on any prior
+/// `normalize` pass.
+///
+/// Each returned span is one paragraph's content, `(start, end)`
+/// codepoint offsets, EXCLUDING the separating run itself (a paragraph's
+/// span shouldn't include the gap that separates it from the next one).
+/// A leading or trailing qualifying run produces an empty span at that
+/// edge, which is DISCARDED rather than emitted: an empty "paragraph"
+/// is not a useful chunk. Text with no qualifying run at all yields
+/// exactly one paragraph: the whole text. Empty input yields `[]`.
+///
+/// UNLIKE `word_bounds`/`sentence_bounds`, this split point is
+/// structurally grapheme-safe with no merge step needed: every split
+/// happens strictly INSIDE a run of `\n`/`\r` characters (`\r\n` is
+/// consumed as one unit, matching `normalize`'s own CRLF folding, so a
+/// CRLF pair is never itself torn in two), and neither character is a
+/// combining mark: a grapheme cluster spanning a newline would require a
+/// combining mark to immediately follow it, at which point the newline
+/// (never emitted in any paragraph's span: it's discarded as separator
+/// content) is a non-printing control character, not text either
+/// paragraph's caller would consider "split". No visible content
+/// character is ever cut mid-cluster by this function.
+pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut bounds = Vec::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if chars[i] == '\n' || chars[i] == '\r' {
+            let run_start = i;
+            let mut units = 0usize;
+            while i < n && (chars[i] == '\n' || chars[i] == '\r') {
+                if chars[i] == '\r' && i + 1 < n && chars[i + 1] == '\n' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                units += 1;
+            }
+            if units >= 2 {
+                if seg_start < run_start {
+                    bounds.push((seg_start, run_start));
+                }
+                seg_start = i;
+            }
+            // A single-unit run is ordinary content: no split, keep scanning.
+        } else {
+            i += 1;
+        }
+    }
+    if seg_start < n {
+        bounds.push((seg_start, n));
+    }
+    bounds
+}
+
+/// [`chunk_by_words`]'s paragraph-count twin: each chunk spans
+/// `paragraphs_per_chunk` consecutive [`paragraph_bounds`] segments,
+/// `overlap` PARAGRAPHS repeated. Same contract, same preconditions,
+/// same empty-input answer: see [`paragraph_bounds`] for exactly what
+/// counts as a paragraph boundary here (a heuristic, not a Unicode
+/// Standard segmentation).
+pub fn chunk_by_paragraphs(
+    text: &str,
+    paragraphs_per_chunk: usize,
+    overlap: usize,
+) -> Vec<(usize, usize)> {
+    let bounds = paragraph_bounds(text);
+    chunk_by_segments(&bounds, paragraphs_per_chunk, overlap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- grapheme-cluster safety (the truncate_impl regression, re-derived here) ----
+
+    #[test]
+    fn chunk_by_words_never_splits_a_thai_sara_am_cluster_across_two_words() {
+        // Raw word_bounds("x0ำy0ำz") = [(0,2)="x0", (2,3)="ำ", (3,5)="y0",
+        // (5,6)="ำ", (6,7)="z"]: TWO combining sequences each split into
+        // a base-segment + a lone-combining-mark segment. Neither "ำ"
+        // segment is whitespace, so a whitespace-only filter would
+        // NOT catch this: chunk_by_words(text, 1, 0) would silently
+        // return a chunk containing only the bare combining mark. The
+        // merge step must fuse each pair into one real word first.
+        let text = "x0\u{0E33}y0\u{0E33}z";
+        let chunks = chunk_by_words(text, 1, 0);
+        let slice =
+            |(a, b): (usize, usize)| -> String { text.chars().skip(a).take(b - a).collect() };
+        assert_eq!(chunks.len(), 3, "chunks: {chunks:?}");
+        assert_eq!(slice(chunks[0]), "x0\u{0E33}");
+        assert_eq!(slice(chunks[1]), "y0\u{0E33}");
+        assert_eq!(slice(chunks[2]), "z");
+        // No chunk is a bare, unattached combining mark.
+        for &c in &chunks {
+            assert_ne!(slice(c), "\u{0E33}");
+        }
+    }
+
+    #[test]
+    fn chunk_by_sentences_never_splits_a_grapheme_cluster_across_two_sentences() {
+        // sentence_bounds is coarser than word_bounds and, empirically,
+        // does not isolate the SARA AM combining mark into its own
+        // sentence segment for ordinary sentence-terminated text, but
+        // the merge step runs unconditionally (see chunk_by_sentences'
+        // implementation), so this pins that no chunk produced by it
+        // ever starts or ends strictly inside a cluster, regardless.
+        let text = "One 0\u{0E33} fish. Two 0\u{0E33} fish.";
+        let valid: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+        for sentences_per_chunk in 1..=3 {
+            let chunks = chunk_by_sentences(text, sentences_per_chunk, 0);
+            for &(a, b) in &chunks {
+                assert!(valid.contains(&a), "start {a} mid-cluster: {chunks:?}");
+                assert!(valid.contains(&b), "end {b} mid-cluster: {chunks:?}");
+            }
+        }
+    }
+
+    // ---- chunk_by_words / chunk_by_sentences ----
+
+    #[test]
+    fn chunk_by_words_groups_exact_word_counts() {
+        // word_bounds("the cat sat on the mat") segments: the/ /cat/ /sat/
+        // /on/ /the/ /mat: 11 raw segments (6 real word tokens + 5
+        // inter-word spaces, each its own WB segment), but chunk_by_words
+        // filters the whitespace-only segments out FIRST so "2 words per
+        // chunk" means 2 real tokens, not 2 raw segments (which would
+        // silently be ~1 real word per chunk on ordinary prose). 2 words
+        // per chunk, no overlap: 3 chunks of 2 real words each, spans
+        // still contiguous slices of the ORIGINAL text (inter-word space
+        // inside a chunk rides along naturally).
+        let text = "the cat sat on the mat";
+        let chunks = chunk_by_words(text, 2, 0);
+        let slice =
+            |(a, b): (usize, usize)| -> String { text.chars().skip(a).take(b - a).collect() };
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(slice(chunks[0]), "the cat");
+        assert_eq!(slice(chunks[1]), "sat on");
+        assert_eq!(slice(chunks[2]), "the mat");
+        // Non-overlapping in this overlap=0 case, but chunks are NOT
+        // necessarily contiguous any more (the space between "cat" and
+        // "sat" belongs to neither chunk): this function makes no
+        // covering-partition claim, unlike chunk_text.
+        for w in chunks.windows(2) {
+            assert!(w[1].0 >= w[0].1);
+        }
+    }
+
+    #[test]
+    fn chunk_by_words_counts_real_tokens_not_raw_word_bounds_segments() {
+        // The regression this pins: word_bounds gives an inter-word space
+        // run its OWN segment, so a naive "group N raw segments" reading
+        // of "words_per_chunk" would silently mean roughly HALF as many
+        // real words per chunk on ordinary space-separated prose.
+        // "one two three four five six seven" has 7 real word tokens (13
+        // raw word_bounds segments, 7 words + 6 spaces): 3 per chunk
+        // must yield exactly ceil(7/3) = 3 chunks, the last holding the
+        // remaining 1 word, never the wrong (roughly-halved) count a
+        // raw-segment grouping would produce.
+        let text = "one two three four five six seven";
+        let chunks = chunk_by_words(text, 3, 0);
+        assert_eq!(chunks.len(), 3, "chunks: {chunks:?}");
+        let slice =
+            |(a, b): (usize, usize)| -> String { text.chars().skip(a).take(b - a).collect() };
+        assert_eq!(slice(chunks[0]), "one two three");
+        assert_eq!(slice(chunks[1]), "four five six");
+        assert_eq!(slice(chunks[2]), "seven");
+    }
+
+    #[test]
+    fn chunk_by_words_overlap_repeats_words_at_each_boundary() {
+        let text = "one two three four five six seven";
+        let chunks = chunk_by_words(text, 3, 1);
+        assert!(chunks.len() >= 2);
+        for w in chunks.windows(2) {
+            assert!(
+                w[1].0 < w[0].1,
+                "no overlap between {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(
+                w[1].0 > w[0].0,
+                "no forward progress: {:?} -> {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_by_words_overlap_actually_shares_content_langchain_34804_regression() {
+        // LangChain issue #34804: chunk_overlap was silently a no-op
+        // except when a size-overflow forced a merge: a real, shipped
+        // bug in the most popular chunking library. The regression this
+        // pins: consecutive chunks must share GENUINE, non-empty text,
+        // not merely satisfy a position check that happens to coincide
+        // with hitting a size ceiling. 8 words, no chunk here divides
+        // evenly to a size ceiling by coincidence; the overlap must still
+        // manifest as literal shared text on every transition.
+        let text = "alpha beta gamma delta epsilon zeta eta theta";
+        let chunks = chunk_by_words(text, 3, 1);
+        assert!(chunks.len() >= 2, "chunks: {chunks:?}");
+        let slice =
+            |(a, b): (usize, usize)| -> String { text.chars().skip(a).take(b - a).collect() };
+        for w in chunks.windows(2) {
+            let (prev_start, prev_end) = w[0];
+            let (next_start, next_end) = w[1];
+            let shared: String = text
+                .chars()
+                .skip(next_start)
+                .take(prev_end.saturating_sub(next_start))
+                .collect();
+            assert!(
+                !shared.trim().is_empty(),
+                "no genuine shared content between {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+            // The shared span reads identically from EITHER chunk's own
+            // text (it's the same underlying offsets on both sides).
+            let from_prev = &slice((prev_start, prev_end))[(next_start - prev_start)..];
+            let from_next = &slice((next_start, next_end))[..(prev_end - next_start)];
+            assert_eq!(from_prev, from_next);
+            assert_eq!(from_prev, shared);
+        }
+    }
+
+    #[test]
+    fn chunk_by_sentences_groups_exact_sentence_counts() {
+        let text = "One. Two. Three. Four. Five.";
+        let chunks = chunk_by_sentences(text, 2, 0);
+        assert!(chunks.len() >= 2);
+        let mut prev_end = 0usize;
+        for &(a, b) in &chunks {
+            assert_eq!(a, prev_end);
+            prev_end = b;
+        }
+        assert_eq!(prev_end, text.chars().count());
+    }
+
+    #[test]
+    fn chunk_by_sentences_overlap_repeats_sentences() {
+        let text = "One. Two. Three. Four. Five. Six.";
+        let chunks = chunk_by_sentences(text, 3, 1);
+        assert!(chunks.len() >= 2);
+        for w in chunks.windows(2) {
+            assert!(w[1].0 < w[0].1);
+            assert!(w[1].0 > w[0].0);
+        }
+    }
+
+    #[test]
+    fn chunk_by_sentences_overlap_actually_shares_content_langchain_34804_regression() {
+        // Same LangChain #34804 regression as chunk_by_words' twin: the
+        // shared span must be real, extractable text, not merely a
+        // position check; and this must hold even though 6 sentences
+        // over 3-per-chunk/1-overlap doesn't divide to any size ceiling.
+        let text = "One. Two. Three. Four. Five. Six.";
+        let chunks = chunk_by_sentences(text, 3, 1);
+        assert!(chunks.len() >= 2, "chunks: {chunks:?}");
+        let chars: Vec<char> = text.chars().collect();
+        let slice = |(a, b): (usize, usize)| -> String { chars[a..b].iter().collect() };
+        for w in chunks.windows(2) {
+            let (_, prev_end) = w[0];
+            let (next_start, _) = w[1];
+            assert!(
+                next_start < prev_end,
+                "no overlap: {:?} -> {:?}",
+                w[0],
+                w[1]
+            );
+            let shared: String = chars[next_start..prev_end].iter().collect();
+            assert!(
+                !shared.trim().is_empty(),
+                "no genuine shared content between {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(slice(w[0]).ends_with(&shared));
+            assert!(slice(w[1]).starts_with(&shared));
+        }
+    }
+
+    #[test]
+    fn chunk_by_word_or_sentence_empty_text_is_no_chunks() {
+        assert_eq!(chunk_by_words("", 3, 0), Vec::<(usize, usize)>::new());
+        assert_eq!(chunk_by_sentences("", 3, 0), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn paragraph_bounds_splits_on_blank_line_runs() {
+        let text = "First para.\n\nSecond para.\n\nThird para.";
+        let bounds = paragraph_bounds(text);
+        let chars: Vec<char> = text.chars().collect();
+        let pieces: Vec<String> = bounds
+            .iter()
+            .map(|&(a, b)| chars[a..b].iter().collect())
+            .collect();
+        assert_eq!(pieces, vec!["First para.", "Second para.", "Third para."]);
+    }
+
+    #[test]
+    fn paragraph_bounds_a_single_newline_is_not_a_break() {
+        let text = "line one\nline two";
+        assert_eq!(paragraph_bounds(text), vec![(0, text.chars().count())]);
+    }
+
+    #[test]
+    fn paragraph_bounds_three_plus_newlines_are_still_one_break() {
+        let text = "First.\n\n\n\nSecond.";
+        let bounds = paragraph_bounds(text);
+        assert_eq!(bounds.len(), 2);
+        let chars: Vec<char> = text.chars().collect();
+        let second: String = chars[bounds[1].0..bounds[1].1].iter().collect();
+        assert_eq!(second, "Second.");
+    }
+
+    #[test]
+    fn paragraph_bounds_crlf_run_counts_as_two_units() {
+        let text = "First.\r\n\r\nSecond.";
+        let bounds = paragraph_bounds(text);
+        let chars: Vec<char> = text.chars().collect();
+        let pieces: Vec<String> = bounds
+            .iter()
+            .map(|&(a, b)| chars[a..b].iter().collect())
+            .collect();
+        assert_eq!(pieces, vec!["First.", "Second."]);
+    }
+
+    #[test]
+    fn paragraph_bounds_lone_cr_run_counts_too() {
+        let text = "First.\r\rSecond.";
+        let bounds = paragraph_bounds(text);
+        assert_eq!(bounds.len(), 2);
+    }
+
+    #[test]
+    fn paragraph_bounds_leading_and_trailing_blank_runs_are_trimmed() {
+        let text = "\n\n\nHello\n\n\n";
+        let bounds = paragraph_bounds(text);
+        let chars: Vec<char> = text.chars().collect();
+        assert_eq!(bounds.len(), 1);
+        let piece: String = chars[bounds[0].0..bounds[0].1].iter().collect();
+        assert_eq!(piece, "Hello");
+    }
+
+    #[test]
+    fn paragraph_bounds_no_breaks_is_one_paragraph() {
+        let text = "just one paragraph, no blank lines at all";
+        assert_eq!(paragraph_bounds(text), vec![(0, text.chars().count())]);
+    }
+
+    #[test]
+    fn paragraph_bounds_empty_text_is_no_paragraphs() {
+        assert_eq!(paragraph_bounds(""), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn chunk_by_paragraphs_groups_exact_paragraph_counts() {
+        // Unlike chunk_by_sentences (whose UAX #29 segments already carry
+        // their own trailing whitespace, so chunks stay contiguous),
+        // paragraph_bounds EXCLUDES the separating blank-line run from
+        // each paragraph's span, so, like chunk_by_words, chunks here
+        // are not necessarily contiguous; assert on content, not on
+        // gapless coverage.
+        let text = "P1.\n\nP2.\n\nP3.\n\nP4.\n\nP5.";
+        let chunks = chunk_by_paragraphs(text, 2, 0);
+        let slice =
+            |(a, b): (usize, usize)| -> String { text.chars().skip(a).take(b - a).collect() };
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(slice(chunks[0]), "P1.\n\nP2.");
+        assert_eq!(slice(chunks[1]), "P3.\n\nP4.");
+        assert_eq!(slice(chunks[2]), "P5.");
+    }
+
+    #[test]
+    fn chunk_by_paragraphs_overlap_repeats_paragraphs() {
+        let text = "P1.\n\nP2.\n\nP3.\n\nP4.\n\nP5.\n\nP6.";
+        let chunks = chunk_by_paragraphs(text, 3, 1);
+        assert!(chunks.len() >= 2);
+        for w in chunks.windows(2) {
+            assert!(w[1].0 < w[0].1);
+            assert!(w[1].0 > w[0].0);
+        }
+    }
+
+    #[test]
+    fn chunk_by_paragraphs_overlap_actually_shares_content_langchain_34804_regression() {
+        // Same LangChain #34804 regression, paragraph-count sibling: the
+        // shared span between consecutive chunks must be real,
+        // extractable paragraph text.
+        let text = "P1.\n\nP2.\n\nP3.\n\nP4.\n\nP5.\n\nP6.";
+        let chunks = chunk_by_paragraphs(text, 3, 1);
+        assert!(chunks.len() >= 2, "chunks: {chunks:?}");
+        let chars: Vec<char> = text.chars().collect();
+        let slice = |(a, b): (usize, usize)| -> String { chars[a..b].iter().collect() };
+        for w in chunks.windows(2) {
+            let (_, prev_end) = w[0];
+            let (next_start, _) = w[1];
+            assert!(
+                next_start < prev_end,
+                "no overlap: {:?} -> {:?}",
+                w[0],
+                w[1]
+            );
+            let shared: String = chars[next_start..prev_end].iter().collect();
+            assert!(
+                !shared.trim().is_empty(),
+                "no genuine shared content between {:?} and {:?}",
+                w[0],
+                w[1]
+            );
+            assert!(slice(w[0]).ends_with(&shared));
+            assert!(slice(w[1]).starts_with(&shared));
+        }
+    }
+
+    #[test]
+    fn chunk_by_paragraphs_empty_text_is_no_chunks() {
+        assert_eq!(chunk_by_paragraphs("", 3, 0), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn chunk_by_paragraphs_single_chunk_when_fewer_paragraphs_than_per_chunk() {
+        let text = "Only one paragraph here.";
+        let chunks = chunk_by_paragraphs(text, 100, 0);
+        assert_eq!(chunks, vec![(0, text.chars().count())]);
+    }
+
+    #[test]
+    fn chunk_by_words_single_chunk_when_fewer_words_than_per_chunk() {
+        let text = "hi there";
+        let chunks = chunk_by_words(text, 100, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], (0, text.chars().count()));
+    }
+
+    #[test]
+    fn chunk_by_words_last_chunk_may_be_partial() {
+        // 5 word-level segments spelled out won't divide evenly by a
+        // stride of 2 in general; confirm the last chunk just takes
+        // whatever remains rather than panicking or dropping content.
+        let text = "alpha beta gamma";
+        let bounds = segmentation_impl::word_bounds(text);
+        let chunks = chunk_by_words(text, 2, 0);
+        let last = *chunks.last().unwrap();
+        assert_eq!(last.1, bounds.last().unwrap().1);
+    }
+
+    #[test]
+    #[should_panic(expected = "per_chunk must be at least 1")]
+    fn chunk_by_segments_panics_on_zero_per_chunk() {
+        // Pins that the `per_chunk > 0` precondition is an `assert!`, not a
+        // `debug_assert!` that a release build would silently skip: the
+        // three pyo3 wrappers already reject this before it ever reaches
+        // here, but this function is reachable directly within the crate,
+        // and a regression back to `debug_assert!` would only be caught by
+        // a release-mode run, never by `cargo test`'s debug profile. This
+        // test can't tell `assert!` from `debug_assert!` either (both panic
+        // in a debug test build), but it does pin that the condition and
+        // message stay intact, and any regression that inlines/removes the
+        // check outright still fails it.
+        let bounds = [(0usize, 1usize), (1, 2), (2, 3)];
+        chunk_by_segments(&bounds, 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "overlap must be less than per_chunk")]
+    fn chunk_by_segments_panics_when_overlap_at_least_per_chunk() {
+        let bounds = [(0usize, 1usize), (1, 2), (2, 3)];
+        chunk_by_segments(&bounds, 2, 2);
+    }
+
+    #[test]
+    fn chunk_by_segments_forward_progress_is_unconditional_by_construction() {
+        // per_chunk - overlap >= 1 is the caller's precondition (validated
+        // at the pyo3 boundary); confirm the resulting stride actually
+        // produces strictly increasing starts over a battery, matching
+        // chunk_text_overlapping's own runtime-checked guarantee (this one
+        // needs no runtime check since stride >= 1 is structural).
+        let text = "one two three four five six seven eight nine ten";
+        for per_chunk in 1..6 {
+            for overlap in 0..per_chunk {
+                let chunks = chunk_by_words(text, per_chunk, overlap);
+                let mut prev_start: Option<usize> = None;
+                for &(start, _) in &chunks {
+                    if let Some(p) = prev_start {
+                        assert!(start > p, "per_chunk={per_chunk}, overlap={overlap}");
+                    }
+                    prev_start = Some(start);
+                }
+            }
+        }
+    }
+}

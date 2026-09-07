@@ -1,0 +1,54 @@
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::PyList;
+
+use crate::merkle_impl;
+
+/// `tors.merkle_root(chunks: list[bytes]) -> str`: the Merkle root over
+/// `chunks` as lowercase hex, one GIL-released native pass. Domain-separated
+/// SHA-256 (RFC 6962 style: leaves hash `0x00 || chunk`, internal nodes hash
+/// `0x01 || left || right`). See `src/merkle_impl.rs` for why this does NOT
+/// use the wrapped crate's built-in undifferentiated hasher. An empty list
+/// raises `ValueError` ("root of no chunks" has no non-arbitrary value); a
+/// non-`list` argument or a non-`bytes` entry raises `TypeError`.
+///
+/// GIL model: the list walk (zero-copy `&[u8]` borrows) happens under the
+/// GIL; the whole tree build runs under one `py.detach`.
+#[pyfunction]
+pub fn merkle_root(py: Python<'_>, chunks: Bound<'_, PyList>) -> PyResult<String> {
+    let items: Vec<_> = chunks.iter().collect();
+    let mut borrowed: Vec<&[u8]> = Vec::with_capacity(items.len());
+    for item in &items {
+        borrowed.push(item.extract::<&[u8]>()?);
+    }
+    py.detach(|| merkle_impl::merkle_root(&borrowed))
+        .ok_or_else(|| PyValueError::new_err("root of no chunks"))
+}
+
+/// `tors.merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) ->
+/// list[int]`: indices where `chunks_a[i] != chunks_b[i]`, comparing chunk
+/// DIGESTS rather than raw contents (each chunk is hashed once regardless of
+/// size; the comparison itself is a fixed 32-byte cost per index). Every
+/// index at or beyond the shorter list's length is reported. Two empty lists
+/// diff to `[]`. Argument contract matches `merkle_root`'s.
+///
+/// GIL model: both list walks happen under the GIL; the whole hash-and-scan
+/// runs under one `py.detach`.
+#[pyfunction]
+pub fn merkle_diff(
+    py: Python<'_>,
+    chunks_a: Bound<'_, PyList>,
+    chunks_b: Bound<'_, PyList>,
+) -> PyResult<Vec<usize>> {
+    let items_a: Vec<_> = chunks_a.iter().collect();
+    let mut a: Vec<&[u8]> = Vec::with_capacity(items_a.len());
+    for item in &items_a {
+        a.push(item.extract::<&[u8]>()?);
+    }
+    let items_b: Vec<_> = chunks_b.iter().collect();
+    let mut b: Vec<&[u8]> = Vec::with_capacity(items_b.len());
+    for item in &items_b {
+        b.push(item.extract::<&[u8]>()?);
+    }
+    Ok(py.detach(|| merkle_impl::merkle_diff(&a, &b)))
+}

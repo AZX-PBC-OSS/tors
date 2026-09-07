@@ -1,0 +1,57 @@
+# cargo-deny configuration — the repo-wide, permanent licensing gate (spec
+# v0.4 item 6). The allowlist is permissive-only: MIT, Apache-2.0,
+# BSD-2/3-Clause, ISC, Zlib. No GPL/LGPL/AGPL/MPL, no unlicensed, nothing
+# else. Dual-licensed crates ("MIT OR Apache-2.0", memchr's "MIT OR
+# UNLICENSE") pass when any one branch is allowed — SPDX expression
+# evaluation, not string matching.
+#
+# Run locally with `make deny` (cargo deny check licenses advisories bans);
+# CI runs the same three checks in the lint job (see .github/workflows/ci.yml).
+# Every dependency's license is also recorded in the README's dependency
+# table — this file is the enforcement, that table is the human-readable
+# record.
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    # Two additions beyond the spec's literal list, both flagged by the first
+    # `cargo deny check` run over the actual tree and both permissive grants
+    # inside the gate's stated intent ("permissive only; no GPL/LGPL/AGPL/MPL,
+    # no unlicensed") — recorded here so the deviation is visible, not silent:
+    #
+    # - Apache-2.0 WITH LLVM-exception: target-lexicon (a pyo3 build
+    #   dependency, therefore unavoidable behind pyo3). The LLVM-exception
+    #   REMOVES attribution obligations from Apache-2.0 in specific cases —
+    #   strictly more permissive than the plain Apache-2.0 already allowed.
+    # - Unicode-3.0: unicode-ident ((MIT OR Apache-2.0) AND Unicode-3.0, a
+    #   proc-macro2 dependency), the permissive license the Unicode
+    #   Consortium publishes the UCD data under. The Rust ecosystem's
+    #   unicode-rs crates adopted it for their generated tables.
+    # - 0BSD: enum-iterator / enum-iterator-derive (rphonetic's phonetic-code
+    #   dependencies, for soundex/metaphone). The BSD Zero Clause License is
+    #   OSI-approved and public-domain-equivalent — strictly more permissive
+    #   than plain MIT (it drops even the attribution requirement).
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "0BSD",
+]
+# The allowlist is policy, not a measurement of today's tree: BSD-2/3-Clause,
+# ISC, and Zlib are allowed for future dependencies before any of them is
+# actually pulled in, so "allowed but not yet encountered" is not a finding.
+unused-allowed-license = "allow"
+
+[advisories]
+version = 2
+
+[bans]
+# Multiple versions of one crate are a warning, not a denial: the dev-tree
+# (criterion and friends) legitimately pulls overlapping versions, and
+# denying there would be noise without protecting anything — the runtime
+# dependency set is small enough to eyeball on every bump (README table).
+multiple-versions = "warn"

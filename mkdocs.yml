@@ -24,6 +24,9 @@ theme:
 nav:
   - Home: index.md
   - API reference: api.md
+  - Recipes:
+      - Ingesting a real document: recipe-ingest.md
+      - A lightweight retrieval/reranking pipeline: recipe-retrieval.md
 
 markdown_extensions:
   - pymdownx.highlight
