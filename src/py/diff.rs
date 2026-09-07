@@ -1,10 +1,10 @@
-use pyo3::exceptions::PyTimeoutError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 
 use crate::diff_impl;
+use crate::py::_borrow::timeout_err;
 use crate::validate_deadline_ms;
 
 /// The shared marshalling tail of `tors.diff_opcodes` and
@@ -89,7 +89,7 @@ pub fn diff_opcodes(
     validate_deadline_ms(deadline_ms)?;
     let opcodes = py
         .detach(|| diff_impl::diff_opcodes_deadline(a, b, deadline_ms))
-        .map_err(|err| PyTimeoutError::new_err(err.message()))?;
+        .map_err(|err| timeout_err(err.message()))?;
     opcodes_into_pytuples(py, opcodes)
 }
 
@@ -128,6 +128,6 @@ pub fn diff_opcodes_lines(
     validate_deadline_ms(deadline_ms)?;
     let opcodes = py
         .detach(|| diff_impl::diff_opcodes_lines_deadline(a, b, deadline_ms))
-        .map_err(|err| PyTimeoutError::new_err(err.message()))?;
+        .map_err(|err| timeout_err(err.message()))?;
     opcodes_into_pytuples(py, opcodes)
 }

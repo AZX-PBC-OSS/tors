@@ -4,6 +4,7 @@ use pyo3::types::{PyList, PyString};
 use rust_stemmers::Stemmer;
 
 use crate::pipeline_impl;
+use crate::py::_borrow::{EmptyPolicy, borrow_str_list};
 use crate::py::lemma_dict::resolve_lemma_dict;
 use crate::tokenize_impl::parse_stemmer_algorithm;
 
@@ -76,44 +77,47 @@ pub fn apply_pipeline(
     let lemma_dict = resolve_lemma_dict(lemma_dict)?;
 
     // The argument-contract check (every element genuinely a `str`) runs
-    // UNCONDITIONALLY, before any identity short-circuit: a `TypeError`
-    // on a non-`str` element must fire even when every transform step is
-    // off, never silently pass through untouched.
-    let items: Vec<_> = texts.iter().collect();
-    let mut borrowed: Vec<&str> = Vec::with_capacity(items.len());
-    for item in &items {
-        borrowed.push(item.extract::<&str>()?);
-    }
+    // UNCONDITIONALLY via the shared walk (`_borrow.rs`'s soundness
+    // story), before any identity short-circuit: a `TypeError` on a
+    // non-`str` element must fire even when every transform step is off,
+    // never silently pass through untouched.
+    let out = borrow_str_list(&texts, EmptyPolicy::Allow, |_items, borrowed| {
+        if !nfd
+            && !lowercase
+            && !strip_accents
+            && stemmer.is_none()
+            && lemma_dict.is_none()
+            && !collapse_whitespace
+        {
+            // The identity path: every step is off, so no text can
+            // possibly change. Signal the caller, which still owns
+            // `texts`, to return the caller's ORIGINAL list object,
+            // matching the zero-allocation contract this crate's other
+            // identity-returning functions already give
+            // (normalize/quote/replace_many), rather than building an
+            // equal-but-new list.
+            return Ok(None);
+        }
 
-    if !nfd
-        && !lowercase
-        && !strip_accents
-        && stemmer.is_none()
-        && lemma_dict.is_none()
-        && !collapse_whitespace
-    {
-        // The identity path: every step is off, so no text can possibly
-        // change. Return the caller's ORIGINAL list object, matching the
-        // zero-allocation contract this crate's other identity-returning
-        // functions already give (normalize/quote/replace_many), rather
-        // than building an equal-but-new list.
-        return Ok(texts.into_any().unbind());
-    }
-
-    let out = py.detach(|| {
-        pipeline_impl::apply_pipeline(
-            &borrowed,
-            nfd,
-            lowercase,
-            strip_accents,
-            stemmer.as_ref(),
-            lemma_dict.as_deref(),
-            collapse_whitespace,
-        )
-    });
-    let result = PyList::empty(py);
-    for s in out {
-        result.append(PyString::new(py, &s))?;
-    }
-    Ok(result.into_any().unbind())
+        let out = py.detach(|| {
+            pipeline_impl::apply_pipeline(
+                borrowed,
+                nfd,
+                lowercase,
+                strip_accents,
+                stemmer.as_ref(),
+                lemma_dict.as_deref(),
+                collapse_whitespace,
+            )
+        });
+        let result = PyList::empty(py);
+        for s in out {
+            result.append(PyString::new(py, &s))?;
+        }
+        Ok(Some(result.into_any().unbind()))
+    })?;
+    Ok(match out {
+        Some(result) => result,
+        None => texts.into_any().unbind(),
+    })
 }

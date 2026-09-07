@@ -6,11 +6,17 @@
 //! concerns rather than in one crate-wide file; `lib.rs` keeps only the
 //! genuinely cross-feature helpers (`detached_transform`, `EagerIter`,
 //! `validate_deadline_ms`, `parse_boundary`) and the `#[pymodule]`
-//! registration.
+//! registration. This layer's own cross-feature helpers live here:
+//! `_borrow` (the shared list/dict argument walks and validators, private
+//! to the py layer) and the `eager_iter_class!` macro (the shared
+//! `__iter__`/`__next__`/`__length_hint__` trio over `EagerIter`).
+
+mod _borrow;
 
 pub mod bm25;
 pub mod chunk;
 pub mod codec;
+pub mod compiled_patterns;
 pub mod diff;
 pub mod encoding;
 pub mod fence;
@@ -29,3 +35,38 @@ pub mod simhash;
 pub mod tfidf;
 pub mod truncate;
 pub mod url;
+
+/// Emits one eager-iterator `#[pyclass]`: the Python-visible class NAME,
+/// its per-class doc comment (the payload's `#[doc]` attribute lands on
+/// the struct through pyo3's doc-attribute path, so the class `__doc__`
+/// is exactly a hand-written doc comment's), and the item type, wrapped
+/// over the shared `EagerIter` core: `__iter__` returning the iterator
+/// itself, `__next__` delegating to the buffer cursor, and
+/// `__length_hint__` reporting the remaining count. The trio is
+/// identical for every `*_iter` surface (the class name is per-struct in
+/// pyo3; the logic is the one core), so one declarative spelling keeps
+/// the classes from drifting. The trailing semicolon is optional,
+/// statement and block invocation styles alike.
+macro_rules! eager_iter_class {
+    ($(#[$doc:meta])* $name:ident, $item:ty $(;)?) => {
+        $(#[$doc])*
+        #[pyclass]
+        pub struct $name(crate::EagerIter<$item>);
+
+        #[pymethods]
+        impl $name {
+            fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+                slf
+            }
+
+            fn __next__(&mut self) -> Option<$item> {
+                self.0.next()
+            }
+
+            fn __length_hint__(&self) -> usize {
+                self.0.remaining()
+            }
+        }
+    };
+}
+pub(crate) use eager_iter_class;

@@ -5,38 +5,28 @@ use pyo3::{Py, PyAny};
 use std::borrow::Cow;
 
 use crate::EagerIter;
+use crate::py::_borrow::{EmptyPolicy, borrow_dict_pairs, borrow_str_list};
+use crate::py::eager_iter_class;
 use crate::search_impl;
 
 /// The GIL-held pattern-list walk + detached run shared by `find_patterns`,
-/// `find_patterns_iter`, and `count_matches`: collect the item handles (the
-/// borrowed `&str`s point into the str objects' immutable UTF-8 buffers,
-/// valid for as long as the objects are referenced; the list holds them,
-/// and these handles re-pin that for the compiler, the same soundness
-/// argument as every str-in borrow in this crate), borrow each entry's
-/// UTF-8 (the standard str-in class), refuse empty patterns with
-/// `ValueError("empty pattern")` (an empty pattern would match at every
-/// position and has no leftmost-longest meaning), then run `run` over the
-/// borrows and the text under ONE `py.detach` and map a build failure to a
-/// `ValueError` carrying the engine's message. One function, three
-/// spellings, so the argument walk and the soundness story cannot drift
-/// apart.
+/// `find_patterns_iter`, and `count_matches`: the `_borrow::borrow_str_list`
+/// walk (its doc carries the handles-alive-across-the-detach soundness
+/// story, true by construction there), patterns refused empty with
+/// `ValueError("empty pattern")`, then `run` over the borrows and the text
+/// under ONE `py.detach` and a build failure mapped to a `ValueError`
+/// carrying the engine's message. One function, three spellings, so the
+/// walk and the run cannot drift apart.
 fn run_over_borrowed_patterns<R: Send>(
     py: Python<'_>,
     patterns: &Bound<'_, PyList>,
     text: &str,
     run: impl FnOnce(&[&str], &str) -> Result<R, search_impl::BuildError> + Send,
 ) -> PyResult<R> {
-    let items: Vec<_> = patterns.iter().collect();
-    let mut borrowed: Vec<&str> = Vec::with_capacity(items.len());
-    for item in &items {
-        let pattern = item.extract::<&str>()?;
-        if pattern.is_empty() {
-            return Err(PyValueError::new_err("empty pattern"));
-        }
-        borrowed.push(pattern);
-    }
-    py.detach(|| run(&borrowed, text))
-        .map_err(|err| PyValueError::new_err(err.to_string()))
+    borrow_str_list(patterns, EmptyPolicy::Refuse, |_items, borrowed| {
+        py.detach(|| run(borrowed, text))
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    })
 }
 
 /// The `(start, end, pattern_index)` triple shape shared by the list and
@@ -48,28 +38,14 @@ fn matches_into_triples(matches: Vec<search_impl::PatternMatch>) -> Vec<(usize, 
         .collect()
 }
 
-/// The streaming search (v0.9): the same iterator design over
-/// `find_patterns`' matches, yielding the SAME `(start, end, pattern_index)`
-/// triples as the list API (pinned to sequence-parity), the whole search
-/// (pattern-list walk, automaton build, scan, byte→char conversion) under
-/// ONE detach at construction, one 3-tuple of ints per `__next__`. See
-/// `find_patterns_iter`'s docs for the marshalling-caveat answer this is.
-#[pyclass]
-pub struct FindPatternsIter(EagerIter<(usize, usize, usize)>);
-
-#[pymethods]
-impl FindPatternsIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming search (v0.9): the same iterator design over
+    /// `find_patterns`' matches, yielding the SAME `(start, end, pattern_index)`
+    /// triples as the list API (pinned to sequence-parity), the whole search
+    /// (pattern-list walk, automaton build, scan, byte→char conversion) under
+    /// ONE detach at construction, one 3-tuple of ints per `__next__`. See
+    /// `find_patterns_iter`'s docs for the marshalling-caveat answer this is.
+    FindPatternsIter, (usize, usize, usize);
 }
 
 /// `tors.find_patterns(patterns, text)`: leftmost-longest, non-overlapping
@@ -256,25 +232,12 @@ pub fn replace_many(
     if replacements.is_empty() {
         return Ok(text.into_any().unbind());
     }
-    // Keep the item handles alive: the borrowed &strs point into the str
-    // objects' immutable UTF-8 buffers, valid for as long as the objects are
-    // referenced (the dict holds them; these handles re-pin that for the
-    // compiler), and readable inside the detach. Same soundness
-    // argument as every str-in borrow in this crate (find_patterns' list
-    // walk over again).
-    let items: Vec<_> = replacements.iter().collect();
-    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(items.len());
-    for (key, value) in &items {
-        let old = key.extract::<&str>()?;
-        if old.is_empty() {
-            return Err(PyValueError::new_err("empty pattern"));
-        }
-        let new = value.extract::<&str>()?;
-        pairs.push((old, new));
-    }
-    let out = py
-        .detach(|| search_impl::replace_many(s, &pairs))
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    // The shared dict walk (`_borrow.rs`'s soundness story: handles alive
+    // across the detach by construction), empty keys refused.
+    let out = borrow_dict_pairs(&replacements, |pairs| {
+        py.detach(|| search_impl::replace_many(s, pairs))
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    })?;
     match out {
         Cow::Borrowed(_) => Ok(text.into_any().unbind()),
         Cow::Owned(out) => Ok(out.into_pyobject(py)?.into_any().unbind()),
@@ -323,21 +286,13 @@ pub fn replace_many_masked(
     if replacements.is_empty() {
         return Ok(text.into_any().unbind());
     }
-    // The same dict walk as replace_many (handles alive across the detach):
-    // the shared soundness argument, the empty-key refusal, DRY by shape.
-    let items: Vec<_> = replacements.iter().collect();
-    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(items.len());
-    for (key, value) in &items {
-        let old = key.extract::<&str>()?;
-        if old.is_empty() {
-            return Err(PyValueError::new_err("empty pattern"));
-        }
-        let new = value.extract::<&str>()?;
-        pairs.push((old, new));
-    }
-    let out = py
-        .detach(|| search_impl::replace_many_masked(s, &pairs, mask_char))
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    // The shared dict walk as replace_many (`_borrow.rs`'s soundness
+    // story: handles alive across the detach by construction, empty keys
+    // refused).
+    let out = borrow_dict_pairs(&replacements, |pairs| {
+        py.detach(|| search_impl::replace_many_masked(s, pairs, mask_char))
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    })?;
     match out {
         Cow::Borrowed(_) => Ok(text.into_any().unbind()),
         Cow::Owned(out) => Ok(out.into_pyobject(py)?.into_any().unbind()),

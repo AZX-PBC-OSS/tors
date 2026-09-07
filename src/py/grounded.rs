@@ -1,7 +1,8 @@
-use pyo3::exceptions::{PyTimeoutError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::grounded_impl;
+use crate::py::_borrow::{timeout_err, validate_unit_interval};
 use crate::validate_deadline_ms;
 
 /// `tors.is_grounded(claim, source, *, fuzzy=False, threshold=0.85,
@@ -31,9 +32,7 @@ pub fn is_grounded(
     threshold: f64,
     deadline_ms: Option<f64>,
 ) -> PyResult<bool> {
-    if !(0.0..=1.0).contains(&threshold) {
-        return Err(PyValueError::new_err("threshold must be in [0.0, 1.0]"));
-    }
+    validate_unit_interval("threshold", threshold, false)?;
     if !fuzzy && deadline_ms.is_some() {
         return Err(PyValueError::new_err(
             "deadline_ms is only meaningful when fuzzy=True",
@@ -44,5 +43,5 @@ pub fn is_grounded(
     }
     validate_deadline_ms(deadline_ms)?;
     py.detach(|| grounded_impl::is_grounded_fuzzy(claim, source, threshold, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))
+        .map_err(|err| timeout_err(err.message()))
 }

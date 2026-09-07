@@ -59,6 +59,24 @@
 //! needs no byte→char pass of its own, and the `Cow` identity contract on its
 //! answer, is documented on the function.
 //!
+//! # The compiled spelling
+//!
+//! The free functions below build their automaton (and the duplicate-id
+//! remap, or the first-value map) from the pattern list on EVERY call:
+//! the right shape for a one-off call, the wrong shape for a pipeline
+//! that runs the SAME fixed vocabulary (a redaction list, a terminology
+//! rewrite table) over many texts or many times, where the per-call build
+//! is a fixed cost the work keeps re-paying for an automaton it already
+//! had. [`CompiledPatterns`] is the `re.compile()` answer: build once,
+//! hold the automaton and the remaps behind one `Arc`, and every scan
+//! afterwards is the free function's scan CLASSES minus the build (the
+//! pyo3 wrapper `tors.CompiledPatterns` in `src/py/compiled_patterns.rs`
+//! holds it; its gate is tests/test_compiled_patterns.py, which re-runs
+//! the free functions' own batteries through a compiled fixture so the
+//! two spellings cannot drift independently, plus the amortization story
+//! pinned as construction + N calls vs N free calls at a document-scale
+//! corpus).
+//!
 //! Pure Rust, no pyo3 types: the criterion bench (benches/search.rs) drives
 //! this path directly; the pyo3 wrapper in `lib.rs` adds only the argument
 //! borrows and the O(matches) return marshalling (see the crate GIL model
@@ -94,23 +112,57 @@ pub struct PatternMatch {
     pub pattern: usize,
 }
 
-/// The leftmost-longest, non-overlapping matches of `patterns` in `text`, in
-/// Python `str` index units, in increasing start order; the full contract is
-/// the module docs above.
-pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>, BuildError> {
-    let ac = AhoCorasickBuilder::new()
+/// The ONE automaton every spelling in this module drives: built
+/// leftmost-longest over the pattern list (see the module docs for the
+/// semantics). Shared by the free functions' per-call build and by
+/// [`CompiledPatterns`]'s one-time build, so the two spellings drive the
+/// identical engine configuration by construction.
+fn build_leftmost(patterns: &[&str]) -> Result<aho_corasick::AhoCorasick, BuildError> {
+    AhoCorasickBuilder::new()
         .match_kind(MatchKind::LeftmostLongest)
-        .build(patterns)?;
-    // Canonical ids: for duplicates (and only duplicates can tie, see the
-    // module docs), report the FIRST index the pattern string occupies. The
-    // remap is applied to whatever id the automaton reports, so the answer is
-    // deterministic even where the engine's duplicate-id choice is not
-    // specified.
+        .build(patterns)
+}
+
+/// The canonical-id remap of the find side: one slot per pattern (indexed
+/// by automaton id, which is the pattern's position in the list the
+/// automaton was built over), holding the FIRST list index that pattern
+/// string occupies. For duplicates (and only duplicates can tie, see the
+/// module docs), a match reports the FIRST index, and the remap makes
+/// that deterministic regardless of which duplicate id the automaton's
+/// internals hand back.
+fn first_id_remap(patterns: &[&str]) -> Vec<usize> {
     let mut first_id: Vec<usize> = Vec::with_capacity(patterns.len());
     let mut seen: HashMap<&str, usize> = HashMap::with_capacity(patterns.len());
     for (idx, pattern) in patterns.iter().enumerate() {
         first_id.push(*seen.entry(*pattern).or_insert(idx));
     }
+    first_id
+}
+
+/// The first-value map of the replace side: key string to the FIRST pair's
+/// value (a dict cannot produce duplicate keys, but the slice spelling
+/// can, and the first pair wins for the value the same way the find
+/// side's remap makes the first index win). Every value lookup the
+/// replace scans perform routes through this map, so the matched span IS
+/// the lookup key.
+fn first_values<'a>(replacements: &'a [(&'a str, &'a str)]) -> HashMap<&'a str, &'a str> {
+    let mut values: HashMap<&str, &str> = HashMap::with_capacity(replacements.len());
+    for (key, value) in replacements {
+        values.entry(*key).or_insert(*value);
+    }
+    values
+}
+
+/// The shared scan of the find side: the automaton's matches over `text`,
+/// converted from byte offsets to Python `str` indices, with the ASCII
+/// fast path and the boundary-aware conversion pass of the module docs.
+/// Driven identically by the free spelling (a fresh automaton per call)
+/// and the compiled one ([`CompiledPatterns`]: the automaton built once).
+fn scan_matches(
+    ac: &aho_corasick::AhoCorasick,
+    first_id: &[usize],
+    text: &str,
+) -> Vec<PatternMatch> {
     let mut matches = Vec::new();
     if text.is_ascii() {
         // Fast path: byte offsets ARE char offsets; nothing to convert.
@@ -141,7 +193,16 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
             byte_cursor = m.end();
         }
     }
-    Ok(matches)
+    matches
+}
+
+/// The leftmost-longest, non-overlapping matches of `patterns` in `text`, in
+/// Python `str` index units, in increasing start order; the full contract is
+/// the module docs above.
+pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>, BuildError> {
+    let ac = build_leftmost(patterns)?;
+    let first_id = first_id_remap(patterns);
+    Ok(scan_matches(&ac, &first_id, text))
 }
 
 /// The number of leftmost-longest, non-overlapping matches of `patterns`
@@ -196,9 +257,7 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
 /// tolerance; pinned over the golden battery and the tiny-alphabet
 /// exhaustive sweep by the tests below.
 pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError> {
-    let ac = AhoCorasickBuilder::new()
-        .match_kind(MatchKind::LeftmostLongest)
-        .build(patterns)?;
+    let ac = build_leftmost(patterns)?;
     // The same find_iter scan find_patterns drives; `.count()` consumes
     // each match as it is yielded, so no match record ever exists.
     Ok(ac.find_iter(text).count())
@@ -273,7 +332,24 @@ pub fn replace_many<'a>(
     text: &'a str,
     replacements: &[(&str, &str)],
 ) -> Result<Cow<'a, str>, BuildError> {
-    let (ac, first) = replace_automaton(replacements)?;
+    let keys: Vec<&str> = replacements.iter().map(|(key, _)| *key).collect();
+    let ac = build_leftmost(&keys)?;
+    let values = first_values(replacements);
+    Ok(scan_replace(&ac, &values, text))
+}
+
+/// The shared splice of the replace side: [`replace_many`]'s scan over a
+/// built automaton and a validated `values` map (key string to the first
+/// pair's value; the matched span IS the key's bytes, so the span itself
+/// is the lookup key, and the hit is guaranteed by construction: the
+/// automaton only matches keys the map carries). Driven identically by
+/// the free spelling and the compiled one, with the identity-return
+/// contract (the `Cow` convention) intact on both lanes.
+fn scan_replace<'a>(
+    ac: &aho_corasick::AhoCorasick,
+    values: &HashMap<&str, &str>,
+    text: &'a str,
+) -> Cow<'a, str> {
     // text.len() is a good starting capacity for most workloads (replacement
     // values are typically comparable in length to the keys they replace);
     // a bigger swing still amortizes via the normal growth doubling, but this
@@ -287,42 +363,20 @@ pub fn replace_many<'a>(
     for m in ac.find_iter(text) {
         matched = true;
         out.push_str(&text[last..m.start()]);
-        out.push_str(replacements[first[&text[m.start()..m.end()]]].1);
+        out.push_str(values[&text[m.start()..m.end()]]);
         last = m.end();
     }
     if !matched {
-        return Ok(Cow::Borrowed(text));
+        return Cow::Borrowed(text);
     }
     out.push_str(&text[last..]);
     // The identity contract's second lane: a replacement whose net effect is
     // the identity (value == key, or mutually-cancelling splices) hands back
     // the input itself rather than a byte-identical copy of it.
     if out == text {
-        return Ok(Cow::Borrowed(text));
+        return Cow::Borrowed(text);
     }
-    Ok(Cow::Owned(out))
-}
-
-/// The machinery shared by the two replace spellings ([`replace_many`] and
-/// [`replace_many_masked`]): the ONE automaton over the keys
-/// (`MatchKind::LeftmostLongest`, this module's search semantics) and the
-/// first-duplicate-wins index remap. For duplicate keys (a dict cannot
-/// produce them, but the slice spelling can), the FIRST pair wins: for the
-/// id the same way `find_patterns`' canonical-id remap makes it, and for the
-/// value because every value lookup is routed through this map. The matched
-/// span IS the key's bytes, so the span itself is the lookup key.
-fn replace_automaton<'a>(
-    replacements: &'a [(&'a str, &'a str)],
-) -> Result<(aho_corasick::AhoCorasick, HashMap<&'a str, usize>), BuildError> {
-    let keys: Vec<&str> = replacements.iter().map(|(key, _)| *key).collect();
-    let ac = AhoCorasickBuilder::new()
-        .match_kind(MatchKind::LeftmostLongest)
-        .build(&keys)?;
-    let mut first: HashMap<&str, usize> = HashMap::with_capacity(replacements.len());
-    for (idx, (key, _)) in replacements.iter().enumerate() {
-        first.entry(*key).or_insert(idx);
-    }
-    Ok((ac, first))
+    Cow::Owned(out)
 }
 
 /// The length-preserving redaction spelling of [`replace_many`]: the SAME
@@ -424,8 +478,24 @@ pub fn replace_many_masked<'a>(
     replacements: &[(&str, &str)],
     mask: char,
 ) -> Result<Cow<'a, str>, BuildError> {
-    let (ac, first) = replace_automaton(replacements)?;
-    // Same capacity reservation as replace_many, for the same reason: the
+    let keys: Vec<&str> = replacements.iter().map(|(key, _)| *key).collect();
+    let ac = build_leftmost(&keys)?;
+    let values = first_values(replacements);
+    Ok(scan_replace_masked(&ac, &values, text, mask))
+}
+
+/// The shared masked splice: [`replace_many_masked`]'s scan over a built
+/// automaton and a validated `values` map, each matched span replaced by
+/// the masked value of exactly the span's CHARACTER count (the mask rule
+/// documented on [`replace_many_masked`]), driven identically by the free
+/// and compiled spellings.
+fn scan_replace_masked<'a>(
+    ac: &aho_corasick::AhoCorasick,
+    values: &HashMap<&str, &str>,
+    text: &'a str,
+    mask: char,
+) -> Cow<'a, str> {
+    // Same capacity reservation as scan_replace, for the same reason: the
     // character count is preserved exactly, so text.len() bytes is an even
     // better starting estimate here than in the unmasked splice (it is
     // exact whenever every value and the mask stay within the key's own
@@ -438,7 +508,7 @@ pub fn replace_many_masked<'a>(
         let span = &text[m.start()..m.end()];
         out.push_str(&text[last..m.start()]);
         let span_chars = span.chars().count();
-        let value = replacements[first[span]].1;
+        let value = values[span];
         let value_chars = value.chars().count();
         if value_chars >= span_chars {
             // Truncation: the value's first L characters; the mask is
@@ -452,7 +522,7 @@ pub fn replace_many_masked<'a>(
         last = m.end();
     }
     if !matched {
-        return Ok(Cow::Borrowed(text));
+        return Cow::Borrowed(text);
     }
     out.push_str(&text[last..]);
     // The identity contract's second lane: a masked replacement whose net
@@ -460,9 +530,162 @@ pub fn replace_many_masked<'a>(
     // key, a padding that regrows it) hands back the input itself rather
     // than a character-identical copy of it.
     if out == text {
-        return Ok(Cow::Borrowed(text));
+        return Cow::Borrowed(text);
     }
-    Ok(Cow::Owned(out))
+    Cow::Owned(out)
+}
+
+/// The call-time replacements-validation failure: the dict handed to a
+/// compiled replace call must key EXACTLY the compiled pattern set (every
+/// pattern paired with a value, no other keys), because the automaton is
+/// the compiled part and can only ever match that set; a key outside it
+/// could never be honored (the free function would have built it in), and
+/// a pattern without a value could never be spliced. `unknown` carries
+/// the offending dict keys, `missing` the count of compiled patterns the
+/// dict left unvalued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplacementsMismatch {
+    pub unknown: Vec<String>,
+    pub missing: usize,
+}
+
+impl ReplacementsMismatch {
+    /// The `str()` of the `ValueError` the pyo3 layer raises. The key and
+    /// pattern names are capped at three shown plus a count, so a huge
+    /// vocabulary mismatch cannot build a huge exception message.
+    pub fn message(&self) -> String {
+        fn show(names: &[String]) -> String {
+            let mut shown: Vec<String> = names.iter().take(3).map(|k| format!("{k:?}")).collect();
+            if names.len() > 3 {
+                shown.push(format!("... and {} more", names.len() - 3));
+            }
+            shown.join(", ")
+        }
+        format!(
+            "replacements must pair every compiled pattern with a value (no others): \
+             unknown keys [{}], {} pattern(s) missing a value",
+            show(&self.unknown),
+            self.missing
+        )
+    }
+}
+
+/// A pattern list compiled once (the module docs' compiled spelling): the
+/// ONE leftmost-longest automaton over the list, the owned pattern
+/// strings, the find side's canonical-id remap, and the pattern-string to
+/// first-index map the replace side validates call-time dicts against.
+/// Immutable after [`CompiledPatterns::build`], so sharing one behind an
+/// `Arc` across many calls and threads is sound with no synchronization
+/// beyond the refcount itself (the `CompiledLemmaDict` discipline).
+///
+/// The scans are the free functions' own ([`scan_matches`],
+/// [`scan_replace`], [`scan_replace_masked`], and the count spelling's
+/// `find_iter(text).count()`), driven over the held automaton: a compiled
+/// call is the free call's scan classes minus the build, by construction
+/// rather than by reimplementation, which is what the parity gates in
+/// this module and in tests/test_compiled_patterns.py pin.
+pub struct CompiledPatterns {
+    /// The automaton over the pattern list, `MatchKind::LeftmostLongest`.
+    ac: aho_corasick::AhoCorasick,
+    /// Owned copies of the patterns, list order (the automaton's id space).
+    patterns: Vec<String>,
+    /// The find side's canonical-id remap: automaton id to first list
+    /// index (see [`first_id_remap`]).
+    first_id: Vec<usize>,
+    /// Pattern string to first list index: the replace side's validation
+    /// set (a call-time dict must key exactly this set) and the routing
+    /// for its values.
+    first_index: HashMap<String, usize>,
+}
+
+impl CompiledPatterns {
+    /// The one-time build: the automaton, the remaps, and the owned
+    /// pattern strings, from a NON-EMPTY-entry pattern list (the empty
+    /// list is legal and compiles to a zero-pattern automaton that finds
+    /// nothing; the entry-level refusal is the caller's, the same
+    /// `ValueError("empty pattern")` contract the free functions' wrapper
+    /// enforces).
+    pub fn build(patterns: &[&str]) -> Result<Self, BuildError> {
+        let ac = build_leftmost(patterns)?;
+        let first_id = first_id_remap(patterns);
+        let owned: Vec<String> = patterns.iter().map(|p| (*p).to_string()).collect();
+        let mut first_index: HashMap<String, usize> = HashMap::with_capacity(owned.len());
+        for (idx, pattern) in owned.iter().enumerate() {
+            first_index.entry(pattern.clone()).or_insert(idx);
+        }
+        Ok(CompiledPatterns {
+            ac,
+            patterns: owned,
+            first_id,
+            first_index,
+        })
+    }
+
+    /// The list's length, mirroring `len(patterns)` on the source list
+    /// (duplicates included, the same count the automaton's id space has).
+    pub fn pattern_count(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// The find spelling: [`find_patterns`]' scan over the held automaton,
+    /// same matches, same canonical duplicate ids.
+    pub fn find(&self, text: &str) -> Vec<PatternMatch> {
+        scan_matches(&self.ac, &self.first_id, text)
+    }
+
+    /// The count spelling: [`count_matches`]' scan over the held
+    /// automaton.
+    pub fn count(&self, text: &str) -> usize {
+        self.ac.find_iter(text).count()
+    }
+
+    /// Validates a call-time replacements pairing and builds the value
+    /// map the replace scans look spans up in: every dict key must be a
+    /// compiled pattern (a key the automaton cannot match could never be
+    /// honored), and every compiled pattern must carry a value (a matched
+    /// pattern with no value could never be spliced; the free spelling
+    /// would simply not have that key in its automaton). Duplicate keys
+    /// in the slice spelling route first-pair-wins, [`first_values`]'s
+    /// own rule.
+    pub fn replace_values<'a>(
+        &self,
+        pairs: &[(&'a str, &'a str)],
+    ) -> Result<HashMap<&'a str, &'a str>, ReplacementsMismatch> {
+        let mut values: HashMap<&str, &str> = HashMap::with_capacity(pairs.len());
+        let mut unknown: Vec<String> = Vec::new();
+        for (key, value) in pairs {
+            if !self.first_index.contains_key(*key) {
+                unknown.push((*key).to_string());
+            }
+            values.entry(*key).or_insert(*value);
+        }
+        // Dict keys are unique, so the in-set key count is the map's size
+        // minus the unknown ones, and every compiled pattern is valued
+        // exactly when that count reaches the pattern set's size.
+        let in_set = values.len() - unknown.len();
+        let missing = self.first_index.len().saturating_sub(in_set);
+        if !unknown.is_empty() || missing > 0 {
+            return Err(ReplacementsMismatch { unknown, missing });
+        }
+        Ok(values)
+    }
+
+    /// The replace spelling: [`replace_many`]'s scan over the held
+    /// automaton and the validated call-time values.
+    pub fn replace_many<'a>(&self, text: &'a str, values: &HashMap<&str, &str>) -> Cow<'a, str> {
+        scan_replace(&self.ac, values, text)
+    }
+
+    /// The masked replace spelling: [`replace_many_masked`]'s scan over
+    /// the held automaton and the validated call-time values.
+    pub fn replace_many_masked<'a>(
+        &self,
+        text: &'a str,
+        values: &HashMap<&str, &str>,
+        mask: char,
+    ) -> Cow<'a, str> {
+        scan_replace_masked(&self.ac, values, text, mask)
+    }
 }
 
 #[cfg(test)]
@@ -1320,6 +1543,266 @@ mod tests {
                     "Cow contract: pairs {set:?} over {text:?}"
                 );
             }
+        }
+    }
+
+    // --- the compiled spelling (CompiledPatterns) --------------------------
+    //
+    // The parity gates: every compiled scan is the free function's own
+    // scan over the held automaton, so the two spellings must agree
+    // everywhere the free batteries reach, plus the call-time validation
+    // contract pinned on its own error contents.
+
+    /// Compiles `patterns` once, panicking on nothing (a build failure
+    /// here is a bug in the test, not a case).
+    fn compiled(patterns: &[&str]) -> CompiledPatterns {
+        CompiledPatterns::build(patterns).unwrap_or_else(|err| panic!("build failed: {err}"))
+    }
+
+    /// The compiled find in the tuple shape the `find` helper speaks, so
+    /// the parity assertions compare like with like.
+    fn compiled_find(cp: &CompiledPatterns, text: &str) -> Vec<(usize, usize, usize)> {
+        cp.find(text)
+            .into_iter()
+            .map(|m| (m.start, m.end, m.pattern))
+            .collect()
+    }
+
+    #[test]
+    fn compiled_find_and_count_parity_over_the_tiny_alphabet_sweep() {
+        // The exhaustive sweep, compiled side: the same 2,520 pairs the
+        // free spelling's own sweep covers (every pattern list of size 0-3
+        // over {"a", "ab", "b"} × every text over {"a", "b"} up to length
+        // 5), each list compiled ONCE and both find spellings and both
+        // count spellings run over it, exact list/number equality with
+        // the free functions and the char-space reference.
+        let pool = ["a", "ab", "b"];
+        let mut pattern_lists: Vec<Vec<&str>> = vec![Vec::new()];
+        for size in 1..=3 {
+            for combo in 0..pool.len().pow(size) {
+                let mut list = Vec::with_capacity(size as usize);
+                let mut rest = combo;
+                for _ in 0..size {
+                    list.push(pool[rest % pool.len()]);
+                    rest /= pool.len();
+                }
+                pattern_lists.push(list);
+            }
+        }
+        let mut texts: Vec<String> = Vec::new();
+        for length in 0..=5 {
+            for bits in 0..(1usize << length) {
+                let text: String = (0..length)
+                    .map(|i| if bits & (1 << i) == 0 { 'a' } else { 'b' })
+                    .collect();
+                texts.push(text);
+            }
+        }
+        for patterns in &pattern_lists {
+            let cp = compiled(patterns);
+            for text in &texts {
+                let found = compiled_find(&cp, text);
+                assert_eq!(
+                    found,
+                    find(patterns, text),
+                    "compiled/free find disagreement on {patterns:?} over {text:?}"
+                );
+                assert_eq!(
+                    found,
+                    reference(patterns, text),
+                    "compiled/reference disagreement on {patterns:?} over {text:?}"
+                );
+                assert_eq!(
+                    cp.count(text),
+                    count(patterns, text),
+                    "compiled/free count disagreement on {patterns:?} over {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_find_parity_over_the_golden_and_multibyte_batteries() {
+        // The golden overlap rows and the multibyte mapping battery's own
+        // rows (extracted from the pinned expectations above), re-run
+        // through one compiled fixture per row: the byte→char conversion
+        // pass and the duplicate first-index rule must survive the
+        // compiled route exactly.
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let alternating = format!("é{}é{}é", 'b', 'b');
+        type Case<'a> = (Vec<&'a str>, String);
+        let cases: Vec<Case> = vec![
+            (vec!["abc", "abcd"], "abcd".to_string()),
+            (vec!["abcd", "abc"], "abcd".to_string()),
+            (vec!["bcd", "cd"], "abcdcd".to_string()),
+            (vec!["ab", "abc", "abcd"], "abcdabcab".to_string()),
+            (vec!["abc", "abc"], "abcabc".to_string()),
+            (vec!["abcd", "abc", "abcd"], "abcd".to_string()),
+            (Vec::new(), "abc".to_string()),
+            (vec!["café"], "café café".to_string()),
+            (vec!["cafe\u{301}"], "cafe\u{301} ok".to_string()),
+            (vec!["東京", "京都"], "京都東京京都".to_string()),
+            (vec![family], format!("hi{family}!")),
+            (vec!["ab"], "éabéab".to_string()),
+            (vec!["b", "é"], alternating),
+            (vec!["éé", "é"], "ééé".to_string()),
+        ];
+        for (patterns, text) in &cases {
+            let cp = compiled(patterns);
+            assert_eq!(
+                compiled_find(&cp, text),
+                find(patterns, text),
+                "compiled/free disagreement on {patterns:?} over {text:?}"
+            );
+            assert_eq!(
+                cp.count(text),
+                count(patterns, text),
+                "compiled/free count disagreement on {patterns:?} over {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_replace_parity_over_the_tiny_alphabet_sweep() {
+        // The exhaustive sweep, replace side: every replacement list of
+        // size 0-2 over the keys {"a", "ab", "b"} with values {"X", ""},
+        // each list's KEY SET compiled once and the same pairs validated
+        // and spliced through the compiled route, exact equality with the
+        // free replace and the char-space oracle, plus the Cow contract
+        // (borrowed exactly when the oracle's answer equals the input).
+        let keys = ["a", "ab", "b"];
+        let values = ["X", ""];
+        let per_slot = keys.len() * values.len();
+        let mut sets: Vec<Vec<(&str, &str)>> = vec![Vec::new()];
+        for size in 1..=2 {
+            for combo in 0..per_slot.pow(size) {
+                let mut list = Vec::with_capacity(size as usize);
+                let mut rest = combo;
+                for _ in 0..size {
+                    let slot = rest % per_slot;
+                    list.push((keys[slot % keys.len()], values[slot / keys.len()]));
+                    rest /= per_slot;
+                }
+                sets.push(list);
+            }
+        }
+        let mut texts: Vec<String> = Vec::new();
+        for length in 0..=5 {
+            for bits in 0..(1usize << length) {
+                let text: String = (0..length)
+                    .map(|i| if bits & (1 << i) == 0 { 'a' } else { 'b' })
+                    .collect();
+                texts.push(text);
+            }
+        }
+        for set in &sets {
+            let key_list: Vec<&str> = set.iter().map(|(key, _)| *key).collect();
+            let cp = compiled(&key_list);
+            let values_map = cp
+                .replace_values(set)
+                .unwrap_or_else(|err| panic!("validation failed on {set:?}: {}", err.message()));
+            for text in &texts {
+                let got = cp.replace_many(text, &values_map);
+                let want = replace(set, text);
+                assert_eq!(&*got, &*want, "pairs {set:?} over {text:?}");
+                assert_eq!(
+                    matches!(&got, Cow::Borrowed(_)),
+                    matches!(&want, Cow::Borrowed(_)),
+                    "Cow contract: pairs {set:?} over {text:?}"
+                );
+                let masked = cp.replace_many_masked(text, &values_map, '#');
+                let want_masked = replace_masked(set, text, '#');
+                assert_eq!(
+                    &*masked, &*want_masked,
+                    "masked pairs {set:?} over {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_replace_validation_is_the_exact_key_set() {
+        // The call-time contract, pinned on the error contents: unknown
+        // keys and missing values are each refused, the exact key set
+        // passes, and duplicates in the compiled LIST collapse to the one
+        // dict key (the set semantics, not list-position semantics).
+        let cp = compiled(&["cat", "catalogue", "cat"]);
+        // The exact set passes (order-free: the pairs are a slice, the
+        // dict spelling has no order at all).
+        let pairs = [("catalogue", "Y"), ("cat", "X")];
+        assert!(cp.replace_values(&pairs).is_ok());
+        // An unknown key is refused and named.
+        let err = cp
+            .replace_values(&[("cat", "X"), ("dog", "Z")])
+            .unwrap_err();
+        assert_eq!(err.unknown, vec!["dog".to_string()]);
+        assert_eq!(err.missing, 1); // "catalogue" left unvalued
+        assert!(err.message().contains("\"dog\""));
+        assert!(err.message().contains("1 pattern(s) missing a value"));
+        // A missing pattern is refused with its count.
+        let err = cp.replace_values(&[("cat", "X")]).unwrap_err();
+        assert!(err.unknown.is_empty());
+        assert_eq!(err.missing, 1);
+        // The empty compiled list accepts only the empty map.
+        let empty = compiled(&[]);
+        assert!(empty.replace_values(&[]).is_ok());
+        assert_eq!(
+            empty.replace_values(&[("a", "b")]).unwrap_err(),
+            ReplacementsMismatch {
+                unknown: vec!["a".to_string()],
+                missing: 0
+            }
+        );
+        // Duplicates in the pairs slice collapse to the one key (set
+        // semantics), and first-pair-wins routing is pinned through the
+        // parity sweep above (duplicate keys in the free slice spelling):
+        // here the duplicate-only pairing is a MISSING failure, because
+        // "catalogue" stays unvalued.
+        assert_eq!(
+            cp.replace_values(&[("cat", "first"), ("cat", "second")])
+                .unwrap_err()
+                .missing,
+            1
+        );
+        // len mirrors the source list, duplicates included.
+        assert_eq!(cp.pattern_count(), 3);
+        assert_eq!(empty.pattern_count(), 0);
+    }
+
+    #[test]
+    fn compiled_matches_the_free_functions_over_multibyte_random_texts() {
+        // The multibyte random sweep, compiled side: the same deterministic
+        // LCG texts the free spelling's sweep builds, the compiled fixture
+        // built once outside the loop, find/count/replace parity plus the
+        // replace-side validation feeding a per-text value map keyed by
+        // the fixed pattern set.
+        let alphabet = ['a', 'b', 'é', '\u{301}', '東', '京', '\u{1F980}'];
+        let patterns = ["éa", "東京", "\u{1F980}", "ab", "b\u{301}"];
+        let cp = compiled(&patterns);
+        let pairs: Vec<(&str, &str)> = patterns.iter().map(|p| (*p, "X")).collect();
+        let values = cp.replace_values(&pairs).expect("the fixed set validates");
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for case in 0..200u64 {
+            let length = (case % 40) as usize;
+            let text: String = (0..length)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    alphabet[(state >> 33) as usize % alphabet.len()]
+                })
+                .collect();
+            assert_eq!(
+                compiled_find(&cp, &text),
+                find(&patterns, &text),
+                "case {case}: {text:?}"
+            );
+            assert_eq!(cp.count(&text), count(&patterns, &text), "case {case}");
+            assert_eq!(
+                &*cp.replace_many(&text, &values),
+                &*replace(&pairs, &text),
+                "case {case}: {text:?}"
+            );
         }
     }
 }

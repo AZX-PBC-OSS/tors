@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 
 use crate::merkle_impl;
+use crate::py::_borrow::borrow_bytes_list;
 
 /// `tors.merkle_root(chunks: list[bytes]) -> str`: the Merkle root over
 /// `chunks` as lowercase hex, one GIL-released native pass. Domain-separated
@@ -16,13 +17,12 @@ use crate::merkle_impl;
 /// GIL; the whole tree build runs under one `py.detach`.
 #[pyfunction]
 pub fn merkle_root(py: Python<'_>, chunks: Bound<'_, PyList>) -> PyResult<String> {
-    let items: Vec<_> = chunks.iter().collect();
-    let mut borrowed: Vec<&[u8]> = Vec::with_capacity(items.len());
-    for item in &items {
-        borrowed.push(item.extract::<&[u8]>()?);
-    }
-    py.detach(|| merkle_impl::merkle_root(&borrowed))
-        .ok_or_else(|| PyValueError::new_err("root of no chunks"))
+    // The shared walk (`_borrow.rs`'s soundness story: handles alive
+    // across the detach by construction).
+    borrow_bytes_list(&chunks, |borrowed| {
+        py.detach(|| merkle_impl::merkle_root(borrowed))
+            .ok_or_else(|| PyValueError::new_err("root of no chunks"))
+    })
 }
 
 /// `tors.merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) ->
@@ -40,15 +40,12 @@ pub fn merkle_diff(
     chunks_a: Bound<'_, PyList>,
     chunks_b: Bound<'_, PyList>,
 ) -> PyResult<Vec<usize>> {
-    let items_a: Vec<_> = chunks_a.iter().collect();
-    let mut a: Vec<&[u8]> = Vec::with_capacity(items_a.len());
-    for item in &items_a {
-        a.push(item.extract::<&[u8]>()?);
-    }
-    let items_b: Vec<_> = chunks_b.iter().collect();
-    let mut b: Vec<&[u8]> = Vec::with_capacity(items_b.len());
-    for item in &items_b {
-        b.push(item.extract::<&[u8]>()?);
-    }
-    Ok(py.detach(|| merkle_impl::merkle_diff(&a, &b)))
+    // The shared walk twice (`_borrow.rs`'s soundness story: handles
+    // alive across the detach by construction), nested because both
+    // borrows must be in scope for the one detached diff.
+    borrow_bytes_list(&chunks_a, |a| {
+        borrow_bytes_list(&chunks_b, |b| {
+            Ok(py.detach(|| merkle_impl::merkle_diff(a, b)))
+        })
+    })
 }

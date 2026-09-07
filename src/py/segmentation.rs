@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::EagerIter;
+use crate::py::eager_iter_class;
 use crate::segmentation_impl;
 
 /// `tors.grapheme_count`: the number of UAX #29 EXTENDED grapheme clusters
@@ -38,83 +39,55 @@ pub fn word_bounds(py: Python<'_>, text: &str) -> Vec<(usize, usize)> {
     py.detach(|| segmentation_impl::word_bounds(text))
 }
 
-/// The streaming spelling of `tors.word_bounds` (v0.4): a lazy iterator
-/// yielding the SAME `(start, end)` pairs, in the same order, as the list
-/// API, pinned to sequence-parity by tests/test_segmentation.py over every
-/// UAX #29 tricky row and hypothesis text.
-///
-/// GIL model: this is the design that answers the v0.3 marshalling cost
-/// (428-497ms of GIL-held 3.67M-tuple construction at 12 MiB, see
-/// `word_bounds`' doc and the README). The whole segmentation, the same
-/// detached core pass the list API runs, fills an internal bounds buffer
-/// under ONE `py.detach` when the iterator is constructed and stays GIL-free
-/// for its full duration (the buffer is 16 bytes per segment against the
-/// list shape's Python tuples). Each `__next__` then holds the GIL only to
-/// construct ONE 2-tuple of ints, µs-scale, so the worst heartbeat gap stays
-/// in the ping-floor band every str-in cell sits in (measured 15.4ms worst
-/// gap over a 327-358ms full-drain wall at 12 MiB, against the list shape's
-/// structurally-unattainable 428-567ms band).
-///
-/// The full drain is ~2.1x FASTER than the list API at 12 MiB (347ms vs
-/// 724ms, min-of-3, same process: the per-`__next__` tuple path is cheaper
-/// per bound than the list-return conversion), so the iterator wins on both
-/// axes at whole-file sizes; the list API stays the right shape for small
-/// inputs and one-shot batch work.
-///
-/// Eager-at-construction is a design requirement: UAX #29 word boundaries are not
-/// safely resumable mid-text (word-class runs span arbitrary distances, so
-/// a chunk-restart would mis-boundary at every cut that lands mid-word, and
-/// the crate exposes no safe-restart points), so the buffer is filled by one
-/// whole-text pass up front rather than per-batch re-segmentation.
-///
-/// The iterator machinery itself is the shared [`EagerIter`] core (below).
-/// `sentence_bounds_iter` (v0.8) and `find_patterns_iter` (v0.9) use the
-/// same design over UAX #29 sentence boundaries and search matches; the
-/// eager-at-construction argument holds identically for both (SB6/SB7/SB8
-/// lookahead classes and leftmost-longest resume-at-match-end state span
-/// arbitrary distances, so per-batch restarts would mis-segment).
-#[pyclass]
-pub struct WordBoundsIter(EagerIter<(usize, usize)>);
-
-/// The streaming sentence segmentation (v0.8): the same iterator design and
-/// GIL model as [`WordBoundsIter`] over `sentence_bounds`, with the same
-/// sequence as the list API (pinned to sequence-parity), one detached
-/// whole-text pass at construction, one 2-tuple of ints per `__next__`.
-/// Sentence counts are far below word counts on the same text (measured
-/// ~1/22nd on 12 MiB prose), so the streaming shape matters less here than
-/// for `word_bounds`; it exists for symmetry and for whole-corpus sweeps
-/// that never materialize the list.
-#[pyclass]
-pub struct SentenceBoundsIter(EagerIter<(usize, usize)>);
-
-#[pymethods]
-impl WordBoundsIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming spelling of `tors.word_bounds` (v0.4): a lazy iterator
+    /// yielding the SAME `(start, end)` pairs, in the same order, as the list
+    /// API, pinned to sequence-parity by tests/test_segmentation.py over every
+    /// UAX #29 tricky row and hypothesis text.
+    ///
+    /// GIL model: this is the design that answers the v0.3 marshalling cost
+    /// (428-497ms of GIL-held 3.67M-tuple construction at 12 MiB, see
+    /// `word_bounds`' doc and the README). The whole segmentation, the same
+    /// detached core pass the list API runs, fills an internal bounds buffer
+    /// under ONE `py.detach` when the iterator is constructed and stays GIL-free
+    /// for its full duration (the buffer is 16 bytes per segment against the
+    /// list shape's Python tuples). Each `__next__` then holds the GIL only to
+    /// construct ONE 2-tuple of ints, µs-scale, so the worst heartbeat gap stays
+    /// in the ping-floor band every str-in cell sits in (measured 15.4ms worst
+    /// gap over a 327-358ms full-drain wall at 12 MiB, against the list shape's
+    /// structurally-unattainable 428-567ms band).
+    ///
+    /// The full drain is ~2.1x FASTER than the list API at 12 MiB (347ms vs
+    /// 724ms, min-of-3, same process: the per-`__next__` tuple path is cheaper
+    /// per bound than the list-return conversion), so the iterator wins on both
+    /// axes at whole-file sizes; the list API stays the right shape for small
+    /// inputs and one-shot batch work.
+    ///
+    /// Eager-at-construction is a design requirement: UAX #29 word boundaries are not
+    /// safely resumable mid-text (word-class runs span arbitrary distances, so
+    /// a chunk-restart would mis-boundary at every cut that lands mid-word, and
+    /// the crate exposes no safe-restart points), so the buffer is filled by one
+    /// whole-text pass up front rather than per-batch re-segmentation.
+    ///
+    /// The iterator machinery itself is the shared [`EagerIter`] core (below).
+    /// `sentence_bounds_iter` (v0.8) and `find_patterns_iter` (v0.9) use the
+    /// same design over UAX #29 sentence boundaries and search matches; the
+    /// eager-at-construction argument holds identically for both (SB6/SB7/SB8
+    /// lookahead classes and leftmost-longest resume-at-match-end state span
+    /// arbitrary distances, so per-batch restarts would mis-segment).
+    WordBoundsIter, (usize, usize);
 }
 
-#[pymethods]
-impl SentenceBoundsIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming sentence segmentation (v0.8): the same iterator design and
+    /// GIL model as [`WordBoundsIter`] over `sentence_bounds`, with the same
+    /// sequence as the list API (pinned to sequence-parity), one detached
+    /// whole-text pass at construction, one 2-tuple of ints per `__next__`.
+    /// Sentence counts are far below word counts on the same text (measured
+    /// ~1/22nd on 12 MiB prose), so the streaming shape matters less here than
+    /// for `word_bounds`; it exists for symmetry and for whole-corpus sweeps
+    /// that never materialize the list.
+    SentenceBoundsIter, (usize, usize);
 }
 
 /// `tors.word_bounds_iter(text)`: the streaming segmentation surface; see

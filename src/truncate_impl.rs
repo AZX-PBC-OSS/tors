@@ -22,7 +22,6 @@
 //! for.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -54,15 +53,65 @@ pub enum Boundary {
     Sentence,
 }
 
-/// The byte offset of the `char_idx`-th codepoint of `text` (0-indexed);
-/// `text.len()` (one past the last byte) when `char_idx` is at or past the
-/// codepoint length, the same "end of input" convention `str::len` itself
-/// uses for an out-of-range slice bound.
-fn byte_offset_of_char(text: &str, char_idx: usize) -> usize {
-    match text.char_indices().nth(char_idx) {
-        Some((byte_idx, _)) => byte_idx,
-        None => text.len(),
+/// Every grapheme-cluster boundary at or before `max_chars`, in BOTH
+/// index units at once: parallel ascending arrays of each boundary's
+/// codepoint index and byte offset, from ONE forward pass that stops at
+/// the budget. Every position a `truncate_to_bounds` cut can land on (a
+/// cluster-safe segment end, the hard-cut fallback, and the byte offset
+/// the final slice needs) is a cluster boundary inside that range, so
+/// the walk never passes it: a small budget on a huge corpus walks only
+/// the prefix instead of the whole text. The caller has already
+/// established the text exceeds `max_chars` codepoints, so the walk
+/// always stops at the first cluster boundary past the budget; 0 always
+/// records.
+fn grapheme_boundary_offsets_within(text: &str, max_chars: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut char_starts = Vec::with_capacity(max_chars);
+    let mut byte_starts = Vec::with_capacity(max_chars);
+    let mut char_idx = 0usize;
+    let mut byte_idx = 0usize;
+    for cluster in text.graphemes(true) {
+        if char_idx > max_chars {
+            break;
+        }
+        char_starts.push(char_idx);
+        byte_starts.push(byte_idx);
+        char_idx += cluster.chars().count();
+        byte_idx += cluster.len();
     }
+    (char_starts, byte_starts)
+}
+
+/// The word/sentence segment ends that are ALSO grapheme-cluster
+/// boundaries (the cluster-safety intersection every cut in this module
+/// and `chunk_impl` filters through), as one ascending `Vec<usize>`:
+/// `bounds`'s ends merged against `grapheme_starts`, both ascending, one
+/// two-pointer pass. This is the shared helper behind both modules' cut
+/// machinery (one copy, owned here with the rest of the boundary/cut
+/// rule, imported by `chunk_impl`), and it replaces the `HashSet<usize>`
+/// both spellings formerly built: a 12 MiB prose input holds millions of
+/// boundaries, where a multi-million-entry hash set costs an order of
+/// magnitude more memory than this flat `Vec<usize>` while answering the
+/// same membership question; the callers that need a RANGE (the largest
+/// end at or before a budget) binary-search it with `partition_point`,
+/// O(log n) per cut. `grapheme_starts` chooses the range: `chunk_text`
+/// passes every boundary of the text, `truncate_to_bounds` only those at
+/// or before its budget, which bounds the merge output exactly where its
+/// own `<= max_chars` filter would have cut anyway.
+pub(crate) fn cluster_safe_ends(
+    bounds: &[(usize, usize)],
+    grapheme_starts: &[usize],
+) -> Vec<usize> {
+    let mut ends = Vec::with_capacity(bounds.len());
+    let mut gi = 0usize;
+    for &(_, end) in bounds {
+        while gi < grapheme_starts.len() && grapheme_starts[gi] < end {
+            gi += 1;
+        }
+        if gi < grapheme_starts.len() && grapheme_starts[gi] == end {
+            ends.push(end);
+        }
+    }
+    ends
 }
 
 /// Truncate `text` to at most `max_chars` codepoints, cutting at the last
@@ -95,34 +144,35 @@ fn byte_offset_of_char(text: &str, char_idx: usize) -> usize {
 ///   Trimming can only ever shrink the result further, so it cannot violate
 ///   the `max_chars` invariant above.
 pub fn truncate_to_bounds(text: &str, max_chars: usize, boundary: Boundary) -> Cow<'_, str> {
-    let total = text.chars().count();
-    if total <= max_chars {
+    if text.chars().count() <= max_chars {
         return Cow::Borrowed(text);
     }
-    let grapheme_starts = grapheme_boundary_chars(text);
+    // The text exceeds the budget, so the boundary walk below stops at
+    // the first cluster boundary past it and never touches the rest of
+    // the text.
+    let (grapheme_starts, byte_starts) = grapheme_boundary_offsets_within(text, max_chars);
     let bounds = match boundary {
         Boundary::Word => segmentation_impl::word_bounds(text),
         Boundary::Sentence => segmentation_impl::sentence_bounds(text),
     };
-    let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
-    let cut_chars = bounds
-        .iter()
-        .map(|&(_, end)| end)
-        .filter(|&end| end <= max_chars && grapheme_set.contains(&end))
-        .max()
-        .unwrap_or_else(|| {
-            // No word/sentence boundary is also cluster-safe within budget
-            // (or none fit at all): fall back to the largest grapheme
-            // boundary <= max_chars, which always exists (0 always
-            // qualifies) so this never panics on an empty iterator.
-            grapheme_starts
-                .iter()
-                .copied()
-                .filter(|&g| g <= max_chars)
-                .max()
-                .unwrap_or(0)
-        });
-    let byte_cut = byte_offset_of_char(text, cut_chars);
+    let ends = cluster_safe_ends(&bounds, &grapheme_starts);
+    let hi = ends.partition_point(|&end| end <= max_chars);
+    let cut_chars = if hi > 0 {
+        ends[hi - 1]
+    } else {
+        // No word/sentence boundary is also cluster-safe within budget
+        // (or none fit at all): fall back to the largest grapheme
+        // boundary <= max_chars, the bounded walk's last recorded start
+        // (0 always records, so this always exists).
+        *grapheme_starts.last().unwrap()
+    };
+    // The cut is one of the walk's recorded boundaries by construction
+    // (an end that survived the cluster-safety merge, or the fallback's
+    // own last record), so its byte offset is the parallel array's entry
+    // at the same index: no `char_indices` re-walk of the text to turn a
+    // codepoint index back into a byte offset.
+    let cut_idx = grapheme_starts.partition_point(|&g| g < cut_chars);
+    let byte_cut = byte_starts[cut_idx];
     Cow::Owned(text[..byte_cut].trim_end().to_string())
 }
 

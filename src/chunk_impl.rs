@@ -53,13 +53,12 @@
 //! of segments rather than a character/byte budget, a different enough
 //! shape to deserve its own file.
 
-use std::collections::HashSet;
-
 use crate::segmentation_impl;
-use crate::truncate_impl::{Boundary, grapheme_boundary_chars};
+use crate::truncate_impl::{Boundary, cluster_safe_ends};
 use fastcdc::v2020::{
     AVERAGE_MAX, AVERAGE_MIN, FastCDC, MAXIMUM_MAX, MAXIMUM_MIN, MINIMUM_MAX, MINIMUM_MIN,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Snap `limit` down to the largest grapheme-cluster boundary `<= limit`:
 /// the hard-cut fallback's grapheme-safety, the same rule
@@ -90,19 +89,68 @@ pub(crate) fn grapheme_safe_hard_cut(
     }
 }
 
-/// The end of the codepoint span `chars[from..to]` after `str::trim_end`'s
-/// rule: the largest `end <= to` such that `chars[from..end]` carries no
-/// trailing Unicode whitespace; `from` itself when the whole span is
-/// whitespace (the caller's empty-chunk case). [`chunk_text`]'s trim is
-/// `truncate_to_bounds`'s trim expressed in codepoint indices: a chunker
-/// cannot delete characters, so the CALLER moves its cut back to this end
-/// and lets the trimmed whitespace ride the next chunk instead.
-fn trimmed_end(chars: &[char], from: usize, to: usize) -> usize {
-    let mut end = to;
-    while end > from && chars[end - 1].is_whitespace() {
-        end -= 1;
+/// The grapheme-boundary grid the chunk loop cuts on, fused with the one
+/// per-cluster fact the trim needs: whether each cluster is entirely
+/// Unicode whitespace. One forward pass (the same grapheme walk
+/// `truncate_impl::grapheme_boundary_chars` drives, each codepoint
+/// decoded exactly once for both the grid's char count and the
+/// whitespace test) returning the ascending cluster starts plus a
+/// parallel all-whitespace flag per cluster. This replaces the former
+/// whole-text `Vec<char>` (a separate full decode pass and 4 bytes per
+/// codepoint): the codepoint budget's `total` is the grid's own final
+/// accumulated count (its last entry, the same total the bounds walk's
+/// last segment end carries), and the trim only ever asks whether the
+/// clusters just before a cut are whitespace, a question the flags
+/// answer by grid index with no text re-read at all.
+fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
+    let mut starts = Vec::new();
+    let mut whitespace = Vec::new();
+    let mut char_idx = 0usize;
+    for cluster in text.graphemes(true) {
+        starts.push(char_idx);
+        let mut cp_len = 0usize;
+        let mut all_ws = true;
+        for c in cluster.chars() {
+            cp_len += 1;
+            all_ws &= c.is_whitespace();
+        }
+        whitespace.push(all_ws);
+        char_idx += cp_len;
     }
-    end
+    starts.push(char_idx);
+    (starts, whitespace)
+}
+
+/// The end of the codepoint span `[grid[from_idx], grid[to_idx])` after
+/// `str::trim_end`'s rule, as a cluster-grid INDEX (`grid` the
+/// `grapheme_boundary_whitespace` starts, `to_idx` a cut the caller
+/// already knows is a cluster boundary, `from_idx` the current chunk
+/// start's own index): the largest end at or before the cut such that no
+/// cluster from `from_idx` up to it is entirely whitespace, `from_idx`
+/// itself when the whole span is whitespace (the caller's empty-chunk
+/// case). Backs the cut off over trailing all-whitespace clusters.
+///
+/// Backing off WHOLE CLUSTERS lands exactly where `str::trim_end` stops,
+/// whether trim_end is spelled over the byte slice between the two
+/// offsets or as the former char-by-char walk over a `Vec<char>`:
+/// whitespace codepoints are their own complete UTF-8 sequences, so the
+/// byte-slice and char-slice trims agree, and no cluster MIXES
+/// whitespace and non-whitespace in a way that could separate them: a
+/// whitespace codepoint either starts its own cluster (whatever combines
+/// after it, e.g. NBSP + a combining accent, makes a mixed cluster whose
+/// LAST codepoint is that non-whitespace mark, exactly where trim_end
+/// stops) or is the LF of a CRLF pair (whose CR is whitespace too, an
+/// all-whitespace cluster trim_end removes whole). So trim_end's
+/// stopping point is always a cluster boundary with only all-whitespace
+/// clusters between it and the cut, which is precisely what this
+/// walk-back computes; the mixed battery's "a\r\nb. c\r d\ne" row pins
+/// the CRLF case.
+fn trimmed_end(cluster_whitespace: &[bool], from_idx: usize, to_idx: usize) -> usize {
+    let mut idx = to_idx;
+    while idx > from_idx && cluster_whitespace[idx - 1] {
+        idx -= 1;
+    }
+    idx
 }
 
 /// Boundary-aware chunking of `text`: consecutive `(start, end)` pairs in
@@ -130,8 +178,9 @@ fn trimmed_end(chars: &[char], from: usize, to: usize) -> usize {
 /// never accepted, and the hard-cut fallback snaps to the nearest cluster
 /// boundary (`grapheme_safe_hard_cut`) rather than a raw codepoint offset.
 /// Like `truncate_to_bounds`, this is computed ONCE up front (the
-/// whole-text grapheme boundary set, `grapheme_boundary_chars`, one O(n)
-/// pass) and reused as an O(log n) lookup per chunk: no per-chunk
+/// whole-text grapheme boundary grid, `grapheme_boundary_whitespace`, one
+/// O(n) pass fused with the trim's per-cluster whitespace flags) and
+/// reused as an O(log n) lookup per chunk: no per-chunk
 /// re-scan. The one place this can still exceed `max_chars`: a SINGLE
 /// grapheme cluster wider than the whole remaining budget (e.g. an
 /// oversized ZWJ emoji chain), where a covering chunker cannot drop content
@@ -175,30 +224,33 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
         max_chars > 0,
         "max_chars must be at least 1 (chunks are non-empty), got {max_chars}"
     );
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
+    let bounds = match boundary {
+        Boundary::Word => segmentation_impl::word_bounds(text),
+        Boundary::Sentence => segmentation_impl::sentence_bounds(text),
+    };
     // The whole-text segment ends AND grapheme-cluster boundaries, each
     // computed ONCE: word/sentence bounds are already in codepoint units,
     // and every chunk's cut is a search over these ascending ends: the
     // per-suffix re-segmentation a truncate_to_bounds-per-chunk spelling
     // would pay is the cost this avoids. `ends` is additionally
     // intersected with grapheme-cluster boundaries up front (one O(n)
-    // filter over the whole list, not a per-chunk re-check) so every
-    // accepted cut is cluster-safe by construction: see
-    // `grapheme_safe_hard_cut` for the fallback's own cluster-safety.
-    let bounds = match boundary {
-        Boundary::Word => segmentation_impl::word_bounds(text),
-        Boundary::Sentence => segmentation_impl::sentence_bounds(text),
-    };
-    let grapheme_starts = grapheme_boundary_chars(text);
-    let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
-    let ends: Vec<usize> = bounds
-        .into_iter()
-        .map(|(_, end)| end)
-        .filter(|end| grapheme_set.contains(end))
-        .collect();
+    // merge over the whole list, `truncate_impl::cluster_safe_ends`: the
+    // SAME shared helper `truncate_to_bounds`'s own cut filters through,
+    // not a per-chunk re-check or a second spelling) so every accepted
+    // cut is cluster-safe by construction: see `grapheme_safe_hard_cut`
+    // for the fallback's own cluster-safety. The grid walk replaces the
+    // former `Vec<char>` whole-text collect with its own accumulated
+    // codepoint count (the grid's final entry) plus the trim's
+    // per-cluster whitespace flags.
+    let (grapheme_starts, cluster_whitespace) = grapheme_boundary_whitespace(text);
+    let total = *grapheme_starts.last().unwrap();
+    let ends = cluster_safe_ends(&bounds, &grapheme_starts);
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
     let mut start = 0usize;
+    // The grid index of `start` (every chunk start is a cluster boundary
+    // by construction: 0, or a previous cut or trimmed end), so the
+    // trim's walk-back is pure index arithmetic over the flags.
+    let mut start_idx = 0usize;
     while start < total {
         let remaining = total - start;
         if remaining <= max_chars {
@@ -226,15 +278,22 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
         } else {
             grapheme_safe_hard_cut(&grapheme_starts, start, limit)
         };
-        let trimmed = trimmed_end(&chars, start, cut);
-        if trimmed > start {
+        // Every cut is a grid boundary (an end that survived the
+        // cluster-safety merge, or the hard cut's own snapped boundary),
+        // so its grid index is a binary search away.
+        let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
+        let trimmed_idx = trimmed_end(&cluster_whitespace, start_idx, cut_idx);
+        if trimmed_idx > start_idx {
+            let trimmed = grapheme_starts[trimmed_idx];
             chunks.push((start, trimmed));
             start = trimmed;
+            start_idx = trimmed_idx;
         } else {
             // The span is entirely whitespace: trimming it would empty
             // the chunk, so it goes out whole (the documented exception).
             chunks.push((start, cut));
             start = cut;
+            start_idx = cut_idx;
         }
     }
     chunks
@@ -305,8 +364,6 @@ pub fn chunk_text_overlapping(
         "overlap must be less than max_chars (no forward progress otherwise), \
          got overlap={overlap}, max_chars={max_chars}"
     );
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
     let bounds = match boundary {
         Boundary::Word => segmentation_impl::word_bounds(text),
         Boundary::Sentence => segmentation_impl::sentence_bounds(text),
@@ -315,15 +372,15 @@ pub fn chunk_text_overlapping(
     // function's comments. The overlap SNAP below reuses this same
     // cluster-safe `ends` list, so a snapped start is never mid-cluster
     // either.
-    let grapheme_starts = grapheme_boundary_chars(text);
-    let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
-    let ends: Vec<usize> = bounds
-        .into_iter()
-        .map(|(_, end)| end)
-        .filter(|end| grapheme_set.contains(end))
-        .collect();
+    let (grapheme_starts, cluster_whitespace) = grapheme_boundary_whitespace(text);
+    let total = *grapheme_starts.last().unwrap();
+    let ends = cluster_safe_ends(&bounds, &grapheme_starts);
     let mut chunks = Vec::new();
     let mut start = 0usize;
+    // The grid index of `start`, carried across iterations exactly as
+    // chunk_text's: every start here is a snapped boundary end, a cut, or
+    // a trimmed end, all grid boundaries by construction.
+    let mut start_idx = 0usize;
     loop {
         let remaining = total - start;
         let chunk_end = if remaining <= max_chars {
@@ -336,8 +393,13 @@ pub fn chunk_text_overlapping(
             } else {
                 grapheme_safe_hard_cut(&grapheme_starts, start, limit)
             };
-            let trimmed = trimmed_end(&chars, start, cut);
-            if trimmed > start { trimmed } else { cut }
+            let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
+            let trimmed_idx = trimmed_end(&cluster_whitespace, start_idx, cut_idx);
+            if trimmed_idx > start_idx {
+                grapheme_starts[trimmed_idx]
+            } else {
+                cut
+            }
         };
         chunks.push((start, chunk_end));
         if chunk_end >= total {
@@ -355,6 +417,7 @@ pub fn chunk_text_overlapping(
         } else {
             chunk_end
         };
+        start_idx = grapheme_starts.partition_point(|&g| g < start);
     }
     chunks
 }

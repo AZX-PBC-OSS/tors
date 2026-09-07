@@ -7,6 +7,7 @@ use crate::chunk_by_segment_impl;
 use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
 use crate::parse_boundary;
+use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
 /// max_size=65534) -> list[tuple[int, int]]`: FastCDC 2020 content-defined
@@ -137,29 +138,15 @@ pub fn chunk_text(
     Ok(chunks)
 }
 
-/// The streaming twin of [`chunk_text`]: same `(start, end)` sequence, same
-/// argument contract, the [`EagerIter`] shape (whole scan under one
-/// `py.detach` at construction, one 2-tuple per `__next__`) `word_bounds_iter`
-/// already established. Avoids materializing a `list` for documents that
-/// chunk into the hundreds of thousands of pieces, where the GIL-held
-/// tuple-marshalling cost `word_bounds_iter`'s docs measure would otherwise
-/// dominate.
-#[pyclass]
-pub struct ChunkTextIter(EagerIter<(usize, usize)>);
-
-#[pymethods]
-impl ChunkTextIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming twin of [`chunk_text`]: same `(start, end)` sequence, same
+    /// argument contract, the [`EagerIter`] shape (whole scan under one
+    /// `py.detach` at construction, one 2-tuple per `__next__`) `word_bounds_iter`
+    /// already established. Avoids materializing a `list` for documents that
+    /// chunk into the hundreds of thousands of pieces, where the GIL-held
+    /// tuple-marshalling cost `word_bounds_iter`'s docs measure would otherwise
+    /// dominate.
+    ChunkTextIter, (usize, usize);
 }
 
 /// `tors.chunk_text_iter(text, max_chars, *, overlap=0, boundary="word")`:
@@ -248,23 +235,9 @@ pub fn chunk_by_words(
     Ok(py.detach(|| chunk_by_segment_impl::chunk_by_words(text, words_per_chunk, overlap)))
 }
 
-/// The streaming twin of [`chunk_by_words`]: same shape as [`ChunkTextIter`].
-#[pyclass]
-pub struct ChunkByWordsIter(EagerIter<(usize, usize)>);
-
-#[pymethods]
-impl ChunkByWordsIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming twin of [`chunk_by_words`]: same shape as [`ChunkTextIter`].
+    ChunkByWordsIter, (usize, usize);
 }
 
 /// `tors.chunk_by_words_iter(text, words_per_chunk, *, overlap=0)`:
@@ -333,23 +306,9 @@ pub fn chunk_by_sentences(
     Ok(py.detach(|| chunk_by_segment_impl::chunk_by_sentences(text, sentences_per_chunk, overlap)))
 }
 
-/// The streaming twin of [`chunk_by_sentences`]: same shape as [`ChunkTextIter`].
-#[pyclass]
-pub struct ChunkBySentencesIter(EagerIter<(usize, usize)>);
-
-#[pymethods]
-impl ChunkBySentencesIter {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<(usize, usize)> {
-        self.0.next()
-    }
-
-    fn __length_hint__(&self) -> usize {
-        self.0.remaining()
-    }
+eager_iter_class! {
+    /// The streaming twin of [`chunk_by_sentences`]: same shape as [`ChunkTextIter`].
+    ChunkBySentencesIter, (usize, usize);
 }
 
 /// `tors.chunk_by_sentences_iter(text, sentences_per_chunk, *, overlap=0)`:

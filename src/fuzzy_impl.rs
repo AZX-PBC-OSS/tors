@@ -130,15 +130,19 @@ pub fn levenshtein(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<usize, 
     let budget = Budget::new(deadline_ms);
     if a == b {
         // Identical operands: one O(n) equality scan, exact; no DP, no
-        // char vectors, inside any sane budget.
+        // char vectors. The scan is still work the budget bounds: a
+        // multi-MiB pair can outlive a tight budget on the scan alone.
+        budget.expired()?;
         return Ok(0);
     }
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     if a_chars.is_empty() {
+        budget.expired()?;
         return Ok(b_chars.len());
     }
     if b_chars.is_empty() {
+        budget.expired()?;
         return Ok(a_chars.len());
     }
     // The shorter operand is the bit-vector pattern (its length is the
@@ -246,6 +250,11 @@ fn levenshtein_myers_bitvector(
         }
     }
     debug_assert!(score >= 0, "edit distance cannot go negative");
+    // The tail: the in-loop check fires only every 1024 text positions, so
+    // a text shorter than that (or one whose overrun lands between check
+    // points) is verdicted here, after the compute, against the same
+    // clock. Every return path of `levenshtein` now consults the budget.
+    budget.expired()?;
     Ok(score as usize)
 }
 
@@ -267,15 +276,27 @@ fn levenshtein_myers_bitvector(
 /// transposition walk.
 pub fn jaro(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<f64, DeadlineExceeded> {
     let budget = Budget::new(deadline_ms);
+    jaro_within(a, b, &budget)
+}
+
+/// The single-clock spelling `jaro_winkler` shares: computes Jaro against
+/// the CALLER's budget (one clock for the whole compound call), with the
+/// degenerates consulting it before returning.
+fn jaro_within(a: &str, b: &str, budget: &Budget) -> Result<f64, DeadlineExceeded> {
     let a_chars: Vec<char> = a.chars().collect();
     let b_chars: Vec<char> = b.chars().collect();
     if a_chars.is_empty() && b_chars.is_empty() {
+        budget.expired()?;
         return Ok(1.0);
     }
     if a_chars.is_empty() || b_chars.is_empty() {
+        // The materialization of the non-empty side is work the budget
+        // bounds: a multi-MiB operand can outlive a tight budget on the
+        // collect alone.
+        budget.expired()?;
         return Ok(0.0);
     }
-    jaro_core(&a_chars, &b_chars, &budget)
+    jaro_core(&a_chars, &b_chars, budget)
 }
 
 /// The Jaro-Winkler similarity: [`jaro`], then (only when the Jaro score
@@ -285,9 +306,12 @@ pub fn jaro(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<f64, DeadlineE
 /// capped at 4 chars and `p = 0.1`. Below the threshold the Jaro score is
 /// returned unchanged, common prefix or not. Same character-level
 /// convention and same deadline machinery as [`jaro`] (the boost itself is
-/// O(prefix) and needs no check of its own).
+/// ONE budget covers the whole compound call: the Jaro pass
+/// and the prefix scan run against a single clock, so the prefix cannot
+/// escape a budget the Jaro pass already consumed).
 pub fn jaro_winkler(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<f64, DeadlineExceeded> {
-    let sim = jaro(a, b, deadline_ms)?;
+    let budget = Budget::new(deadline_ms);
+    let sim = jaro_within(a, b, &budget)?;
     if sim > 0.7 {
         let prefix_length = a
             .chars()
@@ -295,6 +319,7 @@ pub fn jaro_winkler(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<f64, D
             .take(4)
             .take_while(|(ca, cb)| ca == cb)
             .count();
+        budget.expired()?;
         Ok(sim + 0.1 * prefix_length as f64 * (1.0 - sim))
     } else {
         Ok(sim)
@@ -353,6 +378,10 @@ fn jaro_core(a: &[char], b: &[char], budget: &Budget) -> Result<f64, DeadlineExc
         }
     }
     transpositions /= 2;
+    // The tail: the match pass checks every 1024 outer steps, so a pair
+    // shorter than that (or one whose overrun lands between check points)
+    // is verdicted here against the same clock.
+    budget.expired()?;
     if matches == 0 {
         Ok(0.0)
     } else {
@@ -699,8 +728,7 @@ mod tests {
         assert!(err.elapsed_ms > 5.0, "elapsed must exceed the budget");
         let message = err.message();
         assert!(message.contains("deadline_ms 5.0ms"), "{message}");
-        assert!(message.contains("elapsed "), "{message}");
-        // And the deadline actually bounded the work: the call returned
+        assert!(message.contains("elapsed "), "{message}"); // And the deadline actually bounded the work: the call returned
         // in well under the unbounded cost (loose bound for a loaded
         // runner).
         let started = Instant::now();
@@ -762,5 +790,56 @@ mod tests {
         assert_eq!(jaro("", &b, Some(20.0)), Ok(0.0));
         assert_eq!(jaro_winkler("", "", Some(20.0)), Ok(1.0));
         assert_eq!(jaro_winkler(&b, "", Some(20.0)), Ok(0.0));
+    }
+
+    #[test]
+    fn an_expired_budget_fires_on_the_fast_paths_too() {
+        // The contract: deadline_ms bounds the WHOLE call, the fast paths
+        // included. Each row below gives its path work that provably
+        // outlives its budget: the identical-operand equality scan over
+        // 16 MiB (memcmp, ~0.7 ms measured: a 0.1 ms budget), the
+        // empty-side materialization of 16 MiB (chars().collect, tens of
+        // ms: a 1 ms budget), and the sub-check-point bit-vector tail (a
+        // 200-char pair whose single in-loop check at idx 0 runs before
+        // any work, so only the tail can verdict it).
+        let big = "a".repeat(16 * 1024 * 1024);
+        let err = levenshtein(&big, &big, Some(0.1)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 0.1,
+            "identical-operand scan must consult the budget"
+        );
+        let err = levenshtein("", &big, Some(1.0)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 1.0,
+            "empty-side materialization must consult the budget"
+        );
+        let err = jaro("", &big, Some(1.0)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 1.0,
+            "jaro empty-side materialization must consult the budget"
+        );
+        // Sub-check-point compute: 200 chars of two-letter noise whose DP
+        // cannot outlive 1ms, so a 0.0001ms budget is the only way the
+        // tail fires (the in-loop check at idx 0 runs before any work).
+        let a = random_two_letter(200, 11);
+        let b = random_two_letter(200, 22);
+        let err = levenshtein(&a, &b, Some(0.0001)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 0.0001,
+            "the bit-vector tail must verdict short inputs"
+        );
+        let err = jaro(&a, &b, Some(0.0001)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 0.0001,
+            "the jaro tail must verdict short inputs"
+        );
+        // The compound call: one clock, so a budget consumed by the Jaro
+        // pass leaves nothing for the prefix scan (the degenerate-empty
+        // jaro plus a 16 MiB prefix scan on the other side's material).
+        let err = jaro_winkler("", &big, Some(1.0)).unwrap_err();
+        assert!(
+            err.elapsed_ms > 1.0,
+            "jaro_winkler must run on one clock end to end"
+        );
     }
 }

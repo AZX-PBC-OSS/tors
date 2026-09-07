@@ -1,10 +1,11 @@
 use crate::diff_impl;
-use pyo3::exceptions::{PyTimeoutError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 use pyo3::{Py, PyAny};
 
 use crate::fuzzy_impl;
+use crate::py::_borrow::{EmptyPolicy, borrow_str_list, timeout_err, validate_unit_interval};
 use crate::validate_deadline_ms;
 
 /// `tors.similarity_ratio(a, b, *, deadline_ms=None)`:
@@ -31,7 +32,7 @@ pub fn similarity_ratio(
 ) -> PyResult<f64> {
     validate_deadline_ms(deadline_ms)?;
     py.detach(|| diff_impl::similarity_ratio_deadline(a, b, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))
+        .map_err(|err| timeout_err(err.message()))
 }
 
 /// `tors.get_close_matches(word, possibilities, n=3, cutoff=0.6, *,
@@ -71,31 +72,26 @@ pub fn get_close_matches(
         return Err(PyValueError::new_err(format!("n must be > 0: {n}")));
     }
     let n = n as usize;
-    if !(0.0..=1.0).contains(&cutoff) {
-        return Err(PyValueError::new_err(format!(
-            "cutoff must be in [0.0, 1.0]: {cutoff}"
-        )));
-    }
+    validate_unit_interval("cutoff", cutoff, true)?;
     validate_deadline_ms(deadline_ms)?;
-    // The candidate walk mirrors find_patterns' list walk: handles kept
-    // alive across the detach (the borrowed &strs point into the str
-    // objects' immutable UTF-8 buffers; the list holds them, these handles
-    // re-pin that for the compiler), but with NO empty-refusal (an empty
-    // candidate is legal, difflib scores it 0.0 unless word is empty too).
-    let items: Vec<_> = possibilities.iter().collect();
-    let mut candidates: Vec<&str> = Vec::with_capacity(items.len());
-    for item in &items {
-        candidates.push(item.extract::<&str>()?);
-    }
-    let indices = py
-        .detach(|| diff_impl::close_matches(word, &candidates, n, cutoff, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))?;
-    // Indices → the ORIGINAL candidate objects (references, zero copy).
-    let picked = indices
-        .into_iter()
-        .map(|idx| items[idx].clone())
-        .collect::<Vec<_>>();
-    Ok(PyList::new(py, picked)?.into_any().unbind())
+    // The shared candidate walk (`_borrow.rs`'s soundness story: handles
+    // alive across the detach by construction), with NO empty-refusal
+    // (an empty candidate is legal, difflib scores it 0.0 unless word is
+    // empty too); the handles are still in scope on the marshalling side
+    // because the ORIGINAL candidate objects are what the return hands
+    // back, selected by index.
+    let out = borrow_str_list(&possibilities, EmptyPolicy::Allow, |items, candidates| {
+        let indices = py
+            .detach(|| diff_impl::close_matches(word, candidates, n, cutoff, deadline_ms))
+            .map_err(|err| timeout_err(err.message()))?;
+        // Indices → the ORIGINAL candidate objects (references, zero copy).
+        let picked = indices
+            .into_iter()
+            .map(|idx| items[idx].clone())
+            .collect::<Vec<_>>();
+        Ok(PyList::new(py, picked)?.into_any().unbind())
+    })?;
+    Ok(out)
 }
 
 /// `tors.levenshtein(a, b, *, deadline_ms=None)`: the unit-cost edit
@@ -117,7 +113,7 @@ pub fn get_close_matches(
 pub fn levenshtein(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -> PyResult<usize> {
     validate_deadline_ms(deadline_ms)?;
     py.detach(|| fuzzy_impl::levenshtein(a, b, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))
+        .map_err(|err| timeout_err(err.message()))
 }
 
 /// `tors.jaro(a, b, *, deadline_ms=None)`: the Jaro similarity
@@ -132,7 +128,7 @@ pub fn levenshtein(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -
 pub fn jaro(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -> PyResult<f64> {
     validate_deadline_ms(deadline_ms)?;
     py.detach(|| fuzzy_impl::jaro(a, b, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))
+        .map_err(|err| timeout_err(err.message()))
 }
 
 /// `tors.jaro_winkler(a, b, *, deadline_ms=None)`: Jaro-Winkler (Jaro plus
@@ -146,5 +142,5 @@ pub fn jaro(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -> PyRes
 pub fn jaro_winkler(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -> PyResult<f64> {
     validate_deadline_ms(deadline_ms)?;
     py.detach(|| fuzzy_impl::jaro_winkler(a, b, deadline_ms))
-        .map_err(|err| PyErr::new::<PyTimeoutError, _>(err.message()))
+        .map_err(|err| timeout_err(err.message()))
 }

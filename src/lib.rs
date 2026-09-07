@@ -267,6 +267,7 @@ pub mod py;
 use py::bm25::*;
 use py::chunk::*;
 use py::codec::*;
+use py::compiled_patterns::CompiledPatterns;
 use py::diff::*;
 use py::encoding::*;
 use py::fence::*;
@@ -423,5 +424,6 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(daitch_mokotoff, m)?)?;
     m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
+    m.add_class::<CompiledPatterns>()?;
     Ok(())
 }

@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use rust_stemmers::Stemmer;
 
+use crate::py::_borrow::{EmptyPolicy, borrow_str_list};
 use crate::py::lemma_dict::resolve_lemma_dict;
 use crate::tfidf_impl;
 use crate::tokenize_impl::parse_stemmer_algorithm;
@@ -76,17 +77,16 @@ pub fn tf_idf(
         .map_err(PyValueError::new_err)?
         .map(Stemmer::create);
     let lemma_dict = resolve_lemma_dict(lemma_dict)?;
-    let items: Vec<_> = corpus.iter().collect();
-    let mut borrowed: Vec<&str> = Vec::with_capacity(items.len());
-    for item in &items {
-        borrowed.push(item.extract::<&str>()?);
-    }
-    Ok(py.detach(|| {
-        tfidf_impl::tf_idf(
-            &borrowed,
-            strip_accents,
-            stemmer.as_ref(),
-            lemma_dict.as_deref(),
-        )
-    }))
+    // The shared walk (`_borrow.rs`'s soundness story: handles alive
+    // across the detach by construction), empty documents legal.
+    borrow_str_list(&corpus, EmptyPolicy::Allow, |_items, borrowed| {
+        Ok(py.detach(|| {
+            tfidf_impl::tf_idf(
+                borrowed,
+                strip_accents,
+                stemmer.as_ref(),
+                lemma_dict.as_deref(),
+            )
+        }))
+    })
 }

@@ -196,6 +196,40 @@ def find_patterns_iter(
 def count_matches(patterns: list[str], text: str) -> int: ...
 
 
+# GIL note (the CompiledLemmaDict discipline, over the search surface): the
+# pattern list compiled ONCE (one detached build at construction), then
+# every call is the free function's scan classes MINUS the per-call
+# automaton build: one Arc refcount bump, the scan under one detach, the
+# same marshalling as the free spelling. Immutable after construction, so
+# sharing one across many calls and threads is sound with no
+# synchronization beyond the refcount. The replace spellings validate the
+# replacements dict at CALL time (values change per call; the automaton is
+# the compiled part): it must key EXACTLY the compiled pattern set, every
+# pattern paired with a value and no others (ValueError otherwise, naming
+# the unknown keys and the missing count), which is what makes
+# cp.replace_many(text, m) == tors.replace_many(text, m) hold by
+# construction. The empty pattern list compiles (its scans find nothing)
+# and then accepts only the empty dict. Argument contracts otherwise match
+# the free functions' exactly (list-of-str patterns at construction, the
+# empty-pattern-string ValueError, lone-surrogate UnicodeEncodeError, the
+# one-character mask rule on the masked spelling).
+class CompiledPatterns:
+    """A pattern list compiled once: the `re.compile()` answer to the free
+    search spellings' per-call automaton build. Build once, reuse across
+    many calls (a fixed vocabulary over a document pipeline) instead of
+    rebuilding the same automaton every call. Immutable once built."""
+
+    def __init__(self, patterns: list[str]) -> None: ...
+    def __len__(self) -> int: ...
+    def find(self, text: str) -> list[tuple[int, int, int]]: ...
+    def find_iter(self, text: str) -> Iterator[tuple[int, int, int]]: ...
+    def count(self, text: str) -> int: ...
+    def replace_many(self, text: str, replacements: dict[str, str]) -> str: ...
+    def replace_many_masked(
+        self, text: str, replacements: dict[str, str], mask: str = "*"
+    ) -> str: ...
+
+
 # GIL note: the grapheme_count precedent for the word segmenter: a single
 # int return (no marshalling class), the whole scan GIL-released, and O(1)
 # memory where len(word_bounds(text)) materializes the full tuple list.

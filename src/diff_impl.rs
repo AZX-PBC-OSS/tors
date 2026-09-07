@@ -347,14 +347,19 @@ pub fn diff_opcodes_lines_deadline(
 // against the running stdlib (python3.12 difflib) before pinning.
 //
 // M is accumulated by a counting hook driven through the SAME Myers
-// entry point the capture spelling uses (see [`matched_chars`]): a scored
-// pair allocates only its two `Vec<char>` tokenizations (no op vector, no
-// per-op enum traffic), which is what makes a 10k-candidate
+// entry point the capture spelling uses (see [`matched_and_total`]): a
+// scored pair allocates at most its two `Vec<char>` tokenizations (no op
+// vector, no per-op enum traffic), which is what makes a 10k-candidate
 // `close_matches` scan pay the search itself, not 10k op-vector
-// materializations. The bulk spelling (`close_matches`) layers a provable
-// length-ratio prefilter on top: a candidate whose ratio ceiling is
-// STRICTLY under the cutoff is skipped before any tokenization (see
-// [`ratio_ceiling`]), so the all-miss scan class runs no searches at all.
+// materializations; a pure-ASCII pair skips even the tokenization (see
+// [`matched_and_total`]'s ASCII fast path): every byte IS a character,
+// so the engine runs over the two borrowed byte slices, zero allocation.
+// The bulk spelling (`close_matches`) layers a provable length-ratio
+// prefilter on top: a candidate whose ratio ceiling is STRICTLY under the
+// cutoff is skipped before any tokenization (see [`ratio_ceiling`]), so
+// the all-miss scan class runs no searches at all, and the prefilter's
+// per-candidate length pass takes the same ASCII shortcut (see
+// [`char_len`]).
 
 /// difflib's `_calculate_ratio` verbatim (difflib.py:39-42): `2.0*M/T`,
 /// with the zero-total guard returning `1.0`. That is difflib's own answer
@@ -410,52 +415,83 @@ impl DiffHook for CountEqualHook {
     }
 }
 
-/// The shared M computation, the spine of both similarity spellings: the
-/// matched-char total over THE SAME Myers equal-ops [`diff_opcodes`] emits,
-/// accumulated by [`CountEqualHook`] through `diff_slices_deadline`: the
-/// very dispatcher call (`algorithms::diff_deadline` on the full `0..len`
-/// ranges, hence the same `myers::diff_deadline` search, preflight, and
-/// deadline-bail checks) that `capture_diff_slices_deadline` drives its
-/// `Compact`/`Replace`/`Capture` chain through, so the count IS the capture
-/// spelling's equal-op sum without materializing the op vector: one pair
-/// costs its two `Vec<char>` tokenizations and nothing else (the capture
-/// path's presentation hooks only merge and shift ops, which preserves the
-/// equal-length total; a differential battery pins the agreement). The
-/// identical-input fast path counts `a`'s chars: exactly the single equal
-/// op's length, no search. `deadline` is similar's absolute bail Instant,
-/// passed through verbatim; the expiry verdict is the CALLER's, because the
-/// two spellings budget differently: one clock per pair for
-/// [`similarity_ratio_deadline`], ONE shared clock for the whole candidate
-/// scan in [`close_matches`].
-fn matched_chars(a: &str, b: &str, deadline: Option<Instant>) -> usize {
-    if a == b {
-        a.chars().count()
+/// A char count with the ASCII shortcut: an ASCII `str`'s characters ARE
+/// its bytes (`chars().count() == len()`), so the byte length answers
+/// directly after the one `is_ascii` scan, and only a non-ASCII operand
+/// pays the `chars()` decode walk. The same number either way; a speed
+/// spelling, not a semantic one.
+fn char_len(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
     } else {
-        let old: Vec<char> = a.chars().collect();
-        let new: Vec<char> = b.chars().collect();
-        let mut hook = CountEqualHook(0);
-        diff_slices_deadline(Algorithm::Myers, &mut hook, &old, &new, deadline)
-            .expect("the counting sink cannot fail");
-        hook.0
+        s.chars().count()
     }
 }
 
-/// The per-pair spelling of [`matched_chars`]: the same one-clock-per-call
-/// shape as [`diff_opcodes_deadline`] (the saturating budget, similar's
-/// bail Instant, and the expiry verdict after the search; see the comment
-/// there), yielding the matched total or [`DeadlineExceeded`].
-fn matched_chars_deadline(
-    a: &str,
-    b: &str,
-    deadline_ms: Option<f64>,
-) -> Result<usize, DeadlineExceeded> {
-    let started = Instant::now();
-    let deadline = deadline_ms.and_then(|ms| started.checked_add(budget_from_ms(ms)));
-    let matches = matched_chars(a, b, deadline);
-    if let Some(err) = exceeded_after(started, deadline_ms) {
-        return Err(err);
+/// The shared M and T computation, the spine of both similarity spellings:
+/// the matched-char total M over THE SAME Myers equal-ops [`diff_opcodes`]
+/// emits, accumulated by [`CountEqualHook`] through `diff_slices_deadline`
+/// (the very dispatcher call (`algorithms::diff_deadline` on the full
+/// `0..len` ranges, hence the same `myers::diff_deadline` search, preflight,
+/// and deadline-bail checks) that `capture_diff_slices_deadline` drives its
+/// `Compact`/`Replace`/`Capture` chain through, so the count IS the capture
+/// spelling's equal-op sum without materializing the op vector), plus the
+/// pair's total char count T as a byproduct of the same pass, so
+/// [`similarity_ratio_deadline`] never re-counts operands it just
+/// tokenized. The identical-input fast path counts `a`'s chars and doubles
+/// them (exactly the single equal op's length over both sides), no search.
+/// The ASCII fast path: when BOTH operands are pure ASCII, every byte IS
+/// a character, so the `u8` sequence over `a.as_bytes()` holds exactly the
+/// same elements, in the same order, under the same equality, with the
+/// same element count, as the `Vec<char>` tokenization of the same text;
+/// the engine is element-type-generic (`Eq + Hash`, verified in similar's
+/// source: the preflight's hash buckets are only ever probed by key and
+/// resolved by explicit equality, never iterated, and record ids are
+/// assigned in first-occurrence scan order, so nothing depends on the
+/// element type's hash values), and driving it over the borrowed byte
+/// slices produces the same ops with the same lengths in the same units:
+/// the two token-vector allocations simply do not happen. The
+/// byte-vs-char equivalence is pinned by the differential battery below
+/// (`the_hook_count_is_the_capture_sum_everywhere_the_batteries_reach`:
+/// the hook count now takes the byte route on ASCII pairs while the
+/// capture side stays on chars, so every disagreement is loud).
+/// `deadline` is similar's absolute bail Instant, passed through verbatim;
+/// the expiry verdict is the CALLER's, because the two spellings budget
+/// differently: one clock per pair for [`similarity_ratio_deadline`], ONE
+/// shared clock for the whole candidate scan in [`close_matches`].
+fn matched_and_total(a: &str, b: &str, deadline: Option<Instant>) -> (usize, usize) {
+    if a == b {
+        let len = char_len(a);
+        (len, 2 * len)
+    } else if a.is_ascii() && b.is_ascii() {
+        // The byte route: same sequence, same equalities, same op lengths
+        // in the same units, zero allocation (the doc above is the proof).
+        let mut hook = CountEqualHook(0);
+        diff_slices_deadline(
+            Algorithm::Myers,
+            &mut hook,
+            a.as_bytes(),
+            b.as_bytes(),
+            deadline,
+        )
+        .expect("the counting sink cannot fail");
+        (hook.0, a.len() + b.len())
+    } else {
+        let old: Vec<char> = a.chars().collect();
+        let new: Vec<char> = b.chars().collect();
+        let total = old.len() + new.len();
+        let mut hook = CountEqualHook(0);
+        diff_slices_deadline(Algorithm::Myers, &mut hook, &old, &new, deadline)
+            .expect("the counting sink cannot fail");
+        (hook.0, total)
     }
-    Ok(matches)
+}
+
+/// The M half of [`matched_and_total`], the spelling [`close_matches`] and
+/// the test batteries call: the matched-char total alone (the caller holds
+/// the pair's own lengths already).
+fn matched_chars(a: &str, b: &str, deadline: Option<Instant>) -> usize {
+    matched_and_total(a, b, deadline).0
 }
 
 /// `difflib.SequenceMatcher(None, a, b).ratio()` at native speed: `2.0*M/T`
@@ -490,28 +526,33 @@ pub fn similarity_ratio(a: &str, b: &str) -> f64 {
 }
 
 /// The deadline-bounded spelling of [`similarity_ratio`]: `deadline_ms`
-/// bounds the WHOLE call (the `Vec<char>` materialization, the Myers
-/// search, and the identical-input fast path alike, one clock started at
-/// entry), with the same saturating arithmetic and expiry tail as
-/// [`diff_opcodes_deadline`] ([`budget_from_ms`]/[`exceeded_after`], the
-/// same bail-then-verdict two-step over similar's deadline mechanism). The
-/// caller guarantees a positive finite value where `Some` (the pyo3 layer
-/// validates before calling). On expiry the approximated M similar's
+/// bounds the WHOLE call (the `Vec<char>` materialization on non-ASCII
+/// pairs, the Myers search, and the identical-input fast path alike, one
+/// clock started at entry), with the same saturating arithmetic and expiry
+/// tail as [`diff_opcodes_deadline`] ([`budget_from_ms`]/[`exceeded_after`],
+/// the same bail-then-verdict two-step over similar's deadline mechanism).
+/// The caller guarantees a positive finite value where `Some` (the pyo3
+/// layer validates before calling). On expiry the approximated M similar's
 /// deadline mechanism produces is DISCARDED and [`DeadlineExceeded`] is
 /// returned: the `TimeoutError` contract, never a silently degraded
 /// score. `None` is exactly [`similarity_ratio`]. The O(ND) worst case on
 /// hard pairs (the character-permutation shape, the same DoS class the
 /// opcode spellings document) is the whole reason this spelling exists.
+/// The total T comes out of the same pass ([`matched_and_total`]), not a
+/// second `chars().count()` walk over each operand the call just
+/// tokenized or measured.
 pub fn similarity_ratio_deadline(
     a: &str,
     b: &str,
     deadline_ms: Option<f64>,
 ) -> Result<f64, DeadlineExceeded> {
-    let matches = matched_chars_deadline(a, b, deadline_ms)?;
-    Ok(ratio_from_matches(
-        matches,
-        a.chars().count() + b.chars().count(),
-    ))
+    let started = Instant::now();
+    let deadline = deadline_ms.and_then(|ms| started.checked_add(budget_from_ms(ms)));
+    let (matches, total) = matched_and_total(a, b, deadline);
+    if let Some(err) = exceeded_after(started, deadline_ms) {
+        return Err(err);
+    }
+    Ok(ratio_from_matches(matches, total))
 }
 
 /// difflib's ordering-and-truncation tail (difflib.py:707, difflib.py:710):
@@ -576,10 +617,11 @@ mod search_seam {
 /// short-word dictionary measures (the bench's own shape: a 41-char query
 /// against a dictionary whose longest entry is 17 chars, where every
 /// single candidate is under-ceiling at the 0.6 default). A skipped
-/// candidate costs one `chars().count()` pass over its bytes and
-/// allocates nothing: the two `Vec<char>` tokenizations a searched pair
-/// pays inside [`matched_chars`] never happen, so a 10k-candidate miss
-/// scan runs zero searches and zero token-vector allocations.
+/// candidate costs one length pass over its bytes ([`char_len`]: the
+/// ASCII shortcut included) and allocates nothing: the two `Vec<char>`
+/// tokenizations a searched pair pays inside [`matched_chars`] never
+/// happen, so a 10k-candidate miss scan runs zero searches and zero
+/// token-vector allocations.
 ///
 /// The order is difflib's ACTUAL rule, not input order: difflib appends
 /// `(ratio, x)` pairs (difflib.py:707) and takes `heapq.nlargest(n, ...)`
@@ -617,12 +659,13 @@ pub fn close_matches(
     // the whole scan: every candidate's search bails at the same absolute
     // Instant, and the expiry verdict is re-checked after each candidate.
     let deadline = deadline_ms.and_then(|ms| started.checked_add(budget_from_ms(ms)));
-    let word_len = word.chars().count();
+    let word_len = char_len(word);
     let mut scored: Vec<(f64, usize)> = Vec::new();
     for (idx, candidate) in candidates.iter().enumerate() {
-        // The cheap length pass FIRST: one scan of the candidate's bytes,
-        // no allocation, feeding the ceiling test before any tokenization.
-        let cand_len = candidate.chars().count();
+        // The cheap length pass FIRST: one scan of the candidate's bytes
+        // (the [`char_len`] ASCII shortcut included), no allocation,
+        // feeding the ceiling test before any tokenization.
+        let cand_len = char_len(candidate);
         let score = if ratio_ceiling(word_len, cand_len) < cutoff {
             // The provable skip: this candidate's ratio cannot reach the
             // cutoff (see [`ratio_ceiling`]), so its Myers search is pure

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tors._tors import (
     CompiledLemmaDict,
+    CompiledPatterns,
     apply_pipeline,
     b64_decode,
     b64_encode_bytes,
@@ -84,6 +85,7 @@ __all__ = [
     "chunk_text",
     "chunk_text_iter",
     "CompiledLemmaDict",
+    "CompiledPatterns",
     "count_matches",
     "daitch_mokotoff",
     "decode_utf16",
