@@ -662,4 +662,28 @@ def apply_pipeline(
 # alongside edit-distance scoring, not instead of it).
 def soundex(text: str) -> str: ...
 def metaphone(text: str) -> str: ...
+# The full dual-key form of metaphone: Double Metaphone's alternate code
+# carries the second plausible (typically non-Anglicized) pronunciation,
+# so a name match on EITHER key counts; two equal elements when there is
+# only one pronunciation.
+def double_metaphone(text: str) -> tuple[str, str]: ...
+# NYSIIS (1970), strict commons-codec variant (codes capped at 6
+# characters): a Soundex successor for name matching.
+def nysiis(text: str) -> str: ...
+# Daitch-Mokotoff Soundex (1985), the Jewish-genealogy standard for
+# Central/Eastern European surnames. A LIST because the rule table
+# branches on ambiguous transliterations: one name can encode to
+# several 6-digit codes, and two names match if their lists intersect.
+# Unlike soundex/metaphone, no-letters input is ["000000"] (each code
+# padded to 6 digits), not "".
+def daitch_mokotoff(text: str) -> list[str]: ...
+
+
+# A Soundex variant with a finer-grained letter-to-digit mapping than
+# classic soundex (more consonant classes distinguished, an uncapped
+# code rather than soundex's fixed letter-plus-3-digit shape) — a
+# genuinely distinct algorithm, not a formatting variant. Same
+# ASCII-letters-only pre-filter and upstream-panic-avoidance note as
+# soundex.
+def refined_soundex(text: str) -> str: ...
 

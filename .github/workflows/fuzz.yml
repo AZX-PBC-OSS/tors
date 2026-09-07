@@ -1,0 +1,68 @@
+# The scheduled deep fuzzing pass. ci.yml's `fuzz-smoke` job runs the same
+# targets for 15s on every push (a regression net); this job gives them a
+# longer 30s budget on a weekly schedule, when runner minutes are cheap and
+# nobody is waiting on the result, plus a manual `workflow_dispatch` trigger
+# for running a pass on demand (e.g. after a change to a covered core).
+# Crashes fail the job (no continue-on-error); the crash inputs libFuzzer
+# writes to fuzz/artifacts/ and the accumulated corpus are uploaded on
+# failure only, so a red run carries its repro case with it.
+
+name: fuzz
+
+on:
+  schedule:
+    # Mondays 03:20 UTC: off the top of the hour, away from the busiest
+    # minute of GitHub's scheduled-workload peak.
+    - cron: "20 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust (nightly)
+        # cargo-fuzz's instrumented builds need nightly's -Z sanitizer flags;
+        # the rest of CI stays on stable (see the lint job's own note in
+        # ci.yml).
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo
+        # Same choice as ci.yml's fuzz-smoke job (rationale there).
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target\nfuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz (30s per target)
+        working-directory: fuzz
+        run: |
+          set -e
+          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff phonetic bm25 tfidf; do
+            echo "=== $t ==="
+            cargo +nightly fuzz run "$t" -- -max_total_time=30 -close_fd_mask=3
+          done
+
+      - name: Upload corpus and crash artifacts
+        # Failure only: a green run's corpus is reproducible from the seed
+        # inputs, but a red run's crash file is the repro case the report
+        # needs (minimize it locally with `cargo fuzz tmin`).
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crash-artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+          if-no-files-found: ignore

@@ -418,6 +418,10 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(apply_pipeline, m)?)?;
     m.add_function(wrap_pyfunction!(soundex, m)?)?;
     m.add_function(wrap_pyfunction!(metaphone, m)?)?;
+    m.add_function(wrap_pyfunction!(double_metaphone, m)?)?;
+    m.add_function(wrap_pyfunction!(nysiis, m)?)?;
+    m.add_function(wrap_pyfunction!(daitch_mokotoff, m)?)?;
+    m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
     Ok(())
 }

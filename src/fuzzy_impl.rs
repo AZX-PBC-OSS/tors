@@ -1,29 +1,29 @@
-//! Character-level fuzzy-match metrics — the pure-Rust core of the
+//! Character-level fuzzy-match metrics: the pure-Rust core of the
 //! `tors` similarity functions: Levenshtein distance, Jaro similarity and
 //! Jaro-Winkler similarity, all deadline-bounded.
 //!
 //! CPython has no stdlib spelling of any of the three: `difflib`'s ratio is
 //! not a metric (it is 2·M/T over a non-minimal matching, not an edit
 //! distance), and every real spelling (`python-Levenshtein`, `rapidfuzz`)
-//! is third-party. All three are O(n·m) in the worst case — on two 1 MiB
+//! is third-party. All three are O(n·m) in the worst case: on two 1 MiB
 //! strings that is minutes of CPU, exactly the superlinear class
 //! `diff_opcodes`' `deadline_ms` exists for (the README's diff section
 //! records the measured ladder for its engine; the DP here is the same
-//! complexity class). The obvious route — calling `strsim` directly —
+//! complexity class). The obvious route (calling `strsim` directly)
 //! cannot meet that bar: its functions are uninterruptible (no deadline
 //! parameter, no bail-out point in their loops), so a deadline could never
 //! fire mid-DP and the DoS discipline would be vacuous. DECISION: the
 //! metrics are implemented here with per-row/phase deadline checks (the
-//! check overhead is one `Instant` comparison per DP row — negligible
+//! check overhead is one `Instant` comparison per DP row, negligible
 //! against the m cells the row just cost), and `strsim 0.11.1`, already a
 //! dev-dependency, is the DEV-side differential oracle pinning our formulas
 //! to a maintained implementation: the crate tests below assert equality
 //! with `strsim::levenshtein`/`jaro`/`jaro_winkler` over a generated
 //! battery (ASCII, accented, CJK, emoji, empty/degenerate) plus hand-derived
-//! known vectors from the literature — the correctness of the crate WITHOUT
+//! known vectors from the literature: the correctness of the crate WITHOUT
 //! shipping a runtime dependency, and the DoS bar intact.
 //!
-//! All three operate on `char`s — a Rust `char` IS a Unicode scalar value,
+//! All three operate on `char`s: a Rust `char` IS a Unicode scalar value,
 //! exactly what a Python `str` index addresses, so every length the
 //! Levenshtein result counts is a CHARACTER count (the house convention;
 //! see `diff_impl`'s module docs for the same stance). Byte-level metrics
@@ -32,19 +32,19 @@
 //! The Jaro-Winkler boost threshold is `> 0.7` and the prefix cap is 4 with
 //! p = 0.1, read from strsim's own source (strsim-0.11.1/src/lib.rs,
 //! `generic_jaro_winkler`: `if sim > 0.7` and `.take(4)`, boost
-//! `sim + 0.1 * prefix_length * (1.0 - sim)`) — the standard spelling the
-//! literature uses, pinned here rather than guessed.
+//! `sim + 0.1 * prefix_length * (1.0 - sim)`); it is the standard spelling
+//! the literature uses, pinned here rather than guessed.
 //!
 //! Pure Rust, no pyo3 types: the deadline outcome ([`DeadlineExceeded`])
 //! mirrors `diff_impl`'s shape and is what the later pyo3 layer maps to
 //! `TimeoutError`; the fields exist for the message, which names both
-//! numbers. The budget arithmetic itself — `budget_from_ms`'s saturating
-//! ms→`Duration` conversion and the elapsed-vs-budget comparison — is NOT
+//! numbers. The budget arithmetic itself (`budget_from_ms`'s saturating
+//! ms→`Duration` conversion and the elapsed-vs-budget comparison) is NOT
 //! reimplemented here: it is `diff_impl::elapsed_exceeds` (which itself
 //! calls `diff_impl::budget_from_ms`), the same shared helper
 //! `grounded_impl`'s `is_grounded_fuzzy` reuses, kept DRY across every
 //! `deadline_ms`-bearing primitive in the crate. Only the
-//! `DeadlineExceeded` TYPE is local — its own field set and its own
+//! `DeadlineExceeded` TYPE is local: its own field set and its own
 //! function-named `message()`, `diff_impl`'s documented convention for why
 //! each caller keeps a distinct wrapper.
 
@@ -55,7 +55,7 @@ use crate::diff_impl::elapsed_exceeds;
 
 /// The deadline outcome, mirroring `diff_impl`'s shape: the call exceeded
 /// its caller-supplied budget, so the (partial) result is discarded.
-/// Carries both numbers the message names — the deadline and the elapsed
+/// Carries both numbers the message names: the deadline and the elapsed
 /// cost. The pyo3 layer maps this to `TimeoutError`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeadlineExceeded {
@@ -85,10 +85,10 @@ fn exceeded_after(started: Instant, deadline_ms: Option<f64>) -> Option<Deadline
 }
 
 /// One clock per call: the start instant and the absolute deadline instant
-/// (`None` when unbounded — no budget set, or a budget so out of range it
+/// (`None` when unbounded; no budget set, or a budget so out of range it
 /// saturates past the clock's range). The expiry check is one
 /// `Instant::now()` comparison, called per DP row (Levenshtein) or per
-/// phase/1024-outer-steps (Jaro) — negligible against the work each row or
+/// phase/1024-outer-steps (Jaro), negligible against the work each row or
 /// phase performs, and the only way a deadline can fire mid-DP.
 struct Budget {
     deadline_ms: Option<f64>,
@@ -123,13 +123,13 @@ impl Budget {
 /// over char vectors, the deadline checked once per ROW. Symmetric by
 /// construction: the DP's recurrence is symmetric in its two operands
 /// (every operation cost is 1 on both axes), and the symmetry is pinned
-/// over the full test battery below — `levenshtein(a, b) ==
+/// over the full test battery below: `levenshtein(a, b) ==
 /// levenshtein(b, a)` for every pair, both spellings also differentially
 /// pinned against `strsim::levenshtein`.
 pub fn levenshtein(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<usize, DeadlineExceeded> {
     let budget = Budget::new(deadline_ms);
     if a == b {
-        // Identical operands: one O(n) equality scan, exact — no DP, no
+        // Identical operands: one O(n) equality scan, exact; no DP, no
         // char vectors, inside any sane budget.
         return Ok(0);
     }
@@ -142,7 +142,7 @@ pub fn levenshtein(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<usize, 
         return Ok(a_chars.len());
     }
     // The shorter operand is the bit-vector pattern (its length is the
-    // register width the algorithm needs) — Myers' algorithm handles up to
+    // register width the algorithm needs); Myers' algorithm handles up to
     // one machine word (64 positions) per pattern in a single pass; beyond
     // that the classic DP below still runs, unchanged. Most of tors's
     // realistic fuzzy-match inputs (names, identifiers, short queries) are
@@ -188,19 +188,19 @@ fn levenshtein_dp(
 /// Myers' bit-vector algorithm (G. Myers, "A Fast Bit-Vector Algorithm for
 /// Approximate String Matching Based on Dynamic Programming", JACM 46(3),
 /// 1999) for unit-cost edit distance, single-block form: `pattern` (at most
-/// 64 characters — one `u64` register per DP column-delta) against
+/// 64 characters, one `u64` register per DP column-delta) against
 /// `text` of any length, in O(n) time and O(1) auxiliary space (`Peq` is
-/// O(distinct characters in pattern), never O(pattern × text)) — the DP
+/// O(distinct characters in pattern), never O(pattern × text)); the DP
 /// above is O(pattern · text). This is a different algorithm from the same
 /// author's O(ND) diff search backing `diff_opcodes`; the two solve
 /// different problems and share no code.
 ///
 /// The DP being simulated tracks, at each text position, the edit distance
-/// between `pattern` and the text prefix ending there — this function
+/// between `pattern` and the text prefix ending there; this function
 /// returns the final value, the distance against the whole text, which is
 /// exactly `levenshtein`'s contract when `text` is the complete second
 /// operand rather than a substring-search haystack. `Pv`/`Mv` encode which
-/// DP cells increased or decreased relative to the cell one row up — the
+/// DP cells increased or decreased relative to the cell one row up: the
 /// standard formulation, reproduced from the paper rather than approximated.
 fn levenshtein_myers_bitvector(
     pattern: &[char],
@@ -249,8 +249,8 @@ fn levenshtein_myers_bitvector(
     Ok(score as usize)
 }
 
-/// The Jaro similarity of `a` and `b` — a `f64` in [0.0, 1.0], higher is
-/// more similar — over CHARACTER sequences.
+/// The Jaro similarity of `a` and `b` (a `f64` in [0.0, 1.0], higher is
+/// more similar) over CHARACTER sequences.
 ///
 /// Semantics (the standard flag-based algorithm, the one `strsim` runs and
 /// the crate tests differentially pin): the matching window is
@@ -259,7 +259,7 @@ fn levenshtein_myers_bitvector(
 /// left-to-right); transpositions are the count of mismatched pairs when
 /// the two matched subsequences are walked side by side, divided by 2
 /// (integer); the score is `(m/|a| + m/|b| + (m−t)/m)/3`, or 0.0 when
-/// `m == 0`. Degenerates: both empty → 1.0, one empty → 0.0 — no
+/// `m == 0`. Degenerates: both empty → 1.0, one empty → 0.0; no
 /// allocation, no passes.
 ///
 /// The deadline is checked per phase: every 1024 chars of the match pass's
@@ -278,9 +278,9 @@ pub fn jaro(a: &str, b: &str, deadline_ms: Option<f64>) -> Result<f64, DeadlineE
     jaro_core(&a_chars, &b_chars, &budget)
 }
 
-/// The Jaro-Winkler similarity: [`jaro`], then — only when the Jaro score
-/// clears the standard boost threshold `> 0.7` (the exact threshold
-/// `strsim` itself uses, read from its source) — a prefix boost
+/// The Jaro-Winkler similarity: [`jaro`], then (only when the Jaro score
+/// clears the standard boost threshold `> 0.7`; the exact threshold
+/// `strsim` itself uses, read from its source) a prefix boost
 /// `jaro + l·p·(1 − jaro)` where `l` is the length of the common prefix
 /// capped at 4 chars and `p = 0.1`. Below the threshold the Jaro score is
 /// returned unchanged, common prefix or not. Same character-level
@@ -313,8 +313,8 @@ fn jaro_core(a: &[char], b: &[char], budget: &Budget) -> Result<f64, DeadlineExc
     let mut b_flags = vec![false; b_len];
     let mut matches = 0usize;
     // The match pass: for each a[i], the first unmatched equal b[j] in
-    // [i−w, i+w] (clamped). O(a_len·window) worst case — the deadline
-    // check every 1024 outer steps is the honest bound for that pass.
+    // [i−w, i+w] (clamped). O(a_len·window) worst case; the deadline
+    // check every 1024 outer steps is the bound for that pass.
     for i in 0..a_len {
         if i % 1024 == 0 {
             budget.expired()?;
@@ -330,12 +330,12 @@ fn jaro_core(a: &[char], b: &[char], budget: &Budget) -> Result<f64, DeadlineExc
             }
         }
     }
-    // The transposition walk: both flagged subsequences side by side, each
-    // unequal pair one transposition, halved by INTEGER division —
+    // transposition walk: both flagged subsequences side by side, each
+    // unequal pair one transposition, halved by INTEGER division,
     // matching strsim's own `transpositions /= 2` (verified against its
     // vendored source), not because the mismatch count is guaranteed even.
     // It is NOT: matched characters that cycle through more than a 2-cycle
-    // (e.g. a 3-cycle rotation) yield an odd count — "102" vs "021000" is
+    // (e.g. a 3-cycle rotation) yield an odd count: "102" vs "021000" is
     // the pinned regression (3 mismatches, floors to 1, not 1.5). A float
     // division here would silently diverge from strsim on exactly this
     // class of input.
@@ -370,7 +370,7 @@ mod tests {
     // --- hand-derived known vectors (the independent anchor) --------------
     //
     // Values derived by hand from the formulas in the doc comments; if any
-    // of these disagrees with strsim, that is a STOP-worthy finding — the
+    // of these disagrees with strsim, that is a STOP-worthy finding: the
     // differential test below would be the one to fail on it.
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
     // --- the differential oracle (strsim 0.11.1, the dev-dependency) -------
 
     /// The battery the differential runs over: every pair of strings over
-    /// {'a', 'b'} up to length 4 (625 ordered pairs — every degenerate,
+    /// {'a', 'b'} up to length 4 (625 ordered pairs; every degenerate,
     /// window edge, transposition and repeated-char shape at small size),
     /// plus the named Unicode and literature rows.
     fn battery() -> Vec<(String, String)> {
@@ -472,7 +472,7 @@ mod tests {
         // The differential this algorithm swap actually needs: the
         // bit-vector fast path against the DP it replaces for
         // pattern.len() <= 64, over a much wider alphabet and length range
-        // than the {a,b}-up-to-4 battery above — a deterministic xorshift
+        // than the {a,b}-up-to-4 battery above: a deterministic xorshift
         // over ASCII, Latin accents, CJK, and emoji, at lengths spanning
         // the 64-character single-block boundary from both sides.
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -655,7 +655,7 @@ mod tests {
         let one = jaro_winkler("aXXX", "aYYY", None).unwrap();
         assert!(four > one);
         // Below the threshold: jaro("axxxx","ayyyy") = (1/5+1/5+1)/3 =
-        // 7/15 ≈ 0.467 ≤ 0.7, common prefix 'a' notwithstanding — no boost.
+        // 7/15 ≈ 0.467 ≤ 0.7, common prefix 'a' notwithstanding: no boost.
         let low = jaro("axxxx", "ayyyy", None).unwrap();
         assert!(low <= 0.7, "{low}");
         assert_eq!(jaro_winkler("axxxx", "ayyyy", None), Ok(low));
@@ -670,7 +670,7 @@ mod tests {
     // --- the deadline (the DoS discipline) ----------------------------------
     //
     // The hard shape a deadline exists for: two ~60k-char strings over a
-    // 2-letter alphabet — the DP is ~3.6e9 cells and the per-row check is
+    // 2-letter alphabet: the DP is ~3.6e9 cells and the per-row check is
     // the only thing that can fire inside it. Built with the same
     // deterministic xorshift spelling diff_impl's tests use.
 
@@ -692,7 +692,7 @@ mod tests {
         let b = random_two_letter(60_000, 0x0123_4567_89AB_CDEF);
         // One DP row of 60k cells costs microseconds; the full 60k-row DP
         // is minutes, so a 5ms budget fires within the first rows. The
-        // per-row check is the mechanism under test — the assert is the
+        // per-row check is the mechanism under test: the assert is the
         // proof.
         let err = levenshtein(&a, &b, Some(5.0)).unwrap_err();
         assert_eq!(err.deadline_ms, 5.0);
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn a_huge_but_finite_budget_saturates_to_unbounded() {
-        // 1e300 ms is positive and finite but overflows Duration — the
+        // 1e300 ms is positive and finite but overflows Duration; the
         // saturating discipline maps it to unbounded, never a panic.
         for (a, b) in battery() {
             let (a, b) = (a.as_str(), b.as_str());
@@ -747,8 +747,8 @@ mod tests {
     #[test]
     fn degenerate_fast_paths_never_allocate_the_dp() {
         // Equal operands: the fast path is one O(n) equality scan, so a
-        // budget the DP could never meet (a 200k-row DP is ~4e10 cells —
-        // minutes) still returns Ok(0) instantly — the pin that the DP
+        // budget the DP could never meet (a 200k-row DP is ~4e10 cells,
+        // minutes) still returns Ok(0) instantly: the pin that the DP
         // was never entered.
         let a = "ab".repeat(100_000);
         assert_eq!(levenshtein(&a, &a, Some(20.0)), Ok(0));
@@ -756,7 +756,7 @@ mod tests {
         let b = "xyz🦀".repeat(50_000);
         assert_eq!(levenshtein("", &b, Some(20.0)), Ok(200_000));
         assert_eq!(levenshtein(&b, "", Some(20.0)), Ok(200_000));
-        // Jaro degenerates: both empty 1.0, one empty 0.0 — no passes.
+        // Jaro degenerates: both empty 1.0, one empty 0.0; no passes.
         assert_eq!(jaro("", "", Some(20.0)), Ok(1.0));
         assert_eq!(jaro(&b, "", Some(20.0)), Ok(0.0));
         assert_eq!(jaro("", &b, Some(20.0)), Ok(0.0));

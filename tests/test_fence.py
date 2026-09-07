@@ -14,7 +14,7 @@ from __future__ import annotations
 import textwrap
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from tors import dedent, extract_code_blocks, strip_code_fences
@@ -245,7 +245,38 @@ class TestDedentParityWithStdlib:
     """``tors.dedent`` must be byte-exact with ``textwrap.dedent``, the
     same closed-set differential discipline as the other stdlib-twin
     functions, over a whitespace/text-heavy alphabet biased toward the
-    margin edge cases (mixed tabs/spaces, blank lines, no common margin)."""
+    margin edge cases (mixed tabs/spaces, blank lines, no common margin).
+
+    One cross-version divergence, probed and scoped (the b64 gate's
+    discipline): CPython 3.14 changed ``textwrap.dedent`` to treat the
+    ``str.splitlines`` separator class (VT, FF, FS, GS, RS, US, NEL, LS,
+    PS) as line boundaries for margin computation, where every earlier
+    release treats only ``\\n`` as a boundary. Measured shape of the
+    change (this box, 3.12.7 vs 3.14.0): ``dedent("\\x0b")`` returns
+    ``""`` on 3.14 and ``"\\x0b"`` before it; ``dedent("  a\\n\\x0b\\n
+    b")`` returns ``"a\\n\\nb"`` on 3.14 and ``"  a\\n\\x0b\\n  b"``
+    before it. tors ships ONE machine (the pre-3.14 ``\\n``-only rule) on
+    every interpreter, the same one-behavior discipline as the b64 core;
+    on interpreters with the changed stdlib the differential below
+    therefore excludes text containing any separator of that class, and
+    tors's own behavior is pinned on both stdlib generations by the rows
+    in ``TestDedentPins``. Adopting the 3.14 rule in the core instead is
+    a deliberate one-machine decision for the owner: it would flip these
+    pins and invert the exclusion."""
+
+    # The separator class whose handling changed in CPython 3.14's
+    # textwrap.dedent (probed set; US/\x1f included because the probe
+    # showed 3.14 stripping it too even though str.splitlines does not
+    # split on it).
+    _CHANGED_SEPARATORS = (
+        "\x0b\x0c\x1c\x1d\x1e\x1f\x85\u2028\u2029"
+    )
+
+    @staticmethod
+    def _stdlib_changed() -> bool:
+        # Behavioral probe, not a version tuple: patch-level behavior is
+        # exactly where version gates lie.
+        return textwrap.dedent("\x0b") == ""
 
     @given(
         st.text(
@@ -260,6 +291,10 @@ class TestDedentParityWithStdlib:
     @given(st.text(max_size=100))
     @settings(max_examples=300)
     def test_matches_stdlib_dedent_over_arbitrary_text(self, text: str) -> None:
+        if self._stdlib_changed() and any(
+            sep in text for sep in self._CHANGED_SEPARATORS
+        ):
+            assume(False)
         assert dedent(text) == textwrap.dedent(text)
 
     def test_basic_common_margin_is_stripped(self) -> None:
@@ -277,6 +312,29 @@ class TestDedentParityWithStdlib:
     def test_no_common_margin_is_unchanged(self) -> None:
         text = "a\n  b\n"
         assert dedent(text) == textwrap.dedent(text) == text
+
+
+class TestDedentPins:
+    """tors's dedent machine pinned directly, on every interpreter
+    regardless of the running stdlib's generation: only ``\\n`` is a line
+    boundary for margin computation, the pre-3.14 ``textwrap.dedent``
+    rule (see TestDedentParityWithStdlib's docstring for the 3.14 stdlib
+    change and the scoping decision). These rows flip deliberately, as
+    one change, if the owner adopts the 3.14 rule in the core."""
+
+    def test_separator_only_text_is_returned_verbatim(self) -> None:
+        for sep in TestDedentParityWithStdlib._CHANGED_SEPARATORS:
+            assert dedent(sep) == sep, f"dedent({sep!r})"
+
+    def test_separators_are_ordinary_characters_for_the_margin(self) -> None:
+        # A single line's margin strips with no newline involved (the
+        # stdlib's own single-line behavior); the separator is an
+        # ordinary character in it.
+        assert dedent("  a\x0b  b") == "a\x0b  b"
+        # The \n lines set the margin; the separator line starts with the
+        # separator (not space/tab), so there is no common margin to
+        # strip and the text is unchanged.
+        assert dedent("  a\n\x0b\n  b") == "  a\n\x0b\n  b"
 
     def test_mixed_zero_indent_and_pure_whitespace_lines_of_varying_composition(
         self,

@@ -1,10 +1,12 @@
 //! `normalize`/`finalize` never panic on arbitrary strings, output is
-//! always valid UTF-8, and the zero-cost identity path is never a false
+//! always valid UTF-8, normalize is idempotent, finalize's digest is the
+//! sha256 of normalize's output (checked against an independent hasher),
+//! and the zero-cost identity path is never a false
 //! positive: whenever `normalize_cow` borrows the input unchanged, the
 //! borrowed value really must equal a hypothetical full-scan result. Since
 //! a full independent oracle isn't available in this harness, the checked
-//! invariant is the weaker but still real one: `normalize_cow(s) == s`
-//! exactly when it borrows — a false-positive identity return would violate
+//! identity invariant is the weaker but still real one: `normalize_cow(s) == s`
+//! exactly when it borrows: a false-positive identity return would violate
 //! this immediately, since `Cow::Borrowed(x) == s` is definitionally true,
 //! but pairing it with a second independent call to `normalize` (the
 //! always-scanning owned-output spelling) catches any divergence between
@@ -32,10 +34,25 @@ fuzz_target!(|s: &str| {
         assert_eq!(cow.as_ref(), s, "identity path borrowed a changed value");
     }
 
+    // Idempotence: a second pass over the output changes nothing.
+    assert_eq!(
+        tors::normalize_impl::normalize(&scanned),
+        scanned,
+        "normalize is not idempotent on {s:?}"
+    );
+
     let (finalized, digest) = tors::finalize_impl::finalize(s);
     assert_eq!(
         finalized, scanned,
         "finalize's text half disagrees with normalize"
+    );
+    // The digest is the sha256 of normalize's output, the documented
+    // contract; checked against an independent hasher here.
+    use sha2::Digest as _;
+    let expected = const_hex::encode(sha2::Sha256::digest(scanned.as_bytes()));
+    assert_eq!(
+        digest, expected,
+        "finalize digest is not sha256(normalize output) on {s:?}"
     );
     assert_eq!(digest.len(), 64, "sha256 hex digest must be 64 chars");
     assert!(

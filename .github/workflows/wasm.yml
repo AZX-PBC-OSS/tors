@@ -1,0 +1,93 @@
+name: WASM
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Manual trigger for debugging a workflow change without pushing a commit.
+  workflow_dispatch:
+
+# Cancel the superseded run for the same branch when a new push lands:
+# rapid follow-up commits stop burning runner minutes on an already-outdated run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pyodide:
+    # The wasm leg of the 2026-09 feasibility spike: every pure-Rust core
+    # builds unchanged for wasm32-unknown-emscripten, and the resulting wheel
+    # imports and passes a functional smoke test in Pyodide 314.x under node
+    # (verified locally during the spike). This job re-proves the build on
+    # every push; the wheel is attached as an artifact only — publishing
+    # Pyodide wheels (PEP 783 PyEmscripten tags on PyPI, or the pyodide
+    # package registry) is deliberately out of scope.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        # Python 3.14 is load-bearing, not just convenient: pyodide-build
+        # derives the whole cross-build matrix from the driving interpreter,
+        # and 3.14 selects Pyodide 314.x / pyemscripten_2026_0 / Emscripten
+        # 5.0.3 plus a stable Rust toolchain (1.93.0) that clears the crate's
+        # 1.90 MSRV — driving from 3.13 would pin a Rust nightly below MSRV.
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.14"
+
+      - name: Get pyodide-build config
+        # pyodide-build owns the pairing of Rust and Emscripten versions for
+        # the target platform (query it; don't hard-code it here, so a
+        # pyodide-build upgrade re-pins both in lockstep). The `pyodide` CLI
+        # entry point ships as a dependency of pyodide-build itself.
+        id: pyodide
+        run: |
+          echo "rust-toolchain=$(uvx --from pyodide-build pyodide config get rust_toolchain)" >> "$GITHUB_OUTPUT"
+          echo "emscripten-version=$(uvx --from pyodide-build pyodide config get emscripten_version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        # Same action SHA as ci.yml; the version itself comes from the
+        # pyodide-build config above (the pairing pyodide-build expects),
+        # not from this workflow.
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # toolchain from pyodide-build
+        with:
+          toolchain: ${{ steps.pyodide.outputs.rust-toolchain }}
+          targets: wasm32-unknown-emscripten
+
+      - name: Cache cargo
+        # Same choice as ci.yml's cache steps (rationale there). The key
+        # naturally includes the emscripten target's artifacts under the
+        # default per-job keying on the lockfile.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Cache pyodide xbuildenv
+        # pyodide build would otherwise re-download the ~400MB emsdk +
+        # wasm CPython xbuildenv on every cold run. Keyed on the Emscripten
+        # version so a pyodide-build bump that changes the toolchain
+        # invalidates the cache instead of reusing a stale emsdk.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pyodide-build
+          key: pyodide-xbuildenv-${{ steps.pyodide.outputs.emscripten-version }}
+
+      - name: Build the Pyodide wheel
+        # `pyodide build` wraps the maturin build backend: it installs the
+        # emsdk into the xbuildenv, sets the cross-compile environment
+        # (CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_* , PYO3_CROSS_*), and
+        # repacks maturin's emscripten_5_0_3 tag into the PEP 783
+        # pyemscripten_2026_0 platform tag. RUSTUP_TOOLCHAIN pins cargo to
+        # the version pyodide-build expects regardless of the runner default.
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.pyodide.outputs.rust-toolchain }}
+        run: uvx --from pyodide-build pyodide build . -o dist
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tors-pyodide-wheel
+          path: dist/*.whl
+          if-no-files-found: error

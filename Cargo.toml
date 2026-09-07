@@ -80,7 +80,10 @@ fastcdc = "5.0.0"
 chardetng = "1.0.0"
 encoding_rs = "0.8"
 rust-stemmers = "1.2.0"
-rphonetic = "4.0.0"
+# `embedded_dm` embeds the commons-codec dmrules.txt rule table so
+# DaitchMokotoffSoundex::default() is usable; without it the crate only
+# builds DM encoders from caller-supplied rules.
+rphonetic = { version = "4.0.0", features = ["embedded_dm"] }
 
 [features]
 default = ["extension-module"]

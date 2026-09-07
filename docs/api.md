@@ -1862,3 +1862,86 @@ tors.metaphone("jumped")
 tors.soundex("José"), tors.metaphone("café")
 # ('J200', 'KF')  — accents dropped, not crashed on
 ```
+
+## `tors.double_metaphone`
+
+```python
+def double_metaphone(text: str) -> tuple[str, str]: ...
+```
+
+The full dual-key form of `tors.metaphone`: `(primary, alternate)`. The
+alternate code is the algorithm's whole point — for names readable two
+ways (Germanic/Slavic vs. Anglicized) it carries the second
+pronunciation, so a name-matching pipeline scores a match when EITHER
+key of two names agrees; for words with one plausible pronunciation the
+two elements are equal. Same ENGLISH/Latin-script scope, ASCII-letters
+pre-filter, and upstream-panic-avoidance note as `soundex`/`metaphone`
+above. Empty input (or input with no ASCII letters) → `("", "")`.
+
+```python
+tors.double_metaphone("jumped")
+# ('JMPT', 'AMPT')
+```
+
+## `tors.nysiis`
+
+```python
+def nysiis(text: str) -> str: ...
+```
+
+The NYSIIS code (New York State Identification and Intelligence System,
+1970), via `rphonetic`'s strict commons-codec variant (codes capped at 6
+characters). A Soundex successor with better first-letter and vowel
+handling. Same scope/pre-filter/panic-avoidance note as `soundex` — the
+filter additionally keeps NYSIIS keys pure ASCII, since the crate's own
+clean step would otherwise let accented letters through into the code
+itself. Empty input (or input with no ASCII letters) → `""`.
+
+```python
+tors.nysiis("Washington")
+# 'WASANG'
+```
+
+## `tors.daitch_mokotoff`
+
+```python
+def daitch_mokotoff(text: str) -> list[str]: ...
+```
+
+The Daitch-Mokotoff Soundex codes (1985), via `rphonetic`'s port of
+Apache Commons Codec with branching enabled: 6-digit codes designed for
+Central/Eastern European surnames, the standard of Jewish-genealogy
+surname matching, distinguishing sounds (guttural vs. sibilant) classic
+Soundex conflates. Returns a LIST, not a single string: the rule table
+branches on ambiguous transliterations, so one name can legitimately
+encode to several codes — two names match if ANY of their code lists
+intersect. Each code is padded to 6 digits, so input with no encodable
+letters yields `["000000"]`, not `""`. Same
+scope/pre-filter/upstream-panic-avoidance note as `soundex`.
+
+```python
+tors.daitch_mokotoff("Peters")
+# ['734000', '739400']
+```
+
+## `tors.refined_soundex`
+
+```python
+def refined_soundex(text: str) -> str: ...
+```
+
+A Soundex variant with a finer-grained letter-to-digit mapping table
+than classic Soundex — more consonant classes distinguished, at the
+cost of a longer, uncapped code rather than Soundex's fixed
+letter-plus-three-digit shape. A genuinely distinct mapping, not a
+formatting variant of `tors.soundex` (confirmed: `"Robert"` encodes
+differently under each). Shares Soundex's exact upstream panic bug
+(confirmed directly against the raw crate: `RefinedSoundex::default()
+.encode("José")` panics with an out-of-bounds table index), so it
+carries the same ASCII-letters pre-filter. Empty input (or input with
+no ASCII letters) → `""`.
+
+```python
+tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
+# ('R901096', 'R901096')
+```

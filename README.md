@@ -35,6 +35,27 @@ maturin develop --release
 
 Once published: `pip install tors`.
 
+### Pyodide / WebAssembly
+
+The Rust cores are OS-free, so `tors` also builds for
+[Pyodide](https://pyodide.org) (CPython compiled to WebAssembly) as a
+PEP 783 `pyemscripten` wheel — the abi3-py310 story carries over unchanged,
+one wheel covers every Pyodide Python ≥ 3.10. The `WASM` workflow builds it
+on every push (artifact only; publishing to PyPI's Emscripten platform is not
+wired up). To build one locally:
+
+```sh
+rustup target add wasm32-unknown-emscripten
+uvx --python 3.14 --from pyodide-build pyodide build . -o dist
+```
+
+The driving interpreter matters: Python 3.14 targets Pyodide 314.x /
+`pyemscripten_2026_0` with a stable Rust toolchain; driving from 3.13 pins a
+Rust nightly older than this crate's MSRV. SIMD-dependent dependencies
+(base64, simdutf8, memchr, aho-corasick) compile their scalar fallbacks for
+wasm; the extension has been smoke-tested (import + representative calls
+across every core family) in Pyodide under node.
+
 ## What's in it
 
 61 functions plus one small helper class, grouped by what they do. Each entry is a
@@ -73,7 +94,9 @@ all.
 none of which the stdlib ships.
 - `similarity_ratio` / `get_close_matches`: `difflib`'s ratio and closest-match search
 - `levenshtein` / `jaro` / `jaro_winkler`: classic edit-distance and similarity metrics
-- `soundex` / `metaphone`: classic English/Latin-script phonetic codes
+- `soundex` / `metaphone` / `double_metaphone` / `nysiis` / `daitch_mokotoff` /
+  `refined_soundex`: classic English/Latin-script phonetic codes, five distinct
+  mapping tables for the same name-matching/dedup lane
 
 **Multi-pattern search & redaction**: leftmost-longest search and simultaneous replace,
 a combination no stdlib or maintained GIL-free binding offers.
@@ -380,6 +403,19 @@ a direct dependency), 1 `Zlib OR Apache-2.0 OR MIT` (tinyvec), 1
 1 `Apache-2.0/MIT` (rs_merkle: the closure's third spelling of a dual
 grant), and 1 `MIT/BSD-3-Clause` (rust-stemmers, a fourth spelling of the
 same dual-grant idea). Every one satisfies the allowlist.
+
+## Development
+
+The `fuzz/` crate drives the `*_impl.rs` cores with raw adversarial bytes via
+cargo-fuzz (libFuzzer): a bug class the hypothesis-based Python tests cannot
+reach, since they shape input around documented contracts rather than raw
+bytes. `cargo fuzz run <target> -- -max_total_time=30` runs one target
+briefly (nightly toolchain and `cargo install cargo-fuzz --locked`
+required); targets assert the same invariants the Python gates pin, at
+raw-byte depth; crashes are minimized with `cargo fuzz tmin`. `make
+fuzz-quick` runs every target for 30s each; the weekly `fuzz` workflow runs
+the same set in CI. See
+[CONTRIBUTING.md](CONTRIBUTING.md#fuzzing) for the full setup.
 
 ## Contributing
 
