@@ -12,14 +12,20 @@
 //! content line's indent is counted in literal ASCII space characters only;
 //! a line indented with a tab is not treated as fence-relevant indentation).
 //!
-//! `dedent` is a port of CPython's `textwrap.dedent` (Lib/textwrap.py), the
-//! same two-regex algorithm: normalize whitespace-only lines to empty,
+//! `dedent` is a port of CPython 3.14's rewritten `textwrap.dedent`
+//! (Lib/textwrap.py, gh-131792): normalize whitespace-only lines to empty,
 //! then compute the longest common leading-whitespace-run STRING (not
-//! count: `"  "` and `"\t"` share no common prefix) via the same
-//! incremental startswith/prefix-trim reduction, differential-tested
-//! against the running stdlib in tests/test_fence.py.
+//! count: `"  "` and `"\t"` share no common prefix), differential-tested
+//! against the running stdlib in tests/test_fence.py. tors ships the
+//! CPython 3.14 behavior on every supported Python version; see the
+//! version note on `fence_impl::dedent` for the specific pre-3.14
+//! divergence (Unicode-whitespace-only lines like a lone `\v` or `\f`) this
+//! choice documents rather than replicates, the same convention
+//! `src/b64_impl.rs` uses for `b64_decode`.
 
 use std::borrow::Cow;
+
+use crate::normalize_impl::is_py_whitespace;
 
 /// One fenced code block: `language` is the info string's first
 /// whitespace-delimited word (`None` if the info string is empty or
@@ -249,37 +255,66 @@ pub fn strip_code_fences(text: &str) -> Cow<'_, str> {
     Cow::Borrowed(text)
 }
 
-/// `tors.dedent`'s core: `textwrap.dedent`'s exact algorithm (see the
-/// module docs): whitespace-only lines normalize to empty, then the longest
-/// common leading-whitespace-run STRING among the remaining non-empty
-/// lines is computed and stripped from every line that starts with it.
-/// Returns `Cow::Borrowed(text)` only when the transform is a true no-op
-/// (no whitespace-only line to normalize AND nothing to strip), the crate's
-/// `Cow` identity convention, checked by a final `out == text` comparison rather
-/// than short-circuited, so it is exact by construction rather than by a
-/// separate no-op detector that could drift from the transform itself.
+/// `tors.dedent`'s core: `textwrap.dedent`'s CPython 3.14+ algorithm (see
+/// the module docs): whitespace-only lines normalize to empty, then the
+/// longest common leading-whitespace-run STRING among the remaining
+/// non-empty lines is computed and stripped from every line that starts
+/// with it. Returns `Cow::Borrowed(text)` only when the transform is a true
+/// no-op (no whitespace-only line to normalize AND nothing to strip), the
+/// crate's `Cow` identity convention, checked by a final `out == text`
+/// comparison rather than short-circuited, so it is exact by construction
+/// rather than by a separate no-op detector that could drift from the
+/// transform itself.
+///
+/// **Version note**: `textwrap.dedent` was rewritten in CPython 3.14
+/// (gh-131792), and the rewrite changed observable behavior, not just
+/// performance: the old implementation tested "is this line whitespace-
+/// only" with the regex `^[ \t]+$`, so a line made of some OTHER Unicode
+/// whitespace character (`\v`, `\f`, a non-breaking space, ...) was never
+/// recognized as blank and its (zero-length, since `[ \t]` doesn't match
+/// it) leading run collapsed the common margin to nothing. 3.14 tests
+/// blankness with `str.strip()`, which is Unicode-whitespace-aware, and
+/// computes the margin from a plain string common-prefix rather than a
+/// `[ \t]*`-anchored regex, so the leading run it credits toward the
+/// margin is any Unicode whitespace, not just space/tab. Following this
+/// crate's `b64_decode`-style convention for cross-version stdlib parity
+/// (see `src/b64_impl.rs`'s module doc), tors ships the FIXED, 3.14
+/// behavior unconditionally on every Python version it supports (3.10+);
+/// callers on an older interpreter will see `tors.dedent` diverge from
+/// their own `textwrap.dedent` on inputs containing non-space/tab
+/// whitespace-only lines. Ordinary indentation (space/tab, by far the
+/// common case) is unaffected either way.
 pub fn dedent(text: &str) -> Cow<'_, str> {
     let raw_lines: Vec<&str> = text.split('\n').collect();
-    // Step 1: whitespace-only lines (>=1 char, all ' '/'\t') normalize to "".
+    // Step 1: whitespace-only lines (>=1 char, all Unicode-whitespace)
+    // normalize to "" — matches `str.strip()`'s truthiness test, not the
+    // old `[ \t]+` regex (see the version note above).
     let normalized: Vec<&str> = raw_lines
         .iter()
         .map(|&line| {
-            if !line.is_empty() && line.chars().all(|c| c == ' ' || c == '\t') {
+            if !line.is_empty() && line.chars().all(is_py_whitespace) {
                 ""
             } else {
                 line
             }
         })
         .collect();
-    // Step 2: the leading [ \t]* run of every line that has a char OTHER
-    // than space/tab (i.e. every non-empty line post-normalization)
-    // contributes to the margin.
+    // Step 2: the leading [ \t] run of every line that has a non-whitespace
+    // char (i.e. every non-empty line post-normalization) contributes to
+    // the margin: EXACTLY space and tab, the CPython 3.14 stdlib's own
+    // margin set (measured: every other whitespace char, VT through
+    // ideographic space, leaves a leading run untouched on the running
+    // stdlib; only the step-1 line normalization uses the full isspace
+    // set).
     let mut margin: Option<&str> = None;
     for &line in &normalized {
         if line.is_empty() {
             continue;
         }
-        let lead_len: usize = line.chars().take_while(|&c| c == ' ' || c == '\t').count();
+        let lead_len: usize = line
+            .chars()
+            .take_while(|&c| matches!(c, ' ' | '\t'))
+            .count();
         let lead_byte: usize = line.chars().take(lead_len).map(char::len_utf8).sum();
         let indent = &line[..lead_byte];
         margin = Some(match margin {
@@ -445,6 +480,17 @@ mod tests {
     #[test]
     fn dedent_whitespace_only_lines_normalize_but_dont_gate_margin() {
         assert_eq!(&*dedent("  a\n   \n  b\n"), "a\n\nb\n");
+    }
+
+    #[test]
+    fn dedent_form_feed_and_vertical_tab_only_lines_normalize_too() {
+        // CPython 3.14 (gh-131792) tests blankness with `str.strip()`
+        // (Unicode-whitespace-aware), not the pre-3.14 `^[ \t]+$` regex, so
+        // a line made only of `\v`/`\f` now normalizes and no longer
+        // collapses the common margin to nothing. See the version note on
+        // `dedent`.
+        assert_eq!(&*dedent("  a\n\x0b\n  b\n"), "a\n\nb\n");
+        assert_eq!(&*dedent("  a\n\x0c\n  b\n"), "a\n\nb\n");
     }
 
     #[test]

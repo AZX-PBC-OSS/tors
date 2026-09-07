@@ -676,9 +676,9 @@ tors.strip_code_fences("```py\nprint(1)\n```")
 def dedent(text: str) -> str: ...
 ```
 
-`textwrap.dedent(text)`, byte-exact: CPython's own algorithm (`Lib/textwrap.py`'s
-two-regex reduction, ported line-for-line), the longest common leading-whitespace-run
-*string* shared by every non-whitespace-only line is stripped from each line, and
+`textwrap.dedent(text)`, byte-exact against CPython 3.14's rewritten algorithm
+(`Lib/textwrap.py`, gh-131792): the longest common leading-whitespace-run *string*
+shared by every non-whitespace-only line is stripped from each line, and
 whitespace-only lines normalize to empty. Tabs and spaces are distinct characters for
 the common-prefix computation, exactly as the stdlib documents (`"  x"` and `"\tx"`
 share no margin); never tab-expanded. `tors.dedent(s) is s` exactly when
@@ -686,6 +686,17 @@ share no margin); never tab-expanded. `tors.dedent(s) is s` exactly when
 `extract_code_blocks`/`strip_code_fences` for re-indenting pulled-out code, and a
 GIL-released primitive in its own right for any pipeline calling `textwrap.dedent` on
 large text today.
+
+**Version note**: `textwrap.dedent` was rewritten in CPython 3.14, and the rewrite
+changed observable behavior, not just performance: a line consisting solely of some
+*other* Unicode whitespace character (`\v`, `\f`, a non-breaking space, ...) is now
+recognized as blank and normalized, where the pre-3.14 implementation only recognized
+`[ \t]` as blank-line whitespace. `tors.dedent` ships the 3.14 behavior unconditionally
+on every Python version it supports (3.10+), the same cross-version parity convention
+`b64_decode` uses (see its docs above): on an older interpreter, `tors.dedent` and that
+interpreter's own `textwrap.dedent` can diverge on inputs containing a non-space/tab
+whitespace-only line. Ordinary space/tab indentation, the overwhelming common case, is
+unaffected either way.
 
 ```python
 tors.dedent("  a\n  b\n")
@@ -1518,6 +1529,14 @@ itself was a no-op. NFD, not NFKD: NFKD's extra compatibility decomposition
 would also touch ligatures/width variants (`"ﬁ"` → `"fi"`), which
 accent-folding shouldn't. Default `False`: accents are preserved unless
 asked to fold them.
+
+A token made ENTIRELY of combining marks (a bare accent with no base
+letter, e.g. from already-decomposed input) strips down to the empty
+string; such tokens are dropped, never counted as a `""` term. This is
+the same structural exclusion `scikit-learn`'s default `token_pattern`
+(`r"(?u)\b\w\w+\b"`, which can never match zero characters) achieves for
+`TfidfVectorizer`, applied here after folding rather than via a regex over
+the raw text.
 
 **`stemmer`** names a Snowball algorithm (`"english"`, `"french"`,
 `"german"`, ... 18 languages via the `rust-stemmers` crate: an

@@ -248,35 +248,35 @@ class TestDedentParityWithStdlib:
     margin edge cases (mixed tabs/spaces, blank lines, no common margin).
 
     One cross-version divergence, probed and scoped (the b64 gate's
-    discipline): CPython 3.14 changed ``textwrap.dedent`` to treat the
-    ``str.splitlines`` separator class (VT, FF, FS, GS, RS, US, NEL, LS,
-    PS) as line boundaries for margin computation, where every earlier
-    release treats only ``\\n`` as a boundary. Measured shape of the
-    change (this box, 3.12.7 vs 3.14.0): ``dedent("\\x0b")`` returns
-    ``""`` on 3.14 and ``"\\x0b"`` before it; ``dedent("  a\\n\\x0b\\n
-    b")`` returns ``"a\\n\\nb"`` on 3.14 and ``"  a\\n\\x0b\\n  b"``
-    before it. tors ships ONE machine (the pre-3.14 ``\\n``-only rule) on
-    every interpreter, the same one-behavior discipline as the b64 core;
-    on interpreters with the changed stdlib the differential below
-    therefore excludes text containing any separator of that class, and
-    tors's own behavior is pinned on both stdlib generations by the rows
-    in ``TestDedentPins``. Adopting the 3.14 rule in the core instead is
-    a deliberate one-machine decision for the owner: it would flip these
-    pins and invert the exclusion."""
+    discipline): CPython 3.14 changed ``textwrap.dedent`` to normalize
+    whitespace-only lines and compute margins with ``str.strip``'s
+    whitespace set (which includes the four control separators
+    ``\\x1c``-``\\x1f`` that Unicode's White_Space property excludes);
+    every earlier release used ``[ \\t]``-only margins and left separator
+    characters ordinary. tors ships ONE machine: the 3.14 rule, on every
+    interpreter (the same one-behavior discipline as the b64 core). On
+    interpreters with the OLD stdlib the differential below therefore
+    excludes text containing any whitespace character of the changed
+    class, and tors's own behavior is pinned on both stdlib generations
+    by the rows in ``TestDedentPins``."""
 
-    # The separator class whose handling changed in CPython 3.14's
-    # textwrap.dedent (probed set; US/\x1f included because the probe
-    # showed 3.14 stripping it too even though str.splitlines does not
-    # split on it).
-    _CHANGED_SEPARATORS = (
-        "\x0b\x0c\x1c\x1d\x1e\x1f\x85\u2028\u2029"
+    # The whitespace class whose handling differs between stdlib
+    # generations: Python's isspace set beyond ASCII space/tab/newline
+    # (the Unicode White_Space characters plus the four controls). The
+    # probe char is a VT, in both sets' changed region.
+    _CHANGED_WHITESPACE = (
+        "\x0b\x0c\r\x1c\x1d\x1e\x1f\x85\u00a0\u1680"
+        "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+        "\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
     )
 
     @staticmethod
-    def _stdlib_changed() -> bool:
+    def _stdlib_is_old() -> bool:
         # Behavioral probe, not a version tuple: patch-level behavior is
-        # exactly where version gates lie.
-        return textwrap.dedent("\x0b") == ""
+        # exactly where version gates lie. The 3.14 stdlib strips a
+        # whitespace-only single-line text of its margin; the old one
+        # leaves it verbatim.
+        return textwrap.dedent("\x0b") == "\x0b"
 
     @given(
         st.text(
@@ -291,8 +291,8 @@ class TestDedentParityWithStdlib:
     @given(st.text(max_size=100))
     @settings(max_examples=300)
     def test_matches_stdlib_dedent_over_arbitrary_text(self, text: str) -> None:
-        if self._stdlib_changed() and any(
-            sep in text for sep in self._CHANGED_SEPARATORS
+        if self._stdlib_is_old() and any(
+            ws in text for ws in self._CHANGED_WHITESPACE
         ):
             assume(False)
         assert dedent(text) == textwrap.dedent(text)
@@ -316,25 +316,33 @@ class TestDedentParityWithStdlib:
 
 class TestDedentPins:
     """tors's dedent machine pinned directly, on every interpreter
-    regardless of the running stdlib's generation: only ``\\n`` is a line
-    boundary for margin computation, the pre-3.14 ``textwrap.dedent``
-    rule (see TestDedentParityWithStdlib's docstring for the 3.14 stdlib
-    change and the scoping decision). These rows flip deliberately, as
-    one change, if the owner adopts the 3.14 rule in the core."""
+    regardless of the running stdlib's generation: the CPython 3.14
+    ``textwrap.dedent`` rule (whitespace-only lines normalize, margins
+    use ``str.strip``'s whitespace set including the ``\\x1c``-``\\x1f``
+    controls). See TestDedentParityWithStdlib's docstring for the stdlib
+    generations and the scoping decision."""
 
-    def test_separator_only_text_is_returned_verbatim(self) -> None:
-        for sep in TestDedentParityWithStdlib._CHANGED_SEPARATORS:
-            assert dedent(sep) == sep, f"dedent({sep!r})"
+    def test_whitespace_only_single_line_normalizes_to_empty(self) -> None:
+        # Every Python-isspace character alone: the 3.14 stdlib's own
+        # answers, pinned on both generations.
+        for ws in TestDedentParityWithStdlib._CHANGED_WHITESPACE:
+            assert dedent(ws) == "", f"dedent({ws!r})"
 
-    def test_separators_are_ordinary_characters_for_the_margin(self) -> None:
-        # A single line's margin strips with no newline involved (the
-        # stdlib's own single-line behavior); the separator is an
-        # ordinary character in it.
-        assert dedent("  a\x0b  b") == "a\x0b  b"
-        # The \n lines set the margin; the separator line starts with the
-        # separator (not space/tab), so there is no common margin to
-        # strip and the text is unchanged.
-        assert dedent("  a\n\x0b\n  b") == "  a\n\x0b\n  b"
+    def test_controls_join_the_margin_per_pythons_strip_set(self) -> None:
+        # The line-normalization set is Python's isspace (includes the
+        # \x1c-\x1f controls); the MARGIN set is exactly [ \t] (measured
+        # on the running 3.14 stdlib: every other whitespace char leaves a
+        # leading run untouched). Pin both sides of that line.
+        assert dedent("\x1f") == ""
+        assert dedent("\x1f0") == "\x1f0"
+        assert dedent("\x1f  a") == "\x1f  a"
+        assert dedent("\x1f  a\n\x1f  b") == "\x1f  a\n\x1f  b"
+        assert dedent("\x0b  a") == "\x0b  a"
+
+    def test_separator_lines_normalize_and_the_margin_strips(self) -> None:
+        # The \x0b line is whitespace-only: normalizes to empty; the
+        # remaining lines share the "  " margin.
+        assert dedent("  a\n\x0b\n  b") == "a\n\nb"
 
     def test_mixed_zero_indent_and_pure_whitespace_lines_of_varying_composition(
         self,

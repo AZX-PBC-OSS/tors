@@ -169,6 +169,22 @@ pub(crate) fn strip_accents_from(token: &str) -> Cow<'_, str> {
 /// unusual in practice but well-defined, not an error: the dict is
 /// consulted on the ALREADY-stemmed form (a caller wanting lemma-only
 /// normalization simply omits `stemmer`).
+/// Note on empty terms: `strip_accents` can reduce a segment to nothing
+/// (a token made ENTIRELY of combining marks, e.g. a bare combining
+/// accent with no base letter, NFD-decomposes to itself and every
+/// codepoint in it is a mark, so stripping marks removes the whole
+/// thing). Such a segment is dropped rather than yielding a `""` term:
+/// the same structural exclusion `scikit-learn`'s `TfidfVectorizer`
+/// achieves via its default `token_pattern` (`r"(?u)\b\w\w+\b"`, which
+/// can never match zero characters), applied here downstream instead of
+/// upstream because tors's tokenizer walks real-word segments rather than
+/// a regex over the raw text. An empty term would otherwise inflate
+/// `tf_idf`/`bm25_rank`'s vocabulary with a meaningless all-documents-
+/// tied entry. The filter runs on the FINAL folded form (after
+/// `strip_accents`/`stemmer`/`lemma_dict`, whichever ran), since any of
+/// those could in principle be the step that empties a token; it never
+/// fires on the `strip_accents = false` default path (nothing upstream of
+/// it can produce `""` from a non-empty real-word segment).
 pub(crate) fn normalized_word_tokens(
     text: &str,
     strip_accents: bool,
@@ -176,7 +192,7 @@ pub(crate) fn normalized_word_tokens(
     lemma_dict: Option<&HashMap<String, String>>,
 ) -> Vec<String> {
     real_word_segments(text)
-        .map(|segment| {
+        .filter_map(|segment| {
             let lowered = segment.to_lowercase();
             let folded: String = if strip_accents {
                 strip_accents_from(&lowered).into_owned()
@@ -187,10 +203,11 @@ pub(crate) fn normalized_word_tokens(
                 Some(stemmer) => stemmer.stem(&folded).into_owned(),
                 None => folded,
             };
-            match lemma_dict.and_then(|dict| dict.get(&stemmed)) {
+            let term = match lemma_dict.and_then(|dict| dict.get(&stemmed)) {
                 Some(lemma) => lemma.clone(),
                 None => stemmed,
-            }
+            };
+            (!term.is_empty()).then_some(term)
         })
         .collect()
 }
@@ -242,6 +259,23 @@ mod tests {
             normalized_word_tokens(already_decomposed, true, None, None),
             vec!["eclair".to_string()]
         );
+    }
+
+    #[test]
+    fn strip_accents_drops_a_token_made_entirely_of_combining_marks() {
+        // A bare U+0301 COMBINING ACUTE ACCENT with no preceding base
+        // character (start of string) is its own UAX #29 word segment
+        // (`real_word_segments` yields it, since it's not whitespace).
+        // NFD is a no-op on it (already decomposed), and stripping every
+        // combining mark then removes the whole segment. Must be dropped
+        // from the term list, not kept as a bogus "" term.
+        let tokens = normalized_word_tokens("\u{0301}au caf\u{0301}", true, None, None);
+        assert_eq!(
+            tokens,
+            vec!["au".to_string(), "caf".to_string()],
+            "a combining-marks-only segment must be filtered out, not yield an empty term"
+        );
+        assert!(tokens.iter().all(|t| !t.is_empty()));
     }
 
     #[test]
