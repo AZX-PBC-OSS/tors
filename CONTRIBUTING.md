@@ -46,16 +46,18 @@ stale doc is treated as a defect, the same severity as a stale test.
 
 ## Fuzzing
 
-`fuzz/` holds `cargo-fuzz` (libFuzzer) targets for the parsing/decoding cores
-most exposed to raw adversarial input — `decode_utf8`, `decode_utf16`,
-`b64_decode`, `html_unescape`, the fence-extraction family, `chunk_hierarchical`,
-and `normalize`/`finalize`. These call the `*_impl.rs` cores directly (no pyo3
-boundary, no Python interpreter needed) and check crash-freedom plus a few
-cross-function invariants (`utf8_is_valid` must never disagree with
-`decode_utf8`'s own success/failure; a zero-cost identity return must never be
-a false positive). This is a different bug class than the hypothesis-based
-Python tests, which shape input around documented contracts rather than raw
-adversarial bytes.
+`fuzz/` holds `cargo-fuzz` (libFuzzer) targets for the parsing/decoding/scoring
+cores most exposed to raw adversarial input: `decode_utf8`, `decode_utf16`,
+`b64_decode`, `html_unescape`, `fence`, `chunk_hierarchical`, `normalize`,
+`search`, `segmentation`, `diff`, `phonetic`, `bm25`, and `tfidf` (the current
+list is `fuzz/Cargo.toml`'s `[[bin]]` entries — treat that file, not this one,
+as the source of truth if the two ever disagree). These call the `*_impl.rs`
+cores directly (no pyo3 boundary, no Python interpreter needed) and check
+crash-freedom plus a few cross-function invariants (`utf8_is_valid` must never
+disagree with `decode_utf8`'s own success/failure; a zero-cost identity return
+must never be a false positive). This is a different bug class than the
+hypothesis-based Python tests, which shape input around documented contracts
+rather than raw adversarial bytes.
 
 Requires nightly and `cargo-fuzz`:
 
@@ -77,7 +79,9 @@ with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`.
 PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/)
 (`feat:`, `fix:`, `docs:`, etc.): enforced by CI and parsed by release-please to decide the
 next version and CHANGELOG entry. Do not hand-edit `CHANGELOG.md` or bump the version in
-`pyproject.toml` yourself; release-please owns both.
+`pyproject.toml`/`Cargo.toml` yourself; release-please owns all three (see
+`release-please-config.json`'s `extra-files` entry, which keeps Cargo.toml's version in
+step with pyproject.toml's on every release).
 
 ## Reporting bugs and requesting features
 

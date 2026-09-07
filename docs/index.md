@@ -31,9 +31,51 @@ import tors
 
 tors.normalize("line one  \n\n\n\nline two\r\n")
 # "line one\n\nline two"
+
+tors.chunk_text("a long document...", max_chars=500, overlap=50)
+# [(0, 500), (450, 950), ...] — word-boundary-aware (start, end) spans, with overlap
+
+tors.find_patterns(["cat", "catalogue"], "the cat sat in the catalogue")
+# [(4, 7, 0), (19, 28, 1)] — leftmost-longest, one native pass over every pattern
 ```
 
-See the [API reference](api.md) for the full behavior of `tors.normalize`.
+See the [API reference](api.md) for the full behavior of every function, grouped by
+what it does (normalization, segmentation, diffing, fuzzy/phonetic matching,
+multi-pattern search, chunking, retrieval, and more).
+
+## Sync and async
+
+Every function releases the GIL for its native pass — call it directly and the rest of
+your program (other threads, the asyncio event loop) stays free while it runs. That is
+not the same as not blocking the *calling* coroutine: a native pass invoked directly
+from a coroutine still occupies that coroutine's own turn on the event loop for the
+call's full wall-clock duration.
+
+`tors.aio` covers exactly the functions where that duration is large enough to matter
+(the chunking family, `tf_idf`, `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`,
+`apply_pipeline`) with a plain `asyncio.to_thread` dispatch, so the event loop stays
+responsive across the call:
+
+```python
+import tors
+import tors.aio
+
+# Sync: fine for a script, or for a short call even inside a coroutine.
+scores = tors.tf_idf(corpus)
+
+# Async: use inside a service's request path when corpus/document size means
+# the native pass could otherwise hold up the event loop for the call's duration.
+scores = await tors.aio.tf_idf(corpus)
+```
+
+There is no size-based branching inside any wrapper — the choice between the sync
+spelling and `tors.aio` is always the caller's, made once at the call site. The rest of
+`tors` (short, µs-to-low-ms-scale calls — `normalize`, `find_patterns`, phonetic codes,
+and the rest) keeps exactly one, sync, spelling: wrapping those in a thread dispatch
+would add real overhead for no benefit. See the
+[README's Async use section](https://github.com/AZX-PBC-OSS/tors#async-use) for the
+full rationale, the complete `tors.aio` function list, and measured heartbeat-gap
+numbers.
 
 ## Recipes
 

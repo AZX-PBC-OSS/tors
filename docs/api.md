@@ -373,6 +373,8 @@ def diff_opcodes(
 ) -> list[tuple[str, int, int, int, int]]: ...
 ```
 
+**Async**: `await tors.aio.diff_opcodes(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 `difflib.SequenceMatcher(None, a, b).get_opcodes()`'s SHAPE at native speed:
 `(tag, i1, i2, j1, j2)` tuples with `tag` in `{"equal", "replace", "delete",
 "insert"}`, ranges monotone/contiguous/covering both sides, adjacent delete+insert
@@ -412,6 +414,8 @@ def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
 ```
+
+**Async**: `await tors.aio.diff_opcodes_lines(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 The LINE-level spelling of `diff_opcodes`: the same opcode shape, engine, validity
 contract, boundary-class divergences, and `deadline_ms` machinery; but the operands
@@ -1019,6 +1023,8 @@ def chunk_text(
 ) -> list[tuple[int, int]]: ...
 ```
 
+**Async**: `await tors.aio.chunk_text(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 The context-window/RAG packing primitive: boundary-aware chunking of `text` into
 `(start, end)` pairs in Python `str` index (codepoint) units, each chunk at most
 `max_chars` codepoints, cut at word or sentence boundaries wherever the budget
@@ -1089,6 +1095,8 @@ list(tors.chunk_text_iter("cats are cute and cats are fun", 12))
 def chunk_by_words(text: str, words_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
 ```
 
+**Async**: `await tors.aio.chunk_by_words(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 The unit-count twin of `chunk_text`: instead of a character budget, each chunk spans
 exactly `words_per_chunk` consecutive WORD TOKENS, not `word_bounds`'
 raw segment count. `word_bounds` follows UAX #29 exactly, which gives an inter-word
@@ -1141,6 +1149,8 @@ list(tors.chunk_by_words_iter("one two three four five six seven", 3))
 def chunk_by_sentences(text: str, sentences_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
 ```
 
+**Async**: `await tors.aio.chunk_by_sentences(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 `chunk_by_words`' sentence-count twin (`sentence_bounds`'s UAX #29 segmenter): each
 chunk spans `sentences_per_chunk` consecutive sentence segments, `overlap` SENTENCES
 repeated. Same argument contract, same empty-input answer, same
@@ -1170,6 +1180,8 @@ list(tors.chunk_by_sentences_iter("One. Two. Three. Four. Five.", 2))
 def chunk_by_paragraphs(text: str, paragraphs_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
 ```
 
+**Async**: `await tors.aio.chunk_by_paragraphs(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 `chunk_by_words`/`chunk_by_sentences`'s paragraph-count twin: each chunk spans
 `paragraphs_per_chunk` consecutive paragraphs, `overlap` PARAGRAPHS repeated. A
 paragraph boundary here is a run of 2+ consecutive newlines (`\r\n` counts as one
@@ -1197,6 +1209,8 @@ tors.chunk_by_paragraphs("First paragraph here.\n\nSecond paragraph here.\n\nThi
 ```python
 def chunk_hierarchical(text: str, max_chars: int, separators: list[str] | None = None, *, overlap: int = 0) -> list[tuple[int, int]]: ...
 ```
+
+**Async**: `await tors.aio.chunk_hierarchical(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 Priority-ordered fallback chunking: the `chunk_text`/`chunk_by_*` family's
 fourth shape, and the pattern LangChain's `RecursiveCharacterTextSplitter`
@@ -1263,6 +1277,8 @@ def chunk_cdc(
     data: bytes, *, min_size: int = 4096, avg_size: int = 16384, max_size: int = 65534
 ) -> list[tuple[int, int]]: ...
 ```
+
+**Async**: `await tors.aio.chunk_cdc(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 FastCDC 2020 content-defined chunking, one GIL-released native pass: `(start, end)`
 **byte** spans (not codepoints: unlike every other segmentation function here, this
@@ -1516,6 +1532,8 @@ def tf_idf(
 ) -> list[list[tuple[str, float]]]: ...
 ```
 
+**Async**: `await tors.aio.tf_idf(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 Stateless TF-IDF over `corpus`, one GIL-released native pass: no
 vocabulary/vectorizer object persists between calls; every call scores
 fresh over exactly the documents given. Fills a real gap: Python's stdlib
@@ -1700,6 +1718,8 @@ def bm25_rank(
 ) -> list[tuple[int, float]]: ...
 ```
 
+**Async**: `await tors.aio.bm25_rank(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 Okapi BM25 score for every document in `corpus` against `query`, one
 GIL-released native pass: `(index, score)` pairs for EVERY document: no
 top-k cutoff baked in, slice/sort the result yourself; sorted by score
@@ -1803,6 +1823,8 @@ def apply_pipeline(
     collapse_whitespace: bool = False,
 ) -> list[str]: ...
 ```
+
+**Async**: `await tors.aio.apply_pipeline(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 A stateless, general-purpose batch text preprocessor: every requested step
 fused into ONE GIL-released native pass over the WHOLE `texts` list.
