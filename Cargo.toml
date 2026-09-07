@@ -1,5 +1,10 @@
 [package]
-name = "tors"
+# crates.io already has an unrelated, dormant `tors` crate (a 2017 multidimensional-array
+# lib, last published 0.1.0) — that name isn't available, so the Rust crate publishes as
+# `tors-core`. The Python package (PyPI, and the compiled extension module Python imports)
+# stays `tors`: `[lib] name` below is independent of `[package] name` and is what actually
+# governs the built library's name, so this rename has no effect on the Python-facing API.
+name = "tors-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
@@ -9,9 +14,6 @@ readme = "README.md"
 repository = "https://github.com/AZX-PBC-OSS/tors"
 keywords = ["text", "unicode", "pyo3", "gil-free", "normalization"]
 categories = ["text-processing", "encoding"]
-# crates.io already has an unrelated `tors` crate (a dormant multidimensional-array lib);
-# this crate is bundled into the PyPI wheel via maturin, not published to crates.io itself.
-publish = false
 
 [lib]
 name = "tors"

@@ -1,12 +1,9 @@
 # release-type is `python`: it bumps pyproject.toml's [project].version and CHANGELOG.md
-# from Conventional Commits — never hand-edit either. It does NOT touch Cargo.toml's
-# [package].version; that field is cosmetic (the crate has `publish = false` and is never
-# pushed to crates.io under this name, see Cargo.toml's own comment) and drifting from
-# pyproject.toml's version is harmless. If tors ever does publish the crate separately,
-# add Cargo.toml to a release-please-config.json `extra-files` entry at that point.
-#
-# No release-please-config.json/.release-please-manifest.json: a single-package repo needs
-# neither — release-type is passed directly.
+# from Conventional Commits — never hand-edit either. release-please-config.json's
+# `extra-files` entry additionally bumps Cargo.toml's [package].version (the `tors-core`
+# crate published to crates.io) to the same value in the same release PR, so the two
+# registries never drift apart. Cargo.lock's own version field for the package self-heals
+# on the next `cargo build` (nothing in this repo builds Rust with `--locked`).
 #
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
 # a tag released this way will NOT auto-trigger publish.yml's `push: tags` step — see that
@@ -46,7 +43,11 @@ jobs:
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          release-type: python
+          # config-file/manifest-file (not a bare release-type input): the extra-files
+          # entry in release-please-config.json is what bumps Cargo.toml's [package].version
+          # alongside pyproject.toml's — that customization needs manifest mode.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
       - name: Warn that publish.yml cannot auto-trigger

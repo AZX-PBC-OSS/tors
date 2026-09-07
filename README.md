@@ -58,7 +58,7 @@ across every core family) in Pyodide under node.
 
 ## What's in it
 
-61 functions plus one small helper class, grouped by what they do. Each entry is a
+65 functions plus two small helper classes, grouped by what they do. Each entry is a
 one-line description; full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
 
@@ -104,6 +104,7 @@ a combination no stdlib or maintained GIL-free binding offers.
   iterator, and count forms
 - `replace_many`: simultaneous multi-pattern replace, one pass, no re-scanning
 - `replace_many_masked`: the same, length-preserving, for offset-safe redaction
+- `CompiledPatterns`: a build-once handle for a fixed pattern list, reused across calls
 
 **Markdown / code-fence extraction**: pull structured content out of model output.
 - `extract_code_blocks`: every fenced code block, per CommonMark's fence grammar

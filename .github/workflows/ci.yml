@@ -13,6 +13,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default: every job here reads and builds, none writes anything back to
+# the repo or an external registry, so the top-level GITHUB_TOKEN needs no more than this.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

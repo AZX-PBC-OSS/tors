@@ -626,6 +626,51 @@ tors.count_matches(["cat", "catalogue"], "the cat sat in the catalogue")
 # 2
 ```
 
+## `tors.CompiledPatterns`
+
+```python
+class CompiledPatterns:
+    def __init__(self, patterns: list[str]) -> None: ...
+    def __len__(self) -> int: ...
+    def find(self, text: str) -> list[tuple[int, int, int]]: ...
+    def find_iter(self, text: str) -> Iterator[tuple[int, int, int]]: ...
+    def count(self, text: str) -> int: ...
+    def replace_many(self, text: str, replacements: dict[str, str]) -> str: ...
+    def replace_many_masked(
+        self, text: str, replacements: dict[str, str], mask: str = "*"
+    ) -> str: ...
+```
+
+The `re.compile()` answer to `find_patterns`/`replace_many`'s per-call automaton build
+(the same `tors.CompiledLemmaDict` pattern, applied to pattern search instead of
+lemmatization — see `tors.apply_pipeline`'s docs above): building the Aho-Corasick
+automaton is the expensive part of every one of these calls, and a fixed vocabulary
+scanned over many documents (a redaction pipeline, a tagger) otherwise rebuilds it on
+every single call for no reason. `CompiledPatterns(patterns)` builds it once under one
+GIL-released pass; every method after that is the free function's exact scan MINUS the
+automaton build, sharing the compiled automaton by one `Arc` clone per call — sound to
+reuse across many calls and threads with no synchronization beyond that refcount.
+
+Each method mirrors its free-function twin exactly: `cp.find(text) ==
+tors.find_patterns(patterns, text)`, `cp.count(text) == tors.count_matches(patterns,
+text)`, and so on, for every method above. The two `replace_many*` methods validate
+their `replacements` dict at CALL time (values can change per call; only the pattern
+set is fixed at construction): it must key EXACTLY the compiled pattern set — every
+compiled pattern paired with a value, no extra keys — or `ValueError` names the unknown
+and missing keys. `len(cp)` is the number of compiled patterns. Construction takes the
+same argument contract as `find_patterns`' pattern list (`list[str]`, non-empty
+entries); the empty pattern list compiles successfully (every scan finds nothing) and
+then accepts only the empty replacements dict. Immutable once built: there is no way to
+add or remove a pattern from an existing `CompiledPatterns`.
+
+```python
+cp = tors.CompiledPatterns(["cat", "catalogue"])   # pay the automaton build once
+for doc in corpus:
+    cp.find(doc)                                    # O(1) automaton reuse per call
+cp.replace_many("the cat sat", {"cat": "dog", "catalogue": "library"})
+# 'the dog sat'
+```
+
 ## `tors.extract_code_blocks`
 
 ```python

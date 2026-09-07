@@ -17,6 +17,11 @@ sha2 = "0.10"
 const-hex = "1.19"
 
 [dependencies.tors]
+# The crates.io package is `tors-core` (the plain `tors` name is an unrelated,
+# dormant crate — see the main Cargo.toml's own comment); `package` renames the
+# dependency back to `tors` locally so every fuzz target's `use tors::...` stays
+# unchanged.
+package = "tors-core"
 path = ".."
 # The library target only: pulling in `extension-module` would try to link
 # libpython, which a bare fuzz binary neither has nor needs (the same reason

@@ -13,6 +13,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default: the build is artifact-only (see the job's own comment), nothing
+# here writes back to the repo or publishes anywhere.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 

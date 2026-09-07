@@ -129,3 +129,34 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Publish
         run: uv publish --trusted-publishing automatic dist/*
+
+  publish-crate:
+    name: Publish to crates.io
+    # Independent of the PyPI leg above: the crate (published as `tors-core`, see
+    # Cargo.toml's own comment on the name collision) needs no wheel artifacts, just the
+    # source tree and Cargo.lock, so it runs in parallel rather than behind `needs`.
+    #
+    # First release only: crates.io has no PyPI-style "pending trusted publisher" for a
+    # crate that has never been published, so the very first `tors-core` release must be
+    # `cargo publish`d manually (from a machine already `cargo login`-ed). Only after that
+    # succeeds can a Trusted Publisher be configured in the crate's crates.io settings
+    # (GitHub owner `AZX-PBC-OSS`, repo `tors`, workflow `publish.yml`) — this job is that
+    # configuration's target and does nothing until it exists.
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write # Trusted Publishing (OIDC) — no API token secret needed or used.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish
+        # --no-default-features: `extension-module` (the crate's default) doesn't link
+        # libpython, which breaks a plain `cargo publish` verification build the same way
+        # it breaks `cargo test`/`cargo build` — see Cargo.toml's own feature comment.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p tors-core --no-default-features
