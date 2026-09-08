@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tors"
-version = "0.3.0"
+version = "0.3.1"
 description = "Fast, GIL-free text and document operations for Python — normalization, Unicode segmentation, diffing, fuzzy matching, chunking, encoding/near-dup detection, Merkle integrity, and URL/redaction utilities, backed by Rust."
 readme = "README.md"
 requires-python = ">=3.10"
