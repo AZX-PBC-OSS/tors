@@ -33,7 +33,12 @@
 //! `diff_opcodes` already has for adversarial input: checked once per
 //! window (a window's own Myers search is itself deadline-bounded via
 //! `similar`'s `capture_diff_slices_deadline`, so even one huge window
-//! cannot blow through the budget uninterrupted).
+//! cannot blow through the budget uninterrupted). An exact-containment
+//! floor runs first: when `source.contains(claim)` the answer is `true`
+//! before any windowing or deadline setup, so a claim present verbatim is
+//! always grounded regardless of window alignment or `deadline_ms` (a
+//! verbatim substring is grounded by definition — the windowed ratio is
+//! only consulted when there is no exact match to find).
 
 use std::time::Instant;
 
@@ -105,6 +110,17 @@ pub fn is_grounded_fuzzy(
     if claim.is_empty() {
         return Ok(true);
     }
+    // Exact-containment floor: a claim present VERBATIM in `source` is
+    // grounded by definition — it is exactly what `fuzzy=False` reports — so
+    // short-circuit before the windowed scan. Without this, a verbatim claim
+    // at an offset unaligned with the stride-`L/2` windows overlaps its
+    // nearest window by only ~3L/4, scores ~0.75 < the 0.85 default, and is
+    // wrongly reported ungrounded. This runs BEFORE deadline setup, so a
+    // verbatim substring is grounded even under a tight `deadline_ms` —
+    // intentional: exact containment holds independent of the budget.
+    if source.contains(claim) {
+        return Ok(true);
+    }
     let started = Instant::now();
     let deadline = deadline_ms.and_then(|ms| started.checked_add(budget_from_ms(ms)));
     let claim_chars: Vec<char> = claim.chars().collect();
@@ -161,6 +177,24 @@ mod tests {
         assert!(is_grounded_exact("", "anything"));
         assert!(is_grounded_exact("", ""));
         assert!(!is_grounded_exact("x", ""));
+    }
+
+    #[test]
+    fn fuzzy_reports_a_verbatim_substring_at_any_offset() {
+        // Exact containment is a floor on the fuzzy verdict: a claim present
+        // verbatim in source must be grounded at any offset, even where
+        // stride-L/2 windowing would otherwise straddle it and score below
+        // threshold.
+        for claim in [
+            "the quick brown fox jumps over lazy dog",
+            "café über naïve résumé — 速い茶色の狐",
+        ] {
+            for lead in 0..41 {
+                let source = format!("{}{}{}", "x".repeat(lead), claim, "x".repeat(30));
+                assert_eq!(is_grounded_fuzzy(claim, &source, 0.85, None), Ok(true));
+                assert_eq!(is_grounded_fuzzy(claim, &source, 1.0, None), Ok(true));
+            }
+        }
     }
 
     #[test]

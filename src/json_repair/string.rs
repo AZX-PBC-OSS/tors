@@ -1478,7 +1478,19 @@ impl Parser {
                 && self.ctx_has(Ctx::Array)
                 && (state.string_acc.is_empty() || !state.string_acc.ends_with(outer))
             {
-                let i = self.skip_to_character(&[outer], 0);
+                // Memoized, like the sibling `}` lookahead earlier in this
+                // scan. This branch fires once per `]` while scanning a string
+                // body in array context, so an uncached forward scan makes
+                // `'["' + ']'*n + '" x'` O(n^2). Parity-safe HERE for a narrow
+                // reason: this site is reached only with s[self.index] == ']'
+                // and the sibling cached [outer] call only with '}', both
+                // non-backslash anchors, so the [outer] scan never starts
+                // inside a backslash run and the memo is uncached-exact at
+                // these two sites (it is NOT "cached == uncached" in general:
+                // a scan starting inside a backslash run can flip escape
+                // parity — do not add a cached [outer] call at a non-anchored
+                // site).
+                let i = self.cached_skip_to_character(state, &[outer], 0);
                 if self.get(i as isize).is_none() {
                     break;
                 }

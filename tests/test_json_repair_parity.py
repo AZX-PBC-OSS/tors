@@ -88,6 +88,8 @@ _BASE_RAWS: list[str] = [
     '{"a":1}{"b":2}',  # concatenated objects
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
+    '["' + "]" * 64 + '" x',  # array-context `]` run in a string body: the
+    # memoized-lookahead O(n^2) fix stays byte-identical to the oracle here.
 ]
 
 # NOTE (§9.4): no fenced TOP-LEVEL SCALAR lives in _BASE_RAWS — tors recovers
