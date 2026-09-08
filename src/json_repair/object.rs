@@ -1296,18 +1296,22 @@ mod tests {
             other => panic!("expected a merged object, got {other:?}"),
         }
         let comma_cap = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(200));
-        assert!(Parser::new(&comma_cap, false, None)
-            .parse()
-            .unwrap_err()
-            .contains("Input nesting exceeds"));
+        assert!(
+            Parser::new(&comma_cap, false, None)
+                .parse()
+                .unwrap_err()
+                .contains("Input nesting exceeds")
+        );
 
         let merge_ok = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(198));
         assert!(matches!(parse_ok(&merge_ok), Value::Object(_)));
         let merge_cap = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(199));
-        assert!(Parser::new(&merge_cap, false, None)
-            .parse()
-            .unwrap_err()
-            .contains("Input nesting exceeds"));
+        assert!(
+            Parser::new(&merge_cap, false, None)
+                .parse()
+                .unwrap_err()
+                .contains("Input nesting exceeds")
+        );
     }
 
     #[test]
@@ -1398,4 +1402,3 @@ mod tests {
         );
     }
 }
-

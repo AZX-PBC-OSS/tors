@@ -11,7 +11,9 @@ below as intentional behavior, not parity cases.
 from __future__ import annotations
 
 import json
+import random
 import re
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -708,6 +710,48 @@ class TestRobustness:
         assert repair_json_loads(
             '{"a":[0],["b":[0],1]', strict=True, skip_json_loads=True
         ) == {"a": [0], "b": [0]}
+
+    def test_recursion_class_grammar_sweep_stays_total(self) -> None:
+        # A seeded sweep over a grammar of every stack-growing construct the
+        # parser has — both continuation merges (the array-merge chain
+        # needs its array-valued head member `{"a":[0],` to arm the merge
+        # hook; the bare fragment chain parses iteratively), structural
+        # nesting, string-colon objects, comment runs, escaped keys, parens
+        # — at fragment counts far past every cap AND past the measured
+        # unguarded-crash thresholds (the array-merge chain SIGSEGVs around
+        # 8k fragments on the main thread, the comma chain around 15k).
+        # Every input must either parse or raise ValueError: a parse build
+        # with an unguarded cycle anywhere in this grammar kills the
+        # process (which is exactly the loud signal this pin exists to
+        # send). Over-aggressive guarding is NOT this pin's job — the
+        # below-cap and boundary tests assert the parses it would break.
+        rng = random.Random(20260908)
+        chains: list[tuple[str, Callable[[int], str]]] = [
+            ("array_merge", lambda n: '{"a":[0],' + '["b":[0],' * n + "1]"),
+            ("comma_merge", lambda n: '{"a":1}' + ', "k":1}' * n),
+            ("strcolon_nest", lambda n: "[" + '"b": [' * n),
+            ("brace_nest", lambda n: '{"a":' * n),
+            ("bracket_nest", lambda n: "[" * n),
+            ("paren_nest", lambda n: "(" * n),
+        ]
+        junks = ["", " ", "\n", "/*x*/", "/x", "junk ", ' "s",', "1,", "}"]
+        for case in range(48):
+            name, build = chains[case % len(chains)]
+            count = rng.randrange(250, 20_000)
+            # Two thirds pure chains (the crash shapes), one third with
+            # junk spliced between fragments — the chains break, but the
+            # junk-with-fragments interaction stays covered at scale.
+            if case % 3 == 2:
+                fragment = {"array_merge": '["b":[0],', "comma_merge": ', "k":1}'}.get(
+                    name, build(1)
+                )
+                payload = (fragment + rng.choice(junks)) * (count // 8)
+            else:
+                payload = build(count)
+            try:
+                repair_json(payload, skip_json_loads=True)
+            except ValueError:
+                pass  # the capped, documented outcome for runaway chains
 
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and

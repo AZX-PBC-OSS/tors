@@ -25,6 +25,14 @@
 //!   schema-noncompliant payload against a typed schema — the alignment
 //!   layer (validate, coerce `"1"`→1 and `"yes"`→true, fill the missing
 //!   default, re-validate).
+//! - `merge_chain_198` / `comma_chain_199` / `seq_merges_2k` (group
+//!   `repair_json_continuations`): the continuation-merge recursions at
+//!   their deepest ADMISSIBLE sizes (one slot under MAX_NESTING) plus a
+//!   2_000-deep same-level sequential merge — the cells that keep the
+//!   depth guards honest: a guard that over-counts turns the first two
+//!   into raises (and this bench's setup asserts Ok, so it fails loudly),
+//!   and any per-merge overhead beyond the two integer ops shows up as a
+//!   regression against the recorded baseline.
 //!
 //! Corpus builders are deterministic (no RNG): a top-level object wrapping
 //! a list of records whose string values are the shared prose sentence
@@ -325,5 +333,46 @@ fn bench_repair_json_schema(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_repair_json, bench_repair_json_schema);
+fn bench_repair_json_continuations(c: &mut Criterion) {
+    // The continuation-merge cells: chains sized one slot under the
+    // MAX_NESTING cap so the guarded recursion runs at its deepest
+    // admissible extent, and a same-level sequential merge run an order
+    // of magnitude past it (sequential merges balance enter/leave per
+    // continuation, so depth never accrues). Setup asserts each payload
+    // actually parses Ok — a depth-accounting regression that turns these
+    // into raises fails the bench here instead of silently benchmarking
+    // the error path.
+    let cfg = RepairConfig {
+        skip_json_loads: true,
+        ..RepairConfig::default()
+    };
+    let merge_chain = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(198));
+    assert!(repair(&merge_chain, &cfg).is_ok());
+    let comma_chain = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(199));
+    assert!(repair(&comma_chain, &cfg).is_ok());
+    let seq_merges = format!("{}{}", r#"{"a":[1]"#, ", [2]".repeat(2_000));
+    assert!(repair(&seq_merges, &cfg).is_ok());
+
+    let mut group = c.benchmark_group("repair_json_continuations");
+    for (name, payload) in [
+        ("merge_chain_198", merge_chain.as_str()),
+        ("comma_chain_199", comma_chain.as_str()),
+        ("seq_merges_2k", seq_merges.as_str()),
+    ] {
+        group.throughput(Throughput::Bytes(payload.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new(name, format!("{}B", payload.len())),
+            payload,
+            |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&cfg))),
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_repair_json,
+    bench_repair_json_schema,
+    bench_repair_json_continuations
+);
 criterion_main!(benches);
