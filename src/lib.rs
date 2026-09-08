@@ -8,8 +8,10 @@
 //! (CPython-parity HTML entity unescaping over generated tables),
 //! [`segmentation_impl`] (UAX #29 grapheme/word segmentation),
 //! [`utf8_impl`] (SIMD UTF-8 validity), [`diff_impl`] (character-level
-//! opcode diffs in difflib's shape), and [`search_impl`] (leftmost-longest
-//! multi-pattern search); they are
+//! opcode diffs in difflib's shape), [`search_impl`] (leftmost-longest
+//! multi-pattern search), [`truncate_impl`] (boundary-safe and
+//! ellipsis-marked truncation), and [`controls_impl`] (C0/DEL control-run
+//! scrub); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -204,6 +206,7 @@ pub mod bm25_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
+pub mod controls_impl;
 pub mod decode_impl;
 pub mod diff_impl;
 pub mod encoding_impl;
@@ -390,6 +393,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(strip_code_fences, m)?)?;
     m.add_function(wrap_pyfunction!(dedent, m)?)?;
     m.add_function(wrap_pyfunction!(truncate_to_bounds, m)?)?;
+    m.add_function(wrap_pyfunction!(truncate_ellipsis, m)?)?;
+    m.add_function(wrap_pyfunction!(strip_controls, m)?)?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;

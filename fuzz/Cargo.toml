@@ -118,3 +118,17 @@ path = "fuzz_targets/tfidf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "truncate_ellipsis"
+path = "fuzz_targets/truncate_ellipsis.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "controls"
+path = "fuzz_targets/controls.rs"
+test = false
+doc = false
+bench = false

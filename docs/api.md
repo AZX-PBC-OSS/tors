@@ -59,6 +59,8 @@ tors.normalize("line one  \n\n\n\nline two\r\n")
 # "line one\n\nline two"
 ```
 
+**Async**: `await tors.aio.normalize(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 ## `tors.finalize`
 
 ```python
@@ -79,6 +81,38 @@ behavior, the same boundary every str-in function here documents.
 text, digest = tors.finalize("line one  \n\n\n\nline two\r\n")
 # ("line one\n\nline two", "e986ba08...f7b942a")
 ```
+
+**Async**: `await tors.aio.finalize(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
+## `tors.strip_controls`
+
+```python
+def strip_controls(text: str) -> str: ...
+```
+
+Replace every maximal run of C0 controls (`U+0000`–`U+001F`, tabs and newlines
+included) and DEL (`U+007F`) with a single ASCII space, one GIL-released native
+pass: byte-identical to `re.compile(r"[\x00-\x1f\x7f]+").sub(" ", text)`. The
+scrub model-authored display text needs before it is stored or served (a chatty
+or injected model cannot plant terminal control sequences in a row the UI
+renders).
+
+Two scope cuts, both deliberate. C1 controls (`U+0080`–`U+009F`) pass through
+untouched: the adopted call-site regexes do not cover them either, so covering
+them here would silently change adopted behavior — C1 scrubbing is a follow-up
+with its own contract, not a silent extension of this one. And `\t`, `\n`,
+`\r` ARE scrubbed (they are C0): do not reach for this on multi-line prose you
+want to keep line-shaped. No edge strip either: a control run at either end
+becomes an edge space for the caller to `.strip()`.
+
+`tors.strip_controls(s) is s` exactly when `s` holds no C0/DEL character.
+
+```python
+tors.strip_controls("score: 4\x00\x01great\x7f")
+# "score: 4 great "
+```
+
+**Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 ## `tors.nfc` / `tors.nfd` / `tors.nfkc` / `tors.nfkd`
 
@@ -214,6 +248,8 @@ closed-set convention). The argument must be exactly `bytes` (`bytearray`/`memor
 raise `TypeError`): the pass reads a zero-copy borrow of the immutable buffer with the
 GIL released, and a writable buffer would be a data race, not a semantic difference.
 
+**Async**: `await tors.aio.decode_utf8(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 ## `tors.finalize_utf8`
 
 ```python
@@ -227,6 +263,8 @@ extraction pipeline wants for its text reads. Strict (default) raises the stdlib
 substitutions through the pipeline. Same bytes-in GIL model as `decode_utf8`: no
 argument-materialization class at all.
 
+**Async**: `await tors.aio.finalize_utf8(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
 ## `tors.b64_encode_bytes`
 
 ```python
@@ -236,6 +274,8 @@ def b64_encode_bytes(raw: bytes) -> str: ...
 `base64.b64encode(raw).decode("ascii")` (RFC 4648 standard alphabet, padded), for
 content-addressing paths that today hold the GIL for the whole encode. The argument
 contract matches the bytes-in surface (exactly `bytes`).
+
+**Async**: `await tors.aio.b64_encode_bytes(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 ## `tors.b64_decode`
 
@@ -257,6 +297,8 @@ to run under (pre-fix stdlibs, and 3.10's distinct regex validator, are document
 divergences). `validate=True` is the default (decode-side callers want invalid input
 to fail loudly); a non-ASCII `str` (including one holding lone surrogates) raises the
 stdlib's own plain `ValueError`; non-`str` input raises `TypeError`.
+
+**Async**: `await tors.aio.b64_decode(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 ## `tors.utf8_is_valid`
 
@@ -317,6 +359,8 @@ unlike `finalize_utf8`'s.
 tors.decode_utf16(b"\xff\xfeh\x00i\x00")                        # "hi"
 tors.decode_utf16(b"h\x00i", errors="replace")                  # "h�"
 ```
+
+**Async**: `await tors.aio.decode_utf16(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 ## `tors.utf16_is_valid`
 
@@ -789,6 +833,39 @@ tors.truncate_to_bounds("cats are cute", 9)
 tors.truncate_to_bounds("One. Two. Three.", 10, boundary="sentence")
 # "One. Two."
 ```
+
+**Async**: `await tors.aio.truncate_to_bounds(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
+## `tors.truncate_ellipsis`
+
+```python
+def truncate_ellipsis(text: str, max_chars: int) -> str: ...
+```
+
+The DB-column truncation shape: hard cut to at most `max_chars` codepoints plus
+a U+2026 `…` marker, one GIL-released native pass, never mid-grapheme-cluster.
+Unlike `truncate_to_bounds` there is no word/sentence awareness — a storage
+bound is positional, not semantic, and the marker tells the reader the value
+continues.
+
+At most `max_chars - 1` codepoints are kept plus the one-codepoint marker, so
+the result never exceeds `max_chars` (it falls short when cluster backoff
+requires it: a cut landing inside a combining sequence, ZWJ emoji chain, or
+regional-indicator flag pair snaps back past the whole cluster rather than
+splitting it). On plain text the stored length is exactly the bound. No
+trailing-whitespace trim: the cut is positional.
+
+`tors.truncate_ellipsis(s, n) is s` exactly when `s` already has `<= n`
+codepoints. `max_chars == 0` yields `""` (no room for even the marker — the
+naive `value[:0] + "…"` spelling answers `"…"` here, exceeding a zero bound);
+`max_chars < 0` raises `ValueError` before any work runs.
+
+```python
+tors.truncate_ellipsis("hello world", 6)
+# "hello…"
+```
+
+**Async**: `await tors.aio.truncate_ellipsis(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
 
 ## `tors.is_grounded`
 

@@ -31,6 +31,19 @@ def normalize(text: str) -> str: ...
 def finalize(text: str) -> tuple[str, str]: ...
 
 
+# Replace every maximal run of C0 controls (U+0000-U+001F, tabs and
+# newlines included) and DEL (U+007F) with a single ASCII space:
+# byte-identical to re.compile(r"[\x00-\x1f\x7f]+").sub(" ", text). C1
+# controls (U+0080-U+009F) pass through untouched, deliberately (the
+# adopted call-site regexes do not cover them either; covering them would
+# silently change adopted behavior). No edge strip: a control run at
+# either end becomes an edge space for the caller to strip.
+# tors.strip_controls(s) is s exactly when s holds no C0/DEL character.
+#
+# GIL note: detached_transform's shape, the same as normalize.
+def strip_controls(text: str) -> str: ...
+
+
 def nfc(text: str) -> str: ...
 
 
@@ -303,6 +316,21 @@ def dedent(text: str) -> str: ...
 def truncate_to_bounds(
     text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"
 ) -> str: ...
+
+
+# The DB-column truncation shape: hard cut to at most max_chars codepoints
+# plus a U+2026 ellipsis marker, never mid-grapheme-cluster (combining
+# accents, ZWJ sequences, flag pairs snap back past the whole cluster). No
+# word/sentence awareness (unlike truncate_to_bounds): a storage bound is
+# positional, not semantic. At most max_chars - 1 codepoints are kept plus
+# the one-codepoint marker, so the result NEVER exceeds max_chars (it falls
+# short when cluster backoff requires it); no trailing-whitespace trim.
+# tors.truncate_ellipsis(s, n) is s exactly when s already has <= n
+# codepoints. max_chars == 0 yields "" (no room for even the marker);
+# max_chars < 0 raises ValueError.
+#
+# GIL note: detached_transform's shape, the same as truncate_to_bounds.
+def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 
 
 # Is claim grounded in source: fuzzy=False (default) is source.contains(claim)

@@ -13,13 +13,15 @@ Which functions, and why only these: thread dispatch through
 ``asyncio.to_thread`` costs on the order of tens of microseconds, noise
 next to a millisecond-or-slower native pass over a real corpus or
 document, real overhead next to a microsecond-scale call over a short
-string. Wrapping every export in a thread hop would make the small,
-common calls (``grapheme_count``, ``levenshtein`` on two short strings)
-slower through this module than through the plain sync spelling, for no
-benefit. So this module covers only the functions whose realistic inputs
+string. So this module covers only the functions whose realistic inputs
 are large enough that the thread-hop cost is reliably negligible: the
-chunking family, the retrieval/scoring primitives, the diff engine, and
-the batch pipeline. Every other tors function keeps exactly one spelling
+chunking family, the retrieval/scoring primitives, the diff engine, the
+batch pipeline, and the input-scaling text/byte pipeline codecs
+(``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
+``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
+``truncate_ellipsis``, ``strip_controls``) — each a single native pass
+whose cost scales with its input, e.g. ``finalize`` over a 12 MiB
+document. Every other tors function keeps exactly one spelling
 (the sync one); call it directly from a coroutine when the input is
 small; a synchronous call that finishes in microseconds does not need
 asyncio at all, and wrapping it here would be lying about a cost that
@@ -68,9 +70,19 @@ __all__: list[str] = []
 # The curated large-input subset, named explicitly rather than inferred
 # from tors.__all__ by exclusion (see the module docstring for why the
 # rest of tors intentionally has no async twin): the chunking family, the
-# retrieval/scoring primitives, the diff engine, and the batch pipeline.
+# retrieval/scoring primitives, the diff engine, the batch pipeline, and
+# the input-scaling text/byte pipeline codecs (normalize/finalize,
+# decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
+# truncate_ellipsis, strip_controls: each a single native pass whose cost
+# scales with its input, the 12 MiB-document shape this module exists
+# for). Microsecond-scale calls over short strings (the normalization
+# forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
+# detect_encoding's guess) stay sync-only: the thread hop would cost more
+# than the call itself.
 _WRAPPED = (
     "apply_pipeline",
+    "b64_decode",
+    "b64_encode_bytes",
     "bm25_rank",
     "chunk_by_paragraphs",
     "chunk_by_sentences",
@@ -78,9 +90,16 @@ _WRAPPED = (
     "chunk_cdc",
     "chunk_hierarchical",
     "chunk_text",
+    "decode_utf16",
+    "decode_utf8",
     "diff_opcodes",
     "diff_opcodes_lines",
+    "finalize",
+    "finalize_utf8",
+    "normalize",
+    "strip_controls",
     "tf_idf",
+    "truncate_ellipsis",
 )
 
 

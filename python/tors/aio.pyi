@@ -12,6 +12,37 @@ from typing import Literal
 
 from tors import CompiledLemmaDict, _StemmerLanguage
 
+async def normalize(text: str) -> str: ...
+
+
+async def finalize(text: str) -> tuple[str, str]: ...
+
+
+async def strip_controls(text: str) -> str: ...
+
+
+async def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
+
+
+async def finalize_utf8(
+    raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
+) -> tuple[str, str]: ...
+
+
+async def b64_encode_bytes(raw: bytes) -> str: ...
+
+
+async def b64_decode(s: str, *, validate: bool = True) -> bytes: ...
+
+
+async def decode_utf16(
+    raw: bytes,
+    *,
+    errors: Literal["strict", "replace"] = "strict",
+    byteorder: Literal["native", "little", "big"] = "native",
+) -> str: ...
+
+
 async def diff_opcodes(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
@@ -20,6 +51,9 @@ async def diff_opcodes(
 async def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
+
+
+async def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 
 
 async def chunk_cdc(

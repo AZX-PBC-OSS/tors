@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 
+use crate::controls_impl;
 use crate::detached_transform;
 use crate::normalize_impl;
 
@@ -55,4 +56,22 @@ pub fn finalize(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<(Py<PyAny
         out.into_pyobject(py)?.into_any().unbind()
     };
     Ok((normalized, digest))
+}
+
+/// `tors.strip_controls`: replace every maximal run of C0 controls
+/// (`U+0000`–`U+001F`, tabs and newlines included) and DEL (`U+007F`) with
+/// a single ASCII space — the scrub model-authored display text needs
+/// before it is stored or served. Byte-identical to
+/// `re.compile(r"[\x00-\x1f\x7f]+").sub(" ", text)`; C1 controls
+/// (`U+0080`–`U+009F`) pass through untouched (see `src/controls_impl.rs`
+/// for why that exclusion is load-bearing, not an oversight).
+///
+/// Identity-return contract: `tors.strip_controls(s) is s` exactly when
+/// `s` holds no C0/DEL character. No strip of the edges: a control run at
+/// either end becomes an edge space for the caller to `.strip()`.
+///
+/// GIL model: `detached_transform`'s shape, the same as `normalize`.
+#[pyfunction]
+pub fn strip_controls(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
+    detached_transform(py, text, controls_impl::strip_controls)
 }

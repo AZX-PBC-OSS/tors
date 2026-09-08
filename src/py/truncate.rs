@@ -52,3 +52,35 @@ pub fn truncate_to_bounds(
         truncate_impl::truncate_to_bounds(s, max_chars, boundary)
     })
 }
+
+/// `tors.truncate_ellipsis(text, max_chars)`: the DB-column truncation
+/// shape — hard cut to at most `max_chars` codepoints plus a U+2026
+/// `…` marker, never mid-grapheme-cluster. Unlike `truncate_to_bounds`
+/// there is no word/sentence awareness: a storage bound is positional, not
+/// semantic, and the marker tells the reader the value continues.
+///
+/// Contract (`src/truncate_impl.rs`): `<= max_chars` codepoints comes back
+/// UNCHANGED (identity return, `is s` exactly when no truncation happens);
+/// otherwise the kept prefix is the largest cluster boundary at or before
+/// `max_chars - 1` plus the marker, so the result never exceeds
+/// `max_chars` (it falls short when cluster backoff requires it).
+/// `max_chars == 0` yields `""` — there is no room for even the marker —
+/// and `max_chars < 0` raises `ValueError` before any work runs. No
+/// trailing-whitespace trim: the cut is positional.
+///
+/// GIL model: `detached_transform`'s shape, the same as
+/// `truncate_to_bounds`.
+#[pyfunction(signature = (text, max_chars))]
+pub fn truncate_ellipsis(
+    py: Python<'_>,
+    text: Bound<'_, PyString>,
+    max_chars: i64,
+) -> PyResult<Py<PyAny>> {
+    if max_chars < 0 {
+        return Err(PyValueError::new_err("max_chars must be >= 0"));
+    }
+    let max_chars = max_chars as usize;
+    detached_transform(py, text, move |s| {
+        truncate_impl::truncate_ellipsis(s, max_chars)
+    })
+}

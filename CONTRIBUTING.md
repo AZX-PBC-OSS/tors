@@ -49,7 +49,8 @@ stale doc is treated as a defect, the same severity as a stale test.
 `fuzz/` holds `cargo-fuzz` (libFuzzer) targets for the parsing/decoding/scoring
 cores most exposed to raw adversarial input: `decode_utf8`, `decode_utf16`,
 `b64_decode`, `html_unescape`, `fence`, `chunk_hierarchical`, `normalize`,
-`search`, `segmentation`, `diff`, `phonetic`, `bm25`, and `tfidf` (the current
+`search`, `segmentation`, `diff`, `phonetic`, `bm25`, `tfidf`,
+`truncate_ellipsis`, and `strip_controls` (the current
 list is `fuzz/Cargo.toml`'s `[[bin]]` entries — treat that file, not this one,
 as the source of truth if the two ever disagree). These call the `*_impl.rs`
 cores directly (no pyo3 boundary, no Python interpreter needed) and check

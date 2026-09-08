@@ -176,6 +176,58 @@ pub fn truncate_to_bounds(text: &str, max_chars: usize, boundary: Boundary) -> C
     Cow::Owned(text[..byte_cut].trim_end().to_string())
 }
 
+/// The marker `truncate_ellipsis` appends to a cut value: U+2026 HORIZONTAL
+/// ELLIPSIS, one codepoint. The same marker `ta_sync`'s column-bound
+/// `truncate` uses (`value[:limit - 1] + "…"`, stored length exactly the
+/// bound), so adopting the tors spelling keeps stored values byte-identical
+/// on every input where the naive cut does not land mid-cluster.
+pub const ELLIPSIS: char = '\u{2026}';
+
+/// Truncate `text` to at most `max_chars` codepoints with an ellipsis
+/// marker: a hard cut (no word/sentence awareness, unlike
+/// `truncate_to_bounds` — this is the DB-column shape, where the bound is a
+/// storage limit, not a reading break), made grapheme-cluster-safe.
+///
+/// * If `text` already has `<= max_chars` codepoints, it comes back
+///   UNCHANGED, per the crate's `Cow` identity convention:
+///   `tors.truncate_ellipsis(s, n) is s` exactly when no truncation
+///   happens.
+/// * Otherwise the kept prefix is the largest grapheme-cluster boundary at
+///   or before `max_chars - 1` codepoints (one codepoint of budget is the
+///   marker itself), plus `ELLIPSIS`. The result never exceeds `max_chars`
+///   codepoints; it falls short when cluster backoff requires it (a cut
+///   landing inside a ZWJ sequence or combining cluster snaps back past
+///   the whole cluster), correctness over filling the last codepoint.
+/// * `max_chars == 0` yields empty (there is no room for even the marker;
+///   the naive `value[:0] + "…"` spelling answers `"…"` here, exceeding a
+///   zero bound — this does not repeat that).
+/// * No trailing-whitespace trim: the cut is positional, not semantic, and
+///   the caller asked for exactly the bound. `"abc   "` at `max_chars=5`
+///   keeps its spaces then the marker.
+///
+/// Composes the same `grapheme_boundary_offsets_within` walk
+/// `truncate_to_bounds` uses (prefix-only: a small bound on a huge value
+/// walks only the prefix), no new dependency, no new algorithm.
+pub fn truncate_ellipsis(text: &str, max_chars: usize) -> Cow<'_, str> {
+    if text.chars().count() <= max_chars {
+        return Cow::Borrowed(text);
+    }
+    if max_chars == 0 {
+        return Cow::Owned(String::new());
+    }
+    // The text exceeds the budget, so the walk stops at the first cluster
+    // boundary past `max_chars - 1` and never touches the rest of it. The
+    // last recorded start is the largest cluster boundary within budget (0
+    // always records, so this always exists), and every recorded start is
+    // a char boundary, so the slice below cannot panic.
+    let (_char_starts, byte_starts) = grapheme_boundary_offsets_within(text, max_chars - 1);
+    let byte_cut = *byte_starts.last().unwrap();
+    let mut out = String::with_capacity(byte_cut + ELLIPSIS.len_utf8());
+    out.push_str(&text[..byte_cut]);
+    out.push(ELLIPSIS);
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +386,112 @@ mod tests {
                     assert!(
                         got.chars().count() <= max_chars,
                         "exceeded max_chars={max_chars} for {text:?}/{boundary:?}: {got:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn ellipsis(text: &str, max_chars: usize) -> String {
+        truncate_ellipsis(text, max_chars).into_owned()
+    }
+
+    #[test]
+    fn ellipsis_no_op_when_already_within_budget() {
+        let text = "short text";
+        assert!(matches!(
+            truncate_ellipsis(text, text.chars().count()),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(truncate_ellipsis(text, 1000), Cow::Borrowed(_)));
+        assert!(matches!(truncate_ellipsis("", 0), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn ellipsis_cuts_to_exact_bound_plus_marker() {
+        // The ta_sync column-bound shape: kept prefix of max_chars - 1 plus
+        // U+2026, stored length exactly the bound on plain text.
+        assert_eq!(ellipsis("hello world", 6), "hello\u{2026}");
+        assert_eq!(ellipsis("hello world", 11), "hello world");
+        assert_eq!(ellipsis("abcdef", 1), "\u{2026}");
+    }
+
+    #[test]
+    fn ellipsis_max_chars_zero_is_empty() {
+        // NOT "…": the marker alone would exceed a zero bound.
+        assert_eq!(ellipsis("hello", 0), "");
+    }
+
+    #[test]
+    fn ellipsis_does_not_trim_trailing_whitespace() {
+        // Positional cut, not semantic: spaces survive, then the marker.
+        assert_eq!(ellipsis("abc   def", 5), "abc \u{2026}");
+    }
+
+    #[test]
+    fn ellipsis_backs_off_a_combining_cluster() {
+        // "ab" + COMBINING ACUTE + "cd": budget 3 (prefix 2) lands inside
+        // the b+accent cluster, so the cut snaps back to "a".
+        assert_eq!(ellipsis("ab\u{0301}cd", 3), "a\u{2026}");
+        assert_eq!(ellipsis("ab\u{0301}cd", 4), "ab\u{0301}\u{2026}");
+    }
+
+    #[test]
+    fn ellipsis_never_splits_a_zwj_sequence_or_flag() {
+        let text = "hi \u{1f469}\u{200d}\u{1f52c} there";
+        for max_chars in 0..=text.chars().count() + 2 {
+            let got = ellipsis(text, max_chars);
+            assert!(
+                got.chars().count() <= max_chars,
+                "exceeded {max_chars}: {got:?}"
+            );
+            // Marker excluded, the kept prefix must hold whole clusters.
+            let kept = got.strip_suffix('\u{2026}').unwrap_or(&got);
+            let has_zwj = kept.contains('\u{200d}');
+            let has_woman = kept.contains('\u{1f469}');
+            let has_scope = kept.contains('\u{1f52c}');
+            assert_eq!(
+                has_zwj,
+                has_woman && has_scope,
+                "ZWJ sequence split for max_chars={max_chars}: {got:?}"
+            );
+        }
+        let flag = "a\u{1f1fa}\u{1f1f8}b";
+        for max_chars in 0..=flag.chars().count() {
+            let got = ellipsis(flag, max_chars);
+            assert!(got.chars().count() <= max_chars);
+            let kept = got.strip_suffix('\u{2026}').unwrap_or(&got);
+            assert_eq!(
+                kept.contains('\u{1f1fa}'),
+                kept.contains('\u{1f1f8}'),
+                "flag split for max_chars={max_chars}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ellipsis_never_exceeds_max_chars_over_a_battery() {
+        let cases = [
+            "",
+            "a",
+            "hello world",
+            "caf\u{e9} \u{1f600}",
+            "\u{2026}\u{2026}\u{2026}",
+        ];
+        for text in cases {
+            for max_chars in 0..=text.chars().count() + 2 {
+                let got = ellipsis(text, max_chars);
+                assert!(
+                    got.chars().count() <= max_chars,
+                    "exceeded max_chars={max_chars} for {text:?}: {got:?}"
+                );
+                // Either untouched, or cut with the marker at the end (the
+                // kept prefix may itself contain U+2026; only the suffix
+                // is pinned here).
+                if got != text {
+                    assert!(
+                        max_chars == 0 || got.ends_with('\u{2026}'),
+                        "marker shape wrong for {text:?}/{max_chars}: {got:?}"
                     );
                 }
             }

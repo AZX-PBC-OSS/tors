@@ -65,7 +65,7 @@ across every core family) in Pyodide under node.
 
 ## What's in it
 
-65 functions plus two small helper classes, grouped by what they do. Each entry is a
+67 functions plus two small helper classes, grouped by what they do. Each entry is a
 one-line description; full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
 
@@ -76,6 +76,7 @@ normalization form directly.
 - `finalize`: `normalize` plus a SHA-256 of the result, in one pass
 - `nfc` / `nfd` / `nfkc` / `nfkd`: the four Unicode normalization forms standalone
 - `html_unescape`: `html.unescape`, full HTML5 entity table
+- `strip_controls`: every C0/DEL control run becomes one space (model-output scrub)
 
 **UTF-8 / UTF-16 / base64 codecs**: validate and decode bytes without holding the GIL
 for the whole buffer.
@@ -122,6 +123,8 @@ a combination no stdlib or maintained GIL-free binding offers.
 against its source.
 - `truncate_to_bounds`: cut to a character budget at a word/sentence boundary, never
   mid-grapheme
+- `truncate_ellipsis`: hard cut to a character budget plus a `…` marker, never
+  mid-grapheme (the DB-column shape)
 - `is_grounded`: exact or fuzzy substring check of a claim against its source
 
 **URL encoding**: `urllib.parse`'s percent-encoding quartet, GIL-released.
@@ -262,7 +265,10 @@ wall-clock duration. `tors.aio` is the pre-wired fix for the functions where tha
 `asyncio.to_thread`, and the event loop stays responsive for its whole duration.
 
 It covers only the large-input-shaped functions (the chunking family, `tf_idf`,
-`bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, and `apply_pipeline`), not all of
+`bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`, the
+`normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
+`decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, and
+`truncate_ellipsis`/`strip_controls`), not all of
 `tors`. Thread dispatch costs on the order of tens of microseconds: noise next to a
 millisecond-or-slower native pass over a real corpus or document, real overhead next to a
 microsecond-scale call over a short string. Wrapping every export would make the small,
