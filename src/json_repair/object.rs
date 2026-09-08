@@ -219,6 +219,53 @@ fn as_schema_slot(value: &Value) -> Result<Option<Value>, String> {
 /// and the additionalProperties:false drop flag.
 type PropertySchemaResolution = (Option<Value>, Vec<Option<Value>>, bool);
 
+/// The row-width summary of an array's inner arrays: the incremental
+/// spelling of parse_object.py's whole-array `list_lengths` rescan.
+/// `Uniform(w)` answers upstream's "all inner arrays share one width"
+/// directly; `None` is the no-inner-arrays case (an empty `list_lengths`);
+/// `Mixed` is differing widths. Folding only what a merge appends is
+/// equivalent to rescanning because within one key-scan loop the merge is
+/// the previous array's only mutator — see
+/// [`Parser::merge_object_array_continuation`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MergeWidths {
+    /// No inner arrays seen.
+    None,
+    /// Every inner array so far has this width (zero included — Python's
+    /// falsy zero width reaches the no-width branch at USE, not here).
+    Uniform(usize),
+    /// Inner arrays of differing widths seen.
+    Mixed,
+}
+
+impl MergeWidths {
+    /// The full scan, exactly upstream's `list_lengths` collection: fold
+    /// every inner array's width, in order.
+    fn scan<'a>(items: impl IntoIterator<Item = &'a Value>) -> MergeWidths {
+        let mut summary = MergeWidths::None;
+        summary.fold_over(items);
+        summary
+    }
+
+    /// Fold every inner-array width of `items` into this summary, in order.
+    fn fold_over<'a>(&mut self, items: impl IntoIterator<Item = &'a Value>) {
+        for item in items {
+            if let Value::Array(inner) = item {
+                self.fold(inner.len());
+            }
+        }
+    }
+
+    /// Fold one inner-array width into the summary.
+    fn fold(&mut self, width: usize) {
+        *self = match (*self, width) {
+            (MergeWidths::None, _) => MergeWidths::Uniform(width),
+            (MergeWidths::Uniform(existing), _) if existing == width => *self,
+            (MergeWidths::Uniform(_), _) | (MergeWidths::Mixed, _) => MergeWidths::Mixed,
+        };
+    }
+}
+
 impl Parser {
     /// parse_object.py's `parse_object`: the object main loop.
     /// `<object> ::= '{' [ <member> *(', ' <member>) ] '}'` — a sequence of
@@ -387,13 +434,18 @@ impl Parser {
         // Python's try/finally: the pop below runs on every exit path, so
         // the loop communicates through key/rollback_index and the Result
         // carried out of `loop`.
+        // The merge-continuation run's row-width summary: initialized by
+        // the first merge's full scan, folded forward by every later merge
+        // in THIS loop (the loop breaks as soon as a key parses, so a
+        // later run rescans — never a stale summary).
+        let mut merge_widths: Option<MergeWidths> = None;
         let outcome: Result<(), String> = loop {
             if self.cur().is_none() {
                 break Ok(());
             }
             rollback_index = self.index;
             if self.cur() == Some('[') && key.is_empty() {
-                match self.merge_object_array_continuation(obj) {
+                match self.merge_object_array_continuation(obj, &mut merge_widths) {
                     Ok(true) => continue,
                     Ok(false) => {}
                     Err(err) => break Err(err),
@@ -435,7 +487,23 @@ impl Parser {
     /// key position continues the PREVIOUS member's array value (rows
     /// regrouped when the existing rows share one width); returns whether
     /// the continuation was taken.
-    fn merge_object_array_continuation(&mut self, obj: &mut ObjectBuilder) -> Result<bool, String> {
+    ///
+    /// `widths` is the row-width summary of the previous member's array —
+    /// the incremental spelling of upstream's whole-array `list_lengths`
+    /// rescan. The summary lives in parse_object_key's key-scan loop for
+    /// exactly one sequential-merge run: the first merge folds the whole
+    /// previous array (upstream's scan, once), every later merge folds
+    /// only what THIS merge appends, because within the key-scan loop the
+    /// merge is the previous array's only mutator (a parsed key breaks the
+    /// loop and the next run starts a fresh summary). Rescanning per merge
+    /// made same-level continuation runs — `{"a":[1], [2], [3], ...` —
+    /// O(M²) in the merge count (~5s at 200k merges); the fold keeps the
+    /// same outputs at O(total input).
+    fn merge_object_array_continuation(
+        &mut self,
+        obj: &mut ObjectBuilder,
+        widths: &mut Option<MergeWidths>,
+    ) -> Result<bool, String> {
         let (prev_key, prev_is_list) = match obj.last_mut() {
             Some((key, value)) => (key.clone(), matches!(value, Value::Array(_))),
             None => return Ok(false),
@@ -467,25 +535,18 @@ impl Parser {
             && let Some((_, prev_value)) = obj.last_mut()
             && let Value::Array(prev_items) = prev_value
         {
-            let list_lengths: Vec<usize> = prev_items
-                .iter()
-                .filter_map(|item| match item {
-                    Value::Array(items) => Some(items.len()),
-                    _ => None,
-                })
-                .collect();
-            let expected_len = if !list_lengths.is_empty()
-                && list_lengths.iter().all(|&len| len == list_lengths[0])
-            {
-                Some(list_lengths[0])
-            } else {
-                None
+            // The first merge of a run folds the whole previous array
+            // (upstream's list_lengths scan, verbatim); later merges find
+            // the summary already current.
+            let summary = widths.get_or_insert_with(|| MergeWidths::scan(prev_items.iter()));
+            // Upstream's expected_len: Some(width) iff the array HAS inner
+            // arrays and they all share one width; Python's truthiness
+            // then drops a zero shared width to the no-width branch.
+            let expected_len = match *summary {
+                MergeWidths::Uniform(width) if width != 0 => Some(width),
+                MergeWidths::Uniform(_) | MergeWidths::Mixed | MergeWidths::None => None,
             };
-            if let Some(expected_len) = expected_len
-                    // Python's truthiness: a zero shared width is falsy and
-                    // takes the no-width branch below.
-                    && expected_len != 0
-            {
+            if let Some(expected_len) = expected_len {
                 let mut tail: Vec<Value> = Vec::new();
                 while !matches!(prev_items.last(), Some(Value::Array(_))) {
                     match prev_items.pop() {
@@ -501,26 +562,39 @@ impl Parser {
                         for chunk in tail.chunks(expected_len) {
                             prev_items.push(Value::Array(chunk.to_vec()));
                         }
+                        // Regrouped rows carry the summary's own width.
+                        summary.fold(expected_len);
                     } else {
                         prev_items.extend(tail);
+                        // The popped tail was non-arrays by construction:
+                        // no widths to fold.
                     }
                 }
                 if !new_items.is_empty() {
                     if new_items.iter().all(|item| matches!(item, Value::Array(_))) {
                         // Additional rows: append them without
                         // flattening.
+                        summary.fold_over(new_items.iter());
                         prev_items.extend(new_items);
                     } else {
+                        summary.fold(new_items.len());
                         prev_items.push(Value::Array(new_items));
                     }
                 }
             } else {
                 // No shared row width to regroup around: a lone list
                 // item flattens into the previous value; anything else
-                // extends as-is.
+                // extends as-is. Either way the appended items keep
+                // their own shapes, so their array widths fold in.
                 match new_items.as_slice() {
-                    [Value::Array(inner)] => prev_items.extend(inner.iter().cloned()),
-                    _ => prev_items.extend(new_items),
+                    [Value::Array(inner)] => {
+                        summary.fold_over(inner.iter());
+                        prev_items.extend(inner.iter().cloned());
+                    }
+                    _ => {
+                        summary.fold_over(new_items.iter());
+                        prev_items.extend(new_items);
+                    }
                 }
             }
         }
@@ -1312,6 +1386,156 @@ mod tests {
                 .unwrap_err()
                 .contains("Input nesting exceeds")
         );
+    }
+
+    #[test]
+    fn parse_object_merge_continuation_row_widths() {
+        // The array-merge continuation's row-width summary (the incremental
+        // spelling of upstream's list_lengths rescan) must produce the
+        // identical outputs across every summary transition: uniform kept,
+        // uniform broken to mixed, mixed from the start, zero shared width
+        // (Python truthiness: falsy -> the no-width branch), divisible and
+        // non-divisible trailing tails, the lone-list flatten, and leading
+        // scalars. Each expected value is upstream-differential-verified
+        // (json_repair 0.63.4, skip_json_loads).
+        let cases: &[(&str, Value)] = &[
+            // uniform rows + a same-width row: uniformity kept.
+            (
+                r#"{"a": [[1,2]], [3,4]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        a(vec![Value::Int(3), Value::Int(4)]),
+                    ]),
+                )]),
+            ),
+            // a width-breaking row: uniform -> mixed.
+            (
+                r#"{"a": [[1,2]], [3,4], [5]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        a(vec![Value::Int(3), Value::Int(4)]),
+                        a(vec![Value::Int(5)]),
+                    ]),
+                )]),
+            ),
+            // past the break the no-width branch extends as-is.
+            (
+                r#"{"a": [[1,2]], [3,4], [5], [6]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        a(vec![Value::Int(3), Value::Int(4)]),
+                        a(vec![Value::Int(5)]),
+                        Value::Int(6),
+                    ]),
+                )]),
+            ),
+            // a divisible trailing tail regroups into rows of the shared
+            // width.
+            (
+                r#"{"a": [[1,2], 3, 4], [5, 6]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        a(vec![Value::Int(3), Value::Int(4)]),
+                        a(vec![Value::Int(5), Value::Int(6)]),
+                    ]),
+                )]),
+            ),
+            // a non-divisible tail stays flat.
+            (
+                r#"{"a": [[1,2], 3], [4]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        Value::Int(3),
+                        a(vec![Value::Int(4)]),
+                    ]),
+                )]),
+            ),
+            // a zero shared width is falsy: the no-width branch.
+            (
+                r#"{"a": [[]], [1]}"#,
+                obj(&[("a", a(vec![a(vec![]), Value::Int(1)]))]),
+            ),
+            // zero width, then more scalars.
+            (
+                r#"{"a": [[]], [1], [2]}"#,
+                obj(&[("a", a(vec![a(vec![]), Value::Int(1), Value::Int(2)]))]),
+            ),
+            // mixed widths from the start: no regroup, extend as-is.
+            (
+                r#"{"a": [[1], [2,3]], [4]}"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1)]),
+                        a(vec![Value::Int(2), Value::Int(3)]),
+                        Value::Int(4),
+                    ]),
+                )]),
+            ),
+            // the lone list item flattens into the previous value.
+            (
+                r#"{"a": [1], [[2]]"#,
+                obj(&[("a", a(vec![Value::Int(1), Value::Int(2)]))]),
+            ),
+            // two rows extend as-is (not the lone-list shape).
+            (
+                r#"{"a": [1], [[2], [3]]"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        Value::Int(1),
+                        a(vec![Value::Int(2)]),
+                        a(vec![Value::Int(3)]),
+                    ]),
+                )]),
+            ),
+            // a leading scalar before the rows: widths unaffected.
+            (
+                r#"{"a": [1, [2]], [3]"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        Value::Int(1),
+                        a(vec![Value::Int(2)]),
+                        a(vec![Value::Int(3)]),
+                    ]),
+                )]),
+            ),
+            // no comma between the member and its continuation.
+            (
+                r#"{"a": [[1,2]] [3,4]"#,
+                obj(&[(
+                    "a",
+                    a(vec![
+                        a(vec![Value::Int(1), Value::Int(2)]),
+                        a(vec![Value::Int(3), Value::Int(4)]),
+                    ]),
+                )]),
+            ),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_ok(raw), *expected, "raw: {raw}");
+        }
+        // A same-width run keeps uniformity across many folds: every
+        // continuation lands as one more row.
+        let mut payload = String::from(r#"{"a": [[0,1]]"#);
+        for i in 0..8 {
+            payload.push_str(&format!(", [{},{}]", 2 * i + 2, 2 * i + 3));
+        }
+        let rows: Vec<Value> = (0..9)
+            .map(|i| a(vec![Value::Int(2 * i), Value::Int(2 * i + 1)]))
+            .collect();
+        assert_eq!(parse_ok(&payload), obj(&[("a", a(rows))]));
     }
 
     #[test]

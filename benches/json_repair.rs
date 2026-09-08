@@ -46,7 +46,13 @@
 //! Run locally with `cargo bench --no-default-features --bench json_repair` —
 //! the `--no-default-features` is required because `extension-module`
 //! deliberately does not link libpython, which a bench binary needs. CI only
-//! compiles it (`cargo bench --no-run`, equally with `--no-default-features`).
+//! compiles it (`cargo bench --no-run`, equally with `--no-default-features`)
+//! — the CI timing GATE for this surface is the Python lane instead
+//! (tests/test_json_repair_performance.py, `-m timing`, 3.12 leg): its cells
+//! assert output equality against the oracle and wall ratios, so a
+//! regression this bench would catch fails CI through that lane. The setup
+//! asserts below fire whenever the bench IS run, so a depth-accounting
+//! regression can never silently time the error path.
 
 #[expect(dead_code)] // `decomposed` and `crlf` have no json_repair-bench cell
 // (normalize.rs/bytes.rs/text.rs bench them), so within THIS bench's

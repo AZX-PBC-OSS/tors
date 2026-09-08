@@ -160,3 +160,33 @@ def _assert_cell_beats_the_oracle(name: str, raw: str) -> None:
 )
 def test_repair_beats_the_oracle_on_the_same_bytes(name: str, raw: str) -> None:
     _assert_cell_beats_the_oracle(name, raw)
+
+
+def _seq_merge_payload(count: int) -> str:
+    return '{"a":[1]' + ", [2]" * count + "}"
+
+
+def test_sequential_merge_wall_scales_linearly_not_quadratically() -> None:
+    """The array-merge continuation maintains its row-width summary
+    incrementally across a same-level merge run (the summary lives in
+    parse_object_key's key-scan loop and folds only what each merge
+    appends), so quadrupling the merge count quadruples the work: the
+    100k-merge wall stays within a small factor of 4x the 25k-merge wall.
+    The rescan-the-whole-previous-array-per-merge shape this gate pins out
+    was O(M^2) — 16x per quadrupling, ~5s at 200k merges from 1.6 MB of
+    input. Machine-speed-immune by construction: the assertion is a ratio
+    of two walls on the same box, never an absolute time."""
+    small = _min_wall_ms(
+        lambda p: tors.repair_json(p, skip_json_loads=True), _seq_merge_payload(25_000)
+    )
+    large = _min_wall_ms(
+        lambda p: tors.repair_json(p, skip_json_loads=True),
+        _seq_merge_payload(100_000),
+    )
+    # Linear scaling: 4x the merges = 4x the wall; 1.5x slack for cache
+    # effects. Quadratic would need 16x and fails loudly.
+    assert large < 6.0 * small, (
+        f"sequential merges scale super-linearly: 100k merges {large:.1f}ms "
+        f"vs 25k merges {small:.1f}ms (ratio {large / small:.1f}x; linear "
+        "would be ~4x) — the per-merge row-width rescan is back"
+    )
