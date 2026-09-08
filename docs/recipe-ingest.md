@@ -97,6 +97,15 @@ response and don't want to write the "is this the single-fence case" check
 yourself. If neither applies to your source — plain text, no markdown —
 skip this step.
 
+JSON model output is the next lane over, same machinery:
+`tors.repair_json` / `tors.repair_json_loads` repair malformed JSON —
+missing commas and quotes, truncated containers, stray prose — in one call,
+and unwrap the single-fence case themselves via this same fence grammar, so
+a response wrapped in exactly one json-tagged fence needs no extraction
+step at all. For multiple blocks, compose the two:
+`tors.repair_json_loads(code)` over each `code` from
+`tors.extract_code_blocks(md, lang="json")`.
+
 ## 4. Chunk
 
 Pick the chunker that matches your document's structure. For structured

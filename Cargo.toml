@@ -86,6 +86,40 @@ rust-stemmers = "1.2.0"
 # DaitchMokotoffSoundex::default() is usable; without it the crate only
 # builds DM encoders from caller-supplied rules.
 rphonetic = { version = "4.0.0", features = ["embedded_dm"] }
+# json_repair's schema-guided validation engine: the mature Rust JSON Schema
+# validator (drafts 4 through 2020-12), maintained by a core maintainer of
+# Python's own `jsonschema` library, 87M+ downloads with active releases.
+# The pragmatic-not-ideological dependency call: schema validation is full of
+# trapdoors a hand-rolled subset gets silently wrong (draft keyword deltas,
+# `pattern` regexes, `$ref` resolution, oneOf exclusivity), and this crate is
+# the ecosystem's battle-tested answer. json_repair itself delegates to the
+# Python `jsonschema` package for exactly this step; tors uses the Rust one.
+# default-features = false: the crate's defaults pull its remote-$ref
+# resolvers (reqwest + rustls + an entire TLS stack, plus a file resolver)
+# for schemas that $ref out to URLs and files; tors resolves LOCAL `#/...`
+# JSON pointers only — json_repair's SchemaRepairer raises on any other $ref
+# spelling, and tors keeps that contract — so the resolvers are pure weight.
+jsonschema = { version = "0.55", default-features = false }
+# The JSON interchange type the validator works over (and the shape the
+# schema/`Value` boundary conversions speak). Already in the tree as
+# criterion's transitive, so the direct edge adds no new package — the same
+# precedent as aho-corasick and encoding_rs.
+serde_json = "1"
+# The single-number extraction grammar behind schema-mode numeric coercion
+# ("$50.0", "USD 50", "1,234.789" — one token, maximal munch, percent
+# suffix). Already in the tree as the jsonschema crate's pattern-validation
+# engine, so this direct edge adds no new package either; a declarative
+# grammar instead of hand-rolled byte arithmetic is the robust choice here
+# (comma grouping is exactly the kind of fiddly indexing that breaks on
+# locale-shaped input).
+regex = "1"
+# ALL datetime parsing and calendar/clock validation for the date/time
+# coercion: jiff's ISO/RFC-3339 parsers plus a small declarative strptime
+# table for the other accepted shapes, its civil constructors as the
+# calendar authority, its Display as the canonical output. MIT OR
+# UNLICENSE (the memchr election precedent). default-features off with
+# std only — no timezone database needed (fixed offsets + civil types).
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [features]
 default = ["extension-module"]
@@ -144,4 +178,8 @@ harness = false
 
 [[bench]]
 name = "retrieval"
+harness = false
+
+[[bench]]
+name = "json_repair"
 harness = false

@@ -46,7 +46,14 @@ Changelog = "https://github.com/AZX-PBC-OSS/tors/releases"
 [dependency-groups]
 dev = [
     "hypothesis>=6.167.1",
+    # json-repair is the exact-pinned differential oracle for tests/test_json_repair.py (a version bump is a deliberate parity re-sync); jsonschema is that suite's schema-mode runtime.
+    "json-repair==0.63.4",
+    "jsonschema>=4.21",
     "maturin>=1.15.0",
+    # pydantic v2 drives the model -> schema -> repair -> model_validate
+    # end-to-end tests (tests/test_json_repair_e2e.py); the repair functions
+    # also accept models directly at runtime.
+    "pydantic>=2",
     "pytest>=9.1.1",
     "ruff>=0.16.6",
 ]

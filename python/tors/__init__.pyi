@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from typing import Literal
+from typing import Any, Literal
 
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
 # STEMMER_LANGUAGES (this is that same list, spelled as a type). Shared by
@@ -292,6 +292,74 @@ def strip_code_fences(text: str) -> str: ...
 #
 # GIL note: detached_transform's shape, the same as strip_code_fences.
 def dedent(text: str) -> str: ...
+
+
+# Repair malformed JSON (the LLM-output shape: missing commas/quotes/
+# brackets, truncated values, stray prose, comments, Python-isms) and
+# return the repaired document as a STRING, re-serialized to json.dumps'
+# canonical form exactly like the json_repair port this implements
+# (upstream: mangiucugna/json_repair, MIT): valid-but-noncanonical input
+# normalizes; the nothing-recoverable sentinel renders as the bare empty
+# string. Whole-input single-fence payloads unwrap first via the CommonMark
+# fence grammar (~~~, longer closers, indented fences included).
+#
+# GIL note: the whole repair — strict fast path, repair parser, schema
+# alignment, validator — runs with the GIL released; the residue is the
+# schema-argument walk plus the O(output) string marshalling.
+def repair_json(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    ensure_ascii: bool = True,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> str: ...
+
+
+# The loads-mode spelling: the repaired document as decoded OBJECTS, the
+# json.loads drop-in (the "" sentinel, not None, when nothing is
+# recoverable). No ensure_ascii (no serialization happens).
+#
+# GIL note: the repair itself runs detached; the GIL-held residue is the
+# O(result) object-tree construction (the word_bounds list-marshalling
+# class) plus the schema-argument walk.
+def repair_json_loads(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
+
+
+# The diagnostics spelling: the loads-mode value plus the structured action
+# log — a list of {action, path, detail, from, to, suggestion} dicts (the
+# last three None when unused) over the closed action vocabulary
+# (coerce/fill/insert_default/remap_key/suggest/drop_property/drop_item/
+# unwrap_string/wrap_array/fill_required/format_date/skip_fragment/
+# map_array_to_object/unwrap_root_array). Schema-free calls return an empty
+# list in v1 (parser-level narration is a follow-up).
+#
+# GIL note: the loads shape plus O(diagnostics) dict construction.
+def repair_json_diagnostics(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> tuple[
+    dict[str, Any] | list[Any] | str | int | float | bool | None,
+    list[dict[str, Any]],
+]: ...
 
 
 # Truncate to at most max_chars codepoints, cutting at the last word (or,

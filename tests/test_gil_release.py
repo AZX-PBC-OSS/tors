@@ -840,6 +840,33 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     )
 
 
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_repair_json_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The json-repair claim: the whole repair pass — fence pre-pass, strict
+    probe, repair parser, serializer — runs under ``py.detach``, and the
+    return is one string, so the loop stays at heartbeat granularity while
+    megabytes of damaged JSON are repaired. Measured on the dev box
+    (ambient load ~3, 3 samples per cell): prose 12 MiB of structurally
+    damaged LLM-JSON (unterminated strings, missing commas and closers):
+    worst gap 10.2ms of a 122ms wall (0.08) — the ping floor plus the
+    str-out marshalling band, deep inside both shared budgets (~3x on the
+    ratio, ~8x on the ceiling)."""
+    chunks, _remainder = divmod(size_bytes, 20_000)
+    payload = (
+        "{"
+        + "".join(f'"k{i}": "{_CORPORA["prose"](20_000)}, ' for i in range(chunks))
+        + '"t": 1'
+    )
+    assert len(payload) >= 11 * _MIB  # scale sanity, not a budget
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.repair_json, payload)
+        )
+    )
+
+
 @pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_grapheme_count_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(

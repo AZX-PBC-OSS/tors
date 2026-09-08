@@ -1,0 +1,1236 @@
+//! The object-repair parser: a port of json_repair's `parse_object.py`
+//! (upstream: https://github.com/mangiucugna/json_repair by Stefano
+//! Baccianella, MIT, pinned at commit
+//! 251d141786d0f6ff561f6ec04d90188a338e2470, version 0.63.4): the object
+//! main loop, the key/value sub-parsers, the duplicate-key split, the
+//! empty-object classifier (object/array/salvage-set repairs), and the
+//! schema-layer hooks (`parser_schema.py`'s object config,
+//! `pattern_properties.py` matching, the required/default finalization).
+//! Every branch is ported 1:1 in upstream's order of checks.
+//!
+//! # Porting notes (the decisions this file's dynamics forced)
+//!
+//! - `self.log(...)` sites upstream become rationale COMMENTS here (log
+//!   texts are not ported; the heuristic each explained gets the comment),
+//!   per the port contract in `parser.rs`'s docs. The parser-level
+//!   `repairer._log(...)` sites (inserted default / dropped extra property)
+//!   are wired to §6.4's diagnostic vocabulary ("insert_default" /
+//!   "drop_property") through the take/put-back repairer helper.
+//! - The repairer never stays borrowed across parser mutation: the resolver
+//!   runs once per `parse_object` call to an ACTIVITY bit plus owned
+//!   config/schema copies, and every later schema-layer access re-acquires
+//!   the repairer through the take/put-back helper ([`with_repairer`], the
+//!   same shape `parser.rs` pins for its own repairer calls).
+//! - Python passes `None` schema slots into `repair_value`; the pinned Rust
+//!   signature takes `&Value`, and upstream's `resolve_schema(None) is True`
+//!   (no constraints) makes `Value::Bool(true)` the None spelling at that
+//!   boundary. JSON `null` in a schema slot IS Python's `None` and maps to
+//!   `Option::None` everywhere a `dict|bool|None` slot flows onward.
+//! - `_copy_json_value` (deep copy + non-JSON raise) is `Value::clone()`
+//!   here: the schema tree is already a `Value` — JSON-domain by
+//!   construction — so the deep copy is trivial and the raise arms are
+//!   structurally unreachable.
+//! - `_finalize_object`'s missing-required message lists the keys in the
+//!   schema's `required` order; upstream iterates a Python SET there (its
+//!   order is hash-arbitrary, so there is no order to preserve).
+//! - Upstream's `_parse_object_key` ASSERTS the key parse returned a str;
+//!   in OBJECT_KEY context the only non-str direct results come from
+//!   pathological comment/LLM-block re-entries, where upstream CRASHES with
+//!   AssertionError. tors must stay total (the fuzz/hypothesis gates), so a
+//!   non-str result maps to the empty key and the scan continues — the one
+//!   deliberate behavior divergence in this file, unreachable from any
+//!   corpus input.
+//! - Python `try/finally` context regions port to explicit
+//!   `ctx_push`/`ctx_pop` pairs with the pop on every exit path; upstream's
+//!   `with self.context.enter(...)` regions likewise bracket the recursive
+//!   reparse calls below.
+//! - Splice sites (upstream slice-assignment on `json_str`): the
+//!   duplicate-key split INSERTS `{` at `index + 1`; the escaped-object
+//!   repair REPLACES `[start_index - 1, index + 1)` (both ends clamped the
+//!   way Python slicing clamps — the cursor can sit past the end of the
+//!   input when these fire, and `Vec::splice` would panic on an unclamped
+//!   end).
+//!
+//! # Test provenance
+//!
+//! The `#[cfg(test)]` batteries port the VALUE-level assertions of
+//! upstream's `tests/test_parse_object.py` (every case, driven through
+//! `Parser::parse`, which is what `repair_json(..., skip_json_loads=True,
+//! return_objects=True)` runs) and the object/array strict raises of
+//! `tests/test_strict_mode.py` with the exact catalog strings. The
+//! assertions that intentionally live ONLY in the pytest corpus
+//! (`tests/test_json_repair.py`, agent C's): the serialized-STRING forms of
+//! these same inputs (`repair_json(...)` without `return_objects`, the
+//! dumps parity `dumps.rs` owns), the `logging=True` log-text assertions,
+//! and every case whose behavior belongs to `string.rs`/`parser.rs`'s own
+//! batteries.
+
+use super::parser::{Ctx, Parser};
+use super::{ObjectBuilder, STRING_DELIMITERS, Value};
+use crate::json_schema_impl::{
+    ObjectSchemaConfig, SchemaRepairer, match_pattern_properties, resolve_parser_object_schema,
+};
+use crate::normalize_impl::is_py_whitespace;
+
+/// `parser.rs`'s `with_repairer` take/put-back pattern, replicated for this
+/// file (the landed helper is private to `parser`'s module): every
+/// schema-layer call needs `&mut SchemaRepairer` while the parser state
+/// around it needs `&mut self`, and the repairer must be back in place on
+/// every path — `repair()` still needs it for the final validation.
+fn with_repairer<T>(parser: &mut Parser, f: impl FnOnce(Option<&mut SchemaRepairer>) -> T) -> T {
+    let mut taken = std::mem::take(&mut parser.schema_repairer);
+    let out = f(taken.as_mut());
+    parser.schema_repairer = taken;
+    out
+}
+
+/// parse_object.py's `_classify_empty_object_repair` return kinds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmptyObjectRepair {
+    Keep,
+    Object,
+    SchemaSetObject,
+    Array,
+}
+
+/// parse_object.py's `_finalize_object`: after a schema-guided object parse
+/// closed, enforce `required` (standard mode raises; salvage defers) and
+/// insert declared `default` values for absent optional properties.
+fn finalize_object(
+    mut obj: Value,
+    repairer: Option<&SchemaRepairer>,
+    schema_config: Option<&ObjectSchemaConfig>,
+    path: &str,
+) -> Result<Value, String> {
+    let (repairer, schema_config) = match (repairer, schema_config) {
+        (Some(repairer), Some(schema_config)) => (repairer, schema_config),
+        _ => return Ok(obj),
+    };
+
+    let missing_required: Vec<&str> = schema_config
+        .required
+        .iter()
+        .filter(|key| obj.object_get(key).is_none())
+        .map(|key| key.as_str())
+        .collect();
+    if !missing_required.is_empty() && !repairer.is_salvage() {
+        let joined = missing_required.join(", ");
+        return Err(format!("Missing required properties at {path}: {joined}"));
+    }
+
+    for (key, prop_schema) in &schema_config.properties {
+        if obj.object_get(key).is_some() || schema_config.required.iter().any(|r| r == key) {
+            continue;
+        }
+        if let Value::Object(entries) = prop_schema
+            && let Some((_, default)) = entries.iter().find(|(k, _)| k == "default")
+        {
+            // Upstream deep-copies the default via repairer._copy_json_value
+            // (a Value tree is already JSON-domain, so clone is that copy
+            // and the non-JSON raise arms cannot fire).
+            obj.object_insert(key.to_string(), default.clone());
+            repairer.record(
+                "insert_default",
+                &format!("{path}.{key}"),
+                "Inserted default value for missing property",
+                None,
+                Some(default.clone()),
+                None,
+            );
+        }
+    }
+    Ok(obj)
+}
+
+/// parse_object.py's `_strip_comments_for_empty_object_classification`: a
+/// pure scan over the object BODY that drops `#`/`//`/`/*...*/` comments
+/// while preserving quoted spans and backslash runs, for the empty-object
+/// classifier's "is anything left?" probe.
+fn strip_comments_for_empty_object_classification(body: &str) -> String {
+    let body: Vec<char> = body.chars().collect();
+    let mut stripped = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut backslashes = 0usize;
+    let mut index = 0usize;
+    while index < body.len() {
+        let ch = body[index];
+        let next_char = body.get(index + 1).copied();
+
+        if ch == '\\' {
+            backslashes += 1;
+            stripped.push(ch);
+            index += 1;
+            continue;
+        }
+        if let Some(quote) = in_quote {
+            stripped.push(ch);
+            if ch == quote && backslashes.is_multiple_of(2) {
+                in_quote = None;
+            }
+            backslashes = 0;
+            index += 1;
+            continue;
+        }
+        if STRING_DELIMITERS.contains(&ch) && backslashes.is_multiple_of(2) {
+            in_quote = Some(ch);
+            stripped.push(ch);
+            backslashes = 0;
+            index += 1;
+            continue;
+        }
+        backslashes = 0;
+
+        if ch == '#' || (ch == '/' && next_char == Some('/')) {
+            index += if ch == '/' { 2 } else { 1 };
+            while index < body.len() && !matches!(body[index], '\n' | '\r') {
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '/' && next_char == Some('*') {
+            index += 2;
+            while index + 1 < body.len() && !(body[index] == '*' && body[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(body.len());
+            continue;
+        }
+
+        stripped.push(ch);
+        index += 1;
+    }
+    stripped
+}
+
+/// Python's `schema_value is not None and not isinstance(schema_value,
+/// (dict, bool))` raise shape, over the Value domain: a per-key schema slot
+/// must be null (Python `None`), bool, or dict.
+fn as_schema_slot(value: &Value) -> Result<Option<Value>, String> {
+    match value {
+        // JSON null is Python's None spelling for "no schema here".
+        Value::Null => Ok(None),
+        Value::Bool(_) | Value::Object(_) => Ok(Some(value.clone())),
+        _ => Err("Schema must be an object.".into()),
+    }
+}
+
+/// parse_object.py's `_resolve_object_property_schema` return: the guiding
+/// schema (None = Python's null slot), the extra patternProperties schemas,
+/// and the additionalProperties:false drop flag.
+type PropertySchemaResolution = (Option<Value>, Vec<Option<Value>>, bool);
+
+impl Parser {
+    /// parse_object.py's `parse_object`: the object main loop.
+    /// `<object> ::= '{' [ <member> *(', ' <member>) ] '}'` — a sequence of
+    /// members, repaired member by member.
+    pub(crate) fn parse_object(
+        &mut self,
+        schema: Option<&Value>,
+        path: &str,
+    ) -> Result<Value, String> {
+        // The builder's side index keeps member insertion O(1) (a linear
+        // object_insert scan is O(n²) on large objects), and the seen set
+        // carries the duplicate-key gate the same way.
+        let mut obj = ObjectBuilder::new();
+        let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let start_index = self.index;
+        let parsing_object_value = self.ctx_current() == Some(Ctx::ObjectValue);
+        let (repairer, schema, schema_config) =
+            resolve_parser_object_schema(self.schema_repairer.as_ref(), schema)?;
+        // The resolver's repairer reference borrows self only long enough to
+        // answer "is schema-guided object parsing active"; every later
+        // schema-layer access goes back through with_repairer.
+        let repairer_active = repairer.is_some();
+
+        while self.cur().unwrap_or('}') != '}' {
+            self.skip_whitespaces();
+
+            if self.cur() == Some(':') {
+                // Upstream logs a ':' before any key and ignores it.
+                self.index += 1;
+            }
+
+            let (key, rollback_index) = self.parse_object_key(&mut obj)?;
+            if self.ctx_has(Ctx::Array) && seen_keys.contains(&key) {
+                if self.strict {
+                    // Upstream logs the duplicate key found in strict mode
+                    // before raising.
+                    return Err("Duplicate key found in strict mode while parsing object.".into());
+                }
+                if !parsing_object_value && self.should_split_duplicate_object(rollback_index) {
+                    // A duplicate key that does not look like a plain
+                    // comma-separated repeat: close the object here and
+                    // roll the cursor back (the split below).
+                    self.split_object_on_duplicate_key(rollback_index);
+                    break;
+                }
+                // Not splitting (an object-value context, or a duplicate
+                // key with a normal comma separator): upstream logs keeping
+                // the duplicate-key overwrite behavior.
+            }
+
+            self.skip_whitespaces();
+            if self.cur().unwrap_or('}') == '}' {
+                continue;
+            }
+
+            self.skip_whitespaces();
+            if self.cur() != Some(':') && self.strict {
+                // Upstream logs the missing ':' in strict mode before
+                // raising.
+                return Err("Missing ':' after key in strict mode while parsing object.".into());
+            }
+            // A missing ':' outside strict mode: upstream logs the missed
+            // ':' after a key and carries on.
+
+            self.index += 1;
+            let (prop_schema, extra_schemas, drop_property) =
+                self.resolve_object_property_schema(repairer_active, schema_config.as_ref(), &key)?;
+            let key_path = format!("{path}.{key}");
+            let mut value =
+                self.parse_object_value(repairer_active, prop_schema.as_ref(), &key_path)?;
+
+            if repairer_active {
+                // Python passes each extra schema (possibly None) into
+                // repair_value; the pinned &Value signature takes the
+                // no-constraints resolution Bool(true) as None's spelling.
+                let no_constraints = Value::Bool(true);
+                for extra_schema in &extra_schemas {
+                    let schema_arg = extra_schema.as_ref().unwrap_or(&no_constraints);
+                    value = with_repairer(self, |repairer| match repairer {
+                        Some(repairer) => repairer.repair_value(value, schema_arg, &key_path),
+                        // Unreachable from the active gate (the resolver
+                        // pairs an active repairer with self.schema_repairer
+                        // present, and with_repairer always puts it back):
+                        // the value passes through unchanged, exactly the
+                        // branch the gate would have taken.
+                        None => Ok(value),
+                    })?;
+                }
+            }
+
+            if !repairer_active
+                && matches!(&value, Value::Str(text) if text.is_empty())
+                && self.strict
+                && !self.get(-1).is_some_and(|c| STRING_DELIMITERS.contains(&c))
+            {
+                // Upstream logs the empty parsed value in strict mode before
+                // raising.
+                return Err("Parsed value is empty in strict mode while parsing object.".into());
+            }
+
+            if !repairer_active || !drop_property {
+                seen_keys.insert(key.clone());
+                obj.insert(key, value);
+            } else {
+                // Upstream logs the dropped extra property; the §6.4
+                // diagnostic vocabulary maps it to "drop_property".
+                with_repairer(self, |repairer| {
+                    if let Some(repairer) = repairer {
+                        repairer.record(
+                            "drop_property",
+                            &key_path,
+                            "Dropped extra property not allowed by the schema",
+                            Some(value),
+                            None,
+                            None,
+                        );
+                    }
+                });
+            }
+
+            if matches!(self.cur(), Some(',') | Some('\'') | Some('"')) {
+                self.index += 1;
+            }
+            if self.cur() == Some(']') && self.ctx_has(Ctx::Array) {
+                // A closing array bracket while an array encloses this
+                // object: close the object here and leave the ']' for the
+                // array (the -1/+1 pair below nets to "not consumed").
+                self.index -= 1;
+                break;
+            }
+            self.skip_whitespaces();
+        }
+
+        self.index += 1;
+
+        let (repaired_empty_object, repaired_value) = self.repair_empty_object_result(
+            &obj,
+            start_index,
+            schema.as_ref(),
+            path,
+            repairer_active,
+        )?;
+        if repaired_empty_object {
+            // Every repaired branch carries a value; the keep branches
+            // never set the flag (the fallback is inert).
+            return Ok(repaired_value.unwrap_or(Value::Str(String::new())));
+        }
+
+        self.complete_object_parse(
+            obj,
+            schema.as_ref(),
+            path,
+            repairer_active,
+            schema_config.as_ref(),
+        )
+    }
+
+    /// parse_object.py's `_parse_object_key`: scan one object key (with the
+    /// array-continuation merge hook), returning `(key, rollback_index)`.
+    /// The OBJECT_KEY context brackets the whole scan, popping on every
+    /// exit path (Python's try/finally).
+    fn parse_object_key(&mut self, obj: &mut ObjectBuilder) -> Result<(String, usize), String> {
+        let mut key = String::new();
+        let mut rollback_index = self.index;
+        self.ctx_push(Ctx::ObjectKey);
+        // Python's try/finally: the pop below runs on every exit path, so
+        // the loop communicates through key/rollback_index and the Result
+        // carried out of `loop`.
+        let outcome: Result<(), String> = loop {
+            if self.cur().is_none() {
+                break Ok(());
+            }
+            rollback_index = self.index;
+            if self.cur() == Some('[') && key.is_empty() {
+                match self.merge_object_array_continuation(obj) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(err) => break Err(err),
+                }
+            }
+
+            let raw_key = match self.parse_string() {
+                Ok(value) => value,
+                Err(err) => break Err(err),
+            };
+            // Upstream asserts the key parse returned a str; in OBJECT_KEY
+            // context the only non-str direct results come from
+            // pathological comment/LLM-block re-entries, where upstream
+            // crashes on the assert. tors stays total: the empty key stands
+            // in and the scan continues (the module docs' one deliberate
+            // divergence).
+            key = match raw_key {
+                Value::Str(text) => text,
+                _ => String::new(),
+            };
+            if key.is_empty() {
+                self.skip_whitespaces();
+            }
+            if !key.is_empty() || matches!(self.cur(), Some(':') | Some('}')) {
+                if key.is_empty() && self.strict {
+                    // Upstream logs the empty key found in strict mode
+                    // before raising.
+                    break Err("Empty key found in strict mode while parsing object.".into());
+                }
+                break Ok(());
+            }
+        };
+        self.ctx_pop();
+        outcome?;
+        Ok((key, rollback_index))
+    }
+
+    /// parse_object.py's `_merge_object_array_continuation`: a '[' at the
+    /// key position continues the PREVIOUS member's array value (rows
+    /// regrouped when the existing rows share one width); returns whether
+    /// the continuation was taken.
+    fn merge_object_array_continuation(&mut self, obj: &mut ObjectBuilder) -> Result<bool, String> {
+        let (prev_key, prev_is_list) = match obj.last_mut() {
+            Some((key, value)) => (key.clone(), matches!(value, Value::Array(_))),
+            None => return Ok(false),
+        };
+        // Python: `if not prev_key or not isinstance(obj[prev_key], list) or
+        // self.strict` — an empty-string key is falsy there.
+        if prev_key.is_empty() || !prev_is_list || self.strict {
+            return Ok(false);
+        }
+
+        self.index += 1;
+        let new_array = self.parse_array(None, "$", ']')?;
+        if let Value::Array(new_items) = new_array
+            && let Some((_, prev_value)) = obj.last_mut()
+            && let Value::Array(prev_items) = prev_value
+        {
+            let list_lengths: Vec<usize> = prev_items
+                .iter()
+                .filter_map(|item| match item {
+                    Value::Array(items) => Some(items.len()),
+                    _ => None,
+                })
+                .collect();
+            let expected_len = if !list_lengths.is_empty()
+                && list_lengths.iter().all(|&len| len == list_lengths[0])
+            {
+                Some(list_lengths[0])
+            } else {
+                None
+            };
+            if let Some(expected_len) = expected_len
+                    // Python's truthiness: a zero shared width is falsy and
+                    // takes the no-width branch below.
+                    && expected_len != 0
+            {
+                let mut tail: Vec<Value> = Vec::new();
+                while !matches!(prev_items.last(), Some(Value::Array(_))) {
+                    match prev_items.pop() {
+                        Some(item) => tail.push(item),
+                        None => break,
+                    }
+                }
+                if !tail.is_empty() {
+                    tail.reverse();
+                    if tail.len().is_multiple_of(expected_len) {
+                        // Row values found without an inner array:
+                        // group them into rows of the shared width.
+                        for chunk in tail.chunks(expected_len) {
+                            prev_items.push(Value::Array(chunk.to_vec()));
+                        }
+                    } else {
+                        prev_items.extend(tail);
+                    }
+                }
+                if !new_items.is_empty() {
+                    if new_items.iter().all(|item| matches!(item, Value::Array(_))) {
+                        // Additional rows: append them without
+                        // flattening.
+                        prev_items.extend(new_items);
+                    } else {
+                        prev_items.push(Value::Array(new_items));
+                    }
+                }
+            } else {
+                // No shared row width to regroup around: a lone list
+                // item flattens into the previous value; anything else
+                // extends as-is.
+                match new_items.as_slice() {
+                    [Value::Array(inner)] => prev_items.extend(inner.iter().cloned()),
+                    _ => prev_items.extend(new_items),
+                }
+            }
+        }
+
+        self.skip_whitespaces();
+        if self.cur() == Some(',') {
+            self.index += 1;
+        }
+        self.skip_whitespaces();
+        Ok(true)
+    }
+
+    /// parse_object.py's `_should_split_duplicate_object`: a duplicate key
+    /// splits the object UNLESS it looks like a plain comma-separated
+    /// repeat (quoted key, comma before it, colon after it).
+    fn should_split_duplicate_object(&self, rollback_index: usize) -> bool {
+        let mut lookback_idx: isize = rollback_index as isize - self.index as isize - 1;
+        let mut prev_non_whitespace = self.get(lookback_idx);
+        while prev_non_whitespace.is_some_and(is_py_whitespace) {
+            lookback_idx -= 1;
+            prev_non_whitespace = self.get(lookback_idx);
+        }
+        let key_start_char = self.get(rollback_index as isize - self.index as isize);
+        let next_non_whitespace = self.get(self.scroll_whitespaces(0) as isize);
+        !(key_start_char.is_some_and(|c| STRING_DELIMITERS.contains(&c))
+            && prev_non_whitespace == Some(',')
+            && next_non_whitespace == Some(':'))
+    }
+
+    /// parse_object.py's `_split_object_on_duplicate_key` — THE SPLICE:
+    /// rewind onto the key's opening and insert a `{` there, so the parent
+    /// container re-parses the tail as a fresh object.
+    fn split_object_on_duplicate_key(&mut self, rollback_index: usize) {
+        self.index = rollback_index - 1;
+        // Python's json_str[:index+1] + "{" + json_str[index+1:] — an insert
+        // at index + 1.
+        self.s.insert(self.index + 1, '{');
+    }
+
+    /// parse_object.py's `_resolve_object_property_schema`: pick the schema
+    /// guiding one member's value — the declared property, the first
+    /// patternProperties match (extras carried alongside), the
+    /// additionalProperties dict, or `true`; plus the drop flag for
+    /// `additionalProperties: false`.
+    fn resolve_object_property_schema(
+        &self,
+        repairer_active: bool,
+        schema_config: Option<&ObjectSchemaConfig>,
+        key: &str,
+    ) -> Result<PropertySchemaResolution, String> {
+        let Some(schema_config) = schema_config else {
+            return Ok((None, Vec::new(), false));
+        };
+        if !repairer_active {
+            return Ok((None, Vec::new(), false));
+        }
+
+        if let Some((_, schema_value)) = schema_config.properties.iter().find(|(k, _)| k == key) {
+            let prop_schema = as_schema_slot(schema_value)?;
+            return Ok((prop_schema, Vec::new(), false));
+        }
+
+        let mut matched: Vec<Value> = Vec::new();
+        // The unsupported-regex patterns the matcher reports are logged one
+        // by one upstream and skipped; tors keeps the skip (the log site is
+        // a comment per the port contract).
+        let mut _unsupported_patterns: Vec<String> = Vec::new();
+        if let Some(pattern_properties) = &schema_config.pattern_properties
+            && pattern_properties.is_truthy()
+        {
+            (matched, _unsupported_patterns) = match_pattern_properties(pattern_properties, key);
+        }
+        if !matched.is_empty() {
+            let prop_schema = as_schema_slot(&matched[0])?;
+            let mut extra_schemas: Vec<Option<Value>> = Vec::new();
+            for extra_schema in &matched[1..] {
+                extra_schemas.push(as_schema_slot(extra_schema)?);
+            }
+            return Ok((prop_schema, extra_schemas, false));
+        }
+
+        match &schema_config.additional_properties {
+            // additionalProperties: false — this property is not allowed.
+            Some(Value::Bool(false)) => Ok((None, Vec::new(), true)),
+            Some(dict @ Value::Object(_)) => Ok((Some(dict.clone()), Vec::new(), false)),
+            // Absent (or any non-dict, non-false spelling): anything goes.
+            _ => Ok((Some(Value::Bool(true)), Vec::new(), false)),
+        }
+    }
+
+    /// parse_object.py's `_parse_object_value`: parse one member's value in
+    /// the OBJECT_VALUE context (bracketed with the pop on every exit path,
+    /// Python's try/finally), routing through the schema layer when active.
+    fn parse_object_value(
+        &mut self,
+        repairer_active: bool,
+        prop_schema: Option<&Value>,
+        key_path: &str,
+    ) -> Result<Value, String> {
+        self.ctx_push(Ctx::ObjectValue);
+        self.skip_whitespaces();
+        let ch = self.cur();
+        let result: Result<Value, String> = if matches!(ch, Some(',') | Some('}')) {
+            // Upstream logs the stray separator standing in for a value.
+            if repairer_active {
+                // Python passes prop_schema (possibly None) into
+                // repair_value; the pinned &Value signature takes the
+                // no-constraints resolution Bool(true) as None's spelling.
+                let no_constraints = Value::Bool(true);
+                let schema_arg = prop_schema.unwrap_or(&no_constraints);
+                with_repairer(self, |repairer| match repairer {
+                    Some(repairer) => repairer.repair_value(Value::Missing, schema_arg, key_path),
+                    // Unreachable from the active gate (see the loop's
+                    // with_repairer note): the no-repairer branch's "".
+                    None => Ok(Value::Str(String::new())),
+                })
+            } else {
+                Ok(Value::Str(String::new()))
+            }
+        } else if repairer_active {
+            self.parse_json(prop_schema, key_path, true, false)
+        } else {
+            self.parse_json(None, "$", true, false)
+        };
+        self.ctx_pop();
+        result
+    }
+
+    /// parse_object.py's `_repair_empty_object_result`: an object that
+    /// parsed empty over a non-trivial span gets a second chance — the
+    /// escaped-key normalization reparse, the salvage set-as-object
+    /// reparse, or the array fallback.
+    fn repair_empty_object_result(
+        &mut self,
+        obj: &ObjectBuilder,
+        start_index: usize,
+        schema: Option<&Value>,
+        path: &str,
+        repairer_active: bool,
+    ) -> Result<(bool, Option<Value>), String> {
+        // isize arithmetic: the trailing skips can leave the cursor past the
+        // end, and the span check must not underflow below start_index.
+        // An object is truthy iff non-empty (CPython).
+        if !obj.is_empty() || (self.index as isize - start_index as isize) <= 2 {
+            return Ok((false, None));
+        }
+
+        if self.strict {
+            // Upstream logs the empty object with extra characters in
+            // strict mode before raising.
+            return Err(
+                "Parsed object is empty but contains extra characters in strict mode.".into(),
+            );
+        }
+
+        let (empty_object_repair, normalized_object) =
+            self.classify_empty_object_repair(start_index, schema, repairer_active);
+        if empty_object_repair == EmptyObjectRepair::Object
+            && let Some(normalized_object) = normalized_object
+        {
+            // THE SPLICE: replace the attempted span (the '{' at
+            // start_index - 1 through the cursor) with the normalized
+            // object text; Python's slice assignment clamps its end, and so
+            // does the min() here (the cursor may sit past the end).
+            let end_index = (self.index + 1).min(self.s.len());
+            self.s
+                .splice(start_index - 1..end_index, normalized_object.chars());
+            self.index = start_index;
+            self.ctx_push(Ctx::ObjectKey);
+            let repaired = self.parse_object(schema, path);
+            self.ctx_pop();
+            let repaired_value = repaired?;
+            self.deferred_contexts.push(Ctx::ObjectKey);
+            return Ok((true, Some(repaired_value)));
+        }
+        if empty_object_repair == EmptyObjectRepair::SchemaSetObject {
+            // Salvage schema expects an object here: re-parse the set-like
+            // members as object keys (null-valued when they are all
+            // non-empty strings).
+            self.index = start_index;
+            self.ctx_push(Ctx::ObjectKey);
+            let set_items = self.parse_array(None, "$", ']');
+            self.ctx_pop();
+            let set_items = set_items?;
+            self.deferred_contexts.push(Ctx::ObjectKey);
+            if let Value::Array(items) = &set_items {
+                let key_candidates: Vec<&str> = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Str(text) if !text.is_empty() => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if key_candidates.len() == items.len() {
+                    // dict.fromkeys: the candidate keys in order, every
+                    // value null, DUPLICATES COLLAPSED to the first
+                    // occurrence (build through object_insert, which
+                    // updates in place at first position).
+                    let mut set_object = Value::Object(Vec::new());
+                    for key in key_candidates {
+                        set_object.object_insert(key.to_string(), Value::Null);
+                    }
+                    return Ok((true, Some(set_object)));
+                }
+            }
+            return Ok((true, Some(set_items)));
+        }
+        if empty_object_repair == EmptyObjectRepair::Array {
+            // Upstream logs the empty object and retries it as an array.
+            self.index = start_index;
+            self.ctx_push(Ctx::ObjectKey);
+            let repaired_array = self.parse_array(None, "$", ']');
+            self.ctx_pop();
+            let repaired_array = repaired_array?;
+            self.deferred_contexts.push(Ctx::ObjectKey);
+            return Ok((true, Some(repaired_array)));
+        }
+        Ok((false, None))
+    }
+
+    /// parse_object.py's `_classify_empty_object_repair`: decide what the
+    /// empty object's span actually contains — keep (object-shaped
+    /// leftovers), normalize-and-reparse (escaped object keys), the salvage
+    /// set-as-object, or the array fallback.
+    fn classify_empty_object_repair(
+        &self,
+        start_index: usize,
+        schema: Option<&Value>,
+        repairer_active: bool,
+    ) -> (EmptyObjectRepair, Option<String>) {
+        // attempted_object spans the '{' at start_index - 1 through the
+        // cursor; Python slicing clamps both ends (the cursor can sit past
+        // the end), which the min() and get() reproduce.
+        let end = (self.index + 1).min(self.s.len());
+        let attempted_object: String = self
+            .s
+            .get(start_index - 1..end)
+            .map_or_else(String::new, |chars| chars.iter().collect());
+        let mut body: String = attempted_object.chars().skip(1).collect();
+        if body.ends_with('}') {
+            // body.removesuffix("}")
+            body.pop();
+        }
+        let body = body.trim_start_matches(is_py_whitespace);
+        if body.is_empty() {
+            return (EmptyObjectRepair::Keep, None);
+        }
+        if (body.starts_with("\\\"") && body.contains("\\\":"))
+            || (body.starts_with("\\'") && body.contains("\\':"))
+        {
+            // Upstream logs the escaped-object-key normalization before
+            // reparsing it as an object.
+            let normalized_object = attempted_object.replace("\\\"", "\"").replace("\\'", "'");
+            return (EmptyObjectRepair::Object, Some(normalized_object));
+        }
+        let stripped = strip_comments_for_empty_object_classification(body);
+        let body = stripped.trim_start_matches(is_py_whitespace);
+        if body.is_empty() {
+            return (EmptyObjectRepair::Keep, None);
+        }
+
+        let mut in_quote: Option<char> = None;
+        let mut backslashes = 0usize;
+        for ch in body.chars() {
+            if ch == '\\' {
+                backslashes += 1;
+                continue;
+            }
+            if let Some(quote) = in_quote {
+                if ch == quote && backslashes.is_multiple_of(2) {
+                    in_quote = None;
+                }
+            } else if STRING_DELIMITERS.contains(&ch) && backslashes.is_multiple_of(2) {
+                in_quote = Some(ch);
+            } else if ch == ':' && backslashes.is_multiple_of(2) {
+                // Upstream logs the object-style separator still present:
+                // keep the object repair.
+                return (EmptyObjectRepair::Keep, None);
+            }
+            backslashes = 0;
+        }
+
+        if repairer_active
+            && let Some(repairer) = self.schema_repairer.as_ref()
+            && repairer.is_salvage()
+            && schema.is_some_and(|schema_value| {
+                matches!(schema_value, Value::Object(_))
+                    && repairer.is_object_schema(schema_value)
+                    && !repairer.is_array_schema(schema_value)
+            })
+        {
+            return (EmptyObjectRepair::SchemaSetObject, None);
+        }
+        (EmptyObjectRepair::Array, None)
+    }
+
+    /// parse_object.py's `_complete_object_parse`: the object's exit —
+    /// skip one extra closing brace when nested, merge a comma-then-
+    /// delimiter continuation into this object, and finalize against the
+    /// schema config.
+    fn complete_object_parse(
+        &mut self,
+        mut obj: ObjectBuilder,
+        schema: Option<&Value>,
+        path: &str,
+        repairer_active: bool,
+        schema_config: Option<&ObjectSchemaConfig>,
+    ) -> Result<Value, String> {
+        if !self.ctx_empty() {
+            if self.cur() == Some('}')
+                && !matches!(
+                    self.ctx_current(),
+                    Some(Ctx::ObjectKey) | Some(Ctx::ObjectValue)
+                )
+            {
+                // Upstream logs the extra closing brace and skips it.
+                self.index += 1;
+            }
+            return Ok(obj.finish());
+        }
+
+        self.skip_whitespaces();
+        if self.cur() == Some(',') {
+            self.index += 1;
+            self.skip_whitespaces();
+            if self.cur().is_some_and(|c| STRING_DELIMITERS.contains(&c)) && !self.strict {
+                // Upstream logs the comma + string delimiter after the
+                // closing brace and checks for additional key-value pairs.
+                let additional_obj = self.parse_object(schema, path)?;
+                if let Value::Object(additional) = additional_obj {
+                    // dict.update: overwrite in place, append the new.
+                    for (key, value) in additional {
+                        obj.insert(key, value);
+                    }
+                }
+            }
+        }
+
+        // The resolver's local repairer: Some only while schema-guided.
+        let repairer = if repairer_active {
+            self.schema_repairer.as_ref()
+        } else {
+            None
+        };
+        finalize_object(obj.finish(), repairer, schema_config, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(raw: &str) -> Value {
+        Parser::new(raw, false, None)
+            .parse()
+            .expect("plain parse should not fail")
+    }
+
+    fn parse_strict(raw: &str) -> Result<Value, String> {
+        Parser::new(raw, true, None).parse()
+    }
+
+    fn s(text: &str) -> Value {
+        Value::Str(text.to_string())
+    }
+
+    fn obj(entries: &[(&str, Value)]) -> Value {
+        Value::Object(
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect(),
+        )
+    }
+
+    fn a(items: Vec<Value>) -> Value {
+        Value::Array(items)
+    }
+
+    #[test]
+    fn parse_object() {
+        // test_parse_object.py::test_parse_object
+        assert_eq!(parse_ok("{}"), obj(&[]));
+        assert_eq!(
+            parse_ok(r#"{ "key": "value", "key2": 1, "key3": True }"#),
+            obj(&[
+                ("key", s("value")),
+                ("key2", Value::Int(1)),
+                ("key3", Value::Bool(true)),
+            ])
+        );
+        assert_eq!(parse_ok("{"), obj(&[]));
+        assert_eq!(
+            parse_ok(r#"{ "key": value, "key2": 1 "key3": null }"#),
+            obj(&[
+                ("key", s("value")),
+                ("key2", Value::Int(1)),
+                ("key3", Value::Null),
+            ])
+        );
+        // upstream asserts the serialized "{}" for these; the Value form is
+        // the parser-level pin (dumps parity is dumps.rs's battery)
+        assert_eq!(parse_ok("   {  }   "), obj(&[]));
+        assert_eq!(parse_ok("{"), obj(&[]));
+        assert_eq!(parse_ok("}"), s(""));
+        assert_eq!(parse_ok("{\""), obj(&[]));
+    }
+
+    #[test]
+    fn parse_object_edge_cases() {
+        // test_parse_object.py::test_parse_object_edge_cases (every
+        // assertion)
+        assert_eq!(parse_ok("{foo: [}"), obj(&[("foo", a(vec![]))]));
+        assert_eq!(parse_ok(r#"{"": "value""#), obj(&[("", s("value"))]));
+        assert_eq!(
+            parse_ok(r#"{"key": "v"alue"}"#),
+            obj(&[("key", s("v\"alue\""))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"value_1": true, COMMENT "value_2": "data"}"#),
+            obj(&[("value_1", Value::Bool(true)), ("value_2", s("data"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"value_1": true, SHOULD_NOT_EXIST "value_2": "data" AAAA }"#),
+            obj(&[("value_1", Value::Bool(true)), ("value_2", s("data"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"" : true, "key2": "value2"}"#),
+            obj(&[("", Value::Bool(true)), ("key2", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{""answer"":[{""traits"":''Female aged 60+'',""answer1"":""5""}]}"#),
+            obj(&[(
+                "answer",
+                a(vec![obj(&[
+                    ("traits", s("Female aged 60+")),
+                    ("answer1", s("5")),
+                ])])
+            )])
+        );
+        assert_eq!(
+            parse_ok(r#"{ "words": abcdef", "numbers": 12345", "words2": ghijkl" }"#),
+            obj(&[
+                ("words", s("abcdef")),
+                ("numbers", Value::Int(12345)),
+                ("words2", s("ghijkl")),
+            ])
+        );
+        assert_eq!(
+            parse_ok(r#"{"number": 1,"reason": "According...""ans": "YES"}"#),
+            obj(&[
+                ("number", Value::Int(1)),
+                ("reason", s("According...")),
+                ("ans", s("YES")),
+            ])
+        );
+        assert_eq!(
+            parse_ok(r#"{ "a" : "{ b": {} }" }"#),
+            obj(&[("a", s("{ b"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"b": "xxxxx" true}"#),
+            obj(&[("b", s("xxxxx"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "Lorem "ipsum" s,"}"#),
+            obj(&[("key", s("Lorem \"ipsum\" s,"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"lorem": ipsum, sic, datum.",}"#),
+            obj(&[("lorem", s("ipsum, sic, datum."))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"lorem": sic tamet. "ipsum": sic tamet, quick brown fox. "sic": ipsum}"#),
+            obj(&[
+                ("lorem", s("sic tamet.")),
+                ("ipsum", s("sic tamet")),
+                ("sic", s("ipsum")),
+            ])
+        );
+        assert_eq!(
+            parse_ok(r#"{"lorem_ipsum": "sic tamet, quick brown fox. }"#),
+            obj(&[("lorem_ipsum", s("sic tamet, quick brown fox."))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key":value, " key2":"value2" }"#),
+            obj(&[("key", s("value")), (" key2", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key":value "key2":"value2" }"#),
+            obj(&[("key", s("value")), ("key2", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{'text': 'words{words in brackets}more words'}"#),
+            obj(&[("text", s("words{words in brackets}more words"))])
+        );
+        assert_eq!(
+            parse_ok("{text:words{words in brackets}}"),
+            obj(&[("text", s("words{words in brackets}"))])
+        );
+        assert_eq!(
+            parse_ok("{text:words{words in brackets}m}"),
+            obj(&[("text", s("words{words in brackets}m"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value, value2"```"#),
+            obj(&[("key", s("value, value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value}```"#),
+            obj(&[("key", s("value"))])
+        );
+        assert_eq!(
+            parse_ok("{key:value,key2:value2}"),
+            obj(&[("key", s("value")), ("key2", s("value2"))])
+        );
+        assert_eq!(parse_ok(r#"{"key:"value"}"#), obj(&[("key", s("value"))]));
+        assert_eq!(parse_ok("{key:value}"), obj(&[("key", s("value"))]));
+        // the duplicate-key split at the """" (a second member follows the
+        // doubled quotes)
+        let lorem = || obj(&[("lorem", obj(&[("ipsum", s("sic"))]))]);
+        assert_eq!(
+            parse_ok(r#"[{"lorem": {"ipsum": "sic"}, """" "lorem": {"ipsum": "sic"}]"#),
+            a(vec![lorem(), lorem()])
+        );
+        // array-continuation merges at the key position
+        assert_eq!(
+            parse_ok(
+                r#"{ "key": ["arrayvalue"], ["arrayvalue1"], ["arrayvalue2"], "key3": "value3" }"#
+            ),
+            obj(&[
+                (
+                    "key",
+                    a(vec![s("arrayvalue"), s("arrayvalue1"), s("arrayvalue2")])
+                ),
+                ("key3", s("value3")),
+            ])
+        );
+        assert_eq!(
+            parse_ok(r#"{ "key": [[1, 2, 3], "a", "b"], [[4, 5, 6], [7, 8, 9]] }"#),
+            obj(&[(
+                "key",
+                a(vec![
+                    a(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+                    s("a"),
+                    s("b"),
+                    a(vec![Value::Int(4), Value::Int(5), Value::Int(6)]),
+                    a(vec![Value::Int(7), Value::Int(8), Value::Int(9)]),
+                ])
+            )])
+        );
+        assert_eq!(
+            parse_ok(r#"{ "key": ["arrayvalue"], "key3": "value3", ["arrayvalue1"] }"#),
+            obj(&[
+                ("key", a(vec![s("arrayvalue")])),
+                ("key3", s("value3")),
+                ("arrayvalue1", s("")),
+            ])
+        );
+        // the double-escaped inner object stays a string value
+        assert_eq!(
+            parse_ok(r#"{"key": "{\\"key\\":[\"value\"],\\"key2\":"value2"}"}"#),
+            obj(&[("key", s(r#"{"key":["value"],"key2":"value2"}"#))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": , "key2": "value2"}"#),
+            obj(&[("key", s("")), ("key2", s("value2"))])
+        );
+        // the ']' rollback leaves the bracket for the enclosing array
+        assert_eq!(
+            parse_ok(r#"{"array":[{"key": "value"], "key2": "value2"}"#),
+            obj(&[
+                ("array", a(vec![obj(&[("key", s("value"))])])),
+                ("key2", s("value2")),
+            ])
+        );
+        // the duplicate-key split splice
+        assert_eq!(
+            parse_ok(r#"[{"key":"value"}},{"key":"value"}]"#),
+            a(vec![
+                obj(&[("key", s("value"))]),
+                obj(&[("key", s("value"))])
+            ])
+        );
+        assert_eq!(
+            parse_ok(
+                r#"{'key': ['a':{'duplicated_key': 'duplicated_value', 'duplicated_key': 'duplicated_value'}]}"#
+            ),
+            obj(&[(
+                "key",
+                a(vec![obj(&[(
+                    "a",
+                    obj(&[("duplicated_key", s("duplicated_value"))]),
+                )])])
+            )])
+        );
+        // skip_json_loads upstream: the parser path, duplicate key kept via
+        // the in-place overwrite
+        assert_eq!(
+            parse_ok(r#"[{"b":"v2","b":"v2"}]"#),
+            a(vec![obj(&[("b", s("v2"))])])
+        );
+        // the set-like object falls back to an array of its items
+        assert_eq!(
+            parse_ok("{'item1', 'item2', 'item3'}"),
+            a(vec![s("item1"), s("item2"), s("item3")])
+        );
+    }
+
+    #[test]
+    fn parse_object_preserves_backslash_escaped_keys() {
+        // test_parse_object.py::test_parse_object_preserves_backslash_escaped_keys
+        // (log-text assertions skipped: logs are not ported)
+        let raw = r#"{\"key\": \"value\"}"#;
+        assert_eq!(parse_ok(raw), obj(&[("key", s("value"))]));
+    }
+
+    #[test]
+    fn parse_object_empty_object_classifier_keeps_objectish_inputs() {
+        // test_parse_object.py::test_parse_object_empty_object_classifier_keeps_objectish_inputs
+        // (log-text assertions skipped: logs are not ported)
+        assert_eq!(parse_ok("{:}"), obj(&[]));
+        assert_eq!(parse_ok("{   }"), obj(&[]));
+    }
+
+    #[test]
+    fn parse_object_empty_object_classifier_keeps_array_fallback_for_backslash_noise() {
+        // test_parse_object.py::test_parse_object_empty_object_classifier_keeps_array_fallback_for_backslash_noise
+        // (log-text assertions skipped: logs are not ported): the escaped
+        // backslash normalizes to a backspace inside the fallback array's
+        // single string item
+        assert_eq!(parse_ok(r#"{foo\bar}"#), a(vec![s("foo\u{8}ar}")]));
+    }
+
+    #[test]
+    fn parse_object_empty_object_array_fallback_preserves_legacy_key_context() {
+        // test_parse_object.py::test_parse_object_empty_object_array_fallback_preserves_legacy_key_context
+        assert_eq!(parse_ok("[{5}s "), a(vec![a(vec![Value::Int(5)])]));
+    }
+
+    #[test]
+    fn parse_object_merge_at_the_end() {
+        // test_parse_object.py::test_parse_object_merge_at_the_end
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, "key2": "value2"}"#),
+            obj(&[("key", s("value")), ("key2", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, "key2": }"#),
+            obj(&[("key", s("value")), ("key2", s(""))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, []"#),
+            obj(&[("key", s("value"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, ["abc"]"#),
+            a(vec![obj(&[("key", s("value"))]), a(vec![s("abc")])])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, {}"#),
+            obj(&[("key", s("value"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, "" : "value2"}"#),
+            obj(&[("key", s("value")), ("", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key": "value"}, "key2" "value2"}"#),
+            obj(&[("key", s("value")), ("key2", s("value2"))])
+        );
+        assert_eq!(
+            parse_ok(r#"{"key1": "value1"}, "key2": "value2", "key3": "value3"}"#),
+            obj(&[
+                ("key1", s("value1")),
+                ("key2", s("value2")),
+                ("key3", s("value3")),
+            ])
+        );
+    }
+
+    #[test]
+    fn strict_mode_object_raises() {
+        // test_strict_mode.py::test_strict_duplicate_keys_inside_array
+        assert_eq!(
+            parse_strict(r#"[{"key": "first", "key": "second"}]"#),
+            Err("Duplicate key found in strict mode while parsing object.".to_string())
+        );
+        // test_strict_mode.py::test_strict_rejects_empty_keys
+        assert_eq!(
+            parse_strict(r#"{"" : "value"}"#),
+            Err("Empty key found in strict mode while parsing object.".to_string())
+        );
+        // test_strict_mode.py::test_strict_requires_colon_between_key_and_value
+        assert_eq!(
+            parse_strict(r#"{"missing" "colon"}"#),
+            Err("Missing ':' after key in strict mode while parsing object.".to_string())
+        );
+        // test_strict_mode.py::test_strict_rejects_empty_values
+        assert_eq!(
+            parse_strict(r#"{"key": , "key2": "value2"}"#),
+            Err("Parsed value is empty in strict mode while parsing object.".to_string())
+        );
+        // test_strict_mode.py::test_strict_rejects_empty_object_with_extra_characters
+        assert_eq!(
+            parse_strict(r#"{"dangling"}"#),
+            Err("Parsed object is empty but contains extra characters in strict mode.".to_string())
+        );
+        // test_strict_mode.py::test_strict_rejects_empty_escaped_object_with_extra_characters
+        assert_eq!(
+            parse_strict(r#"{\"key\": \"value\"}"#),
+            Err("Parsed object is empty but contains extra characters in strict mode.".to_string())
+        );
+        // test_strict_mode.py::test_strict_detects_immediate_doubled_quotes
+        assert_eq!(
+            parse_strict(r#"{"key": """"}"#),
+            Err("Found doubled quotes followed by another quote.".to_string())
+        );
+        // test_strict_mode.py::test_strict_detects_doubled_quotes_followed_by_string
+        assert_eq!(
+            parse_strict(r#"{"key": "" "value"}"#),
+            Err(
+                "Found doubled quotes followed by another quote while parsing a string."
+                    .to_string()
+            )
+        );
+    }
+}

@@ -65,7 +65,7 @@ across every core family) in Pyodide under node.
 
 ## What's in it
 
-67 functions plus two small helper classes, grouped by what they do. Each entry is a
+70 functions plus two small helper classes, grouped by what they do. Each entry is a
 one-line description; full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
 
@@ -118,6 +118,12 @@ a combination no stdlib or maintained GIL-free binding offers.
 - `extract_code_blocks`: every fenced code block, per CommonMark's fence grammar
 - `strip_code_fences`: unwrap a whole response wrapped in exactly one fence
 - `dedent`: `textwrap.dedent`, byte-exact
+
+**JSON repair**: fix malformed JSON from model output, with or without a schema.
+- `repair_json` / `repair_json_loads` / `repair_json_diagnostics`: port of
+  json_repair (parity pinned to 0.63.4); syntax repair, schema-guided
+  alignment and coercion (dict, bool, or pydantic v2 model as the schema;
+  `locale=` for separator conventions), and the repair action log as data
 
 **Truncation & lexical grounding**: fit text to a budget, or sanity-check a claim
 against its source.
@@ -221,8 +227,16 @@ The scope cuts below are decisions, not oversights:
 - **General regex.** `find_patterns`/`replace_many` are leftmost-longest multi-pattern
   literal search, not a regex engine; `chunk_hierarchical`'s `separators` are literal
   strings, not patterns.
-- **Schema-aware JSON/YAML coercion.** Out of scope for the same reason lemmatization
-  is: it needs a schema or model, not an algorithm.
+- **Schema-aware JSON/YAML coercion.** The JSON side moved IN with the
+  `repair_json` family: syntax repair of malformed JSON and schema-guided
+  alignment/coercion against a JSON Schema are algorithms — a repair
+  parser's heuristics plus a standard validator over caller-supplied schema
+  data, the shape json_repair itself proved — not a model, so they fit this
+  crate's posture. Still out, for the original reason: other schema
+  languages, YAML/TOML repair, prompt-side constrained generation (the
+  BAML-style problem of steering the model while it writes, rather than
+  repairing after), and full JSON-Schema-language tooling — tors repairs
+  and validates against schemas; it does not generate them.
 - **A bundled lemma dictionary.** `apply_pipeline`/`tf_idf`/`bm25_rank` apply a
   caller-supplied lemma map; `tors` ships no lemma data of its own, because full
   lemmatization needs a per-language dataset or a POS-tagging model, not an algorithm;
@@ -339,14 +353,18 @@ methodology, corpus construction, and the full per-function tables.
 
 The license gate is `cargo deny check licenses advisories bans` (`make deny`; the same
 three checks run in CI's lint job). The allowlist in `deny.toml` is permissive-only:
-MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus three documented additions, all
+MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, plus four documented additions, all
 permissive grants inside the gate's intent:
 `Apache-2.0 WITH LLVM-exception` (target-lexicon, a pyo3 build dependency: the
 LLVM-exception *removes* attribution obligations from Apache-2.0), `Unicode-3.0`
 (unicode-ident, the permissive license the Unicode Consortium publishes the UCD data
-under), and `0BSD` (enum-iterator/enum-iterator-derive, `soundex`/`metaphone`'s
+under), `0BSD` (enum-iterator/enum-iterator-derive, `soundex`/`metaphone`'s
 `rphonetic` dependency's own dependencies: the BSD Zero Clause License is
-OSI-approved and public-domain-equivalent, strictly more permissive than plain MIT).
+OSI-approved and public-domain-equivalent, strictly more permissive than plain
+MIT), and `MIT-0` (borrow-or-share, a fluent-uri dependency pulled in by the
+jsonschema crate's `referencing` $ref machinery, the json_repair port's validation
+engine: MIT No Attribution is plain MIT with the attribution obligation removed,
+the same family as 0BSD — recorded in `deny.toml`).
 No GPL/LGPL/AGPL/MPL, no unlicensed. Dual/tri-licensed crates are consumed via
 an allowed branch: notably r-efi (a getrandom dependency, dev tree only) offers
 `LGPL-2.1-or-later` as one branch of `MIT OR Apache-2.0 OR LGPL-2.1-or-later`; tors
@@ -374,6 +392,10 @@ dev tree, criterion and friends, is included in the check):
 | encoding_rs | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | the `Encoding` type chardetng's guess returns: already pulled in transitively by chardetng; named directly only to call `.name()` on it, no new package in the tree (the BSD-3-Clause conjunct is the WHATWG Encoding Standard data files' grant, inside the gate's BSD-3 allowance) |
 | rust-stemmers | 1.2.0 | MIT OR BSD-3-Clause | tf_idf's/bm25_rank's opt-in Snowball stemmer= knob (18 languages): pulls in serde/serde_derive as a non-optional dependency (an `Algorithm` enum derive, unused by tors's own call sites); recorded here because it is the one real transitive-weight addition in this table |
 | rphonetic | 4.0.0 | Apache-2.0 | soundex/metaphone's phonetic-code algorithms (an Apache Commons Codec port): pulls in enum-iterator/enum-iterator-derive (0BSD, the license-gate addition noted above), nom, and thiserror; tors pre-filters every input to ASCII letters before calling into it, working around a real, verified panic in the crate's own Soundex/DoubleMetaphone encoders on ordinary accented input (see the API docs) |
+| jsonschema | 0.55 | MIT OR Apache-2.0 | json_repair's schema-guided validation engine: the mature Rust JSON Schema validator (drafts 4-2020-12), maintained by a core maintainer of Python's own jsonschema; local `#/...` refs only (default-features off — its remote-$ref resolvers would pull a TLS stack); pulls the num family via its exact-rational multipleOf arithmetic (fraction) — the tree's one real transitive-weight addition, the rust-stemmers precedent |
+| serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
+| regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package (the same precedent) |
+| jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only — no TZDB backend, the accept-list shapes need none |
 | criterion *(dev)* | 0.5.1 | Apache-2.0 OR MIT | the benchmark harness |
 | strsim *(dev)* | 0.11.1 | MIT | differential oracle for levenshtein/jaro/jaro_winkler tests |
 
@@ -417,6 +439,16 @@ a direct dependency), 1 `Zlib OR Apache-2.0 OR MIT` (tinyvec), 1
 1 `Apache-2.0/MIT` (rs_merkle: the closure's third spelling of a dual
 grant), and 1 `MIT/BSD-3-Clause` (rust-stemmers, a fourth spelling of the
 same dual-grant idea). Every one satisfies the allowlist.
+
+That count and its per-license tally predate the json_repair feature: the
+port's four direct dependencies grow the runtime package closure from 55 to
+102 (jsonschema's draft-4-2020-12 validation tree is the addition; serde_json
+and regex were already in the lock as transitives, and jiff brings one small
+crate, so the real addition is jsonschema's tree). The incl-dev count and
+the tally above re-derive at the next lock
+update, and the gate re-checks every new entry against the allowlist on
+every run — the MIT-0 license it flagged on the way in (borrow-or-share) is
+recorded above and in `deny.toml`.
 
 ## Development
 
