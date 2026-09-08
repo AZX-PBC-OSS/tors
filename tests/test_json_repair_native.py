@@ -605,6 +605,110 @@ class TestRobustness:
         merged = repair_json_loads(payload, skip_json_loads=True)
         assert merged == {"a": 1, **{f"k{i}": 1 for i in range(150)}}
 
+    def test_merged_array_continuation_chains_raise_instead_of_crashing(self) -> None:
+        # `{"a":[0],` + `["b":[0],` * N nests through the array-continuation
+        # merge: a '[' at the key position merges into the previous
+        # array-valued member, and the merged array's first item — a string
+        # followed by ':' — is a missing object start parsed by parse_object
+        # directly, whose key scan sees another '[' and merges again. That
+        # cycle had no depth guard anywhere on it: it grew the native stack
+        # per fragment and overflowed — an uncatchable SIGSEGV around 8k
+        # fragments (main thread; fewer on worker-sized stacks) — instead of
+        # the documented catchable ValueError. The continuation guard caps
+        # it like every other deep-recursion path.
+        payload = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json(payload, skip_json_loads=True)
+        # schema-guided and salvage parsing flow through the same guarded site:
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json(payload, schema={"type": "object"}, skip_json_loads=True)
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json(
+                payload, schema={"type": "object"}, salvage=True, skip_json_loads=True
+            )
+
+    def test_merged_array_continuations_below_the_cap_still_merge(self) -> None:
+        # The guard must fire only past MAX_NESTING, never on an ordinary
+        # merge chain: nested chains below the cap still merge every
+        # fragment (an over-counting regression would raise early), and
+        # same-level sequential merges never accrue depth at all —
+        # enter/leave is balanced per continuation.
+        assert repair_json_loads(
+            '{"a":[0],["b":[0],["b":[0],1]', skip_json_loads=True
+        ) == {"a": [0, {"b": [0, {"b": [0], "1": ""}]}]}
+        expected: dict[str, Any] = {"b": [0], "1": ""}
+        for _ in range(149):
+            expected = {"b": [0, expected]}
+        payload = '{"a":[0],' + '["b":[0],' * 150 + '1]'
+        assert repair_json_loads(payload, skip_json_loads=True) == {"a": [0, expected]}
+        assert repair_json_loads('{"a":[1], [2], [3]}', skip_json_loads=True) == {
+            "a": [1, 2, 3]
+        }
+
+    def test_continuation_chains_cap_at_max_nesting_exactly(self) -> None:
+        # Both continuation recursions share the MAX_NESTING budget with
+        # structural nesting. The comma chain spends 1 (the initial `{`) +
+        # 1 per fragment (scalar values add nothing): 199 fragments parse
+        # (depth 200), the 200th raises. The array-merge chain spends the
+        # same 1 + 1 per fragment PLUS 1 for the innermost fragment's
+        # `[0]` value (a container nested inside every merge): 198
+        # fragments parse, the 199th raises. Pinning the exact edges
+        # catches future accounting drift in either direction —
+        # over-counting an edge rejects inputs the cap admits, missing one
+        # reopens the crash.
+        comma_ok = '{"a":1}' + ', "k":1}' * 199
+        assert repair_json_loads(comma_ok, skip_json_loads=True) == {"a": 1, "k": 1}
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json('{"a":1}' + ', "k":1}' * 200, skip_json_loads=True)
+        expected: dict[str, Any] = {"b": [0], "1": ""}
+        for _ in range(197):
+            expected = {"b": [0, expected]}
+        merge_ok = '{"a":[0],' + '["b":[0],' * 198 + '1]'
+        assert repair_json_loads(merge_ok, skip_json_loads=True) == {"a": [0, expected]}
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json('{"a":[0],' + '["b":[0],' * 199 + '1]', skip_json_loads=True)
+
+    def test_related_recursion_shapes_route_through_guarded_edges(self) -> None:
+        # Siblings of the continuation chains that DO pass guarded edges on
+        # every cycle: string-colon objects nested inside arrays (`["b": [`
+        # per level, each through parse_json's '[' branch) and salvage-mode
+        # comma-merging (every salvage fragment re-enters parse_json).
+        # Pinning them keeps a future refactor from quietly rerouting these
+        # shapes past the guards.
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json('[' + '"b": [' * 2_000, skip_json_loads=True)
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json(
+                '{"a":1}' + ', "k":1}' * 2_000,
+                schema={"type": "object"},
+                salvage=True,
+                skip_json_loads=True,
+            )
+
+    def test_strict_mode_has_no_continuation_merges(self) -> None:
+        # Both continuation merges are repairs and never fire in strict
+        # mode: the comma shape surfaces strict's own multiple-elements
+        # error, and the array-merge shape parses without merging.
+        with pytest.raises(ValueError, match="Multiple top-level JSON elements"):
+            repair_json('{"a":1}, "k":1}', strict=True, skip_json_loads=True)
+        assert repair_json_loads(
+            '{"a":[0],["b":[0],1]', strict=True, skip_json_loads=True
+        ) == {"a": [0], "b": [0]}
+
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and
         # ensure_ascii re-emits the identical pair bytes.

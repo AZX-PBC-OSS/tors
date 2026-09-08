@@ -447,7 +447,22 @@ impl Parser {
         }
 
         self.index += 1;
-        let new_array = self.parse_array(None, "$", ']')?;
+        // Depth-guard the recursion. This continuation calls parse_array,
+        // whose first item is often a string followed by ':' — a missing
+        // object start parsed by parse_object directly — and that object's
+        // key scan can take another '[' continuation, so a nested chain
+        // (`{"a":[0],` followed by `["b":[0],` repeated) grows the native
+        // stack one frame pair per fragment with no cap anywhere on the
+        // cycle — an uncatchable SIGSEGV, not the documented catchable
+        // ValueError. enter_depth caps it at MAX_NESTING like every other
+        // deep-recursion path (the same enter/parse/leave/`?` shape
+        // parse_json's `{`/`[`/`(` branches and complete_object_parse's
+        // comma-merge use); balanced on every non-abort path, so same-level
+        // sequential merges (`{"a":[1], [2], [3]}`) never accrue depth.
+        self.enter_depth()?;
+        let new_array = self.parse_array(None, "$", ']');
+        self.leave_depth();
+        let new_array = new_array?;
         if let Value::Array(new_items) = new_array
             && let Some((_, prev_value)) = obj.last_mut()
             && let Value::Array(prev_items) = prev_value
@@ -1187,6 +1202,115 @@ mod tests {
     }
 
     #[test]
+    fn merged_array_continuation_chains_hit_the_depth_cap_not_the_stack() {
+        // `{"a":[0],` + `["b":[0],` * N nests through the array-continuation
+        // merge: a '[' at the key position merges into the previous
+        // array-valued member (merge_object_array_continuation →
+        // parse_array), whose first item — a string followed by ':' — is a
+        // missing object start parsed by parse_object directly, and that
+        // object's key scan sees another '[' and merges again. Without a
+        // depth guard on that continuation the cycle grew the native stack
+        // with no cap anywhere on it — an uncatchable SIGSEGV around 8k
+        // fragments (main thread; ~4k fewer on worker-sized stacks), not
+        // the documented catchable ValueError.
+        let payload = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(2_000));
+        let err = Parser::new(&payload, false, None)
+            .parse()
+            .expect_err("a runaway array-merge chain must raise, not recurse unbounded");
+        assert!(err.contains("Input nesting exceeds"));
+    }
+
+    #[test]
+    fn merged_array_continuations_below_the_cap_still_merge() {
+        // The guard fires only past MAX_NESTING. An ordinary nested merge
+        // chain still parses and merges every fragment (an off-by-one that
+        // trips the guard early would fail the 150-level descent below),
+        // and same-level sequential merges never accrue depth at all —
+        // enter/leave is balanced per continuation, so merged items land
+        // flat in the previous array.
+        // N=2 pins the exact merged shape:
+        assert_eq!(
+            parse_ok(r#"{"a":[0],["b":[0],["b":[0],1]"#),
+            obj(&[(
+                "a",
+                a(vec![
+                    Value::Int(0),
+                    obj(&[(
+                        "b",
+                        a(vec![
+                            Value::Int(0),
+                            obj(&[("b", a(vec![Value::Int(0)])), ("1", s(""))]),
+                        ]),
+                    )]),
+                ])
+            )])
+        );
+        // A 150-fragment chain descends 150 objects deep to the innermost
+        // fragment's exact shape.
+        let payload = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(150));
+        let value = parse_ok(&payload);
+        fn member<'a>(value: &'a Value, key: &str) -> &'a Value {
+            match value {
+                Value::Object(entries) => entries
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v)
+                    .unwrap_or_else(|| panic!("member {key} missing")),
+                other => panic!("expected an object, got {other:?}"),
+            }
+        }
+        fn item(value: &Value, idx: usize) -> &Value {
+            match value {
+                Value::Array(items) => &items[idx],
+                other => panic!("expected an array, got {other:?}"),
+            }
+        }
+        let mut node = item(member(&value, "a"), 1);
+        for _ in 1..150 {
+            node = item(member(node, "b"), 1);
+        }
+        assert_eq!(node, &obj(&[("b", a(vec![Value::Int(0)])), ("1", s(""))]));
+        // Same-level sequential merges stay flat:
+        assert_eq!(
+            parse_ok(r#"{"a":[1], [2], [3]}"#),
+            obj(&[("a", a(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))])
+        );
+    }
+
+    #[test]
+    fn continuation_chains_cap_at_max_nesting_exactly() {
+        // Both continuation recursions (comma-merge and array-merge) share
+        // the MAX_NESTING budget with structural nesting. The comma chain
+        // spends 1 (the initial `{`) + 1 per fragment (scalar values add
+        // nothing): 199 fragments parse (depth 200), the 200th raises.
+        // The array-merge chain spends the same 1 + 1 per fragment PLUS 1
+        // for the innermost fragment's `[0]` value (a container nested
+        // inside every merge): 198 fragments parse (depth 200), the 199th
+        // raises. Pinning the exact edges catches future accounting drift
+        // in either direction — over-counting an edge rejects inputs the
+        // cap admits, missing one reopens the crash.
+        let comma_ok = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(199));
+        match parse_ok(&comma_ok) {
+            // "a" plus the repeated "k" (dict.update collapses the rest)
+            Value::Object(entries) => assert_eq!(entries.len(), 2),
+            other => panic!("expected a merged object, got {other:?}"),
+        }
+        let comma_cap = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(200));
+        assert!(Parser::new(&comma_cap, false, None)
+            .parse()
+            .unwrap_err()
+            .contains("Input nesting exceeds"));
+
+        let merge_ok = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(198));
+        assert!(matches!(parse_ok(&merge_ok), Value::Object(_)));
+        let merge_cap = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(199));
+        assert!(Parser::new(&merge_cap, false, None)
+            .parse()
+            .unwrap_err()
+            .contains("Input nesting exceeds"));
+    }
+
+    #[test]
     fn parse_object_merge_at_the_end() {
         // test_parse_object.py::test_parse_object_merge_at_the_end
         assert_eq!(
@@ -1274,3 +1398,4 @@ mod tests {
         );
     }
 }
+

@@ -291,6 +291,21 @@ class TestDifferentialParity:
         with pytest.raises((ValueError, RecursionError)):
             json_repair_lib.repair_json(_DEEP_RAW, schema=DEEP_SCHEMA)
 
+    def test_continuation_chain_recursion_both_raise(self) -> None:
+        # §9.6 both-raise pin for the array-continuation merge chain
+        # (`{"a":[0],` + `["b":[0],` * N): tors caps it at MAX_NESTING
+        # fragments and the oracle at its own recursion limit, so at a size
+        # far past both thresholds each engine raises a ValueError — the
+        # differential signal that neither crashes. (A tors build without
+        # the continuation guard dies with SIGSEGV here, which kills the
+        # process rather than failing the assertion — the native suite's
+        # sub-2k sizes fail cleanly instead.)
+        merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        with pytest.raises(ValueError):
+            tors.repair_json(merge_chain, skip_json_loads=True)
+        with pytest.raises(ValueError):
+            json_repair_lib.repair_json(merge_chain, skip_json_loads=True)
+
     @pytest.mark.parametrize(
         'raw', STRICT_CORPUS, ids=[f'strict-{i}' for i in range(len(STRICT_CORPUS))]
     )

@@ -110,12 +110,13 @@ pub(crate) struct Parser {
     pub(crate) schema_repairer: Option<SchemaRepairer>,
     /// Container-nesting depth for the MAX_NESTING guard: parse_json's `{`
     /// and `[` branches increment on entry and decrement on their way out,
-    /// as does complete_object_parse's comma-merge continuation (object.rs)
-    /// — structural nesting and comma-merge chains share this one budget, so
-    /// a chain of comma-merged fragments and the nesting depth of what they
-    /// merge compete for the same MAX_NESTING slots. Exceeding the cap raises
-    /// the recursion-depth ValueError (upstream hits Python's RecursionError
-    /// at a comparable depth; tors normalizes it — see mod.rs's docs).
+    /// as do the two continuation recursions — complete_object_parse's
+    /// comma-merge and merge_object_array_continuation's array-merge
+    /// (object.rs) — so structural nesting and either kind of continuation
+    /// chain compete for one shared MAX_NESTING budget. Exceeding the cap
+    /// raises the recursion-depth ValueError (upstream hits Python's
+    /// RecursionError at a comparable depth; tors normalizes it — see
+    /// mod.rs's docs).
     pub(crate) depth: usize,
     /// parse_comment's parse_json re-entry depth. Garbage-separated
     /// comment runs (`'/x' * n`) chain parse_json → parse_comment →
