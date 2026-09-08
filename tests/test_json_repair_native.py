@@ -776,6 +776,25 @@ class TestRobustness:
             except ValueError:
                 pass  # the capped, documented outcome for runaway chains
 
+    def test_array_close_run_in_a_string_body_is_not_quadratic(self) -> None:
+        # `'["' + ']'*n + '" x'` drove an O(n^2) uncached forward scan in
+        # scan_string_body's array branch (~18s at n=200k before the fix); the
+        # memoized lookahead makes it linear (~45ms). Absolute wall bound with
+        # a large margin over the linear cost and well under the quadratic one.
+        import time as _time
+
+        n = 200_000
+        start = _time.perf_counter()
+        result = repair_json_loads('["' + "]" * n + '" x')
+        # In the default lane (not `timing`): a 3.0s ceiling is ~60x the
+        # linear cost and far under the ~18s quadratic, so it is robust to CI
+        # load — the same shape as the other default-lane robustness bounds
+        # (e.g. tests/test_similarity.py, tests/test_grounded.py).
+        assert _time.perf_counter() - start < 3.0
+        # also pin the shape, so a fast-but-wrong scan (e.g. always break on
+        # `]`) cannot pass on the wall bound alone:
+        assert result == ["]" * n, "x"]
+
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and
         # ensure_ascii re-emits the identical pair bytes.

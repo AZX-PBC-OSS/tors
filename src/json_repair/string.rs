@@ -1628,7 +1628,32 @@ impl Parser {
                 && self.ctx_has(Ctx::Array)
                 && (state.string_acc.is_empty() || !state.string_acc.ends_with(outer))
             {
-                let i = self.skip_to_character(&[outer], 0);
+                // Memoized, like the sibling `}` lookahead earlier in this
+                // scan. This branch fires once per `]` while scanning a string
+                // body in array context, so an uncached forward scan makes
+                // `'["' + ']'*n + '" x'` O(n^2).
+                //
+                // Parity-safety of sharing the `[outer]` memo key: every
+                // reader/writer of that key starts its scan one past a
+                // non-backslash char — this `]` site (idx 0, after `]`), the
+                // sibling `}` probe above (idx 1, after `}`), and
+                // classify_object_value_comma's CommaSkip `[next_special]`
+                // scan (after a quote). None starts inside a backslash run, so
+                // escape parity is fixed and the memo is uncached-exact for all
+                // of them (verified: zero divergences vs json-repair 0.63.4 over
+                // an exhaustive `]`/`}`/`\`/`"` sweep). This is NOT
+                // "cached == uncached" in general — a scan starting inside a
+                // backslash run can flip escape parity — so do NOT add a cached
+                // [outer] call at a non-anchored site.
+                //
+                // Residual (tracked in #13): when the closing quote is
+                // preceded by an EVEN-length backslash run (the quote itself
+                // is unescaped, but the char before the match is a backslash),
+                // cached_skip_to_character's own `s[m-1] != '\\'` write guard
+                // suppresses the memo and this scan stays O(n^2). That path is
+                // bounded by the repair family's deadline_ms (see #13), not by
+                // this memo.
+                let i = self.cached_skip_to_character(state, &[outer], 0);
                 if self.get(i as isize).is_none() {
                     break;
                 }
