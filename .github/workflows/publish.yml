@@ -157,6 +157,16 @@ jobs:
         # --no-default-features: `extension-module` (the crate's default) doesn't link
         # libpython, which breaks a plain `cargo publish` verification build the same way
         # it breaks `cargo test`/`cargo build` — see Cargo.toml's own feature comment.
+        #
+        # Lockfile self-heal: a release tag can carry a Cargo.lock whose root-package
+        # version predates the release PR's version bump (release-please bumps
+        # versions without refreshing locks), and cargo rewrites that one field on
+        # first contact, which `cargo publish`'s clean-tree gate would otherwise
+        # reject. The assert below keeps the gate's spirit: anything dirty OTHER
+        # than Cargo.lock still aborts, and only then does --allow-dirty cover
+        # cargo's own bookkeeping.
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p tors-core --no-default-features
+        run: |
+          git diff --exit-code -- . ':!Cargo.lock'
+          cargo publish -p tors-core --no-default-features --allow-dirty

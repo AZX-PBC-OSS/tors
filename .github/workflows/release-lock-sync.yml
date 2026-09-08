@@ -1,0 +1,51 @@
+# Keeps release-please PRs shippable: release-please bumps versions in
+# pyproject.toml/Cargo.toml without refreshing uv.lock/Cargo.lock, so every
+# release tag ships stale locks — which breaks docs CI (`uv sync --locked`)
+# on the merge commit and trips `cargo publish`'s clean-tree gate in
+# publish.yml. This workflow runs `uv lock` plus a lock-writing cargo pass
+# on the release PR itself and pushes any resulting sync into the PR
+# branch, so the tag release-please cuts already carries fresh locks.
+#
+# Same-repo branch only (release-please--branches--main): pushing to a
+# fork's branch would fail, and release-please never opens forks here.
+
+name: release-lock-sync
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sync-locks:
+    if: startsWith(github.head_ref, 'release-please--branches--main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Refresh lockfiles to the release PR's versions
+        run: |
+          uv lock
+          # Any cargo pass that resolves writes the root-package version
+          # field into Cargo.lock; check is the cheapest such pass (no
+          # linking, so default features are fine here).
+          cargo check --all-targets
+      - name: Push the sync back into the release PR
+        run: |
+          if git diff --exit-code -- uv.lock Cargo.lock; then
+            echo "lockfiles already fresh, nothing to push"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock Cargo.lock
+          git commit -m "chore: sync lockfiles to the release versions"
+          git push origin HEAD:${{ github.head_ref }}
