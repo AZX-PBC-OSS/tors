@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.4.0...v0.4.1) (2026-09-08)
+
+
+### Documentation
+
+* under schema= the ""-nothing-recoverable sentinel is validated, not escaped ([69946f1](https://github.com/AZX-PBC-OSS/tors/commit/69946f19538fa198e597f382d20ec3025178df68))
+
 ## [0.4.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.3.1...v0.4.0) (2026-09-08)
 
 
