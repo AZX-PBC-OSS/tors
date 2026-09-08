@@ -1243,7 +1243,11 @@ search, no new dependency for the exact case. `fuzzy=True` compares `claim` agai
 overlapping same-length windows of `source` (stride `claim`'s length / 2) using the
 only diffing engine already in the crate (the `similar` Myers engine backing
 `diff_opcodes`), and reports whether the BEST window's difflib-style ratio (`2 *
-matched_chars / (len(claim) + len(window))`) reaches `threshold`.
+matched_chars / (len(claim) + len(window))`) reaches `threshold`. `fuzzy=True` is a
+superset of `fuzzy=False`: an exact-containment floor runs first, so a claim present
+verbatim in `source` is grounded before any windowing (independent of window alignment,
+and before `deadline_ms` applies — a verbatim substring never times out). The windowed
+ratio is consulted only when there is no exact match.
 
 Windowing, rather than one whole-string diff of `claim` against all of `source`, is
 DoS discipline: the realistic RAG-grounding shape is a short claim against a

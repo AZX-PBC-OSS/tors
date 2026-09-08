@@ -145,6 +145,25 @@ class TestFuzzy:
         if cleared_hi:
             assert cleared_lo
 
+    def test_a_verbatim_substring_is_grounded_at_every_offset(self) -> None:
+        """fuzzy=True is a superset of exact containment: a claim present
+        verbatim in source must be grounded wherever it sits. Before the
+        exact-containment floor, stride-L/2 windowing straddled the claim at
+        unaligned offsets and scored ~0.75 < the 0.85 default, wrongly
+        rejecting a literal substring."""
+        # ASCII plus a multi-byte claim: str::contains is UTF-8-boundary-safe
+        # and the floor runs before any char-window code, so a verbatim claim
+        # is grounded regardless of encoding or offset.
+        for claim in (
+            "the quick brown fox jumps over lazy dog",
+            "café über naïve résumé — 速い茶色の狐",
+        ):
+            for lead in range(41):
+                source = ("x" * lead) + claim + ("x" * 30)
+                assert claim in source  # verbatim-present
+                assert is_grounded(claim, source, fuzzy=True)
+                assert is_grounded(claim, source, fuzzy=True, threshold=1.0)
+
 
 class TestArgumentContract:
     @pytest.mark.parametrize("bad", [-0.1, 1.1], ids=["below-zero", "above-one"])
@@ -200,13 +219,28 @@ class TestDeadline:
         assert wall < 2.0, f"deadline-bounded call took {wall:.2f}s"
 
     def test_a_generous_deadline_never_expires(self) -> None:
+        # A NEAR-match, deliberately not a verbatim substring, so the scan
+        # still traverses the windowed path (the exact-containment floor would
+        # otherwise short-circuit before the deadline machinery is exercised).
         assert (
             is_grounded(
-                "the cat sat",
+                "the cet sat",
                 "the cat sat on the mat",
                 fuzzy=True,
                 threshold=0.5,
                 deadline_ms=60_000.0,
             )
+            is True
+        )
+
+    def test_a_verbatim_claim_is_grounded_before_the_deadline_applies(self) -> None:
+        # Complement of the zero-budget timeout test above (which uses a
+        # NON-substring claim): the exact-containment floor short-circuits
+        # before deadline setup, so a verbatim substring is grounded even under
+        # an effectively-zero budget — never TimeoutError.
+        claim = "x" * 2_000
+        source = ("y" * 200_000) + claim + ("y" * 200_000)
+        assert (
+            is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
             is True
         )

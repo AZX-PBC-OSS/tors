@@ -19,6 +19,13 @@ use crate::validate_deadline_ms;
 /// expiry, a positive-finite-or-`None` precondition validated before any
 /// work runs.
 ///
+/// `fuzzy=True` is a superset of `fuzzy=False`: an exact-containment floor
+/// (`source.contains(claim)`) runs first, so a claim present verbatim is
+/// grounded before any windowing — regardless of window alignment, and
+/// before `deadline_ms` is even set up (a verbatim substring never times
+/// out; `deadline_ms` bounds the windowed scan that runs only when there is
+/// no exact match). The floor is one linear memchr-accelerated pass.
+///
 /// GIL model: `fuzzy=False` is one `py.detach`'d `str::contains` call.
 /// `fuzzy=True` runs the whole windowed scan under `py.detach`; the
 /// `TimeoutError` (if any) is constructed after the GIL is reacquired, the
