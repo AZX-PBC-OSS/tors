@@ -804,3 +804,29 @@ class TestDiagnosticsVocabularyCompleteness:
                 '{"items": "[\\"a\\", \\"b\\"]"}', schema=unwrap_schema
             )[1]
         )
+
+
+class TestNothingRecoverableUnderSchema:
+    """Under ``schema=``, the ""-nothing-recoverable value is itself validated
+    against the schema instead of escaping as the sentinel return the
+    schema-free spelling documents: a non-string-typed schema turns "nothing
+    recoverable" into the same ``ValueError`` every other nonconformant value
+    raises, while a string-typed schema accepts it (an empty string is a valid
+    string). Consumers build degrade paths on the raise, so it is pinned."""
+
+    def test_nothing_recoverable_raises_under_a_typed_schema(self) -> None:
+        with pytest.raises(ValueError):
+            repair_json_loads("no JSON anywhere in this prose", schema=_COUNT_SCHEMA)
+
+    def test_empty_input_raises_under_a_typed_schema(self) -> None:
+        with pytest.raises(ValueError):
+            repair_json_loads("", schema=_COUNT_SCHEMA)
+
+    def test_object_schema_names_the_expected_type_in_the_error(self) -> None:
+        with pytest.raises(ValueError, match="object"):
+            repair_json_loads("plain prose, no braces at all", schema=_KEY_SCHEMA)
+
+    def test_string_schema_accepts_the_sentinel(self) -> None:
+        # A string-typed schema legitimately accepts "" — the raise is the
+        # typed-schema behavior, not an unconditional one.
+        assert repair_json_loads("no JSON anywhere", schema={"type": "string"}) == ""

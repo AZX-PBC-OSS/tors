@@ -805,7 +805,7 @@ def repair_json(
     skip_json_loads: bool = False,
     ensure_ascii: bool = True,
     strict: bool = False,
-    schema: dict[str, Any] | bool | None = None,
+    schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
 ) -> str: ...
@@ -840,7 +840,13 @@ repaired value is the empty string and `repair_json` returns the empty
 string — not `"\"\""` — upstream's convention for never returning a bare
 pair of quotes. The price is an ambiguity shared with upstream: a
 legitimately repaired top-level empty-string value renders identically.
-Check `result == ""` for "nothing recoverable".
+Check `result == ""` for "nothing recoverable". **Under `schema=` the sentinel
+does not escape as a return**: the empty-string value is itself validated against
+the schema, so a non-string-typed schema answers the same `ValueError` every other
+nonconformant value does (an object schema: `"" is not of type "object"`) —
+"nothing recoverable" becomes a raise, not a sentinel — while a string-typed
+schema accepts it, an empty string being a valid string. Pinned by
+`tests/test_json_repair_native.py`.
 
 **The fence pre-pass.** Before anything else, the whole input is tested
 against CommonMark's fenced-code-block grammar — the same single-block
@@ -984,7 +990,7 @@ def repair_json_loads(
     *,
     skip_json_loads: bool = False,
     strict: bool = False,
-    schema: dict[str, Any] | bool | None = None,
+    schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
@@ -998,7 +1004,10 @@ goes straight into use with no `json.loads` round trip. There is no
 `ensure_ascii` here because nothing is serialized. The empty-string
 sentinel carries over as a real `""` return — "nothing recoverable",
 ambiguous with a legitimately repaired top-level empty-string value, the
-same collapse upstream's `loads` has.
+same collapse upstream's `loads` has. Under `schema=` the sentinel is
+schema-validated instead: a non-string-typed schema turns "nothing
+recoverable" into the same `ValueError` every other nonconformant value
+raises — see `tors.repair_json`'s sentinel paragraph above.
 
 ```python
 tors.repair_json_loads("{'users': [{'name': 'Ada',}]}")
@@ -1013,7 +1022,7 @@ def repair_json_diagnostics(
     *,
     skip_json_loads: bool = False,
     strict: bool = False,
-    schema: dict[str, Any] | bool | None = None,
+    schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
 ) -> tuple[dict[str, Any] | list[Any] | str | int | float | bool | None, list[dict[str, Any]]]: ...
