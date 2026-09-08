@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.3.1...v0.4.0) (2026-09-08)
+
+
+### Features
+
+* port json_repair 0.63.4 — schema-guided LLM JSON repair, GIL-free ([626c589](https://github.com/AZX-PBC-OSS/tors/commit/626c589c15f1263e604a35902e07b3052d3f4971))
+* port json_repair 0.63.4 — schema-guided LLM JSON repair, GIL-free ([6d2ddcd](https://github.com/AZX-PBC-OSS/tors/commit/6d2ddcdb83ad76cd434d3b110bc1aa342a62e3f3))
+
 ## [0.3.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.3.0...v0.3.1) (2026-09-08)
 
 
