@@ -24,6 +24,7 @@ pub mod forms;
 pub mod fuzzy;
 pub mod grounded;
 pub mod html;
+pub mod json_repair;
 pub mod lemma_dict;
 pub mod merkle;
 pub mod normalize;

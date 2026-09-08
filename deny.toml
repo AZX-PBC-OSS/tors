@@ -34,12 +34,17 @@ allow = [
     #   Consortium publishes the UCD data under. The Rust ecosystem's
     #   unicode-rs crates adopted it for their generated tables.
     # - 0BSD: enum-iterator / enum-iterator-derive (rphonetic's phonetic-code
-    #   dependencies, for soundex/metaphone). The BSD Zero Clause License is
-    #   OSI-approved and public-domain-equivalent — strictly more permissive
-    #   than plain MIT (it drops even the attribution requirement).
+    # dependencies, for soundex/metaphone). The BSD Zero Clause License is
+    # OSI-approved and public-domain-equivalent — strictly more permissive
+    # than plain MIT (it drops even the attribution requirement).
+    # - MIT-0: borrow-or-share (a fluent-uri dependency, pulled in by the
+    # jsonschema crate's `referencing` $ref machinery). MIT No Attribution is
+    # plain MIT with the attribution obligation REMOVED — strictly more
+    # permissive than the MIT already allowed, the same family as 0BSD above.
     "Apache-2.0 WITH LLVM-exception",
     "Unicode-3.0",
     "0BSD",
+    "MIT-0",
 ]
 # The allowlist is policy, not a measurement of today's tree: BSD-2/3-Clause,
 # ISC, and Zlib are allowed for future dependencies before any of them is

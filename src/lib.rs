@@ -200,6 +200,17 @@
 //! `strsim` as the dev-side differential oracle) and single int/float
 //! returns. `replace_many_masked` is `replace_many`'s classes exactly (one
 //! GIL-held dict walk, the scan+splice under one detach, one string out).
+//!
+//! The JSON repair surface (`repair_json`/`repair_json_loads`/
+//! `repair_json_diagnostics`) runs the WHOLE repair detached — the strict
+//! fast path, the repair parser, the schema alignment, and the validator
+//! compile+check — so a malformed multi-megabyte model dump never holds
+//! the GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
+//! handles; each dict/list entry pays the standard str-in borrow class)
+//! and the return marshalling: the O(output) string for `repair_json`, the
+//! O(result) object-tree construction for the loads/diagnostics spellings
+//! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
+//! dicts for the diagnostics flavor.
 
 pub mod b64_impl;
 pub mod bm25_impl;
@@ -217,6 +228,8 @@ pub mod fuzzy_impl;
 pub mod grounded_impl;
 pub mod html_impl;
 pub mod html_table;
+pub mod json_repair;
+pub mod json_schema_impl;
 pub mod merkle_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
@@ -278,6 +291,7 @@ use py::forms::*;
 use py::fuzzy::*;
 use py::grounded::*;
 use py::html::*;
+use py::json_repair::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
 use py::normalize::*;
@@ -392,6 +406,9 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_code_blocks, m)?)?;
     m.add_function(wrap_pyfunction!(strip_code_fences, m)?)?;
     m.add_function(wrap_pyfunction!(dedent, m)?)?;
+    m.add_function(wrap_pyfunction!(repair_json, m)?)?;
+    m.add_function(wrap_pyfunction!(repair_json_loads, m)?)?;
+    m.add_function(wrap_pyfunction!(repair_json_diagnostics, m)?)?;
     m.add_function(wrap_pyfunction!(truncate_to_bounds, m)?)?;
     m.add_function(wrap_pyfunction!(truncate_ellipsis, m)?)?;
     m.add_function(wrap_pyfunction!(strip_controls, m)?)?;

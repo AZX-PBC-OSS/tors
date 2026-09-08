@@ -33,13 +33,19 @@ use crate::normalize_impl::is_py_whitespace;
 /// are PYTHON STR INDEX (codepoint) offsets of the block's raw span in the
 /// ORIGINAL text: the opening fence line's first character through the end
 /// of the closing fence line's line terminator (or end of input, for an
-/// unterminated fence).
+/// unterminated fence); `code_start`/`code_end` are the same-unit offsets of
+/// the RAW (undedented, terminator-preserving) content BETWEEN the fences —
+/// the span `code` was dedented from, exposed for callers that need the
+/// bytes verbatim (`json_repair_impl`'s fence pre-pass must NOT let the
+/// dedent rewrite JSON string content).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeBlock {
     pub language: Option<String>,
     pub code: String,
     pub start: usize,
     pub end: usize,
+    pub code_start: usize,
+    pub code_end: usize,
 }
 
 /// A physical line of the input, as both byte and char spans: `content` is
@@ -205,11 +211,25 @@ fn scan(text: &str) -> Vec<CodeBlock> {
             Some(close_idx) => physical[close_idx].char_line_end,
             None => text.chars().count(),
         };
+        // The raw content span: from the first byte after the opening fence
+        // line's terminator (or the degenerate no-content-lines position,
+        // which `physical.get(i + 1)` handles by falling back to the opener
+        // line's own end) to the start of the closing fence line, or to the
+        // end of input for an unterminated fence.
+        let code_start = physical
+            .get(i + 1)
+            .map_or(physical[i].char_line_end, |line| line.char_start);
+        let code_end = match closing {
+            Some(close_idx) => physical[close_idx].char_start,
+            None => text.chars().count(),
+        };
         blocks.push(CodeBlock {
             language: open.language,
             code,
             start,
             end,
+            code_start,
+            code_end,
         });
         i = match closing {
             Some(close_idx) => close_idx + 1,
@@ -253,6 +273,41 @@ pub fn strip_code_fences(text: &str) -> Cow<'_, str> {
         return Cow::Owned(std::mem::take(&mut block.code));
     }
     Cow::Borrowed(text)
+}
+
+/// `tors.repair_json`'s fence pre-pass core: the single-fence unwrap in its
+/// RAW form. Same single-block-spans-the-whole-trimmed-input gate as
+/// [`strip_code_fences`], but the content comes back VERBATIM — undedented,
+/// CRLF-preserving — because the JSON repair that consumes it must see the
+/// bytes the model actually emitted: the fence dedent strips up to three
+/// leading spaces per line, and inside a JSON *string value* those spaces
+/// are payload, not indentation. `None` for every non-single-block input
+/// (prose around the fence, multiple blocks, no fence). The CommonMark
+/// grammar (backtick or tilde fences, 3+ long, longer closers, tolerated
+/// fence indent) is the same scan `extract_code_blocks` runs — json_repair
+/// itself reaches the embedded JSON by skipping the wrapper characters, which
+/// lands on the same result for container payloads; tors additionally runs
+/// its strict fast path over the unwrapped text and recovers fenced
+/// top-level scalars, both documented on the repair surface.
+pub fn unwrap_code_fence(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let blocks = scan(trimmed);
+    let total_chars = trimmed.chars().count();
+    if let [block] = &blocks[..]
+        && block.start == 0
+        && block.end == total_chars
+    {
+        let to_byte = |char_idx: usize| -> usize {
+            trimmed
+                .char_indices()
+                .nth(char_idx)
+                .map_or(trimmed.len(), |(byte, _)| byte)
+        };
+        let start = to_byte(block.code_start);
+        let end = to_byte(block.code_end);
+        return trimmed.get(start..end);
+    }
+    None
 }
 
 /// `tors.dedent`'s core: `textwrap.dedent`'s CPython 3.14+ algorithm (see
@@ -585,5 +640,82 @@ mod tests {
         // and without corrupting the surrounding scan.
         assert!(got[0].language.is_some());
         assert_eq!(got[0].code, "code\n");
+    }
+
+    #[test]
+    fn unwrap_returns_raw_undedented_content() {
+        // unwrap_code_fence trims the whole input first, so the single
+        // block's opening fence line always sits at indent 0 and the raw
+        // content keeps every content line's own leading whitespace
+        // verbatim (which the JSON consumer tolerates as inter-token ws).
+        // The dedent-vs-raw DISTINCTION is exercised mid-document below.
+        let text = "  ```json\n  {\n    \"a\": 1\n  }\n  ```";
+        let raw = unwrap_code_fence(text).unwrap();
+        assert_eq!(raw, "  {\n    \"a\": 1\n  }\n");
+        // Mid-document (untrimmed): the fence carries a 2-space indent that
+        // `code` strips (up to the fence indent, per CommonMark) while the
+        // raw span keeps it.
+        let doc = "x\n  ```json\n  {\n  ```";
+        let blocks = extract_code_blocks(doc, None);
+        assert_eq!(blocks[0].code, "{\n");
+        let to_byte = |ci: usize| doc.char_indices().nth(ci).map_or(doc.len(), |(b, _)| b);
+        assert_eq!(
+            &doc[to_byte(blocks[0].code_start)..to_byte(blocks[0].code_end)],
+            "  {\n"
+        );
+    }
+
+    #[test]
+    fn unwrap_handles_tilde_and_longer_closer_fences() {
+        assert_eq!(unwrap_code_fence("~~~json\n[1]\n~~~"), Some("[1]\n"));
+        // A 4-tick opener is not closed by a 3-tick line: that line is
+        // CONTENT, and the block runs to EOF (which still spans the whole
+        // input, so the unwrap applies with the stray fence verbatim —
+        // here with no trailing newline, since the input has none).
+        assert_eq!(
+            unwrap_code_fence("````json\n{\"k\": \"v\"}\n```"),
+            Some("{\"k\": \"v\"}\n```")
+        );
+    }
+
+    #[test]
+    fn unwrap_preserves_crlf() {
+        assert_eq!(
+            unwrap_code_fence("```json\r\n{\"a\": 1}\r\n```\r\n"),
+            Some("{\"a\": 1}\r\n")
+        );
+    }
+
+    #[test]
+    fn unwrap_is_none_outside_the_single_block_case() {
+        assert_eq!(unwrap_code_fence("no fences"), None);
+        assert_eq!(unwrap_code_fence("prose\n```json\n{}\n```\ntail"), None);
+        assert_eq!(
+            unwrap_code_fence("```json\n{}\n```\n```json\n[]\n```"),
+            None
+        );
+        assert_eq!(unwrap_code_fence("```"), Some(""));
+    }
+
+    #[test]
+    fn code_span_is_consistent_with_the_block_span() {
+        // Invariant pins for the new raw-span fields: content span inside
+        // block span, and the raw slice round-trips through the same bytes
+        // the dedent started from.
+        for text in [
+            "```json\n{\"a\": 1}\n```",
+            "```\nplain\n```",
+            "```rust\nfn main() {}\n",
+            "  ~~~\n  x\n  ~~~",
+            "```",
+        ] {
+            let trimmed = text.trim();
+            let blocks = scan(trimmed);
+            for block in &blocks {
+                assert!(block.code_start <= block.code_end);
+                assert!(block.start <= block.code_start);
+                assert!(block.code_end <= block.end);
+            }
+        }
     }
 }

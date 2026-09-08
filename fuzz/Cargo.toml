@@ -132,3 +132,10 @@ path = "fuzz_targets/controls.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "json_repair"
+path = "fuzz_targets/json_repair.rs"
+test = false
+doc = false
+bench = false

@@ -796,6 +796,352 @@ tors.dedent("  a\n  b\n")
 # "a\nb\n"
 ```
 
+## `tors.repair_json`
+
+```python
+def repair_json(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    ensure_ascii: bool = True,
+    strict: bool = False,
+    schema: dict[str, Any] | bool | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> str: ...
+```
+
+Repairs malformed JSON from LLMs, APIs, logs, and user input, returning the
+repaired document as a JSON string: a Rust port of the Python library
+json_repair (Stefano Baccianella, MIT,
+[github.com/mangiucugna/json_repair](https://github.com/mangiucugna/json_repair)),
+with parity pinned to json-repair==0.63.4 — the upstream behavior corpus
+is ported into `tests/test_json_repair_{core,schema,parity}.py`, and a
+differential suite runs tors and json_repair over the same inputs, so the
+pin is proven, not asserted. The repair parser handles the failure modes model output actually
+exhibits: missing and trailing commas, unquoted keys and values,
+single-quoted and curly-quoted strings, truncated containers, comments,
+stray prose around the payload, Python-isms (`None`/`True`/`False`, tuple
+literals), doubled quotes, and broken escapes — in the default mode it
+repairs instead of raising, whatever the input looks like.
+
+**The fast path.** Unless `skip_json_loads`, a strict `json.loads`-parity
+parse of the (fence-unwrapped, below) input runs first, and valid JSON
+short-circuits the repair parser. The result is re-serialized through a
+`json.dumps`-parity serializer either way, so valid-but-noncanonical input
+normalizes — `{ "a" : 1 }` comes back as `{"a": 1}` — exactly like
+upstream, which also re-dumps. Under a `schema` the probe does not
+short-circuit: valid JSON is validated and repaired if noncompliant before
+any fallback to the schema-guided parser, so a schema is enforced on clean
+input too.
+
+**The empty-string sentinel.** When nothing recoverable is found, the
+repaired value is the empty string and `repair_json` returns the empty
+string — not `"\"\""` — upstream's convention for never returning a bare
+pair of quotes. The price is an ambiguity shared with upstream: a
+legitimately repaired top-level empty-string value renders identically.
+Check `result == ""` for "nothing recoverable".
+
+**The fence pre-pass.** Before anything else, the whole input is tested
+against CommonMark's fenced-code-block grammar — the same single-block
+unwrapping `tors.strip_code_fences` documents. If the trimmed input is
+EXACTLY one fenced block, its content is unwrapped and repaired: tilde
+fences, closers longer than their openers, and indented fences are handled
+by the grammar rather than by the repair parser's garbage-skip reaching the
+same answer by accident, and fenced-but-valid JSON takes the fast path
+instead of the repair parser. The pre-pass also recovers fenced top-level
+scalars (a fence wrapping just `"hi"` yields `"hi"`) where upstream returns
+`""` — its one behavior change beyond parity, listed with the divergences
+below. A response with prose around a fence, or multiple blocks, is not the
+single-block case; compose with `tors.extract_code_blocks` for those:
+
+```python
+tors.repair_json("{ 'name': 'Ada', 'role': 'admin', }")
+# '{"name": "Ada", "role": "admin"}'
+
+tors.repair_json('```json\n{"ok": true}\n```')
+# '{"ok": true}'
+
+# a multi-block response: pull the json blocks, repair each
+blocks = tors.extract_code_blocks(response, lang="json")
+repaired = [tors.repair_json(code) for _, code, _, _ in blocks]
+```
+
+**`skip_json_loads`** skips the upfront strict parse only, forcing the
+repair parser even on valid JSON — upstream's knob for callers who already
+know the input is broken. It does NOT skip the parser-internal suffix
+probe: after a prose prefix, once a top-level container starts, the parser
+still tries a targeted strict decode of the value from that point — that
+probe is part of the repair parser proper and stays on, exactly as
+upstream behaves.
+
+**`ensure_ascii`** is the one `json.dumps` serialization knob carried over:
+`True` (the default) escapes every non-ASCII codepoint as `\uXXXX` (astral
+characters as surrogate pairs), `False` emits them verbatim. Upstream's
+other pass-through kwargs (`indent`, `sort_keys`, ...) are not ported.
+
+**`strict`** flips the documented leniencies into `ValueError`s at the
+first structural ambiguity instead of repairing past them: duplicate keys,
+empty keys, a missing `:` after a key, an empty parsed value, an object
+that parses empty but still carries characters, multiple top-level
+elements, doubled quotes. The mode for input that SHOULD be valid and whose
+first real defect you want named rather than patched. `strict=True`
+together with `schema` raises
+`ValueError("schema and strict cannot be used together.")`.
+
+**`schema`** switches on schema-guided repair: the parsed value is aligned
+to the schema — scalar coercions (`"4"` → 4, `"yes"` → `true`), fills for
+missing values, defaults inserted for absent properties, extra properties
+dropped where `additionalProperties` forbids them, union branches tried
+until one validates — then validated in full, with failures raising
+`ValueError` at the offending path (`"Expected string at $.name."`).
+Accepts a JSON Schema dict, a boolean schema, or a pydantic v2 model (class
+or instance): the model's `model_json_schema()` output is used directly,
+with field `default`s and `default_factory`s injected into it (factory
+first) and Enum-member defaults carried as their `.value` — so the
+model → schema → LLM → repair → `Model.model_validate` agent loop needs no
+manual schema step. Mutually exclusive with `strict` (above). See
+`tors.repair_json_diagnostics` for the action-by-action log of everything
+schema mode does.
+
+**`salvage`** is the best-effort spelling of schema mode (upstream's
+`schema_repair_mode="salvage"`, spelled as a bool): top-level fragments
+that fail the schema are skipped until one validates, invalid array items
+and extra properties are dropped rather than raised, and missing `required`
+properties are filled from their subschema's `default`/`const`/`enum[0]`.
+It requires a schema: `salvage=True` without one raises
+`ValueError("salvage=True requires schema.")`.
+
+Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
+`schema` that is not a dict, bool, model, or `None` raises
+`ValueError("schema must be a JSON Schema dict, boolean schema, or pydantic
+v2 model.")`; a bad `locale` (below) raises a `ValueError` naming it; a
+lone surrogate in `s` raises `UnicodeEncodeError` at the argument boundary,
+the same str-in convention every function here documents.
+
+**GIL.** One detached native pass covers the fence pre-pass, the repair
+parse, the schema alignment, and the validator compile. The GIL-held
+residue is the caller-supplied `schema` dict walk (converted into the
+internal value tree before the pass starts) and the return marshalling
+after it: one string for this spelling; for `tors.repair_json_loads` and
+`tors.repair_json_diagnostics`, the construction of the Python object tree
+and the diagnostics list, O(result) — the same disclosed marshalling class
+the list-returning search functions document (see `tors.find_patterns_iter`'s
+O(matches) note and the README's Performance section).
+
+**Divergences from upstream json_repair** — the complete list; the
+differential suite pins everything else to json-repair==0.63.4:
+
+- **Not ported**: `stream_stable`, the text repair log (superseded by
+  `tors.repair_json_diagnostics`), the file and CLI flavors
+  (`json_fd`/`load`/`from_file` and the CLI module), `json.dumps`
+  pass-through kwargs beyond `ensure_ascii`, and the `schema_repair_mode`
+  string (the `salvage=` bool instead).
+- **Lone surrogates**: a `\uXXXX` escape that decodes to an unpaired
+  surrogate becomes U+FFFD — a Rust string cannot hold a lone surrogate,
+  and pyo3 could not return one anyway. Input text containing literal lone
+  surrogates never reaches the parser: it raises `UnicodeEncodeError` at
+  the argument boundary, the same str-in convention every function here
+  documents.
+- **Non-ASCII digits**: Unicode Nd digits beyond 0-9 (Arabic-Indic and
+  friends) do not enter the number path — upstream's `str.isdigit` is
+  Unicode-wide, tors's check is ASCII-only. Pure runs (like `"١٢٣"`) fail
+  to repair on both sides; a non-ASCII digit LEADING ASCII digits
+  (`"²5"`) makes upstream abandon the value where tors skips the mark and
+  parses the digits — the one mixed-run shape where the classes differ.
+- **Fenced top-level scalars** are recovered where upstream returns `""`
+  (the fence pre-pass above).
+- **The validation boundary**: schema validation runs on the Rust
+  `jsonschema` crate, so failure-message wording is that crate's, not
+  Python `jsonschema`'s; integers beyond u64 validate lossily as f64;
+  non-finite numbers under a schema raise `ValueError` where Python
+  tolerates `NaN`; union branches are validated wrapped so `#/...` refs
+  keep root scope (a pathological subschema-local `$defs` shadowing root
+  `$defs` diverges). `format` is unasserted on BOTH sides — upstream passes
+  no `format_checker`, and tors matches it.
+- **Deep nesting**: `ValueError("Input nesting exceeds the supported parser
+  recursion depth.")` at 200 nested containers, where upstream raises an
+  uncaught `RecursionError` at roughly its own recursion limit — the same
+  failure normalized into the error catalog at a lower, pinned threshold.
+- **On by default, tors-native**: key-typo remap, enum "Did you mean ..."
+  suffixes, date/uuid normalization, numeric extraction tiers, and the
+  diagnostics output are extensions upstream does not have — see
+  `tors.repair_json_diagnostics`. One consequence: on the strict fast path
+  tors normalizes already-valid values (date formats, fold-matching key
+  spellings, directly-declared `properties` and `allOf` members) where
+  upstream's valid-JSON shortcut returns them untouched — matching what
+  upstream's own repair lane does with `skip_json_loads=True`, so tors is
+  self-consistent across its two lanes for everything except
+  `oneOf`/`anyOf`-wrapped guidance, where the fast path deliberately does
+  not guess which branch applies (upstream's fast path has the same
+  reach).
+
+## `tors.repair_json_loads`
+
+```python
+def repair_json_loads(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    schema: dict[str, Any] | bool | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
+```
+
+The `json.loads` drop-in spelling of `tors.repair_json`: the same repair
+pipeline and the same knobs (`skip_json_loads`, `strict`, `schema`,
+`salvage` — see `tors.repair_json`'s docs above), with the decoded object
+returned directly instead of a re-serialized string, so a repaired document
+goes straight into use with no `json.loads` round trip. There is no
+`ensure_ascii` here because nothing is serialized. The empty-string
+sentinel carries over as a real `""` return — "nothing recoverable",
+ambiguous with a legitimately repaired top-level empty-string value, the
+same collapse upstream's `loads` has.
+
+```python
+tors.repair_json_loads("{'users': [{'name': 'Ada',}]}")
+# {'users': [{'name': 'Ada'}]}
+```
+
+## `tors.repair_json_diagnostics`
+
+```python
+def repair_json_diagnostics(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    schema: dict[str, Any] | bool | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+) -> tuple[dict[str, Any] | list[Any] | str | int | float | bool | None, list[dict[str, Any]]]: ...
+```
+
+The `(value, diagnostics)` spelling: `tors.repair_json_loads`'s exact
+result paired with one record per repair action taken. Upstream narrates
+these actions to its `logging` facility; tors does not port that text log —
+this function is the replacement, the same narration as data. Each record
+carries `action` (from the closed vocabulary below), `path` (json_repair's
+path spelling: `"$"`, `"$.key"`, `"$.items[3]"`), `detail` (one human
+sentence), and, where the action has them, `from`/`to` (the value before
+and after) and `suggestion`. The vocabulary:
+
+| action | when it fires |
+|---|---|
+| `coerce` | a scalar is converted to the schema's type: `"4"` → 4, `"4.0"` → 4, `4` → `"4"`, `"1.5"` → 1.5, `"yes"`/`"on"`/`"1"` → `true` and `"no"`/`"off"`/`"0"` → `false`, a number to its truthiness |
+| `fill` | a missing value (an object value slot that runs straight into `,` or `}`, e.g. `{"key":}`) is filled from the schema: `const`, else `enum[0]`, else `default`, else the type's empty value (`""`, `0`, `false`, `[]`, `{}`, `null`) |
+| `insert_default` | a property absent from the object whose subschema declares `default` (and is not `required`) gets that default |
+| `remap_key` | tors-native: a key matching no property is remapped to the closest property name — thresholds below |
+| `suggest` | tors-native, report-only: a near-miss that was NOT auto-corrected — a key, an enum member, an ambiguous date, or a disclosed numeric-format assumption, per the four features below |
+| `drop_property` | an extra property not covered by the schema is dropped (`additionalProperties` does not allow it) |
+| `drop_item` | an array item is dropped: invalid under its item schema while salvaging, or beyond tuple-form `items` not covered by `additionalItems` |
+| `unwrap_string` | a string value holding a JSON document is parsed and unwrapped to the object/array the schema expects (under salvage, repaired first if merely malformed) |
+| `wrap_array` | a non-array value is wrapped in a single-element array to match an array schema |
+| `fill_required` | salvage: a `required` property missing from the object is filled from its subschema's `default`/`const`/`enum[0]` |
+| `format_date` | tors-native: a date/date-time string is normalized to the RFC 3339 form — below |
+| `skip_fragment` | salvage: a top-level fragment that does not match the schema is skipped while hunting for one that does |
+| `map_array_to_object` | salvage: a list with exactly the schema's property count is mapped onto those property names, in order |
+| `unwrap_root_array` | salvage: a single-item root array `[{...}]` is unwrapped to `{...}` |
+
+**Scope of the log (v1).** Parser-level repair narration — the syntax-layer
+fixes `repair_json` performs without a schema — is not recorded yet, so a
+schema-free call returns an empty list; the log covers schema-layer actions
+and the tors-native suggestions below.
+
+**Key-normalization ladder (deterministic tier).** A key that differs
+from a property only by case or separator style (`first-name`,
+`First Name`, `FIRST_NAME` → `first_name`) remaps with confidence 1.0 —
+the match is exact after folding, not a guess — so it fires even on
+permissive schemas and on the valid-JSON fast path (the un-remapped shape
+strands real data on a dead key while the property takes its default).
+One guard keeps it safe: the rename is kept only when the value can live
+under the target property (a speculative repair through it succeeds), so
+an incompatible value keeps its original, already-valid key instead of
+turning valid input into a coercion failure. This tier also reaches
+`allOf` members (pydantic's inheritance shape); `oneOf`/`anyOf` stay
+unreached on the fast path.
+
+**Key-typo remap.** When an object key matches no `properties` entry and no
+`patternProperties` pattern, tors scores it against every property name
+with `tors.jaro_winkler` and remaps it (`from` the old key, `to` the new)
+only when the evidence is strong AND the alternative is loss or failure:
+the best score is >= 0.75, it is unique (the second-best more than 0.05
+lower), the target property is absent from the object, and either
+`additionalProperties` is false (the key would otherwise be dropped) or the
+target is in `required` (validation would otherwise fail). An exact
+case-insensitive match scores a perfect 1.0. Below the remap bar, a best
+score >= 0.60 still emits a report-only `suggest` diagnostic and falls
+through to upstream semantics: no remap, no drop, the key keeps its
+spelling.
+
+**Enum suggestions.** When a value fails an `enum` check (never `const`),
+the `ValueError` gains " Did you mean '...'?" naming the closest STRING
+enum member under the same jaro-winkler >= 0.60 threshold, plus a
+`suggest` diagnostic. Enum values are never auto-remapped: a near-miss is
+reported, not guessed.
+
+**Date, time, and uuid normalization.** For string values whose subschema
+declares `format: "date"`, `"date-time"`, `"time"`, or `"uuid"` (directly
+or through an `allOf` member), accepted forms normalize: ISO dates
+(`YYYY-MM-DD`, two-digit padded) and slash dates (`YYYY/MM/DD`,
+padding-tolerant); date-times `<date>[T ]HH:MM[:SS[.frac]]` on either date
+spelling; month-name forms (`March 15, 2024`, `15 March 2024`,
+`15 Mar, 2024`, case-insensitive). Dates come out `YYYY-MM-DD`;
+date-times come out `YYYY-MM-DDTHH:MM:SS[.frac]` — seconds always
+emitted, the fractional part trimmed to its shortest exact form — and an
+input that carried an offset (Z or ±HH:MM/±HHMM) normalizes to its UTC
+INSTANT with a `Z` rendering (`2024-03-15T14:30:00+0530` →
+`2024-03-15T09:00:00Z`); a missing offset stays missing. `format: "time"`
+gains seconds (`14:30` → `14:30:00`); `format: "uuid"` canonicalizes to
+lowercase when the shape is a UUID (non-UUID strings pass through for
+validation to judge). Numeric `X/Y/YYYY` (or `YYYY/X/Y`) forms coerce ONLY
+when a component over 12 disambiguates month from day; when both
+candidates are 12 or under (`03/04/2024`) the date is genuinely ambiguous
+and gets a `suggest` diagnostic instead of a guess. Invalid calendar dates
+(month lengths, leap years) are left for validation. `format` is not
+otherwise enforced — upstream passes no `format_checker`, and tors matches
+it; this normalization is the one place `format` is consulted at all.
+
+**Numeric coercion ladder and `locale`.** String values under an
+`integer`/`number` property climb a four-tier ladder: (1) the whole
+trimmed string parses; (2) the string minus unambiguous noise (underscores,
+fullwidth and Arabic-Indic script digits, and — with a known locale — that
+locale's own separators) parses; (3) exactly one number token in the prose
+extracts (`"USD 50"` → 50, `"$1,234.56"` → 1234.56, `-"50"` → -50), with
+percent suffixes read by the declared type (`"50%"` → 0.5 on `number`
+fields, the fraction; → 50 on `integer` fields, the percent count); (4)
+Auto mode's separator-ambiguity resolution, below. A dropped decimal
+marker never extracts (`.5` on an integer field refuses, never 5), and
+Python's unbounded integer semantics hold at any magnitude —
+`"12345678901234567890123"` coerces exactly, never a saturating cast.
+
+`locale=` tells tors which separator convention the model uses: a BCP 47
+tag string (`"de-DE"`, case-insensitive, `-` or `_`; region variants like
+`de-CH` carry their CLDR separators; Lakh-style grouping locales such as
+`en-IN` are refused) or a dict `{"decimal": ..., "grouping": ...}` of
+one-character separators for conventions the table does not carry. With a
+known locale every form is deterministic: `"1,234"` reads 1.234 in German
+and 1234 in English, by data rather than by guess. The default (`locale=None`,
+Auto) assumes en-US for the separator-ambiguous shapes — but never
+silently: both readings are extracted and filtered by the declared type
+and the property schema, a single surviving reading is the deterministic
+answer (silent), and when both survive the en-US reading wins WITH a
+`suggest` diagnostic naming the discarded reading's `locale=` override
+(`"1,234"` on a number field → 1234 plus `locale='de-DE'`). A single
+separated number whose readings all fail the declared type refuses with
+the retry-able hint (`pass locale='en-US' or 'de-DE' ...`); prose without
+a single number gets the plain upstream refusal.
+
+```python
+value, diags = tors.repair_json_diagnostics(
+    '{"count": "4"}',
+    schema={"type": "object", "properties": {"count": {"type": "integer"}}},
+)
+# ({'count': 4}, [{'action': 'coerce', 'path': '$.count', ...}])
+```
+
 ## `tors.truncate_to_bounds`
 
 ```python
