@@ -129,9 +129,13 @@ str corpora rendered to UTF-8 bytes):
 - ``tors.b64_encode_bytes`` via ``asyncio.to_thread``: the residue is the marshalling
   of the 4/3x-sized ASCII output: 12 MiB worst gaps 10.1-11.2ms against 5-9ms walls
   (wall under the ping floor: the ratio there is the sub-ping artifact, hence a ceiling-only
-  cell); 32 MiB 27.5-29.3ms of 48-50ms (0.57-0.58) against the b64-specific 0.80 ratio
-  budget; 48 MiB 37.0-48.8ms of 68-80ms (0.54-0.61) and 96 MiB 67.2-78.3ms of
-  139-161ms (0.46-0.50), measured and unasserted (ceiling margin ~1.3x under load).
+  cell); 32 MiB 27.5-29.3ms of 48-50ms (0.57-0.58) on the dev box — ceiling-only
+  since the 0.2.1 recalibration, because on a fast quiet box the walls collapse to
+  12-19ms where the heartbeat's own wobble decides the ratio (same
+  floor-resolution failure the diff cell recalibrated for); 96 MiB is the
+  regression-detecting ratio cell at the b64-specific 0.80 budget (0.46-0.50 dev,
+  0.23-0.33 fast box: ~1.6x margin both boxes, detach shows ~1.0). 48 MiB
+  measured and unasserted: 37.0-48.8ms of 68-80ms (0.54-0.61).
   The b64 budget derivation: 0.80 is ~1.3x above the worst measured ratio (0.61) and
   ~20% below the ~1.0 a GIL-held pass shows in every sample; the shared 0.30 is
   structurally unattainable for b64 because the fast encode makes the marshalling the
@@ -143,18 +147,22 @@ str corpora rendered to UTF-8 bytes):
   records the structural reason and asserts the sizes where the budgets do
   discriminate.
 
-diff_opcodes cells (the 12 MiB near-identical and shuffled pairs from
+diff_opcodes cells (the 32 MiB near-identical and 12 MiB shuffled pairs from
 ``reference.diff_pair_near_identical`` / ``reference.diff_pair_shuffled``;
 measured on the dev box, ambient load 5.3-6.6, 3 samples per cell):
 
-- Near-identical (the six scattered line edits -> 235 opcodes): worst gaps
-  10.5-11.2ms of 76-88ms walls (ratio 0.12-0.14): the ping floor plus the two
-  zero-copy ASCII argument borrows and a ~0.05ms 235-tuple marshalling; inside
-  both SHARED budgets with ~2x ratio margin. The native diff over a
-  near-identical corpus is fast enough that the ping floor dominates the
-  ratio; if walls ever collapse toward the ping floor on a quiet box, this
-  cell follows the b64 12 MiB ceiling-only recalibration precedent rather
-  than pretending the 0.30 ratio is meaningful there.
+- Near-identical (scattered line edits -> dozens of opcodes): at 12 MiB,
+  worst gaps 10.5-11.2ms of 76-88ms walls (ratio 0.12-0.14): the ping floor
+  plus the two zero-copy ASCII argument borrows and a ~0.05ms opcode-tuple
+  marshalling; inside both SHARED budgets with ~2x ratio margin. The pair
+  is 32 MiB, not 12, deliberately: on a fast quiet box the 12 MiB walls
+  (~30ms) sit inside the heartbeat floor's own run-to-run wobble (5-11ms
+  gaps: ratio 0.18 one run, 0.35 the next, same budget, no code change —
+  the ratio stops resolving and the cell flakes). At 32 MiB the walls
+  (~100ms on that box) restore ~5x margin (measured 0.06) while a detach
+  regression still holds the whole wall at ~1.0 on every box; ceiling-only
+  was rejected because a held 30ms wall on a fast box sits under the 100ms
+  ceiling, which would blind the cell exactly where it is weakest.
 - Shuffled (103,421 opcodes; the O(ops) marshalling band made visible, the
   ``word_bounds`` list-shape class): worst gaps 20.4-26.3ms of 1554-1626ms
   walls (0.013-0.017). The marshalling itself is the delta over the
@@ -242,8 +250,10 @@ box, ambient load 2.0, 5 samples per cell, corpora from
   floor, so the gap/wall ratio (4.2-6.4) is the suite's documented
   sub-ping artifact and the cell asserts the 100ms ceiling only (the b64
   12 MiB / utf8_is_valid / find_patterns-sparse precedent, ~8x margin).
-  The line-level spelling is ~30x cheaper in wall than its char-level
-  twin on the same pair (76-88ms, the cell) because the diff runs
+  The line-level spelling is ~30x cheaper in wall than the char-level
+  spelling on the same 12 MiB pair (76-88ms on the dev box, when the
+  char-level cell still measured that size before its 32 MiB
+  recalibration above) because the diff runs
   over lines, not characters; a limitation in the sparse-search
   cell's shape: a ~2.5ms diff held or released is invisible under the floor
   either way, so this cell pins that the line-split + Myers pass leaves the
@@ -537,30 +547,48 @@ def test_finalize_utf8_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 
 @pytest.mark.parametrize(
     "size_bytes, ratio_budget",
-    [(12 * _MIB, None), (32 * _MIB, _B64_RATIO_BUDGET)],
-    ids=["12MiB-ceiling-only", "32MiB-both-budgets"],
+    [(12 * _MIB, None), (32 * _MIB, None), (96 * _MIB, _B64_RATIO_BUDGET)],
+    ids=["12MiB-ceiling-only", "32MiB-ceiling-only", "96MiB-ratio"],
 )
 def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int, ratio_budget: float | None
 ) -> None:
-    """The b64 claim, in two cells with different jobs. The GIL-held residue
+    """The b64 claim, in three cells with different jobs. The GIL-held residue
     is the marshalling of the 4/3x-sized ASCII output, structurally a LARGER
     fraction of the wall than finalize's residue, because the encode itself is so
-    fast. Measured (ambient load 4.3-5.6, 5 samples per cell, prose bytes):
+    fast. Measured on the dev box (ambient load 4.3-5.6, 5 samples per cell,
+    prose bytes):
 
     - 12 MiB: worst gaps 10.1-11.2ms (the ping floor plus ~1ms of marshalling a
       16 MiB output) against walls of only 5-9ms, and the wall sits UNDER the 10ms
       ping floor, so the gap/wall ratio (1.0-2.3) is the artifact this suite
       already documents for sub-ping walls, not evidence of blocking; the cell
       asserts the 100ms ceiling (>=9x margin) and records the band.
-    - 32 MiB: worst gaps 27.5-29.3ms of 48-50ms walls (ratio 0.57-0.58): the
-      43 MiB output's marshalling band at ~2.4GB/s under this load. This is the
-      regression-detecting cell: the 0.80 b64 ratio budget holds with ~1.4x
-      margin, while a detach regression (GIL-held encode) shows ratio ~1.0 in
-      every sample and fails it; the ceiling holds with ~3.4x margin.
-    - Larger sizes, measured and unasserted: 48 MiB 37.0-48.8ms of
-      68-80ms (0.54-0.61); 96 MiB 67.2-78.3ms of 139-161ms (0.46-0.50); the
-      ceiling margin shrinks to ~1.3x under load, below this suite's tolerance.
+    - 32 MiB: worst gaps 27.5-29.3ms of 48-50ms walls (ratio 0.57-0.58) on the
+      dev box: the 43 MiB output's marshalling band at ~2.4GB/s under load.
+      Ceiling-only since the 0.2.1 recalibration: on a fast quiet box the
+      walls collapse to 12-19ms — barely above the 10ms ping floor — where
+      the heartbeat's own 5-11ms run-to-run wobble decides the ratio (whole
+      samples at ~1.0 when no tick lands inside the marshal window, ~0.4
+      when one does: flaky with no code change either way). The ratio at
+      this size no longer resolves, the same floor-resolution failure the
+      diff near-identical cell recalibrated for; the cell keeps the 100ms
+      ceiling (a several-fold marshalling blowout still trips it) and the
+      detach-detection job moves to the 96 MiB cell, whose walls dominate
+      the floor on every box.
+    - 96 MiB: worst gaps 67.2-78.3ms of 139-161ms walls (ratio 0.46-0.50) on
+      the dev box; 9.4-15.6ms of 40-52ms (0.23-0.33) on the fast box. This
+      is the regression-detecting cell: the 0.80 b64 ratio budget holds with
+      ~1.6x margin on both boxes, while a detach regression (GIL-held
+      encode, one C call holding encode+marshalling together with no
+      bytecode boundary) shows ratio ~1.0 in every sample and fails it; the
+      ceiling holds with margin to spare on both boxes.
+    - The b64 budget derivation: 0.80 is ~1.3x above the worst measured ratio
+      and ~20% below the ~1.0 a GIL-held pass shows in every sample; the
+      shared 0.30 is structurally unattainable for b64 because the fast
+      encode makes the marshalling the dominant share of the wall
+      (gap/wall -> marshal/(encode+marshal) ~ 0.6-0.75 as size grows,
+      measured).
     - The red side, same placement: ``base64.b64encode(...).decode("ascii")``
       holds the GIL for the encode: measured 122.7-127.6ms of 188-199ms walls
       at 96 MiB, reproducing the ~150ms GIL-held b64encode observation at
@@ -625,14 +653,14 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
     between encode and ``decode("ascii")`` and the worst gap is the encode
     alone, under both budgets at those sizes. A tors detach regression is
     ONE C call (encode and marshalling held together, no bytecode
-    boundary), which pins the whole wall: the 32 MiB tors cell's measured
-    band is 0.57-0.58 against its 0.80 budget, and a one-call hold of such
-    a wall shows ratio ~1.0, the shape the single-C-call reds above
-    demonstrate directly. The b64 budget's discriminating power for tors's
-    own shape is real, but it rests on the one-call structure, not on the
-    stdlib red side's two-call shape at small sizes; recorded here so the
-    next reader does not mistake the 12/32 MiB b64 red sides for
-    regression-proof."""
+    boundary), which pins the whole wall: the 96 MiB tors cell's measured
+    band is 0.46-0.50 (dev box) and 0.23-0.33 (fast box) against its 0.80
+    budget, and a one-call hold of such a wall shows ratio ~1.0, the shape
+    the single-C-call reds above demonstrate directly. The b64 budget's
+    discriminating power for tors's own shape is real, but it rests on the
+    one-call structure, not on the stdlib red side's two-call shape at
+    small sizes; recorded here so the next reader does not mistake the
+    12/32 MiB b64 red sides for regression-proof."""
     corpus = corpus_utf8("prose", size_bytes) if cell == "stdlib-b64-encode" else prose(size_bytes)
     red = _stdlib_b64_expression if cell == "stdlib-b64-encode" else reference_finalize
     observed = [
@@ -999,22 +1027,34 @@ def test_utf8_is_valid_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+@pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])
 def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
     """The diff claim on the few-opcode shape: the WHOLE diff (both
     operands' ``Vec<char>`` materialization and the Myers search) runs under
-    ``py.detach``, so a near-identical 12 MiB pair (six scattered line edits,
-    235 opcodes) leaves the loop ticking at heartbeat granularity while
-    ~80ms of native diff work runs. Measured on the dev box (ambient load
-    5.3, 3 samples): worst gaps 10.5-11.2ms of 76-88ms walls (ratio
-    0.12-0.14): the ping floor plus the two zero-copy ASCII argument borrows
-    and a ~0.05ms 235-tuple marshalling. Inside both shared budgets with ~2x
-    ratio margin; a detach regression (the diff itself GIL-held) holds the
-    whole wall at ratio ~1.0 and fails by ~3x. If walls ever collapse toward
-    the ping floor on a quiet box, recalibrate ceiling-only per the b64 12
-    MiB precedent (see the module docstring's b64 discussion)."""
+    ``py.detach``, so a near-identical pair (six scattered line edits,
+    dozens of opcodes) leaves the loop ticking at heartbeat granularity
+    while ~100ms of native diff work runs. Measured on the dev box (ambient
+    load 5.3, 3 samples, 12 MiB pair): worst gaps 10.5-11.2ms of 76-88ms
+    walls (ratio 0.12-0.14): the ping floor plus the two zero-copy ASCII
+    argument borrows and a ~0.05ms opcode-tuple marshalling. Inside both
+    shared budgets with ~2x ratio margin; a detach regression (the diff
+    itself GIL-held) holds the whole wall at ratio ~1.0 and fails by ~3x.
+
+    Why 32 MiB and not 12: the ratio only resolves when the wall clears
+    the 10ms ping floor by a wide margin, and on a fast quiet box the 12
+    MiB pair's ~30ms walls sit inside the heartbeat floor's own wobble
+    (5-11ms gaps run to run: ratio 0.18 one run, 0.35 the next, against
+    the same 0.30 budget — a measurement-resolution failure, not a code
+    regression; tors's detach verified working throughout). At 32 MiB the
+    walls (~100ms on that box, ~210ms implied for the dev box's pace)
+    restore ~5x ratio margin (measured 0.06) on every box while a detach
+    regression still holds the whole wall at ~1.0. The ceiling-only
+    alternative was considered and rejected: on a fast box a held 30ms
+    wall shows ~30ms gaps, under the 100ms ceiling, so ceiling-only would
+    go blind exactly where the ratio is weakest — enlargement keeps both
+    budgets discriminating everywhere."""
     a, b = diff_pair_near_identical(size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.diff_opcodes, a, b))
