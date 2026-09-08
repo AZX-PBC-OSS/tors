@@ -306,6 +306,14 @@ def dedent(text: str) -> str: ...
 # GIL note: the whole repair — strict fast path, repair parser, schema
 # alignment, validator — runs with the GIL released; the residue is the
 # schema-argument walk plus the O(output) string marshalling.
+#
+# deadline_ms (default None = unbounded) bounds the whole repair the way
+# diff_opcodes' deadline_ms does: a positive-finite-or-None budget validated
+# up front, TimeoutError on expiry. It is a DoS backstop for pathological
+# inputs (a handful of quadratic parser shapes shared with upstream
+# json_repair) — a bounded abort, not a speed-up; a completing parse is
+# byte-identical whether or not a deadline is set. It applies to all three
+# spellings.
 def repair_json(
     s: str,
     *,
@@ -316,6 +324,7 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> str: ...
 
 
@@ -335,6 +344,7 @@ def repair_json_loads(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
 
 
@@ -356,6 +366,7 @@ def repair_json_diagnostics(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> tuple[
     dict[str, Any] | list[Any] | str | int | float | bool | None,
     list[dict[str, Any]],

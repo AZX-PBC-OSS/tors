@@ -127,7 +127,14 @@ pub(crate) struct Parser {
     /// by parse_comment's own loop and cost one re-entry, so legitimate
     /// inputs never approach the cap.
     comment_depth: usize,
+    // PROTOTYPE deadline fields
+    deadline_started: Option<std::time::Instant>,
+    deadline_ms: Option<f64>,
+    deadline_counter: u32,
+    deadline_error: Option<String>,
 }
+
+pub(crate) const DEADLINE_TAG: &str = "\u{0}tors-repair-deadline";
 
 impl Parser {
     pub(crate) fn new(s: &str, strict: bool, schema_repairer: Option<SchemaRepairer>) -> Parser {
@@ -161,6 +168,10 @@ impl Parser {
             schema_repairer,
             depth: 0,
             comment_depth: 0,
+            deadline_started: None,
+            deadline_ms: None,
+            deadline_counter: 0,
+            deadline_error: None,
         }
     }
 
@@ -185,6 +196,68 @@ impl Parser {
     /// The character at the cursor (the overwhelmingly common `get(0)`).
     pub(crate) fn cur(&self) -> Option<char> {
         self.get(0)
+    }
+
+    // PROTOTYPE deadline plumbing
+    pub(crate) fn set_deadline(&mut self, started: std::time::Instant, ms: f64) {
+        self.deadline_started = Some(started);
+        self.deadline_ms = Some(ms);
+    }
+
+    /// The sampled check for TIGHT char loops (e.g. `scan_string_body`),
+    /// where each iteration is O(1) and an `Instant::now` per iteration
+    /// would dominate: only every 256th call reads the clock.
+    #[inline]
+    pub(crate) fn deadline_expired(&mut self) -> bool {
+        if self.deadline_ms.is_none() {
+            return false;
+        }
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        self.deadline_counter = self.deadline_counter.wrapping_add(1);
+        if self.deadline_counter & 0xFF != 0 {
+            return false;
+        }
+        self.deadline_now_expired()
+    }
+
+    /// The UNSAMPLED check for coarse loops whose every iteration is already
+    /// at least O(n) (the `parse_json` dispatch loop: each turn may perform
+    /// an O(n) buffer splice). Sampling here would let overshoot grow with
+    /// input size (256 O(n) splices between clock reads); an `Instant::now`
+    /// per turn is negligible against that O(n) work, so read the clock
+    /// every time and keep the guarantee tight.
+    #[inline]
+    fn deadline_now_expired(&mut self) -> bool {
+        let Some(ms) = self.deadline_ms else {
+            return false;
+        };
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        if let Some(started) = self.deadline_started
+            && let Some((d, e)) = crate::diff_impl::elapsed_exceeds(started, Some(ms))
+        {
+            self.deadline_error = Some(format!("{DEADLINE_TAG} deadline_ms={d} elapsed_ms={e}"));
+            return true;
+        }
+        false
+    }
+
+    #[inline]
+    pub(crate) fn check_deadline(&mut self) -> Result<(), String> {
+        if self.deadline_now_expired() {
+            return Err(self
+                .deadline_error
+                .clone()
+                .unwrap_or_else(|| DEADLINE_TAG.to_string()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_deadline_error(&mut self) -> Option<String> {
+        self.deadline_error.take()
     }
 
     /// json_parser.py's `skip_whitespaces`: advance `index` past whitespace.
@@ -571,6 +644,7 @@ impl Parser {
         let (repairer_active, resolved_schema) = self.resolve_schema_for_parse(schema)?;
 
         loop {
+            self.check_deadline()?;
             // None means that we are at the end of the string provided.
             let Some(ch) = self.cur() else {
                 return Ok(Value::Str(String::new()));

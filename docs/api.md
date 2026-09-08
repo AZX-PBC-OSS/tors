@@ -808,6 +808,7 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> str: ...
 ```
 
@@ -917,6 +918,18 @@ and extra properties are dropped rather than raised, and missing `required`
 properties are filled from their subschema's `default`/`const`/`enum[0]`.
 It requires a schema: `salvage=True` without one raises
 `ValueError("salvage=True requires schema.")`.
+
+**`deadline_ms`** (default `None` = unbounded) bounds the whole repair the
+way `diff_opcodes`' `deadline_ms` does: a positive-finite-or-`None` budget
+validated up front, `TimeoutError` on expiry. It is a DoS backstop for a few
+pathological O(n²) parser shapes (duplicate-key-in-array splices, empty-object
+splices, and a backslash-run string scan) that `tors` shares with upstream
+`json_repair` — a bounded *abort*, not a speed-up: a completing parse is
+byte-identical whether or not a deadline is set, and a benign large document
+does not trip a generous budget (the deadline discriminates pathological
+*shape*, not *size*). It applies to all three spellings and is checked with
+the GIL released, so `TimeoutError` is raised after reacquiring it — the same
+shape as `diff_opcodes`.
 
 Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
 `schema` that is not a dict, bool, model, or `None` raises

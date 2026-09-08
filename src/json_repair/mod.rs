@@ -74,6 +74,7 @@ pub(crate) fn exact_decimal_of_float(f: f64) -> Option<String> {
     let text = format!("{f:.0}");
     Some(if text == "-0" { "0".to_string() } else { text })
 }
+pub(crate) use parser::DEADLINE_TAG;
 pub(crate) use parser::normalize_big_int_text;
 
 use crate::json_schema_impl::SchemaRepairer;
@@ -418,6 +419,7 @@ pub struct RepairConfig {
     pub schema: Option<Value>,
     pub diagnostics: bool,
     pub locale: NumericLocale,
+    pub deadline_ms: Option<f64>,
 }
 
 /// One recorded action from [`repair`] — the structured successor of
@@ -546,6 +548,9 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     // (upstream translates its RecursionErrors here; tors' parser and
     // repairer raise the normalized messages themselves).
     let mut parser = parser::Parser::new(text, cfg.strict, repairer);
+    if let Some(ms) = cfg.deadline_ms {
+        parser.set_deadline(std::time::Instant::now(), ms);
+    }
     let (value, diagnostics) = match schema_value.as_ref() {
         Some(_) => {
             let value = parser.parse_with_schema()?;

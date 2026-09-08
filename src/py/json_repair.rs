@@ -18,7 +18,23 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
+use crate::json_repair::DEADLINE_TAG;
 use crate::json_repair::{self, Diagnostic, NumericLocale, RepairConfig, Value};
+use crate::py::_borrow::timeout_err;
+use crate::validate_deadline_ms;
+
+/// Map a `repair()` error string to the right Python exception: a
+/// `DEADLINE_TAG`-prefixed message is a deadline abort -> `TimeoutError`;
+/// anything else is the normal `ValueError`.
+fn map_repair_err(message: String) -> PyErr {
+    match message.strip_prefix(DEADLINE_TAG) {
+        // Strip the NUL-prefixed internal sentinel so the surfaced
+        // TimeoutError reads cleanly (e.g. "repair_json exceeded its
+        // deadline_ms=... (elapsed_ms=...)").
+        Some(rest) => timeout_err(format!("repair_json exceeded its{rest}")),
+        None => PyValueError::new_err(message),
+    }
+}
 
 /// The schema-side depth cap: Python-side nesting in a schema dict can be
 /// arbitrary (it is caller data, not parser output), so the walk is capped
@@ -353,6 +369,7 @@ fn resolve_locale_arg(obj: &Bound<'_, PyAny>) -> PyResult<NumericLocale> {
 /// The shared `schema=` argument walk + config assembly for all three
 /// spellings: the GIL-held schema walk happens here, then the whole repair
 /// runs detached with the assembled config.
+#[allow(clippy::too_many_arguments)]
 fn build_config(
     py: Python<'_>,
     skip_json_loads: bool,
@@ -361,6 +378,7 @@ fn build_config(
     diagnostics: bool,
     schema: Option<&Bound<'_, PyAny>>,
     locale: Option<&Bound<'_, PyAny>>,
+    deadline_ms: Option<f64>,
 ) -> PyResult<RepairConfig> {
     let schema_value = match schema {
         None => None,
@@ -391,6 +409,7 @@ fn build_config(
         schema: schema_value,
         diagnostics,
         locale,
+        deadline_ms,
     })
 }
 
@@ -400,7 +419,7 @@ fn build_config(
 /// noncanonical input normalizes; `ensure_ascii=False` keeps non-ASCII
 /// verbatim). The nothing-recoverable sentinel renders as the bare empty
 /// string, upstream's own convention.
-#[pyfunction(signature = (s, *, skip_json_loads = false, ensure_ascii = true, strict = false, schema = None, salvage = false, locale = None))]
+#[pyfunction(signature = (s, *, skip_json_loads = false, ensure_ascii = true, strict = false, schema = None, salvage = false, locale = None, deadline_ms = None))]
 #[allow(clippy::too_many_arguments)]
 pub fn repair_json(
     py: Python<'_>,
@@ -411,7 +430,9 @@ pub fn repair_json(
     schema: Option<Bound<'_, PyAny>>,
     salvage: bool,
     locale: Option<Bound<'_, PyAny>>,
+    deadline_ms: Option<f64>,
 ) -> PyResult<String> {
+    validate_deadline_ms(deadline_ms)?;
     let cfg = build_config(
         py,
         skip_json_loads,
@@ -420,6 +441,7 @@ pub fn repair_json(
         false,
         schema.as_ref(),
         locale.as_ref(),
+        deadline_ms,
     )?;
     py.detach(|| match json_repair::repair(s, &cfg) {
         // The sentinel renders as the bare empty string, not '""'.
@@ -427,7 +449,7 @@ pub fn repair_json(
         Ok((value, _)) => Ok(json_repair::dumps(&value, ensure_ascii)),
         Err(message) => Err(message),
     })
-    .map_err(PyValueError::new_err)
+    .map_err(map_repair_err)
 }
 
 /// `tors.repair_json_loads`: the repaired JSON as decoded OBJECTS — the
@@ -435,7 +457,8 @@ pub fn repair_json(
 /// nothing is recoverable, exactly like upstream. The GIL-held residue is
 /// the O(result) object-tree construction (the `word_bounds`
 /// list-marshalling class).
-#[pyfunction(signature = (s, *, skip_json_loads = false, strict = false, schema = None, salvage = false, locale = None))]
+#[pyfunction(signature = (s, *, skip_json_loads = false, strict = false, schema = None, salvage = false, locale = None, deadline_ms = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn repair_json_loads(
     py: Python<'_>,
     s: &str,
@@ -444,7 +467,9 @@ pub fn repair_json_loads(
     schema: Option<Bound<'_, PyAny>>,
     salvage: bool,
     locale: Option<Bound<'_, PyAny>>,
+    deadline_ms: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
+    validate_deadline_ms(deadline_ms)?;
     let cfg = build_config(
         py,
         skip_json_loads,
@@ -453,10 +478,11 @@ pub fn repair_json_loads(
         false,
         schema.as_ref(),
         locale.as_ref(),
+        deadline_ms,
     )?;
     let value = py
         .detach(|| json_repair::repair(s, &cfg))
-        .map_err(PyValueError::new_err)?;
+        .map_err(map_repair_err)?;
     value_to_py(py, &value.0)
 }
 
@@ -466,7 +492,8 @@ pub fn repair_json_loads(
 /// repair, coercion, fill, drop, remap, and tors-native suggestion. The v1
 /// scope note: schema-free calls return an empty list (parser-level
 /// narration is a follow-up); see the docs for the action vocabulary.
-#[pyfunction(signature = (s, *, skip_json_loads = false, strict = false, schema = None, salvage = false, locale = None))]
+#[pyfunction(signature = (s, *, skip_json_loads = false, strict = false, schema = None, salvage = false, locale = None, deadline_ms = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn repair_json_diagnostics(
     py: Python<'_>,
     s: &str,
@@ -475,7 +502,9 @@ pub fn repair_json_diagnostics(
     schema: Option<Bound<'_, PyAny>>,
     salvage: bool,
     locale: Option<Bound<'_, PyAny>>,
+    deadline_ms: Option<f64>,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    validate_deadline_ms(deadline_ms)?;
     let cfg = build_config(
         py,
         skip_json_loads,
@@ -484,10 +513,11 @@ pub fn repair_json_diagnostics(
         true,
         schema.as_ref(),
         locale.as_ref(),
+        deadline_ms,
     )?;
     let (value, diagnostics) = py
         .detach(|| json_repair::repair(s, &cfg))
-        .map_err(PyValueError::new_err)?;
+        .map_err(map_repair_err)?;
     let value = value_to_py(py, &value)?;
     let list = PyList::empty(py);
     for diagnostic in &diagnostics {

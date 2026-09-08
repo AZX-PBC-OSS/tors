@@ -588,6 +588,9 @@ impl Parser {
             StringEntry::Scan(state) => state,
         };
         let ch = self.scan_string_body(&mut state);
+        if let Some(err) = self.take_deadline_error() {
+            return Err(err);
+        }
         Ok(Value::Str(self.finalize_string_result(&mut state, ch)))
     }
 
@@ -1447,6 +1450,9 @@ impl Parser {
         while let Some(c) = ch
             && (c != outer || state.in_low_smart_quote_span())
         {
+            if self.deadline_expired() {
+                break;
+            }
             if state.missing_quotes {
                 if self.ctx_current() == Some(Ctx::ObjectKey) && (c == ':' || is_py_whitespace(c)) {
                     // Upstream logs "missing the left delimiter in object

@@ -1031,3 +1031,65 @@ class TestNothingRecoverableUnderSchema:
         # A string-typed schema legitimately accepts "" — the raise is the
         # typed-schema behavior, not an unconditional one.
         assert repair_json_loads("no JSON anywhere", schema={"type": "string"}) == ""
+
+
+class TestRepairDeadline:
+    """deadline_ms bounds the repair against pathological O(n^2) parser
+    shapes (each shared with upstream json_repair): a bounded abort, not a
+    speed-up, and a strict no-op when unset."""
+
+    # Three distinct quadratics; unbounded, each runs for ~20-30s at n=200k.
+    # dup-key + empty-object are bounded by the parse_json dispatch check,
+    # the backslash string-scan by the scan_string_body check.
+    _DUP_KEY = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
+    _EMPTY_OBJ = '[' + '{ }' * 200_000 + ']'
+    _STRING_SCAN = '["' + ']' * 200_000 + '\\\\" x'
+
+    @pytest.mark.parametrize(
+        "raw",
+        [_DUP_KEY, _EMPTY_OBJ, _STRING_SCAN],
+        ids=["dup-key", "empty-object", "string-scan"],
+    )
+    def test_a_pathological_input_is_bounded_by_the_deadline(self, raw: str) -> None:
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json(raw, deadline_ms=100)
+        # A real bound: the ~20s+ unbounded run is cut short well under 2s.
+        assert _time.perf_counter() - start < 2.0
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '[{' + '"a":1 "a":1 ' * 50 + '}]',
+            '[' + '{ }' * 50 + ']',
+            '["' + ']' * 50 + '\\\\" x',
+        ],
+        ids=["dup-key", "empty-object", "string-scan"],
+    )
+    def test_a_generous_deadline_does_not_change_output(self, raw: str) -> None:
+        # Below the deadline the result is byte-identical to the unbounded call.
+        assert repair_json(raw, deadline_ms=60_000) == repair_json(raw)
+
+    def test_a_large_valid_input_does_not_trip_a_generous_deadline(self) -> None:
+        # The deadline distinguishes pathological SHAPE from benign SIZE: a
+        # multi-MB well-formed document parses far under a generous budget
+        # (an input-size cap could not tell the two apart).
+        big = '[' + ','.join(f'{{"k{i}": {i}}}' for i in range(100_000)) + ']'
+        assert len(big) > 1_000_000
+        repair_json(big, deadline_ms=5_000)  # must not raise
+
+    @pytest.mark.parametrize("bad", [0.0, -5.0, float("nan"), float("inf")])
+    def test_non_positive_or_non_finite_deadline_raises_value_error(self, bad: float) -> None:
+        with pytest.raises(ValueError):
+            repair_json("{}", deadline_ms=bad)
+
+    def test_all_three_spellings_honor_the_deadline(self) -> None:
+        raw = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
+        with pytest.raises(TimeoutError):
+            repair_json(raw, deadline_ms=100)
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, deadline_ms=100)
+        with pytest.raises(TimeoutError):
+            repair_json_diagnostics(raw, deadline_ms=100)
