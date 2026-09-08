@@ -834,8 +834,20 @@ impl Parser {
             if self.cur().is_some_and(|c| STRING_DELIMITERS.contains(&c)) && !self.strict {
                 // Upstream logs the comma + string delimiter after the
                 // closing brace and checks for additional key-value pairs.
-                let additional_obj = self.parse_object(schema, path)?;
-                if let Value::Object(additional) = additional_obj {
+                //
+                // Depth-guard the recursion. This continuation calls
+                // parse_object, which can reach another comma-merge and
+                // recurse again, so an unbounded chain (`{"a":1}` followed by
+                // `, "k":1}` repeated) grows the native stack one frame per
+                // fragment and overflows it — an uncatchable SIGSEGV, not the
+                // documented catchable ValueError. enter_depth caps it at
+                // MAX_NESTING and raises "Input nesting exceeds ...", the same
+                // enter/parse/leave/`?` shape parse_json's `{`/`[`/`(` branches
+                // use (parser.rs); balanced on every non-abort path.
+                self.enter_depth()?;
+                let additional_obj = self.parse_object(schema, path);
+                self.leave_depth();
+                if let Value::Object(additional) = additional_obj? {
                     // dict.update: overwrite in place, append the new.
                     for (key, value) in additional {
                         obj.insert(key, value);
@@ -1144,6 +1156,34 @@ mod tests {
     fn parse_object_empty_object_array_fallback_preserves_legacy_key_context() {
         // test_parse_object.py::test_parse_object_empty_object_array_fallback_preserves_legacy_key_context
         assert_eq!(parse_ok("[{5}s "), a(vec![a(vec![Value::Int(5)])]));
+    }
+
+    #[test]
+    fn comma_merged_object_fragments_hit_the_depth_cap_not_the_stack() {
+        // `{"a":1}` + `, "k":1}` * N recurses through complete_object_parse's
+        // comma-merge continuation; without the depth guard it overflows the
+        // native stack (uncatchable). Guarded, it raises the same capped error
+        // as every other deep-recursion path — never a crash.
+        let payload = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(2_000));
+        let err = Parser::new(&payload, false, None)
+            .parse()
+            .expect_err("a runaway comma-merge chain must raise, not recurse unbounded");
+        assert!(err.contains("Input nesting exceeds"));
+    }
+
+    #[test]
+    fn comma_merged_fragments_below_the_cap_still_merge() {
+        // The guard fires only past MAX_NESTING; an ordinary comma-merge
+        // chain must still parse and merge every fragment (so an off-by-one
+        // that trips the guard early would fail here).
+        let mut payload = String::from(r#"{"a":1}"#);
+        for i in 0..150 {
+            payload.push_str(&format!(r#", "k{i}":1}}"#));
+        }
+        match parse_ok(&payload) {
+            Value::Object(entries) => assert_eq!(entries.len(), 151),
+            other => panic!("expected a merged object, got {other:?}"),
+        }
     }
 
     #[test]

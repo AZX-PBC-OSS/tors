@@ -575,6 +575,36 @@ class TestRobustness:
             ):
                 repair_json(pattern * 12_000, skip_json_loads=True)
 
+    def test_comma_merged_object_fragments_raise_instead_of_crashing(self) -> None:
+        # `{"a":1}` + `, "k":1}` * N is handled by complete_object_parse's
+        # comma-merge continuation, which recurses into parse_object per
+        # fragment; without the depth guard this overflowed the native stack
+        # (an uncatchable SIGSEGV) at a few thousand fragments on a worker
+        # stack. The guard caps it and raises the same catchable ValueError as
+        # the other deep-recursion paths.
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json('{"a":1}' + ', "k":1}' * 2_000, skip_json_loads=True)
+        # the schema-guided path flows `schema` through the same guarded site:
+        with pytest.raises(
+            ValueError, match="Input nesting exceeds the supported parser recursion depth"
+        ):
+            repair_json(
+                '{"a":1}' + ', "k":1}' * 2_000,
+                schema={"type": "object"},
+                skip_json_loads=True,
+            )
+
+    def test_comma_merged_fragments_below_the_cap_still_merge(self) -> None:
+        # The guard must fire only past MAX_NESTING, never on an ordinary
+        # merge chain: a regression that over-counts depth would raise early
+        # and silently change behavior on inputs upstream handles — the exact
+        # parity-risk class this guard is scoped to avoid.
+        payload = '{"a":1}' + "".join(f', "k{i}":1}}' for i in range(150))
+        merged = repair_json_loads(payload, skip_json_loads=True)
+        assert merged == {"a": 1, **{f"k{i}": 1 for i in range(150)}}
+
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and
         # ensure_ascii re-emits the identical pair bytes.
