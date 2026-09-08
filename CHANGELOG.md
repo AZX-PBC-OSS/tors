@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.2.0...v0.3.0) (2026-09-08)
+
+
+### Features
+
+* add truncate_ellipsis and strip_controls, extend tors.aio to input-scaling codecs ([9d4d824](https://github.com/AZX-PBC-OSS/tors/commit/9d4d824f03c761f86d7782f6ceeea7d7942e5a35))
+
+
+### Documentation
+
+* update install instructions now that tors/tors-core are published ([9a32133](https://github.com/AZX-PBC-OSS/tors/commit/9a32133a7d50c5099070648b1347ae11e452fbfe))
+
 ## [0.2.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.1.0...v0.2.0) (2026-09-07)
 
 
