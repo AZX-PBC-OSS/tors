@@ -45,22 +45,23 @@
 //! an all-literal `["\n", ". ", " "]` list would pin them to (the guesses
 //! cut inside "U.S. team"; the segmenters do not — the exact reason the
 //! default hierarchy exists). `[None]` is therefore identical to
-//! `separators = None`. Cost stated plainly: the splice pays the same
-//! three whole-text walks the default hierarchy does (paragraph,
-//! sentence, word) AT MOST ONCE per call — the first `None` entry
-//! builds the three default levels and every later `None` is
-//! recognized as a duplicate and skipped, inert by the `find_map`
-//! dominance argument (identical levels can never change the answer:
-//! the first occurrence of a level always dominates its duplicate), so
-//! a caller mixing literals with `None` over a 12 MiB document pays
-//! the ~350 ms the README measures for the default hierarchy once, on
-//! top of one scan per literal, regardless of how many `None` entries
-//! the list carries. The former spelling re-paid all three walks —
-//! and their cut vectors, ~45 MiB per duplicate on a 6 MiB document —
-//! per `None` entry, a caller-controlled unbounded cost (`[None; 100]`
-//! on a 6 MiB document is an OOM shape); the dedup removes it under
-//! the #21 pathological-input discipline, memoized like #24's lazy
-//! bitmap.
+//! `separators = None`. Cost stated plainly: every level — each of the
+//! three default walks, each distinct custom literal — pays its one
+//! whole-text walk AT MOST once per call, and ONLY when a window
+//! actually consults it: levels are built on first consultation (the
+//! window loop walks the list strictly through `find_map`, in priority
+//! order), so a budget that never falls past the paragraph level never
+//! runs the sentence or word walks at all, and a whole-document budget
+//! that never cuts pays nothing but the codepoint count. Duplicate
+//! entries — `None` or a repeated literal — are recognized at list
+//! construction and skipped, inert by the `find_map` dominance
+//! argument (identical levels can never change the answer: the first
+//! occurrence of a level always dominates its duplicate), so neither
+//! `[None] * 100` nor `[" "] * 100` is the caller-controlled unbounded
+//! cost the per-entry spelling made them (every duplicate re-paid the
+//! walks plus ~45 MiB of cut vectors per 6 MiB of text, an OOM shape);
+//! the dedup and the deferral close both spellings under the #21
+//! pathological-input discipline, memoized like #24's lazy bitmap.
 //!
 //! UNLIKE [`crate::chunk_impl::chunk_text`] (a lossless covering
 //! partition), this is NOT lossless: at every level except the raw-cut
@@ -72,10 +73,13 @@
 //! stays true here for the same reason (a caller asking to split ON a
 //! marker wants it gone, not duplicated).
 //!
-//! Performance: every level's candidate cut-position list is computed ONCE
-//! per call (one scan per level: `paragraph_bounds`/`sentence_bounds`/
-//! `word_bounds` for the default levels, one `memmem` pass per
-//! custom literal), never re-scanned per chunk. Building each chunk is one
+//! Performance: every CONSULTED level's candidate cut-position list is
+//! computed at most once per call — at the level's FIRST consultation
+//! (`find_map` reaches levels strictly in priority order, so a level no
+//! window ever needs is never scanned at all: one `paragraph_bounds`/
+//! `sentence_bounds`/`word_bounds` walk or one `memchr::memmem` pass
+//! per distinct level the budget actually reaches, never re-scanned
+//! per chunk). Building each chunk is one
 //! `partition_point` binary search per level: O(n × levels) total, levels
 //! bounded by the small, caller-supplied list length. The codepoint `total`
 //! the budget arithmetic needs is one branchless byte pass (every UTF-8
@@ -85,7 +89,7 @@
 //! bit per codepoint on non-ASCII text — or, on pure-ASCII text, an
 //! all-ones bitmap plus the CRLF fixup, two SIMD byte scans, no
 //! segmentation walk at all — built at most once per call and ONLY when a
-//! call actually needs it — a level with cuts to filter, the raw-cut
+//! call actually needs it — a consulted level with cuts to filter, the raw-cut
 //! fallback, or an overlap snap; a custom hierarchy whose literals never
 //! match (the whole-document-budget case) builds none of it. The former
 //! spelling paid an unconditional `Vec<char>` collect plus a
@@ -93,9 +97,16 @@
 //! anything else could run, which dominated document-scale cost and was
 //! superlinear on top of it (#22: a 12 MiB document spent ~1.2 s in
 //! ~12.6M hashed inserts regardless of chunk budget or separator
-//! presence). Forward progress is pinned the
+//! presence), and the eager level spelling paid every level's walk up
+//! front even when the budget never consulted it (a 2000-codepoint
+//! budget over 12 MiB of prose ran the sentence and word walks, ~190 ms
+//! and ~130 ms, to answer every window at the paragraph level — the
+//! deferral is what makes the default hierarchy at a paragraph-scale
+//! budget cost its paragraph walk and nothing else). Forward progress is pinned the
 //! same way [`crate::chunk_impl::chunk_text_overlapping`]'s is: a hard
 //! iteration-count assertion in the tests, not just a slow-test timeout.
+
+use std::collections::HashSet;
 
 use memchr::memmem;
 
@@ -190,52 +201,161 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 /// order — the splice a `None` entry in a custom `separators` list
 /// inserts at its position, and the whole hierarchy when `separators` is
 /// `None`. One whole-text walk per level (`paragraph_bounds`, UAX #29
-/// `sentence_bounds`, UAX #29 `word_bounds`), each computed at most
-/// once per call — the first `None` entry builds all three and
-/// `custom_levels` skips every later duplicate — never per chunk.
-fn default_levels(text: &str) -> Vec<Level> {
-    vec![
-        level_from_paragraph_bounds(paragraph_bounds(text)),
-        level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
-        level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
-    ]
+/// `sentence_bounds`, UAX #29 `word_bounds`), each paid AT MOST once per
+/// call and only at its FIRST consultation — never per chunk, and never
+/// at all for a level the budget never consults.
+///
+/// The deferral is answer-neutral by construction: a level's cut vector
+/// is a pure function of (kind, text), the window loop consults levels
+/// strictly through `find_map` in list order, and nothing else reads
+/// the list, so building a level at its first consultation produces
+/// bit-identical answers to building it upfront — the differential
+/// oracle in the tests (which keeps the eager spelling) pins that
+/// equivalence over the corpus × budget × overlap × hierarchy sweep.
+#[derive(Clone, Copy)]
+enum SlotKind<'a> {
+    Paragraph,
+    Sentence,
+    Word,
+    Literal(&'a str),
 }
 
-/// Build the caller-supplied levels from a `separators` list: a literal
-/// `Some(s)` is one [`level_from_literal`] scan; a `None` entry splices
-/// [`default_levels`] in at its position — at most once per call, the
-/// first `None` building the levels and every later one skipped as a
-/// duplicate (see the arm below for why a duplicate is provably inert);
-/// an empty literal is a no-op level (dropped, the same filter the
-/// all-literal spelling always applied).
-fn custom_levels(text: &str, seps: &[Option<&str>]) -> Vec<Level> {
-    let mut levels = Vec::new();
-    let mut spliced = false;
-    for entry in seps {
-        match entry {
-            None => {
-                if !spliced {
-                    levels.extend(default_levels(text));
-                    spliced = true;
+/// One level's slot in the deferred list: still unbuilt, or built once
+/// and cached for the rest of the call. `Pending -> Ready` transitions
+/// at most once per slot, so a consulted level pays its scan exactly
+/// once however many windows reach it — the same memoization shape
+/// `GraphemeIndex`'s `Option` slot applies one structure over.
+enum Slot<'a> {
+    Pending(SlotKind<'a>),
+    Ready(Level),
+}
+
+/// The priority-ordered level list in deferred form, plus the one
+/// consultation point: `best_cut` walks the slots in order through
+/// `find_map`, building each visited slot on first visit. The
+/// grapheme-cluster cut filter the eager spelling applied to every
+/// level at list-construction time runs at the BUILD site instead, so
+/// an unconsulted level never forces the grapheme index on its cuts'
+/// behalf either.
+struct Levels<'a> {
+    slots: Vec<Slot<'a>>,
+}
+
+impl<'a> Levels<'a> {
+    /// The deferred list from a `separators` value: `None` is the
+    /// default hierarchy's three slots; a custom list is one deferred
+    /// literal slot per DISTINCT literal (`Some("")` stays the dropped
+    /// no-op it always was), with the FIRST `None` entry splicing the
+    /// three default slots in at its position and every later `None`
+    /// skipped. Both dedups — `None` and literal — are provably inert
+    /// by the same `find_map` dominance argument: the window loop
+    /// consults slots only through `find_map` (the FIRST slot
+    /// supplying a cut wins; the list is never indexed positionally or
+    /// counted), and a duplicate's level is bit-identical to its
+    /// original's, so a duplicate can never change an answer its
+    /// original didn't already give. Before the dedup, every duplicate
+    /// was a re-paid whole-text walk plus a full cut vector — ~45 MiB
+    /// per duplicate `None` on a 6 MiB document, the same for a
+    /// repeated literal that matches often (`[" "] * 100` was the OOM
+    /// shape `[None; 100]` was) — a caller-controlled unbounded cost
+    /// the #21 pathological-input discipline closes here, memoized
+    /// like #24's lazy bitmap.
+    fn new(separators: Option<&'a [Option<&'a str>]>) -> Levels<'a> {
+        let slots = match separators {
+            None => vec![
+                Slot::Pending(SlotKind::Paragraph),
+                Slot::Pending(SlotKind::Sentence),
+                Slot::Pending(SlotKind::Word),
+            ],
+            Some(seps) => {
+                let mut slots = Vec::new();
+                let mut spliced = false;
+                let mut seen_literals: HashSet<&str> = HashSet::new();
+                for entry in seps {
+                    match entry {
+                        None => {
+                            if !spliced {
+                                slots.push(Slot::Pending(SlotKind::Paragraph));
+                                slots.push(Slot::Pending(SlotKind::Sentence));
+                                slots.push(Slot::Pending(SlotKind::Word));
+                                spliced = true;
+                            }
+                        }
+                        Some("") => {}
+                        Some(s) => {
+                            if seen_literals.insert(s) {
+                                slots.push(Slot::Pending(SlotKind::Literal(s)));
+                            }
+                        }
+                    }
                 }
-                // A duplicate splice is skipped, not re-built: the window
-                // loop consults `levels` only through `find_map` (the
-                // FIRST level supplying a cut wins, and the list is never
-                // indexed positionally or counted), and a duplicate's
-                // levels are bit-identical to the first splice's, so a
-                // duplicate can never change an answer its original
-                // didn't already give — inert. Re-paying the three
-                // whole-text walks and their ~45 MiB of cut vectors (on a
-                // 6 MiB document) per duplicate was a caller-controlled
-                // unbounded cost — `[None; 100]` is an OOM shape — the
-                // same pathological-input discipline #21 established:
-                // build once per call, memoized like #24's lazy bitmap.
+                slots
             }
-            Some("") => {}
-            Some(s) => levels.push(level_from_literal(text, s)),
-        }
+        };
+        Levels { slots }
     }
-    levels
+
+    /// The window loop's consultation: first slot in priority order
+    /// supplying an in-budget forward-progress cut, building each
+    /// visited slot on first visit. `SlotKind` is `Copy`, so the
+    /// pending kind reads out before the slot is overwritten with its
+    /// built level.
+    fn best_cut(
+        &mut self,
+        text: &str,
+        total: usize,
+        graphemes: &mut Option<GraphemeIndex>,
+        after: usize,
+        limit: usize,
+    ) -> Option<(usize, usize)> {
+        self.slots.iter_mut().find_map(|slot| {
+            if let Slot::Pending(kind) = *slot {
+                let level = build_level(kind, text, total, graphemes);
+                *slot = Slot::Ready(level);
+            }
+            match slot {
+                Slot::Ready(level) => level.best_cut(after, limit),
+                Slot::Pending(_) => unreachable!("the arm above built the level"),
+            }
+        })
+    }
+}
+
+/// One slot's level, built and grapheme-filtered: the same scan the
+/// eager spelling ran at list construction, moved to first
+/// consultation. The filter is the same "never split a cluster" fix
+/// chunk_text/chunk_by_* apply, extended here to custom literal
+/// separators too (a caller's separator could, in principle, land
+/// inside a cluster on pathological input), and the default hierarchy
+/// is NOT exempt: `word_bounds`/`sentence_bounds` follow UAX #29
+/// exactly, which scores some combining sequences (Thai SARA AM,
+/// U+0E33) as their own word/sentence segment even though the grapheme
+/// rules join them to the preceding base character into one cluster —
+/// `truncate_impl`'s module docs document the same divergence — so
+/// their cuts need this filter exactly like a custom literal's do. A
+/// level with no cuts filters nothing and builds nothing (a
+/// never-matching separator costs its one scan, no structure).
+fn build_level(
+    kind: SlotKind<'_>,
+    text: &str,
+    total: usize,
+    graphemes: &mut Option<GraphemeIndex>,
+) -> Level {
+    let mut level = match kind {
+        SlotKind::Paragraph => level_from_paragraph_bounds(paragraph_bounds(text)),
+        SlotKind::Sentence => {
+            level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text))
+        }
+        SlotKind::Word => level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
+        SlotKind::Literal(s) => level_from_literal(text, s),
+    };
+    if !level.cuts.is_empty() {
+        let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+        level
+            .cuts
+            .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+    }
+    level
 }
 
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
@@ -288,38 +408,21 @@ pub fn chunk_hierarchical(
     // `total` was the only thing that collect was ever read for.
     let total = char_count(text);
 
-    let mut levels: Vec<Level> = match separators {
-        Some(seps) => custom_levels(text, seps),
-        None => default_levels(text),
-    };
+    // The deferred level list: no walk, no scan, no cut vector exists
+    // yet — each level builds at its first consultation below, at most
+    // once per call, and a level no window consults never builds at
+    // all (the answer-neutrality argument is on [`Levels`]; the eager
+    // spelling built every level up front, which at a paragraph-scale
+    // budget paid the sentence and word walks to answer every window
+    // at the paragraph level).
+    let mut levels = Levels::new(separators);
     // The grapheme boundary index: built lazily, AT MOST ONCE per call, at
-    // the first site that actually needs it — the cut filter below (only
-    // for a level with cuts to filter), the raw-cut fallback, or the
-    // overlap snap. The former spelling built the whole per-codepoint
-    // structure unconditionally before anything else could run, which is
-    // the document-scale cost #22 measured.
+    // the first site that actually needs it — a consulted level's cut
+    // filter (the build site applies it, see [`build_level`]), the
+    // raw-cut fallback, or the overlap snap. The former spelling built
+    // the whole per-codepoint structure unconditionally before anything
+    // else could run, which is the document-scale cost #22 measured.
     let mut graphemes: Option<GraphemeIndex> = None;
-    // Every level's cuts are additionally filtered to grapheme-cluster
-    // boundaries, one O(cuts) bitmap pass each: the same "never split a
-    // cluster" fix chunk_text/chunk_by_* already apply, extended here to
-    // custom literal separators too (a caller's separator could, in
-    // principle, land inside a cluster on pathological input). The
-    // default hierarchy is NOT exempt: `word_bounds`/`sentence_bounds`
-    // follow UAX #29 exactly, which scores some combining sequences
-    // (Thai SARA AM, U+0E33) as their own word/sentence segment even
-    // though the grapheme rules join them to the preceding base character
-    // into one cluster — `truncate_impl`'s module docs document the same
-    // divergence — so their cuts need this filter exactly like a custom
-    // literal's do. A level with no cuts filters nothing and builds
-    // nothing (a never-matching separator costs one scan, no structure).
-    for level in &mut levels {
-        if !level.cuts.is_empty() {
-            let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
-            level
-                .cuts
-                .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
-        }
-    }
 
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
     let mut start = 0usize;
@@ -337,8 +440,7 @@ pub fn chunk_hierarchical(
         }
         let limit = start + max_chars;
         let cut = levels
-            .iter()
-            .find_map(|level| level.best_cut(start, limit))
+            .best_cut(text, total, &mut graphemes, start, limit)
             .unwrap_or_else(|| {
                 let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
                 let end = g.hard_cut(start, limit);
@@ -400,10 +502,11 @@ mod tests {
         let total = chars.len();
 
         // The oracle keeps its OWN inline level building (not the new
-        // `default_levels`/`custom_levels` helpers) so the differential
-        // sweep below pins those helpers' output against this spelling,
-        // the same way it pins the bitmap machinery: extended for the
-        // `None` entry in the former code's own inline style.
+        // deferred `Levels` slots) so the differential sweep below pins
+        // the deferral and both dedups' output against this eager,
+        // duplicate-rebuilding spelling, the same way it pins the bitmap
+        // machinery: extended for the `None` entry in the former code's
+        // own inline style.
         let mut levels: Vec<Level> = match separators {
             Some(seps) => {
                 let mut built = Vec::new();
@@ -658,76 +761,99 @@ mod tests {
         // None entry changes nothing (it can never supply a cut, so the
         // spliced levels answer every window the default hierarchy would):
         // exact-equality properties over the whole differential corpus and
-        // a budget sweep, far stronger than a couple of spot cases. A
-        // repeated None entry is the same inertness one level deeper: a
-        // duplicate's levels are identical to their first occurrence's,
-        // so the find_map can never reach a duplicate that changes an
-        // answer its original didn't already give — [None, None] IS
-        // [None], and the duplicated line-first list is the unduplicated
-        // one (the corpus texts contain "\n", so the literal genuinely
-        // matches: the pin is meaningful, not vacuous). That inertness is
-        // also overlap-INDEPENDENT — the splice (and, since the dedup,
-        // the skipping of duplicates) happens in level-building, before
-        // any windowing or overlap snap — so the duplicate pair is swept
-        // over the boundary-adjacent overlaps the bitmap differential
-        // above uses, and an eightfold run pins that longer duplicate
-        // lists stay inert, free now that the splice is built once per
-        // call regardless of list length.
+        // a budget sweep, far stronger than a couple of spot cases.
+        // Duplicate inertness — of `None` AND of literals, both deduped at
+        // slot construction — is the same argument one level deeper: a
+        // duplicate's level is identical to its first occurrence's, so
+        // the find_map can never reach a duplicate that changes an answer
+        // its original didn't already give — [None, None] IS [None], and
+        // the duplicated line-first list is the unduplicated one (the
+        // corpus texts contain "\n", so the literal genuinely matches:
+        // the pin is meaningful, not vacuous). That inertness is also
+        // overlap-INDEPENDENT — the dedup happens in list construction,
+        // before any windowing or overlap snap — so every duplicate shape
+        // is swept over the boundary-adjacent overlaps the bitmap
+        // differential above uses, and an eightfold run pins that longer
+        // duplicate lists stay inert, free now that the splice is built
+        // once per call regardless of list length. (The dedup's COST —
+        // what this output-equality sweep cannot see, since the
+        // undeduped spelling passes it too — is pinned by the timing
+        // cells in tests/test_performance.py.)
         for text in differential_corpus() {
             let total = text.chars().count();
             for max_chars in 1..=total.min(48) {
-                assert_eq!(
-                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
-                    chunk_hierarchical(&text, max_chars, None, 0),
-                    "text={text:?} max_chars={max_chars}"
-                );
-                assert_eq!(
-                    chunk_hierarchical(
-                        &text,
-                        max_chars,
-                        Some(&[Some("ZZZ_NEVER_MATCHES"), None]),
-                        0
-                    ),
-                    chunk_hierarchical(&text, max_chars, None, 0),
-                    "text={text:?} max_chars={max_chars}"
-                );
-                assert_eq!(
-                    chunk_hierarchical(&text, max_chars, Some(&[None, None]), 0),
-                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
-                    "duplicate None changed the answer: text={text:?} max_chars={max_chars}"
-                );
-                assert_eq!(
-                    chunk_hierarchical(
-                        &text,
-                        max_chars,
-                        Some(&[Some("\n"), None, Some("\n"), None]),
-                        0
-                    ),
-                    chunk_hierarchical(&text, max_chars, Some(&[Some("\n"), None]), 0),
-                    "duplicated [\"\\n\", None] changed the answer: text={text:?} \
-                     max_chars={max_chars}"
-                );
-                // The same inertness one rung longer: the dedup makes the
-                // eightfold list cost exactly what the single splice does
-                // (one build per call, duplicates skipped), so it must
-                // answer exactly what the single one does too.
-                assert_eq!(
-                    chunk_hierarchical(&text, max_chars, Some(&[None; 8]), 0),
-                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
-                    "eightfold None changed the answer: text={text:?} max_chars={max_chars}"
-                );
-                // Duplicate-inertness under overlap, the envelope the
-                // pyo3 layer validates (overlap < max_chars) and the
-                // bitmap differential above sweeps: 0, 1, and the last
-                // legal value.
                 for overlap in [0usize, 1, max_chars.saturating_sub(1)]
                     .into_iter()
                     .filter(|&o| o < max_chars)
                 {
                     assert_eq!(
+                        chunk_hierarchical(&text, max_chars, Some(&[None]), overlap),
+                        chunk_hierarchical(&text, max_chars, None, overlap),
+                        "text={text:?} max_chars={max_chars} overlap={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_hierarchical(
+                            &text,
+                            max_chars,
+                            Some(&[Some("ZZZ_NEVER_MATCHES"), None]),
+                            overlap
+                        ),
+                        chunk_hierarchical(&text, max_chars, None, overlap),
+                        "text={text:?} max_chars={max_chars} overlap={overlap}"
+                    );
+                    // Duplicate None entries, pairwise and eightfold:
+                    // skipped at construction, inert under overlap.
+                    assert_eq!(
                         chunk_hierarchical(&text, max_chars, Some(&[None, None]), overlap),
                         chunk_hierarchical(&text, max_chars, Some(&[None]), overlap),
-                        "duplicate None changed the answer under overlap: text={text:?} \
+                        "duplicate None changed the answer: text={text:?} \
+                         max_chars={max_chars} overlap={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_hierarchical(&text, max_chars, Some(&[None; 8]), overlap),
+                        chunk_hierarchical(&text, max_chars, Some(&[None]), overlap),
+                        "eightfold None changed the answer: text={text:?} \
+                         max_chars={max_chars} overlap={overlap}"
+                    );
+                    // The duplicated line-first list, duplicate literals
+                    // in every position: the same dominance argument for
+                    // the `Some(s)` arm the dedup now covers.
+                    assert_eq!(
+                        chunk_hierarchical(
+                            &text,
+                            max_chars,
+                            Some(&[Some("\n"), None, Some("\n"), None]),
+                            overlap
+                        ),
+                        chunk_hierarchical(&text, max_chars, Some(&[Some("\n"), None]), overlap),
+                        "duplicated [\"\\n\", None] changed the answer: text={text:?} \
+                         max_chars={max_chars} overlap={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_hierarchical(
+                            &text,
+                            max_chars,
+                            Some(&[Some("\n"), Some("\n")]),
+                            overlap
+                        ),
+                        chunk_hierarchical(&text, max_chars, Some(&[Some("\n")]), overlap),
+                        "duplicated literal changed the answer: text={text:?} \
+                         max_chars={max_chars} overlap={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_hierarchical(
+                            &text,
+                            max_chars,
+                            Some(&[Some(" "), Some("\n"), Some(" ")]),
+                            overlap
+                        ),
+                        chunk_hierarchical(
+                            &text,
+                            max_chars,
+                            Some(&[Some(" "), Some("\n")]),
+                            overlap
+                        ),
+                        "mid-list duplicated literal changed the answer: text={text:?} \
                          max_chars={max_chars} overlap={overlap}"
                     );
                 }

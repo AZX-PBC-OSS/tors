@@ -1839,16 +1839,23 @@ rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost stated plainly: the first `None` entry pays the same three
-whole-text walks the default hierarchy pays (paragraph, sentence, word —
-the ~350 ms the 12 MiB measurement below shows), AT MOST once per call:
-every later `None` is recognized as a duplicate and skipped, inert
-(identical levels can never change the answer — the first occurrence of
-a level always dominates its duplicate), so the cost is bounded per call
-no matter how many `None` entries the list carries, on top of one scan
-per literal. Before the dedup this was re-paid per `None` entry — walks
-plus ~45 MiB of cut vectors per duplicate on a 6 MiB document, a
-caller-controlled unbounded cost (`[None] * 100` was an OOM shape).
+Cost stated plainly: every level — each of the three default walks,
+each distinct custom literal — pays its one whole-text walk AT MOST
+once per call, and ONLY when a window consults it: levels are built at
+their first consultation (the window loop walks the list strictly
+through `find_map`, in priority order), so a budget that answers every
+window at the paragraph level never runs the sentence or word walks at
+all, and duplicate entries — `None` or a repeated literal — are
+recognized at list construction and skipped, inert (identical levels
+can never change the answer — the first occurrence of a level always
+dominates its duplicate), so `[None] * 100` costs what `[None]` does
+(~1.7 ms at a 2000-codepoint budget over 6 MiB of prose, the paragraph
+walk alone) and `[" "] * 100` what `[" "]` does (~9 ms). The former
+spelling re-paid the walks per duplicate entry — walks plus ~45 MiB of
+cut vectors per duplicate on a 6 MiB document, a caller-controlled
+unbounded cost (`[None] * 100` measured 17.2 s and +3,120 MiB of peak
+RSS, `[" "] * 100` 790 ms and +1,560 MiB — OOM shapes) — closed by the
+construction-time dedup and the first-consultation deferral.
 
 **Rust API note**: 0.6.0 changes the public `tors-core` crate's
 `chunk_hierarchical(text, max_chars, separators, overlap)` signature —
@@ -1856,9 +1863,11 @@ caller-controlled unbounded cost (`[None] * 100` was an OOM shape).
 the type the `None`-entry splice requires — which is breaking for direct
 Rust consumers of the separately-published crate at 0.x. Python callers
 are unaffected: an all-literal list behaves identically under either
-spelling. The merge landed as a plain `feat:` with no `BREAKING CHANGE:`
-footer, so release-please's changelog will not surface it; this note is
-the visible record.
+spelling. The merge that introduced it (#28) landed as a plain `feat:`
+with no `BREAKING CHANGE:` footer — release-please would not have
+surfaced it on its own — so the footer is restated on the follow-up fix
+commit (#31), which release-please will carry into the 0.6.0 changelog
+when that release lands, and this note is the docs-side record.
 
 **Unlike `chunk_text`, this is NOT a lossless covering partition**: at
 every level except the raw cut, the separator itself is DROPPED between
@@ -1882,22 +1891,36 @@ level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
 
-Cost at document scale: one scan per level (the default hierarchy's
-paragraph/sentence/word walks, or one literal search per custom separator),
-one branchless byte pass for the codepoint count, and one grapheme
-boundary index — a one-bit-per-codepoint bitmap built LAZILY, only when a
-level actually has cuts to filter, a window needs the raw-cut fallback, or
+Cost at document scale: one scan per CONSULTED level — the default
+hierarchy's paragraph/sentence/word walks, or one literal search per
+distinct custom separator — each paid at most once per call, at the
+level's first consultation by the window loop; one branchless byte pass
+for the codepoint count; and one grapheme boundary index — a
+one-bit-per-codepoint bitmap built LAZILY, only when a consulted level
+actually has cuts to filter, a window needs the raw-cut fallback, or
 `overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
-instead of a segmentation walk. A custom hierarchy that never matches
-under a whole-document budget builds none of it. Measured on 12 MiB
-(min-of-3, `tools/bench_chunking.py`): a never-matching custom hierarchy
-~3 ms; the default hierarchy at a 2000-codepoint budget ~350 ms, which is
-its own word walk (~130 ms) plus sentence walk (~190 ms) — the accurate
-UAX #29 segmentation the function exists to provide. Before this change an
-unconditional `Vec<char>` collect plus a `HashSet` of every grapheme
-boundary in the document ran before anything else: ~1.0-1.2 s for the
-never-matching case regardless of budget, ~3.0 s for the default
-hierarchy, superlinear in input size.
+instead of a segmentation walk. A budget that answers every window at
+the paragraph level never runs the sentence or word walks; a custom
+hierarchy that never matches under a whole-document budget is one
+codepoint count and nothing else — no window consults a level, so not
+even the literal's own scan runs. Measured on 12 MiB
+(`tools/bench_chunking.py`): the default hierarchy at a 2000-codepoint
+budget over prose runs only its paragraph walk, ~3.4 ms — it was ~350
+ms when every level built eagerly, its word walk (~130 ms) plus
+sentence walk (~190 ms) scanned before the first window asked — and
+budgets that fall further consult, and pay, more: ~192 ms at a
+500-codepoint budget (the sentence walk joins the paragraph walk; the
+word walk is still never consulted), ~385 ms at a 100-codepoint budget
+(all three walks, plus a 20× denser chunk loop) — the laziness prices
+consultation, it does not skip walks the answer needs; a never-matching
+custom hierarchy under a whole-document budget ~2.5 ms, the codepoint
+count. Before #22 an unconditional `Vec<char>` collect plus a `HashSet`
+of every grapheme boundary in the document ran before anything else:
+~1.0-1.2 s for the never-matching case regardless of budget, ~3.0 s for
+the default hierarchy, superlinear in input size — #22 removed that
+unconditional grapheme structure, and this follow-up removed the
+unconditional level builds that had remained, which is what the
+~350 ms → ~3.4 ms drop measures.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,
