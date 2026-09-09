@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.4.1...v0.5.0) (2026-09-09)
+
+
+### Features
+
+* **repair:** add deadline_ms to bound pathological O(n²) inputs ([#21](https://github.com/AZX-PBC-OSS/tors/issues/21)) ([09a97b3](https://github.com/AZX-PBC-OSS/tors/commit/09a97b341d03cffd1a6ad6edfb5fd0aeb2b8ceb0))
+
+
+### Bug Fixes
+
+* is_grounded(fuzzy=True) rejects a verbatim substring ([#17](https://github.com/AZX-PBC-OSS/tors/issues/17)) ([1cce6d2](https://github.com/AZX-PBC-OSS/tors/commit/1cce6d28c520a0a60158e00c3532e3fc8ee1c2bc))
+* repair_json O(n²) on array-close runs (part A of [#13](https://github.com/AZX-PBC-OSS/tors/issues/13)) ([#18](https://github.com/AZX-PBC-OSS/tors/issues/18)) ([c15b493](https://github.com/AZX-PBC-OSS/tors/commit/c15b4936f9a1590838945ae60bea9f3a9b5beaa5))
+* repair_json SIGSEGV on comma-joined object fragments ([#19](https://github.com/AZX-PBC-OSS/tors/issues/19)) ([d9e1845](https://github.com/AZX-PBC-OSS/tors/commit/d9e184581d4e9a76361db8bf9e04d9ef846adec8))
+* restore [#21](https://github.com/AZX-PBC-OSS/tors/issues/21)'s deadline_ms, silently reverted by [#24](https://github.com/AZX-PBC-OSS/tors/issues/24)'s stale-base squash ([#25](https://github.com/AZX-PBC-OSS/tors/issues/25)) ([ec494c5](https://github.com/AZX-PBC-OSS/tors/commit/ec494c5a30930c4b723c2f89ed7fd9fe25b6c8db))
+
+
+### Performance Improvements
+
+* replace the chunkers' unconditional per-char grapheme structures with a lazy bitmap ([#24](https://github.com/AZX-PBC-OSS/tors/issues/24)) ([36d4016](https://github.com/AZX-PBC-OSS/tors/commit/36d4016bbea24f9f53f688140faa42ac4eb28688))
+
 ## [0.4.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.4.0...v0.4.1) (2026-09-08)
 
 
