@@ -134,22 +134,33 @@ jobs:
         run: uv sync --locked
 
       - name: Pytest
-        # -m "not timing": the timing lane (tests/test_gil_release.py and
-        # tests/test_performance.py — the asyncio heartbeat-gap and wall-band
-        # measurement cells, marked `timing` in pyproject.toml) is slow and
-        # load-sensitive, so the matrix legs deselect it and ONE dedicated
-        # step on this 3.12 leg runs it right after: the GIL/perf contracts
-        # still gate every push, once, instead of being paid on all five
-        # legs. The marker split is exact (both lane files carry a module-level
-        # pytestmark, nothing else does), so no test loses its lane — verified
-        # by `pytest --collect-only -m timing` + `-m "not timing"` summing to
-        # the unfiltered count.
-        # -rP: also show the captured stdout of PASSING tests. The suite's
-        # print-only measurement cells (deliberately unasserted bands, e.g.
-        # b64_decode's wall parity) record their numbers via print, which the
-        # default -q report swallows — -rP surfaces them in the CI log for
-        # the record.
-        run: uv run --no-sync pytest -q -rP -m "not timing"
+        # -m "not timing and not sweep": two lanes are deselected here and
+        # run ONCE on the 3.12 leg (steps below) instead of on all five
+        # matrix legs:
+        #   - timing: the load-sensitive measurement cells
+        #     (tests/test_gil_release.py, tests/test_performance.py).
+        #   - sweep: the 67k-cell exhaustive structural parity battery in
+        #     tests/test_json_repair_parity.py — extension-parity against
+        #     the json_repair oracle, identical on every Python version.
+        # The marker split is exact (every lane cell carries its marker),
+        # so no test loses its lane — verified by `pytest --collect-only`
+        # per lane summing to the unfiltered count.
+        # NO -rP on this step. -rP makes pytest retain the captured stdout
+        # of every passing test; at ~70k items the fast lane measured 17.5s
+        # without it and was still running at 180s with it (locally), and
+        # on CI it was the 450-955s stall at the 99% line that pushed legs
+        # from ~2 min to 18-29 min. Print-for-the-record cells live in the
+        # timing lane, which keeps its own -rP.
+        run: uv run --no-sync pytest -q -m "not timing and not sweep"
+
+      - name: Pytest (sweep lane)
+        # The exhaustive structural parity battery the matrix legs above
+        # deselect: 67k parametrized cells, Python-version-independent, so
+        # one leg pays for it. Plain -q, no -rP — nothing in this lane
+        # prints for the record, and -rP on a lane this size is the
+        # captured-output blowup documented on the fast-lane step above.
+        if: matrix.python-version == '3.12'
+        run: uv run --no-sync pytest -q -m sweep
 
       - name: Pytest (timing lane)
         # The lane the matrix legs above deselect, run ONCE (the 3.12 leg,
