@@ -5,7 +5,7 @@
 # stays `tors`: `[lib] name` below is independent of `[package] name` and is what actually
 # governs the built library's name, so this rename has no effect on the Python-facing API.
 name = "tors-core"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
