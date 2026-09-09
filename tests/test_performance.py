@@ -77,7 +77,13 @@ import pytest
 
 import tors
 from reference import corpus_b64, corpus_utf8, crlf, decomposed, entities, prose, reference_finalize
-from tors import chunk_by_sentences, chunk_by_words, chunk_hierarchical
+from tors import (
+    chunk_by_lines,
+    chunk_by_paragraphs,
+    chunk_by_sentences,
+    chunk_by_words,
+    chunk_hierarchical,
+)
 
 # The timing lane: every test in this module is a measurement cell (wall-time
 # bands and races over multi-MiB corpora), slow and load-sensitive, so CI's
@@ -320,17 +326,34 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #     chunk_by_words, 12 MiB prose, 200 words/chunk: ~1923ms -> ~165ms
 #     chunk_by_sentences, 12 MiB prose, 10 sentences/chunk:
 #     ~1328ms -> ~200ms
+#
+# Follow-up pass (lazy level builds + ASCII scan fast paths; this box,
+# CPython 3.13): default hierarchy @2000 12 MiB prose ~351ms -> ~3.6ms
+# (a paragraph-scale budget consults only the paragraph level; the
+# sentence/word walks never run), by-lines @50 12 MiB ~13.6ms -> ~0.4ms
+# and by-paras @5 ~10.4ms -> ~0.4ms (ASCII memchr2 scan; non-ASCII keeps
+# the char machine). The docstrings below carry the detail.
 # ---------------------------------------------------------------------------
 
 
 def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures() -> None:
     """The whole-document-budget custom-hierarchy cell from #22: a
-    never-matching separator list must cost one count pass plus one scan
-    pass (ratioed against CPython's own ``in``, a C-speed scan of the same
-    text), not the unconditional per-codepoint grapheme structure the
-    former spelling built before anything else could run. Measured ratio
-    ~2 after the fix (the count pass plus marshalling rides on top of the
-    scan); the former spelling measured ~700x."""
+    never-matching separator list under a budget that swallows the whole
+    text must cost ONE CODEPOINT COUNT and nothing else. Under the
+    lazy-level pass the level is never consulted (the first window fits
+    the entire document), so it is never built and never scanned -- the
+    literal's scan does not run at all, where the pre-lazy spelling paid
+    one count pass plus one scan pass. The reference stays CPython's own
+    ``in``, a C-speed scan of the same text, because the class of
+    regression this cell guards (an unconditional per-codepoint
+    structure or scan built before the budget is even examined) shows up
+    as wall time against exactly that reference. Measured on this box
+    (Linux, CPython 3.13, ambient load 42-85 in a shared-box burst
+    window, min-of-3 after warmup): ~2.6ms for the call, both builds in
+    the same 2.4-3.6ms noise-bound band -- no speedup is claimed for the
+    laziness change here, only the cheaper structural story (the bare
+    scan measured ~6.0ms in the same contended window). The former
+    pre-#22 spelling measured ~700x."""
     q = "q" * (12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 12 * _MIB, ["xyz"]), q)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, q)
@@ -343,14 +366,20 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
 
 def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii() -> None:
     """The laziness contract, on the input where it is load-bearing: for
-    NON-ASCII text the grapheme index is a full segmentation walk
-    (~150ms at 12 MiB), so a call that never needs it (never-matching
-    separators, whole-document budget: no cuts to filter, no raw-cut
-    window, no overlap snap) must not build it. The reference is the same
-    ``in`` scan; measured ~5ms vs ~2ms on decomposed prose (ratio ~2.5)
-    when lazy, ~75x if the index were built unconditionally — the ASCII
-    fast path masks that regression on single-byte corpora, which is why
-    this cell runs decomposed text."""
+    NON-ASCII text a whole-text level build is a full segmentation walk
+    (the grapheme index ~150ms at 12 MiB), so a call that never consults
+    a level (never-matching separators, whole-document budget: no cuts
+    to filter, no raw-cut window, no overlap snap) must build nothing.
+    Under the lazy-level pass the literal is never even scanned -- the
+    whole call is one codepoint count (an O(n) walk on non-ASCII text)
+    plus marshalling, where the pre-lazy spelling paid the scan pass too.
+    The reference is the same ``in`` scan; measured ~2.6ms vs ~1.4ms on
+    decomposed prose (ratio ~1.9) on this box (Linux, CPython 3.13,
+    ambient load 42-85, min-of-3 after warmup), and both builds sit in
+    the same 2.4-3.6ms noise-bound band -- no speedup claimed, the
+    cheaper structure is the point. ~75x if the index were built
+    unconditionally -- the ASCII fast path masks that regression on
+    single-byte corpora, which is why this cell runs decomposed text."""
     corpus = decomposed(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s), ["xyz"]), corpus)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, corpus)
@@ -366,10 +395,18 @@ def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() ->
     own UAX #29 walks (word_count + sentence_count on the same corpus,
     measured in-process). The hierarchy IS those walks; everything around
     them -- level construction, the cut filter, the chunk loop,
-    marshalling -- must be marginal. Measured ~351ms against a ~320ms
-    reference sum (ratio ~1.1) after the fix; the former spelling measured
-    ~9.4x (the grapheme hash set dominated the segmentation it was
-    filtering)."""
+    marshalling -- must be marginal. Measured on this box (Linux, CPython
+    3.13, ambient load 42-85, min-of-3 after warmup): ~3.6ms against a
+    ~316ms walk sum (ratio ~0.01) after the lazy-level pass -- at this
+    2000-codepoint budget only the paragraph level is ever consulted, so
+    the sentence and word walks never run at all (the dedicated
+    ["\n\n"]-ratio cell below pins that property against a tighter
+    reference); the pre-lazy spelling measured ~351ms against a ~320ms
+    reference sum (ratio ~1.1), and the original pre-#22 spelling ~9.4x
+    (the grapheme hash set dominated the segmentation it was filtering).
+    The assertion is kept as the standing ceiling in the other direction:
+    whatever levels a budget DOES consult, the machinery around the
+    walks must not dominate them."""
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
     walks_ms = _min_wall_ms(tors.word_count, corpus) + _min_wall_ms(tors.sentence_count, corpus)
@@ -377,6 +414,64 @@ def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() ->
         f"chunk_hierarchical default 12MiB took {tors_ms:.0f}ms against "
         f"{walks_ms:.0f}ms of its own segmentation walks "
         f"({tors_ms / walks_ms:.1f}x); per-call machinery is dominating the walks"
+    )
+
+
+def test_chunk_hierarchical_default_hierarchy_builds_only_the_levels_the_budget_consults() -> None:
+    """The lazy-level contract at the budget where it pays: at a
+    paragraph-scale budget (2000 codepoints over 12 MiB of prose) every
+    window is answered by the paragraph level, so the sentence and word
+    walks -- the expensive lower levels of the default hierarchy -- must
+    never run at all. The load-fair reference is ``["\n\n"]``, a custom
+    hierarchy whose single literal supplies an equivalent top level
+    WITHOUT the default hierarchy's lower levels: both sides pay the
+    same paragraph scan plus the same windowing, so the default spelling
+    may only add marginal construction cost, never two more whole-text
+    walks. Measured on this box (Linux, CPython 3.13, ambient load
+    42-85, min-of-3 after warmup): 3.6ms default vs 3.7ms literal (ratio
+    ~1.0); on main the same pair measured ~332ms vs ~3.6ms (~92x,
+    failing the 3.0x ceiling) because the hierarchy built every level up
+    front -- the sentence walk (~186ms) and the word walk (~131ms) ran
+    on a call whose budget never consulted them."""
+    corpus = prose(12 * _MIB)
+    default_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
+    literal_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, ["\n\n"]), corpus)
+    assert default_ms < 3.0 * literal_ms, (
+        f"chunk_hierarchical default @2000 12MiB took {default_ms:.1f}ms against "
+        f"{literal_ms:.1f}ms for the paragraph-literal-only hierarchy "
+        f"({default_ms / literal_ms:.1f}x); a budget the lower levels never "
+        "answer is building them anyway"
+    )
+
+
+def test_chunk_hierarchical_duplicate_separator_entries_are_deduped_not_rebuilt() -> None:
+    """The dedup contract at slot construction, load-fair ratios (both
+    sides in the same process, min-of-3 after warmup): duplicate entries
+    in a custom separator list are collapsed, so ``[None] * 8`` must cost
+    one spliced default hierarchy, not eight, and ``[" "] * 8`` one
+    literal level, not eight. Measured on this box (Linux, CPython 3.13,
+    ambient load 42-85, min-of-3 after warmup; 6 MiB prose, budget 2000):
+    1.7ms for ``[None]`` vs 1.7ms for ``[None] * 8`` (ratio 1.0), 8.9ms
+    for ``[" "]`` vs 9.0ms for ``[" "] * 8`` (ratio 1.0). On main the
+    same cells measured ~8x and would fail this ceiling: the ``[None]``
+    pair measured 1347.1ms vs 169.2ms (~8x), the duplicate-``[" "]``
+    shape the same class (the ``[" "] * 100`` spelling measured 790.4ms
+    there vs 9.0ms now) -- each duplicate entry was rebuilt as its own
+    slot, eight whole-text walks for eight identical levels."""
+    corpus = prose(6 * _MIB)
+    lone_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None]), corpus)
+    eight_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None] * 8), corpus)
+    assert eight_none_ms < 1.5 * lone_none_ms, (
+        f"chunk_hierarchical [None]*8 @2000 6MiB took {eight_none_ms:.1f}ms against "
+        f"{lone_none_ms:.1f}ms for [None] ({eight_none_ms / lone_none_ms:.1f}x); "
+        "duplicate separator entries are being rebuilt per slot instead of deduped"
+    )
+    lone_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [" "]), corpus)
+    eight_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [" "] * 8), corpus)
+    assert eight_space_ms < 1.5 * lone_space_ms, (
+        f"chunk_hierarchical [' ']*8 @2000 6MiB took {eight_space_ms:.1f}ms against "
+        f"{lone_space_ms:.1f}ms for [' '] ({eight_space_ms / lone_space_ms:.1f}x); "
+        "duplicate separator entries are being rebuilt per slot instead of deduped"
     )
 
 
@@ -406,4 +501,58 @@ def test_chunk_by_sentences_is_its_own_sentence_walk() -> None:
         f"chunk_by_sentences 12MiB took {tors_ms:.0f}ms against a "
         f"{walk_ms:.0f}ms sentence walk ({tors_ms / walk_ms:.1f}x); the merge "
         "machinery is dominating the segmentation it windows"
+    )
+
+
+def test_chunk_by_paragraphs_absolute_band_holds() -> None:
+    """``chunk_by_paragraphs`` has no stdlib comparator (a paragraph here
+    is tors's own documented 2+-newline heuristic), so like
+    ``grapheme_count`` its wall cell is an absolute regression ceiling
+    with generous margin, not a race. Measured on this machine (Linux,
+    CPython 3.13, ambient load 42-85 in a shared-box burst window,
+    min-of-3 after warmup, the helper's own sample count): ~0.4ms at
+    12 MiB of prose after the ASCII memchr2 scan fast path (the
+    pre-fast-path per-char spelling measured ~10.4ms on this box at the
+    same corpus; a CRLF-dense log ran 12.8ms there). The ceiling is 10ms
+    (~25x margin over the new measurement), positioned so that a
+    regression back to the per-char decode loop FAILS this cell: the old
+    spelling's ~10.4ms blows straight through 10ms, where the former
+    30ms ceiling would have absorbed it silently. This cell exists
+    because the #28 codegen change moved this function's wall by +23-28%
+    (8.55ms -> 10.96ms on the same corpus, measured at the criterion
+    level) without any existing cell noticing -- the chunking-family
+    section had no paragraph row at all; a future change of that class
+    should at least have a ceiling to argue against."""
+    corpus = prose(12 * _MIB)
+    took_ms = _min_wall_ms(lambda s: chunk_by_paragraphs(s, 200), corpus)
+    assert took_ms < 10.0, (
+        f"chunk_by_paragraphs 12MiB took {took_ms:.1f}ms, outside the absolute "
+        "band (measured ~0.4ms at 12 MiB, ceiling 10ms; the pre-fast-path "
+        "per-char spelling measured ~10.4ms on this box and must fail this "
+        "cell); the paragraph scan regressed"
+    )
+
+
+def test_chunk_by_lines_absolute_band_holds() -> None:
+    """``chunk_by_lines``' cell, same absolute-band shape as
+    ``chunk_by_paragraphs``' (no stdlib comparator, one fused linear
+    scan): measured ~0.4ms at 12 MiB of prose on this machine (Linux,
+    CPython 3.13, ambient load 42-85 in a shared-box burst window,
+    min-of-3 after warmup, the helper's own sample count) after the
+    ASCII memchr2 scan fast path; the pre-fast-path per-char spelling
+    measured ~13.6ms on this box at the same corpus (a CRLF-dense log:
+    12.8ms). Ceiling 10ms (~25x margin over the new measurement),
+    positioned so that a regression back to the per-char decode loop
+    FAILS it: the old spelling's ~13.6ms blows straight through 10ms,
+    where the former 40ms ceiling would have absorbed it silently. The
+    scan and the real-line filter are one pass with O(1) memory beyond
+    the output, so only a class regression (a per-line allocation, a
+    lost fusion, a lost fast path) reaches the ceiling."""
+    corpus = prose(12 * _MIB)
+    took_ms = _min_wall_ms(lambda s: chunk_by_lines(s, 200), corpus)
+    assert took_ms < 10.0, (
+        f"chunk_by_lines 12MiB took {took_ms:.1f}ms, outside the absolute band "
+        "(measured ~0.4ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
+        "spelling measured ~13.6ms on this box and must fail this cell); the "
+        "line scan regressed"
     )

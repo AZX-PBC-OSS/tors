@@ -550,7 +550,10 @@ def chunk_by_sentences_iter(
 # survive as the paragraph gap" convention normalize's own pipeline
 # already uses (it collapses 3+ down to exactly 2, never below). This is
 # a HEURISTIC, not a Unicode Standard segmentation (there is no UAX for
-# paragraphs): a single \n is ordinary content, not a break. Same
+# paragraphs): a single \n is ordinary content, not a break. Unlike the
+# word/line twins, paragraphs have NO content filter: a whitespace-only
+# paragraph IS emitted as a chunk (only fully-empty spans are dropped),
+# so an overlapping pair of chunks can share blank content. Same
 # contract, same argument validation, same empty-input answer as its
 # siblings.
 def chunk_by_paragraphs(
@@ -566,7 +569,12 @@ def chunk_by_paragraphs(
 # lines neither count toward lines_per_chunk nor split a chunk's interior
 # (they ride along inside a chunk's span exactly as inter-word whitespace
 # rides along in chunk_by_words), so lines_per_chunk=200 means 200
-# content lines. Spans run first included line's start through last
+# content lines. "Non-whitespace" is definitional: the Unicode
+# White_Space property (char::is_whitespace), under which an NBSP-only
+# line is blank and U+001C-U+001F (FS/GS/RS/US) count as line CONTENT,
+# diverging from Python's str.isspace() (which treats those four as
+# whitespace) and from str.splitlines (which even breaks on them; tors
+# does not). Spans run first included line's start through last
 # included line's end, NOT through the trailing break (not a covering
 # partition); a trailing break at end of text yields no trailing empty
 # line. Final chunk may hold fewer lines; empty or no-content-line text

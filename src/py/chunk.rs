@@ -420,12 +420,21 @@ pub fn chunk_by_paragraphs(
 /// to the nearest GRAPHEME boundary (not necessarily a semantic
 /// paragraph/sentence/word boundary; a documented simplification of the
 /// single-hierarchy overlap snap `chunk_text_overlapping` uses), with the
-/// same snap-collapse-to-zero-overlap degradation on a too-short trailing
-/// chunk.
+/// same snap-collapse-to-zero-overlap degradation when the grapheme-snapped
+/// overlap target would reach the chunk's own start (a too-short chunk, or
+/// one whose overlap window is consumed by a multi-codepoint cluster such
+/// as `\r\n`).
 ///
 /// `max_chars < 1` or `overlap < 0` raise `ValueError`. Empty `text`
 /// returns `[]`. An empty `separators` list is legal and skips straight to
 /// the raw-cut fallback for every chunk.
+///
+/// Cost at document scale is the levels your budget actually CONSULTS:
+/// each level's scan runs at most once per call, at its first
+/// consultation, so a budget that never falls past the paragraph level
+/// never pays the sentence or word walks at all, and duplicate entries
+/// (`None` or a repeated literal) are deduped — `[None] * 100` and
+/// `[" "] * 100` cost what the single entry does.
 ///
 /// GIL model: identical to `chunk_by_words`. The whole multi-level scan
 /// runs under one `py.detach`; the return marshalling is O(chunks)
@@ -455,6 +464,13 @@ pub fn chunk_hierarchical(
     }
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
+    // The one intermediate materialization pyo3's borrowed-Vec
+    // limitation forces (`Option<Vec<Option<&str>>>` cannot be extracted
+    // directly: FromPyObject is not general enough over the borrowed
+    // element lifetime): O(list) transient, owned Strings freed with the
+    // call. The slot list the core builds from it is O(DISTINCT entries)
+    // after the dedup, so the pathological `[None] * N` spellings pay
+    // this pass and nothing beyond it.
     let seps: Option<Vec<Option<&str>>> = separators
         .as_ref()
         .map(|v| v.iter().map(|entry| entry.as_deref()).collect());
@@ -476,13 +492,18 @@ pub fn chunk_hierarchical(
 /// neither count toward `lines_per_chunk` nor split a chunk's interior
 /// (they ride along inside a chunk's span exactly as inter-word
 /// whitespace rides along in `chunk_by_words`), so a caller reaching for
-/// `lines_per_chunk=200` gets 200 content lines. `(start, end)` offsets
-/// span the first included line's start through the last included line's
-/// end (NOT through the trailing break after it: non-overlapping chunks
-/// are not necessarily contiguous). The final chunk may hold fewer lines
-/// when the total doesn't divide evenly. Empty text, or text with no
-/// content lines at all, returns `[]`. A trailing break at end of text
-/// yields no trailing empty line.
+/// `lines_per_chunk=200` gets 200 content lines. "Non-whitespace" is
+/// definitional here: the Unicode `White_Space` property
+/// (`char::is_whitespace`), under which an NBSP-only line is blank and
+/// U+001C–U+001F (FS/GS/RS/US) count as line CONTENT, diverging from
+/// Python's `str.isspace()` (which treats those four as whitespace) and
+/// from `str.splitlines` (which even breaks on them; tors does not).
+/// `(start, end)` offsets span the first included line's start through
+/// the last included line's end (NOT through the trailing break after
+/// it: non-overlapping chunks are not necessarily contiguous). The final
+/// chunk may hold fewer lines when the total doesn't divide evenly.
+/// Empty text, or text with no content lines at all, returns `[]`. A
+/// trailing break at end of text yields no trailing empty line.
 ///
 /// `lines_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >=
 /// lines_per_chunk` raises `ValueError` (no forward progress: each

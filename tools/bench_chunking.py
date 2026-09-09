@@ -15,8 +15,18 @@ Cells (12 MiB unless noted, the issue's own scale):
 - hierarchical-default-2000: real prose, the default paragraph -> word
   hierarchy at a 2000-codepoint budget -- the segmentation walks the
   function exists to provide, plus the cut filter and chunk walk.
+- hierarchical-none8/none100-2000 (6 MiB): the duplicate-entry dedup
+  story -- [None]*8 and [None]*100 against the lone-[None] cost; after
+  slot-construction dedup every spelling walks one spliced default
+  hierarchy, where the rebuild-per-entry spelling measured 1.3s and
+  17.2s per pass on main.
 - by-words / by-sentences / by-paragraphs: the unit-count chunkers over
   the same prose at their natural window sizes.
+- by-lines: the merge-free sibling at 50 lines (mirroring the criterion
+  group's corpus-derived ``by_lines_50`` budget): one fused scan, no
+  segmentation walk and no boundary index. The ``log`` corpus variant
+  runs the same budget over a deterministic CRLF-dense log (the break
+  kinds the scan's CR/CRLF folding exists for, not prose-shaped text).
 - walks: the component scans (grapheme/word/sentence count) as reference
   rows, the "what the residual IS" numbers.
 
@@ -92,6 +102,18 @@ CELLS: list[tuple[str, str, int, str]] = [
         "lambda s: tors.chunk_hierarchical(s, 2000, overlap=200)",
     ),
     (
+        "hierarchical-none8-2000 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 2000, [None] * 8)",
+    ),
+    (
+        "hierarchical-none100-2000 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 2000, [None] * 100)",
+    ),
+    (
         "by-words 200 12MiB",
         "prose",
         12 * MIB,
@@ -109,6 +131,18 @@ CELLS: list[tuple[str, str, int, str]] = [
         12 * MIB,
         "lambda s: tors.chunk_by_paragraphs(s, 5)",
     ),
+    (
+        "by-lines 50 12MiB",
+        "prose",
+        12 * MIB,
+        "lambda s: tors.chunk_by_lines(s, 50)",
+    ),
+    (
+        "by-lines 50 12MiB log",
+        "log",
+        12 * MIB,
+        "lambda s: tors.chunk_by_lines(s, 50)",
+    ),
     ("walk: grapheme_count 12MiB", "prose", 12 * MIB, "tors.grapheme_count"),
     ("walk: word_count 12MiB", "prose", 12 * MIB, "tors.word_count"),
     ("walk: sentence_count 12MiB", "prose", 12 * MIB, "tors.sentence_count"),
@@ -125,6 +159,31 @@ if kind == "prose":
             "after the bushing torque specifications changed. Maintenance windows "
             "now close within fourteen days. ") * 4 + "\n\n"
     corpus = unit * (size // len(unit) + 1)
+elif kind == "log":
+    # Deterministic CRLF-dense log, ~100-char lines: a CRLF ending every
+    # 7th line, a blank line every 13th, a whitespace-only line every
+    # 29th, a lone-\r ending every 41st -- the break kinds the by-lines
+    # scan's CR/CRLF folding and blank-line judgement exist for, rather
+    # than prose-shaped text. No filesystem dependency.
+    parts = []
+    n = 0
+    total = 0
+    while total < size:
+        n += 1
+        if n % 13 == 0:
+            content = ""
+        elif n % 29 == 0:
+            content = " \t "
+        else:
+            content = (
+                f"2026-09-09T12:00:{n % 60:02d}Z INFO svc=api-{n % 16:02d} "
+                f"shard={n % 8} latency_ms={n % 999:03d} status=200 "
+                f"bytes_out={(n * 37) % 100000:06d} user=agent{n % 4096:04d}"
+            )
+        ending = "\r" if n % 41 == 0 else ("\r\n" if n % 7 == 0 else "\n")
+        parts.append(content + ending)
+        total += len(content) + len(ending)
+    corpus = "".join(parts)
 else:
     corpus = "q" * size
 fn = eval(line)

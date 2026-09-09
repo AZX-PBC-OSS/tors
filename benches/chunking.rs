@@ -4,8 +4,9 @@
 //! offsets, feeds `merkle_root`/`merkle_diff`'s dedup/incremental-sync
 //! use) — plus the document-scale regression lane for
 //! `chunk_hierarchical` and the unit-count chunkers (`chunk_by_words`/
-//! `chunk_by_sentences`/`chunk_by_lines`), the cells issue #22 measured
-//! — joined by `chunk_by_lines`, the family's newest spelling, for the
+//! `chunk_by_sentences`/`chunk_by_paragraphs`/`chunk_by_lines`), the
+//! cells issue #22 measured — joined by `chunk_by_lines`, the family's
+//! newest spelling, for the
 //! same story: a per-call cost that used to be dominated by
 //! unconditional per-codepoint structures (a whole-text `Vec<char>` plus
 //! a `HashSet<usize>` of every grapheme boundary) and is now the
@@ -92,16 +93,18 @@ fn bench_chunk_cdc(c: &mut Criterion) {
 
 /// The #22 document-scale lane: `chunk_hierarchical` at both hierarchy
 /// kinds plus the unit-count chunkers — the merge-based pair
-/// (`by_words`/`by_sentences`) at the issue's own cell shapes, and the
-/// merge-free `by_lines` sibling at a corpus-derived one (no issue cell
-/// exists for it to mirror; the cell's own comment derives the budget).
+/// (`by_words`/`by_sentences`) at the issue's own cell shapes,
+/// `by_paragraphs` at the wall-time tool's own row, and the merge-free
+/// `by_lines` sibling at a corpus-derived one (no issue cell exists for
+/// it to mirror; the cell's own comment derives the budget).
 /// The `never-match` cells (a custom separator list that
 /// matches nothing, whole-document budget) isolate the per-call machinery
 /// — one count pass, one scan pass, no grapheme structure; the
-/// `default_2000` cells are the segmentation walks the function exists to
-/// provide; `by_words`/`by_sentences` are the unit-count spellings that
-/// carry the same boundary index, `by_lines` the sibling that carries
-/// none (its line breaks are structurally grapheme-safe). 12 MiB cells
+/// `default_2000` cells are the segmentation walks the function exists
+/// to provide; `by_words`/`by_sentences` are the unit-count spellings that
+/// carry the same boundary index, `by_paragraphs` and `by_lines` the
+/// siblings that carry none (their newline-run breaks are structurally
+/// grapheme-safe, no merge step). 12 MiB cells
 /// drop the sample count (the `chunk_cdc` 100 MiB precedent): ~300 ms
 /// per iteration does not need criterion's default 100 samples to hold
 /// a stable line.
@@ -159,6 +162,21 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
         &text,
         |bench, text| {
             bench.iter(|| chunk_by_segment_impl::chunk_by_sentences(black_box(text), 10, 0))
+        },
+    );
+    // The wall-time tool's own "by-paragraphs 5" row, mirrored here so
+    // the criterion group keeps a paragraph line (no issue-#22 cell to
+    // mirror either — the budget is the tool's, keeping the criterion
+    // and wall-time tables comparable): the shared prose corpus is one
+    // paragraph per 666-byte unit (18,893 paragraphs in this 12 MiB
+    // text), so 5 per chunk keeps the windowing meaningful (3,779
+    // chunks; a 200-paragraph window would collapse the same text
+    // to 95).
+    group.bench_with_input(
+        BenchmarkId::new("by_paragraphs_5", format!("{}B", text.len())),
+        &text,
+        |bench, text| {
+            bench.iter(|| chunk_by_segment_impl::chunk_by_paragraphs(black_box(text), 5, 0))
         },
     );
     // No issue-#22 cell to mirror (words/sentences above have those),

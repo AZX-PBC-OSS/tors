@@ -64,6 +64,22 @@ class TestArgumentContract:
         for s, e in chunks:
             assert e - s <= 5
 
+    @pytest.mark.parametrize(
+        "separators",
+        [[1, None], ["a", 2], [b"\n"], "abc"],
+        ids=["int-entry", "int-entry-later", "bytes-entry", "bare-str-not-a-list"],
+    )
+    def test_junk_separator_entries_raise_type_error(self, separators: object) -> None:
+        # The separators argument is exactly ``list[str | None]`` (or
+        # ``None``): a non-str non-None entry -- or a bare ``str``, which
+        # is not a list at all -- is rejected with ``TypeError`` by pyo3's
+        # extraction before any Rust code runs, the same str-exactly
+        # argument boundary ``find_patterns``' pattern list follows. No
+        # message match: pyo3's wording is an implementation detail, the
+        # type is the contract.
+        with pytest.raises(TypeError):
+            chunk_hierarchical("hello", 5, separators=separators)  # type: ignore[arg-type]
+
     def test_text_within_budget_is_one_chunk(self) -> None:
         assert chunk_hierarchical("hello world", 100) == [(0, 11)]
 
@@ -210,6 +226,19 @@ class TestNoneEntrySplice:
                     f"{text[max(0, p - 4) : p + 4]!r}"
                 )
 
+    def test_offsets_are_codepoint_offsets_on_astral_text(self) -> None:
+        # Each emoji is a single Python codepoint but four UTF-8 bytes,
+        # so a byte-offset regression would read (0, 9), (9, 14) here
+        # instead of the codepoint offsets below. The "\n" literal never
+        # fires on this text, so the spliced default hierarchy's word
+        # level supplies the cut -- and the offsets are str slicing
+        # units at every level, so slicing the chunks back out must
+        # return whole emoji, never a torn surrogate half.
+        text = "\U0001f600 \U0001f601 \U0001f602"  # 5 codepoints, 14 UTF-8 bytes
+        chunks = chunk_hierarchical(text, 3, ["\n", None])
+        assert chunks == [(0, 3), (3, 5)]
+        assert [text[s:e] for s, e in chunks] == ["\U0001f600 \U0001f601", " \U0001f602"]
+
     def test_spliced_sentence_fallback_keeps_the_us_team_whole(self) -> None:
         # The contrast that motivates the splice: on this thread with
         # max_chars=40, the naive literal hierarchy ["\n", ". ", " "] cuts
@@ -319,8 +348,18 @@ class TestGraphemeSafety:
 # Hypothesis properties
 # ---------------------------------------------------------------------------
 
+# The newline is deliberate: "\n" is category Cc, which the category
+# whitelist below never draws, so without it in the sampled set the
+# spliced-hierarchy property's ["\n", None] shape would carry a line
+# literal that can never FIRE -- dead weight above the splice, the same
+# shape test_a_never_matching_literal_above_a_none_entry_changes_nothing
+# pins deliberately, exercising no line cut at all. Sampling "\n" (and
+# "." and " ", already reachable through the categories but weighted up
+# here) lets every shape's literals actually match, so the splice
+# exercises its line level.
 _TEXT = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N", "Zs", "P"), max_codepoint=0x2FFF),
+    alphabet=st.sampled_from(["\n", ".", " "])
+    | st.characters(whitelist_categories=("L", "N", "Zs", "P"), max_codepoint=0x2FFF),
     max_size=300,
 )
 
@@ -339,6 +378,23 @@ def test_no_chunk_exceeds_max_chars_default_hierarchy(text: str, max_chars: int)
                 f"chunk exceeded max_chars={max_chars} without being a single "
                 f"oversized grapheme cluster: {text[s:e]!r}"
             )
+
+
+@given(text=_TEXT, max_chars=st.integers(min_value=1, max_value=50))
+@settings(max_examples=150)
+def test_no_chunk_exceeds_max_chars_spliced_hierarchies(text: str, max_chars: int) -> None:
+    # The default hierarchy's budget property (above) extended to the
+    # None-entry splice shapes: a lone splice ([None]), a dead literal
+    # above it, and the chat-thread shape (["\n", None]) must all keep the
+    # same one documented exception -- a chunk may exceed max_chars only
+    # when it is exactly one grapheme cluster.
+    for seps in ([None], ["-", None], ["\n", None]):
+        for s, e in chunk_hierarchical(text, max_chars, separators=seps):
+            if e - s > max_chars:
+                assert grapheme_count(text[s:e]) == 1, (
+                    f"separators={seps}: chunk exceeded max_chars={max_chars} without "
+                    f"being a single oversized grapheme cluster: {text[s:e]!r}"
+                )
 
 
 @given(text=_TEXT, max_chars=st.integers(min_value=1, max_value=50))
