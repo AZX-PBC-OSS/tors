@@ -6,6 +6,11 @@ hierarchy (``separators=None``) uses tors's own accurate UAX #29 segmenters
 (paragraph -> sentence -> word) rather than literal guesses, and a
 CUSTOM hierarchy (``separators=[...]``) takes caller-supplied LITERAL
 strings (not regex, a scope line documented in ``src/chunk_hierarchical_impl.rs``).
+A ``None`` ENTRY in a custom list splices that same accurate default
+hierarchy in at its position (``["\n", None]`` = line -> paragraph ->
+sentence -> word -> raw cut), so a caller-supplied literal shape keeps
+tors's real segmenters as its oversized-segment fallback instead of
+naive ``". "`` / ``" "`` literal guesses.
 
 UNLIKE ``chunk_text``, this is NOT a lossless covering partition: the
 separator itself is dropped between chunks at every level except the final
@@ -24,7 +29,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from tors import chunk_hierarchical, grapheme_count
+from tors import chunk_hierarchical, grapheme_count, sentence_bounds
 
 # ---------------------------------------------------------------------------
 # Argument contract
@@ -137,6 +142,107 @@ class TestCustomSeparators:
         with_sentinel = chunk_hierarchical(text, 4, separators=[" ", ""])
         without_sentinel = chunk_hierarchical(text, 4, separators=[" "])
         assert with_sentinel == without_sentinel
+
+
+# ---------------------------------------------------------------------------
+# None entries: a custom hierarchy may splice the accurate default
+# hierarchy (paragraph -> sentence -> word, UAX #29) in at a position,
+# keeping a caller-supplied literal shape without inheriting naive
+# ". " / " " literal guesses as the oversized-segment fallback.
+# ---------------------------------------------------------------------------
+
+
+class TestNoneEntrySplice:
+    def test_a_lone_none_entry_is_identical_to_the_default_hierarchy(self) -> None:
+        # [None] splices the whole default hierarchy in as the only
+        # level: indistinguishable from not passing separators at all.
+        texts = [
+            "One. Two. Three Four Five.",
+            "First para.\n\nSecond para with more words in it than the first.",
+            "a\nb\nc d e f g h i j k l m n o p",
+        ]
+        for text in texts:
+            for max_chars in (5, 9, 17, 40):
+                assert chunk_hierarchical(text, max_chars, separators=[None]) == chunk_hierarchical(
+                    text, max_chars
+                )
+            assert chunk_hierarchical(text, 12, separators=[None], overlap=3) == chunk_hierarchical(
+                text, 12, overlap=3
+            )
+
+    def test_a_never_matching_literal_above_a_none_entry_changes_nothing(self) -> None:
+        # A literal that can never supply a cut is dead weight above the
+        # splice: the hierarchy behaves exactly like the default one.
+        text = "One. Two. Three Four Five. Six seven eight."
+        for max_chars in (6, 11, 24):
+            assert chunk_hierarchical(
+                text, max_chars, separators=["ZZZ_NEVER_MATCHES", None]
+            ) == chunk_hierarchical(text, max_chars)
+
+    def test_line_then_splice_never_splits_mid_line_on_a_thread(self) -> None:
+        # ["\n", None] is the chat-thread shape: one message per line, the
+        # "\n" literal keeping whole lines whole whenever they fit, and
+        # the spliced UAX #29 sentence level (not naive ". " literals) as
+        # the oversized-line fallback. At this budget every cut lands
+        # either at a line break or at a real sentence boundary,
+        # verified directly against sentence_bounds.
+        text = (
+            "Nathan: kicking off.\n"
+            "Priya: We briefed the U.S. team on the numbers. They asked for a "
+            "follow-up meeting. The budget holds.\n"
+            "Nathan: done."
+        )
+        chunks = chunk_hierarchical(text, 60, separators=["\n", None])
+        pieces = [text[s:e] for s, e in chunks]
+        # whole lines stay whole when they fit the budget
+        assert pieces[0] == "Nathan: kicking off."
+        assert pieces[-1] == "Nathan: done."
+        sentence_edges = {p for s, e in sentence_bounds(text) for p in (s, e)}
+        # a cut at the "\n" level consumes the break itself, so a boundary
+        # position lands at a line break iff it is flush against one
+        break_positions = {i for i, ch in enumerate(text) if ch in "\r\n"}
+        for s, e in chunks:
+            for p in (s, e):
+                if p in (0, len(text)):
+                    continue
+                assert p in sentence_edges or p in break_positions or (p - 1) in break_positions, (
+                    f"cut {p} is neither at a line break nor a sentence boundary: "
+                    f"{text[max(0, p - 4) : p + 4]!r}"
+                )
+
+    def test_spliced_sentence_fallback_keeps_the_us_team_whole(self) -> None:
+        # The contrast that motivates the splice: on this thread with
+        # max_chars=40, the naive literal hierarchy ["\n", ". ", " "] cuts
+        # right after "U.S" — the ". " matcher treats the period ending
+        # "U.S." as a separator, severing the name and dropping the period
+        # — while the spliced hierarchy's word level walks past the name,
+        # keeping "U.S. team" whole inside one piece.
+        text = (
+            "Nathan: kicking off.\n"
+            "Priya: We briefed the U.S. team on the numbers. They asked for a "
+            "follow-up meeting. The budget holds.\n"
+            "Nathan: done."
+        )
+        naive = [text[s:e] for s, e in chunk_hierarchical(text, 40, separators=["\n", ". ", " "])]
+        spliced = [text[s:e] for s, e in chunk_hierarchical(text, 40, separators=["\n", None])]
+        assert any(p.endswith("U.S") for p in naive), "naive hierarchy no longer severs the name?"
+        assert not any("U.S. team" in p for p in naive)
+        assert any("U.S. team" in p for p in spliced)
+        assert not any(p.endswith("U.S") for p in spliced)
+
+    def test_a_none_entry_between_literals_splices_at_its_position(self) -> None:
+        # Position is respected: ["---", None] puts the literal ABOVE the
+        # splice (it supplies the coarser cut and is consumed as a
+        # separator), while [None, "---"] puts the same literal BELOW the
+        # whole spliced hierarchy, where it can never fire (word-level
+        # cuts already exist), so the "---" rides inside a piece as plain
+        # text.
+        text = "One two three.---Four five six seven eight nine ten eleven twelve."
+        above = [text[s:e] for s, e in chunk_hierarchical(text, 14, separators=["---", None])]
+        below = [text[s:e] for s, e in chunk_hierarchical(text, 14, separators=[None, "---"])]
+        assert above[0] == "One two three."
+        assert all("---" not in p for p in above)
+        assert any("---" in p for p in below)
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +404,10 @@ def test_chunk_edges_are_grapheme_boundaries_custom_separators_and_overlap(
 ) -> None:
     assume(overlap < max_chars)
     # A clean literal, a literal that MATCHES INSIDE the SARA AM cluster,
-    # and a multi-level list: the custom-hierarchy filter's whole reason
-    # to exist is the second one.
-    for seps in (["-"], ["ำ"], ["-", " "]):
+    # a multi-level list, and a None-spliced list: the custom-hierarchy
+    # filter's whole reason to exist is the second one, and the spliced
+    # default hierarchy must survive the same filter unchanged.
+    for seps in (["-"], ["ำ"], ["-", " "], ["-", None]):
         for s, e in chunk_hierarchical(text, max_chars, separators=seps, overlap=overlap):
             assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
             assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"

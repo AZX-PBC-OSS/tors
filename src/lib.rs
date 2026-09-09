@@ -423,6 +423,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_by_sentences, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_sentences_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_paragraphs, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_by_lines, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_by_lines_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;

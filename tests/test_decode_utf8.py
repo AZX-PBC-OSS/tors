@@ -208,9 +208,7 @@ class TestMalformedShapeBattery:
     def test_finalize_utf8_replace_matches_finalize_of_the_replace_decode(
         self, raw: bytes, because: str
     ) -> None:
-        assert finalize_utf8(raw, errors="replace") == finalize(
-            raw.decode("utf-8", "replace")
-        )
+        assert finalize_utf8(raw, errors="replace") == finalize(raw.decode("utf-8", "replace"))
 
     def test_replace_counts_replacement_chars_like_cpython(self) -> None:
         # The measured CPython layouts: constraint violations (overlong,
@@ -314,9 +312,7 @@ class TestFinalizeUtf8Contract:
 
     @given(st.text(max_size=200))
     @settings(max_examples=300)
-    def test_bytes_in_agrees_with_str_in_for_any_text_the_old_api_accepts(
-        self, text: str
-    ) -> None:
+    def test_bytes_in_agrees_with_str_in_for_any_text_the_old_api_accepts(self, text: str) -> None:
         """Cross-surface consistency: for every str tors.normalize/finalize accept,
         the bytes-in path over its UTF-8 encoding returns the identical pair,
         a caller can switch either way without changing any stored digest."""
@@ -324,9 +320,7 @@ class TestFinalizeUtf8Contract:
 
     @given(pathological_text())
     @settings(max_examples=300)
-    def test_bytes_in_agrees_with_str_in_on_pathological_whitespace_text(
-        self, text: str
-    ) -> None:
+    def test_bytes_in_agrees_with_str_in_on_pathological_whitespace_text(self, text: str) -> None:
         assert finalize_utf8(text.encode("utf-8")) == finalize(text)
 
     def test_finalize_utf8_hash_is_of_the_normalized_decoded_text(self) -> None:
@@ -341,9 +335,7 @@ class TestFinalizeUtf8Contract:
         # The one-call shape an extraction pipeline wants: replace-reads collapse
         # into a single native call, pinned by parity with the two-step expression.
         raw = b"caf\xc3\xa9 \xe0\x80\x80 trailing \xff"
-        assert finalize_utf8(raw, errors="replace") == finalize(
-            raw.decode("utf-8", "replace")
-        )
+        assert finalize_utf8(raw, errors="replace") == finalize(raw.decode("utf-8", "replace"))
 
 
 class TestBytesOnlyArgumentContract:

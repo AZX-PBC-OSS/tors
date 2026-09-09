@@ -1,6 +1,7 @@
 """Contract gate for the text-chunking family: ``tors.chunk_text`` (with its
 ``overlap`` parameter) and the segment-count-windowed ``tors.chunk_by_words``
-/ ``tors.chunk_by_sentences`` / ``tors.chunk_by_paragraphs``.
+/ ``tors.chunk_by_sentences`` / ``tors.chunk_by_paragraphs`` /
+``tors.chunk_by_lines``.
 
 ``chunk_text`` with ``overlap=0`` (the default) is a LOSSLESS COVERING
 PARTITION: chunks are non-empty, contiguous, strictly increasing, cover the
@@ -16,6 +17,11 @@ COUNT rather than a character budget: each chunk spans exactly N consecutive
 word/sentence segments (the last chunk may hold fewer), with Y segments of
 overlap repeated at the start of the next chunk.
 
+``chunk_by_lines`` is the line-count sibling of that windowing (the
+transcript/log shape): a break is a ``\n``, a lone ``\r``, or a ``\r\n`` pair
+counted as ONE unit, and a line counts only when it carries content, so
+blank lines ride along inside a chunk's span rather than counting.
+
 Forward progress (no infinite loop) is the one invariant enforced most
 aggressively here: every property test below either bounds the chunk count
 by the input length, or asserts strictly-increasing chunk starts directly,
@@ -29,6 +35,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from tors import (
+    chunk_by_lines,
+    chunk_by_lines_iter,
     chunk_by_paragraphs,
     chunk_by_sentences,
     chunk_by_sentences_iter,
@@ -79,9 +87,7 @@ class TestChunkTextNoOverlap:
         boundary=st.sampled_from(["word", "sentence"]),
     )
     @settings(max_examples=300)
-    def test_covering_partition_contract(
-        self, text: str, max_chars: int, boundary: str
-    ) -> None:
+    def test_covering_partition_contract(self, text: str, max_chars: int, boundary: str) -> None:
         chunks = chunk_text(text, max_chars, boundary=boundary)
         prev_end = 0
         for a, b in chunks:
@@ -412,6 +418,121 @@ class TestChunkByParagraphs:
 
 
 # ---------------------------------------------------------------------------
+# chunk_by_lines: the transcript/log shape. A break is a \n, a lone \r,
+# or a \r\n pair counted as ONE unit (the same CR/CRLF folding as
+# chunk_by_paragraphs; str.splitlines' exotic separators are NOT breaks).
+# A line counts only when it carries content, so blank lines ride inside
+# a chunk's span rather than counting, and a chunk ends at its last
+# line's end, never through the trailing break (non-covering, like
+# chunk_by_words).
+# ---------------------------------------------------------------------------
+
+
+class TestChunkByLines:
+    def test_empty_text_is_no_chunks(self) -> None:
+        assert chunk_by_lines("", 3) == []
+
+    def test_whitespace_only_text_is_no_chunks(self) -> None:
+        # No line carries a non-whitespace codepoint, so there is nothing
+        # to window: not even a blank-line chunk.
+        assert chunk_by_lines("   \n\t\n\r\n", 3) == []
+
+    def test_worked_example_no_overlap(self) -> None:
+        text = "l1\nl2\nl3\nl4\nl5"
+        chunks = chunk_by_lines(text, 2)
+        assert [text[a:b] for a, b in chunks] == ["l1\nl2", "l3\nl4", "l5"]
+
+    def test_crlf_pair_is_one_unit_and_is_never_torn(self) -> None:
+        # \r\n folds into ONE break, so a 1-line window never treats the
+        # pair as a "\r" break plus a "\n" break and tears it across two
+        # chunks' gap.
+        text = "a\r\nb"
+        assert chunk_by_lines(text, 1) == [(0, 1), (3, 4)]
+        assert chunk_by_lines(text, 2) == [(0, 4)]
+
+    def test_lone_carriage_return_is_a_break(self) -> None:
+        text = "a\rb"
+        assert chunk_by_lines(text, 1) == [(0, 1), (2, 3)]
+
+    def test_splitlines_exotic_separators_are_not_breaks(self) -> None:
+        # str.splitlines() would also break on \v \f NEL LS PS; the line
+        # contract here (like chunk_by_paragraphs) recognizes only \n,
+        # lone \r, and \r\n, so vertical tab and form feed ride as
+        # ordinary content inside one line.
+        text = "a\vb\fc"
+        assert chunk_by_lines(text, 1) == [(0, 5)]
+
+    def test_blank_lines_do_not_count_but_ride_inside_a_chunk_span(self) -> None:
+        # A line counts only when it carries content: the blank line
+        # between the two messages neither counts toward the window nor
+        # splits a chunk's interior — it rides along inside the chunk's
+        # span, exactly as inter-word whitespace rides along in
+        # chunk_by_words.
+        text = "msg one\n\nmsg two"
+        assert chunk_by_lines(text, 2) == [(0, 16)]  # one window holds both content lines
+        assert chunk_by_lines(text, 1) == [(0, 7), (9, 16)]
+
+    def test_trailing_break_yields_no_phantom_empty_line(self) -> None:
+        # A chunk ends at its last line's end, never through the trailing
+        # break, and that trailing break does not materialize an extra
+        # empty final chunk.
+        text = "l1\n"
+        assert chunk_by_lines(text, 1) == [(0, 2)]
+        assert text[0:2] == "l1"
+
+    def test_fewer_lines_than_per_chunk_is_one_chunk(self) -> None:
+        text = "one\ntwo"
+        assert chunk_by_lines(text, 100) == [(0, len(text))]
+
+    def test_last_chunk_may_be_partial(self) -> None:
+        text = "l1\nl2\nl3\nl4\nl5"
+        chunks = chunk_by_lines(text, 2)
+        assert chunks[-1] == (12, 14)
+        assert chunks[-1][1] == len(text)
+
+    def test_worked_example_with_overlap(self) -> None:
+        # The LangChain #34804-shaped regression the words/sentences/
+        # paragraphs classes above already pin, mirrored here: overlap
+        # must repeat WHOLE lines (genuine shared content), never merely
+        # accept the parameter while sharing nothing or only break chars.
+        text = "l1\nl2\nl3\nl4\nl5"
+        chunks = chunk_by_lines(text, 2, overlap=1)
+        assert [text[a:b] for a, b in chunks] == ["l1\nl2", "l2\nl3", "l3\nl4", "l4\nl5"]
+        for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
+            assert next_start < prev_end, "no actual overlap"
+            shared = text[next_start:prev_end]
+            assert shared, "shared span must be non-empty"
+            assert shared.strip(), "shared span carries no line content"
+
+    def test_lines_per_chunk_zero_or_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="lines_per_chunk must be >= 1, got 0"):
+            chunk_by_lines("a\nb", 0)
+        with pytest.raises(ValueError, match="lines_per_chunk must be >= 1, got -1"):
+            chunk_by_lines("a\nb", -1)
+
+    def test_overlap_equal_to_or_above_lines_per_chunk_raises(self) -> None:
+        with pytest.raises(
+            ValueError, match="overlap must be < lines_per_chunk, got overlap=2, lines_per_chunk=2"
+        ):
+            chunk_by_lines("a\nb\nc", 2, overlap=2)
+
+    def test_negative_overlap_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap must be >= 0, got -1"):
+            chunk_by_lines("a\nb", 2, overlap=-1)
+
+    @given(st.text(alphabet="ab \n\r", max_size=60), st.integers(min_value=1, max_value=5))
+    @settings(max_examples=300)
+    def test_forward_progress_never_stalls(self, text: str, per_chunk: int) -> None:
+        """No stalled/looping start over arbitrary break-heavy input,
+        for every valid overlap below ``per_chunk``, the fast-failing
+        guarantee this whole module docstring names as the top priority."""
+        for overlap in range(per_chunk):
+            chunks = chunk_by_lines(text, per_chunk, overlap=overlap)
+            starts = [a for a, _ in chunks]
+            assert all(b > a for a, b in zip(starts, starts[1:], strict=False))
+
+
+# ---------------------------------------------------------------------------
 # Composition sanity: pipeline shape these primitives exist to serve
 # ---------------------------------------------------------------------------
 
@@ -433,7 +554,8 @@ class TestComposesAsDocumented:
 
 
 # ---------------------------------------------------------------------------
-# Streaming twins: chunk_text_iter / chunk_by_words_iter / chunk_by_sentences_iter
+# Streaming twins: chunk_text_iter / chunk_by_words_iter /
+# chunk_by_sentences_iter / chunk_by_lines_iter
 # ---------------------------------------------------------------------------
 
 
@@ -451,18 +573,21 @@ class TestStreamingIterParity:
 
     def test_chunk_by_words_iter_matches_the_list(self) -> None:
         text = "one two three four five six seven"
-        assert list(chunk_by_words_iter(text, 3, overlap=1)) == chunk_by_words(
-            text, 3, overlap=1
-        )
+        assert list(chunk_by_words_iter(text, 3, overlap=1)) == chunk_by_words(text, 3, overlap=1)
 
     def test_chunk_by_sentences_iter_matches_the_list(self) -> None:
         text = "One. Two. Three. Four."
         assert list(chunk_by_sentences_iter(text, 2)) == chunk_by_sentences(text, 2)
 
+    def test_chunk_by_lines_iter_matches_the_list(self) -> None:
+        text = "l1\nl2\nl3\nl4\nl5"
+        assert list(chunk_by_lines_iter(text, 2, overlap=1)) == chunk_by_lines(text, 2, overlap=1)
+
     def test_empty_text_is_an_empty_iterator_not_an_error(self) -> None:
         assert list(chunk_text_iter("", 5)) == []
         assert list(chunk_by_words_iter("", 3)) == []
         assert list(chunk_by_sentences_iter("", 3)) == []
+        assert list(chunk_by_lines_iter("", 3)) == []
 
     def test_length_hint_counts_down_as_the_iterator_drains(self) -> None:
         it = chunk_text_iter("abc def ghi jkl mno", 8)
@@ -499,6 +624,20 @@ class TestStreamingIterParity:
             text, per_chunk, overlap=overlap
         )
 
+    @given(
+        text=st.text(alphabet="ab \n\r", max_size=40),
+        per_chunk=st.integers(min_value=1, max_value=6),
+        data=st.data(),
+    )
+    @settings(max_examples=200)
+    def test_chunk_by_lines_iter_matches_the_list_property(
+        self, text: str, per_chunk: int, data: object
+    ) -> None:
+        overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))  # type: ignore[attr-defined]
+        assert list(chunk_by_lines_iter(text, per_chunk, overlap=overlap)) == chunk_by_lines(
+            text, per_chunk, overlap=overlap
+        )
+
     def test_raises_the_same_value_errors_as_the_list_functions(self) -> None:
         with pytest.raises(ValueError, match="max_chars must be >= 1"):
             chunk_text_iter("abc", 0)
@@ -506,6 +645,8 @@ class TestStreamingIterParity:
             chunk_by_words_iter("abc", 0)
         with pytest.raises(ValueError, match="sentences_per_chunk must be >= 1"):
             chunk_by_sentences_iter("abc", 0)
+        with pytest.raises(ValueError, match="lines_per_chunk must be >= 1"):
+            chunk_by_lines_iter("a\nb", 0)
 
 
 # ---------------------------------------------------------------------------

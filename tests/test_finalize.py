@@ -29,9 +29,7 @@ from reference import (  # noqa: I001 -- the shared oracle module (tests/referen
 )
 from tors import finalize, normalize
 
-_SHA256_OF_EMPTY = (
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-)
+_SHA256_OF_EMPTY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 _SHA256_OF_ABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
 
@@ -110,9 +108,7 @@ class TestFinalizeProperty:
 
     @given(st.text(alphabet="ab" + _E_ACUTE_PRECOMPOSED + _COMBINING_ACUTE, max_size=300))
     @settings(max_examples=300)
-    def test_finalize_agrees_with_normalize_on_nfc_equivalent_inputs(
-        self, text: str
-    ) -> None:
+    def test_finalize_agrees_with_normalize_on_nfc_equivalent_inputs(self, text: str) -> None:
         # Hash-gated dedupe depends on NFC-equivalent inputs hashing identically: the
         # normalized text (and therefore its hash) must be a function of the composed
         # content, not of the incoming decomposition form.
@@ -181,9 +177,7 @@ class TestIdentityReturnContract:
 
     @given(pathological_text())
     @settings(max_examples=500)
-    def test_value_identity_implies_object_identity_for_the_string_element(
-        self, text: str
-    ) -> None:
+    def test_value_identity_implies_object_identity_for_the_string_element(self, text: str) -> None:
         result, _ = finalize(text)
         if result == text:
             assert result is text

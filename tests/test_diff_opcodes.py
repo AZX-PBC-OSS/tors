@@ -633,9 +633,7 @@ class TestDeadline:
         operands inside any ordinary budget return the single-equal list (no
         timeout, no search)."""
         a = diff_pair_near_identical(64 * 1024)[0]
-        assert tors.diff_opcodes(a, a, deadline_ms=5_000.0) == [
-            ("equal", 0, len(a), 0, len(a))
-        ]
+        assert tors.diff_opcodes(a, a, deadline_ms=5_000.0) == [("equal", 0, len(a), 0, len(a))]
         assert tors.diff_opcodes("", "", deadline_ms=5_000.0) == []
 
     @pytest.mark.parametrize("bad", [0.0, -50.0], ids=["zero", "negative"])

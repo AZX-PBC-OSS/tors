@@ -404,6 +404,13 @@ pub fn chunk_by_paragraphs(
 /// This REPLACES the default hierarchy for the levels it specifies, but the
 /// grapheme-safe raw cut is still always appended as the final fallback
 /// regardless (unlike LangChain, no trailing `""` sentinel is required).
+/// A `None` ENTRY in an otherwise-literal list splices the default
+/// hierarchy's three accurate levels in at that position:
+/// `["\n", None]` is line → paragraph → sentence → word → raw cut — the
+/// line-oriented-text shape (a chat thread, one message per line, never
+/// split mid-line) whose oversized-line fallback is the REAL UAX #29
+/// segmenter rather than the `". "`/`" "` literal guesses an all-literal
+/// list would pin it to. `[None]` is identical to `separators=None`.
 ///
 /// UNLIKE `chunk_text`, this is NOT a lossless covering partition: at
 /// every level except the raw cut, the separator itself is DROPPED
@@ -428,7 +435,7 @@ pub fn chunk_hierarchical(
     py: Python<'_>,
     text: &str,
     max_chars: i64,
-    separators: Option<Vec<String>>,
+    separators: Option<Vec<Option<String>>>,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
     if max_chars < 1 {
@@ -448,10 +455,107 @@ pub fn chunk_hierarchical(
     }
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
-    let seps: Option<Vec<&str>> = separators
+    let seps: Option<Vec<Option<&str>>> = separators
         .as_ref()
-        .map(|v| v.iter().map(String::as_str).collect());
+        .map(|v| v.iter().map(|entry| entry.as_deref()).collect());
     Ok(py.detach(|| {
         chunk_hierarchical_impl::chunk_hierarchical(text, max_chars, seps.as_deref(), overlap)
     }))
+}
+
+/// `tors.chunk_by_lines(text, lines_per_chunk, *, overlap=0)`:
+/// [`chunk_by_words`]/[`chunk_by_sentences`]/[`chunk_by_paragraphs`]'s
+/// line-count twin. Each chunk spans `lines_per_chunk` consecutive lines,
+/// `overlap` LINES repeated at the start of the next chunk. A line break
+/// is a `\n`, a lone `\r`, or a `\r\n` pair counted as ONE unit (the same
+/// CR/CRLF folding convention `chunk_by_paragraphs` and `normalize`'s own
+/// pipeline use; `str.splitlines`' exotic separators — `\v`, `\f`, NEL,
+/// LS, PS — are NOT breaks here). A line counts as a line only when it
+/// carries at least one non-whitespace codepoint, the same real-token
+/// discipline `chunk_by_words` applies to word segments: blank lines
+/// neither count toward `lines_per_chunk` nor split a chunk's interior
+/// (they ride along inside a chunk's span exactly as inter-word
+/// whitespace rides along in `chunk_by_words`), so a caller reaching for
+/// `lines_per_chunk=200` gets 200 content lines. `(start, end)` offsets
+/// span the first included line's start through the last included line's
+/// end (NOT through the trailing break after it: non-overlapping chunks
+/// are not necessarily contiguous). The final chunk may hold fewer lines
+/// when the total doesn't divide evenly. Empty text, or text with no
+/// content lines at all, returns `[]`. A trailing break at end of text
+/// yields no trailing empty line.
+///
+/// `lines_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >=
+/// lines_per_chunk` raises `ValueError` (no forward progress: each
+/// chunk's stride is `lines_per_chunk - overlap` lines, always `>= 1` by
+/// construction once validated, so no runtime snap-fallback is needed).
+///
+/// GIL model: identical to [`chunk_by_words`].
+#[pyfunction(signature = (text, lines_per_chunk, *, overlap = 0))]
+pub fn chunk_by_lines(
+    py: Python<'_>,
+    text: &str,
+    lines_per_chunk: i64,
+    overlap: i64,
+) -> PyResult<Vec<(usize, usize)>> {
+    if lines_per_chunk < 1 {
+        return Err(PyValueError::new_err(format!(
+            "lines_per_chunk must be >= 1, got {lines_per_chunk}"
+        )));
+    }
+    if overlap < 0 {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be >= 0, got {overlap}"
+        )));
+    }
+    if overlap >= lines_per_chunk {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be < lines_per_chunk, got overlap={overlap}, lines_per_chunk={lines_per_chunk}"
+        )));
+    }
+    let lines_per_chunk = lines_per_chunk as usize;
+    let overlap = overlap as usize;
+    Ok(py.detach(|| chunk_by_segment_impl::chunk_by_lines(text, lines_per_chunk, overlap)))
+}
+
+eager_iter_class! {
+    /// The streaming twin of [`chunk_by_lines`]: same shape as
+    /// [`ChunkTextIter`], and the same rationale as every other `_iter`
+    /// spelling: the list shape's GIL-held marshalling cost is measured
+    /// for segment-count-heavy outputs (`word_bounds` on 12 MiB of
+    /// prose, 3.67M segments, holds the GIL for 428-497ms just
+    /// marshalling the list), and a line-oriented corpus (a multi-MiB
+    /// log or transcript) is in that piece-count class, chunking into
+    /// hundreds of thousands of pieces.
+    ChunkByLinesIter, (usize, usize);
+}
+
+/// `tors.chunk_by_lines_iter(text, lines_per_chunk, *, overlap=0)`:
+/// [`chunk_by_lines`]'s streaming spelling; see [`ChunkByLinesIter`].
+#[pyfunction(signature = (text, lines_per_chunk, *, overlap = 0))]
+pub fn chunk_by_lines_iter(
+    py: Python<'_>,
+    text: Bound<'_, PyString>,
+    lines_per_chunk: i64,
+    overlap: i64,
+) -> PyResult<Py<ChunkByLinesIter>> {
+    if lines_per_chunk < 1 {
+        return Err(PyValueError::new_err(format!(
+            "lines_per_chunk must be >= 1, got {lines_per_chunk}"
+        )));
+    }
+    if overlap < 0 {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be >= 0, got {overlap}"
+        )));
+    }
+    if overlap >= lines_per_chunk {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be < lines_per_chunk, got overlap={overlap}, lines_per_chunk={lines_per_chunk}"
+        )));
+    }
+    let lines_per_chunk = lines_per_chunk as usize;
+    let overlap = overlap as usize;
+    let s = text.to_str()?;
+    let chunks = py.detach(|| chunk_by_segment_impl::chunk_by_lines(s, lines_per_chunk, overlap));
+    Py::new(py, ChunkByLinesIter(EagerIter::new(py, text, chunks)))
 }

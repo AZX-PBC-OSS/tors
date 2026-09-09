@@ -80,7 +80,7 @@ _TOKYO = chr(0x6771) + chr(0x4EAC)  # 東京: two 3-byte chars
 _KYOTO = chr(0x4EAC) + chr(0x90FD)  # 京都
 _OSAKA = chr(0x5927) + chr(0x962A)  # 大阪
 _FAMILY = (
-    "\U0001F468" + _ZWJ + "\U0001F469" + _ZWJ + "\U0001F467"
+    "\U0001f468" + _ZWJ + "\U0001f469" + _ZWJ + "\U0001f467"
 )  # man-ZWJ-woman-ZWJ-girl: 5 chars, 18 bytes
 
 
@@ -130,9 +130,7 @@ _FAMILY = (
         "no-matches",
     ],
 )
-def test_golden_battery(
-    text: str, replacements: dict[str, str], expected: str
-) -> None:
+def test_golden_battery(text: str, replacements: dict[str, str], expected: str) -> None:
     """The fixed anchor of the contract: every golden case asserts the EXACT
     expected string and the oracle's agreement, so a hand-computed
     expectation that disagreed with the brute-force reference would fail
@@ -184,8 +182,7 @@ def test_multibyte_keys_values_and_text(
     these rows, and every row is cross-checked against the character-space
     oracle."""
     assert not (
-        text.isascii()
-        and all(k.isascii() and v.isascii() for k, v in replacements.items())
+        text.isascii() and all(k.isascii() and v.isascii() for k, v in replacements.items())
     ), "every row of the multi-byte battery must carry non-ASCII somewhere"
     result = replace_many(text, replacements)
     assert result == expected
@@ -444,9 +441,7 @@ def test_every_replacement_map_over_a_tiny_alphabet_matches_the_reference() -> N
         texts.extend("".join(combo) for combo in itertools.product("ab", repeat=length))
     for replacements in dicts:
         for text in texts:
-            assert replace_many(text, replacements) == reference_replace_many(
-                text, replacements
-            )
+            assert replace_many(text, replacements) == reference_replace_many(text, replacements)
 
 
 # --- replace_many_masked: the length-preserving redaction spelling --------------------
@@ -490,8 +485,12 @@ class TestReplaceManyMasked:
             # CHARACTER-level on every UTF-8 width.
             ("café café", {"café": "C"}, "*", "C*** C***"),
             ("京都東京", {"東京": "TOKYO"}, "*", "京都TO"),
-            ("cafe" + _COMBINING_ACUTE + " ok", {"cafe" + _COMBINING_ACUTE: "café"}, "*",
-             "café* ok"),
+            (
+                "cafe" + _COMBINING_ACUTE + " ok",
+                {"cafe" + _COMBINING_ACUTE: "café"},
+                "*",
+                "café* ok",
+            ),
             # A multi-byte MASK pads with its own single character.
             ("éaé cat", {"cat": "X"}, _E_ACUTE, "éaé X" + _E_ACUTE + _E_ACUTE),
             ("cat", {"cat": "XY"}, "東", "XY東"),
@@ -533,9 +532,9 @@ class TestReplaceManyMasked:
         assert result == expected
         assert len(result) == len(text)
         reshaped = {
-            key: value[: len(key)] if len(value) >= len(key) else value + mask * (
-                len(key) - len(value)
-            )
+            key: value[: len(key)]
+            if len(value) >= len(key)
+            else value + mask * (len(key) - len(value))
             for key, value in replacements.items()
         }
         assert result == reference_replace_many(text, reshaped)
@@ -602,9 +601,7 @@ class TestReplaceManyMasked:
         whole word, two multi-byte chars) is refused up front with the
         exact message."""
         for bad in ("", "**", "abc", "éé", "東京"):
-            with pytest.raises(
-                ValueError, match="^mask must be exactly one character"
-            ):
+            with pytest.raises(ValueError, match="^mask must be exactly one character"):
                 replace_many_masked("cat", {"cat": "X"}, bad)
 
     def test_identity_contract_is_the_net_identity_idiom(self) -> None:

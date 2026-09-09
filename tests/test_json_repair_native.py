@@ -49,7 +49,7 @@ class TestFenceIntegration:
         assert repair_json('```json\n{"a": 1}\n```') == '{"a": 1}'
 
     def test_tilde_json_fence_unwraps(self) -> None:
-        assert repair_json('~~~json\n[1, 2]\n~~~') == '[1, 2]'
+        assert repair_json("~~~json\n[1, 2]\n~~~") == "[1, 2]"
 
     def test_four_tick_fence_unwraps(self) -> None:
         # CommonMark §4.5: the closer must run at least as long as the opener.
@@ -81,12 +81,8 @@ class TestFenceIntegration:
 class TestKeyLadder:
     """Key-normalization ladder + fuzzy remap tier (DESIGN §6.0–6.1)."""
 
-    @pytest.mark.parametrize(
-        "typo", ["First Name", "first-name", "FIRST_NAME", "firstname"]
-    )
-    def test_normalization_ladder_remaps_case_separator_variants(
-        self, typo: str
-    ) -> None:
+    @pytest.mark.parametrize("typo", ["First Name", "first-name", "FIRST_NAME", "firstname"])
+    def test_normalization_ladder_remaps_case_separator_variants(self, typo: str) -> None:
         value, diags = repair_json_diagnostics(
             json.dumps({typo: "Ada", "age": 30}), schema=_KEY_SCHEMA
         )
@@ -145,9 +141,7 @@ class TestKeyLadder:
             "properties": {"name": {"type": "string"}},
             "additionalProperties": True,
         }
-        mechanical, diags = repair_json_diagnostics(
-            '{"Na Me": "Ada"}', schema=schema
-        )
+        mechanical, diags = repair_json_diagnostics('{"Na Me": "Ada"}', schema=schema)
         assert mechanical == {"name": "Ada"}
         assert any(d["action"] == "remap_key" for d in diags)
         fuzzy, diags = repair_json_diagnostics('{"nam": "Ada"}', schema=schema)
@@ -164,13 +158,15 @@ class TestKeyLadder:
             "properties": {"first_name": {"type": "string"}, "age": {"type": "integer"}},
             "required": ["age"],
         }
-        assert repair_json_loads(
-            '{"First Name": "Ada", "age": 30}', schema=schema
-        ) == {"first_name": "Ada", "age": 30}
+        assert repair_json_loads('{"First Name": "Ada", "age": 30}', schema=schema) == {
+            "first_name": "Ada",
+            "age": 30,
+        }
         # And the kebab/spellings family through the same lane.
-        assert repair_json_loads(
-            '{"first-name": "Ada", "age": 30}', schema=schema
-        ) == {"first_name": "Ada", "age": 30}
+        assert repair_json_loads('{"first-name": "Ada", "age": 30}', schema=schema) == {
+            "first_name": "Ada",
+            "age": 30,
+        }
 
 
 class TestEnumSuggestion:
@@ -204,31 +200,22 @@ class TestDateNormalization:
         assert repair_json_loads(json.dumps(raw), schema=_DATE_SCHEMA) == want
 
     def test_slash_date_emits_format_date_diagnostic(self) -> None:
-        value, diags = repair_json_diagnostics(
-            json.dumps("2024/03/15"), schema=_DATE_SCHEMA
-        )
+        value, diags = repair_json_diagnostics(json.dumps("2024/03/15"), schema=_DATE_SCHEMA)
         assert value == "2024-03-15"
         assert any(d["action"] == "format_date" for d in diags)
 
     def test_already_normalized_date_has_no_diagnostic(self) -> None:
-        value, diags = repair_json_diagnostics(
-            json.dumps("2024-03-15"), schema=_DATE_SCHEMA
-        )
+        value, diags = repair_json_diagnostics(json.dumps("2024-03-15"), schema=_DATE_SCHEMA)
         assert value == "2024-03-15"
         assert all(d["action"] != "format_date" for d in diags)
 
     def test_ambiguous_numeric_date_is_unchanged_with_suggest(self) -> None:
-        value, diags = repair_json_diagnostics(
-            json.dumps("03/04/2024"), schema=_DATE_SCHEMA
-        )
+        value, diags = repair_json_diagnostics(json.dumps("03/04/2024"), schema=_DATE_SCHEMA)
         assert value == "03/04/2024"
         assert any(d["action"] == "suggest" for d in diags)
 
     def test_invalid_calendar_date_is_unchanged(self) -> None:
-        assert (
-            repair_json_loads(json.dumps("2024-02-30"), schema=_DATE_SCHEMA)
-            == "2024-02-30"
-        )
+        assert repair_json_loads(json.dumps("2024-02-30"), schema=_DATE_SCHEMA) == "2024-02-30"
 
     @pytest.mark.parametrize(
         ("raw", "want"),
@@ -286,12 +273,10 @@ class TestCommaSplit:
 
 class TestSeparators:
     def test_digit_group_separators_are_stripped_for_integers(self) -> None:
-        assert repair_json_loads('{"count": "1,234"}', schema=_COUNT_SCHEMA) == {
-            "count": 1234
+        assert repair_json_loads('{"count": "1,234"}', schema=_COUNT_SCHEMA) == {"count": 1234}
+        assert repair_json_loads('{"count": "82_461_110"}', schema=_COUNT_SCHEMA) == {
+            "count": 82461110
         }
-        assert repair_json_loads(
-            '{"count": "82_461_110"}', schema=_COUNT_SCHEMA
-        ) == {"count": 82461110}
 
 
 class TestDiagnosticsShape:
@@ -352,9 +337,7 @@ class TestDiagnosticsShape:
 
     def test_unused_from_to_slots_are_none(self) -> None:
         # The ambiguous-date suggest rewrites no value, so from/to stay None.
-        _, diags = repair_json_diagnostics(
-            json.dumps("03/04/2024"), schema=_DATE_SCHEMA
-        )
+        _, diags = repair_json_diagnostics(json.dumps("03/04/2024"), schema=_DATE_SCHEMA)
         suggests = [d for d in diags if d["action"] == "suggest"]
         assert suggests
         for diag in suggests:
@@ -372,9 +355,7 @@ class TestDiagnosticsShape:
 
 
 class TestArgumentContracts:
-    @pytest.mark.parametrize(
-        "fn", [repair_json, repair_json_loads, repair_json_diagnostics]
-    )
+    @pytest.mark.parametrize("fn", [repair_json, repair_json_loads, repair_json_diagnostics])
     def test_non_str_input_raises_type_error(self, fn: Any) -> None:
         with pytest.raises(TypeError):
             fn(1)  # type: ignore[arg-type]
@@ -527,9 +508,7 @@ class TestExactNumbers:
 
     def test_big_integer_strings_stay_exact(self) -> None:
         raw = '{"n": "12345678901234567890123"}'
-        assert repair_json_loads(raw, schema=self._INT_SCHEMA) == {
-            "n": 12345678901234567890123
-        }
+        assert repair_json_loads(raw, schema=self._INT_SCHEMA) == {"n": 12345678901234567890123}
 
     def test_big_integral_floats_convert_to_their_exact_decimal(self) -> None:
         # int(1e30) in Python is the EXACT value of the binary float.
@@ -618,7 +597,7 @@ class TestRobustness:
         # fragments (main thread; fewer on worker-sized stacks) — instead of
         # the documented catchable ValueError. The continuation guard caps
         # it like every other deep-recursion path.
-        payload = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        payload = '{"a":[0],' + '["b":[0],' * 2_000 + "1]"
         with pytest.raises(
             ValueError, match="Input nesting exceeds the supported parser recursion depth"
         ):
@@ -631,9 +610,7 @@ class TestRobustness:
         with pytest.raises(
             ValueError, match="Input nesting exceeds the supported parser recursion depth"
         ):
-            repair_json(
-                payload, schema={"type": "object"}, salvage=True, skip_json_loads=True
-            )
+            repair_json(payload, schema={"type": "object"}, salvage=True, skip_json_loads=True)
 
     def test_merged_array_continuations_below_the_cap_still_merge(self) -> None:
         # The guard must fire only past MAX_NESTING, never on an ordinary
@@ -641,17 +618,15 @@ class TestRobustness:
         # fragment (an over-counting regression would raise early), and
         # same-level sequential merges never accrue depth at all —
         # enter/leave is balanced per continuation.
-        assert repair_json_loads(
-            '{"a":[0],["b":[0],["b":[0],1]', skip_json_loads=True
-        ) == {"a": [0, {"b": [0, {"b": [0], "1": ""}]}]}
+        assert repair_json_loads('{"a":[0],["b":[0],["b":[0],1]', skip_json_loads=True) == {
+            "a": [0, {"b": [0, {"b": [0], "1": ""}]}]
+        }
         expected: dict[str, Any] = {"b": [0], "1": ""}
         for _ in range(149):
             expected = {"b": [0, expected]}
-        payload = '{"a":[0],' + '["b":[0],' * 150 + '1]'
+        payload = '{"a":[0],' + '["b":[0],' * 150 + "1]"
         assert repair_json_loads(payload, skip_json_loads=True) == {"a": [0, expected]}
-        assert repair_json_loads('{"a":[1], [2], [3]}', skip_json_loads=True) == {
-            "a": [1, 2, 3]
-        }
+        assert repair_json_loads('{"a":[1], [2], [3]}', skip_json_loads=True) == {"a": [1, 2, 3]}
 
     def test_continuation_chains_cap_at_max_nesting_exactly(self) -> None:
         # Both continuation recursions share the MAX_NESTING budget with
@@ -673,12 +648,12 @@ class TestRobustness:
         expected: dict[str, Any] = {"b": [0], "1": ""}
         for _ in range(197):
             expected = {"b": [0, expected]}
-        merge_ok = '{"a":[0],' + '["b":[0],' * 198 + '1]'
+        merge_ok = '{"a":[0],' + '["b":[0],' * 198 + "1]"
         assert repair_json_loads(merge_ok, skip_json_loads=True) == {"a": [0, expected]}
         with pytest.raises(
             ValueError, match="Input nesting exceeds the supported parser recursion depth"
         ):
-            repair_json('{"a":[0],' + '["b":[0],' * 199 + '1]', skip_json_loads=True)
+            repair_json('{"a":[0],' + '["b":[0],' * 199 + "1]", skip_json_loads=True)
 
     def test_related_recursion_shapes_route_through_guarded_edges(self) -> None:
         # Siblings of the continuation chains that DO pass guarded edges on
@@ -690,7 +665,7 @@ class TestRobustness:
         with pytest.raises(
             ValueError, match="Input nesting exceeds the supported parser recursion depth"
         ):
-            repair_json('[' + '"b": [' * 2_000, skip_json_loads=True)
+            repair_json("[" + '"b": [' * 2_000, skip_json_loads=True)
         with pytest.raises(
             ValueError, match="Input nesting exceeds the supported parser recursion depth"
         ):
@@ -707,9 +682,10 @@ class TestRobustness:
         # error, and the array-merge shape parses without merging.
         with pytest.raises(ValueError, match="Multiple top-level JSON elements"):
             repair_json('{"a":1}, "k":1}', strict=True, skip_json_loads=True)
-        assert repair_json_loads(
-            '{"a":[0],["b":[0],1]', strict=True, skip_json_loads=True
-        ) == {"a": [0], "b": [0]}
+        assert repair_json_loads('{"a":[0],["b":[0],1]', strict=True, skip_json_loads=True) == {
+            "a": [0],
+            "b": [0],
+        }
 
     def test_escaped_delimiter_run_in_a_string_body_is_not_quadratic(self) -> None:
         # `{` + `{\"k\": 1}` * n + `}` puts 2n escaped quotes through
@@ -724,7 +700,7 @@ class TestRobustness:
         import time as _time
 
         n = 32_000
-        payload = "{" + r'{\"k\": 1}' * n + "}"
+        payload = "{" + r"{\"k\": 1}" * n + "}"
         start = _time.perf_counter()
         result = repair_json_loads(payload, skip_json_loads=True)
         elapsed = _time.perf_counter() - start
@@ -803,9 +779,7 @@ class TestRobustness:
 
         n = 100_000
         start = _time.perf_counter()
-        result = repair_json_loads(
-            '{"a": "' + "}" * n + '"' + "y" * n + '"z', skip_json_loads=True
-        )
+        result = repair_json_loads('{"a": "' + "}" * n + '"' + "y" * n + '"z', skip_json_loads=True)
         assert _time.perf_counter() - start < 3.0
         assert result == {"a": ("}" * n) + '"' + ("y" * n) + '"z'}
 
@@ -868,12 +842,12 @@ class TestRobustness:
 
         k = 100_000
         start = _time.perf_counter()
-        result = repair_json_loads('["' + (']' + '\\\\') * k + '" x', skip_json_loads=True)
+        result = repair_json_loads('["' + ("]" + "\\\\") * k + '" x', skip_json_loads=True)
         assert _time.perf_counter() - start < 3.0
         # Each pair but the last contributes `]\` (the `]` is kept, the
         # even run halves to one backslash); the last pair's run collapses
         # entirely before the closing quote, and the tail rides along.
-        assert result == [(']' + '\\') * (k - 1) + ']' + '" x']
+        assert result == [("]" + "\\") * (k - 1) + "]" + '" x']
 
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and
@@ -920,18 +894,17 @@ class TestFoldRevert:
             "type": "object",
             "properties": {"first_name": {"type": "string"}},
         }
-        assert repair_json_loads('{"First Name": "Ada"}', schema=schema) == {
-            "first_name": "Ada"
-        }
+        assert repair_json_loads('{"First Name": "Ada"}', schema=schema) == {"first_name": "Ada"}
 
 
 class TestDedup:
     """CPython set/dict.fromkeys collapses the reviewer's duplicate shapes."""
 
     def test_set_object_collapses_duplicate_members(self) -> None:
-        assert repair_json_loads(
-            "{'a', 'b', 'a'}", schema={"type": "object"}, salvage=True
-        ) == {"a": None, "b": None}
+        assert repair_json_loads("{'a', 'b', 'a'}", schema={"type": "object"}, salvage=True) == {
+            "a": None,
+            "b": None,
+        }
 
     def test_duplicate_required_entries_collapse_in_errors(self) -> None:
         schema: dict[str, Any] = {
@@ -1144,8 +1117,8 @@ class TestRepairDeadline:
     # backslash-adjacent string-scan when this branch lifted the memo's
     # write guard; both are pinned below / in TestRobustness as wall-time
     # guards instead.)
-    _DUP_KEY = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
-    _EMPTY_OBJ = '[' + '{ }' * 200_000 + ']'
+    _DUP_KEY = "[{" + '"a":1 "a":1 ' * 200_000 + "}]"
+    _EMPTY_OBJ = "[" + "{ }" * 200_000 + "]"
 
     @pytest.mark.parametrize(
         "raw",
@@ -1165,9 +1138,9 @@ class TestRepairDeadline:
     @pytest.mark.parametrize(
         "raw",
         [
-            '[{' + '"a":1 "a":1 ' * 50 + '}]',
-            '[' + '{ }' * 50 + ']',
-            '["' + ']' * 50 + '\\\\" x',
+            "[{" + '"a":1 "a":1 ' * 50 + "}]",
+            "[" + "{ }" * 50 + "]",
+            '["' + "]" * 50 + '\\\\" x',
         ],
         ids=["dup-key", "empty-object", "string-scan"],
     )
@@ -1184,7 +1157,7 @@ class TestRepairDeadline:
         # oracle-pinned output).
         import time as _time
 
-        raw = '["' + ']' * 200_000 + '\\\\" x'
+        raw = '["' + "]" * 200_000 + '\\\\" x'
         start = _time.perf_counter()
         repair_json(raw)
         assert _time.perf_counter() - start < 2.0
@@ -1196,7 +1169,7 @@ class TestRepairDeadline:
         # (~20ms at n=200k; the old quadratic would need tens of seconds).
         import time as _time
 
-        raw = '[' + '{\\"k\\":1 ' * 200_000 + ']'
+        raw = "[" + '{\\"k\\":1 ' * 200_000 + "]"
         start = _time.perf_counter()
         repair_json(raw)
         assert _time.perf_counter() - start < 2.0
@@ -1205,7 +1178,7 @@ class TestRepairDeadline:
         # The deadline distinguishes pathological SHAPE from benign SIZE: a
         # multi-MB well-formed document parses far under a generous budget
         # (an input-size cap could not tell the two apart).
-        big = '[' + ','.join(f'{{"k{i}": {i}}}' for i in range(100_000)) + ']'
+        big = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(100_000)) + "]"
         assert len(big) > 1_000_000
         repair_json(big, deadline_ms=5_000)  # must not raise
 
@@ -1215,7 +1188,7 @@ class TestRepairDeadline:
             repair_json("{}", deadline_ms=bad)
 
     def test_all_three_spellings_honor_the_deadline(self) -> None:
-        raw = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
+        raw = "[{" + '"a":1 "a":1 ' * 200_000 + "}]"
         with pytest.raises(TimeoutError):
             repair_json(raw, deadline_ms=100)
         with pytest.raises(TimeoutError):
@@ -1235,7 +1208,7 @@ class TestRepairDeadline:
         # The same wording as diff_opcodes' TimeoutError, fronted with the
         # called spelling's own name (a small input under a 1ms budget
         # aborts on the first dispatch-loop check).
-        raw = '[{' + '"a":1 "a":1 ' * 5_000 + '}]'
+        raw = "[{" + '"a":1 "a":1 ' * 5_000 + "}]"
         with pytest.raises(
             TimeoutError,
             match=rf"^{name} deadline exceeded: elapsed \d+\.\dms > deadline_ms 1\.0ms$",
@@ -1275,7 +1248,7 @@ class TestRepairDeadline:
         # The schema-guided and salvage fragment loops route through the
         # same dispatch-loop check; a small pathological input under a 1ms
         # budget aborts on both.
-        raw = '[{' + '"a":1 "a":1 ' * 5_000 + '}]'
+        raw = "[{" + '"a":1 "a":1 ' * 5_000 + "}]"
         with pytest.raises(TimeoutError):
             repair_json_loads(raw, schema={"type": "array"}, deadline_ms=1)
         with pytest.raises(TimeoutError):

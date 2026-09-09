@@ -142,6 +142,7 @@ class TestAwaitCorrectness:
             ("chunk_by_words", ("one two three four five six", 2), {}),
             ("chunk_by_sentences", ("One. Two. Three.", 1), {}),
             ("chunk_by_paragraphs", ("a\n\nb\n\nc", 1), {}),
+            ("chunk_by_lines", ("l1\nl2\nl3\nl4\nl5", 2), {}),
             ("chunk_cdc", (b"x" * 20_000,), {}),
             ("chunk_hierarchical", ("One. Two. Three. Four.", 8), {}),
             ("tf_idf", (["the cat sat", "the dog ran"],), {}),
@@ -159,9 +160,7 @@ class TestAwaitCorrectness:
         ],
         ids=lambda value: value if isinstance(value, str) else "",
     )
-    def test_awaiting_equals_the_sync_spelling(
-        self, name: str, args: tuple, kwargs: dict
-    ) -> None:
+    def test_awaiting_equals_the_sync_spelling(self, name: str, args: tuple, kwargs: dict) -> None:
         async def run() -> object:
             return await getattr(tors.aio, name)(*args, **kwargs)
 

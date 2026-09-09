@@ -135,9 +135,7 @@ def _live_params(fn: Callable[..., Any]) -> list[tuple[str, str, Any]]:
             inspect.Parameter.KEYWORD_ONLY: "keyword-only",
             inspect.Parameter.VAR_KEYWORD: "var-keyword",
         }[param.kind]
-        default = (
-            _NO_DEFAULT if param.default is inspect.Parameter.empty else param.default
-        )
+        default = _NO_DEFAULT if param.default is inspect.Parameter.empty else param.default
         out.append((param.name, kind, default))
     return out
 
@@ -193,17 +191,14 @@ def test_every_stub_signature_matches_the_live_function() -> None:
             if arg.annotation is None
         ] + (["*args"] if stub_fn.args.vararg and stub_fn.args.vararg.annotation is None else [])
         unannotated += (
-            ["**kwargs"]
-            if stub_fn.args.kwarg and stub_fn.args.kwarg.annotation is None
-            else []
+            ["**kwargs"] if stub_fn.args.kwarg and stub_fn.args.kwarg.annotation is None else []
         )
         assert not unannotated, (
             f"{name}: the stub ships untyped parameters {unannotated}: the "
             "typed surface must be fully annotated"
         )
         assert stub_fn.returns is not None, (
-            f"{name}: the stub has no return annotation: the typed surface "
-            "must be fully annotated"
+            f"{name}: the stub has no return annotation: the typed surface must be fully annotated"
         )
 
 
@@ -221,9 +216,7 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
 
     def one_def(tree: ast.Module, name: str) -> ast.FunctionDef:
         (fn,) = (
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
         )
         return fn
 
@@ -249,9 +242,7 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
         "def b64_decode(s: str, *, validate: bool = True) -> bytes: ...",
         "def b64_decode(s: str, validate: bool = True) -> bytes: ...",
     )
-    assert [p[:2] for p in signature_of(lost_marker, "b64_decode")] != [
-        p[:2] for p in live_b64
-    ]
+    assert [p[:2] for p in signature_of(lost_marker, "b64_decode")] != [p[:2] for p in live_b64]
     # Axis 4: an annotation is dropped (the structural completeness pin).
     unannotated = base.replace(
         "def b64_decode(s: str, *, validate: bool = True) -> bytes: ...",

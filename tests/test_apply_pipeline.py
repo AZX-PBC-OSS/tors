@@ -68,9 +68,9 @@ class TestIndividualSteps:
         assert apply_pipeline([already_decomposed], strip_accents=True) == ["eclair"]
 
     def test_stemmer_preserves_punctuation_and_whitespace_verbatim(self) -> None:
-        assert apply_pipeline(
-            ["The cats, running fast!"], lowercase=True, stemmer="english"
-        ) == ["the cat, run fast!"]
+        assert apply_pipeline(["The cats, running fast!"], lowercase=True, stemmer="english") == [
+            "the cat, run fast!"
+        ]
 
     def test_lemma_dict_substitutes_and_preserves_the_rest(self) -> None:
         out = apply_pipeline(
@@ -94,9 +94,7 @@ class TestOrderOfOperations:
         # -> French-stem -> "decid". A wrong order (e.g. stemming before
         # lowercasing) would miss the Snowball algorithm's lowercase-only
         # rule tables and produce a different result.
-        out = apply_pipeline(
-            ["DÉCIDER"], lowercase=True, strip_accents=True, stemmer="french"
-        )
+        out = apply_pipeline(["DÉCIDER"], lowercase=True, strip_accents=True, stemmer="french")
         assert out == ["decid"]
 
     def test_stemming_and_lemma_dict_compose_lookup_on_stemmed_form(self) -> None:
@@ -182,9 +180,9 @@ class TestCompiledLemmaDict:
         # Arc::clone rather than a fresh HashMap build.
         compiled = CompiledLemmaDict({"better": "good"})
         for _ in range(50):
-            assert apply_pipeline(
-                ["This is better."], lowercase=True, lemma_dict=compiled
-            ) == ["this is good."]
+            assert apply_pipeline(["This is better."], lowercase=True, lemma_dict=compiled) == [
+                "this is good."
+            ]
 
     def test_lone_surrogate_raises(self) -> None:
         with pytest.raises(UnicodeEncodeError):
@@ -220,8 +218,6 @@ class TestProperties:
 
     @given(texts=st.lists(_TEXT, max_size=8))
     @settings(max_examples=100)
-    def test_collapse_whitespace_output_has_no_multi_space_runs(
-        self, texts: list[str]
-    ) -> None:
+    def test_collapse_whitespace_output_has_no_multi_space_runs(self, texts: list[str]) -> None:
         for text in apply_pipeline(texts, collapse_whitespace=True):
             assert "  " not in text

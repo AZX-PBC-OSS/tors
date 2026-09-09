@@ -167,16 +167,12 @@ class TestArgumentContract:
         [b"abc", bytearray(b"abc"), 123, None],
         ids=["bytes", "bytearray", "int", "none"],
     )
-    def test_non_str_arguments_raise_type_error(
-        self, form_name: str, not_str: object
-    ) -> None:
+    def test_non_str_arguments_raise_type_error(self, form_name: str, not_str: object) -> None:
         with pytest.raises(TypeError):
             _TORS_FORMS[form_name](not_str)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("form_name", _FORMS)
-    def test_lone_surrogates_are_refused_at_the_argument_boundary(
-        self, form_name: str
-    ) -> None:
+    def test_lone_surrogates_are_refused_at_the_argument_boundary(self, form_name: str) -> None:
         """Same pyo3 ``&str`` boundary as ``tors.normalize`` /
         ``tors.finalize`` (pinned in tests/test_finalize.py's surrogate class):
         a str holding a lone surrogate cannot be UTF-8-borrowed, so the call

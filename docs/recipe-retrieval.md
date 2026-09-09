@@ -48,8 +48,10 @@ corpus = [
 
 fingerprints = [tors.simhash64(c) for c in corpus]
 
+
 def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
+
 
 hamming(fingerprints[0], fingerprints[1])  # near-duplicate pair
 # 1
@@ -150,8 +152,10 @@ not as a standalone correctness guarantee.
 ```python
 import tors
 
+
 def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
+
 
 def search(corpus: list[str], query: str, *, dup_threshold: int = 3) -> list[tuple[int, float]]:
     # drop near-duplicate chunks before scoring

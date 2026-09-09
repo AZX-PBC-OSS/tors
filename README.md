@@ -65,7 +65,7 @@ across every core family) in Pyodide under node.
 
 ## What's in it
 
-70 functions plus two small helper classes, grouped by what they do. Each entry is a
+72 functions plus two small helper classes, grouped by what they do. Each entry is a
 one-line description; full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
 
@@ -144,8 +144,11 @@ packing.
 - `chunk_by_words` / `chunk_by_words_iter`: fixed word-count chunks
 - `chunk_by_sentences` / `chunk_by_sentences_iter`: fixed sentence-count chunks
 - `chunk_by_paragraphs`: fixed paragraph-count chunks (blank-line heuristic)
+- `chunk_by_lines` / `chunk_by_lines_iter`: fixed line-count chunks (blank lines ride
+  along, never counted — the log/chat-thread shape)
 - `chunk_hierarchical`: priority-ordered fallback chunking (`RecursiveCharacterTextSplitter`
-  pattern)
+  pattern); `None` entries splice the accurate default hierarchy into a custom one —
+  `["\n", None]` is line-first with UAX #29 fallback
 
 **Information retrieval**: lexical/statistical primitives for small-corpus search and
 integrity, without an embeddings dependency.
@@ -172,15 +175,28 @@ tors.finalize("line one  \n\n\n\nline two\r\n")
 ```
 
 ```python
-text = (
-    "This is sentence one. This is sentence two. "
-    "This is sentence three. This is sentence four."
-)
+text = "This is sentence one. This is sentence two. This is sentence three. This is sentence four."
 chunks = tors.chunk_by_sentences(text, 2)
 # [(0, 44), (44, 90)]
 
 [text[s:e] for s, e in chunks]
 # ['This is sentence one. This is sentence two. ', 'This is sentence three. This is sentence four.']
+```
+
+```python
+thread = (
+    "Ana: kickoff at nine.\n"
+    "Ben: We briefed the U.S. team on the numbers. They asked for a follow-up.\n"
+    "Ana: done."
+)
+chunks = tors.chunk_hierarchical(thread, 40, ["\n", None])
+# [(0, 21), (22, 59), (59, 95), (96, 106)]
+
+[thread[s:e] for s, e in chunks]
+# ['Ana: kickoff at nine.',
+#  'Ben: We briefed the U.S. team on the ',
+#  'numbers. They asked for a follow-up.',
+#  'Ana: done.']
 ```
 
 ```python
@@ -193,7 +209,7 @@ tors.bm25_rank("quick fox", corpus)
 # [(0, 1.3162195220480066), (2, 0.4798180901812613), (1, 0.0)]
 ```
 
-All three run against the built extension; the output above is what they actually
+All four run against the built extension; the output above is what they actually
 return. For every function's full argument contract, error behavior, and more examples,
 see:
 
@@ -301,9 +317,10 @@ coroutine keeps ticking with worst gaps well under the call's own wall during a 
 `diff_opcodes` await).
 
 The streaming iterator constructors (`word_bounds_iter` and siblings, including the
-chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/`chunk_by_sentences_iter`)
-have no async twin: an iterator is not an awaitable shape, and draining one to a list
-inside a worker thread is exactly what the already-covered list-returning sibling does.
+chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/`chunk_by_sentences_iter`/
+`chunk_by_lines_iter`) have no async twin: an iterator is not an awaitable shape, and
+draining one to a list inside a worker thread is exactly what the already-covered
+list-returning sibling does.
 The eager construction pass is the GIL-released part anyway, so the manual
 `await asyncio.to_thread(lambda: list(tors.word_bounds_iter(text)))` covers the
 streaming shape when it is genuinely needed. Signatures are identical to the sync

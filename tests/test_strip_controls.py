@@ -83,7 +83,7 @@ class TestScopeCuts:
         assert strip_controls("a\r\nb") == "a b"
 
     def test_multibyte_text_around_controls_survives(self) -> None:
-        assert strip_controls("caf\u00e9\x00\U0001F600") == "caf\u00e9 \U0001F600"
+        assert strip_controls("caf\u00e9\x00\U0001f600") == "caf\u00e9 \U0001f600"
 
 
 class TestEdges:

@@ -380,9 +380,9 @@ class TestSimilarityRatioDeadline:
         """A deadline the search never reaches changes NOTHING: a
         far-future budget saturates to unbounded and the scalar is
         byte-identical to the default call."""
-        assert similarity_ratio(
-            "qpqpq", "qpwqpq", deadline_ms=60_000.0
-        ) == similarity_ratio("qpqpq", "qpwqpq")
+        assert similarity_ratio("qpqpq", "qpwqpq", deadline_ms=60_000.0) == similarity_ratio(
+            "qpqpq", "qpwqpq"
+        )
 
     @pytest.mark.parametrize("bad", [0.0, -50.0, float("nan"), float("inf")])
     def test_nonpositive_or_nonfinite_deadlines_raise_value_error(self, bad: float) -> None:
@@ -585,9 +585,9 @@ class TestGetCloseMatches:
         byte-identical to the default call, and ``None`` is the default
         (purely additive parameter)."""
         possibilities = ["ape", "apple", "peach", "puppy"]
-        assert get_close_matches(
-            "appel", possibilities, deadline_ms=60_000.0
-        ) == get_close_matches("appel", possibilities)
+        assert get_close_matches("appel", possibilities, deadline_ms=60_000.0) == get_close_matches(
+            "appel", possibilities
+        )
         assert get_close_matches("appel", possibilities, deadline_ms=None) == get_close_matches(
             "appel", possibilities
         )
@@ -624,9 +624,9 @@ class TestGetCloseMatches:
     @pytest.mark.parametrize("bad_n", ["3", 3.0, None])
     def test_non_int_n_raises_type_error(self, bad_n: object) -> None:
         """``n`` and ``cutoff`` are the only two parameters of this function
-        without a type-boundary test (word, possibilities, and deadline_ms
-each have one above); ``n: isize`` is
-        extracted the same pyo3 way as everything else that IS tested."""
+                without a type-boundary test (word, possibilities, and deadline_ms
+        each have one above); ``n: isize`` is
+                extracted the same pyo3 way as everything else that IS tested."""
         with pytest.raises(TypeError):
             get_close_matches("ab", ["abc"], n=bad_n)  # type: ignore[arg-type]
 

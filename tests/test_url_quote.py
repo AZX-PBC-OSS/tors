@@ -101,7 +101,7 @@ from hypothesis import strategies as st
 
 from tors import quote, quote_plus, unquote, unquote_plus
 
-_E_MOJI = "\U0001F600"  # 4-byte UTF-8, astral plane
+_E_MOJI = "\U0001f600"  # 4-byte UTF-8, astral plane
 _LONG_ROW = "user name+50%/café?page=1&x=~y#frag" + _E_MOJI
 _LONG_ROW_QUOTED = "user%20name%2B50%25/caf%C3%A9?page=1&x=~y#frag%F0%9F%98%80"
 
@@ -438,7 +438,7 @@ def test_unquote_plus_inverts_quote_plus_over_utf8_text(text_safe: tuple[str, st
         "",
         "hello world",
         "café naïve",
-        "\U0001F600 emoji ☃ snowman",
+        "\U0001f600 emoji ☃ snowman",
         "path/to/file?query=1&other=2",
         "50% plus + signs",
         "tilde~under_score.dot-dash",
@@ -609,9 +609,7 @@ class TestArgumentContract:
         ids=["bytes", "bytearray", "int", "none"],
     )
     @pytest.mark.parametrize("fn", [quote, quote_plus], ids=["quote", "quote_plus"])
-    def test_non_str_safe_raises_type_error(
-        self, fn: Callable[..., str], not_str: object
-    ) -> None:
+    def test_non_str_safe_raises_type_error(self, fn: Callable[..., str], not_str: object) -> None:
         """``safe`` is exactly ``str`` too; the stdlib also accepts bytes
         safe-sets (byte-level), out of scope for the same reason as bytes
         text."""

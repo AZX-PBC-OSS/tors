@@ -855,16 +855,10 @@ def test_repair_json_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     ratio, ~8x on the ceiling)."""
     chunks, _remainder = divmod(size_bytes, 20_000)
     payload = (
-        "{"
-        + "".join(f'"k{i}": "{_CORPORA["prose"](20_000)}, ' for i in range(chunks))
-        + '"t": 1'
+        "{" + "".join(f'"k{i}": "{_CORPORA["prose"](20_000)}, ' for i in range(chunks)) + '"t": 1'
     )
     assert len(payload) >= 11 * _MIB  # scale sanity, not a budget
-    asyncio.run(
-        _assert_loop_stays_responsive(
-            lambda: asyncio.to_thread(tors.repair_json, payload)
-        )
-    )
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.repair_json, payload)))
 
 
 @pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
@@ -886,9 +880,7 @@ def test_grapheme_count_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     ~8x on the ceiling)."""
     corpus = _CORPORA[corpus_kind](size_bytes)
     asyncio.run(
-        _assert_loop_stays_responsive(
-            lambda: asyncio.to_thread(tors.grapheme_count, corpus)
-        )
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.grapheme_count, corpus))
     )
 
 
@@ -942,7 +934,9 @@ def test_word_bounds_marshalling_band_is_pinned_against_regression(
     detail = "; ".join(
         f"blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms operation "
         f"({gap / wall:.0%}, over the 1.0s ceiling and/or the "
-        f"{_WORD_BOUNDS_RATIO_BUDGET:.0%} ratio budget)" if wall else "n/a"
+        f"{_WORD_BOUNDS_RATIO_BUDGET:.0%} ratio budget)"
+        if wall
+        else "n/a"
         for gap, wall in observed
     )
     raise AssertionError(
@@ -1083,9 +1077,7 @@ def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbe
     go blind exactly where the ratio is weakest — enlargement keeps both
     budgets discriminating everywhere."""
     a, b = diff_pair_near_identical(size_bytes)
-    asyncio.run(
-        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.diff_opcodes, a, b))
-    )
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.diff_opcodes, a, b)))
 
 
 # The shuffled cell's marshalling-band regression ceiling: NOT the suite's
@@ -1615,10 +1607,7 @@ def _quote_unchunked_core(text: str) -> str:
     chunking threshold; the value-parity assert in the red-side cell
     proves the table is the stdlib's own."""
     always_safe = frozenset(string.ascii_letters + string.digits + "_.-~" + "/")
-    table = {
-        byte: chr(byte) if chr(byte) in always_safe else f"%{byte:02X}"
-        for byte in range(256)
-    }
+    table = {byte: chr(byte) if chr(byte) in always_safe else f"%{byte:02X}" for byte in range(256)}
     return "".join(map(table.__getitem__, text.encode("utf-8")))
 
 

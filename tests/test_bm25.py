@@ -210,9 +210,7 @@ class TestLemmaDict:
         # With stemming (-> "run") + a lemma map applied to BOTH query and
         # corpus, "move" and the stemmed corpus terms collapse to the same
         # substituted term.
-        mapped = dict(
-            bm25_rank("move", corpus, stemmer="english", lemma_dict={"run": "move"})
-        )
+        mapped = dict(bm25_rank("move", corpus, stemmer="english", lemma_dict={"run": "move"}))
         assert mapped[0] > 0.0
 
     def test_non_dict_raises_type_error(self) -> None:
@@ -227,9 +225,9 @@ class TestLemmaDict:
         mapping = {"run": "move"}
         compiled = CompiledLemmaDict(mapping)
         corpus = ["the runner runs fast", "a cat sat"]
-        assert bm25_rank(
-            "move", corpus, stemmer="english", lemma_dict=mapping
-        ) == bm25_rank("move", corpus, stemmer="english", lemma_dict=compiled)
+        assert bm25_rank("move", corpus, stemmer="english", lemma_dict=mapping) == bm25_rank(
+            "move", corpus, stemmer="english", lemma_dict=compiled
+        )
         with pytest.raises(TypeError):
             bm25_rank("q", ["a"], lemma_dict={"a": 1})  # type: ignore[dict-item]
 
@@ -237,16 +235,12 @@ class TestLemmaDict:
 class TestProperties:
     @given(query=_WORDS, corpus=_CORPUS)
     @settings(max_examples=200)
-    def test_output_length_matches_corpus_length(
-        self, query: str, corpus: list[str]
-    ) -> None:
+    def test_output_length_matches_corpus_length(self, query: str, corpus: list[str]) -> None:
         assert len(bm25_rank(query, corpus)) == len(corpus)
 
     @given(query=_WORDS, corpus=_CORPUS)
     @settings(max_examples=200)
-    def test_every_original_index_appears_exactly_once(
-        self, query: str, corpus: list[str]
-    ) -> None:
+    def test_every_original_index_appears_exactly_once(self, query: str, corpus: list[str]) -> None:
         indices = [i for i, _ in bm25_rank(query, corpus)]
         assert sorted(indices) == list(range(len(corpus)))
 
@@ -258,9 +252,7 @@ class TestProperties:
 
     @given(query=_WORDS, corpus=_CORPUS)
     @settings(max_examples=200)
-    def test_results_are_sorted_by_score_descending(
-        self, query: str, corpus: list[str]
-    ) -> None:
+    def test_results_are_sorted_by_score_descending(self, query: str, corpus: list[str]) -> None:
         scores = [s for _, s in bm25_rank(query, corpus)]
         assert scores == sorted(scores, reverse=True)
 
@@ -271,9 +263,7 @@ class TestProperties:
 
     @given(query=_ASCII_WORDS, corpus=_ASCII_CORPUS)
     @settings(max_examples=100)
-    def test_matches_the_independent_reference_formula(
-        self, query: str, corpus: list[str]
-    ) -> None:
+    def test_matches_the_independent_reference_formula(self, query: str, corpus: list[str]) -> None:
         # ASCII-only here by design: `_reference_score`'s naive
         # `.split()` tokenizer and tors's real UAX #29 segmenter agree on
         # ASCII whitespace-delimited words, but can legitimately diverge

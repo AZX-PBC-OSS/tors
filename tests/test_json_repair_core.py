@@ -30,74 +30,121 @@ class TestCorpusStrings:
     """Every str-out assertion from the six upstream corpus files."""
 
     def test_valid_json(self) -> None:
-        assert repair_json(  # upstream test_valid_json
-            '{"name": "John", "age": 30, "city": "New York"}'
-        ) == '{"name": "John", "age": 30, "city": "New York"}'
-        assert repair_json(  # upstream test_valid_json
-            '{"employees":["John", "Anna", "Peter"]} '
-        ) == '{"employees": ["John", "Anna", "Peter"]}'
-        assert repair_json(  # upstream test_valid_json
-            '{"key": "value:value"}'
-        ) == '{"key": "value:value"}'
-        assert repair_json(  # upstream test_valid_json
-            '{"text": "The quick brown fox,"}'
-        ) == '{"text": "The quick brown fox,"}'
-        assert repair_json(  # upstream test_valid_json
-            '{"text": "The quick brown fox won\'t jump"}'
-        ) == '{"text": "The quick brown fox won\'t jump"}'
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"name": "John", "age": 30, "city": "New York"}'
+            )
+            == '{"name": "John", "age": 30, "city": "New York"}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"employees":["John", "Anna", "Peter"]} '
+            )
+            == '{"employees": ["John", "Anna", "Peter"]}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"key": "value:value"}'
+            )
+            == '{"key": "value:value"}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"text": "The quick brown fox,"}'
+            )
+            == '{"text": "The quick brown fox,"}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"text": "The quick brown fox won\'t jump"}'
+            )
+            == '{"text": "The quick brown fox won\'t jump"}'
+        )
         assert repair_json('{"key": ""') == '{"key": ""}'  # upstream test_valid_json
-        assert repair_json(  # upstream test_valid_json
-            '{"key1": {"key2": [1, 2, 3]}}'
-        ) == '{"key1": {"key2": [1, 2, 3]}}'
-        assert repair_json(  # upstream test_valid_json
-            '{"key": 12345678901234567890}'
-        ) == '{"key": 12345678901234567890}'
-        assert repair_json(  # upstream test_valid_json
-            '{"key": "value\u263a"}'
-        ) == '{"key": "value\\u263a"}'
-        assert repair_json(  # upstream test_valid_json
-            '{"key": "value\\nvalue"}'
-        ) == '{"key": "value\\nvalue"}'
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"key1": {"key2": [1, 2, 3]}}'
+            )
+            == '{"key1": {"key2": [1, 2, 3]}}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"key": 12345678901234567890}'
+            )
+            == '{"key": 12345678901234567890}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"key": "value\u263a"}'
+            )
+            == '{"key": "value\\u263a"}'
+        )
+        assert (
+            repair_json(  # upstream test_valid_json
+                '{"key": "value\\nvalue"}'
+            )
+            == '{"key": "value\\nvalue"}'
+        )
 
     def test_multiple_jsons_str(self) -> None:
         assert repair_json("[]{}") == "[]"  # upstream test_multiple_jsons
-        assert repair_json(  # upstream test_multiple_jsons
-            '[]{"key":"value"}'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_multiple_jsons
-            '{"key":"value"}[1,2,3,True]'
-        ) == '[{"key": "value"}, [1, 2, 3, true]]'
-        assert repair_json(  # upstream test_multiple_jsons
-            'lorem ```json {"key":"value"} ``` ipsum ```json [1,2,3,True] ``` 42'
-        ) == '[{"key": "value"}, [1, 2, 3, true]]'
-        assert repair_json(  # upstream test_multiple_jsons
-            '[{"key":"value"}][{"key":"value_after"}]'
-        ) == '[{"key": "value_after"}]'
+        assert (
+            repair_json(  # upstream test_multiple_jsons
+                '[]{"key":"value"}'
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_multiple_jsons
+                '{"key":"value"}[1,2,3,True]'
+            )
+            == '[{"key": "value"}, [1, 2, 3, true]]'
+        )
+        assert (
+            repair_json(  # upstream test_multiple_jsons
+                'lorem ```json {"key":"value"} ``` ipsum ```json [1,2,3,True] ``` 42'
+            )
+            == '[{"key": "value"}, [1, 2, 3, true]]'
+        )
+        assert (
+            repair_json(  # upstream test_multiple_jsons
+                '[{"key":"value"}][{"key":"value_after"}]'
+            )
+            == '[{"key": "value_after"}]'
+        )
 
     def test_fenced_prose_str(self) -> None:
         raw_decision = (  # upstream test_parenthesized_prose_does_not_hijack_fenced_json
             "\n**Decision**: bla, bla (some clarification):\n\n"
-            "```json\n{\n  \"key\": \"value\"\n}\n```\n"
+            '```json\n{\n  "key": "value"\n}\n```\n'
         )
         assert repair_json(raw_decision) == '{"key": "value"}'
         raw_numbered = (  # upstream test_numbered_prose_line_does_not_hijack_fenced_json
-            "\n(1) Keep this note in the explanation.\n\n"
-            "```json\n{\n  \"key\": \"value\"\n}\n```\n"
+            '\n(1) Keep this note in the explanation.\n\n```json\n{\n  "key": "value"\n}\n```\n'
         )
         assert repair_json(raw_numbered) == '{"key": "value"}'
 
     def test_skip_json_loads_str(self) -> None:
-        assert repair_json(  # upstream test_repair_json_skip_json_loads
-            '{"key": true, "key2": false, "key3": null}', skip_json_loads=True
-        ) == '{"key": true, "key2": false, "key3": null}'
-        assert repair_json(  # upstream test_repair_json_skip_json_loads
-            '{"key": true, "key2": false, "key3": }', skip_json_loads=True
-        ) == '{"key": true, "key2": false, "key3": ""}'
+        assert (
+            repair_json(  # upstream test_repair_json_skip_json_loads
+                '{"key": true, "key2": false, "key3": null}', skip_json_loads=True
+            )
+            == '{"key": true, "key2": false, "key3": null}'
+        )
+        assert (
+            repair_json(  # upstream test_repair_json_skip_json_loads
+                '{"key": true, "key2": false, "key3": }', skip_json_loads=True
+            )
+            == '{"key": true, "key2": false, "key3": ""}'
+        )
 
     def test_ensure_ascii_str(self) -> None:
-        assert repair_json(  # upstream test_ensure_ascii
-            "{'test_\u4e2d\u56fd\u4eba_ascii':'\u7edf\u4e00\u7801'}", ensure_ascii=False
-        ) == '{"test_\u4e2d\u56fd\u4eba_ascii": "\u7edf\u4e00\u7801"}'
+        assert (
+            repair_json(  # upstream test_ensure_ascii
+                "{'test_\u4e2d\u56fd\u4eba_ascii':'\u7edf\u4e00\u7801'}", ensure_ascii=False
+            )
+            == '{"test_\u4e2d\u56fd\u4eba_ascii": "\u7edf\u4e00\u7801"}'
+        )
 
     def test_recursion_payload_depth_500_raises(self) -> None:
         # upstream test_repair_json_normalizes_real_parser_recursion_error
@@ -113,102 +160,195 @@ class TestCorpusStrings:
 
     def test_parse_object_edge_cases_str(self) -> None:
         assert repair_json("{foo: [}") == '{"foo": []}'  # upstream test_parse_object_edge_cases
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"": "value"'
-        ) == '{"": "value"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": "v"alue"}'
-        ) == '{"key": "v\\"alue\\""}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"value_1": true, COMMENT "value_2": "data"}'
-        ) == '{"value_1": true, "value_2": "data"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"value_1": true, SHOULD_NOT_EXIST "value_2": "data" AAAA }'
-        ) == '{"value_1": true, "value_2": "data"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"" : true, "key2": "value2"}'
-        ) == '{"": true, "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{""answer"":[{""traits"":\'\'Female aged 60+\'\',""answer1"":""5""}]}'
-        ) == '{"answer": [{"traits": "Female aged 60+", "answer1": "5"}]}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{ "words": abcdef", "numbers": 12345", "words2": ghijkl" }'
-        ) == '{"words": "abcdef", "numbers": 12345, "words2": "ghijkl"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"number": 1,"reason": "According...""ans": "YES"}'
-        ) == '{"number": 1, "reason": "According...", "ans": "YES"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{ "a" : "{ b": {} }" }'
-        ) == '{"a": "{ b"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"b": "xxxxx" true}'
-        ) == '{"b": "xxxxx"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": "Lorem "ipsum" s,"}'
-        ) == '{"key": "Lorem \\"ipsum\\" s,"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"lorem": ipsum, sic, datum.",}'
-        ) == '{"lorem": "ipsum, sic, datum."}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"lorem": sic tamet. "ipsum": sic tamet, quick brown fox. "sic": ipsum}'
-        ) == '{"lorem": "sic tamet.", "ipsum": "sic tamet", "sic": "ipsum"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"lorem_ipsum": "sic tamet, quick brown fox. }'
-        ) == '{"lorem_ipsum": "sic tamet, quick brown fox."}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key":value, " key2":"value2" }'
-        ) == '{"key": "value", " key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key":value "key2":"value2" }'
-        ) == '{"key": "value", "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            "{'text': 'words{words in brackets}more words'}"
-        ) == '{"text": "words{words in brackets}more words"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            "{text:words{words in brackets}}"
-        ) == '{"text": "words{words in brackets}"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            "{text:words{words in brackets}m}"
-        ) == '{"text": "words{words in brackets}m"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": "value, value2"```'
-        ) == '{"key": "value, value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": "value}```'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            "{key:value,key2:value2}"
-        ) == '{"key": "value", "key2": "value2"}'
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"": "value"'
+            )
+            == '{"": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": "v"alue"}'
+            )
+            == '{"key": "v\\"alue\\""}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"value_1": true, COMMENT "value_2": "data"}'
+            )
+            == '{"value_1": true, "value_2": "data"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"value_1": true, SHOULD_NOT_EXIST "value_2": "data" AAAA }'
+            )
+            == '{"value_1": true, "value_2": "data"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"" : true, "key2": "value2"}'
+            )
+            == '{"": true, "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{""answer"":[{""traits"":\'\'Female aged 60+\'\',""answer1"":""5""}]}'
+            )
+            == '{"answer": [{"traits": "Female aged 60+", "answer1": "5"}]}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{ "words": abcdef", "numbers": 12345", "words2": ghijkl" }'
+            )
+            == '{"words": "abcdef", "numbers": 12345, "words2": "ghijkl"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"number": 1,"reason": "According...""ans": "YES"}'
+            )
+            == '{"number": 1, "reason": "According...", "ans": "YES"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{ "a" : "{ b": {} }" }'
+            )
+            == '{"a": "{ b"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"b": "xxxxx" true}'
+            )
+            == '{"b": "xxxxx"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": "Lorem "ipsum" s,"}'
+            )
+            == '{"key": "Lorem \\"ipsum\\" s,"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"lorem": ipsum, sic, datum.",}'
+            )
+            == '{"lorem": "ipsum, sic, datum."}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"lorem": sic tamet. "ipsum": sic tamet, quick brown fox. "sic": ipsum}'
+            )
+            == '{"lorem": "sic tamet.", "ipsum": "sic tamet", "sic": "ipsum"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"lorem_ipsum": "sic tamet, quick brown fox. }'
+            )
+            == '{"lorem_ipsum": "sic tamet, quick brown fox."}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key":value, " key2":"value2" }'
+            )
+            == '{"key": "value", " key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key":value "key2":"value2" }'
+            )
+            == '{"key": "value", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                "{'text': 'words{words in brackets}more words'}"
+            )
+            == '{"text": "words{words in brackets}more words"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                "{text:words{words in brackets}}"
+            )
+            == '{"text": "words{words in brackets}"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                "{text:words{words in brackets}m}"
+            )
+            == '{"text": "words{words in brackets}m"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": "value, value2"```'
+            )
+            == '{"key": "value, value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": "value}```'
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                "{key:value,key2:value2}"
+            )
+            == '{"key": "value", "key2": "value2"}'
+        )
         assert repair_json('{"key:"value"}') == '{"key": "value"}'  # upstream edge cases
         assert repair_json('{"key:value}') == '{"key": "value"}'  # upstream edge cases
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '[{"lorem": {"ipsum": "sic"}, """" "lorem": {"ipsum": "sic"}]'
-        ) == '[{"lorem": {"ipsum": "sic"}}, {"lorem": {"ipsum": "sic"}}]'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{ "key": ["arrayvalue"], ["arrayvalue1"], ["arrayvalue2"], "key3": "value3" }'
-        ) == '{"key": ["arrayvalue", "arrayvalue1", "arrayvalue2"], "key3": "value3"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{ "key": [[1, 2, 3], "a", "b"], [[4, 5, 6], [7, 8, 9]] }'
-        ) == '{"key": [[1, 2, 3], "a", "b", [4, 5, 6], [7, 8, 9]]}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{ "key": ["arrayvalue"], "key3": "value3", ["arrayvalue1"] }'
-        ) == '{"key": ["arrayvalue"], "key3": "value3", "arrayvalue1": ""}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": "{\\\\"key\\\\\\":[\\"value\\\\\\"],\\"key2\\":"value2"}"}'
-        ) == '{"key": "{\\"key\\":[\\"value\\"],\\"key2\\":\\"value2\\"}"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"key": , "key2": "value2"}'
-        ) == '{"key": "", "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '{"array":[{"key": "value"], "key2": "value2"}'
-        ) == '{"array": [{"key": "value"}], "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            '[{"key":"value"}},{"key":"value"}]'
-        ) == '[{"key": "value"}, {"key": "value"}]'
-        assert repair_json(  # upstream test_parse_object_edge_cases
-            "{'key': ['a':{'duplicated_key': 'duplicated_value', "
-            "'duplicated_key': 'duplicated_value'}]}"
-        ) == '{"key": [{"a": {"duplicated_key": "duplicated_value"}}]}'
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '[{"lorem": {"ipsum": "sic"}, """" "lorem": {"ipsum": "sic"}]'
+            )
+            == '[{"lorem": {"ipsum": "sic"}}, {"lorem": {"ipsum": "sic"}}]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{ "key": ["arrayvalue"], ["arrayvalue1"], ["arrayvalue2"], "key3": "value3" }'
+            )
+            == '{"key": ["arrayvalue", "arrayvalue1", "arrayvalue2"], "key3": "value3"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{ "key": [[1, 2, 3], "a", "b"], [[4, 5, 6], [7, 8, 9]] }'
+            )
+            == '{"key": [[1, 2, 3], "a", "b", [4, 5, 6], [7, 8, 9]]}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{ "key": ["arrayvalue"], "key3": "value3", ["arrayvalue1"] }'
+            )
+            == '{"key": ["arrayvalue"], "key3": "value3", "arrayvalue1": ""}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": "{\\\\"key\\\\\\":[\\"value\\\\\\"],\\"key2\\":"value2"}"}'
+            )
+            == '{"key": "{\\"key\\":[\\"value\\"],\\"key2\\":\\"value2\\"}"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"key": , "key2": "value2"}'
+            )
+            == '{"key": "", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '{"array":[{"key": "value"], "key2": "value2"}'
+            )
+            == '{"array": [{"key": "value"}], "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                '[{"key":"value"}},{"key":"value"}]'
+            )
+            == '[{"key": "value"}, {"key": "value"}]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_edge_cases
+                "{'key': ['a':{'duplicated_key': 'duplicated_value', "
+                "'duplicated_key': 'duplicated_value'}]}"
+            )
+            == '{"key": [{"a": {"duplicated_key": "duplicated_value"}}]}'
+        )
 
     def test_parse_object_backslash_key_str(self) -> None:
         # upstream test_parse_object_preserves_backslash_escaped_keys
@@ -216,30 +356,54 @@ class TestCorpusStrings:
         assert repair_json(raw, skip_json_loads=True) == '{"key": "value"}'
 
     def test_parse_object_merge_at_end_str(self) -> None:
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, "key2": "value2"}'
-        ) == '{"key": "value", "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, "key2": }'
-        ) == '{"key": "value", "key2": ""}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, []'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, ["abc"]'
-        ) == '[{"key": "value"}, ["abc"]]'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, {}'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, "" : "value2"}'
-        ) == '{"key": "value", "": "value2"}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key": "value"}, "key2" "value2"}'
-        ) == '{"key": "value", "key2": "value2"}'
-        assert repair_json(  # upstream test_parse_object_merge_at_the_end
-            '{"key1": "value1"}, "key2": "value2", "key3": "value3"}'
-        ) == '{"key1": "value1", "key2": "value2", "key3": "value3"}'
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, "key2": "value2"}'
+            )
+            == '{"key": "value", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, "key2": }'
+            )
+            == '{"key": "value", "key2": ""}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, []'
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, ["abc"]'
+            )
+            == '[{"key": "value"}, ["abc"]]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, {}'
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, "" : "value2"}'
+            )
+            == '{"key": "value", "": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key": "value"}, "key2" "value2"}'
+            )
+            == '{"key": "value", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_object_merge_at_the_end
+                '{"key1": "value1"}, "key2": "value2", "key3": "value3"}'
+            )
+            == '{"key1": "value1", "key2": "value2", "key3": "value3"}'
+        )
 
     def test_parse_array_str(self) -> None:
         assert repair_json("[[1\n\n]") == "[[1]]"  # upstream test_parse_array
@@ -252,29 +416,50 @@ class TestCorpusStrings:
         assert repair_json("[1, 2, 3,") == "[1, 2, 3]"  # upstream edge cases
         assert repair_json("[1, 2, 3, ...]") == "[1, 2, 3]"  # upstream edge cases
         assert repair_json("[1, 2, ... , 3]") == "[1, 2, 3]"  # upstream edge cases
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            "[1, 2, '...', 3]"
-        ) == '[1, 2, "...", 3]'
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            "[true, false, null, ...]"
-        ) == "[true, false, null]"
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                "[1, 2, '...', 3]"
+            )
+            == '[1, 2, "...", 3]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                "[true, false, null, ...]"
+            )
+            == "[true, false, null]"
+        )
         assert repair_json('["a" "b" "c" 1') == '["a", "b", "c", 1]'  # upstream edge cases
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"employees":["John", "Anna",'
-        ) == '{"employees": ["John", "Anna"]}'
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"employees":["John", "Anna", "Peter'
-        ) == '{"employees": ["John", "Anna", "Peter"]}'
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"key1": {"key2": [1, 2, 3'
-        ) == '{"key1": {"key2": [1, 2, 3]}}'
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"employees":["John", "Anna",'
+            )
+            == '{"employees": ["John", "Anna"]}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"employees":["John", "Anna", "Peter'
+            )
+            == '{"employees": ["John", "Anna", "Peter"]}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"key1": {"key2": [1, 2, 3'
+            )
+            == '{"key1": {"key2": [1, 2, 3]}}'
+        )
         assert repair_json('{"key": ["value]}') == '{"key": ["value"]}'  # upstream edge cases
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '["lorem "ipsum" sic"]'
-        ) == '["lorem \\"ipsum\\" sic"]'
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"key1": ["value1", "value2"}, "key2": ["value3", "value4"]}'
-        ) == '{"key1": ["value1", "value2"], "key2": ["value3", "value4"]}'
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '["lorem "ipsum" sic"]'
+            )
+            == '["lorem \\"ipsum\\" sic"]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"key1": ["value1", "value2"}, "key2": ["value3", "value4"]}'
+            )
+            == '{"key1": ["value1", "value2"], "key2": ["value3", "value4"]}'
+        )
         raw_headers = (  # upstream test_parse_array_edge_cases
             '{"headers": ["A", "B", "C"], "rows": [["r1a", "r1b", "r1c"], '
             '["r2a", "r2b", "r2c"], "r3a", "r3b", "r3c"], '
@@ -286,9 +471,12 @@ class TestCorpusStrings:
             '["r4a", "r4b", "r4c"], ["r5a", "r5b", "r5c"]]}'
         )
         assert repair_json(raw_headers) == expected_headers
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"key": ["value" "value1" "value2"]}'
-        ) == '{"key": ["value", "value1", "value2"]}'
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"key": ["value" "value1" "value2"]}'
+            )
+            == '{"key": ["value", "value1", "value2"]}'
+        )
         assert repair_json(  # upstream test_parse_array_edge_cases
             '{"key": ["lorem "ipsum" dolor "sit" amet, "consectetur" ", '
             '"lorem "ipsum" dolor", "lorem"]}'
@@ -296,21 +484,30 @@ class TestCorpusStrings:
             '{"key": ["lorem \\"ipsum\\" dolor \\"sit\\" amet, \\"consectetur\\" ", '
             '"lorem \\"ipsum\\" dolor", "lorem"]}'
         )
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '{"k"e"y": "value"}'
-        ) == '{"k\\"e\\"y": "value"}'
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '{"k"e"y": "value"}'
+            )
+            == '{"k\\"e\\"y": "value"}'
+        )
         assert repair_json('["key":"value"}]') == '[{"key": "value"}]'  # upstream edge cases
         assert repair_json('["key":"value"]') == '[{"key": "value"}]'  # upstream edge cases
         assert repair_json('[ "key":"value"]') == '[{"key": "value"}]'  # upstream edge cases
-        assert repair_json(  # upstream test_parse_array_edge_cases
-            '[{"key": "value", "key'
-        ) == '[{"key": "value"}, ["key"]]'
+        assert (
+            repair_json(  # upstream test_parse_array_edge_cases
+                '[{"key": "value", "key'
+            )
+            == '[{"key": "value"}, ["key"]]'
+        )
         assert repair_json("{'key1', 'key2'}") == '["key1", "key2"]'  # upstream edge cases
 
     def test_parse_array_missing_quotes_str(self) -> None:
-        assert repair_json(  # upstream test_parse_array_missing_quotes
-            '["value1" value2", "value3"]'
-        ) == '["value1", "value2", "value3"]'
+        assert (
+            repair_json(  # upstream test_parse_array_missing_quotes
+                '["value1" value2", "value3"]'
+            )
+            == '["value1", "value2", "value3"]'
+        )
         assert repair_json(  # upstream test_parse_array_missing_quotes
             '{"bad_one":["Lorem Ipsum", "consectetur" comment" ], '
             '"good_one":[ "elit", "sed", "tempor"]}'
@@ -319,8 +516,7 @@ class TestCorpusStrings:
             '"good_one": ["elit", "sed", "tempor"]}'
         )
         assert repair_json(  # upstream test_parse_array_missing_quotes
-            '{"bad_one": ["Lorem Ipsum","consectetur" comment],'
-            '"good_one": ["elit","sed","tempor"]}'
+            '{"bad_one": ["Lorem Ipsum","consectetur" comment],"good_one": ["elit","sed","tempor"]}'
         ) == (
             '{"bad_one": ["Lorem Ipsum", "consectetur", "comment"], '
             '"good_one": ["elit", "sed", "tempor"]}'
@@ -334,66 +530,120 @@ class TestCorpusStrings:
         assert repair_json("stringbeforeobject {}") == "{}"  # upstream test_parse_string
 
     def test_missing_and_mixed_quotes_str(self) -> None:
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            "{'key': 'string', 'key2': false, \"key3\": null, \"key4\": unquoted}"
-        ) == '{"key": "string", "key2": false, "key3": null, "key4": "unquoted"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": "John", "age": 30, "city": "New York'
-        ) == '{"name": "John", "age": 30, "city": "New York"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": "John", "age": 30, city: "New York"}'
-        ) == '{"name": "John", "age": 30, "city": "New York"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": "John", "age": 30, "city": New York}'
-        ) == '{"name": "John", "age": 30, "city": "New York"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": John, "age": 30, "city": "New York"}'
-        ) == '{"name": "John", "age": 30, "city": "New York"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{\u201cslanted_delimiter\u201d: "value"}'
-        ) == '{"slanted_delimiter": "value"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": "John", "age": 30, "city": "New'
-        ) == '{"name": "John", "age": 30, "city": "New"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"name": "John", "age": 30, "city": "New York, "gender": "male"}'
-        ) == '{"name": "John", "age": 30, "city": "New York", "gender": "male"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '[{"key": "value", COMMENT "notes": "lorem "ipsum", sic." }]'
-        ) == '[{"key": "value", "notes": "lorem \\"ipsum\\", sic."}]'
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                "{'key': 'string', 'key2': false, \"key3\": null, \"key4\": unquoted}"
+            )
+            == '{"key": "string", "key2": false, "key3": null, "key4": "unquoted"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": "John", "age": 30, "city": "New York'
+            )
+            == '{"name": "John", "age": 30, "city": "New York"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": "John", "age": 30, city: "New York"}'
+            )
+            == '{"name": "John", "age": 30, "city": "New York"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": "John", "age": 30, "city": New York}'
+            )
+            == '{"name": "John", "age": 30, "city": "New York"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": John, "age": 30, "city": "New York"}'
+            )
+            == '{"name": "John", "age": 30, "city": "New York"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{\u201cslanted_delimiter\u201d: "value"}'
+            )
+            == '{"slanted_delimiter": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": "John", "age": 30, "city": "New'
+            )
+            == '{"name": "John", "age": 30, "city": "New"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"name": "John", "age": 30, "city": "New York, "gender": "male"}'
+            )
+            == '{"name": "John", "age": 30, "city": "New York", "gender": "male"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '[{"key": "value", COMMENT "notes": "lorem "ipsum", sic." }]'
+            )
+            == '[{"key": "value", "notes": "lorem \\"ipsum\\", sic."}]'
+        )
         assert repair_json('{"key": ""value"}') == '{"key": "value"}'  # upstream mixed quotes
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"key": "value", 5: "value"}'
-        ) == '{"key": "value", "5": "value"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"foo": "\\"bar\\""'
-        ) == '{"foo": "\\"bar\\""}'
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"key": "value", 5: "value"}'
+            )
+            == '{"key": "value", "5": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"foo": "\\"bar\\""'
+            )
+            == '{"foo": "\\"bar\\""}'
+        )
         assert repair_json('{"" key":"val"') == '{" key": "val"}'  # upstream mixed quotes
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"key": value "key2" : "value2" '
-        ) == '{"key": "value", "key2": "value2"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"key": "lorem ipsum ... "sic " tamet. ...}'
-        ) == '{"key": "lorem ipsum ... \\"sic \\" tamet. ..."}'
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"key": value "key2" : "value2" '
+            )
+            == '{"key": "value", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"key": "lorem ipsum ... "sic " tamet. ...}'
+            )
+            == '{"key": "lorem ipsum ... \\"sic \\" tamet. ..."}'
+        )
         assert repair_json('{"key": value , }') == '{"key": "value"}'  # upstream mixed quotes
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"comment": "lorem, "ipsum" sic "tamet". To improve"}'
-        ) == '{"comment": "lorem, \\"ipsum\\" sic \\"tamet\\". To improve"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"key": "v"alu"e"} key:'
-        ) == '{"key": "v\\"alu\\"e"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '{"key": "v"alue", "key2": "value2"}'
-        ) == '{"key": "v\\"alue", "key2": "value2"}'
-        assert repair_json(  # upstream test_missing_and_mixed_quotes
-            '[{"key": "v"alu,e", "key2": "value2"}]'
-        ) == '[{"key": "v\\"alu,e", "key2": "value2"}]'
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"comment": "lorem, "ipsum" sic "tamet". To improve"}'
+            )
+            == '{"comment": "lorem, \\"ipsum\\" sic \\"tamet\\". To improve"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"key": "v"alu"e"} key:'
+            )
+            == '{"key": "v\\"alu\\"e"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '{"key": "v"alue", "key2": "value2"}'
+            )
+            == '{"key": "v\\"alue", "key2": "value2"}'
+        )
+        assert (
+            repair_json(  # upstream test_missing_and_mixed_quotes
+                '[{"key": "v"alu,e", "key2": "value2"}]'
+            )
+            == '[{"key": "v\\"alu,e", "key2": "value2"}]'
+        )
 
     def test_escaping_str(self) -> None:
         assert repair_json("'\"'") == ""  # upstream test_escaping
-        assert repair_json(  # upstream test_escaping
-            '{"key": \'string"\n\t\\le\'}'
-        ) == '{"key": "string\\"\\n\\t\\\\le"}'
+        assert (
+            repair_json(  # upstream test_escaping
+                '{"key": \'string"\n\t\\le\'}'
+            )
+            == '{"key": "string\\"\\n\\t\\\\le"}'
+        )
         assert repair_json(  # upstream test_escaping
             r'{"real_content": "Some string: Some other string \t Some string '
             r'<a href=\"https://domain.com\">Some link</a>"'
@@ -403,54 +653,93 @@ class TestCorpusStrings:
         )
         assert repair_json('{"key_1\n": "value"}') == '{"key_1": "value"}'  # upstream escaping
         assert repair_json('{"key\t_": "value"}') == '{"key\\t_": "value"}'  # upstream escaping
-        assert repair_json(  # upstream test_escaping
-            '{"key": \'\u0076\u0061\u006c\u0075\u0065\'}'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_escaping
-            '{"key": "\\u0076\\u0061\\u006C\\u0075\\u0065"}', skip_json_loads=True
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_escaping
-            """{"key": "valu\\'e"}"""
-        ) == """{"key": "valu'e"}"""
-        assert repair_json(  # upstream test_escaping
-            '{\'key\': "{\\"key\\": 1, \\"key2\\": 1}"}'
-        ) == '{"key": "{\\"key\\": 1, \\"key2\\": 1}"}'
+        assert (
+            repair_json(  # upstream test_escaping
+                "{\"key\": '\u0076\u0061\u006c\u0075\u0065'}"
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_escaping
+                '{"key": "\\u0076\\u0061\\u006C\\u0075\\u0065"}', skip_json_loads=True
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_escaping
+                """{"key": "valu\\'e"}"""
+            )
+            == """{"key": "valu'e"}"""
+        )
+        assert (
+            repair_json(  # upstream test_escaping
+                '{\'key\': "{\\"key\\": 1, \\"key2\\": 1}"}'
+            )
+            == '{"key": "{\\"key\\": 1, \\"key2\\": 1}"}'
+        )
 
     def test_markdown_str(self) -> None:
-        assert repair_json(  # upstream test_markdown
-            '{ "content": "[LINK]("https://google.com")" }'
-        ) == '{"content": "[LINK](\\"https://google.com\\")"}'
-        assert repair_json(  # upstream test_markdown
-            '{ "content": "[LINK](" }'
-        ) == '{"content": "[LINK]("}'
-        assert repair_json(  # upstream test_markdown
-            '{ "content": "[LINK](", "key": true }'
-        ) == '{"content": "[LINK](", "key": true}'
+        assert (
+            repair_json(  # upstream test_markdown
+                '{ "content": "[LINK]("https://google.com")" }'
+            )
+            == '{"content": "[LINK](\\"https://google.com\\")"}'
+        )
+        assert (
+            repair_json(  # upstream test_markdown
+                '{ "content": "[LINK](" }'
+            )
+            == '{"content": "[LINK]("}'
+        )
+        assert (
+            repair_json(  # upstream test_markdown
+                '{ "content": "[LINK](", "key": true }'
+            )
+            == '{"content": "[LINK](", "key": true}'
+        )
 
     def test_leading_trailing_str(self) -> None:
-        assert repair_json(  # upstream test_leading_trailing_characters
-            '````{ "key": "value" }```'
-        ) == '{"key": "value"}'
-        assert repair_json(  # upstream test_leading_trailing_characters
-            '{    "a": "",    "b": [ { "c": 1} ] \n}```'
-        ) == '{"a": "", "b": [{"c": 1}]}'
-        assert repair_json(  # upstream test_leading_trailing_characters
-            "Based on the information extracted, here is the filled JSON output: "
-            "```json { 'a': 'b' } ```"
-        ) == '{"a": "b"}'
-        assert repair_json(  # upstream test_leading_trailing_characters
-            "\nThe next 64 elements are:\n```json\n{ \"key\": \"value\" }\n```"
-        ) == '{"key": "value"}'
+        assert (
+            repair_json(  # upstream test_leading_trailing_characters
+                '````{ "key": "value" }```'
+            )
+            == '{"key": "value"}'
+        )
+        assert (
+            repair_json(  # upstream test_leading_trailing_characters
+                '{    "a": "",    "b": [ { "c": 1} ] \n}```'
+            )
+            == '{"a": "", "b": [{"c": 1}]}'
+        )
+        assert (
+            repair_json(  # upstream test_leading_trailing_characters
+                "Based on the information extracted, here is the filled JSON output: "
+                "```json { 'a': 'b' } ```"
+            )
+            == '{"a": "b"}'
+        )
+        assert (
+            repair_json(  # upstream test_leading_trailing_characters
+                '\nThe next 64 elements are:\n```json\n{ "key": "value" }\n```'
+            )
+            == '{"key": "value"}'
+        )
 
     def test_string_json_llm_block_str(self) -> None:
         assert repair_json('{"key": "``"') == '{"key": "``"}'  # upstream llm block
         assert repair_json('{"key": "```json"') == '{"key": "```json"}'  # upstream llm block
-        assert repair_json(  # upstream test_string_json_llm_block
-            '{"key": "```json {"key": [{"key1": 1},{"key2": 2}]}```"}'
-        ) == '{"key": {"key": [{"key1": 1}, {"key2": 2}]}}'
-        assert repair_json(  # upstream test_string_json_llm_block
-            '{"response": "```json{}"'
-        ) == '{"response": "```json{}"}'
+        assert (
+            repair_json(  # upstream test_string_json_llm_block
+                '{"key": "```json {"key": [{"key1": 1},{"key2": 2}]}```"}'
+            )
+            == '{"key": {"key": [{"key1": 1}, {"key2": 2}]}}'
+        )
+        assert (
+            repair_json(  # upstream test_string_json_llm_block
+                '{"response": "```json{}"'
+            )
+            == '{"response": "```json{}"}'
+        )
 
     def test_inline_object_literals_str(self) -> None:
         # upstream test_parse_string_keeps_inline_object_literal_after_comma
@@ -489,65 +778,107 @@ class TestCorpusStrings:
         assert repair_json("{'': 1}") == '{"": 1}'
 
     def test_boolean_literals_str(self) -> None:
-        assert repair_json(  # upstream test_parse_boolean_or_null
-            '  {"key": true, "key2": false, "key3": null}'
-        ) == '{"key": true, "key2": false, "key3": null}'
-        assert repair_json(  # upstream test_parse_boolean_or_null
-            '{"key": TRUE, "key2": FALSE, "key3": Null}   '
-        ) == '{"key": true, "key2": false, "key3": null}'
+        assert (
+            repair_json(  # upstream test_parse_boolean_or_null
+                '  {"key": true, "key2": false, "key3": null}'
+            )
+            == '{"key": true, "key2": false, "key3": null}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_boolean_or_null
+                '{"key": TRUE, "key2": FALSE, "key3": Null}   '
+            )
+            == '{"key": true, "key2": false, "key3": null}'
+        )
 
     def test_parse_number_edge_cases_str(self) -> None:
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            ' - { "test_key": ["test_value", "test_value2"] }'
-        ) == '{"test_key": ["test_value", "test_value2"]}'
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                ' - { "test_key": ["test_value", "test_value2"] }'
+            )
+            == '{"test_key": ["test_value", "test_value2"]}'
+        )
         assert repair_json('{"key": 1/3}') == '{"key": "1/3"}'  # upstream number edge cases
         assert repair_json('{"key": .25}') == '{"key": 0.25}'  # upstream number edge cases
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            '{"here": "now", "key": 1/3, "foo": "bar"}'
-        ) == '{"here": "now", "key": "1/3", "foo": "bar"}'
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            '{"key": 12345/67890}'
-        ) == '{"key": "12345/67890"}'
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                '{"here": "now", "key": 1/3, "foo": "bar"}'
+            )
+            == '{"here": "now", "key": "1/3", "foo": "bar"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                '{"key": 12345/67890}'
+            )
+            == '{"key": "12345/67890"}'
+        )
         assert repair_json("[105,12") == "[105, 12]"  # upstream number edge cases
         assert repair_json('{"key", 105,12,') == '{"key": "105,12"}'  # upstream edge cases
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            '{"key": 1/3, "foo": "bar"}'
-        ) == '{"key": "1/3", "foo": "bar"}'
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                '{"key": 1/3, "foo": "bar"}'
+            )
+            == '{"key": "1/3", "foo": "bar"}'
+        )
         assert repair_json('{"key": 10-20}') == '{"key": "10-20"}'  # upstream edge cases
         assert repair_json('{"key": 1.1.1}') == '{"key": "1.1.1"}'  # upstream edge cases
         assert repair_json("[- ") == "[]"  # upstream test_parse_number_edge_cases
         assert repair_json('{"key": 1. }') == '{"key": 1.0}'  # upstream number edge cases
         assert repair_json('{"key": 1e10 }') == '{"key": 10000000000.0}'  # upstream edge cases
         assert repair_json('{"key": 1e }') == '{"key": 1}'  # upstream number edge cases
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            '{"key": 1notanumber }'
-        ) == '{"key": "1notanumber"}'
-        assert repair_json(  # upstream test_parse_number_edge_cases
-            '{"rowId": 57eeeeb1-450b-482c-81b9-4be77e95dee2}'
-        ) == '{"rowId": "57eeeeb1-450b-482c-81b9-4be77e95dee2"}'
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                '{"key": 1notanumber }'
+            )
+            == '{"key": "1notanumber"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_number_edge_cases
+                '{"rowId": 57eeeeb1-450b-482c-81b9-4be77e95dee2}'
+            )
+            == '{"rowId": "57eeeeb1-450b-482c-81b9-4be77e95dee2"}'
+        )
         assert repair_json("[1, 2notanumber]") == '[1, "2notanumber"]'  # upstream edge cases
 
     def test_parse_comment_str(self) -> None:
         assert repair_json("/") == ""  # upstream test_parse_comment
         assert repair_json('/* comment */ {"key": "value"}')  # upstream test_parse_comment
-        assert repair_json(  # upstream test_parse_comment
-            '{ "key": { "key2": "value2" // comment }, "key3": "value3" }'
-        ) == '{"key": {"key2": "value2"}}'
-        assert repair_json(  # upstream test_parse_comment
-            '{ "key": { "key2": "value2" // comment\n}, "key3": "value3" }'
-        ) == '{"key": {"key2": "value2"}, "key3": "value3"}'
-        assert repair_json(  # upstream test_parse_comment
-            '{ "key": { "key2": "value2" # comment }, "key3": "value3" }'
-        ) == '{"key": {"key2": "value2"}, "key3": "value3"}'
-        assert repair_json(  # upstream test_parse_comment
-            '{ "key": { "key2": "value2" /* comment */ }, "key3": "value3" }'
-        ) == '{"key": {"key2": "value2"}, "key3": "value3"}'
-        assert repair_json(  # upstream test_parse_comment
-            '[ "value", /* comment */ "value2" ]'
-        ) == '["value", "value2"]'
-        assert repair_json(  # upstream test_parse_comment
-            '{ "key": "value" /* comment'
-        ) == '{"key": "value"}'
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '{ "key": { "key2": "value2" // comment }, "key3": "value3" }'
+            )
+            == '{"key": {"key2": "value2"}}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '{ "key": { "key2": "value2" // comment\n}, "key3": "value3" }'
+            )
+            == '{"key": {"key2": "value2"}, "key3": "value3"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '{ "key": { "key2": "value2" # comment }, "key3": "value3" }'
+            )
+            == '{"key": {"key2": "value2"}, "key3": "value3"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '{ "key": { "key2": "value2" /* comment */ }, "key3": "value3" }'
+            )
+            == '{"key": {"key2": "value2"}, "key3": "value3"}'
+        )
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '[ "value", /* comment */ "value2" ]'
+            )
+            == '["value", "value2"]'
+        )
+        assert (
+            repair_json(  # upstream test_parse_comment
+                '{ "key": "value" /* comment'
+            )
+            == '{"key": "value"}'
+        )
 
 
 class TestCorpusLoads:
@@ -724,7 +1055,7 @@ class TestCorpusLoads:
         assert repair_json_loads(  # upstream test_parse_array_python_tuple_literals
             '("a", "b", "c")'
         ) == ["a", "b", "c"]
-        assert repair_json_loads('((1, 2), (3, 4))') == [[1, 2], [3, 4]]  # upstream tuples
+        assert repair_json_loads("((1, 2), (3, 4))") == [[1, 2], [3, 4]]  # upstream tuples
         assert repair_json_loads(  # upstream test_parse_array_python_tuple_literals
             '{"coords": (1, 2), "ok": true}'
         ) == {"coords": [1, 2], "ok": True}
@@ -826,8 +1157,8 @@ class TestCorpusLoads:
         )
         # upstream test_parse_string_keeps_low_smart_quote_span_closed_by_ascii_quote
         _assert_loads_both(
-            '{"text": "despre \u201eautocritic\u0103\" \u0219i autocompasiune"}',
-            {"text": "despre \u201eautocritic\u0103\" \u0219i autocompasiune"},
+            '{"text": "despre \u201eautocritic\u0103" \u0219i autocompasiune"}',
+            {"text": 'despre \u201eautocritic\u0103" \u0219i autocompasiune'},
         )
         # upstream test_parse_string_keeps_low_smart_quote_span_closed_by_unicode_quote
         _assert_loads_both(
@@ -837,7 +1168,7 @@ class TestCorpusLoads:
         # upstream ..._closed_by_escaped_ascii_quote
         _assert_loads_both(
             '{"text": "aplica\u021bie \u201esham\\"), a f\u0103cut"}',
-            {"text": "aplica\u021bie \u201esham\"), a f\u0103cut"},
+            {"text": 'aplica\u021bie \u201esham"), a f\u0103cut'},
         )
         # upstream test_parse_string_escaped_low_smart_quote_does_not_open_inner_span
         _assert_loads_both(
@@ -887,9 +1218,10 @@ class TestCorpusLoads:
 
     def test_regular_members(self) -> None:
         # upstream test_parse_string_still_closes_regular_object_members_after_quoted_values
-        assert repair_json_loads(
-            '{"first": "value", "second": "next"}', skip_json_loads=True
-        ) == {"first": "value", "second": "next"}
+        assert repair_json_loads('{"first": "value", "second": "next"}', skip_json_loads=True) == {
+            "first": "value",
+            "second": "next",
+        }
 
     def test_boolean_null_top_level(self) -> None:
         assert repair_json_loads("True") == ""  # upstream test_parse_boolean_or_null
@@ -935,9 +1267,9 @@ class TestCorpusLoads:
 
     def test_escaped_braces_and_latex(self) -> None:
         # upstream test_parse_string_preserves_escaped_braces_after_comma_group
-        assert repair_json_loads(
-            r'{ "key": "\\{1,2\\} \\{3\\}" }', skip_json_loads=True
-        ) == {"key": r"\{1,2\} \{3\}"}
+        assert repair_json_loads(r'{ "key": "\\{1,2\\} \\{3\\}" }', skip_json_loads=True) == {
+            "key": r"\{1,2\} \{3\}"
+        }
         # upstream test_parse_string_preserves_latex_command_after_bracketed_comma
         assert repair_json_loads(
             r'{ "key": "x [0,2] f(-\\frac{3}{4})" }', skip_json_loads=True
@@ -1034,9 +1366,7 @@ class TestStrictMode:
     def test_duplicate_keys_inside_array(self) -> None:
         # upstream test_strict_duplicate_keys_inside_array
         with pytest.raises(ValueError, match="Duplicate key found"):
-            repair_json(
-                '[{"key": "first", "key": "second"}]', strict=True, skip_json_loads=True
-            )
+            repair_json('[{"key": "first", "key": "second"}]', strict=True, skip_json_loads=True)
 
     def test_rejects_empty_keys(self) -> None:
         # upstream test_strict_rejects_empty_keys

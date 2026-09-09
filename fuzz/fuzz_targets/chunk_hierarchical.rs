@@ -27,7 +27,7 @@ struct Input {
     text: String,
     max_chars: std::num::NonZeroU16,
     overlap_raw: u16,
-    separators: Option<Vec<String>>,
+    separators: Option<Vec<Option<String>>>,
 }
 
 /// The chunk positions that must be grapheme-cluster boundaries for the
@@ -93,11 +93,11 @@ fuzz_target!(|input: Input| {
     // the boundary.
     let overlap = (input.overlap_raw as usize) % max_chars.max(1);
 
-    let sep_refs: Option<Vec<&str>> = input
+    let sep_refs: Option<Vec<Option<&str>>> = input
         .separators
         .as_ref()
-        .map(|v| v.iter().map(String::as_str).collect());
-    let sep_slice: Option<&[&str]> = sep_refs.as_deref();
+        .map(|v| v.iter().map(|entry| entry.as_deref()).collect());
+    let sep_slice: Option<&[Option<&str>]> = sep_refs.as_deref();
 
     let chunks = tors::chunk_hierarchical_impl::chunk_hierarchical(
         &input.text,
@@ -111,7 +111,11 @@ fuzz_target!(|input: Input| {
     // The unit-count chunkers over the same arbitrary text: same
     // per-chunk/overlap envelope (per_chunk in 1..=u16, overlap clamped),
     // cluster safety for the two merge-based spellings, basic contract
-    // for the line-run paragraph heuristic.
+    // for the line-run paragraph heuristic and the line scanner (both
+    // produce break-run-edge spans, documented as not necessarily
+    // grapheme-aligned — a combining mark after a newline joins the
+    // newline's cluster, and the newline is separator content no
+    // paragraph's or line's caller would call "split").
     for per_chunk in [1usize, 2, 3, 7, max_chars] {
         let overlap = overlap % per_chunk;
         let words = tors::chunk_by_segment_impl::chunk_by_words(&input.text, per_chunk, overlap);
@@ -126,5 +130,8 @@ fuzz_target!(|input: Input| {
         let paragraphs =
             tors::chunk_by_segment_impl::chunk_by_paragraphs(&input.text, per_chunk, overlap);
         assert_basic_contract(&paragraphs, total, "chunk_by_paragraphs");
+
+        let lines = tors::chunk_by_segment_impl::chunk_by_lines(&input.text, per_chunk, overlap);
+        assert_basic_contract(&lines, total, "chunk_by_lines");
     }
 });

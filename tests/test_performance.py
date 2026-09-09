@@ -135,9 +135,7 @@ def _stdlib_decode_finalize(raw: bytes) -> tuple[str, str]:
 def test_finalize_beats_the_reference_pipeline_on_the_same_corpus(
     corpus_kind: str, size_bytes: int
 ) -> None:
-    corpus = {"prose": prose, "decomposed": decomposed, "crlf": crlf}[corpus_kind](
-        size_bytes
-    )
+    corpus = {"prose": prose, "decomposed": decomposed, "crlf": crlf}[corpus_kind](size_bytes)
     tors_ms = _min_wall_ms(tors.finalize, corpus)
     ref_ms = _min_wall_ms(reference_finalize, corpus)
     assert tors_ms < _MARGIN * ref_ms, (
@@ -215,8 +213,10 @@ def test_b64_decode_wall_time_vs_the_stdlib_is_measured_not_asserted(
     corpus = corpus_b64(corpus_kind, size_bytes)
     tors_ms = _min_wall_ms(tors.b64_decode, corpus)
     std_ms = _min_wall_ms(_stdlib_b64_decode, corpus)
-    print(f"b64_decode {corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.2f}ms "
-          f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}")
+    print(
+        f"b64_decode {corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.2f}ms "
+        f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
 
 
 @pytest.mark.parametrize("size_bytes", [1 * _MIB, 12 * _MIB], ids=["1MiB", "12MiB"])
@@ -263,15 +263,15 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(tors.html_unescape, corpus)
     std_ms = _min_wall_ms(_stdlib_html_unescape, corpus)
-    print(f"html_unescape no-& prose 12MiB: tors {tors_ms:.2f}ms "
-          f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}")
+    print(
+        f"html_unescape no-& prose 12MiB: tors {tors_ms:.2f}ms "
+        f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
 
 
 @pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
 @pytest.mark.parametrize("size_bytes", [1 * _MIB, 12 * _MIB], ids=["1MiB", "12MiB"])
-def test_grapheme_count_absolute_band_holds(
-    corpus_kind: str, size_bytes: int
-) -> None:
+def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -> None:
     """``tors.grapheme_count`` has no stdlib comparator (the gap is the
     feature), so its wall cell is an absolute band, a regression ceiling
     with generous margin, not a race. Measured on the dev box (ambient load
@@ -372,9 +372,7 @@ def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() ->
     filtering)."""
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
-    walks_ms = _min_wall_ms(tors.word_count, corpus) + _min_wall_ms(
-        tors.sentence_count, corpus
-    )
+    walks_ms = _min_wall_ms(tors.word_count, corpus) + _min_wall_ms(tors.sentence_count, corpus)
     assert tors_ms < 2.0 * walks_ms, (
         f"chunk_hierarchical default 12MiB took {tors_ms:.0f}ms against "
         f"{walks_ms:.0f}ms of its own segmentation walks "

@@ -111,9 +111,7 @@ class TestHandDerivedTable:
     @pytest.mark.parametrize(
         ("text", "bounds"),
         _CASES,
-        ids=[
-            f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _ in _CASES
-        ],
+        ids=[f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _ in _CASES],
     )
     def test_matches_the_uax29_derived_table(
         self, text: str, bounds: list[tuple[int, int]]
@@ -157,9 +155,7 @@ class TestArgumentContract:
         [b"abc", bytearray(b"abc"), memoryview(b"abc"), 123, None],
         ids=["bytes", "bytearray", "memoryview", "int", "none"],
     )
-    def test_non_str_arguments_raise_type_error(
-        self, fn_name: str, not_str: object
-    ) -> None:
+    def test_non_str_arguments_raise_type_error(self, fn_name: str, not_str: object) -> None:
         fn = {
             "sentence_bounds": sentence_bounds,
             "sentence_bounds_iter": sentence_bounds_iter,
@@ -171,9 +167,7 @@ class TestArgumentContract:
     @pytest.mark.parametrize(
         "fn_name", ["sentence_bounds", "sentence_bounds_iter", "sentence_count"]
     )
-    def test_lone_surrogates_are_refused_at_the_argument_boundary(
-        self, fn_name: str
-    ) -> None:
+    def test_lone_surrogates_are_refused_at_the_argument_boundary(self, fn_name: str) -> None:
         """Same pyo3 ``&str`` boundary as every str-in function (pinned for
         ``finalize`` in tests/test_finalize.py, for the segmentation
         surface in tests/test_segmentation.py)."""
@@ -284,9 +278,7 @@ class TestSentenceCount:
     @pytest.mark.parametrize(
         ("text", "bounds"),
         _CASES,
-        ids=[
-            f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _ in _CASES
-        ],
+        ids=[f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _ in _CASES],
     )
     def test_count_equals_the_list_length_on_every_tricky_row(
         self, text: str, bounds: list[tuple[int, int]]
@@ -297,9 +289,7 @@ class TestSentenceCount:
         STerm rows) are exactly where a count fast path could diverge from
         the segmentation the list API pins."""
         assert sentence_count(text) == len(bounds), f"sentence_count for {text!a}"
-        assert sentence_count(text) == len(sentence_bounds(text)), (
-            f"sentence_count for {text!a}"
-        )
+        assert sentence_count(text) == len(sentence_bounds(text)), f"sentence_count for {text!a}"
 
     @given(st.text(alphabet=st.characters(exclude_categories=("Cn", "Cs")), max_size=48))
     @settings(max_examples=400)

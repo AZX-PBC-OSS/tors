@@ -70,9 +70,7 @@ class TestReconstruction:
 
     @given(st.text(alphabet="ab\n", max_size=24), st.text(alphabet="ab\n", max_size=24))
     @settings(max_examples=300)
-    def test_opcodes_reconstruct_both_sides_over_arbitrary_line_pairs(
-        self, a: str, b: str
-    ) -> None:
+    def test_opcodes_reconstruct_both_sides_over_arbitrary_line_pairs(self, a: str, b: str) -> None:
         """The structural contract (contiguity, coverage, alternation,
         per-tag nonemptiness, equal-content equals, full reconstruction)
         holds when ``a_lines``/``b_lines`` are built the WAY THE DOCS SAY
@@ -248,9 +246,7 @@ class TestDeadline:
 
     def test_a_generous_deadline_yields_the_identical_opcodes(self) -> None:
         a, b = diff_pair_near_identical(256 * 1024)
-        assert tors.diff_opcodes_lines(a, b, deadline_ms=60_000.0) == tors.diff_opcodes_lines(
-            a, b
-        )
+        assert tors.diff_opcodes_lines(a, b, deadline_ms=60_000.0) == tors.diff_opcodes_lines(a, b)
 
     def test_identical_inputs_under_a_deadline_still_short_circuit(self) -> None:
         a = diff_pair_near_identical(64 * 1024)[0]

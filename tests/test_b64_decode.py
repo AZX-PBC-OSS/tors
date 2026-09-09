@@ -106,14 +106,42 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     ("Zh==", True, b"f"),  # non-canonical trailing bits: accepted, like a2b_base64
     ("ABCDEFGH", True, b"\x00\x10\x83\x10Q\x87"),
     # --- strict-mode errors ---
-    ("Z", True, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
-    ("Zm9vY", True, ("Error", "Invalid base64-encoded string: number of data characters (5) "
-     "cannot be 1 more than a multiple of 4")),
-    ("Z==", True, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
-    ("A==", True, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
+    (
+        "Z",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "Zm9vY",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (5) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "Z==",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "A==",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
     ("Zg=", True, ("Error", "Incorrect padding")),
     ("Zm9vYg", True, ("Error", "Incorrect padding")),
     ("Zm9vYg=", True, ("Error", "Incorrect padding")),
@@ -140,10 +168,24 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     # A pad at quad position 1: the end-of-input length error (was
     # "Discontinuous padding" pre-fix: the machine now breaks to the count
     # error instead of classifying the pad itself).
-    ("Z=g=", True, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
-    ("Z==g=", True, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
+    (
+        "Z=g=",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "Z==g=",
+        True,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
     # A data char after ONE pad at quad position 2: still discontinuous.
     ("Zg=g", True, ("Error", "Discontinuous padding not allowed")),
     ("Zm8=g", True, ("Error", "Excess data after padding")),
@@ -153,14 +195,42 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     ("Zm9v=Zg==", True, ("Error", "Excess padding not allowed")),
     # --- lenient-mode: non-alphabet discarded, excess pads ignored, data
     # --- after padding RESUMES decoding (the gh-145264 fix itself) ---
-    ("Z", False, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
-    ("Zm9vY", False, ("Error", "Invalid base64-encoded string: number of data characters (5) "
-     "cannot be 1 more than a multiple of 4")),
-    ("Z==", False, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
-    ("A=", False, ("Error", "Invalid base64-encoded string: number of data characters (1) "
-     "cannot be 1 more than a multiple of 4")),
+    (
+        "Z",
+        False,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "Zm9vY",
+        False,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (5) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "Z==",
+        False,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
+    (
+        "A=",
+        False,
+        (
+            "Error",
+            "Invalid base64-encoded string: number of data characters (1) "
+            "cannot be 1 more than a multiple of 4",
+        ),
+    ),
     ("Zg=", False, ("Error", "Incorrect padding")),
     ("Zm9vYg", False, ("Error", "Incorrect padding")),
     ("Z=g=", False, ("Error", "Incorrect padding")),
@@ -255,16 +325,19 @@ class TestBatteryAgainstTheStdlib:
                 "disagrees with the recorded literal; re-record the battery"
             )
         elif tors != stdlib:
-            print(f"{_PRE_FIX_DIVERGENCE_NOTE}{s!r} validate={validate}: "
-                  f"tors={tors!r} stdlib={stdlib!r}")
+            print(
+                f"{_PRE_FIX_DIVERGENCE_NOTE}{s!r} validate={validate}: "
+                f"tors={tors!r} stdlib={stdlib!r}"
+            )
 
 
 class TestErrorPathTypeParity:
     @pytest.mark.parametrize(
         ("s", "validate", "expected"),
         [(s, v, e) for s, v, e in _BATTERY if isinstance(e, tuple)],
-        ids=[f"{s!a}-{'strict' if v else 'lenient'}"
-             for s, v, e in _BATTERY if isinstance(e, tuple)],
+        ids=[
+            f"{s!a}-{'strict' if v else 'lenient'}" for s, v, e in _BATTERY if isinstance(e, tuple)
+        ],
     )
     def test_raises_the_real_binascii_error_class_with_the_recorded_message(
         self, s: str, validate: bool, expected: tuple[str, str]
@@ -416,9 +489,7 @@ class TestArgumentContract:
             b64_decode(not_str)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("validate", [True, False])
-    def test_non_ascii_str_raises_value_error_before_any_decoding(
-        self, validate: bool
-    ) -> None:
+    def test_non_ascii_str_raises_value_error_before_any_decoding(self, validate: bool) -> None:
         """``base64.b64decode`` refuses a non-ASCII ``str`` with plain
         ``ValueError`` from ``_bytes_from_decode_data``, before binascii is
         ever reached, so tors must too: same type (NOT binascii.Error), same
@@ -443,11 +514,9 @@ class TestArgumentContract:
         ``UnicodeEncodeError`` (a subclass of ValueError, so naive
         ``pytest.raises(ValueError)`` would pass; the ``type(...) is``
         assertion is the actual pin)."""
-        with (
-            pytest.raises(
-                ValueError, match="string argument should contain only ASCII"
-            ) as excinfo
-        ):
+        with pytest.raises(
+            ValueError, match="string argument should contain only ASCII"
+        ) as excinfo:
             b64_decode(surrogate, validate=validate)
         assert type(excinfo.value) is ValueError
         try:

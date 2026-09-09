@@ -133,16 +133,17 @@ chunks = tors.chunk_hierarchical(doc, 80, ["\n## ", "\n\n", ". ", " "])
 above. The separator itself is dropped between chunks (unlike
 `tors.chunk_text`'s lossless-partition contract), which is what you want
 when splitting on a header marker: the header text stays with the section
-it introduces, and the marker itself isn't duplicated into both chunks.
+it introduces, and the marker itself isn't duplicated into both chunks. A
+`separators` entry may also be `None`, splicing the default accurate
+hierarchy in at that position — the one-message-per-line shape
+`["\n", None]` is the subject of the
+[transcripts recipe](recipe-transcripts.md).
 
 For plain prose with no structure to key off, `chunk_by_sentences` (or
 `chunk_by_words` for a token-count budget) is the simpler choice:
 
 ```python
-prose = (
-    "This is sentence one. This is sentence two. "
-    "This is sentence three. This is sentence four."
-)
+prose = "This is sentence one. This is sentence two. This is sentence three. This is sentence four."
 chunks = tors.chunk_by_sentences(prose, 2)
 # [(0, 44), (44, 90)]
 [prose[s:e] for s, e in chunks]
@@ -161,6 +162,7 @@ size will perform for your model.
 
 ```python
 import tors
+
 
 def ingest(raw: bytes, *, markdown: bool = False) -> list[str]:
     if tors.utf8_is_valid(raw):
