@@ -1702,10 +1702,12 @@ collapses 3+ down to exactly 2, never below). **This is a heuristic, not a Unico
 Standard segmentation** (there is no UAX for paragraphs, unlike UAX #29 for
 words/sentences): a single `\n` is ordinary content, not a break. A
 leading or trailing blank-line run is trimmed rather than emitted as an empty
-paragraph; text with no qualifying run at all is one paragraph. Same argument
-contract, same empty-input answer, same forward-progress-by-construction guarantee
+paragraph; text with no qualifying run at all is one paragraph. Unlike the
+word/line twins, paragraphs have NO content filter here: a whitespace-only
+paragraph IS emitted as a chunk (only fully-empty spans are dropped), so an
+overlapping pair of chunks can share blank content. Same argument contract,
+same empty-input answer, same forward-progress-by-construction guarantee
 as `chunk_by_words`/`chunk_by_sentences`.
-
 No retrieval or LLM-quality claim is made for any chunking strategy in this family:
 tors guarantees the mechanical contract (correct boundaries, genuine overlap, the
 right knobs), not an outcome it doesn't control.
@@ -1737,6 +1739,11 @@ non-whitespace codepoint, the same real-token discipline `chunk_by_words` applie
 word segments: blank lines neither count toward `lines_per_chunk` nor split a chunk's
 interior — they ride along inside a chunk's span exactly as inter-word whitespace
 rides along in `chunk_by_words`, so `lines_per_chunk=200` means 200 content lines.
+"Non-whitespace" is definitional here: the Unicode `White_Space` property
+(`char::is_whitespace`), under which an NBSP-only line is blank and
+U+001C–U+001F (FS/GS/RS/US) count as line CONTENT, diverging from
+Python's `str.isspace()` (which treats those four as whitespace) and from
+`str.splitlines` (which even breaks on them; tors does not).
 `(start, end)` codepoint offsets span the first included line's start through the
 last included line's end (NOT through the trailing break after it, so unlike
 `chunk_text`'s covering-partition contract, non-overlapping chunks here are not
@@ -1832,10 +1839,26 @@ rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost stated plainly: a `None` entry pays the same three whole-text walks
-the default hierarchy pays (paragraph, sentence, word — the ~350 ms the
-12 MiB measurement below shows), once per call, on top of one scan per
-literal.
+Cost stated plainly: the first `None` entry pays the same three
+whole-text walks the default hierarchy pays (paragraph, sentence, word —
+the ~350 ms the 12 MiB measurement below shows), AT MOST once per call:
+every later `None` is recognized as a duplicate and skipped, inert
+(identical levels can never change the answer — the first occurrence of
+a level always dominates its duplicate), so the cost is bounded per call
+no matter how many `None` entries the list carries, on top of one scan
+per literal. Before the dedup this was re-paid per `None` entry — walks
+plus ~45 MiB of cut vectors per duplicate on a 6 MiB document, a
+caller-controlled unbounded cost (`[None] * 100` was an OOM shape).
+
+**Rust API note**: 0.6.0 changes the public `tors-core` crate's
+`chunk_hierarchical(text, max_chars, separators, overlap)` signature —
+`separators` moved from `Option<&[&str]>` to `Option<&[Option<&str>]>`,
+the type the `None`-entry splice requires — which is breaking for direct
+Rust consumers of the separately-published crate at 0.x. Python callers
+are unaffected: an all-literal list behaves identically under either
+spelling. The merge landed as a plain `feat:` with no `BREAKING CHANGE:`
+footer, so release-please's changelog will not surface it; this note is
+the visible record.
 
 **Unlike `chunk_text`, this is NOT a lossless covering partition**: at
 every level except the raw cut, the separator itself is DROPPED between

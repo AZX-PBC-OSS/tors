@@ -77,7 +77,13 @@ import pytest
 
 import tors
 from reference import corpus_b64, corpus_utf8, crlf, decomposed, entities, prose, reference_finalize
-from tors import chunk_by_sentences, chunk_by_words, chunk_hierarchical
+from tors import (
+    chunk_by_lines,
+    chunk_by_paragraphs,
+    chunk_by_sentences,
+    chunk_by_words,
+    chunk_hierarchical,
+)
 
 # The timing lane: every test in this module is a measurement cell (wall-time
 # bands and races over multi-MiB corpora), slow and load-sensitive, so CI's
@@ -406,4 +412,44 @@ def test_chunk_by_sentences_is_its_own_sentence_walk() -> None:
         f"chunk_by_sentences 12MiB took {tors_ms:.0f}ms against a "
         f"{walk_ms:.0f}ms sentence walk ({tors_ms / walk_ms:.1f}x); the merge "
         "machinery is dominating the segmentation it windows"
+    )
+
+
+def test_chunk_by_paragraphs_absolute_band_holds() -> None:
+    """``chunk_by_paragraphs`` has no stdlib comparator (a paragraph here
+    is tors's own documented 2+-newline heuristic), so like
+    ``grapheme_count`` its wall cell is an absolute regression ceiling
+    with generous margin, not a race. Measured on this machine (Linux,
+    CPython 3.13, ambient load 6.6, min-of-10 after warmup): ~10.3ms at
+    12 MiB of prose. The ceiling is 30ms (~2.9x): the pass is one linear
+    line/blank-run scan, so a regression to a per-paragraph allocation or
+    a quadratic rescan path blows straight through it. This cell exists
+    because the #28 codegen change moved this function's wall by +23-28%
+    (8.55ms -> 10.96ms on the same corpus, measured at the criterion
+    level) without any existing cell noticing -- the chunking-family
+    section had no paragraph row at all; a future change of that class
+    should at least have a ceiling to argue against."""
+    corpus = prose(12 * _MIB)
+    took_ms = _min_wall_ms(lambda s: chunk_by_paragraphs(s, 200), corpus)
+    assert took_ms < 30.0, (
+        f"chunk_by_paragraphs 12MiB took {took_ms:.0f}ms, outside the absolute "
+        "band (measured ~10.3ms at 12 MiB, ceiling 30ms with ~2.9x margin); "
+        "the paragraph scan regressed"
+    )
+
+
+def test_chunk_by_lines_absolute_band_holds() -> None:
+    """``chunk_by_lines``' cell, same absolute-band shape as
+    ``chunk_by_paragraphs``' (no stdlib comparator, one fused linear
+    scan): measured ~13.9ms at 12 MiB of prose on this machine (Linux,
+    CPython 3.13, ambient load 6.6, min-of-10 after warmup), ceiling 40ms
+    (~2.9x). The scan and the real-line filter are one pass with O(1)
+    memory beyond the output, so only a class regression (a per-line
+    allocation, a lost fusion) reaches the ceiling."""
+    corpus = prose(12 * _MIB)
+    took_ms = _min_wall_ms(lambda s: chunk_by_lines(s, 200), corpus)
+    assert took_ms < 40.0, (
+        f"chunk_by_lines 12MiB took {took_ms:.0f}ms, outside the absolute band "
+        "(measured ~13.9ms at 12 MiB, ceiling 40ms with ~2.9x margin); the "
+        "line scan regressed"
     )

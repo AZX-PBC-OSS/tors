@@ -420,8 +420,10 @@ pub fn chunk_by_paragraphs(
 /// to the nearest GRAPHEME boundary (not necessarily a semantic
 /// paragraph/sentence/word boundary; a documented simplification of the
 /// single-hierarchy overlap snap `chunk_text_overlapping` uses), with the
-/// same snap-collapse-to-zero-overlap degradation on a too-short trailing
-/// chunk.
+/// same snap-collapse-to-zero-overlap degradation when the grapheme-snapped
+/// overlap target would reach the chunk's own start (a too-short chunk, or
+/// one whose overlap window is consumed by a multi-codepoint cluster such
+/// as `\r\n`).
 ///
 /// `max_chars < 1` or `overlap < 0` raise `ValueError`. Empty `text`
 /// returns `[]`. An empty `separators` list is legal and skips straight to
@@ -476,13 +478,18 @@ pub fn chunk_hierarchical(
 /// neither count toward `lines_per_chunk` nor split a chunk's interior
 /// (they ride along inside a chunk's span exactly as inter-word
 /// whitespace rides along in `chunk_by_words`), so a caller reaching for
-/// `lines_per_chunk=200` gets 200 content lines. `(start, end)` offsets
-/// span the first included line's start through the last included line's
-/// end (NOT through the trailing break after it: non-overlapping chunks
-/// are not necessarily contiguous). The final chunk may hold fewer lines
-/// when the total doesn't divide evenly. Empty text, or text with no
-/// content lines at all, returns `[]`. A trailing break at end of text
-/// yields no trailing empty line.
+/// `lines_per_chunk=200` gets 200 content lines. "Non-whitespace" is
+/// definitional here: the Unicode `White_Space` property
+/// (`char::is_whitespace`), under which an NBSP-only line is blank and
+/// U+001C–U+001F (FS/GS/RS/US) count as line CONTENT, diverging from
+/// Python's `str.isspace()` (which treats those four as whitespace) and
+/// from `str.splitlines` (which even breaks on them; tors does not).
+/// `(start, end)` offsets span the first included line's start through
+/// the last included line's end (NOT through the trailing break after
+/// it: non-overlapping chunks are not necessarily contiguous). The final
+/// chunk may hold fewer lines when the total doesn't divide evenly.
+/// Empty text, or text with no content lines at all, returns `[]`. A
+/// trailing break at end of text yields no trailing empty line.
 ///
 /// `lines_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >=
 /// lines_per_chunk` raises `ValueError` (no forward progress: each
