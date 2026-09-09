@@ -50,9 +50,7 @@ _NOTE_JSON = 'He said \\"replace the gasket\\" and left \\\\ the spec on the she
 def _escape_json_string(s: str) -> str:
     out: list[str] = []
     for c in s:
-        out.append(
-            {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(c, c)
-        )
+        out.append({'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(c, c))
     return "".join(out)
 
 
@@ -124,12 +122,8 @@ def _assert_cell_beats_the_oracle(name: str, raw: str) -> None:
         f"comparison is no longer apples-to-apples "
         f"(tors={tors_value!r:.200} oracle={oracle_value!r:.200})"
     )
-    tors_ms = _min_wall_ms(
-        lambda p: tors.repair_json(p, skip_json_loads=True), raw
-    )
-    oracle_ms = _min_wall_ms(
-        lambda p: json_repair.repair_json(p, skip_json_loads=True), raw
-    )
+    tors_ms = _min_wall_ms(lambda p: tors.repair_json(p, skip_json_loads=True), raw)
+    oracle_ms = _min_wall_ms(lambda p: json_repair.repair_json(p, skip_json_loads=True), raw)
     assert tors_ms < _MARGIN * oracle_ms, (
         f"{name}: tors {tors_ms:.2f}ms vs oracle {oracle_ms:.2f}ms "
         f"(ratio {tors_ms / oracle_ms:.3f}): the native port lost more than "
@@ -167,24 +161,21 @@ def _seq_merge_payload(count: int) -> str:
 
 
 def test_escaped_delimiter_run_wall_scales_linearly_not_quadratically() -> None:
-    """The escape normalizer's pop-then-push repairs carry a one-level
-    undo record (see StringParseState's field docs), so quadrupling the
-    escaped-delimiter count quadruples the work: the 32k-fragment wall
-    stays within a small factor of 4x the 8k-fragment wall. The
-    whole-accumulator rescan this gate pins out was O(n^2) — 16x per
-    quadrupling, ~1.2s at 16k fragments. Machine-speed-immune by
+    """The escape normalizer's tail rewrites pop the counter-neutral
+    backslash and push the replacement through the incremental
+    accumulator bookkeeping (see rewrite_escape_tail's docs), so
+    quadrupling the escaped-delimiter count quadruples the work: the
+    32k-fragment wall stays within a small factor of 4x the 8k-fragment
+    wall. The whole-accumulator rescan this gate pins out was O(n^2) —
+    16x per quadrupling, ~1.2s at 16k fragments. Machine-speed-immune by
     construction: a ratio of two walls on the same box."""
-    frag = r'{\"k\": 1}'
+    frag = r"{\"k\": 1}"
 
     def payload(count: int) -> str:
         return "{" + frag * count + "}"
 
-    small = _min_wall_ms(
-        lambda p: tors.repair_json(p, skip_json_loads=True), payload(8_000)
-    )
-    large = _min_wall_ms(
-        lambda p: tors.repair_json(p, skip_json_loads=True), payload(32_000)
-    )
+    small = _min_wall_ms(lambda p: tors.repair_json(p, skip_json_loads=True), payload(8_000))
+    large = _min_wall_ms(lambda p: tors.repair_json(p, skip_json_loads=True), payload(32_000))
     # Linear scaling: 4x the fragments = 4x the wall; 1.5x slack for cache
     # effects. Quadratic would need 16x and fails loudly.
     assert large < 6.0 * small, (
@@ -217,4 +208,81 @@ def test_sequential_merge_wall_scales_linearly_not_quadratically() -> None:
         f"sequential merges scale super-linearly: 100k merges {large:.1f}ms "
         f"vs 25k merges {small:.1f}ms (ratio {large / small:.1f}x; linear "
         "would be ~4x) — the per-merge row-width rescan is back"
+    )
+
+
+# The lookahead-shape section: the seven adversarial classes the
+# lookahead-memo work fixed (per-shape wall bounds and oracle-pinned
+# outputs live in test_json_repair_native's TestRobustness; these are the
+# SCALING gates — the class, not the instance). Every cell must stay
+# linear in its input, so doubling the input may at most double the wall
+# plus measurement slack; a quadratic regression was ~4x per doubling and
+# fails outright. Known and deliberately ungated: the duplicate-key
+# splice (`'[{' + '"a":1 '*n + '}]'`) is still O(n^2) — the Vec<char>
+# insert memmove, tracked in issue #13; a ratio gate here would fail
+# today.
+
+_LOOKAHEAD_SHAPES: list[tuple[str, Callable[[int], str], Callable[[int], object]]] = [
+    (
+        "array_close_run",
+        lambda n: '["' + "]" * n + '" x',
+        lambda n: ["]" * n, "x"],
+    ),
+    (
+        "backslash_run_before_close",
+        lambda n: '["' + "]" * n + '\\\\" x',
+        lambda n: [("]" * n) + '" x'],
+    ),
+    (
+        "interleaved_close_escape_run",
+        lambda n: '["' + ("]" + "\\\\") * n + '" x',
+        lambda n: [("]" + "\\") * (n - 1) + "]" + '" x'],
+    ),
+    (
+        "objval_close_run_with_gap",
+        lambda n: '{"a": "' + "}" * n + '"' + "y" * n + '"z',
+        lambda n: {"a": ("}" * n) + '"' + ("y" * n) + '"z'},
+    ),
+    (
+        "regex_class_quote_run",
+        lambda n: '{"a": "[' + 'x"' * n + '"}',
+        lambda n: {"a": "[" + ('x"' * n)},
+    ),
+    (
+        "object_key_colon_run",
+        lambda n: "{" + "a:b," * n + "}",
+        lambda n: {"a": "b"},
+    ),
+    (
+        "internal_quote_run_in_array",
+        lambda n: '["' + 'a"' * n + '"]',
+        lambda n: ['a"' * n],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "build", "pin"),
+    _LOOKAHEAD_SHAPES,
+    ids=[name for name, _, _ in _LOOKAHEAD_SHAPES],
+)
+def test_adversarial_lookahead_shapes_stay_linear(
+    name: str, build: Callable[[int], str], pin: Callable[[int], object]
+) -> None:
+    """Doubling the input must ~double the wall on every fixed quadratic
+    class: the memoized lookaheads, the incremental escape-tail rewrite,
+    the pairing-walk outcome cache, and the lazy whitespace probe are all
+    amortized-O(1) per event, so any superlinear creep is a regression of
+    the class, not noise (min-of-samples keeps the ratio tight). The
+    in-cell verdict pins are the shapes' oracle-pinned outputs, so a
+    fast-but-wrong scan can never pass on the wall ratio alone."""
+    small, large = build(50_000), build(100_000)
+    assert tors.repair_json_loads(small, skip_json_loads=True) == pin(50_000)
+    assert tors.repair_json_loads(large, skip_json_loads=True) == pin(100_000)
+    small_ms = _min_wall_ms(lambda p: tors.repair_json(p, skip_json_loads=True), small)
+    large_ms = _min_wall_ms(lambda p: tors.repair_json(p, skip_json_loads=True), large)
+    assert large_ms < 3.5 * small_ms, (
+        f"{name}: 2n {large_ms:.2f}ms vs n {small_ms:.2f}ms"
+        f" (ratio {large_ms / small_ms:.2f}x; linear is ~2x, quadratic ~4x)"
+        " — the shape grew superlinearly"
     )
