@@ -287,21 +287,22 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
     // (in-run, unit count, pending-CR) instead of the former whole-text
     // `Vec<char>` collect with random access and a lookahead, the same
     // #22 allocation class: O(text) time, O(1) memory beyond the output.
-    // The pending-CR flag IS the lookahead: a '\r' counts one unit and
-    // stays pending; a following '\n' completes the CRLF pair without
-    // adding a unit; anything else leaves the '\r' standing as its own
-    // unit (already counted).
-    let total = char_count(text);
-    if total == 0 {
-        return Vec::new();
-    }
+    // The codepoint total the end-of-text close needs is derived inside
+    // the walk (`total = cp + 1` per codepoint) rather than paid as a
+    // separate whole-text `char_count` pass before it — one decode of
+    // the text, not two. The pending-CR flag IS the lookahead: a '\r'
+    // counts one unit and stays pending; a following '\n' completes the
+    // CRLF pair without adding a unit; anything else leaves the '\r'
+    // standing as its own unit (already counted).
     let mut bounds = Vec::new();
+    let mut total = 0usize;
     let mut seg_start = 0usize;
     let mut in_run = false;
     let mut run_start = 0usize;
     let mut units = 0usize;
     let mut pending_cr = false;
     for (cp, ch) in text.chars().enumerate() {
+        total = cp + 1;
         match ch {
             '\r' => {
                 if !in_run {
@@ -349,6 +350,12 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
         }
         seg_start = total;
     }
+    // The final paragraph is guarded by `seg_start < total` — KEPT,
+    // unlike `line_bounds`' content-filter guard: paragraph_bounds has
+    // no has-content flag, so the guard is the only thing standing
+    // between a trailing qualifying run's `seg_start = total` and a
+    // phantom empty paragraph. Empty text falls out with no special
+    // case: the loop never runs, `total` stays 0, `0 < 0` is false.
     if seg_start < total {
         bounds.push((seg_start, total));
     }
@@ -360,7 +367,10 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
 /// `overlap` PARAGRAPHS repeated. Same contract, same preconditions,
 /// same empty-input answer: see [`paragraph_bounds`] for exactly what
 /// counts as a paragraph boundary here (a heuristic, not a Unicode
-/// Standard segmentation).
+/// Standard segmentation). UNLIKE the word/line twins, paragraphs have
+/// NO content filter: a whitespace-only paragraph IS emitted as a chunk
+/// (only fully-empty spans are dropped), so an overlapping pair of
+/// chunks can share blank content.
 pub fn chunk_by_paragraphs(
     text: &str,
     paragraphs_per_chunk: usize,
@@ -388,7 +398,12 @@ pub fn chunk_by_paragraphs(
 /// line (a chat thread), one record per line (a log), one cue per block
 /// are the shapes this exists for, and a caller reaching for
 /// `lines_per_chunk=200` wants 200 content lines, not "200 lines, of
-/// which 40 are blank separators". The blank lines between two counted
+/// which 40 are blank separators". "Non-whitespace" is definitional
+/// here: the Unicode `White_Space` property (`char::is_whitespace`),
+/// under which U+001C–U+001F (FS/GS/RS/US) count as CONTENT (Python's
+/// `str.isspace()` treats them as whitespace, and `str.splitlines`
+/// even breaks on them, so a ported expectation may differ) and NBSP
+/// counts as blank. The blank lines between two counted
 /// lines of the SAME chunk still ride along inside its span (the span is
 /// a contiguous slice of the ORIGINAL text between two absolute offsets,
 /// exactly as inter-word whitespace rides along in `chunk_by_words`);
@@ -408,19 +423,19 @@ pub fn chunk_by_paragraphs(
 pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
     // The scan as ONE streaming decode pass, the same shape as
     // `paragraph_bounds`' state machine (no whole-text `Vec<char>`
-    // collect): a `pending_cr` flag is the CRLF lookahead, and a
-    // `has_non_ws` flag carries the real-line filter so the segment list
-    // is built in the same pass that finds the breaks. O(text) time,
-    // O(lines) memory.
-    let total = char_count(text);
-    if total == 0 {
-        return Vec::new();
-    }
+    // collect, and no `char_count` pre-pass either: the codepoint total
+    // the end-of-text close needs is derived inside the walk, `total =
+    // cp + 1` per codepoint, so "one pass" is now literally true): a
+    // `pending_cr` flag is the CRLF lookahead, and a `has_non_ws` flag
+    // carries the real-line filter so the segment list is built in the
+    // same pass that finds the breaks. O(text) time, O(lines) memory.
     let mut bounds = Vec::new();
+    let mut total = 0usize;
     let mut seg_start = 0usize;
     let mut has_non_ws = false;
     let mut pending_cr = false;
     for (cp, ch) in text.chars().enumerate() {
+        total = cp + 1;
         match ch {
             '\r' => {
                 // Opens a break unit whether it stands alone or begins a
@@ -452,9 +467,16 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
             }
         }
     }
-    // End of text closes the final line; a trailing break unit already
-    // moved `seg_start` to `total`, so nothing phantom is emitted.
-    if has_non_ws && seg_start < total {
+    // End of text closes the final line, and `has_non_ws` ALONE is the
+    // phantom-line guarantee: it resets together with `seg_start` at
+    // every break unit, and only a codepoint at `cp >= seg_start` can
+    // set it after the last reset, so `has_non_ws` holding at end of
+    // text implies a real line at `(seg_start, total)` — the former
+    // `seg_start < total` half of the guard was implied by exactly that
+    // argument and is gone. A trailing break unit already reset
+    // `has_non_ws`; empty text never enters the loop, so the flag stays
+    // false and `[]` falls out with no special case.
+    if has_non_ws {
         bounds.push((seg_start, total));
     }
     bounds
@@ -466,7 +488,9 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
 /// preconditions, same empty-input answer as its siblings; see
 /// [`line_bounds`] for exactly what counts as a line here (a
 /// content-carrying, newline-terminated segment — blank lines neither
-/// count nor split a chunk's interior).
+/// count nor split a chunk's interior, "content" being the Unicode
+/// `White_Space` reading [`line_bounds`] pins, not Python's
+/// `str.isspace()` notion).
 pub fn chunk_by_lines(text: &str, lines_per_chunk: usize, overlap: usize) -> Vec<(usize, usize)> {
     let bounds = line_bounds(text);
     chunk_by_segments(&bounds, lines_per_chunk, overlap)

@@ -45,15 +45,22 @@
 //! an all-literal `["\n", ". ", " "]` list would pin them to (the guesses
 //! cut inside "U.S. team"; the segmenters do not — the exact reason the
 //! default hierarchy exists). `[None]` is therefore identical to
-//! `separators = None`. Cost stated plainly: a `None` entry pays the same
-//! three whole-text walks the default hierarchy does (paragraph, sentence,
-//! word), once per `None` entry — a caller mixing literals with `None`
-//! over a 12 MiB document pays the ~350 ms the README measures for the
-//! default hierarchy PER `None` entry, on top of one scan per literal;
-//! two `None` entries pay six walks. A repeated `None` is therefore
-//! pointless but inert — identical levels can never change the `find_map`
-//! answer (the first occurrence of a level always dominates its
-//! duplicate), so the duplicate only re-pays the walks.
+//! `separators = None`. Cost stated plainly: the splice pays the same
+//! three whole-text walks the default hierarchy does (paragraph,
+//! sentence, word) AT MOST ONCE per call — the first `None` entry
+//! builds the three default levels and every later `None` is
+//! recognized as a duplicate and skipped, inert by the `find_map`
+//! dominance argument (identical levels can never change the answer:
+//! the first occurrence of a level always dominates its duplicate), so
+//! a caller mixing literals with `None` over a 12 MiB document pays
+//! the ~350 ms the README measures for the default hierarchy once, on
+//! top of one scan per literal, regardless of how many `None` entries
+//! the list carries. The former spelling re-paid all three walks —
+//! and their cut vectors, ~45 MiB per duplicate on a 6 MiB document —
+//! per `None` entry, a caller-controlled unbounded cost (`[None; 100]`
+//! on a 6 MiB document is an OOM shape); the dedup removes it under
+//! the #21 pathological-input discipline, memoized like #24's lazy
+//! bitmap.
 //!
 //! UNLIKE [`crate::chunk_impl::chunk_text`] (a lossless covering
 //! partition), this is NOT lossless: at every level except the raw-cut
@@ -183,9 +190,9 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 /// order — the splice a `None` entry in a custom `separators` list
 /// inserts at its position, and the whole hierarchy when `separators` is
 /// `None`. One whole-text walk per level (`paragraph_bounds`, UAX #29
-/// `sentence_bounds`, UAX #29 `word_bounds`), each computed once per
-/// splice — once per `None` entry in a custom list, once for the whole
-/// default hierarchy — never per chunk.
+/// `sentence_bounds`, UAX #29 `word_bounds`), each computed at most
+/// once per call — the first `None` entry builds all three and
+/// `custom_levels` skips every later duplicate — never per chunk.
 fn default_levels(text: &str) -> Vec<Level> {
     vec![
         level_from_paragraph_bounds(paragraph_bounds(text)),
@@ -196,14 +203,34 @@ fn default_levels(text: &str) -> Vec<Level> {
 
 /// Build the caller-supplied levels from a `separators` list: a literal
 /// `Some(s)` is one [`level_from_literal`] scan; a `None` entry splices
-/// [`default_levels`] in at its position; an empty literal is a no-op
-/// level (dropped, the same filter the all-literal spelling always
-/// applied).
+/// [`default_levels`] in at its position — at most once per call, the
+/// first `None` building the levels and every later one skipped as a
+/// duplicate (see the arm below for why a duplicate is provably inert);
+/// an empty literal is a no-op level (dropped, the same filter the
+/// all-literal spelling always applied).
 fn custom_levels(text: &str, seps: &[Option<&str>]) -> Vec<Level> {
     let mut levels = Vec::new();
+    let mut spliced = false;
     for entry in seps {
         match entry {
-            None => levels.extend(default_levels(text)),
+            None => {
+                if !spliced {
+                    levels.extend(default_levels(text));
+                    spliced = true;
+                }
+                // A duplicate splice is skipped, not re-built: the window
+                // loop consults `levels` only through `find_map` (the
+                // FIRST level supplying a cut wins, and the list is never
+                // indexed positionally or counted), and a duplicate's
+                // levels are bit-identical to the first splice's, so a
+                // duplicate can never change an answer its original
+                // didn't already give — inert. Re-paying the three
+                // whole-text walks and their ~45 MiB of cut vectors (on a
+                // 6 MiB document) per duplicate was a caller-controlled
+                // unbounded cost — `[None; 100]` is an OOM shape — the
+                // same pathological-input discipline #21 established:
+                // build once per call, memoized like #24's lazy bitmap.
+            }
             Some("") => {}
             Some(s) => levels.push(level_from_literal(text, s)),
         }
@@ -638,7 +665,14 @@ mod tests {
         // answer its original didn't already give — [None, None] IS
         // [None], and the duplicated line-first list is the unduplicated
         // one (the corpus texts contain "\n", so the literal genuinely
-        // matches: the pin is meaningful, not vacuous).
+        // matches: the pin is meaningful, not vacuous). That inertness is
+        // also overlap-INDEPENDENT — the splice (and, since the dedup,
+        // the skipping of duplicates) happens in level-building, before
+        // any windowing or overlap snap — so the duplicate pair is swept
+        // over the boundary-adjacent overlaps the bitmap differential
+        // above uses, and an eightfold run pins that longer duplicate
+        // lists stay inert, free now that the splice is built once per
+        // call regardless of list length.
         for text in differential_corpus() {
             let total = text.chars().count();
             for max_chars in 1..=total.min(48) {
@@ -673,6 +707,30 @@ mod tests {
                     "duplicated [\"\\n\", None] changed the answer: text={text:?} \
                      max_chars={max_chars}"
                 );
+                // The same inertness one rung longer: the dedup makes the
+                // eightfold list cost exactly what the single splice does
+                // (one build per call, duplicates skipped), so it must
+                // answer exactly what the single one does too.
+                assert_eq!(
+                    chunk_hierarchical(&text, max_chars, Some(&[None; 8]), 0),
+                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
+                    "eightfold None changed the answer: text={text:?} max_chars={max_chars}"
+                );
+                // Duplicate-inertness under overlap, the envelope the
+                // pyo3 layer validates (overlap < max_chars) and the
+                // bitmap differential above sweeps: 0, 1, and the last
+                // legal value.
+                for overlap in [0usize, 1, max_chars.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&o| o < max_chars)
+                {
+                    assert_eq!(
+                        chunk_hierarchical(&text, max_chars, Some(&[None, None]), overlap),
+                        chunk_hierarchical(&text, max_chars, Some(&[None]), overlap),
+                        "duplicate None changed the answer under overlap: text={text:?} \
+                         max_chars={max_chars} overlap={overlap}"
+                    );
+                }
             }
         }
     }

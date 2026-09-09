@@ -64,6 +64,22 @@ class TestArgumentContract:
         for s, e in chunks:
             assert e - s <= 5
 
+    @pytest.mark.parametrize(
+        "separators",
+        [[1, None], ["a", 2], [b"\n"], "abc"],
+        ids=["int-entry", "int-entry-later", "bytes-entry", "bare-str-not-a-list"],
+    )
+    def test_junk_separator_entries_raise_type_error(self, separators: object) -> None:
+        # The separators argument is exactly ``list[str | None]`` (or
+        # ``None``): a non-str non-None entry -- or a bare ``str``, which
+        # is not a list at all -- is rejected with ``TypeError`` by pyo3's
+        # extraction before any Rust code runs, the same str-exactly
+        # argument boundary ``find_patterns``' pattern list follows. No
+        # message match: pyo3's wording is an implementation detail, the
+        # type is the contract.
+        with pytest.raises(TypeError):
+            chunk_hierarchical("hello", 5, separators=separators)  # type: ignore[arg-type]
+
     def test_text_within_budget_is_one_chunk(self) -> None:
         assert chunk_hierarchical("hello world", 100) == [(0, 11)]
 
@@ -339,6 +355,23 @@ def test_no_chunk_exceeds_max_chars_default_hierarchy(text: str, max_chars: int)
                 f"chunk exceeded max_chars={max_chars} without being a single "
                 f"oversized grapheme cluster: {text[s:e]!r}"
             )
+
+
+@given(text=_TEXT, max_chars=st.integers(min_value=1, max_value=50))
+@settings(max_examples=150)
+def test_no_chunk_exceeds_max_chars_spliced_hierarchies(text: str, max_chars: int) -> None:
+    # The default hierarchy's budget property (above) extended to the
+    # None-entry splice shapes: a lone splice ([None]), a dead literal
+    # above it, and the chat-thread shape (["\n", None]) must all keep the
+    # same one documented exception -- a chunk may exceed max_chars only
+    # when it is exactly one grapheme cluster.
+    for seps in ([None], ["-", None], ["\n", None]):
+        for s, e in chunk_hierarchical(text, max_chars, separators=seps):
+            if e - s > max_chars:
+                assert grapheme_count(text[s:e]) == 1, (
+                    f"separators={seps}: chunk exceeded max_chars={max_chars} without "
+                    f"being a single oversized grapheme cluster: {text[s:e]!r}"
+                )
 
 
 @given(text=_TEXT, max_chars=st.integers(min_value=1, max_value=50))

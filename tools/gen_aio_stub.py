@@ -12,9 +12,11 @@ change that touches the sync stub).
 Only the curated large-input functions named in ``tors.aio._WRAPPED``
 are translated (see ``tors/aio.py``'s module docstring for why the rest
 of ``tors`` intentionally has no async twin — most functions are cheap
-enough that a thread hop would cost more than the call itself). The sync
-stub's comments travel with their functions so the GIL notes stay
-readable in both spellings.
+enough that a thread hop would cost more than the call itself). Only the
+SIGNATURES travel: the extraction is each function's ``def`` lines
+(``lines[node.lineno - 1 : node.end_lineno]``), so the sync stub's
+comments stay in the sync stub and the generated ``aio.pyi`` carries no
+comments at all.
 
 The translated text is piped through ``ruff format`` (the repo's
 formatter, a dev-group dependency, invoked as ``python -m ruff``)
@@ -46,7 +48,8 @@ def _ruff_format(text: str) -> str:
     unformatted stub if ruff is missing or refuses the input — a stale or
     malformed artifact must never be written silently.
     """
-    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell, repo's own formatter
+    # Fixed argv, no shell, the repo's own formatter.
+    proc = subprocess.run(
         [sys.executable, "-m", "ruff", "format", "--stdin-filename", str(ASYNC_STUB), "-"],
         input=text,
         capture_output=True,

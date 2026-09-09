@@ -145,6 +145,9 @@ class TestAwaitCorrectness:
             ("chunk_by_lines", ("l1\nl2\nl3\nl4\nl5", 2), {}),
             ("chunk_cdc", (b"x" * 20_000,), {}),
             ("chunk_hierarchical", ("One. Two. Three. Four.", 8), {}),
+            # a None-entry separator list must marshal through to_thread's
+            # kwargs path exactly like the sync spelling's own list[str|None]
+            ("chunk_hierarchical", ("One. Two. Three Four Five.", 5), {"separators": ["\n", None]}),
             ("tf_idf", (["the cat sat", "the dog ran"],), {}),
             ("bm25_rank", ("cat", ["the cat sat", "the dog ran"]), {}),
             ("apply_pipeline", (["Café", "MUSEUM"],), {"lowercase": True}),

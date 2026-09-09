@@ -17,6 +17,9 @@ Cells (12 MiB unless noted, the issue's own scale):
   function exists to provide, plus the cut filter and chunk walk.
 - by-words / by-sentences / by-paragraphs: the unit-count chunkers over
   the same prose at their natural window sizes.
+- by-lines: the merge-free sibling at 50 lines (mirroring the criterion
+  group's corpus-derived ``by_lines_50`` budget): one fused scan, no
+  segmentation walk and no boundary index.
 - walks: the component scans (grapheme/word/sentence count) as reference
   rows, the "what the residual IS" numbers.
 
@@ -108,6 +111,12 @@ CELLS: list[tuple[str, str, int, str]] = [
         "prose",
         12 * MIB,
         "lambda s: tors.chunk_by_paragraphs(s, 5)",
+    ),
+    (
+        "by-lines 50 12MiB",
+        "prose",
+        12 * MIB,
+        "lambda s: tors.chunk_by_lines(s, 50)",
     ),
     ("walk: grapheme_count 12MiB", "prose", 12 * MIB, "tors.grapheme_count"),
     ("walk: word_count 12MiB", "prose", 12 * MIB, "tors.word_count"),

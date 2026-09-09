@@ -457,10 +457,35 @@ class TestChunkByLines:
     def test_splitlines_exotic_separators_are_not_breaks(self) -> None:
         # str.splitlines() would also break on \v \f NEL LS PS; the line
         # contract here (like chunk_by_paragraphs) recognizes only \n,
-        # lone \r, and \r\n, so vertical tab and form feed ride as
-        # ordinary content inside one line.
+        # lone \r, and \r\n, so vertical tab, form feed, NEL, LS, and PS
+        # all ride as ordinary content inside one line.
         text = "a\vb\fc"
         assert chunk_by_lines(text, 1) == [(0, 5)]
+        assert chunk_by_lines("a\x85b\u2028c\u2029d", 1) == [(0, 7)]
+
+    def test_blank_line_judgement_is_the_unicode_white_space_property_not_str_isspace(self) -> None:
+        # WHICH lines carry content is judged by the Unicode White_Space
+        # property (Rust's char::is_whitespace), not str.isspace(): an
+        # NBSP-only line is blank (White_Space=Yes, it rides inside a
+        # chunk's span without counting, exactly like an empty line),
+        # while the FS-US separator controls \x1c-\x1f are White_Space=No
+        # even though str.isspace() accepts them, so an FS-only line
+        # carries CONTENT and counts toward the window like a visible
+        # character. The one deliberate str.isspace divergence, pinned
+        # truthfully as-is.
+        assert chunk_by_lines("a\n\u00a0\nb", 1) == [(0, 1), (4, 5)]
+        assert chunk_by_lines("a\n\x1c\nb", 1) == [(0, 1), (2, 3), (4, 5)]
+
+    def test_offsets_are_codepoint_offsets_on_astral_text(self) -> None:
+        # One emoji per line: each is a single Python codepoint but four
+        # UTF-8 bytes, so a byte-offset regression would read (0, 4) and
+        # (8, 12) here instead. Offsets are str slicing units, and slicing
+        # the chunks back out must return whole emoji, never a torn
+        # surrogate half.
+        text = "\U0001f600\n\U0001f601"  # 3 codepoints, 9 UTF-8 bytes
+        assert chunk_by_lines(text, 1) == [(0, 1), (2, 3)]
+        assert [text[a:b] for a, b in chunk_by_lines(text, 1)] == ["\U0001f600", "\U0001f601"]
+        assert chunk_by_lines(text, 2) == [(0, 3)]
 
     def test_blank_lines_do_not_count_but_ride_inside_a_chunk_span(self) -> None:
         # A line counts only when it carries content: the blank line
@@ -647,6 +672,33 @@ class TestStreamingIterParity:
             chunk_by_sentences_iter("abc", 0)
         with pytest.raises(ValueError, match="lines_per_chunk must be >= 1"):
             chunk_by_lines_iter("a\nb", 0)
+
+    def test_raises_the_same_overlap_value_errors_as_the_list_functions(self) -> None:
+        # The argument contract's other two branches, which the
+        # per-chunk=0 rows above do not reach: negative overlap, and
+        # overlap >= the per-chunk count. Each iter twin rejects them
+        # with the list spelling's own message, values included where
+        # the family's wording carries them (chunk_by_lines' newer
+        # messages name the numbers; the older siblings' do not) -- the
+        # same messages the list-level classes above pin.
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_text_iter("abc def", 5, overlap=-1)
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_words_iter("one two three", 2, overlap=-1)
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_sentences_iter("One. Two.", 2, overlap=-1)
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_lines_iter("a\nb", 2, overlap=-1)
+        with pytest.raises(ValueError, match="overlap must be < max_chars"):
+            chunk_text_iter("abc def", 5, overlap=5)
+        with pytest.raises(ValueError, match="overlap must be < words_per_chunk"):
+            chunk_by_words_iter("one two three", 2, overlap=2)
+        with pytest.raises(ValueError, match="overlap must be < sentences_per_chunk"):
+            chunk_by_sentences_iter("One. Two.", 2, overlap=2)
+        with pytest.raises(
+            ValueError, match="overlap must be < lines_per_chunk, got overlap=2, lines_per_chunk=2"
+        ):
+            chunk_by_lines_iter("a\nb\nc", 2, overlap=2)
 
 
 # ---------------------------------------------------------------------------
