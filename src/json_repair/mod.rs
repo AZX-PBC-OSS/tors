@@ -75,6 +75,7 @@ pub(crate) fn exact_decimal_of_float(f: f64) -> Option<String> {
     Some(if text == "-0" { "0".to_string() } else { text })
 }
 pub(crate) use parser::normalize_big_int_text;
+pub(crate) use parser::{DEADLINE_TAG, deadline_exceeded_payload};
 
 use crate::json_schema_impl::SchemaRepairer;
 
@@ -418,6 +419,7 @@ pub struct RepairConfig {
     pub schema: Option<Value>,
     pub diagnostics: bool,
     pub locale: NumericLocale,
+    pub deadline_ms: Option<f64>,
 }
 
 /// One recorded action from [`repair`] — the structured successor of
@@ -462,6 +464,13 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     if cfg.salvage && cfg.schema.is_none() {
         return Err("salvage=True requires schema.".into());
     }
+    // The deadline clock starts here, not at Parser::new below: the fence
+    // pre-pass and the strict fast path are part of the repair the budget
+    // bounds. A fast path that COMPLETES returns its answer even past the
+    // budget (the deadline stops further work, it does not nullify done
+    // work); the check after the block only keeps a budget the failed
+    // fast path already burned from also paying for a full repair parse.
+    let deadline = cfg.deadline_ms.map(|ms| (std::time::Instant::now(), ms));
     // The text every downstream stage sees: the fence-unwrapped payload when
     // the whole input is one fenced block, the input itself otherwise. A
     // same-line opening fence ("```[1,2]") makes the payload CommonMark's
@@ -538,6 +547,13 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
         }
     }
 
+    if let Some(&(started, ms)) = deadline.as_ref()
+        && let Some((deadline_ms, elapsed_ms)) =
+            crate::diff_impl::elapsed_exceeds(started, Some(ms))
+    {
+        return Err(deadline_exceeded_payload(deadline_ms, elapsed_ms));
+    }
+
     // The repair parser (json_parser.py's parse()/parse_with_schema()).
     // With a schema the repairer MOVES into the parser — diagnostics
     // accumulated during the failed fast path survive, exactly like
@@ -546,6 +562,9 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     // (upstream translates its RecursionErrors here; tors' parser and
     // repairer raise the normalized messages themselves).
     let mut parser = parser::Parser::new(text, cfg.strict, repairer);
+    if let Some((started, ms)) = deadline {
+        parser.set_deadline(started, ms);
+    }
     let (value, diagnostics) = match schema_value.as_ref() {
         Some(_) => {
             let value = parser.parse_with_schema()?;

@@ -127,6 +127,42 @@ pub(crate) struct Parser {
     /// by parse_comment's own loop and cost one re-entry, so legitimate
     /// inputs never approach the cap.
     comment_depth: usize,
+    /// The deadline clock, armed by `repair()` — it starts at the top of
+    /// that call, so the budget covers the fence pre-pass and the strict
+    /// fast path, not just this parser. `None` = unbounded (every
+    /// existing caller): each check below is then a single `is_none`.
+    deadline: Option<(std::time::Instant, f64)>,
+    /// Sampling counter for [`Self::deadline_expired`] (1-in-256). A
+    /// `Cell` so the `&self` scan primitives can force the next check to
+    /// read the clock after a long scan (see
+    /// [`Self::force_deadline_check`]).
+    deadline_counter: std::cell::Cell<u32>,
+    /// The sticky abort payload: once the budget is exceeded, every later
+    /// check short-circuits and this is the surfaced error.
+    deadline_error: Option<String>,
+}
+
+/// The sentinel prefix marking a deadline abort inside the parser's
+/// `Err(String)` channel (otherwise shared with the upstream-parity
+/// ValueError messages). The py layer strips it and raises `TimeoutError`
+/// carrying the called spelling's own name; the tag itself never surfaces
+/// in a user-visible message.
+pub(crate) const DEADLINE_TAG: &str = "\u{0}tors-repair-deadline";
+
+/// Scans (or span builds) at least this long force the next deadline
+/// check to read the clock. Below it, a scan is one of ≤256 O(K) units
+/// that can run between two sampled reads; above it, the scan itself is
+/// the O(n)-per-cycle work the budget must catch, so at most one long
+/// scan runs past an expired budget. Total worst-case overshoot:
+/// ~256 × 1 KiB of short-scan work plus one long scan.
+pub(crate) const DEADLINE_FORCE_SCAN_CHARS: usize = 1024;
+
+/// The payload every abort site emits — the sticky error set here, and
+/// `repair()`'s post-fast-path check — in the same shape as
+/// `diff_opcodes`' TimeoutError, so the py layer only has to front it
+/// with the spelling's name.
+pub(crate) fn deadline_exceeded_payload(deadline_ms: f64, elapsed_ms: f64) -> String {
+    format!("{DEADLINE_TAG} elapsed {elapsed_ms:.1}ms > deadline_ms {deadline_ms:.1}ms")
 }
 
 impl Parser {
@@ -161,6 +197,9 @@ impl Parser {
             schema_repairer,
             depth: 0,
             comment_depth: 0,
+            deadline: None,
+            deadline_counter: std::cell::Cell::new(0),
+            deadline_error: None,
         }
     }
 
@@ -185,6 +224,102 @@ impl Parser {
     /// The character at the cursor (the overwhelmingly common `get(0)`).
     pub(crate) fn cur(&self) -> Option<char> {
         self.get(0)
+    }
+
+    /// Whether a deadline is armed. The scan loops split on this so the
+    /// unbounded path compiles deadline-free (see `scan_string_body`).
+    #[inline]
+    pub(crate) fn deadline_armed(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    /// Arm the deadline with `repair()`'s clock (started at the top of
+    /// that call): the parser only reads it.
+    pub(crate) fn set_deadline(&mut self, started: std::time::Instant, ms: f64) {
+        self.deadline = Some((started, ms));
+    }
+
+    /// The sampled check for O(1)-iteration loops — `scan_string_body`'s
+    /// char scan and (through [`Self::check_deadline`]) the `parse_json`
+    /// dispatch loop. An `Instant::now` per iteration would dominate the
+    /// char scan and cost one clock read per array item / object member
+    /// in the dispatch case (an unsampled dispatch check measured +13%
+    /// armed on a 3.8 MB repairable parse; sampled, ≤2%), so only every
+    /// 256th call reads the clock. The bound is therefore soft — up to
+    /// 256 iterations of O(1) work can run past an expired budget between
+    /// reads — and [`Self::force_deadline_check`] reclaims tightness
+    /// wherever a single iteration can cost O(n).
+    #[inline]
+    pub(crate) fn deadline_expired(&mut self) -> bool {
+        if self.deadline.is_none() {
+            return false;
+        }
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        let counter = self.deadline_counter.get().wrapping_add(1);
+        self.deadline_counter.set(counter);
+        if counter & 0xFF != 0 {
+            return false;
+        }
+        self.deadline_now_expired()
+    }
+
+    /// Force the next check to read the clock. Call after any work whose
+    /// cost is proportional to the remaining input — a buffer splice, a
+    /// long scan, a long span build: the following parse always passes a
+    /// check before the next such unit can run, so at most one O(n) unit
+    /// plus the work up to it slips between clock reads — the same
+    /// tightness an unsampled dispatch check bought, at ~1/256 the clock
+    /// reads on benign input.
+    #[inline]
+    pub(crate) fn force_deadline_check(&self) {
+        if self.deadline.is_some() {
+            self.deadline_counter.set(0xFF);
+        }
+    }
+    /// The clock read behind every sampled check: reads the wall clock,
+    /// and on expiry latches the sticky payload. Unsampled callers do not
+    /// exist — the two remaining uses are `deadline_expired`'s every-256th
+    /// call and the forced reads after splices.
+    #[inline]
+    fn deadline_now_expired(&mut self) -> bool {
+        let Some(&(started, ms)) = self.deadline.as_ref() else {
+            return false;
+        };
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        if let Some((d, e)) = crate::diff_impl::elapsed_exceeds(started, Some(ms)) {
+            self.deadline_error = Some(deadline_exceeded_payload(d, e));
+            return true;
+        }
+        false
+    }
+
+    /// The dispatch-loop check: sampled through [`Self::deadline_expired`],
+    /// `Err` carrying the sticky payload once the budget is exceeded — and
+    /// on every later call, so an abort can never be swallowed by a retry
+    /// layer. The fallback arm is unreachable by construction
+    /// (`deadline_now_expired` latches the payload before returning true)
+    /// and kept panic-free: this parser is a fuzz target.
+    #[inline]
+    pub(crate) fn check_deadline(&mut self) -> Result<(), String> {
+        if self.deadline_expired() {
+            return Err(self
+                .deadline_error
+                .clone()
+                .unwrap_or_else(|| DEADLINE_TAG.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Take the sticky abort. The scan loops break without an error
+    /// channel of their own; their caller polls this once the loop exits.
+    /// The sticky flag makes a missed poll harmless — the next
+    /// `check_deadline` fires instead.
+    pub(crate) fn take_deadline_error(&mut self) -> Option<String> {
+        self.deadline_error.take()
     }
 
     /// json_parser.py's `skip_whitespaces`: advance `index` past whitespace.
@@ -218,7 +353,8 @@ impl Parser {
     /// by an EVEN run of backslashes); returns the offset from `index` to
     /// that position, or the distance to the end when not found.
     pub(crate) fn skip_to_character(&self, targets: &[char], idx: usize) -> usize {
-        let mut i = self.index + idx;
+        let start = self.index + idx;
+        let mut i = start;
         let n = self.s.len();
         let mut backslashes = 0usize;
         while i < n {
@@ -229,12 +365,25 @@ impl Parser {
                 continue;
             }
             if targets.contains(&ch) && backslashes.is_multiple_of(2) {
+                self.note_scan_distance(i - start);
                 return i - self.index;
             }
             backslashes = 0;
             i += 1;
         }
+        self.note_scan_distance(n - start);
         n - self.index
+    }
+
+    /// A scan of [`DEADLINE_FORCE_SCAN_CHARS`] or more is O(remaining)
+    /// work between two sampled checks — the repeated-long-scan class the
+    /// parser's quadratics are made of — so it forces the next check to
+    /// read the clock (see `force_deadline_check`).
+    #[inline]
+    pub(crate) fn note_scan_distance(&self, traversed: usize) {
+        if traversed >= DEADLINE_FORCE_SCAN_CHARS {
+            self.force_deadline_check();
+        }
     }
 
     /// json_context.py's `context.current`: the innermost context.
@@ -571,6 +720,7 @@ impl Parser {
         let (repairer_active, resolved_schema) = self.resolve_schema_for_parse(schema)?;
 
         loop {
+            self.check_deadline()?;
             // None means that we are at the end of the string provided.
             let Some(ch) = self.cur() else {
                 return Ok(Value::Str(String::new()));

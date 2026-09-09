@@ -306,6 +306,23 @@ def dedent(text: str) -> str: ...
 # GIL note: the whole repair — strict fast path, repair parser, schema
 # alignment, validator — runs with the GIL released; the residue is the
 # schema-argument walk plus the O(output) string marshalling.
+#
+# deadline_ms (default None = unbounded) bounds the whole repair the way
+# diff_opcodes' deadline_ms does: a positive-finite-or-None budget validated
+# up front, TimeoutError on expiry ("<spelling> deadline exceeded: elapsed
+# Xms > deadline_ms Yms"). The clock starts at the top of the call — the
+# fence pre-pass and the json.loads fast-path attempt burn the budget too
+# (a fast path that completes past the budget still returns its answer).
+# It is a DoS backstop for the quadratic parser shapes shared with upstream
+# json_repair (splice rescans and the backslash-run string scan) — a
+# bounded abort, not a speed-up; a completing parse is byte-identical
+# whether or not a deadline is set. The bound is soft (the tight loops
+# sample the clock 1-in-256, re-tightened after every O(n) splice/scan)
+# and bounds CPU time, not native stack growth (runaway continuation
+# recursions are depth-guarded separately). Unset costs nothing on the
+# valid-JSON fast path and one predicted branch per parser dispatch turn
+# (~+6% worst-case on a multi-MB skip_json_loads parse); set adds ≤2%.
+# Applies to all three spellings.
 def repair_json(
     s: str,
     *,
@@ -316,6 +333,7 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> str: ...
 
 
@@ -335,6 +353,7 @@ def repair_json_loads(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
 
 
@@ -356,6 +375,7 @@ def repair_json_diagnostics(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> tuple[
     dict[str, Any] | list[Any] | str | int | float | bool | None,
     list[dict[str, Any]],
