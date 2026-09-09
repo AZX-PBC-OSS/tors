@@ -1572,6 +1572,15 @@ raises `ValueError`: the chunk stride is `words_per_chunk - overlap` tokens, and
 unlike `chunk_text`'s character-granularity overlap this stride is always `>= 1` by
 construction once validated, so forward progress needs no runtime fallback.
 
+Cost at document scale: one `word_bounds` walk, one grapheme boundary index (a
+one-bit-per-codepoint bitmap — on pure-ASCII text it is two SIMD byte scans, no
+segmentation walk — shared with `chunk_hierarchical` and `chunk_by_sentences`), a
+zero-copy merge fast path when no boundary needs it, and one streaming decode pass
+for the token filter. Measured on 12 MiB of prose (min-of-3, `tools/bench_chunking.py`):
+~160 ms, ~90 MiB transient (the word-bounds list itself) — the word walk plus
+marginal machinery. Before this change it built a `HashSet` of every grapheme boundary
+plus a whole-text `Vec<char>` unconditionally: ~1.9 s and ~500 MiB on the same input.
+
 ```python
 tors.chunk_by_words("one two three four five six seven", 3)
 # [(0, 13), (14, 27), (28, 33)]
@@ -1706,6 +1715,23 @@ is legal and skips straight to the raw-cut fallback for every chunk. Every
 level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
+
+Cost at document scale: one scan per level (the default hierarchy's
+paragraph/sentence/word walks, or one literal search per custom separator),
+one branchless byte pass for the codepoint count, and one grapheme
+boundary index — a one-bit-per-codepoint bitmap built LAZILY, only when a
+level actually has cuts to filter, a window needs the raw-cut fallback, or
+`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
+instead of a segmentation walk. A custom hierarchy that never matches
+under a whole-document budget builds none of it. Measured on 12 MiB
+(min-of-3, `tools/bench_chunking.py`): a never-matching custom hierarchy
+~3 ms; the default hierarchy at a 2000-codepoint budget ~350 ms, which is
+its own word walk (~130 ms) plus sentence walk (~190 ms) — the accurate
+UAX #29 segmentation the function exists to provide. Before this change an
+unconditional `Vec<char>` collect plus a `HashSet` of every grapheme
+boundary in the document ran before anything else: ~1.0-1.2 s for the
+never-matching case regardless of budget, ~3.0 s for the default
+hierarchy, superlinear in input size.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,

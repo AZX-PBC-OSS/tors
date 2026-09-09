@@ -77,6 +77,7 @@ import pytest
 
 import tors
 from reference import corpus_b64, corpus_utf8, crlf, decomposed, entities, prose, reference_finalize
+from tors import chunk_by_sentences, chunk_by_words, chunk_hierarchical
 
 # The timing lane: every test in this module is a measurement cell (wall-time
 # bands and races over multi-MiB corpora), slow and load-sensitive, so CI's
@@ -294,4 +295,117 @@ def test_grapheme_count_absolute_band_holds(
         f"grapheme_count {corpus_kind} {size_bytes // _MIB}MiB took {took_ms:.0f}ms, "
         "outside the absolute band (measured ~118-123ms at 12 MiB, ceiling 400ms "
         "with 3.3x margin); the cluster scan regressed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The chunking family's document-scale cost shape (#22): the per-call cost
+# must be the segmentation walks the function is FOR, not per-codepoint
+# structures built unconditionally. Load-fair ratios (both sides measured
+# in the same process, min-of-3 after warmup), so a shared-runner slowdown
+# inflates both sides together.
+#
+# Measured on the dev box (Linux, CPython 3.12, min-of-3 after warmup),
+# before the fix -> after:
+#
+#     chunk_hierarchical, 12 MiB degenerate single-char run, custom
+#     never-matching separators, whole-document budget: ~1048ms -> ~2.6ms
+#     (the unconditional grapheme HashSet + Vec<char> collect; ~400x)
+#
+#     chunk_hierarchical, 12 MiB prose, default hierarchy, 2000-char
+#     budget: ~2996ms -> ~351ms; the residual is the word walk (~132ms)
+#     plus the sentence walk (~188ms) -- the accurate UAX #29 hierarchy
+#     the function exists to provide
+#
+#     chunk_by_words, 12 MiB prose, 200 words/chunk: ~1923ms -> ~165ms
+#     chunk_by_sentences, 12 MiB prose, 10 sentences/chunk:
+#     ~1328ms -> ~200ms
+# ---------------------------------------------------------------------------
+
+
+def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures() -> None:
+    """The whole-document-budget custom-hierarchy cell from #22: a
+    never-matching separator list must cost one count pass plus one scan
+    pass (ratioed against CPython's own ``in``, a C-speed scan of the same
+    text), not the unconditional per-codepoint grapheme structure the
+    former spelling built before anything else could run. Measured ratio
+    ~2 after the fix (the count pass plus marshalling rides on top of the
+    scan); the former spelling measured ~700x."""
+    q = "q" * (12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 12 * _MIB, ["xyz"]), q)
+    scan_ms = _min_wall_ms(lambda s: "xyz" in s, q)
+    assert tors_ms < 8.0 * scan_ms, (
+        f"chunk_hierarchical no-match 12MiB took {tors_ms:.1f}ms against an "
+        f"{scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); the lazily-built "
+        "grapheme machinery regressed to an unconditional structure"
+    )
+
+
+def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii() -> None:
+    """The laziness contract, on the input where it is load-bearing: for
+    NON-ASCII text the grapheme index is a full segmentation walk
+    (~150ms at 12 MiB), so a call that never needs it (never-matching
+    separators, whole-document budget: no cuts to filter, no raw-cut
+    window, no overlap snap) must not build it. The reference is the same
+    ``in`` scan; measured ~5ms vs ~2ms on decomposed prose (ratio ~2.5)
+    when lazy, ~75x if the index were built unconditionally — the ASCII
+    fast path masks that regression on single-byte corpora, which is why
+    this cell runs decomposed text."""
+    corpus = decomposed(12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s), ["xyz"]), corpus)
+    scan_ms = _min_wall_ms(lambda s: "xyz" in s, corpus)
+    assert tors_ms < 8.0 * scan_ms, (
+        f"chunk_hierarchical no-match non-ASCII 12MiB took {tors_ms:.1f}ms against "
+        f"an {scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); the grapheme "
+        "index is being built on a call that cannot use it"
+    )
+
+
+def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() -> None:
+    """The default hierarchy's per-call cost contract: no more than its
+    own UAX #29 walks (word_count + sentence_count on the same corpus,
+    measured in-process). The hierarchy IS those walks; everything around
+    them -- level construction, the cut filter, the chunk loop,
+    marshalling -- must be marginal. Measured ~351ms against a ~320ms
+    reference sum (ratio ~1.1) after the fix; the former spelling measured
+    ~9.4x (the grapheme hash set dominated the segmentation it was
+    filtering)."""
+    corpus = prose(12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
+    walks_ms = _min_wall_ms(tors.word_count, corpus) + _min_wall_ms(
+        tors.sentence_count, corpus
+    )
+    assert tors_ms < 2.0 * walks_ms, (
+        f"chunk_hierarchical default 12MiB took {tors_ms:.0f}ms against "
+        f"{walks_ms:.0f}ms of its own segmentation walks "
+        f"({tors_ms / walks_ms:.1f}x); per-call machinery is dominating the walks"
+    )
+
+
+def test_chunk_by_words_is_its_own_word_walk() -> None:
+    """chunk_by_words' per-call cost contract: the word walk it is FOR,
+    plus only marginal machinery (the grapheme index build, the merge, the
+    streaming token filter). Measured ~165ms against ~132ms of word_count
+    (ratio ~1.25) after the fix; the former spelling measured ~14.6x."""
+    corpus = prose(12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_by_words(s, 200), corpus)
+    walk_ms = _min_wall_ms(tors.word_count, corpus)
+    assert tors_ms < 2.5 * walk_ms, (
+        f"chunk_by_words 12MiB took {tors_ms:.0f}ms against a {walk_ms:.0f}ms "
+        f"word walk ({tors_ms / walk_ms:.1f}x); the merge/filter machinery is "
+        "dominating the segmentation it windows"
+    )
+
+
+def test_chunk_by_sentences_is_its_own_sentence_walk() -> None:
+    """chunk_by_sentences' cost contract, same shape as chunk_by_words':
+    measured ~200ms against ~188ms of sentence_count (ratio ~1.07) after
+    the fix; the former spelling measured ~7.1x."""
+    corpus = prose(12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_by_sentences(s, 10), corpus)
+    walk_ms = _min_wall_ms(tors.sentence_count, corpus)
+    assert tors_ms < 2.5 * walk_ms, (
+        f"chunk_by_sentences 12MiB took {tors_ms:.0f}ms against a "
+        f"{walk_ms:.0f}ms sentence walk ({tors_ms / walk_ms:.1f}x); the merge "
+        "machinery is dominating the segmentation it windows"
     )
