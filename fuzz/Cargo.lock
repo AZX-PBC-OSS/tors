@@ -1282,6 +1282,7 @@ dependencies = [
  "libfuzzer-sys",
  "sha2 0.10.9",
  "tors-core",
+ "unicode-segmentation",
 ]
 
 [[package]]

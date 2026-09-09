@@ -808,7 +808,6 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
-    deadline_ms: float | None = None,
 ) -> str: ...
 ```
 
@@ -918,36 +917,6 @@ and extra properties are dropped rather than raised, and missing `required`
 properties are filled from their subschema's `default`/`const`/`enum[0]`.
 It requires a schema: `salvage=True` without one raises
 `ValueError("salvage=True requires schema.")`.
-
-**`deadline_ms`** (default `None` = unbounded) bounds the whole repair the
-way `diff_opcodes`' `deadline_ms` does: a positive-finite-or-`None` budget
-validated up front, `TimeoutError` on expiry. The clock starts at the top of
-the call — the fence pre-pass and the `json.loads` fast-path attempt burn
-the budget too, and a fast path that *completes* past the budget still
-returns its answer (the deadline stops further work; it does not nullify
-done work). It is a DoS backstop for the pathological O(n²) parser shapes
-`tors` shares with upstream `json_repair` — duplicate-key-in-array splices,
-empty-object splices, and a backslash-run string scan — a bounded *abort*,
-not a speed-up: a completing parse is
-byte-identical whether or not a deadline is set, and a benign large document
-does not trip a generous budget (the deadline discriminates pathological
-*shape*, not *size*). It applies to all three spellings and is checked with
-the GIL released, so `TimeoutError` is raised after reacquiring it — the
-same shape as `diff_opcodes`, including the message:
-`"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
-
-Two honest limits. The bound is *soft*: the tight loops sample the clock
-1-in-256, but every O(n) unit — a buffer splice, a long scan, a wide span
-build — forces the very next check to read it, so at most one such unit
-runs past an expired budget (measured worst overshoot ~8% at n=1M). And
-it bounds CPU *time*, not native stack growth: a runaway continuation
-recursion can still overflow the stack before the budget expires — that
-class is depth-guarded separately (`MAX_NESTING`), not time-bounded.
-Cost when unset: nothing on the valid-JSON fast path, and one predicted
-branch per dispatch turn in the repair parser — measured ~+6% worst-case
-on a multi-MB `skip_json_loads=True` parse, ~+3% on a corrupt-document
-repair, within noise on the pathological shapes. Cost when set: ≤2% on
-top of that (the checks are sampled).
 
 Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
 `schema` that is not a dict, bool, model, or `None` raises
@@ -1603,6 +1572,15 @@ raises `ValueError`: the chunk stride is `words_per_chunk - overlap` tokens, and
 unlike `chunk_text`'s character-granularity overlap this stride is always `>= 1` by
 construction once validated, so forward progress needs no runtime fallback.
 
+Cost at document scale: one `word_bounds` walk, one grapheme boundary index (a
+one-bit-per-codepoint bitmap — on pure-ASCII text it is two SIMD byte scans, no
+segmentation walk — shared with `chunk_hierarchical` and `chunk_by_sentences`), a
+zero-copy merge fast path when no boundary needs it, and one streaming decode pass
+for the token filter. Measured on 12 MiB of prose (min-of-3, `tools/bench_chunking.py`):
+~160 ms, ~90 MiB transient (the word-bounds list itself) — the word walk plus
+marginal machinery. Before this change it built a `HashSet` of every grapheme boundary
+plus a whole-text `Vec<char>` unconditionally: ~1.9 s and ~500 MiB on the same input.
+
 ```python
 tors.chunk_by_words("one two three four five six seven", 3)
 # [(0, 13), (14, 27), (28, 33)]
@@ -1737,6 +1715,23 @@ is legal and skips straight to the raw-cut fallback for every chunk. Every
 level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
+
+Cost at document scale: one scan per level (the default hierarchy's
+paragraph/sentence/word walks, or one literal search per custom separator),
+one branchless byte pass for the codepoint count, and one grapheme
+boundary index — a one-bit-per-codepoint bitmap built LAZILY, only when a
+level actually has cuts to filter, a window needs the raw-cut fallback, or
+`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
+instead of a segmentation walk. A custom hierarchy that never matches
+under a whole-document budget builds none of it. Measured on 12 MiB
+(min-of-3, `tools/bench_chunking.py`): a never-matching custom hierarchy
+~3 ms; the default hierarchy at a 2000-codepoint budget ~350 ms, which is
+its own word walk (~130 ms) plus sentence walk (~190 ms) — the accurate
+UAX #29 segmentation the function exists to provide. Before this change an
+unconditional `Vec<char>` collect plus a `HashSet` of every grapheme
+boundary in the document ran before anything else: ~1.0-1.2 s for the
+never-matching case regardless of budget, ~3.0 s for the default
+hierarchy, superlinear in input size.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,

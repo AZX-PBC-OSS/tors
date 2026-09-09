@@ -21,7 +21,7 @@ stalled/looping start fails fast rather than hanging the suite.
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from tors import chunk_hierarchical, grapheme_count
@@ -255,3 +255,52 @@ def test_chunk_starts_are_strictly_increasing(text: str, max_chars: int) -> None
     starts = [s for s, _ in chunks]
     assert starts == sorted(set(starts))
     assert all(b > a for a, b in zip(starts, starts[1:], strict=False))
+
+
+# ---------------------------------------------------------------------------
+# Grapheme-boundary alignment, the invariant the #22 rewrite (the shared
+# GraphemeIndex bitmap behind the cut filter, the raw-cut fallback, and the
+# overlap snap) must not lose: every chunk edge lands on a cluster boundary
+# for BOTH hierarchies and under overlap. A codepoint index p is a cluster
+# boundary iff splitting there counts the same clusters on both sides — a
+# cluster spanning p would be counted once per side.
+# ---------------------------------------------------------------------------
+
+
+def _is_grapheme_boundary(text: str, p: int) -> bool:
+    return grapheme_count(text[:p]) + grapheme_count(text[p:]) == grapheme_count(text)
+
+
+# SARA AM is a category-L Thai letter, so the existing _TEXT alphabet can
+# already pair it with a base character; this dedicated alphabet makes the
+# pairing frequent, and adds CRLF (the ASCII fast path's one join rule).
+_CLUSTER_ALPHABET = st.text(
+    alphabet=st.sampled_from(["0", "ำ", "ก", " ", "-", ".", "\r", "\n"]), max_size=80
+)
+
+
+@given(text=_CLUSTER_ALPHABET, max_chars=st.integers(min_value=1, max_value=30))
+@settings(max_examples=150)
+def test_chunk_edges_are_grapheme_boundaries_default_hierarchy(text: str, max_chars: int) -> None:
+    for s, e in chunk_hierarchical(text, max_chars):
+        assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
+        assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"
+
+
+@given(
+    text=_CLUSTER_ALPHABET,
+    max_chars=st.integers(min_value=2, max_value=30),
+    overlap=st.integers(min_value=0, max_value=29),
+)
+@settings(max_examples=150)
+def test_chunk_edges_are_grapheme_boundaries_custom_separators_and_overlap(
+    text: str, max_chars: int, overlap: int
+) -> None:
+    assume(overlap < max_chars)
+    # A clean literal, a literal that MATCHES INSIDE the SARA AM cluster,
+    # and a multi-level list: the custom-hierarchy filter's whole reason
+    # to exist is the second one.
+    for seps in (["-"], ["ำ"], ["-", " "]):
+        for s, e in chunk_hierarchical(text, max_chars, separators=seps, overlap=overlap):
+            assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
+            assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"

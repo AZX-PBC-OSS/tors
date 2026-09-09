@@ -15,6 +15,12 @@ libfuzzer-sys = "0.4"
 # hashes exactly the way the code under test does.
 sha2 = "0.10"
 const-hex = "1.19"
+# The chunk_hierarchical target's independent cluster oracle: the same
+# crate (and version) the main crate's grapheme machinery runs on, so the
+# fuzz check answers "is this a cluster boundary" exactly the way
+# production's tables do, without trusting the code under test to
+# re-answer its own question.
+unicode-segmentation = "1.13.3"
 
 [dependencies.tors]
 # The crates.io package is `tors-core` (the plain `tors` name is an unrelated,

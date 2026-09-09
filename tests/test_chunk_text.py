@@ -36,6 +36,7 @@ from tors import (
     chunk_by_words_iter,
     chunk_text,
     chunk_text_iter,
+    grapheme_count,
 )
 
 # ---------------------------------------------------------------------------
@@ -505,3 +506,55 @@ class TestStreamingIterParity:
             chunk_by_words_iter("abc", 0)
         with pytest.raises(ValueError, match="sentences_per_chunk must be >= 1"):
             chunk_by_sentences_iter("abc", 0)
+
+
+# ---------------------------------------------------------------------------
+# Grapheme-boundary alignment for the unit-count chunkers, the invariant
+# their merge step (against the shared grapheme boundary index) must not
+# lose on arbitrary text: every chunk edge lands on a cluster boundary.
+# chunk_by_paragraphs is deliberately NOT here: its spans are line-run
+# edges, documented as not necessarily cluster-aligned (a combining mark
+# after a newline joins the newline's own cluster, and the newline is
+# separator content no paragraph's caller would call "split").
+# ---------------------------------------------------------------------------
+
+
+def _is_grapheme_boundary(text: str, p: int) -> bool:
+    # Splitting at a cluster boundary counts the same clusters on both
+    # sides; a cluster spanning p is counted once per side.
+    return grapheme_count(text[:p]) + grapheme_count(text[p:]) == grapheme_count(text)
+
+
+_CLUSTER_ALPHABET = st.text(
+    alphabet=st.sampled_from(["0", "ำ", "ก", " ", "-", ".", "\r", "\n"]), max_size=80
+)
+
+
+@given(
+    text=_CLUSTER_ALPHABET,
+    per_chunk=st.integers(min_value=1, max_value=5),
+    data=st.data(),
+)
+@settings(max_examples=150)
+def test_chunk_by_words_edges_are_grapheme_boundaries(
+    text: str, per_chunk: int, data: object
+) -> None:
+    overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))  # type: ignore[attr-defined]
+    for s, e in chunk_by_words(text, per_chunk, overlap=overlap):
+        assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
+        assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"
+
+
+@given(
+    text=_CLUSTER_ALPHABET,
+    per_chunk=st.integers(min_value=1, max_value=5),
+    data=st.data(),
+)
+@settings(max_examples=150)
+def test_chunk_by_sentences_edges_are_grapheme_boundaries(
+    text: str, per_chunk: int, data: object
+) -> None:
+    overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))  # type: ignore[attr-defined]
+    for s, e in chunk_by_sentences(text, per_chunk, overlap=overlap):
+        assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
+        assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"
