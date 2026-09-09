@@ -405,7 +405,16 @@ def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 # exactly; fuzzy=True is a windowed difflib-ratio scan of source against
 # threshold (a LEXICAL check: no NLI/semantic model; see the crate's
 # grounded_impl module docs for exactly what the score measures and its
-# DoS-bounded windowing over long sources). An empty claim is vacuously
+# DoS-bounded windowing over long sources). fuzzy=True is a superset of
+# fuzzy=False: a verbatim substring is grounded before windowing and before
+# deadline_ms applies (so threshold=1.0 fuzzy subsumes exact containment, and
+# a verbatim claim never times out). Near matches are alignment-independent
+# in the guarantee band: a region with aligned ratio r is detected at any
+# offset whenever r >= max(0.75, threshold + 1/32) (a bounded refinement
+# pass over the best coarse windows; one typo in a 9+ char claim clears the
+# 0.85 default wherever it sits), best-effort below r = 0.75, and evictable
+# from the 64 refinement candidates by adversarial decoys — the regime
+# deadline_ms exists for. An empty claim is vacuously
 # grounded in anything on both paths. threshold must be in [0.0, 1.0].
 # deadline_ms is only accepted (and only meaningful) when fuzzy=True; it
 # bounds the whole fuzzy scan the same way diff_opcodes' deadline_ms does:

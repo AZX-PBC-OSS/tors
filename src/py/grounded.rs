@@ -19,8 +19,21 @@ use crate::validate_deadline_ms;
 /// expiry, a positive-finite-or-`None` precondition validated before any
 /// work runs.
 ///
-/// GIL model: `fuzzy=False` is one `py.detach`'d `str::contains` call.
-/// `fuzzy=True` runs the whole windowed scan under `py.detach`; the
+/// `fuzzy=True` is a superset of `fuzzy=False`: an exact-containment floor
+/// (`memmem`, see grounded_impl's module docs for why not std's contains)
+/// runs first, so a claim present verbatim is grounded before any
+/// windowing — regardless of window alignment, and before `deadline_ms` is
+/// even set up (a verbatim substring never times out; `deadline_ms` bounds
+/// the windowed scan that runs only when there is no exact match). Near
+/// matches are alignment-independent in the guarantee band — a region with
+/// aligned ratio r is detected at any offset whenever
+/// r >= max(0.75, threshold + 1/32), via the bounded refinement pass;
+/// best-effort below r = 0.75, and evictable from the 64 refinement
+/// candidates by adversarial decoys (the regime `deadline_ms` exists for)
+/// — see `grounded_impl`'s module docs.
+///
+/// GIL model: `fuzzy=False` is one `py.detach`'d `memmem` containment
+/// check. `fuzzy=True` runs the whole windowed scan under `py.detach`; the
 /// `TimeoutError` (if any) is constructed after the GIL is reacquired, the
 /// same `diff_opcodes` shape.
 #[pyfunction(signature = (claim, source, *, fuzzy = false, threshold = 0.85, deadline_ms = None))]

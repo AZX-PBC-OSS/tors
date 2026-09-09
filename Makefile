@@ -44,12 +44,16 @@ dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
 	uv sync --locked --reinstall-package tors
 
-# The ci.yml lint job, verbatim: fmt gate, clippy in both feature configs
+# The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
+# crate — not a workspace member, so root cargo fmt never sees it; without
+# this line the fuzz targets rot silently, truncate_ellipsis.rs had
+# already drifted), clippy in both feature configs
 # (pyo3's cfg flags differ between them, so each pass surfaces lints in code the
 # other never compiles), and ruff over the Python side (tests/, tools/,
 # python/; config in pyproject.toml, the dev-group ruff runs it).
 lint:
 	cargo fmt --check
+	cargo fmt --check --manifest-path fuzz/Cargo.toml
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --no-default-features -- -D warnings
 	uv run --no-sync ruff check .
@@ -101,7 +105,7 @@ gen-html-table:
 # 30s-per-target smoke run suitable before a PR; a real fuzzing campaign
 # (hours, one target, targeted at a specific area of suspicion) is
 # `cargo +nightly fuzz run <target>` run directly, not through this target.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff phonetic bm25 tfidf truncate_ellipsis controls json_repair
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \

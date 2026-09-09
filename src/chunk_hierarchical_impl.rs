@@ -46,7 +46,7 @@
 //!
 //! Performance: every level's candidate cut-position list is computed ONCE
 //! per call (one scan per level: `paragraph_bounds`/`sentence_bounds`/
-//! `word_bounds` for the default levels, one `str::match_indices` pass per
+//! `word_bounds` for the default levels, one `memmem` pass per
 //! custom literal), never re-scanned per chunk. Building each chunk is one
 //! `partition_point` binary search per level: O(n × levels) total, levels
 //! bounded by the small, caller-supplied list length. Forward progress is
@@ -55,6 +55,8 @@
 //! timeout.
 
 use std::collections::HashSet;
+
+use memchr::memmem;
 
 use crate::chunk_by_segment_impl::paragraph_bounds;
 use crate::chunk_impl::grapheme_safe_hard_cut;
@@ -114,8 +116,10 @@ fn level_from_paragraph_bounds(bounds: Vec<(usize, usize)>) -> Level {
 /// (the separator is not part of either chunk), the next chunk resumes at
 /// the match end (the separator is dropped, the same convention
 /// [`level_from_paragraph_bounds`] already applies to blank-line runs).
-/// One `match_indices` pass over the whole text, converted from byte to
-/// codepoint offsets in the same forward walk (no second pass).
+/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way —
+/// std's `match_indices` runs the same algorithm without the SIMD skip
+/// and crawls on degenerate repeated-byte documents), converted from byte
+/// to codepoint offsets in the same forward walk (no second pass).
 fn level_from_literal(text: &str, separator: &str) -> Level {
     if separator.is_empty() {
         // An empty literal matches everywhere and cuts nothing meaningful
@@ -125,16 +129,19 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
         // than a pathological infinite-candidate one.
         return Level { cuts: Vec::new() };
     }
+    // Every match of a literal needle IS the needle: its char length is a
+    // loop-invariant, counted once.
+    let sep_chars = separator.chars().count();
     let mut cuts = Vec::new();
     let mut char_idx = 0usize;
     let mut byte_idx = 0usize;
-    for (byte_start, matched) in text.match_indices(separator) {
+    for byte_start in memmem::find_iter(text.as_bytes(), separator.as_bytes()) {
         char_idx += text[byte_idx..byte_start].chars().count();
         let start_char = char_idx;
-        let end_char = start_char + matched.chars().count();
+        let end_char = start_char + sep_chars;
         cuts.push((start_char, end_char));
         char_idx = end_char;
-        byte_idx = byte_start + matched.len();
+        byte_idx = byte_start + separator.len();
     }
     Level { cuts }
 }

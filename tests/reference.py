@@ -367,6 +367,86 @@ SEARCH_SPARSE_PATTERNS: tuple[str, ...] = ("monthly", "weekly", "annually")
 # lines for the line-level one).
 
 
+def _lcs_len(a: str, b: str) -> int:
+    """Longest-common-subsequence length by the classic O(len(a)·len(b))
+    rolling-row DP: an algorithm sharing no machinery with ``similar``'s
+    Myers engine, so agreement between the two is evidence about the
+    CONTRACT (M is maximal), not a shared bug."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    for ch in a:
+        cur = [0]
+        extend = cur.extend  # the DP's whole body: one row per char of a
+        for j, bj in enumerate(b, start=1):
+            extend((prev[j - 1] + 1,) if ch == bj else (max(prev[j], cur[j - 1]),))
+        prev = cur
+    return prev[-1]
+
+
+def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bool:
+    """The pure-Python model of ``tors.is_grounded(fuzzy=True)``'s documented
+    contract: the exact-containment floor, then the best ``2·M/T`` ratio over
+    the same-length stride-``len(claim)//2`` windows of ``source`` (the
+    truncated tail window included), then — when the coarse best falls short
+    — the bounded refinement pass: the top 64 windows scoring >= 0.5 (by
+    ``(score, start)``, the streaming keep-K-largest set; the truncated tail
+    competes like any other), each re-scanned at fine stride
+    ``max(1, L // 16)`` across ``[w - L//2, min(w + L//2, n - L)]``, the grid
+    always extended to the range's upper end. Every coarse window is scored
+    — the implementation's early break at ``best >= threshold`` is
+    verdict-equivalent, since ``best`` only ever rises and the comparison is
+    the same at the end; likewise the refinement's best-first order and
+    early break, so this model scans each candidate's full fine range and
+    still lands on the identical verdict.
+    ``M`` here is the LCS length from the independent DP above, NOT
+    difflib's anchored matching blocks: tors's ``M`` is the maximal one
+    (``M == LCS`` exactly, the minimal-edit-script consequence of the
+    Myers engine), so this oracle is exact on the repeated-character
+    inputs where difflib's own recursion can pick a smaller-but-valid ``M``
+    (the pinned ``"010"``/``"120"`` divergence class in the grounded tests)."""
+    if not claim:
+        return True
+    if claim in source:
+        return True  # the exact-containment floor
+    m, n = len(claim), len(source)
+    if n <= m:
+        # No windowing possible: one direct comparison, the same convention.
+        return 2 * _lcs_len(claim, source) / (m + n) >= threshold
+    stride = max(m // 2, 1)
+    best = 0.0
+    band: list[tuple[float, int]] = []  # (score, char start), full + tail
+    start = 0
+    while True:
+        end = min(start + m, n)
+        score = 2 * _lcs_len(claim, source[start:end]) / (m + end - start)
+        best = max(best, score)
+        if score >= 0.5:
+            band.append((score, start))
+        if end == n:
+            break
+        start += stride
+    if best >= threshold:
+        return True
+    # The candidate set: top 64 by (score, start) — the same set the
+    # implementation's streaming keep-K-largest maintains.
+    candidates = sorted(band, key=lambda c: (c[0], c[1]), reverse=True)[:64]
+    fine = max(m // 16, 1)
+    for w in [c[1] for c in candidates]:
+        if best >= threshold:
+            break
+        lo = max(0, w - m // 2)
+        hi = min(w + m // 2, n - m)
+        if lo > hi:
+            continue
+        starts = list(range(lo, hi + 1, fine))
+        if starts[-1] != hi:
+            starts.append(hi)  # the grid alone could leave a fine-1 gap at hi
+        for fstart in starts:
+            best = max(best, 2 * _lcs_len(claim, source[fstart : fstart + m]) / (2 * m))
+    return best >= threshold
+
+
 def reference_find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]:
     """The leftmost-longest oracle: a brute-force, non-overlapping reference,
     O(len(text) · len(patterns)) over CHARACTER positions, pure Python ``str``

@@ -63,6 +63,7 @@
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
+use memchr::memchr;
 use similar::algorithms::{DiffHook, diff_slices_deadline};
 use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 
@@ -275,8 +276,22 @@ pub fn diff_opcodes_deadline(
 /// the `'\n'` terminator, the single convention document tooling actually
 /// wants (`difflib` users diff `splitlines(keepends=True)` operands), kept
 /// explicit and simple rather than tolerant of every Unicode line boundary.
+/// The terminator scan is memchr (SIMD), not `split_inclusive`'s
+/// byte-at-a-time char search: the identical-operand fast path pays ONLY
+/// this split, and 12 MiB documents make the difference measurable.
 pub fn split_keepend_lines(text: &str) -> Vec<&str> {
-    text.split_inclusive('\n').collect()
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while let Some(rel) = memchr(b'\n', &bytes[start..]) {
+        let end = start + rel + 1;
+        out.push(&text[start..end]);
+        start = end;
+    }
+    if start < bytes.len() {
+        out.push(&text[start..]);
+    }
+    out
 }
 
 /// The line-level spelling of [`diff_opcodes_deadline`]: the same engine
