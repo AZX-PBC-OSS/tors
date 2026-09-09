@@ -140,6 +140,25 @@ pub(crate) struct Parser {
     /// The sticky abort payload: once the budget is exceeded, every later
     /// check short-circuits and this is the surfaced error.
     deadline_error: Option<String>,
+    /// The lookahead memo for skip_to_character, keyed by target set and
+    /// LIVED AT THE PARSER LEVEL (a deliberate divergence from upstream,
+    /// which scopes it to one string's parse state): entries are pure
+    /// buffer facts — (targets, start) -> first unescaped match, valid for
+    /// every anchored reader — so sharing them across the many short
+    /// string parses of one repair (e.g. `'{' + 'a:b,'*n + '}'` parses n
+    /// values, each with a fresh state and, upstream, a fresh O(n)-to-end
+    /// scan per comma) is exact. Cleared on the ONE buffer-mutating site
+    /// (split_object_on_duplicate_key's `{` splice shifts every absolute
+    /// position at/after the insert). Bounded per key (see string.rs's
+    /// cache_put).
+    pub(crate) lookahead_cache: Vec<(LookaheadKey, LookaheadEntry)>,
+    /// Scratch for string.rs's array_pairing_walk (one walk's outer-target
+    /// positions and per-interval stop chars): owned by the parser, taken
+    /// for the walk and returned with capacity kept, so repeated walks
+    /// neither re-allocate nor pay logarithmic Vec growth. Memory is
+    /// bounded by the largest walk in the repair.
+    pub(crate) pairing_scratch_outers: Vec<usize>,
+    pub(crate) pairing_scratch_stops: Vec<Option<usize>>,
 }
 
 /// The sentinel prefix marking a deadline abort inside the parser's
@@ -165,8 +184,24 @@ pub(crate) fn deadline_exceeded_payload(deadline_ms: f64, elapsed_ms: f64) -> St
     format!("{DEADLINE_TAG} elapsed {elapsed_ms:.1}ms > deadline_ms {deadline_ms:.1}ms")
 }
 
+/// The lookahead-cache key: the target chars in call order, '\0'-padded
+/// (upstream's dict keys are the target tuples; no target is ever '\0',
+/// and the largest set upstream builds is the 6-element
+/// `[*STRING_DELIMITERS, "{", "["]`).
+pub(crate) type LookaheadKey = [char; 6];
+/// One memo entry: `(scan start, first unescaped match)`, `None` = "no
+/// unescaped target at or after start".
+pub(crate) type LookaheadEntry = (usize, Option<usize>);
+
 impl Parser {
     pub(crate) fn new(s: &str, strict: bool, schema_repairer: Option<SchemaRepairer>) -> Parser {
+        // One allocation for the char buffer: `str::chars()` is not
+        // ExactSizeIterator, so a bare collect() grows the Vec
+        // logarithmically. `s.len()` is the exact char count for ASCII (the
+        // overwhelmingly common JSON case) and a ≤4x over-estimate for
+        // multi-byte input — and the spare capacity is not waste: the
+        // duplicate-key splice inserts `{` chars into this same buffer, so
+        // headroom defers (often eliminates) its reallocation+copy.
         Parser {
             // One exact allocation instead of `collect`'s realloc ladder:
             // `chars()`' size hint floors at a quarter of the byte length,
@@ -200,6 +235,9 @@ impl Parser {
             deadline: None,
             deadline_counter: std::cell::Cell::new(0),
             deadline_error: None,
+            lookahead_cache: Vec::new(),
+            pairing_scratch_outers: Vec::new(),
+            pairing_scratch_stops: Vec::new(),
         }
     }
 
@@ -352,10 +390,62 @@ impl Parser {
     /// `index + idx` until an UNESCAPED target character (a target preceded
     /// by an EVEN run of backslashes); returns the offset from `index` to
     /// that position, or the distance to the end when not found.
+    ///
+    /// Single-target scans (the engine's overwhelmingly common lookahead
+    /// shape) take a branch-free scan loop: `position` to the next target
+    /// or backslash — a pattern the optimizer vectorizes over the u32 char
+    /// units, where the original branchy walk could not — then a bounded
+    /// walk back over the preceding backslash run for the escape parity.
+    /// The walk-back's total cost is bounded by the runs the scan skipped
+    /// in bulk, so even backslash-dense input stays linear. Multi-target
+    /// sets (CommaSkip's 5-6 char delimiter sets) keep the char walk.
     pub(crate) fn skip_to_character(&self, targets: &[char], idx: usize) -> usize {
-        let start = self.index + idx;
-        let mut i = start;
         let n = self.s.len();
+        let origin = self.index + idx;
+        let mut i = origin;
+        if let &[t] = targets {
+            while i < n {
+                let Some(rel) = self.s[i..].iter().position(|&c| c == t || c == '\\') else {
+                    break;
+                };
+                i += rel;
+                if self.s[i] == t {
+                    // The backslash run immediately before the candidate,
+                    // CLAMPED at the scan's start: the forward walk's
+                    // counter begins at zero there, so backslashes before
+                    // the start never count against the first candidates.
+                    let run_start = self.s[..i]
+                        .iter()
+                        .rposition(|&c| c != '\\')
+                        .map_or(0, |p| p + 1)
+                        .max(origin);
+                    if (i - run_start).is_multiple_of(2) {
+                        self.note_scan_distance(i - origin);
+                        return i - self.index;
+                    }
+                    // Escaped target: parity consumed, continue fresh.
+                    i += 1;
+                } else {
+                    // A backslash run: skip it whole; its parity covers
+                    // exactly the next char, any outcome of which resumes
+                    // the scan one past it (matched-and-odd is escaped,
+                    // non-target resets, matched-and-even returned above).
+                    let run_start = i;
+                    while i < n && self.s[i] == '\\' {
+                        i += 1;
+                    }
+                    let odd_run = (i - run_start) % 2 == 1;
+                    if i < n && self.s[i] == t && !odd_run {
+                        self.note_scan_distance(i - origin);
+                        return i - self.index;
+                    }
+                    i += 1;
+                }
+            }
+            self.note_scan_distance(n - origin);
+            return n - self.index;
+        }
+        let start = origin;
         let mut backslashes = 0usize;
         while i < n {
             let ch = self.s[i];
@@ -1118,6 +1208,64 @@ pub(crate) fn normalize_big_int_text(number_str: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reference char-walk skip_to_character (the multi-target arm's
+    /// loop, spelled for any target count): the single-target fast path is
+    /// verified against it exhaustively.
+    fn skip_to_character_reference(s: &[char], start: usize, targets: &[char]) -> usize {
+        let n = s.len();
+        let mut i = start;
+        let mut backslashes = 0usize;
+        while i < n {
+            let ch = s[i];
+            if ch == '\\' {
+                backslashes += 1;
+                i += 1;
+                continue;
+            }
+            if targets.contains(&ch) && backslashes.is_multiple_of(2) {
+                return i;
+            }
+            backslashes = 0;
+            i += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn single_target_fast_path_matches_the_char_walk_exhaustively() {
+        // Every string of length <= 6 over the lookahead-steering alphabet,
+        // every start position, three single-target spellings (the ASCII
+        // delimiter, the bracket, a smart-quote outer): the vectorized
+        // fast path must return the reference walk's exact position —
+        // same match, same not-found distance.
+        let alphabet = ['[', ']', '{', '}', '"', '\\', 'x', '„', '”'];
+        for len in 0..=6usize {
+            for combo in 0..alphabet.len().pow(len as u32) {
+                let mut digits = combo;
+                let s: Vec<char> = (0..len)
+                    .map(|_| {
+                        let c = alphabet[digits % alphabet.len()];
+                        digits /= alphabet.len();
+                        c
+                    })
+                    .collect();
+                for &t in &['"', ']', '”'] {
+                    for start in 0..=len {
+                        let mut parser = Parser::new("", false, None);
+                        parser.s = s.clone();
+                        parser.index = 0;
+                        let fast = parser.skip_to_character(&[t], start);
+                        let want = skip_to_character_reference(&s, start, &[t]);
+                        assert_eq!(
+                            fast, want,
+                            "fast path diverged on s={s:?} start={start} target={t:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn parse_ok(raw: &str) -> Value {
         Parser::new(raw, false, None)

@@ -626,15 +626,22 @@ impl Parser {
 
     /// parse_object.py's `_split_object_on_duplicate_key` — THE SPLICE:
     /// rewind onto the key's opening and insert a `{` there, so the parent
-    /// container re-parses the tail as a fresh object.
+    /// container re-parses the tail as a fresh object. The insert shifts
+    /// every absolute position at/after it, so the parser-level lookahead
+    /// memo (pure buffer facts keyed by absolute positions) is cleared
+    /// here — the only buffer-mutating site.
     fn split_object_on_duplicate_key(&mut self, rollback_index: usize) {
         self.index = rollback_index - 1;
         // Python's json_str[:index+1] + "{" + json_str[index+1:] — an insert
         // at index + 1.
         self.s.insert(self.index + 1, '{');
         // An O(n) buffer splice: the next deadline check must read the
-        // clock, keeping the splice-rescan bound tight.
+        // clock, keeping the splice-rescan bound tight. It also shifts
+        // every absolute position at/after it, so the parser-level
+        // lookahead memo (pure buffer facts keyed by absolute positions)
+        // is cleared here — the only buffer-mutating site.
         self.force_deadline_check();
+        self.lookahead_cache.clear();
     }
 
     /// parse_object.py's `_resolve_object_property_schema`: pick the schema

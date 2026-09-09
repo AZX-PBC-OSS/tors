@@ -14,6 +14,7 @@ oracle-compared here; each exclusion cites its §9 number.
 
 from __future__ import annotations
 
+import itertools
 import json
 import random
 from typing import Any
@@ -96,6 +97,22 @@ _BASE_RAWS: list[str] = [
     # in an array body: the heaviest escape-repair density, pinned.
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
+    '["' + "]" * 64 + '" x',  # array-context `]` run in a string body: the
+    # memoized-lookahead O(n^2) fix stays byte-identical to the oracle here.
+    r'''[{"a": "]}\\"x"}]''',  # mixed `]`/`}`/`\\`/`"` in an array-of-object
+    # string body: exercises the shared `[outer]` memo across the `]` and `}`
+    # sites and pins it byte-identical to the oracle.
+    '["' + (']' + '\\\\') * 32 + '" x',  # interleaved `]`/even-backslash-run
+    # string body: the incremental escape-tail rewrite (upstream rebuilds the
+    # accumulator per normalization) stays byte-identical to the oracle.
+    '["' + 'a"' * 64 + '"]',  # internal-quote run in an array string: the
+    # pairing-walk outcome memo (upstream re-walks per quote candidate).
+    '{"a": "' + '}' * 64 + '"' + 'y' * 64 + '"z',  # object-value `}` run with a
+    # long quote-free gap: the `}`-branch's lstring lookahead memo.
+    '{"a": "[' + 'x"' * 64 + '"}',  # quote run under an open regex character
+    # class: the whitespace-flag + memoized `]` lookahead rewrite.
+    '{' + 'a:b,' * 64 + '}',  # unquoted-key member run: the parser-level
+    # lookahead memo shared across the run's many short string parses.
 ]
 
 # NOTE (§9.4): no fenced TOP-LEVEL SCALAR lives in _BASE_RAWS — tors recovers
@@ -430,6 +447,47 @@ def _parses(s: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+# The exhaustive structural sweep alphabet: every char that steers the
+# lookahead memos (brackets, delimiters, escape runs) plus one ordinary
+# filler. All strings up to _SWEEP_MAXLEN over this alphabet that contain a
+# delimiter and a bracket exercise every memo-site interaction at
+# exhaustively small sizes.
+_SWEEP_ALPHABET = ['[', ']', '{', '}', '"', '\\', 'x']
+_SWEEP_MAXLEN = 6
+
+
+def _sweep_raws() -> list[str]:
+    raws: list[str] = []
+    for length in range(1, _SWEEP_MAXLEN + 1):
+        for tup in itertools.product(_SWEEP_ALPHABET, repeat=length):
+            s = ''.join(tup)
+            if '"' in s and (']' in s or '}' in s):
+                raws.append(s)
+    return raws
+
+
+class TestExhaustiveStructuralSweep:
+    """Every short string over the structural alphabet, both engines.
+
+    This is the committed form of the exhaustive `]`/`}`/`\\`/`"` sweep the
+    lookahead-memo fixes were verified with: sharing one memo key across the
+    `}`/`]`/ObjectKey/comma-classify sites, dropping upstream's
+    backslash-adjacent write guard, and caching pairing-walk outcomes are
+    each only exact for ANCHORED scan starts — and the anchored-start
+    argument is over exactly these chars. A memo bug that flips one verdict
+    diverges tors from the oracle on at least one of these raws.
+    """
+
+    @pytest.mark.parametrize('raw', _sweep_raws())
+    def test_engine_lane_parity(self, raw: str) -> None:
+        got = tors.repair_json(raw, skip_json_loads=True)
+        want = json_repair_lib.repair_json(raw, skip_json_loads=True)
+        assert got == want
+        got_loads = tors.repair_json_loads(raw, skip_json_loads=True)
+        want_loads = json_repair_lib.loads(raw, skip_json_loads=True)
+        assert got_loads == want_loads
 
 
 class TestHypothesisInvariants:
