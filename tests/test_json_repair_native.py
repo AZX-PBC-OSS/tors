@@ -776,24 +776,104 @@ class TestRobustness:
             except ValueError:
                 pass  # the capped, documented outcome for runaway chains
 
-    def test_array_close_run_in_a_string_body_is_not_quadratic(self) -> None:
-        # `'["' + ']'*n + '" x'` drove an O(n^2) uncached forward scan in
-        # scan_string_body's array branch (~18s at n=200k before the fix); the
-        # memoized lookahead makes it linear (~45ms). Absolute wall bound with
-        # a large margin over the linear cost and well under the quadratic one.
+    def test_backslash_run_before_array_close_is_not_quadratic(self) -> None:
+        # `'["' + ']'*n + '\\\\' + '" x'` (an even backslash run makes the
+        # close backslash-ADJACENT) still drove O(n^2) after the memoized
+        # `]` lookahead: cached_skip_to_character's `s[m-1] != '\\'` write
+        # guard suppressed the memo for exactly those matches, so every `]`
+        # rescanned the remaining input (~12s at n=200k before the guard was
+        # lifted; the interleaved `']' + '\\\\'` spelling is the same class).
         import time as _time
 
         n = 200_000
         start = _time.perf_counter()
-        result = repair_json_loads('["' + "]" * n + '" x')
-        # In the default lane (not `timing`): a 3.0s ceiling is ~60x the
-        # linear cost and far under the ~18s quadratic, so it is robust to CI
-        # load — the same shape as the other default-lane robustness bounds
-        # (e.g. tests/test_similarity.py, tests/test_grounded.py).
+        result = repair_json_loads('["' + "]" * n + '\\\\" x', skip_json_loads=True)
         assert _time.perf_counter() - start < 3.0
-        # also pin the shape, so a fast-but-wrong scan (e.g. always break on
-        # `]`) cannot pass on the wall bound alone:
-        assert result == ["]" * n, "x"]
+        # pin the shape (byte-identical to json-repair 0.63.4 at every n):
+        # the even run halves to nothing, the close survives as content.
+        assert result == [("]" * n) + '" x']
+
+    def test_objval_close_run_with_delimiter_gap_is_not_quadratic(self) -> None:
+        # `'{"a": "' + '}'*n + '"' + 'y'*n + '"z'`: every `}` in the run ran
+        # the `}`-branch's UNmemoized `skip_to_character(&[lstring_delimiter])`
+        # over the same long quote-free gap (~5.5s at n=100k before the scan
+        # was memoized; the memoized `}` lookahead one line above it already
+        # made the rest of the branch linear).
+        import time as _time
+
+        n = 100_000
+        start = _time.perf_counter()
+        result = repair_json_loads(
+            '{"a": "' + "}" * n + '"' + "y" * n + '"z', skip_json_loads=True
+        )
+        assert _time.perf_counter() - start < 3.0
+        assert result == {"a": ("}" * n) + '"' + ("y" * n) + '"z'}
+
+    def test_regex_character_class_quote_run_is_not_quadratic(self) -> None:
+        # `'{"a": "[' + 'x"'*n + '"}'`: with a regex character class open and
+        # no `]` anywhere ahead, every closing-quote candidate ran
+        # quote_belongs_to_regex_character_class's UNmemoized
+        # `skip_to_character(&[']'])` to the end of input (~12s at n=100k
+        # before the scan was memoized through the string state).
+        import time as _time
+
+        n = 100_000
+        start = _time.perf_counter()
+        result = repair_json_loads('{"a": "[' + 'x"' * n + '"}', skip_json_loads=True)
+        assert _time.perf_counter() - start < 3.0
+        # The parity of the quote run decides the closer (the last quote
+        # closes on odd runs, stays content on even ones): even n keeps
+        # every pair as content — `{"a": "[" + 'x"'*n}`.
+        assert result == {"a": "[" + ('x"' * n)}
+
+    def test_object_key_colon_run_is_not_quadratic(self) -> None:
+        # `'{' + 'a:b,'*n + '}'`: unquoted object keys put the scan in
+        # ObjectKey context, where every `:` ran two UNmemoized
+        # skip_to_character lookaheads over the whole remaining member run
+        # (~25s at n=100k before both scans were memoized). The repaired
+        # value is n-independent (the duplicate key splits collapse), so the
+        # shape pin is a constant.
+        import time as _time
+
+        n = 100_000
+        start = _time.perf_counter()
+        result = repair_json_loads("{" + "a:b," * n + "}", skip_json_loads=True)
+        assert _time.perf_counter() - start < 3.0
+        assert result == {"a": "b"}
+
+    def test_internal_quote_run_in_array_string_is_not_quadratic(self) -> None:
+        # `'["' + 'a"'*n + '"]'`: every internal quote candidate in an
+        # array-context string body walked handle_right_delimiter_candidate's
+        # delimiter-PAIRING loop over all remaining quotes (~7s at n=100k
+        # before the walk outcomes were cached). The pin holds for every n:
+        # the quote pairing keeps every internal quote as content and the
+        # final quote closes the string.
+        import time as _time
+
+        n = 100_000
+        start = _time.perf_counter()
+        result = repair_json_loads('["' + 'a"' * n + '"]', skip_json_loads=True)
+        assert _time.perf_counter() - start < 3.0
+        assert result == ['a"' * n]
+
+    def test_interleaved_close_and_escape_run_is_not_quadratic(self) -> None:
+        # `'["' + (']' + '\\\\')*k + '" x'`: the interleaved even-backslash
+        # runs made the escape normalizer rewrite the accumulator tail once
+        # per pair, and each rewrite REBUILT the whole accumulator
+        # (rebuild_unmatched_opening_braces) — O(k) per pair, O(k^2) total
+        # (~12s at k=100k). The rewrite now pops the counter-neutral
+        # backslash and appends through the incremental bookkeeping, O(1)
+        # per pair. (Upstream rebuilds per rewrite and stays quadratic.)
+        import time as _time
+
+        k = 100_000
+        start = _time.perf_counter()
+        result = repair_json_loads('["' + (']' + '\\\\') * k + '" x', skip_json_loads=True)
+        assert _time.perf_counter() - start < 3.0
+        # Each pair but the last contributes `]\` (the `]` is kept, the
+        # even run halves to one backslash); the last pair's run collapses
+        # entirely before the closing quote, and the tail rides along.
+        assert result == [(']' + '\\') * (k - 1) + ']' + '" x']
 
     def test_well_formed_surrogate_pairs_survive(self) -> None:
         # A legal \udXXX\udCXX pair is the astral char it encodes, and
@@ -1057,19 +1137,20 @@ class TestRepairDeadline:
     shapes (each shared with upstream json_repair): a bounded abort, not a
     speed-up, and a strict no-op when unset."""
 
-    # Three distinct quadratics; unbounded, each runs for tens of seconds at
+    # Two distinct quadratics; unbounded, each runs for tens of seconds at
     # n=200k. dup-key and empty-object are bounded through the parse_json
-    # dispatch loop, the backslash string-scan through scan_string_body.
-    # (A fourth, the escaped-object-key splice rescan, went linear when
-    # #19 landed; it is pinned below as a wall-time guard instead.)
+    # dispatch loop. (Two more went linear as their classes were fixed —
+    # the escaped-object-key splice rescan when #19 landed, the
+    # backslash-adjacent string-scan when this branch lifted the memo's
+    # write guard; both are pinned below / in TestRobustness as wall-time
+    # guards instead.)
     _DUP_KEY = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
     _EMPTY_OBJ = '[' + '{ }' * 200_000 + ']'
-    _STRING_SCAN = '["' + ']' * 200_000 + '\\\\" x'
 
     @pytest.mark.parametrize(
         "raw",
-        [_DUP_KEY, _EMPTY_OBJ, _STRING_SCAN],
-        ids=["dup-key", "empty-object", "string-scan"],
+        [_DUP_KEY, _EMPTY_OBJ],
+        ids=["dup-key", "empty-object"],
     )
     def test_a_pathological_input_is_bounded_by_the_deadline(self, raw: str) -> None:
         import time as _time
@@ -1093,6 +1174,20 @@ class TestRepairDeadline:
     def test_a_generous_deadline_does_not_change_output(self, raw: str) -> None:
         # Below the deadline the result is byte-identical to the unbounded call.
         assert repair_json(raw, deadline_ms=60_000) == repair_json(raw)
+
+    def test_the_backslash_string_scan_stays_linear(self) -> None:
+        # `'["' + ']'*n + '\\\\' + '" x'` was the third bounded quadratic
+        # (tens of seconds at n=200k) until the lookahead memo's write
+        # guard was lifted — backslash-adjacent matches memoize exactly for
+        # anchored starts. Pin the wall so it stays that way (~4ms at
+        # n=200k; TestRobustness carries the same shape with its
+        # oracle-pinned output).
+        import time as _time
+
+        raw = '["' + ']' * 200_000 + '\\\\" x'
+        start = _time.perf_counter()
+        repair_json(raw)
+        assert _time.perf_counter() - start < 2.0
 
     def test_the_escaped_object_shape_stays_linear(self) -> None:
         # '[' + '{\\"k\\":1 ' * n + ']' was the fourth quadratic (30s+ at
