@@ -8,6 +8,16 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "tors-documents/Cargo.toml",
+          "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "tors-documents/pyproject.toml",
+          "jsonpath": "$.project.version"
         }
       ]
     }

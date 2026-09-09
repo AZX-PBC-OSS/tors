@@ -2722,3 +2722,657 @@ no ASCII letters) → `""`.
 tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 # ('R901096', 'R901096')
 ```
+
+## `tors.documents`
+
+Document-format extraction: PDF, the office and text formats (doc/docx, xls/xlsx,
+ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv), and HTML, converted to GitHub-Flavored
+Markdown or plain text — one GIL-released native pass per call, the same discipline as
+every function above.
+
+This surface ships in a second wheel: `pip install tors[documents]`. The base `tors`
+wheel re-exports it as `tors.documents` (an `ImportError` with the install hint fires
+when the payload is absent), and the payload (`tors-documents`) is version-locked to
+`tors` — same number, released together. The split is weight discipline: the engines
+live in `tors-core` behind the cargo feature `documents`, default OFF, so the base
+build compiles none of them; only the payload wheel does.
+
+The split is also the lazy-import design, and the laziness is measured (2026-09,
+fresh processes, `/proc/self/status` `VmHWM` on this box): a bare `python` peaks at
+11.9 MB; `import tors` at 14.7 MB, with `tors.documents` absent from `sys.modules`
+— the base wheel carries no engine code at all, so the import has nothing to touch
+(a subprocess gate in the suite pins the absence); `import tors.documents` at
+18.7 MB despite all four engines being compiled into the one payload `.so` — demand
+paging: the engine code pages only materialize as conversions first run. You pay
+nothing for documents unless you install and import them.
+
+The engines are chosen per format family by head-to-head measurement (2026-09; the
+comparison and its fixtures are documented in the `documents_impl` crate docs, and the
+suite that pins them is `tests/test_documents_engines.py`):
+
+| format family | engine | why (measured) |
+|---|---|---|
+| PDF | pdf_oxide 0.3.78 | two-column layouts come back as separate reading-order blocks (not interleaved), `/Link` annotations render as `[text](uri)`, heading detection on |
+| HTML | html-to-markdown-rs 3.12 | drops `<script>`/`<style>` by construction (the disqualifying failure of the alternatives, which leak CSS/JS text into the body); padded GFM tables, indented nested lists, clean code fences |
+| office + text (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv) | anydoc 0.2.4 | renders style-based docx headings and list markers that office_oxide drops entirely; covers rtf/odt/epub/csv, which office_oxide cannot read at all |
+| `backend="oxide"` (caller-selectable) | office_oxide 0.1.10 | the alternative reader for the OOXML + legacy office formats: exact entity text (no `&`-escaping), against the heading/list losses above — a documented lane for diffing the two engines on your own corpus, never the default (decompression posture: 512 MiB per-part caps, no total-across-parts or output cap — the measured cases are in the `max_bytes=` paragraph below) |
+
+**The input is `path` OR `data`**: every path-taking function also accepts the
+document as `data=` bytes — the in-memory caller's entry, so an upload already held
+as bytes converts with no temp-file roundtrip. Exactly one of the two (both →
+`ValueError`, neither → `TypeError`, a non-bytes `data=` → `TypeError`, all raised
+under the GIL before any work runs). A `data=` call has no file name, so format
+resolution rests on `format=` and the content markers alone.
+
+**GIL model, every function in this section**: argument marshalling
+(validation) happens under the GIL; the one O(n) bytes copy a `data=` call
+pays (a borrow cannot cross `py.detach`) rides INSIDE the detach with the
+rest of the pass — measured 2026-09-09: a 400 MB `data=` call's max
+heartbeat gap is ~1.1 ms under a 1 ms ping, where a GIL-side copy starved
+the same ping for ~78 ms — and the WHOLE native pass — file read when
+`path=`, format sniff, engine conversion, and for `to_text` the markdown
+strip — runs inside one `py.detach`, and exceptions are constructed after
+the GIL is reacquired; nothing raises from inside the detached region. The
+hazard this removes is concrete: the official pdf_oxide pyo3 wheel
+measures as GIL-held per call (worst heartbeat gap 23.6ms on a 9-page
+document under a 10ms ping, 2026-09, growing with document size); this
+payload calls the crate's Rust API directly under `py.detach` instead. The
+band is pinned by the suite
+(`tests/test_documents_engines.py` and `tests/test_pdf.py` hold the
+heartbeat-granularity and 8-thread byte-identical concurrency gates).
+
+**Error taxonomy** (shared by every path-taking function here):
+
+| exception | raised when |
+|---|---|
+| `OSError` | the file is missing or unreadable (IO) — a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
+| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the TYPE only — never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes — `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float — a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"` — a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over `max_bytes=` (an EXPLICIT budget binds every lane — the PDF-only family included — checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=` — a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages — route the document to an OCR stage |
+
+**Format resolution order** — a mislabeled or extensionless file (a temp-file download,
+say) still converts, because content, not the name, picks the extractor:
+
+1. an explicit `format=` (extension spelling, no dot, case-insensitive);
+2. the content markers: the binary signatures first (PDF header, RTF open group, OLE
+   stream names, ZIP package mimetype), then the HTML document marker (after a BOM and
+   whitespace, the first markup is `<!DOCTYPE html` or `<html`, case-insensitive), then
+   the CSV heuristic — the last resort of content resolution: text, not markup, where
+   the first up-to-64 non-empty lines each carry the SAME count (≥1) of one delimiter
+   candidate (`,` / `;` / TAB, tried in that order), two lines minimum;
+3. the input name's extension — the `path=` when there was one (`data=` has no
+   name; a one-line `.tsv` or an `.xhtml` fragment resolve here, through the same
+   name vocabulary `format=` uses);
+4. else `ValueError` — nothing names a format.
+
+**The typed surface**: `Backend`/`Format`/`PageKind` are `str` enums — each member IS
+its accepted string, so `format="docx"` and `format=Format.DOCX` are the same call, and
+plain strings the Rust validator accepts (container variants like `"docm"`/`"xlsm"`)
+keep working without enum churn. `to_markdown`/`to_text` return the resolved format as
+a `Format` member; `sniff` returns `Format | None`. The rules live native; the typed
+view adds typing only, never a second copy of a rule.
+
+**One page convention, everywhere**: every page number this surface names is a 0-based
+index — `pages=`, `PdfClassification.pages_needing_ocr`, `pdf_extract`'s list positions,
+and `NeedsOcrError.pages`. anydoc internally reports 1-based page numbers; the core
+re-bases its list once, at the seam where the engine's answer crosses into this API, so
+a caller routing pages to OCR never has to remember which list carries which convention
+(a mixed-convention API is a silent off-by-one aimed at exactly that caller).
+
+## `tors.documents.to_markdown` / `tors.documents.to_text`
+
+```python
+def to_markdown(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    password: str | None = None,
+    max_bytes: int | None = None,
+) -> tuple[Format, str]: ...
+
+
+def to_text(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    pages: int | list[int] | tuple[int, int] | None = None,
+    password: str | None = None,
+    max_bytes: int | None = None,
+) -> tuple[Format, str]: ...
+```
+
+Convert any working-format document to GitHub-Flavored Markdown (`to_markdown`) or
+plain text (`to_text`), returning `(format, output)` where `format` is the format the
+conversion actually used (a `Format` member). The document is `path` (a file, the
+only positional — a REGULAR file: FIFOs/devices/sockets are refused before the read)
+or `data=` (its bytes — the same conversion, byte-identical output;
+no name to consult, so resolution rests on `format=` and the content markers).
+`format=` names the format explicitly (`"pdf"`, `"html"`/`"htm"`/`"xhtml"`,
+`"docx"`, `"xlsx"`, `"pptx"`, `"doc"`, `"xls"`, `"ppt"`, `"rtf"`, `"odt"`, `"ods"`,
+`"odp"`, `"epub"`, `"csv"`, `"tsv"`, plus the container variants
+`"docm"`/`"xlsm"`/`"ppsx"` mapping onto these — the same OOXML packages with the
+content-type override naming the macro/show variant, resolved and sniffed as their
+base kinds; `"xlsb"` routes the Excel kind as vocabulary sugar, but genuine xlsb
+content is BIFF12 `.bin` sheets, not worksheet XML, and is REFUSED — the engines do
+not read it); `None` (the default) resolves
+it by the order above — content markers first, the input name's extension last.
+
+`backend=` picks the engine where they overlap: `"auto"` (the default) routes by the
+measured table; `"oxide"` forces pdf_oxide for PDF and office_oxide for the
+OOXML/legacy office formats; `"anydoc"` forces anydoc. A forced backend raises
+`ValueError` on a format that engine cannot read — never a silent fallback.
+
+`pages=` selects a PDF page subset, and is valid on the pdf_oxide lane only (any other
+format, or `backend="anydoc"` on a PDF, raises `ValueError`):
+
+- a single `int` — one 0-based page;
+- a `list` of ints — the explicit set;
+- a 2-tuple `(start, stop)` — a half-open range of 0-based page indices (`(0, 2)` on a
+  two-page document is both pages; `(1, 3)` selects the pages at indices 1 and 2).
+
+The refusals split by Python's own convention, and the suite's red-team lane pins
+the split: a wrong TYPE is `TypeError` — a bool, float, or str where a page index
+belongs (`pages=[True]`, `[1.5]`, `["a"]`, `(True, 2)`; `range(1.0)` and `seq[1.5]`
+raise `TypeError` in the stdlib too, and a bool would otherwise launder through
+pyo3's i64 extraction as page 0 or 1); a wrong VALUE or SHAPE is `ValueError` — a
+negative index, an empty list, an empty or backwards range, a tuple that is not the
+`(start, stop)` pair, an int too large for the i64 the binding extracts
+(`pages=[2**70]`). Both classes raise under the GIL, before any native work runs,
+each repr'ing the offending value; bounds are validated against the
+real page count inside the detached pass. The selection is deduped into document
+order (caller-supplied order and repeats are normalized away), the per-page
+conversions are joined with pdf_oxide's own inter-page separator, and a full range is
+byte-identical to the whole-document conversion.
+
+`password=` unlocks an encrypted PDF — the PDF kinds only (a password on any other
+format is `ValueError`, "password= applies to PDF documents only": a
+silently-ignored password would leave the caller believing a document is protected
+on a lane that cannot know; a non-str `password=` is the same `TypeError`
+convention as every argument here). Without it, an encrypted PDF fails closed on
+EVERY entry: the door check raises at open — `ValueError`, "PDF is encrypted and
+requires a password" — never empty output masquerading as "no content" (the
+pre-fix shape, measured on an RC4-128 fixture: `to_markdown`/`pdf_extract` returned
+`""` on a locked document while `pdf_classify` raised, the two entries disagreeing
+about the same bytes; the check now raises at open for all). A wrong password is its
+own clean `ValueError` — "the password did not unlock this PDF". The unlock rides
+the pdf_oxide lane, the default `auto` and forced `oxide` both; `backend="anydoc"`
+on a PDF has no unlock and refuses encrypted documents outright.
+
+`max_bytes=` is the input ceiling, and its contract has two halves. An EXPLICIT
+`max_bytes` binds EVERY engine lane — pdf and HTML included — and is enforced
+BEFORE any work runs: the file's size at open (a `path=` call never reads an
+over-budget byte), the buffer's length on entry (a `data=` call never copies
+one). `max_bytes=None` (the default) is the post-read doctrine: the 32 MiB
+default ceiling covers the anydoc AND office_oxide lanes only — the two lanes
+that amplify input into resident memory — because the lane is unknowable before
+the container sniff, which is exactly why only the explicit budget can be
+pre-read. Over either, the call raises `ValueError` naming both sizes and the
+`max_bytes=` override.
+
+The anydoc amplification, restated at the measured worst case (2026-09-09, this
+box): a many-short-cells csv amplifies ~146× — a 24 MiB one peaked at 3.4 GiB
+RSS, stable across input sizes (the earlier "~36×" figure was a benign
+long-cell shape; short cells are the common upload and the expensive one), so
+the 32 MiB default budgets ~4.6 GiB of worst-case headroom on the converting
+worker — tighter is often right, and `max_bytes=` is the knob. The motivating
+integrator shape — a service capping uploads at 100 MB — passes
+`max_bytes=100 * 1024 * 1024` and must budget for the worst case at that
+ceiling: ~146× of 100 MiB is ~14 GiB of RSS headroom on the converting worker
+(benign csv shapes measure far lower, ~36×; budget for the worst case, not the
+benign one).
+
+The opt-in `backend="oxide"` lane's decompression posture, measured on
+office_oxide 0.1.10 (locked): per-part caps of 512 MiB — declared AND actual,
+refused pre-decompression (a 600 MiB declared part is refused in ~0.03s at
+~20 MiB RSS with "decompression limit exceeded: part 'word/document.xml'
+expands to more than 536870912 bytes") — plus an XML nesting cap of 256 on a
+16 MiB parse stack. It has NO total-across-parts cap and NO output cap: a
+399 KiB zip carrying a 400 MiB `word/document.xml` (under the per-part cap)
+converts at ~1.6 GiB peak RSS in ~0.9s, emitting ~400 MiB of markdown —
+multi-part and output blowups remain the caller's risk on that lane, which is
+one reason it is never the default. (The older "333 KiB zip-bomb docx →
+1.7 GiB" figure was office_oxide 0.1.9, before the per-part caps — history,
+not current posture. anydoc, by contrast, caps decompression engine-side:
+128 MiB per entry, 512 MiB total — a zip-bomb fixture lane in the suite pins
+both engines' caps firing.)
+
+`to_text` is the same conversion, routing, and `pages=`/`password=`/`max_bytes=`
+semantics, with the markdown normalized to plain text — ONE text shape for every
+format and engine: headings keep their text (markers dropped), list items keep
+indentation and numbering, table rows join their cells with `" | "`, code blocks
+keep their content without fences, links become `label (url)`. The normalization
+runs inside the same detached pass, over the markdown — deliberately, because each
+engine's own plain-text surface differs (pdf_oxide's, measured, merges two-column
+layouts line-by-line; the strip preserves the markdown converter's reading-order
+blocks). The strip's inline machinery (link labels, image labels, emphasis)
+recurses per nesting level and is depth-bounded at 256: past the bound the
+remaining `[…](…)` machinery degrades to literal text instead of recursing toward
+a stack overflow — a 30,000-deep `[[[…x…]]()…]()` nest converts (exit 0,
+non-empty output) where the unbounded strip crashed the process (the fix's
+subprocess pin is in `tests/test_documents_engines.py`; the exact degradation
+shape is unit-pinned in `src/gfm_strip_impl.rs`).
+
+A multi-sheet workbook renders whole: anydoc emits each sheet as its own
+`## <sheet name>` section — a measured two-sheet workbook (an `Alpha` table over a
+`Beta` one) comes back as `## Alpha\n\n|...|\n\n## Beta\n\n|...|` — so per-sheet
+output is the caller's split on the `## ` headings. A single-sheet workbook
+renders with no `##` heading at all — the table is the whole output (the
+committed engines_samples.xlsx does exactly that) — so that split must tolerate
+its absence. There is deliberately no
+sheet-selection argument: whole-document output is the shape downstream callers
+consume.
+
+```python
+import tors.documents
+
+fmt, markdown = tors.documents.to_markdown("tests/engines_corpus/engines_page.html")
+# (Format.HTML, "# Annual Engineering Report\n\n## Transformer Program\n\nSee the
+#  [field handbook](https://handbook.example.com/torque) for torque tables.\n\n...")
+
+fmt, text = tors.documents.to_text("tests/engines_corpus/engines_link.pdf")
+# (Format.PDF, "Visit the field handbook (https://handbook.example.com/guide)\n")
+#  the /Link annotation survived as `label (url)` — the plain-text link shape
+
+fmt, text = tors.documents.to_text("tests/engines_corpus/engines_units.csv")
+# (Format.CSV, "unit | status\nT-101 | healthy\nT-102 | needs review\n")
+#  table rows join their cells with " | "
+
+# a page subset: page index 1 only (0-based), byte-identical rule included
+fmt, md = tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf", pages=1)
+# (Format.PDF, "second page line\n")
+tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf", pages=(0, 2))[
+    1
+] == tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf")[1]
+# True — a full range is the whole document, byte-identical
+```
+
+A file with no usable extension still converts — the content markers decide:
+
+```python
+# engines_report.docx's bytes, saved with no extension (a temp-file download):
+tors.documents.to_markdown("upload.bin")
+# (Format.DOCX, "Quarterly Review Q3 2026\n\n...")
+
+# ...or never write the temp file at all — the bytes in, the same answer out:
+data = open("engines_report.docx", "rb").read()
+tors.documents.to_markdown(data=data) == tors.documents.to_markdown("engines_report.docx")
+# True — byte-identical, the pinned contract of the in-memory entry
+```
+
+**Async**: `await tors.documents.aio.to_markdown(...)` / `to_text(...)` run under
+`asyncio.to_thread` so the event loop stays responsive across the call — see
+[`tors.documents.aio`](#torsdocumentsaio) below.
+
+## `tors.documents.sniff`
+
+```python
+def sniff(data: bytes) -> Format | None: ...
+```
+
+The standalone content-marker format detector — what `to_markdown`/`to_text` would
+resolve these BYTES to from content alone, with no path and no extension: the PDF
+header, the RTF open group, OLE stream names, the ZIP package mimetype, the HTML
+document marker. `sniff` OPENS AND PARSES THE CONTAINER: anydoc's detection reads
+the ZIP/OLE package's metadata (and the main part when the markers need it), so the
+call's cost is a package parse, not a marker scan — a 120 KiB zip measured 267 MiB
+peak RSS to answer docx (2026-09-09, this box). Budget accordingly when sniffing
+untrusted leading bytes: the container is parsed before the format is named. (It
+still has no async twin: the call is a single short native pass, and the thread hop
+plus the parse would price the awaitable spelling above its value — the sync call
+is the surface.)
+
+`None` is not an error: it is the answer "the content names no format" — a
+signature-less text format such as CSV (name it via `format=` or let the extension),
+or not a document at all. The routing caller's mislabeled-download answer: the bytes'
+verdict overrides any label the download carried.
+
+```python
+import tors.documents
+
+tors.documents.sniff(b"%PDF-1.7 ...")
+# Format.PDF
+tors.documents.sniff(b"{\\rtf1\\ansi ...")
+# Format.RTF
+tors.documents.sniff(b"<!DOCTYPE html>\n<html><body>hi</body></html>")
+# Format.HTML
+tors.documents.sniff(b"unit,status\nT-101,healthy\nT-102,failing\n")
+# Format.CSV (the content heuristic: two non-empty lines, same comma count)
+tors.documents.sniff(b"just some words\nover two lines\n")
+# None — prose: the content names no format
+tors.documents.sniff(b'{"unit": "T-101", "ok": true}\n{"unit": "T-102", "ok": false}\n')
+# None — JSON-lines: the comma counts agree, but the record lines open with `{` —
+#  declined by the CSV heuristic; not a documents format, `format=` the escape hatch
+```
+
+Three doctrine notes, all probed and pinned. XHTML: an `<?xml version="1.0"?>`
+prologue before the doctype is skipped by the HTML marker (XHTML is HTML's XML
+serialization) — `sniff(b'<?xml version="1.0"?><!DOCTYPE html...')` is `Format.HTML`,
+while every OTHER XML vocabulary (`<svg`, DocBook) sniff-answers `None`. JSON-lines:
+record lines opening with `{` (or `[`) are declined by the CSV heuristic — their
+comma counts AGREE across lines (every record serializes the same keys), so the
+delimiter witness alone would claim them, and anydoc's csv parser would then mangle
+records that are not cells; json-lines is deliberately not a documents format,
+`None` is the honest answer, and `format=` is the escape hatch — the same hatch a
+csv whose FIRST field opens with a brace takes (the guard reads the first
+non-empty line). And the answer is the container-TRUE name a conversion would
+report: an OLE workbook sniffs `Format.XLS`, a ZIP-based one `Format.XLSX` —
+`sniff` and `to_markdown` cannot disagree about what the bytes are.
+
+## `tors.documents.pdf_extract`
+
+```python
+def pdf_extract(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> tuple[list[str], str]: ...
+```
+
+Read a PDF (`path`, or `data=` bytes) and return `(per_page_plain_text, markdown)` — one native pass over one
+open document, the parse paid once for both outputs. `per_page_plain_text` is a
+`list[str]`, one entry per page in page order: the text-layer-probe view. An
+image-only/scanned page is an empty string, NOT an error, and a zero-page or textless
+document yields empty output — routing decisions ("this PDF needs OCR") are the
+CALLER's, made on these values (or on `pdf_classify`'s verdicts), never silently made
+here. `markdown` is pdf_oxide's whole-document conversion: heading detection on,
+images off, Tagged-PDF structure-tree reading order falling back to XY-Cut on
+untagged documents, `/Link` annotations rendered as `[text](uri)`.
+
+**The PDF family's engine lanes and input budget** — `backend=` and `max_bytes=`
+on all four PDF-only functions, the same vocabulary the conversion pair takes.
+`backend="auto"` (the default) and `backend="oxide"` both run pdf_oxide — the same
+mapping the routing table makes for PDF ("oxide" is the oxide-family engine for
+this format), byte-identical output either way. `backend="anydoc"` is refused
+before any work runs with a named `ValueError`: a CAPABILITY refusal, not the
+format-level one (PDF+anydoc converts on `to_markdown`/`to_text`), because
+anydoc's entire PDF surface is whole-document markdown — `to_markdown(bytes)` is
+the one function its PDF module exposes (~anydoc-0.2.4/src/formats/pdf.rs), and
+its only per-page knowledge is the `NeedsOcr` refusal — while these four calls
+are the probe-rich ones: `pdf_extract`'s per-page plain text IS the OCR-routing
+signal (an image-only page comes back as an empty string, the caller's
+route-to-OCR witness), `pdf_page_count` walks the page tree (a count its
+reader never returns on success), `pdf_classify` classifies per page,
+and `pdf_link_uris` walks `/Annots` (anydoc has no annotation surface at all).
+Whole-document markdown from anydoc is one `to_markdown(path, backend="anydoc")`
+call away. `max_bytes=` is the input budget: an explicit value binds pre-read
+exactly as on the conversion pair — the `path=`'s size at open, the `data=`
+length on entry, never an over-budget byte read or copied; `None` (the default)
+keeps the pdf lane unmetered (the 32 MiB default ceiling is the anydoc and
+office_oxide lanes' post-read check — lanes these PDF-only calls never run).
+`password=` unlocks an encrypted PDF; without it the entry fails closed —
+`ValueError` at open, never empty output masquerading as "no content" (the empty
+strings above are for unlocked documents; a contract failure precedes the work,
+so an encrypted document under `backend="anydoc"` surfaces the capability
+refusal, never the door-check error).
+
+```python
+import tors.documents
+
+pages, markdown = tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf")
+# (["first page line", "second page line"], "first page line\n\n---\n\nsecond page line\n")
+#  per-page plain text + the joined markdown, one open, one pass
+
+# the lane vocabulary: "oxide" is the engine "auto" already routes PDF to,
+# "anydoc" a capability refusal pointing at the conversion pair
+tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend="oxide") == (
+    pages,
+    markdown,
+)
+# True — the same pdf_oxide lane either way, byte-identical answers
+try:
+    tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend="anydoc")
+except ValueError as exc:
+    exc
+    # ValueError('backend "anydoc" cannot serve the per-page text probe (the
+    #  OCR-routing signal): anydoc\'s PDF surface is whole-document conversion
+    #  only — to_markdown/to_text with backend="anydoc" (NeedsOcrError is that
+    #  lane\'s scanned-page signal); use backend=\'auto\' or \'oxide\' here')
+    #  the capability refusal, its message the pointer at the pair
+```
+
+**Async**: `await tors.documents.aio.pdf_extract(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.pdf_page_count`
+
+```python
+def pdf_page_count(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> int: ...
+```
+
+The page tree and nothing else — no content extraction. For gating expensive
+downstream work (an OCR or conversion pass that scales with page count) without
+paying for any of it. `password=` unlocks an encrypted PDF; without it the entry
+fails closed (`ValueError` at open). `backend=`/`max_bytes=` follow the family's
+shared lane note in the [`pdf_extract`](#torsdocumentspdf_extract) section
+above: auto/oxide run pdf_oxide byte-identically, `backend="anydoc"` the
+capability refusal (a count that engine's reader never returns on
+success), an explicit budget binding pre-read.
+
+```python
+import tors.documents
+
+tors.documents.pdf_page_count("tests/engines_corpus/engines_two_page.pdf")
+# 2
+```
+
+**Async**: `await tors.documents.aio.pdf_page_count(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.pdf_link_uris`
+
+```python
+def pdf_link_uris(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> list[list[str]]: ...
+```
+
+The `/Annots` link walk: for every page, the URIs of its link annotations whose action
+is a URI, in annotation order — one `list[str]` per page, page order, empty lists for
+pages without link annotations. This is the raw navigation surface, deliberately
+beside the markdown's inline `[text](uri)` links because the two answer different
+questions: the markdown carries links whose visible text belongs in prose; this walk
+carries every URI, including ones behind link rectangles whose text is not itself a
+link (a "click here" button, an image, a bare rectangle) which no text rendering
+surfaces at all. The caller that motivated it measured the difference on real
+resumes: 60 documents, 16 links from the text layer, 34 from the annotations — a
+quarter of candidates gained a LinkedIn/GitHub URL no text shape would show.
+
+Verbatim and narrow, both on purpose: the lists are never deduped or canonicalized
+(callers canonicalize differently — per-page review panels vs whole-document
+projections), and only URI actions surface (`GoTo` is in-document navigation,
+`GoToR` a remote file — neither is a web URI, and neither is fabricated into one).
+Malformed annotation dictionaries are skipped by the engine's parser, not propagated
+as page failures. `backend=`/`max_bytes=` follow the family's shared lane note in
+the [`pdf_extract`](#torsdocumentspdf_extract) section above — the annotation walk
+is pdf_oxide's reader (auto/oxide byte-identically), and `backend="anydoc"` the
+capability refusal: anydoc has no annotation surface at all.
+`password=` unlocks an encrypted PDF; without it the entry fails closed
+(`ValueError` at open — never empty lists masquerading as "no links").
+
+```python
+import tors.documents
+
+tors.documents.pdf_link_uris("tests/engines_corpus/engines_link.pdf")
+# [["https://handbook.example.com/guide"]]  — page 0's one link annotation
+tors.documents.pdf_link_uris("tests/engines_corpus/engines_two_page.pdf")
+# [[], []]  — no link annotations anywhere: empty lists, never fabricated
+```
+
+**Async**: `await tors.documents.aio.pdf_link_uris(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.pdf_classify`
+
+```python
+def pdf_classify(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
+) -> PdfClassification: ...
+```
+
+The cheap text-vs-image preflight over a PDF — no content conversion, no OCR,
+no rasterization. The answer to "does this PDF have a text layer, or is it an image
+we can do nothing with locally", as a `PdfClassification` (below): every page's
+`PageKind` verdict, the pages needing OCR, and the two derived routing booleans.
+Encrypted documents fail closed on every entry (`ValueError` at open — pdf_oxide's
+security rule: a security state is never masked as "all pages empty");
+`password=` unlocks one. `backend=`/`max_bytes=` follow the family's shared lane
+note in the [`pdf_extract`](#torsdocumentspdf_extract) section above: auto/oxide
+run pdf_oxide byte-identically, `backend="anydoc"` the capability refusal
+(per-page classification — that engine's only per-page knowledge is the binary
+needs-OCR refusal), an explicit budget binding pre-read.
+
+`PageKind` is the per-page vocabulary: `"text"` (a native text layer), `"scanned"`
+(image-dominated — OCR the page), `"image_text"` (hybrid), `"mixed"`, or `"empty"`.
+**`EMPTY` is distinct from `SCANNED`**, and the distinction is the point: a blank page
+is neither extractable nor an image to recover — it is not an error and not OCR work —
+so `pages_needing_ocr` deliberately excludes it. `has_text` is true when at least one
+page is `text`/`image_text`/`mixed` (extraction will yield something); `image_only` is
+true when every page is `scanned` and there is at least one page (route the whole
+document to an OCR stage).
+
+The indices here are 0-based, like every page number this surface names — see the
+convention note in the [`tors.documents`](#torsdocuments) section above.
+
+```python
+import tors.documents
+
+cls = tors.documents.pdf_classify("tests/engines_corpus/engines_mixed.pdf")
+# PdfClassification(page_count=2, page_kinds=[<PageKind.TEXT: 'text'>,
+#                   <PageKind.SCANNED: 'scanned'>], pages_needing_ocr=[1])
+cls.has_text, cls.image_only, cls.pages_needing_ocr
+# (True, False, [1])   — page index 1 (0-based: the second page) is the scan
+
+cls = tors.documents.pdf_classify("tests/engines_corpus/engines_blank.pdf")
+# PdfClassification(page_count=1, page_kinds=[<PageKind.EMPTY: 'empty'>], pages_needing_ocr=[])
+#  blank ≠ scanned: nothing to extract, nothing to recover, no OCR routing
+```
+
+**Async**: `await tors.documents.aio.pdf_classify(...)` runs this under
+`asyncio.to_thread` so the event loop stays responsive across the call.
+
+## `tors.documents.PdfClassification`
+
+The `pdf_classify` result: the preflight's answer with the routing rules derived
+exactly once (the `has_text`/`image_only` rules live in the native getters; the typed
+view adds typing only). Attributes: `page_count: int`, `page_kinds: list[PageKind]`
+(every page's verdict, page order), `pages_needing_ocr: list[int]` (the 0-based
+indices of the image-only pages — empty for a born-digital document, every page for a
+scan, the difference for a mixed one), `has_text: bool`, `image_only: bool`. The
+`repr` is the construction shape shown above.
+
+## `tors.documents.NeedsOcrError`
+
+```python
+class NeedsOcrError(ValueError):
+    pages: list[int]  # the 0-based page indices needing OCR
+    page_count: int
+```
+
+Raised by `to_markdown`/`to_text` when the anydoc backend hits a PDF with
+scanned/image-only pages — the "route this document to an OCR stage" signal, as an
+exception because the conversion genuinely cannot proceed on those pages. A
+`ValueError` subclass, so a broad `except ValueError` still catches it.
+`.pages` holds 0-based page indices, the same convention as `pages=` and
+`PdfClassification.pages_needing_ocr` (anydoc's 1-based numbers are re-based once, at
+the core's seam); `.page_count` the document's page count.
+
+```python
+import tors.documents
+
+try:
+    tors.documents.to_markdown("tests/engines_corpus/engines_scanned.pdf", backend="anydoc")
+except tors.documents.NeedsOcrError as exc:
+    exc.pages, exc.page_count
+    # ([0], 1)  — page index 0 of 1 needs OCR
+```
+
+The default `"auto"` routing sends PDF to pdf_oxide, whose lane yields empty text for
+scanned pages instead (`pdf_extract`/`pdf_classify` are the preflight calls); the
+exception is the anydoc lane's answer.
+
+## `tors.documents.Backend` / `tors.documents.Format`
+
+```python
+class Backend(str, Enum):
+    AUTO = "auto"  # route by the measured table (the default)
+    OXIDE = "oxide"  # force pdf_oxide / office_oxide
+    ANYDOC = "anydoc"  # force anydoc
+
+
+class Format(str, Enum):
+    PDF = "pdf"
+    HTML = "html"
+    DOC = "doc"
+    DOCX = "docx"
+    XLS = "xls"
+    XLSX = "xlsx"
+    PPT = "ppt"
+    PPTX = "pptx"
+    RTF = "rtf"
+    ODT = "odt"
+    ODS = "ods"
+    ODP = "odp"
+    EPUB = "epub"
+    CSV = "csv"
+    TSV = "tsv"  # name-only vocabulary: accepted as format= input, never a resolved or sniffed answer (tsv bytes resolve and sniff as csv)
+```
+
+`str` enums: each member IS its accepted string (`Backend.AUTO == "auto"` is `True`),
+so every plain-string call keeps working and the enums cost nothing at the boundary —
+the Rust validator remains the authority, and vocabulary the enums don't enumerate
+yet (container variants like `"docm"`/`"xlsm"`) stays accepted as plain strings. A
+resolved format outside the vocabulary is a bug and surfaces as `ValueError`.
+
+`tors.documents.__version__` (and `tors_documents.__version__`, its source) is the
+payload wheel's version, baked from the crate's `Cargo.toml` at build time — the
+same number release-please bumps in lockstep across both wheels, so the two can
+never disagree.
+
+## `tors.documents.aio`
+
+The awaitable spellings of the six path functions — `to_markdown`, `to_text`,
+`pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris` — each an
+unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
+spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
+native pass whose cost scales with the document (a small one is milliseconds, a large
+one hundreds), the exact class a thread hop pays for. `sniff` stays sync-only: its
+cost is a container parse (see its section above), but it remains a single short
+native pass a sync caller runs directly — no awaitable spelling ships. There is
+no size-based branching inside any wrapper, and the choice between the sync spelling
+and `tors.documents.aio` is the caller's, made once at the call site.
+
+**Cancellation semantics, stated because a caller can be hurt by them**:
+`asyncio.to_thread` cannot cancel the native pass. `wait_for`/`timeout()` on one of
+these awaitables cancels the FUTURE — the `asyncio` wrapper returns control at the
+deadline — while the underlying thread runs the conversion to completion, holding
+its memory (the amplification lanes' worth: potentially gigabytes), and repeated
+timeouts pile up blocked threads on the shared default executor. Treat these
+awaitables as uncancellable work: size the input before the call (`max_bytes=` is
+the pre-read guard), and only call with a timeout you are also willing to abandon
+the thread to.
+
+```python
+import tors.documents.aio
+
+fmt, text = await tors.documents.aio.to_text("report.docx")
+# same conversion, same (Format, text) return, off the event loop's turn
+```

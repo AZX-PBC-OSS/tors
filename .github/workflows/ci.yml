@@ -41,8 +41,13 @@ jobs:
         # ~10s clean build never amortizes sccache's install + cache-restore overhead on
         # top of it. rust-cache already keys per job on the lockfile. sccache is wired
         # where it does pay — the local edit/compile loop, via the Makefile (which does
-        # the same: sccache locally, no compiler cache in CI).
+        # the same: sccache locally, no compiler cache in CI). The workspaces list adds
+        # tors-documents/target: the payload crate is deliberately NOT a cargo workspace
+        # member (its Cargo.toml's header), so it builds into its own target dir the
+        # root key would never cache — the same reason the fuzz job maps fuzz/ below.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
       - name: Cargo fmt
         run: cargo fmt --check
@@ -53,6 +58,12 @@ jobs:
         # silently (truncate_ellipsis.rs had already drifted).
         run: cargo fmt --check --manifest-path fuzz/Cargo.toml
 
+      - name: Cargo fmt (documents payload)
+        # The tors-documents payload crate is also deliberately not a cargo
+        # workspace member (the fuzz-crate precedent), so the root fmt gate
+        # never sees it either — `make lint` runs this same line locally.
+        run: cargo fmt --check --manifest-path tors-documents/Cargo.toml
+
       - name: Cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -61,6 +72,23 @@ jobs:
         # build (--no-default-features): pyo3's cfg flags differ between the two configs,
         # so each pass can surface lints in code the other never compiles.
         run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Cargo clippy (documents feature)
+        # Third pass, in the documents configuration the payload wheel builds
+        # (tors-core with the `documents` feature on): the cfg-gated engine
+        # surface (documents_impl/pdf_impl/gfm_strip_impl and its unit tests)
+        # is code the two configs above never compile — the same reason the
+        # no-default-features pass exists.
+        run: cargo clippy --all-targets --no-default-features --features documents -- -D warnings
+
+      - name: Cargo clippy (documents payload)
+        # The tors-documents payload crate's own bindings, through its own
+        # manifest (it is deliberately not a workspace member, so root clippy
+        # never sees it — the fuzz-crate precedent). No --features spelling
+        # here: the payload package defines no features; its tors-core path
+        # dependency already carries `documents`, so the plain manifest build
+        # compiles the engine surface.
+        run: cargo clippy --all-targets --manifest-path tors-documents/Cargo.toml -- -D warnings
 
       - name: Cargo deny (licenses, advisories, bans)
         # The repo-wide, permanent licensing gate (spec v0.4 item 6): the
@@ -71,6 +99,18 @@ jobs:
         # would add to every run.
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
+          command-arguments: licenses advisories bans
+
+      - name: Cargo deny (documents payload lock)
+        # The SECOND, independent lockfile: tors-documents resolves its
+        # own Cargo.lock (deliberately not a cargo workspace member — its
+        # Cargo.toml's header), and that package set is not a subset of
+        # the root lock's (deny.toml's [graph] comment has the measured
+        # skew). Same action, same deny.toml policy, same three checks —
+        # only the manifest differs.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: tors-documents/Cargo.toml
           command-arguments: licenses advisories bans
 
       - name: Install uv
@@ -100,6 +140,14 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The suite's committed binary fixtures (tests/corpus/,
+          # tests/engines_corpus/ — pdf/docx/xlsx/pptx/odt/…) are git-LFS
+          # objects (see .gitattributes): checkout materializes them only
+          # with this flag, and the corpus-drift and engine gates read
+          # their bytes. The lint and fuzz jobs need no fixtures and stay
+          # on the plain checkout.
+          lfs: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -114,6 +162,14 @@ jobs:
         # rather than once per matrix entry.
         if: matrix.python-version == '3.12'
         run: cargo test --no-default-features
+
+      - name: Cargo test (documents feature)
+        # The documents lane's crate-side tests (routing table, separator pins,
+        # classify semantics) in the configuration the payload wheel builds —
+        # the engine surface's unit tests are cfg-gated code the base config
+        # above never compiles.
+        if: matrix.python-version == '3.12'
+        run: cargo test --no-default-features --features documents
 
       - name: Compile benches
         # Compile-guard only: the bench docstring (benches/normalize.rs) and the design
@@ -130,8 +186,13 @@ jobs:
 
       - name: Sync dependencies and build the extension
         # --locked: fail if uv.lock is out of date with pyproject.toml, rather than silently
-        # rewriting it.
-        run: uv sync --locked
+        # rewriting it. --extra documents: the tors[documents] payload wheel (the uv
+        # workspace member tors-documents/): the pytest suite's documents gates
+        # (tests/test_documents_engines.py, tests/test_pdf.py) run against the payload,
+        # and a plain `uv sync --locked` is EXACT — it would uninstall the payload and
+        # silently skip those gates (the same reason `make install`/`make dev` always
+        # carry the extra).
+        run: uv sync --locked --extra documents
 
       - name: Pytest
         # -m "not timing and not sweep": two lanes are deselected here and
@@ -174,7 +235,7 @@ jobs:
 
   fuzz-smoke:
     # A cheap regression net, not a real fuzzing campaign: 15s per target
-    # (CONTRIBUTING.md's `make fuzz-quick` runs the same targets for 30s
+    # (CONTRIBUTING.md's `make fuzz-quick` runs the full target list for 30s
     # locally) — enough to catch a reintroduced panic on every push without
     # meaningfully lengthening CI. A real multi-hour campaign against one
     # target of active suspicion is a local `cargo +nightly fuzz run
@@ -199,10 +260,20 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Fuzz (15s per target)
+        # The same list as the Makefile's FUZZ_TARGETS and fuzz.yml's
+        # weekly pass — this loop had drifted from both (truncate_ellipsis,
+        # controls, json_repair were Makefile-only). gfm_strip joined the
+        # lists when its char-boundary fence-trim panic was fixed
+        # (strip_fence_content, unit-pinned). documents_markdown stays
+        # deliberately absent: it SIGSEGVs on a KNOWN upstream bug
+        # (pdf_oxide 0.3.78 parse_object/parse_array recursion, no depth
+        # cap) — the Makefile's FUZZ_TARGETS comment carries the repro.
+        # It stays built and committed as the repro harness, joining the
+        # run lists when pdf_oxide ships a cap.
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf json_repair; do
+          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
           done

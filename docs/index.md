@@ -45,8 +45,19 @@ tors.find_patterns(["cat", "catalogue"], "the cat sat in the catalogue")
 ```
 
 See the [API reference](api.md) for the full behavior of every function, grouped by
-what it does (normalization, segmentation, diffing, fuzzy/phonetic matching,
+what they do (normalization, segmentation, diffing, fuzzy/phonetic matching,
 multi-pattern search, chunking, retrieval, and more).
+
+## Documents
+
+Document-format extraction — PDF, the office and text formats, HTML — to GitHub-Flavored
+Markdown or plain text, GIL-free, ships as a second wheel: `pip install tors[documents]`.
+The base wheel re-exports it as `tors.documents` (with an install hint when the extra is
+absent), and the base build carries none of the engine weight. The engine table, the
+measured routing rationale, and a quick example are in the
+[README's Documents section](https://github.com/AZX-PBC-OSS/tors#documents); the full
+reference — `to_markdown`/`to_text`/`sniff`, the PDF family, the typed enums, and
+`tors.documents.aio` — is in the [API reference's documents section](api.md#torsdocuments).
 
 ## Sync and async
 
@@ -58,8 +69,10 @@ call's full wall-clock duration.
 
 `tors.aio` covers exactly the functions where that duration is large enough to matter
 (the chunking family, `tf_idf`, `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`,
-`apply_pipeline`) with a plain `asyncio.to_thread` dispatch, so the event loop stays
-responsive across the call:
+`apply_pipeline`, the `normalize`/`finalize` pipeline pair, the
+`decode_utf8`/`finalize_utf8`/`decode_utf16`/`b64_encode_bytes`/`b64_decode` byte
+codecs, and `truncate_ellipsis`/`strip_controls`) with a plain `asyncio.to_thread`
+dispatch, so the event loop stays responsive across the call:
 
 ```python
 import tors

@@ -1,9 +1,13 @@
 # release-type is `python`: it bumps pyproject.toml's [project].version and CHANGELOG.md
 # from Conventional Commits — never hand-edit either. release-please-config.json's
-# `extra-files` entry additionally bumps Cargo.toml's [package].version (the `tors-core`
-# crate published to crates.io) to the same value in the same release PR, so the two
-# registries never drift apart. Cargo.lock's own version field for the package self-heals
-# on the next `cargo build` (nothing in this repo builds Rust with `--locked`).
+# `extra-files` entries additionally bump, to the same value in the same release PR:
+# Cargo.toml's [package].version (the `tors-core` crate published to crates.io),
+# tors-documents/Cargo.toml's and tors-documents/pyproject.toml's versions (the
+# `tors-documents` payload wheel, version-locked to `tors` — one release, two wheels;
+# publish.yml's publish-documents job asserts the lockstep before uploading), so the
+# registries never drift apart. The two Cargo.locks' own version fields for their
+# packages self-heal on the next `cargo build` (nothing in this repo builds Rust with
+# `--locked`), and release-lock-sync.yml refreshes them on the release PR itself.
 #
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
 # a tag released this way will NOT auto-trigger publish.yml's `push: tags` step — see that
@@ -44,7 +48,8 @@ jobs:
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           # config-file/manifest-file (not a bare release-type input): the extra-files
-          # entry in release-please-config.json is what bumps Cargo.toml's [package].version
+          # entries in release-please-config.json are what bump Cargo.toml's,
+          # tors-documents/Cargo.toml's, and tors-documents/pyproject.toml's versions
           # alongside pyproject.toml's — that customization needs manifest mode.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

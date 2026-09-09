@@ -2,7 +2,9 @@
 
 Fast, GIL-free text and document operations for Python, backed by Rust: normalization,
 Unicode segmentation, diffing, fuzzy and phonetic matching, multi-pattern search and
-redaction, chunking, and lightweight retrieval (TF-IDF, BM25, SimHash, Merkle integrity),
+redaction, chunking, and lightweight retrieval (TF-IDF, BM25, SimHash, Merkle integrity)
+— plus, behind an optional extra, cross-format document extraction (PDF, Office,
+RTF/ODF/EPUB, CSV, HTML to markdown or plain text) —
 in the spirit of `orjson` for JSON or `polars` for dataframes.
 
 ## Why
@@ -37,6 +39,12 @@ pip install maturin
 maturin develop --release
 ```
 
+The document-extraction surface is a second wheel behind an extra — `pip install
+"tors[documents]"` — with its own layout, engine matrix, and current publication
+state in [Documents](#documents), below.
+From a checkout, `uv sync --locked --extra documents` builds and installs the
+payload wheel from this tree.
+
 The underlying Rust crate is also on crates.io, published separately as `tors-core`
 (the plain `tors` name belongs to an unrelated, dormant crate). `cargo add tors-core`,
 then `use tors::...` in code — `[lib] name` in `Cargo.toml` keeps the importable crate
@@ -65,9 +73,10 @@ across every core family) in Pyodide under node.
 
 ## What's in it
 
-72 functions plus two small helper classes, grouped by what they do. Each entry is a
-one-line description; full signatures, argument contracts, and edge cases are in the
-[API reference](docs/api.md).
+72 functions plus two small helper classes, grouped by what they do (the `documents`
+extra, below, adds seven document-extraction functions and its own helper types).
+Each entry is a one-line description; full signatures, argument contracts, and edge
+cases are in the [API reference](docs/api.md).
 
 **Unicode normalization & forms**: clean up messy extracted text, or apply a single
 normalization form directly.
@@ -161,6 +170,262 @@ integrity, without an embeddings dependency.
 - `apply_pipeline`: fused NFD/lowercase/accent-fold/stem/lemma/whitespace-collapse pass
   over a whole text list
 - `CompiledLemmaDict`: a build-once handle for a large `lemma_dict`, reused across calls
+
+**Document-format extraction** (`tors.documents`, the `documents` extra — see
+[Documents](#documents)): bytes on disk to markdown or plain text, GIL-free,
+engine-routed per format family.
+- `to_markdown` / `to_text`: any working format (pdf, doc/docx, xls/xlsx, ppt/pptx,
+  rtf, odt/ods/odp, epub, csv/tsv, html/xhtml) to GFM markdown or plain text,
+  `(format, output)` back, with `pages=` PDF subsets, `password=` for encrypted
+  PDFs (fail closed without), and `max_bytes=` as the input budget — an explicit
+  value binds every engine lane before a byte is read, `None` keeping the 32 MiB
+  default (post-read, the amplifying lanes only) — the document is a `path` or
+  in-memory `data=` bytes
+  (byte-identical answers, no temp-file roundtrip)
+- `sniff`: the content-marker format detector over bytes alone
+- `pdf_extract`: per-page plain text plus whole-document markdown, one pass
+- `pdf_page_count`: the page tree and nothing else
+- `pdf_classify` / `PdfClassification`: the cheap text-vs-image preflight (which pages
+  are scans), plus `NeedsOcrError`, the typed route-to-OCR signal
+- `pdf_link_uris`: the `/Annots` link walk — every page's link URIs, the raw
+  navigation surface no text rendering carries
+
+## Documents
+
+`tors.documents` is document-format extraction: PDF, the office and text formats
+(doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv), and HTML, converted to
+GitHub-Flavored Markdown or plain text — GIL-free the same way everything above is, with
+the whole read + sniff + convert pass inside one `py.detach`. It ships as a second wheel:
+
+```sh
+pip install tors[documents]
+```
+
+The two-wheel split is deliberate: the extraction engines live in `tors-core` behind the
+cargo feature `documents`, which is default OFF, so the base `tors` build carries none of
+the engine weight — only the payload wheel compiles it. The compiled surface itself is
+the payload package `tors_documents`; the base wheel ships only a typed shim,
+`tors.documents`, which re-exports the payload's names when it is installed (import
+through `tors.documents` — the payload's own name is the wire it rides on, not the
+surface to target) and raises the install hint when it is not:
+
+```
+ImportError: the documents-extraction surface ships in the tors-documents wheel: install it with `pip install tors[documents]`
+```
+
+The payload is version-locked to `tors` (the same number in both `pyproject.toml`s and
+both `Cargo.toml`s — release-please bumps all four in one release PR, and the
+`publish` workflow asserts the lockstep before uploading). The `publish` workflow
+builds and publishes BOTH wheels on a release tag: the base `tors` wheel from the root
+manifest, the `tors-documents` payload from its own directory, each uploading through
+its own Trusted Publishing identity (the payload's PyPI project needs its trusted
+publisher configured once — this repo, workflow `publish.yml`, environment `pypi` —
+before the first release; a pending publisher can be set up before any release exists).
+Until the first release lands on the index, `pip install tors[documents]` works from a
+checkout (`uv sync --locked --extra documents`).
+
+The measured reason for the split (release, linux x86-64, symbols stripped,
+2026-09-09): the base extension is 7.4 MiB; the same extension with the documents
+feature compiled in — engines, extraction cores, bindings — is 30.1 MiB, 4.1×. Users
+who don't extract documents keep the lean download. One known cost of the current
+build, stated plainly: the payload `.so` also carries the base surface's compiled code
+a second time (`tors-core`'s pyo3 module rides along in its rlib), so a
+`tors[documents]` install holds ~37.5 MiB of extensions against the ~30 MiB a single
+combined wheel would weigh — an engine-lane cleanup candidate (compile the base
+module out when `tors-core` is built as a dependency), not a cost of the split itself.
+
+```python
+import tors.documents
+
+fmt, markdown = tors.documents.to_markdown("report.docx")
+# (Format.DOCX, "Quarterly Review Q3 2026\n\n...")
+
+cls = tors.documents.pdf_classify("incoming.pdf")
+if cls.image_only:
+    route_to_ocr("incoming.pdf")  # every page is a scan: nothing local can read it
+elif cls.pages_needing_ocr:  # 0-based indices of the image-only pages
+    ocr_pages("incoming.pdf", cls.pages_needing_ocr)
+
+try:
+    fmt, text = tors.documents.to_text("incoming.pdf", backend="anydoc")
+except tors.documents.NeedsOcrError as exc:
+    ocr_pages("incoming.pdf", exc.pages)  # 0-based indices, same as pages_needing_ocr
+```
+
+`pages=` selects a PDF page subset on the pdf_oxide lane only (one 0-based page, a
+list, or a half-open `(start, stop)` range); the selection is deduped into document
+order and a full range is byte-identical to the whole-document conversion. Any other
+format, or `backend="anydoc"` on a PDF, refuses `pages=` with `ValueError` rather
+than silently converting the whole document.
+
+### The API
+
+```python
+to_markdown(path=None, data=None, format=None, backend="auto", pages=None,
+            password=None, max_bytes=None) -> tuple[Format, str]
+to_text(path=None, data=None, format=None, backend="auto", pages=None,
+        password=None, max_bytes=None) -> tuple[Format, str]
+sniff(data: bytes) -> Format | None
+pdf_extract(path=None, data=None, password=None, backend="auto",
+            max_bytes=None) -> tuple[list[str], str]
+pdf_page_count(path=None, data=None, password=None, backend="auto",
+               max_bytes=None) -> int
+pdf_classify(path=None, data=None, password=None, backend="auto",
+             max_bytes=None) -> PdfClassification
+pdf_link_uris(path=None, data=None, password=None, backend="auto",
+              max_bytes=None) -> list[list[str]]
+```
+
+`path` accepts `str | os.PathLike[str]`. `Format`, `Backend`, and `PageKind` are
+`str` enums whose members ARE their accepted strings, so every plain-string call
+keeps working and the vocabulary can grow without enum churn in caller code. The
+full per-function contract (format resolution, error mapping, the GIL model) is the
+native docstrings in `tors-documents/src/lib.rs`, held by
+`tests/test_documents_engines.py` and `tests/test_pdf.py`; the user-facing
+reference — signatures, the `pages=` and format-resolution rules, the error
+taxonomy, `tors.documents.aio` — is the documents section of
+[`docs/api.md`](docs/api.md).
+
+- `format=` names the format explicitly (extension spelling, case-insensitive;
+  the container variants `docm`/`xlsm`/`ppsx` map onto their parents — the same
+  OOXML packages with the content-type override naming the macro/show variant,
+  resolved and sniffed as their base kinds; `tsv` is
+  accepted as a name and resolves onto the csv kind — the resolved and sniffed
+  name is always `"csv"`, never `"tsv"`. `xlsb` is vocabulary sugar only: the
+  name routes the Excel kind, but genuine xlsb content is BIFF12 `.bin` sheets,
+  not worksheet XML, and is refused — the engines do not read it). `None` sniffs
+  the format from content markers
+  (the PDF header, the RTF open group, OLE stream names, the ZIP package mimetype,
+  the HTML document marker, with a delimiter-agreement heuristic for signature-less
+  CSV), the path's extension as the fallback — so a mislabeled file still converts.
+  The returned `Format` is what the conversion actually used, and the Excel family
+  reports its container honestly: `"xls"` for OLE bytes, `"xlsx"` for a ZIP package,
+  regardless of what the explicit name said.
+- `sniff(data)` answers the same content question standalone, over bytes alone with
+  no path — the mislabeled-download answer. It OPENS AND PARSES THE CONTAINER
+  (anydoc's detection reads the ZIP/OLE package metadata; a 120 KiB zip measured
+  267 MiB peak RSS to answer docx), so budget it like a parse, not a marker scan.
+  `None` is not an error: the content names no format.
+- `pdf_extract` returns `(per_page_plain_text, whole_document_markdown)` — one pass
+  over one open document, the parse paid once for both outputs. An image-only page
+  is an empty string, not an error; routing decisions are the caller's, never
+  silently made.
+- `pdf_classify` is the cheap text-vs-image preflight: `PdfClassification` carries
+  `.page_count`, `.page_kinds` (per page: `"text"`, `"scanned"`, `"image_text"`,
+  `"mixed"`, or `"empty"` — a blank page is deliberately distinct from a scan),
+  `.pages_needing_ocr` (the 0-based indices of image-only pages, excluding blanks),
+  and the derived `.has_text` / `.image_only`. Encrypted documents fail closed on
+  every entry (`ValueError` without `password=`).
+- Errors: `OSError` for a missing/unreadable file (the matched subclass —
+  `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
+  `ValueError` for an unknown format name, an undetectable file, an unusable
+  backend/format pair, the PDF-only family's `backend="anydoc"` capability
+  refusal (raised before any work runs — anydoc's PDF surface is the
+  `to_markdown`/`to_text` conversion pair, not the per-page probes these calls
+  are), an invalid `pages=` selection, a malformed/encrypted document, an input
+  over `max_bytes=` (an EXPLICIT budget binds every lane — pdf and HTML
+  included, the PDF-only family too — checked before a byte is read or copied;
+  the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only;
+  on the PDF-only family `None` is unmetered outright, those calls never run
+  either metered lane), a non-regular `path=` (FIFO/device/socket — typed,
+  naming `path` and the kind, before the read), or a NUL byte inside `path=`
+  (CPython's own `open()` convention). `NeedsOcrError` (a `ValueError` subclass
+  carrying `.pages` — the 0-based indices needing OCR, the same convention as
+  `pages=` and `pages_needing_ocr` — and `.page_count`) is raised only on the
+  anydoc PDF lane; the default pdf_oxide lane returns empty output for scanned
+  pages and leaves the OCR decision to `pdf_classify`/`pdf_extract`.
+
+### The engine matrix
+
+Four engines, routed per format family by head-to-head measurement (the full
+comparison lives in the `documents_impl` crate docs; the suite pinning it is
+`tests/test_documents_engines.py`). `backend="auto"` is the measured-best lane;
+the forced backends raise on a format their engine cannot read, never a silent
+fallback:
+
+| format family | `backend="auto"` | `backend="oxide"` | `backend="anydoc"` |
+|---|---|---|---|
+| pdf | pdf_oxide 0.3.78 | pdf_oxide | anydoc (pdf-inspector) |
+| the PDF-only family (`pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`) | pdf_oxide | pdf_oxide | `ValueError` — a capability refusal, not a format one (see below) |
+| html / htm | html-to-markdown-rs 3.12 | `ValueError` | `ValueError` |
+| doc / docx (incl. `docm`) | anydoc 0.2.4 | office_oxide 0.1.10 | anydoc |
+| xls / xlsx (incl. `xlsm`) | anydoc | office_oxide | anydoc |
+| ppt / pptx (incl. `ppsx`) | anydoc | `ValueError` (ppsx) / office_oxide (pptx) | anydoc |
+| rtf | anydoc | `ValueError` | anydoc |
+| odt / ods / odp | anydoc | `ValueError` | anydoc |
+| epub | anydoc | `ValueError` | anydoc |
+| csv / tsv | anydoc | `ValueError` | anydoc |
+
+(`xlsb` is absent on purpose: the name routes the Excel kind as vocabulary sugar,
+but genuine xlsb content — BIFF12 `.bin` sheets, not worksheet XML — is refused by
+both engines; `ppsx` converts on the auto/anydoc lane and is refused by
+office_oxide, which checks the presentation content type — clean refusals, never
+silent fallbacks, both pinned in the suite.)
+
+The PDF-only family's row is a capability refusal, not a format one: PDF+anydoc
+converts (`to_markdown`/`to_text` with `backend="anydoc"`), but anydoc's entire
+PDF surface is whole-document markdown — `to_markdown(bytes)` is the one function
+its PDF module exposes (~anydoc-0.2.4/src/formats/pdf.rs), its only per-page
+knowledge the NeedsOcr refusal — while the four probe calls need exactly the
+surfaces it lacks: the per-page text probe (itself the OCR-routing signal), the
+page tree, per-page classification, and the `/Annots` walk. `backend="anydoc"`
+on any of the four is a named `ValueError` raised before any work runs, pointing
+at the conversion pair. Their `max_bytes=` matches the conversion pair's: an
+explicit budget binds before a byte is read or copied; `None` keeps the pdf lane
+unmetered (the 32 MiB default is the anydoc/office_oxide lanes' post-read check,
+and those PDF-only calls never run either lane).
+
+Why this split: pdf_oxide reads two-column layouts as separate reading-order blocks,
+renders `/Link` annotations as `[text](uri)`, and detects oversize-font headings,
+where anydoc's PDF engine (pdf-inspector) interleaves columns line-by-line and drops
+links; html-to-markdown-rs is the only measured HTML engine that drops
+`<script>`/`<style>` by construction; anydoc renders style-based docx headings
+(`pStyle` → `#`) and list markers that office_oxide drops entirely, and covers
+rtf/odt/epub/csv office_oxide cannot read at all. `backend="oxide"` exists so a
+pipeline can diff the two engines' output on its own corpus — office_oxide's one
+measured win is exact entity text (no `&`-escaping, which anydoc does and the
+plain-text strip normalizes back). Every probe-able cell above was verified against
+the committed fixtures in `tests/engines_corpus/` — the OOXML alias containers
+included (`docm`/`xlsm`/`ppsx` fixtures are [Content_Types].xml rewrites of the
+base generators, converted byte-identically to their bases and pinned as such);
+the legacy `doc`/`xls`/`ppt` cells have no Python fixture (OLE compound files are
+not hand-generatable without an Office writer) and are pinned by the crate-side
+routing-table test (`src/documents_impl.rs`) plus the mutation lane's typed-error
+contract — honestly uncovered at the conversion level.
+
+### Async and the GIL
+
+`tors.documents.aio` gives the six input-scaling functions (`to_markdown`,
+`to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`) their
+`asyncio.to_thread` twins — same signatures, same discipline as `tors.aio` (an
+unconditional thread hop,
+never a size-based branch; `sniff` stays sync-only — its cost is a container
+parse, but it remains a single short native pass a sync caller runs directly).
+One caveat the aio docstrings carry too: `asyncio.to_thread` is uncancellable
+mid-pass — a `wait_for` timeout returns control while the thread runs the
+conversion to completion, and repeated timeouts pin the default executor's
+threads. See the `tors.documents.aio` section of the API reference.
+
+The GIL claim is the point of the payload: every function runs its whole native
+pass — file read, format sniff, engine conversion, and `to_text`'s strip — inside
+one `py.detach`, with only the argument borrow, validation, and the O(output) return
+marshalling under the GIL; the O(n) bytes copy a `data=` call pays rides inside
+the detach with the rest of the pass (a 400 MB call's max heartbeat gap measured
+~1.1 ms, 2026-09-09). The official pdf_oxide pyo3 wheel measures as GIL-held per
+call — worst heartbeat gap 23.6ms on a 9-page document under a 10ms ping (2026-09),
+growing with document size — so this payload calls the crate's Rust API directly
+under `py.detach` instead. The bands are pinned by name:
+`tests/test_documents_engines.py::test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity`
+(a 10ms heartbeat stays live through a ~470KB conversion),
+`::test_concurrent_conversions_are_identical` (8 threads convert concurrently,
+byte-identical results),
+`::test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity` (the
+anydoc amplification lane), and
+`tests/test_pdf.py::test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity`
+(worst gaps 10.7–13.9ms on 130–160ms walls — the marshalling floor; a detach
+regression holds the whole wall and fails the budget by an order of magnitude).
+The heartbeat cells are `timing`-lane marked (CI's matrix legs deselect the lane,
+one 3.12 leg runs it).
 
 ## Examples
 
@@ -439,7 +704,11 @@ dev tree, criterion and friends, is included in the check):
 | serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
 | regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package (the same precedent) |
 | jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only — no TZDB backend, the accept-list shapes need none |
-| criterion *(dev)* | 0.5.1 | Apache-2.0 OR MIT | the benchmark harness |
+| pdf_oxide *(optional, `documents`)* | 0.3.78 | MIT OR Apache-2.0 | the documents payload's PDF engine (two-column reading order, link annotations, headings); default features only, and the caret bounds the 0.x line — see Cargo.toml's own comment for the measured rationale |
+| anydoc *(optional, `documents`)* | 0.2.4 | MIT | the payload's office/text engine (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv) |
+| office_oxide *(optional, `documents`)* | 0.1.10 | MIT OR Apache-2.0 | the payload's caller-selectable `backend="oxide"` lane; already compiled in via pdf_oxide's tree, so the direct edge adds no new package |
+| html-to-markdown-rs *(optional, `documents`)* | 3.12 | MIT | the payload's HTML engine; default-features off (its optional HTTP/MCP stack stays out) |
+| criterion *(dev)* | 0.8.2 | Apache-2.0 OR MIT | the benchmark harness |
 | strsim *(dev)* | 0.11.1 | MIT | differential oracle for levenshtein/jaro/jaro_winkler tests |
 
 Maintenance note (the spec's module decision): `simdutf8`'s
@@ -462,36 +731,67 @@ battle-tested implementation of this exact algorithm in the Rust ecosystem;
 it was already in the lock as a transitive dependency (criterion's regex) before
 find_patterns made it direct, so the dependency tree grew by zero packages.
 
-Transitive closure at the last lock-state count (120 `Cargo.lock` entries
-including tors itself, i.e. 119 dependency packages incl. dev, re-derived with
-`cargo metadata` over the current lock): 74 `MIT OR Apache-2.0`, 12 MIT
-(fastcdc and strsim among them), 6 `Apache-2.0 OR MIT`, 5 Apache-2.0
-(rphonetic, soundex/metaphone's crate, among them), 3
-`MIT/Apache-2.0` (criterion-plot, itertools, version_check), 3
-`Unlicense OR MIT` (aho-corasick, memchr, winapi-util), 2 `0BSD`
+Transitive closure at the current lock state (325 `Cargo.lock` entries
+including tors-core itself, i.e. 324 dependency packages incl. dev and the
+documents engine tree, re-derived with `cargo metadata --all-features` over
+the current lock): 176 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, and
+anydoc among them), 18 `Apache-2.0 OR MIT` (chardetng, autocfg), 12
+`MIT/Apache-2.0` (version_check, winapi, siphasher) plus 2 `Apache-2.0/MIT`
+(rs_merkle, bytecount) and 1 `Apache-2.0 / MIT` (fnv) — three more spellings
+of the same dual grant, 10 `Unlicense OR MIT` (aho-corasick, memchr, jiff)
+and 4 `Unlicense/MIT` (csv, same-file, walkdir), 8 Apache-2.0 (rphonetic,
+soundex/metaphone's crate, among them), 3 `Apache-2.0 WITH LLVM-exception OR
+Apache-2.0 OR MIT` (wasip2, wit-bindgen), 3 `Zlib OR Apache-2.0 OR MIT`
+(tinyvec, bytemuck), 3 `MIT OR Apache-2.0 OR Zlib` (tinyvec_macros, the
+zune image crates) and 2 `MIT OR Zlib OR Apache-2.0` (miniz_oxide, both
+versions), 3 Zlib (foldhash, slotmap, zlib-rs — engine-tree arrivals), 2
+`BSD-2-Clause OR Apache-2.0 OR MIT` (zerocopy), 2 `BSD-3-Clause OR
+Apache-2.0` (moxcms, pxfm, the engines' color management), 2 BSD-3-Clause
+(the brotli alloc pair), 2 `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi,
+both major versions, the tri-license noted above), 2 `0BSD`
 (enum-iterator/enum-iterator-derive, rphonetic's own dependencies: the
-license-gate addition above), 2
-`Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` (wasip2, wit-bindgen),
-2 `BSD-2-Clause OR Apache-2.0 OR MIT` (zerocopy), 2 `Unlicense/MIT`
-(same-file, walkdir), 1 `(Apache-2.0 OR MIT) AND BSD-3-Clause` (encoding_rs,
-a direct dependency), 1 `Zlib OR Apache-2.0 OR MIT` (tinyvec), 1
-`MIT OR Apache-2.0 OR Zlib` (tinyvec_macros), 1
-`Apache-2.0 WITH LLVM-exception` (target-lexicon), 1
-`(MIT OR Apache-2.0) AND Unicode-3.0` (unicode-ident), 1
-`MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi, the tri-license noted above),
-1 `Apache-2.0/MIT` (rs_merkle: the closure's third spelling of a dual
-grant), and 1 `MIT/BSD-3-Clause` (rust-stemmers, a fourth spelling of the
-same dual-grant idea). Every one satisfies the allowlist.
+license-gate addition above), and 1 each of the singles: `0BSD OR MIT OR
+Apache-2.0` (adler2, a miniz_oxide dependency in the engine tree), `MIT-0`
+(borrow-or-share), `Apache-2.0 WITH LLVM-exception` (target-lexicon), `(MIT
+OR Apache-2.0) AND Unicode-3.0` (unicode-ident), `(Apache-2.0 OR MIT) AND
+BSD-3-Clause` (encoding_rs, a direct dependency), `CC0-1.0` (tiny-keccak,
+the documents-tree addition), `Apache-2.0 OR BSL-1.0` (ryu, the csv crate's
+float formatter in anydoc's tree — the Apache-2.0 branch elected), `BSD-3-Clause AND MIT`
+(brotli) and `BSD-3-Clause/MIT` (brotli-decompressor), and
+`MIT/BSD-3-Clause` (rust-stemmers, a fourth spelling of the same dual-grant
+idea). Every one satisfies the allowlist.
 
-That count and its per-license tally predate the json_repair feature: the
-port's four direct dependencies grow the runtime package closure from 55 to
-102 (jsonschema's draft-4-2020-12 validation tree is the addition; serde_json
+The count above is the current lock state, json_repair and the documents
+engine tree both in. The json_repair port's four direct dependencies grew
+the runtime package closure from 55 to 102 (jsonschema's draft-4-2020-12
+validation tree is the addition; serde_json
 and regex were already in the lock as transitives, and jiff brings one small
-crate, so the real addition is jsonschema's tree). The incl-dev count and
-the tally above re-derive at the next lock
-update, and the gate re-checks every new entry against the allowlist on
-every run — the MIT-0 license it flagged on the way in (borrow-or-share) is
-recorded above and in `deny.toml`.
+crate, so the real addition is jsonschema's tree); the engine tree is the
+next delta on top, inside the count through the all-features gate
+resolution below. The gate re-checks every new entry against the allowlist
+on every run — the MIT-0 license it flagged on the way in (borrow-or-share)
+is recorded above and in `deny.toml`. The four `documents` engines above are
+the same story one feature later: feature-gated (default OFF), so they are
+absent from the base wheel's build and present in the payload's. One gate
+fact stated exactly (verified 2026-09-09): the wired gate — `make deny` and
+CI's cargo-deny step — runs at the repo root and covers the FULL engine
+tree, because `deny.toml`'s `[graph] all-features = true` resolves every
+cargo feature of the workspace into the checked graph, `documents`
+included: the root lock's 325 entries carry pdf_oxide/anydoc/office_oxide/
+html-to-markdown-rs and their transitive trees, resolution is
+metadata-only (nothing links), and `cargo deny check licenses advisories
+bans` at the root passes over all of them. The payload-manifest invocation
+— `cargo deny --manifest-path tors-documents/Cargo.toml check licenses
+advisories bans` — also passes at the current lock state (verified
+2026-09-09), but it is a redundant subset check, not the engine tree's
+only gate: every crate the payload's own graph builds is already present
+in the root graph (`deny.toml`'s `[graph]` comment records the same). The
+two documents-tree entries the engine tree forced into `deny.toml`:
+`CC0-1.0` is allowlisted (`tiny-keccak` 2.0.2, public-domain-equivalent,
+pulled by html-to-markdown-rs's `compile-time-rng` ahash feature — it is
+not in the base graph), and RUSTSEC-2026-0192 (`ttf-parser` unmaintained,
+an unconditional transitive of both pdf_oxide's and anydoc's PDF stacks)
+is ignored with its reason recorded in `deny.toml`.
 
 ## Development
 
@@ -502,8 +802,10 @@ bytes. `cargo fuzz run <target> -- -max_total_time=30` runs one target
 briefly (nightly toolchain and `cargo install cargo-fuzz --locked`
 required); targets assert the same invariants the Python gates pin, at
 raw-byte depth; crashes are minimized with `cargo fuzz tmin`. `make
-fuzz-quick` runs every target for 30s each; the weekly `fuzz` workflow runs
-the same set in CI. See
+fuzz-quick` runs every target for 30s each (the full 17-target set); CI runs
+subsets of that set — the `fuzz-smoke` job 15 targets at 15s each on every
+push, the weekly `fuzz` workflow 14 of them at 30s each — so the full set is
+a local `make fuzz-quick`. See
 [CONTRIBUTING.md](CONTRIBUTING.md#fuzzing) for the full setup.
 
 ## Contributing

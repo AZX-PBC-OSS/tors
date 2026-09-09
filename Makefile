@@ -28,9 +28,13 @@ endif
 # aggregate-target pattern: one `check` target wrapping the whole list).
 check: lint test
 
-# Setup: build the extension + dev deps (CONTRIBUTING.md "Setup").
+# Setup: build the extension + dev deps (CONTRIBUTING.md "Setup"). The
+# documents extra is always synced: the pytest suite's documents gates
+# (tests/test_documents_engines.py) run against the tors.documents payload
+# (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
+# is EXACT — it would uninstall the payload and silently skip those gates.
 install:
-	uv sync --locked
+	uv sync --locked --extra documents
 
 # Rebuild the extension after Rust edits. uv's wheel cache does not key on Rust
 # sources, so a bare `uv sync` would leave pytest importing the stale .so.
@@ -39,34 +43,42 @@ install:
 # CPython's extension-suffix order ranks a version-specific .so AHEAD of the
 # abi3 one, the dev-loop landmine tests/conftest.py fails loudly on): after
 # `make dev` exactly one fresh _tors.abi3.so remains, and plain `pytest`
-# (without the preload runner) binds it.
+# (without the preload runner) binds it. --extra documents: same reason as
+# `install` — the payload must stay installed for the documents gates.
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
-	uv sync --locked --reinstall-package tors
+	uv sync --locked --extra documents --reinstall-package tors
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
 # crate — not a workspace member, so root cargo fmt never sees it; without
 # this line the fuzz targets rot silently, truncate_ellipsis.rs had
-# already drifted), clippy in both feature configs
-# (pyo3's cfg flags differ between them, so each pass surfaces lints in code the
-# other never compiles), and ruff over the Python side (tests/, tools/,
+# already drifted), clippy in BOTH feature configs plus the documents
+# config (pyo3's cfg flags differ between them, and the documents surface
+# is cfg-gated code the other configs never compile — the same reason the
+# two-config pass exists), and ruff over the Python side (tests/, tools/,
 # python/; config in pyproject.toml, the dev-group ruff runs it).
 lint:
 	cargo fmt --check
+	cargo fmt --check --manifest-path tors-documents/Cargo.toml
 	cargo fmt --check --manifest-path fuzz/Cargo.toml
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --no-default-features -- -D warnings
+	cargo clippy --all-targets --no-default-features --features documents -- -D warnings
+	cargo clippy --all-targets --manifest-path tors-documents/Cargo.toml -- -D warnings
 	uv run --no-sync ruff check .
 
-# Rust unit tests (extension-module off: it doesn't link libpython) and the pytest
-# suite. Depends on `dev` so pytest always imports the extension built from the
-# current tree, never a stale wheel. NOTE: unlike ci.yml's matrix legs (which
-# deselect the timing lane and run it in ONE dedicated 3.12 step), this target
-# runs EVERYTHING, the timing measurement cells included, because a local
-# `make test` is the full pre-PR gate; the lane split exists to stop CI paying
-# the slow, load-sensitive cells five times, not to thin the local run.
+# Rust unit tests (extension-module off: it doesn't link libpython) in BOTH
+# feature configs — the documents lane is the engine surface's crate-side
+# tests (routing table, separator pin, classify semantics) — and the pytest
+# suite. Depends on `dev` so pytest always imports the extension built from
+# the current tree, never a stale wheel. NOTE: unlike ci.yml's matrix legs
+# (which deselect the timing lane and run it in ONE dedicated 3.12 step), this
+# target runs EVERYTHING, the timing measurement cells included, because a
+# local `make test` is the full pre-PR gate; the lane split exists to stop CI
+# paying the slow, load-sensitive cells five times, not to thin the local run.
 test: dev
 	cargo test --no-default-features
+	cargo test --no-default-features --features documents
 	uv run --no-sync pytest -q
 
 # Run the criterion suite (CI only compiles it, with --no-run): both benches.
@@ -77,12 +89,17 @@ bench:
 fmt:
 	cargo fmt
 
-# The licensing gate (the ci.yml lint job's Cargo deny step): the
+# The licensing gate (the ci.yml lint job's two Cargo deny steps): the
 # permissive-only license allowlist, the advisory policy, and the ban
-# policy live in deny.toml. Requires cargo-deny on PATH
+# policy live in deny.toml. BOTH lockfiles are gated: tors-documents
+# resolves its own independent Cargo.lock (not a workspace member — its
+# Cargo.toml's header) whose package set is not a subset of the root
+# lock's (deny.toml's [graph] comment), so the payload manifest gets its
+# own pass. Requires cargo-deny on PATH
 # (`cargo install cargo-deny --locked`, ~1min).
 deny:
 	cargo deny check licenses advisories bans
+	cargo deny --manifest-path tors-documents/Cargo.toml check licenses advisories bans
 
 # Regenerate src/html_table.rs from the RUNNING interpreter's html module
 # (tools/gen_html_table.py; the provenance line lives in the generated header).
@@ -105,7 +122,31 @@ gen-html-table:
 # 30s-per-target smoke run suitable before a PR; a real fuzzing campaign
 # (hours, one target, targeted at a specific area of suspicion) is
 # `cargo +nightly fuzz run <target>` run directly, not through this target.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair
+# The wired-in list, kept identical to ci.yml's fuzz-smoke loop and
+# fuzz.yml's weekly pass — the two CI loops had drifted from this one
+# (truncate_ellipsis, controls, json_repair were Makefile-only).
+#
+# gfm_strip joined the run lists 2026-09-09: the byte-counted fence
+# indent trim in strip_fence_content sliced inside a multi-byte
+# whitespace char when the budget ran out mid-char ("start byte index 3
+# is not a char boundary; it is inside U+0085", fuzz-found from an
+# accumulated corpus). Fixed by consuming only WHOLE whitespace chars
+# (unit-pinned + both crash artifacts re-run clean + a 120s/1.37M-run
+# smoke clean).
+#
+# documents_markdown stays deliberately ABSENT from the run lists: built
+# and committed (fuzz/Cargo.toml [[bin]], the `documents` feature is on
+# in the fuzz crate's tors dep so the surface compiles), but it
+# SIGSEGVs on an UPSTREAM bug, and a known-crashing target in the
+# always-run lists is a time bomb, not a regression net:
+#
+# pdf_oxide 0.3.78's parser::parse_object/parse_array mutual recursion
+# has no depth cap, so a ~30k-deep array in a PDF the Auto router must
+# parse (the Root's value, /Kids) overflows the stack (reproduced
+# 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
+# alternation). It stays committed as the repro harness, joining the run
+# lists when pdf_oxide ships a cap.
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \
