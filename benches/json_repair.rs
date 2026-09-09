@@ -48,7 +48,8 @@
 mod common;
 
 use common::prose;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::json_repair::{RepairConfig, loads_strict, repair};
 
 /// The corpus's fixed note value, hand-written in ALREADY-ESCAPED form

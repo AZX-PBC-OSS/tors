@@ -72,7 +72,8 @@
 mod common;
 
 use common::prose;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::search_impl;
 
 // The two pattern sets, mirroring tests/reference.py's SEARCH_SPARSE_PATTERNS
