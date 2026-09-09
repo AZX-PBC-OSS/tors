@@ -1238,8 +1238,9 @@ def is_grounded(
 Checks whether `claim` is grounded in `source`: a LEXICAL check, not a semantic/NLI
 one; be precise about that boundary, this is not a hallucination-detection model.
 
-`fuzzy=False` (the default) is `source.contains(claim)` exactly: Rust's own substring
-search, no new dependency for the exact case. `fuzzy=True` compares `claim` against
+`fuzzy=False` (the default) is exact substring containment: the `memchr` crate's
+SIMD-skipped two-way search (`memmem`, already a dependency), a byte-level find that is
+UTF-8-boundary-safe by construction. `fuzzy=True` compares `claim` against
 overlapping same-length windows of `source` (stride `claim`'s length / 2) using the
 only diffing engine already in the crate (the `similar` Myers engine backing
 `diff_opcodes`), and reports whether the BEST window's difflib-style ratio (`2 *
@@ -1249,13 +1250,27 @@ verbatim in `source` is grounded before any windowing (independent of window ali
 and before `deadline_ms` applies — a verbatim substring never times out). The windowed
 ratio is consulted only when there is no exact match.
 
+The floor guarantees the verbatim case unconditionally; near matches get a bounded
+guarantee band instead of raw window luck: a same-length source region whose aligned
+ratio is `r` is detected at ANY offset whenever `r >= max(0.75, threshold + 1/32)` —
+a bounded refinement pass re-scans the best coarse windows at a fine stride, a
+constant budget on top of the linear scan. One substitution in a 9+ character claim
+clears the `0.85` default wherever it sits. Below `r = 0.75` detection is
+best-effort (the recall floor of the DoS windowing), and a genuine region can be
+evicted from the 64 refinement candidates by adversarial decoy text scoring higher —
+the regime `deadline_ms` exists for (both limits are pinned in `tests/test_grounded.py`).
+
 Windowing, rather than one whole-string diff of `claim` against all of `source`, is
 DoS discipline: the realistic RAG-grounding shape is a short claim against a
 long retrieved passage, so bounding each diff's operands to roughly `claim`'s length
 keeps the total work close to linear in `source`'s length instead of the O(source ×
-claim) a single unwindowed diff would cost. `deadline_ms` (only accepted, and only
+claim) a single unwindowed diff would cost — and windows slide through one reusable
+O(claim)-sized buffer, so a 12 MiB passage costs kilobytes rather than a
+whole-source char vector, and an early exit stops consuming input mid-source.
+`deadline_ms` (only accepted, and only
 meaningful, when `fuzzy=True`) bounds the WHOLE scan on top of that, the same
-discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has: `TimeoutError`
+discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has — checked after every window
+diff, coarse and refinement alike: `TimeoutError`
 on expiry naming the elapsed cost and the deadline, a positive-finite-or-`None`
 precondition validated before any work runs. Even a single very large window's own
 Myers search is itself deadline-bounded (`similar`'s `capture_diff_slices_deadline`),

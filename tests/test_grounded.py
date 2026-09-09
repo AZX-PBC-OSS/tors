@@ -16,12 +16,28 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
+    reference_is_grounded_fuzzy,
+)
 from tors import is_grounded
 
 _TEXT = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N", "Zs"), max_codepoint=0x2FFF),
     max_size=200,
 )
+
+
+@st.composite
+def _spliced(draw):
+    """A claim embedded VERBATIM in a source at an arbitrary offset (the
+    `lead`/`tail` padding from a single-alphabet filler): the shape the
+    exact-containment floor exists for. Drawing `lead` freely is the point —
+    window alignment mod the stride-``L/2`` grid is exactly the dimension
+    hand-rolled offset sweeps cannot cover densely."""
+    claim = draw(_TEXT)
+    lead = draw(st.integers(0, 120))
+    tail = draw(st.integers(0, 60))
+    return claim, ("x" * lead) + claim + ("x" * tail)
 
 
 class TestExactContainment:
@@ -164,12 +180,236 @@ class TestFuzzy:
                 assert is_grounded(claim, source, fuzzy=True)
                 assert is_grounded(claim, source, fuzzy=True, threshold=1.0)
 
+    @given(claim_source=_spliced())
+    @settings(max_examples=300)
+    def test_a_spliced_claim_is_fuzzy_grounded_at_every_threshold(self, claim_source) -> None:
+        """The superset contract as a PROPERTY, not just the hand-rolled
+        offset sweep above: a claim present verbatim at an ARBITRARY offset
+        is grounded at EVERY threshold (threshold cannot demote a literal
+        substring), and before the deadline applies (the floor runs ahead of
+        deadline setup, so even an effectively-zero budget must ground a
+        verbatim claim, never TimeoutError). This is the red/green row for
+        the original bug: it fails on the pre-floor windowed scan wherever
+        the offset lands ~L/4 into the stride grid."""
+        claim, source = claim_source
+        assert claim in source  # the splice is verbatim by construction
+        for threshold in (1.0, 0.85, 0.5):
+            assert is_grounded(claim, source, fuzzy=True, threshold=threshold)
+        assert is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
+
+    @given(claim=_TEXT, source=_TEXT)
+    @settings(max_examples=300)
+    def test_threshold_one_fuzzy_is_exactly_exact_containment(
+        self, claim: str, source: str
+    ) -> None:
+        """Both directions of the equivalence the .pyi states ("threshold=1.0
+        fuzzy subsumes exact containment"): a verbatim substring must clear
+        1.0 (the floor), and a NON-substring must NEVER clear it (a window
+        only scores 1.0 when it equals the claim, which is containment by
+        another name; shorter truncated tail windows and the
+        source-shorter-than-claim direct comparison are both strictly < 1).
+        Pins the pair of invariants the floor's own tests leave one-sided."""
+        assert (
+            is_grounded(claim, source, fuzzy=True, threshold=1.0) == (claim in source)
+        ), (claim, source)
+
+    def test_a_near_exact_non_substring_clears_085_but_never_a_threshold_of_one(self) -> None:
+        """One substitution, so the exact-containment floor CANNOT
+        short-circuit and the windowed scorer must produce the verdict.
+        Restores the scorer coverage the floor removed from the
+        identical-strings test above (a verbatim claim now returns at the
+        floor before any window is diffed) and pins the no-false-positive
+        direction at threshold=1.0 alongside it."""
+        source = "the cat sat on the mat"
+        assert "the cet sat" not in source
+        assert is_grounded("the cet sat", source, fuzzy=True, threshold=0.85) is True
+        assert is_grounded("the cet sat", source, fuzzy=True, threshold=1.0) is False
+
+    def test_a_one_typo_near_match_at_any_offset_clears_the_default(self) -> None:
+        """The refinement pass's headline guarantee: a same-length source
+        region matching the claim with ratio r is detected at ANY offset
+        whenever r >= max(0.75, threshold + 1/32). One substitution at L=41
+        gives r = 40/41 = 0.976, comfortably above 0.85 + 1/32, so every
+        offset must clear the default. Before refinement, stride-L/2
+        windowing straddled the region at unaligned offsets (nearest window
+        overlapping only ~3L/4, score ~0.73) and wrongly rejected it — the
+        same defect class the exact-containment floor fixed for verbatim
+        claims, here fixed for near matches."""
+        claim = "the bushing torque specifications changed"  # 41 chars
+        near = "the bushing torqxe specifications changed"  # one substitution
+        assert claim not in near
+        for lead in range(41):
+            source = ("q" * lead) + near + ("q" * 60)
+            assert is_grounded(claim, source, fuzzy=True) is True, f"lead {lead}"
+
+    def test_three_typos_at_the_worst_alignment_still_clear_the_default(self) -> None:
+        # r = 38/41 = 0.927 >= 0.85 + 1/32: still inside the guaranteed band,
+        # even at the worst stride alignment (lead 10 = L/4 into the grid).
+        claim = "the bushing torque specifications changed"
+        near = "".join("Z" if i in (5, 18, 33) else c for i, c in enumerate(claim))
+        source = ("q" * 10) + near + ("q" * 60)
+        assert is_grounded(claim, source, fuzzy=True) is True
+
+    def test_the_detection_margin_is_pinned(self) -> None:
+        """The guarantee is sufficient, not necessary: r >= 0.85 + 1/32 is
+        the WORST-CASE fine-grid misalignment bound, and at L=41 the fine
+        stride is 2, so a region whose start lands on the grid is scored
+        exactly aligned. Pinned at the measured edge — six substitutions
+        (r = 0.854, below the worst-case line) still clear the default
+        here; seven (r = 0.829, below the threshold outright) do not, and
+        clear 0.8 where the guarantee covers them — with the oracle's
+        agreement asserted on every row."""
+        claim = "the bushing torque specifications changed"
+        for d, at_default, at_08 in ((6, True, True), (7, False, True)):
+            step = 41 // d
+            chars = list(claim)
+            for k in range(d):
+                chars[k * step] = "Z"
+            near = "".join(chars)
+            source = ("q" * 10) + near + ("q" * 60)
+            for threshold, expected in ((0.85, at_default), (0.8, at_08)):
+                got = is_grounded(claim, source, fuzzy=True, threshold=threshold)
+                assert got is expected, (d, threshold)
+                assert got == reference_is_grounded_fuzzy(claim, source, threshold), (d, threshold)
+
+    def test_a_near_tail_region_is_detected_through_the_tail_window_candidate(self) -> None:
+        """The tail row: a five-typo region (r = 0.878) whose aligned start
+        (76) sits past the last full grid window (60) and 4 chars before
+        the truncated tail window (80). No full window reaches it: the
+        nearest, [60, 101), overlaps only 25 of the region's 41 chars and
+        scores ~0.49 — below the 0.5 candidate entry — so the full-grid
+        candidates never cover the region. The truncated tail window's own
+        score (~0.79: it holds 37 of the region's chars against the
+        denominator 41 + 40) puts it in the candidate band like any other,
+        and its refinement range clamps at the last possible region start
+        n - L = 79 — covering the aligned start 76, which the fine grid
+        scans. n = 120: grid 0/20/40/60 full, truncated tail [80, 120);
+        region [76, 117). The tail competes like an ordinary candidate —
+        score-gated, evictable, no forced mechanism (one existed briefly
+        and was removed; the brute-force geometry search found no
+        guarantee-band region needing it). The flush variant (region
+        ending exactly at the source's end, start = n - L) is pinned
+        alongside so the two tail geometries stay distinguishable."""
+        claim = "the bushing torque specifications changed"
+        near = "".join("Z" if i in (3, 11, 19, 27, 35) else c for i, c in enumerate(claim))
+        near_tail = ("q" * 76) + near + ("q" * 3)
+        flush = ("q" * 79) + near
+        assert len(near_tail) == 120 and claim not in near_tail
+        for source in (near_tail, flush):
+            assert is_grounded(claim, source, fuzzy=True) is True
+            assert reference_is_grounded_fuzzy(claim, source, 0.85) is True
+
+    def test_candidate_eviction_at_the_64th_band_window_is_the_pinned_flood_limit(self) -> None:
+        """The 64-candidate cap is the documented adversarial limit: the
+        top (score, start) band windows are all the refinement will ever
+        see, so a real near-match whose straddled coarse score (~0.73)
+        ranks below 64 decoys scoring above it (seven-typo variants,
+        r = 0.829, at grid-aligned offsets) is evicted and the verdict is
+        FALSE despite r = 40/41 >= the guarantee — the regime deadline_ms
+        exists for. The boundary is exact (63 decoys still find it), and
+        the oracle mirrors the eviction identically on both sides."""
+        claim = "the bushing torque specifications changed"
+        real = "the bushing torqxe specifications changed"
+        decoy = "".join("Z" if i in (2, 8, 14, 20, 26, 32, 38) else c for i, c in enumerate(claim))
+
+        def build(n_decoys: int) -> str:
+            parts = [("q" * 10) + real]
+            at = 60  # every decoy starts at a multiple of the stride, 20
+            for _ in range(n_decoys):
+                have = sum(len(p) for p in parts)
+                parts.append(("q" * (at - have)) + decoy)
+                at += 60
+            parts.append("q" * 60)
+            return "".join(parts)
+
+        for n, expected in ((63, True), (64, False)):
+            source = build(n)
+            got = is_grounded(claim, source, fuzzy=True)
+            assert got is expected, n
+            assert got == reference_is_grounded_fuzzy(claim, source, 0.85), n
+
+    @given(claim=_TEXT, index=st.data())
+    @settings(max_examples=200)
+    def test_a_one_substitution_near_match_at_any_offset_is_grounded(self, claim, index) -> None:
+        """The guarantee as a PROPERTY: splice a one-substitution near-match
+        of the claim into padding at an arbitrary offset; it must clear the
+        default threshold wherever it sits. Claim length is drawn >= 12 so
+        r = (L-1)/L >= 0.917 stays above the 0.85 + 1/32 guarantee line.
+        This is the red/green row for the refinement pass: it fails on the
+        pre-refinement scan wherever the offset lands misaligned."""
+        if len(claim) < 12:
+            return
+        i = index.draw(st.integers(0, len(claim) - 1))
+        sub = index.draw(st.sampled_from("qz9"))
+        near = claim[:i] + sub + claim[i + 1 :]
+        lead = index.draw(st.integers(0, 120))
+        tail = index.draw(st.integers(0, 60))
+        source = ("q" * lead) + near + ("q" * tail)
+        assert is_grounded(claim, source, fuzzy=True, threshold=0.85) is True, (claim, near, lead)
+
+    def test_empty_source_is_ungrounded_except_at_threshold_zero(self) -> None:
+        # The empty-source convention (no window to score, the verdict is
+        # 0.0 against the threshold): ungrounded at any positive threshold,
+        # vacuously grounded at exactly 0.0.
+        assert is_grounded("x", "", fuzzy=True, threshold=0.85) is False
+        assert is_grounded("claim", "", fuzzy=True, threshold=0.5) is False
+        assert is_grounded("x", "", fuzzy=True, threshold=0.0) is True
+
+    @given(claim=_TEXT, source=_TEXT)
+    @settings(max_examples=100)
+    def test_fuzzy_verdicts_match_the_lcs_window_model_on_realistic_text(
+        self, claim: str, source: str
+    ) -> None:
+        """The full-contract differential oracle (tests/reference.py's
+        reference_is_grounded_fuzzy): floor, windowing, stride, truncated
+        tail window, the bounded refinement pass (candidate top-K, fine
+        grid, capped ranges), and the threshold comparison all modeled
+        independently in pure Python, with M from an LCS DP rather than any
+        difflib or Myers machinery. Agreement here proves the whole
+        algorithm's verdict, not just the pieces the pinned rows cover."""
+        for threshold in (1.0, 0.85):
+            assert is_grounded(claim, source, fuzzy=True, threshold=threshold) == (
+                reference_is_grounded_fuzzy(claim, source, threshold)
+            ), (claim, source, threshold)
+
+    @given(
+        claim=st.text(alphabet="ab", max_size=20),
+        source=st.text(alphabet="ab", max_size=80),
+    )
+    @settings(max_examples=200)
+    def test_fuzzy_verdicts_match_the_lcs_window_model_on_repeated_characters(
+        self, claim: str, source: str
+    ) -> None:
+        """The same oracle over a two-letter alphabet: maximally repeated
+        characters are exactly where difflib's anchored alignment and the
+        maximal-LCS alignment diverge (the pinned "010"/"120" class), so
+        this lane proves tors's M == LCS claim holds on the hard class
+        while the realistic-text lane above covers the ordinary shapes."""
+        for threshold in (1.0, 0.85, 0.6, 0.3):
+            assert is_grounded(claim, source, fuzzy=True, threshold=threshold) == (
+                reference_is_grounded_fuzzy(claim, source, threshold)
+            ), (claim, source, threshold)
+
 
 class TestArgumentContract:
     @pytest.mark.parametrize("bad", [-0.1, 1.1], ids=["below-zero", "above-one"])
     def test_out_of_range_threshold_raises_value_error(self, bad: float) -> None:
         with pytest.raises(ValueError, match="threshold"):
             is_grounded("a", "b", fuzzy=True, threshold=bad)
+
+    def test_validation_precedes_the_exact_containment_floor(self) -> None:
+        """The floor returns before deadline SETUP, but argument VALIDATION
+        is still ahead of it (the pyo3 layer validates threshold and
+        deadline_ms before any work runs): a verbatim claim — which the
+        floor grounds in microseconds — cannot bypass a bad threshold or a
+        nonpositive deadline_ms. Pins the ordering the "a verbatim claim
+        never times out" doc leans on: never-timeout is a property of VALID
+        budgets, not of skipped validation."""
+        assert is_grounded("cat", "the cat sat", fuzzy=True) is True  # the floor's lane
+        with pytest.raises(ValueError, match="threshold"):
+            is_grounded("cat", "the cat sat", fuzzy=True, threshold=1.1)
+        with pytest.raises(ValueError, match="deadline_ms"):
+            is_grounded("cat", "the cat sat", fuzzy=True, deadline_ms=0.0)
 
     def test_deadline_ms_without_fuzzy_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="deadline_ms"):

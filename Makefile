@@ -101,7 +101,7 @@ gen-html-table:
 # 30s-per-target smoke run suitable before a PR; a real fuzzing campaign
 # (hours, one target, targeted at a specific area of suspicion) is
 # `cargo +nightly fuzz run <target>` run directly, not through this target.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff phonetic bm25 tfidf truncate_ellipsis controls json_repair
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \

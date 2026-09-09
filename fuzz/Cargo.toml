@@ -99,6 +99,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grounded"
+path = "fuzz_targets/grounded.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "phonetic"
 path = "fuzz_targets/phonetic.rs"
 test = false
