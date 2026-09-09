@@ -43,6 +43,10 @@ class TestApiReferenceExamples:
             "ERROR io failure\nINFO retry ok\n\nINFO shutdown"
         )
         assert tors.chunk_by_lines(log, 2) == [(0, 20), (22, 55), (56, 84)]
+        # the api.md chunk_by_lines_iter section's example, pinned directly
+        # (not only transitively through the streaming-parity tests): the
+        # iterator must yield the doc's literal list on the same `log`
+        assert list(tors.chunk_by_lines_iter(log, 2)) == [(0, 20), (22, 55), (56, 84)]
         assert tors.chunk_by_lines(log, 2, overlap=1) == [
             (0, 20),
             (10, 38),

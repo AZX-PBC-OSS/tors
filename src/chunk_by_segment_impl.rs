@@ -21,6 +21,8 @@
 //!
 //! [`crate::chunk_impl`]
 
+use memchr::memchr2_iter;
+
 use crate::segmentation_impl;
 use crate::truncate_impl::{GraphemeIndex, char_count};
 
@@ -283,26 +285,37 @@ pub fn chunk_by_sentences(
 /// paragraph's caller would consider "split". No visible content
 /// character is ever cut mid-cluster by this function.
 pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
-    // The scan as ONE streaming decode pass — a three-flag state machine
-    // (in-run, unit count, pending-CR) instead of the former whole-text
-    // `Vec<char>` collect with random access and a lookahead, the same
-    // #22 allocation class: O(text) time, O(1) memory beyond the output.
-    // The codepoint total the end-of-text close needs is derived inside
-    // the walk (`total = cp + 1` per codepoint) rather than paid as a
-    // separate whole-text `char_count` pass before it — one decode of
-    // the text, not two. The pending-CR flag IS the lookahead: a '\r'
-    // counts one unit and stays pending; a following '\n' completes the
-    // CRLF pair without adding a unit; anything else leaves the '\r'
-    // standing as its own unit (already counted).
+    // Two spellings of the same state machine, chosen by text class:
+    // pure-ASCII text (the common corpus class) scans with a SIMD
+    // `memchr2` jump table between `\r`/`\n` bytes — byte index IS
+    // codepoint index on ASCII, so the offsets are exact — while
+    // non-ASCII text keeps the streaming decode walk (the fast path
+    // has no `char`-decode at all; both are pinned to the random-access
+    // oracle in the tests, and the ASCII/char split is differential-
+    // pinned by the corpus below, whose members straddle both paths).
+    if text.is_ascii() {
+        return paragraph_bounds_ascii(text);
+    }
+    // The non-ASCII walk as ONE streaming decode pass — a three-flag
+    // state machine (in-run, unit count, pending-CR) instead of the
+    // former whole-text `Vec<char>` collect with random access and a
+    // lookahead, the same #22 allocation class: O(text) time, O(1)
+    // memory beyond the output. The codepoint total the end-of-text
+    // close needs is the loop's own counter, read once AFTER the loop
+    // (the mid-loop `total = cp + 1` store the former spelling carried
+    // was never read in-flight, and its dead store was codegen luck to
+    // eliminate — the counter is not). The pending-CR flag IS the
+    // lookahead: a '\r' counts one unit and stays pending; a following
+    // '\n' completes the CRLF pair without adding a unit; anything
+    // else leaves the '\r' standing as its own unit (already counted).
     let mut bounds = Vec::new();
-    let mut total = 0usize;
+    let mut cp = 0usize;
     let mut seg_start = 0usize;
     let mut in_run = false;
     let mut run_start = 0usize;
     let mut units = 0usize;
     let mut pending_cr = false;
-    for (cp, ch) in text.chars().enumerate() {
-        total = cp + 1;
+    for ch in text.chars() {
         match ch {
             '\r' => {
                 if !in_run {
@@ -340,10 +353,12 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
                 }
             }
         }
+        cp += 1;
     }
     // End of text terminates a trailing run the same way: seg_start moves
     // past the run whenever the run qualifies (the push itself is guarded
     // by seg_start < run_start, the leading-empty-paragraph discard).
+    let total = cp;
     if in_run && units >= 2 {
         if seg_start < run_start {
             bounds.push((seg_start, run_start));
@@ -358,6 +373,95 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
     // case: the loop never runs, `total` stays 0, `0 < 0` is false.
     if seg_start < total {
         bounds.push((seg_start, total));
+    }
+    bounds
+}
+
+/// The ASCII spelling of [`paragraph_bounds`]' state machine: the same
+/// in-run/unit-count/pending-CR logic, visited only at break bytes —
+/// `memchr2(b'\r', b'\n')` hops between them over the content spans a
+/// paragraph scan has no per-byte work for at all (no content filter
+/// here), so a 12 MiB prose document costs the break hits, not 12M
+/// decode-and-match iterations. `after_break` (one past the last break
+/// byte) is the content-span edge the machine's non-break arm acts on:
+/// bytes between two hits are all non-break by construction, so
+/// `pos > after_break` IS "a content codepoint arrived", and the first
+/// such byte after a run is where the machine moves `seg_start`.
+fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let n = bytes.len(); // == total codepoints: pure ASCII
+    let mut bounds = Vec::new();
+    let mut seg_start = 0usize;
+    let mut in_run = false;
+    let mut run_start = 0usize;
+    let mut units = 0usize;
+    let mut pending_cr = false;
+    let mut after_break = 0usize;
+    for pos in memchr2_iter(b'\r', b'\n', bytes) {
+        if pos > after_break {
+            // Content intervened: close any open run exactly as the
+            // machine's non-break arm does (`seg_start` moves to the
+            // first content byte, which IS `after_break`).
+            if in_run && units >= 2 {
+                if seg_start < run_start {
+                    bounds.push((seg_start, run_start));
+                }
+                seg_start = after_break;
+            }
+            in_run = false;
+            pending_cr = false;
+        }
+        match bytes[pos] {
+            b'\r' => {
+                if !in_run {
+                    in_run = true;
+                    run_start = pos;
+                    units = 0;
+                }
+                units += 1;
+                pending_cr = true;
+            }
+            _ => {
+                if !in_run {
+                    in_run = true;
+                    run_start = pos;
+                    units = 0;
+                }
+                if pending_cr {
+                    // Completes the pending CRLF pair: one unit total.
+                    pending_cr = false;
+                } else {
+                    units += 1;
+                }
+            }
+        }
+        after_break = pos + 1;
+    }
+    // Trailing content (text does not end on a break byte) closes any
+    // open run the same way the next break byte would have — the
+    // in-loop close only runs at a hit, and a run left open by the LAST
+    // hit is not a trailing break run unless the text really ends on
+    // break bytes (`n == after_break`). The paragraph after that run is
+    // the final `(after_break, n)` span.
+    if n > after_break {
+        if in_run && units >= 2 {
+            if seg_start < run_start {
+                bounds.push((seg_start, run_start));
+            }
+            seg_start = after_break;
+        }
+        in_run = false;
+    }
+    // End of text on a break-byte run terminates it the way the
+    // machine's loop-exit does.
+    if in_run && units >= 2 {
+        if seg_start < run_start {
+            bounds.push((seg_start, run_start));
+        }
+        seg_start = n;
+    }
+    if seg_start < n {
+        bounds.push((seg_start, n));
     }
     bounds
 }
@@ -421,21 +525,28 @@ pub fn chunk_by_paragraphs(
 /// plus an orphan combining mark, not visible content any line's caller
 /// would call "split".
 pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
-    // The scan as ONE streaming decode pass, the same shape as
-    // `paragraph_bounds`' state machine (no whole-text `Vec<char>`
-    // collect, and no `char_count` pre-pass either: the codepoint total
-    // the end-of-text close needs is derived inside the walk, `total =
-    // cp + 1` per codepoint, so "one pass" is now literally true): a
-    // `pending_cr` flag is the CRLF lookahead, and a `has_non_ws` flag
-    // carries the real-line filter so the segment list is built in the
-    // same pass that finds the breaks. O(text) time, O(lines) memory.
+    // The same two-spelling split as `paragraph_bounds`: a SIMD
+    // `memchr2` walk over break bytes on pure-ASCII text (byte index
+    // IS codepoint index, so offsets are exact), the streaming decode
+    // state machine on non-ASCII text. Both are pinned to the
+    // random-access oracle in the tests.
+    if text.is_ascii() {
+        return line_bounds_ascii(text);
+    }
+    // The non-ASCII scan as ONE streaming decode pass, the same shape
+    // as `paragraph_bounds`' state machine (no whole-text `Vec<char>`
+    // collect, no `char_count` pre-pass, and no mid-loop `total` store
+    // either — the counter is read once after the loop, never stored
+    // per codepoint): a `pending_cr` flag is the CRLF lookahead, and a
+    // `has_non_ws` flag carries the real-line filter so the segment
+    // list is built in the same pass that finds the breaks. O(text)
+    // time, O(lines) memory.
     let mut bounds = Vec::new();
-    let mut total = 0usize;
+    let mut cp = 0usize;
     let mut seg_start = 0usize;
     let mut has_non_ws = false;
     let mut pending_cr = false;
-    for (cp, ch) in text.chars().enumerate() {
-        total = cp + 1;
+    for ch in text.chars() {
         match ch {
             '\r' => {
                 // Opens a break unit whether it stands alone or begins a
@@ -466,6 +577,7 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
                 pending_cr = false;
             }
         }
+        cp += 1;
     }
     // End of text closes the final line, and `has_non_ws` ALONE is the
     // phantom-line guarantee: it resets together with `seg_start` at
@@ -476,8 +588,81 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
     // argument and is gone. A trailing break unit already reset
     // `has_non_ws`; empty text never enters the loop, so the flag stays
     // false and `[]` falls out with no special case.
+    let total = cp;
     if has_non_ws {
         bounds.push((seg_start, total));
+    }
+    bounds
+}
+
+/// ASCII's exact `char::is_whitespace` image: the Unicode `White_Space`
+/// property's ASCII members are 0x09-0x0D and 0x20, and nothing else in
+/// ASCII (NBSP U+00A0, NEL U+0085 and the other White_Space codepoints
+/// are non-ASCII and take the char-machine path instead, where the real
+/// property is applied). Break bytes never reach this predicate inside
+/// a content span, but the full set is stated for the definitional
+/// match with the property.
+#[inline]
+fn is_ascii_ws(b: u8) -> bool {
+    matches!(b, 0x09..=0x0D | 0x20)
+}
+
+/// The ASCII spelling of [`line_bounds`]' state machine: `memchr2`
+/// hops between break bytes, and each hop's content span — the bytes
+/// since the last break unit's end, all non-break by construction —
+/// is folded into the real-line flag with one contiguous slice scan
+/// (auto-vectorized by the same compiler that would have nothing to
+/// vectorize in a per-`char` decode loop). The break-byte handling
+/// itself is the machine verbatim: `\r` closes the line at itself,
+/// a `\n` either completes a pending CRLF or closes the line at
+/// itself.
+fn line_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let n = bytes.len(); // == total codepoints: pure ASCII
+    let mut bounds = Vec::new();
+    let mut seg_start = 0usize;
+    let mut has_non_ws = false;
+    let mut pending_cr = false;
+    let mut after_break = 0usize;
+    for pos in memchr2_iter(b'\r', b'\n', bytes) {
+        if pos > after_break {
+            has_non_ws |= bytes[after_break..pos].iter().any(|&b| !is_ascii_ws(b));
+            pending_cr = false;
+        }
+        match bytes[pos] {
+            b'\r' => {
+                if has_non_ws {
+                    bounds.push((seg_start, pos));
+                }
+                seg_start = pos + 1;
+                has_non_ws = false;
+                pending_cr = true;
+            }
+            _ => {
+                if pending_cr {
+                    // Completes the CRLF pair: the line already ended at
+                    // the '\r'; the next line begins after this '\n'.
+                    seg_start = pos + 1;
+                    pending_cr = false;
+                } else {
+                    if has_non_ws {
+                        bounds.push((seg_start, pos));
+                    }
+                    seg_start = pos + 1;
+                    has_non_ws = false;
+                }
+            }
+        }
+        after_break = pos + 1;
+    }
+    // Trailing content after the last break byte closes the final line
+    // under the same flag the machine carries (an all-whitespace
+    // trailing span leaves it unset: no phantom line).
+    if n > after_break {
+        has_non_ws |= bytes[after_break..].iter().any(|&b| !is_ascii_ws(b));
+    }
+    if has_non_ws {
+        bounds.push((seg_start, n));
     }
     bounds
 }
@@ -670,13 +855,39 @@ mod tests {
     #[test]
     fn paragraph_state_machine_survives_a_deterministic_newline_soup() {
         // Pseudo-random text over exactly the alphabet the paragraph
-        // scanner branches on (\r, \n, CRLF pairings, and one ordinary
-        // character), so the state machine's unit counting is checked
-        // against the random-access oracle on runs no hand-written corpus
-        // anticipates — including runs that end at end-of-text.
+        // scanner branches on (\r, \n, CRLF pairings, whitespace, and
+        // one ordinary character), so the state machine's unit counting
+        // is checked against the random-access oracle on runs no
+        // hand-written corpus anticipates — including runs that end at
+        // end-of-text. The soup is pure ASCII, so every case exercises
+        // the memchr2 fast path against the oracle's per-char
+        // reference; the differential corpus above straddles the
+        // ASCII/char split with Thai and CJK members.
+        newline_soup(300);
+    }
+
+    #[test]
+    #[ignore] // the pre-PR long-run sweep: `cargo test -- --ignored` runs it
+    fn paragraph_state_machine_survives_a_200k_case_newline_soup() {
+        // The committed shape of the "hundreds of thousands of probe
+        // calls" a red-team pass runs ad hoc: same generator, same
+        // oracle, 200k cases — a couple of seconds in a debug build,
+        // which is why the default suite carries the 300-case cut and
+        // this is the explicitly-invoked long form.
+        newline_soup(200_000);
+    }
+
+    /// The deterministic newline soup itself: a splitmix-style LCG over
+    /// an alphabet of exactly the bytes both scanners branch on
+    /// (`\r`, `\n`, space/tab, an ordinary character), each text 1-60
+    /// codepoints, every case checked against BOTH random-access
+    /// oracles — `paragraph_bounds`' unit counting AND `line_bounds`'
+    /// blank-line/CRLF folding (its own reference, the same sweep the
+    /// line differential corpus runs, at soup scale instead).
+    fn newline_soup(cases: usize) {
         let mut state = 0x853C49E6748FEA9Bu64;
-        let alphabet = ['x', '\r', '\n'];
-        for _ in 0..300 {
+        let alphabet = ['x', ' ', '\t', '\r', '\n'];
+        for _ in 0..cases {
             let mut text = String::new();
             for _ in 0..(state % 60 + 1) as usize {
                 state = state
@@ -687,7 +898,12 @@ mod tests {
             assert_eq!(
                 paragraph_bounds(&text),
                 paragraph_bounds_reference(&text),
-                "divergence on {text:?}"
+                "paragraph divergence on {text:?}"
+            );
+            assert_eq!(
+                line_bounds(&text),
+                line_bounds_reference(&text),
+                "line divergence on {text:?}"
             );
         }
     }

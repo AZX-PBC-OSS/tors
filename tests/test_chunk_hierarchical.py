@@ -226,6 +226,19 @@ class TestNoneEntrySplice:
                     f"{text[max(0, p - 4) : p + 4]!r}"
                 )
 
+    def test_offsets_are_codepoint_offsets_on_astral_text(self) -> None:
+        # Each emoji is a single Python codepoint but four UTF-8 bytes,
+        # so a byte-offset regression would read (0, 9), (9, 14) here
+        # instead of the codepoint offsets below. The "\n" literal never
+        # fires on this text, so the spliced default hierarchy's word
+        # level supplies the cut -- and the offsets are str slicing
+        # units at every level, so slicing the chunks back out must
+        # return whole emoji, never a torn surrogate half.
+        text = "\U0001f600 \U0001f601 \U0001f602"  # 5 codepoints, 14 UTF-8 bytes
+        chunks = chunk_hierarchical(text, 3, ["\n", None])
+        assert chunks == [(0, 3), (3, 5)]
+        assert [text[s:e] for s, e in chunks] == ["\U0001f600 \U0001f601", " \U0001f602"]
+
     def test_spliced_sentence_fallback_keeps_the_us_team_whole(self) -> None:
         # The contrast that motivates the splice: on this thread with
         # max_chars=40, the naive literal hierarchy ["\n", ". ", " "] cuts
@@ -335,8 +348,18 @@ class TestGraphemeSafety:
 # Hypothesis properties
 # ---------------------------------------------------------------------------
 
+# The newline is deliberate: "\n" is category Cc, which the category
+# whitelist below never draws, so without it in the sampled set the
+# spliced-hierarchy property's ["\n", None] shape would carry a line
+# literal that can never FIRE -- dead weight above the splice, the same
+# shape test_a_never_matching_literal_above_a_none_entry_changes_nothing
+# pins deliberately, exercising no line cut at all. Sampling "\n" (and
+# "." and " ", already reachable through the categories but weighted up
+# here) lets every shape's literals actually match, so the splice
+# exercises its line level.
 _TEXT = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N", "Zs", "P"), max_codepoint=0x2FFF),
+    alphabet=st.sampled_from(["\n", ".", " "])
+    | st.characters(whitelist_categories=("L", "N", "Zs", "P"), max_codepoint=0x2FFF),
     max_size=300,
 )
 

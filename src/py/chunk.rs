@@ -429,6 +429,13 @@ pub fn chunk_by_paragraphs(
 /// returns `[]`. An empty `separators` list is legal and skips straight to
 /// the raw-cut fallback for every chunk.
 ///
+/// Cost at document scale is the levels your budget actually CONSULTS:
+/// each level's scan runs at most once per call, at its first
+/// consultation, so a budget that never falls past the paragraph level
+/// never pays the sentence or word walks at all, and duplicate entries
+/// (`None` or a repeated literal) are deduped — `[None] * 100` and
+/// `[" "] * 100` cost what the single entry does.
+///
 /// GIL model: identical to `chunk_by_words`. The whole multi-level scan
 /// runs under one `py.detach`; the return marshalling is O(chunks)
 /// 2-tuples of ints.
@@ -457,6 +464,13 @@ pub fn chunk_hierarchical(
     }
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
+    // The one intermediate materialization pyo3's borrowed-Vec
+    // limitation forces (`Option<Vec<Option<&str>>>` cannot be extracted
+    // directly: FromPyObject is not general enough over the borrowed
+    // element lifetime): O(list) transient, owned Strings freed with the
+    // call. The slot list the core builds from it is O(DISTINCT entries)
+    // after the dedup, so the pathological `[None] * N` spellings pay
+    // this pass and nothing beyond it.
     let seps: Option<Vec<Option<&str>>> = separators
         .as_ref()
         .map(|v| v.iter().map(|entry| entry.as_deref()).collect());

@@ -242,7 +242,7 @@ The scope cuts below are decisions, not oversights:
 
 - **General regex.** `find_patterns`/`replace_many` are leftmost-longest multi-pattern
   literal search, not a regex engine; `chunk_hierarchical`'s `separators` are literal
-  strings, not patterns.
+  strings — or `None`, splicing in the default hierarchy — not patterns.
 - **Schema-aware JSON/YAML coercion.** The JSON side moved IN with the
   `repair_json` family: syntax repair of malformed JSON and schema-guided
   alignment/coercion against a JSON Schema are algorithms — a repair
@@ -347,18 +347,29 @@ widens further (17–21 ms vs 250–272 ms).
 object with only a SIMD sentinel scan: 2.4–7.7 ms where a full pass costs 100+ ms
 (28–45× faster).
 
-**Chunking at document scale costs its segmentation walks, not per-codepoint
-bookkeeping.** `chunk_hierarchical` over 12 MiB of prose with the default
-paragraph→sentence→word hierarchy and a 2000-codepoint budget runs in ~350 ms — its
-own word walk (~130 ms) plus its sentence walk (~190 ms) — and a custom hierarchy
-whose separators never match, under a whole-document budget, in ~3 ms: one codepoint
-count plus one literal scan, nothing else. The unit-count twins moved the same way
-(`chunk_by_words` 12 MiB: ~1.9 s → ~160 ms). These functions used to build a
+**Chunking at document scale costs the segmentation walks it actually consults, not
+per-codepoint bookkeeping or levels it never reaches.** `chunk_hierarchical` builds
+each separator level at its first consultation, so over 12 MiB of prose with the
+default paragraph→sentence→word hierarchy and a 2000-codepoint budget — where every
+window is answered at the paragraph level — only the paragraph walk runs: ~3.4 ms,
+against ~350 ms for the eager level builds it replaced, which scanned its word walk
+(~130 ms) plus sentence walk (~190 ms) up front whatever the budget asked. Duplicate
+separators are deduped at list construction — `None` and repeated literals both — so
+`[None] * 100` costs what `[None]` does (~1.7 ms at a 2000-codepoint budget over
+6 MiB; the per-duplicate spelling measured 17.2 s and +3,120 MiB of peak RSS) and
+`[" "] * 100` what `[" "]` does (~9 ms; was 790 ms and +1,560 MiB). A custom
+hierarchy whose separators never match, under a whole-document budget, is one
+codepoint count and nothing else (~2.5 ms): no window consults a level, so not even
+the literal's scan runs. The line and paragraph twins gained an ASCII `memchr2` fast
+path on top: `chunk_by_lines` over 12 MiB of prose at 50 lines/chunk went ~14 ms →
+~0.4 ms, and `chunk_by_paragraphs` at 5 went ~10 ms → ~0.5 ms (non-ASCII keeps the
+char machine, outputs differential-pinned identical). These functions used to build a
 `Vec<char>` of the whole text plus a `HashSet` of every grapheme boundary —
 unconditionally, before any early exit could matter — which dominated their cost and
 grew superlinearly; that machinery is now a lazily-built one-bit-per-codepoint bitmap
 (two SIMD scans on pure-ASCII text, no segmentation walk), differential-pinned to the
-old behavior. The measurement cells live in `tools/bench_chunking.py` and the
+old behavior, with `chunk_by_words` carrying the same history (12 MiB: ~1.9 s →
+~160 ms). The measurement cells live in `tools/bench_chunking.py` and the
 `chunk_hierarchical`/`chunk_by_segment` criterion groups; the wall contracts gate in
 `tests/test_performance.py`.
 
