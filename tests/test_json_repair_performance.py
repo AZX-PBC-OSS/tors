@@ -166,6 +166,34 @@ def _seq_merge_payload(count: int) -> str:
     return '{"a":[1]' + ", [2]" * count + "}"
 
 
+def test_escaped_delimiter_run_wall_scales_linearly_not_quadratically() -> None:
+    """The escape normalizer's pop-then-push repairs carry a one-level
+    undo record (see StringParseState's field docs), so quadrupling the
+    escaped-delimiter count quadruples the work: the 32k-fragment wall
+    stays within a small factor of 4x the 8k-fragment wall. The
+    whole-accumulator rescan this gate pins out was O(n^2) — 16x per
+    quadrupling, ~1.2s at 16k fragments. Machine-speed-immune by
+    construction: a ratio of two walls on the same box."""
+    frag = r'{\"k\": 1}'
+
+    def payload(count: int) -> str:
+        return "{" + frag * count + "}"
+
+    small = _min_wall_ms(
+        lambda p: tors.repair_json(p, skip_json_loads=True), payload(8_000)
+    )
+    large = _min_wall_ms(
+        lambda p: tors.repair_json(p, skip_json_loads=True), payload(32_000)
+    )
+    # Linear scaling: 4x the fragments = 4x the wall; 1.5x slack for cache
+    # effects. Quadratic would need 16x and fails loudly.
+    assert large < 6.0 * small, (
+        f"escaped-delimiter runs scale super-linearly: 32k {large:.1f}ms vs "
+        f"8k {small:.1f}ms (ratio {large / small:.1f}x; linear would be "
+        "~4x) — the whole-accumulator rescan is back"
+    )
+
+
 def test_sequential_merge_wall_scales_linearly_not_quadratically() -> None:
     """The array-merge continuation maintains its row-width summary
     incrementally across a same-level merge run (the summary lives in

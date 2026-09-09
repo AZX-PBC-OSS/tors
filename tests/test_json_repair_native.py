@@ -711,6 +711,29 @@ class TestRobustness:
             '{"a":[0],["b":[0],1]', strict=True, skip_json_loads=True
         ) == {"a": [0], "b": [0]}
 
+    def test_escaped_delimiter_run_in_a_string_body_is_not_quadratic(self) -> None:
+        # `{` + `{\"k\": 1}` * n + `}` puts 2n escaped quotes through
+        # scan_string_body's escape normalizer; every pop-then-push repair
+        # used to rebuild the brace/class counters by rescanning the WHOLE
+        # accumulator (O(n^2): ~1.2s at 16k fragments, minutes at the MiB
+        # scale — 2.05e9 chars scanned for a 160 KB document, measured).
+        # The one-level undo record makes each repair O(1). Absolute wall
+        # bound with a large margin over the linear cost (~8ms at 32k) and
+        # far under the quadratic (~5s at 32k); the shape is pinned too, so
+        # a fast-but-wrong path cannot pass on the wall bound alone.
+        import time as _time
+
+        n = 32_000
+        payload = "{" + r'{\"k\": 1}' * n + "}"
+        start = _time.perf_counter()
+        result = repair_json_loads(payload, skip_json_loads=True)
+        elapsed = _time.perf_counter() - start
+        assert elapsed < 1.5, (
+            f"escaped-delimiter run took {elapsed:.2f}s at {n} fragments — "
+            "the whole-accumulator rescan is back"
+        )
+        assert result == {}
+
     def test_recursion_class_grammar_sweep_stays_total(self) -> None:
         # A seeded sweep over a grammar of every stack-growing construct the
         # parser has — both continuation merges (the array-merge chain
