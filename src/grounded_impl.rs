@@ -647,6 +647,24 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_the_refinement_pass_respects_a_generous_deadline() {
+        // The straddled one-typo geometry (lead 10: coarse best ~0.73 <
+        // 0.85, only the refinement finds it) under a generous budget: the
+        // refinement's own per-window deadline checks must all pass and the
+        // verdict arrive — the deadline plumbing on the refinement path,
+        // which the zero-budget tests never reach (they expire at the
+        // coarse stage). 60s against microsecond-scale work is
+        // machine-speed-immune.
+        let claim = "the bushing torque specifications changed";
+        let near = "the bushing torqxe specifications changed";
+        let source = format!("{}{}{}", "q".repeat(10), near, "q".repeat(60));
+        assert_eq!(
+            is_grounded_fuzzy(claim, &source, 0.85, Some(60_000.0)),
+            Ok(true)
+        );
+    }
+
+    #[test]
     fn fuzzy_a_near_exact_non_substring_clears_the_default_but_never_one() {
         // One substitution, so the exact-containment floor cannot
         // short-circuit and the windowed scorer must produce the verdict:

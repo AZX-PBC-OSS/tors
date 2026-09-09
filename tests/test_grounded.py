@@ -484,3 +484,18 @@ class TestDeadline:
             is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
             is True
         )
+
+    def test_the_refinement_pass_respects_a_generous_deadline(self) -> None:
+        # The straddled one-typo geometry (lead 10: coarse best ~0.73 < 0.85,
+        # only the refinement finds it) under a generous budget: the
+        # refinement's per-window deadline checks must all pass and the
+        # verdict arrive — the deadline plumbing on the refinement path,
+        # which the zero-budget test above never reaches (it expires at the
+        # coarse stage). 60s against microsecond work is machine-immune.
+        claim = "the bushing torque specifications changed"
+        near = "the bushing torqxe specifications changed"
+        source = ("q" * 10) + near + ("q" * 60)
+        assert (
+            is_grounded(claim, source, fuzzy=True, threshold=0.85, deadline_ms=60_000.0)
+            is True
+        )
