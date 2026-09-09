@@ -4,10 +4,12 @@
 //! offsets, feeds `merkle_root`/`merkle_diff`'s dedup/incremental-sync
 //! use) — plus the document-scale regression lane for
 //! `chunk_hierarchical` and the unit-count chunkers (`chunk_by_words`/
-//! `chunk_by_sentences`), the cells issue #22 measured: a per-call cost
-//! that used to be dominated by unconditional per-codepoint structures
-//! (a whole-text `Vec<char>` plus a `HashSet<usize>` of every grapheme
-//! boundary) and is now the segmentation walks themselves. The first two
+//! `chunk_by_sentences`/`chunk_by_lines`), the cells issue #22 measured
+//! — joined by `chunk_by_lines`, the family's newest spelling, for the
+//! same story: a per-call cost that used to be dominated by
+//! unconditional per-codepoint structures (a whole-text `Vec<char>` plus
+//! a `HashSet<usize>` of every grapheme boundary) and is now the
+//! segmentation walks themselves. The first two
 //! groups bench together because the module they live in
 //! (`src/chunk_impl.rs`) frames them as the two halves of one chunking
 //! story, not because they share an engine — see that file's own module
@@ -89,15 +91,20 @@ fn bench_chunk_cdc(c: &mut Criterion) {
 }
 
 /// The #22 document-scale lane: `chunk_hierarchical` at both hierarchy
-/// kinds plus the two merge-based unit-count chunkers, at the issue's own
-/// cell shapes. The `never-match` cells (a custom separator list that
+/// kinds plus the unit-count chunkers — the merge-based pair
+/// (`by_words`/`by_sentences`) at the issue's own cell shapes, and the
+/// merge-free `by_lines` sibling at a corpus-derived one (no issue cell
+/// exists for it to mirror; the cell's own comment derives the budget).
+/// The `never-match` cells (a custom separator list that
 /// matches nothing, whole-document budget) isolate the per-call machinery
 /// — one count pass, one scan pass, no grapheme structure; the
 /// `default_2000` cells are the segmentation walks the function exists to
 /// provide; `by_words`/`by_sentences` are the unit-count spellings that
-/// carry the same boundary index. 12 MiB cells drop the sample count (the
-/// `chunk_cdc` 100 MiB precedent): ~300 ms per iteration does not need
-/// criterion's default 100 samples to hold a stable line.
+/// carry the same boundary index, `by_lines` the sibling that carries
+/// none (its line breaks are structurally grapheme-safe). 12 MiB cells
+/// drop the sample count (the `chunk_cdc` 100 MiB precedent): ~300 ms
+/// per iteration does not need criterion's default 100 samples to hold
+/// a stable line.
 fn bench_chunk_hierarchical(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunk_hierarchical");
     for target_bytes in [1024 * 1024, 12 * 1024 * 1024] {
@@ -127,7 +134,12 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
         |bench, q| {
             let budget = 12 * 1024 * 1024;
             bench.iter(|| {
-                chunk_hierarchical_impl::chunk_hierarchical(black_box(q), budget, Some(&["xyz"]), 0)
+                chunk_hierarchical_impl::chunk_hierarchical(
+                    black_box(q),
+                    budget,
+                    Some(&[Some("xyz")]),
+                    0,
+                )
             })
         },
     );
@@ -148,6 +160,17 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
         |bench, text| {
             bench.iter(|| chunk_by_segment_impl::chunk_by_sentences(black_box(text), 10, 0))
         },
+    );
+    // No issue-#22 cell to mirror (words/sentences above have those),
+    // and the shared prose corpus is paragraph-shaped — one content
+    // line per 666-byte unit, 18,893 content lines in this 12 MiB
+    // text — so the budget is corpus-derived: 50 lines per chunk keeps
+    // the windowing meaningful (378 chunks; a 2000-line window would
+    // collapse the same text to 10).
+    group.bench_with_input(
+        BenchmarkId::new("by_lines_50", format!("{}B", text.len())),
+        &text,
+        |bench, text| bench.iter(|| chunk_by_segment_impl::chunk_by_lines(black_box(text), 50, 0)),
     );
     group.finish();
 }

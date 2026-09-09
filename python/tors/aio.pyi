@@ -13,54 +13,30 @@ from typing import Literal
 from tors import CompiledLemmaDict, _StemmerLanguage
 
 async def normalize(text: str) -> str: ...
-
-
 async def finalize(text: str) -> tuple[str, str]: ...
-
-
 async def strip_controls(text: str) -> str: ...
-
-
 async def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
-
-
 async def finalize_utf8(
     raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
 ) -> tuple[str, str]: ...
-
-
 async def b64_encode_bytes(raw: bytes) -> str: ...
-
-
 async def b64_decode(s: str, *, validate: bool = True) -> bytes: ...
-
-
 async def decode_utf16(
     raw: bytes,
     *,
     errors: Literal["strict", "replace"] = "strict",
     byteorder: Literal["native", "little", "big"] = "native",
 ) -> str: ...
-
-
 async def diff_opcodes(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
-
-
 async def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
-
-
 async def truncate_ellipsis(text: str, max_chars: int) -> str: ...
-
-
 async def chunk_cdc(
     data: bytes, *, min_size: int = 4096, avg_size: int = 16384, max_size: int = 65534
 ) -> list[tuple[int, int]]: ...
-
-
 async def chunk_text(
     text: str,
     max_chars: int,
@@ -68,32 +44,25 @@ async def chunk_text(
     overlap: int = 0,
     boundary: Literal["word", "sentence"] = "word",
 ) -> list[tuple[int, int]]: ...
-
-
 async def chunk_by_words(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
-
-
 async def chunk_by_sentences(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
-
-
 async def chunk_by_paragraphs(
     text: str, paragraphs_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
-
-
+async def chunk_by_lines(
+    text: str, lines_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
 async def chunk_hierarchical(
     text: str,
     max_chars: int,
-    separators: list[str] | None = None,
+    separators: list[str | None] | None = None,
     *,
     overlap: int = 0,
 ) -> list[tuple[int, int]]: ...
-
-
 async def tf_idf(
     corpus: list[str],
     *,
@@ -101,8 +70,6 @@ async def tf_idf(
     stemmer: _StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[list[tuple[str, float]]]: ...
-
-
 async def bm25_rank(
     query: str,
     corpus: list[str],
@@ -113,8 +80,6 @@ async def bm25_rank(
     stemmer: _StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
-
-
 async def apply_pipeline(
     texts: list[str],
     *,

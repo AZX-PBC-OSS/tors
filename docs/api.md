@@ -253,7 +253,9 @@ GIL released, and a writable buffer would be a data race, not a semantic differe
 ## `tors.finalize_utf8`
 
 ```python
-def finalize_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> tuple[str, str]: ...
+def finalize_utf8(
+    raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
+) -> tuple[str, str]: ...
 ```
 
 Decode + normalize + hash in one GIL-released call:
@@ -356,8 +358,8 @@ already covers it; a fused decode+normalize+hash twin has no demonstrated caller
 unlike `finalize_utf8`'s.
 
 ```python
-tors.decode_utf16(b"\xff\xfeh\x00i\x00")                        # "hi"
-tors.decode_utf16(b"h\x00i", errors="replace")                  # "h�"
+tors.decode_utf16(b"\xff\xfeh\x00i\x00")  # "hi"
+tors.decode_utf16(b"h\x00i", errors="replace")  # "h�"
 ```
 
 **Async**: `await tors.aio.decode_utf16(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
@@ -365,7 +367,9 @@ tors.decode_utf16(b"h\x00i", errors="replace")                  # "h�"
 ## `tors.utf16_is_valid`
 
 ```python
-def utf16_is_valid(raw: bytes, *, byteorder: Literal["native", "little", "big"] = "native") -> bool: ...
+def utf16_is_valid(
+    raw: bytes, *, byteorder: Literal["native", "little", "big"] = "native"
+) -> bool: ...
 ```
 
 `tors.utf8_is_valid`'s shape for the UTF-16 side: `True` exactly when
@@ -373,8 +377,8 @@ def utf16_is_valid(raw: bytes, *, byteorder: Literal["native", "little", "big"] 
 materialized on either path.
 
 ```python
-tors.utf16_is_valid(b"h\x00i\x00")                              # True
-tors.utf16_is_valid(b"h\x00i")                                  # False
+tors.utf16_is_valid(b"h\x00i\x00")  # True
+tors.utf16_is_valid(b"h\x00i")  # False
 ```
 
 ## `tors.detect_encoding`
@@ -712,9 +716,9 @@ then accepts only the empty replacements dict. Immutable once built: there is no
 add or remove a pattern from an existing `CompiledPatterns`.
 
 ```python
-cp = tors.CompiledPatterns(["cat", "catalogue"])   # pay the automaton build once
+cp = tors.CompiledPatterns(["cat", "catalogue"])  # pay the automaton build once
 for doc in corpus:
-    cp.find(doc)                                    # O(1) automaton reuse per call
+    cp.find(doc)  # O(1) automaton reuse per call
 cp.replace_many("the cat sat", {"cat": "dog", "catalogue": "library"})
 # 'the dog sat'
 ```
@@ -722,7 +726,9 @@ cp.replace_many("the cat sat", {"cat": "dog", "catalogue": "library"})
 ## `tors.extract_code_blocks`
 
 ```python
-def extract_code_blocks(text: str, lang: str | None = None) -> list[tuple[str | None, str, int, int]]: ...
+def extract_code_blocks(
+    text: str, lang: str | None = None
+) -> list[tuple[str | None, str, int, int]]: ...
 ```
 
 Extracts every fenced code block in `text` per CommonMark §4.5's fenced-code-block
@@ -1185,7 +1191,9 @@ value, diags = tors.repair_json_diagnostics(
 ## `tors.truncate_to_bounds`
 
 ```python
-def truncate_to_bounds(text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word") -> str: ...
+def truncate_to_bounds(
+    text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"
+) -> str: ...
 ```
 
 Truncates `text` to at most `max_chars` codepoints, one GIL-released native pass,
@@ -1313,8 +1321,9 @@ in `[0.0, 1.0]`.
 ```python
 tors.is_grounded("cat", "the cat sat")
 # True
-tors.is_grounded("the cat sat", "Lorem ipsum. The cats sit on mats today.",
-                  fuzzy=True, threshold=0.6)
+tors.is_grounded(
+    "the cat sat", "Lorem ipsum. The cats sit on mats today.", fuzzy=True, threshold=0.6
+)
 # True
 ```
 
@@ -1322,6 +1331,7 @@ tors.is_grounded("the cat sat", "Lorem ipsum. The cats sit on mats today.",
 
 ```python
 def similarity_ratio(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
+
 
 def get_close_matches(
     word: str,
@@ -1487,10 +1497,10 @@ callers who round-trip `surrogateescape`-decoded text (e.g. from `os.fsdecode`) 
 `unquote` should be aware of it.
 
 ```python
-tors.quote("café/data", "/")           # "caf%C3%A9/data"
-tors.quote_plus("a b+c")               # "a+b%2Bc"
-tors.unquote("caf%C3%A9%20data")       # "café data"
-tors.unquote_plus("a+b%2Bc")           # "a b+c"
+tors.quote("café/data", "/")  # "caf%C3%A9/data"
+tors.quote_plus("a b+c")  # "a+b%2Bc"
+tors.unquote("caf%C3%A9%20data")  # "café data"
+tors.unquote_plus("a+b%2Bc")  # "a b+c"
 ```
 
 ## `tors.chunk_text`
@@ -1574,7 +1584,9 @@ list(tors.chunk_text_iter("cats are cute and cats are fun", 12))
 ## `tors.chunk_by_words`
 
 ```python
-def chunk_by_words(text: str, words_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
+def chunk_by_words(
+    text: str, words_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
 ```
 
 **Async**: `await tors.aio.chunk_by_words(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
@@ -1622,7 +1634,9 @@ tors.chunk_by_words("one two three four five six seven", 3, overlap=1)
 ## `tors.chunk_by_words_iter`
 
 ```python
-def chunk_by_words_iter(text: str, words_per_chunk: int, *, overlap: int = 0) -> Iterator[tuple[int, int]]: ...
+def chunk_by_words_iter(
+    text: str, words_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
 ```
 
 `chunk_by_words`' streaming twin, the same `chunk_text_iter` shape: one detached
@@ -1637,7 +1651,9 @@ list(tors.chunk_by_words_iter("one two three four five six seven", 3))
 ## `tors.chunk_by_sentences`
 
 ```python
-def chunk_by_sentences(text: str, sentences_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
+def chunk_by_sentences(
+    text: str, sentences_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
 ```
 
 **Async**: `await tors.aio.chunk_by_sentences(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
@@ -1655,7 +1671,9 @@ tors.chunk_by_sentences("One. Two. Three. Four. Five.", 2)
 ## `tors.chunk_by_sentences_iter`
 
 ```python
-def chunk_by_sentences_iter(text: str, sentences_per_chunk: int, *, overlap: int = 0) -> Iterator[tuple[int, int]]: ...
+def chunk_by_sentences_iter(
+    text: str, sentences_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
 ```
 
 `chunk_by_sentences`' streaming twin, the same `chunk_text_iter` shape.
@@ -1668,7 +1686,9 @@ list(tors.chunk_by_sentences_iter("One. Two. Three. Four. Five.", 2))
 ## `tors.chunk_by_paragraphs`
 
 ```python
-def chunk_by_paragraphs(text: str, paragraphs_per_chunk: int, *, overlap: int = 0) -> list[tuple[int, int]]: ...
+def chunk_by_paragraphs(
+    text: str, paragraphs_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
 ```
 
 **Async**: `await tors.aio.chunk_by_paragraphs(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
@@ -1691,14 +1711,91 @@ tors guarantees the mechanical contract (correct boundaries, genuine overlap, th
 right knobs), not an outcome it doesn't control.
 
 ```python
-tors.chunk_by_paragraphs("First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here.", 2)
+tors.chunk_by_paragraphs(
+    "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here.", 2
+)
 # [(0, 45), (47, 68)]
+```
+
+## `tors.chunk_by_lines`
+
+```python
+def chunk_by_lines(
+    text: str, lines_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
+```
+
+**Async**: `await tors.aio.chunk_by_lines(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+
+`chunk_by_words`/`chunk_by_sentences`/`chunk_by_paragraphs`'s line-count twin: each
+chunk spans `lines_per_chunk` consecutive lines, `overlap` LINES repeated at the start
+of the next chunk. A line break is a `\n`, a lone `\r`, or a `\r\n` pair counted as
+ONE unit (the same CR/CRLF folding convention `chunk_by_paragraphs` and `normalize`'s
+own pipeline use; `str.splitlines`' exotic separators — `\v`, `\f`, NEL, LS, PS —
+are NOT breaks here). A line counts as a line only when it carries at least one
+non-whitespace codepoint, the same real-token discipline `chunk_by_words` applies to
+word segments: blank lines neither count toward `lines_per_chunk` nor split a chunk's
+interior — they ride along inside a chunk's span exactly as inter-word whitespace
+rides along in `chunk_by_words`, so `lines_per_chunk=200` means 200 content lines.
+`(start, end)` codepoint offsets span the first included line's start through the
+last included line's end (NOT through the trailing break after it, so unlike
+`chunk_text`'s covering-partition contract, non-overlapping chunks here are not
+necessarily contiguous); a trailing break at end of text yields no trailing empty
+line. The final chunk may hold fewer lines when the total doesn't divide evenly.
+Empty text, or text with no content lines at all, returns `[]`. Same argument
+contract, same empty-input answer, same forward-progress-by-construction guarantee
+as its siblings.
+
+The line-oriented-text shape this exists for: one message per line (a chat thread),
+one record per line (a log), one cue per block. Cost at document scale: ONE
+streaming decode pass (the line scan and the real-line filter fused, O(text) time,
+O(1) memory beyond the output) — no segmentation walk and no grapheme boundary
+index at all, unlike `chunk_by_words`/`chunk_by_sentences`: every split lands
+strictly between a break character and adjacent content, so the split point is
+structurally grapheme-safe with nothing to check.
+
+```python
+log = "INFO boot\nINFO ready\n\nWARN disk at 90%\nERROR io failure\nINFO retry ok\n\nINFO shutdown"
+
+tors.chunk_by_lines(log, 2)
+# [(0, 20), (22, 55), (56, 84)] — 6 content lines, 3 chunks of exactly 2: the
+# blank between chunks 1 and 2 falls in the gap (chunk 2 starts at "WARN"),
+# while the blank inside the final chunk rides along, never counted
+tors.chunk_by_lines(log, 2, overlap=1)
+# [(0, 20), (10, 38), (22, 55), (39, 69), (56, 84)] — overlap repeats whole
+# LINES: (10, 38) is "INFO ready\n\nWARN disk at 90%", blank riding along
+```
+
+## `tors.chunk_by_lines_iter`
+
+```python
+def chunk_by_lines_iter(
+    text: str, lines_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
+```
+
+`chunk_by_lines`' streaming twin, the same `chunk_text_iter` shape: one detached
+whole-text pass at construction, one 2-tuple per `__next__`, identical sequence to
+the list API. Like every `_iter` spelling it has no async twin (an iterator is not
+an awaitable shape; see the README's Async use section) — and it exists for the
+same reason as the other `_iter` twins: the list shape's GIL-held marshalling
+cost is measured for segment-count-heavy outputs (`word_bounds` on 12 MiB of
+prose, 3.67M segments, holds the GIL for 428–497 ms just marshalling the list,
+the README's disclosed numbers), and a line-oriented corpus (a multi-MiB log or
+transcript) is in that piece-count class, chunking into hundreds of thousands
+of pieces.
+
+```python
+list(tors.chunk_by_lines_iter(log, 2))
+# [(0, 20), (22, 55), (56, 84)]
 ```
 
 ## `tors.chunk_hierarchical`
 
 ```python
-def chunk_hierarchical(text: str, max_chars: int, separators: list[str] | None = None, *, overlap: int = 0) -> list[tuple[int, int]]: ...
+def chunk_hierarchical(
+    text: str, max_chars: int, separators: list[str | None] | None = None, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
 ```
 
 **Async**: `await tors.aio.chunk_hierarchical(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
@@ -1724,6 +1821,21 @@ hierarchy for the levels it specifies, but the grapheme-safe raw cut is
 still always appended as the final fallback regardless; unlike LangChain,
 no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
+
+An entry in that list may also be `None`: it splices the default
+hierarchy's three accurate levels in AT THAT POSITION, the mix an
+all-literal list could not express before. `["\n", None]` is
+line → paragraph → sentence → word → raw cut — the line-oriented-text
+shape (a chat thread, one message per line, never split mid-line) whose
+oversized-line fallback is the REAL UAX #29 sentence/word segmenter
+rather than the `". "`/`" "` literal guesses an all-literal
+`["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
+sentence boundary, and the naive list severs `"U.S. team"` where the
+spliced hierarchy does not. `[None]` is identical to `separators=None`.
+Cost stated plainly: a `None` entry pays the same three whole-text walks
+the default hierarchy pays (paragraph, sentence, word — the ~350 ms the
+12 MiB measurement below shows), once per call, on top of one scan per
+literal.
 
 **Unlike `chunk_text`, this is NOT a lossless covering partition**: at
 every level except the raw cut, the separator itself is DROPPED between
@@ -1768,14 +1880,33 @@ No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,
 genuine overlap, the right knobs), not an outcome it doesn't control. This
 is additive: `chunk_text`/`chunk_by_words`/`chunk_by_sentences`/
-`chunk_by_paragraphs` remain the right choice for the common case;
-`chunk_hierarchical` is for custom, format-aware, or multi-granularity
-needs those simpler functions can't express.
+`chunk_by_paragraphs`/`chunk_by_lines` remain the right choice for the
+common case; `chunk_hierarchical` is for custom, format-aware, or
+multi-granularity needs those simpler functions can't express.
 
 ```python
 md = "# Title\nSome intro text here.\n## Section\nMore content in this section."
 tors.chunk_hierarchical(md, 60, ["\n## ", "\n\n", ". ", " "])
 # [(0, 29), (33, 70)]  ->  "# Title\nSome intro text here." / "Section\nMore content in this section."
+
+thread = (
+    "Nathan: kicking off the sync.\n"
+    "Priya: We briefed the U.S. team on the numbers. "
+    "They asked for a follow-up meeting. The budget holds.\n"
+    "Nathan: done."
+)
+tors.chunk_hierarchical(thread, 60, ["\n", None])
+# [(0, 29), (30, 78), (78, 131), (132, 145)]
+#  -> whole lines where they fit; the oversized Priya line falls to REAL
+#     sentence boundaries ("on the numbers. " / "meeting. The budget holds.")
+
+tors.chunk_hierarchical(thread, 40, ["\n", ". ", " "])[1]
+# (30, 55)  -> "Priya: We briefed the U.S" — the naive ". " list severs the name
+tors.chunk_hierarchical(thread, 40, ["\n", None])[1]
+# (30, 69)  -> "Priya: We briefed the U.S. team on the " — the splice does not
+
+tors.chunk_hierarchical(thread, 24, [None]) == tors.chunk_hierarchical(thread, 24)
+# True — [None] IS separators=None
 ```
 
 ## `tors.chunk_cdc`
@@ -2176,7 +2307,7 @@ after the one-time build: measured at roughly 57x faster than the raw-
 point is paying it once instead of on every call:
 
 ```python
-compiled = tors.CompiledLemmaDict(lemma_dict)   # pay the cost once
+compiled = tors.CompiledLemmaDict(lemma_dict)  # pay the cost once
 for batch in many_batches:
     tors.apply_pipeline(batch, lowercase=True, lemma_dict=compiled)  # O(1) per call after
 ```
@@ -2307,9 +2438,11 @@ correctly implemented here, not a model-quality promise.
 ```python
 tors.bm25_rank(
     "quick fox",
-    ["the quick brown fox jumps over the lazy dog",
-     "a lazy cat sleeps all day",
-     "the fox and the dog are friends"],
+    [
+        "the quick brown fox jumps over the lazy dog",
+        "a lazy cat sleeps all day",
+        "the fox and the dog are friends",
+    ],
 )
 # [(0, 1.3162195220480066), (2, 0.4798180901812613), (1, 0.0)]
 
@@ -2398,13 +2531,17 @@ choice; a non-`dict` `lemma_dict`, or one with a non-`str` key/value,
 raises `TypeError`.
 
 ```python
-tors.apply_pipeline(["  Café  RUNNERS   are   RUNNING!  "],
-    nfd=True, lowercase=True, strip_accents=True, stemmer="english",
-    collapse_whitespace=True)
+tors.apply_pipeline(
+    ["  Café  RUNNERS   are   RUNNING!  "],
+    nfd=True,
+    lowercase=True,
+    strip_accents=True,
+    stemmer="english",
+    collapse_whitespace=True,
+)
 # [' cafe runner are run! ']
 
-tors.apply_pipeline(["This is better, right?"], lowercase=True,
-    lemma_dict={"better": "good"})
+tors.apply_pipeline(["This is better, right?"], lowercase=True, lemma_dict={"better": "good"})
 # ['this is good, right?']
 ```
 

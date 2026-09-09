@@ -34,6 +34,27 @@
 //! trailing `""`; tors does not require this, and ignores a trailing `""`
 //! if one is passed, since the raw cut already covers that case).
 //!
+//! A `None` ENTRY in an otherwise-literal list splices the default
+//! hierarchy's three accurate levels in AT THAT POSITION: the mix the
+//! all-or-nothing custom list could not express before. The motivating
+//! shape is line-oriented text that must never split mid-line but whose
+//! oversized lines still deserve ACCURATE fallback cuts — a chat thread,
+//! one message per line: `["\n", None]` is line → paragraph → sentence →
+//! word → raw cut, where the sentence/word levels below the line level
+//! are the real UAX #29 segmenters, not the `". "`/`" "` literal guesses
+//! an all-literal `["\n", ". ", " "]` list would pin them to (the guesses
+//! cut inside "U.S. team"; the segmenters do not — the exact reason the
+//! default hierarchy exists). `[None]` is therefore identical to
+//! `separators = None`. Cost stated plainly: a `None` entry pays the same
+//! three whole-text walks the default hierarchy does (paragraph, sentence,
+//! word), once per `None` entry — a caller mixing literals with `None`
+//! over a 12 MiB document pays the ~350 ms the README measures for the
+//! default hierarchy PER `None` entry, on top of one scan per literal;
+//! two `None` entries pay six walks. A repeated `None` is therefore
+//! pointless but inert — identical levels can never change the `find_map`
+//! answer (the first occurrence of a level always dominates its
+//! duplicate), so the duplicate only re-pays the walks.
+//!
 //! UNLIKE [`crate::chunk_impl::chunk_text`] (a lossless covering
 //! partition), this is NOT lossless: at every level except the raw-cut
 //! fallback, the separator itself is DROPPED between chunks (the chunk
@@ -158,6 +179,38 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
     Level { cuts }
 }
 
+/// The default hierarchy's three accurate levels, in coarsest-first
+/// order — the splice a `None` entry in a custom `separators` list
+/// inserts at its position, and the whole hierarchy when `separators` is
+/// `None`. One whole-text walk per level (`paragraph_bounds`, UAX #29
+/// `sentence_bounds`, UAX #29 `word_bounds`), each computed once per
+/// splice — once per `None` entry in a custom list, once for the whole
+/// default hierarchy — never per chunk.
+fn default_levels(text: &str) -> Vec<Level> {
+    vec![
+        level_from_paragraph_bounds(paragraph_bounds(text)),
+        level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
+        level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
+    ]
+}
+
+/// Build the caller-supplied levels from a `separators` list: a literal
+/// `Some(s)` is one [`level_from_literal`] scan; a `None` entry splices
+/// [`default_levels`] in at its position; an empty literal is a no-op
+/// level (dropped, the same filter the all-literal spelling always
+/// applied).
+fn custom_levels(text: &str, seps: &[Option<&str>]) -> Vec<Level> {
+    let mut levels = Vec::new();
+    for entry in seps {
+        match entry {
+            None => levels.extend(default_levels(text)),
+            Some("") => {}
+            Some(s) => levels.push(level_from_literal(text, s)),
+        }
+    }
+    levels
+}
+
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
 /// pairs, each chunk at most `max_chars` codepoints, cut at the COARSEST
 /// level (first in `levels`, excluding the always-appended grapheme-safe
@@ -170,8 +223,9 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 /// whole remaining budget (e.g. an oversized ZWJ emoji chain) is kept
 /// whole rather than split, so that one chunk can exceed `max_chars`:
 /// this never affects ordinary text (no cluster is more than a handful of
-/// codepoints). See the module docs for the default-vs-custom hierarchy
-/// and the separator-dropped (not lossless) contract. `overlap` snaps the next
+/// codepoints). See the module docs for the default-vs-custom hierarchy,
+/// the `None`-entry splice, and the separator-dropped (not lossless)
+/// contract. `overlap` snaps the next
 /// chunk's start backward from the just-emitted chunk's end to the nearest
 /// GRAPHEME boundary at or before the target (never mid-cluster): NOT
 /// necessarily a semantic word/sentence/paragraph boundary the way
@@ -185,7 +239,7 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 pub fn chunk_hierarchical(
     text: &str,
     max_chars: usize,
-    separators: Option<&[&str]>,
+    separators: Option<&[Option<&str>]>,
     overlap: usize,
 ) -> Vec<(usize, usize)> {
     if text.is_empty() {
@@ -208,16 +262,8 @@ pub fn chunk_hierarchical(
     let total = char_count(text);
 
     let mut levels: Vec<Level> = match separators {
-        Some(seps) => seps
-            .iter()
-            .filter(|s| !s.is_empty())
-            .map(|s| level_from_literal(text, s))
-            .collect(),
-        None => vec![
-            level_from_paragraph_bounds(paragraph_bounds(text)),
-            level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
-            level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
-        ],
+        Some(seps) => custom_levels(text, seps),
+        None => default_levels(text),
     };
     // The grapheme boundary index: built lazily, AT MOST ONCE per call, at
     // the first site that actually needs it — the cut filter below (only
@@ -316,7 +362,7 @@ mod tests {
     fn chunk_hierarchical_reference(
         text: &str,
         max_chars: usize,
-        separators: Option<&[&str]>,
+        separators: Option<&[Option<&str>]>,
         overlap: usize,
     ) -> Vec<(usize, usize)> {
         if text.is_empty() {
@@ -326,12 +372,31 @@ mod tests {
         let chars: Vec<char> = text.chars().collect();
         let total = chars.len();
 
+        // The oracle keeps its OWN inline level building (not the new
+        // `default_levels`/`custom_levels` helpers) so the differential
+        // sweep below pins those helpers' output against this spelling,
+        // the same way it pins the bitmap machinery: extended for the
+        // `None` entry in the former code's own inline style.
         let mut levels: Vec<Level> = match separators {
-            Some(seps) => seps
-                .iter()
-                .filter(|s| !s.is_empty())
-                .map(|s| level_from_literal(text, s))
-                .collect(),
+            Some(seps) => {
+                let mut built = Vec::new();
+                for entry in seps {
+                    match entry {
+                        None => {
+                            built.push(level_from_paragraph_bounds(paragraph_bounds(text)));
+                            built.push(level_from_contiguous_bounds(
+                                segmentation_impl::sentence_bounds(text),
+                            ));
+                            built.push(level_from_contiguous_bounds(
+                                segmentation_impl::word_bounds(text),
+                            ));
+                        }
+                        Some("") => {}
+                        Some(s) => built.push(level_from_literal(text, s)),
+                    }
+                }
+                built
+            }
             None => vec![
                 level_from_paragraph_bounds(paragraph_bounds(text)),
                 level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
@@ -415,16 +480,22 @@ mod tests {
 
     #[test]
     fn bitmap_lazy_spelling_matches_the_former_implementation_exactly() {
-        let separator_cases: Vec<Option<Vec<&str>>> = vec![
+        let separator_cases: Vec<Option<Vec<Option<&str>>>> = vec![
             None,
             Some(vec![]),
-            Some(vec!["ZZZ_NEVER_MATCHES"]),
-            Some(vec!["xyz"]),
-            Some(vec![" "]),
-            Some(vec![". "]),
-            Some(vec!["\n\n", " "]),
-            Some(vec!["\u{0E33}"]),
-            Some(vec!["", " "]),
+            Some(vec![Some("ZZZ_NEVER_MATCHES")]),
+            Some(vec![Some("xyz")]),
+            Some(vec![Some(" ")]),
+            Some(vec![Some(". ")]),
+            Some(vec![Some("\n\n"), Some(" ")]),
+            Some(vec![Some("\u{0E33}")]),
+            Some(vec![Some(""), Some(" ")]),
+            // The None-entry splice: alone (== default), under a literal
+            // (the line-first shape), above a literal, and mid-list.
+            Some(vec![None]),
+            Some(vec![Some("\n"), None]),
+            Some(vec![Some("\n## "), None, Some("\n")]),
+            Some(vec![Some(""), None]),
         ];
         for text in differential_corpus() {
             let total = text.chars().count();
@@ -440,7 +511,7 @@ mod tests {
                     .filter(|&o| o < max_chars)
                 {
                     for seps in &separator_cases {
-                        let sep_refs: Option<Vec<&str>> = seps.as_ref().map(|v| v.to_vec());
+                        let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
                         let new =
                             chunk_hierarchical(&text, max_chars, sep_refs.as_deref(), overlap);
                         let old = chunk_hierarchical_reference(
@@ -470,7 +541,7 @@ mod tests {
         let text = "0\u{0E33} 0\u{0E33} 0\u{0E33}";
         let boundaries: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
         for max_chars in 1..text.chars().count() {
-            let chunks = chunk_hierarchical(text, max_chars, Some(&["\u{0E33}"]), 0);
+            let chunks = chunk_hierarchical(text, max_chars, Some(&[Some("\u{0E33}")]), 0);
             assert!(!chunks.is_empty(), "no chunks at max_chars={max_chars}");
             for &(s, e) in &chunks {
                 assert!(
@@ -518,7 +589,12 @@ mod tests {
     #[test]
     fn custom_markdown_separators_split_on_headers_first() {
         let text = "# Title\nintro text\n## Section\nmore text here that is long";
-        let chunks = chunk_hierarchical(text, 40, Some(&["\n## ", "\n\n", ". ", " "]), 0);
+        let chunks = chunk_hierarchical(
+            text,
+            40,
+            Some(&[Some("\n## "), Some("\n\n"), Some(". "), Some(" ")]),
+            0,
+        );
         let texts = text_of(&chunks, text);
         assert_eq!(texts[0], "# Title\nintro text");
         assert!(texts.iter().any(|t| t.starts_with("Section")));
@@ -529,7 +605,7 @@ mod tests {
         // A single "word" with no boundary anywhere and no separator
         // match at all: only the grapheme-safe raw cut can produce chunks.
         let text = "a".repeat(100);
-        let chunks = chunk_hierarchical(&text, 10, Some(&["XYZ_NEVER_MATCHES"]), 0);
+        let chunks = chunk_hierarchical(&text, 10, Some(&[Some("XYZ_NEVER_MATCHES")]), 0);
         assert!(!chunks.is_empty());
         for &(s, e) in &chunks {
             assert!(e - s <= 10);
@@ -544,6 +620,149 @@ mod tests {
         let chunks = chunk_hierarchical(text, 5, Some(&[]), 0);
         for &(s, e) in &chunks {
             assert!(e - s <= 5);
+        }
+    }
+
+    // ---- The None entry: splicing the accurate hierarchy into a custom list ----
+
+    #[test]
+    fn none_entry_alone_reproduces_the_default_hierarchy_exactly() {
+        // [None] IS separators=None, and a never-matching literal above a
+        // None entry changes nothing (it can never supply a cut, so the
+        // spliced levels answer every window the default hierarchy would):
+        // exact-equality properties over the whole differential corpus and
+        // a budget sweep, far stronger than a couple of spot cases. A
+        // repeated None entry is the same inertness one level deeper: a
+        // duplicate's levels are identical to their first occurrence's,
+        // so the find_map can never reach a duplicate that changes an
+        // answer its original didn't already give — [None, None] IS
+        // [None], and the duplicated line-first list is the unduplicated
+        // one (the corpus texts contain "\n", so the literal genuinely
+        // matches: the pin is meaningful, not vacuous).
+        for text in differential_corpus() {
+            let total = text.chars().count();
+            for max_chars in 1..=total.min(48) {
+                assert_eq!(
+                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
+                    chunk_hierarchical(&text, max_chars, None, 0),
+                    "text={text:?} max_chars={max_chars}"
+                );
+                assert_eq!(
+                    chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        Some(&[Some("ZZZ_NEVER_MATCHES"), None]),
+                        0
+                    ),
+                    chunk_hierarchical(&text, max_chars, None, 0),
+                    "text={text:?} max_chars={max_chars}"
+                );
+                assert_eq!(
+                    chunk_hierarchical(&text, max_chars, Some(&[None, None]), 0),
+                    chunk_hierarchical(&text, max_chars, Some(&[None]), 0),
+                    "duplicate None changed the answer: text={text:?} max_chars={max_chars}"
+                );
+                assert_eq!(
+                    chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        Some(&[Some("\n"), None, Some("\n"), None]),
+                        0
+                    ),
+                    chunk_hierarchical(&text, max_chars, Some(&[Some("\n"), None]), 0),
+                    "duplicated [\"\\n\", None] changed the answer: text={text:?} \
+                     max_chars={max_chars}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn line_first_splice_cuts_an_oversized_line_at_real_sentence_boundaries() {
+        // The motivating shape for the None entry: a chat thread, one
+        // message per line, never split mid-line — and an oversized
+        // message falling back to the ACCURATE UAX #29 sentence level.
+        // Every cut this budget produces must land either at a line break
+        // or at a real sentence boundary, never anywhere else.
+        let text = "Nathan: kicking off.\nPriya: We briefed the U.S. team on the numbers. \
+                    They asked for a follow-up meeting. The budget holds.\nNathan: done.";
+        let seps: &[Option<&str>] = &[Some("\n"), None];
+        let chunks = chunk_hierarchical(text, 60, Some(seps), 0);
+        assert!(chunks.len() > 1, "expected the oversized line to split");
+        let chars: Vec<char> = text.chars().collect();
+        let sentence_ends: Vec<usize> = segmentation_impl::sentence_bounds(text)
+            .into_iter()
+            .map(|(_, end)| end)
+            .collect();
+        for &(_, end) in &chunks {
+            if end == chars.len() {
+                continue; // the final chunk runs to the end untrimmed
+            }
+            let at_line_break = chars[end] == '\n';
+            let at_sentence_end = sentence_ends.contains(&end);
+            assert!(
+                at_line_break || at_sentence_end,
+                "cut at {end} is neither a line break nor a sentence boundary: {chunks:?}"
+            );
+        }
+        // The name "U.S. team" survives whole in some chunk: the sentence
+        // level's SB6-SB8 rules do not break after "U.S." the way a naive
+        // ends-with-punctuation rule does.
+        let joined: Vec<String> = chunks
+            .iter()
+            .map(|&(s, e)| chars[s..e].iter().collect())
+            .collect();
+        assert!(
+            joined.iter().any(|p| p.contains("U.S. team")),
+            "no chunk holds the name whole: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn all_literal_fallbacks_sever_where_the_none_splice_does_not() {
+        // The contrast the None entry exists for, pinned from both sides:
+        // the SAME thread and a budget below the first sentence boundary.
+        // The all-literal [\"\\n\", \". \", \" \"] list's \". \" level has a
+        // match after \"U.S.\" (a mid-name non-sentence), so it severs the
+        // name; the spliced [\"\\n\", None] list has no in-budget sentence
+        // cut there and falls to the WORD level, whose cuts are UAX #29
+        // word boundaries — every piece still ends at a word boundary, and
+        // the word walk never lands inside the name's letter sequence.
+        let text = "Nathan: kicking off.\nPriya: We briefed the U.S. team on the numbers. \
+                    They asked for a follow-up meeting. The budget holds.\nNathan: done.";
+        let naive = chunk_hierarchical(text, 40, Some(&[Some("\n"), Some(". "), Some(" ")]), 0);
+        let naive_pieces: Vec<String> = naive
+            .iter()
+            .map(|&(s, e)| text.chars().skip(s).take(e - s).collect())
+            .collect();
+        assert!(
+            naive_pieces.iter().any(|p| p.ends_with("U.S")),
+            "expected the naive literal list to sever the name (the '. ' match \
+             after 'U.S.' drops the period as separator): {naive_pieces:?}"
+        );
+
+        let spliced = chunk_hierarchical(text, 40, Some(&[Some("\n"), None]), 0);
+        let spliced_pieces: Vec<String> = spliced
+            .iter()
+            .map(|&(s, e)| text.chars().skip(s).take(e - s).collect())
+            .collect();
+        for piece in &spliced_pieces {
+            assert!(
+                !piece.ends_with("U.S") && !piece.ends_with("U.S."),
+                "the spliced hierarchy severed the name: {spliced_pieces:?}"
+            );
+        }
+        // And the name rides WHOLE inside one piece (the word-level cuts
+        // walk past it, never through it).
+        assert!(
+            spliced_pieces.iter().any(|p| p.contains("U.S. team")),
+            "no chunk holds the name whole: {spliced_pieces:?}"
+        );
+        // Both spellings still respect the budget and make progress.
+        for chunks in [&naive, &spliced] {
+            for &(s, e) in chunks {
+                assert!(e - s <= 40);
+            }
         }
     }
 
@@ -614,7 +833,7 @@ mod tests {
         // tiny budget over long text: must still terminate promptly via
         // the raw-cut fallback, never loop.
         let text = "x".repeat(500);
-        let chunks = chunk_hierarchical(&text, 3, Some(&["NEVER"]), 1);
+        let chunks = chunk_hierarchical(&text, 3, Some(&[Some("NEVER")]), 1);
         assert!(chunks.len() >= 166);
     }
 }

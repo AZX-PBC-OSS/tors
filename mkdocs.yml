@@ -27,6 +27,7 @@ nav:
   - Recipes:
       - Ingesting a real document: recipe-ingest.md
       - A lightweight retrieval/reranking pipeline: recipe-retrieval.md
+      - Chunking threads and transcripts: recipe-transcripts.md
 
 markdown_extensions:
   - pymdownx.highlight

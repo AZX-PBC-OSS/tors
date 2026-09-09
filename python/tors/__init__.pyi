@@ -26,10 +26,7 @@ _StemmerLanguage = Literal[
 ]
 
 def normalize(text: str) -> str: ...
-
-
 def finalize(text: str) -> tuple[str, str]: ...
-
 
 # Replace every maximal run of C0 controls (U+0000-U+001F, tabs and
 # newlines included) and DEL (U+007F) with a single ASCII space:
@@ -42,19 +39,10 @@ def finalize(text: str) -> tuple[str, str]: ...
 #
 # GIL note: detached_transform's shape, the same as normalize.
 def strip_controls(text: str) -> str: ...
-
-
 def nfc(text: str) -> str: ...
-
-
 def nfd(text: str) -> str: ...
-
-
 def nfkc(text: str) -> str: ...
-
-
 def nfkd(text: str) -> str: ...
-
 
 # Raises ValueError on CPython 3.11+ when a DECIMAL numeric reference's digit
 # run exceeds sys.get_int_max_str_digits() (default 4300): the stdlib's own
@@ -66,16 +54,9 @@ def nfkd(text: str) -> str: ...
 # a power of two; the limit applies only to non-power-of-two bases). CPython
 # 3.10 has no limit at all, and tors matches it there: nothing raises.
 def html_unescape(text: str) -> str: ...
-
-
 def grapheme_count(text: str) -> int: ...
-
-
 def word_bounds(text: str) -> list[tuple[int, int]]: ...
-
-
 def word_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
-
 
 # GIL note: same shape as the list/iterator word_bounds pair: the whole
 # segmentation runs with the GIL released (one detached pass; the iterator
@@ -85,27 +66,14 @@ def word_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
 # here. UAX #29 rule-based segmentation only: no dictionary segmentation
 # for spaceless scripts (Thai/Khmer/Burmese/Japanese); see the README.
 def sentence_bounds(text: str) -> list[tuple[int, int]]: ...
-
-
 def sentence_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
-
-
 def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
-
-
 def finalize_utf8(
     raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
 ) -> tuple[str, str]: ...
-
-
 def b64_encode_bytes(raw: bytes) -> str: ...
-
-
 def b64_decode(s: str, *, validate: bool = True) -> bytes: ...
-
-
 def utf8_is_valid(raw: bytes) -> bool: ...
-
 
 # BOM-sniffing native order, or an explicit little/big order that never
 # sniffs or strips a BOM: matching Python's "utf-16" vs "utf-16-le"/
@@ -118,12 +86,9 @@ def decode_utf16(
     errors: Literal["strict", "replace"] = "strict",
     byteorder: Literal["native", "little", "big"] = "native",
 ) -> str: ...
-
-
 def utf16_is_valid(
     raw: bytes, *, byteorder: Literal["native", "little", "big"] = "native"
 ) -> bool: ...
-
 
 # A heuristic guess, not a validator: the intended pipeline is utf8_is_valid
 # first, and detect_encoding only on bytes that already failed that check.
@@ -132,7 +97,6 @@ def utf16_is_valid(
 # bytes.decode()), never raises for well-formedness reasons. tld is an
 # ASCII top-level domain WITHOUT the leading dot ("jp", not ".jp").
 def detect_encoding(raw: bytes, *, tld: str | None = None) -> str: ...
-
 
 # GIL note (the word_bounds list-shape precedent): the diff itself runs with
 # the GIL released, but building the returned list constructs one 5-tuple per
@@ -155,7 +119,6 @@ def diff_opcodes(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
 
-
 # GIL note: identical to diff_opcodes' classes: the whole line split +
 # Myers search runs with the GIL released (the deadline_ms budget checked
 # inside the detached region; TimeoutError constructed after the GIL is
@@ -168,7 +131,6 @@ def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
 
-
 # GIL note: the find_patterns argument shape over a dict: one GIL-held walk
 # borrowing each key and value, then automaton build + scan + splice with
 # the GIL released, then either the identity return (no key matched, or the
@@ -179,14 +141,12 @@ def diff_opcodes_lines(
 # re-scanned; dict order cannot matter.
 def replace_many(text: str, replacements: dict[str, str]) -> str: ...
 
-
 # GIL note (the word_bounds list-shape precedent, again): the automaton build,
 # the scan, and the byte→char offset conversion all run with the GIL released,
 # but building the returned list constructs one 3-tuple of ints per match under
 # the GIL: O(number of matches). See the README's Performance section and
 # tests/test_gil_release.py for the measured sparse/dense bands.
 def find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]: ...
-
 
 # GIL note: the streaming spelling of find_patterns: the whole search
 # (pattern-list walk, automaton build, scan, byte→char conversion) fills an
@@ -195,10 +155,7 @@ def find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]:
 # answer to the list shape's O(matches) tuple-marshalling caveat (~13 ms
 # held per 100k matches in the list shape). Same sequence as the list API,
 # pinned.
-def find_patterns_iter(
-    patterns: list[str], text: str
-) -> Iterator[tuple[int, int, int]]: ...
-
+def find_patterns_iter(patterns: list[str], text: str) -> Iterator[tuple[int, int, int]]: ...
 
 # GIL note: the count spelling of find_patterns: the same
 # leftmost-longest, non-overlapping search answering just the number, with
@@ -207,7 +164,6 @@ def find_patterns_iter(
 # (counting is offset-free). count_matches(p, t) == len(find_patterns(p, t)),
 # pinned. A single int return: no marshalling class at all.
 def count_matches(patterns: list[str], text: str) -> int: ...
-
 
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
 # pattern list compiled ONCE (one detached build at construction), then
@@ -242,18 +198,15 @@ class CompiledPatterns:
         self, text: str, replacements: dict[str, str], mask: str = "*"
     ) -> str: ...
 
-
 # GIL note: the grapheme_count precedent for the word segmenter: a single
 # int return (no marshalling class), the whole scan GIL-released, and O(1)
 # memory where len(word_bounds(text)) materializes the full tuple list.
 # word_count(t) == len(word_bounds(t)), pinned.
 def word_count(text: str) -> int: ...
 
-
 # GIL note: word_count's shape over sentences: single int, O(1) memory,
 # sentence_count(t) == len(sentence_bounds(t)), pinned.
 def sentence_count(text: str) -> int: ...
-
 
 # CommonMark §4.5 fenced code blocks, hand-rolled (not a Markdown parser
 # dependency): (language, code, start, end) tuples in document order.
@@ -271,7 +224,6 @@ def extract_code_blocks(
     text: str, lang: str | None = None
 ) -> list[tuple[str | None, str, int, int]]: ...
 
-
 # If text, trimmed of leading/trailing whitespace, is EXACTLY one fenced
 # code block (including the unterminated-fence case), return its dedented
 # code content; otherwise return text UNCHANGED (not even
@@ -283,7 +235,6 @@ def extract_code_blocks(
 # object back (zero marshalling) or the O(output) unwrapped string.
 def strip_code_fences(text: str) -> str: ...
 
-
 # textwrap.dedent(text), byte-for-byte: the longest common leading
 # whitespace-run STRING (tabs and spaces are distinct characters: "  x"
 # and "\tx" share no margin) is stripped from every line, and
@@ -292,7 +243,6 @@ def strip_code_fences(text: str) -> str: ...
 #
 # GIL note: detached_transform's shape, the same as strip_code_fences.
 def dedent(text: str) -> str: ...
-
 
 # Repair malformed JSON (the LLM-output shape: missing commas/quotes/
 # brackets, truncated values, stray prose, comments, Python-isms) and
@@ -336,7 +286,6 @@ def repair_json(
     deadline_ms: float | None = None,
 ) -> str: ...
 
-
 # The loads-mode spelling: the repaired document as decoded OBJECTS, the
 # json.loads drop-in (the "" sentinel, not None, when nothing is
 # recoverable). No ensure_ascii (no serialization happens).
@@ -355,7 +304,6 @@ def repair_json_loads(
     locale: str | dict[str, str] | None = None,
     deadline_ms: float | None = None,
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
-
 
 # The diagnostics spelling: the loads-mode value plus the structured action
 # log — a list of {action, path, detail, from, to, suggestion} dicts (the
@@ -381,7 +329,6 @@ def repair_json_diagnostics(
     list[dict[str, Any]],
 ]: ...
 
-
 # Truncate to at most max_chars codepoints, cutting at the last word (or,
 # boundary="sentence", sentence) boundary at or before max_chars: composing
 # the crate's own word_bounds/sentence_bounds segmentation, not a new
@@ -405,7 +352,6 @@ def truncate_to_bounds(
     text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"
 ) -> str: ...
 
-
 # The DB-column truncation shape: hard cut to at most max_chars codepoints
 # plus a U+2026 ellipsis marker, never mid-grapheme-cluster (combining
 # accents, ZWJ sequences, flag pairs snap back past the whole cluster). No
@@ -419,7 +365,6 @@ def truncate_to_bounds(
 #
 # GIL note: detached_transform's shape, the same as truncate_to_bounds.
 def truncate_ellipsis(text: str, max_chars: int) -> str: ...
-
 
 # Is claim grounded in source: fuzzy=False (default) is source.contains(claim)
 # exactly; fuzzy=True is a windowed difflib-ratio scan of source against
@@ -453,7 +398,6 @@ def is_grounded(
     deadline_ms: float | None = None,
 ) -> bool: ...
 
-
 # GIL note: urllib.parse.quote/unquote are pure Python: a GIL-held
 # whole-text pass for the most-used encoding operation in web/ingestion
 # pipelines. These are byte-exact stdlib parity (pinned differentially per
@@ -461,16 +405,9 @@ def is_grounded(
 # f(s) is s when nothing encodes/decodes. The stdlib's encoding/errors
 # parameters are out of scope (UTF-8 only).
 def quote(text: str, safe: str = "/") -> str: ...
-
-
 def quote_plus(text: str, safe: str = "") -> str: ...
-
-
 def unquote(text: str) -> str: ...
-
-
 def unquote_plus(text: str) -> str: ...
-
 
 # GIL note: difflib's ratio/get_close_matches shape over the same Myers
 # engine as diff_opcodes: two str-in borrows, the search GIL-released, a
@@ -481,8 +418,6 @@ def unquote_plus(text: str) -> str: ...
 # (TimeoutError on expiry; an enormous-but-finite budget saturates to
 # unbounded).
 def similarity_ratio(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
-
-
 def get_close_matches(
     word: str,
     possibilities: list[str],
@@ -492,7 +427,6 @@ def get_close_matches(
     deadline_ms: float | None = None,
 ) -> list[str]: ...
 
-
 # GIL note: the edit-distance/similarity metrics CPython has no stdlib
 # spelling of: O(n*m) DP passes GIL-released with a per-row/phase
 # deadline_ms check (TimeoutError on expiry; the budget is the DoS guard:
@@ -500,13 +434,8 @@ def get_close_matches(
 # 0.11 crate-side as the differential oracle; symmetric; single int/float
 # returns, no marshalling class.
 def levenshtein(a: str, b: str, *, deadline_ms: float | None = None) -> int: ...
-
-
 def jaro(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
-
-
 def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
-
 
 # GIL note: replace_many's classes exactly (one GIL-held dict walk, the
 # scan+splice GIL-released, one string out), with the length guarantee: for
@@ -518,17 +447,13 @@ def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: 
 # (redaction that keeps pre-computed offsets valid). Pass "" as a value to
 # force pure masking. mask must be exactly one character (one codepoint;
 # ValueError otherwise). Identity contract: is s exactly when == s.
-def replace_many_masked(
-    text: str, replacements: dict[str, str], mask: str = "*"
-) -> str: ...
-
+def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*") -> str: ...
 
 # Domain-separated SHA-256 (RFC 6962-style: leaves hash 0x00‖chunk, internal
 # nodes hash 0x01‖left‖right): not the crate's undifferentiated default,
 # which is forgeable (CVE-2012-2459-class leaf/internal-node confusion).
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
-
 
 # FastCDC 2020 content-defined chunking: (start, end) BYTE spans (not
 # codepoints: a byte-level primitive, unlike word_bounds/sentence_bounds),
@@ -542,7 +467,6 @@ def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 def chunk_cdc(
     data: bytes, *, min_size: int = 4096, avg_size: int = 16384, max_size: int = 65534
 ) -> list[tuple[int, int]]: ...
-
 
 # GIL note: the context-window/RAG packing primitive: boundary-aware cuts
 # under a character budget (truncate_to_bounds' own cut rule applied
@@ -570,7 +494,6 @@ def chunk_text(
     boundary: Literal["word", "sentence"] = "word",
 ) -> list[tuple[int, int]]: ...
 
-
 # The streaming twin of chunk_text: same sequence, same argument contract,
 # the word_bounds_iter shape (whole scan under one detach at construction,
 # one 2-tuple per __next__): avoids materializing a list for documents
@@ -582,7 +505,6 @@ def chunk_text_iter(
     overlap: int = 0,
     boundary: Literal["word", "sentence"] = "word",
 ) -> Iterator[tuple[int, int]]: ...
-
 
 # GIL note: word-count-windowed chunking: the semantic-chunking RAG
 # shape, measured in real WORD TOKENS (word_bounds' segments filtered to
@@ -605,12 +527,10 @@ def chunk_by_words(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 
-
 # The streaming twin of chunk_by_words: same shape as chunk_text_iter.
 def chunk_by_words_iter(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
-
 
 # chunk_by_words' sentence-count twin (sentence_bounds' UAX #29
 # segmenter). Same contract, same argument validation, same empty-input
@@ -619,12 +539,10 @@ def chunk_by_sentences(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 
-
 # The streaming twin of chunk_by_sentences: same shape as chunk_text_iter.
 def chunk_by_sentences_iter(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
-
 
 # chunk_by_words/chunk_by_sentences' paragraph-count twin. A paragraph
 # boundary is a run of 2+ consecutive newline characters (\r\n counts as
@@ -639,6 +557,37 @@ def chunk_by_paragraphs(
     text: str, paragraphs_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 
+# chunk_by_words/chunk_by_sentences/chunk_by_paragraphs' line-count twin.
+# A line break is a \n, a lone \r, or a \r\n pair counted as ONE unit
+# (the same CR/CRLF folding convention; str.splitlines' exotic separators
+# -- \v, \f, NEL, LS, PS -- are NOT breaks here). A line counts as a line
+# only when it carries at least one non-whitespace codepoint, the same
+# real-token discipline chunk_by_words applies to word segments: blank
+# lines neither count toward lines_per_chunk nor split a chunk's interior
+# (they ride along inside a chunk's span exactly as inter-word whitespace
+# rides along in chunk_by_words), so lines_per_chunk=200 means 200
+# content lines. Spans run first included line's start through last
+# included line's end, NOT through the trailing break (not a covering
+# partition); a trailing break at end of text yields no trailing empty
+# line. Final chunk may hold fewer lines; empty or no-content-line text
+# -> []. overlap repeats whole LINES at the next chunk's start and must
+# be < lines_per_chunk (ValueError otherwise; the stride
+# lines_per_chunk - overlap is always >= 1 once validated). GIL-released
+# whole pass; O(chunks) 2-tuple marshalling.
+def chunk_by_lines(
+    text: str, lines_per_chunk: int, *, overlap: int = 0
+) -> list[tuple[int, int]]: ...
+
+# The streaming twin of chunk_by_lines: same shape as chunk_text_iter,
+# and the same rationale as every other _iter spelling: the list shape's
+# GIL-held marshalling cost is measured for segment-count-heavy outputs
+# (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
+# 428-497 ms just marshalling the list), and a line-oriented corpus (a
+# multi-MiB log or transcript) is in that piece-count class, chunking
+# into hundreds of thousands of pieces.
+def chunk_by_lines_iter(
+    text: str, lines_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
 
 # Priority-ordered fallback chunking (LangChain's RecursiveCharacterTextSplitter
 # pattern): cut at the COARSEST level that fits max_chars, falling back to
@@ -648,21 +597,27 @@ def chunk_by_paragraphs(
 # separators=[...] is a caller-supplied list of LITERAL strings (not regex),
 # coarsest first, e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
-# appended. NOT a lossless partition (unlike chunk_text): the separator
-# itself is dropped between chunks, the same chunk_by_paragraphs convention.
-# overlap snaps to the nearest GRAPHEME boundary (not necessarily a semantic
-# one, a documented simplification of chunk_text_overlapping's single-level
-# snap). max_chars < 1 or overlap < 0 raise ValueError; overlap >= max_chars
-# raises ValueError. Empty text returns []; an empty separators list is legal
-# and skips straight to the raw-cut fallback.
+# appended. A None ENTRY in an otherwise-literal list splices the default
+# hierarchy's three accurate levels in at that position: ["\n", None] is
+# line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
+# shape (a chat thread, one message per line, never split mid-line) whose
+# oversized-line fallback is the real UAX #29 segmenter rather than the
+# ". "/" " literal guesses an all-literal list pins it to; [None] is
+# identical to separators=None. NOT a lossless partition (unlike
+# chunk_text): the separator itself is dropped between chunks, the same
+# chunk_by_paragraphs convention. overlap snaps to the nearest GRAPHEME
+# boundary (not necessarily a semantic one, a documented simplification of
+# chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
+# raise ValueError; overlap >= max_chars raises ValueError. Empty text
+# returns []; an empty separators list is legal and skips straight to the
+# raw-cut fallback.
 def chunk_hierarchical(
     text: str,
     max_chars: int,
-    separators: list[str] | None = None,
+    separators: list[str | None] | None = None,
     *,
     overlap: int = 0,
 ) -> list[tuple[int, int]]: ...
-
 
 # GIL note: the whole tokenize (UAX #29 words) + FNV-1a hash + 64-bit vote
 # pass runs GIL-released; a single int return (no marshalling class).
@@ -674,7 +629,6 @@ def chunk_hierarchical(
 # deployment. Order-invariant (a bag-of-words vote).
 def simhash64(text: str) -> int: ...
 
-
 # GIL note: simhash64's classes exactly: the whole tokenize+hash+vote
 # pass GIL-released, a single int return. The 128-bit spelling: twice the
 # bit positions; unrelated distances roughly double while the near-dup
@@ -684,7 +638,6 @@ def simhash64(text: str) -> int: ...
 # otherwise (deterministic, order-invariant, empty → 0, (a ^ b).bit_count()
 # for the distance; thresholds corpus-dependent).
 def simhash128(text: str) -> int: ...
-
 
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased
@@ -734,7 +687,6 @@ def tf_idf(
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[list[tuple[str, float]]]: ...
 
-
 # A RERANKING primitive, not a search index: recomputes corpus statistics
 # from scratch every call, the right shape for scoring a small,
 # already-retrieved candidate set (tens to a few hundred documents) against
@@ -766,7 +718,6 @@ def bm25_rank(
     stemmer: _StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
-
 
 # A stateless, GENERAL-PURPOSE batch text preprocessor: every requested
 # step fused into ONE GIL-released pass over the WHOLE texts list. Pure
@@ -808,7 +759,6 @@ def apply_pipeline(
     collapse_whitespace: bool = False,
 ) -> list[str]: ...
 
-
 # Classic phonetic-code algorithms (rphonetic, an Apache Commons Codec
 # port): ENGLISH/Latin-script-oriented heuristics, not general Unicode
 # phonetics. Input is pre-filtered to ASCII letters before encoding
@@ -821,14 +771,17 @@ def apply_pipeline(
 # alongside edit-distance scoring, not instead of it).
 def soundex(text: str) -> str: ...
 def metaphone(text: str) -> str: ...
+
 # The full dual-key form of metaphone: Double Metaphone's alternate code
 # carries the second plausible (typically non-Anglicized) pronunciation,
 # so a name match on EITHER key counts; two equal elements when there is
 # only one pronunciation.
 def double_metaphone(text: str) -> tuple[str, str]: ...
+
 # NYSIIS (1970), strict commons-codec variant (codes capped at 6
 # characters): a Soundex successor for name matching.
 def nysiis(text: str) -> str: ...
+
 # Daitch-Mokotoff Soundex (1985), the Jewish-genealogy standard for
 # Central/Eastern European surnames. A LIST because the rule table
 # branches on ambiguous transliterations: one name can encode to
@@ -837,7 +790,6 @@ def nysiis(text: str) -> str: ...
 # padded to 6 digits), not "".
 def daitch_mokotoff(text: str) -> list[str]: ...
 
-
 # A Soundex variant with a finer-grained letter-to-digit mapping than
 # classic soundex (more consonant classes distinguished, an uncapped
 # code rather than soundex's fixed letter-plus-3-digit shape) — a
@@ -845,4 +797,3 @@ def daitch_mokotoff(text: str) -> list[str]: ...
 # ASCII-letters-only pre-filter and upstream-panic-avoidance note as
 # soundex.
 def refined_soundex(text: str) -> str: ...
-

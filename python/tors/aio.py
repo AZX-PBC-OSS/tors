@@ -38,12 +38,13 @@ the caller's, made once at the call site, not a runtime guess.
 
 The excluded shapes: the streaming iterator constructors
 (``word_bounds_iter`` and siblings, including the chunking family's own
-``chunk_text_iter``/``chunk_by_words_iter``/``chunk_by_sentences_iter``)
-are not wrapped, because an iterator is not an awaitable shape and
-draining one to a list inside a worker thread is exactly what the
-already-covered list-returning sibling (``chunk_text``,
-``chunk_by_words``, ``chunk_by_sentences``) already does; a caller who
-wants the streaming shape under asyncio writes
+``chunk_text_iter``/``chunk_by_words_iter``/``chunk_by_sentences_iter``/
+``chunk_by_lines_iter``) are not wrapped, because an iterator is not an
+awaitable shape and draining one to a list inside a worker thread is
+exactly what the already-covered list-returning sibling (``chunk_text``,
+``chunk_by_words``, ``chunk_by_sentences``, ``chunk_by_paragraphs``,
+``chunk_by_lines``) already does; a caller who wants the streaming shape
+under asyncio writes
 ``await asyncio.to_thread(lambda: list(tors.word_bounds_iter(text)))``
 directly; that one line is the whole pattern, matching the manual
 ``to_thread`` wrap this module exists to save callers from writing
@@ -84,6 +85,7 @@ _WRAPPED = (
     "b64_decode",
     "b64_encode_bytes",
     "bm25_rank",
+    "chunk_by_lines",
     "chunk_by_paragraphs",
     "chunk_by_sentences",
     "chunk_by_words",
