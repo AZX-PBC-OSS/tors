@@ -67,10 +67,19 @@ fn assert_cluster_safe(chunks: &[(usize, usize)], text: &str, budget: usize, wha
 fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
     let mut prev_start = None;
     for &(start, end) in chunks {
-        assert!(start < end, "{what}: empty or inverted chunk: ({start}, {end})");
-        assert!(end <= total, "{what}: chunk end {end} exceeds text length {total}");
+        assert!(
+            start < end,
+            "{what}: empty or inverted chunk: ({start}, {end})"
+        );
+        assert!(
+            end <= total,
+            "{what}: chunk end {end} exceeds text length {total}"
+        );
         if let Some(prev) = prev_start {
-            assert!(start > prev, "{what}: starts not strictly increasing at {start}");
+            assert!(
+                start > prev,
+                "{what}: starts not strictly increasing at {start}"
+            );
         }
         prev_start = Some(start);
     }
@@ -105,8 +114,7 @@ fuzz_target!(|input: Input| {
     // for the line-run paragraph heuristic.
     for per_chunk in [1usize, 2, 3, 7, max_chars] {
         let overlap = overlap % per_chunk;
-        let words =
-            tors::chunk_by_segment_impl::chunk_by_words(&input.text, per_chunk, overlap);
+        let words = tors::chunk_by_segment_impl::chunk_by_words(&input.text, per_chunk, overlap);
         assert_basic_contract(&words, total, "chunk_by_words");
         assert_cluster_safe(&words, &input.text, usize::MAX, "chunk_by_words");
 
