@@ -261,8 +261,54 @@ enum StringEntry {
 /// accumulator while maintaining the unmatched-brace count and the regex
 /// character-class start (see the field docs for the byte-unit choice).
 fn append_string_content(state: &mut StringParseState, content: &[char]) {
+    // The batched inline twin of acc_push (see its docs for the rules and
+    // the undo-record contract): the per-char counter rules apply in this
+    // loop — no per-char call — and the ONE undo record written is for the
+    // slice's LAST char (the only one a later pop could remove). A
+    // per-char acc_push call here cost ~1.5ms/MiB of call overhead on
+    // escaped-prose corpora (measured, interleaved criterion: the
+    // malformed cell regressed 47% until this went back to a loop).
+    let mut last_brace_effect = 0i8;
+    let mut last_class_pre = state.regex_character_class_start;
+    let mut last_was_active = false;
     for &ch in content {
-        acc_push(state, ch);
+        last_class_pre = state.regex_character_class_start;
+        match ch {
+            '{' => {
+                last_brace_effect = 1;
+                last_was_active = true;
+                state.object_value_unmatched_opening_braces += 1;
+            }
+            '}' if state.object_value_unmatched_opening_braces > 0 => {
+                last_brace_effect = -1;
+                last_was_active = true;
+                state.object_value_unmatched_opening_braces -= 1;
+            }
+            // just past the '[' ('[' is one byte, so +1 is the byte unit's
+            // equivalent of upstream's codepoint `+ 1`)
+            '[' => {
+                last_brace_effect = 0;
+                last_was_active = true;
+                state.regex_character_class_start = Some(state.string_acc.len() + 1);
+            }
+            ']' => {
+                last_brace_effect = 0;
+                last_was_active = true;
+                state.regex_character_class_start = None;
+            }
+            // Content char: changed nothing, so it carries no undo record.
+            _ => {
+                last_brace_effect = 0;
+                last_was_active = false;
+            }
+        }
+        state.string_acc.push(ch);
+    }
+    if !content.is_empty() {
+        state.last_brace_effect = last_brace_effect;
+        state.last_class_pre = last_class_pre;
+        state.last_was_active = last_was_active;
+        state.undo_ready = true;
     }
 }
 
@@ -274,8 +320,9 @@ fn append_string_content(state: &mut StringParseState, content: &[char]) {
 /// brace/class-ACTIVE chars (`{`, counted `}`, `[`, `]`) change either
 /// counter, so only they write the undo record; content chars take the
 /// no-record fast path (popping them needs no undo — they changed
-/// nothing), which keeps the per-char overhead off prose-heavy string
-/// bodies (the common case).
+/// nothing). The escape repairs call this once per repaired char (rare);
+/// bulk appends go through append_string_content's batched loop.
+#[inline]
 fn acc_push(state: &mut StringParseState, ch: char) {
     match ch {
         '{' => {
@@ -321,6 +368,7 @@ fn acc_push(state: &mut StringParseState, ch: char) {
 /// any future call site pops twice without an intervening push. Popping
 /// a content char (no record written) is a plain pop — it changed
 /// nothing, so there is nothing to undo.
+#[inline]
 fn acc_pop(state: &mut StringParseState) {
     debug_assert!(
         state.undo_ready,
@@ -1670,6 +1718,14 @@ impl Parser {
         {
             rstrip_py(&mut state.string_acc);
         }
+        // The strips above are the accumulator's TERMINAL mutations, the
+        // only ones outside acc_push/acc_pop: they remove py-whitespace
+        // only (never a brace/class-active char), so the counters stay
+        // valid — but the undo records now describe stripped chars. Consume
+        // the record here so the one-level-undo tripwire (acc_pop's debug
+        // assert) fires on any future pop-after-finalize instead of
+        // silently applying a stale record.
+        state.undo_ready = false;
 
         std::mem::take(&mut state.string_acc)
     }
