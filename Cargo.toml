@@ -120,6 +120,65 @@ regex = "1"
 # UNLICENSE (the memchr election precedent). default-features off with
 # std only — no timezone database needed (fixed offsets + civil types).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# The whole PDF surface (`pdf_extract`/`pdf_page_count`, `src/pdf_impl.rs`):
+# open + per-page text + markdown conversion, called directly under
+# `py.detach` — the crate ships pyo3 bindings of its own, but that wheel
+# measures as GIL-held per call (worst heartbeat gap 23.6ms on a 9-page
+# doc, 2026-09, growing with document size), which is the exact hazard a
+# tors surface exists to remove, so the Rust API is used instead and the
+# pass runs detached. MIT OR Apache-2.0; MSRV 1.88 (under this crate's
+# 1.90 floor); pure Rust, `Send + Sync` document type, 100% pass rate on
+# the 3,830-PDF veraPDF/pdf.js/SafeDocs corpora per its published
+# benchmark. Default features only — no `rendering` (tiny-skia/JBIG2), no
+# `signatures`, no `python`/`pyo3` (this crate IS the binding), no
+# `parallel`; the image/table/font stacks that remain are unconditional
+# upstream dependencies, not options. The caret on "0.3.78" bounds to
+# <0.4: 0.x minors carry breaking changes, and this crate should take
+# them deliberately, not through a plain `cargo update`.
+pdf_oxide = { version = "0.3.78", optional = true }
+# The rest of the documents surface (doc/docx/xls/xlsx/ppt/pptx, rtf, odt/ods/odp,
+# epub, csv) — firecrawl's converter: one document model + one GFM serializer
+# across all of them, content-based format detection, typed errors including
+# NeedsOcr { pages } (page-precise OCR routing). MIT, MSRV 1.88, no cargo
+# features of its own (one build shape). Measured head-to-head against
+# office_oxide (already compiled in via pdf_oxide's tree, 2026-09): anydoc
+# renders style-based docx headings and list markers that office_oxide drops
+# entirely, and covers rtf/odt/epub/csv office_oxide cannot read at all; its
+# one measured loss is cosmetic (& is HTML-escaped in its markdown output,
+# which tors's strip normalizes back). Its own PDF path (pdf-inspector)
+# measured WORSE than pdf_oxide on columns/links, which is why PDF routes to
+# pdf_oxide and anydoc handles everything else. The caret bounds to <0.3.
+anydoc = { version = "0.2.4", optional = true }
+# The `backend="oxide"` lane of the documents surface (`src/documents_impl.rs`):
+# office_oxide's DOCX/XLSX/PPTX (+ legacy DOC/XLS/PPT) reader — the caller-
+# selectable alternative to anydoc's, exposed so downstream pipelines can
+# diff the two engines' output on their own corpora. MIT OR Apache-2.0,
+# MSRV 1.88. NOT weight: pdf_oxide already compiles it in as a normal
+# dependency, so this direct edge adds no new package to the tree — only a
+# direct API edge to code already there (the same precedent as
+# aho-corasick and encoding_rs, both promoted from lock transitives). The
+# anydoc-vs-office_oxide routing default lives in documents_impl's docs.
+office_oxide = { version = "0.1.10", optional = true }
+# The HTML lane of the documents surface (`src/documents_impl.rs`): neither
+# anydoc nor office_oxide reads HTML, so the lane has its own engine.
+# html-to-markdown-rs (MIT, xberg-io, 1.2M downloads) is the measured pick
+# over the alternatives (2026-09, over a polluted-head fixture — title,
+# <style>, <script> — plus headings/bold/italic/hyperlink/nested-lists/
+# GFM-table/blockquote/code-fence/entities/CJK/emoji): it drops <script>/
+# <style> BY CONSTRUCTION (htmd routes them through its generic block
+# handler, leaking CSS/JS text into the body markdown — architectural, not
+# a bugfix away; cennan ingests web pages, so noise text in the IR is
+# disqualifying), emits padded GFM tables WITH the `|---|` delimiter row
+# (fast_html2md omits it — not valid GFM), indents nested lists, decodes
+# entities fully, and keeps code fences clean. Its two quirks are
+# option-level, not architectural, and both are handled at the call site:
+# the <title> would become YAML frontmatter (suppressed by
+# `extract_metadata: false`, verified) and mixed `-`/`*` list markers
+# (cosmetic; the GFM strip pass handles either).
+# default-features = false: the optional cargo features (axum/tokio/rmcp/
+# schemars/serde/image — an HTTP-serving + MCP + image stack) are pure
+# weight for this lane. The caret bounds to <4.
+html-to-markdown-rs = { version = "3.12", default-features = false, optional = true }
 
 [features]
 default = ["extension-module"]
@@ -127,6 +186,20 @@ default = ["extension-module"]
 # does not link libpython, which breaks a plain `cargo test`/`cargo build` binary target;
 # maturin enables the default feature set, `cargo test --no-default-features` skips it.
 extension-module = ["pyo3/extension-module"]
+# The document-format extraction surface (the tors-core cores
+# `src/pdf_impl.rs`, `src/documents_impl.rs`, `src/gfm_strip_impl.rs`
+# behind the feature, and the pyo3 bindings `tors-documents/src/lib.rs`):
+# pdf_oxide for PDF, html-to-markdown-rs for HTML, anydoc for
+# every other working format, office_oxide as the selectable oxide backend
+# for the OOXML/legacy office formats. Optional so Rust consumers of
+# `tors-core` stay lean; the Python side ships it as the SECOND wheel —
+# tors-documents, whose Cargo.toml path-deps on this crate with
+# features = ["documents"] and wraps the cores in pyo3 bindings, installed
+# by `pip install tors[documents]` and re-exported as tors.documents. The
+# base wheel builds with the feature off: it carries none of the engine
+# weight, and the split is what keeps both downstream pipelines (one
+# documents-heavy, one not) on one dependency line each.
+documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-markdown-rs"]
 
 [dev-dependencies]
 criterion = "0.8"

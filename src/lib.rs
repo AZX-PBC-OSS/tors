@@ -233,6 +233,20 @@ pub mod json_schema_impl;
 pub mod merkle_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
+// The documents surface is feature-gated (`documents`): its engines
+// (pdf_oxide, anydoc, office_oxide, html-to-markdown-rs) are optional deps
+// so the base build and the base PyPI wheel stay lean, and its pyo3
+// wrappers live in the separate `tors-documents` crate (the
+// `tors[documents]` payload wheel) — the extraction CORES stay here,
+// behind the feature, as the single source of truth for Rust consumers
+// too. See each module's docs for the engine choices and their
+// measurements.
+#[cfg(feature = "documents")]
+pub mod documents_impl;
+#[cfg(feature = "documents")]
+pub mod gfm_strip_impl;
+#[cfg(feature = "documents")]
+pub mod pdf_impl;
 pub mod pipeline_impl;
 pub mod search_impl;
 pub mod segmentation_impl;

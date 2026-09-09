@@ -23,8 +23,35 @@ updates:
       rust-minor-patch:
         update-types: ["minor", "patch"]
 
+  # The payload crate resolves its own engine tree into its own lockfile:
+  # tors-documents is deliberately NOT a cargo workspace member (its
+  # Cargo.toml's header), so the root cargo entry above never sees
+  # tors-documents/Cargo.lock — the pyo3 and engine (pdf_oxide, anydoc,
+  # office_oxide, html-to-markdown-rs) bumps resolved there need this second
+  # entry to arrive as PRs. The engines sit in BOTH lockfiles (root's as
+  # tors-core's optional deps, the payload's as its resolved tree), so the two
+  # entries open separate PRs, each keeping its own lock fresh; a path
+  # dependency (tors-core from "..") is not a registry dep and is never
+  # bumpable, the same reason tors-documents/Cargo.toml's pyo3 line is the
+  # only [dependencies] entry this entry can ever propose a change to.
+  - package-ecosystem: cargo
+    directory: /tors-documents
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps-rust)"
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+
   # `uv` is a first-class Dependabot ecosystem (understands pyproject.toml and uv.lock
   # natively) — not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.
+  # Root pyproject.toml only: the uv workspace pulls the payload in, so its (empty)
+  # Python side rides this entry's uv.lock too. No /tors-documents uv/pip entry:
+  # that pyproject.toml declares no dependencies at all — its only requirement is
+  # the maturin build-backend pin, inert since the payload deliberately ships no
+  # sdist (publish.yml's documents jobs) — so a Python-side entry there would have
+  # nothing to bump.
   - package-ecosystem: uv
     directory: /
     schedule:

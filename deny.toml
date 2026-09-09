@@ -11,6 +11,19 @@
 # table — this file is the enforcement, that table is the human-readable
 # record.
 
+[graph]
+# All cargo features of the workspace package resolve into the checked
+# graph, not just the default set. The `documents` feature is default-OFF
+# (the base wheel builds without it; the tors-documents payload wheel is
+# the only build that turns it on), so a default-features graph would
+# license-check none of the engine tree — pdf_oxide/anydoc/office_oxide/
+# html-to-markdown-rs and their ~130 transitive packages. Resolution is
+# metadata-only (nothing links), so `extension-module` being co-enabled is
+# harmless; the payload crate's own graph (tors-documents/Cargo.toml,
+# checked with `cargo deny --manifest-path ...`) is a subset of this one —
+# every crate it builds is already present here.
+all-features = true
+
 [licenses]
 version = 2
 allow = [
@@ -20,10 +33,11 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "Zlib",
-    # Two additions beyond the spec's literal list, both flagged by the first
-    # `cargo deny check` run over the actual tree and both permissive grants
-    # inside the gate's stated intent ("permissive only; no GPL/LGPL/AGPL/MPL,
-    # no unlicensed") — recorded here so the deviation is visible, not silent:
+    # Additions beyond the spec's literal list, each flagged the first time
+    # `cargo deny check` met it in the actual tree and each a permissive
+    # grant inside the gate's stated intent ("permissive only; no
+    # GPL/LGPL/AGPL/MPL, no unlicensed") — recorded here so the deviation
+    # is visible, not silent:
     #
     # - Apache-2.0 WITH LLVM-exception: target-lexicon (a pyo3 build
     #   dependency, therefore unavoidable behind pyo3). The LLVM-exception
@@ -34,17 +48,29 @@ allow = [
     #   Consortium publishes the UCD data under. The Rust ecosystem's
     #   unicode-rs crates adopted it for their generated tables.
     # - 0BSD: enum-iterator / enum-iterator-derive (rphonetic's phonetic-code
-    # dependencies, for soundex/metaphone). The BSD Zero Clause License is
-    # OSI-approved and public-domain-equivalent — strictly more permissive
-    # than plain MIT (it drops even the attribution requirement).
+    # dependencies, for soundex/metaphone), and adler2 (a miniz_oxide
+    # dependency in the documents engine tree). The BSD Zero Clause License
+    # is OSI-approved and public-domain-equivalent — strictly more
+    # permissive than plain MIT (it drops even the attribution
+    # requirement).
     # - MIT-0: borrow-or-share (a fluent-uri dependency, pulled in by the
-    # jsonschema crate's `referencing` $ref machinery). MIT No Attribution is
-    # plain MIT with the attribution obligation REMOVED — strictly more
-    # permissive than the MIT already allowed, the same family as 0BSD above.
+    # jsonschema crate's `referencing` $ref machinery). MIT No Attribution
+    # is plain MIT with the attribution obligation REMOVED — strictly more
+    # permissive than the MIT already allowed, the same family as 0BSD
+    # above.
+    # - CC0-1.0: tiny-keccak (a documents-engine-tree dependency:
+    #   html-to-markdown-rs → ahash's `compile-time-rng` feature →
+    #   const-random → const-random-macro → tiny-keccak, the Keccak
+    #   permutation behind the macro's compile-time RNG). CC0 1.0 is a
+    #   public-domain dedication — no conditions at all, strictly more
+    #   permissive than the 0BSD already allowed. (Not OSI-approved as a
+    #   license precisely because it dedicates rather than licenses; inside
+    #   this gate's "permissive only" intent all the same.)
     "Apache-2.0 WITH LLVM-exception",
     "Unicode-3.0",
     "0BSD",
     "MIT-0",
+    "CC0-1.0",
 ]
 # The allowlist is policy, not a measurement of today's tree: BSD-2/3-Clause,
 # ISC, and Zlib are allowed for future dependencies before any of them is
@@ -53,6 +79,21 @@ unused-allowed-license = "allow"
 
 [advisories]
 version = 2
+ignore = [
+    # RUSTSEC-2026-0192 (`ttf-parser` unmaintained): an unconditional
+    # transitive of BOTH documents engines' PDF stacks — pdf_oxide 0.3.78's
+    # own font parsing and anydoc's pdf-inspector — so neither a bump inside
+    # this repo nor a feature toggle can remove it, and the advisory itself
+    # states no safe upgrade exists (the suggested alternative, skrifa, is
+    # already in pdf_oxide's tree alongside it; migrating to it is pdf_oxide
+    # upstream's move, tracked by their harfbuzz/ttf-parser#217 announcement).
+    # Unmaintained-informational, not a vulnerability: the crate parses font
+    # tables out of PDFs tors never authors, and pdf_oxide's published
+    # benchmark (100% over the 3,830-PDF veraPDF/pdf.js/SafeDocs corpora)
+    # is the operative safety evidence. Revisit when pdf_oxide ships a
+    # ttf-parser-free release.
+    { id = "RUSTSEC-2026-0192", reason = "unconditional transitive of pdf_oxide/anydoc's PDF stacks; unmaintained-informational, no safe upgrade; upstream (pdf_oxide) owns the skrifa migration" },
+]
 
 [bans]
 # Multiple versions of one crate are a warning, not a denial: the dev-tree

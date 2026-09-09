@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import ModuleType
+
 from tors._tors import (
     CompiledLemmaDict,
     CompiledPatterns,
@@ -153,3 +155,18 @@ __all__ = [
     "word_bounds_iter",
     "word_count",
 ]
+
+
+def __getattr__(name: str) -> ModuleType:
+    """The lazy ``documents`` door (PEP 562): ``tors.documents`` on an
+    imported base package imports the shim — and through it the
+    tors-documents payload wheel — on first touch, so a plain ``import
+    tors`` still loads no engine (the split-wheel doctrine, pinned by the
+    laziness gate). A missing payload wheel answers with the shim's own
+    ImportError install hint; every other name is the standard module
+    AttributeError."""
+    if name == "documents":
+        import tors.documents as documents
+
+        return documents
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

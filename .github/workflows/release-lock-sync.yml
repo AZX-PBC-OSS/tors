@@ -1,10 +1,10 @@
 # Keeps release-please PRs shippable: release-please bumps versions in
-# pyproject.toml/Cargo.toml without refreshing uv.lock/Cargo.lock, so every
-# release tag ships stale locks — which breaks docs CI (`uv sync --locked`)
-# on the merge commit and trips `cargo publish`'s clean-tree gate in
-# publish.yml. This workflow runs `uv lock` plus a lock-writing cargo pass
-# on the release PR itself and pushes any resulting sync into the PR
-# branch, so the tag release-please cuts already carries fresh locks.
+# pyproject.toml/Cargo.toml (root and tors-documents/) without refreshing
+# uv.lock/Cargo.lock, so every release tag ships stale locks — which breaks
+# docs CI (`uv sync --locked`) on the merge commit and trips `cargo publish`'s
+# clean-tree gate in publish.yml. This workflow runs `uv lock` plus lock-writing
+# cargo passes on the release PR itself and pushes any resulting sync into the
+# PR branch, so the tag release-please cuts already carries fresh locks.
 #
 # Same-repo branch only (release-please--branches--main): pushing to a
 # fork's branch would fail, and release-please never opens forks here.
@@ -38,14 +38,22 @@ jobs:
           # field into Cargo.lock; check is the cheapest such pass (no
           # linking, so default features are fine here).
           cargo check --all-targets
+          # The payload's own lock, same doctrine: a resolving pass writes
+          # tors-documents' version field into tors-documents/Cargo.lock.
+          # cargo metadata resolves without compiling anything — the payload
+          # pulls the whole engine tree, which check would pay for pointlessly
+          # here — and the lock is the only thing this pass is after (the
+          # payload ships as a wheel, never via cargo publish, so nothing
+          # ever gates on its lock beyond freshness).
+          cargo metadata --manifest-path tors-documents/Cargo.toml --format-version 1 > /dev/null
       - name: Push the sync back into the release PR
         run: |
-          if git diff --exit-code -- uv.lock Cargo.lock; then
+          if git diff --exit-code -- uv.lock Cargo.lock tors-documents/Cargo.lock; then
             echo "lockfiles already fresh, nothing to push"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add uv.lock Cargo.lock
+          git add uv.lock Cargo.lock tors-documents/Cargo.lock
           git commit -m "chore: sync lockfiles to the release versions"
           git push origin HEAD:${{ github.head_ref }}

@@ -1,0 +1,39 @@
+# The `tors[documents]` payload crate: the pyo3 bindings for the
+# documents-format extraction surface whose pure-Rust cores live in the root
+# `tors-core` crate behind its `documents` cargo feature (pdf_oxide for PDF,
+# anydoc for every other working format — see the root Cargo.toml's dep
+# comments and src/documents_impl.rs for the measured routing).
+#
+# NOT a cargo workspace member, deliberately, the same way `fuzz/` is not
+# (see fuzz/Cargo.toml's header): a workspace build would unify features
+# across members and silently enable the root crate's `documents` feature
+# (this crate requires it) for every root-level `cargo build`/`cargo test`
+# invocation — the exact lean-base property the feature exists to protect
+# would be gone. This crate builds through its own manifest
+# (`cargo build --manifest-path tors-documents/Cargo.toml`, or maturin via
+# this directory's pyproject.toml), pulling tors-core as a path dependency
+# with the feature ON, and never participates in root cargo commands.
+#
+# Version lockstep: this crate and its pyproject.toml carry the SAME version
+# as the root crate — release-please bumps them together via extra-files
+# (see release-please-config.json), one release, two wheels.
+
+[package]
+name = "tors-documents"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "The tors.documents payload: PDF and office-format extraction to GFM markdown or plain text, GIL-free — pdf_oxide and anydoc behind tors's binding discipline."
+readme = "README.md"
+publish = false
+
+[lib]
+name = "tors_documents"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The extraction cores (src/pdf_impl.rs, src/documents_impl.rs,
+# src/gfm_strip_impl.rs) — the engines come in through this feature.
+tors-core = { path = "..", features = ["documents"] }
+pyo3 = { version = "0.29", features = ["abi3-py310", "extension-module"] }

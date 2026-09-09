@@ -30,3 +30,5 @@ build/
 # one — a `maturin sdist` from this tree carries no .serena/ entry; before
 # the rule, untracked-and-unignored directories leaked into it).
 /.serena/
+.worktrees/
+tors-documents/target/

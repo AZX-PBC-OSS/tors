@@ -38,6 +38,16 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+# The real PyPI extra the documents surface rides on: the tors-documents
+# payload wheel (tors-documents/, version-locked to this package — one
+# release, two wheels, release-please bumps them together). The base wheel
+# ships only the tors.documents shim; `pip install tors[documents]` pulls
+# the compiled extraction surface in. Locally the extra resolves through
+# the uv workspace (below), never from an index — the payload is
+# source-built from this tree; published wheels carry the pin.
+[project.optional-dependencies]
+documents = ["tors-documents"]
+
 [project.urls]
 Homepage = "https://github.com/AZX-PBC-OSS/tors"
 Repository = "https://github.com/AZX-PBC-OSS/tors"
@@ -50,6 +60,24 @@ dev = [
     "json-repair==0.63.4",
     "jsonschema>=4.21",
     "maturin>=1.15.0",
+    # The document WRITERS behind tests/docgen.py's randomized lane: real
+    # format bytes from the standard maintained generators (real Word
+    # styles/numbering, real pptx layouts/notes parts, real xlsx
+    # shared-strings, real PDF content streams/link annotations), so the
+    # cross-format validation suite measures the engines against what
+    # actual authoring tools emit — not hand-built minimal subsets (the
+    # committed corpus keeps those, byte-deterministically; this lane is
+    # seeded-random and never committed, so writer nondeterminism is
+    # harmless). Dev-group only: none of these ship in any wheel.
+    "fpdf2>=2.8",
+    # the encrypted-PDF fixture generator for the password= gates (fpdf2
+    # writes the born-digital page, pypdf wraps it in an RC4-128 standard
+    # security handler — pure-python in pypdf, where AES would drag in the
+    # cryptography package this dev group does not carry)
+    "pypdf>=6.9",
+    "python-docx>=1.2",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
     # pydantic v2 drives the model -> schema -> repair -> model_validate
     # end-to-end tests (tests/test_json_repair_e2e.py); the repair functions
     # also accept models directly at runtime.
@@ -64,6 +92,16 @@ docs = [
 
 [tool.uv]
 default-groups = ["dev"]
+# The payload crate as a uv workspace member: `tors[documents]` (the extra
+# above) resolves it from THIS tree — never from an index — so `uv sync
+# --extra documents` builds and installs the extraction surface locally.
+# A uv-workspace membership is independent of cargo's: tors-documents
+# deliberately stays OUT of the cargo workspace (its Cargo.toml's header)
+# so root cargo commands never see the `documents` feature.
+workspace = { members = ["tors-documents"] }
+
+[tool.uv.sources]
+tors-documents = { workspace = true }
 
 [tool.maturin]
 python-source = "python"

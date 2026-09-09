@@ -1,5 +1,6 @@
-# The scheduled deep fuzzing pass. ci.yml's `fuzz-smoke` job runs the same
-# targets for 15s on every push (a regression net); this job gives them a
+# The scheduled deep fuzzing pass. ci.yml's `fuzz-smoke` job runs most of
+# the same targets for 15s on every push (a regression net); this job gives
+# the target list
 # longer 30s budget on a weekly schedule, when runner minutes are cheap and
 # nobody is waiting on the result, plus a manual `workflow_dispatch` trigger
 # for running a pass on demand (e.g. after a change to a covered core).

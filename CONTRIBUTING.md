@@ -5,13 +5,18 @@ Thanks for your interest in contributing to `tors`!
 ## Setup
 
 ```sh
-uv sync --locked
+uv sync --locked --extra documents
 ```
 
 Every command after that takes `--no-sync` (a bare `uv run` re-resolves the environment and
-can silently drop the Rust extension build).
+can silently drop the Rust extension build). The `--extra documents` is load-bearing,
+not optional: it keeps the tors-documents payload wheel installed, and a plain
+`uv sync --locked` is EXACT — it would uninstall the payload and the pytest suite's
+documents gates would silently skip at module level (the same hazard `make install`/
+`make dev` and CI's sync step document by always carrying the extra).
 
-After changing Rust code: `uv sync --locked --reinstall-package tors` or `maturin develop`.
+After changing Rust code: `uv sync --locked --extra documents --reinstall-package tors`
+or `maturin develop`.
 
 ## Before you open a PR
 
@@ -23,6 +28,10 @@ cargo fmt --check
 uv run --no-sync ruff check .
 cargo deny check licenses advisories bans
 ```
+
+The pytest line presupposes Setup's `--extra documents`: the payload wheel must still
+be installed (`--no-sync` never reinstalls it), or the documents gates skip at module
+level — a green run that validated nothing on the document side.
 
 `make lint` wraps the fmt/clippy/ruff lines (clippy in both feature configs);
 `make test` wraps the pytest and cargo-test lines plus the extension rebuild. The
@@ -83,6 +92,74 @@ next version and CHANGELOG entry. Do not hand-edit `CHANGELOG.md` or bump the ve
 `pyproject.toml`/`Cargo.toml` yourself; release-please owns all three (see
 `release-please-config.json`'s `extra-files` entry, which keeps Cargo.toml's version in
 step with pyproject.toml's on every release).
+
+## Releasing
+
+One release ships three artifacts: the `tors` wheels + sdist and the
+`tors-documents` wheels to PyPI, and the `tors-core` crate to crates.io. The
+`tors-documents` wheel is version-locked to `tors` — same number, one release
+PR, two wheels — and `publish.yml`'s `publish-documents` job asserts the
+lockstep before uploading, because the `tors[documents]` extra pins the payload
+by name (not version): a mismatched pair would install side by side silently.
+Drift is therefore a build failure, never a quiet user-visible bug.
+
+Release-please owns every version: the release PR it opens from Conventional
+Commits bumps `pyproject.toml`, `Cargo.toml`, `tors-documents/Cargo.toml`, and
+`tors-documents/pyproject.toml` together (`release-please-config.json`'s
+`extra-files`), and `release-lock-sync.yml` refreshes `uv.lock` and both
+`Cargo.lock`s on the PR itself. Never hand-bump any of the four files.
+
+Merging the release PR cuts the tag but does NOT publish: a tag cut with
+`GITHUB_TOKEN` cannot start a workflow run (see `release-please.yml`'s header,
+which prints this reminder with the tag name on every release). Unless the
+optional GitHub App token described there is configured, trigger the publish
+run by hand: Actions → publish → Run workflow → select the new tag `vX.Y.Z`.
+That one run publishes everything — the base jobs, the documents jobs, and the
+crates.io job run from the same workflow file.
+
+### One-time publishing setup
+
+The base `tors` PyPI project, the `tors-core` crates.io crate, and the `pypi`
+and `crates-io` GitHub environments are already configured (crates.io has had
+a Trusted Publisher on this repo since `tors-core` 0.3.1). One setup remains,
+required ONCE and BEFORE the first `tors-documents` release tag:
+
+- **PyPI pending publisher** (this is the whole auth story — no API token
+  exists or is needed anywhere). On pypi.org, logged in as the account that
+  will own the project: account menu → *Publishing* → *Add a pending
+  publisher*, with exactly:
+  - Project name: `tors-documents`
+  - Owner: `AZX-PBC-OSS`
+  - Repository: `tors`
+  - Workflow filename: `publish.yml`
+  - Environment name: `pypi`
+
+  A pending publisher is required before the first release because PyPI
+  refuses a Trusted Publishing upload for a project that does not exist yet;
+  with this in place, the first `publish-documents` run creates the project
+  and every later release authenticates the same way. The `environment: pypi`
+  the workflow's jobs declare (publish.yml) must match the environment name
+  entered here exactly — it is part of the OIDC claim PyPI verifies.
+
+- **GitHub environment `pypi`**: Settings → Environments → `pypi` — already in
+  use by the base `publish` job; `publish-documents` reuses it, and a Trusted
+  Publishing identity is per PyPI project, not per environment, so nothing new
+  is needed here. (Only create protection rules if you want a human approval
+  gate in front of registry uploads; they then apply to both PyPI jobs.)
+
+Nothing is needed on the crates.io side for the documents work: the four
+engines (`pdf_oxide`, `anydoc`, `office_oxide`, `html-to-markdown-rs`) are
+optional, registry-sourced dependencies of `tors-core`, so they ride the next
+`cargo publish` normally and stay opt-in for Rust consumers — the feature is
+off by default, and publish.yml's crates job publishes with `--no-default-features`,
+so its verification build never even compiles them. The payload crate itself
+(`tors-documents`) is `publish = false` in its Cargo.toml: its `tors-core`
+dependency is a path dependency, which cargo cannot publish, and PyPI is its
+only distribution channel — that line is deliberate, not a TODO.
+
+The docs site needs nothing from a release: `docs.yml` builds the static
+`docs/*.md` with only the docs dependency group installed (`--no-install-project`),
+so no wheel — base or payload — is ever needed for the site to build or deploy.
 
 ## Reporting bugs and requesting features
 

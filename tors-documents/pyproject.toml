@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tors-documents"
+# Lockstep with the root `tors` version — release-please bumps this file
+# together with the root pyproject/Cargo.toml (one release, two wheels).
+version = "0.5.0"
+description = "The tors.documents payload — PDF and office-format extraction to GFM markdown or plain text, GIL-free: pdf_oxide and anydoc behind tors's binding discipline."
+# Payload-local, deliberately: maturin resolves readme (and every metadata
+# path) against THIS manifest's directory, so a "../README.md" pointing at
+# the repo root's file is rejected — the wheel carries its own README.
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AZX, PBC." }]
+maintainers = [{ name = "AZX, PBC." }]
+keywords = ["pdf", "docx", "xlsx", "rtf", "odt", "markdown", "gil-free", "rust", "text-extraction"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Text Processing",
+    "Topic :: Text Processing :: Markup",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/AZX-PBC-OSS/tors"
+Repository = "https://github.com/AZX-PBC-OSS/tors"
+Changelog = "https://github.com/AZX-PBC-OSS/tors/releases"
+
+[tool.maturin]
+python-source = "python"
+module-name = "tors_documents._tors_documents"

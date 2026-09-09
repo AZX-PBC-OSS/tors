@@ -28,9 +28,13 @@ endif
 # aggregate-target pattern: one `check` target wrapping the whole list).
 check: lint test
 
-# Setup: build the extension + dev deps (CONTRIBUTING.md "Setup").
+# Setup: build the extension + dev deps (CONTRIBUTING.md "Setup"). The
+# documents extra is always synced: the pytest suite's documents gates
+# (tests/test_documents_engines.py) run against the tors.documents payload
+# (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
+# is EXACT — it would uninstall the payload and silently skip those gates.
 install:
-	uv sync --locked
+	uv sync --locked --extra documents
 
 # Rebuild the extension after Rust edits. uv's wheel cache does not key on Rust
 # sources, so a bare `uv sync` would leave pytest importing the stale .so.
@@ -39,34 +43,42 @@ install:
 # CPython's extension-suffix order ranks a version-specific .so AHEAD of the
 # abi3 one, the dev-loop landmine tests/conftest.py fails loudly on): after
 # `make dev` exactly one fresh _tors.abi3.so remains, and plain `pytest`
-# (without the preload runner) binds it.
+# (without the preload runner) binds it. --extra documents: same reason as
+# `install` — the payload must stay installed for the documents gates.
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
-	uv sync --locked --reinstall-package tors
+	uv sync --locked --extra documents --reinstall-package tors
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
 # crate — not a workspace member, so root cargo fmt never sees it; without
 # this line the fuzz targets rot silently, truncate_ellipsis.rs had
-# already drifted), clippy in both feature configs
-# (pyo3's cfg flags differ between them, so each pass surfaces lints in code the
-# other never compiles), and ruff over the Python side (tests/, tools/,
+# already drifted), clippy in BOTH feature configs plus the documents
+# config (pyo3's cfg flags differ between them, and the documents surface
+# is cfg-gated code the other configs never compile — the same reason the
+# two-config pass exists), and ruff over the Python side (tests/, tools/,
 # python/; config in pyproject.toml, the dev-group ruff runs it).
 lint:
 	cargo fmt --check
+	cargo fmt --check --manifest-path tors-documents/Cargo.toml
 	cargo fmt --check --manifest-path fuzz/Cargo.toml
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --no-default-features -- -D warnings
+	cargo clippy --all-targets --no-default-features --features documents -- -D warnings
+	cargo clippy --all-targets --manifest-path tors-documents/Cargo.toml -- -D warnings
 	uv run --no-sync ruff check .
 
-# Rust unit tests (extension-module off: it doesn't link libpython) and the pytest
-# suite. Depends on `dev` so pytest always imports the extension built from the
-# current tree, never a stale wheel. NOTE: unlike ci.yml's matrix legs (which
-# deselect the timing lane and run it in ONE dedicated 3.12 step), this target
-# runs EVERYTHING, the timing measurement cells included, because a local
-# `make test` is the full pre-PR gate; the lane split exists to stop CI paying
-# the slow, load-sensitive cells five times, not to thin the local run.
+# Rust unit tests (extension-module off: it doesn't link libpython) in BOTH
+# feature configs — the documents lane is the engine surface's crate-side
+# tests (routing table, separator pin, classify semantics) — and the pytest
+# suite. Depends on `dev` so pytest always imports the extension built from
+# the current tree, never a stale wheel. NOTE: unlike ci.yml's matrix legs
+# (which deselect the timing lane and run it in ONE dedicated 3.12 step), this
+# target runs EVERYTHING, the timing measurement cells included, because a
+# local `make test` is the full pre-PR gate; the lane split exists to stop CI
+# paying the slow, load-sensitive cells five times, not to thin the local run.
 test: dev
 	cargo test --no-default-features
+	cargo test --no-default-features --features documents
 	uv run --no-sync pytest -q
 
 # Run the criterion suite (CI only compiles it, with --no-run): both benches.
