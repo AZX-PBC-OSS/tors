@@ -297,6 +297,7 @@ class TestConcurrency:
         assert all(result == expected for result in results)
 
 
+@pytest.mark.timing
 def test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +308,9 @@ def test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     measured 2026-09: worst gap ~= the whole call) blocks it for the full wall.
     The ~470KB single-page document keeps the wall an order of magnitude over
     the 10ms ping floor so the ratio resolves (the module docstring's guidance).
+    A TIMING-lane cell: the load-sensitive band measurement CI's matrix legs
+    deselect (`-m "not timing and not sweep"`), one 3.12 leg running it — the
+    marker-split contract every lane cell carries.
     """
     import asyncio
 

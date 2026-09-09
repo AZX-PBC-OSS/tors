@@ -89,12 +89,17 @@ bench:
 fmt:
 	cargo fmt
 
-# The licensing gate (the ci.yml lint job's Cargo deny step): the
+# The licensing gate (the ci.yml lint job's two Cargo deny steps): the
 # permissive-only license allowlist, the advisory policy, and the ban
-# policy live in deny.toml. Requires cargo-deny on PATH
+# policy live in deny.toml. BOTH lockfiles are gated: tors-documents
+# resolves its own independent Cargo.lock (not a workspace member — its
+# Cargo.toml's header) whose package set is not a subset of the root
+# lock's (deny.toml's [graph] comment), so the payload manifest gets its
+# own pass. Requires cargo-deny on PATH
 # (`cargo install cargo-deny --locked`, ~1min).
 deny:
 	cargo deny check licenses advisories bans
+	cargo deny --manifest-path tors-documents/Cargo.toml check licenses advisories bans
 
 # Regenerate src/html_table.rs from the RUNNING interpreter's html module
 # (tools/gen_html_table.py; the provenance line lives in the generated header).
@@ -117,7 +122,31 @@ gen-html-table:
 # 30s-per-target smoke run suitable before a PR; a real fuzzing campaign
 # (hours, one target, targeted at a specific area of suspicion) is
 # `cargo +nightly fuzz run <target>` run directly, not through this target.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair
+# The wired-in list, kept identical to ci.yml's fuzz-smoke loop and
+# fuzz.yml's weekly pass — the two CI loops had drifted from this one
+# (truncate_ellipsis, controls, json_repair were Makefile-only).
+#
+# gfm_strip joined the run lists 2026-09-09: the byte-counted fence
+# indent trim in strip_fence_content sliced inside a multi-byte
+# whitespace char when the budget ran out mid-char ("start byte index 3
+# is not a char boundary; it is inside U+0085", fuzz-found from an
+# accumulated corpus). Fixed by consuming only WHOLE whitespace chars
+# (unit-pinned + both crash artifacts re-run clean + a 120s/1.37M-run
+# smoke clean).
+#
+# documents_markdown stays deliberately ABSENT from the run lists: built
+# and committed (fuzz/Cargo.toml [[bin]], the `documents` feature is on
+# in the fuzz crate's tors dep so the surface compiles), but it
+# SIGSEGVs on an UPSTREAM bug, and a known-crashing target in the
+# always-run lists is a time bomb, not a regression net:
+#
+# pdf_oxide 0.3.78's parser::parse_object/parse_array mutual recursion
+# has no depth cap, so a ~30k-deep array in a PDF the Auto router must
+# parse (the Root's value, /Kids) overflows the stack (reproduced
+# 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
+# alternation). It stays committed as the repro harness, joining the run
+# lists when pdf_oxide ships a cap.
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \

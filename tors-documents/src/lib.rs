@@ -29,6 +29,7 @@
 //! every function here: the O(output) string marshalling, plus
 //! `to_markdown`/`to_text`'s two-string tuple.
 
+use std::io::Read as _;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -67,11 +68,15 @@ pyo3::create_exception!(
 /// rule: a security state is never masked as "all pages empty") —
 /// `password=` unlocks one (a wrong password is its own clean
 /// `ValueError`, and the unlock applies to every PDF entry, not just
-/// this one).
+/// this one). A `path=` naming a FIFO, device, or socket is a
+/// `ValueError` naming `path` and the kind (the shared source spine
+/// reads REGULAR files only — open(2) on a no-writer FIFO blocks
+/// forever with the GIL released, and `/dev/zero` reads unboundedly).
 ///
 /// GIL model: the source marshalling under the GIL (`parse_source`: the
-/// path type-checked and Unicode-validated, a `data=` call paying its one
-/// bytes copy, every refusal naming its argument), the read+classify under
+/// path type-checked and Unicode-validated, a `data=` call BORROWING
+/// the immutable buffer — the one bytes copy runs inside the detach,
+/// see [`Source`]), the read+classify under
 /// `py.detach`, then the return object construction (three attribute
 /// values, O(pages)) — `pdf_extract`'s residue class with the smallest
 /// native pass of the PDF family.
@@ -82,14 +87,14 @@ pub fn pdf_classify(
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PdfClassification> {
-    let source = parse_source(py, path, data, "pdf_classify")?;
+    let source = parse_source(path, data, "pdf_classify")?;
     let password = parse_password(password)?;
     let classification = py
         .detach(move || {
-            let bytes = source.into_bytes().map_err(tors::pdf_impl::PdfError::Io)?;
-            tors::pdf_impl::classify(bytes, password.as_deref())
+            let bytes = source.into_bytes()?;
+            tors::pdf_impl::classify(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
         })
-        .map_err(pdf_error)?;
+        .map_err(pdf_lane_error)?;
     Ok(PdfClassification {
         page_count: classification.page_count,
         page_kinds: classification.page_kinds,
@@ -177,8 +182,11 @@ impl PdfClassification {
 /// (`to_markdown`/`to_text`) take the backend choice.
 ///
 /// Errors: a missing/unreadable file raises `OSError`; anything that fails
-/// to parse as a PDF raises `ValueError` with pdf_oxide's reason. Both are
-/// constructed AFTER the GIL is reacquired.
+/// to parse as a PDF raises `ValueError` with pdf_oxide's reason; a `path=`
+/// naming a FIFO, device, or socket is a `ValueError` naming `path` and
+/// the kind (the shared source spine reads regular files only). Both of
+/// the typed refusals are constructed
+/// AFTER the GIL is reacquired.
 ///
 /// GIL model: the whole pass — file read, PDF parse, per-page text
 /// extraction, markdown conversion — runs under one `py.detach`. The
@@ -195,14 +203,14 @@ pub fn pdf_extract(
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, String)> {
-    let source = parse_source(py, path, data, "pdf_extract")?;
+    let source = parse_source(path, data, "pdf_extract")?;
     let password = parse_password(password)?;
     let extracted = py
         .detach(move || {
-            let bytes = source.into_bytes().map_err(tors::pdf_impl::PdfError::Io)?;
-            tors::pdf_impl::extract(bytes, password.as_deref())
+            let bytes = source.into_bytes()?;
+            tors::pdf_impl::extract(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
         })
-        .map_err(pdf_error)?;
+        .map_err(pdf_lane_error)?;
     Ok((extracted.pages, extracted.markdown))
 }
 
@@ -214,7 +222,9 @@ pub fn pdf_extract(
 /// count) without paying for any of it.
 ///
 /// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
-/// that do not parse as a PDF, both raised after the GIL is reacquired.
+/// that do not parse as a PDF, and `ValueError` naming `path` for a
+/// FIFO/device/socket path (regular files only, the shared source spine) —
+/// all raised after the GIL is reacquired.
 ///
 /// GIL model: `pdf_extract`'s shape with the smallest possible return —
 /// the path str marshalling (`parse_path`), the open+page-tree walk under
@@ -226,13 +236,13 @@ pub fn pdf_page_count(
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<usize> {
-    let source = parse_source(py, path, data, "pdf_page_count")?;
+    let source = parse_source(path, data, "pdf_page_count")?;
     let password = parse_password(password)?;
     py.detach(move || {
-        let bytes = source.into_bytes().map_err(tors::pdf_impl::PdfError::Io)?;
-        tors::pdf_impl::page_count(bytes, password.as_deref())
+        let bytes = source.into_bytes()?;
+        tors::pdf_impl::page_count(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
-    .map_err(pdf_error)
+    .map_err(pdf_lane_error)
 }
 
 /// `tors.documents.pdf_link_uris(path) -> list[list[str]]` (or
@@ -265,7 +275,9 @@ pub fn pdf_page_count(
 /// same lane `pdf_extract` runs.
 ///
 /// Errors: `OSError` (matched subclass) for a missing/unreadable `path=`;
-/// `ValueError` for bytes that do not parse as a PDF. Same GIL model as
+/// `ValueError` for bytes that do not parse as a PDF, and for a
+/// FIFO/device/socket `path=` (regular files only, the shared source
+/// spine). Same GIL model as
 /// `pdf_classify` — the source marshalling under the GIL, the
 /// read+page-tree+annotation walk under one `py.detach`, the nested list
 /// marshalling (O(annotations)) after the reacquire.
@@ -276,13 +288,13 @@ pub fn pdf_link_uris(
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<Vec<String>>> {
-    let source = parse_source(py, path, data, "pdf_link_uris")?;
+    let source = parse_source(path, data, "pdf_link_uris")?;
     let password = parse_password(password)?;
     py.detach(move || {
-        let bytes = source.into_bytes().map_err(tors::pdf_impl::PdfError::Io)?;
-        tors::pdf_impl::link_uris(bytes, password.as_deref())
+        let bytes = source.into_bytes()?;
+        tors::pdf_impl::link_uris(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
-    .map_err(pdf_error)
+    .map_err(pdf_lane_error)
 }
 
 /// `tors.documents.to_markdown(path, data=None, format=None,
@@ -316,13 +328,29 @@ pub fn pdf_link_uris(
 /// and text surfaces returned `""` on a locked document while classify
 /// raised). A wrong password is its own clean `ValueError`.
 ///
-/// `max_bytes` overrides the engine-lane input ceiling (default 32 MiB,
-/// covering the anydoc AND office_oxide lanes — anydoc measures ~36x RSS
-/// amplification on delimiter formats, 2026-09: a 100 MiB csv peaked at
-/// 3.7 GiB; a zip-bombed office_oxide container measured far worse, and
-/// that engine has no decompression caps of its own, so the input ceiling
-/// is the only guard on the opt-in `backend="oxide"` lane. The pdf_oxide
-/// and HTML lanes are unmetered). A positive `int`.
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An EXPLICIT budget is binding on EVERY engine lane: it is enforced
+/// before a byte is read (a `path=`'s size at open, a `data=` call's
+/// length) — the engine lane is unknowable before the container sniff
+/// that these very bytes feed, so a budget that waited for the lane to
+/// be known would be a budget the pdf/HTML lanes never see (the pre-fix
+/// shape, probed 2026-09: `max_bytes=1` on a real PDF converted
+/// unmolested; and worse, `to_text(path="/dev/zero", max_bytes=65536)`
+/// read forever — the ceiling ran only in the core, only after the
+/// read). `None` (the default) keeps the default-ceiling doctrine
+/// exactly as before: the measured 32 MiB, checked after the read, on
+/// the anydoc AND office_oxide lanes only — anydoc's csv lane measures
+/// ~36x on benign shapes but ~146x worst case on adversarial ones (a
+/// 24 MiB many-short-cells csv peaked at 3.4 GiB, stable across sizes,
+/// so the 32 MiB default ceiling budgets ~4.6 GiB worst case: size
+/// workers for that or pass a lower `max_bytes`), and office_oxide
+/// 0.1.10 added per-part decompression caps (512 MiB per part, declared
+/// and actual, XML depth 256 on a 16 MiB parse stack) but still has no
+/// total-across-parts cap and no output cap (a 399 KiB zip carrying a
+/// 400 MiB part converts at ~1.6 GiB peak; a 600 MiB part is refused
+/// pre-decompression) — so the input ceiling remains the only aggregate
+/// guard on the opt-in `backend="oxide"` lane; the pdf_oxide and HTML
+/// lanes stay unmetered under the default.
 ///
 /// `backend` picks the engine where they overlap: `"auto"` (the default;
 /// the native layer takes `None` as the same choice) routes by the
@@ -349,15 +377,23 @@ pub fn pdf_link_uris(
 /// (a non-string format or backend; a bool, float, or str where a page
 /// index belongs), `ValueError` for a wrong value or shape (an unknown
 /// or empty `backend=` name; a negative, empty, or backwards `pages=`
-/// range; a non-Unicode path). The document failures are constructed
-/// after the GIL is reacquired: `OSError` for a missing/unreadable file
-/// (the matched subclass — `FileNotFoundError`, `IsADirectoryError`);
-/// `NeedsOcrError` (a `ValueError` subclass carrying `.pages` and
-/// `.page_count`) when the anydoc backend hits a PDF with scanned pages —
-/// route the document to OCR; `ValueError` for an unknown format name,
-/// an undetectable file, an unusable backend/format pair, an
-/// out-of-bounds `pages=` selection (the core's message names the page
-/// count), or a malformed/encrypted/over-limit document.
+/// range; a non-Unicode path; a path with an embedded NUL byte —
+/// CPython's own `open()` refusal). The input-side and document
+/// failures are constructed after the GIL is reacquired: `OSError` for
+/// a missing/unreadable file (the matched subclass —
+/// `FileNotFoundError`, `IsADirectoryError` — directories keep their
+/// pinned shape); `ValueError` naming `path` and the kind for a
+/// FIFO/device/socket `path=` (regular files only, so the unbounded
+/// `/dev/zero` read and the no-writer FIFO block can never begin), and
+/// the ceiling `ValueError` — both sizes named, the core's own message
+/// on the metered lanes — for any input over an explicit `max_bytes`
+/// (refused BEFORE the read or copy); `NeedsOcrError` (a `ValueError`
+/// subclass carrying `.pages` and `.page_count`) when the anydoc
+/// backend hits a PDF with scanned pages — route the document to OCR;
+/// `ValueError` for an unknown format name, an undetectable file, an
+/// unusable backend/format pair, an out-of-bounds `pages=` selection
+/// (the core's message names the page count), or a
+/// malformed/encrypted/over-limit document.
 ///
 /// GIL model: the whole argument marshalling (path, format, backend,
 /// pages — validation and normalization) under the GIL, the whole
@@ -471,8 +507,10 @@ type CoreConvert = for<'a> fn(
 /// strip runs inside the core, so the binding sees one shape for both):
 /// marshal and validate every argument under the GIL (`parse_path`,
 /// `parse_format`, `parse_backend`, `parse_pages`, every refusal naming
-/// its argument and repr'ing the value), run the WHOLE native pass — file
-/// read, format sniff, engine conversion — under one `py.detach`, then
+/// its argument — repr'ing the value, except the content-bearing
+/// `data=`, which names the type only), run the WHOLE native pass — file
+/// read (regular files only, under an explicit budget), format sniff,
+/// engine conversion — under one `py.detach`, then
 /// the error mapping and the two-string return after the GIL is
 /// reacquired. `what` is the CALLER's own name (`"to_markdown"`/
 /// `"to_text"`), riding into `parse_source`'s both/neither refusals so
@@ -494,14 +532,14 @@ fn convert(
     what: &str,
     core: CoreConvert,
 ) -> PyResult<(&'static str, String)> {
-    let source = parse_source(py, path, data, what)?;
+    let source = parse_source(path, data, what)?;
     let format = parse_format(format)?;
     let backend = parse_backend(backend)?;
     let pages = parse_pages(pages)?;
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;
     let converted = match py.detach(move || {
-        let (bytes, hint) = source.into_input().map_err(DocumentError::Io)?;
+        let (bytes, hint) = source.into_input(max_bytes).map_err(input_document_error)?;
         core(
             bytes,
             hint.as_deref(),
@@ -533,7 +571,17 @@ fn convert(
 ///
 /// `None` is not an error: the content names no format (a signature-less
 /// text format such as CSV — name it via `format=` — or not a document at
-/// all). `sniff` never opens a parser: the markers are container-level.
+/// all).
+///
+/// Cost, honestly: `sniff` is NOT a bounded marker scan. anydoc's detect
+/// opens the ZIP/OLE package and parses its metadata (rels and
+/// content-types, with a fallback into the MAIN PART when the markers
+/// need it), so a classification-only pipeline pays a container-level
+/// parse of the package — measured 2026-09: a 120 KiB zip peaked at
+/// 267 MiB RSS to answer "docx". Budget a `sniff` call like a small
+/// open, not like a header peek. (A `max_bytes` knob for `sniff` alone
+/// is deliberately out of scope: the convert lane's ceiling is the
+/// convert lane's.)
 ///
 /// `data=` is strict `bytes` — anything else is a `TypeError` naming the
 /// argument, the house convention (the raw pyo3 cast error the manual
@@ -542,7 +590,8 @@ fn convert(
 /// callers pass `bytes(data)`, the same strict contract as the convert
 /// lane's `data=`.
 ///
-/// GIL model: the bytes-in zero-copy borrow under the GIL, the marker scan
+/// GIL model: the bytes-in zero-copy borrow under the GIL, the
+/// detection pass (the package parse the cost paragraph above names)
 /// under `py.detach`, and the `str | None` return (the name is `&'static`
 /// — the vocabulary's own spelling — so no owned String is built just to
 /// be copied into the Python str) — the bytes-in family's
@@ -564,46 +613,274 @@ pub fn sniff(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<&'stati
 
 /// Marshal the `path` argument under the GIL: a `str` (the typed wrappers
 /// have already `os.fspath`'d PathLike inputs) whose content must be valid
-/// Unicode. Both refusal shapes name `path` and repr the value — the raw
-/// pyo3 `&str`-conversion failures they replace do not: a non-str path
-/// surfaces as a bare `'int' object is not an instance of 'str'` that
-/// leaves a four-argument call site guessing which argument failed, and a
-/// lone-surrogate path (a filename that escaped a POSIX-only tool) as a
-/// `UnicodeEncodeError` about 'utf-8' that reads like a conversion bug in
-/// the document engine, not a caller-input problem (both probed on the
-/// 0.5.0 wheel, 2026-09).
-/// The document's input: a `path=` the detached pass reads, or the
-/// caller's `data=` bytes (copied once under the GIL — a borrow cannot
-/// cross `py.detach`, and a memcpy of even a 25MB upload is single-digit
-/// milliseconds against the conversion pass it precedes). `into_bytes`
-/// also yields the NAME hint the extension fallback of format resolution
-/// consults: the path, when there was one — a `data=` call has no name and
-/// rests on `format=`/content markers alone, the doctrine `sniff`
-/// encodes (the core's `resolve` says the same, in its own words).
-enum Source {
-    Path(PathBuf),
-    Data(Vec<u8>),
+/// Unicode and carry no NUL. All three refusal shapes name `path` and
+/// repr the value — the raw pyo3 `&str`-conversion failures they replace
+/// do not: a non-str path surfaces as a bare `'int' object is not an
+/// instance of 'str'` that leaves a four-argument call site guessing which
+/// argument failed, a lone-surrogate path (a filename that escaped a
+/// POSIX-only tool) as a `UnicodeEncodeError` about 'utf-8' that reads
+/// like a conversion bug in the document engine, and a NUL-bearing path
+/// as a plain `OSError` from the filesystem layer where CPython's own
+/// `open("a\0b")` raises `ValueError: embedded null byte` (all probed on
+/// the 0.5.0 wheel / the PR #27 red-team pass, 2026-09).
+fn parse_path(path: &Bound<'_, PyAny>) -> PyResult<PathBuf> {
+    let string = path.cast::<PyString>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "path must be a str or os.PathLike, not {}",
+            py_repr(path)
+        ))
+    })?;
+    match string.to_str() {
+        Ok(text) if text.contains('\0') => Err(PyValueError::new_err(format!(
+            "path must be a valid filesystem path (no embedded null byte), not {}",
+            py_repr(path)
+        ))),
+        Ok(text) => Ok(PathBuf::from(text)),
+        Err(_) => Err(PyValueError::new_err(format!(
+            "path must be valid Unicode (no lone surrogates), not {}",
+            py_repr(path)
+        ))),
+    }
 }
 
-impl Source {
+/// The document's input: a `path=` the detached pass reads (REGULAR
+/// files only — [`Source::into_input`] refuses the other kinds before
+/// open(2)/read can begin), or the caller's `data=` bytes, BORROWED
+/// zero-copy from the caller's `PyBytes`.
+///
+/// The borrow crossing `py.detach` is sound by construction — `sniff`'s
+/// precedent, the same argument restated: the buffer is immutable
+/// (nothing can mutate a `bytes` object GIL-free), and CPython holds the
+/// caller's argument reference for the whole call, so the slice outlives
+/// the detached pass that reads it. The ONE copy (`to_vec`) runs inside
+/// the detach, where it belongs: measured 2026-09, a 400 MB `data=`
+/// call held the GIL ~78 ms when the copy ran parse-side — a 1 GiB
+/// upload is a 1 GiB GIL-held interpreter stall that way, and pure
+/// memory bandwidth inside the detach. Do NOT extend this pattern to a
+/// MUTABLE buffer (bytearray/memoryview): the immutability is the whole
+/// safety argument, which is why `parse_source` refuses those on the
+/// spot (strict `bytes`) and must keep refusing them.
+///
+/// `into_input` also yields the NAME hint the extension fallback of
+/// format resolution consults: the path, when there was one — a `data=`
+/// call has no name and rests on `format=`/content markers alone, the
+/// doctrine `sniff` encodes (the core's `resolve` says the same, in its
+/// own words).
+enum Source<'a> {
+    Path(PathBuf),
+    Data(&'a [u8]),
+}
+
+/// The binding-layer input refusals — the shapes an `io::Error` cannot
+/// carry, because they are typed VALUE refusals, not environment
+/// failures: `Io` maps to `OSError` (pyo3's matched-subclass
+/// `From<io::Error>`, the existing doctrine), `Refused` to `ValueError`
+/// with the message pre-built where the refusal fired (it names the
+/// argument and the reason, the house convention). Returned as a VALUE
+/// out of the detached pass — nothing raises from inside the detach —
+/// and mapped to a `PyErr` after the GIL is reacquired.
+enum InputError {
+    Io(std::io::Error),
+    Refused(String),
+}
+
+impl Source<'_> {
     /// The bytes alone — the PDF family's entry (no name to consult:
-    /// those functions are PDF-only by construction).
-    fn into_bytes(self) -> Result<Vec<u8>, std::io::Error> {
-        Ok(self.into_input()?.0)
+    /// those functions are PDF-only by construction, and their surface
+    /// carries no `max_bytes=` to gate with).
+    fn into_bytes(self) -> Result<Vec<u8>, InputError> {
+        Ok(self.into_input(None)?.0)
     }
 
     /// The bytes AND the name hint — the convert spine's entry (the
     /// extension fallback's last resort; `None` for a `data=` call).
-    fn into_input(self) -> Result<(Vec<u8>, Option<String>), std::io::Error> {
+    ///
+    /// `max_bytes` is the caller's EXPLICIT budget (the absurd values
+    /// were already refused under the GIL by `parse_max_bytes`):
+    /// `Some(limit)` is binding HERE, before a byte is read or copied,
+    /// on every lane — the engine lane is unknowable before the
+    /// container sniff that these very bytes feed, so an explicit budget
+    /// cannot wait for the lane to be known (the red-team findings:
+    /// `max_bytes=65536` on `/dev/zero` read forever because the ceiling
+    /// ran only post-read in the core, and a caller budgeting on a PDF
+    /// or HTML document got the full parse — those lanes never saw the
+    /// knob). `None` keeps the default doctrine exactly: the core's
+    /// post-read 32 MiB check, on the anydoc and office_oxide lanes
+    /// only.
+    fn into_input(self, max_bytes: Option<usize>) -> Result<(Vec<u8>, Option<String>), InputError> {
         match self {
             Source::Path(path) => {
                 // parse_path already validated the Unicode, so the hint is
                 // always representable; `.to_str()` cannot fail here.
                 let hint = path.to_str().map(str::to_string);
-                Ok((std::fs::read(&path)?, hint))
+                // The FAST refusal, before open(2) is ever entered: a FIFO
+                // with no writer blocks INSIDE open (the GIL released, the
+                // thread unreclaimable), and /dev/zero reads unboundedly
+                // once opened — so the exotic kinds must be turned away at
+                // the stat, not at the open. This is the cheap gate; the
+                // fstat below is the authority.
+                let pre = std::fs::metadata(&path).map_err(InputError::Io)?;
+                refuse_non_regular(&path, pre.file_type())?;
+                refuse_over_ceiling(max_bytes, pre.len())?;
+                // The AUTHORITY: fstat ON THE OPEN HANDLE — whatever a
+                // stat/open race did to the path in between, this is the
+                // file the read below actually reads, and it must be a
+                // regular file under the same budget. (Directories
+                // deliberately flow past both checks: their pinned
+                // refusal is the read's own EISDIR OSError, unchanged.)
+                let mut file = std::fs::File::open(&path).map_err(InputError::Io)?;
+                let meta = file.metadata().map_err(InputError::Io)?;
+                refuse_non_regular(&path, meta.file_type())?;
+                refuse_over_ceiling(max_bytes, meta.len())?;
+                // std::fs::read's own shape, on the verified handle: the
+                // capacity hint from the fstat size (an explicit budget
+                // already bounds it; the default lane keeps parity with
+                // the pre-fix allocation).
+                let size = usize::try_from(meta.len()).unwrap_or(0);
+                let mut bytes = Vec::with_capacity(size);
+                file.read_to_end(&mut bytes).map_err(InputError::Io)?;
+                Ok((bytes, hint))
             }
-            Source::Data(bytes) => Ok((bytes, None)),
+            Source::Data(bytes) => {
+                // The data lane's twin gate: the budget refuses before the
+                // copy (the bytes are already resident — the caller's own
+                // memory — but the parse it would feed is not free).
+                refuse_over_ceiling(max_bytes, bytes.len() as u64)?;
+                // The one copy, inside the detach (the enum's docs).
+                Ok((bytes.to_vec(), None))
+            }
         }
+    }
+}
+
+/// Refuse a `path` that names anything but a regular file (or a
+/// directory — those keep their pinned EISDIR `OSError`): FIFOs,
+/// character/block devices, and sockets are valid PATHS of unusable
+/// input KIND — a value refusal (`ValueError`), per the module's
+/// type-vs-value convention — naming `path` and the KIND, so the caller
+/// can act on what the path actually is.
+fn refuse_non_regular(
+    path: &std::path::Path,
+    file_type: std::fs::FileType,
+) -> Result<(), InputError> {
+    if file_type.is_file() || file_type.is_dir() {
+        return Ok(());
+    }
+    Err(InputError::Refused(format!(
+        "path must name a regular file (the document's bytes), not {}: {}",
+        input_kind(&file_type),
+        path.display()
+    )))
+}
+
+/// The explicit-budget pre-gate: `Some(limit)` with the input over it is
+/// the same ceiling `ValueError` the engine lanes raise, fired before
+/// the read (path) or the copy (data) — same class, same two rendered
+/// sizes. Where the core's message names the engine lane (knowable only
+/// after the sniff), this one names the knob and states the doctrine:
+/// an explicit budget binds every lane; the 32 MiB default is the
+/// core's post-read check on the anydoc/oxide lanes only. `None` never
+/// refuses here.
+fn refuse_over_ceiling(max_bytes: Option<usize>, size: u64) -> Result<(), InputError> {
+    let Some(limit) = max_bytes else {
+        return Ok(());
+    };
+    // usize -> u64 is lossless on every platform; the stat side is u64
+    // natively, so the gate compares in the wider type.
+    if size <= limit as u64 {
+        return Ok(());
+    }
+    Err(InputError::Refused(format!(
+        "the document is {} and the input ceiling is {} (an explicit max_bytes is binding \
+         on every engine lane — pdf and HTML included — and is checked before any work \
+         runs; the 32 MiB default, by contrast, is enforced after the read, on the \
+         anydoc and office_oxide lanes only): split the file, or pass a larger max_bytes",
+        render_size(size as usize),
+        render_size(limit),
+    )))
+}
+
+/// One size for a ceiling refusal, legible at every scale — the core's
+/// own `render_size` spelling (src/documents_impl.rs), mirrored here so
+/// the binding's pre-read refusal and the core's post-read refusal
+/// render IDENTICALLY (MiB where that rounding stays honest, raw bytes
+/// below it; a 52 KiB refusal must not round to "0.0 MiB vs 0.0 MiB",
+/// two sizes neither readable).
+fn render_size(size: usize) -> String {
+    let mib = size as f64 / (1024.0 * 1024.0);
+    if mib < 0.1 {
+        format!("{size} bytes")
+    } else {
+        format!("{mib:.1} MiB")
+    }
+}
+
+/// The stat kind of an irregular input, for the refusal message: the
+/// caller can act on the KIND (a FIFO means a stuck producer; a
+/// character device means /dev/zero's unbounded read), not on a bare
+/// "not a regular file". Unix names them precisely; elsewhere the
+/// honest generic is all stat gives.
+#[cfg(unix)]
+fn input_kind(file_type: &std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt as _;
+    if file_type.is_fifo() {
+        "a FIFO"
+    } else if file_type.is_char_device() {
+        "a character device"
+    } else if file_type.is_block_device() {
+        "a block device"
+    } else if file_type.is_socket() {
+        "a socket"
+    } else {
+        "not a regular file"
+    }
+}
+
+#[cfg(not(unix))]
+fn input_kind(_: &std::fs::FileType) -> &'static str {
+    "not a regular file"
+}
+
+/// `InputError` to the convert lane's core error: `Io` rides as `Io`
+/// (the existing `OSError` mapping), a typed refusal as `Convert` (the
+/// `ValueError` arm of `document_error`) — the refusal crosses out of
+/// the detach as a value and becomes a Python `ValueError` after the
+/// GIL is reacquired, like every other document refusal.
+fn input_document_error(err: InputError) -> DocumentError {
+    match err {
+        InputError::Io(io) => DocumentError::Io(io),
+        InputError::Refused(what) => DocumentError::Convert(what),
+    }
+}
+
+/// The PDF family's detach-pass error: the engine's own `PdfError`, or
+/// the input refusal kept DISTINCT from it. The distinction is the
+/// point: `PdfError`'s only string-carrying variant renders as
+/// "Invalid PDF: {message}", and an input refusal must never wear that
+/// prefix — a FIFO path or an oversized file was never READ, let alone
+/// parsed, so "invalid PDF" about it would be a lie in the message. Both
+/// arms map to their own `PyErr` after the GIL is reacquired.
+enum PdfLaneError {
+    Pdf(tors::pdf_impl::PdfError),
+    Input(InputError),
+}
+
+impl From<InputError> for PdfLaneError {
+    fn from(err: InputError) -> Self {
+        PdfLaneError::Input(err)
+    }
+}
+
+/// [`PdfLaneError`] to the Python side: the engine arm keeps
+/// `pdf_error`'s mapping (`Io` → the matched `OSError` subclass,
+/// everything else "not a readable PDF" → `ValueError`), the input arm
+/// maps its own way (`Io` → `OSError`, a typed refusal → `ValueError`
+/// with the message verbatim, no engine prefix).
+fn pdf_lane_error(err: PdfLaneError) -> PyErr {
+    match err {
+        PdfLaneError::Pdf(err) => pdf_error(err),
+        PdfLaneError::Input(InputError::Io(io)) => PyErr::from(io),
+        PdfLaneError::Input(InputError::Refused(what)) => PyValueError::new_err(what),
     }
 }
 
@@ -611,15 +888,21 @@ impl Source {
 /// the two — both is a `ValueError`, neither a `TypeError` (the
 /// missing-required-argument convention; the function name rides in
 /// `what` so the message reads like Python's own). A `data=` that is not
-/// `bytes` is a `TypeError` naming the argument (strict `bytes`, matching
-/// the typed surface's signature — `bytearray`/`memoryview` callers pass
-/// `bytes(data)`, the copy they are paying anyway).
-fn parse_source(
-    py: Python<'_>,
-    path: Option<&Bound<'_, PyAny>>,
-    data: Option<&Bound<'_, PyAny>>,
+/// `bytes` is a `TypeError` naming the argument and the TYPE ONLY (the
+/// `password=` doctrine, extended to the one other content-bearing
+/// argument: the pre-fix repr rode a rejected 1 MiB bytearray's whole
+/// ~4 MB content into the exception message — straight into logged
+/// tracebacks — and a `memoryview` repr leaked a raw heap address; both
+/// probed 2026-09). Strict `bytes`, matching the typed surface's
+/// signature — `bytearray`/`memoryview` callers pass `bytes(data)`, the
+/// copy they are paying anyway. A `data=` call BORROWS the buffer here
+/// (see [`Source`]'s docs for the soundness argument); the copy runs
+/// inside the detach.
+fn parse_source<'a>(
+    path: Option<&'a Bound<'_, PyAny>>,
+    data: Option<&'a Bound<'_, PyAny>>,
     what: &str,
-) -> PyResult<Source> {
+) -> PyResult<Source<'a>> {
     match (path, data) {
         (Some(_), Some(_)) => Err(PyValueError::new_err(format!(
             "{what}: pass either path or data, not both"
@@ -632,28 +915,11 @@ fn parse_source(
             let bytes = data.cast::<PyBytes>().map_err(|_| {
                 PyTypeError::new_err(format!(
                     "data must be bytes (the document's content), not {}",
-                    py_repr(data)
+                    type_name(data)
                 ))
             })?;
-            let _ = py;
-            Ok(Source::Data(bytes.as_bytes().to_vec()))
+            Ok(Source::Data(bytes.as_bytes()))
         }
-    }
-}
-
-fn parse_path(path: &Bound<'_, PyAny>) -> PyResult<PathBuf> {
-    let string = path.cast::<PyString>().map_err(|_| {
-        PyTypeError::new_err(format!(
-            "path must be a str or os.PathLike, not {}",
-            py_repr(path)
-        ))
-    })?;
-    match string.to_str() {
-        Ok(text) => Ok(PathBuf::from(text)),
-        Err(_) => Err(PyValueError::new_err(format!(
-            "path must be valid Unicode (no lone surrogates), not {}",
-            py_repr(path)
-        ))),
     }
 }
 
@@ -717,16 +983,19 @@ fn parse_password(password: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String
 /// the measured 32 MiB engine-lane ceiling, see the core's
 /// `DEFAULT_ANYDOC_INPUT_LIMIT` — the name is historical, the ceiling
 /// covers the anydoc and office_oxide lanes) or a positive `int` the
-/// caller budgets instead. Wrong TYPES raise `TypeError` (bool first — it
-/// launders as an int), wrong VALUES `ValueError` (negative, zero,
-/// i64-overflow).
+/// caller budgets instead. An EXPLICIT budget is binding on every lane
+/// and is enforced pre-read by the binding itself (see
+/// [`Source::into_input`]); `None` keeps the core's post-read default
+/// doctrine. Wrong TYPES raise `TypeError` (bool first — it launders as
+/// an int), wrong VALUES `ValueError` (negative, zero, i64-overflow).
 fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
     let Some(max_bytes) = max_bytes else {
         return Ok(None);
     };
     if max_bytes.is_instance_of::<PyBool>() {
         return Err(PyTypeError::new_err(
-            "max_bytes must be an int (the engine lane's input ceiling in bytes), not a bool",
+            "max_bytes must be an int (the input ceiling in bytes, binding on every lane \
+             when explicit), not a bool",
         ));
     }
     let Ok(limit) = max_bytes.extract::<i64>() else {
@@ -737,13 +1006,15 @@ fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usiz
             )));
         }
         return Err(PyTypeError::new_err(format!(
-            "max_bytes must be an int (the engine lane's input ceiling in bytes), not {}",
+            "max_bytes must be an int (the input ceiling in bytes, binding on every lane \
+             when explicit), not {}",
             py_repr(max_bytes)
         )));
     };
     if limit <= 0 {
         return Err(PyValueError::new_err(format!(
-            "max_bytes must be positive (the engine lane's input ceiling in bytes), not {limit}"
+            "max_bytes must be positive (the input ceiling in bytes, binding on every lane \
+             when explicit), not {limit}"
         )));
     }
     // Belt-and-braces (wheels are 64-bit-only): a 32-bit `as` would silently lower the caller's budget.
@@ -901,9 +1172,11 @@ fn index_of(item: &Bound<'_, PyAny>) -> PyResult<usize> {
 }
 
 /// The value's type name (`"bytes"`, `"int"`, …) for the refusals that
-/// must not carry the value: `password=`'s (the one secret-bearing
-/// argument — a secret never rides into a message) and `sniff`'s bytes
-/// refusal. The complement of [`py_repr`]: names the TYPE, never the
+/// must not carry the value: `password=`'s (a secret never rides into a
+/// message), `sniff`'s bytes refusal, and `parse_source`'s `data=`
+/// refusal (document CONTENT never rides into one either — a rejected
+/// 1 MiB bytearray's repr was a ~4 MB message, probed 2026-09). The
+/// complement of [`py_repr`]: names the TYPE, never the
 /// value; cannot fail on a real object (every type has a `__name__`), the
 /// placeholder the same belt as `py_repr`'s.
 fn type_name(value: &Bound<'_, PyAny>) -> String {

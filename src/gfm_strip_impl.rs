@@ -374,14 +374,24 @@ fn closes_fence(line: &FenceLine<'_>, open: &OpenFence) -> bool {
 /// markers (each with one optional space), repeated while either budget
 /// remains. The machinery is the engine's (`> quoted code` is quote plus
 /// code; anydoc's empty quoted line is `>` alone), the rest is the code's
-/// own bytes, trailing whitespace included.
+/// own bytes, trailing whitespace included. The indent trim is a byte
+/// budget against a leading whitespace run that may hold multi-byte
+/// whitespace chars (fuzz-found 2026-09-09: a two-space-plus-`\u{85}`
+/// content line under an indent-3 fence sliced inside the `\u{85}`), so
+/// it consumes only WHOLE whitespace chars while they fit — a char the
+/// budget cannot fit is the code's own content, kept verbatim.
 fn strip_fence_content<'a>(line: &'a str, open: &OpenFence) -> &'a str {
     let mut rest = line;
     let mut spaces = open.indent;
     let mut quotes = open.quotes;
     loop {
-        let leading = rest.len() - rest.trim_start().len();
-        let take = leading.min(spaces);
+        let mut take = 0;
+        for (_, ch) in rest.char_indices() {
+            if !ch.is_whitespace() || take + ch.len_utf8() > spaces {
+                break;
+            }
+            take += ch.len_utf8();
+        }
         rest = &rest[take..];
         spaces -= take;
         if quotes == 0 {
@@ -849,6 +859,25 @@ fn find_equal_run(chars: &[char], from: usize, len: usize) -> Option<usize> {
     None
 }
 
+/// The recursion-depth cap for [`strip_emphasis_and_links`]: the inline
+/// pass recurses once per nesting level of a link label, an image label,
+/// or emphasis content, and that recursion is otherwise unbounded.
+/// Measured 2026-09-09 (PR #27 red-team follow-up): a docx whose
+/// paragraph text is `[[[…]]()…]()` ~30,000 deep (~120 KB) drove it into
+/// a stack overflow — SIGSEGV, exit -11, uncatchable in any binding (the
+/// recursion runs on the caller's stack, whatever thread that is). 256 is
+/// the document engines' own nesting convention, adopted for the same
+/// role here: anydoc caps XML depth at 256, and office_oxide 0.1.10's
+/// `MAX_NESTING_DEPTH` is 256 — empirically calibrated by its authors
+/// against a dedicated 16 MB parse stack (their table: the release cliff
+/// is 3,000-4,000 levels there, 512-1,024 on a bare 2 MiB thread). This
+/// pass has no dedicated stack, so 256 carries the same 2x margin against
+/// the 2 MiB figure while sitting far past any real engine output (no
+/// engine nests labels more than 2-3 deep — the module docs' input
+/// contract). Past the cap the remainder degrades to literal text (see
+/// [`strip_emphasis_and_links_at_depth`]).
+const MAX_INLINE_DEPTH: usize = 256;
+
 /// `[label](url)` → `label (url)` — `label` alone when the label IS the
 /// destination (pdf_oxide renders a bare URL as `[url](url)` and a bare
 /// email as `[e](mailto:e)`; html-to-markdown-rs emits `<url>`/`<e>`
@@ -856,9 +885,24 @@ fn find_equal_run(chars: &[char], from: usize, len: usize) -> Option<usize> {
 /// `![alt](src)` → `alt`; `<url>` autolinks → the url itself; emphasis
 /// marker pairs unwrapped (a link label's own content gets the same
 /// treatment — anydoc labels carry styled runs). Nested brackets inside
-/// labels are not pinned (no engine emits them); a `[` without a matching
-/// `](url)` passes through.
+/// labels arrive from no engine (real output nests 1-3 deep); the
+/// pathological `[[[…]]()…]()` shape is pinned by the depth-cap test —
+/// see [`MAX_INLINE_DEPTH`]. A `[` without a matching `](url)` passes
+/// through.
 fn strip_emphasis_and_links(line: &str) -> String {
+    strip_emphasis_and_links_at_depth(line, 0)
+}
+
+/// [`strip_emphasis_and_links`]'s worker, carrying the recursion depth
+/// (one level per unwrapped label/image/emphasis nest). At
+/// [`MAX_INLINE_DEPTH`] the line is returned verbatim: the remaining
+/// label is emitted as literal text — lossy (its own `[…](…)` machinery
+/// stays) but non-crashing, the same degradation the measured engines
+/// show on deep HTML.
+fn strip_emphasis_and_links_at_depth(line: &str, depth: usize) -> String {
+    if depth >= MAX_INLINE_DEPTH {
+        return line.to_string();
+    }
     let chars: Vec<char> = line.chars().collect();
     // Which characters are backslash-escaped (the engines escape literal
     // markers: anydoc's styled runs escape their own content — `*a \* b*`
@@ -905,7 +949,7 @@ fn strip_emphasis_and_links(line: &str) -> String {
         {
             // An image contributes its alt text only: the source is a
             // binary reference, noise for plain text.
-            out.push_str(&strip_emphasis_and_links(&label));
+            out.push_str(&strip_emphasis_and_links_at_depth(&label, depth + 1));
             i = next;
             continue;
         }
@@ -915,7 +959,7 @@ fn strip_emphasis_and_links(line: &str) -> String {
             if url == label || url == format!("mailto:{label}") {
                 out.push_str(&label);
             } else {
-                out.push_str(&strip_emphasis_and_links(&label));
+                out.push_str(&strip_emphasis_and_links_at_depth(&label, depth + 1));
                 if !url.is_empty() {
                     out.push_str(" (");
                     out.push_str(&url);
@@ -951,7 +995,7 @@ fn strip_emphasis_and_links(line: &str) -> String {
                         find_run_at(&chars, &escaped_at, i + run_len + 1, c, run_len)
                 {
                     let content: String = chars[i + run_len..close].iter().collect();
-                    out.push_str(&strip_emphasis_and_links(&content));
+                    out.push_str(&strip_emphasis_and_links_at_depth(&content, depth + 1));
                     i = close + run_len;
                     continue;
                 }
@@ -1114,24 +1158,44 @@ fn find_unescaped_bracket_close(chars: &[char], escaped_at: &[bool], open: usize
     None
 }
 
+/// Put the lifted code spans back, replacing each `\u{0}<idx>\u{0}`
+/// sentinel with its span. The sentinel grammar is ours (NUL never
+/// appears in engine markdown), but `strip` is a pub fn and literal NUL
+/// reaches it directly: a sentinel-shaped sequence that is not one of
+/// ours — a 0 (the indices are 1-based), an out-of-range index, a
+/// non-numeric body, or an opener that never closes — is literal text
+/// and passes through VERBATIM, NULs included. Never a panic (the old
+/// `idx - 1` underflowed on 0: a debug abort, a release wrap to
+/// usize::MAX), never a silent drop (an unmatched index used to vanish
+/// with its NULs).
 fn restore_code_spans(line: &str, spans: &[String]) -> String {
     if spans.is_empty() {
         return line.to_string();
     }
     let mut out = String::with_capacity(line.len());
-    let mut in_sentinel = false;
     let mut index = String::new();
+    let mut in_sentinel = false;
     for c in line.chars() {
         if c == '\u{0}' {
-            if in_sentinel {
-                if let Ok(idx) = index.parse::<usize>()
-                    && let Some(span) = spans.get(idx - 1)
+            if !in_sentinel {
+                in_sentinel = true;
+                index.clear();
+            } else {
+                if let Some(span) = index
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|idx| idx.checked_sub(1))
+                    .and_then(|idx| spans.get(idx))
                 {
                     out.push_str(span);
+                } else {
+                    out.push('\u{0}');
+                    out.push_str(&index);
+                    out.push('\u{0}');
                 }
+                in_sentinel = false;
                 index.clear();
             }
-            in_sentinel = !in_sentinel;
             continue;
         }
         if in_sentinel {
@@ -1139,6 +1203,11 @@ fn restore_code_spans(line: &str, spans: &[String]) -> String {
         } else {
             out.push(c);
         }
+    }
+    // An opener that never closes is literal text too: flush it verbatim.
+    if in_sentinel {
+        out.push('\u{0}');
+        out.push_str(&index);
     }
     out
 }
@@ -1425,6 +1494,21 @@ mod tests {
     }
 
     #[test]
+    fn fence_indent_trim_never_splits_a_multibyte_whitespace_char() {
+        // Fuzz-found 2026-09-09 (cargo-fuzz gfm_strip, artifact
+        // crash-bce7ac6e): a fence opened at indent 3 with a content line
+        // whose leading whitespace run is two ASCII spaces plus the
+        // two-byte NEXT LINE char \u{85} made the byte-budgeted machinery
+        // trim slice at byte 3 — inside \u{85}'s bytes 2..4 — and panic
+        // ("byte index 3 is not a char boundary"). The trim now consumes
+        // only WHOLE leading whitespace chars while they fit the budget:
+        // a char the budget cannot fit is the code's own content, kept
+        // verbatim.
+        let markdown = concat!("   ```\n", "  \u{85}x\n", "   ```\n");
+        assert_eq!(strip(markdown), "\u{85}x\n");
+    }
+
+    #[test]
     fn horizontal_rules_go() {
         assert_eq!(strip("before\n\n---\n\nafter\n"), "before\n\nafter\n");
         // the dash rule's other spellings — interleaved whitespace, long
@@ -1675,6 +1759,54 @@ mod tests {
         assert_eq!(strip("one\n\n\n\n\ntwo\n"), "one\n\ntwo\n");
         assert_eq!(strip(""), "");
         assert_eq!(strip("\n"), "");
+    }
+
+    #[test]
+    fn pathological_link_label_nesting_degrades_instead_of_overflowing() {
+        // RED-GREEN 2026-09-09: `strip_emphasis_and_links` recursed once
+        // per bracket-nesting level of a link label with no bound at all.
+        // Measured: a docx whose paragraph text is `[[[…]]()…]()` ~30,000
+        // deep (~120 KB) made `to_text(backend="oxide")` SIGSEGV (exit
+        // -11) — the recursion runs on the caller's stack, and no binding
+        // in any language can catch a stack overflow. This drives the
+        // public `strip` entry with a 200,000-deep construct: deep enough
+        // to exhaust every stack this crate runs on. The contract past
+        // the cap (MAX_INLINE_DEPTH, 256): the remaining label is emitted
+        // as literal text — lossy (its own `[…](…)` machinery stays) but
+        // alive, the same degradation the measured engines show on deep
+        // HTML.
+        let depth = 200_000;
+        let markdown = format!("{}x{}\n", "[".repeat(depth), "]()".repeat(depth));
+        let text = strip(&markdown);
+        // The degradation is exact: each level below the cap unwraps one
+        // `[…](…)` layer, and the first call AT the cap returns its whole
+        // line verbatim — 256 wrapper levels gone, the rest literal text.
+        let remaining = depth - 256;
+        let expected = format!("{}x{}\n", "[".repeat(remaining), "]()".repeat(remaining));
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn literal_nul_sentinel_sequences_are_text_not_a_crash_or_a_drop() {
+        // RED-GREEN 2026-09-09: the engines strip NUL from their text, so
+        // the `\u{0}<idx>\u{0}` sentinels [`lift_code_spans`] writes are
+        // unambiguous in engine markdown — but `strip` is a pub fn (and a
+        // fuzz target), and literal NUL reaches it directly. A `\u{0}0\u{0}`
+        // body (0 is one BELOW the first sentinel, which is 1-based) hit
+        // `spans.get(idx - 1)`: debug panicked on the underflow; release
+        // wrapped to usize::MAX, `.get()` → `None`, and the text between
+        // the NULs silently vanished. The contract pinned here: a
+        // sentinel-shaped sequence that is not one of ours — a 0, an
+        // out-of-range index, a non-numeric body, or an opener that never
+        // closes — is literal text and passes through verbatim, NULs
+        // included. Never a panic, never a silent drop. (The real code
+        // span in the input keeps `spans` non-empty: an empty-span line
+        // short-circuits restore and exercises nothing.)
+        let input = "real `code` and \u{0}0\u{0} \u{0}9\u{0} \u{0}x\u{0} \u{0} tail\n";
+        assert_eq!(
+            strip(input),
+            "real code and \u{0}0\u{0} \u{0}9\u{0} \u{0}x\u{0} \u{0} tail\n"
+        );
     }
 
     // --- probed and NOT emitted: the shapes the strip deliberately does

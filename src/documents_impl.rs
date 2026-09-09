@@ -354,21 +354,32 @@ fn engine_for(kind: Kind, backend: Backend) -> Result<Engine, DocumentError> {
 
 /// The document-engine lanes' default input ceiling: 32 MiB, applied to
 /// the two lanes that AMPLIFY their input into resident memory — anydoc
-/// and office_oxide. anydoc AMPLIFIES at a measured ~36× on delimiter
-/// formats (2026-09, this box: a 100 MiB csv peaked at 3.7 GiB RSS and a
-/// 50 MiB one at 1.9 GiB — anydoc materializes row structures per cell;
-/// the conversion also ran ~6.8s on the 100 MiB file) and additionally
-/// caps decompression engine-side (its own package limits: 128 MiB per
-/// entry, 512 MiB total, a 4M× expansion bound). office_oxide has NO
-/// decompression caps of its own: a 333 KiB zip-bombed docx peaked at
-/// 1.7 GiB RSS on that lane (measured 2026-09), which is why it gets the
-/// same input-side bound even though the bound does not — cannot — cap
-/// what a compressed container inflates to; selecting `backend="oxide"`
-/// accepts that risk (an opt-in lane, never the default). 32 MiB keeps
-/// anydoc's measured worst case near 1.2 GiB — a survivable spike on an
-/// ingestion worker — and is overridden per call by
-/// [`ConvertOptions::max_bytes`] when the caller's budget is bigger (or
-/// tighter). The NAME stays anydoc-branded (history: the knob was born
+/// and office_oxide. anydoc AMPLIFIES at a measured ~146× worst case on
+/// adversarial delimiter formats (2026-09-09, this box: a 24 MiB csv of
+/// 1,258,291 rows × 10 one-char cells peaked at 3.42 GiB RSS through
+/// to_text in 6.4 s, and a 12 MiB one at 1.73 GiB in 3.1 s — the
+/// multiple is stable across sizes, a per-byte property: anydoc
+/// materializes row structures per cell. The earlier ~36× figure — a
+/// 100 MiB csv → 3.7 GiB — was a benign-shape measurement; cells per
+/// byte, not file size, drives the multiple) and additionally caps
+/// decompression engine-side (its own package limits: 128 MiB per entry,
+/// 512 MiB total, a 4M× expansion bound). office_oxide 0.1.10 (released
+/// 2026-09-09, its changelog #144/#151) now enforces MAX_PART_SIZE =
+/// 512 MiB per part — declared and actual bytes; XML nesting depth 256
+/// on its own 16 MB parse stack — but still has NO total-across-parts
+/// cap and NO output cap: measured the same day, a 399 KiB zip with a
+/// 400 MiB word/document.xml converts successfully at 1.58 GiB peak RSS
+/// in under a second (the ~400 MiB markdown handed over whole), while a
+/// 598 KiB zip declaring a 600 MiB part is refused pre-decompression
+/// ("decompression limit exceeded … more than 536870912 bytes", 0.03 s,
+/// ~20 MiB RSS). That is why the oxide lane gets the same input-side
+/// bound even though the bound does not — cannot — cap what a compressed
+/// container inflates to; selecting `backend="oxide"` accepts that risk
+/// (an opt-in lane, never the default). At the measured ~146×, the 32
+/// MiB default ceiling's honest worst case on the anydoc lane is ~4.6
+/// GiB — not a survivable spike on a small ingestion worker; callers
+/// with tight budgets must lower [`ConvertOptions::max_bytes`] or split
+/// the file. The NAME stays anydoc-branded (history: the knob was born
 /// anydoc-only and the payload crate's docs reference it by this name);
 /// the SEMANTICS are both amplified lanes. The pdf_oxide and HTML lanes
 /// are unmetered here: pdf_oxide's own resource limits govern there, and
@@ -418,18 +429,21 @@ pub struct ConvertOptions<'a> {
     pub password: Option<&'a str>,
     /// The engine-lane input ceiling, in bytes: it bounds INPUT size on
     /// the two lanes that amplify input into resident memory — anydoc
-    /// (~36× RSS on delimiter formats: 100 MiB csv → 3.7 GiB peak, 50 MiB
-    /// → 1.9 GiB, 2026-09) and office_oxide (a 333 KiB zip-bombed docx →
-    /// 1.7 GiB peak on that lane, same date). `None` is the default: the
-    /// 32 MiB [`DEFAULT_ANYDOC_INPUT_LIMIT`]; `Some(n)` raises or lowers
-    /// it for callers with a bigger (or tighter) memory budget. The
-    /// honest limits of what it bounds: anydoc additionally caps
-    /// decompression ENGINE-SIDE (its package limits), while office_oxide
-    /// has NO decompression caps at all — an opt-in lane whose caller
-    /// accepts unbounded-decompression risk by selecting it; the ceiling
-    /// bounds the bytes handed in, never the bytes they inflate to. The
-    /// pdf_oxide and HTML lanes are unmetered by this knob: their own
-    /// limits govern.
+    /// (~146× RSS worst case on adversarial delimiter formats: a 24 MiB
+    /// csv → 3.42 GiB peak, a 12 MiB one → 1.73 GiB, 2026-09-09) and
+    /// office_oxide (a 399 KiB zip-bombed docx with a 400 MiB part →
+    /// 1.58 GiB peak on that lane, same date). `None` is the default:
+    /// the 32 MiB [`DEFAULT_ANYDOC_INPUT_LIMIT`]; `Some(n)` raises or
+    /// lowers it for callers with a bigger (or tighter) memory budget —
+    /// at the measured multiple the default's anydoc-lane worst case is
+    /// ~4.6 GiB, so tighter is often right. The honest limits of what it
+    /// bounds: anydoc additionally caps decompression ENGINE-SIDE (its
+    /// package limits), while office_oxide 0.1.10 caps 512 MiB per part
+    /// but has NO total-across-parts cap and NO output cap — an opt-in
+    /// lane whose caller accepts unbounded multi-part decompression risk
+    /// by selecting it; the ceiling bounds the bytes handed in, never
+    /// the bytes they inflate to. The pdf_oxide and HTML lanes are
+    /// unmetered by this knob: their own limits govern.
     pub max_bytes: Option<usize>,
 }
 
@@ -586,23 +600,25 @@ fn convert(
         ));
     }
     // The input ceiling: BOTH document-holding lanes that AMPLIFY their
-    // input into resident memory — anydoc (~36x on delimiter formats, and
-    // engine-side decompression caps on top; see
-    // [DEFAULT_ANYDOC_INPUT_LIMIT]) and office_oxide (no decompression
-    // caps of its own: a 333 KiB zip-bomb docx peaked at 1.7 GiB RSS on
-    // the oxide lane, measured 2026-09) — so the opt-in lane gets the
-    // same input-side bound as the default one. What the ceiling does NOT
-    // do is bound office_oxide's DEcompression: that lane's caller
-    // accepts unbounded-decompression risk by selecting it (the honest
-    // state, stated in [`ConvertOptions::max_bytes`]'s docs).
+    // input into resident memory — anydoc (~146x worst case on
+    // adversarial delimiter formats, and engine-side decompression caps
+    // on top; see [DEFAULT_ANYDOC_INPUT_LIMIT]) and office_oxide (512
+    // MiB per part since 0.1.10, but no total-across-parts cap and no
+    // output cap: a 399 KiB zip-bomb docx with a 400 MiB part peaked at
+    // 1.58 GiB RSS on the oxide lane, measured 2026-09-09) — so the
+    // opt-in lane gets the same input-side bound as the default one.
+    // What the ceiling does NOT do is bound office_oxide's DEcompression
+    // beyond that per-part cap: that lane's caller accepts unbounded
+    // multi-part decompression risk by selecting it (the honest state,
+    // stated in [`ConvertOptions::max_bytes`]'s docs).
     if engine == Engine::Anydoc || engine == Engine::OfficeOxide {
         let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
         if bytes.len() > limit {
             return Err(DocumentError::Convert(format!(
                 "the document is {} and the {} engine lane's input ceiling is {} \
                  (that lane amplifies input into resident memory at a measured multiple \
-                 — 2026-09: ~36x on anydoc's delimiter formats, ~5000x on a \
-                 zip-bombed office_oxide container): split the file, or pass a larger \
+                 — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                 ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
                  max_bytes",
                 render_size(bytes.len()),
                 engine_name(engine),
@@ -1277,13 +1293,15 @@ mod tests {
 
     #[test]
     fn the_oxide_lane_shares_the_input_ceiling() {
-        // office_oxide had NO input bound of its own (measured 2026-09: a
-        // 333 KiB zip-bombed docx peaked at 1.7 GiB RSS on that lane,
-        // before the ceiling was extended to it), so the opt-in lane gets
-        // the same input-side guard as the default one — named for ITS
+        // office_oxide had NO input bound of its own (measured 2026-09,
+        // against 0.1.9 — which had no decompression caps at all: a 333
+        // KiB zip-bombed docx peaked at 1.7 GiB RSS on that lane, before
+        // the ceiling was extended to it), so the opt-in lane gets the
+        // same input-side guard as the default one — named for ITS
         // engine lane. What the guard does not do is bound decompression
-        // (office_oxide has no caps; see ConvertOptions::max_bytes's
-        // honest statement of that).
+        // beyond office_oxide 0.1.10's own 512 MiB-per-part cap: there is
+        // no total-across-parts cap and no output cap (see
+        // ConvertOptions::max_bytes's honest statement of that).
         let docx = write_docx_bytes();
         let over = to_markdown_with(
             docx.clone(),

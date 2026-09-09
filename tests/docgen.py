@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import io
 import random
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -426,6 +427,69 @@ def random_rtf(seed: int) -> tuple[bytes, GroundTruth]:
     return raw, truth
 
 
+# --- the OOXML alias containers (docm / xlsm / ppsx) --------------------------
+#
+# The macro-enabled / slide-show variants of the writer libraries' own
+# output: the same package with [Content_Types].xml's main-document
+# override respelled (the only difference between the containers), so the
+# fuzz lane measures the aliases over REAL writer bytes. Ground truth is
+# the base generator's unchanged — the alias IS the base document, only
+# the container's content-type name differs.
+
+_CT_DOCX_MAIN = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+)
+_CT_DOCM_MAIN = "application/vnd.ms-word.document.macroEnabled.main+xml"
+_CT_XLSX_MAIN = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+)
+_CT_XLSM_MAIN = "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
+_CT_PPTX_MAIN = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+)
+_CT_PPSX_MAIN = (
+    "application/vnd.openxmlformats-officedocument.presentationml"
+    ".slideshow.macroEnabled.main+xml"
+)
+
+
+def _ooxml_alias(raw: bytes, base_ct: str, alias_ct: str) -> bytes:
+    """Rewrite [Content_Types].xml's main-document override inside a
+    writer-produced OOXML package: the macro-enabled/show variants are the
+    same container with that one attribute respelled."""
+    source = zipfile.ZipFile(io.BytesIO(raw))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(base_ct.encode(), alias_ct.encode())
+            archive.writestr(item, data)
+    return out.getvalue()
+
+
+def random_docm(seed: int) -> tuple[bytes, GroundTruth]:
+    """random_docx's document in the macro-enabled container — the alias
+    the engines convert as docx on both lanes (anydoc and office_oxide)."""
+    raw, truth = random_docx(seed)
+    return _ooxml_alias(raw, _CT_DOCX_MAIN, _CT_DOCM_MAIN), truth
+
+
+def random_xlsm(seed: int) -> tuple[bytes, GroundTruth]:
+    """random_xlsx's workbook in the macro-enabled container — the alias
+    the engines convert as xlsx on both lanes (anydoc and office_oxide)."""
+    raw, truth = random_xlsx(seed)
+    return _ooxml_alias(raw, _CT_XLSX_MAIN, _CT_XLSM_MAIN), truth
+
+
+def random_ppsx(seed: int) -> tuple[bytes, GroundTruth]:
+    """random_pptx's deck in the slide-show container — the alias the
+    auto/anydoc lane converts as pptx (office_oxide refuses the slideshow
+    content type; the fuzz lane's auto conversion is the coverage)."""
+    raw, truth = random_pptx(seed)
+    return _ooxml_alias(raw, _CT_PPTX_MAIN, _CT_PPSX_MAIN), truth
+
+
 # --- html (string templates: generation IS the format) ------------------------
 
 
@@ -504,8 +568,11 @@ def random_html(seed: int) -> tuple[bytes, GroundTruth]:
 GENERATORS: dict[str, Callable[[int], tuple[bytes, GroundTruth]]] = {
     "pdf": random_pdf,
     "docx": random_docx,
+    "docm": random_docm,
     "pptx": random_pptx,
+    "ppsx": random_ppsx,
     "xlsx": random_xlsx,
+    "xlsm": random_xlsm,
     "odt": random_odt,
     "csv": random_csv,
     "rtf": random_rtf,
@@ -515,8 +582,11 @@ GENERATORS: dict[str, Callable[[int], tuple[bytes, GroundTruth]]] = {
 FILE_EXTENSIONS: dict[str, str] = {
     "pdf": ".pdf",
     "docx": ".docx",
+    "docm": ".docm",
     "pptx": ".pptx",
+    "ppsx": ".ppsx",
     "xlsx": ".xlsx",
+    "xlsm": ".xlsm",
     "odt": ".odt",
     "csv": ".csv",
     "rtf": ".rtf",

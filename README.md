@@ -177,8 +177,10 @@ engine-routed per format family.
 - `to_markdown` / `to_text`: any working format (pdf, doc/docx, xls/xlsx, ppt/pptx,
   rtf, odt/ods/odp, epub, csv/tsv, html/xhtml) to GFM markdown or plain text,
   `(format, output)` back, with `pages=` PDF subsets, `password=` for encrypted
-  PDFs (fail closed without), and `max_bytes=` to budget the anydoc lane's
-  measured input ceiling — the document is a `path` or in-memory `data=` bytes
+  PDFs (fail closed without), and `max_bytes=` as the input budget — an explicit
+  value binds every engine lane before a byte is read, `None` keeping the 32 MiB
+  default (post-read, the amplifying lanes only) — the document is a `path` or
+  in-memory `data=` bytes
   (byte-identical answers, no temp-file roundtrip)
 - `sniff`: the content-marker format detector over bytes alone
 - `pdf_extract`: per-page plain text plus whole-document markdown, one pass
@@ -281,9 +283,14 @@ taxonomy, `tors.documents.aio` — is the documents section of
 [`docs/api.md`](docs/api.md).
 
 - `format=` names the format explicitly (extension spelling, case-insensitive;
-  container variants `docm`/`xlsm`/`xlsb`/`ppsx` map onto their parents; `tsv` is
-  accepted as a name and resolves onto the csv kind — the resolved and sniffed name
-  is always `"csv"`, never `"tsv"`). `None` sniffs the format from content markers
+  the container variants `docm`/`xlsm`/`ppsx` map onto their parents — the same
+  OOXML packages with the content-type override naming the macro/show variant,
+  resolved and sniffed as their base kinds; `tsv` is
+  accepted as a name and resolves onto the csv kind — the resolved and sniffed
+  name is always `"csv"`, never `"tsv"`. `xlsb` is vocabulary sugar only: the
+  name routes the Excel kind, but genuine xlsb content is BIFF12 `.bin` sheets,
+  not worksheet XML, and is refused — the engines do not read it). `None` sniffs
+  the format from content markers
   (the PDF header, the RTF open group, OLE stream names, the ZIP package mimetype,
   the HTML document marker, with a delimiter-agreement heuristic for signature-less
   CSV), the path's extension as the fallback — so a mislabeled file still converts.
@@ -291,8 +298,10 @@ taxonomy, `tors.documents.aio` — is the documents section of
   reports its container honestly: `"xls"` for OLE bytes, `"xlsx"` for a ZIP package,
   regardless of what the explicit name said.
 - `sniff(data)` answers the same content question standalone, over bytes alone with
-  no path — the mislabeled-download answer — and never opens a parser. `None` is not
-  an error: the content names no format.
+  no path — the mislabeled-download answer. It OPENS AND PARSES THE CONTAINER
+  (anydoc's detection reads the ZIP/OLE package metadata; a 120 KiB zip measured
+  267 MiB peak RSS to answer docx), so budget it like a parse, not a marker scan.
+  `None` is not an error: the content names no format.
 - `pdf_extract` returns `(per_page_plain_text, whole_document_markdown)` — one pass
   over one open document, the parse paid once for both outputs. An image-only page
   is an empty string, not an error; routing decisions are the caller's, never
@@ -303,12 +312,25 @@ taxonomy, `tors.documents.aio` — is the documents section of
   `.pages_needing_ocr` (the 0-based indices of image-only pages, excluding blanks),
   and the derived `.has_text` / `.image_only`. Encrypted documents fail closed on
   every entry (`ValueError` without `password=`).
-- Errors: `OSError` for a missing/unreadable file; `ValueError` for an unknown
+- Errors: `OSError` for a missing/unreadable file (the matched subclass —
+  `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
+  `ValueError` for an unknown
   format name, an undetectable file, an unusable backend/format pair, an invalid
-  `pages=` selection, a malformed/encrypted document, or an input over the
-  anydoc/office_oxide lane `max_bytes=` ceiling (32 MiB by default). `NeedsOcrError` (a
-  `ValueError` subclass carrying `.pages` — the 0-based indices needing OCR, the same
-  convention as `pages=` and `pages_needing_ocr` — and
+  - Errors: `OSError` for a missing/unreadable file (the matched subclass —
+    `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
+    `ValueError` for an unknown
+    format name, an undetectable file, an unusable backend/format pair, an invalid
+    `pages=` selection, a malformed/encrypted document, an input over `max_bytes=`
+    (an EXPLICIT budget binds every lane — pdf and HTML included — checked before a
+    byte is read or copied; the 32 MiB default, post-read, covers the anydoc and
+    office_oxide lanes only), a non-regular `path=` (FIFO/device/socket — typed,
+    naming `path` and the kind, before the read), or a NUL byte inside `path=`
+    (CPython's own `open()` convention). `NeedsOcrError` (a
+    `ValueError` subclass carrying `.pages` — the 0-based indices needing OCR, the same
+    convention as `pages=` and `pages_needing_ocr` — and
+    `.page_count`) is raised only on the anydoc PDF lane; the default pdf_oxide lane
+    returns empty output for scanned pages and leaves the OCR decision to
+    `pdf_classify`/`pdf_extract`.
   `.page_count`) is raised only on the anydoc PDF lane; the default pdf_oxide lane
   returns empty output for scanned pages and leaves the OCR decision to
   `pdf_classify`/`pdf_extract`.
@@ -326,12 +348,18 @@ fallback:
 | pdf | pdf_oxide 0.3.78 | pdf_oxide | anydoc (pdf-inspector) |
 | html / htm | html-to-markdown-rs 3.12 | `ValueError` | `ValueError` |
 | doc / docx (incl. `docm`) | anydoc 0.2.4 | office_oxide 0.1.10 | anydoc |
-| xls / xlsx (incl. `xlsm`, `xlsb`) | anydoc | office_oxide | anydoc |
-| ppt / pptx (incl. `ppsx`) | anydoc | office_oxide | anydoc |
+| xls / xlsx (incl. `xlsm`) | anydoc | office_oxide | anydoc |
+| ppt / pptx (incl. `ppsx`) | anydoc | `ValueError` (ppsx) / office_oxide (pptx) | anydoc |
 | rtf | anydoc | `ValueError` | anydoc |
 | odt / ods / odp | anydoc | `ValueError` | anydoc |
 | epub | anydoc | `ValueError` | anydoc |
 | csv / tsv | anydoc | `ValueError` | anydoc |
+
+(`xlsb` is absent on purpose: the name routes the Excel kind as vocabulary sugar,
+but genuine xlsb content — BIFF12 `.bin` sheets, not worksheet XML — is refused by
+both engines; `ppsx` converts on the auto/anydoc lane and is refused by
+office_oxide, which checks the presentation content type — clean refusals, never
+silent fallbacks, both pinned in the suite.)
 
 Why this split: pdf_oxide reads two-column layouts as separate reading-order blocks,
 renders `/Link` annotations as `[text](uri)`, and detects oversize-font headings,
@@ -343,9 +371,13 @@ rtf/odt/epub/csv office_oxide cannot read at all. `backend="oxide"` exists so a
 pipeline can diff the two engines' output on its own corpus — office_oxide's one
 measured win is exact entity text (no `&`-escaping, which anydoc does and the
 plain-text strip normalizes back). Every probe-able cell above was verified against
-the committed fixtures in `tests/engines_corpus/`; the legacy `doc`/`xls`/`ppt`
-cells have no Python fixture and are pinned by the crate-side routing-table test
-(`src/documents_impl.rs`).
+the committed fixtures in `tests/engines_corpus/` — the OOXML alias containers
+included (`docm`/`xlsm`/`ppsx` fixtures are [Content_Types].xml rewrites of the
+base generators, converted byte-identically to their bases and pinned as such);
+the legacy `doc`/`xls`/`ppt` cells have no Python fixture (OLE compound files are
+not hand-generatable without an Office writer) and are pinned by the crate-side
+routing-table test (`src/documents_impl.rs`) plus the mutation lane's typed-error
+contract — honestly uncovered at the conversion level.
 
 ### Async and the GIL
 
@@ -353,23 +385,33 @@ cells have no Python fixture and are pinned by the crate-side routing-table test
 `to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`) their
 `asyncio.to_thread` twins — same signatures, same discipline as `tors.aio` (an
 unconditional thread hop,
-never a size-based branch; `sniff`'s marker scan is microsecond-scale and stays
-sync-only).
+never a size-based branch; `sniff` stays sync-only — its cost is a container
+parse, but it remains a single short native pass a sync caller runs directly).
+One caveat the aio docstrings carry too: `asyncio.to_thread` is uncancellable
+mid-pass — a `wait_for` timeout returns control while the thread runs the
+conversion to completion, and repeated timeouts pin the default executor's
+threads. See the `tors.documents.aio` section of the API reference.
 
 The GIL claim is the point of the payload: every function runs its whole native
 pass — file read, format sniff, engine conversion, and `to_text`'s strip — inside
 one `py.detach`, with only the argument borrow, validation, and the O(output) return
-marshalling under the GIL. The official pdf_oxide pyo3 wheel measures as GIL-held per
+marshalling under the GIL; the O(n) bytes copy a `data=` call pays rides inside
+the detach with the rest of the pass (a 400 MB call's max heartbeat gap measured
+~1.1 ms, 2026-09-09). The official pdf_oxide pyo3 wheel measures as GIL-held per
 call — worst heartbeat gap 23.6ms on a 9-page document under a 10ms ping (2026-09),
 growing with document size — so this payload calls the crate's Rust API directly
 under `py.detach` instead. The bands are pinned by name:
 `tests/test_documents_engines.py::test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity`
 (a 10ms heartbeat stays live through a ~470KB conversion),
 `::test_concurrent_conversions_are_identical` (8 threads convert concurrently,
-byte-identical results), and
+byte-identical results),
+`::test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity` (the
+anydoc amplification lane), and
 `tests/test_pdf.py::test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity`
 (worst gaps 10.7–13.9ms on 130–160ms walls — the marshalling floor; a detach
 regression holds the whole wall and fails the budget by an order of magnitude).
+The heartbeat cells are `timing`-lane marked (CI's matrix legs deselect the lane,
+one 3.12 leg runs it).
 
 ## Examples
 

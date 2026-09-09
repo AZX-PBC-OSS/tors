@@ -125,6 +125,22 @@ class PageKind(str, Enum):
 # Generic-iterable acceptance is a proposed extension, not a current fact.
 
 
+def _coerce_path(path: str | os.PathLike[str] | None) -> str | None:
+    """os.fspath with the surface's own refusal convention: a ``path`` that
+    is neither str nor PathLike is a TypeError NAMING ``path`` (and
+    repr'ing the value) — os.fspath's own bare ``expected str, bytes or
+    os.PathLike object, not int`` names neither the argument nor the
+    function, against the every-message-names-the-argument convention the
+    native layer already holds (probed 2026-09: ``to_markdown(123)`` died
+    in the wrapper before the native parse_path could refuse it properly)."""
+    if path is None:
+        return None
+    try:
+        return os.fspath(path)
+    except TypeError:
+        raise TypeError(f"path must be a str or os.PathLike, not {path!r}") from None
+
+
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
@@ -136,17 +152,20 @@ def to_markdown(
 ) -> tuple[Format, str]:
     """Convert any working-format document to GFM markdown on the
     measured-best engine (the full contract is the native function's
-    docstring). Exactly one of ``path`` (a file, the only positional) or
-    ``data`` (the document's bytes — the in-memory caller's entry, no
+    docstring). Exactly one of ``path`` (a file, the only positional —
+    a REGULAR file; FIFOs/devices/sockets are refused before the read)
+    or ``data`` (the document's bytes — the in-memory caller's entry, no
     temp-file roundtrip; no name to consult, so resolution rests on
     ``format=`` and the content markers alone). ``password=`` unlocks an
     encrypted PDF (the PDF kinds only — a password on any other format is
-    a clean error); ``max_bytes=`` overrides the anydoc lane's measured
-    32 MiB input ceiling. Returns ``(Format, markdown)`` — the format the
+    a clean error); an explicit ``max_bytes=`` is binding on EVERY engine
+    lane, checked before a byte is read or copied, while ``None`` keeps
+    the 32 MiB default (enforced after the read, on the anydoc/oxide
+    lanes only). Returns ``(Format, markdown)`` — the format the
     conversion actually used. The whole read+sniff+convert pass runs
     GIL-free."""
     resolved, output = _native_to_markdown(
-        None if path is None else os.fspath(path),
+        _coerce_path(path),
         data,
         format,
         backend,
@@ -171,7 +190,7 @@ def to_text(
     normalized to plain text — one text shape for every format and
     engine. Returns ``(Format, text)``."""
     resolved, text = _native_to_text(
-        None if path is None else os.fspath(path),
+        _coerce_path(path),
         data,
         format,
         backend,
@@ -185,7 +204,10 @@ def to_text(
 def sniff(data: bytes) -> Format | None:
     """The content-marker format detector over bytes alone: what
     ``to_markdown`` would resolve ``data`` to with no path and no
-    extension. ``None`` = the content names no format."""
+    extension. ``None`` = the content names no format. Not a bounded
+    marker scan: anydoc's detect parses the package containers — a
+    120 KiB zip measured 267 MiB peak RSS to answer docx (the full cost
+    is the native docstring's)."""
     name = _native_sniff(data)
     return None if name is None else Format(name)
 
@@ -199,7 +221,7 @@ def pdf_classify(
     function's docstring), as the typed view. ``path`` or ``data=``;
     ``password=`` for an encrypted PDF."""
     return PdfClassification(
-        _native_pdf_classify(None if path is None else os.fspath(path), data, password)
+        _native_pdf_classify(_coerce_path(path), data, password)
     )
 
 
@@ -212,7 +234,7 @@ def pdf_extract(
     ``(per_page_plain_text, markdown)`` — one GIL-free pass over one open
     document (the full contract is the native function's docstring);
     ``password=`` for an encrypted PDF."""
-    return _native_pdf_extract(None if path is None else os.fspath(path), data, password)
+    return _native_pdf_extract(_coerce_path(path), data, password)
 
 
 def pdf_link_uris(
@@ -225,7 +247,7 @@ def pdf_link_uris(
     navigation surface no text rendering carries (the full contract is the
     native function's docstring). One GIL-free pass; ``password=`` for an
     encrypted PDF."""
-    return _native_pdf_link_uris(None if path is None else os.fspath(path), data, password)
+    return _native_pdf_link_uris(_coerce_path(path), data, password)
 
 
 def pdf_page_count(
@@ -235,7 +257,7 @@ def pdf_page_count(
 ) -> int:
     """The page tree and nothing else (``path`` or ``data=``), one
     GIL-free pass; ``password=`` for an encrypted PDF."""
-    return _native_pdf_page_count(None if path is None else os.fspath(path), data, password)
+    return _native_pdf_page_count(_coerce_path(path), data, password)
 
 
 class PdfClassification:

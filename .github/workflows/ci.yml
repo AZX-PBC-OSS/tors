@@ -101,6 +101,18 @@ jobs:
         with:
           command-arguments: licenses advisories bans
 
+      - name: Cargo deny (documents payload lock)
+        # The SECOND, independent lockfile: tors-documents resolves its
+        # own Cargo.lock (deliberately not a cargo workspace member — its
+        # Cargo.toml's header), and that package set is not a subset of
+        # the root lock's (deny.toml's [graph] comment has the measured
+        # skew). Same action, same deny.toml policy, same three checks —
+        # only the manifest differs.
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: tors-documents/Cargo.toml
+          command-arguments: licenses advisories bans
+
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile — not this workflow — owns its version.
@@ -248,10 +260,20 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Fuzz (15s per target)
+        # The same list as the Makefile's FUZZ_TARGETS and fuzz.yml's
+        # weekly pass — this loop had drifted from both (truncate_ellipsis,
+        # controls, json_repair were Makefile-only). gfm_strip joined the
+        # lists when its char-boundary fence-trim panic was fixed
+        # (strip_fence_content, unit-pinned). documents_markdown stays
+        # deliberately absent: it SIGSEGVs on a KNOWN upstream bug
+        # (pdf_oxide 0.3.78 parse_object/parse_array recursion, no depth
+        # cap) — the Makefile's FUZZ_TARGETS comment carries the repro.
+        # It stays built and committed as the repro harness, joining the
+        # run lists when pdf_oxide ships a cap.
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf json_repair; do
+          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
           done

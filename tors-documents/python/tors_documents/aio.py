@@ -10,13 +10,31 @@ carry the same types as the sync ones — ``Format`` for the resolved
 format, the ``PdfClassification`` view for ``pdf_classify`` — never the
 raw native strings — and the ``path``/``data=`` pair flows through
 unchanged (``data=`` being the in-memory caller's whole point: no thread
-hop should reintroduce a temp file). ``sniff`` is deliberately absent: its marker scan is
-microsecond-scale and stays sync-only, the thread hop costing more than
-the call.
+hop should reintroduce a temp file). ``sniff`` is deliberately absent:
+it stays sync-only — a single short native pass (a container parse, not
+a marker scan; see the sync docstring's measured cost), where the
+thread hop would price the awaitable spelling above its value.
 
 Unconditionally ``asyncio.to_thread``, no size-based branching, the same
 contract as ``tors.aio``: the choice between the sync spelling and this
 module is the caller's, made once at the call site, not a runtime guess.
+
+Cancellation semantics, honestly — read before relying on ``wait_for``
+timeouts: ``asyncio.to_thread`` is UNCANCELLABLE mid-pass. Cancelling the
+awaiting task (or a ``wait_for`` timeout firing) detaches the AWAIT only;
+the underlying thread keeps running the native pass — read, sniff,
+conversion — to completion, holding the memory that pass needs, because
+the engines have no cancellation cooperation of their own and the thread
+cannot be reclaimed or interrupted. Two consequences worth pricing
+before the pattern is load-bearing: a large document keeps its thread
+(and its peak RSS) busy for the whole native wall no matter how quickly
+the caller gives up, and REPEATED timeouts against large inputs pin the
+shared default executor's threads one per abandoned call, each running
+to completion — a slow executor-pool leak under retry loops. True
+cancellation needs engine cooperation and is out of scope here; a caller
+that needs abandonable conversion should run it in a process the caller
+controls (``concurrent.futures.ProcessPoolExecutor`` or a worker whose
+lifetime the caller owns) and abandon THAT.
 """
 
 from __future__ import annotations

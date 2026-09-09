@@ -19,9 +19,16 @@
 # license-check none of the engine tree — pdf_oxide/anydoc/office_oxide/
 # html-to-markdown-rs and their ~130 transitive packages. Resolution is
 # metadata-only (nothing links), so `extension-module` being co-enabled is
-# harmless; the payload crate's own graph (tors-documents/Cargo.toml,
-# checked with `cargo deny --manifest-path ...`) is a subset of this one —
-# every crate it builds is already present here.
+# harmless. The payload crate resolves its own INDEPENDENT lockfile
+# (tors-documents/Cargo.lock — the crate is deliberately not a cargo
+# workspace member, its Cargo.toml's header), and that lock's package set
+# is NOT a subset of this one's: it carries packages and versions the
+# root lock never resolves (measured 2026-09: 6 payload-only names, among
+# them the payload's whole multiversion lane, plus 8 version-skewed
+# pairs). Both lockfiles are therefore gated — the root graph here, and a
+# second run over the payload manifest (`cargo deny --manifest-path
+# tors-documents/Cargo.toml check licenses advisories bans`, wired in
+# ci.yml's lint job and `make deny`).
 all-features = true
 
 [licenses]

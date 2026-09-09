@@ -2,9 +2,14 @@
 # pyproject.toml/Cargo.toml (root and tors-documents/) without refreshing
 # uv.lock/Cargo.lock, so every release tag ships stale locks — which breaks
 # docs CI (`uv sync --locked`) on the merge commit and trips `cargo publish`'s
-# clean-tree gate in publish.yml. This workflow runs `uv lock` plus lock-writing
-# cargo passes on the release PR itself and pushes any resulting sync into the
-# PR branch, so the tag release-please cuts already carries fresh locks.
+# clean-tree gate in publish.yml. Its extra-files bumps also never touch the
+# `tors-documents==X.Y.*` extra pin in pyproject.toml (jsonpath targets
+# version lines only), which would drift a minor behind on every minor bump
+# and hand the publish.yml assert a release PR to reject. This workflow
+# rewrites the pin to the release's version, runs `uv lock` plus lock-writing
+# cargo passes on the release PR itself, and pushes any resulting sync into
+# the PR branch, so the tag release-please cuts already carries fresh locks
+# and a fresh pin.
 #
 # Same-repo branch only (release-please--branches--main): pushing to a
 # fork's branch would fail, and release-please never opens forks here.
@@ -33,6 +38,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Refresh lockfiles to the release PR's versions
         run: |
+          # The extra's payload pin first, so one `uv lock` below covers it:
+          # release-please's bump leaves `tors-documents==X.Y.*` at the OLD
+          # minor. ${base%.*} is the new version's major.minor (0.6.1 → 0.6),
+          # the pin's own granularity; on a patch bump the rewrite is a
+          # no-op, which the push step's diff check handles like any other
+          # no-op. (The pin is inert through the uv workspace — uv ignores
+          # the specifier for workspace members — so `uv lock` needs no
+          # change for it; the rewrite is for the PUBLISHED wheel metadata,
+          # where maturin bakes the pin in verbatim, and for the
+          # publish.yml lockstep assert that gates on it.)
+          base="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+          sed -i "s/tors-documents==[0-9]*\.[0-9]*\.\*/tors-documents==${base%.*}.*/" pyproject.toml
           uv lock
           # Any cargo pass that resolves writes the root-package version
           # field into Cargo.lock; check is the cheapest such pass (no
@@ -47,13 +64,18 @@ jobs:
           # ever gates on its lock beyond freshness).
           cargo metadata --manifest-path tors-documents/Cargo.toml --format-version 1 > /dev/null
       - name: Push the sync back into the release PR
+        # HEAD_REF through the environment, not inline: github.head_ref is
+        # attacker-influenceable text (actionlint's script-injection rule),
+        # and a quoted environment indirection cannot escape the quoting.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
-          if git diff --exit-code -- uv.lock Cargo.lock tors-documents/Cargo.lock; then
-            echo "lockfiles already fresh, nothing to push"
+          if git diff --exit-code -- pyproject.toml uv.lock Cargo.lock tors-documents/Cargo.lock; then
+            echo "lockfiles and documents pin already fresh, nothing to push"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add uv.lock Cargo.lock tors-documents/Cargo.lock
-          git commit -m "chore: sync lockfiles to the release versions"
-          git push origin HEAD:${{ github.head_ref }}
+          git add pyproject.toml uv.lock Cargo.lock tors-documents/Cargo.lock
+          git commit -m "chore: sync lockfiles and documents pin to the release versions"
+          git push origin HEAD:"$HEAD_REF"

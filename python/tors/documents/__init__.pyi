@@ -118,11 +118,14 @@ def to_markdown(
 ) -> tuple[Format, str]:
     """Convert any working-format document (pdf, doc/docx, xls/xlsx,
     ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv, html) to GitHub-Flavored
-    Markdown on the measured-best engine for its format. ``password=``
-    unlocks an encrypted PDF (the PDF kinds only); ``max_bytes=``
-    overrides the anydoc lane's 32 MiB input ceiling. Returns
-    ``(Format, markdown)`` — the format the conversion actually used. The
-    whole read+sniff+convert pass runs GIL-free."""
+    Markdown on the measured-best engine for its format. ``path=`` must
+    name a regular file (FIFOs/devices/sockets are refused before the
+    read). ``password=`` unlocks an encrypted PDF (the PDF kinds only);
+    an explicit ``max_bytes=`` is binding on every engine lane, checked
+    before a byte is read or copied, while ``None`` keeps the 32 MiB
+    default (enforced after the read, on the anydoc/oxide lanes only).
+    Returns ``(Format, markdown)`` — the format the conversion actually
+    used. The whole read+sniff+convert pass runs GIL-free."""
 
 def to_text(
     path: str | os.PathLike[str] | None = None,
@@ -143,7 +146,9 @@ def sniff(data: bytes) -> Format | None:
     ``to_markdown`` would resolve ``data`` to with no path and no
     extension. ``None`` = not a document at all, or a guard-refused shape
     such as JSON-lines (record lines the delimiter witness alone would
-    claim as csv). Never opens a parser; runs GIL-free."""
+    claim as csv). Not a bounded marker scan: the package containers are
+    parsed to answer (a 120 KiB zip measured 267 MiB peak RSS). Runs
+    GIL-free."""
 
 def pdf_classify(
     path: str | os.PathLike[str] | None = None,

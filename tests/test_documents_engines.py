@@ -111,6 +111,19 @@ def _format_name(kind: str) -> str:
     return Path(ENGINES_FILENAMES[kind]).suffix.lstrip(".")
 
 
+def _resolved_name(kind: str) -> str:
+    """The format name a conversion of this corpus kind RESOLVES to. The
+    OOXML alias containers (docm_rich/xlsm/ppsx_rich) resolve onto their
+    base kinds — one OOXML package each, the [Content_Types].xml override
+    names the macro/show variant and the engines read the same parts the
+    base carries — so the resolved (and sniffed) name is the container's
+    own (docx/xlsx/pptx), never the alias; every other kind's is its
+    extension."""
+    return {"docm_rich": "docx", "xlsm": "xlsx", "ppsx_rich": "pptx"}.get(
+        kind, _format_name(kind)
+    )
+
+
 # --- the committed corpus pin -------------------------------------------------
 
 
@@ -150,8 +163,10 @@ def _oracle_lines(kind: str) -> list[str]:
     corpus five carry EXPECTED_TEXT's lines (their own extraction oracle);
     the shared-vocabulary fixtures (docx_rich/odt_rich/html_rich — built
     from the RICH_* constants) carry that vocabulary plus their per-fixture
-    extras; the remaining variants carry only their own lines (csv is
-    tabular data, the pptx/pdf variants have no shared vocabulary)."""
+    extras; the OOXML aliases (docm_rich/xlsm/ppsx_rich) carry their base
+    fixtures' lines (the container is the base's, only the content-type
+    override differs); the remaining variants carry only their own lines
+    (csv is tabular data, the pptx/pdf variants have no shared vocabulary)."""
     from documents import EXPECTED_TEXT
 
     if kind in EXPECTED_TEXT:
@@ -174,18 +189,25 @@ def _oracle_lines(kind: str) -> list[str]:
         "pdf_link": [PDF_LINK_LABEL],
         "pdf_two_page": ["first page line", "second page line"],
         "docx_rich": ["Closing note."],
+        "docm_rich": ["Closing note."],  # generate_docx_rich's container as a docm
         "pptx_rich": [SLIDE1_TITLE, *SLIDE1_BODY, SLIDE2_TITLE, RICH_NOTES],
+        "ppsx_rich": [SLIDE1_TITLE, *SLIDE1_BODY, SLIDE2_TITLE, RICH_NOTES],
         "odt_rich": ["Draw oil samples quarterly."],
         "csv_rich": ["T-101", "healthy", "T-102", "needs review"],
         "html_rich": [RICH_NOTES],
+        "xlsm": EXPECTED_TEXT["xlsx"].splitlines(),  # generate_xlsx's container as an xlsm
     }
     lines = per_kind[kind]
-    if kind in {"docx_rich", "odt_rich", "html_rich"}:
+    if kind in {"docx_rich", "docm_rich", "odt_rich", "html_rich"}:
         lines = shared + lines
     return lines
 
 
-@pytest.mark.parametrize("kind", ["docx_rich", "xlsx", "pptx_rich"], ids=lambda kind: kind)
+@pytest.mark.parametrize(
+    "kind",
+    ["docx_rich", "docm_rich", "xlsx", "xlsm", "pptx_rich"],
+    ids=["docx-rich", "docm-rich", "xlsx", "xlsm", "pptx-rich"],
+)
 def test_the_oxide_forced_backend_converts_the_ooxml_family_and_aligns(
     tmp_path: Path, kind: str
 ) -> None:
@@ -196,10 +218,13 @@ def test_the_oxide_forced_backend_converts_the_ooxml_family_and_aligns(
     gate as the auto lane's matrix (every oracle line survives) plus the
     resolved name; the structural gates stay on the auto lane (lean by
     design — the overlap is content parity, not a second structure
-    contract)."""
+    contract). The macro-enabled aliases (docm_rich/xlsm) are part of the
+    working overlap (office_oxide reads the macroEnabled main+xml content
+    type); ppsx_rich is deliberately absent — office_oxide REFUSES the
+    slideshow content type, a divergence the alias class below pins."""
     path = _materialize(tmp_path, kind)
     resolved, markdown = to_markdown(path, backend="oxide")
-    assert resolved == _format_name(kind)
+    assert resolved == _resolved_name(kind)
     for line in _oracle_lines(kind):
         assert align(line) in align(markdown), f"{kind}: oracle line missing: {line!r}"
 
@@ -336,7 +361,10 @@ class TestStructureGates:
         parser is delimiter-separated, so the engine lane's one-line
         vocabulary mapping (``tsv`` → the csv kind) is all that stands
         between here and support. This gate SKIPS WITH THIS REASON until
-        the name resolves, then holds it to the same table contract."""
+        the name resolves, then holds it to the same table contract. The
+        resolved name is pinned EXACTLY as csv — the README's "always csv,
+        never tsv" contract (probed 2026-09-09 before pinning: the mapping
+        lands, the resolved answer is Format.CSV)."""
         path = tmp_path / "engines_units.tsv"
         path.write_bytes(b"unit\tstatus\nT-101\thealthy\nT-102\tneeds review\n")
         try:
@@ -346,7 +374,7 @@ class TestStructureGates:
                 f"format name 'tsv' not yet in the vocabulary ({exc}); "
                 "the engine lane's mapping lands it"
             )
-        assert resolved in {"tsv", "csv"}
+        assert resolved == "csv"
         assert "T-101" in markdown and "healthy" in markdown
         assert any(
             set(line.replace("|", "").replace(" ", "").replace(":", "")) == {"-"}
@@ -389,7 +417,9 @@ def test_random_documents_align_in_both_modes(tmp_path: Path, kind: str, seed: i
     assert resolved
     result = check_alignment(truth, markdown)
     assert not result.failures, result.failures
-    structure = check_markdown_structure(truth, markdown, gate_links=kind in {"docx", "html"})
+    structure = check_markdown_structure(
+        truth, markdown, gate_links=kind in {"docx", "docm", "html"}
+    )
     assert not structure, structure
     if kind == "html":
         assert not check_no_leak(markdown)
@@ -500,8 +530,11 @@ def test_sniff_exposes_magic_byte_detection(tmp_path: Path) -> None:
     expectations = {
         "pdf": "pdf",
         "docx_rich": "docx",
+        "docm_rich": "docx",  # the alias sniffs as its container (docx), never its extension
         "xlsx": "xlsx",
+        "xlsm": "xlsx",  # same container honesty: the macro-enabled workbook sniffs xlsx
         "pptx_rich": "pptx",
+        "ppsx_rich": "pptx",  # the slide-show alias sniffs as its container (pptx)
         "odt_rich": "odt",
         "rtf": "rtf",
         "html_rich": "html",
@@ -608,21 +641,125 @@ def test_a_forced_backend_refuses_a_format_it_cannot_read(
         to_markdown(path, backend=backend)
 
 
+# --- the OOXML alias containers (docm / xlsm / ppsx) ------------------------------
+#
+# The macro-enabled (docm/xlsm) and slide-show (ppsx) variants are genuine
+# aliases: the SAME OOXML packages as docx/xlsx/pptx with
+# [Content_Types].xml's main-document override naming the variant (the
+# only difference between the containers — tests/documents.py's
+# `_ooxml_alias_container` builds the committed fixtures by exactly that
+# rewrite, and docgen.py's `_ooxml_alias` does the same over the writer
+# libraries' own output for the fuzz lane). xlsb is NOT an alias and is
+# pinned as refused below; the legacy OLE trio (doc/xls/ppt) stays
+# honestly uncovered (no fixture can hand-generate OLE compound files —
+# the README discloses them).
+
+
+class TestOoxmlAliasContainers:
+    """The alias contract: the conversion IS the base format's —
+    byte-identical output, the base kind's resolved name, reachable by the
+    alias EXTENSION (the routing caller's file naming) and the alias NAME
+    (the format= vocabulary) — plus the honest lane divergence (oxide
+    refuses ppsx's slideshow content type) and the xlsb disclosure (the
+    name routes the Excel kind; genuine BIFF12 content is refused)."""
+
+    @pytest.mark.parametrize(
+        ("kind", "base"),
+        [("docm_rich", "docx_rich"), ("xlsm", "xlsx"), ("ppsx_rich", "pptx_rich")],
+        ids=["docm", "xlsm", "ppsx"],
+    )
+    def test_the_alias_container_converts_as_its_base_byte_identically(
+        self, tmp_path: Path, kind: str, base: str
+    ) -> None:
+        """The alias's whole contract: same parts, same conversion — both
+        modes byte-identical to the base fixture's, and the resolved name
+        the container's own (docx/xlsx/pptx), never the alias."""
+        alias_path = _materialize(tmp_path, kind)
+        base_path = _materialize(tmp_path, base)
+        assert to_markdown(alias_path) == to_markdown(base_path), f"{kind}: output diverged"
+        assert to_text(alias_path) == to_text(base_path), f"{kind}: text diverged"
+        assert to_markdown(alias_path)[0] == _resolved_name(kind)
+
+    def test_the_alias_names_route_their_base_kinds(self, tmp_path: Path) -> None:
+        """format="docm"/"xlsm"/"ppsx" are vocabulary spellings of the base
+        kinds: the explicit name resolves the base kind and converts
+        byte-identically to the sniffed call — a routing instruction, never
+        a different conversion (the doctrine the explicit-name matrix holds
+        for every kind, held here for the alias spellings specifically)."""
+        for kind in ("docm_rich", "xlsm", "ppsx_rich"):
+            path = _materialize(tmp_path, kind)
+            sniffed = to_markdown(path)
+            resolved, markdown = to_markdown(path, format=_format_name(kind))
+            assert resolved == _resolved_name(kind)
+            assert markdown == sniffed[1], f"{kind}: the alias NAME changed the conversion"
+
+    def test_the_oxide_lane_refuses_ppsx_cleanly(self, tmp_path: Path) -> None:
+        """The honest lane divergence: office_oxide checks the presentation
+        content type and refuses the slide-show variant — a typed
+        ValueError naming what the package holds and what was expected,
+        never a silent fallback and never a crash. (docm/xlsm are in the
+        oxide lane's working overlap — the forced-oxide matrix above.)"""
+        path = _materialize(tmp_path, "ppsx_rich")
+        with pytest.raises(ValueError, match="format mismatch") as raised:
+            to_markdown(path, backend="oxide")
+        message = str(raised.value)
+        assert "slideshow.macroEnabled.main+xml" in message, message
+        assert "expected a PresentationML presentation" in message, message
+
+    def test_genuine_xlsb_content_is_refused_not_mangled(self, tmp_path: Path) -> None:
+        """The xlsb disclosure, pinned: "xlsb" IS a name in the format
+        vocabulary (it routes the Excel kind — OOXML Excel bytes under
+        format="xlsb" convert, vocabulary sugar), but the format itself is
+        a DIFFERENT binary container (BIFF12 .bin sheet streams, not
+        worksheet XML): a zip carrying the genuine shape is refused with a
+        typed ValueError, never silently empty output pretending to be a
+        read. The engines do not read xlsb, and this pin holds them to
+        saying so."""
+        import io
+
+        xlsx = ENGINES_CORPUS["xlsx"]
+        source = zipfile.ZipFile(io.BytesIO(xlsx))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename == "[Content_Types].xml":
+                    data = data.replace(
+                        b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        b"application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+                    )
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    # the real xlsb carries BIFF12 binary streams here, not XML
+                    item.filename = "xl/worksheets/sheet1.bin"
+                    data = b"\x86\x00\x00\x01\x00\x00\x00\x01" + b"\x00" * 40
+                archive.writestr(item, data)
+        path = tmp_path / "engines_binary.xlsb"
+        path.write_bytes(out.getvalue())
+        with pytest.raises(ValueError, match="(?i)sheet"):
+            to_markdown(str(path), format="xlsb")
+        # the name itself still routes OOXML Excel bytes (the vocabulary sugar)
+        resolved, markdown = to_markdown(data=xlsx, format="xlsb")
+        assert resolved == "xlsx"
+        assert markdown == to_markdown(data=xlsx)[1]
+
+
 @pytest.mark.parametrize("kind", sorted(ENGINES_CORPUS), ids=lambda kind: kind)
 def test_an_explicitly_named_format_matches_the_sniffed_conversion(
     tmp_path: Path, kind: str
 ) -> None:
     """format= names the format instead of sniffing it — a routing
     instruction, never a different conversion: for every corpus kind the
-    resolved name is the one asked for, and the output is byte-identical
-    to the sniffed default's (which itself resolved the same name — the
-    sniffed and explicit paths agree on every kind in the matrix)."""
+    output is byte-identical to the sniffed default's. The resolved name
+    is the container's own (_resolved_name): the alias kinds' extensions
+    (docm/xlsm/ppsx) spell names that route their base kinds, and the
+    resolved answer names the container (docx/xlsx/pptx), never the alias
+    — the same container-honesty the Excel family's xls/xlsx split carries."""
     path = _materialize(tmp_path, kind)
     name = _format_name(kind)
     sniffed = to_markdown(path)
-    assert sniffed[0] == name
+    assert sniffed[0] == _resolved_name(kind)
     resolved, markdown = to_markdown(path, format=name)
-    assert resolved == name
+    assert resolved == _resolved_name(kind)
     assert markdown == sniffed[1]
 
 
@@ -750,20 +887,34 @@ def test_content_markers_win_over_the_files_extension(tmp_path: Path, kind: str)
     content as the correctly-named file. The extension is only the
     fallback for content no marker names — that path is pinned by the
     generic-zip gate, not by any corpus kind (every kind's content is
-    marker-named, csv included: the delimiter heuristic names it)."""
+    marker-named, csv included: the delimiter heuristic names it). The
+    alias kinds resolve to their base names under the wrong extension
+    too — the markers name the CONTAINER (docx/xlsx/pptx), which is the
+    true format of the bytes."""
     name = _format_name(kind)
     wrong_extension = ".docx" if name == "pdf" else ".pdf"
     path = tmp_path / f"mislabeled_{kind}{wrong_extension}"
     path.write_bytes(ENGINES_CORPUS[kind])
     resolved, markdown = to_markdown(str(path))
-    assert resolved == name, "the extension must not win over the content markers"
+    assert resolved == _resolved_name(kind), "the extension must not win over the content markers"
     for line in _oracle_lines(kind):
         assert align(line) in align(markdown), f"{kind}: oracle line missing: {line!r}"
 
 
 # --- GIL band and concurrency (the payload-level claims) -------------------------
+#
+# The heartbeat cells in this section carry ``@pytest.mark.timing`` (the
+# measurement lane): they are load-sensitive band measurements over
+# generated multi-hundred-KB documents, the same class of cell as
+# tests/test_gil_release.py's, and CI's matrix legs deselect the lane
+# (`-m "not timing and not sweep"`) with one 3.12 leg running it — the
+# marker-split contract ci.yml's comments claim (every lane cell carries
+# its marker). The concurrency cells stay in the fast lane: they assert
+# byte-identical answers under threads, not gap bands, and are
+# load-insensitive.
 
 
+@pytest.mark.timing
 def test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
@@ -813,6 +964,7 @@ def test_concurrent_conversions_are_identical(tmp_path: Path) -> None:
     assert sorted(results) == sorted(expected)
 
 
+@pytest.mark.timing
 def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
@@ -826,6 +978,34 @@ def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
     path = tmp_path / "big.pdf"
     path.write_bytes(generate_pdf_big(6000))
+
+    def op() -> None:
+        to_text(str(path))
+
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+
+@pytest.mark.timing
+def test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity(
+    tmp_path: Path,
+) -> None:
+    """The anydoc lane's heartbeat cell — the AMPLIFICATION lane, the one
+    the 32 MiB default input ceiling exists for (a many-short-cells csv
+    holds a measured ~146x its input in resident memory at the worst case),
+    and so the heaviest native pass per input byte. The same shared
+    methodology over a generated 2 MiB csv (measured 2026-09-09 on this
+    box: ~0.3s wall, ~190 MiB peak — an order of magnitude over the 10ms
+    ping floor so the ratio resolves, while staying memory-sane for a
+    measurement cell). The pdf-lane cells above hold the read+convert
+    shape; this one holds the lane whose engine materializes row
+    structures per cell."""
+    from test_gil_release import _assert_loop_stays_responsive
+
+    header = ",".join(f"h{column}" for column in range(16)) + "\n"
+    row = ",".join(f"c{column}" for column in range(16)) + "\n"
+    unit = (header + row).encode()
+    path = tmp_path / "engines_units_big.csv"
+    path.write_bytes(unit * (2 * 1024 * 1024 // len(unit)))
 
     def op() -> None:
         to_text(str(path))
@@ -1083,10 +1263,12 @@ class TestPayloadAdversarialSurface:
         the kwargs forward through the thread hop unchanged — pages=
         selects the same page subset the sync call selects,
         byte-identical (the forwarding pin beyond the path/data/password
-        trio the other aio gates cover); and sniff (a microsecond marker
-        scan) has no async twin in either the payload's aio or the base
-        shim's re-export, per the house rule that the thread hop would
-        cost more than the call."""
+        trio the other aio gates cover); and sniff has no async twin in
+        either the payload's aio or the base shim's re-export, per the
+        house rule that the thread hop must pay for itself (sniff's cost
+        is a container parse, not a marker scan — measured 267 MiB peak
+        RSS on a 120 KiB zip — but it stays a sync caller's call: no
+        awaitable spelling ships)."""
         from tors_documents import Format
         from tors_documents import aio as payload_aio
 
@@ -1125,6 +1307,9 @@ class TestBytesInputAndLinkWalk:
     path-only API; the link walk is the raw URI surface no text rendering
     carries). ``data=`` IS the same conversion: byte-identical output, the
     same typed answers, the same error taxonomy — only the source differs.
+    The O(n) copy a ``data=`` call pays rides inside the detach with the
+    rest of the pass (a 400 MB call's max heartbeat gap measured ~1.1 ms,
+    2026-09-09 — pinned red-green by the hardening suite's probe).
     """
 
     def test_data_conversions_are_byte_identical_to_path_conversions(self, tmp_path: Path) -> None:
@@ -1221,10 +1406,12 @@ class TestBytesInputAndLinkWalk:
         assert plain_uris == [[], []]
 
     def test_sniff_then_data_is_the_bytes_pipeline_shape(self, tmp_path: Path) -> None:
-        """The upload route's two-step: sniff the leading bytes (no
-        parser, microseconds), then convert the full body in memory —
-        no temp file anywhere in the flow, and both halves agree on what
-        the bytes are."""
+        """The upload route's two-step: sniff the leading bytes (the true
+        cost is a container parse, not a marker scan — anydoc's detect
+        opens the ZIP/OLE package and reads its metadata; a 120 KiB zip
+        measured 267 MiB peak RSS to answer docx), then convert the full
+        body in memory — no temp file anywhere in the flow, and both
+        halves agree on what the bytes are."""
         from tors_documents import Format
 
         data = Path(_materialize(tmp_path, "pdf_link")).read_bytes()
@@ -1407,11 +1594,15 @@ _CEILING_CSV = (
 
 class TestAnydocInputCeiling:
     """The anydoc lane's memory posture as a caller-facing contract: that
-    engine measures ~36x RSS amplification on delimiter formats, so the
+    engine amplifies input into resident memory at ~36x on benign
+    delimiter shapes and ~146x at the measured worst case (2026-09-09,
+    this box: a 24 MiB many-short-cells csv peaked 3.4 GiB, stable across
+    sizes — the old "~36x" figure was a benign long-cell shape), so the
     lane carries a DEFAULT 32 MiB input ceiling (a crate-side constant,
-    pinned in the Rust tests — no 33 MB fixture is built here) and
-    max_bytes= is the per-call override — a typed refusal naming both
-    sizes, never a silent OOM."""
+    pinned in the Rust tests — no 33 MB fixture is built here; at the
+    worst-case multiple that default budgets ~4.6 GiB) and max_bytes= is
+    the per-call override — a typed refusal naming both sizes, never a
+    silent OOM."""
 
     def test_a_document_over_the_ceiling_is_refused_naming_both_sizes(self) -> None:
         """Over the ceiling is a ValueError naming the engine lane, the
@@ -1459,16 +1650,42 @@ class TestAnydocInputCeiling:
         assert resolved is Format.CSV
         assert "T-101" in markdown and "needs review" in markdown
 
-    def test_max_bytes_does_not_apply_to_the_non_anydoc_lanes(self) -> None:
-        """The ceiling is the anydoc lane's memory posture, not a global
-        input meter: the pdf_oxide lane is unmetered, so max_bytes=1 over
-        real PDF bytes converts unmolested — the knob simply does not
-        apply to that lane. A regression to GLOBAL enforcement (the PDF
-        refusing under max_bytes=1) or to a per-lane refusal (a ValueError
-        naming a ceiling the lane does not carry) fails this pin."""
+    def test_an_explicit_max_bytes_binds_every_lane_not_just_the_anydoc_one(
+        self, tmp_path: Path
+    ) -> None:
+        """The REPINNED contract (the input-side hardening's deliberate
+        change; the new-contract pins also live in the hardening suite —
+        this is the engines suite's own hold on it). Red, captured verbatim
+        on this tree before the repin: this test's old pin — max_bytes=1
+        over real PDF bytes CONVERTS, "the knob simply does not apply to
+        that lane" — failed as
+        ``ValueError: the document is 859 bytes and the input ceiling is
+        1 bytes (an explicit max_bytes is binding on every engine lane —
+        pdf and HTML included ...)``. Green now pins the new doctrine: an
+        EXPLICIT max_bytes refuses the PDF on both source lanes (data= and
+        path=, the pre-read/pre-copy check) with the input-ceiling
+        ValueError naming both sizes, while max_bytes=None keeps the
+        default doctrine exactly — the 32 MiB default is the post-read
+        check on the anydoc/oxide lanes only, so the same PDF converts
+        unmolested without a budget (the lane is unknowable before the
+        container sniff, which is exactly why only the explicit budget
+        can be pre-read)."""
         from tors_documents import Format
 
-        resolved, markdown = to_markdown(data=ENGINES_CORPUS["pdf_two_page"], max_bytes=1)
+        pdf = ENGINES_CORPUS["pdf_two_page"]
+        path = tmp_path / "two.pdf"
+        path.write_bytes(pdf)
+        for refused in (
+            lambda: to_markdown(data=pdf, max_bytes=1),
+            lambda: to_markdown(str(path), max_bytes=1),
+        ):
+            with pytest.raises(ValueError, match="ceiling") as raised:
+                refused()
+            message = str(raised.value)
+            assert "max_bytes" in message, message
+            assert "the document is" in message and "input ceiling is" in message, message
+            assert "859 bytes" in message and "1 bytes" in message, message
+        resolved, markdown = to_markdown(str(path))
         assert resolved is Format.PDF
         assert "first page line" in markdown and "second page line" in markdown
 
@@ -1485,6 +1702,185 @@ class TestAnydocInputCeiling:
             for bad in (True, "64KB", 1.5):
                 with pytest.raises(TypeError, match="max_bytes must be an int"):
                     convert(data=_CEILING_CSV, max_bytes=bad)
+
+
+# --- the inline-recursion bound (the emphasis-strip depth cap) -------------------
+#
+# The gfm strip's SIGSEGV fix, pinned at the Python layer: the inline
+# machinery (link labels, image labels, emphasis) recurses per nesting
+# level, so a sufficiently deep `[…](…)` nest overflowed the stack and
+# killed the PROCESS — the crash shape a subprocess probe exists to catch
+# (the pre-fix behavior must never run in the pytest runner). The bound is
+# MAX_INLINE_DEPTH=256, Rust-pinned in src/gfm_strip_impl.rs (the exact
+# degradation — past 256 the remaining machinery degrades to literal text
+# instead of recursing); this is the loose lane pin: the conversion
+# SURVIVES the input and answers non-empty, in a child, on a bounded
+# budget.
+
+_RECURSION_DEPTH = 30_000  # ~120 KB of paragraph text: the nest, fast to build
+
+
+class TestInlineRecursionBound:
+    """The 30,000-deep `[[[…x…]]()…]()` construct through the oxide text
+    lane: red (measured on the pre-fix tree) the process SIGSEGVed; green
+    it converts, exit 0, non-empty output. The exact degradation shape is
+    the Rust unit pins' to hold (don't double-pin brittle exactness here);
+    this pin holds the SURVIVAL contract at the entry-point layer."""
+
+    def test_a_30k_deep_link_label_nest_converts_in_a_subprocess(self, tmp_path: Path) -> None:
+        """A docx (python-docx, the dev group's writer — docgen.py's lane)
+        whose one paragraph is the nest, converted by `to_text(
+        backend="oxide")` in a SUBPROCESS: the pre-fix shape is a SIGSEGV
+        (a dead child, nonzero exit), so the probe must never run
+        in-process. The child prints a bounded summary (resolved name,
+        output length — never the ~120 KB output itself); the parent
+        asserts exit 0 and the non-empty answer the child reports."""
+        import subprocess
+        import sys
+        import textwrap
+
+        from docx import Document
+
+        document = Document()
+        document.add_paragraph("[" * _RECURSION_DEPTH + "x" + "]()" * _RECURSION_DEPTH)
+        path = tmp_path / "deep_nest.docx"
+        document.save(path)
+
+        code = textwrap.dedent(
+            """
+            import sys
+            from tors_documents import to_text
+            resolved, out = to_text(path=sys.argv[1], backend="oxide")
+            assert out, "the conversion answered empty"
+            print(f"resolved={resolved.value} out_len={len(out)}")
+            """
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", code, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, (
+            "the deep-nest probe child died — the pre-fix shape is a "
+            f"SIGSEGV in the strip:\n{done.stdout}\n{done.stderr}"
+        )
+        assert "resolved=docx out_len=" in done.stdout, done.stdout
+
+
+# --- zip-bomb refusal: the engine-side decompression caps ------------------------
+#
+# The regression net the PR description claimed but never had: the caps
+# FIRE. Both fixtures are runtime-generated (never committed binaries —
+# the encrypted-PDF lane's precedent) under tmp_path, and both stream
+# their part content in bounded chunks so the test never holds the
+# inflated part in one bytes object. The refusals are asserted, never RSS
+# bounds, so the cells cannot flake on memory accounting.
+
+_MIB = 1024 * 1024
+
+
+def _zip_bomb_docx(path: Path, inflated_mib: int) -> None:
+    """A valid docx container whose one word/document.xml declares and
+    inflates to `inflated_mib` MiB: the part is a single compressible text
+    run (a real zip bomb's shape — hundreds of MiB inside a few hundred
+    KiB of stored zip) streamed in 1 MiB chunks, wrapped in enough XML to
+    be the part it claims."""
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType='
+        '"application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        '.main+xml"/></Types>\n'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type='
+        '"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"'
+        ' Target="word/document.xml"/></Relationships>\n'
+    )
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        with archive.open("word/document.xml", "w") as part:
+            prefix = (
+                b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                b"<w:body><w:p><w:r><w:t xml:space=\"preserve\">"
+            )
+            suffix = b"</w:t></w:r></w:p></w:body></w:document>"
+            part.write(prefix)
+            written = len(prefix)
+            target = inflated_mib * _MIB - len(suffix)
+            chunk = b"x" * _MIB
+            while written < target:
+                part.write(chunk[: min(len(chunk), target - written)])
+                written += min(len(chunk), target - written)
+            part.write(suffix)
+
+
+class TestZipBombRefusals:
+    """The two decompression caps a zip-bombed OOXML container must hit,
+    each pinned as the typed refusal it is (the caps' EXISTENCE is the
+    pin — an RSS bound would flake on memory accounting, so none is
+    asserted). Measured on this tree, 2026-09-09: the anydoc lane refuses
+    a 400 MiB part on its declared size at the zip directory, before an
+    inflate; the oxide lane refuses a 600 MiB declared part
+    pre-decompression in ~0.03s at ~20 MiB RSS (asserted here only as a
+    typed refusal plus a sub-second wall — the speed IS the
+    pre-decompression proof: an inflated refusal would take seconds and
+    gigabytes)."""
+
+    def test_the_anydoc_lane_refuses_a_400_mib_part_bomb(self, tmp_path: Path) -> None:
+        """anydoc's engine-side package caps (128 MiB per entry, 512 MiB
+        total across entries): a ~400 KiB zip whose word/document.xml
+        declares ~400 MiB is refused by `to_markdown` (the docx auto lane
+        IS anydoc) with the typed ValueError naming the cap and the entry
+        — NOT the lane's input-ceiling message (the zip itself is far
+        under the 32 MiB default; the ENGINE-side cap is what fires), the
+        discriminator this pin exists to hold."""
+        path = tmp_path / "bomb_anydoc.docx"
+        _zip_bomb_docx(path, inflated_mib=400)
+        assert path.stat().st_size < _MIB, "the fixture lost the bomb shape (stored > 1 MiB)"
+        with pytest.raises(ValueError, match="resource limit exceeded") as raised:
+            to_markdown(str(path))
+        message = str(raised.value)
+        assert "max_entry_bytes" in message, message
+        assert "word/document.xml" in message, message
+        assert "input ceiling" not in message, (
+            f"the input ceiling fired where the engine-side cap should have:\n{message}"
+        )
+
+    def test_the_oxide_lane_refuses_a_600_mib_declared_part_pre_decompression(
+        self, tmp_path: Path
+    ) -> None:
+        """office_oxide 0.1.10's per-part cap (512 MiB, declared AND
+        actual): the refusal fires on the DECLARED size in the zip
+        directory, before a single byte is inflated — pinned as the typed
+        refusal naming the part and the cap's own number, plus a
+        sub-second wall (measured 0.03s on this box; inflating 600 MiB
+        and parsing it would cost seconds and ~1.6 GiB, so the wall band
+        is the pre-decompression proof that cannot flake)."""
+        import time
+
+        path = tmp_path / "bomb_oxide.docx"
+        _zip_bomb_docx(path, inflated_mib=600)
+        assert path.stat().st_size < _MIB, "the fixture lost the bomb shape (stored > 1 MiB)"
+        started = time.perf_counter()
+        with pytest.raises(ValueError, match="decompression limit exceeded") as raised:
+            to_markdown(str(path), backend="oxide")
+        elapsed = time.perf_counter() - started
+        message = str(raised.value)
+        assert "word/document.xml" in message, message
+        assert "536870912" in message, message  # 512 MiB: the cap's own number, verbatim
+        assert elapsed < 2.0, (
+            f"the refusal took {elapsed:.2f}s — the pre-decompression guard "
+            "regressed (measured 0.03s; an inflated refusal costs seconds)"
+        )
 
 
 # --- JSON-lines is not csv (the sniffer's record-shape guard) ---------------------

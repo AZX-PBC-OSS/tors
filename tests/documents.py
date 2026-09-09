@@ -279,6 +279,30 @@ _CT_NOTES = (
     '<Override PartName="/ppt/notesSlides/notesSlide{n}.xml" ContentType='
     '"application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>'
 )
+_CT_XLSX_MAIN = (
+    '<Override PartName="/xl/workbook.xml" ContentType='
+    '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+)
+# The macro-enabled / slide-show container variants — the genuine OOXML
+# aliases: docm/xlsm/ppsx are the SAME packages as docx/xlsx/pptx (every
+# part identical) with [Content_Types].xml's main-document override naming
+# the variant, so the engines convert them as their base kinds. xlsb is
+# NOT one (its sheets are BIFF12 .bin streams, not worksheet XML): the
+# name routes the Excel kind, but genuine xlsb content is refused — pinned
+# in the engines suite, disclosed in the README.
+_CT_DOCM_MAIN = (
+    '<Override PartName="/word/document.xml" ContentType='
+    '"application/vnd.ms-word.document.macroEnabled.main+xml"/>'
+)
+_CT_XLSM_MAIN = (
+    '<Override PartName="/xl/workbook.xml" ContentType='
+    '"application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>'
+)
+_CT_PPSX_MAIN = (
+    '<Override PartName="/ppt/presentation.xml" ContentType='
+    '"application/vnd.openxmlformats-officedocument.presentationml'
+    '.slideshow.macroEnabled.main+xml"/>'
+)
 
 
 def _root_rels(target: str) -> str:
@@ -403,8 +427,7 @@ def generate_xlsx() -> bytes:
         + f'<Types xmlns="{_CT_NS}">'
         + _CT_RELS
         + _CT_XML
-        + '<Override PartName="/xl/workbook.xml" ContentType='
-        + '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + _CT_XLSX_MAIN
         + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType='
         + '"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
         + '<Override PartName="/xl/sharedStrings.xml" ContentType='
@@ -825,6 +848,51 @@ def generate_pptx_rich() -> bytes:
     )
 
 
+# --- the OOXML alias containers (docm / xlsm / ppsx) -----------------------------
+#
+# The genuine aliases as [Content_Types].xml rewrites of the base generators
+# above: the macro-enabled (docm/xlsm) and slide-show (ppsx) variants are
+# the same packages with the one main-document override respelled — the
+# ONLY difference between the containers. The rewrite is byte-stable (a
+# no-op rewrite round-trips the base bytes exactly, probed), so the
+# committed fixtures hold the same determinism contract as their bases.
+
+
+def _ooxml_alias_container(raw: bytes, base_ct: str, alias_ct: str) -> bytes:
+    """The base generator's package with [Content_Types].xml's main
+    override respelled to the variant's content type, rebuilt through
+    `_zip_bytes` so the pinned-ZipInfo determinism contract holds."""
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        entries = [
+            (
+                item.filename,
+                archive.read(item.filename).replace(base_ct.encode(), alias_ct.encode()),
+            )
+            for item in archive.infolist()
+        ]
+    return _zip_bytes(entries)
+
+
+def generate_docm_rich() -> bytes:
+    """generate_docx_rich's package as a docm — the macro-enabled alias the
+    engines convert as docx on both lanes (anydoc and office_oxide)."""
+    return _ooxml_alias_container(generate_docx_rich(), _CT_DOCX_MAIN, _CT_DOCM_MAIN)
+
+
+def generate_xlsm() -> bytes:
+    """generate_xlsx's package as an xlsm — the macro-enabled alias the
+    engines convert as xlsx on both lanes (anydoc and office_oxide)."""
+    return _ooxml_alias_container(generate_xlsx(), _CT_XLSX_MAIN, _CT_XLSM_MAIN)
+
+
+def generate_ppsx_rich() -> bytes:
+    """generate_pptx_rich's package as a ppsx — the slide-show alias the
+    auto/anydoc lane converts as pptx (office_oxide REFUSES the slideshow
+    content type: an honest clean-refusal divergence the engines suite
+    pins, never a silent fallback)."""
+    return _ooxml_alias_container(generate_pptx_rich(), _CT_PPTX_MAIN, _CT_PPSX_MAIN)
+
+
 # --- the ODF family (odt / ods / odp) + epub, the OCF sibling ------------------
 #
 # One container contract (the mimetype entry STORED and first — `_odf_bytes`)
@@ -1232,11 +1300,18 @@ def generate_pdf_big(lines: int = 6000) -> bytes:
 # The CORPUS's five documents ride along (same bytes, no duplication) so the
 # engine matrix covers every format the suite can build; the rich variants
 # add the structural depth the gates need. Markdown is deliberately absent:
-# it is already IR, not an engine format. The one remaining vocabulary gap
-# is the legacy MS-binary trio (doc/xls/ppt): OLE compound files are not
-# hand-generatable without an Office writer, so no fixture pins them — the
-# engine lane's coverage of those names rests on the alias-mapped containers
-# (docm/xlsm/xlsb/ppsx) and the mutation lane's typed-error contract.
+# it is already IR, not an engine format. The OOXML alias containers
+# (docm_rich/xlsm/ppsx_rich — the [Content_Types].xml rewrites above) are
+# fixture-covered: the engines convert them as their base kinds, resolved
+# under the base names. xlsb is deliberately NOT among them — its sheets
+# are BIFF12 .bin streams, not worksheet XML, so genuine xlsb content is
+# refused (the name routes the Excel kind, vocabulary sugar only; the
+# refusal is pinned in the engines suite). The remaining vocabulary gap is
+# the legacy MS-binary trio (doc/xls/ppt): OLE compound files are not
+# hand-generatable without an Office writer, so no fixture pins them —
+# their coverage rests on the crate-side routing-table test
+# (src/documents_impl.rs) and the mutation lane's typed-error contract,
+# and the README discloses them as uncovered.
 #
 # The engines kinds' content oracle: EXPECTED_TEXT began as the five-document
 # corpus's extraction oracle; the matrix's own kinds (no stdlib reader, no
@@ -1260,8 +1335,11 @@ ENGINES_CORPUS: dict[str, bytes] = {
     "rtf": CORPUS["rtf"],
     "docx": CORPUS["docx"],
     "docx_rich": generate_docx_rich(),
+    "docm_rich": generate_docm_rich(),
     "xlsx": CORPUS["xlsx"],
+    "xlsm": generate_xlsm(),
     "pptx_rich": generate_pptx_rich(),
+    "ppsx_rich": generate_ppsx_rich(),
     "odt_rich": generate_odt_rich(),
     "ods_rich": generate_ods_rich(),
     "odp_rich": generate_odp_rich(),
@@ -1282,8 +1360,11 @@ ENGINES_FILENAMES: dict[str, str] = {
     "rtf": "engines_notes.rtf",
     "docx": "engines_report.docx",
     "docx_rich": "engines_annual_report.docx",
+    "docm_rich": "engines_annual_report_macro.docm",
     "xlsx": "engines_samples.xlsx",
+    "xlsm": "engines_samples_macro.xlsm",
     "pptx_rich": "engines_review.pptx",
+    "ppsx_rich": "engines_review_show.ppsx",
     "odt_rich": "engines_manual.odt",
     "ods_rich": "engines_units.ods",
     "odp_rich": "engines_review.odp",

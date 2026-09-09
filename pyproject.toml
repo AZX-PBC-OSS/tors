@@ -42,11 +42,18 @@ classifiers = [
 # payload wheel (tors-documents/, version-locked to this package — one
 # release, two wheels, release-please bumps them together). The base wheel
 # ships only the tors.documents shim; `pip install tors[documents]` pulls
-# the compiled extraction surface in. Locally the extra resolves through
-# the uv workspace (below), never from an index — the payload is
-# source-built from this tree; published wheels carry the pin.
+# the compiled extraction surface in. The payload is PINNED to this
+# package's minor (`==X.Y.*`): the tors-documents name is unregistered on
+# PyPI, so an unpinned extra is a squatting race (whoever registers the
+# name first satisfies every existing install) and a permanent skew
+# (tors 0.5 co-installing tors-documents 0.7) — the pin plus the
+# version-lockstep assert in publish.yml close both. Locally the extra
+# resolves through the uv workspace (below), never from an index, so the
+# pin is inert in dev; release-lock-sync.yml rewrites it on every
+# release bump (release-please's extra-files only touches version lines,
+# not this one).
 [project.optional-dependencies]
-documents = ["tors-documents"]
+documents = ["tors-documents==0.5.*"]
 
 [project.urls]
 Homepage = "https://github.com/AZX-PBC-OSS/tors"

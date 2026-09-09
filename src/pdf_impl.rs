@@ -52,6 +52,22 @@
 //! with pdf_oxide's own inter-page separator — measured: `to_markdown_all`
 //! IS that join — so a full document range selected through `pages=`
 //! reproduces the whole-document conversion byte-for-byte.
+//!
+//! # One upstream robustness fact, measured and on record
+//!
+//! pdf_oxide 0.3.78's object parser (`parse_object` in its parser.rs) is
+//! mutually recursive with its array/dictionary parsers and has no depth
+//! cap — its `max_nesting: 100` parser-config field is dead code (zero
+//! uses outside parser_config.rs) — so a 60,336-byte PDF carrying a
+//! 30,000-deep nested array in its trailer SIGSEGVs every entry point
+//! that opens the document (pdf_page_count, pdf_extract, pdf_classify,
+//! pdf_link_uris, to_markdown, to_text — all share this seam's `open()`;
+//! reproduced 2026-09-09 on pdf_page_count, to_markdown, and
+//! pdf_classify: exit -11, uncatchable). The crash is upstream, not
+//! fixable at this seam — a tors-side parser pre-scan would mean
+//! duplicating pdf_oxide's parser to defend against one defect — and is
+//! tracked by the new fuzz target, with the real fix (a depth cap in
+//! pdf_oxide's parser) to be reported upstream.
 
 use pdf_oxide::converters::ConversionOptions;
 use pdf_oxide::document::PdfDocument;

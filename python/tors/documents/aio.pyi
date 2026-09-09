@@ -6,8 +6,18 @@ Each is ``asyncio.to_thread`` over the typed wrapper, so the async answers
 carry the same types as the sync ones, and the ``path``/``data=`` pair
 flows through unchanged (``data=`` being the in-memory caller's whole
 point: no thread hop should reintroduce a temp file). ``sniff`` stays
-sync-only (the marker scan is microseconds; the thread hop would cost
-more than the call)."""
+sync-only (a single short native pass — a container parse, not a marker
+scan; the thread hop would price the awaitable above its value).
+
+Cancellation semantics: ``asyncio.to_thread`` is uncancellable
+mid-pass — cancelling the awaiting task (or a ``wait_for`` timeout)
+detaches the await only, while the underlying thread runs the native
+pass to completion, holding its memory (the engines have no
+cancellation cooperation); repeated timeouts against large inputs pin
+the shared default executor's threads, one per abandoned call. A caller
+that needs abandonable conversion should run it in a process it
+controls. See ``tors.documents.aio``'s docstring for the full statement.
+"""
 
 from __future__ import annotations
 

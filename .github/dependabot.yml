@@ -44,6 +44,32 @@ updates:
       rust-minor-patch:
         update-types: ["minor", "patch"]
 
+  # The fuzz crate is the THIRD independent manifest (fuzz/Cargo.toml's own
+  # header): not a cargo workspace member, resolving its own fuzz/Cargo.lock,
+  # so neither cargo entry above sees its bumps — libfuzzer-sys and arbitrary
+  # ride this lane. The tors-core line is a path dependency (".."), not a
+  # registry dep, so it is never bumpable here either (the same reason the
+  # /tors-documents entry never sees its own tors-core line). The three
+  # ORACLE pins (sha2, const-hex, unicode-segmentation) are deliberately
+  # hand-synced to the root Cargo.toml's own versions (fuzz/Cargo.toml's
+  # oracle comment): dependabot bumps toward latest, not toward
+  # "match the root crate", so an automated bump of any of the three would
+  # silently break that sync — they are ignored here and ride the root's
+  # bumps, which need the matching fuzz edit by hand anyway.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps-rust)"
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "sha2"
+      - dependency-name: "const-hex"
+      - dependency-name: "unicode-segmentation"
+
   # `uv` is a first-class Dependabot ecosystem (understands pyproject.toml and uv.lock
   # natively) — not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.
   # Root pyproject.toml only: the uv workspace pulls the payload in, so its (empty)

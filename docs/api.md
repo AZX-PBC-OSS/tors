@@ -2709,7 +2709,7 @@ suite that pins them is `tests/test_documents_engines.py`):
 | PDF | pdf_oxide 0.3.78 | two-column layouts come back as separate reading-order blocks (not interleaved), `/Link` annotations render as `[text](uri)`, heading detection on |
 | HTML | html-to-markdown-rs 3.12 | drops `<script>`/`<style>` by construction (the disqualifying failure of the alternatives, which leak CSS/JS text into the body); padded GFM tables, indented nested lists, clean code fences |
 | office + text (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv) | anydoc 0.2.4 | renders style-based docx headings and list markers that office_oxide drops entirely; covers rtf/odt/epub/csv, which office_oxide cannot read at all |
-| `backend="oxide"` (caller-selectable) | office_oxide 0.1.10 | the alternative reader for the OOXML + legacy office formats: exact entity text (no `&`-escaping), against the heading/list losses above — a documented lane for diffing the two engines on your own corpus, never the default |
+| `backend="oxide"` (caller-selectable) | office_oxide 0.1.10 | the alternative reader for the OOXML + legacy office formats: exact entity text (no `&`-escaping), against the heading/list losses above — a documented lane for diffing the two engines on your own corpus, never the default (decompression posture: 512 MiB per-part caps, no total-across-parts or output cap — the measured cases are in the `max_bytes=` paragraph below) |
 
 **The input is `path` OR `data`**: every path-taking function also accepts the
 document as `data=` bytes — the in-memory caller's entry, so an upload already held
@@ -2718,26 +2718,30 @@ as bytes converts with no temp-file roundtrip. Exactly one of the two (both →
 under the GIL before any work runs). A `data=` call has no file name, so format
 resolution rests on `format=` and the content markers alone.
 
-**GIL model, every function in this section**: argument marshalling (validation,
-plus the one O(n) bytes copy a `data=` call pays — a borrow cannot cross
-`py.detach`, and a memcpy of even a 25MB upload is single-digit milliseconds against
-the conversion pass it precedes) happens under the GIL, the WHOLE native pass — file
-read when `path=`, format sniff, engine conversion, and for `to_text` the markdown
-strip — runs inside one `py.detach`, and exceptions are constructed after the GIL is
-reacquired; nothing raises from inside the detached region. The hazard this removes is concrete: the official pdf_oxide pyo3 wheel
-measures as GIL-held per call (worst heartbeat gap 23.6ms on a 9-page document under a
-10ms ping, 2026-09, growing with document size); this payload calls the crate's Rust
-API directly under `py.detach` instead. The band is pinned by the suite
-(`tests/test_documents_engines.py` and `tests/test_pdf.py` hold the heartbeat-granularity
-and 8-thread byte-identical concurrency gates).
+**GIL model, every function in this section**: argument marshalling
+(validation) happens under the GIL; the one O(n) bytes copy a `data=` call
+pays (a borrow cannot cross `py.detach`) rides INSIDE the detach with the
+rest of the pass — measured 2026-09-09: a 400 MB `data=` call's max
+heartbeat gap is ~1.1 ms under a 1 ms ping, where a GIL-side copy starved
+the same ping for ~78 ms — and the WHOLE native pass — file read when
+`path=`, format sniff, engine conversion, and for `to_text` the markdown
+strip — runs inside one `py.detach`, and exceptions are constructed after
+the GIL is reacquired; nothing raises from inside the detached region. The
+hazard this removes is concrete: the official pdf_oxide pyo3 wheel
+measures as GIL-held per call (worst heartbeat gap 23.6ms on a 9-page
+document under a 10ms ping, 2026-09, growing with document size); this
+payload calls the crate's Rust API directly under `py.detach` instead. The
+band is pinned by the suite
+(`tests/test_documents_engines.py` and `tests/test_pdf.py` hold the
+heartbeat-granularity and 8-thread byte-identical concurrency gates).
 
 **Error taxonomy** (shared by every path-taking function here):
 
 | exception | raised when |
 |---|---|
-| `OSError` | the file is missing or unreadable (IO) |
-| `TypeError` | neither `path` nor `data=` was passed; a non-bytes `data=`; a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over the anydoc/office_oxide lane ceiling (32 MiB by default, `max_bytes=` to raise or lower it) |
+| `OSError` | the file is missing or unreadable (IO) — a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
+| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the TYPE only — never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over `max_bytes=` (an EXPLICIT budget binds every lane, checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=` — a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages — route the document to an OCR stage |
 
 **Format resolution order** — a mislabeled or extensionless file (a temp-file download,
@@ -2797,12 +2801,17 @@ def to_text(
 Convert any working-format document to GitHub-Flavored Markdown (`to_markdown`) or
 plain text (`to_text`), returning `(format, output)` where `format` is the format the
 conversion actually used (a `Format` member). The document is `path` (a file, the
-only positional) or `data=` (its bytes — the same conversion, byte-identical output;
+only positional — a REGULAR file: FIFOs/devices/sockets are refused before the read)
+or `data=` (its bytes — the same conversion, byte-identical output;
 no name to consult, so resolution rests on `format=` and the content markers).
 `format=` names the format explicitly (`"pdf"`, `"html"`/`"htm"`/`"xhtml"`,
 `"docx"`, `"xlsx"`, `"pptx"`, `"doc"`, `"xls"`, `"ppt"`, `"rtf"`, `"odt"`, `"ods"`,
-`"odp"`, `"epub"`, `"csv"`, `"tsv"`, plus container variants like
-`"docm"`/`"xlsm"`/`"xlsb"`/`"ppsx"` mapping onto these); `None` (the default) resolves
+`"odp"`, `"epub"`, `"csv"`, `"tsv"`, plus the container variants
+`"docm"`/`"xlsm"`/`"ppsx"` mapping onto these — the same OOXML packages with the
+content-type override naming the macro/show variant, resolved and sniffed as their
+base kinds; `"xlsb"` routes the Excel kind as vocabulary sugar, but genuine xlsb
+content is BIFF12 `.bin` sheets, not worksheet XML, and is REFUSED — the engines do
+not read it); `None` (the default) resolves
 it by the order above — content markers first, the input name's extension last.
 
 `backend=` picks the engine where they overlap: `"auto"` (the default) routes by the
@@ -2846,22 +2855,43 @@ own clean `ValueError` — "the password did not unlock this PDF". The unlock ri
 the pdf_oxide lane, the default `auto` and forced `oxide` both; `backend="anydoc"`
 on a PDF has no unlock and refuses encrypted documents outright.
 
-`max_bytes=` is the engine-lane input ceiling, DEFAULT 32 MiB, covering the anydoc
-AND office_oxide lanes — a measurement, not a guess: anydoc amplifies input into
-resident memory at ~36× on delimiter formats (2026-09, this box: a 100 MiB csv peaked
-at 3.7 GiB RSS, a 50 MiB one at 1.9 GiB, the conversion ~6.8s on the 100 MiB file —
-anydoc materializes row structures per cell), so an unbounded default is an OOM-kill
-aimed at whichever worker shares the caller's memory; 32 MiB keeps that measured worst
-case near 1.2 GiB. The opt-in `backend="oxide"` lane is bounded by the same input
-ceiling but has NO decompression caps of its own (a 333 KiB zip-bombed docx measured
-1.69 GiB peak RSS there before the ceiling; anydoc, by contrast, caps decompression
-engine-side) — the ceiling is the only guard on that lane, which is one reason it is
-never the default. Over the ceiling the call raises `ValueError` naming both sizes
-and the `max_bytes=` override; callers with a bigger budget pass `max_bytes=` (the
-pdf_oxide and HTML lanes are unmetered — pdf_oxide's own limits govern there). The
-motivating integrator shape — a service capping uploads at 100 MB — needs
-`max_bytes=100 * 1024 * 1024` and ~3.7 GiB of RSS headroom on the converting
-worker at the measured 36× (the 100 MiB csv cell above).
+`max_bytes=` is the input ceiling, and its contract has two halves. An EXPLICIT
+`max_bytes` binds EVERY engine lane — pdf and HTML included — and is enforced
+BEFORE any work runs: the file's size at open (a `path=` call never reads an
+over-budget byte), the buffer's length on entry (a `data=` call never copies
+one). `max_bytes=None` (the default) is the post-read doctrine: the 32 MiB
+default ceiling covers the anydoc AND office_oxide lanes only — the two lanes
+that amplify input into resident memory — because the lane is unknowable before
+the container sniff, which is exactly why only the explicit budget can be
+pre-read. Over either, the call raises `ValueError` naming both sizes and the
+`max_bytes=` override.
+
+The anydoc amplification, restated at the measured worst case (2026-09-09, this
+box): a many-short-cells csv amplifies ~146× — a 24 MiB one peaked at 3.4 GiB
+RSS, stable across input sizes (the earlier "~36×" figure was a benign
+long-cell shape; short cells are the common upload and the expensive one), so
+the 32 MiB default budgets ~4.6 GiB of worst-case headroom on the converting
+worker — tighter is often right, and `max_bytes=` is the knob. The motivating
+integrator shape — a service capping uploads at 100 MB — passes
+`max_bytes=100 * 1024 * 1024` and must budget for the worst case at that
+ceiling: ~146× of 100 MiB is ~14 GiB of RSS headroom on the converting worker
+(benign csv shapes measure far lower, ~36×; budget for the worst case, not the
+benign one).
+
+The opt-in `backend="oxide"` lane's decompression posture, measured on
+office_oxide 0.1.10 (locked): per-part caps of 512 MiB — declared AND actual,
+refused pre-decompression (a 600 MiB declared part is refused in ~0.03s at
+~20 MiB RSS with "decompression limit exceeded: part 'word/document.xml'
+expands to more than 536870912 bytes") — plus an XML nesting cap of 256 on a
+16 MiB parse stack. It has NO total-across-parts cap and NO output cap: a
+399 KiB zip carrying a 400 MiB `word/document.xml` (under the per-part cap)
+converts at ~1.6 GiB peak RSS in ~0.9s, emitting ~400 MiB of markdown —
+multi-part and output blowups remain the caller's risk on that lane, which is
+one reason it is never the default. (The older "333 KiB zip-bomb docx →
+1.7 GiB" figure was office_oxide 0.1.9, before the per-part caps — history,
+not current posture. anydoc, by contrast, caps decompression engine-side:
+128 MiB per entry, 512 MiB total — a zip-bomb fixture lane in the suite pins
+both engines' caps firing.)
 
 `to_text` is the same conversion, routing, and `pages=`/`password=`/`max_bytes=`
 semantics, with the markdown normalized to plain text — ONE text shape for every
@@ -2871,7 +2901,13 @@ keep their content without fences, links become `label (url)`. The normalization
 runs inside the same detached pass, over the markdown — deliberately, because each
 engine's own plain-text surface differs (pdf_oxide's, measured, merges two-column
 layouts line-by-line; the strip preserves the markdown converter's reading-order
-blocks).
+blocks). The strip's inline machinery (link labels, image labels, emphasis)
+recurses per nesting level and is depth-bounded at 256: past the bound the
+remaining `[…](…)` machinery degrades to literal text instead of recursing toward
+a stack overflow — a 30,000-deep `[[[…x…]]()…]()` nest converts (exit 0,
+non-empty output) where the unbounded strip crashed the process (the fix's
+subprocess pin is in `tests/test_documents_engines.py`; the exact degradation
+shape is unit-pinned in `src/gfm_strip_impl.rs`).
 
 A multi-sheet workbook renders whole: anydoc emits each sheet as its own
 `## <sheet name>` section — a measured two-sheet workbook (an `Alpha` table over a
@@ -2933,9 +2969,14 @@ def sniff(data: bytes) -> Format | None: ...
 The standalone content-marker format detector — what `to_markdown`/`to_text` would
 resolve these BYTES to from content alone, with no path and no extension: the PDF
 header, the RTF open group, OLE stream names, the ZIP package mimetype, the HTML
-document marker. `sniff` never opens a parser: the markers are container-level, so
-the call is microsecond-scale (which is also why it has no async twin — the thread hop
-would cost more than the scan).
+document marker. `sniff` OPENS AND PARSES THE CONTAINER: anydoc's detection reads
+the ZIP/OLE package's metadata (and the main part when the markers need it), so the
+call's cost is a package parse, not a marker scan — a 120 KiB zip measured 267 MiB
+peak RSS to answer docx (2026-09-09, this box). Budget accordingly when sniffing
+untrusted leading bytes: the container is parsed before the format is named. (It
+still has no async twin: the call is a single short native pass, and the thread hop
+plus the parse would price the awaitable spelling above its value — the sync call
+is the surface.)
 
 `None` is not an error: it is the answer "the content names no format" — a
 signature-less text format such as CSV (name it via `format=` or let the extension),
@@ -3210,10 +3251,21 @@ The awaitable spellings of the six path functions — `to_markdown`, `to_text`,
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large
-one hundreds), the exact class a thread hop pays for. `sniff` stays sync-only: a
-microsecond-scale marker scan where the hop would cost more than the call. There is
+one hundreds), the exact class a thread hop pays for. `sniff` stays sync-only: its
+cost is a container parse (see its section above), but it remains a single short
+native pass a sync caller runs directly — no awaitable spelling ships. There is
 no size-based branching inside any wrapper, and the choice between the sync spelling
 and `tors.documents.aio` is the caller's, made once at the call site.
+
+**Cancellation semantics, stated because a caller can be hurt by them**:
+`asyncio.to_thread` cannot cancel the native pass. `wait_for`/`timeout()` on one of
+these awaitables cancels the FUTURE — the `asyncio` wrapper returns control at the
+deadline — while the underlying thread runs the conversion to completion, holding
+its memory (the amplification lanes' worth: potentially gigabytes), and repeated
+timeouts pile up blocked threads on the shared default executor. Treat these
+awaitables as uncancellable work: size the input before the call (`max_bytes=` is
+the pre-read guard), and only call with a timeout you are also willing to abandon
+the thread to.
 
 ```python
 import tors.documents.aio
