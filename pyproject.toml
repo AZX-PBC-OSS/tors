@@ -84,6 +84,13 @@ markers = [
     # paying the lane five times; locally `pytest` (and `make test`) run
     # everything, marker or not.
     "timing: measurement cell (GIL heartbeat-gap / wall-time band) — the slow, load-sensitive lane; CI runs it once on the 3.12 leg",
+    # The sweep lane: the 67k-cell exhaustive structural parity battery in
+    # tests/test_json_repair_parity.py (L<=6 over the structural alphabet,
+    # parametrized). It is extension-parity against the json_repair oracle —
+    # Python-version-independent, so CI runs it once on the 3.12 leg instead
+    # of on all five matrix legs; locally `pytest` (and `make test`) run
+    # everything, marker or not.
+    "sweep: exhaustive structural parity cell — the Python-version-independent battery; CI runs it once on the 3.12 leg",
 ]
 
 [tool.ruff]

@@ -29,7 +29,8 @@
 mod common;
 
 use common::{crlf, decomposed, prose};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::utf8_impl;
 
 fn bench_utf8_is_valid(c: &mut Criterion, kind: &str, bytes: &[u8]) {

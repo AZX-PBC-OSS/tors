@@ -27,7 +27,8 @@
 mod common;
 
 use common::prose;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::fence_impl;
 
 /// One prose paragraph, one fenced code block — repeated to the target

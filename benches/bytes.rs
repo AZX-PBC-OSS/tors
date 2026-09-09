@@ -27,7 +27,8 @@
 mod common;
 
 use common::{crlf, decomposed, prose};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::b64_impl;
 use tors::decode_impl;
 use tors::finalize_impl;

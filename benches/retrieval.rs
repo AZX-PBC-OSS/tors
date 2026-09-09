@@ -24,8 +24,9 @@ mod common;
 use std::collections::HashMap;
 
 use common::PROSE_SENTENCE;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rust_stemmers::{Algorithm, Stemmer};
+use std::hint::black_box;
 use tors::bm25_impl;
 use tors::tfidf_impl;
 
