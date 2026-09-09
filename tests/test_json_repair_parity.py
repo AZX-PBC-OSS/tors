@@ -86,6 +86,14 @@ _BASE_RAWS: list[str] = [
     '{"a": "x", "b": }',  # missing value: second member
     "{a: 'x', b: None}",  # combined: unquoted + single + None
     '{"a":1}{"b":2}',  # concatenated objects
+    '{' + r'{\"k\": 1}' * 64 + '}',  # escaped-delimiter run in a string
+    # body: the escape normalizer's incremental undo record stays
+    # byte-identical to the oracle here.
+    r'{"bs": "\\\\", "m": "\\"k\\" \u201e x"}',  # backslash run +
+    # delimiter unescape + smart quote in one body: exercises every
+    # acc_pop repair arm against the oracle.
+    '[' + r'{\"k\": \"v\"}' * 48 + ']',  # escaped key AND value run
+    # in an array body: the heaviest escape-repair density, pinned.
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
 ]
@@ -290,6 +298,21 @@ class TestDifferentialParity:
             tors.repair_json(_DEEP_RAW, schema=DEEP_SCHEMA)
         with pytest.raises((ValueError, RecursionError)):
             json_repair_lib.repair_json(_DEEP_RAW, schema=DEEP_SCHEMA)
+
+    def test_continuation_chain_recursion_both_raise(self) -> None:
+        # §9.6 both-raise pin for the array-continuation merge chain
+        # (`{"a":[0],` + `["b":[0],` * N): tors caps it at MAX_NESTING
+        # fragments and the oracle at its own recursion limit, so at a size
+        # far past both thresholds each engine raises a ValueError — the
+        # differential signal that neither crashes. (A tors build without
+        # the continuation guard dies with SIGSEGV here, which kills the
+        # process rather than failing the assertion — the native suite's
+        # sub-2k sizes fail cleanly instead.)
+        merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        with pytest.raises(ValueError):
+            tors.repair_json(merge_chain, skip_json_loads=True)
+        with pytest.raises(ValueError):
+            json_repair_lib.repair_json(merge_chain, skip_json_loads=True)
 
     @pytest.mark.parametrize(
         'raw', STRICT_CORPUS, ids=[f'strict-{i}' for i in range(len(STRICT_CORPUS))]

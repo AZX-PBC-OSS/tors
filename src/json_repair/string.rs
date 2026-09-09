@@ -139,6 +139,35 @@ struct StringParseState {
     /// `quote_belongs_to_regex_character_class`) uses the same unit, so the
     /// observable behavior is identical.
     regex_character_class_start: Option<usize>,
+    /// One level of UNDO for the accumulator's last char — the incremental
+    /// twin of upstream's `_rebuild_unmatched_opening_braces` rescan. Every
+    /// `acc_push` records what the pushed char did to
+    /// `object_value_unmatched_opening_braces` (a `{` is +1, a `}` is -1
+    /// only when the balance before it was positive — resolved AT PUSH
+    /// TIME, exactly the scan's sequential resolution) and the
+    /// `regex_character_class_start` value it replaced; `acc_pop` subtracts
+    /// the recorded effect and restores the recorded pre-value, so the
+    /// pop-then-push escape repairs (upstream: `pop()` + `push(x)` +
+    /// `_rebuild...`) stay O(1) instead of rescanning the whole
+    /// accumulator — which made escaped-delimiter runs O(n^2): measured
+    /// 2.05e9 chars scanned for a 160 KB escaped-key document. Gated from
+    /// both lanes: an absolute wall bound plus shape pin in
+    /// test_json_repair_native, and a machine-speed-immune scaling ratio
+    /// in test_json_repair_performance.
+    last_brace_effect: i8,
+    last_class_pre: Option<usize>,
+    /// Whether the accumulator's last char is one of the brace/class-ACTIVE
+    /// chars (so its undo record is meaningful). Content chars write no
+    /// record — popping them needs no undo — and this flag is how `acc_pop`
+    /// tells an active char's record from a stale one.
+    last_was_active: bool,
+    /// Whether `acc_pop`'s undo record is live: set by every push, cleared
+    /// by every pop. A second pop without an intervening push has no undo
+    /// data (the char before the last never recorded any) — every current
+    /// pop site pops at most once before pushing again (or never again),
+    /// and the debug assert turns any future violation into a test-time
+    /// panic instead of a silent wrong result.
+    undo_ready: bool,
 }
 
 impl Default for StringParseState {
@@ -161,6 +190,10 @@ impl StringParseState {
             inline_container_stack: Vec::new(),
             object_value_has_no_future_delimiter: false,
             lookahead_cache: Vec::new(),
+            last_brace_effect: 0,
+            last_class_pre: None,
+            last_was_active: false,
+            undo_ready: false,
             object_value_unmatched_opening_braces: 0,
             regex_character_class_start: None,
         }
@@ -228,42 +261,126 @@ enum StringEntry {
 /// accumulator while maintaining the unmatched-brace count and the regex
 /// character-class start (see the field docs for the byte-unit choice).
 fn append_string_content(state: &mut StringParseState, content: &[char]) {
-    let start_byte = state.string_acc.len();
-    let mut byte_off = 0usize;
+    // The batched inline twin of acc_push (see its docs for the rules and
+    // the undo-record contract): the per-char counter rules apply in this
+    // loop — no per-char call — and the ONE undo record written is for the
+    // slice's LAST char (the only one a later pop could remove). A
+    // per-char acc_push call here cost ~1.5ms/MiB of call overhead on
+    // escaped-prose corpora (measured, interleaved criterion: the
+    // malformed cell regressed 47% until this went back to a loop).
+    let mut last_brace_effect = 0i8;
+    let mut last_class_pre = state.regex_character_class_start;
+    let mut last_was_active = false;
     for &ch in content {
-        state.string_acc.push(ch);
-        if ch == '{' {
-            state.object_value_unmatched_opening_braces += 1;
-        } else if ch == '}' && state.object_value_unmatched_opening_braces > 0 {
-            state.object_value_unmatched_opening_braces -= 1;
-        } else if ch == '[' {
+        last_class_pre = state.regex_character_class_start;
+        match ch {
+            '{' => {
+                last_brace_effect = 1;
+                last_was_active = true;
+                state.object_value_unmatched_opening_braces += 1;
+            }
+            '}' if state.object_value_unmatched_opening_braces > 0 => {
+                last_brace_effect = -1;
+                last_was_active = true;
+                state.object_value_unmatched_opening_braces -= 1;
+            }
             // just past the '[' ('[' is one byte, so +1 is the byte unit's
             // equivalent of upstream's codepoint `+ 1`)
-            state.regex_character_class_start = Some(start_byte + byte_off + 1);
-        } else if ch == ']' {
-            state.regex_character_class_start = None;
+            '[' => {
+                last_brace_effect = 0;
+                last_was_active = true;
+                state.regex_character_class_start = Some(state.string_acc.len() + 1);
+            }
+            ']' => {
+                last_brace_effect = 0;
+                last_was_active = true;
+                state.regex_character_class_start = None;
+            }
+            // Content char: changed nothing, so it carries no undo record.
+            _ => {
+                last_brace_effect = 0;
+                last_was_active = false;
+            }
         }
-        byte_off += ch.len_utf8();
+        state.string_acc.push(ch);
+    }
+    if !content.is_empty() {
+        state.last_brace_effect = last_brace_effect;
+        state.last_class_pre = last_class_pre;
+        state.last_was_active = last_was_active;
+        state.undo_ready = true;
     }
 }
 
-/// parse_string.py's `_rebuild_unmatched_opening_braces`: recompute the
-/// brace count and class start from the whole accumulator (after the escape
-/// normalizer rewrites its tail).
-fn rebuild_unmatched_opening_braces(state: &mut StringParseState) {
-    state.object_value_unmatched_opening_braces = 0;
-    state.regex_character_class_start = None;
-    for (index, ch) in state.string_acc.char_indices() {
-        if ch == '{' {
+/// Push one char onto the accumulator, maintaining both counters and
+/// recording the pushed char's UNDO data (see the field docs): the brace
+/// effect is resolved at push time — a `}` decrements only when the
+/// balance before it is positive, exactly the sequential scan's rule —
+/// and the class start's pre-value is what the push overwrites. Only
+/// brace/class-ACTIVE chars (`{`, counted `}`, `[`, `]`) change either
+/// counter, so only they write the undo record; content chars take the
+/// no-record fast path (popping them needs no undo — they changed
+/// nothing). The escape repairs call this once per repaired char (rare);
+/// bulk appends go through append_string_content's batched loop.
+#[inline]
+fn acc_push(state: &mut StringParseState, ch: char) {
+    match ch {
+        '{' => {
+            state.last_brace_effect = 1;
+            state.last_class_pre = state.regex_character_class_start;
             state.object_value_unmatched_opening_braces += 1;
-        } else if ch == '}' && state.object_value_unmatched_opening_braces > 0 {
+        }
+        '}' if state.object_value_unmatched_opening_braces > 0 => {
+            state.last_brace_effect = -1;
+            state.last_class_pre = state.regex_character_class_start;
             state.object_value_unmatched_opening_braces -= 1;
-        } else if ch == '[' {
-            state.regex_character_class_start = Some(index + 1);
-        } else if ch == ']' {
+        }
+        // just past the '[' ('[' is one byte, so +1 is the byte unit's
+        // equivalent of upstream's codepoint `+ 1`)
+        '[' => {
+            state.last_brace_effect = 0;
+            state.last_class_pre = state.regex_character_class_start;
+            state.regex_character_class_start = Some(state.string_acc.len() + 1);
+        }
+        ']' => {
+            state.last_brace_effect = 0;
+            state.last_class_pre = state.regex_character_class_start;
             state.regex_character_class_start = None;
         }
+        _ => {
+            // No counter change: no undo record needed.
+            state.last_was_active = false;
+            state.string_acc.push(ch);
+            state.undo_ready = true;
+            return;
+        }
     }
+    state.last_was_active = true;
+    state.string_acc.push(ch);
+    state.undo_ready = true;
+}
+
+/// Pop the accumulator's last char, undoing its recorded effect — the
+/// incremental twin of upstream's whole-accumulator
+/// `_rebuild_unmatched_opening_braces` rescan after a pop (the O(n^2)
+/// class this helper replaces: see the field docs). One level of undo
+/// only: a pop consumes the record, and the debug assert below fires if
+/// any future call site pops twice without an intervening push. Popping
+/// a content char (no record written) is a plain pop — it changed
+/// nothing, so there is nothing to undo.
+#[inline]
+fn acc_pop(state: &mut StringParseState) {
+    debug_assert!(
+        state.undo_ready,
+        "acc_pop: no undo record (double pop, or pop before any push)"
+    );
+    if state.last_was_active {
+        state.object_value_unmatched_opening_braces =
+            (state.object_value_unmatched_opening_braces as i8 - state.last_brace_effect) as usize;
+        state.regex_character_class_start = state.last_class_pre;
+    }
+    state.string_acc.pop();
+    state.undo_ready = false;
 }
 
 /// object_value_context.py threads a `skip_to_character` callable through
@@ -775,9 +892,8 @@ impl Parser {
         if state.in_low_smart_quote_span() && ch == '"' {
             // A bare ASCII quote inside a „...” span: replace the backslash
             // with the quote and close the span.
-            state.string_acc.pop();
-            state.string_acc.push(ch);
-            rebuild_unmatched_opening_braces(state);
+            acc_pop(state);
+            acc_push(state, ch);
             state.pop_low_smart_quote_span();
             self.index += 1;
             return (true, self.cur());
@@ -794,17 +910,16 @@ impl Parser {
             let next_char = self.get((run_end - self.index) as isize);
             if run_length.is_multiple_of(2) && next_char != Some(active) {
                 // Halve an even backslash run (it escapes itself).
-                state.string_acc.pop();
+                acc_pop(state);
                 for _ in 0..run_length / 2 {
-                    state.string_acc.push('\\');
+                    acc_push(state, '\\');
                 }
-                rebuild_unmatched_opening_braces(state);
                 self.index = run_end;
                 return (true, self.cur());
             }
         }
         if ch == active || matches!(ch, 't' | 'n' | 'r' | 'b' | '\\') {
-            state.string_acc.pop();
+            acc_pop(state);
             let escape_seqs = match ch {
                 't' => '\t',
                 'n' => '\n',
@@ -812,8 +927,7 @@ impl Parser {
                 'b' => '\u{8}',
                 _ => ch,
             };
-            state.string_acc.push(escape_seqs);
-            rebuild_unmatched_opening_braces(state);
+            acc_push(state, escape_seqs);
             self.index += 1;
             let mut next_char = self.cur();
             // Fold any immediately-following `\"`/`\\`-style pairs into the
@@ -823,9 +937,8 @@ impl Parser {
                 && state.string_acc.ends_with('\\')
                 && (nc == active || nc == '\\')
             {
-                state.string_acc.pop();
-                state.string_acc.push(nc);
-                rebuild_unmatched_opening_braces(state);
+                acc_pop(state);
+                acc_push(state, nc);
                 self.index += 1;
                 next_char = self.cur();
             }
@@ -849,18 +962,16 @@ impl Parser {
                     Some(c) => c,
                     None => match self.decode_surrogate_pair(code, hi) {
                         Some((astral, consumed)) => {
-                            state.string_acc.pop();
-                            state.string_acc.push(astral);
-                            rebuild_unmatched_opening_braces(state);
+                            acc_pop(state);
+                            acc_push(state, astral);
                             self.index += 1 + num_chars + consumed;
                             return (true, self.cur());
                         }
                         None => '\u{FFFD}',
                     },
                 };
-                state.string_acc.pop();
-                state.string_acc.push(decoded);
-                rebuild_unmatched_opening_braces(state);
+                acc_pop(state);
+                acc_push(state, decoded);
                 self.index += 1 + num_chars;
                 return (true, self.cur());
             }
@@ -869,9 +980,8 @@ impl Parser {
             // shouldn't be escaped, removing the escape" (Python's
             // precedence: `char == "„" or (char in STRING_DELIMITERS and
             // char != active)`).
-            state.string_acc.pop();
-            state.string_acc.push(ch);
-            rebuild_unmatched_opening_braces(state);
+            acc_pop(state);
+            acc_push(state, ch);
             self.index += 1;
             return (true, self.cur());
         }
@@ -1512,8 +1622,7 @@ impl Parser {
             let Some(c) = ch else {
                 if STREAM_STABLE && !state.string_acc.is_empty() && state.string_acc.ends_with('\\')
                 {
-                    state.string_acc.pop();
-                    rebuild_unmatched_opening_braces(state);
+                    acc_pop(state);
                 }
                 break;
             };
@@ -1609,6 +1718,14 @@ impl Parser {
         {
             rstrip_py(&mut state.string_acc);
         }
+        // The strips above are the accumulator's TERMINAL mutations, the
+        // only ones outside acc_push/acc_pop: they remove py-whitespace
+        // only (never a brace/class-active char), so the counters stay
+        // valid — but the undo records now describe stripped chars. Consume
+        // the record here so the one-level-undo tripwire (acc_pop's debug
+        // assert) fires on any future pop-after-finalize instead of
+        // silently applying a stale record.
+        state.undo_ready = false;
 
         std::mem::take(&mut state.string_acc)
     }
@@ -1672,6 +1789,92 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The naive whole-accumulator scan — upstream's
+    /// `_rebuild_unmatched_opening_braces`, kept verbatim as the oracle
+    /// for the incremental twin's differential test below.
+    fn oracle_scan(acc: &str) -> (usize, Option<usize>) {
+        let mut braces = 0usize;
+        let mut class = None;
+        for (index, ch) in acc.char_indices() {
+            if ch == '{' {
+                braces += 1;
+            } else if ch == '}' && braces > 0 {
+                braces -= 1;
+            } else if ch == '[' {
+                class = Some(index + 1);
+            } else if ch == ']' {
+                class = None;
+            }
+        }
+        (braces, class)
+    }
+
+    /// Differential proof of the incremental counters: replay seeded
+    /// random push / pop-then-push / slice-append sequences — the exact
+    /// mutation shapes the escape normalizer performs — and assert the
+    /// maintained (brace balance, class start) equals the oracle's full
+    /// rescan after every step, on accumulators built from the characters
+    /// that actually drive the counters (`{`, `}`, `[`, `]`, letters,
+    /// backslashes, multibyte).
+    #[test]
+    fn incremental_brace_counters_match_the_full_rescan_oracle() {
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        const ALPHABET: [char; 8] = ['{', '}', '[', ']', 'a', '\\', '\u{201E}', '\u{1F600}'];
+        for _case in 0..128 {
+            let mut state = StringParseState::new();
+            for _step in 0..512 {
+                match next() % 10 {
+                    0..=4 => {
+                        let ch = ALPHABET[(next() % ALPHABET.len() as u64) as usize];
+                        acc_push(&mut state, ch);
+                    }
+                    5..=7 => {
+                        // pop-then-push (the escape repairs' shape); one in
+                        // eight pops stays bare (the terminal-cleanup
+                        // shape). The real call sites never pop twice
+                        // without an intervening push — the one-level undo
+                        // contract — so the grammar mirrors that: pop only
+                        // when an undo record is live, else push.
+                        if state.undo_ready {
+                            acc_pop(&mut state);
+                            if next() % 8 != 0 {
+                                let ch = ALPHABET[(next() % ALPHABET.len() as u64) as usize];
+                                acc_push(&mut state, ch);
+                            }
+                        } else {
+                            let ch = ALPHABET[(next() % ALPHABET.len() as u64) as usize];
+                            acc_push(&mut state, ch);
+                        }
+                    }
+                    _ => {
+                        // slice append (the inline-container shape)
+                        let len = (next() % 4) as usize;
+                        let content: Vec<char> = (0..len)
+                            .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                            .collect();
+                        append_string_content(&mut state, &content);
+                    }
+                }
+                let got = (
+                    state.object_value_unmatched_opening_braces,
+                    state.regex_character_class_start,
+                );
+                let want = oracle_scan(&state.string_acc);
+                assert_eq!(
+                    got, want,
+                    "divergent counters after step (acc {:?})",
+                    state.string_acc
+                );
+            }
+        }
+    }
 
     fn parse_string_in(raw: &str, ctx: Ctx) -> Result<Value, String> {
         let mut parser = Parser::new(raw, false, None);
