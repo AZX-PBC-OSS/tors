@@ -468,6 +468,7 @@ def _sweep_raws() -> list[str]:
     return raws
 
 
+@pytest.mark.sweep
 class TestExhaustiveStructuralSweep:
     """Every short string over the structural alphabet, both engines.
 
