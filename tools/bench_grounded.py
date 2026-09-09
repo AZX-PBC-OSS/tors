@@ -295,9 +295,7 @@ def main() -> None:
                 time_cell(
                     source, claims, partial(tors.is_grounded, fuzzy=True, threshold=FUZZY_THRESHOLD)
                 ),
-                time_cell(
-                    source, claims, partial(upstream_fuzzy, threshold=FUZZY_THRESHOLD)
-                ),
+                time_cell(source, claims, partial(upstream_fuzzy, threshold=FUZZY_THRESHOLD)),
             ]
             print(_row(shape, label, chars, times))
     print(

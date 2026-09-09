@@ -94,9 +94,7 @@ _DIAGNOSTIC_ACTIONS: frozenset[str] = frozenset(
 class TestModelAsSchema:
     def test_model_accepted_directly(self) -> None:
         # Pattern: the model class goes straight into schema=, no manual call.
-        value = repair_json_loads(
-            '{"name": "x", "rating": "4"}', schema=ProductReview
-        )
+        value = repair_json_loads('{"name": "x", "rating": "4"}', schema=ProductReview)
         assert value == {
             "name": "x",
             "rating": 4,
@@ -110,11 +108,7 @@ class TestModelAsSchema:
 
     def test_fenced_model_output(self) -> None:
         # Pattern: prose + one fence still repairs against the model.
-        raw = (
-            "Here is your review:\n"
-            '```json\n{"name": "x", "rating": "4",}\n```\n'
-            "Hope this helps!"
-        )
+        raw = 'Here is your review:\n```json\n{"name": "x", "rating": "4",}\n```\nHope this helps!'
         value = repair_json_loads(raw, schema=ProductReview)
         model = ProductReview.model_validate(value)
         assert model.name == "x"
@@ -133,9 +127,7 @@ class TestModelAsSchema:
 class TestKeyRepair:
     def test_key_typos_fixed_then_validated(self) -> None:
         # Pattern: case typos remap first, then the model validates.
-        value = repair_json_loads(
-            '{"Name": "x", "Rating": "3"}', schema=ProductReview
-        )
+        value = repair_json_loads('{"Name": "x", "Rating": "3"}', schema=ProductReview)
         assert value["name"] == "x"
         assert value["rating"] == 3
         ProductReview.model_validate(value)
@@ -151,10 +143,7 @@ class TestKeyRepair:
 class TestNestedPayloads:
     def test_nested_order(self) -> None:
         # Pattern: deep scalars coerce inside nested models, fenced or not.
-        bare = (
-            '{order_id: "A-1", items: '
-            '[{sku: "w-1", qty: "2", price: 3.5},], total: "19.99",}'
-        )
+        bare = '{order_id: "A-1", items: [{sku: "w-1", qty: "2", price: 3.5},], total: "19.99",}'
         fenced = "```json\n" + bare + "\n```"
         for raw in (bare, fenced):
             value = repair_json_loads(raw, schema=Order)
@@ -188,11 +177,7 @@ class TestSchemaErrors:
 class TestObservability:
     def test_diagnostics_tell_the_story(self) -> None:
         # Pattern: diagnostics narrate the same repair that loads returns.
-        raw = (
-            "Here is your review:\n"
-            '```json\n{"name": "x", "rating": "4",}\n```\n'
-            "Hope this helps!"
-        )
+        raw = 'Here is your review:\n```json\n{"name": "x", "rating": "4",}\n```\nHope this helps!'
         value, diags = repair_json_diagnostics(raw, schema=ProductReview)
         assert value == repair_json_loads(raw, schema=ProductReview)
         assert any(d["action"] == "coerce" for d in diags)
@@ -200,11 +185,7 @@ class TestObservability:
 
     def test_str_spelling_roundtrip(self) -> None:
         # Pattern: the str spelling serializes exactly the loads value.
-        raw = (
-            "Here is your review:\n"
-            '```json\n{"name": "x", "rating": "4",}\n```\n'
-            "Hope this helps!"
-        )
+        raw = 'Here is your review:\n```json\n{"name": "x", "rating": "4",}\n```\nHope this helps!'
         text = repair_json(raw, schema=ProductReview)
         assert json.loads(text) == repair_json_loads(raw, schema=ProductReview)
 
@@ -230,9 +211,7 @@ class TestModelEdgeCases:
         class Aliased(pydantic.BaseModel):
             name: str = pydantic.Field(default="x", alias="userName")
 
-        assert repair_json_loads("{", schema=Aliased, skip_json_loads=True) == {
-            "userName": "x"
-        }
+        assert repair_json_loads("{", schema=Aliased, skip_json_loads=True) == {"userName": "x"}
 
     def test_enum_member_default_uses_the_member_value(self) -> None:
         class Color(enum.Enum):
@@ -243,6 +222,4 @@ class TestModelEdgeCases:
 
         # The Enum-member default is injected as its member VALUE (the
         # JSON spelling), not the member's repr.
-        assert repair_json_loads("{", schema=Pick, skip_json_loads=True) == {
-            "c": "red"
-        }
+        assert repair_json_loads("{", schema=Pick, skip_json_loads=True) == {"c": "red"}

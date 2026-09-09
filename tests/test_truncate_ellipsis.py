@@ -118,22 +118,22 @@ class TestClusterSafety:
         assert truncate_ellipsis(text, 4) == "ab\u0301" + _ELLIPSIS
 
     def test_zwj_sequence_is_never_split(self) -> None:
-        text = "hi \U0001F469\u200d\U0001F52C there"
+        text = "hi \U0001f469\u200d\U0001f52c there"
         for max_chars in range(len(text) + 3):
             got = truncate_ellipsis(text, max_chars)
             assert len(got) <= max_chars
             kept = got[:-1] if got != text and got.endswith(_ELLIPSIS) else got
-            assert ("\u200d" in kept) == ("\U0001F469" in kept and "\U0001F52C" in kept), (
+            assert ("\u200d" in kept) == ("\U0001f469" in kept and "\U0001f52c" in kept), (
                 f"split ZWJ at {max_chars}: {got!r}"
             )
 
     def test_flag_pair_is_never_split(self) -> None:
-        text = "a\U0001F1FA\U0001F1F8b"
+        text = "a\U0001f1fa\U0001f1f8b"
         for max_chars in range(len(text) + 1):
             got = truncate_ellipsis(text, max_chars)
             assert len(got) <= max_chars
             kept = got[:-1] if got != text and got.endswith(_ELLIPSIS) else got
-            assert ("\U0001F1FA" in kept) == ("\U0001F1F8" in kept), (
+            assert ("\U0001f1fa" in kept) == ("\U0001f1f8" in kept), (
                 f"split flag at {max_chars}: {got!r}"
             )
 

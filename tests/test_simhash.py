@@ -74,9 +74,7 @@ class TestDeterminism:
 
 class TestBagOfWords:
     def test_reversed_word_order_is_the_same_fingerprint(self) -> None:
-        assert simhash64("one two three four five six") == simhash64(
-            "six five four three two one"
-        )
+        assert simhash64("one two three four five six") == simhash64("six five four three two one")
 
     def test_permuted_punctuation_is_the_same_fingerprint(self) -> None:
         assert simhash64("Hello, world!") == simhash64("world! Hello,")

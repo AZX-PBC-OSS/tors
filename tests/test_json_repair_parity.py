@@ -29,10 +29,10 @@ json_repair_lib = pytest.importorskip("json_repair")  # pin: json-repair==0.63.4
 
 _BASE_RAWS: list[str] = [
     '{"a": 1 "b": 2}',  # missing comma: object members
-    '[1 2 3]',  # missing comma: array items
+    "[1 2 3]",  # missing comma: array items
     '{"a": 1, "b": 2 "c": 3}',  # missing comma: later member
     '{"a": 1, "b": 2',  # missing bracket: unclosed object
-    '[1, 2, 3',  # missing bracket: unclosed array
+    "[1, 2, 3",  # missing bracket: unclosed array
     '{"a": "hello}',  # missing quote: unterminated string value
     '{"a: 1}',  # missing quote: unterminated key
     '{"a": {"b": [1, 2',  # truncated: nested containers
@@ -41,77 +41,77 @@ _BASE_RAWS: list[str] = [
     "{'a': 1}",  # single quotes: object
     "['a', 'b']",  # single quotes: array
     "{'a': 'hi'}",  # single quotes: key and value
-    '{a: 1}',  # unquoted key: single
-    '{a: 1, b: 2}',  # unquoted keys: multiple
+    "{a: 1}",  # unquoted key: single
+    "{a: 1, b: 2}",  # unquoted keys: multiple
     '{name: "bob"}',  # unquoted key: string value
     '{"a": /*x*/ 1}',  # comment: inline block comment
     '// lead\n{"a": 1}',  # comment: leading line comment
     '/*x*/{"a": 1}',  # comment: leading block comment
     'Answer: {"a": 1}',  # prose prefix: object payload
-    'Here: [1, 2]',  # prose prefix: array payload
+    "Here: [1, 2]",  # prose prefix: array payload
     'Result: {"a": true}',  # prose prefix: boolean member
-    '(1, 2, 3)',  # tuple: top-level parenthesized
+    "(1, 2, 3)",  # tuple: top-level parenthesized
     '{"a": (1, 2)}',  # tuple: parenthesized value
-    '(1,)',  # tuple: single element
+    "(1,)",  # tuple: single element
     '{"a": True}',  # Python literal: True
     '{"a": False}',  # Python literal: False
     '{"a": None}',  # Python literal: None
-    '[True, False, None]',  # Python literals: mixed array
+    "[True, False, None]",  # Python literals: mixed array
     '{"a": True, "b": None}',  # Python literals: mixed object
     '""hi""',  # doubled quotes: top-level string
     '{"a": ""hi""}',  # doubled quotes: member value
     '{"a": "x\\qy"}',  # escape: invalid \\q escape
     '{"a": "\\u41"}',  # escape: truncated \\u escape
-    "```json\n" '{"a": 1}\n' "```",  # fenced payload: object (no top-level scalar)
-    "```json\n" "[1, 2]\n" "```",  # fenced payload: array (no top-level scalar)
-    "~~~json\n" '{"a": 1}\n' "~~~",  # fenced payload: tilde fence object
-    "```\n" '{"a": 1}\n' "```",  # fenced payload: untagged fence object
+    '```json\n{"a": 1}\n```',  # fenced payload: object (no top-level scalar)
+    "```json\n[1, 2]\n```",  # fenced payload: array (no top-level scalar)
+    '~~~json\n{"a": 1}\n~~~',  # fenced payload: tilde fence object
+    '```\n{"a": 1}\n```',  # fenced payload: untagged fence object
     '{"a": {"b": 1 "c": 2}}',  # nested damage: missing comma deep
     '{"a": [1 2]}',  # nested damage: array missing comma
     "{'a': {'b': 1}}",  # nested damage: single quotes deep
-    '{a: {b: 2}}',  # nested damage: unquoted keys deep
+    "{a: {b: 2}}",  # nested damage: unquoted keys deep
     '{"a": {"b": {',  # nested damage: truncated deep
     '[{"a": [1, {"b": 2',  # nested damage: truncated mixed stack
     '{"a": 1,}',  # trailing comma: object
-    '[1, 2,]',  # trailing comma: array
+    "[1, 2,]",  # trailing comma: array
     '{"a" 1}',  # missing colon after key
     '{"a": 1,, "b": 2}',  # doubled comma between members
-    '',  # empty input: nothing-recoverable sentinel
-    '   ',  # whitespace only: sentinel
-    '\"\"',  # valid empty string: the sentinel spelling both sides share
+    "",  # empty input: nothing-recoverable sentinel
+    "   ",  # whitespace only: sentinel
+    '""',  # valid empty string: the sentinel spelling both sides share
     '{"a": }',  # missing value after colon
     '{"a": "b" "c": "d"}',  # missing comma: string values
     '[1, {"a": True}, None]',  # nested damage: Python literals in array
     '{"a": [1, 2}',  # mismatched closer: brace for bracket
-    'not json at all',  # prose only: sentinel
+    "not json at all",  # prose only: sentinel
     '{"a": "x", "b": }',  # missing value: second member
     "{a: 'x', b: None}",  # combined: unquoted + single + None
     '{"a":1}{"b":2}',  # concatenated objects
-    '{' + r'{\"k\": 1}' * 64 + '}',  # escaped-delimiter run in a string
+    "{" + r"{\"k\": 1}" * 64 + "}",  # escaped-delimiter run in a string
     # body: the escape normalizer's incremental undo record stays
     # byte-identical to the oracle here.
     r'{"bs": "\\\\", "m": "\\"k\\" \u201e x"}',  # backslash run +
     # delimiter unescape + smart quote in one body: exercises every
     # acc_pop repair arm against the oracle.
-    '[' + r'{\"k\": \"v\"}' * 48 + ']',  # escaped key AND value run
+    "[" + r"{\"k\": \"v\"}" * 48 + "]",  # escaped key AND value run
     # in an array body: the heaviest escape-repair density, pinned.
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
     '["' + "]" * 64 + '" x',  # array-context `]` run in a string body: the
     # memoized-lookahead O(n^2) fix stays byte-identical to the oracle here.
-    r'''[{"a": "]}\\"x"}]''',  # mixed `]`/`}`/`\\`/`"` in an array-of-object
+    r"""[{"a": "]}\\"x"}]""",  # mixed `]`/`}`/`\\`/`"` in an array-of-object
     # string body: exercises the shared `[outer]` memo across the `]` and `}`
     # sites and pins it byte-identical to the oracle.
-    '["' + (']' + '\\\\') * 32 + '" x',  # interleaved `]`/even-backslash-run
+    '["' + ("]" + "\\\\") * 32 + '" x',  # interleaved `]`/even-backslash-run
     # string body: the incremental escape-tail rewrite (upstream rebuilds the
     # accumulator per normalization) stays byte-identical to the oracle.
     '["' + 'a"' * 64 + '"]',  # internal-quote run in an array string: the
     # pairing-walk outcome memo (upstream re-walks per quote candidate).
-    '{"a": "' + '}' * 64 + '"' + 'y' * 64 + '"z',  # object-value `}` run with a
+    '{"a": "' + "}" * 64 + '"' + "y" * 64 + '"z',  # object-value `}` run with a
     # long quote-free gap: the `}`-branch's lstring lookahead memo.
     '{"a": "[' + 'x"' * 64 + '"}',  # quote run under an open regex character
     # class: the whitespace-flag + memoized `]` lookahead rewrite.
-    '{' + 'a:b,' * 64 + '}',  # unquoted-key member run: the parser-level
+    "{" + "a:b," * 64 + "}",  # unquoted-key member run: the parser-level
     # lookahead memo shared across the run's many short string parses.
 ]
 
@@ -143,51 +143,51 @@ SCHEMA_CORPUS: list[tuple[str, dict[str, Any]]] = [
     ('{"a": 1}', {"type": "object", "properties": {"a": {"type": "boolean"}}}),
     # fill: missing key completed from default
     (
-        '{}',
-        {'type': 'object', 'properties': {'a': {'type': 'string', 'default': 'hi'}}},
+        "{}",
+        {"type": "object", "properties": {"a": {"type": "string", "default": "hi"}}},
     ),
     # fill: required key already present passes through
     (
         '{"a": 1}',
-        {'type': 'object', 'properties': {'a': {'type': 'integer'}}, 'required': ['a']},
+        {"type": "object", "properties": {"a": {"type": "integer"}}, "required": ["a"]},
     ),
     # coercion: array items "1"/"2" -> integers
     (
         '{"a": ["1", "2"]}',
         {
-            'type': 'object',
-            'properties': {'a': {'type': 'array', 'items': {'type': 'integer'}}},
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {"type": "integer"}}},
         },
     ),
     # unwrap: JSON-string container "[1, 2]" -> array with coerced items
     (
         '{"a": "[1, 2]"}',
         {
-            'type': 'object',
-            'properties': {'a': {'type': 'array', 'items': {'type': 'integer'}}},
+            "type": "object",
+            "properties": {"a": {"type": "array", "items": {"type": "integer"}}},
         },
     ),
     # union: oneOf picks the validating branch for "1"
     (
         '{"a": "1"}',
         {
-            'type': 'object',
-            'properties': {'a': {'oneOf': [{'type': 'integer'}, {'type': 'string'}]}},
+            "type": "object",
+            "properties": {"a": {"oneOf": [{"type": "integer"}, {"type": "string"}]}},
         },
     ),
     # $ref: local "#/$defs/n" pointer resolves to integer
     (
         '{"a": 1}',
         {
-            '$defs': {'n': {'type': 'integer'}},
-            'type': 'object',
-            'properties': {'a': {'$ref': '#/$defs/n'}},
+            "$defs": {"n": {"type": "integer"}},
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/n"}},
         },
     ),
     # enum: integer member passes with no suggestion text involved
-    ('{"a": 2}', {'type': 'object', 'properties': {'a': {'enum': [1, 2, 3]}}}),
+    ('{"a": 2}', {"type": "object", "properties": {"a": {"enum": [1, 2, 3]}}}),
     # boolean schema True allows anything
-    ('true', True),  # type: ignore[list-item]
+    ("true", True),  # type: ignore[list-item]
 ]
 
 SCHEMA_VALUE_RAISE_CORPUS: list[tuple[str, dict[str, Any]]] = [
@@ -196,18 +196,18 @@ SCHEMA_VALUE_RAISE_CORPUS: list[tuple[str, dict[str, Any]]] = [
     # itself is compared, never the message.
     (
         '{"a": "abc"}',
-        {'type': 'object', 'properties': {'a': {'type': 'string', 'pattern': '^\\d+$'}}},
+        {"type": "object", "properties": {"a": {"type": "string", "pattern": "^\\d+$"}}},
     ),
 ]
 
 _DEEP_DEPTH = 500
-_DEEP_RAW = '{"x": ' * _DEEP_DEPTH + '1' + '}' * _DEEP_DEPTH
+_DEEP_RAW = '{"x": ' * _DEEP_DEPTH + "1" + "}" * _DEEP_DEPTH
 
 
 def _deep_schema(depth: int) -> dict[str, Any]:
-    schema: dict[str, Any] = {'type': 'integer'}
+    schema: dict[str, Any] = {"type": "integer"}
     for _ in range(depth):
-        schema = {'type': 'object', 'properties': {'x': schema}}
+        schema = {"type": "object", "properties": {"x": schema}}
     return schema
 
 
@@ -233,7 +233,7 @@ STRICT_CORPUS: list[str] = [
 
 class TestDifferentialParity:
     @pytest.mark.parametrize(
-        ('raw', 'kwargs'), CORPUS, ids=[f'corpus-{i}' for i in range(len(CORPUS))]
+        ("raw", "kwargs"), CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))]
     )
     def test_str_parity(self, raw: str, kwargs: dict[str, Any]) -> None:
         got = tors.repair_json(raw, **kwargs)
@@ -241,7 +241,7 @@ class TestDifferentialParity:
         assert got == want
 
     @pytest.mark.parametrize(
-        ('raw', 'kwargs'), CORPUS, ids=[f'corpus-{i}' for i in range(len(CORPUS))]
+        ("raw", "kwargs"), CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))]
     )
     def test_loads_parity(self, raw: str, kwargs: dict[str, Any]) -> None:
         got = tors.repair_json_loads(raw, **kwargs)
@@ -249,12 +249,12 @@ class TestDifferentialParity:
         assert got == want
 
     @pytest.mark.parametrize(
-        ('raw', 'schema'),
+        ("raw", "schema"),
         SCHEMA_CORPUS,
-        ids=[f'schema-{i}' for i in range(len(SCHEMA_CORPUS))],
+        ids=[f"schema-{i}" for i in range(len(SCHEMA_CORPUS))],
     )
     def test_schema_parity(self, raw: str, schema: dict[str, Any] | bool) -> None:
-        pytest.importorskip('jsonschema')
+        pytest.importorskip("jsonschema")
         got = tors.repair_json(raw, schema=schema)
         want = json_repair_lib.repair_json(raw, schema=schema)
         assert got == want
@@ -263,12 +263,12 @@ class TestDifferentialParity:
         assert got_loads == want_loads
 
     @pytest.mark.parametrize(
-        ('raw', 'schema'),
+        ("raw", "schema"),
         SCHEMA_VALUE_RAISE_CORPUS,
-        ids=[f'schema-raise-{i}' for i in range(len(SCHEMA_VALUE_RAISE_CORPUS))],
+        ids=[f"schema-raise-{i}" for i in range(len(SCHEMA_VALUE_RAISE_CORPUS))],
     )
     def test_schema_raise_parity(self, raw: str, schema: dict[str, Any]) -> None:
-        pytest.importorskip('jsonschema')
+        pytest.importorskip("jsonschema")
         with pytest.raises(ValueError):
             tors.repair_json(raw, schema=schema)
         with pytest.raises(ValueError):
@@ -310,7 +310,7 @@ class TestDifferentialParity:
         # the oracle raises RecursionError (uncaught) near the interpreter
         # limit — both raise, types differ, so only the both-raise shape is
         # compared, never messages.
-        pytest.importorskip('jsonschema')
+        pytest.importorskip("jsonschema")
         with pytest.raises(ValueError):
             tors.repair_json(_DEEP_RAW, schema=DEEP_SCHEMA)
         with pytest.raises((ValueError, RecursionError)):
@@ -325,14 +325,14 @@ class TestDifferentialParity:
         # the continuation guard dies with SIGSEGV here, which kills the
         # process rather than failing the assertion — the native suite's
         # sub-2k sizes fail cleanly instead.)
-        merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + "1]"
         with pytest.raises(ValueError):
             tors.repair_json(merge_chain, skip_json_loads=True)
         with pytest.raises(ValueError):
             json_repair_lib.repair_json(merge_chain, skip_json_loads=True)
 
     @pytest.mark.parametrize(
-        'raw', STRICT_CORPUS, ids=[f'strict-{i}' for i in range(len(STRICT_CORPUS))]
+        "raw", STRICT_CORPUS, ids=[f"strict-{i}" for i in range(len(STRICT_CORPUS))]
     )
     def test_error_parity(self, raw: str) -> None:
         # skip_json_loads=True matches upstream's own strict-test spellings:
@@ -362,8 +362,8 @@ _base_text = st.text(
     alphabet=st.characters(
         min_codepoint=0x20,
         max_codepoint=0xFFFF,
-        exclude_categories=('Cs',),
-        exclude_characters='\\',
+        exclude_categories=("Cs",),
+        exclude_characters="\\",
     ),
     max_size=12,
 )
@@ -371,17 +371,13 @@ _key_text = st.text(
     alphabet=st.characters(
         min_codepoint=0x20,
         max_codepoint=0xFFFF,
-        exclude_categories=('Cs',),
-        exclude_characters='\\',
+        exclude_categories=("Cs",),
+        exclude_characters="\\",
     ),
     max_size=6,
 )
-_ascii_text = st.text(
-    alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=12
-)
-_ascii_key = st.text(
-    alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=6
-)
+_ascii_text = st.text(alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=12)
+_ascii_key = st.text(alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E), max_size=6)
 
 
 def _json_strategy(
@@ -407,9 +403,9 @@ def _json_strategy(
 json_strategy = _json_strategy(_base_text, _key_text)
 ascii_json_strategy = _json_strategy(_ascii_text, _ascii_key)
 
-_INSERT_CHARS = [',', ':', '{', '}', '[', ']', '`', ' ', '#']
-_QUOTE_CHARS = ["'", '"', '`']
-_QUOTEISH = ("'", '"', '`')
+_INSERT_CHARS = [",", ":", "{", "}", "[", "]", "`", " ", "#"]
+_QUOTE_CHARS = ["'", '"', "`"]
+_QUOTEISH = ("'", '"', "`")
 
 
 def _mutate(s: str, seed: int) -> str:
@@ -420,13 +416,13 @@ def _mutate(s: str, seed: int) -> str:
     op = rng.randrange(5)
     if op == 0:  # delete a char at a random index
         idx = rng.randrange(len(s))
-        return s[:idx] + s[idx + 1:]
+        return s[:idx] + s[idx + 1 :]
     if op == 1:  # replace a random quote-ish char with one of '"`'
         spots = [i for i, c in enumerate(s) if c in _QUOTEISH]
         if not spots:
             return s
         idx = rng.choice(spots)
-        return s[:idx] + rng.choice(_QUOTE_CHARS) + s[idx + 1:]
+        return s[:idx] + rng.choice(_QUOTE_CHARS) + s[idx + 1 :]
     if op == 2:  # truncate at a random position
         idx = rng.randrange(len(s) + 1)
         return s[:idx]
@@ -434,11 +430,11 @@ def _mutate(s: str, seed: int) -> str:
         idx = rng.randrange(len(s) + 1)
         return s[:idx] + rng.choice(_INSERT_CHARS) + s[idx:]
     # swap a random ',' with ':'
-    spots = [i for i, c in enumerate(s) if c == ',']
+    spots = [i for i, c in enumerate(s) if c == ","]
     if not spots:
         return s
     idx = rng.choice(spots)
-    return s[:idx] + ':' + s[idx + 1:]
+    return s[:idx] + ":" + s[idx + 1 :]
 
 
 def _parses(s: str) -> bool:
@@ -454,7 +450,7 @@ def _parses(s: str) -> bool:
 # filler. All strings up to _SWEEP_MAXLEN over this alphabet that contain a
 # delimiter and a bracket exercise every memo-site interaction at
 # exhaustively small sizes.
-_SWEEP_ALPHABET = ['[', ']', '{', '}', '"', '\\', 'x']
+_SWEEP_ALPHABET = ["[", "]", "{", "}", '"', "\\", "x"]
 _SWEEP_MAXLEN = 6
 
 
@@ -462,8 +458,8 @@ def _sweep_raws() -> list[str]:
     raws: list[str] = []
     for length in range(1, _SWEEP_MAXLEN + 1):
         for tup in itertools.product(_SWEEP_ALPHABET, repeat=length):
-            s = ''.join(tup)
-            if '"' in s and (']' in s or '}' in s):
+            s = "".join(tup)
+            if '"' in s and ("]" in s or "}" in s):
                 raws.append(s)
     return raws
 
@@ -481,7 +477,7 @@ class TestExhaustiveStructuralSweep:
     diverges tors from the oracle on at least one of these raws.
     """
 
-    @pytest.mark.parametrize('raw', _sweep_raws())
+    @pytest.mark.parametrize("raw", _sweep_raws())
     def test_engine_lane_parity(self, raw: str) -> None:
         got = tors.repair_json(raw, skip_json_loads=True)
         want = json_repair_lib.repair_json(raw, skip_json_loads=True)
@@ -497,7 +493,7 @@ class TestHypothesisInvariants:
     def test_never_raises_and_output_is_valid(self, value: Any, seed: int) -> None:
         mutated = _mutate(json.dumps(value), seed)
         out = tors.repair_json(mutated)  # default args: must never raise
-        assert out == '' or _parses(out)
+        assert out == "" or _parses(out)
 
     @given(ascii_json_strategy)
     @settings(max_examples=200, deadline=None)
@@ -511,7 +507,7 @@ class TestHypothesisInvariants:
         # spelling — which is upstream's own ambiguity (json_repair's
         # `if parsed_json == "": return ""` shortcut returns '' for '""'
         # too), not a serializer defect.
-        assume(value != '')
+        assume(value != "")
         s = json.dumps(value)
         assert tors.repair_json(s) == s
 
@@ -520,7 +516,7 @@ class TestHypothesisInvariants:
     def test_loads_matches_str_roundtrip(self, value: Any, seed: int) -> None:
         mutated = _mutate(json.dumps(value), seed)
         repaired = tors.repair_json(mutated)
-        if repaired == '' or not _parses(repaired):
+        if repaired == "" or not _parses(repaired):
             return
         assert tors.repair_json_loads(mutated) == json.loads(repaired)
 
@@ -532,5 +528,5 @@ class TestHypothesisInvariants:
         # (move the shape to an explicit exclusion with a §9 comment, the way
         # fenced scalars are excluded below for the §9.4 split).
         mutated = _mutate(json.dumps(value), seed)
-        assume('```json' not in mutated)  # §9.4 fenced-scalar divergence
+        assume("```json" not in mutated)  # §9.4 fenced-scalar divergence
         assert tors.repair_json(mutated) == json_repair_lib.repair_json(mutated)

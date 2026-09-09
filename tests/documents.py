@@ -63,9 +63,7 @@ MD_INTRO = (
     "The quarterly oil sample interval for field outages was adjusted after "
     "the bushing torque specifications changed."
 )
-MD_ENTITY_SENTENCE = (
-    "Torque &amp; bushing figures &copy; " + _E_ACUTE + "quipe readiness &#233;."
-)
+MD_ENTITY_SENTENCE = "Torque &amp; bushing figures &copy; " + _E_ACUTE + "quipe readiness &#233;."
 MD_CRLF_BLOCK = (
     "Windows-origin excerpt: adjusted after the bushing scan.\r\n"
     "Torque windows close within fourteen days.\r\n"
@@ -126,8 +124,8 @@ MARKDOWN_NORMALIZED = "\n".join(
 
 # The entity-decoded spelling of the markdown text (html.unescape semantics:
 # &amp; &copy; &#233; decode; everything else verbatim).
-MARKDOWN_UNESCAPED = MARKDOWN_TEXT.replace("&amp;", "&").replace("&copy;", chr(0xA9)).replace(
-    "&#233;", _E_ACUTE
+MARKDOWN_UNESCAPED = (
+    MARKDOWN_TEXT.replace("&amp;", "&").replace("&copy;", chr(0xA9)).replace("&#233;", _E_ACUTE)
 )
 
 # --- RTF ---------------------------------------------------------------------------
@@ -433,9 +431,7 @@ def extract_xlsx(raw: bytes) -> str:
     return "\n".join(rows)
 
 
-XLSX_TEXT = "\n".join(
-    "\t".join(XLSX_SHARED_STRINGS[value] for value in row) for row in XLSX_ROWS
-)
+XLSX_TEXT = "\n".join("\t".join(XLSX_SHARED_STRINGS[value] for value in row) for row in XLSX_ROWS)
 
 # --- PDF (minimal: FlateDecode content stream, one Tj per line) ---------------------
 

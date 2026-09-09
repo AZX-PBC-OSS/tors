@@ -146,9 +146,7 @@ class TestMerkleRootDomainSeparation:
 
     @given(_chunks_strategy.filter(lambda c: len(c) >= 1))
     @settings(max_examples=200)
-    def test_root_matches_reference_for_arbitrary_chunk_lists(
-        self, chunks: list[bytes]
-    ) -> None:
+    def test_root_matches_reference_for_arbitrary_chunk_lists(self, chunks: list[bytes]) -> None:
         assert merkle_root(chunks) == _reference_root(chunks)
 
 
@@ -269,15 +267,11 @@ class TestMerkleDiff:
 
     @given(_chunk_pair_strategy)
     @settings(max_examples=300)
-    def test_matches_brute_force_reference(
-        self, pair: tuple[list[bytes], list[bytes]]
-    ) -> None:
+    def test_matches_brute_force_reference(self, pair: tuple[list[bytes], list[bytes]]) -> None:
         a, b = pair
         assert merkle_diff(a, b) == _reference_diff(a, b)
 
     @given(_chunks_strategy)
     @settings(max_examples=100)
-    def test_diff_of_a_list_against_itself_is_always_empty(
-        self, chunks: list[bytes]
-    ) -> None:
+    def test_diff_of_a_list_against_itself_is_always_empty(self, chunks: list[bytes]) -> None:
         assert merkle_diff(chunks, list(chunks)) == []

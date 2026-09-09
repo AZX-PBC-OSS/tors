@@ -564,12 +564,10 @@ class TestRefEscapesAndUnions:
 
     def test_allof_enum_chain_folds(self) -> None:
         # allOf members apply conjunctively: the enum rides the type.
-        schema: dict[str, Any] = {
-            "allOf": [{"type": "string"}, {"enum": ["red", "green"]}]
-        }
+        schema: dict[str, Any] = {"allOf": [{"type": "string"}, {"enum": ["red", "green"]}]}
         assert repair_json_loads('"red"', schema=schema) == "red"
         with pytest.raises(ValueError):
-            repair_json_loads('5', schema=schema)
+            repair_json_loads("5", schema=schema)
 
     def test_draft07_tuple_items_with_additional_items(self) -> None:
         # Draft-07 tuple form: fixed-position schemas plus additionalItems

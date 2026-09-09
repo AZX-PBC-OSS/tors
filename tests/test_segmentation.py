@@ -137,10 +137,7 @@ class TestHandDerivedTable:
     @pytest.mark.parametrize(
         ("text", "graphemes", "bounds"),
         _CASES,
-        ids=[
-            f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}"
-            for t, _, _ in _CASES
-        ],
+        ids=[f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _, _ in _CASES],
     )
     def test_matches_the_uax29_derived_table(
         self, text: str, graphemes: int, bounds: list[tuple[int, int]]
@@ -186,18 +183,41 @@ class TestStructuralProperties:
     _CLUSTER_SPANNING_WORDS = tuple(
         chr(cp)
         for cp in (
-            0x0600, 0x0601, 0x0602, 0x0603, 0x0604, 0x0605, 0x06DD, 0x070F,
-            0x0890, 0x0891, 0x08E2, 0x0D4E, 0x0E33, 0x0EB3, 0x110BD, 0x110CD,
-            0x111C2, 0x111C3, 0x113D1, 0x1193F, 0x11941, 0x11A84, 0x11A85,
-            0x11A86, 0x11A87, 0x11A88, 0x11A89, 0x11D46, 0x11F02,
+            0x0600,
+            0x0601,
+            0x0602,
+            0x0603,
+            0x0604,
+            0x0605,
+            0x06DD,
+            0x070F,
+            0x0890,
+            0x0891,
+            0x08E2,
+            0x0D4E,
+            0x0E33,
+            0x0EB3,
+            0x110BD,
+            0x110CD,
+            0x111C2,
+            0x111C3,
+            0x113D1,
+            0x1193F,
+            0x11941,
+            0x11A84,
+            0x11A85,
+            0x11A86,
+            0x11A87,
+            0x11A88,
+            0x11A89,
+            0x11D46,
+            0x11F02,
         )
     )
 
     @given(st.text(alphabet=st.characters(exclude_categories=("Cn", "Cs")), max_size=48))
     @settings(max_examples=400)
-    def test_word_bounds_are_monotonic_covering_and_round_trip(
-        self, text: str
-    ) -> None:
+    def test_word_bounds_are_monotonic_covering_and_round_trip(self, text: str) -> None:
         """The structural promise any conforming segmenter makes: bounds are
         strictly increasing (each segment non-empty, none overlapping), they
         cover exactly [0, len(text)] (first starts at 0, last ends at the
@@ -214,9 +234,7 @@ class TestStructuralProperties:
 
     @given(st.text(alphabet=st.characters(exclude_categories=("Cn", "Cs")), max_size=48))
     @settings(max_examples=400)
-    def test_splitting_into_word_segments_never_loses_grapheme_clusters(
-        self, text: str
-    ) -> None:
+    def test_splitting_into_word_segments_never_loses_grapheme_clusters(self, text: str) -> None:
         """Unconditional weak form: summing the grapheme counts of the word
         segments is always >= the whole string's count (a cluster that spans
         a segment boundary (a cluster-spanning character, see
@@ -237,9 +255,7 @@ class TestStructuralProperties:
         )
     )
     @settings(max_examples=400)
-    def test_grapheme_count_is_additive_over_word_segments(
-        self, text: str
-    ) -> None:
+    def test_grapheme_count_is_additive_over_word_segments(self, text: str) -> None:
         """The strong cross-function invariant, scoped where it is true: for
         text free of the cluster-spanning set (see
         ``_CLUSTER_SPANNING_WORDS``, the complete measured set: the GB9b
@@ -264,9 +280,7 @@ class TestArgumentContract:
         [b"abc", bytearray(b"abc"), memoryview(b"abc"), 123, None],
         ids=["bytes", "bytearray", "memoryview", "int", "none"],
     )
-    def test_non_str_arguments_raise_type_error(
-        self, fn_name: str, not_str: object
-    ) -> None:
+    def test_non_str_arguments_raise_type_error(self, fn_name: str, not_str: object) -> None:
         fn = {
             "grapheme_count": grapheme_count,
             "word_bounds": word_bounds,
@@ -276,9 +290,7 @@ class TestArgumentContract:
             fn(not_str)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize("fn_name", ["grapheme_count", "word_bounds", "word_count"])
-    def test_lone_surrogates_are_refused_at_the_argument_boundary(
-        self, fn_name: str
-    ) -> None:
+    def test_lone_surrogates_are_refused_at_the_argument_boundary(self, fn_name: str) -> None:
         """Same pyo3 ``&str`` boundary as every str-in function (pinned for
         ``finalize`` in tests/test_finalize.py)."""
         fn = {
@@ -389,10 +401,7 @@ class TestWordCount:
     @pytest.mark.parametrize(
         ("text", "graphemes", "bounds"),
         _CASES,
-        ids=[
-            f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}"
-            for t, _, _ in _CASES
-        ],
+        ids=[f"{t[:12]!a}" if len(t) <= 12 else f"{t[:6]!a}...{len(t)}" for t, _, _ in _CASES],
     )
     def test_count_equals_the_list_length_on_every_tricky_row(
         self, text: str, graphemes: int, bounds: list[tuple[int, int]]

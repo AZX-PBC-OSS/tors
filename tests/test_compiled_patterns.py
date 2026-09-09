@@ -284,9 +284,7 @@ def test_replace_parity_over_the_tiny_alphabet_sweep() -> None:
     for replacements in dicts:
         cp = CompiledPatterns(list(replacements))
         for text in texts:
-            assert cp.replace_many(text, replacements) == replace_many(
-                text, replacements
-            )
+            assert cp.replace_many(text, replacements) == replace_many(text, replacements)
             assert cp.replace_many_masked(text, replacements) == replace_many_masked(
                 text, replacements
             )
@@ -460,9 +458,7 @@ class TestArgumentContract:
         [b"abc", bytearray(b"abc"), 123, None],
         ids=["bytes", "bytearray", "int", "none"],
     )
-    def test_non_str_text_raises_type_error_on_every_method(
-        self, not_str: object
-    ) -> None:
+    def test_non_str_text_raises_type_error_on_every_method(self, not_str: object) -> None:
         cp = CompiledPatterns(["ok"])
         with pytest.raises(TypeError):
             cp.find(not_str)  # type: ignore[arg-type]
@@ -639,6 +635,5 @@ def test_the_amortization_cell_load_is_disclosed() -> None:
     ratios, the wall-cell discipline the GIL cells use for loaded CI
     runners."""
     print(
-        f"[amortization cells] ambient load at run: "
-        f"{tuple(round(x, 2) for x in os.getloadavg())}"
+        f"[amortization cells] ambient load at run: {tuple(round(x, 2) for x in os.getloadavg())}"
     )

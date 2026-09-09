@@ -131,9 +131,12 @@ class TestFuzzy:
         expected_ratio = difflib.SequenceMatcher(None, claim, source).ratio()
         for threshold in (0.0, expected_ratio, min(expected_ratio + 0.01, 1.0), 1.0):
             expected = expected_ratio >= threshold or threshold == 0.0
-            assert (
-                is_grounded(claim, source, fuzzy=True, threshold=threshold) == expected
-            ), (claim, source, threshold, expected_ratio)
+            assert is_grounded(claim, source, fuzzy=True, threshold=threshold) == expected, (
+                claim,
+                source,
+                threshold,
+                expected_ratio,
+            )
 
     def test_unwindowed_divergence_row_both_engines_valid_but_different(self) -> None:
         """The pinned real divergence found while fixing the test above:
@@ -209,9 +212,10 @@ class TestFuzzy:
         another name; shorter truncated tail windows and the
         source-shorter-than-claim direct comparison are both strictly < 1).
         Pins the pair of invariants the floor's own tests leave one-sided."""
-        assert (
-            is_grounded(claim, source, fuzzy=True, threshold=1.0) == (claim in source)
-        ), (claim, source)
+        assert is_grounded(claim, source, fuzzy=True, threshold=1.0) == (claim in source), (
+            claim,
+            source,
+        )
 
     def test_a_near_exact_non_substring_clears_085_but_never_a_threshold_of_one(self) -> None:
         """One substitution, so the exact-containment floor CANNOT
@@ -481,8 +485,7 @@ class TestDeadline:
         claim = "x" * 2_000
         source = ("y" * 200_000) + claim + ("y" * 200_000)
         assert (
-            is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
-            is True
+            is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS) is True
         )
 
     def test_the_refinement_pass_respects_a_generous_deadline(self) -> None:
@@ -495,7 +498,4 @@ class TestDeadline:
         claim = "the bushing torque specifications changed"
         near = "the bushing torqxe specifications changed"
         source = ("q" * 10) + near + ("q" * 60)
-        assert (
-            is_grounded(claim, source, fuzzy=True, threshold=0.85, deadline_ms=60_000.0)
-            is True
-        )
+        assert is_grounded(claim, source, fuzzy=True, threshold=0.85, deadline_ms=60_000.0) is True

@@ -133,9 +133,7 @@ def _decode_rust_literal(literal: str) -> str:
 def _bench_facts(source: str) -> tuple[dict[str, str], dict[str, str]]:
     """A source's sentence constants (decoded) and, per corpus kind, the unit it
     repeats: the sentence ``.repeat(n)`` plus the builder's literal suffix."""
-    sentences = {
-        m["name"]: _decode_rust_literal(m["literal"]) for m in _SENTENCE.finditer(source)
-    }
+    sentences = {m["name"]: _decode_rust_literal(m["literal"]) for m in _SENTENCE.finditer(source)}
     units: dict[str, str] = {}
     for m in _BUILDER.finditer(source):
         assert m["unit"] in sentences, f"bench builder {m['kind']!r} lost its sentence const"
@@ -273,9 +271,7 @@ def test_diff_bench_word_swap_and_numbering_constants_match_reference() -> None:
     inserted line carry) and the numbering width (what makes the shuffled
     pair's lines distinct) must be the same values on both sides."""
     source = _BENCH_SOURCES["diff.rs"]
-    strings = {
-        m["name"]: m["literal"] for m in _DIFF_STRING_CONST.finditer(source)
-    }
+    strings = {m["name"]: m["literal"] for m in _DIFF_STRING_CONST.finditer(source)}
     assert {
         "WORD_SWAP_OLD": strings["WORD_SWAP_OLD"],
         "WORD_SWAP_NEW": strings["WORD_SWAP_NEW"],
@@ -301,8 +297,7 @@ def test_diff_bench_edit_position_fractions_match_reference() -> None:
         for m in _DIFF_FRACTION_ARRAY.finditer(source)
     }
     pairs = {
-        m["name"]: (int(m["num"]), int(m["den"]))
-        for m in _DIFF_FRACTION_PAIR.finditer(source)
+        m["name"]: (int(m["num"]), int(m["den"])) for m in _DIFF_FRACTION_PAIR.finditer(source)
     }
     assert arrays["REPLACE_FRACTIONS"] == list(_DIFF_REPLACE_FRACTIONS), (
         "benches/diff.rs's replacement fractions drifted from reference.py's "
@@ -326,9 +321,7 @@ def test_diff_bench_lcg_constants_match_reference() -> None:
         digits = value.removeprefix("0x").replace("_", "")
         return int(digits, 16 if value.startswith("0x") else 10)
 
-    consts = {
-        m["name"]: parse(m["value"]) for m in _DIFF_LCG_CONST.finditer(source)
-    }
+    consts = {m["name"]: parse(m["value"]) for m in _DIFF_LCG_CONST.finditer(source)}
     assert consts["LCG_SEED"] == _DIFF_LCG_SEED, "LCG seed drifted between bench and reference"
     assert consts["LCG_MUL"] == _DIFF_LCG_MUL, "LCG multiplier drifted between bench and reference"
     assert consts["LCG_INC"] == _DIFF_LCG_INC, "LCG increment drifted between bench and reference"
@@ -343,11 +336,11 @@ def test_diff_bench_builds_lines_with_python_split_semantics() -> None:
     assert source.count("split('\\n')") >= 2, (
         "benches/diff.rs no longer builds its lines via split('\\n') in both "
         "builders: the line count (and with it the whole shuffle) would diverge "
-        "from reference.py's split(\"\\n\") corpora"
+        'from reference.py\'s split("\\n") corpora'
     )
     assert ".lines()" not in source, (
         "benches/diff.rs uses str::lines(): its trailing-empty-line semantics "
-        "diverge from the Python twin's split(\"\\n\")"
+        'diverge from the Python twin\'s split("\\n")'
     )
 
 
@@ -388,9 +381,7 @@ def test_diff_bench_shuffle_loop_and_edit_branches_are_pinned() -> None:
 # (which drive find_patterns with the reference tuples) cross-reference on
 # the same patterns.
 
-_SEARCH_PATTERN_ARRAY = re.compile(
-    r"const (?P<name>\w+): \[&str; \d+\] = \[(?P<items>[^;]*)\];"
-)
+_SEARCH_PATTERN_ARRAY = re.compile(r"const (?P<name>\w+): \[&str; \d+\] = \[(?P<items>[^;]*)\];")
 _SEARCH_PATTERN_ITEM = re.compile(r'"(?P<word>[^"]*)"')
 
 
@@ -405,10 +396,8 @@ def test_search_bench_pattern_sets_match_reference() -> None:
         for m in _SEARCH_PATTERN_ARRAY.finditer(source)
     }
     assert arrays["SPARSE_PATTERNS"] == list(SEARCH_SPARSE_PATTERNS), (
-        "benches/search.rs's sparse pattern set drifted from reference.py's "
-        "SEARCH_SPARSE_PATTERNS"
+        "benches/search.rs's sparse pattern set drifted from reference.py's SEARCH_SPARSE_PATTERNS"
     )
     assert arrays["DENSE_PATTERNS"] == list(SEARCH_DENSE_PATTERNS), (
-        "benches/search.rs's dense pattern set drifted from reference.py's "
-        "SEARCH_DENSE_PATTERNS"
+        "benches/search.rs's dense pattern set drifted from reference.py's SEARCH_DENSE_PATTERNS"
     )

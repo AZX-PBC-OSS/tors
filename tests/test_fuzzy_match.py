@@ -225,9 +225,7 @@ def test_jaro_winkler_matches_the_pure_python_oracle(a: str, b: str) -> None:
     prefix cap on top of the Jaro oracle; the rows where a naive
     always-boost or uncapped-prefix implementation diverge are drawn
     here, not just pinned in the battery."""
-    assert jaro_winkler(a, b) == pytest.approx(
-        _reference_jaro_winkler(a, b), rel=1e-12, abs=1e-12
-    )
+    assert jaro_winkler(a, b) == pytest.approx(_reference_jaro_winkler(a, b), rel=1e-12, abs=1e-12)
 
 
 @given(st.text(max_size=24), st.text(max_size=24))
@@ -361,9 +359,7 @@ class TestArgumentContract:
         [levenshtein, jaro, jaro_winkler],
         ids=["levenshtein", "jaro", "jaro_winkler"],
     )
-    def test_lone_surrogates_are_refused_at_the_argument_boundary(
-        self, metric: object
-    ) -> None:
+    def test_lone_surrogates_are_refused_at_the_argument_boundary(self, metric: object) -> None:
         """Lone surrogates (a ``str`` CPython can hold but UTF-8 cannot
         encode) are refused with ``UnicodeEncodeError`` before any Rust
         code runs, the standard str-in boundary every tors function

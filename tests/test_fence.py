@@ -291,9 +291,7 @@ class TestDedentParityWithStdlib:
     @given(st.text(max_size=100))
     @settings(max_examples=300)
     def test_matches_stdlib_dedent_over_arbitrary_text(self, text: str) -> None:
-        if self._stdlib_is_old() and any(
-            ws in text for ws in self._CHANGED_WHITESPACE
-        ):
+        if self._stdlib_is_old() and any(ws in text for ws in self._CHANGED_WHITESPACE):
             assume(False)
         assert dedent(text) == textwrap.dedent(text)
 

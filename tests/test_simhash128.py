@@ -227,9 +227,7 @@ class TestIndependenceFromSimhash64:
 
     @given(text=_TEXT)
     @settings(max_examples=100)
-    def test_128_bit_value_is_not_merely_the_64_bit_value_widened(
-        self, text: str
-    ) -> None:
+    def test_128_bit_value_is_not_merely_the_64_bit_value_widened(self, text: str) -> None:
         wide = simhash128(text)
         narrow = simhash64(text)
         if narrow != 0:

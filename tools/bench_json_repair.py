@@ -201,15 +201,11 @@ def _build_doc(target: int, variant: int) -> str:
 
 
 def _dump_sq(s: str) -> str:
-    escaped = (
-        s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\t", "\\t")
-    )
+    escaped = s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\t", "\\t")
     return "'" + escaped + "'"
 
 
-def _dump(
-    obj: Any, *, quote: str = '"', unquoted_keys: bool = False, comma: str = ", "
-) -> str:
+def _dump(obj: Any, *, quote: str = '"', unquoted_keys: bool = False, comma: str = ", ") -> str:
     """Serialize with deliberate JSON defects: quote character, bare keys, missing commas."""
     if obj is True:
         return "true"
@@ -413,8 +409,7 @@ _TABLE_HEADER = (
 def _row(shape: str, label: str, chars: int, times: list[float] | None) -> str:
     if times is None:
         return (
-            f"{shape:<9} {label:>7} {chars:>9,} {'-':>10} {'-':>11} {'-':>11} {'-':>8}"
-            "  divergent"
+            f"{shape:<9} {label:>7} {chars:>9,} {'-':>10} {'-':>11} {'-':>11} {'-':>8}  divergent"
         )
     tors_str, tors_loads, lib = times
     ratio = _fmt_ratio(lib / tors_str)
@@ -477,8 +472,7 @@ def main() -> None:
             times = [time_cell(docs, fn) for fn in _lanes(_cell_schema(shape))]
             print(_row(shape, label, chars, times))
     print(
-        "speedup = json_repair str us/call / tors str us/call;"
-        " check = outputs equal on every doc"
+        "speedup = json_repair str us/call / tors str us/call; check = outputs equal on every doc"
     )
 
 

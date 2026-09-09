@@ -114,7 +114,7 @@ CELLS: list[tuple[str, str, int, str]] = [
     ("walk: sentence_count 12MiB", "prose", 12 * MIB, "tors.sentence_count"),
 ]
 
-_CHILD = r'''
+_CHILD = r"""
 import gc, sys, time
 import tors
 
@@ -140,7 +140,7 @@ while passes < 2 or (passes < max_passes and passes * best < min_seconds):
 gc.enable()
 with open(out_path, "w") as f:
     f.write(f"{best * 1000:.2f}\n")
-'''
+"""
 
 
 def _run_cell(kind: str, size: int, line: str) -> tuple[float, int]:

@@ -181,7 +181,7 @@ _COMBINING_ACUTE = chr(0x301)  # decomposed accent: 2 UTF-8 bytes, 1 char
 _ZWJ = chr(0x200D)  # zero-width joiner: 3 bytes, 1 char
 _VS16 = chr(0xFE0F)  # variation selector-16: 3 bytes, 1 char (a combining mark)
 _FAMILY = (
-    "\U0001F468" + _ZWJ + "\U0001F469" + _ZWJ + "\U0001F467"
+    "\U0001f468" + _ZWJ + "\U0001f469" + _ZWJ + "\U0001f467"
 )  # man-ZWJ-woman-ZWJ-girl: 5 chars, 18 bytes
 
 
@@ -194,7 +194,7 @@ _MULTIBYTE_MAPPING_CASES: list[tuple[list[str], str, list[tuple[int, int, int]]]
     (["東京"], "京都東京大阪", [(2, 4, 0)]),
     (["東京", "京都"], "京都東京京都", [(0, 2, 1), (2, 4, 0), (4, 6, 1)]),
     ([_FAMILY], "hi" + _FAMILY + "!", [(2, 7, 0)]),
-    (["\U0001F980" + _VS16], "\U0001F980" + _VS16 + "!", [(0, 2, 0)]),
+    (["\U0001f980" + _VS16], "\U0001f980" + _VS16 + "!", [(0, 2, 0)]),
     (["ab"], "éabéab", [(1, 3, 0), (4, 6, 0)]),
     (["éab"], "東京éab", [(2, 5, 0)]),
     # é b é b é, built by concatenation: a typed literal is visually

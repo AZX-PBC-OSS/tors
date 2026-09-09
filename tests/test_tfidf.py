@@ -226,9 +226,7 @@ class TestProperties:
 
     @given(corpus=_CORPUS)
     @settings(max_examples=200)
-    def test_terms_within_a_document_are_alphabetically_sorted(
-        self, corpus: list[str]
-    ) -> None:
+    def test_terms_within_a_document_are_alphabetically_sorted(self, corpus: list[str]) -> None:
         for doc in tf_idf(corpus):
             terms = [t for t, _ in doc]
             assert terms == sorted(terms)
