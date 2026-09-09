@@ -56,6 +56,10 @@ fn bench_truncate_to_bounds(c: &mut Criterion) {
 // grounded shape; a same-length claim built from characters the corpus
 // never contains is the ungrounded shape (forces the full scan).
 const GROUNDED_CLAIM: &str = "the bushing torque specifications changed";
+// A NEAR-match (one transposed letter), deliberately NOT a verbatim substring,
+// so the fuzzy grounded cell exercises the windowed ratio scan rather than
+// short-circuiting on the exact-containment floor.
+const GROUNDED_FUZZY_CLAIM: &str = "the bushing torqeu specifications changed";
 const UNGROUNDED_CLAIM: &str = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
 fn bench_is_grounded_exact(c: &mut Criterion) {
@@ -84,8 +88,13 @@ fn bench_is_grounded_fuzzy(c: &mut Criterion) {
             &source,
             |bench, source| {
                 bench.iter(|| {
-                    grounded_impl::is_grounded_fuzzy(black_box(GROUNDED_CLAIM), source, 0.85, None)
-                        .expect("no deadline set")
+                    grounded_impl::is_grounded_fuzzy(
+                        black_box(GROUNDED_FUZZY_CLAIM),
+                        source,
+                        0.85,
+                        None,
+                    )
+                    .expect("no deadline set")
                 })
             },
         );

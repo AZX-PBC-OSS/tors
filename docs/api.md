@@ -808,6 +808,7 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> str: ...
 ```
 
@@ -917,6 +918,36 @@ and extra properties are dropped rather than raised, and missing `required`
 properties are filled from their subschema's `default`/`const`/`enum[0]`.
 It requires a schema: `salvage=True` without one raises
 `ValueError("salvage=True requires schema.")`.
+
+**`deadline_ms`** (default `None` = unbounded) bounds the whole repair the
+way `diff_opcodes`' `deadline_ms` does: a positive-finite-or-`None` budget
+validated up front, `TimeoutError` on expiry. The clock starts at the top of
+the call — the fence pre-pass and the `json.loads` fast-path attempt burn
+the budget too, and a fast path that *completes* past the budget still
+returns its answer (the deadline stops further work; it does not nullify
+done work). It is a DoS backstop for the pathological O(n²) parser shapes
+`tors` shares with upstream `json_repair` — duplicate-key-in-array splices,
+empty-object splices, and a backslash-run string scan — a bounded *abort*,
+not a speed-up: a completing parse is
+byte-identical whether or not a deadline is set, and a benign large document
+does not trip a generous budget (the deadline discriminates pathological
+*shape*, not *size*). It applies to all three spellings and is checked with
+the GIL released, so `TimeoutError` is raised after reacquiring it — the
+same shape as `diff_opcodes`, including the message:
+`"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
+
+Two honest limits. The bound is *soft*: the tight loops sample the clock
+1-in-256, but every O(n) unit — a buffer splice, a long scan, a wide span
+build — forces the very next check to read it, so at most one such unit
+runs past an expired budget (measured worst overshoot ~8% at n=1M). And
+it bounds CPU *time*, not native stack growth: a runaway continuation
+recursion can still overflow the stack before the budget expires — that
+class is depth-guarded separately (`MAX_NESTING`), not time-bounded.
+Cost when unset: nothing on the valid-JSON fast path, and one predicted
+branch per dispatch turn in the repair parser — measured ~+6% worst-case
+on a multi-MB `skip_json_loads=True` parse, ~+3% on a corrupt-document
+repair, within noise on the pathological shapes. Cost when set: ≤2% on
+top of that (the checks are sampled).
 
 Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
 `schema` that is not a dict, bool, model, or `None` raises
@@ -1238,20 +1269,39 @@ def is_grounded(
 Checks whether `claim` is grounded in `source`: a LEXICAL check, not a semantic/NLI
 one; be precise about that boundary, this is not a hallucination-detection model.
 
-`fuzzy=False` (the default) is `source.contains(claim)` exactly: Rust's own substring
-search, no new dependency for the exact case. `fuzzy=True` compares `claim` against
+`fuzzy=False` (the default) is exact substring containment: the `memchr` crate's
+SIMD-skipped two-way search (`memmem`, already a dependency), a byte-level find that is
+UTF-8-boundary-safe by construction. `fuzzy=True` compares `claim` against
 overlapping same-length windows of `source` (stride `claim`'s length / 2) using the
 only diffing engine already in the crate (the `similar` Myers engine backing
 `diff_opcodes`), and reports whether the BEST window's difflib-style ratio (`2 *
-matched_chars / (len(claim) + len(window))`) reaches `threshold`.
+matched_chars / (len(claim) + len(window))`) reaches `threshold`. `fuzzy=True` is a
+superset of `fuzzy=False`: an exact-containment floor runs first, so a claim present
+verbatim in `source` is grounded before any windowing (independent of window alignment,
+and before `deadline_ms` applies — a verbatim substring never times out). The windowed
+ratio is consulted only when there is no exact match.
+
+The floor guarantees the verbatim case unconditionally; near matches get a bounded
+guarantee band instead of raw window luck: a same-length source region whose aligned
+ratio is `r` is detected at ANY offset whenever `r >= max(0.75, threshold + 1/32)` —
+a bounded refinement pass re-scans the best coarse windows at a fine stride, a
+constant budget on top of the linear scan. One substitution in a 9+ character claim
+clears the `0.85` default wherever it sits. Below `r = 0.75` detection is
+best-effort (the recall floor of the DoS windowing), and a genuine region can be
+evicted from the 64 refinement candidates by adversarial decoy text scoring higher —
+the regime `deadline_ms` exists for (both limits are pinned in `tests/test_grounded.py`).
 
 Windowing, rather than one whole-string diff of `claim` against all of `source`, is
 DoS discipline: the realistic RAG-grounding shape is a short claim against a
 long retrieved passage, so bounding each diff's operands to roughly `claim`'s length
 keeps the total work close to linear in `source`'s length instead of the O(source ×
-claim) a single unwindowed diff would cost. `deadline_ms` (only accepted, and only
+claim) a single unwindowed diff would cost — and windows slide through one reusable
+O(claim)-sized buffer, so a 12 MiB passage costs kilobytes rather than a
+whole-source char vector, and an early exit stops consuming input mid-source.
+`deadline_ms` (only accepted, and only
 meaningful, when `fuzzy=True`) bounds the WHOLE scan on top of that, the same
-discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has: `TimeoutError`
+discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has — checked after every window
+diff, coarse and refinement alike: `TimeoutError`
 on expiry naming the elapsed cost and the deadline, a positive-finite-or-`None`
 precondition validated before any work runs. Even a single very large window's own
 Myers search is itself deadline-bounded (`similar`'s `capture_diff_slices_deadline`),
@@ -1553,6 +1603,15 @@ raises `ValueError`: the chunk stride is `words_per_chunk - overlap` tokens, and
 unlike `chunk_text`'s character-granularity overlap this stride is always `>= 1` by
 construction once validated, so forward progress needs no runtime fallback.
 
+Cost at document scale: one `word_bounds` walk, one grapheme boundary index (a
+one-bit-per-codepoint bitmap — on pure-ASCII text it is two SIMD byte scans, no
+segmentation walk — shared with `chunk_hierarchical` and `chunk_by_sentences`), a
+zero-copy merge fast path when no boundary needs it, and one streaming decode pass
+for the token filter. Measured on 12 MiB of prose (min-of-3, `tools/bench_chunking.py`):
+~160 ms, ~90 MiB transient (the word-bounds list itself) — the word walk plus
+marginal machinery. Before this change it built a `HashSet` of every grapheme boundary
+plus a whole-text `Vec<char>` unconditionally: ~1.9 s and ~500 MiB on the same input.
+
 ```python
 tors.chunk_by_words("one two three four five six seven", 3)
 # [(0, 13), (14, 27), (28, 33)]
@@ -1687,6 +1746,23 @@ is legal and skips straight to the raw-cut fallback for every chunk. Every
 level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
+
+Cost at document scale: one scan per level (the default hierarchy's
+paragraph/sentence/word walks, or one literal search per custom separator),
+one branchless byte pass for the codepoint count, and one grapheme
+boundary index — a one-bit-per-codepoint bitmap built LAZILY, only when a
+level actually has cuts to filter, a window needs the raw-cut fallback, or
+`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
+instead of a segmentation walk. A custom hierarchy that never matches
+under a whole-document budget builds none of it. Measured on 12 MiB
+(min-of-3, `tools/bench_chunking.py`): a never-matching custom hierarchy
+~3 ms; the default hierarchy at a 2000-codepoint budget ~350 ms, which is
+its own word walk (~130 ms) plus sentence walk (~190 ms) — the accurate
+UAX #29 segmentation the function exists to provide. Before this change an
+unconditional `Vec<char>` collect plus a `HashSet` of every grapheme
+boundary in the document ran before anything else: ~1.0-1.2 s for the
+never-matching case regardless of budget, ~3.0 s for the default
+hierarchy, superlinear in input size.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,

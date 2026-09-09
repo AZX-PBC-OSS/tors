@@ -19,10 +19,8 @@
 //!
 //! [`crate::chunk_impl`]
 
-use std::collections::HashSet;
-
 use crate::segmentation_impl;
-use crate::truncate_impl::grapheme_boundary_chars;
+use crate::truncate_impl::{GraphemeIndex, char_count};
 
 /// Merge adjacent CONTIGUOUS segments (`bounds[i].1 == bounds[i + 1].0`:
 /// the `word_bounds`/`sentence_bounds` covering-partition contract) whose
@@ -36,21 +34,85 @@ use crate::truncate_impl::grapheme_boundary_chars;
 /// exactly on such a split would silently divide the cluster between two
 /// returned chunks; merging the two segments before windowing removes the
 /// cut point rather than special-casing it per chunk. One forward pass,
-/// O(n).
+/// O(n), the membership question answered O(1) by the shared
+/// [`GraphemeIndex`] bitmap (the former `HashSet<usize>` built from the
+/// whole boundary list cost ~12.6M hashed inserts — ~1.2 s — on a 12 MiB
+/// document, the same #22 pathology `chunk_hierarchical` fixed).
 fn merge_mid_cluster_boundaries(
     bounds: Vec<(usize, usize)>,
-    grapheme_set: &HashSet<usize>,
+    graphemes: &GraphemeIndex,
 ) -> Vec<(usize, usize)> {
+    // Fast path: when no adjacent pair shares a mid-cluster edge, the
+    // merge would return the input unchanged — so it does, the input Vec
+    // moving through with no copy. That is the common case (any text
+    // without UAX-29/grapheme boundary divergence, e.g. pure-ASCII prose
+    // with no CRLF pairs, where the merge pass would otherwise duplicate
+    // a multi-MiB bounds list just to push every segment through). One
+    // allocation-free scan decides; the differential tests pin both
+    // paths to the same output.
+    if !bounds
+        .windows(2)
+        .any(|w| w[0].1 == w[1].0 && !graphemes.is_boundary(w[1].0))
+    {
+        return bounds;
+    }
     let mut merged: Vec<(usize, usize)> = Vec::with_capacity(bounds.len());
     for (start, end) in bounds {
         match merged.last_mut() {
-            Some(last) if last.1 == start && !grapheme_set.contains(&start) => {
+            Some(last) if last.1 == start && !graphemes.is_boundary(start) => {
                 last.1 = end;
             }
             _ => merged.push((start, end)),
         }
     }
     merged
+}
+
+/// `chunk_by_words`'s real-token filter — keep exactly the segments
+/// carrying at least one non-whitespace codepoint — as ONE streaming
+/// decode pass over `text` instead of the former whole-text `Vec<char>`
+/// collect (4 bytes per codepoint materialized just to random-access
+/// slice each segment, the same #22 allocation class). `merged` is a
+/// contiguous covering partition of `[0, total)` (word_bounds' own
+/// contract, preserved by the merge), so a single forward decode crosses
+/// every segment edge in sequence: each decoded codepoint folds into the
+/// current segment's has-a-non-whitespace flag, and each completed
+/// segment is kept or dropped on that flag alone. O(text) time, O(1)
+/// memory beyond the output.
+fn retain_non_whitespace_segments(text: &str, merged: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::with_capacity(merged.len());
+    let mut seg = 0usize;
+    let mut has_non_ws = false;
+    let mut cp = 0usize;
+    // The partition's contiguity, debug-pinned: segment `seg` must begin
+    // exactly where the decode cursor is when it opens.
+    let mut seg_start_cp = 0usize;
+    for ch in text.chars() {
+        if seg < merged.len() && cp == merged[seg].1 {
+            debug_assert_eq!(merged[seg].0, seg_start_cp);
+            if has_non_ws {
+                bounds.push(merged[seg]);
+            }
+            seg += 1;
+            seg_start_cp = cp;
+            has_non_ws = false;
+        }
+        has_non_ws |= !ch.is_whitespace();
+        cp += 1;
+    }
+    // The final segment completes at the decode's end, not before another
+    // codepoint arrives. A partition that stopped short of the decode's
+    // end (a contract violation, since word_bounds covers the whole text)
+    // leaves a segment unconsumed: caught here in debug.
+    if seg < merged.len() && cp == merged[seg].1 {
+        debug_assert_eq!(merged[seg].0, seg_start_cp);
+        if has_non_ws {
+            bounds.push(merged[seg]);
+        }
+        seg += 1;
+    }
+    debug_assert_eq!(seg, merged.len());
+    bounds
 }
 
 /// The shared "N segments per chunk, Y segments of overlap" walk behind
@@ -147,18 +209,14 @@ fn chunk_by_segments(
 /// boundary landing there would silently split it:
 /// [`merge_mid_cluster_boundaries`] closes this before windowing starts.
 pub fn chunk_by_words(text: &str, words_per_chunk: usize, overlap: usize) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = text.chars().collect();
     // Merge any word_bounds segment edge that would split a grapheme
     // cluster (the SARA AM edge, see `merge_mid_cluster_boundaries`)
     // BEFORE filtering out whitespace-only segments: the merge relies on
     // `word_bounds`' raw covering-partition contiguity, which the
     // whitespace filter below would otherwise break (it opens gaps).
-    let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
-    let merged = merge_mid_cluster_boundaries(segmentation_impl::word_bounds(text), &grapheme_set);
-    let bounds: Vec<(usize, usize)> = merged
-        .into_iter()
-        .filter(|&(start, end)| chars[start..end].iter().any(|c| !c.is_whitespace()))
-        .collect();
+    let graphemes = GraphemeIndex::build(text, char_count(text));
+    let merged = merge_mid_cluster_boundaries(segmentation_impl::word_bounds(text), &graphemes);
+    let bounds = retain_non_whitespace_segments(text, merged);
     chunk_by_segments(&bounds, words_per_chunk, overlap)
 }
 
@@ -176,9 +234,8 @@ pub fn chunk_by_sentences(
     // sentence_bounds' segments (also a covering, contiguous partition,
     // so the merge's contiguity assumption holds directly: no
     // whitespace-filter step exists here to reorder around).
-    let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
-    let bounds =
-        merge_mid_cluster_boundaries(segmentation_impl::sentence_bounds(text), &grapheme_set);
+    let graphemes = GraphemeIndex::build(text, char_count(text));
+    let bounds = merge_mid_cluster_boundaries(segmentation_impl::sentence_bounds(text), &graphemes);
     chunk_by_segments(&bounds, sentences_per_chunk, overlap)
 }
 
@@ -217,39 +274,74 @@ pub fn chunk_by_sentences(
 /// paragraph's caller would consider "split". No visible content
 /// character is ever cut mid-cluster by this function.
 pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    if n == 0 {
+    // The scan as ONE streaming decode pass — a three-flag state machine
+    // (in-run, unit count, pending-CR) instead of the former whole-text
+    // `Vec<char>` collect with random access and a lookahead, the same
+    // #22 allocation class: O(text) time, O(1) memory beyond the output.
+    // The pending-CR flag IS the lookahead: a '\r' counts one unit and
+    // stays pending; a following '\n' completes the CRLF pair without
+    // adding a unit; anything else leaves the '\r' standing as its own
+    // unit (already counted).
+    let total = char_count(text);
+    if total == 0 {
         return Vec::new();
     }
     let mut bounds = Vec::new();
     let mut seg_start = 0usize;
-    let mut i = 0usize;
-    while i < n {
-        if chars[i] == '\n' || chars[i] == '\r' {
-            let run_start = i;
-            let mut units = 0usize;
-            while i < n && (chars[i] == '\n' || chars[i] == '\r') {
-                if chars[i] == '\r' && i + 1 < n && chars[i + 1] == '\n' {
-                    i += 2;
-                } else {
-                    i += 1;
+    let mut in_run = false;
+    let mut run_start = 0usize;
+    let mut units = 0usize;
+    let mut pending_cr = false;
+    for (cp, ch) in text.chars().enumerate() {
+        match ch {
+            '\r' => {
+                if !in_run {
+                    in_run = true;
+                    run_start = cp;
+                    units = 0;
                 }
                 units += 1;
+                pending_cr = true;
             }
-            if units >= 2 {
-                if seg_start < run_start {
-                    bounds.push((seg_start, run_start));
+            '\n' => {
+                if !in_run {
+                    in_run = true;
+                    run_start = cp;
+                    units = 0;
                 }
-                seg_start = i;
+                if pending_cr {
+                    // Completes the pending CRLF pair: one unit total.
+                    pending_cr = false;
+                } else {
+                    units += 1;
+                }
             }
-            // A single-unit run is ordinary content: no split, keep scanning.
-        } else {
-            i += 1;
+            _ => {
+                if in_run {
+                    if units >= 2 {
+                        if seg_start < run_start {
+                            bounds.push((seg_start, run_start));
+                        }
+                        seg_start = cp;
+                    }
+                    // A single-unit run is ordinary content: no split.
+                    in_run = false;
+                    pending_cr = false;
+                }
+            }
         }
     }
-    if seg_start < n {
-        bounds.push((seg_start, n));
+    // End of text terminates a trailing run the same way: seg_start moves
+    // past the run whenever the run qualifies (the push itself is guarded
+    // by seg_start < run_start, the leading-empty-paragraph discard).
+    if in_run && units >= 2 {
+        if seg_start < run_start {
+            bounds.push((seg_start, run_start));
+        }
+        seg_start = total;
+    }
+    if seg_start < total {
+        bounds.push((seg_start, total));
     }
     bounds
 }
@@ -272,6 +364,198 @@ pub fn chunk_by_paragraphs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The differential oracles below are the pre-#22 spellings verbatim
+    // (whole-text `Vec<char>` collects, `HashSet<usize>` boundary sets,
+    // the random-access paragraph scan), which is why the tests module
+    // re-imports what production no longer uses.
+    use std::collections::HashSet;
+
+    use crate::truncate_impl::grapheme_boundary_chars;
+
+    /// The former `merge_mid_cluster_boundaries`, HashSet spelling, kept
+    /// verbatim as the differential oracle for the bitmap spelling.
+    fn merge_mid_cluster_boundaries_reference(
+        bounds: Vec<(usize, usize)>,
+        grapheme_set: &HashSet<usize>,
+    ) -> Vec<(usize, usize)> {
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(bounds.len());
+        for (start, end) in bounds {
+            match merged.last_mut() {
+                Some(last) if last.1 == start && !grapheme_set.contains(&start) => {
+                    last.1 = end;
+                }
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
+
+    /// The former `chunk_by_words`, verbatim oracle: `Vec<char>` collect,
+    /// `HashSet` boundary set, random-access whitespace slices.
+    fn chunk_by_words_reference(
+        text: &str,
+        words_per_chunk: usize,
+        overlap: usize,
+    ) -> Vec<(usize, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+        let merged = merge_mid_cluster_boundaries_reference(
+            segmentation_impl::word_bounds(text),
+            &grapheme_set,
+        );
+        let bounds: Vec<(usize, usize)> = merged
+            .into_iter()
+            .filter(|&(start, end)| chars[start..end].iter().any(|c| !c.is_whitespace()))
+            .collect();
+        chunk_by_segments(&bounds, words_per_chunk, overlap)
+    }
+
+    /// The former `chunk_by_sentences`, verbatim oracle.
+    fn chunk_by_sentences_reference(
+        text: &str,
+        sentences_per_chunk: usize,
+        overlap: usize,
+    ) -> Vec<(usize, usize)> {
+        let grapheme_set: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+        let bounds = merge_mid_cluster_boundaries_reference(
+            segmentation_impl::sentence_bounds(text),
+            &grapheme_set,
+        );
+        chunk_by_segments(&bounds, sentences_per_chunk, overlap)
+    }
+
+    /// The former `paragraph_bounds`, verbatim oracle: the whole-text
+    /// `Vec<char>` collect with random access and one-codepoint lookahead.
+    fn paragraph_bounds_reference(text: &str) -> Vec<(usize, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let mut bounds = Vec::new();
+        let mut seg_start = 0usize;
+        let mut i = 0usize;
+        while i < n {
+            if chars[i] == '\n' || chars[i] == '\r' {
+                let run_start = i;
+                let mut units = 0usize;
+                while i < n && (chars[i] == '\n' || chars[i] == '\r') {
+                    if chars[i] == '\r' && i + 1 < n && chars[i + 1] == '\n' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    units += 1;
+                }
+                if units >= 2 {
+                    if seg_start < run_start {
+                        bounds.push((seg_start, run_start));
+                    }
+                    seg_start = i;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if seg_start < n {
+            bounds.push((seg_start, n));
+        }
+        bounds
+    }
+
+    /// The differential corpus: word/sentence/paragraph shapes — prose,
+    /// CRLF and lone-CR runs (every unit-counting case the paragraph
+    /// scanner has: CRLF pairs, mixed \n\r, trailing and leading runs),
+    /// Thai SARA AM (the merge's reason to exist), whitespace-only and
+    /// whitespace-heavy text (the token filter's drop-everything and
+    /// ride-along cases), and degenerate runs.
+    fn differential_corpus() -> Vec<String> {
+        vec![
+            String::new(),
+            "   ".to_string(),
+            "a".to_string(),
+            "one two three four five six seven eight".to_string(),
+            "Alpha beta gamma delta. Epsilon zeta eta. Theta iota kappa.".to_string(),
+            "x0\u{0E33}y0\u{0E33}z".to_string(),
+            "One 0\u{0E33} fish. Two 0\u{0E33} fish.".to_string(),
+            "a\n\nb\n\n\nc".to_string(),
+            "a\r\nb\r\n\r\nc".to_string(),
+            "a\rb".to_string(),
+            "\r\n\r\n\r\n".to_string(),
+            "\n\na".to_string(),
+            "a\n\n".to_string(),
+            "a\r\rb\n\n\nc".to_string(),
+            "para one\n\npara two\nsingle\n\npara three".to_string(),
+            " \t \n\n \t ".to_string(),
+            "e\u{0301}e\u{0301} words here".to_string(),
+            "q".repeat(300),
+            "word ".repeat(120),
+        ]
+    }
+
+    #[test]
+    fn streaming_spellings_match_the_former_implementations_exactly() {
+        for text in differential_corpus() {
+            // paragraph_bounds: the state machine against the random-access
+            // scan, over every corpus shape (CRLF pairing, unit counts at
+            // the split threshold, leading/trailing runs).
+            assert_eq!(
+                paragraph_bounds(&text),
+                paragraph_bounds_reference(&text),
+                "paragraph_bounds divergence on {text:?}"
+            );
+            // The unit-count chunkers over the validated envelope
+            // (per_chunk >= 1, overlap < per_chunk), sweeping the
+            // boundary-adjacent values.
+            for per_chunk in 1usize..=6 {
+                for overlap in [0usize, 1, per_chunk.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&o| o < per_chunk)
+                {
+                    assert_eq!(
+                        chunk_by_words(&text, per_chunk, overlap),
+                        chunk_by_words_reference(&text, per_chunk, overlap),
+                        "chunk_by_words divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_by_sentences(&text, per_chunk, overlap),
+                        chunk_by_sentences_reference(&text, per_chunk, overlap),
+                        "chunk_by_sentences divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
+                    assert_eq!(
+                        chunk_by_paragraphs(&text, per_chunk, overlap),
+                        chunk_by_segments(&paragraph_bounds_reference(&text), per_chunk, overlap),
+                        "chunk_by_paragraphs divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_state_machine_survives_a_deterministic_newline_soup() {
+        // Pseudo-random text over exactly the alphabet the paragraph
+        // scanner branches on (\r, \n, CRLF pairings, and one ordinary
+        // character), so the state machine's unit counting is checked
+        // against the random-access oracle on runs no hand-written corpus
+        // anticipates — including runs that end at end-of-text.
+        let mut state = 0x853C49E6748FEA9Bu64;
+        let alphabet = ['x', '\r', '\n'];
+        for _ in 0..300 {
+            let mut text = String::new();
+            for _ in 0..(state % 60 + 1) as usize {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                text.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            assert_eq!(
+                paragraph_bounds(&text),
+                paragraph_bounds_reference(&text),
+                "divergence on {text:?}"
+            );
+        }
+    }
 
     // ---- grapheme-cluster safety (the truncate_impl regression, re-derived here) ----
 

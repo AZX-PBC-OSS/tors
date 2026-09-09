@@ -73,7 +73,8 @@
 //!
 //! Every deadline-bearing primitive in this crate protects against
 //! ADVERSARIAL-INPUT superlinear blowup (Levenshtein/Jaro's O(n·m) DP
-//! tables, `similarity_ratio`'s windowed Myers scans). `bm25_rank` has no
+//! tables, the Myers scans behind `similarity_ratio`/`get_close_matches`).
+//! `bm25_rank` has no
 //! such shape: cost is linear in total corpus token count plus
 //! `corpus_size * distinct_query_terms` for scoring: both driven directly
 //! and proportionally by the SIZES of the caller's own arguments, not by

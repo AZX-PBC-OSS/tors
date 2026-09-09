@@ -14,6 +14,7 @@ oracle-compared here; each exclusion cites its §9 number.
 
 from __future__ import annotations
 
+import itertools
 import json
 import random
 from typing import Any
@@ -86,8 +87,32 @@ _BASE_RAWS: list[str] = [
     '{"a": "x", "b": }',  # missing value: second member
     "{a: 'x', b: None}",  # combined: unquoted + single + None
     '{"a":1}{"b":2}',  # concatenated objects
+    '{' + r'{\"k\": 1}' * 64 + '}',  # escaped-delimiter run in a string
+    # body: the escape normalizer's incremental undo record stays
+    # byte-identical to the oracle here.
+    r'{"bs": "\\\\", "m": "\\"k\\" \u201e x"}',  # backslash run +
+    # delimiter unescape + smart quote in one body: exercises every
+    # acc_pop repair arm against the oracle.
+    '[' + r'{\"k\": \"v\"}' * 48 + ']',  # escaped key AND value run
+    # in an array body: the heaviest escape-repair density, pinned.
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
+    '["' + "]" * 64 + '" x',  # array-context `]` run in a string body: the
+    # memoized-lookahead O(n^2) fix stays byte-identical to the oracle here.
+    r'''[{"a": "]}\\"x"}]''',  # mixed `]`/`}`/`\\`/`"` in an array-of-object
+    # string body: exercises the shared `[outer]` memo across the `]` and `}`
+    # sites and pins it byte-identical to the oracle.
+    '["' + (']' + '\\\\') * 32 + '" x',  # interleaved `]`/even-backslash-run
+    # string body: the incremental escape-tail rewrite (upstream rebuilds the
+    # accumulator per normalization) stays byte-identical to the oracle.
+    '["' + 'a"' * 64 + '"]',  # internal-quote run in an array string: the
+    # pairing-walk outcome memo (upstream re-walks per quote candidate).
+    '{"a": "' + '}' * 64 + '"' + 'y' * 64 + '"z',  # object-value `}` run with a
+    # long quote-free gap: the `}`-branch's lstring lookahead memo.
+    '{"a": "[' + 'x"' * 64 + '"}',  # quote run under an open regex character
+    # class: the whitespace-flag + memoized `]` lookahead rewrite.
+    '{' + 'a:b,' * 64 + '}',  # unquoted-key member run: the parser-level
+    # lookahead memo shared across the run's many short string parses.
 ]
 
 # NOTE (§9.4): no fenced TOP-LEVEL SCALAR lives in _BASE_RAWS — tors recovers
@@ -291,6 +316,21 @@ class TestDifferentialParity:
         with pytest.raises((ValueError, RecursionError)):
             json_repair_lib.repair_json(_DEEP_RAW, schema=DEEP_SCHEMA)
 
+    def test_continuation_chain_recursion_both_raise(self) -> None:
+        # §9.6 both-raise pin for the array-continuation merge chain
+        # (`{"a":[0],` + `["b":[0],` * N): tors caps it at MAX_NESTING
+        # fragments and the oracle at its own recursion limit, so at a size
+        # far past both thresholds each engine raises a ValueError — the
+        # differential signal that neither crashes. (A tors build without
+        # the continuation guard dies with SIGSEGV here, which kills the
+        # process rather than failing the assertion — the native suite's
+        # sub-2k sizes fail cleanly instead.)
+        merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + '1]'
+        with pytest.raises(ValueError):
+            tors.repair_json(merge_chain, skip_json_loads=True)
+        with pytest.raises(ValueError):
+            json_repair_lib.repair_json(merge_chain, skip_json_loads=True)
+
     @pytest.mark.parametrize(
         'raw', STRICT_CORPUS, ids=[f'strict-{i}' for i in range(len(STRICT_CORPUS))]
     )
@@ -407,6 +447,47 @@ def _parses(s: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+# The exhaustive structural sweep alphabet: every char that steers the
+# lookahead memos (brackets, delimiters, escape runs) plus one ordinary
+# filler. All strings up to _SWEEP_MAXLEN over this alphabet that contain a
+# delimiter and a bracket exercise every memo-site interaction at
+# exhaustively small sizes.
+_SWEEP_ALPHABET = ['[', ']', '{', '}', '"', '\\', 'x']
+_SWEEP_MAXLEN = 6
+
+
+def _sweep_raws() -> list[str]:
+    raws: list[str] = []
+    for length in range(1, _SWEEP_MAXLEN + 1):
+        for tup in itertools.product(_SWEEP_ALPHABET, repeat=length):
+            s = ''.join(tup)
+            if '"' in s and (']' in s or '}' in s):
+                raws.append(s)
+    return raws
+
+
+class TestExhaustiveStructuralSweep:
+    """Every short string over the structural alphabet, both engines.
+
+    This is the committed form of the exhaustive `]`/`}`/`\\`/`"` sweep the
+    lookahead-memo fixes were verified with: sharing one memo key across the
+    `}`/`]`/ObjectKey/comma-classify sites, dropping upstream's
+    backslash-adjacent write guard, and caching pairing-walk outcomes are
+    each only exact for ANCHORED scan starts — and the anchored-start
+    argument is over exactly these chars. A memo bug that flips one verdict
+    diverges tors from the oracle on at least one of these raws.
+    """
+
+    @pytest.mark.parametrize('raw', _sweep_raws())
+    def test_engine_lane_parity(self, raw: str) -> None:
+        got = tors.repair_json(raw, skip_json_loads=True)
+        want = json_repair_lib.repair_json(raw, skip_json_loads=True)
+        assert got == want
+        got_loads = tors.repair_json_loads(raw, skip_json_loads=True)
+        want_loads = json_repair_lib.loads(raw, skip_json_loads=True)
+        assert got_loads == want_loads
 
 
 class TestHypothesisInvariants:

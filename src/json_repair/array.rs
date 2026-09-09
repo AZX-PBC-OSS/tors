@@ -230,6 +230,23 @@ impl Parser {
                     if active {
                         // Schema-guided object parsing, then enforce the
                         // schema on the parsed object.
+                        //
+                        // Depth invariant: this direct parse_object call
+                        // takes no enter_depth of its own (entering a
+                        // nested object here does not consume the parser's
+                        // container budget by itself). That is safe ONLY
+                        // because every recursion cycle through this edge
+                        // also passes a guarded edge — the value position
+                        // routes through parse_json's `[`/`{` branches,
+                        // and the key-position '[' continuation through
+                        // merge_object_array_continuation's guard (the
+                        // crash that guard closes). Keep it that way: a
+                        // new call path from here into parse_object or
+                        // parse_array without a guarded edge on the cycle
+                        // reopens the unbounded-recursion SIGSEGV class
+                        // (see object.rs's merge guard and the
+                        // recursion-grammar sweep in
+                        // tests/test_json_repair_native.py).
                         let parsed = self.parse_object(item_schema.as_ref(), &item_path)?;
                         with_repairer(self, |repairer| match repairer {
                             Some(repairer) => repairer.repair_value(parsed, schema_arg, &item_path),
@@ -243,7 +260,8 @@ impl Parser {
                         })?
                     } else {
                         // No schema (or dropping): still parse to keep the
-                        // cursor in sync.
+                        // cursor in sync. Same depth invariant as the
+                        // schema-guided arm above.
                         self.parse_object(None, "$")?
                     }
                 } else {

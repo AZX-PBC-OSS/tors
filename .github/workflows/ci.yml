@@ -47,6 +47,12 @@ jobs:
       - name: Cargo fmt
         run: cargo fmt --check
 
+      - name: Cargo fmt (fuzz crate)
+        # The fuzz crate is intentionally not a workspace member, so the
+        # root fmt gate never sees it; without this step its targets rot
+        # silently (truncate_ellipsis.rs had already drifted).
+        run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+
       - name: Cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -185,7 +191,7 @@ jobs:
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff phonetic bm25 tfidf json_repair; do
+          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf json_repair; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=15 -close_fd_mask=3
           done

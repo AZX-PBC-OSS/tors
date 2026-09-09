@@ -109,10 +109,14 @@ pub(crate) struct Parser {
     /// repairs). Returned to `repair()` afterwards via `take_repairer`.
     pub(crate) schema_repairer: Option<SchemaRepairer>,
     /// Container-nesting depth for the MAX_NESTING guard: parse_json's `{`
-    /// and `[` branches increment on entry and decrement on their way out;
-    /// exceeding the cap raises the recursion-depth ValueError (upstream
-    /// hits Python's RecursionError at a comparable depth; tors normalizes
-    /// it — see mod.rs's docs).
+    /// and `[` branches increment on entry and decrement on their way out,
+    /// as do the two continuation recursions — complete_object_parse's
+    /// comma-merge and merge_object_array_continuation's array-merge
+    /// (object.rs) — so structural nesting and either kind of continuation
+    /// chain compete for one shared MAX_NESTING budget. Exceeding the cap
+    /// raises the recursion-depth ValueError (upstream hits Python's
+    /// RecursionError at a comparable depth; tors normalizes it — see
+    /// mod.rs's docs).
     pub(crate) depth: usize,
     /// parse_comment's parse_json re-entry depth. Garbage-separated
     /// comment runs (`'/x' * n`) chain parse_json → parse_comment →
@@ -123,12 +127,101 @@ pub(crate) struct Parser {
     /// by parse_comment's own loop and cost one re-entry, so legitimate
     /// inputs never approach the cap.
     comment_depth: usize,
+    /// The deadline clock, armed by `repair()` — it starts at the top of
+    /// that call, so the budget covers the fence pre-pass and the strict
+    /// fast path, not just this parser. `None` = unbounded (every
+    /// existing caller): each check below is then a single `is_none`.
+    deadline: Option<(std::time::Instant, f64)>,
+    /// Sampling counter for [`Self::deadline_expired`] (1-in-256). A
+    /// `Cell` so the `&self` scan primitives can force the next check to
+    /// read the clock after a long scan (see
+    /// [`Self::force_deadline_check`]).
+    deadline_counter: std::cell::Cell<u32>,
+    /// The sticky abort payload: once the budget is exceeded, every later
+    /// check short-circuits and this is the surfaced error.
+    deadline_error: Option<String>,
+    /// The lookahead memo for skip_to_character, keyed by target set and
+    /// LIVED AT THE PARSER LEVEL (a deliberate divergence from upstream,
+    /// which scopes it to one string's parse state): entries are pure
+    /// buffer facts — (targets, start) -> first unescaped match, valid for
+    /// every anchored reader — so sharing them across the many short
+    /// string parses of one repair (e.g. `'{' + 'a:b,'*n + '}'` parses n
+    /// values, each with a fresh state and, upstream, a fresh O(n)-to-end
+    /// scan per comma) is exact. Cleared on the ONE buffer-mutating site
+    /// (split_object_on_duplicate_key's `{` splice shifts every absolute
+    /// position at/after the insert). Bounded per key (see string.rs's
+    /// cache_put).
+    pub(crate) lookahead_cache: Vec<(LookaheadKey, LookaheadEntry)>,
+    /// Scratch for string.rs's array_pairing_walk (one walk's outer-target
+    /// positions and per-interval stop chars): owned by the parser, taken
+    /// for the walk and returned with capacity kept, so repeated walks
+    /// neither re-allocate nor pay logarithmic Vec growth. Memory is
+    /// bounded by the largest walk in the repair.
+    pub(crate) pairing_scratch_outers: Vec<usize>,
+    pub(crate) pairing_scratch_stops: Vec<Option<usize>>,
 }
+
+/// The sentinel prefix marking a deadline abort inside the parser's
+/// `Err(String)` channel (otherwise shared with the upstream-parity
+/// ValueError messages). The py layer strips it and raises `TimeoutError`
+/// carrying the called spelling's own name; the tag itself never surfaces
+/// in a user-visible message.
+pub(crate) const DEADLINE_TAG: &str = "\u{0}tors-repair-deadline";
+
+/// Scans (or span builds) at least this long force the next deadline
+/// check to read the clock. Below it, a scan is one of ≤256 O(K) units
+/// that can run between two sampled reads; above it, the scan itself is
+/// the O(n)-per-cycle work the budget must catch, so at most one long
+/// scan runs past an expired budget. Total worst-case overshoot:
+/// ~256 × 1 KiB of short-scan work plus one long scan.
+pub(crate) const DEADLINE_FORCE_SCAN_CHARS: usize = 1024;
+
+/// The payload every abort site emits — the sticky error set here, and
+/// `repair()`'s post-fast-path check — in the same shape as
+/// `diff_opcodes`' TimeoutError, so the py layer only has to front it
+/// with the spelling's name.
+pub(crate) fn deadline_exceeded_payload(deadline_ms: f64, elapsed_ms: f64) -> String {
+    format!("{DEADLINE_TAG} elapsed {elapsed_ms:.1}ms > deadline_ms {deadline_ms:.1}ms")
+}
+
+/// The lookahead-cache key: the target chars in call order, '\0'-padded
+/// (upstream's dict keys are the target tuples; no target is ever '\0',
+/// and the largest set upstream builds is the 6-element
+/// `[*STRING_DELIMITERS, "{", "["]`).
+pub(crate) type LookaheadKey = [char; 6];
+/// One memo entry: `(scan start, first unescaped match)`, `None` = "no
+/// unescaped target at or after start".
+pub(crate) type LookaheadEntry = (usize, Option<usize>);
 
 impl Parser {
     pub(crate) fn new(s: &str, strict: bool, schema_repairer: Option<SchemaRepairer>) -> Parser {
+        // One allocation for the char buffer: `str::chars()` is not
+        // ExactSizeIterator, so a bare collect() grows the Vec
+        // logarithmically. `s.len()` is the exact char count for ASCII (the
+        // overwhelmingly common JSON case) and a ≤4x over-estimate for
+        // multi-byte input — and the spare capacity is not waste: the
+        // duplicate-key splice inserts `{` chars into this same buffer, so
+        // headroom defers (often eliminates) its reallocation+copy.
         Parser {
-            s: s.chars().collect(),
+            // One exact allocation instead of `collect`'s realloc ladder:
+            // `chars()`' size hint floors at a quarter of the byte length,
+            // so a multi-MiB document paid two to three reallocations —
+            // each a full-buffer memmove — before reaching its final size.
+            // `is_ascii` is one early-exit scan (the overwhelmingly common
+            // JSON case) and gives the char count exactly; otherwise a
+            // counting pass buys the exact size at a fraction of a
+            // realloc's cost, so memory stays tight too. Measured (criterion,
+            // interleaved): valid 1 MiB -1.6%, malformed 1 MiB -7%.
+            s: {
+                let capacity = if s.is_ascii() {
+                    s.len()
+                } else {
+                    s.chars().count()
+                };
+                let mut chars = Vec::with_capacity(capacity);
+                chars.extend(s.chars());
+                chars
+            },
             index: 0,
             context: Vec::new(),
             deferred_contexts: Vec::new(),
@@ -139,6 +232,12 @@ impl Parser {
             schema_repairer,
             depth: 0,
             comment_depth: 0,
+            deadline: None,
+            deadline_counter: std::cell::Cell::new(0),
+            deadline_error: None,
+            lookahead_cache: Vec::new(),
+            pairing_scratch_outers: Vec::new(),
+            pairing_scratch_stops: Vec::new(),
         }
     }
 
@@ -163,6 +262,102 @@ impl Parser {
     /// The character at the cursor (the overwhelmingly common `get(0)`).
     pub(crate) fn cur(&self) -> Option<char> {
         self.get(0)
+    }
+
+    /// Whether a deadline is armed. The scan loops split on this so the
+    /// unbounded path compiles deadline-free (see `scan_string_body`).
+    #[inline]
+    pub(crate) fn deadline_armed(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    /// Arm the deadline with `repair()`'s clock (started at the top of
+    /// that call): the parser only reads it.
+    pub(crate) fn set_deadline(&mut self, started: std::time::Instant, ms: f64) {
+        self.deadline = Some((started, ms));
+    }
+
+    /// The sampled check for O(1)-iteration loops — `scan_string_body`'s
+    /// char scan and (through [`Self::check_deadline`]) the `parse_json`
+    /// dispatch loop. An `Instant::now` per iteration would dominate the
+    /// char scan and cost one clock read per array item / object member
+    /// in the dispatch case (an unsampled dispatch check measured +13%
+    /// armed on a 3.8 MB repairable parse; sampled, ≤2%), so only every
+    /// 256th call reads the clock. The bound is therefore soft — up to
+    /// 256 iterations of O(1) work can run past an expired budget between
+    /// reads — and [`Self::force_deadline_check`] reclaims tightness
+    /// wherever a single iteration can cost O(n).
+    #[inline]
+    pub(crate) fn deadline_expired(&mut self) -> bool {
+        if self.deadline.is_none() {
+            return false;
+        }
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        let counter = self.deadline_counter.get().wrapping_add(1);
+        self.deadline_counter.set(counter);
+        if counter & 0xFF != 0 {
+            return false;
+        }
+        self.deadline_now_expired()
+    }
+
+    /// Force the next check to read the clock. Call after any work whose
+    /// cost is proportional to the remaining input — a buffer splice, a
+    /// long scan, a long span build: the following parse always passes a
+    /// check before the next such unit can run, so at most one O(n) unit
+    /// plus the work up to it slips between clock reads — the same
+    /// tightness an unsampled dispatch check bought, at ~1/256 the clock
+    /// reads on benign input.
+    #[inline]
+    pub(crate) fn force_deadline_check(&self) {
+        if self.deadline.is_some() {
+            self.deadline_counter.set(0xFF);
+        }
+    }
+    /// The clock read behind every sampled check: reads the wall clock,
+    /// and on expiry latches the sticky payload. Unsampled callers do not
+    /// exist — the two remaining uses are `deadline_expired`'s every-256th
+    /// call and the forced reads after splices.
+    #[inline]
+    fn deadline_now_expired(&mut self) -> bool {
+        let Some(&(started, ms)) = self.deadline.as_ref() else {
+            return false;
+        };
+        if self.deadline_error.is_some() {
+            return true;
+        }
+        if let Some((d, e)) = crate::diff_impl::elapsed_exceeds(started, Some(ms)) {
+            self.deadline_error = Some(deadline_exceeded_payload(d, e));
+            return true;
+        }
+        false
+    }
+
+    /// The dispatch-loop check: sampled through [`Self::deadline_expired`],
+    /// `Err` carrying the sticky payload once the budget is exceeded — and
+    /// on every later call, so an abort can never be swallowed by a retry
+    /// layer. The fallback arm is unreachable by construction
+    /// (`deadline_now_expired` latches the payload before returning true)
+    /// and kept panic-free: this parser is a fuzz target.
+    #[inline]
+    pub(crate) fn check_deadline(&mut self) -> Result<(), String> {
+        if self.deadline_expired() {
+            return Err(self
+                .deadline_error
+                .clone()
+                .unwrap_or_else(|| DEADLINE_TAG.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Take the sticky abort. The scan loops break without an error
+    /// channel of their own; their caller polls this once the loop exits.
+    /// The sticky flag makes a missed poll harmless — the next
+    /// `check_deadline` fires instead.
+    pub(crate) fn take_deadline_error(&mut self) -> Option<String> {
+        self.deadline_error.take()
     }
 
     /// json_parser.py's `skip_whitespaces`: advance `index` past whitespace.
@@ -195,9 +390,62 @@ impl Parser {
     /// `index + idx` until an UNESCAPED target character (a target preceded
     /// by an EVEN run of backslashes); returns the offset from `index` to
     /// that position, or the distance to the end when not found.
+    ///
+    /// Single-target scans (the engine's overwhelmingly common lookahead
+    /// shape) take a branch-free scan loop: `position` to the next target
+    /// or backslash — a pattern the optimizer vectorizes over the u32 char
+    /// units, where the original branchy walk could not — then a bounded
+    /// walk back over the preceding backslash run for the escape parity.
+    /// The walk-back's total cost is bounded by the runs the scan skipped
+    /// in bulk, so even backslash-dense input stays linear. Multi-target
+    /// sets (CommaSkip's 5-6 char delimiter sets) keep the char walk.
     pub(crate) fn skip_to_character(&self, targets: &[char], idx: usize) -> usize {
-        let mut i = self.index + idx;
         let n = self.s.len();
+        let origin = self.index + idx;
+        let mut i = origin;
+        if let &[t] = targets {
+            while i < n {
+                let Some(rel) = self.s[i..].iter().position(|&c| c == t || c == '\\') else {
+                    break;
+                };
+                i += rel;
+                if self.s[i] == t {
+                    // The backslash run immediately before the candidate,
+                    // CLAMPED at the scan's start: the forward walk's
+                    // counter begins at zero there, so backslashes before
+                    // the start never count against the first candidates.
+                    let run_start = self.s[..i]
+                        .iter()
+                        .rposition(|&c| c != '\\')
+                        .map_or(0, |p| p + 1)
+                        .max(origin);
+                    if (i - run_start).is_multiple_of(2) {
+                        self.note_scan_distance(i - origin);
+                        return i - self.index;
+                    }
+                    // Escaped target: parity consumed, continue fresh.
+                    i += 1;
+                } else {
+                    // A backslash run: skip it whole; its parity covers
+                    // exactly the next char, any outcome of which resumes
+                    // the scan one past it (matched-and-odd is escaped,
+                    // non-target resets, matched-and-even returned above).
+                    let run_start = i;
+                    while i < n && self.s[i] == '\\' {
+                        i += 1;
+                    }
+                    let odd_run = (i - run_start) % 2 == 1;
+                    if i < n && self.s[i] == t && !odd_run {
+                        self.note_scan_distance(i - origin);
+                        return i - self.index;
+                    }
+                    i += 1;
+                }
+            }
+            self.note_scan_distance(n - origin);
+            return n - self.index;
+        }
+        let start = origin;
         let mut backslashes = 0usize;
         while i < n {
             let ch = self.s[i];
@@ -207,12 +455,25 @@ impl Parser {
                 continue;
             }
             if targets.contains(&ch) && backslashes.is_multiple_of(2) {
+                self.note_scan_distance(i - start);
                 return i - self.index;
             }
             backslashes = 0;
             i += 1;
         }
+        self.note_scan_distance(n - start);
         n - self.index
+    }
+
+    /// A scan of [`DEADLINE_FORCE_SCAN_CHARS`] or more is O(remaining)
+    /// work between two sampled checks — the repeated-long-scan class the
+    /// parser's quadratics are made of — so it forces the next check to
+    /// read the clock (see `force_deadline_check`).
+    #[inline]
+    pub(crate) fn note_scan_distance(&self, traversed: usize) {
+        if traversed >= DEADLINE_FORCE_SCAN_CHARS {
+            self.force_deadline_check();
+        }
     }
 
     /// json_context.py's `context.current`: the innermost context.
@@ -549,6 +810,7 @@ impl Parser {
         let (repairer_active, resolved_schema) = self.resolve_schema_for_parse(schema)?;
 
         loop {
+            self.check_deadline()?;
             // None means that we are at the end of the string provided.
             let Some(ch) = self.cur() else {
                 return Ok(Value::Str(String::new()));
@@ -946,6 +1208,64 @@ pub(crate) fn normalize_big_int_text(number_str: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reference char-walk skip_to_character (the multi-target arm's
+    /// loop, spelled for any target count): the single-target fast path is
+    /// verified against it exhaustively.
+    fn skip_to_character_reference(s: &[char], start: usize, targets: &[char]) -> usize {
+        let n = s.len();
+        let mut i = start;
+        let mut backslashes = 0usize;
+        while i < n {
+            let ch = s[i];
+            if ch == '\\' {
+                backslashes += 1;
+                i += 1;
+                continue;
+            }
+            if targets.contains(&ch) && backslashes.is_multiple_of(2) {
+                return i;
+            }
+            backslashes = 0;
+            i += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn single_target_fast_path_matches_the_char_walk_exhaustively() {
+        // Every string of length <= 6 over the lookahead-steering alphabet,
+        // every start position, three single-target spellings (the ASCII
+        // delimiter, the bracket, a smart-quote outer): the vectorized
+        // fast path must return the reference walk's exact position —
+        // same match, same not-found distance.
+        let alphabet = ['[', ']', '{', '}', '"', '\\', 'x', '„', '”'];
+        for len in 0..=6usize {
+            for combo in 0..alphabet.len().pow(len as u32) {
+                let mut digits = combo;
+                let s: Vec<char> = (0..len)
+                    .map(|_| {
+                        let c = alphabet[digits % alphabet.len()];
+                        digits /= alphabet.len();
+                        c
+                    })
+                    .collect();
+                for &t in &['"', ']', '”'] {
+                    for start in 0..=len {
+                        let mut parser = Parser::new("", false, None);
+                        parser.s = s.clone();
+                        parser.index = 0;
+                        let fast = parser.skip_to_character(&[t], start);
+                        let want = skip_to_character_reference(&s, start, &[t]);
+                        assert_eq!(
+                            fast, want,
+                            "fast path diverged on s={s:?} start={start} target={t:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn parse_ok(raw: &str) -> Value {
         Parser::new(raw, false, None)

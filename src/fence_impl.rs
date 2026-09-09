@@ -25,6 +25,8 @@
 
 use std::borrow::Cow;
 
+use memchr::memchr;
+
 use crate::normalize_impl::is_py_whitespace;
 
 /// One fenced code block: `language` is the info string's first
@@ -72,7 +74,11 @@ fn lines(text: &str) -> Vec<Line<'_>> {
     let mut char_start = 0usize;
     let bytes = text.as_bytes();
     loop {
-        let rel_newline = text[byte_start..].find('\n');
+        // memchr for the line-terminator scan (SIMD) rather than
+        // `str::find(char)`'s byte-at-a-time search: this loop is the
+        // whole-document cost of line-splitting, the same discipline
+        // html_impl/url_impl already apply to their byte scans.
+        let rel_newline = memchr(b'\n', &bytes[byte_start..]);
         let (byte_content_end, byte_line_end, has_newline) = match rel_newline {
             Some(rel) => (byte_start + rel, byte_start + rel + 1, true),
             None => (bytes.len(), bytes.len(), false),

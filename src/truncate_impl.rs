@@ -20,6 +20,15 @@
 //! table backing `grapheme_count`), including the hard-cut fallback, so the
 //! result never ends mid-cluster regardless of which boundary kind is asked
 //! for.
+//!
+//! This module is also the crate's shared home for the boundary-set
+//! MACHINERY the chunking family builds on: [`char_count`] (the
+//! allocation-free codepoint count), [`GraphemeIndex`] (the boundary set
+//! as one bit per codepoint — membership, largest-at-or-before, and
+//! first-after queries without the usize grid or hash set a
+//! document-scale input would otherwise pay for), and
+//! [`cluster_safe_ends`] (the single-ended intersection `chunk_text`
+//! filters its cuts through).
 
 use std::borrow::Cow;
 
@@ -33,6 +42,13 @@ use crate::segmentation_impl;
 /// allowed to land on without splitting a cluster. One forward pass over
 /// `text.graphemes(true)`, O(n) total (each codepoint is counted exactly
 /// once across all clusters), not O(n) per cluster.
+///
+/// Test-only since the [`GraphemeIndex`] bitmap replaced every production
+/// consumer: this Vec spelling is the differential ORACLE the bitmap (and
+/// `chunk_impl::grapheme_safe_hard_cut`'s rule via
+/// `GraphemeIndex::hard_cut`) is pinned against — the semantic definition
+/// in entries, the bitmap the compressed production spelling.
+#[cfg(test)]
 pub(crate) fn grapheme_boundary_chars(text: &str) -> Vec<usize> {
     let mut boundaries = Vec::new();
     let mut char_idx = 0usize;
@@ -112,6 +128,191 @@ pub(crate) fn cluster_safe_ends(
         }
     }
     ends
+}
+
+/// A text's codepoint count as one branchless byte pass: every UTF-8
+/// codepoint begins at a byte that is not a continuation byte
+/// (`0b10xxxxxx`), so counting non-continuation bytes IS counting
+/// codepoints. The allocation-free spelling of `text.chars().count()`'s
+/// answer for the callers that need the count WITHOUT the
+/// `Vec<char>`-class whole-text materialization a collect would pay
+/// (`chunk_hierarchical`'s budget arithmetic, the chunkers' grapheme
+/// index below): one pass, zero allocation, auto-vectorized by LLVM.
+pub(crate) fn char_count(text: &str) -> usize {
+    text.as_bytes()
+        .iter()
+        .filter(|&b| (b & 0xC0) != 0x80)
+        .count()
+}
+
+/// A text's grapheme-cluster boundary set as one bit per codepoint: bit
+/// `i` set iff codepoint index `i` begins a cluster, bit 0 always set, and
+/// the end-of-text boundary `total` set too — exactly the entry set
+/// [`grapheme_boundary_chars`] materializes as a `Vec<usize>` (~8 bytes
+/// per codepoint), here as `total / 64 + 1` words of `u64` (~1.6 MB at a
+/// 12 MiB document, two orders of magnitude less) with O(1) cache-friendly
+/// membership instead of a hash. That set is the membership question
+/// every cut-safety filter in the chunking family asks, and the two
+/// positional queries (largest boundary at or before `x`, first boundary
+/// after `x`) are word scans over the same bits. Shared by
+/// `chunk_hierarchical` (its cut filter, raw-cut fallback, and overlap
+/// snap — built lazily, at most once per call) and `chunk_by_segment`
+/// (the mid-cluster segment merge), replacing the `HashSet<usize>` both
+/// formerly built from the whole `Vec<usize>`: a 12 MiB document holds
+/// ~12.6M boundaries, and ~12.6M hashed inserts cost ~1.2 s while being
+/// superlinear on top of it (#22).
+///
+/// WHY a bitmap when [`cluster_safe_ends`] spells the cluster-safety
+/// intersection as a two-pointer merge over the `Vec<usize>`: that helper
+/// answers one question shape — which single-ended bounds are
+/// cluster-safe — while the chunkers' cuts are `(end, next_start)` PAIRS
+/// and their merge edges need arbitrary membership, and one bitmap
+/// answers every question those callers ask without the ~100 MB usize
+/// grid a 12 MiB document would materialize. `grapheme_safe_hard_cut`
+/// (in `chunk_impl`) stays the Vec spelling's home; the rule it encodes
+/// is replicated (and differential-pinned against it) here as
+/// [`GraphemeIndex::hard_cut`].
+pub(crate) struct GraphemeIndex {
+    /// Bit `i` = "codepoint index `i` is a grapheme-cluster boundary".
+    /// `words.len() == total / 64 + 1`: one word PAST bit `total`'s own
+    /// word, so the end-of-text boundary bit is always representable
+    /// (`total.div_ceil(64)` would be one word short whenever `total` is
+    /// an exact multiple of 64, since bit `total` lives in word
+    /// `total >> 6`, not `total - 1 >> 6`).
+    words: Vec<u64>,
+    /// The text's codepoint count: the highest boundary index there is.
+    total: usize,
+}
+
+impl GraphemeIndex {
+    /// One `graphemes(true)` walk setting a bit per cluster start plus the
+    /// final end-of-text bit (the same entries `grapheme_boundary_chars`
+    /// pushes, as bits instead of usizes). `total` is the caller's
+    /// independently-computed codepoint count ([`char_count`]); the debug
+    /// asserts pin the two countings and the fast path's claim to each
+    /// other.
+    ///
+    /// Pure-ASCII text skips the segmentation walk: GB3 (CRLF) is the only
+    /// grapheme rule that joins two ASCII codepoints — no ASCII byte is
+    /// Extend/ZWJ/SpacingMark/Prepend/Regional-Indicator, so every
+    /// codepoint starts a cluster except the LF of each CRLF pair — which
+    /// makes the bitmap all-ones with the CRLF LF bits cleared, buildable
+    /// from one `is_ascii` pass plus one SIMD `\r` scan (char index and
+    /// byte index coincide in ASCII). The sufficiency claim is pinned
+    /// EXHAUSTIVELY against the real segmenter by the 128×128 adjacency
+    /// test in this module's tests, so a unicode-segmentation table
+    /// change that ever touched ASCII clustering fails loudly instead of
+    /// silently mis-bitting.
+    pub(crate) fn build(text: &str, total: usize) -> Self {
+        if text.is_ascii() {
+            let mut words = vec![u64::MAX; total / 64 + 1];
+            let bytes = text.as_bytes();
+            let mut crlf_pairs = 0usize;
+            for cr in memchr::memchr_iter(b'\r', bytes) {
+                // A trailing CR has no LF to join and clears nothing.
+                if cr + 1 < bytes.len() && bytes[cr + 1] == b'\n' {
+                    let lf = cr + 1;
+                    words[lf >> 6] &= !(1u64 << (lf & 63));
+                    crlf_pairs += 1;
+                }
+            }
+            // The all-ones fill sets bits above `total` in the top word:
+            // mask to the representable range, bits `0..=total & 63` of
+            // word `total >> 6` (the `r == 63` case avoids a shift past
+            // `u64`'s width).
+            let r = total & 63;
+            words[total >> 6] &= if r == 63 {
+                u64::MAX
+            } else {
+                (1u64 << (r + 1)) - 1
+            };
+            debug_assert_eq!(
+                text.graphemes(true).count(),
+                total - crlf_pairs,
+                "ASCII fast path diverged from the grapheme tables"
+            );
+            Self { words, total }
+        } else {
+            let mut words = vec![0u64; total / 64 + 1];
+            let mut char_idx = 0usize;
+            for cluster in text.graphemes(true) {
+                words[char_idx >> 6] |= 1u64 << (char_idx & 63);
+                char_idx += cluster.chars().count();
+            }
+            // The end-of-text boundary, the Vec spelling's final entry.
+            words[char_idx >> 6] |= 1u64 << (char_idx & 63);
+            debug_assert_eq!(char_idx, total);
+            Self { words, total }
+        }
+    }
+
+    /// Is codepoint index `i` a cluster boundary? `false` past `total`
+    /// (a defensive answer, not an indexing panic: no cut past `total`
+    /// can exist in the callers' arithmetic, and dropping one only falls
+    /// through to a finer level or the raw cut, never an unsafe output).
+    pub(crate) fn is_boundary(&self, i: usize) -> bool {
+        i <= self.total && (self.words[i >> 6] >> (i & 63)) & 1 == 1
+    }
+
+    /// The largest cluster boundary `<= x`. Bit 0 is always set, so the
+    /// backward scan always terminates; `x` is clamped to `total`, at or
+    /// past which the answer is `total` itself.
+    pub(crate) fn last_at_or_before(&self, x: usize) -> usize {
+        let x = x.min(self.total);
+        let r = x & 63;
+        let mut wi = x >> 6;
+        // Bits `0..=r` of word `wi`; the `r == 63` case spelled out to
+        // avoid shifting past `u64`'s width.
+        let mut bits = self.words[wi]
+            & if r == 63 {
+                u64::MAX
+            } else {
+                (1u64 << (r + 1)) - 1
+            };
+        loop {
+            if bits != 0 {
+                return (wi << 6) + (63 - bits.leading_zeros()) as usize;
+            }
+            wi -= 1;
+            bits = self.words[wi];
+        }
+    }
+
+    /// The smallest cluster boundary strictly `> x`. The caller guarantees
+    /// `x < total` (the chunk loop's `start < total` invariant), and bit
+    /// `total` is always set, so the forward scan always terminates within
+    /// the words.
+    pub(crate) fn first_after(&self, x: usize) -> usize {
+        debug_assert!(x < self.total);
+        let r = x & 63;
+        let mut wi = x >> 6;
+        let mut bits = self.words[wi] & if r == 63 { 0 } else { !((1u64 << (r + 1)) - 1) };
+        loop {
+            if bits != 0 {
+                return (wi << 6) + bits.trailing_zeros() as usize;
+            }
+            wi += 1;
+            bits = self.words[wi];
+        }
+    }
+
+    /// The raw-cut fallback's end for the window `[start, limit]`:
+    /// `chunk_impl::grapheme_safe_hard_cut`'s exact rule against the
+    /// bitmap — the largest boundary `<= limit` when that is genuine
+    /// forward progress past `start`, otherwise the first boundary after
+    /// `start` (a single cluster wider than the whole remaining budget is
+    /// kept whole rather than split, the same documented exception
+    /// `chunk_text`'s hard cut carries: one chunk may exceed `max_chars`).
+    /// `start < total` and `limit < total` are the chunk loop's own
+    /// invariants.
+    pub(crate) fn hard_cut(&self, start: usize, limit: usize) -> usize {
+        let candidate = self.last_at_or_before(limit);
+        if candidate > start {
+            candidate
+        } else {
+            self.first_after(start)
+        }
+    }
 }
 
 /// Truncate `text` to at most `max_chars` codepoints, cutting at the last
@@ -231,6 +432,220 @@ pub fn truncate_ellipsis(text: &str, max_chars: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cluster shapes the boundary machinery has to get right: plain
+    /// ASCII, CRLF and lone-CR (the ASCII fast path's one join rule and
+    /// its near miss), Thai SARA AM (the combining sequence UAX #29
+    /// word/sentence bounds split but grapheme rules join), ZWJ emoji
+    /// chains, regional-indicator pairs, decomposed accents, CJK, and the
+    /// repeated-character runs that stress positional queries. Shared by
+    /// the `GraphemeIndex` tests below.
+    fn boundary_corpus() -> Vec<String> {
+        vec![
+            "a".to_string(),
+            "hello world".to_string(),
+            "Short one.\n\nShort two.".to_string(),
+            "a\r\nb\r\n\r\nc".to_string(),
+            "a\rb".to_string(),
+            "\r".to_string(),
+            "\r\n".to_string(),
+            "x".repeat(62) + "\r\n",
+            "q".repeat(128),
+            "0\u{0E33}".repeat(32),
+            "ab 0\u{0E33} cd ef 0\u{0E33} gh ij 0\u{0E33} kl".to_string(),
+            "e\u{0301}e\u{0301}e\u{0301} ".to_string(),
+            "thumbs up \u{1F44D}\u{200D}\u{1F3FB} flag \u{1F1FA}\u{1F1F8}".to_string(),
+            "q".repeat(200),
+            "abcdefghijklmnopqrstuvwxyz".repeat(8),
+            "\u{4E2D}\u{6587}\u{6587}\u{672C}\u{FF0C}\u{6D4B}\u{8BD5}".to_string(),
+            "mixed 0\u{0E33} ascii \u{1F600} \u{4E2D}\u{6587} tail".to_string(),
+        ]
+    }
+
+    #[test]
+    fn grapheme_index_answers_every_query_the_vec_spelling_does() {
+        for text in boundary_corpus() {
+            let total = text.chars().count();
+            let starts = grapheme_boundary_chars(&text);
+            let index = GraphemeIndex::build(&text, total);
+            for x in 0..=total {
+                assert_eq!(
+                    index.is_boundary(x),
+                    starts.contains(&x),
+                    "is_boundary({x}) on {text:?}"
+                );
+                let expected = starts.iter().rev().find(|&&g| g <= x).copied().unwrap();
+                assert_eq!(
+                    index.last_at_or_before(x),
+                    expected,
+                    "last_at_or_before({x}) on {text:?}"
+                );
+                if x < total {
+                    let expected = starts.iter().find(|&&g| g > x).copied().unwrap();
+                    assert_eq!(
+                        index.first_after(x),
+                        expected,
+                        "first_after({x}) on {text:?}"
+                    );
+                }
+            }
+            // Past-the-end clamping and the defensive membership answer.
+            assert_eq!(index.last_at_or_before(total + 12345), total);
+            assert!(!index.is_boundary(total + 1));
+        }
+        // A 66-codepoint run of TWO-codepoint clusters ("0" + SARA AM),
+        // so boundaries sit at every EVEN index only: the multi-word
+        // arithmetic (mask edges, the r == 63 seam, forward/backward
+        // scans crossing a word boundary) is exercised on its own shape.
+        // The 64-codepoint variant pins the exact-multiple-of-64 seam
+        // where bit `total` lives one word past the last cluster's own
+        // word (a `div_ceil` length is one word short there, and this
+        // test is what catches that class).
+        for clustered in ["0\u{0E33}".repeat(33), "0\u{0E33}".repeat(32)] {
+            let total = clustered.chars().count();
+            let index = GraphemeIndex::build(&clustered, total);
+            for x in 0..=total {
+                let expected_last = if x % 2 == 0 { x } else { x - 1 };
+                assert_eq!(index.last_at_or_before(x), expected_last);
+                assert_eq!(index.is_boundary(x), x % 2 == 0);
+                if x < total {
+                    let expected_next = if x % 2 == 0 { x + 2 } else { x + 1 };
+                    assert_eq!(index.first_after(x), expected_next);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_fast_path_condition_is_exhaustively_the_grapheme_tables_answer() {
+        // `GraphemeIndex::build`'s ASCII fast path rests on one claim: GB3
+        // (CRLF) is the ONLY grapheme rule that joins two ASCII
+        // codepoints, so a break between adjacent ASCII chars happens
+        // everywhere except between \r and \n. Prove it EXHAUSTIVELY
+        // against the actual unicode-segmentation tables in use — every
+        // ordered pair of ASCII bytes, embedded in fixed ASCII context
+        // (the context bytes cannot join anything themselves, so the only
+        // possible cluster spanning the pair's seam is the pair itself) —
+        // so a future table change that ever touched ASCII clustering
+        // fails here loudly instead of silently mis-bitting the fast
+        // path.
+        for a in 0u8..128 {
+            for b in 0u8..128 {
+                let text = format!("xy{}{}zw", a as char, b as char);
+                let starts = grapheme_boundary_chars(&text);
+                let joined = a == b'\r' && b == b'\n';
+                // Position 3 is b's own index: a cluster spanning the
+                // a/b seam would have to be the pair itself.
+                assert_eq!(
+                    starts.contains(&3usize),
+                    !joined,
+                    "ASCII pair ({a:#04x}, {b:#04x}) {} the tables' answer",
+                    if joined {
+                        "joined but tables say break at"
+                    } else {
+                        "breaks but tables join at"
+                    }
+                );
+                // And the fast-path-built index answers every query the
+                // same way on this input.
+                let index = GraphemeIndex::build(&text, text.chars().count());
+                for x in 0..=text.chars().count() {
+                    assert_eq!(index.is_boundary(x), starts.contains(&x));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn char_count_matches_chars_count_over_the_corpus() {
+        // The byte pass's answer is the decode's answer, pinned over every
+        // corpus shape (the multi-byte entries are the ones a broken
+        // continuation-byte mask would miscount).
+        for text in boundary_corpus() {
+            assert_eq!(char_count(&text), text.chars().count(), "{text:?}");
+        }
+        // And a deterministic pseudo-random byte soup: mixed ASCII and
+        // multi-byte sequences in every alignment, so the mask's
+        // auto-vectorized lane boundaries get crossed too.
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut soup = String::new();
+        for _ in 0..2000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            soup.push(match state % 7 {
+                0..=2 => char::from((state >> 8) as u8 % 128), // ASCII lane
+                3 => '\u{0E33}',                               // 2-byte SARA AM
+                4 => '\u{4E2D}',                               // 3-byte CJK
+                5 => '\u{1F600}',                              // 4-byte emoji
+                _ => '\u{0301}',                               // 2-byte combining
+            });
+        }
+        assert_eq!(char_count(&soup), soup.chars().count());
+    }
+
+    #[test]
+    fn grapheme_index_survives_a_deterministic_soup_sweep() {
+        // Pseudo-random mixed-script text (the LCG from char_count's
+        // soup test), so the index is checked against the Vec spelling on
+        // inputs no hand-written corpus anticipates — every position,
+        // every query, plus the hard-cut rule against
+        // chunk_impl::grapheme_safe_hard_cut where its preconditions hold.
+        use crate::chunk_impl::grapheme_safe_hard_cut;
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut alphabet: Vec<char> = ('a'..='z').collect();
+        alphabet.extend([
+            '\r',
+            '\n',
+            ' ',
+            '.',
+            '0',
+            '\u{0E33}',
+            '\u{0301}',
+            '\u{1F600}',
+        ]);
+        for _ in 0..40 {
+            let mut text = String::new();
+            for _ in 0..(state % 200 + 1) as usize {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                text.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            let total = char_count(&text);
+            let starts = grapheme_boundary_chars(&text);
+            let index = GraphemeIndex::build(&text, total);
+            for x in 0..=total {
+                assert_eq!(index.is_boundary(x), starts.contains(&x), "{text:?}@{x}");
+                assert_eq!(
+                    index.last_at_or_before(x),
+                    starts.iter().rev().find(|&&g| g <= x).copied().unwrap(),
+                    "{text:?}@{x}"
+                );
+                if x < total {
+                    assert_eq!(
+                        index.first_after(x),
+                        starts.iter().find(|&&g| g > x).copied().unwrap(),
+                        "{text:?}@{x}"
+                    );
+                }
+            }
+            // The hard-cut rule is grapheme_safe_hard_cut's rule: pin it
+            // against the original over a strided (start, limit) window
+            // sweep (dense enough to hit every seam class — cluster
+            // interiors, tight windows, wide windows — without the full
+            // O(total^2) cross product).
+            for start in (0..total).step_by(3) {
+                for limit in (start..total).step_by(5).chain([total - 1]) {
+                    assert_eq!(
+                        index.hard_cut(start, limit),
+                        grapheme_safe_hard_cut(&starts, start, limit),
+                        "{text:?}@({start},{limit})"
+                    );
+                }
+            }
+        }
+    }
 
     fn word(text: &str, max_chars: usize) -> String {
         truncate_to_bounds(text, max_chars, Boundary::Word).into_owned()

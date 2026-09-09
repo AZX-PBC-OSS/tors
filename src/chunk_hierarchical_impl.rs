@@ -46,20 +46,34 @@
 //!
 //! Performance: every level's candidate cut-position list is computed ONCE
 //! per call (one scan per level: `paragraph_bounds`/`sentence_bounds`/
-//! `word_bounds` for the default levels, one `str::match_indices` pass per
+//! `word_bounds` for the default levels, one `memmem` pass per
 //! custom literal), never re-scanned per chunk. Building each chunk is one
 //! `partition_point` binary search per level: O(n × levels) total, levels
-//! bounded by the small, caller-supplied list length. Forward progress is
-//! pinned the same way [`crate::chunk_impl::chunk_text_overlapping`]'s is:
-//! a hard iteration-count assertion in the tests, not just a slow-test
-//! timeout.
+//! bounded by the small, caller-supplied list length. The codepoint `total`
+//! the budget arithmetic needs is one branchless byte pass (every UTF-8
+//! codepoint starts at a non-continuation byte), not a materialized
+//! `Vec<char>`. The one other whole-text structure is the grapheme boundary
+//! index (see [`GraphemeIndex`]): ONE `graphemes(true)` walk emitting one
+//! bit per codepoint on non-ASCII text — or, on pure-ASCII text, an
+//! all-ones bitmap plus the CRLF fixup, two SIMD byte scans, no
+//! segmentation walk at all — built at most once per call and ONLY when a
+//! call actually needs it — a level with cuts to filter, the raw-cut
+//! fallback, or an overlap snap; a custom hierarchy whose literals never
+//! match (the whole-document-budget case) builds none of it. The former
+//! spelling paid an unconditional `Vec<char>` collect plus a
+//! `HashSet<usize>` of every grapheme boundary in the document BEFORE
+//! anything else could run, which dominated document-scale cost and was
+//! superlinear on top of it (#22: a 12 MiB document spent ~1.2 s in
+//! ~12.6M hashed inserts regardless of chunk budget or separator
+//! presence). Forward progress is pinned the
+//! same way [`crate::chunk_impl::chunk_text_overlapping`]'s is: a hard
+//! iteration-count assertion in the tests, not just a slow-test timeout.
 
-use std::collections::HashSet;
+use memchr::memmem;
 
 use crate::chunk_by_segment_impl::paragraph_bounds;
-use crate::chunk_impl::grapheme_safe_hard_cut;
 use crate::segmentation_impl;
-use crate::truncate_impl::grapheme_boundary_chars;
+use crate::truncate_impl::{GraphemeIndex, char_count};
 
 /// One level's candidate cut points, ascending by `cut_end`. `next_start >=
 /// cut_end` always: equal for contiguous segmenters (word/sentence bounds,
@@ -114,8 +128,10 @@ fn level_from_paragraph_bounds(bounds: Vec<(usize, usize)>) -> Level {
 /// (the separator is not part of either chunk), the next chunk resumes at
 /// the match end (the separator is dropped, the same convention
 /// [`level_from_paragraph_bounds`] already applies to blank-line runs).
-/// One `match_indices` pass over the whole text, converted from byte to
-/// codepoint offsets in the same forward walk (no second pass).
+/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way —
+/// std's `match_indices` runs the same algorithm without the SIMD skip
+/// and crawls on degenerate repeated-byte documents), converted from byte
+/// to codepoint offsets in the same forward walk (no second pass).
 fn level_from_literal(text: &str, separator: &str) -> Level {
     if separator.is_empty() {
         // An empty literal matches everywhere and cuts nothing meaningful
@@ -125,16 +141,19 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
         // than a pathological infinite-candidate one.
         return Level { cuts: Vec::new() };
     }
+    // Every match of a literal needle IS the needle: its char length is a
+    // loop-invariant, counted once.
+    let sep_chars = separator.chars().count();
     let mut cuts = Vec::new();
     let mut char_idx = 0usize;
     let mut byte_idx = 0usize;
-    for (byte_start, matched) in text.match_indices(separator) {
+    for byte_start in memmem::find_iter(text.as_bytes(), separator.as_bytes()) {
         char_idx += text[byte_idx..byte_start].chars().count();
         let start_char = char_idx;
-        let end_char = start_char + matched.chars().count();
+        let end_char = start_char + sep_chars;
         cuts.push((start_char, end_char));
         char_idx = end_char;
-        byte_idx = byte_start + matched.len();
+        byte_idx = byte_start + separator.len();
     }
     Level { cuts }
 }
@@ -144,8 +163,10 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 /// level (first in `levels`, excluding the always-appended grapheme-safe
 /// raw cut) that has an in-budget candidate, falling back to progressively
 /// finer levels only when a coarser one has none over the current window.
-/// The one exception, shared with [`crate::chunk_impl::chunk_text`] via the
-/// same `grapheme_safe_hard_cut`: a single grapheme cluster wider than the
+/// The one exception, the same rule `crate::chunk_impl::chunk_text`
+/// applies via its own `grapheme_safe_hard_cut` (replicated here against
+/// the [`GraphemeIndex`] bitmap and differential-pinned against the
+/// original in the tests): a single grapheme cluster wider than the
 /// whole remaining budget (e.g. an oversized ZWJ emoji chain) is kept
 /// whole rather than split, so that one chunk can exceed `max_chars`:
 /// this never affects ordinary text (no cluster is more than a handful of
@@ -176,8 +197,15 @@ pub fn chunk_hierarchical(
     // bare "attempt to divide by zero": the same discipline `chunk_text`'s
     // own `max_chars > 0` assert applies.
     assert!(max_chars > 0, "max_chars must be at least 1, got 0");
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len();
+    // The codepoint count as one branchless byte pass — every UTF-8
+    // codepoint begins at a byte that is not a continuation byte
+    // (`0b10xxxxxx`), so counting non-continuation bytes IS counting
+    // codepoints — instead of the former whole-text `Vec<char>` collect
+    // (4 bytes per codepoint materialized before anything else could
+    // run, the same O(source) allocation class #17 removed from
+    // `is_grounded_fuzzy` and `chunk_text`'s grapheme grid before that).
+    // `total` was the only thing that collect was ever read for.
+    let total = char_count(text);
 
     let mut levels: Vec<Level> = match separators {
         Some(seps) => seps
@@ -191,17 +219,33 @@ pub fn chunk_hierarchical(
             level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
         ],
     };
-    let grapheme_starts = grapheme_boundary_chars(text);
-    let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
+    // The grapheme boundary index: built lazily, AT MOST ONCE per call, at
+    // the first site that actually needs it — the cut filter below (only
+    // for a level with cuts to filter), the raw-cut fallback, or the
+    // overlap snap. The former spelling built the whole per-codepoint
+    // structure unconditionally before anything else could run, which is
+    // the document-scale cost #22 measured.
+    let mut graphemes: Option<GraphemeIndex> = None;
     // Every level's cuts are additionally filtered to grapheme-cluster
-    // boundaries, one O(level size) pass each: the same "never split a
+    // boundaries, one O(cuts) bitmap pass each: the same "never split a
     // cluster" fix chunk_text/chunk_by_* already apply, extended here to
     // custom literal separators too (a caller's separator could, in
-    // principle, land inside a cluster on pathological input).
+    // principle, land inside a cluster on pathological input). The
+    // default hierarchy is NOT exempt: `word_bounds`/`sentence_bounds`
+    // follow UAX #29 exactly, which scores some combining sequences
+    // (Thai SARA AM, U+0E33) as their own word/sentence segment even
+    // though the grapheme rules join them to the preceding base character
+    // into one cluster — `truncate_impl`'s module docs document the same
+    // divergence — so their cuts need this filter exactly like a custom
+    // literal's do. A level with no cuts filters nothing and builds
+    // nothing (a never-matching separator costs one scan, no structure).
     for level in &mut levels {
-        level
-            .cuts
-            .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+        if !level.cuts.is_empty() {
+            let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+            level
+                .cuts
+                .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+        }
     }
 
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
@@ -223,7 +267,8 @@ pub fn chunk_hierarchical(
             .iter()
             .find_map(|level| level.best_cut(start, limit))
             .unwrap_or_else(|| {
-                let end = grapheme_safe_hard_cut(&grapheme_starts, start, limit);
+                let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+                let end = g.hard_cut(start, limit);
                 (end, end)
             });
         chunks.push((start, cut.0));
@@ -231,8 +276,8 @@ pub fn chunk_hierarchical(
             start = cut.1;
         } else {
             let target = cut.0.saturating_sub(overlap);
-            let ghi = grapheme_starts.partition_point(|&g| g <= target);
-            let snapped = if ghi > 0 { grapheme_starts[ghi - 1] } else { 0 };
+            let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+            let snapped = g.last_at_or_before(target);
             start = if snapped > start { snapped } else { cut.1 };
         }
     }
@@ -242,6 +287,15 @@ pub fn chunk_hierarchical(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The differential oracle below is the pre-#22 implementation verbatim,
+    // which is why the tests module re-imports the three spellings the
+    // production code no longer uses: the `Vec<char>` collect's total, the
+    // `grapheme_boundary_chars` + `HashSet<usize>` filter, and
+    // `grapheme_safe_hard_cut` over the usize grid.
+    use std::collections::HashSet;
+
+    use crate::chunk_impl::grapheme_safe_hard_cut;
+    use crate::truncate_impl::grapheme_boundary_chars;
 
     fn text_of(chunks: &[(usize, usize)], text: &str) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();
@@ -249,6 +303,182 @@ mod tests {
             .iter()
             .map(|&(s, e)| chars[s..e].iter().collect())
             .collect()
+    }
+
+    /// The pre-#22 implementation, kept verbatim as the differential
+    /// oracle for the bitmap/lazy rewrite: every behavior-affecting line
+    /// of the former code (the whole-text `Vec<char>` collect, the
+    /// UNCONDITIONAL `grapheme_boundary_chars` + `HashSet<usize>` filter
+    /// over every level, `grapheme_safe_hard_cut` over the usize grid, the
+    /// `partition_point` overlap snap) runs against the new spelling over
+    /// a corpus × budget × overlap × hierarchy sweep below. The rewrite
+    /// claims bit-identical output; this is the pin.
+    fn chunk_hierarchical_reference(
+        text: &str,
+        max_chars: usize,
+        separators: Option<&[&str]>,
+        overlap: usize,
+    ) -> Vec<(usize, usize)> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        assert!(max_chars > 0, "max_chars must be at least 1, got 0");
+        let chars: Vec<char> = text.chars().collect();
+        let total = chars.len();
+
+        let mut levels: Vec<Level> = match separators {
+            Some(seps) => seps
+                .iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| level_from_literal(text, s))
+                .collect(),
+            None => vec![
+                level_from_paragraph_bounds(paragraph_bounds(text)),
+                level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
+                level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
+            ],
+        };
+        let grapheme_starts = grapheme_boundary_chars(text);
+        let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
+        for level in &mut levels {
+            level
+                .cuts
+                .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+        }
+
+        let mut chunks = Vec::with_capacity(total / max_chars + 1);
+        let mut start = 0usize;
+        let mut iterations = 0usize;
+        while start < total {
+            iterations += 1;
+            assert!(
+                iterations <= total + 1,
+                "chunk_hierarchical: forward-progress invariant violated"
+            );
+            let remaining = total - start;
+            if remaining <= max_chars {
+                chunks.push((start, total));
+                break;
+            }
+            let limit = start + max_chars;
+            let cut = levels
+                .iter()
+                .find_map(|level| level.best_cut(start, limit))
+                .unwrap_or_else(|| {
+                    let end = grapheme_safe_hard_cut(&grapheme_starts, start, limit);
+                    (end, end)
+                });
+            chunks.push((start, cut.0));
+            if overlap == 0 {
+                start = cut.1;
+            } else {
+                let target = cut.0.saturating_sub(overlap);
+                let ghi = grapheme_starts.partition_point(|&g| g <= target);
+                let snapped = if ghi > 0 { grapheme_starts[ghi - 1] } else { 0 };
+                start = if snapped > start { snapped } else { cut.1 };
+            }
+        }
+        chunks
+    }
+
+    /// The differential corpus: every cluster shape the filter and the
+    /// hard cut have to get right — plain ASCII, CRLF/blank-line
+    /// paragraphs, Thai SARA AM (the combining sequence UAX #29 word/
+    /// sentence bounds split but grapheme rules join), ZWJ emoji chains,
+    /// regional-indicator pairs, decomposed accents, and the degenerate
+    /// repeated-character runs that stress the raw cut.
+    fn differential_corpus() -> Vec<String> {
+        vec![
+            "a".to_string(),
+            "hello world".to_string(),
+            "Short one.\n\nShort two.".to_string(),
+            "Alpha beta gamma delta epsilon zeta eta theta.".to_string(),
+            "one two three four five six seven eight nine ten eleven".to_string(),
+            "# Title\nintro text\n## Section\nmore text here that is long".to_string(),
+            "a\r\nb\r\n\r\nc".to_string(),
+            "a\rb".to_string(),
+            "\r".to_string(),
+            "\r\n".to_string(),
+            "ab 0\u{0E33} cd ef 0\u{0E33} gh ij 0\u{0E33} kl".to_string(),
+            "0\u{0E33}0\u{0E33}0\u{0E33}".to_string(),
+            "\u{0E33}\u{0E33}".to_string(),
+            "e\u{0301}e\u{0301}e\u{0301} ".to_string(),
+            "thumbs up \u{1F44D}\u{200D}\u{1F3FB} flag \u{1F1FA}\u{1F1F8}".to_string(),
+            "q".repeat(200),
+            "q".repeat(128),
+            "0\u{0E33}".repeat(32),
+            "abcdefghijklmnopqrstuvwxyz".repeat(8),
+            "\u{4E2D}\u{6587}\u{6587}\u{672C}\u{FF0C}\u{6D4B}\u{8BD5}".to_string(),
+            "mixed 0\u{0E33} ascii \u{1F600} \u{4E2D}\u{6587} tail".to_string(),
+        ]
+    }
+
+    #[test]
+    fn bitmap_lazy_spelling_matches_the_former_implementation_exactly() {
+        let separator_cases: Vec<Option<Vec<&str>>> = vec![
+            None,
+            Some(vec![]),
+            Some(vec!["ZZZ_NEVER_MATCHES"]),
+            Some(vec!["xyz"]),
+            Some(vec![" "]),
+            Some(vec![". "]),
+            Some(vec!["\n\n", " "]),
+            Some(vec!["\u{0E33}"]),
+            Some(vec!["", " "]),
+        ];
+        for text in differential_corpus() {
+            let total = text.chars().count();
+            let budgets = (1..=total.min(48))
+                .chain([64, 97])
+                .filter(|&m| m <= total.max(1));
+            for max_chars in budgets {
+                // The pyo3 layer's validated envelope is overlap < max_chars
+                // (the fuzz target clamps to the same range); sweep the
+                // boundary-adjacent values, not just one mid choice.
+                for overlap in [0usize, 1, max_chars.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&o| o < max_chars)
+                {
+                    for seps in &separator_cases {
+                        let sep_refs: Option<Vec<&str>> = seps.as_ref().map(|v| v.to_vec());
+                        let new =
+                            chunk_hierarchical(&text, max_chars, sep_refs.as_deref(), overlap);
+                        let old = chunk_hierarchical_reference(
+                            &text,
+                            max_chars,
+                            sep_refs.as_deref(),
+                            overlap,
+                        );
+                        assert_eq!(
+                            new, old,
+                            "divergence: text={text:?} max_chars={max_chars} \
+                             overlap={overlap} separators={seps:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn custom_separator_matching_inside_a_cluster_never_cuts_there() {
+        // "0" + SARA AM is ONE grapheme cluster; a literal separator that
+        // matches the SARA AM codepoint alone would cut between the two
+        // codepoints of that cluster. The filter must drop every such
+        // match — the case the filter exists for, pinned because the
+        // bitmap membership query is what answers it now.
+        let text = "0\u{0E33} 0\u{0E33} 0\u{0E33}";
+        let boundaries: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+        for max_chars in 1..text.chars().count() {
+            let chunks = chunk_hierarchical(text, max_chars, Some(&["\u{0E33}"]), 0);
+            assert!(!chunks.is_empty(), "no chunks at max_chars={max_chars}");
+            for &(s, e) in &chunks {
+                assert!(
+                    boundaries.contains(&s) && boundaries.contains(&e),
+                    "chunk ({s}, {e}) splits a cluster at max_chars={max_chars}"
+                );
+            }
+        }
     }
 
     #[test]
