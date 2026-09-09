@@ -24,14 +24,12 @@ use crate::py::_borrow::timeout_err;
 use crate::validate_deadline_ms;
 
 /// Map a `repair()` error string to the right Python exception: a
-/// `DEADLINE_TAG`-prefixed message is a deadline abort -> `TimeoutError`;
-/// anything else is the normal `ValueError`.
-fn map_repair_err(message: String) -> PyErr {
+/// `DEADLINE_TAG`-prefixed payload is a deadline abort -> `TimeoutError`
+/// carrying the called spelling's own name, in the same wording as
+/// `diff_opcodes`' TimeoutError; anything else is the normal `ValueError`.
+fn map_repair_err(message: String, name: &str) -> PyErr {
     match message.strip_prefix(DEADLINE_TAG) {
-        // Strip the NUL-prefixed internal sentinel so the surfaced
-        // TimeoutError reads cleanly (e.g. "repair_json exceeded its
-        // deadline_ms=... (elapsed_ms=...)").
-        Some(rest) => timeout_err(format!("repair_json exceeded its{rest}")),
+        Some(rest) => timeout_err(format!("{name} deadline exceeded:{rest}")),
         None => PyValueError::new_err(message),
     }
 }
@@ -449,7 +447,7 @@ pub fn repair_json(
         Ok((value, _)) => Ok(json_repair::dumps(&value, ensure_ascii)),
         Err(message) => Err(message),
     })
-    .map_err(map_repair_err)
+    .map_err(|e| map_repair_err(e, "repair_json"))
 }
 
 /// `tors.repair_json_loads`: the repaired JSON as decoded OBJECTS — the
@@ -482,7 +480,7 @@ pub fn repair_json_loads(
     )?;
     let value = py
         .detach(|| json_repair::repair(s, &cfg))
-        .map_err(map_repair_err)?;
+        .map_err(|e| map_repair_err(e, "repair_json_loads"))?;
     value_to_py(py, &value.0)
 }
 
@@ -517,7 +515,7 @@ pub fn repair_json_diagnostics(
     )?;
     let (value, diagnostics) = py
         .detach(|| json_repair::repair(s, &cfg))
-        .map_err(map_repair_err)?;
+        .map_err(|e| map_repair_err(e, "repair_json_diagnostics"))?;
     let value = value_to_py(py, &value)?;
     let list = PyList::empty(py);
     for diagnostic in &diagnostics {

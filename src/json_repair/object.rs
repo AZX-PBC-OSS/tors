@@ -632,6 +632,9 @@ impl Parser {
         // Python's json_str[:index+1] + "{" + json_str[index+1:] — an insert
         // at index + 1.
         self.s.insert(self.index + 1, '{');
+        // An O(n) buffer splice: the next deadline check must read the
+        // clock, keeping the splice-rescan bound tight.
+        self.force_deadline_check();
     }
 
     /// parse_object.py's `_resolve_object_property_schema`: pick the schema
@@ -762,6 +765,9 @@ impl Parser {
             let end_index = (self.index + 1).min(self.s.len());
             self.s
                 .splice(start_index - 1..end_index, normalized_object.chars());
+            // An O(n) buffer splice: the next deadline check must read the
+            // clock, keeping the reparse bound tight.
+            self.force_deadline_check();
             self.index = start_index;
             self.ctx_push(Ctx::ObjectKey);
             let repaired = self.parse_object(schema, path);
@@ -829,6 +835,9 @@ impl Parser {
         // cursor; Python slicing clamps both ends (the cursor can sit past
         // the end), which the min() and get() reproduce.
         let end = (self.index + 1).min(self.s.len());
+        // A span this wide is O(remaining) work per empty-object exit (the
+        // empty-object quadratic's other half): force the next check.
+        self.note_scan_distance(end - (start_index - 1));
         let attempted_object: String = self
             .s
             .get(start_index - 1..end)

@@ -588,6 +588,8 @@ impl Parser {
             StringEntry::Scan(state) => state,
         };
         let ch = self.scan_string_body(&mut state);
+        // Before finalize: a deadline abort broke the scan mid-string, and
+        // the sticky error — not the partial state — is the answer.
         if let Some(err) = self.take_deadline_error() {
             return Err(err);
         }
@@ -626,10 +628,14 @@ impl Parser {
         // Skip garbage before the string's first meaningful character: any
         // char that is neither a delimiter nor alphanumeric. (Truthiness:
         // any char, '\0' included, keeps the loop going upstream.)
+        let garbage_start = self.index;
         while ch.is_some_and(|c| !is_string_delimiter(c) && !c.is_alphanumeric()) {
             self.index += 1;
             ch = self.cur();
         }
+        // A quote-free tail makes this skip O(remaining) per string parse
+        // (the empty-object quadratic's driver): force the next check.
+        self.note_scan_distance(self.index - garbage_start);
 
         let Some(ch) = ch else {
             return Ok(StringEntry::Direct(Value::Str(String::new())));
@@ -1163,11 +1169,18 @@ impl Parser {
         let mut stack = vec![closer];
         let mut i = idx + 1;
         while !stack.is_empty() {
-            let ch = self.get(i as isize)?;
+            let ch = match self.get(i as isize) {
+                Some(ch) => ch,
+                None => {
+                    self.note_scan_distance(i - idx);
+                    return None;
+                }
+            };
             if is_string_delimiter(ch) {
                 let end_delimiter = matching_string_delimiter(ch);
                 i = self.skip_to_character(&[end_delimiter], i + 1);
                 if self.get(i as isize) != Some(end_delimiter) {
+                    self.note_scan_distance(i - idx);
                     return None;
                 }
             } else if let Some(nested_closer) = inline_container_closer(ch)
@@ -1177,6 +1190,7 @@ impl Parser {
             } else if stack.last() == Some(&ch) {
                 stack.pop();
                 if stack.is_empty() {
+                    self.note_scan_distance(i + 1 - idx);
                     return Some(i + 1);
                 }
             }
@@ -1190,6 +1204,7 @@ impl Parser {
     /// past whitespace and any `#`/`//`/`/*...*/` comments to where the
     /// next object member would start.
     fn scroll_comment_prefixed_member_start(&self, idx: usize) -> usize {
+        let start = idx;
         let mut idx = self.scroll_whitespaces(idx);
         loop {
             let ch = self.get(idx as isize);
@@ -1219,6 +1234,7 @@ impl Parser {
                     loop {
                         let ch = self.get(idx as isize);
                         let Some(ch) = ch else {
+                            self.note_scan_distance(idx - start);
                             return idx;
                         };
                         if ch == '*' && self.get(idx as isize + 1) == Some('/') {
@@ -1231,6 +1247,7 @@ impl Parser {
                     continue;
                 }
             }
+            self.note_scan_distance(idx - start);
             return idx;
         }
     }
@@ -1443,14 +1460,31 @@ impl Parser {
     /// parse_string.py's `_scan_string_body`: the main scan loop. Returns
     /// the char at the stop position (the right delimiter when the string
     /// closed, whatever ended the scan otherwise, `None` at end of input).
+    ///
+    /// Split on a `const` deadline flag so the unbounded path (every
+    /// existing caller) compiles to the pre-deadline loop with zero
+    /// per-char cost: the armed check is dead code when `DL` is false.
     fn scan_string_body(&mut self, state: &mut StringParseState) -> Option<char> {
+        if self.deadline_armed() {
+            self.scan_string_body_impl::<true>(state)
+        } else {
+            self.scan_string_body_impl::<false>(state)
+        }
+    }
+
+    fn scan_string_body_impl<const DL: bool>(
+        &mut self,
+        state: &mut StringParseState,
+    ) -> Option<char> {
         let outer = state.outer_rstring_delimiter();
 
         let mut ch = self.cur();
         while let Some(c) = ch
             && (c != outer || state.in_low_smart_quote_span())
         {
-            if self.deadline_expired() {
+            if DL && self.deadline_expired() {
+                // True only with the sticky error set; parse_string polls
+                // it below once the scan unwinds.
                 break;
             }
             if state.missing_quotes {
