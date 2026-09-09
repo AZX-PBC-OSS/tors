@@ -35,7 +35,8 @@
 mod common;
 
 use common::prose;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use tors::chunk_by_segment_impl;
 use tors::chunk_hierarchical_impl;
 use tors::chunk_impl;

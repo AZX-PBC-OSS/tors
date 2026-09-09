@@ -129,7 +129,7 @@ default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 strsim = "0.11.1"
 
 [[bench]]
