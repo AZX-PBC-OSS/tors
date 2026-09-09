@@ -1297,6 +1297,291 @@ class TestPayloadAdversarialSurface:
         assert payload.__version__ == version("tors-documents")
 
 
+# --- the PDF family's backend lanes and input budget ------------------------------
+
+
+class TestPdfFamilyBackendAndBudget:
+    """The four PDF-only entry points join the conversion pair's parameter
+    vocabulary — ``backend=`` and ``max_bytes=`` — with honest engine
+    routing: ``"auto"``/``"oxide"`` are the pdf_oxide lane (the mapping
+    ``engine_for`` makes for PDF, byte-identical either way), and
+    ``"anydoc"`` is a CAPABILITY refusal raised under the GIL before any
+    work runs. Red, captured verbatim on this tree before the params
+    existed: ``pdf_extract(path, backend="anydoc")`` died as
+    ``TypeError: pdf_extract() got an unexpected keyword argument
+    'backend'`` — all four functions, ``max_bytes=`` the same shape — the
+    vocabulary was simply absent. The refusal is deliberately NOT the
+    format-level UnsupportedBackend (PDF+anydoc is a usable conversion
+    pair, pinned elsewhere in this suite): anydoc's entire PDF surface
+    is whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs — no
+    per-page text, no page-count success return, no per-page
+    classification, no annotation walk), and each of these calls needs
+    exactly one of those surfaces."""
+
+    def test_anydoc_is_a_capability_refusal_naming_the_lane_and_the_alternative(
+        self, tmp_path: Path
+    ) -> None:
+        """The named ValueError, message pinned: it names ``backend`` and
+        the value, names the capability the call needs, points at the
+        conversion pair as the anydoc PDF surface (with NeedsOcrError as
+        that lane's scanned-page signal), and names the lanes that serve
+        this call. On both source spellings (``path=`` and ``data=``) and
+        through the enum member — the doctrine text is one helper in the
+        core (next to the routing table), so one full pin plus the
+        capability names for the other three calls."""
+        from tors_documents import Backend, pdf_link_uris
+
+        path = _materialize(tmp_path, "pdf_two_page")
+        data = ENGINES_CORPUS["pdf_two_page"]
+        capabilities = {
+            pdf_extract: "the per-page text probe",
+            pdf_page_count: "the page tree",
+            pdf_classify: "per-page classification",
+            pdf_link_uris: "the /Annots link walk",
+        }
+        for call, capability in capabilities.items():
+            for source in ({"path": path}, {"data": data}):
+                with pytest.raises(ValueError, match="backend") as raised:
+                    call(**source, backend="anydoc")
+                message = str(raised.value)
+                assert 'backend "anydoc" cannot serve' in message, message
+                assert capability in message, message
+                assert "to_markdown/to_text" in message, message
+                assert "NeedsOcrError" in message, message
+                assert "backend='auto' or 'oxide'" in message, message
+        # the enum member IS its string: the same refusal
+        with pytest.raises(ValueError, match="cannot serve the per-page text probe"):
+            pdf_extract(path=path, backend=Backend.ANYDOC)
+
+    def test_the_refusal_precedes_the_encrypted_door_check(self) -> None:
+        """A contract failure precedes work: on a locked PDF the
+        ``backend="anydoc"`` call surfaces the CAPABILITY refusal, never
+        the door-check error — the refusal is raised under the GIL, ahead
+        of the detach where the door check lives, so the caller learns
+        the argument is wrong, not that a document they never asked to
+        convert is encrypted."""
+        from tors_documents import pdf_link_uris
+
+        locked = _encrypted_pdf()
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+            with pytest.raises(ValueError, match="cannot serve") as raised:
+                call(data=locked, backend="anydoc")
+            assert "encrypted" not in str(raised.value)
+
+    def test_the_refusal_precedes_the_missing_path_check(self, tmp_path: Path) -> None:
+        """Refusal-before-IO, the ``path=`` spelling (the ``data=`` rows
+        above): on a path that does not exist the ``backend="anydoc"``
+        call surfaces the CAPABILITY ValueError, never FileNotFoundError —
+        the argument contract is checked under the GIL, ahead of the read
+        the missing path would fail, so the caller learns the argument is
+        wrong, not that a file they cannot use is also absent."""
+        missing = str(tmp_path / "not-there.pdf")
+        with pytest.raises(ValueError, match="cannot serve the per-page text probe") as raised:
+            pdf_extract(path=missing, backend="anydoc")
+        assert not isinstance(raised.value, OSError)
+
+    def test_the_same_bytes_convert_on_the_pair_and_refuse_on_the_probe(
+        self, tmp_path: Path
+    ) -> None:
+        """The surface's shape in ONE test, on one byte set (the corpus's
+        engines_report.pdf): the conversion pair's anydoc lane converts it
+        — ``Format.PDF``, real markdown — while the probe's anydoc call
+        refuses with the capability message pointing at that pair. The two
+        halves are pinned separately elsewhere (the backend matrix's
+        overlap cell, this class's refusal pin); held together they are
+        the doctrine itself: the refusal is about the CALL's surface, not
+        the format's — PDF+anydoc is a usable pair, and the probe is not
+        the pair."""
+        from tors_documents import Format
+
+        data = ENGINES_CORPUS["pdf"]
+        resolved, markdown = to_markdown(data=data, backend="anydoc")
+        assert resolved is Format.PDF
+        assert "Quarterly Review Q3 2026" in markdown
+        with pytest.raises(ValueError, match="cannot serve the per-page text probe") as raised:
+            pdf_extract(data=data, backend="anydoc")
+        assert "to_markdown/to_text" in str(raised.value)
+
+    def test_oxide_is_the_default_lane_byte_identically(self, tmp_path: Path) -> None:
+        """"oxide" is the oxide-family engine for PDF — the same mapping
+        ``engine_for`` makes — so forcing it changes nothing: byte-identical
+        outputs on all four calls, both source spellings where cheap (the
+        default's preference for pdf_oxide is a routing choice, never a
+        behavior difference between the two spellings). The link walk's
+        identity pin rides the LINK-BEARING fixture — the real URI list,
+        not the link-less empty shape the bytes-input suite already
+        holds."""
+        from tors_documents import pdf_link_uris
+
+        path = _materialize(tmp_path, "pdf_two_page")
+        data = ENGINES_CORPUS["pdf_two_page"]
+        assert pdf_extract(path, backend="oxide") == pdf_extract(path)
+        assert pdf_extract(data=data, backend="oxide") == pdf_extract(data=data)
+        assert pdf_page_count(path, backend="oxide") == pdf_page_count(path) == 2
+        link_path = _materialize(tmp_path, "pdf_link")
+        assert pdf_link_uris(link_path, backend="oxide") == pdf_link_uris(link_path) == [
+            [PDF_LINK_URL]
+        ]
+        by_default = pdf_classify(path)
+        by_oxide = pdf_classify(path, backend="oxide")
+        assert (by_oxide.page_count, by_oxide.page_kinds, by_oxide.pages_needing_ocr) == (
+            by_default.page_count,
+            by_default.page_kinds,
+            by_default.pages_needing_ocr,
+        )
+
+    def test_auto_and_the_enum_members_are_the_default_lane(self, tmp_path: Path) -> None:
+        """"auto" spelled explicitly, and the ``Backend.AUTO``/
+        ``Backend.OXIDE`` members (each member IS its accepted string), are
+        the default lane on the whole family — the enum vocabulary costs
+        nothing at the boundary and never introduces a second routing
+        rule."""
+        from tors_documents import Backend, pdf_link_uris
+
+        path = _materialize(tmp_path, "pdf_two_page")
+        for call in (pdf_extract, pdf_page_count, pdf_link_uris):
+            for lane in ("auto", Backend.AUTO, Backend.OXIDE):
+                assert call(path, backend=lane) == call(path)
+        by_default = pdf_classify(path)
+        for lane in ("auto", Backend.AUTO, Backend.OXIDE):
+            forced = pdf_classify(path, backend=lane)
+            assert (forced.page_count, forced.page_kinds, forced.pages_needing_ocr) == (
+                by_default.page_count,
+                by_default.page_kinds,
+                by_default.pages_needing_ocr,
+            )
+
+    def test_backend_argument_convention_on_the_pdf_family(self) -> None:
+        """The type-vs-value convention, shared with the conversion pair's
+        ``parse_backend``: a non-str ``backend=`` (bool, int, float, bytes
+        — ``b"anydoc"`` is a str-shaped value of the wrong type, not a
+        lane name) is a TypeError naming the argument and repr'ing the
+        value; a str outside the vocabulary (the empty string included) is
+        a ValueError naming it — raised under the GIL before any work runs,
+        so arbitrary bytes carry the pin, no fixture needed."""
+        from tors_documents import pdf_link_uris
+
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+            for bad in (True, 1, 1.5, b"anydoc"):
+                with pytest.raises(TypeError, match="backend must be one of"):
+                    call(data=b"junk bytes", backend=bad)
+            for bad in ("", "nope"):
+                with pytest.raises(ValueError, match="backend must be one of"):
+                    call(data=b"junk bytes", backend=bad)
+
+    def test_max_bytes_argument_convention_on_the_pdf_family(self) -> None:
+        """The ceiling knob's convention, the conversion pair's pins
+        mirrored (``TestAnydocInputCeiling``'s): 0 and -1 are value
+        problems ("must be positive"); True, "64KB", and 1.5 are type
+        problems naming ``max_bytes=`` (True FIRST, as a type — a bool
+        launders through an int extraction as 1); a 10**30 int is
+        type-correct, value-absurd — the too-large ValueError."""
+        from tors_documents import pdf_link_uris
+
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+            for bad in (0, -1):
+                with pytest.raises(ValueError, match="positive"):
+                    call(data=b"junk bytes", max_bytes=bad)
+            for bad in (True, "64KB", 1.5):
+                with pytest.raises(TypeError, match="max_bytes must be an int"):
+                    call(data=b"junk bytes", max_bytes=bad)
+            with pytest.raises(ValueError, match="too large"):
+                call(data=b"junk bytes", max_bytes=10**30)
+
+    def test_an_explicit_budget_binds_the_pdf_family_pre_read(self, tmp_path: Path) -> None:
+        """The shared source-spine gate, extended to the pdf family: the
+        two-page fixture (859 bytes) under ``max_bytes=1`` refuses on
+        every call, both source spellings, with the binding's own message
+        naming both sizes — the same pre-read refusal the hardening suite
+        pins on the conversion pair (the pdf lane's read path,
+        ``into_bytes``, now carries the same over-ceiling gate
+        ``into_input`` always had). ``max_bytes=None`` converts the same
+        fixture unmolested — the unmetered pin: the 32 MiB default is
+        the core's post-read check on the anydoc/office_oxide lanes only,
+        lanes these PDF-only calls never run — and a roomy budget is
+        byte-identical to None."""
+        from tors_documents import pdf_link_uris
+
+        path = _materialize(tmp_path, "pdf_two_page")
+        data = ENGINES_CORPUS["pdf_two_page"]
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+            for source in ({"path": path}, {"data": data}):
+                with pytest.raises(ValueError, match="ceiling") as raised:
+                    call(**source, max_bytes=1)
+                message = str(raised.value)
+                assert "the document is" in message and "input ceiling is" in message, message
+                assert "859 bytes" in message and "1 bytes" in message, message
+                assert "max_bytes" in message, message
+        assert pdf_extract(path) == pdf_extract(path, max_bytes=10_000_000)
+        assert pdf_page_count(data=data) == 2
+
+    def test_the_ceiling_is_inclusive_at_the_boundary(self) -> None:
+        """``max_bytes == len(data)`` converts — the off-by-one guard on
+        the pre-read gate: a budget exactly the document's size is NOT
+        over it (the comparison is ``size > ceiling``, never ``>=``), one
+        byte under is the refusal, both sizes named in the message."""
+        data = ENGINES_CORPUS["pdf_two_page"]
+        assert pdf_extract(data=data, max_bytes=len(data))[0] == [
+            "first page line",
+            "second page line",
+        ]
+        with pytest.raises(ValueError, match="ceiling") as raised:
+            pdf_extract(data=data, max_bytes=len(data) - 1)
+        assert "859 bytes" in str(raised.value) and "858 bytes" in str(raised.value)
+
+    def test_none_leaves_the_pdf_lane_unmetered_past_the_default_ceiling(
+        self, tmp_path: Path
+    ) -> None:
+        """The budget doctrine's headline pin: ``max_bytes=None`` (the
+        default) leaves the pdf lane UNMETERED — a PDF just over the 32
+        MiB default ceiling (the GIL heartbeat cells' own generator, sized
+        at 410_000 lines ≈ 33.6 MB to stay fast) page-counts fine with
+        both params at rest, while the SAME file under
+        ``max_bytes=<size-1>`` refuses with the ceiling ValueError. The
+        32 MiB default is the anydoc/office_oxide lanes' post-read check —
+        lanes these PDF-only calls never run — so a regression that wires
+        it into the pdf lane (pre-read or post) fails here."""
+        path = tmp_path / "big.pdf"
+        path.write_bytes(generate_pdf_big(410_000))
+        size = path.stat().st_size
+        assert size > 32 * 1024 * 1024
+        assert pdf_page_count(str(path)) == 1
+        assert pdf_page_count(str(path), backend=None, max_bytes=None) == 1
+        with pytest.raises(ValueError, match="ceiling") as raised:
+            pdf_page_count(str(path), max_bytes=size - 1)
+        assert "max_bytes" in str(raised.value)
+
+    def test_aio_carries_the_new_params_through_the_thread_hop(self, tmp_path: Path) -> None:
+        """aio parity for the new params (the existing aio gates' loop
+        pattern, both the payload's aio and the base shim's re-export),
+        all four functions: ``backend="oxide"`` through the hop is the
+        default lane's byte-identical answer, ``backend="anydoc"`` the
+        same capability refusal (each call's own capability named), and
+        an explicit budget the same pre-read ceiling — the awaitable
+        spellings wrap the typed wrappers, so the contract rides along
+        unchanged."""
+        from tors_documents import aio as payload_aio
+        from tors_documents import pdf_extract as sync_extract
+
+        from tors.documents import aio as shim_aio
+
+        path = _materialize(tmp_path, "pdf_two_page")
+        capabilities = {
+            "pdf_extract": "the per-page text probe",
+            "pdf_page_count": "the page tree",
+            "pdf_classify": "per-page classification",
+            "pdf_link_uris": "the /Annots link walk",
+        }
+        for aio_module in (payload_aio, shim_aio):
+            assert asyncio.run(aio_module.pdf_extract(path, backend="oxide")) == sync_extract(path)
+            for name, capability in capabilities.items():
+                call = getattr(aio_module, name)
+                with pytest.raises(ValueError, match=f"cannot serve {capability}"):
+                    asyncio.run(call(path, backend="anydoc"))
+                with pytest.raises(ValueError, match="ceiling"):
+                    asyncio.run(call(path, max_bytes=1))
+
+
 # --- in-memory bytes input + the annotation link walk (red-team lane) ------
 
 

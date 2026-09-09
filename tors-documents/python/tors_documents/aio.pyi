@@ -47,19 +47,27 @@ async def pdf_extract(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,
     password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
 ) -> tuple[list[str], str]: ...
 async def pdf_page_count(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,
     password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
 ) -> int: ...
 async def pdf_link_uris(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,
     password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
 ) -> list[list[str]]: ...
 async def pdf_classify(
     path: str | os.PathLike[str] | None = ...,
     data: bytes | None = ...,
     password: str | None = ...,
+    backend: Backend | str = ...,
+    max_bytes: int | None = ...,
 ) -> PdfClassification: ...

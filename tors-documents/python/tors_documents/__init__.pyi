@@ -142,34 +142,61 @@ def pdf_classify(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
 ) -> PdfClassification:
     """The cheap text-vs-image preflight over an open PDF — no content
     conversion, no OCR, no rasterization. Encrypted documents fail closed
-    (``ValueError``). Runs GIL-free."""
+    (``ValueError``). ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide
+    lane; ``"anydoc"`` is a capability refusal — its PDF surface is the
+    ``to_markdown``/``to_text`` conversion pair); an explicit
+    ``max_bytes=`` binds before the read, ``None`` leaves the lane
+    unmetered. Runs GIL-free."""
 
 def pdf_extract(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
 ) -> tuple[list[str], str]:
     """Open a PDF and return ``(per_page_plain_text, markdown)`` — one
     GIL-free pass over one open document (the parse is paid once for both
     outputs). An image-only page is an empty string, not an error; routing
-    decisions are the caller's."""
+    decisions are the caller's. ``backend=`` is ``"auto"``/``"oxide"``
+    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal — the
+    per-page probe is the OCR-routing signal and anydoc has none; its
+    PDF surface is the ``to_markdown``/``to_text`` conversion pair); an
+    explicit ``max_bytes=`` binds before the read, ``None`` leaves the
+    lane unmetered."""
 
 def pdf_page_count(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
 ) -> int:
     """The page tree and nothing else: open + count, no content
-    extraction, one GIL-free pass."""
+    extraction, one GIL-free pass. ``backend=`` is ``"auto"``/``"oxide"``
+    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal — a count
+    its reader never returns on success; its PDF surface is the
+    ``to_markdown``/``to_text`` conversion pair); an explicit
+    ``max_bytes=`` binds before the read, ``None`` leaves the lane
+    unmetered."""
 
 def pdf_link_uris(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = ...,
+    max_bytes: int | None = None,
 ) -> list[list[str]]:
     """The ``/Annots`` link walk: for every page, the URIs of its link
     annotations, in annotation order — the raw navigation surface no text
-    rendering carries. Verbatim (never deduped); URI actions only."""
+    rendering carries. Verbatim (never deduped); URI actions only.
+    ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide lane;
+    ``"anydoc"`` is a capability refusal — it has no annotation surface;
+    its PDF surface is the ``to_markdown``/``to_text`` conversion pair);
+    an explicit ``max_bytes=`` binds before the read, ``None`` leaves the
+    lane unmetered."""

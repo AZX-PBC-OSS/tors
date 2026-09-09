@@ -217,6 +217,22 @@ except BaseException as exc:
             with pytest.raises(FileNotFoundError):
                 pdf_page_count(str(tmp_path / "nope.pdf"))
 
+    def test_a_directory_with_a_tiny_explicit_budget_keeps_the_eisdir(self, tmp_path: Path) -> None:
+        """The budget gate shares the directory doctrine the kind gate has:
+        a directory is a KIND refusal, not a SIZE one, so an explicit tiny
+        max_bytes never pre-empts the documented IsADirectoryError with the
+        ceiling ValueError. Red, measured 2026-09-09 on this tree: both
+        lanes raised "the document is 40 bytes and the input ceiling is 1
+        bytes" — the tmpdir's stat size beat the budget, and the read's own
+        EISDIR never got to run."""
+        for call in (pdf_extract, to_markdown):
+            if sys.platform == "linux":
+                with pytest.raises(IsADirectoryError):
+                    call(str(tmp_path), max_bytes=1)
+            else:
+                with pytest.raises(OSError):
+                    call(str(tmp_path), max_bytes=1)
+
 
 # --- fix 1b: an explicit max_bytes binds every lane, before the read -------
 

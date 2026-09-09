@@ -352,6 +352,33 @@ fn engine_for(kind: Kind, backend: Backend) -> Result<Engine, DocumentError> {
     }
 }
 
+/// The PDF-family payload calls' `backend="anydoc"` refusal — a
+/// CAPABILITY-level refusal, deliberately not the format-level
+/// [`DocumentError::UnsupportedBackend`] (that one answers "can this
+/// engine read this format", and PDF+anydoc can — [`engine_for`] routes
+/// the pair; this one answers "can this engine serve this CALL"). The
+/// four probe-rich calls need per-engine surfaces anydoc's PDF reader
+/// structurally lacks: its entire PDF surface is `to_markdown(bytes)`
+/// whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs — no
+/// per-page text, no page-count success return, no per-page
+/// classification, no annotation walk), while `pdf_extract`'s per-page
+/// probe IS the OCR-routing signal, `pdf_page_count` walks the page
+/// tree, `pdf_classify` classifies per page, and `pdf_link_uris` walks
+/// `/Annots`. The doctrine text lives HERE, next to the routing table,
+/// so the four functions' messages cannot drift apart; the binding
+/// layer raises it under the GIL at argument-contract time, before any
+/// work runs. Message shape follows [`DocumentError::UnsupportedBackend`]'s
+/// Display: name the backend and the value, name the lack, point at the
+/// fix.
+pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
+    DocumentError::Convert(format!(
+        "backend \"anydoc\" cannot serve {capability}: anydoc's PDF surface is \
+         whole-document conversion only — to_markdown/to_text with backend=\"anydoc\" \
+         (NeedsOcrError is that lane's scanned-page signal); use backend='auto' or \
+         'oxide' here"
+    ))
+}
+
 /// The document-engine lanes' default input ceiling: 32 MiB, applied to
 /// the two lanes that AMPLIFY their input into resident memory — anydoc
 /// and office_oxide. anydoc AMPLIFIES at a measured ~146× worst case on
@@ -1924,6 +1951,40 @@ mod tests {
         let boxed: Box<dyn std::error::Error> =
             pdf_impl::PagesError::Pages("out of range".into()).into();
         assert_eq!(boxed.to_string(), "out of range");
+    }
+
+    #[test]
+    fn the_anydoc_capability_refusal_names_the_lack_and_the_alternative() {
+        // The PDF-family payload calls' shared doctrine, pinned byte-equal
+        // (UnsupportedBackend's message shape — backend and value, the
+        // lack, the fix — with the capability named per call and the
+        // anydoc PDF surface pointed at): the binding layer raises this
+        // exact text, under the GIL, for all four functions, so the
+        // string is the contract and lives with the routing table.
+        let err = anydoc_capability_refusal("the per-page text probe (the OCR-routing signal)");
+        assert_eq!(
+            err.to_string(),
+            "backend \"anydoc\" cannot serve the per-page text probe (the OCR-routing signal): \
+             anydoc's PDF surface is whole-document conversion only — to_markdown/to_text \
+             with backend=\"anydoc\" (NeedsOcrError is that lane's scanned-page signal); \
+             use backend='auto' or 'oxide' here"
+        );
+        // the other three capabilities ride the same doctrine text
+        for capability in [
+            "the page tree (a count its reader never returns on success)",
+            "per-page classification (its only per-page knowledge is the binary needs-OCR refusal)",
+            "the /Annots link walk (it has no annotation surface)",
+        ] {
+            let text = anydoc_capability_refusal(capability).to_string();
+            assert!(
+                text.contains(capability),
+                "must name the capability: {text:?}"
+            );
+            assert!(
+                text.contains("to_markdown/to_text with backend=\"anydoc\""),
+                "must point at the anydoc PDF surface: {text:?}"
+            );
+        }
     }
 
     #[test]

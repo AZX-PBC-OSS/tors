@@ -44,8 +44,9 @@ pyo3::create_exception!(
     "A PDF's scanned/image-only pages, which no local engine can read: route the document to an OCR stage. Carries .pages (the 0-based page indices — the same convention as pages= and pages_needing_ocr) and .page_count, set on every instance the engine raises (a plain user construction of the class carries neither)."
 );
 
-/// `tors.documents.pdf_classify(path) -> PdfClassification` (or
-/// `pdf_classify(data=...)`, `password=` for an encrypted one): the cheap
+/// `tors.documents.pdf_classify(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> PdfClassification` — or
+/// `pdf_classify(data=...)`: the cheap
 /// text-vs-image preflight over a PDF
 /// — no content conversion, no OCR, no rasterization. The answer to "does
 /// this PDF have a text layer, or is it an image we can do nothing with
@@ -64,14 +65,44 @@ pyo3::create_exception!(
 /// - `.image_only` — every page is image-only; nothing local can read
 ///   this document, route it to an OCR stage.
 ///
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide —
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way.
+/// `"anydoc"` is refused BEFORE any work runs, a named `ValueError`
+/// raised under the GIL ahead of the detach and the encrypted door
+/// check: a CAPABILITY refusal, not the format-level UnsupportedBackend
+/// (PDF+anydoc is a usable conversion pair) — anydoc's PDF surface is
+/// whole-document markdown only (~anydoc-0.2.4/src/formats/pdf.rs), and
+/// this call needs per-page classification, of which that engine's only
+/// per-page knowledge is the binary needs-OCR refusal. Whole-document
+/// conversion is the conversion pair's call: `to_markdown`/`to_text`
+/// with `backend="anydoc"` (`NeedsOcrError` is that lane's scanned-page
+/// signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An EXPLICIT budget binds this family pre-read exactly as it binds the
+/// conversion pair — the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied. `None` (the
+/// default) keeps the pdf lane UNMETERED, the unchanged doctrine — the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here).
+///
 /// Encrypted documents fail closed (`ValueError`, pdf_oxide's security
 /// rule: a security state is never masked as "all pages empty") —
 /// `password=` unlocks one (a wrong password is its own clean
 /// `ValueError`, and the unlock applies to every PDF entry, not just
-/// this one). A `path=` naming a FIFO, device, or socket is a
-/// `ValueError` naming `path` and the kind (the shared source spine
-/// reads REGULAR files only — open(2) on a no-writer FIFO blocks
-/// forever with the GIL released, and `/dev/zero` reads unboundedly).
+/// this one; a contract failure precedes the work, so an encrypted
+/// document under `backend="anydoc"` surfaces the capability refusal,
+/// never the door-check error). A `path=` naming a FIFO, device, or
+/// socket is a `ValueError` naming `path` and the kind (the shared
+/// source spine reads REGULAR files only — open(2) on a no-writer FIFO
+/// blocks forever with the GIL released, and `/dev/zero` reads
+/// unboundedly); an input over an explicit `max_bytes` is the ceiling
+/// `ValueError`, both sizes named, refused before the read or copy.
 ///
 /// GIL model: the source marshalling under the GIL (`parse_source`: the
 /// path type-checked and Unicode-validated, a `data=` call BORROWING
@@ -80,18 +111,34 @@ pyo3::create_exception!(
 /// `py.detach`, then the return object construction (three attribute
 /// values, O(pages)) — `pdf_extract`'s residue class with the smallest
 /// native pass of the PDF family.
-#[pyfunction(signature = (path = None, data = None, password = None))]
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
 pub fn pdf_classify(
     py: Python<'_>,
     path: Option<&Bound<'_, PyAny>>,
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PdfClassification> {
     let source = parse_source(path, data, "pdf_classify")?;
     let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "per-page classification (its only per-page knowledge is the binary \
+             needs-OCR refusal)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
     let classification = py
         .detach(move || {
-            let bytes = source.into_bytes()?;
+            let bytes = source.into_bytes(max_bytes)?;
             tors::pdf_impl::classify(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
         })
         .map_err(pdf_lane_error)?;
@@ -160,8 +207,9 @@ impl PdfClassification {
     }
 }
 
-/// `tors.documents.pdf_extract(path) -> (pages, markdown)` (or
-/// `pdf_extract(data=...)`, `password=` for an encrypted one): read a PDF
+/// `tors.documents.pdf_extract(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> (pages, markdown)` — or
+/// `pdf_extract(data=...)`: read a PDF
 /// — from `path`, or from the caller's `data=` bytes — and return
 /// `(per_page_plain_text, whole_document_markdown)` — one native pass over
 /// one open document (the parse is paid once for both outputs).
@@ -177,16 +225,43 @@ impl PdfClassification {
 /// order falling back to XY-Cut on untagged documents, and `/Link`
 /// annotations rendered as `[text](uri)`.
 ///
-/// Always the pdf_oxide engine: this is the probe-rich call, and only
-/// pdf_oxide's per-page surface exists. The generic entry points
-/// (`to_markdown`/`to_text`) take the backend choice.
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide —
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way. This is
+/// the probe-rich call, and `"anydoc"` is refused BEFORE any work runs,
+/// a named `ValueError` raised under the GIL ahead of the detach and the
+/// encrypted door check: a CAPABILITY refusal, not the format-level
+/// UnsupportedBackend (PDF+anydoc is a usable conversion pair) —
+/// anydoc's PDF surface is whole-document markdown only
+/// (~anydoc-0.2.4/src/formats/pdf.rs), and this call needs the per-page
+/// text probe, which IS the OCR-routing signal and has no anydoc
+/// counterpart. Whole-document conversion is the conversion pair's
+/// call: `to_markdown`/`to_text` with `backend="anydoc"`
+/// (`NeedsOcrError` is that lane's scanned-page signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An EXPLICIT budget binds this family pre-read exactly as it binds the
+/// conversion pair — the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied. `None` (the
+/// default) keeps the pdf lane UNMETERED, the unchanged doctrine — the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here).
 ///
 /// Errors: a missing/unreadable file raises `OSError`; anything that fails
 /// to parse as a PDF raises `ValueError` with pdf_oxide's reason; a `path=`
 /// naming a FIFO, device, or socket is a `ValueError` naming `path` and
-/// the kind (the shared source spine reads regular files only). Both of
-/// the typed refusals are constructed
-/// AFTER the GIL is reacquired.
+/// the kind (the shared source spine reads regular files only);
+/// `backend="anydoc"` is the capability `ValueError` above (a contract
+/// failure precedes the work, so an encrypted document under it surfaces
+/// the backend refusal, never the door-check error); an input over an
+/// explicit `max_bytes` is the ceiling `ValueError`, both sizes named,
+/// refused before the read or copy. The input-side refusals are
+/// constructed AFTER the GIL is reacquired; the backend one is raised
+/// under the GIL, before any work runs.
 ///
 /// GIL model: the whole pass — file read, PDF parse, per-page text
 /// extraction, markdown conversion — runs under one `py.detach`. The
@@ -196,57 +271,119 @@ impl PdfClassification {
 /// as GIL-held per call instead (worst heartbeat gap 23.6ms on a 9-page
 /// document under a 10ms ping, 2026-09) — the hazard this binding exists
 /// to remove; the band is pinned by the shared documents suite.
-#[pyfunction(signature = (path = None, data = None, password = None))]
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
 pub fn pdf_extract(
     py: Python<'_>,
     path: Option<&Bound<'_, PyAny>>,
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Vec<String>, String)> {
     let source = parse_source(path, data, "pdf_extract")?;
     let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "the per-page text probe (the OCR-routing signal)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
     let extracted = py
         .detach(move || {
-            let bytes = source.into_bytes()?;
+            let bytes = source.into_bytes(max_bytes)?;
             tors::pdf_impl::extract(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
         })
         .map_err(pdf_lane_error)?;
     Ok((extracted.pages, extracted.markdown))
 }
 
-/// `tors.documents.pdf_page_count(path) -> int` (or
-/// `pdf_page_count(data=...)`, `password=` for an encrypted one): read a
-/// PDF and return its page count —
+/// `tors.documents.pdf_page_count(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> int` — or `pdf_page_count(data=...)`:
+/// read a PDF and return its page count —
 /// the page tree and nothing else, no content extraction. For gating
 /// expensive downstream work (an OCR/conversion pass that scales with page
 /// count) without paying for any of it.
 ///
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide —
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way.
+/// `"anydoc"` is refused BEFORE any work runs, a named `ValueError`
+/// raised under the GIL ahead of the detach and the encrypted door
+/// check: a CAPABILITY refusal, not the format-level UnsupportedBackend
+/// (PDF+anydoc is a usable conversion pair) — anydoc's PDF surface is
+/// whole-document markdown only (~anydoc-0.2.4/src/formats/pdf.rs), and
+/// this call needs the page tree (a count its reader never returns on
+/// success). Whole-document conversion is the
+/// conversion pair's call: `to_markdown`/`to_text` with
+/// `backend="anydoc"` (`NeedsOcrError` is that lane's scanned-page
+/// signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An EXPLICIT budget binds this family pre-read exactly as it binds the
+/// conversion pair — the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied. `None` (the
+/// default) keeps the pdf lane UNMETERED, the unchanged doctrine — the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here).
+///
 /// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
-/// that do not parse as a PDF, and `ValueError` naming `path` for a
-/// FIFO/device/socket path (regular files only, the shared source spine) —
-/// all raised after the GIL is reacquired.
+/// that do not parse as a PDF, `ValueError` naming `path` for a
+/// FIFO/device/socket path (regular files only, the shared source spine),
+/// the capability `ValueError` for `backend="anydoc"` (under the GIL,
+/// before any work runs — so an encrypted document under it surfaces the
+/// backend refusal, never the door-check error), and the ceiling
+/// `ValueError` for an input over an explicit `max_bytes` (both sizes
+/// named, refused before the read or copy) — the input-side refusals
+/// constructed after the GIL is reacquired.
 ///
 /// GIL model: `pdf_extract`'s shape with the smallest possible return —
 /// the path str marshalling (`parse_path`), the open+page-tree walk under
 /// `py.detach`, and a single `int` back, no marshalling class at all.
-#[pyfunction(signature = (path = None, data = None, password = None))]
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
 pub fn pdf_page_count(
     py: Python<'_>,
     path: Option<&Bound<'_, PyAny>>,
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<usize> {
     let source = parse_source(path, data, "pdf_page_count")?;
     let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "the page tree (a count its reader never returns on success)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
     py.detach(move || {
-        let bytes = source.into_bytes()?;
+        let bytes = source.into_bytes(max_bytes)?;
         tors::pdf_impl::page_count(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
     .map_err(pdf_lane_error)
 }
 
-/// `tors.documents.pdf_link_uris(path) -> list[list[str]]` (or
-/// `pdf_link_uris(data=...)`, `password=` for an encrypted one): the
+/// `tors.documents.pdf_link_uris(path, data=None, password=None,
+/// backend="auto", max_bytes=None) -> list[list[str]]` — or
+/// `pdf_link_uris(data=...)`: the
 /// `/Annots` link walk — for every page,
 /// the URIs of its `/Subtype /Link` annotations whose action is a URI
 /// (`/A << /S /URI /URI (...) >>`), in annotation order: one `list[str]`
@@ -271,27 +408,68 @@ pub fn pdf_page_count(
 /// the subtype filter; malformed annotation dictionaries are skipped by
 /// pdf_oxide (its parse tolerates them) rather than poisoning the page.
 ///
-/// Always the pdf_oxide engine (the annotation walk is its reader), the
-/// same lane `pdf_extract` runs.
+/// `backend` names the engine lane, the same vocabulary the conversion
+/// pair takes: `"auto"` (the default; the native layer takes `None` as
+/// the same choice) and `"oxide"` both run pdf_oxide —
+/// the mapping `engine_for` makes for PDF ("oxide" is the oxide-family
+/// engine for this format), byte-identical output either way (the
+/// annotation walk is pdf_oxide's reader). `"anydoc"` is refused BEFORE
+/// any work runs, a named `ValueError` raised under the GIL ahead of the
+/// detach and the encrypted door check: a CAPABILITY refusal, not the
+/// format-level UnsupportedBackend (PDF+anydoc is a usable conversion
+/// pair) — anydoc's PDF surface is whole-document markdown only
+/// (~anydoc-0.2.4/src/formats/pdf.rs), and it has no annotation surface
+/// at all to walk. Whole-document conversion is the conversion pair's
+/// call: `to_markdown`/`to_text` with `backend="anydoc"`
+/// (`NeedsOcrError` is that lane's scanned-page signal).
+///
+/// `max_bytes` is the caller's input budget in bytes (a positive `int`).
+/// An EXPLICIT budget binds this family pre-read exactly as it binds the
+/// conversion pair — the shared source-spine gate: the `path=`'s size at
+/// the stat and again on the open handle, the `data=` length before the
+/// copy; never a byte over budget is read or copied. `None` (the
+/// default) keeps the pdf lane UNMETERED, the unchanged doctrine — the
+/// 32 MiB default ceiling is the core's post-read check on the
+/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here).
 ///
 /// Errors: `OSError` (matched subclass) for a missing/unreadable `path=`;
 /// `ValueError` for bytes that do not parse as a PDF, and for a
 /// FIFO/device/socket `path=` (regular files only, the shared source
-/// spine). Same GIL model as
+/// spine); the capability `ValueError` for `backend="anydoc"` (under the
+/// GIL, before any work runs — so an encrypted document under it
+/// surfaces the backend refusal, never the door-check error); the
+/// ceiling `ValueError` for an input over an explicit `max_bytes` (both
+/// sizes named, refused before the read or copy). Same GIL model as
 /// `pdf_classify` — the source marshalling under the GIL, the
 /// read+page-tree+annotation walk under one `py.detach`, the nested list
 /// marshalling (O(annotations)) after the reacquire.
-#[pyfunction(signature = (path = None, data = None, password = None))]
+#[pyfunction(signature = (
+    path = None,
+    data = None,
+    password = None,
+    backend = None,
+    max_bytes = None,
+))]
 pub fn pdf_link_uris(
     py: Python<'_>,
     path: Option<&Bound<'_, PyAny>>,
     data: Option<&Bound<'_, PyAny>>,
     password: Option<&Bound<'_, PyAny>>,
+    backend: Option<&Bound<'_, PyAny>>,
+    max_bytes: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<Vec<String>>> {
     let source = parse_source(path, data, "pdf_link_uris")?;
     let password = parse_password(password)?;
+    let backend = parse_backend(backend)?;
+    if backend == Backend::Anydoc {
+        return Err(refuse_anydoc(
+            "the /Annots link walk (it has no annotation surface)",
+        ));
+    }
+    let max_bytes = parse_max_bytes(max_bytes)?;
     py.detach(move || {
-        let bytes = source.into_bytes()?;
+        let bytes = source.into_bytes(max_bytes)?;
         tors::pdf_impl::link_uris(bytes, password.as_deref()).map_err(PdfLaneError::Pdf)
     })
     .map_err(pdf_lane_error)
@@ -686,10 +864,19 @@ enum InputError {
 
 impl Source<'_> {
     /// The bytes alone — the PDF family's entry (no name to consult:
-    /// those functions are PDF-only by construction, and their surface
-    /// carries no `max_bytes=` to gate with).
-    fn into_bytes(self) -> Result<Vec<u8>, InputError> {
-        Ok(self.into_input(None)?.0)
+    /// those functions are PDF-only by construction). `max_bytes` is the
+    /// caller's EXPLICIT budget, binding pre-read on this family exactly
+    /// as on the conversion pair: the same [`Source::into_input`] gate
+    /// runs — the path stat, the open-fd fstat, and the `data=` slice,
+    /// all before a byte is read or copied — because a budget that
+    /// skipped this family would be a budget the pdf lane never saw (the
+    /// `max_bytes=` the four functions now take had nowhere to land
+    /// before). `None` keeps the pdf lane unmetered, the unchanged
+    /// doctrine: the 32 MiB default is the core's post-read check on the
+    /// anydoc/office_oxide lanes only — lanes these PDF-only calls never
+    /// run.
+    fn into_bytes(self, max_bytes: Option<usize>) -> Result<Vec<u8>, InputError> {
+        Ok(self.into_input(max_bytes)?.0)
     }
 
     /// The bytes AND the name hint — the convert spine's entry (the
@@ -721,7 +908,7 @@ impl Source<'_> {
                 // fstat below is the authority.
                 let pre = std::fs::metadata(&path).map_err(InputError::Io)?;
                 refuse_non_regular(&path, pre.file_type())?;
-                refuse_over_ceiling(max_bytes, pre.len())?;
+                refuse_over_ceiling(max_bytes, Some(pre.file_type()), pre.len())?;
                 // The AUTHORITY: fstat ON THE OPEN HANDLE — whatever a
                 // stat/open race did to the path in between, this is the
                 // file the read below actually reads, and it must be a
@@ -731,7 +918,7 @@ impl Source<'_> {
                 let mut file = std::fs::File::open(&path).map_err(InputError::Io)?;
                 let meta = file.metadata().map_err(InputError::Io)?;
                 refuse_non_regular(&path, meta.file_type())?;
-                refuse_over_ceiling(max_bytes, meta.len())?;
+                refuse_over_ceiling(max_bytes, Some(meta.file_type()), meta.len())?;
                 // std::fs::read's own shape, on the verified handle: the
                 // capacity hint from the fstat size (an explicit budget
                 // already bounds it; the default lane keeps parity with
@@ -745,7 +932,7 @@ impl Source<'_> {
                 // The data lane's twin gate: the budget refuses before the
                 // copy (the bytes are already resident — the caller's own
                 // memory — but the parse it would feed is not free).
-                refuse_over_ceiling(max_bytes, bytes.len() as u64)?;
+                refuse_over_ceiling(max_bytes, None, bytes.len() as u64)?;
                 // The one copy, inside the detach (the enum's docs).
                 Ok((bytes.to_vec(), None))
             }
@@ -780,11 +967,24 @@ fn refuse_non_regular(
 /// after the sniff), this one names the knob and states the doctrine:
 /// an explicit budget binds every lane; the 32 MiB default is the
 /// core's post-read check on the anydoc/oxide lanes only. `None` never
-/// refuses here.
-fn refuse_over_ceiling(max_bytes: Option<usize>, size: u64) -> Result<(), InputError> {
+/// refuses here. Directories flow past untouched, the same deliberate
+/// pass `refuse_non_regular` gives them: a directory is a KIND refusal
+/// (the read's own EISDIR `OSError`, the pinned doctrine), never a SIZE
+/// one, so the budget never pre-empts it. `file_type` is `None` on the
+/// data lane, which cannot name a directory.
+fn refuse_over_ceiling(
+    max_bytes: Option<usize>,
+    file_type: Option<std::fs::FileType>,
+    size: u64,
+) -> Result<(), InputError> {
     let Some(limit) = max_bytes else {
         return Ok(());
     };
+    // The directory doctrine, refuse_non_regular's own pass: the KIND
+    // refusal (the read's EISDIR) is never pre-empted by a SIZE one.
+    if file_type.is_some_and(|ft| ft.is_dir()) {
+        return Ok(());
+    }
     // usize -> u64 is lossless on every platform; the stat side is u64
     // natively, so the gate compares in the wider type.
     if size <= limit as u64 {
@@ -1057,6 +1257,21 @@ fn parse_backend(backend: Option<&Bound<'_, PyAny>>) -> PyResult<Backend> {
             "backend must be one of ('auto', 'oxide', 'anydoc'), not {other:?}"
         ))),
     }
+}
+
+/// The PDF family's `backend="anydoc"` gate: `documents_impl`'s
+/// capability refusal (the doctrine text lives with the routing table,
+/// so the four functions' messages cannot drift), raised HERE — under
+/// the GIL, at argument-contract time, ahead of the detach and the
+/// encrypted door check. The ordering is the point: a contract failure
+/// precedes work, so an encrypted PDF under `backend="anydoc"` surfaces
+/// THIS refusal, not the door-check error, and no byte is read for a
+/// call that could never run. A plain `ValueError` — the `Convert` arm's
+/// own mapping, a value refusal per the module's type-vs-value
+/// convention (this is not the format-level UnsupportedBackend, which
+/// only the conversion pair can raise).
+fn refuse_anydoc(capability: &str) -> PyErr {
+    PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability).to_string())
 }
 
 /// Parse and normalize the `pages=` argument under the GIL, before any

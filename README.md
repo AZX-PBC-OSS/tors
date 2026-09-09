@@ -266,10 +266,14 @@ to_markdown(path=None, data=None, format=None, backend="auto", pages=None,
 to_text(path=None, data=None, format=None, backend="auto", pages=None,
         password=None, max_bytes=None) -> tuple[Format, str]
 sniff(data: bytes) -> Format | None
-pdf_extract(path=None, data=None, password=None) -> tuple[list[str], str]
-pdf_page_count(path=None, data=None, password=None) -> int
-pdf_classify(path=None, data=None, password=None) -> PdfClassification
-pdf_link_uris(path=None, data=None, password=None) -> list[list[str]]
+pdf_extract(path=None, data=None, password=None, backend="auto",
+            max_bytes=None) -> tuple[list[str], str]
+pdf_page_count(path=None, data=None, password=None, backend="auto",
+               max_bytes=None) -> int
+pdf_classify(path=None, data=None, password=None, backend="auto",
+             max_bytes=None) -> PdfClassification
+pdf_link_uris(path=None, data=None, password=None, backend="auto",
+              max_bytes=None) -> list[list[str]]
 ```
 
 `path` accepts `str | os.PathLike[str]`. `Format`, `Backend`, and `PageKind` are
@@ -314,26 +318,22 @@ taxonomy, `tors.documents.aio` — is the documents section of
   every entry (`ValueError` without `password=`).
 - Errors: `OSError` for a missing/unreadable file (the matched subclass —
   `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
-  `ValueError` for an unknown
-  format name, an undetectable file, an unusable backend/format pair, an invalid
-  - Errors: `OSError` for a missing/unreadable file (the matched subclass —
-    `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
-    `ValueError` for an unknown
-    format name, an undetectable file, an unusable backend/format pair, an invalid
-    `pages=` selection, a malformed/encrypted document, an input over `max_bytes=`
-    (an EXPLICIT budget binds every lane — pdf and HTML included — checked before a
-    byte is read or copied; the 32 MiB default, post-read, covers the anydoc and
-    office_oxide lanes only), a non-regular `path=` (FIFO/device/socket — typed,
-    naming `path` and the kind, before the read), or a NUL byte inside `path=`
-    (CPython's own `open()` convention). `NeedsOcrError` (a
-    `ValueError` subclass carrying `.pages` — the 0-based indices needing OCR, the same
-    convention as `pages=` and `pages_needing_ocr` — and
-    `.page_count`) is raised only on the anydoc PDF lane; the default pdf_oxide lane
-    returns empty output for scanned pages and leaves the OCR decision to
-    `pdf_classify`/`pdf_extract`.
-  `.page_count`) is raised only on the anydoc PDF lane; the default pdf_oxide lane
-  returns empty output for scanned pages and leaves the OCR decision to
-  `pdf_classify`/`pdf_extract`.
+  `ValueError` for an unknown format name, an undetectable file, an unusable
+  backend/format pair, the PDF-only family's `backend="anydoc"` capability
+  refusal (raised before any work runs — anydoc's PDF surface is the
+  `to_markdown`/`to_text` conversion pair, not the per-page probes these calls
+  are), an invalid `pages=` selection, a malformed/encrypted document, an input
+  over `max_bytes=` (an EXPLICIT budget binds every lane — pdf and HTML
+  included, the PDF-only family too — checked before a byte is read or copied;
+  the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only;
+  on the PDF-only family `None` is unmetered outright, those calls never run
+  either metered lane), a non-regular `path=` (FIFO/device/socket — typed,
+  naming `path` and the kind, before the read), or a NUL byte inside `path=`
+  (CPython's own `open()` convention). `NeedsOcrError` (a `ValueError` subclass
+  carrying `.pages` — the 0-based indices needing OCR, the same convention as
+  `pages=` and `pages_needing_ocr` — and `.page_count`) is raised only on the
+  anydoc PDF lane; the default pdf_oxide lane returns empty output for scanned
+  pages and leaves the OCR decision to `pdf_classify`/`pdf_extract`.
 
 ### The engine matrix
 
@@ -346,6 +346,7 @@ fallback:
 | format family | `backend="auto"` | `backend="oxide"` | `backend="anydoc"` |
 |---|---|---|---|
 | pdf | pdf_oxide 0.3.78 | pdf_oxide | anydoc (pdf-inspector) |
+| the PDF-only family (`pdf_extract`/`pdf_page_count`/`pdf_classify`/`pdf_link_uris`) | pdf_oxide | pdf_oxide | `ValueError` — a capability refusal, not a format one (see below) |
 | html / htm | html-to-markdown-rs 3.12 | `ValueError` | `ValueError` |
 | doc / docx (incl. `docm`) | anydoc 0.2.4 | office_oxide 0.1.10 | anydoc |
 | xls / xlsx (incl. `xlsm`) | anydoc | office_oxide | anydoc |
@@ -360,6 +361,19 @@ but genuine xlsb content — BIFF12 `.bin` sheets, not worksheet XML — is refu
 both engines; `ppsx` converts on the auto/anydoc lane and is refused by
 office_oxide, which checks the presentation content type — clean refusals, never
 silent fallbacks, both pinned in the suite.)
+
+The PDF-only family's row is a capability refusal, not a format one: PDF+anydoc
+converts (`to_markdown`/`to_text` with `backend="anydoc"`), but anydoc's entire
+PDF surface is whole-document markdown — `to_markdown(bytes)` is the one function
+its PDF module exposes (~anydoc-0.2.4/src/formats/pdf.rs), its only per-page
+knowledge the NeedsOcr refusal — while the four probe calls need exactly the
+surfaces it lacks: the per-page text probe (itself the OCR-routing signal), the
+page tree, per-page classification, and the `/Annots` walk. `backend="anydoc"`
+on any of the four is a named `ValueError` raised before any work runs, pointing
+at the conversion pair. Their `max_bytes=` matches the conversion pair's: an
+explicit budget binds before a byte is read or copied; `None` keeps the pdf lane
+unmetered (the 32 MiB default is the anydoc/office_oxide lanes' post-read check,
+and those PDF-only calls never run either lane).
 
 Why this split: pdf_oxide reads two-column layouts as separate reading-order blocks,
 renders `/Link` annotations as `[text](uri)`, and detects oversize-font headings,

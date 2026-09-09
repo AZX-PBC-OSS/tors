@@ -2740,8 +2740,8 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 | exception | raised when |
 |---|---|
 | `OSError` | the file is missing or unreadable (IO) — a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
-| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the TYPE only — never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over `max_bytes=` (an EXPLICIT budget binds every lane, checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=` — a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the TYPE only — never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes — `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float — a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"` — a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over `max_bytes=` (an EXPLICIT budget binds every lane — the PDF-only family included — checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=` — a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages — route the document to an OCR stage |
 
 **Format resolution order** — a mislabeled or extensionless file (a temp-file download,
@@ -3022,6 +3022,8 @@ def pdf_extract(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> tuple[list[str], str]: ...
 ```
 
@@ -3035,11 +3037,32 @@ here. `markdown` is pdf_oxide's whole-document conversion: heading detection on,
 images off, Tagged-PDF structure-tree reading order falling back to XY-Cut on
 untagged documents, `/Link` annotations rendered as `[text](uri)`.
 
-Always the pdf_oxide engine: this is the probe-rich call, and only pdf_oxide's
-per-page surface exists; the generic entry points take the `backend=` choice.
+**The PDF family's engine lanes and input budget** — `backend=` and `max_bytes=`
+on all four PDF-only functions, the same vocabulary the conversion pair takes.
+`backend="auto"` (the default) and `backend="oxide"` both run pdf_oxide — the same
+mapping the routing table makes for PDF ("oxide" is the oxide-family engine for
+this format), byte-identical output either way. `backend="anydoc"` is refused
+before any work runs with a named `ValueError`: a CAPABILITY refusal, not the
+format-level one (PDF+anydoc converts on `to_markdown`/`to_text`), because
+anydoc's entire PDF surface is whole-document markdown — `to_markdown(bytes)` is
+the one function its PDF module exposes (~anydoc-0.2.4/src/formats/pdf.rs), and
+its only per-page knowledge is the `NeedsOcr` refusal — while these four calls
+are the probe-rich ones: `pdf_extract`'s per-page plain text IS the OCR-routing
+signal (an image-only page comes back as an empty string, the caller's
+route-to-OCR witness), `pdf_page_count` walks the page tree (a count its
+reader never returns on success), `pdf_classify` classifies per page,
+and `pdf_link_uris` walks `/Annots` (anydoc has no annotation surface at all).
+Whole-document markdown from anydoc is one `to_markdown(path, backend="anydoc")`
+call away. `max_bytes=` is the input budget: an explicit value binds pre-read
+exactly as on the conversion pair — the `path=`'s size at open, the `data=`
+length on entry, never an over-budget byte read or copied; `None` (the default)
+keeps the pdf lane unmetered (the 32 MiB default ceiling is the anydoc and
+office_oxide lanes' post-read check — lanes these PDF-only calls never run).
 `password=` unlocks an encrypted PDF; without it the entry fails closed —
 `ValueError` at open, never empty output masquerading as "no content" (the empty
-strings above are for unlocked documents).
+strings above are for unlocked documents; a contract failure precedes the work,
+so an encrypted document under `backend="anydoc"` surfaces the capability
+refusal, never the door-check error).
 
 ```python
 import tors.documents
@@ -3047,6 +3070,23 @@ import tors.documents
 pages, markdown = tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf")
 # (["first page line", "second page line"], "first page line\n\n---\n\nsecond page line\n")
 #  per-page plain text + the joined markdown, one open, one pass
+
+# the lane vocabulary: "oxide" is the engine "auto" already routes PDF to,
+# "anydoc" a capability refusal pointing at the conversion pair
+tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend="oxide") == (
+    pages,
+    markdown,
+)
+# True — the same pdf_oxide lane either way, byte-identical answers
+try:
+    tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend="anydoc")
+except ValueError as exc:
+    exc
+    # ValueError('backend "anydoc" cannot serve the per-page text probe (the
+    #  OCR-routing signal): anydoc\'s PDF surface is whole-document conversion
+    #  only — to_markdown/to_text with backend="anydoc" (NeedsOcrError is that
+    #  lane\'s scanned-page signal); use backend=\'auto\' or \'oxide\' here')
+    #  the capability refusal, its message the pointer at the pair
 ```
 
 **Async**: `await tors.documents.aio.pdf_extract(...)` runs this under
@@ -3059,13 +3099,19 @@ def pdf_page_count(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> int: ...
 ```
 
 The page tree and nothing else — no content extraction. For gating expensive
 downstream work (an OCR or conversion pass that scales with page count) without
 paying for any of it. `password=` unlocks an encrypted PDF; without it the entry
-fails closed (`ValueError` at open).
+fails closed (`ValueError` at open). `backend=`/`max_bytes=` follow the family's
+shared lane note in the [`pdf_extract`](#torsdocumentspdf_extract) section
+above: auto/oxide run pdf_oxide byte-identically, `backend="anydoc"` the
+capability refusal (a count that engine's reader never returns on
+success), an explicit budget binding pre-read.
 
 ```python
 import tors.documents
@@ -3084,6 +3130,8 @@ def pdf_link_uris(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> list[list[str]]: ...
 ```
 
@@ -3103,7 +3151,10 @@ Verbatim and narrow, both on purpose: the lists are never deduped or canonicaliz
 projections), and only URI actions surface (`GoTo` is in-document navigation,
 `GoToR` a remote file — neither is a web URI, and neither is fabricated into one).
 Malformed annotation dictionaries are skipped by the engine's parser, not propagated
-as page failures. Always the pdf_oxide engine, the same lane as `pdf_extract`.
+as page failures. `backend=`/`max_bytes=` follow the family's shared lane note in
+the [`pdf_extract`](#torsdocumentspdf_extract) section above — the annotation walk
+is pdf_oxide's reader (auto/oxide byte-identically), and `backend="anydoc"` the
+capability refusal: anydoc has no annotation surface at all.
 `password=` unlocks an encrypted PDF; without it the entry fails closed
 (`ValueError` at open — never empty lists masquerading as "no links").
 
@@ -3126,6 +3177,8 @@ def pdf_classify(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> PdfClassification: ...
 ```
 
@@ -3135,7 +3188,11 @@ we can do nothing with locally", as a `PdfClassification` (below): every page's
 `PageKind` verdict, the pages needing OCR, and the two derived routing booleans.
 Encrypted documents fail closed on every entry (`ValueError` at open — pdf_oxide's
 security rule: a security state is never masked as "all pages empty");
-`password=` unlocks one.
+`password=` unlocks one. `backend=`/`max_bytes=` follow the family's shared lane
+note in the [`pdf_extract`](#torsdocumentspdf_extract) section above: auto/oxide
+run pdf_oxide byte-identically, `backend="anydoc"` the capability refusal
+(per-page classification — that engine's only per-page knowledge is the binary
+needs-OCR refusal), an explicit budget binding pre-read.
 
 `PageKind` is the per-page vocabulary: `"text"` (a native text layer), `"scanned"`
 (image-dominated — OCR the page), `"image_text"` (hybrid), `"mixed"`, or `"empty"`.

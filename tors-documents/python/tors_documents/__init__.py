@@ -216,12 +216,18 @@ def pdf_classify(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> PdfClassification:
     """The cheap text-vs-image preflight (the full contract is the native
     function's docstring), as the typed view. ``path`` or ``data=``;
-    ``password=`` for an encrypted PDF."""
+    ``password=`` for an encrypted PDF. ``backend=`` is ``"auto"``/``"oxide"``
+    (the pdf_oxide lane, byte-identical; ``"anydoc"`` is refused — its PDF
+    surface is the ``to_markdown``/``to_text`` conversion pair); an explicit
+    ``max_bytes=`` binds before the read, ``None`` leaves the pdf lane
+    unmetered."""
     return PdfClassification(
-        _native_pdf_classify(_coerce_path(path), data, password)
+        _native_pdf_classify(_coerce_path(path), data, password, backend, max_bytes)
     )
 
 
@@ -229,35 +235,55 @@ def pdf_extract(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> tuple[list[str], str]:
     """Read a PDF (``path`` or ``data=``) and return
     ``(per_page_plain_text, markdown)`` — one GIL-free pass over one open
     document (the full contract is the native function's docstring);
-    ``password=`` for an encrypted PDF."""
-    return _native_pdf_extract(_coerce_path(path), data, password)
+    ``password=`` for an encrypted PDF. ``backend=`` is ``"auto"``/``"oxide"``
+    (the pdf_oxide lane, byte-identical; ``"anydoc"`` is refused — the
+    per-page probe is the OCR-routing signal and anydoc has none; its PDF
+    surface is the ``to_markdown``/``to_text`` conversion pair); an
+    explicit ``max_bytes=`` binds before the read, ``None`` leaves the pdf
+    lane unmetered."""
+    return _native_pdf_extract(_coerce_path(path), data, password, backend, max_bytes)
 
 
 def pdf_link_uris(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> list[list[str]]:
     """The ``/Annots`` link walk (``path`` or ``data=``): for every page,
     the URIs of its link annotations, in annotation order — the raw
     navigation surface no text rendering carries (the full contract is the
     native function's docstring). One GIL-free pass; ``password=`` for an
-    encrypted PDF."""
-    return _native_pdf_link_uris(_coerce_path(path), data, password)
+    encrypted PDF. ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide
+    lane, byte-identical; ``"anydoc"`` is refused — it has no annotation
+    surface; its PDF surface is the ``to_markdown``/``to_text``
+    conversion pair); an explicit ``max_bytes=`` binds before the read,
+    ``None`` leaves the pdf lane unmetered."""
+    return _native_pdf_link_uris(_coerce_path(path), data, password, backend, max_bytes)
 
 
 def pdf_page_count(
     path: str | os.PathLike[str] | None = None,
     data: bytes | None = None,
     password: str | None = None,
+    backend: Backend | str = Backend.AUTO,
+    max_bytes: int | None = None,
 ) -> int:
     """The page tree and nothing else (``path`` or ``data=``), one
-    GIL-free pass; ``password=`` for an encrypted PDF."""
-    return _native_pdf_page_count(_coerce_path(path), data, password)
+    GIL-free pass; ``password=`` for an encrypted PDF. ``backend=`` is
+    ``"auto"``/``"oxide"`` (the pdf_oxide lane, byte-identical;
+    ``"anydoc"`` is refused — its reader reports a count only inside the
+    NeedsOcr refusal; its PDF surface is the ``to_markdown``/``to_text``
+    conversion pair); an explicit ``max_bytes=`` binds before the read,
+    ``None`` leaves the pdf lane unmetered."""
+    return _native_pdf_page_count(_coerce_path(path), data, password, backend, max_bytes)
 
 
 class PdfClassification:
