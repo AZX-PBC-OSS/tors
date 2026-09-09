@@ -1031,3 +1031,138 @@ class TestNothingRecoverableUnderSchema:
         # A string-typed schema legitimately accepts "" — the raise is the
         # typed-schema behavior, not an unconditional one.
         assert repair_json_loads("no JSON anywhere", schema={"type": "string"}) == ""
+
+
+class TestRepairDeadline:
+    """deadline_ms bounds the repair against pathological O(n^2) parser
+    shapes (each shared with upstream json_repair): a bounded abort, not a
+    speed-up, and a strict no-op when unset."""
+
+    # Three distinct quadratics; unbounded, each runs for tens of seconds at
+    # n=200k. dup-key and empty-object are bounded through the parse_json
+    # dispatch loop, the backslash string-scan through scan_string_body.
+    # (A fourth, the escaped-object-key splice rescan, went linear when
+    # #19 landed; it is pinned below as a wall-time guard instead.)
+    _DUP_KEY = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
+    _EMPTY_OBJ = '[' + '{ }' * 200_000 + ']'
+    _STRING_SCAN = '["' + ']' * 200_000 + '\\\\" x'
+
+    @pytest.mark.parametrize(
+        "raw",
+        [_DUP_KEY, _EMPTY_OBJ, _STRING_SCAN],
+        ids=["dup-key", "empty-object", "string-scan"],
+    )
+    def test_a_pathological_input_is_bounded_by_the_deadline(self, raw: str) -> None:
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json(raw, deadline_ms=100)
+        # A real bound: the tens-of-seconds unbounded run is cut short well
+        # under 2s.
+        assert _time.perf_counter() - start < 2.0
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '[{' + '"a":1 "a":1 ' * 50 + '}]',
+            '[' + '{ }' * 50 + ']',
+            '["' + ']' * 50 + '\\\\" x',
+        ],
+        ids=["dup-key", "empty-object", "string-scan"],
+    )
+    def test_a_generous_deadline_does_not_change_output(self, raw: str) -> None:
+        # Below the deadline the result is byte-identical to the unbounded call.
+        assert repair_json(raw, deadline_ms=60_000) == repair_json(raw)
+
+    def test_the_escaped_object_shape_stays_linear(self) -> None:
+        # '[' + '{\\"k\\":1 ' * n + ']' was the fourth quadratic (30s+ at
+        # n=200k) until #19's continuation work made the empty-object
+        # reparse bounded per fragment. Pin the wall so it stays that way
+        # (~20ms at n=200k; the old quadratic would need tens of seconds).
+        import time as _time
+
+        raw = '[' + '{\\"k\\":1 ' * 200_000 + ']'
+        start = _time.perf_counter()
+        repair_json(raw)
+        assert _time.perf_counter() - start < 2.0
+
+    def test_a_large_valid_input_does_not_trip_a_generous_deadline(self) -> None:
+        # The deadline distinguishes pathological SHAPE from benign SIZE: a
+        # multi-MB well-formed document parses far under a generous budget
+        # (an input-size cap could not tell the two apart).
+        big = '[' + ','.join(f'{{"k{i}": {i}}}' for i in range(100_000)) + ']'
+        assert len(big) > 1_000_000
+        repair_json(big, deadline_ms=5_000)  # must not raise
+
+    @pytest.mark.parametrize("bad", [0.0, -5.0, float("nan"), float("inf")])
+    def test_non_positive_or_non_finite_deadline_raises_value_error(self, bad: float) -> None:
+        with pytest.raises(ValueError):
+            repair_json("{}", deadline_ms=bad)
+
+    def test_all_three_spellings_honor_the_deadline(self) -> None:
+        raw = '[{' + '"a":1 "a":1 ' * 200_000 + '}]'
+        with pytest.raises(TimeoutError):
+            repair_json(raw, deadline_ms=100)
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, deadline_ms=100)
+        with pytest.raises(TimeoutError):
+            repair_json_diagnostics(raw, deadline_ms=100)
+
+    @pytest.mark.parametrize(
+        "name,call",
+        [
+            ("repair_json", repair_json),
+            ("repair_json_loads", repair_json_loads),
+            ("repair_json_diagnostics", repair_json_diagnostics),
+        ],
+    )
+    def test_the_timeout_message_names_the_called_spelling(self, name: str, call) -> None:
+        # The same wording as diff_opcodes' TimeoutError, fronted with the
+        # called spelling's own name (a small input under a 1ms budget
+        # aborts on the first dispatch-loop check).
+        raw = '[{' + '"a":1 "a":1 ' * 5_000 + '}]'
+        with pytest.raises(
+            TimeoutError,
+            match=rf"^{name} deadline exceeded: elapsed \d+\.\dms > deadline_ms 1\.0ms$",
+        ):
+            call(raw, deadline_ms=1)
+
+    def test_the_budget_includes_the_strict_fast_path(self) -> None:
+        # The clock starts at the top of repair(), so the strict fast path
+        # (json.loads attempt) burns the budget too: a multi-MB document
+        # whose fast path FAILS at the truncated tail must report the whole
+        # attempt as elapsed, not start a fresh clock at the repair parser.
+        raw = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(400_000))[:-1]
+        pattern = r"elapsed (\d+\.\d)ms > deadline_ms 1\.0ms"
+        with pytest.raises(TimeoutError, match=pattern) as excinfo:
+            repair_json(raw, deadline_ms=1)
+        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        # The fast-path scan of ~4MB is tens of ms; a parser-only clock
+        # would report ~1ms. 30ms sits far from both.
+        assert elapsed >= 30.0
+
+    def test_completed_fast_path_work_is_returned_not_aborted(self) -> None:
+        # The deadline stops further work; it does not nullify done work:
+        # a valid document whose fast path completes past a tiny budget
+        # still returns its parse, byte-identical to the unbounded call
+        # (the same shape as diff_opcodes, where a completed diff returns).
+        raw = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(100_000)) + "]"
+        assert repair_json(raw, deadline_ms=1) == repair_json(raw)
+
+    def test_a_live_deadline_does_not_recolor_strict_errors(self) -> None:
+        # The deadline discriminates by payload, not by timing: a
+        # strict-mode violation under a generous live budget is still the
+        # documented ValueError, never a TimeoutError.
+        with pytest.raises(ValueError, match="strict mode"):
+            repair_json('{"a" 1}', strict=True, deadline_ms=60_000)
+
+    def test_schema_and_salvage_paths_honor_the_deadline(self) -> None:
+        # The schema-guided and salvage fragment loops route through the
+        # same dispatch-loop check; a small pathological input under a 1ms
+        # budget aborts on both.
+        raw = '[{' + '"a":1 "a":1 ' * 5_000 + '}]'
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema={"type": "array"}, deadline_ms=1)
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema={"type": "array"}, salvage=True, deadline_ms=1)

@@ -808,6 +808,7 @@ def repair_json(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> str: ...
 ```
 
@@ -917,6 +918,36 @@ and extra properties are dropped rather than raised, and missing `required`
 properties are filled from their subschema's `default`/`const`/`enum[0]`.
 It requires a schema: `salvage=True` without one raises
 `ValueError("salvage=True requires schema.")`.
+
+**`deadline_ms`** (default `None` = unbounded) bounds the whole repair the
+way `diff_opcodes`' `deadline_ms` does: a positive-finite-or-`None` budget
+validated up front, `TimeoutError` on expiry. The clock starts at the top of
+the call — the fence pre-pass and the `json.loads` fast-path attempt burn
+the budget too, and a fast path that *completes* past the budget still
+returns its answer (the deadline stops further work; it does not nullify
+done work). It is a DoS backstop for the pathological O(n²) parser shapes
+`tors` shares with upstream `json_repair` — duplicate-key-in-array splices,
+empty-object splices, and a backslash-run string scan — a bounded *abort*,
+not a speed-up: a completing parse is
+byte-identical whether or not a deadline is set, and a benign large document
+does not trip a generous budget (the deadline discriminates pathological
+*shape*, not *size*). It applies to all three spellings and is checked with
+the GIL released, so `TimeoutError` is raised after reacquiring it — the
+same shape as `diff_opcodes`, including the message:
+`"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
+
+Two honest limits. The bound is *soft*: the tight loops sample the clock
+1-in-256, but every O(n) unit — a buffer splice, a long scan, a wide span
+build — forces the very next check to read it, so at most one such unit
+runs past an expired budget (measured worst overshoot ~8% at n=1M). And
+it bounds CPU *time*, not native stack growth: a runaway continuation
+recursion can still overflow the stack before the budget expires — that
+class is depth-guarded separately (`MAX_NESTING`), not time-bounded.
+Cost when unset: nothing on the valid-JSON fast path, and one predicted
+branch per dispatch turn in the repair parser — measured ~+6% worst-case
+on a multi-MB `skip_json_loads=True` parse, ~+3% on a corrupt-document
+repair, within noise on the pathological shapes. Cost when set: ≤2% on
+top of that (the checks are sampled).
 
 Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
 `schema` that is not a dict, bool, model, or `None` raises
