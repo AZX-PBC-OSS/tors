@@ -30,7 +30,13 @@ enum Input {
     /// A claim with ONE character mutated, embedded at an arbitrary offset:
     /// the refinement guarantee (r = (L-1)/L >= 0.85 + 1/32 whenever the
     /// claim is 12+ chars), wherever the region sits.
-    NearSpliced { claim: String, lead: u16, tail: u8, at: u8, sub: u8 },
+    NearSpliced {
+        claim: String,
+        lead: u16,
+        tail: u8,
+        at: u8,
+        sub: u8,
+    },
 }
 
 fuzz_target!(|input: Input| {
@@ -86,7 +92,11 @@ fuzz_target!(|input: Input| {
             // that would expire the windowed scan must still ground a
             // verbatim claim — never DeadlineExceeded.
             let got = tors::grounded_impl::is_grounded_fuzzy(&claim, &source, 1.0, Some(0.0001));
-            assert_eq!(got, Ok(true), "verbatim claim timed out under a tiny budget");
+            assert_eq!(
+                got,
+                Ok(true),
+                "verbatim claim timed out under a tiny budget"
+            );
         }
         Input::NearSpliced {
             claim,
