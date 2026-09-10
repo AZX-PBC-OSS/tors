@@ -355,6 +355,23 @@ class TestCorpusStrings:
         raw = '{\\"key\\": \\"value\\"}'
         assert repair_json(raw, skip_json_loads=True) == '{"key": "value"}'
 
+    def test_parse_object_escaped_splice_keeps_bracket_in_value_str(self) -> None:
+        # issue #39: the escaped-key normalization splice (an empty-object
+        # reparse) must not leave a stale lookahead-memo entry behind; the
+        # bracket in the value stays in the value (upstream's answer)
+        assert (
+            repair_json('[{\\"\\":]w]"', skip_json_loads=True)
+            == '[{"": "w]"}]'
+        )
+        assert (
+            repair_json('[{\\"\\":]x]}"', skip_json_loads=True)
+            == '[{"": "x]}"}]'
+        )
+        assert (
+            repair_json('[[{\\"\\":]w]"', skip_json_loads=True)
+            == '[[{"": "w]"}]]'
+        )
+
     def test_parse_object_merge_at_end_str(self) -> None:
         assert (
             repair_json(  # upstream test_parse_object_merge_at_the_end
@@ -1038,6 +1055,13 @@ class TestCorpusLoads:
         assert isinstance(repair_json_loads(r"{foo\bar}", skip_json_loads=True), list)
         # upstream test_parse_object_empty_object_array_fallback_preserves_legacy_key_context
         assert repair_json_loads("[{5}s ", skip_json_loads=True) == [[5]]
+
+    def test_escaped_splice_keeps_bracket_in_value_loads(self) -> None:
+        # issue #39 (loads spelling): the value keeps the bracket a stale
+        # lookahead-memo entry after the escaped-key splice dropped
+        _assert_loads_both('[{\\"\\":]w]"', [{"": "w]"}])
+        _assert_loads_both('x [{\\"\\":]w]"', [{"": "w]"}])
+        _assert_loads_both('[[{\\"\\":]w]"', [[{"": "w]"}]])
 
     def test_parse_array_loads(self) -> None:
         assert repair_json_loads("[]") == []  # upstream test_parse_array

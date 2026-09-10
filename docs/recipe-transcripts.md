@@ -135,6 +135,6 @@ malformed timestamp sails through as content. Voice spans and token counts
 are likewise out (grouping a speaker's turns is application-level work over
 parsed cues; every budget here is a codepoint budget). Format semantics
 belong to the application: parse with a real subtitle library and hand
-`tors` the payload for split points, the split the `cennan` transcript
+`tors` the payload for split points, the split a transcript-ingestion
 pipeline makes (`webvtt-py` for parsing, `tors.sentence_bounds` for the
 offsets).
