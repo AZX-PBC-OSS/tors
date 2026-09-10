@@ -10,7 +10,12 @@
 //! same story: a per-call cost that used to be dominated by
 //! unconditional per-codepoint structures (a whole-text `Vec<char>` plus
 //! a `HashSet<usize>` of every grapheme boundary) and is now the
-//! segmentation walks themselves. The first two
+//! segmentation walks themselves. The `chunk_by_segment` group also
+//! carries issue #30's line/paragraph-scan density lane: the same two
+//! scanners over a realistic-density log corpus and a break-soup
+//! corpus, the two regimes `line_bounds`/`paragraph_bounds`'
+//! density-guarded memchr hop trades between (the bench cells' own
+//! comments carry the numbers). The first two
 //! groups bench together because the module they live in
 //! (`src/chunk_impl.rs`) frames them as the two halves of one chunking
 //! story, not because they share an engine — see that file's own module
@@ -91,6 +96,41 @@ fn bench_chunk_cdc(c: &mut Criterion) {
     group.finish();
 }
 
+/// The #30 line/paragraph-scan density lane's realistic corpus: a
+/// synthetic syslog shape, one 81-byte content line (80 payload bytes +
+/// `'\n'`) times three, then the blank line that closes the paragraph —
+/// the "one break per ~80 bytes" density the issue's per-segment
+/// prototype measured 2.6–2.9× on (17.4 → 6.1 ms on a 21 MB log), and a
+/// qualifying 2-unit paragraph break every third line (~244 bytes) so
+/// the same corpus drives `chunk_by_paragraphs` too. Local to this
+/// bench, the `benches/text.rs` precedent for recipes no other bench
+/// shares: the shared three (`prose`/`decomposed`/`crlf`) stay in
+/// `benches/common/mod.rs` where the corpus-parity test pins them, and
+/// neither shape here has a Python-side twin to stay byte-identical to.
+/// Same quantization idiom as the common module's `repeat_to` (UTF-8
+/// byte-length floor division with a 1-unit floor).
+fn log_lines(target_bytes: usize) -> String {
+    const LOG_LINE: &str =
+        "2026-09-09T12:34:56.789Z INFO worker.12 heartbeat ok latency_ms=41 queue_depth=0\n";
+    let unit = format!("{}{}", LOG_LINE.repeat(3), "\n");
+    unit.repeat((target_bytes / unit.len()).max(1))
+}
+
+/// The density lane's degenerate corpus: `"x\r\n\r\n"` repeated — one
+/// content codepoint then a two-unit CRLF run, a break unit every 2.5
+/// bytes, the "break soup" density where the issue measured the NAIVE
+/// memchr-per-segment loop 2.2× SLOWER than the per-char decoder it
+/// replaced (one memchr call and its setup per 1–2 scanned bytes), i.e.
+/// the no-regression pin for the scanners' density guard. One corpus
+/// serves both scanners: `chunk_by_lines` sees a content line every 5
+/// bytes (the blank line inside each run is dropped by the real-line
+/// filter), `chunk_by_paragraphs` a one-codepoint paragraph every 5
+/// bytes (every run qualifies).
+fn break_soup(target_bytes: usize) -> String {
+    let unit = "x\r\n\r\n";
+    unit.repeat((target_bytes / unit.len()).max(1))
+}
+
 /// The #22 document-scale lane: `chunk_hierarchical` at both hierarchy
 /// kinds plus the unit-count chunkers — the merge-based pair
 /// (`by_words`/`by_sentences`) at the issue's own cell shapes,
@@ -107,7 +147,10 @@ fn bench_chunk_cdc(c: &mut Criterion) {
 /// grapheme-safe, no merge step). 12 MiB cells
 /// drop the sample count (the `chunk_cdc` 100 MiB precedent): ~300 ms
 /// per iteration does not need criterion's default 100 samples to hold
-/// a stable line.
+/// a stable line. The `_log`/`_soup` cells (same budgets, the two
+/// density-lane corpora above) are #30's: realistic density is where the
+/// scanners' memchr hop is supposed to win, soup is where a naive
+/// per-segment memchr loop measurably lost.
 fn bench_chunk_hierarchical(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunk_hierarchical");
     for target_bytes in [1024 * 1024, 12 * 1024 * 1024] {
@@ -189,6 +232,41 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
         BenchmarkId::new("by_lines_50", format!("{}B", text.len())),
         &text,
         |bench, text| bench.iter(|| chunk_by_segment_impl::chunk_by_lines(black_box(text), 50, 0)),
+    );
+    // #30's density lane, same budgets as the prose cells so density is
+    // the only variable: the log corpus (one content line per 81 bytes, a
+    // paragraph break every third line) is the realistic shape the
+    // scanners' memchr hop exists for, the soup corpus (a break unit per
+    // 2.5 bytes) the degenerate shape where the naive per-segment memchr
+    // loop measured 2.2× slower than the per-char decoder — the
+    // no-regression pin for the density guard.
+    let log = log_lines(12 * 1024 * 1024);
+    group.throughput(Throughput::Bytes(log.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("by_lines_50_log", format!("{}B", log.len())),
+        &log,
+        |bench, log| bench.iter(|| chunk_by_segment_impl::chunk_by_lines(black_box(log), 50, 0)),
+    );
+    group.bench_with_input(
+        BenchmarkId::new("by_paragraphs_10_log", format!("{}B", log.len())),
+        &log,
+        |bench, log| {
+            bench.iter(|| chunk_by_segment_impl::chunk_by_paragraphs(black_box(log), 10, 0))
+        },
+    );
+    let soup = break_soup(12 * 1024 * 1024);
+    group.throughput(Throughput::Bytes(soup.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("by_lines_50_soup", format!("{}B", soup.len())),
+        &soup,
+        |bench, soup| bench.iter(|| chunk_by_segment_impl::chunk_by_lines(black_box(soup), 50, 0)),
+    );
+    group.bench_with_input(
+        BenchmarkId::new("by_paragraphs_10_soup", format!("{}B", soup.len())),
+        &soup,
+        |bench, soup| {
+            bench.iter(|| chunk_by_segment_impl::chunk_by_paragraphs(black_box(soup), 10, 0))
+        },
     );
     group.finish();
 }

@@ -1576,6 +1576,23 @@ the GIL only to build one 2-tuple, rather than marshalling the whole result into
 worth reaching for over the list API once a document chunks into the hundreds of
 thousands of pieces, where the marshalling cost dominates.
 
+The argument contract includes error precedence, stated here once for the whole
+chunking family (every list/`_iter` pair: `chunk_text`, `chunk_by_words`,
+`chunk_by_sentences`, `chunk_by_paragraphs`, `chunk_by_lines`, and each one's `_iter`
+twin): a `text` that fails UTF-8 conversion — a lone-surrogate `str`, buildable in
+CPython, impossible in UTF-8 — raises `UnicodeEncodeError` BEFORE any
+count/overlap `ValueError`, identically in both spellings. The list functions take
+`text` as an already-converted argument, so the conversion error always fires first
+there; the `_iter` twins borrow the text before validating counts, so they raise the
+same error on the same call — the two spellings of a function never disagree on
+which error TYPE a bad call raises (the one message-level divergence, a lone
+surrogate in BOTH `text` and `boundary`, is frozen by test: both spellings raise
+`UnicodeEncodeError`, the list reporting the text's surrogate and the iter the
+boundary's, pyo3 extracting `boundary` ahead of the iter body but after the list's
+`text` extraction). For `chunk_text`/`chunk_text_iter` the
+unrecognized-`boundary` `ValueError` comes last of all, after the count/overlap
+checks, in both spellings.
+
 ```python
 list(tors.chunk_text_iter("cats are cute and cats are fun", 12))
 # [(0, 8), (8, 17), (17, 26), (26, 30)]
@@ -1719,6 +1736,43 @@ tors.chunk_by_paragraphs(
 # [(0, 45), (47, 68)]
 ```
 
+## `tors.chunk_by_paragraphs_iter`
+
+```python
+def chunk_by_paragraphs_iter(
+    text: str, paragraphs_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
+```
+
+`chunk_by_paragraphs`' streaming twin, the same `chunk_text_iter` shape: one
+detached whole-text pass at construction, one 2-tuple per `__next__`, identical
+sequence to the list API, same argument contract (the family-wide error-precedence
+paragraph in `chunk_text_iter`'s section included). Like every `_iter` spelling it
+has no async twin (an iterator is not an awaitable shape; see the README's Async
+use section) — and it exists for the same reason as the other `_iter` twins: the
+list shape's GIL-held marshalling cost is measured for segment-count-heavy outputs
+(`word_bounds` on 12 MiB of prose, 3.67M segments, holds the GIL for 428–497 ms
+just marshalling the list, the README's disclosed numbers), and a paragraph-heavy
+corpus (a multi-MiB article dump or report batch, one blank line per record) is in
+that piece-count class, chunking into hundreds of thousands of pieces.
+
+```python
+minutes = (
+    "Attendees: Ada, Grace, Edsger.\n\n"
+    "Grace: parser rewrite halves latency.\n\n"
+    "Edsger: spec drift question, unresolved.\n\n"
+    "Next sync moves to Thursday."
+)
+
+list(tors.chunk_by_paragraphs_iter(minutes, 2))
+# [(0, 69), (71, 141)] — 4 paragraphs, 2 chunks of exactly 2: the blank-line
+# gap between chunks belongs to neither (chunk 2 starts at "Edsger")
+list(tors.chunk_by_paragraphs_iter(minutes, 2, overlap=1))
+# [(0, 69), (32, 111), (71, 141)] — overlap repeats whole PARAGRAPHS:
+# (32, 111) is "Grace: parser rewrite halves latency.\n\nEdsger: spec drift
+# question, unresolved."
+```
+
 ## `tors.chunk_by_lines`
 
 ```python
@@ -1755,8 +1809,14 @@ as its siblings.
 
 The line-oriented-text shape this exists for: one message per line (a chat thread),
 one record per line (a log), one cue per block. Cost at document scale: ONE
-streaming decode pass (the line scan and the real-line filter fused, O(text) time,
-O(1) memory beyond the output) — no segmentation walk and no grapheme boundary
+byte-level walk — `memchr2` hops between break bytes behind an 8-byte inline
+density window before each hop (the memchr-anchored byte-scan discipline the
+crate's other scanners use, plus a density guard this scan adds, so dense break
+runs never pay a hop), the real-line whitespace filter folded into the same pass,
+a per-codepoint fallback for non-ASCII segments, and ASCII certification batched
+as one 4 KiB stride per ~50 segments (a sliding certificate over the whole scan,
+not a per-segment `is_ascii` check); O(text) time, O(1) memory beyond the output
+— no segmentation walk and no grapheme boundary
 index at all, unlike `chunk_by_words`/`chunk_by_sentences`: every split lands
 strictly between a break character and adjacent content, so the split point is
 structurally grapheme-safe with nothing to check.
@@ -1845,16 +1905,21 @@ once per call, and ONLY when a window consults it: levels are built at
 their first consultation (the window loop walks the list strictly
 through `find_map`, in priority order), so a budget that answers every
 window at the paragraph level never runs the sentence or word walks at
-all, and duplicate entries — `None` or a repeated literal — are
-recognized at list construction and skipped, inert (identical levels
-can never change the answer — the first occurrence of a level always
-dominates its duplicate), so `[None] * 100` costs what `[None]` does
-(~1.7 ms at a 2000-codepoint budget over 6 MiB of prose, the paragraph
-walk alone) and `[" "] * 100` what `[" "]` does (~9 ms). The former
-spelling re-paid the walks per duplicate entry — walks plus ~45 MiB of
-cut vectors per duplicate on a 6 MiB document, a caller-controlled
-unbounded cost (`[None] * 100` measured 17.2 s and +3,120 MiB of peak
-RSS, `[" "] * 100` 790 ms and +1,560 MiB — OOM shapes) — closed by the
+all — a `["\n", None]` thread whose every line fits the budget builds
+none of the spliced levels — and duplicate entries — `None` or a
+repeated literal — are recognized at list construction and skipped,
+inert (identical levels can never change the answer — the first
+occurrence of a level always dominates its duplicate), so `[None] * 100`
+costs what `[None]` does (~1.7 ms at a 2000-codepoint budget over
+6 MiB of prose, the paragraph walk alone) and `[" "] * 100` what
+`[" "]` does (~9 ms). Two former spellings paid more: before the dedup,
+every duplicate entry re-paid the walks plus ~45 MiB of cut vectors per
+duplicate on a 6 MiB document — a caller-controlled unbounded cost
+(`[None] * 100` measured 17.2 s and +3,120 MiB of peak RSS,
+`[" "] * 100` 790 ms and +1,560 MiB, OOM shapes) — and between the
+dedup and the lazy levels the walks were paid once per call even when
+no window ever consulted them: a single-chunk budget over 6 MiB spent
+~176 ms building levels that supplied zero cuts. Both closed, by the
 construction-time dedup and the first-consultation deferral.
 
 **Rust API note**: 0.6.0 changes the public `tors-core` crate's
@@ -1891,36 +1956,38 @@ level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
 
-Cost at document scale: one scan per CONSULTED level — the default
-hierarchy's paragraph/sentence/word walks, or one literal search per
-distinct custom separator — each paid at most once per call, at the
-level's first consultation by the window loop; one branchless byte pass
-for the codepoint count; and one grapheme boundary index — a
-one-bit-per-codepoint bitmap built LAZILY, only when a consulted level
-actually has cuts to filter, a window needs the raw-cut fallback, or
-`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
-instead of a segmentation walk. A budget that answers every window at
-the paragraph level never runs the sentence or word walks; a custom
-hierarchy that never matches under a whole-document budget is one
-codepoint count and nothing else — no window consults a level, so not
-even the literal's own scan runs. Measured on 12 MiB
-(`tools/bench_chunking.py`): the default hierarchy at a 2000-codepoint
-budget over prose runs only its paragraph walk, ~3.4 ms — it was ~350
-ms when every level built eagerly, its word walk (~130 ms) plus
-sentence walk (~190 ms) scanned before the first window asked — and
-budgets that fall further consult, and pay, more: ~192 ms at a
-500-codepoint budget (the sentence walk joins the paragraph walk; the
-word walk is still never consulted), ~385 ms at a 100-codepoint budget
-(all three walks, plus a 20× denser chunk loop) — the laziness prices
-consultation, it does not skip walks the answer needs; a never-matching
-custom hierarchy under a whole-document budget ~2.5 ms, the codepoint
-count. Before #22 an unconditional `Vec<char>` collect plus a `HashSet`
-of every grapheme boundary in the document ran before anything else:
-~1.0-1.2 s for the never-matching case regardless of budget, ~3.0 s for
-the default hierarchy, superlinear in input size — #22 removed that
-unconditional grapheme structure, and this follow-up removed the
-unconditional level builds that had remained, which is what the
-~350 ms → ~3.4 ms drop measures.
+Cost at document scale: one scan per CONSULTED level — each level's
+walk or literal search runs at most once per call, at the first window
+that consults it (the default hierarchy's paragraph/sentence/word
+walks, or one literal search per distinct custom separator), so levels
+no window descends to are never scanned at all: a custom hierarchy that
+never matches under a whole-document budget is one codepoint count and
+nothing else — no window consults a level, so not even the literal's
+own scan runs. The one other whole-text structure is the grapheme
+boundary index — a one-bit-per-codepoint bitmap built LAZILY, only when
+a realized level has cuts to filter, a window needs the raw-cut
+fallback, or `overlap` snaps; on pure-ASCII text the index is two SIMD
+byte scans instead of a segmentation walk, and a call that realizes no
+level with cuts and never falls back or snaps builds none of it.
+Measured on 12 MiB prose (min-of-3, `tests/test_performance.py` and
+`tools/bench_chunking.py`): a whole-document budget (`max_chars` at or
+above the text's length) consults no level at all and costs ~0.1 ms
+whatever the hierarchy — default, custom, or `None`-spliced (formerly
+~340 ms for the default hierarchy, and ~176 ms at 6 MiB: the walks paid
+for zero cuts); a 2000-codepoint budget whose windows are all served by
+the paragraph level costs ~1.2 ms (formerly ~350 ms — the eager build
+paid the sentence and word walks no window consulted); budgets that
+genuinely descend pay the walks they use — ~190 ms at a 600-codepoint
+budget (paragraph plus sentence), ~400 ms at 100 (all three levels plus
+a 20× denser chunk loop: the word walk ~130 ms plus sentence walk
+~190 ms, the accurate UAX #29 segmentation the function exists to
+provide). The laziness prices consultation, it does not skip walks the
+answer needs. Before #22 an unconditional `Vec<char>` collect plus a
+`HashSet` of every grapheme boundary in the document ran before
+anything else (~1.0-1.2 s for the never-matching case regardless of
+budget, ~3.0 s for the default hierarchy, superlinear in input size),
+and until the lazy levels every level was built before the first
+window, consulted or not.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,

@@ -58,6 +58,29 @@ class TestApiReferenceExamples:
         # whole line plus the blank line riding along after it
         assert log[10:38] == "INFO ready\n\nWARN disk at 90%"
 
+    def test_chunk_by_paragraphs_iter_minutes_windows(self) -> None:
+        # docs/api.md's chunk_by_paragraphs_iter section, pinned the same
+        # way: the literals the doc shows, list and iter spelling alike.
+        minutes = (
+            "Attendees: Ada, Grace, Edsger.\n\n"
+            "Grace: parser rewrite halves latency.\n\n"
+            "Edsger: spec drift question, unresolved.\n\n"
+            "Next sync moves to Thursday."
+        )
+        assert tors.chunk_by_paragraphs(minutes, 2) == [(0, 69), (71, 141)]
+        assert list(tors.chunk_by_paragraphs_iter(minutes, 2)) == [(0, 69), (71, 141)]
+        assert list(tors.chunk_by_paragraphs_iter(minutes, 2, overlap=1)) == [
+            (0, 69),
+            (32, 111),
+            (71, 141),
+        ]
+        # the overlap slice the doc calls out by content: the repeated
+        # whole paragraph, the blank-line gap riding along after it, and
+        # the next chunk's first paragraph
+        assert minutes[32:111] == (
+            "Grace: parser rewrite halves latency.\n\nEdsger: spec drift question, unresolved."
+        )
+
     def test_chunk_hierarchical_thread(self) -> None:
         thread = (
             "Nathan: kicking off the sync.\n"

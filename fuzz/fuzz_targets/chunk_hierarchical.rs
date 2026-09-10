@@ -19,13 +19,13 @@
 //! regressing end is a bug. Forward progress at the sequence level.
 //!
 //! `chunk_by_lines` carries more than structure: an inline random-access
-//! reference oracle (the Rust unit tests' own `line_bounds_reference`
-//! spelling — that one is `#[cfg(test)]`-only and tors-core is a path
-//! dep, so it is unreachable from this crate and inlined here instead)
-//! plus a windower mirroring `chunk_by_segments`'s documented contract,
-//! a DIFFERENTIAL pin: wrong CRLF folding or a blank-line miscount now
-//! panics the fuzzer with the reproducing input, not just violates
-//! structure.
+//! reference oracle (the same whole-text-`Vec<char>` spelling the Rust
+//! unit tests keep as their own `#[cfg(test)]` oracle — tors-core is a
+//! path dep, so that one is unreachable from this crate and inlined here
+//! instead) plus a windower mirroring `chunk_by_segments`'s documented
+//! contract, a DIFFERENTIAL pin: wrong CRLF folding or a blank-line
+//! miscount now panics the fuzzer with the reproducing input, not just
+//! violates structure.
 //!
 //! Separator hierarchies fuzz in a two-shape x two-budget GRID over the
 //! same body: the `SepEntry` alphabet below (shaped so the
@@ -207,21 +207,21 @@ fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
     }
 }
 
-/// The random-access `line_bounds` oracle, inlined from the Rust unit
-/// tests' own `line_bounds_reference` spelling (that one lives behind
-/// `#[cfg(test)]` in tors-core, invisible to this path-dep crate — the
-/// reason this copy exists): the whole-text `Vec<char>` collect with a
-/// one-codepoint CRLF lookahead. A break unit is a `\n` (unless directly
-/// after a `\r`, whose CRLF pair it completes) or a `\r` (always opens a
-/// unit); a line is the maximal run between break units, KEPT only when
-/// it carries a non-whitespace codepoint; trailing content after the
-/// last break is a line iff non-whitespace, and a trailing break yields
-/// no phantom line. Caveat: the oracle shares production's
-/// `char::is_whitespace()` content filter, so the differential below
-/// pins the two MACHINES (CRLF folding, break counting, windowing)
-/// against each other, NOT the whitespace definition itself — that one
-/// the Python suite pins (tests/test_chunk_text.py, the
-/// White_Space-vs-`str.isspace` cells).
+/// The random-access `line_bounds` oracle, inlined from the same
+/// whole-text-`Vec<char>` spelling the Rust unit tests keep as their
+/// own `#[cfg(test)]` oracle (that one is invisible to this path-dep
+/// crate — the reason this copy exists): the whole-text `Vec<char>`
+/// collect with a one-codepoint CRLF lookahead. A break unit is a `\n`
+/// (unless directly after a `\r`, whose CRLF pair it completes) or a
+/// `\r` (always opens a unit); a line is the maximal run between break
+/// units, KEPT only when it carries a non-whitespace codepoint;
+/// trailing content after the last break is a line iff non-whitespace,
+/// and a trailing break yields no phantom line. Caveat: the oracle
+/// shares production's `char::is_whitespace()` content filter, so the
+/// differential below pins the two MACHINES (CRLF folding, break
+/// counting, windowing) against each other, NOT the whitespace
+/// definition itself — that one the Python suite pins
+/// (tests/test_chunk_text.py, the White_Space-vs-`str.isspace` cells).
 fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();

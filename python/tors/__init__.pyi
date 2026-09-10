@@ -497,7 +497,10 @@ def chunk_text(
 # The streaming twin of chunk_text: same sequence, same argument contract,
 # the word_bounds_iter shape (whole scan under one detach at construction,
 # one 2-tuple per __next__): avoids materializing a list for documents
-# that chunk into the hundreds of thousands of pieces.
+# that chunk into the hundreds of thousands of pieces. Error precedence
+# matches the list spelling exactly: a lone-surrogate str raises
+# UnicodeEncodeError (the text conversion) before any count/overlap
+# ValueError, list and iter alike.
 def chunk_text_iter(
     text: str,
     max_chars: int,
@@ -528,6 +531,9 @@ def chunk_by_words(
 ) -> list[tuple[int, int]]: ...
 
 # The streaming twin of chunk_by_words: same shape as chunk_text_iter.
+# Error precedence matches the list spelling exactly: a lone-surrogate str
+# raises UnicodeEncodeError (the text conversion) before any
+# count/overlap ValueError, list and iter alike.
 def chunk_by_words_iter(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -540,6 +546,9 @@ def chunk_by_sentences(
 ) -> list[tuple[int, int]]: ...
 
 # The streaming twin of chunk_by_sentences: same shape as chunk_text_iter.
+# Error precedence matches the list spelling exactly: a lone-surrogate str
+# raises UnicodeEncodeError (the text conversion) before any
+# count/overlap ValueError, list and iter alike.
 def chunk_by_sentences_iter(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -559,6 +568,20 @@ def chunk_by_sentences_iter(
 def chunk_by_paragraphs(
     text: str, paragraphs_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
+
+# The streaming twin of chunk_by_paragraphs: same shape as chunk_text_iter,
+# and the same rationale as every other _iter spelling: the list shape's
+# GIL-held marshalling cost is measured for segment-count-heavy outputs
+# (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
+# 428-497 ms just marshalling the list), and a paragraph-heavy corpus (a
+# multi-MiB article dump or report batch) is in that piece-count class,
+# chunking into hundreds of thousands of pieces. Error precedence matches
+# the list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
+# (the text conversion) before any count/overlap ValueError, list and iter
+# alike.
+def chunk_by_paragraphs_iter(
+    text: str, paragraphs_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
 
 # chunk_by_words/chunk_by_sentences/chunk_by_paragraphs' line-count twin.
 # A line break is a \n, a lone \r, or a \r\n pair counted as ONE unit
@@ -592,7 +615,10 @@ def chunk_by_lines(
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
 # 428-497 ms just marshalling the list), and a line-oriented corpus (a
 # multi-MiB log or transcript) is in that piece-count class, chunking
-# into hundreds of thousands of pieces.
+# into hundreds of thousands of pieces. Error precedence matches the
+# list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
+# (the text conversion) before any count/overlap ValueError, list and
+# iter alike.
 def chunk_by_lines_iter(
     text: str, lines_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...

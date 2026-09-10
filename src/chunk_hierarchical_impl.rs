@@ -47,21 +47,30 @@
 //! default hierarchy exists). `[None]` is therefore identical to
 //! `separators = None`. Cost stated plainly: every level — each of the
 //! three default walks, each distinct custom literal — pays its one
-//! whole-text walk AT MOST once per call, and ONLY when a window
-//! actually consults it: levels are built on first consultation (the
-//! window loop walks the list strictly through `find_map`, in priority
-//! order), so a budget that never falls past the paragraph level never
-//! runs the sentence or word walks at all, and a whole-document budget
-//! that never cuts pays nothing but the codepoint count. Duplicate
-//! entries — `None` or a repeated literal — are recognized at list
-//! construction and skipped, inert by the `find_map` dominance
-//! argument (identical levels can never change the answer: the first
-//! occurrence of a level always dominates its duplicate), so neither
-//! `[None] * 100` nor `[" "] * 100` is the caller-controlled unbounded
-//! cost the per-entry spelling made them (every duplicate re-paid the
-//! walks plus ~45 MiB of cut vectors per 6 MiB of text, an OOM shape);
-//! the dedup and the deferral close both spellings under the #21
-//! pathological-input discipline, memoized like #24's lazy bitmap.
+//! whole-text walk at most once per call, and only when a window
+//! actually consults it (#30's lazy levels: the splice contributes
+//! three level SPECS, not three whole-text walks, a literal's slot
+//! waits unbuilt the same way, and realization happens on first
+//! consultation — the same at-most-once-per-call memoization #24's
+//! lazy bitmap applies), so `["\n", None]` over a thread whose every
+//! line fits the budget builds NONE of the spliced levels, and one
+//! whose oversized lines fall to the sentence level pays sentence's
+//! walk once and word's never. Duplicate entries — a second or later
+//! `None`, a repeated literal — are recognized at slot construction
+//! and skipped, inert by the `find_map` dominance argument (identical
+//! levels can never change the answer: the first occurrence of a level
+//! always dominates its duplicate), so neither `[None; 100]` nor
+//! `[" "; 100]` is the caller-controlled unbounded cost the per-entry
+//! spelling made them (every duplicate re-paid the walks plus a full
+//! cut vector, ~45 MiB per duplicate on a 6 MiB document — an OOM
+//! shape); the dedups close both spellings under the #21
+//! pathological-input discipline, memoized like #24's lazy bitmap. The
+//! former spellings were eager on both axes on top of that: the
+//! pre-#31 one re-paid all three walks per `None` entry outright, and
+//! #31's dedup still paid the three walks once per call even when no
+//! window ever consulted them (a single-chunk budget over 6 MiB spent
+//! ~176 ms and ~45 MiB on levels that supplied zero cuts); the lazy
+//! realization removes the paid-for-nothing cost.
 //!
 //! UNLIKE [`crate::chunk_impl::chunk_text`] (a lossless covering
 //! partition), this is NOT lossless: at every level except the raw-cut
@@ -74,12 +83,14 @@
 //! marker wants it gone, not duplicated).
 //!
 //! Performance: every CONSULTED level's candidate cut-position list is
-//! computed at most once per call — at the level's FIRST consultation
-//! (`find_map` reaches levels strictly in priority order, so a level no
-//! window ever needs is never scanned at all: one `paragraph_bounds`/
-//! `sentence_bounds`/`word_bounds` walk or one `memchr::memmem` pass
-//! per distinct level the budget actually reaches, never re-scanned
-//! per chunk). Building each chunk is one
+//! computed at most once per call, at the FIRST window that consults it
+//! (#30's lazy levels: one scan per DISTINCT level — `paragraph_bounds`/
+//! `sentence_bounds`/`word_bounds` for the default levels, one `memmem`
+//! pass per custom literal — never re-scanned per chunk, never scanned
+//! at all for a level no window descends to, and never repeated for a
+//! duplicate entry the slot-construction dedup already collapsed; a
+//! single-chunk budget, `max_chars >= total`, consults no level and
+//! walks nothing: one codepoint count, one chunk out). Building each chunk is one
 //! `partition_point` binary search per level: O(n × levels) total, levels
 //! bounded by the small, caller-supplied list length. The codepoint `total`
 //! the budget arithmetic needs is one branchless byte pass (every UTF-8
@@ -89,21 +100,19 @@
 //! bit per codepoint on non-ASCII text — or, on pure-ASCII text, an
 //! all-ones bitmap plus the CRLF fixup, two SIMD byte scans, no
 //! segmentation walk at all — built at most once per call and ONLY when a
-//! call actually needs it — a consulted level with cuts to filter, the raw-cut
-//! fallback, or an overlap snap; a custom hierarchy whose literals never
-//! match (the whole-document-budget case) builds none of it. The former
+//! call actually needs it: a realized level with cuts to filter, the
+//! raw-cut fallback, or an overlap snap. A call that realizes no level
+//! with cuts and never falls back or snaps — the whole-document-budget
+//! case, custom hierarchy or default — builds none of it. The former
 //! spelling paid an unconditional `Vec<char>` collect plus a
 //! `HashSet<usize>` of every grapheme boundary in the document BEFORE
 //! anything else could run, which dominated document-scale cost and was
 //! superlinear on top of it (#22: a 12 MiB document spent ~1.2 s in
 //! ~12.6M hashed inserts regardless of chunk budget or separator
-//! presence), and the eager level spelling paid every level's walk up
-//! front even when the budget never consulted it (a 2000-codepoint
-//! budget over 12 MiB of prose ran the sentence and word walks, ~190 ms
-//! and ~130 ms, to answer every window at the paragraph level — the
-//! deferral is what makes the default hierarchy at a paragraph-scale
-//! budget cost its paragraph walk and nothing else). Forward progress is pinned the
-//! same way [`crate::chunk_impl::chunk_text_overlapping`]'s is: a hard
+//! presence); until #30, every level was additionally built — and every
+//! non-empty one filtered — before the first window, so a budget that
+//! never consulted them paid for them anyway. Forward progress is pinned
+//! the same way [`crate::chunk_impl::chunk_text_overlapping`]'s is: a hard
 //! iteration-count assertion in the tests, not just a slow-test timeout.
 
 use std::collections::HashSet;
@@ -197,165 +206,217 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
     Level { cuts }
 }
 
-/// The default hierarchy's three accurate levels, in coarsest-first
-/// order — the splice a `None` entry in a custom `separators` list
-/// inserts at its position, and the whole hierarchy when `separators` is
-/// `None`. One whole-text walk per level (`paragraph_bounds`, UAX #29
-/// `sentence_bounds`, UAX #29 `word_bounds`), each paid AT MOST once per
-/// call and only at its FIRST consultation — never per chunk, and never
-/// at all for a level the budget never consults.
-///
-/// The deferral is answer-neutral by construction: a level's cut vector
-/// is a pure function of (kind, text), the window loop consults levels
-/// strictly through `find_map` in list order, and nothing else reads
-/// the list, so building a level at its first consultation produces
-/// bit-identical answers to building it upfront — the differential
-/// oracle in the tests (which keeps the eager spelling) pins that
-/// equivalence over the corpus × budget × overlap × hierarchy sweep.
+/// A not-yet-built level: WHICH walk or scan realizes it, not the walk
+/// itself. The default hierarchy's three levels and a `None` splice's
+/// copies exist as specs until the first window that consults them;
+/// a custom literal exists as a spec until the same first
+/// consultation. Realization (one whole-text pass: `paragraph_bounds`,
+/// UAX #29 `sentence_bounds`, UAX #29 `word_bounds`, or one `memmem`
+/// scan for [`LevelSpec::Literal`]) happens in [`LevelSlot::realize`],
+/// never here — building a spec list walks no text at all.
 #[derive(Clone, Copy)]
-enum SlotKind<'a> {
+enum LevelSpec<'a> {
+    /// The blank-line paragraph walk, gaps dropped between chunks.
     Paragraph,
+    /// The UAX #29 sentence walk, contiguous.
     Sentence,
+    /// The UAX #29 word walk, contiguous.
     Word,
+    /// One `memchr::memmem` scan for this caller-supplied literal.
     Literal(&'a str),
 }
 
-/// One level's slot in the deferred list: still unbuilt, or built once
-/// and cached for the rest of the call. `Pending -> Ready` transitions
-/// at most once per slot, so a consulted level pays its scan exactly
-/// once however many windows reach it — the same memoization shape
-/// `GraphemeIndex`'s `Option` slot applies one structure over.
-enum Slot<'a> {
-    Pending(SlotKind<'a>),
-    Ready(Level),
+/// One hierarchy position: the spec waiting to be realized, plus the
+/// memoized [`Level`] once a window has consulted it. `level` stays
+/// `None` until the FIRST `best_cut` consultation and holds the build
+/// for the rest of the call — the same at-most-once-per-call
+/// memoization #24's lazy grapheme bitmap applies, extended (#30) from
+/// the bitmap to the levels themselves: a level no window ever
+/// descends to is never walked, never filtered, never allocated, which
+/// is what removes the eager spelling's paid-for-nothing cost (a
+/// single-chunk budget over 6 MiB spent ~176 ms and ~45 MiB building
+/// three levels that supplied zero cuts).
+struct LevelSlot<'a> {
+    spec: LevelSpec<'a>,
+    level: Option<Level>,
 }
 
-/// The priority-ordered level list in deferred form, plus the one
-/// consultation point: `best_cut` walks the slots in order through
-/// `find_map`, building each visited slot on first visit. The
-/// grapheme-cluster cut filter the eager spelling applied to every
-/// level at list-construction time runs at the BUILD site instead, so
-/// an unconsulted level never forces the grapheme index on its cuts'
-/// behalf either.
-struct Levels<'a> {
-    slots: Vec<Slot<'a>>,
-}
-
-impl<'a> Levels<'a> {
-    /// The deferred list from a `separators` value: `None` is the
-    /// default hierarchy's three slots; a custom list is one deferred
-    /// literal slot per DISTINCT literal (`Some("")` stays the dropped
-    /// no-op it always was), with the FIRST `None` entry splicing the
-    /// three default slots in at its position and every later `None`
-    /// skipped. Both dedups — `None` and literal — are provably inert
-    /// by the same `find_map` dominance argument: the window loop
-    /// consults slots only through `find_map` (the FIRST slot
-    /// supplying a cut wins; the list is never indexed positionally or
-    /// counted), and a duplicate's level is bit-identical to its
-    /// original's, so a duplicate can never change an answer its
-    /// original didn't already give. Before the dedup, every duplicate
-    /// was a re-paid whole-text walk plus a full cut vector — ~45 MiB
-    /// per duplicate `None` on a 6 MiB document, the same for a
-    /// repeated literal that matches often (`[" "] * 100` was the OOM
-    /// shape `[None; 100]` was) — a caller-controlled unbounded cost
-    /// the #21 pathological-input discipline closes here, memoized
-    /// like #24's lazy bitmap.
-    fn new(separators: Option<&'a [Option<&'a str>]>) -> Levels<'a> {
-        let slots = match separators {
-            None => vec![
-                Slot::Pending(SlotKind::Paragraph),
-                Slot::Pending(SlotKind::Sentence),
-                Slot::Pending(SlotKind::Word),
-            ],
-            Some(seps) => {
-                let mut slots = Vec::new();
-                let mut spliced = false;
-                let mut seen_literals: HashSet<&str> = HashSet::new();
-                for entry in seps {
-                    match entry {
-                        None => {
-                            if !spliced {
-                                slots.push(Slot::Pending(SlotKind::Paragraph));
-                                slots.push(Slot::Pending(SlotKind::Sentence));
-                                slots.push(Slot::Pending(SlotKind::Word));
-                                spliced = true;
-                            }
-                        }
-                        Some("") => {}
-                        Some(s) => {
-                            if seen_literals.insert(s) {
-                                slots.push(Slot::Pending(SlotKind::Literal(s)));
-                            }
-                        }
-                    }
-                }
-                slots
-            }
-        };
-        Levels { slots }
-    }
-
-    /// The window loop's consultation: first slot in priority order
-    /// supplying an in-budget forward-progress cut, building each
-    /// visited slot on first visit. `SlotKind` is `Copy`, so the
-    /// pending kind reads out before the slot is overwritten with its
-    /// built level.
-    fn best_cut(
+impl LevelSlot<'_> {
+    /// The slot's built [`Level`], realizing the spec on first
+    /// consultation and memoizing the build for every later window:
+    /// at most one realization per slot per call — `get_or_insert_with`
+    /// on the slot, the same memoization idiom #24's lazy grapheme
+    /// bitmap uses, extended to the levels themselves. Realization is
+    /// the level's one whole-text walk or scan, then — for a level with
+    /// cuts — the grapheme cut filter, exactly the filter semantics the
+    /// former pre-loop pass applied, just paid at build time, so a
+    /// level never consulted never builds, never filters, and never
+    /// triggers the grapheme bitmap.
+    fn realize(
         &mut self,
         text: &str,
         total: usize,
         graphemes: &mut Option<GraphemeIndex>,
-        after: usize,
-        limit: usize,
-    ) -> Option<(usize, usize)> {
-        self.slots.iter_mut().find_map(|slot| {
-            if let Slot::Pending(kind) = *slot {
-                let level = build_level(kind, text, total, graphemes);
-                *slot = Slot::Ready(level);
+    ) -> &Level {
+        self.level.get_or_insert_with(|| {
+            let mut level = match self.spec {
+                LevelSpec::Paragraph => level_from_paragraph_bounds(paragraph_bounds(text)),
+                LevelSpec::Sentence => {
+                    level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text))
+                }
+                LevelSpec::Word => {
+                    level_from_contiguous_bounds(segmentation_impl::word_bounds(text))
+                }
+                LevelSpec::Literal(sep) => level_from_literal(text, sep),
+            };
+            // The realized level's cuts are filtered to grapheme-cluster
+            // boundaries, one O(cuts) bitmap pass: the same "never split a
+            // cluster" fix chunk_text/chunk_by_* already apply, extended
+            // here to custom literal separators too (a caller's separator
+            // could, in principle, land inside a cluster on pathological
+            // input). The default hierarchy is NOT exempt:
+            // `word_bounds`/`sentence_bounds` follow UAX #29 exactly, which
+            // scores some combining sequences (Thai SARA AM, U+0E33) as
+            // their own word/sentence segment even though the grapheme
+            // rules join them to the preceding base character into one
+            // cluster — `truncate_impl`'s module docs document the same
+            // divergence — so their cuts need this filter exactly like a
+            // custom literal's do. A level with no cuts filters nothing
+            // and builds nothing (a never-matching separator costs one
+            // scan, no structure).
+            if !level.cuts.is_empty() {
+                let g = grapheme_index(graphemes, text, total);
+                level
+                    .cuts
+                    .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
             }
-            match slot {
-                Slot::Ready(level) => level.best_cut(after, limit),
-                Slot::Pending(_) => unreachable!("the arm above built the level"),
-            }
+            #[cfg(test)]
+            build_seam::bump_levels();
+            level
         })
     }
 }
 
-/// One slot's level, built and grapheme-filtered: the same scan the
-/// eager spelling ran at list construction, moved to first
-/// consultation. The filter is the same "never split a cluster" fix
-/// chunk_text/chunk_by_* apply, extended here to custom literal
-/// separators too (a caller's separator could, in principle, land
-/// inside a cluster on pathological input), and the default hierarchy
-/// is NOT exempt: `word_bounds`/`sentence_bounds` follow UAX #29
-/// exactly, which scores some combining sequences (Thai SARA AM,
-/// U+0E33) as their own word/sentence segment even though the grapheme
-/// rules join them to the preceding base character into one cluster —
-/// `truncate_impl`'s module docs document the same divergence — so
-/// their cuts need this filter exactly like a custom literal's do. A
-/// level with no cuts filters nothing and builds nothing (a
-/// never-matching separator costs its one scan, no structure).
-fn build_level(
-    kind: SlotKind<'_>,
+/// The default hierarchy's three specs, in coarsest-first order — the
+/// splice a `None` entry in a custom `separators` list inserts at its
+/// position, and the whole hierarchy when `separators` is `None`.
+/// SPECS, not levels: no text is walked here, which is the point — the
+/// walks happen in [`LevelSlot::realize`], only for slots a window
+/// actually consults, at most once per call each.
+fn default_level_specs<'a>() -> Vec<LevelSlot<'a>> {
+    vec![
+        LevelSlot {
+            spec: LevelSpec::Paragraph,
+            level: None,
+        },
+        LevelSlot {
+            spec: LevelSpec::Sentence,
+            level: None,
+        },
+        LevelSlot {
+            spec: LevelSpec::Word,
+            level: None,
+        },
+    ]
+}
+
+/// The caller-supplied hierarchy as a spec list: a literal `Some(s)` is
+/// one [`LevelSpec::Literal`] waiting for its scan — one slot per
+/// DISTINCT literal, a repeated literal skipped as a duplicate the same
+/// way a second `None` is (see the arms below for why a duplicate is
+/// provably inert); a `None` entry splices [`default_level_specs`] in
+/// at its position, at most once per call. An empty literal is a no-op
+/// level (dropped, no slot at all, the same filter the all-literal
+/// spelling always applied — and no seen-set entry either, since it
+/// never produces a slot). Both dedups are provably inert by the same
+/// `find_map` dominance argument: the window loop consults `slots`
+/// only through the find_map (the FIRST slot supplying a cut wins, and
+/// the list is never indexed positionally or counted), and a
+/// duplicate's level is bit-identical to its original's, so a
+/// duplicate can never change an answer its original didn't already
+/// give. Before the dedups, every duplicate was a re-paid whole-text
+/// walk plus a full cut vector — ~45 MiB per duplicate `None` on a
+/// 6 MiB document, the same for a repeated literal that matches often
+/// (`[" "; 100]` was the OOM shape `[None; 100]` was) — a
+/// caller-controlled unbounded cost the #21 pathological-input
+/// discipline closes here, memoized like #24's lazy bitmap. No level
+/// is BUILT here — the whole list is specs, realized per slot on
+/// first consultation.
+fn custom_level_specs<'a>(seps: &[Option<&'a str>]) -> Vec<LevelSlot<'a>> {
+    let mut slots = Vec::new();
+    let mut spliced = false;
+    let mut seen_literals: HashSet<&str> = HashSet::new();
+    for entry in seps {
+        match entry {
+            None => {
+                if !spliced {
+                    slots.extend(default_level_specs());
+                    spliced = true;
+                }
+                // A duplicate splice is skipped, not re-spliced: the
+                // window loop consults `slots` only through the
+                // find_map (the FIRST slot supplying a cut wins, and
+                // the list is never indexed positionally or counted),
+                // and a duplicate's levels are bit-identical to the
+                // first splice's, so a duplicate can never change an
+                // answer its original didn't already give — inert.
+                // Skipping still matters under the lazy spelling: a
+                // duplicate slot a window reached would REALIZE (pay
+                // its walk a second time) before returning the same
+                // None its original just did, and the pre-#31 eager
+                // spelling re-paid the three whole-text walks and
+                // their ~45 MiB of cut vectors (on a 6 MiB document)
+                // per duplicate outright — a caller-controlled
+                // unbounded cost (`[None; 100]` is an OOM shape) — the
+                // same pathological-input discipline #21 established:
+                // contribute once per call, memoized like #24's lazy
+                // bitmap.
+            }
+            // Dropped BEFORE the seen-set: an empty literal never
+            // produces a slot, so it must not occupy a seen-set entry
+            // either (a later non-empty literal is still first-seen,
+            // and any number of empty literals stays a no-op).
+            Some("") => {}
+            Some(s) => {
+                // A duplicate literal is skipped for the same
+                // dominance reason as a duplicate splice: the find_map
+                // only ever reaches it after its original returned
+                // None for this window, and its level is bit-identical
+                // to the original's — the same None again, inert. The
+                // walk a duplicate would otherwise re-pay is one
+                // `memmem` scan plus a full cut vector, so `[Some("
+                // "); N]` is the literal spelling of the `[None; 100]`
+                // OOM shape: caller-controlled unbounded allocation.
+                if seen_literals.insert(s) {
+                    slots.push(LevelSlot {
+                        spec: LevelSpec::Literal(s),
+                        level: None,
+                    });
+                }
+            }
+        }
+    }
+    slots
+}
+
+/// The call's grapheme boundary index, built at the FIRST need: the
+/// realization-time cut filter inside [`LevelSlot::realize`], the
+/// raw-cut fallback, and the overlap snap all funnel through here, so
+/// "at most once per call, only when a call actually needs it" is one
+/// line to read (and the test seam below counts every build). The
+/// former spelling built the whole per-codepoint structure
+/// unconditionally before anything else could run, which is the
+/// document-scale cost #22 measured.
+fn grapheme_index<'g>(
+    graphemes: &'g mut Option<GraphemeIndex>,
     text: &str,
     total: usize,
-    graphemes: &mut Option<GraphemeIndex>,
-) -> Level {
-    let mut level = match kind {
-        SlotKind::Paragraph => level_from_paragraph_bounds(paragraph_bounds(text)),
-        SlotKind::Sentence => {
-            level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text))
-        }
-        SlotKind::Word => level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
-        SlotKind::Literal(s) => level_from_literal(text, s),
-    };
-    if !level.cuts.is_empty() {
-        let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
-        level
-            .cuts
-            .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
-    }
-    level
+) -> &'g GraphemeIndex {
+    graphemes.get_or_insert_with(|| {
+        #[cfg(test)]
+        build_seam::bump_graphemes();
+        GraphemeIndex::build(text, total)
+    })
 }
 
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
@@ -408,20 +469,26 @@ pub fn chunk_hierarchical(
     // `total` was the only thing that collect was ever read for.
     let total = char_count(text);
 
-    // The deferred level list: no walk, no scan, no cut vector exists
-    // yet — each level builds at its first consultation below, at most
-    // once per call, and a level no window consults never builds at
-    // all (the answer-neutrality argument is on [`Levels`]; the eager
-    // spelling built every level up front, which at a paragraph-scale
-    // budget paid the sentence and word walks to answer every window
-    // at the paragraph level).
-    let mut levels = Levels::new(separators);
-    // The grapheme boundary index: built lazily, AT MOST ONCE per call, at
-    // the first site that actually needs it — a consulted level's cut
-    // filter (the build site applies it, see [`build_level`]), the
-    // raw-cut fallback, or the overlap snap. The former spelling built
-    // the whole per-codepoint structure unconditionally before anything
-    // else could run, which is the document-scale cost #22 measured.
+    // The hierarchy as SPECS — no walk paid yet. Every slot is realized
+    // by the FIRST window that consults it ([`LevelSlot::realize`], at
+    // most once per call per slot), so a budget whose windows never
+    // open a level pays nothing for it: the #30 lazy-level extension of
+    // #24's lazy-bitmap idiom. The former spelling built every level —
+    // and filtered every non-empty one, building the grapheme bitmap —
+    // before the first window, so even a single-chunk budget
+    // (`max_chars >= total`, this loop's own first-iteration exit) paid
+    // all three default walks, ~176 ms and ~45 MiB of cut vectors over
+    // a 6 MiB document, for levels that supplied zero cuts.
+    let mut levels: Vec<LevelSlot> = match separators {
+        Some(seps) => custom_level_specs(seps),
+        None => default_level_specs(),
+    };
+    // The grapheme boundary index: built lazily, AT MOST ONCE per call,
+    // at the first site that actually needs it — a realized level's cut
+    // filter, the raw-cut fallback, or the overlap snap, every site one
+    // [`grapheme_index`] call. The former spelling built the whole
+    // per-codepoint structure unconditionally before anything else
+    // could run, which is the document-scale cost #22 measured.
     let mut graphemes: Option<GraphemeIndex> = None;
 
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
@@ -439,10 +506,20 @@ pub fn chunk_hierarchical(
             break;
         }
         let limit = start + max_chars;
+        // The find_map short-circuit is preserved exactly: the FIRST
+        // slot supplying a cut wins, and later slots stay unrealized for
+        // THIS window (a LATER window that reaches them reuses their
+        // memoized build). Realization is the closure's first act, so a
+        // consulted slot is built even when it supplies no cut for the
+        // window — consultation, not success, is what pays the walk.
         let cut = levels
-            .best_cut(text, total, &mut graphemes, start, limit)
+            .iter_mut()
+            .find_map(|slot| {
+                slot.realize(text, total, &mut graphemes)
+                    .best_cut(start, limit)
+            })
             .unwrap_or_else(|| {
-                let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+                let g = grapheme_index(&mut graphemes, text, total);
                 let end = g.hard_cut(start, limit);
                 (end, end)
             });
@@ -451,12 +528,52 @@ pub fn chunk_hierarchical(
             start = cut.1;
         } else {
             let target = cut.0.saturating_sub(overlap);
-            let g = graphemes.get_or_insert_with(|| GraphemeIndex::build(text, total));
+            let g = grapheme_index(&mut graphemes, text, total);
             let snapped = g.last_at_or_before(target);
             start = if snapped > start { snapped } else { cut.1 };
         }
     }
     chunks
+}
+
+/// The test-only counting seam behind the lazy-level pins: per-THREAD
+/// counters of the level realizations and grapheme-index builds this
+/// module issues, so the tests can assert exactly WHICH levels a call
+/// built, how often, and whether it built the bitmap at all — counts
+/// the differential sweep cannot see (it pins lazy == eager OUTPUT;
+/// this pins the laziness itself). Per-thread because the suite's
+/// tests run in parallel: each test's calls bump its own thread's
+/// counters and cannot interfere. Production builds compile none of
+/// this, so the release path carries zero counting cost.
+#[cfg(test)]
+mod build_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LEVELS_BUILT: Cell<usize> = const { Cell::new(0) };
+        static GRAPHEME_INDEX_BUILDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub fn reset() {
+        LEVELS_BUILT.with(|c| c.set(0));
+        GRAPHEME_INDEX_BUILDS.with(|c| c.set(0));
+    }
+
+    pub fn levels_built() -> usize {
+        LEVELS_BUILT.with(Cell::get)
+    }
+
+    pub fn grapheme_index_built() -> usize {
+        GRAPHEME_INDEX_BUILDS.with(Cell::get)
+    }
+
+    pub fn bump_levels() {
+        LEVELS_BUILT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub fn bump_graphemes() {
+        GRAPHEME_INDEX_BUILDS.with(|c| c.set(c.get() + 1));
+    }
 }
 
 #[cfg(test)]
@@ -501,12 +618,13 @@ mod tests {
         let chars: Vec<char> = text.chars().collect();
         let total = chars.len();
 
-        // The oracle keeps its OWN inline level building (not the new
-        // deferred `Levels` slots) so the differential sweep below pins
-        // the deferral and both dedups' output against this eager,
-        // duplicate-rebuilding spelling, the same way it pins the bitmap
-        // machinery: extended for the `None` entry in the former code's
-        // own inline style.
+        // The oracle keeps its OWN inline EAGER level building (not the
+        // spec list + [`LevelSlot::realize`] spelling the production
+        // code now uses) so the differential sweep below pins the lazy
+        // spelling's output against this eager one — the exact pin that
+        // lazy == eager — the same way it pins the bitmap machinery:
+        // extended for the `None` entry in the former code's own inline
+        // style.
         let mut levels: Vec<Level> = match separators {
             Some(seps) => {
                 let mut built = Vec::new();
@@ -659,6 +777,246 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- The lazy levels (#30): seam-counted structural pins. The
+    // differential sweep above pins lazy == eager OUTPUT; these pin the
+    // laziness itself — WHICH levels a call builds, how often, and
+    // whether the grapheme bitmap is built at all — through the
+    // per-thread `build_seam` counters, reset at each test's start.
+
+    #[test]
+    fn whole_document_budget_builds_no_levels_and_no_grapheme_index() {
+        // The issue's own headline cell: a single-chunk budget
+        // (`max_chars >= total`) pays NO level walk at all — the eager
+        // spelling built all three default levels (and the grapheme
+        // bitmap, via the pre-loop cut filter) before the loop's first
+        // iteration could take its own `remaining <= max_chars` exit,
+        // ~176 ms and ~45 MiB over a 6 MiB document for levels that
+        // supplied zero cuts. Every hierarchy spelling of the same call
+        // is equally lazy: default, custom literal, and None-spliced.
+        let text = "Para one.\n\nPara two.\n\nPara three.\n\nPara four.";
+        let total = text.chars().count();
+        for seps in [
+            None,
+            Some(vec![Some("ZZZ_NEVER_MATCHES")]),
+            Some(vec![Some("\n"), None]),
+        ] {
+            build_seam::reset();
+            let chunks = chunk_hierarchical(text, total, seps.as_deref(), 0);
+            assert_eq!(chunks, vec![(0, total)], "seps={seps:?}");
+            assert_eq!(
+                build_seam::levels_built(),
+                0,
+                "a single-chunk budget built levels: seps={seps:?}"
+            );
+            assert_eq!(
+                build_seam::grapheme_index_built(),
+                0,
+                "a single-chunk budget built the grapheme index: seps={seps:?}"
+            );
+        }
+        // Overlap cannot resurrect the cost either: the single chunk
+        // exits the loop before any snap site runs.
+        build_seam::reset();
+        assert_eq!(chunk_hierarchical(text, total, None, 4), vec![(0, total)]);
+        assert_eq!(build_seam::levels_built(), 0);
+        assert_eq!(build_seam::grapheme_index_built(), 0);
+    }
+
+    #[test]
+    fn a_budget_that_never_descends_builds_only_the_paragraph_level() {
+        // A paragraph-sized budget over multi-paragraph text: every
+        // window's FIRST consultation is the paragraph level and it
+        // supplies every cut, so sentence and word are never consulted,
+        // never built, across however many windows the text windows
+        // into — the chunk ends landing on paragraph ends is the
+        // output-level proof the cuts came from the paragraph level.
+        let text = "Short one.\n\nShort two.\n\nShort three.\n\nShort four.";
+        build_seam::reset();
+        let chunks = chunk_hierarchical(text, 12, None, 0);
+        assert_eq!(
+            text_of(&chunks, text),
+            vec!["Short one.", "Short two.", "Short three.", "Short four."]
+        );
+        assert_eq!(
+            build_seam::levels_built(),
+            1,
+            "only the paragraph level may build for a never-descending budget"
+        );
+        // The one built level had cuts to filter, so the bitmap built
+        // exactly once too — at realization, not in any pre-loop pass.
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+    }
+
+    #[test]
+    fn a_budget_that_descends_builds_each_level_at_most_once_per_call() {
+        // One paragraph, one sentence, many words, a word-sized budget:
+        // EVERY window consults paragraph (a lone paragraph has no gap
+        // to cut at), then sentence (its only cut sits past the
+        // window's limit), then word (which supplies the cut) — the
+        // full descent, window after window, and the counts stay at
+        // three: the first window realized all three levels and every
+        // later window reuses the memoized builds.
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        build_seam::reset();
+        let chunks = chunk_hierarchical(text, 7, None, 0);
+        assert!(
+            chunks.len() > 10,
+            "expected many windows, got {}",
+            chunks.len()
+        );
+        assert_eq!(
+            build_seam::levels_built(),
+            3,
+            "each of paragraph/sentence/word must build exactly once"
+        );
+        assert_eq!(
+            build_seam::grapheme_index_built(),
+            1,
+            "the filter bitmap is shared: one build, however many levels filter"
+        );
+        // Overlap adds snap sites, not builds: the bitmap is already
+        // realized by the word level's filter, the levels already
+        // memoized.
+        build_seam::reset();
+        let _ = chunk_hierarchical(text, 7, None, 2);
+        assert_eq!(build_seam::levels_built(), 3);
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+        // Per-CALL scope: a fresh call pays the walks again — the
+        // memoization lives in the call's level slots, not a cache.
+        build_seam::reset();
+        let _ = chunk_hierarchical(text, 7, None, 0);
+        assert_eq!(build_seam::levels_built(), 3);
+    }
+
+    #[test]
+    fn a_never_descended_splice_builds_none_of_its_levels() {
+        // The splice cost, seam-pinned from the cheap side:
+        // `["\n", None]` over lines that all fit the budget — every
+        // window's first consultation is the "\n" literal and it
+        // supplies every cut — builds the LITERAL level and none of the
+        // three spliced specs. The eager spelling paid paragraph/
+        // sentence/word walks for exactly this call shape.
+        let text = "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9";
+        build_seam::reset();
+        let chunks = chunk_hierarchical(text, 5, Some(&[Some("\n"), None]), 0);
+        assert!(chunks.len() >= 5);
+        for &(s, e) in &chunks {
+            assert!(e - s <= 5, "chunk {s}..{e} broke the budget");
+        }
+        assert_eq!(
+            build_seam::levels_built(),
+            1,
+            "only the literal level may build; the spliced specs must stay unrealized"
+        );
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+    }
+
+    #[test]
+    fn raw_cut_fallback_builds_the_grapheme_index_once_not_per_window() {
+        // The bitmap's OTHER lazy build site: a hierarchy with no
+        // levels at all (an empty separators list) under a small budget
+        // builds zero levels and exactly one grapheme index — at the
+        // first window's raw-cut fallback, reused by every later window
+        // and by the overlap snap.
+        let text = "abcdefghij klmno pqrstu";
+        build_seam::reset();
+        let chunks = chunk_hierarchical(text, 5, Some(&[]), 2);
+        assert!(chunks.len() > 1);
+        for &(s, e) in &chunks {
+            assert!(e - s <= 5);
+        }
+        assert_eq!(build_seam::levels_built(), 0);
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+    }
+
+    #[test]
+    fn duplicate_entries_build_once_not_once_per_entry_after_consultation() {
+        // The dedups' structural pin, seam-counted: the output-equality
+        // sweep in the None-splice contract tests pins that duplicates
+        // never change an ANSWER, but the UNdeduped spelling passes
+        // that pin too — what it cannot see is the WALKS a duplicate
+        // would re-pay. The find_map only ever
+        // reaches a duplicate after its original returned None for the
+        // current window, so the pin needs a window that exhausts the
+        // whole (deduped) hierarchy to the raw-cut fallback: the
+        // unbroken "x" run below supplies it. Eightfold [" "] must then
+        // build exactly ONE literal level (not eight identical scans
+        // and cut vectors — the 1.69 GiB shape the dedup closed), and
+        // [None, None] exactly the three spliced levels (not six — a
+        // second None after a CONSULTED splice adds no builds, the pin
+        // the output sweep cannot express). Each duplicated spelling's
+        // output must equal its deduped spelling's, the same inertness
+        // one level deeper.
+        let text = format!("ab cd {}", "x".repeat(40));
+        build_seam::reset();
+        let eight = chunk_hierarchical(&text, 4, Some(&[Some(" "); 8]), 0);
+        assert_eq!(
+            build_seam::levels_built(),
+            1,
+            "eightfold [\" \"] must build one literal level, not one per entry"
+        );
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+        assert_eq!(
+            eight,
+            chunk_hierarchical(&text, 4, Some(&[Some(" ")]), 0),
+            "the duplicated literal list changed the answer"
+        );
+
+        build_seam::reset();
+        let pair = chunk_hierarchical(&text, 4, Some(&[None, None]), 0);
+        assert_eq!(
+            build_seam::levels_built(),
+            3,
+            "[None, None] must build the three spliced levels once, not twice"
+        );
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+        assert_eq!(
+            pair,
+            chunk_hierarchical(&text, 4, Some(&[None]), 0),
+            "the duplicated None list changed the answer"
+        );
+    }
+
+    #[test]
+    fn mixed_duplicate_literals_and_none_entries_collapse_to_each_distinct_entry() {
+        // The two dedups TOGETHER on one list: literals dedup against
+        // literals across any distance (the seen-set is whole-list,
+        // spanning the spliced specs between them), the None splice
+        // against the first splice, and the two rules compose —
+        // ["\n", None, "\n", None, " ", None, " "] is exactly
+        // ["\n", None, " "] as a slot list: one "\n" literal, the three
+        // spliced specs, one " " literal. The line-shaped text (the
+        // "\n" genuinely matches, so the pin is not vacuous) with an
+        // unbroken "x" run forces a window that exhausts the whole
+        // hierarchy to the raw cut, consulting every slot, so the seam
+        // count is the deduped list's own length: five.
+        let text = format!("l0 l1\nl2 {}", "x".repeat(40));
+        let mixed: &[Option<&str>] = &[
+            Some("\n"),
+            None,
+            Some("\n"),
+            None,
+            Some(" "),
+            None,
+            Some(" "),
+        ];
+        let deduped: &[Option<&str>] = &[Some("\n"), None, Some(" ")];
+        build_seam::reset();
+        let chunks = chunk_hierarchical(&text, 5, Some(mixed), 0);
+        assert_eq!(
+            build_seam::levels_built(),
+            5,
+            "the mixed duplicate list must build its five distinct levels, \
+             not one slot per entry (thirteen)"
+        );
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+        assert_eq!(
+            chunks,
+            chunk_hierarchical(&text, 5, Some(deduped), 0),
+            "the mixed duplicate list changed the answer"
+        );
     }
 
     #[test]

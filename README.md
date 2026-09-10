@@ -152,7 +152,8 @@ packing.
   aware, optional overlap
 - `chunk_by_words` / `chunk_by_words_iter`: fixed word-count chunks
 - `chunk_by_sentences` / `chunk_by_sentences_iter`: fixed sentence-count chunks
-- `chunk_by_paragraphs`: fixed paragraph-count chunks (blank-line heuristic)
+- `chunk_by_paragraphs` / `chunk_by_paragraphs_iter`: fixed paragraph-count chunks
+  (blank-line heuristic)
 - `chunk_by_lines` / `chunk_by_lines_iter`: fixed line-count chunks (blank lines ride
   along, never counted — the log/chat-thread shape)
 - `chunk_hierarchical`: priority-ordered fallback chunking (`RecursiveCharacterTextSplitter`
@@ -583,7 +584,8 @@ coroutine keeps ticking with worst gaps well under the call's own wall during a 
 
 The streaming iterator constructors (`word_bounds_iter` and siblings, including the
 chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/`chunk_by_sentences_iter`/
-`chunk_by_lines_iter`) have no async twin: an iterator is not an awaitable shape, and
+`chunk_by_paragraphs_iter`/`chunk_by_lines_iter`) have no async twin: an iterator is
+not an awaitable shape, and
 draining one to a list inside a worker thread is exactly what the already-covered
 list-returning sibling does.
 The eager construction pass is the GIL-released part anyway, so the manual
@@ -625,10 +627,15 @@ separators are deduped at list construction — `None` and repeated literals bot
 `[" "] * 100` what `[" "]` does (~9 ms; was 790 ms and +1,560 MiB). A custom
 hierarchy whose separators never match, under a whole-document budget, is one
 codepoint count and nothing else (~2.5 ms): no window consults a level, so not even
-the literal's scan runs. The line and paragraph twins gained an ASCII `memchr2` fast
-path on top: `chunk_by_lines` over 12 MiB of prose at 50 lines/chunk went ~14 ms →
-~0.4 ms, and `chunk_by_paragraphs` at 5 went ~10 ms → ~0.5 ms (non-ASCII keeps the
-char machine, outputs differential-pinned identical). These functions used to build a
+the literal's scan runs. The line and paragraph twins are byte-level scans — an
+inline density window before each `memchr2` hop so break soup never pays a hop, and
+a sliding ASCII certificate that batches purity checks one 4 KiB stride per ~50
+segments — so `chunk_by_lines` over 12 MiB of prose at 50 lines/chunk runs in
+~0.5 ms (formerly ~8 ms), ~2.3 ms on a one-line-per-~80-bytes log corpus (formerly
+~8.3 ms), and `chunk_by_paragraphs` ~1.4 ms on that log corpus (formerly ~7.5 ms);
+break soup is at parity with the old decoder, and non-ASCII segments keep the byte
+path through a per-segment fallback (outputs differential-pinned identical). These
+functions used to build a
 `Vec<char>` of the whole text plus a `HashSet` of every grapheme boundary —
 unconditionally, before any early exit could matter — which dominated their cost and
 grew superlinearly; that machinery is now a lazily-built one-bit-per-codepoint bitmap
