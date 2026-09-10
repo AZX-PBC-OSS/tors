@@ -1996,4 +1996,561 @@ mod tests {
             Vec::<(usize, usize)>::new()
         );
     }
+
+    // ---- the committed audit harnesses ----
+    //
+    // The red-team differential audit (~1.2M probe cases) ran its
+    // harnesses as adhoc /tmp scripts against the installed extension;
+    // zero divergences found, but zero-divergence coverage that lives
+    // outside the repo protects nothing after /tmp is wiped. The tests
+    // below convert the audit's harness SHAPES into committed gates over
+    // the same two random-access oracles the corpus and soups already
+    // use: exhaustive short-string enumeration (every string over a
+    // break-bearing alphabet up to a length budget), certificate-boundary
+    // surgicals (non-ASCII bytes at exact CERT_CHUNK-multiple offsets on
+    // multi-KiB texts, the region the sub-4096-byte corpus cannot reach),
+    // a window-phase/density sweep, and the systematic White_Space zoo.
+    // The runtime budgets are measured, not guessed: the whole block is
+    // sized to keep `cargo test`'s debug-build wall time in the same
+    // ballpark as the suite it joins.
+
+    /// The audit's exhaustive-alphabet walker: every string over
+    /// `alphabet` from length 0 through `max_len`, shortlex order —
+    /// for {'\r','\n'} at 16 that is 2^0 + ... + 2^16 = 131,071
+    /// strings, the exact count the audit's A-exh-CR-LF probe ran. The
+    /// buffer is reused across cases so the sweep's own allocation cost
+    /// stays out of the differential measurement.
+    fn for_each_string_over(alphabet: &[char], max_len: usize, mut case: impl FnMut(&str)) {
+        let mut buf = String::new();
+        for len in 0..=max_len {
+            // An odometer over alphabet indices; the carry out of the
+            // first digit means every string of this length was visited.
+            let mut digits = vec![0usize; len];
+            loop {
+                buf.clear();
+                buf.extend(digits.iter().map(|&d| alphabet[d]));
+                case(&buf);
+                let mut carry = true;
+                for d in digits.iter_mut().rev() {
+                    if !carry {
+                        break;
+                    }
+                    *d += 1;
+                    carry = *d == alphabet.len();
+                    if carry {
+                        *d = 0;
+                    }
+                }
+                if carry {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The one assertion every audit shape reduces to: both byte
+    /// scanners against their random-access oracles.
+    fn assert_both_scanners_match_the_references(text: &str) {
+        assert_eq!(
+            line_bounds(text),
+            line_bounds_reference(text),
+            "line_bounds divergence on {text:?}"
+        );
+        assert_eq!(
+            paragraph_bounds(text),
+            paragraph_bounds_reference(text),
+            "paragraph_bounds divergence on {text:?}"
+        );
+    }
+
+    /// The unit-count windowers against `chunk_by_segments` over the
+    /// ORACLE bounds — the same differential spelling the corpus sweep
+    /// uses (the windower is shared, already-swept code; the SCANNER is
+    /// the thing under test) — over the audit's per_chunk 1..=3 with
+    /// overlap 0 and per-1.
+    fn assert_windowing_matches_over_oracle_bounds(text: &str) {
+        let lines = line_bounds_reference(text);
+        let paras = paragraph_bounds_reference(text);
+        for per_chunk in 1usize..=3 {
+            let overlaps: &[usize] = if per_chunk == 1 {
+                &[0]
+            } else {
+                &[0, per_chunk - 1]
+            };
+            for &overlap in overlaps {
+                assert_eq!(
+                    chunk_by_lines(text, per_chunk, overlap),
+                    chunk_by_segments(&lines, per_chunk, overlap),
+                    "chunk_by_lines divergence: text={text:?} per={per_chunk} ov={overlap}"
+                );
+                assert_eq!(
+                    chunk_by_paragraphs(text, per_chunk, overlap),
+                    chunk_by_segments(&paras, per_chunk, overlap),
+                    "chunk_by_paragraphs divergence: text={text:?} per={per_chunk} ov={overlap}"
+                );
+            }
+        }
+    }
+
+    /// The audit's surgical-event builder: `events` are (byte offset,
+    /// token) pairs at strictly increasing byte offsets with 'a' fill
+    /// between them and up to `total`, so a two-byte 'é' placed at
+    /// offset k*4096 starts at EXACTLY that byte — the placement
+    /// precision the certificate-boundary shapes exist for (an é one
+    /// byte off is a different case, not this one).
+    fn surgical_text(events: &[(usize, &str)], total: usize) -> String {
+        let mut text = String::with_capacity(total);
+        let mut prev = 0usize;
+        for &(off, token) in events {
+            text.push_str(&"a".repeat(off - prev));
+            text.push_str(token);
+            prev = off + token.len();
+        }
+        text.push_str(&"a".repeat(total - prev));
+        text
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_cr_lf_string_up_to_16_codepoints() {
+        // The audit's A-exh-CR-LF shape: EVERY string over the two break
+        // bytes through length 16 — every CRLF-pairing case (\r\n vs
+        // \n\r vs \r\r), every 2+-unit run-qualification case, leading
+        // and trailing runs, runs ending at end of text — so any
+        // unit-counting mutation with a witness of 16 codepoints or
+        // fewer is caught by CONSTRUCTION, not by the luck of a
+        // 300-case soup draw sampling the same space. The count is
+        // asserted so a regressed alphabet or length budget fails the
+        // sweep itself. Windowing rides every 97th case: the walk over
+        // the oracle bounds is scanner-orthogonal, so a bounded sample
+        // buys the windowing differential without paying 131k × 5
+        // windower calls.
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n'], 16, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 131_071, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_three_symbol_string_up_to_9_codepoints() {
+        // The audit's B-exh-3 shape: every string over {\r, \n, x}
+        // through length 9 (29,524 cases) — the CR/LF alphabet with one
+        // CONTENT byte, so break runs and content segments interleave at
+        // every adjacency, including the content-bearing single-unit
+        // runs the two-symbol alphabet cannot express (a lone \n between
+        // x's is a kept LINE and ordinary paragraph content at once).
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n', 'x'], 9, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 29_524, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_four_symbol_string_up_to_7_codepoints() {
+        // The audit's C-exh-4 shape: every string over {\r, \n, x, VT}
+        // through length 7 (21,845 cases) — VT joins the alphabet
+        // because it is the one ASCII_WS member whose omission from the
+        // fold table is the corpus's own cited mutation pin, and here it
+        // rides at ARBITRARY adjacency to the break bytes and the
+        // content byte, not just the hand-written "a\n\x0b\nb" shape:
+        // blank-looking VT lines next to real lines, VT inside break
+        // runs, VT as a whole blank paragraph.
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n', 'x', '\u{0B}'], 7, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 21_845, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_two_five_symbol_alphabets_up_to_6_codepoints() {
+        // The audit's C-exh-4 extension the runtime budget allows: the
+        // four-symbol alphabet grown to five twice — once with FF (the
+        // OTHER ASCII_WS member below 0x20 the table must carry) and
+        // once with ' ' (the member at 0x20, so the fold answers from a
+        // different table cell than the 0x09..=0x0D run) — at length 6,
+        // 19,531 strings each. The five-symbol product grows too fast to
+        // carry the full 7-length budget of the smaller alphabets; 6
+        // keeps the whole exhaustive block inside its measured seconds.
+        for alphabet in [
+            &['\r', '\n', 'x', '\u{0B}', '\u{0C}'][..],
+            &['\r', '\n', 'x', '\u{0B}', ' '][..],
+        ] {
+            let mut cases = 0usize;
+            for_each_string_over(alphabet, 6, |text| {
+                cases += 1;
+                assert_both_scanners_match_the_references(text);
+                if cases.is_multiple_of(97) {
+                    assert_windowing_matches_over_oracle_bounds(text);
+                }
+            });
+            assert_eq!(cases, 19_531, "the sweep's own size regressed");
+        }
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_certificate_boundary_straddles() {
+        // The AsciiCert arithmetic the sub-4096-byte corpus cannot see:
+        // a non-ASCII byte at k*4096 ± 2 straddles the exact stride a
+        // certify batch ends on, so the batch fails, the locating scan
+        // runs, and the reset-to-past-the-bad-byte (or the p >= b
+        // early-true) branch fires at every alignment a 4 KiB stride
+        // has — the audit's X-structured sweep, scaled to several k: k=1
+        // and k=2 are the first and second batch boundaries, k=31 puts
+        // the straddle ~128 KiB deep, past 31 batch boundaries the
+        // sliding range crossed by extension and reset in turn. Breaks
+        // sit ~104 bytes past the NEXT batch boundary so the
+        // post-straddle segment is itself a second certificate case,
+        // and the trailing "\n\n" gives the paragraph scanner a real
+        // second paragraph; é (2 bytes), an astral emoji (4 bytes) and
+        // CJK (3 bytes) stress the byte-vs-codepoint bookkeeping at
+        // three different token widths.
+        for k in [1usize, 2, 3, 31] {
+            for ch in ["\u{00E9}", "\u{1F600}", "\u{4E2D}"] {
+                for delta in [-2isize, -1, 0, 1, 2] {
+                    let off = (k * CERT_CHUNK).saturating_add_signed(delta);
+                    let brk = (k + 1) * CERT_CHUNK + 104;
+                    let mut text = surgical_text(&[(off, ch)], brk);
+                    text.push('\n');
+                    text.push_str(&"b".repeat(100));
+                    text.push_str("\n\n");
+                    text.push_str(&"c".repeat(50));
+                    assert_both_scanners_match_the_references(&text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_certificate_reset_and_alternation_surgicals() {
+        // The certificate's reset/restart and alternation regimes at
+        // multi-KiB scale, the audit's S4/S5/S6/S7/S8 shapes:
+        // (1) the p >= b extend path — a long pure-ASCII segment
+        // certifies PAST the break, so the very next segment starts
+        // inside the certified range and its é must fail `covers` and
+        // re-batch from a mid-range start (pre swept across the
+        // 4095/4096/4097 and 8191/8192 batch-boundary values);
+        // (2) reset-then-long-run-then-restart, repeated: é, 4100 a's,
+        // é, 8192 a's, a break, then two more é's 4104 bytes apart —
+        // each rep forces a failed batch, a reset, and a restart
+        // against a range the previous rep left behind;
+        // (3) alternation at the period the audit found interesting:
+        // é every 4104 bytes (4096+8, one batch plus the window) and
+        // every 4097, sustained for 32 periods (~131 KiB) so the
+        // certificate fails, resets, and re-derives continuously;
+        // (4) alternation WITH breaks — a 4100-byte segment, é, 3 a's,
+        // a break, 30 times — the reset/restart interleaved with the
+        // window and hop paths; and the extend-heavy twin (8200 a's,
+        // break, é, 10 a's, break) where the certificate SUCCEEDS on
+        // the long runs between hits.
+        for pre in [4095usize, 4096, 4097, 8191, 8192] {
+            let text = format!(
+                "{}\n\u{00E9}{}\n\n{}",
+                "a".repeat(pre),
+                "b".repeat(4100),
+                "c".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&text);
+        }
+        let reset_runs = format!(
+            "{}{}{}{}\n{}{}{}\n\n{}",
+            "\u{00E9}",
+            "a".repeat(4100),
+            "\u{00E9}",
+            "a".repeat(8192),
+            "x".repeat(4104),
+            "\u{00E9}",
+            "x".repeat(4104),
+            "y".repeat(7)
+        )
+        .repeat(6);
+        assert_both_scanners_match_the_references(&reset_runs);
+        let alt_4104 = format!("{}\u{00E9}", "a".repeat(4102)).repeat(32);
+        assert_both_scanners_match_the_references(&alt_4104);
+        let alt_4097 = format!("{}\u{00E9}", "a".repeat(4095)).repeat(32);
+        assert_both_scanners_match_the_references(&alt_4097);
+        let alt_with_breaks =
+            format!("{}\u{00E9}{}\n", "a".repeat(4100), "a".repeat(3)).repeat(30) + "end";
+        assert_both_scanners_match_the_references(&alt_with_breaks);
+        let alt_extend = format!("{}\n\u{00E9}{}\n", "a".repeat(8200), "a".repeat(10)).repeat(15);
+        assert_both_scanners_match_the_references(&alt_extend);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_batch_multiple_segments_and_crlf_straddles() {
+        // Segments whose lengths are EXACTLY the batch arithmetic's
+        // interesting values — 4095/4096/4097 (one stride minus, on,
+        // plus) and 8191/8192/8193 (two strides minus, on, plus) — under
+        // all three break-unit spellings (\n lines, \n\n paragraphs,
+        // \r\n\r\n CRLF-pair paragraphs), so a certify query's end lands
+        // on every side of a batch boundary the stride math has; plus
+        // the é-after-exact-length shape (the certificate succeeds on
+        // the whole segment, then the very next byte is non-ASCII). The
+        // CRLF straddles put a \r at byte 4095 with its \n at 4096 (a
+        // PAIR torn across the batch boundary in byte terms, one unit
+        // in codepoint terms) and the same at 8191/8192, repeated to
+        // ~128 KiB so the sliding range crosses dozens of straddles.
+        for seglen in [4095usize, 4096, 4097, 8191, 8192, 8193] {
+            let lines = format!("{}\n", "a".repeat(seglen)).repeat(4) + "end";
+            assert_both_scanners_match_the_references(&lines);
+            let paras = format!("{}\n\n", "a".repeat(seglen)).repeat(4) + "end";
+            assert_both_scanners_match_the_references(&paras);
+            let crlf_paras = format!("{}\r\n\r\n", "a".repeat(seglen)).repeat(3) + "end";
+            assert_both_scanners_match_the_references(&crlf_paras);
+            let after = format!(
+                "{}\u{00E9}{}\n{}",
+                "a".repeat(seglen),
+                "a".repeat(10),
+                "b".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&after);
+        }
+        let straddle_4096 = format!(
+            "a{}\r\nb{}\r\nc{}\nd{}",
+            "a".repeat(4094),
+            "a".repeat(4095),
+            "a".repeat(4096),
+            "3"
+        )
+        .repeat(8);
+        assert_both_scanners_match_the_references(&straddle_4096);
+        let straddle_8192 = format!(
+            "a{}\r\nb{}\n\nc{}",
+            "a".repeat(8190),
+            "b".repeat(10),
+            "5".repeat(5)
+        );
+        assert_both_scanners_match_the_references(&straddle_8192);
+        let crlf_para_straddle = format!(
+            "a{}\r\n\r\nb{}\r\rc{}",
+            "a".repeat(4094),
+            "b".repeat(99),
+            "7".repeat(6)
+        );
+        assert_both_scanners_match_the_references(&crlf_para_straddle);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_window_edge_and_post_break_non_ascii() {
+        // The BREAK_WINDOW edge from the non-ASCII side: é inside the
+        // first 8 window bytes (offsets 0..=9, both sides of the
+        // window's edge) with the break ~4200 bytes beyond, so the hot
+        // fold raises `saw_non_ascii` and the cold path's certificate
+        // must then fail the very range the window already folded — the
+        // audit's third X-structured sweep. Then non-ASCII immediately
+        // AFTER a break run at cert scale (the first byte of the
+        // post-run segment is the bad byte, the certificate starts its
+        // very first batch on it), the short-segment-after-p shape (a
+        // 10-byte segment squeezed between two 5000-byte ones), and the
+        // cover-p/cover-p-para shapes: a query whose segment ends
+        // exactly at a known-bad byte (line) and its paragraph twin
+        // (the audit's S14/S14b/S14c/S14d).
+        for off in 0..=9usize {
+            let text = format!(
+                "{}\u{00E9}{}\n{}",
+                "a".repeat(off),
+                "a".repeat(4200),
+                "b".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&text);
+        }
+        let after_break_run =
+            format!("{}\n\n\u{00E9}{}\n\n", "a".repeat(4096), "a".repeat(4096)).repeat(15) + "zz";
+        assert_both_scanners_match_the_references(&after_break_run);
+        let short_mid = format!(
+            "a{}\n\u{00E9}b{}\nc{}\nd{}",
+            "a".repeat(4999),
+            "b".repeat(9),
+            "c".repeat(4999),
+            "d".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&short_mid);
+        let cover_p = format!(
+            "a{}\nb{}\n\u{00E9}c{}",
+            "a".repeat(4999),
+            "b".repeat(99),
+            "c".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&cover_p);
+        let cover_p_para = format!(
+            "a{}\n\nb{}\n\n\u{00E9}c{}",
+            "a".repeat(4999),
+            "b".repeat(99),
+            "c".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&cover_p_para);
+    }
+
+    #[test]
+    fn both_scanners_survive_an_eight_mib_single_line_with_surgical_non_ascii_bytes() {
+        // The ONE multi-MiB case the audit budget allows (the probe's
+        // S11 20-MiB family cut to 8 MiB, the mission budget's floor:
+        // measured to keep this test under ~1 s in a debug build): a
+        // single unbroken line — no break byte anywhere, so the line
+        // scanner pays one window, one memchr2 hop over 8 MiB, and
+        // 2048 certify batches; the paragraph scanner the same — with
+        // three surgical é's at 2 MiB+4095, 4 MiB+1 and 6 MiB+4097:
+        // two batch boundaries the sliding range must RESET on, with
+        // ~2 MiB (512 batches) of pure-ASCII extension between them.
+        // The codepoint total is 8 MiB - 3 (three two-byte é's), so any
+        // byte-vs-codepoint drift anywhere in the walk lands in the
+        // final (0, total) span both scanners must emit.
+        let mib = 1024 * 1024;
+        let e1 = 2 * mib + 4095;
+        let e2 = 4 * mib + 1;
+        let e3 = 6 * mib + 4097;
+        let text = surgical_text(
+            &[(e1, "\u{00E9}"), (e2, "\u{00E9}"), (e3, "\u{00E9}")],
+            8 * mib,
+        );
+        assert_both_scanners_match_the_references(&text);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_across_break_phase_fill_and_unit_density() {
+        // The window-phase/density sweep: the first break at byte
+        // `phase` from the segment start for every phase 0..=24 — the
+        // density-guard window is 8 bytes, so phases 7/8/9 are the
+        // phases where the break crosses the window edge and the scan
+        // flips between the inline fold and the memchr2 hop, and the
+        // odd/even phases around them pin the edge under CRLF pairs
+        // (\r the last byte inside the window, \n the first beyond it)
+        // — × the ASCII_WS fills as CONTENT ('x' the control, ' ',
+        // '\t', VT, FF) × the unit shapes (\n, \r, \r\n, and mixed
+        // runs of 2-5 units: the pairing and the 2+-unit paragraph
+        // threshold at every adjacency) × a short within-window tail
+        // and a long beyond-window tail with a second break. Then the
+        // density shape itself: (fill*k + unit)*6 — segments of
+        // exactly k fill bytes for k 1..=12, the densities at and
+        // around the window, six in a row.
+        let fills = ['x', ' ', '\t', '\u{0B}', '\u{0C}'];
+        let units = [
+            "\n", "\r", "\r\n", "\n\n", "\r\r", "\n\r", "\r\n\r\n", "\n\r\n", "\r\n\n", "\r\r\n",
+            "\n\n\n", "\r\n\r", "\n\n\r\r",
+        ];
+        let mut cases = 0usize;
+        for phase in 0..=24usize {
+            for fill in fills {
+                for unit in units {
+                    for tail_len in [1usize, 40] {
+                        let mut text: String = std::iter::repeat_n(fill, phase).collect();
+                        text.push_str(unit);
+                        text.push_str(&"b".repeat(tail_len));
+                        if tail_len == 40 {
+                            text.push_str("\nccc");
+                        }
+                        assert_both_scanners_match_the_references(&text);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 3_250, "the sweep's own size regressed");
+        for k in 1..=12usize {
+            for fill in fills {
+                for unit in ["\n", "\r\n", "\n\r\n", "\r\n\r\n", "\r\r", "\n\n"] {
+                    let unit_text: String = std::iter::repeat_n(fill, k).collect::<String>() + unit;
+                    let text = unit_text.repeat(6) + "b";
+                    assert_both_scanners_match_the_references(&text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_bounds_classifies_the_full_white_space_zoo_and_its_content_lookalikes() {
+        // The systematic White_Space zoo, the audit's WS-ZOO category:
+        // each of the 25 Unicode White_Space codepoints as a line's
+        // SOLE content is a BLANK line (dropped by the real-line
+        // filter — the ASCII_WS table answers below 0x7F, the
+        // char::is_whitespace fallback above it), while U+001C..U+001F
+        // (FS/GS/RS/US — Python's str.isspace/splitlines treat them as
+        // whitespace/breaks; the Unicode White_Space property does not),
+        // ZWSP U+200B, U+180E (White_Space only up to Unicode 6.3) and
+        // the BOM U+FEFF are CONTENT, each its own counted line. The
+        // corpus pins VT/FF/NBSP at three hand-written shapes; this
+        // sweep is the systematic superset — every member once, in the
+        // sole-content position AND as the blank line between two real
+        // lines, so a table or fallback mutation anywhere in the
+        // 25-member set lands here. The paragraph scanner has no
+        // content filter, so every zoo member is ordinary paragraph
+        // content: [(0, 2)] throughout, stated alongside so the
+        // no-filter contract is pinned by the same sweep. Expectations
+        // are STATED, not derived from char::is_whitespace (the
+        // references share production's predicate and would happily
+        // agree with a mutated one); the reference agreement asserted
+        // after pins the non-ASCII members' fallback-path machinery,
+        // which the stated answers alone do not reach.
+        let white_space = [
+            '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}',
+            '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+            '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{2028}',
+            '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}',
+        ];
+        assert_eq!(white_space.len(), 25, "the White_Space set itself drifted");
+        // The two BREAK bytes are White_Space members too, but they are
+        // the delimiters, not "a line's sole content": '{c}\n' with
+        // c='\n' is a 2-unit break run (a paragraph SPLIT, the shape the
+        // 131k exhaustive sweep pins at every length), not a blank
+        // paragraph. The zoo walks the 23 non-break members; the break
+        // pair's own arithmetic is the whole point of the CR/LF
+        // exhaustive sweep above.
+        let blank_content: Vec<char> = white_space
+            .iter()
+            .copied()
+            .filter(|&c| !matches!(c, '\n' | '\r'))
+            .collect();
+        assert_eq!(blank_content.len(), 23);
+        for c in blank_content {
+            let text = format!("{c}\n");
+            assert_eq!(
+                line_bounds(&text),
+                Vec::<(usize, usize)>::new(),
+                "White_Space {c:?} as sole line content must be blank"
+            );
+            assert_eq!(
+                paragraph_bounds(&text),
+                vec![(0, 2)],
+                "paragraph_bounds has no content filter: {c:?}"
+            );
+            let between = format!("a\n{c}\nb");
+            assert_eq!(
+                line_bounds(&between),
+                vec![(0, 1), (4, 5)],
+                "a blank {c:?} line between real lines must vanish"
+            );
+            assert_eq!(
+                paragraph_bounds(&between),
+                vec![(0, 5)],
+                "single lone newlines do not split paragraphs: {c:?}"
+            );
+            assert_both_scanners_match_the_references(&text);
+            assert_both_scanners_match_the_references(&between);
+        }
+        for c in [
+            '\u{001C}', '\u{001D}', '\u{001E}', '\u{001F}', '\u{200B}', '\u{180E}', '\u{FEFF}',
+        ] {
+            let text = format!("{c}\n");
+            assert_eq!(
+                line_bounds(&text),
+                vec![(0, 1)],
+                "content lookalike {c:?} must be a counted line"
+            );
+            assert_eq!(paragraph_bounds(&text), vec![(0, 2)], "{c:?}");
+            assert_both_scanners_match_the_references(&text);
+        }
+    }
 }
