@@ -20,7 +20,15 @@ box this test was written on (WSL2, 28 logical cores, ambient load ~3.5, CPython
 
 The CI assertion covers 1 MiB and 12 MiB over all three corpora with a tolerant
 ``tors < 0.9 x reference`` margin: the measured ratios sit at 0.45-0.67, so the margin
-absorbs a loaded 2-vCPU CI runner (min-of-3 on both sides; noise only ever adds time).
+absorbs a loaded 2-vCPU CI runner. The one observed flake class (a 1 MiB
+decomposed leg at ratio 1.02 under concurrent compile load) is asymmetric
+contention, not symmetric noise: a ~10ms native sample can have ONE preempted
+run set its min-of-3, while the reference's 13-17ms samples amortize the same
+preemption — "both sides inflate together" only holds when neither side's
+samples are short enough for a single scheduler hit to dominate their minimum.
+The fast cells therefore draw min-of-7 (``_FAST_CELL_SAMPLES``), giving the
+native side enough draws to find an uncontended window; the 12 MiB cells keep
+min-of-3 (a 100ms+ sample amortizes preemptions the way the reference's do).
 If tors ever fails to beat the reference at an asserted size, that is a design failure
 of the native pass, not something to threshold away; see the numbers above for what
 healthy looks like.
@@ -96,23 +104,44 @@ pytestmark = pytest.mark.timing
 _MIB = 1024 * 1024
 _MARGIN = 0.9
 _SAMPLES = 3
+# The fast-cell sample count (see the module docstring's flake-class note):
+# a 1 MiB cell's ~10ms native samples are short enough that one preempted
+# run can set min-of-3 while the pure-Python side's longer samples amortize
+# the same preemption — min-of-7 gives the native side enough draws to find
+# an uncontended window under concurrent load.
+_FAST_CELL_SAMPLES = 7
+# Cells at or above this many bytes draw _SAMPLES; smaller cells draw
+# _FAST_CELL_SAMPLES. 4 MiB: the 1 MiB cells flaked at 3, the 12 MiB cells
+# never have (100ms+ samples amortize scheduler hits symmetrically).
+_FAST_CELL_MAX = 4 * _MIB
 
 
 def _min_wall_ms(
-    op: Callable[[str | bytes], object], corpus: str | bytes, warmup: int = 1
+    op: Callable[[str | bytes], object],
+    corpus: str | bytes,
+    warmup: int = 1,
+    samples: int = _SAMPLES,
 ) -> float:
-    """Min-of-``_SAMPLES`` wall after warmup. The corpus parameter is ``str |
+    """Min-of-``samples`` wall after warmup. The corpus parameter is ``str |
     bytes`` because the suite measures both str-in functions (``finalize`` over
     the reference corpora) and bytes-in functions (the surface over
-    ``corpus_utf8``)."""
+    ``corpus_utf8``). ``samples`` is the fast-cell knob: see
+    ``_FAST_CELL_SAMPLES`` for why the 1 MiB native-vs-pure-Python cells draw
+    more samples than the rest."""
     for _ in range(warmup):
         op(corpus)
     best = float("inf")
-    for _ in range(_SAMPLES):
+    for _ in range(samples):
         started = time.monotonic()
         op(corpus)
         best = min(best, time.monotonic() - started)
     return best * 1000.0
+
+
+def _samples_for(size_bytes: int) -> int:
+    """The sample count for a cell of this size: ``_FAST_CELL_SAMPLES`` below
+    ``_FAST_CELL_MAX``, ``_SAMPLES`` at or above."""
+    return _FAST_CELL_SAMPLES if size_bytes < _FAST_CELL_MAX else _SAMPLES
 
 
 def _stdlib_b64(raw: bytes) -> str:
@@ -142,8 +171,9 @@ def test_finalize_beats_the_reference_pipeline_on_the_same_corpus(
     corpus_kind: str, size_bytes: int
 ) -> None:
     corpus = {"prose": prose, "decomposed": decomposed, "crlf": crlf}[corpus_kind](size_bytes)
-    tors_ms = _min_wall_ms(tors.finalize, corpus)
-    ref_ms = _min_wall_ms(reference_finalize, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.finalize, corpus, samples=samples)
+    ref_ms = _min_wall_ms(reference_finalize, corpus, samples=samples)
     assert tors_ms < _MARGIN * ref_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"reference {ref_ms:.1f}ms (ratio {tors_ms / ref_ms:.2f}): the native pass lost "
@@ -161,8 +191,9 @@ def test_b64_encode_bytes_beats_the_stdlib_expression_on_the_same_corpus(
     tors encodes detached and marshals one output. Measured ratios 0.31-0.84 (the
     worst a contended prose 12 MiB cell; see the module docstring)."""
     corpus = corpus_utf8(corpus_kind, size_bytes)
-    tors_ms = _min_wall_ms(tors.b64_encode_bytes, corpus)
-    std_ms = _min_wall_ms(_stdlib_b64, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.b64_encode_bytes, corpus, samples=samples)
+    std_ms = _min_wall_ms(_stdlib_b64, corpus, samples=samples)
     assert tors_ms < _MARGIN * std_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"stdlib {std_ms:.1f}ms (ratio {tors_ms / std_ms:.2f}): the native b64 pass "
@@ -179,8 +210,9 @@ def test_finalize_utf8_beats_the_decode_plus_reference_pipeline_on_the_same_corp
     pass vs the tail it replaces (a GIL-held decode plus the pure-Python
     reference finalize). Measured ratios 0.46-0.75."""
     corpus = corpus_utf8(corpus_kind, size_bytes)
-    tors_ms = _min_wall_ms(tors.finalize_utf8, corpus)
-    ref_ms = _min_wall_ms(_stdlib_decode_finalize, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.finalize_utf8, corpus, samples=samples)
+    ref_ms = _min_wall_ms(_stdlib_decode_finalize, corpus, samples=samples)
     assert tors_ms < _MARGIN * ref_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"decode+reference {ref_ms:.1f}ms (ratio {tors_ms / ref_ms:.2f}): the "
