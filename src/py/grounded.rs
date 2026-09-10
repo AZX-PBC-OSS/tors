@@ -11,7 +11,7 @@ use crate::validate_deadline_ms;
 /// exactly) or something close enough to it (`fuzzy=True`, a
 /// windowed difflib-ratio scan against `threshold`: see
 /// `src/grounded_impl.rs`'s module docs for precisely what the fuzzy score
-/// measures and its DoS-bounded windowing; it is a LEXICAL check, not a
+/// measures and its DoS-bounded windowing; it is a lexical check, not a
 /// semantic/NLI one). An empty `claim` is vacuously grounded in anything on
 /// both paths. `threshold` must be in `[0.0, 1.0]`. `deadline_ms` (only
 /// meaningful, and only accepted, when `fuzzy=True`) bounds the whole fuzzy
@@ -22,15 +22,15 @@ use crate::validate_deadline_ms;
 /// `fuzzy=True` is a superset of `fuzzy=False`: an exact-containment floor
 /// (`memmem`, see grounded_impl's module docs for why not std's contains)
 /// runs first, so a claim present verbatim is grounded before any
-/// windowing — regardless of window alignment, and before `deadline_ms` is
+/// windowing: regardless of window alignment, and before `deadline_ms` is
 /// even set up (a verbatim substring never times out; `deadline_ms` bounds
 /// the windowed scan that runs only when there is no exact match). Near
-/// matches are alignment-independent in the guarantee band — a region with
+/// matches are alignment-independent in the guarantee band: a region with
 /// aligned ratio r is detected at any offset whenever
 /// r >= max(0.75, threshold + 1/32), via the bounded refinement pass;
 /// best-effort below r = 0.75, and evictable from the 64 refinement
-/// candidates by adversarial decoys (the regime `deadline_ms` exists for)
-/// — see `grounded_impl`'s module docs.
+/// candidates by adversarial decoys (the regime `deadline_ms` exists for);
+/// see `grounded_impl`'s module docs.
 ///
 /// GIL model: `fuzzy=False` is one `py.detach`'d `memmem` containment
 /// check. `fuzzy=True` runs the whole windowed scan under `py.detach`; the

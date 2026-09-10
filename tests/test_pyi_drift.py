@@ -1,28 +1,28 @@
 """The ``__init__.pyi`` drift guard: every name ``tors.__all__`` exports (and
 no others) must appear as a ``def`` in ``python/tors/__init__.pyi``, and each
-stub's FULL SIGNATURE (argument names in order, keyword-only markers,
+stub's full signature (argument names in order, keyword-only markers,
 defaults, and per-parameter/return annotations) must match the live
 function.
 
 The stub is the typed surface: a function added to the extension and
 re-exported by ``python/tors/__init__.py`` without a stub entry silently ships
 untyped; a stale stub entry keeps advertising a function that no longer
-exists; and a stub whose SIGNATURE drifted (a keyword argument added to the
+exists; and a stub whose signature drifted (a keyword argument added to the
 extension but not the stub, a default changed on one side, a parameter that
-became keyword-only) ships WRONG types; callers' type checkers validate
+became keyword-only) ships wrong types; callers' type checkers validate
 against the lie. The name-set pin alone (the original guard) catches only the
 first two; this module's signature pin catches the third by diffing each stub
 ``def`` against the live function via ``inspect``.
 
 What ``inspect`` can and cannot see (pyo3 0.29's ``text_signature`` carries
 names, kinds, and defaults (the pyo3 ``#[pyfunction(signature = ...)]``
-declarations in ``src/lib.rs``), but NOT annotations): names, keyword-only
+declarations in ``src/lib.rs``), but not annotations): names, keyword-only
 markers, and defaults are diffed against the live function directly;
 annotations (parameters and return) are pinned structurally (every parameter
 annotated, every def return-annotated) because the stub is their only home.
 The default comparison resolves the stub's literal expressions against the
 live default values, so ``True``/``"strict"``/``None`` literals are compared
-by value, and any non-literal default in a future stub fails LOUDLY (the
+by value, and any non-literal default in a future stub fails loudly (the
 guard does not guess).
 """
 
@@ -38,15 +38,15 @@ import tors
 
 _PYI = Path(__file__).resolve().parent.parent / "python" / "tors" / "__init__.pyi"
 
-# "No default at all", distinct from every legal default VALUE (``None`` is
+# "No default at all", distinct from every legal default value (``None`` is
 # a real default: ``deadline_ms: float | None = None``), and from inspect's
 # own ``Parameter.empty`` sentinel, unified on both sides of the comparison.
 _NO_DEFAULT = object()
 
 
 def _stub_defs() -> dict[str, ast.FunctionDef]:
-    """The pyi's top-level ``def`` nodes, by name, PLUS every top-level
-    ``class``'s ``__init__``, keyed by the CLASS's name (not
+    """The pyi's top-level ``def`` nodes, by name, plus every top-level
+    ``class``'s ``__init__``, keyed by the class's name (not
     ``"__init__"``); ``inspect.signature`` on a class already resolves to
     its constructor signature with ``self`` stripped, so a class is
     compared the exact same way a function is: this just has to find the
@@ -102,7 +102,7 @@ def _stub_params(fn: ast.FunctionDef) -> list[tuple[str, str, Any]]:
         return expr.value
 
     positional = [*a.posonlyargs, *a.args]
-    # a.defaults aligns with the TAIL of the combined positional list.
+    # a.defaults aligns with the tail of the combined positional list.
     first_defaulted = len(positional) - len(a.defaults)
     for index, arg in enumerate(positional):
         kind = "positional-only" if arg in a.posonlyargs else "positional-or-keyword"
@@ -157,7 +157,7 @@ def test_every_dunder_all_name_and_no_others_has_a_pyi_def() -> None:
 
 def test_every_stub_signature_matches_the_live_function() -> None:
     """The full-signature pin: for every exported function, the stub's
-    parameter names IN ORDER, keyword-only markers, and literal defaults must
+    parameter names in order, keyword-only markers, and literal defaults must
     equal the live function's (``inspect`` over the pyo3 text signature; the
     ``#[pyfunction]`` declaration in ``src/lib.rs``), and the stub must be
     fully annotated (every parameter, plus the return). A drift on any axis
@@ -203,7 +203,7 @@ def test_every_stub_signature_matches_the_live_function() -> None:
 
 
 def test_the_guard_itself_catches_each_drift_axis() -> None:
-    """The guard's teeth, proven: mutating a COPY of the pyi text on each
+    """The guard's teeth, proven: mutating a copy of the pyi text on each
     axis (a missing keyword argument, a changed default, a lost keyword-only
     marker, a dropped annotation) must make the signature comparison
     disagree; a drift guard that cannot fail is decoration. Runs against an

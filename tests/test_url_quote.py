@@ -2,60 +2,60 @@
 ``tors.quote_plus``, ``tors.unquote``, ``tors.unquote_plus``: byte-exact
 ``urllib.parse`` parity, UTF-8 only, one detached native pass.
 
-The stdlib spelling is PURE PYTHON (Lib/urllib/parse.py): a GIL-held
+The stdlib spelling is pure Python (Lib/urllib/parse.py): a GIL-held
 whole-text pass for the most-used encoding operation in web and ingestion
 pipelines; tors is the same semantics as one native pass under
 ``py.detach`` (the GIL bands pinned in tests/test_gil_release.py).
 
-Parity is byte-exact against the RUNNING interpreter (the differentials
+Parity is byte-exact against the running interpreter (the differentials
 below, over arbitrary text and safe-sets; they settle everything), with
 the stdlib's quirks pinned by name so a naive RFC 3986 implementation
 cannot pass this gate:
 
 - The never-quote set is RFC 3986 unreserved (ASCII letters, digits,
   ``_ . - ~``, the stdlib's ``_ALWAYS_SAFE``) plus ``safe``'s ASCII
-  members; every other byte of the input's UTF-8 encoding becomes ``%XX``
-  UPPERCASE hex.
-- ``safe`` is BYTE-LEVEL and ASCII-ONLY: the stdlib normalizes a str
-  ``safe`` with ``safe.encode('ascii', 'ignore')``, silently DROPPING
-  non-ASCII members: ``quote("é", "é")`` is ``"%C3%A9"``, not ``"é"``.
+  members; every other byte of the input's UTF-8 encoding becomes ``%xx``
+  uppercase hex.
+- ``safe`` is byte-level and ASCII-only: the stdlib normalizes a str
+  ``safe`` with ``safe.encode('ascii', 'ignore')``, silently dropping
+  non-ASCII members: ``quote("é", "é")`` is ``"%c3%a9"``, not ``"é"``.
 - ``%`` in ``safe`` is honored like any other byte: it stays literal
   (``quote("50%", "%")`` → ``"50%"``).
-- ``quote_plus`` is NOT "quote then replace ``%20`` with ``+``": the
+- ``quote_plus`` is not "quote then replace ``%20`` with ``+``": the
   stdlib quotes with ``' '`` appended to ``safe`` (spaces never encode)
   and then swaps every space for ``+``: same output for valid input,
-  but a literal ``+`` in the text escapes to ``%2B`` unless the CALLER
+  but a literal ``+`` in the text escapes to ``%2B`` unless the caller
   safed it, and a caller-safed space still becomes ``+``.
-- ``unquote`` accepts LOWERCASE hex; a ``%`` not followed by two hex
-  digits stays VERBATIM (``%zz``, a trailing ``%``, ``%%41`` → ``"%A"``);
+- ``unquote`` accepts lowercase hex; a ``%`` not followed by two hex
+  digits stays verbatim (``%zz``, a trailing ``%``, ``%%41`` → ``"%A"``);
   escapes decoding to invalid UTF-8 take the replace handler
   (``%e2%28%a1`` → ``"\ufffd(\ufffd"``, maximal-subpart).
-- The ASCII-run FRAGMENTATION quirk: the stdlib unquotes and UTF-8-decodes
-  each maximal ASCII run INDEPENDENTLY (its ``_asciire`` walk), passing
+- The ASCII-run fragmentation quirk: the stdlib unquotes and UTF-8-decodes
+  each maximal ASCII run independently (its ``_asciire`` walk), passing
   non-ASCII segments through verbatim, so an escape split across an
   ASCII/non-ASCII boundary decodes as two fragments with separate replace
-  verdicts (``unquote("%C3é%A9")`` → ``"\ufffdé\ufffd"``, NOT ``"éé"``),
-  and a non-ASCII char INTERRUPTS an escape (``unquote("%Cé3")`` →
+  verdicts (``unquote("%c3é%a9")`` → ``"\ufffdé\ufffd"``, not ``"éé"``),
+  and a non-ASCII char interrupts an escape (``unquote("%Cé3")`` →
   verbatim).
-- ``unquote_plus`` swaps ``+`` → ``' '`` BEFORE unquoting, so an escaped
+- ``unquote_plus`` swaps ``+`` → ``' '`` before unquoting, so an escaped
   ``%2B`` survives as a literal ``+`` while a raw ``+`` becomes a space;
   the order is the semantics.
 
-The stdlib's ``encoding``/``errors`` parameters are OUT OF SCOPE,
+The stdlib's ``encoding``/``errors`` parameters are out of scope,
 documented as such: the encode side is always UTF-8-strict, the decode
 side always UTF-8-replace.
 
 The identity contracts (each pinned below as object identity):
 
-- ``quote(s, safe) is s`` EXACTLY when ``quote(s, safe) == s``: the
+- ``quote(s, safe) is s`` exactly when ``quote(s, safe) == s``: the
   borrowed lane is "no byte needs encoding", which is precisely output
-  equals input. STRICTLY STRONGER than the stdlib, which re-decodes to a
+  equals input. Strictly stronger than the stdlib, which re-decodes to a
   fresh string on every nonempty input (only its empty-input early return
   hands back the original object).
 - ``unquote(s) is s`` when ``s`` contains no ``%``, exactly the stdlib's
   own ``'%' not in string`` fast path, which is also where it returns the
   original object. The asymmetric residue, both engines: an input whose
-  every ``%`` is invalid hex (``"a%zz"``) decodes to an EQUAL but NEW
+  every ``%`` is invalid hex (``"a%zz"``) decodes to an equal but new
   string. (One measured artifact: an output that is a single Latin-1
   character is CPython's cached 1-char singleton, so ``unquote("%")``
   hands back an object indistinguishable from the input by ``is``; an
@@ -64,7 +64,7 @@ The identity contracts (each pinned below as object identity):
 
 Round-trip properties: ``unquote∘quote == id`` and
 ``unquote_plus∘quote_plus == id`` over UTF-8 text, for safe-sets
-WITHOUT ``%`` (a literal ``%`` preserved by a caller's safe is then
+without ``%`` (a literal ``%`` preserved by a caller's safe is then
 re-read as an escape by the decoder: ``quote("50%41", "%")`` →
 ``"50%41"`` → ``unquote`` → ``"50A"``, inherent to the design and the
 stdlib's answer too), and additionally without ``+`` for the plus pair
@@ -74,18 +74,18 @@ Argument-boundary contract:
 
 - ``text`` and ``safe`` must be exactly ``str``: anything else raises
   ``TypeError`` (the str-exactly rule every tors str argument follows).
-- A ``text`` holding LONE SURROGATES raises ``UnicodeEncodeError`` on the
-  encode side in BOTH engines, message-for-message (the stdlib's
+- A ``text`` holding lone surrogates raises ``UnicodeEncodeError`` on the
+  encode side in both engines, message-for-message (the stdlib's
   ``string.encode('utf-8', 'strict')``; pinned against the live oracle).
   The decode side is the one intentional asymmetry: the stdlib's
-  ``unquote`` PASSES lone surrogates through (its no-``%`` fast path
+  ``unquote`` passes lone surrogates through (its no-``%`` fast path
   returns the input without ever encoding, and non-ASCII segments are
   yielded verbatim), while tors refuses them with ``UnicodeEncodeError``
   at the boundary, the standard str-in price every tors function pays
   for the zero-copy UTF-8 borrow (the ``finalize``/``diff_opcodes``
   precedent), recorded here rather than silently diverging.
 - A ``safe`` holding lone surrogates: the stdlib's ``'ignore'``
-  normalization DROPS them silently; tors refuses with
+  normalization drops them silently; tors refuses with
   ``UnicodeEncodeError`` (the same boundary); the refusal is pinned, the
   stdlib's silent drop recorded as the contrast.
 """
@@ -133,7 +133,7 @@ _LONG_ROW_QUOTED = "user%20name%2B50%25/caf%C3%A9?page=1&x=~y#frag%F0%9F%98%80"
         # Any ASCII member of safe is honored, including space.
         ("a b", " ", "a b"),
         ("a+b", "+", "a+b"),
-        # Non-ASCII safe members are IGNORED (the stdlib normalizes safe
+        # Non-ASCII safe members are ignored (the stdlib normalizes safe
         # with encode('ascii', 'ignore'); byte-level, ASCII-only).
         ("é", "é", "%C3%A9"),
         ("aéb", "é/", "a%C3%A9b"),
@@ -163,8 +163,8 @@ _LONG_ROW_QUOTED = "user%20name%2B50%25/caf%C3%A9?page=1&x=~y#frag%F0%9F%98%80"
     ],
 )
 def test_quote_golden_battery(text: str, safe: str, expected: str) -> None:
-    """The fixed anchor of the encode contract: every row asserts the EXACT
-    expected string AND the running stdlib's agreement; the differential
+    """The fixed anchor of the encode contract: every row asserts the exact
+    expected string and the running stdlib's agreement; the differential
     below proves the agreement in general, this battery pins the named
     quirk classes so a regression reads as a row, not a shrug."""
     assert quote(text, safe) == expected
@@ -181,13 +181,13 @@ def test_quote_golden_battery(text: str, safe: str, expected: str) -> None:
         ("a b", "", "a+b"),
         ("a b c", "", "a+b+c"),
         # A literal `+` escapes to %2B unless the caller safed it, the
-        # quirk that proves quote_plus is NOT quote-then-replace-%20.
+        # quirk that proves quote_plus is not quote-then-replace-%20.
         ("a+b", "", "a%2Bb"),
         ("a+b", "+", "a+b"),
         # No space in the text: exactly plain quote (safe honored as such).
         ("a/b", "/", "a/b"),
         ("a/b", "", "a%2Fb"),
-        # A caller-safed space STILL becomes `+` (space is always swapped).
+        # A caller-safed space still becomes `+` (space is always swapped).
         ("a b", " ", "a+b"),
         # Non-ASCII and the safe-ignore quirk carry through unchanged.
         ("é", "", "%C3%A9"),
@@ -213,7 +213,7 @@ def test_quote_golden_battery(text: str, safe: str, expected: str) -> None:
 )
 def test_quote_plus_golden_battery(text: str, safe: str, expected: str) -> None:
     """The plus-shaped anchor: the space/plus interplay the stdlib's own
-    spelling produces (space in safe, then swap; NOT quote-then-replace),
+    spelling produces (space in safe, then swap; not quote-then-replace),
     each row cross-checked against the running stdlib."""
     assert quote_plus(text, safe) == expected
     assert quote_plus(text, safe) == urllib.parse.quote_plus(text, safe)
@@ -246,15 +246,15 @@ def test_quote_plus_golden_battery(text: str, safe: str, expected: str) -> None:
         ("%e2%28%a1", "\ufffd(\ufffd"),
         ("x%c3", "x\ufffd"),
         # The fragmentation quirk: each maximal ASCII run decodes
-        # INDEPENDENTLY, non-ASCII segments pass verbatim. An escape split
+        # independently, non-ASCII segments pass verbatim. An escape split
         # across the boundary is two fragments with separate replace
-        # verdicts (%C3é%A9 is NOT éé), and a non-ASCII char INTERRUPTS
+        # verdicts (%c3é%a9 is not éé), and a non-ASCII char interrupts
         # an escape entirely.
         ("%C3é%A9", "\ufffdé\ufffd"),
         ("%Cé3", "%Cé3"),
         ("é%41", "éA"),
         ("%41é%42", "AéB"),
-        # `+` is NOT special to unquote.
+        # `+` is not special to unquote.
         ("a+b", "a+b"),
         ("%2B", "+"),
     ],
@@ -299,7 +299,7 @@ def test_unquote_golden_battery(text: str, expected: str) -> None:
     [
         ("", ""),
         ("abc", "abc"),
-        # `+` becomes a space BEFORE unquoting: a raw `+` is a space, an
+        # `+` becomes a space before unquoting: a raw `+` is a space, an
         # escaped %2B survives as a literal `+`.
         ("a+b", "a b"),
         ("%2B", "+"),
@@ -369,7 +369,7 @@ def _text_and_safe(draw: st.DrawFn) -> tuple[str, str]:
 @given(_text_and_safe())
 @settings(max_examples=400)
 def test_quote_matches_the_running_stdlib_exactly(text_safe: tuple[str, str]) -> None:
-    """The encode differential: byte-exact agreement with the RUNNING
+    """The encode differential: byte-exact agreement with the running
     ``urllib.parse.quote`` over arbitrary text and safe-sets: the proof
     that settles the never-quote set, the safe-member quirks (ASCII
     honored, non-ASCII ignored), uppercase hex, and multibyte widths all
@@ -473,14 +473,14 @@ def test_round_trips_over_the_fixed_sample_rows(text: str, safe: str) -> None:
 class TestIdentityContracts:
     def test_quote_returns_the_original_object_when_nothing_encodes(self) -> None:
         """The zero-cost lane: text over the never-quote set returns the
-        ORIGINAL input object (no allocation, no copy; ``Cow::Borrowed``
+        original input object (no allocation, no copy; ``Cow::Borrowed``
         handed back as the same ``PyObject``)."""
         s = "AZaz09_.-~/"
         assert quote(s) is s
 
     def test_quote_identity_is_the_net_identity_idiom(self) -> None:
         """The complete form: a safe-set that covers every escapable byte
-        of the input still returns the ORIGINAL object: ``is s`` exactly
+        of the input still returns the original object: ``is s`` exactly
         when ``== s`` (the no-encode lane is precisely output equals
         input, so a caller-safed no-op encode borrows too)."""
         s = "a b"
@@ -492,7 +492,7 @@ class TestIdentityContracts:
 
     def test_quote_identity_is_stronger_than_the_stdlibs(self) -> None:
         """The measured contrast: the stdlib's nonempty fast path
-        (``not bs.rstrip(...)`` → ``bs.decode()``) ALWAYS allocates a
+        (``not bs.rstrip(...)`` → ``bs.decode()``) always allocates a
         fresh string, so ``urllib.parse.quote(s) is s`` is False for every
         nonempty s; tors returns the input object itself. (The stdlib's
         only identity lane is the EMPTY input, where ``quote`` returns its
@@ -514,7 +514,7 @@ class TestIdentityContracts:
 
     def test_quote_plus_identity_lanes(self) -> None:
         """The plus shapes: no space and nothing encodable → the original
-        object (the no-space branch IS plain quote, so its borrow lane
+        object (the no-space branch is plain quote, so its borrow lane
         holds); a space in the text always rewrites (the swap), so a fresh
         string comes back there no matter what."""
         s = "a+b"
@@ -528,9 +528,9 @@ class TestIdentityContracts:
 
     def test_unquote_returns_the_original_object_exactly_when_no_percent(self) -> None:
         """The decode identity lane is the stdlib's own fast path, and it
-        is EXACTLY no-``%``: any input containing ``%`` takes the fragment
+        is exactly no-``%``: any input containing ``%`` takes the fragment
         walk and returns a fresh string, including the asymmetric residue
-        where nothing valid decodes (``"a%zz"`` comes back EQUAL but NEW,
+        where nothing valid decodes (``"a%zz"`` comes back equal but new,
         in both engines; the stdlib's ``''.join`` builds it fresh too)."""
         for s in ("abc", "", "a+b c/d", "plain text", "é 東京"):
             assert unquote(s) is s
@@ -539,8 +539,8 @@ class TestIdentityContracts:
 
     def test_unquote_percent_row_is_the_latin1_singleton_artifact(self) -> None:
         """The one measured ``%``-containing input whose output is the
-        input OBJECT: ``unquote("%")``. The lane is NOT the borrow (the
-        input contains ``%``); the fresh one-character output IS CPython's
+        input object: ``unquote("%")``. The lane is not the borrow (the
+        input contains ``%``); the fresh one-character output is CPython's
         cached Latin-1 singleton, the same object as the input literal,
         the object-model fact of every fresh 1-char string. Not the
         identity contract; recorded so the row cannot be misread as a
@@ -549,7 +549,7 @@ class TestIdentityContracts:
         sliced = "%%"[:1]  # a fresh 1-char slice: the cached singleton
         assert sliced is singleton
         assert unquote("%") is singleton
-        # Three characters, same walk: a genuinely fresh string.
+        # Three characters, same walk: a fresh string.
         s = "%zz"
         assert unquote(s) == s
         assert unquote(s) is not s
@@ -621,7 +621,7 @@ class TestArgumentContract:
         engines raise ``UnicodeEncodeError`` from the UTF-8 encode (the
         stdlib's ``string.encode('utf-8', 'strict')``, tors's zero-copy
         ``&str`` borrow), the same exception text, pinned against the
-        LIVE oracle, not a recorded literal."""
+        live oracle, not a recorded literal."""
         for fn, stdlib_fn in (
             (quote, urllib.parse.quote),
             (quote_plus, urllib.parse.quote_plus),
@@ -633,8 +633,8 @@ class TestArgumentContract:
             assert str(tors_exc.value) == str(stdlib_exc.value)
 
     def test_lone_surrogate_text_is_refused_on_the_decode_side(self) -> None:
-        """The decode side's ONE intentional asymmetry, recorded rather
-        than laundered: the stdlib's ``unquote`` PASSES lone surrogates
+        """The decode side's one intentional asymmetry, recorded rather
+        than laundered: the stdlib's ``unquote`` passes lone surrogates
         through (its no-``%`` fast path returns the input without ever
         encoding, and non-ASCII segments are yielded verbatim by the
         ``_asciire`` walk; the surrogate never meets an encode call), so
@@ -654,7 +654,7 @@ class TestArgumentContract:
 
     def test_lone_surrogate_safe_is_refused_where_the_stdlib_drops_it(self) -> None:
         """``safe`` holding a lone surrogate: the stdlib's
-        ``encode('ascii', 'ignore')`` normalization DROPS it silently
+        ``encode('ascii', 'ignore')`` normalization drops it silently
         (measured: ``urllib.parse.quote("abc", safe="\\ud800")`` →
         ``"abc"``), while tors refuses with ``UnicodeEncodeError``, the
         same str-in boundary as the text. The refusal is the pinned

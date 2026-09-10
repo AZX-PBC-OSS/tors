@@ -12,12 +12,12 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// bool = False, strip_accents: bool = False, stemmer: str | None = None,
 /// lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 /// collapse_whitespace: bool = False) -> list[str]`: a stateless,
-/// GENERAL-PURPOSE batch text preprocessor: every requested step fused
-/// into ONE GIL-released pass over the WHOLE list. See
+/// general-purpose batch text preprocessor: every requested step fused
+/// into one GIL-released pass over the whole list. See
 /// `src/pipeline_impl.rs` for the exact, fixed-order pipeline
 /// (`nfd` -> `lowercase` -> `strip_accents` -> `stemmer`/`lemma_dict` ->
 /// `collapse_whitespace`, each skipped when its flag is off/`None`) and
-/// why THE PIPELINE ITSELF is pure function composition, not a
+/// why the pipeline itself is pure function composition, not a
 /// `re.compile()`-style compiled-pipeline object: a stateful handle for
 /// the whole pipeline adds no benefit over composing the fused steps
 /// directly. `lemma_dict` specifically is the one narrow exception: see
@@ -26,7 +26,7 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// pipeline object.
 ///
 /// All six steps default off, so `apply_pipeline(texts)` with no other
-/// arguments is a true IDENTITY: the original `texts` list OBJECT comes
+/// arguments is a true identity: the original `texts` list object comes
 /// back unchanged (not just content-equal), the same zero-allocation
 /// contract `normalize`/`quote`/`replace_many` already give when their own
 /// transform is a no-op. An empty `texts` list returns `[]`. A non-`list`
@@ -41,9 +41,9 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// non-`str` key/value, raises `TypeError`.
 ///
 /// **Relationship to `tf_idf`/`bm25_rank`**: those two already fuse the
-/// SAME `strip_accents`/`stemmer`/`lemma_dict` knobs directly into their
+/// same `strip_accents`/`stemmer`/`lemma_dict` knobs directly into their
 /// own tokenization. Calling `apply_pipeline` first and then `tf_idf`/
-/// `bm25_rank` on the result tokenizes TWICE for no benefit. Reach for
+/// `bm25_rank` on the result tokenizes twice for no benefit. Reach for
 /// their own knobs when they're the only consumer; reach for
 /// `apply_pipeline` to preprocess text feeding anything else
 /// (`chunk_text`, `find_patterns`, your own logic).
@@ -51,7 +51,7 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// GIL model: the list walk (borrowed `&str`s, zero-copy), building the
 /// `Stemmer`, and resolving `lemma_dict` (an `Arc::clone` for a
 /// `CompiledLemmaDict`, a fresh `HashMap` build for a raw `dict`) all
-/// happen under the GIL (each done ONCE for the whole call, the same
+/// happen under the GIL (each done once for the whole call, the same
 /// amortization boundary `tf_idf`/`bm25_rank` use); every text's transform
 /// runs under one `py.detach` over the whole list.
 #[pyfunction(signature = (
@@ -76,8 +76,8 @@ pub fn apply_pipeline(
         .map(Stemmer::create);
     let lemma_dict = resolve_lemma_dict(lemma_dict)?;
 
-    // The argument-contract check (every element genuinely a `str`) runs
-    // UNCONDITIONALLY via the shared walk (`_borrow.rs`'s soundness
+    // The argument-contract check (every element a `str`) runs
+    // unconditionally via the shared walk (`_borrow.rs`'s soundness
     // story), before any identity short-circuit: a `TypeError` on a
     // non-`str` element must fire even when every transform step is off,
     // never silently pass through untouched.
@@ -91,7 +91,7 @@ pub fn apply_pipeline(
         {
             // The identity path: every step is off, so no text can
             // possibly change. Signal the caller, which still owns
-            // `texts`, to return the caller's ORIGINAL list object,
+            // `texts`, to return the caller's original list object,
             // matching the zero-allocation contract this crate's other
             // identity-returning functions already give
             // (normalize/quote/replace_many), rather than building an

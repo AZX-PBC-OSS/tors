@@ -44,7 +44,7 @@ class TestDegenerateInputs:
 
     def test_single_word_is_the_vote_of_one(self) -> None:
         # With exactly one token, every bit's vote is +-1 with no other
-        # token to contest it, so the fingerprint IS that token's FNV-1a
+        # token to contest it, so the fingerprint is that token's FNV-1a
         # hash verbatim. Pinned as the literal computed by the Rust
         # implementation (src/simhash_impl.rs's own degenerate-input test).
         assert simhash64("hello") == 0xA430D84680AABD0B

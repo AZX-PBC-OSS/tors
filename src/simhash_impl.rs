@@ -12,7 +12,7 @@
 //! `finalize`'s SHA-256 tail and `merkle_root` answer "is this text
 //! byte-identical", gates that split a text from an original differing by
 //! a single comma. simhash answers the question those gates cannot: "is
-//! this text NEARLY the same." The compatibility row is pinned by the
+//! this text nearly the same." The compatibility row is pinned by the
 //! tests below: identical input always yields the identical fingerprint
 //! (`simhash64(a) == simhash64(b)` whenever `a == b`), so a pipeline can
 //! run both gates off one store: exact dupes at distance 0, near-dupes at
@@ -20,11 +20,11 @@
 //!
 //! # The token hash is FNV-1a, inline: not std's `DefaultHasher`
 //!
-//! A dedupe fingerprint must be stable ACROSS PROCESSES: `DefaultHasher`
+//! A dedupe fingerprint must be stable across processes: `DefaultHasher`
 //! is seeded per process (`RandomState`), so a fingerprint it produced
 //! would change between runs and between machines, silently breaking
 //! every cross-run/cross-machine dedupe built on it. FNV-1a is ~10 lines,
-//! deterministic forever, and adequate for a VOTING hash: it is asked
+//! deterministic forever, and adequate for a voting hash: it is asked
 //! only to spread tokens reasonably uniformly across the 64 bit
 //! positions, not to be cryptographic; a collision between two distinct
 //! tokens merely makes them vote alike, which blurs one vote among 64
@@ -34,9 +34,9 @@
 //!
 //! # Bag of words: ordering does not matter
 //!
-//! The vote is over the MULTISET of tokens, not their sequence: word order
+//! The vote is over the multiset of tokens, not their sequence: word order
 //! never affects the fingerprint (the API's most surprising guarantee:
-//! "the quick brown fox" and "fox brown quick the" are the SAME
+//! "the quick brown fox" and "fox brown quick the" are the same
 //! fingerprint, pinned by the permutation test below). A repeated token
 //! votes once per occurrence, so frequency is preserved; a permutation
 //! preserves the multiset exactly, which is why the pin is an equality,
@@ -44,35 +44,35 @@
 //!
 //! # Tokenization
 //!
-//! Tokens are the segments of the SAME UAX #29 word segmentation walk
+//! Tokens are the segments of the same UAX #29 word segmentation walk
 //! `segmentation_impl::word_bounds` drives (`split_word_bounds`, its
 //! sibling spelling over the same tables; the count/list invariant is
-//! pinned in `segmentation_impl`), with ONE skip: a segment that is
+//! pinned in `segmentation_impl`), with one skip: a segment that is
 //! entirely whitespace is not a token. The WSegSpace rule joins a
-//! whitespace run into ONE segment, a boundary-rule artifact that makes
+//! whitespace run into one segment, a boundary-rule artifact that makes
 //! a pure delimiter run look like a word, and a fingerprint votes over
-//! lexical content, so whitespace-only text has NO tokens and
-//! fingerprints 0 (pinned). Punctuation-only segments ARE tokens:
+//! lexical content, so whitespace-only text has no tokens and
+//! fingerprints 0 (pinned). Punctuation-only segments are tokens:
 //! deterministic, preserved by small edits, and excluding them would be a
 //! lexicon judgment the segmentation tables do not make.
 //!
 //! # Reading the distance
 //!
-//! 0 bits means an identical token MULTISET, a coarser equality than the
+//! 0 bits means an identical token multiset, a coarser equality than the
 //! exact gates' byte equality (same words in any order and any
 //! whitespace). The near-duplicate band, measured by the battery below
 //! and pinned at both scales: a 95-word base's every single-word
 //! swap/drop/insert position moved its fingerprint at most 4 bits (the
 //! document-scale band the fuzzy gate is for; the literature's
 //! conventional "0-2 bits ≈ near-duplicate" guidance is the same
-//! statement with a tighter battery), while the IDENTICAL edits over
+//! statement with a tighter battery), while the identical edits over
 //! 8-12-word sentences moved up to 14 bits (vote margins scale like
 //! sqrt(token count), so short texts have thin margins and every edit
 //! flips more bits). Unrelated sentence pairs sat at least 23 bits apart
-//! (measured min, pinned). HONEST CAVEAT: thresholds are corpus-dependent.
+//! (measured min, pinned). Honest caveat: thresholds are corpus-dependent.
 //! The distance a "same document, small edit" pair sits at scales with
 //! document length, and the unrelated floor depends on vocabulary overlap,
-//! so there is NO universal cutoff; calibrate per deployment against
+//! so there is no universal cutoff; calibrate per deployment against
 //! known near-dup and known-far pairs. Hamming distance itself is a
 //! one-liner at the call site, `(a ^ b).bit_count()` in Python, which
 //! is why this core returns the raw u64 (the pyo3 layer marshals it as a
@@ -218,8 +218,8 @@ pub fn simhash64(text: &str) -> u64 {
 /// by the same battery and pinned: the unrelated floor widens from 23 bits
 /// at 64 bits to 40 at 128, while the near-dup bands grow only sublinearly
 /// (document scale: 3 bits worst vs the 64-bit 4; sentence scale: 20 vs
-/// 14). The near-dup band does NOT scale with the width the way the
-/// unrelated floor does. The win is the SEPARATION between the near-dup
+/// 14). The near-dup band does not scale with the width the way the
+/// unrelated floor does. The win is the separation between the near-dup
 /// band and the unrelated floor, the property a corpus whose 64-bit bands
 /// overlap needs. The calibration caveat carries over unchanged: thresholds are
 /// corpus-dependent. Same contract
@@ -239,7 +239,7 @@ mod tests {
     }
 
     /// The naive spec spelling the incremental core is differentially
-    /// pinned against: collect the tokens, hash them, and vote BIT-MAJOR
+    /// pinned against: collect the tokens, hash them, and vote bit-major
     /// (one pass over the token list per bit) instead of the core's
     /// token-major one-pass form. Same spec, opposite loop nesting; it
     /// guards the incremental implementation, not the spec. The generic
@@ -280,7 +280,7 @@ mod tests {
                 "object identity leaked into the fingerprint for {text:?}"
             );
         }
-        // The bag-of-words property, pinned as EQUALITY (a permutation
+        // The bag-of-words property, pinned as equality (a permutation
         // preserves the token multiset exactly, so the vote is identical):
         // reversed word order, and a permutation that moves punctuation
         // tokens with their words, both fingerprint the same.
@@ -289,10 +289,10 @@ mod tests {
             simhash64("six five four three two one")
         );
         assert_eq!(simhash64("Hello, world!"), simhash64("world! Hello,"));
-        // Frequency is part of the bag: a fourth "the" is a DIFFERENT
+        // Frequency is part of the bag: a fourth "the" is a different
         // multiset, and on this row the changed margins move the
         // fingerprint, the same thin-margin scale-dependence the
-        // near-dup battery measures (a duplicate's vote margin does NOT
+        // near-dup battery measures (a duplicate's vote margin does not
         // always absorb one occurrence; this deterministic row pins that
         // it does not here). Near-equal is not equal.
         assert_ne!(
@@ -315,7 +315,7 @@ mod tests {
 
     /// The generated single-word-edit battery over one base text: every
     /// swap position (word i -> "silently"), every drop position, every
-    /// insert position ("gently" before word i), returning the WORST
+    /// insert position ("gently" before word i), returning the worst
     /// Hamming distance seen. The bound this measures is scale-dependent
     /// (thin vote margins at low token counts: see the near-dup test), so
     /// the battery runs at both sentence and document scale. The generic
@@ -356,11 +356,11 @@ mod tests {
 
     #[test]
     fn near_duplicate_edits_stay_within_the_measured_hamming_bounds() {
-        // DOCUMENT scale, the shape the fuzzy gate is for: a 95-word
+        // Document scale, the shape the fuzzy gate is for: a 95-word
         // base, every single-word swap/drop/insert position. Measured max
         // 4 bits, pinned at 4 (a deterministic battery, so the pin is
         // exactly reproducible); the module doc's near-duplicate band is
-        // THIS scale's statement.
+        // this scale's statement.
         let document = "the old lighthouse keeper walked down the stone \
                         steps every morning before the sun rose over the \
                         harbor and he checked the lamp and the wicks and \
@@ -373,8 +373,8 @@ mod tests {
                         current and every wind that bends the pines above \
                         the cliff";
         assert_eq!(worst_single_edit_distance::<u64>(document), 4);
-        // SENTENCE scale, the other face of the same property:
-        // the IDENTICAL edits over 8-12-word bases moved up to 14 bits.
+        // Sentence scale, the other face of the same property:
+        // the identical edits over 8-12-word bases moved up to 14 bits.
         // Each bit's vote sum has margins on the order of sqrt(token
         // count), so short texts have thin margins and the same two-vote
         // change flips more bits. This is why the near-dup band is stated
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(simhash64("\t\n \r\n\u{a0}"), 0);
         // Single word: the vote of one. Every set bit of the token hash
         // votes +1 (bit 1), every clear bit votes -1 (bit 0), so the
-        // fingerprint IS the token's FNV-1a hash, bit for bit. Derived
+        // fingerprint is the token's FNV-1a hash, bit for bit. Derived
         // from the vote-of-one shape, then pinned as the literal.
         assert_eq!(simhash64("hello"), fnv1a::<u64>("hello"));
         assert_eq!(simhash64("hello"), 0xa430d84680aabd0b);
@@ -549,7 +549,7 @@ mod tests {
     fn exact_gate_compatibility_identical_inputs_fingerprint_identically() {
         // The finalize/merkle compatibility row: the exact gate's
         // precondition (a == b, byte-identical content) implies equal
-        // simhash fingerprints AND equal merkle roots: both gates agree
+        // simhash fingerprints and equal merkle roots: both gates agree
         // on identical input, which is what lets one store serve both.
         // Near-dup pairs (roots differ, fingerprints close) are the fuzzy
         // gate's own territory and are pinned by the battery tests above.

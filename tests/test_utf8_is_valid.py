@@ -6,7 +6,7 @@ success path and pays exception construction and flow on the failure path;
 ``simdutf8`` crate), GIL-released, ``bool`` out, no exception flow on either
 path.
 
-The contract, as two oracle-equal properties over ARBITRARY bytes:
+The contract, as two oracle-equal properties over arbitrary bytes:
 
 - ``utf8_is_valid(raw)`` is ``True`` exactly when ``raw.decode("utf-8")``
   succeeds, the stdlib's own notion of well-formedness, via decode-and-catch;
@@ -20,11 +20,11 @@ lone continuation bytes, surrogate/CESU-8 encodings, the invalid lead bytes
 FC/FD/FF, out-of-range and maximal-subpart shapes) as ``False``, and the
 boundary codepoints around each exclusion zone (U+D7FF/U+E000 around the
 surrogate block, U+10FFFF at the ceiling, plus U+FFFF, a noncharacter but a
-VALID encoding) as ``True``.
+valid encoding) as ``True``.
 
 The argument contract is the bytes-in surface's: exactly ``bytes``
 (``bytearray`` / ``memoryview`` / ``str`` -> ``TypeError``), the same
-zero-copy IMMUTABLE-borrow-under-detach rationale as ``decode_utf8`` (a
+zero-copy immutable-borrow-under-detach rationale as ``decode_utf8`` (a
 writable buffer mutated by another thread mid-read is a data race, not a
 semantic difference).
 
@@ -41,9 +41,9 @@ record is absolute throughput; corpora are
     invalid  12 MiB   0.088 ms        133.5 GiB/s
     invalid  32 MiB   0.578 ms        54.1 GiB/s
 
-Throughput FALLS as the corpus outgrows this box's L3 (95 -> 56 -> 38
+Throughput falls as the corpus outgrows this box's L3 (95 -> 56 -> 38
 GiB/s): past 32 MiB the scan is memory-bound, the shape of a SIMD
-scan, not a flat GiB/s claim. The invalid 12 MiB cell measures FASTER than
+scan, not a flat GiB/s claim. The invalid 12 MiB cell measures faster than
 its valid twin (the trailing 0xFF lets the validator return before the
 final block's fixup work), recorded, not thresholded. The criterion ladder
 (benches/utf8.rs) holds the same story on the Rust core alone, including
@@ -197,7 +197,7 @@ class TestBehavioralCases:
         assert utf8_is_valid(b"") is True
 
     def test_the_return_is_a_genuine_bool_on_both_paths(self) -> None:
-        # The bool return IS the design: no str materialized, no exception
+        # The bool return is the design: no str materialized, no exception
         # flow, pinned as the exact type on the valid and the invalid path.
         assert type(utf8_is_valid(b"abc")) is bool
         assert type(utf8_is_valid(b"\xff")) is bool

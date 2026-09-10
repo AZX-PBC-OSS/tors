@@ -10,34 +10,34 @@
 //!
 //! # Porting notes (the decisions this file's dynamics forced)
 //!
-//! - `self.log(...)` sites upstream become rationale COMMENTS here (log
+//! - `self.log(...)` sites upstream become rationale comments here (log
 //!   texts are not ported; the heuristic each explained gets the comment),
 //!   per the port contract in `parser.rs`'s docs. The parser-level
 //!   `repairer._log(...)` sites (inserted default / dropped extra property)
 //!   are wired to §6.4's diagnostic vocabulary ("insert_default" /
 //!   "drop_property") through the take/put-back repairer helper.
 //! - The repairer never stays borrowed across parser mutation: the resolver
-//!   runs once per `parse_object` call to an ACTIVITY bit plus owned
+//!   runs once per `parse_object` call to an activity bit plus owned
 //!   config/schema copies, and every later schema-layer access re-acquires
 //!   the repairer through the take/put-back helper ([`with_repairer`], the
 //!   same shape `parser.rs` pins for its own repairer calls).
 //! - Python passes `None` schema slots into `repair_value`; the pinned Rust
 //!   signature takes `&Value`, and upstream's `resolve_schema(None) is True`
 //!   (no constraints) makes `Value::Bool(true)` the None spelling at that
-//!   boundary. JSON `null` in a schema slot IS Python's `None` and maps to
+//!   boundary. JSON `null` in a schema slot is Python's `None` and maps to
 //!   `Option::None` everywhere a `dict|bool|None` slot flows onward.
 //! - `_copy_json_value` (deep copy + non-JSON raise) is `Value::clone()`
-//!   here: the schema tree is already a `Value` — JSON-domain by
-//!   construction — so the deep copy is trivial and the raise arms are
+//!   here: the schema tree is already a `Value`: JSON-domain by
+//!   construction, so the deep copy is trivial and the raise arms are
 //!   structurally unreachable.
 //! - `_finalize_object`'s missing-required message lists the keys in the
-//!   schema's `required` order; upstream iterates a Python SET there (its
+//!   schema's `required` order; upstream iterates a Python set there (its
 //!   order is hash-arbitrary, so there is no order to preserve).
-//! - Upstream's `_parse_object_key` ASSERTS the key parse returned a str;
+//! - Upstream's `_parse_object_key` asserts the key parse returned a str;
 //!   in OBJECT_KEY context the only non-str direct results come from
-//!   pathological comment/LLM-block re-entries, where upstream CRASHES with
+//!   pathological comment/LLM-block re-entries, where upstream crashes with
 //!   AssertionError. tors must stay total (the fuzz/hypothesis gates), so a
-//!   non-str result maps to the empty key and the scan continues — the one
+//!   non-str result maps to the empty key and the scan continues: the one
 //!   deliberate behavior divergence in this file, unreachable from any
 //!   corpus input.
 //! - Python `try/finally` context regions port to explicit
@@ -45,21 +45,21 @@
 //!   `with self.context.enter(...)` regions likewise bracket the recursive
 //!   reparse calls below.
 //! - Splice sites (upstream slice-assignment on `json_str`): the
-//!   duplicate-key split INSERTS `{` at `index + 1`; the escaped-object
-//!   repair REPLACES `[start_index - 1, index + 1)` (both ends clamped the
-//!   way Python slicing clamps — the cursor can sit past the end of the
+//!   duplicate-key split inserts `{` at `index + 1`; the escaped-object
+//!   repair replaces `[start_index - 1, index + 1)` (both ends clamped the
+//!   way Python slicing clamps: the cursor can sit past the end of the
 //!   input when these fire, and `Vec::splice` would panic on an unclamped
 //!   end).
 //!
 //! # Test provenance
 //!
-//! The `#[cfg(test)]` batteries port the VALUE-level assertions of
+//! The `#[cfg(test)]` batteries port the value-level assertions of
 //! upstream's `tests/test_parse_object.py` (every case, driven through
 //! `Parser::parse`, which is what `repair_json(..., skip_json_loads=True,
 //! return_objects=True)` runs) and the object/array strict raises of
 //! `tests/test_strict_mode.py` with the exact catalog strings. The
-//! assertions that intentionally live ONLY in the pytest corpus
-//! (`tests/test_json_repair.py`, agent C's): the serialized-STRING forms of
+//! assertions that intentionally live only in the pytest corpus
+//! (`tests/test_json_repair.py`, agent C's): the serialized-string forms of
 //! these same inputs (`repair_json(...)` without `return_objects`, the
 //! dumps parity `dumps.rs` owns), the `logging=True` log-text assertions,
 //! and every case whose behavior belongs to `string.rs`/`parser.rs`'s own
@@ -76,7 +76,7 @@ use crate::normalize_impl::is_py_whitespace;
 /// file (the landed helper is private to `parser`'s module): every
 /// schema-layer call needs `&mut SchemaRepairer` while the parser state
 /// around it needs `&mut self`, and the repairer must be back in place on
-/// every path — `repair()` still needs it for the final validation.
+/// every path: `repair()` still needs it for the final validation.
 fn with_repairer<T>(parser: &mut Parser, f: impl FnOnce(Option<&mut SchemaRepairer>) -> T) -> T {
     let mut taken = std::mem::take(&mut parser.schema_repairer);
     let out = f(taken.as_mut());
@@ -143,7 +143,7 @@ fn finalize_object(
 }
 
 /// parse_object.py's `_strip_comments_for_empty_object_classification`: a
-/// pure scan over the object BODY that drops `#`/`//`/`/*...*/` comments
+/// pure scan over the object body that drops `#`/`//`/`/*...*/` comments
 /// while preserving quoted spans and backslash runs, for the empty-object
 /// classifier's "is anything left?" probe.
 fn strip_comments_for_empty_object_classification(body: &str) -> String {
@@ -225,14 +225,14 @@ type PropertySchemaResolution = (Option<Value>, Vec<Option<Value>>, bool);
 /// directly; `None` is the no-inner-arrays case (an empty `list_lengths`);
 /// `Mixed` is differing widths. Folding only what a merge appends is
 /// equivalent to rescanning because within one key-scan loop the merge is
-/// the previous array's only mutator — see
+/// the previous array's only mutator: see
 /// [`Parser::merge_object_array_continuation`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MergeWidths {
     /// No inner arrays seen.
     None,
-    /// Every inner array so far has this width (zero included — Python's
-    /// falsy zero width reaches the no-width branch at USE, not here).
+    /// Every inner array so far has this width (zero included: Python's
+    /// falsy zero width reaches the no-width branch at use, not here).
     Uniform(usize),
     /// Inner arrays of differing widths seen.
     Mixed,
@@ -268,7 +268,7 @@ impl MergeWidths {
 
 impl Parser {
     /// parse_object.py's `parse_object`: the object main loop.
-    /// `<object> ::= '{' [ <member> *(', ' <member>) ] '}'` — a sequence of
+    /// `<object> ::= '{' [ <member> *(', ' <member>) ] '}'`: a sequence of
     /// members, repaired member by member.
     pub(crate) fn parse_object(
         &mut self,
@@ -436,8 +436,8 @@ impl Parser {
         // carried out of `loop`.
         // The merge-continuation run's row-width summary: initialized by
         // the first merge's full scan, folded forward by every later merge
-        // in THIS loop (the loop breaks as soon as a key parses, so a
-        // later run rescans — never a stale summary).
+        // in this loop (the loop breaks as soon as a key parses, so a
+        // later run rescans: never a stale summary).
         let mut merge_widths: Option<MergeWidths> = None;
         let outcome: Result<(), String> = loop {
             if self.cur().is_none() {
@@ -484,19 +484,19 @@ impl Parser {
     }
 
     /// parse_object.py's `_merge_object_array_continuation`: a '[' at the
-    /// key position continues the PREVIOUS member's array value (rows
+    /// key position continues the previous member's array value (rows
     /// regrouped when the existing rows share one width); returns whether
     /// the continuation was taken.
     ///
-    /// `widths` is the row-width summary of the previous member's array —
+    /// `widths` is the row-width summary of the previous member's array:
     /// the incremental spelling of upstream's whole-array `list_lengths`
     /// rescan. The summary lives in parse_object_key's key-scan loop for
     /// exactly one sequential-merge run: the first merge folds the whole
     /// previous array (upstream's scan, once), every later merge folds
-    /// only what THIS merge appends, because within the key-scan loop the
+    /// only what this merge appends, because within the key-scan loop the
     /// merge is the previous array's only mutator (a parsed key breaks the
     /// loop and the next run starts a fresh summary). Rescanning per merge
-    /// made same-level continuation runs — `{"a":[1], [2], [3], ...` —
+    /// made same-level continuation runs (`{"a":[1], [2], [3], ...`)
     /// O(M²) in the merge count (~5s at 200k merges); the fold keeps the
     /// same outputs at O(total input).
     fn merge_object_array_continuation(
@@ -509,19 +509,19 @@ impl Parser {
             None => return Ok(false),
         };
         // Python: `if not prev_key or not isinstance(obj[prev_key], list) or
-        // self.strict` — an empty-string key is falsy there.
+        // self.strict`: an empty-string key is falsy there.
         if prev_key.is_empty() || !prev_is_list || self.strict {
             return Ok(false);
         }
 
         self.index += 1;
         // Depth-guard the recursion. This continuation calls parse_array,
-        // whose first item is often a string followed by ':' — a missing
-        // object start parsed by parse_object directly — and that object's
+        // whose first item is often a string followed by ':' (a missing
+        // object start parsed by parse_object directly), and that object's
         // key scan can take another '[' continuation, so a nested chain
         // (`{"a":[0],` followed by `["b":[0],` repeated) grows the native
         // stack one frame pair per fragment with no cap anywhere on the
-        // cycle — an uncatchable SIGSEGV, not the documented catchable
+        // cycle: an uncatchable SIGSEGV, not the documented catchable
         // ValueError. enter_depth caps it at MAX_NESTING like every other
         // deep-recursion path (the same enter/parse/leave/`?` shape
         // parse_json's `{`/`[`/`(` branches and complete_object_parse's
@@ -539,7 +539,7 @@ impl Parser {
             // (upstream's list_lengths scan, verbatim); later merges find
             // the summary already current.
             let summary = widths.get_or_insert_with(|| MergeWidths::scan(prev_items.iter()));
-            // Upstream's expected_len: Some(width) iff the array HAS inner
+            // Upstream's expected_len: Some(width) iff the array has inner
             // arrays and they all share one width; Python's truthiness
             // then drops a zero shared width to the no-width branch.
             let expected_len = match *summary {
@@ -608,7 +608,7 @@ impl Parser {
     }
 
     /// parse_object.py's `_should_split_duplicate_object`: a duplicate key
-    /// splits the object UNLESS it looks like a plain comma-separated
+    /// splits the object unless it looks like a plain comma-separated
     /// repeat (quoted key, comma before it, colon after it).
     fn should_split_duplicate_object(&self, rollback_index: usize) -> bool {
         let mut lookback_idx: isize = rollback_index as isize - self.index as isize - 1;
@@ -624,28 +624,28 @@ impl Parser {
             && next_non_whitespace == Some(':'))
     }
 
-    /// parse_object.py's `_split_object_on_duplicate_key` — THE SPLICE:
-    /// rewind onto the key's opening and insert a `{` there, so the parent
+    /// parse_object.py's `_split_object_on_duplicate_key`: the splice.
+    /// Rewind onto the key's opening and insert a `{` there, so the parent
     /// container re-parses the tail as a fresh object. The insert shifts
     /// every absolute position at/after it, so the parser-level lookahead
     /// memo (pure buffer facts keyed by absolute positions) is cleared
-    /// here — the only buffer-mutating site.
+    /// here: the only buffer-mutating site.
     fn split_object_on_duplicate_key(&mut self, rollback_index: usize) {
         self.index = rollback_index - 1;
-        // Python's json_str[:index+1] + "{" + json_str[index+1:] — an insert
+        // Python's json_str[:index+1] + "{" + json_str[index+1:]: an insert
         // at index + 1.
         self.s.insert(self.index + 1, '{');
         // An O(n) buffer splice: the next deadline check must read the
         // clock, keeping the splice-rescan bound tight. It also shifts
         // every absolute position at/after it, so the parser-level
         // lookahead memo (pure buffer facts keyed by absolute positions)
-        // is cleared here — the only buffer-mutating site.
+        // is cleared here: the only buffer-mutating site.
         self.force_deadline_check();
         self.lookahead_cache.clear();
     }
 
     /// parse_object.py's `_resolve_object_property_schema`: pick the schema
-    /// guiding one member's value — the declared property, the first
+    /// guiding one member's value: the declared property, the first
     /// patternProperties match (extras carried alongside), the
     /// additionalProperties dict, or `true`; plus the drop flag for
     /// `additionalProperties: false`.
@@ -687,7 +687,7 @@ impl Parser {
         }
 
         match &schema_config.additional_properties {
-            // additionalProperties: false — this property is not allowed.
+            // additionalProperties: false: this property is not allowed.
             Some(Value::Bool(false)) => Ok((None, Vec::new(), true)),
             Some(dict @ Value::Object(_)) => Ok((Some(dict.clone()), Vec::new(), false)),
             // Absent (or any non-dict, non-false spelling): anything goes.
@@ -734,7 +734,7 @@ impl Parser {
     }
 
     /// parse_object.py's `_repair_empty_object_result`: an object that
-    /// parsed empty over a non-trivial span gets a second chance — the
+    /// parsed empty over a non-trivial span gets a second chance: the
     /// escaped-key normalization reparse, the salvage set-as-object
     /// reparse, or the array fallback.
     fn repair_empty_object_result(
@@ -765,7 +765,7 @@ impl Parser {
         if empty_object_repair == EmptyObjectRepair::Object
             && let Some(normalized_object) = normalized_object
         {
-            // THE SPLICE: replace the attempted span (the '{' at
+            // The splice: replace the attempted span (the '{' at
             // start_index - 1 through the cursor) with the normalized
             // object text; Python's slice assignment clamps its end, and so
             // does the min() here (the cursor may sit past the end).
@@ -803,7 +803,7 @@ impl Parser {
                     .collect();
                 if key_candidates.len() == items.len() {
                     // dict.fromkeys: the candidate keys in order, every
-                    // value null, DUPLICATES COLLAPSED to the first
+                    // value null, duplicates collapsed to the first
                     // occurrence (build through object_insert, which
                     // updates in place at first position).
                     let mut set_object = Value::Object(Vec::new());
@@ -829,7 +829,7 @@ impl Parser {
     }
 
     /// parse_object.py's `_classify_empty_object_repair`: decide what the
-    /// empty object's span actually contains — keep (object-shaped
+    /// empty object's span actually contains: keep (object-shaped
     /// leftovers), normalize-and-reparse (escaped object keys), the salvage
     /// set-as-object, or the array fallback.
     fn classify_empty_object_repair(
@@ -907,7 +907,7 @@ impl Parser {
         (EmptyObjectRepair::Array, None)
     }
 
-    /// parse_object.py's `_complete_object_parse`: the object's exit —
+    /// parse_object.py's `_complete_object_parse`, the object's exit:
     /// skip one extra closing brace when nested, merge a comma-then-
     /// delimiter continuation into this object, and finalize against the
     /// schema config.
@@ -944,9 +944,9 @@ impl Parser {
                 // parse_object, which can reach another comma-merge and
                 // recurse again, so an unbounded chain (`{"a":1}` followed by
                 // `, "k":1}` repeated) grows the native stack one frame per
-                // fragment and overflows it — an uncatchable SIGSEGV, not the
+                // fragment and overflows it: an uncatchable SIGSEGV, not the
                 // documented catchable ValueError. enter_depth caps it at
-                // MAX_NESTING and raises "Input nesting exceeds ...", the same
+                // MAX_NESTING and raises "Input nesting exceeds...", the same
                 // enter/parse/leave/`?` shape parse_json's `{`/`[`/`(` branches
                 // use (parser.rs); balanced on every non-abort path.
                 self.enter_depth()?;
@@ -1268,7 +1268,7 @@ mod tests {
         // `{"a":1}` + `, "k":1}` * N recurses through complete_object_parse's
         // comma-merge continuation; without the depth guard it overflows the
         // native stack (uncatchable). Guarded, it raises the same capped error
-        // as every other deep-recursion path — never a crash.
+        // as every other deep-recursion path: never a crash.
         let payload = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(2_000));
         let err = Parser::new(&payload, false, None)
             .parse()
@@ -1296,11 +1296,11 @@ mod tests {
         // `{"a":[0],` + `["b":[0],` * N nests through the array-continuation
         // merge: a '[' at the key position merges into the previous
         // array-valued member (merge_object_array_continuation →
-        // parse_array), whose first item — a string followed by ':' — is a
+        // parse_array), whose first item (a string followed by ':') is a
         // missing object start parsed by parse_object directly, and that
         // object's key scan sees another '[' and merges again. Without a
         // depth guard on that continuation the cycle grew the native stack
-        // with no cap anywhere on it — an uncatchable SIGSEGV around 8k
+        // with no cap anywhere on it: an uncatchable SIGSEGV around 8k
         // fragments (main thread; ~4k fewer on worker-sized stacks), not
         // the documented catchable ValueError.
         let payload = format!("{}{}1]", r#"{"a":[0],"#, r#"["b":[0],"#.repeat(2_000));
@@ -1315,7 +1315,7 @@ mod tests {
         // The guard fires only past MAX_NESTING. An ordinary nested merge
         // chain still parses and merges every fragment (an off-by-one that
         // trips the guard early would fail the 150-level descent below),
-        // and same-level sequential merges never accrue depth at all —
+        // and same-level sequential merges never accrue depth at all:
         // enter/leave is balanced per continuation, so merged items land
         // flat in the previous array.
         // N=2 pins the exact merged shape:
@@ -1373,11 +1373,11 @@ mod tests {
         // the MAX_NESTING budget with structural nesting. The comma chain
         // spends 1 (the initial `{`) + 1 per fragment (scalar values add
         // nothing): 199 fragments parse (depth 200), the 200th raises.
-        // The array-merge chain spends the same 1 + 1 per fragment PLUS 1
+        // The array-merge chain spends the same 1 + 1 per fragment plus 1
         // for the innermost fragment's `[0]` value (a container nested
         // inside every merge): 198 fragments parse (depth 200), the 199th
         // raises. Pinning the exact edges catches future accounting drift
-        // in either direction — over-counting an edge rejects inputs the
+        // in either direction: over-counting an edge rejects inputs the
         // cap admits, missing one reopens the crash.
         let comma_ok = format!("{}{}", r#"{"a":1}"#, r#", "k":1}"#.repeat(199));
         match parse_ok(&comma_ok) {

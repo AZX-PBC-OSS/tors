@@ -10,25 +10,25 @@
 //!
 //! # Porting notes (the decisions this file's dynamics forced)
 //!
-//! - `self.log(...)` sites upstream become rationale COMMENTS here (log
+//! - `self.log(...)` sites upstream become rationale comments here (log
 //!   texts are not ported; the heuristic each explained gets the comment),
 //!   per the port contract in `parser.rs`'s docs. The parser-level
 //!   `repairer._log("Dropped extra array item ...")` site is wired to
 //!   §6.4's diagnostic vocabulary ("drop_item") through the take/put-back
 //!   repairer helper.
-//! - The ARRAY context brackets the WHOLE item loop: the body lives in
+//! - The array context brackets the whole item loop: the body lives in
 //!   [`Parser::parse_array_items`] (the with-region) and the pop in
-//!   [`Parser::parse_array`] runs on every exit path, Err included — the
+//!   [`Parser::parse_array`] runs on every exit path, Err included: the
 //!   `with self.context.enter(ARRAY)` translation `parser.rs`'s docs pin.
 //! - The repairer never stays borrowed across parser mutation: the resolver
-//!   runs once per `parse_array` call to an ACTIVITY bit plus an owned
+//!   runs once per `parse_array` call to an activity bit plus an owned
 //!   config copy, and every later schema-layer access re-acquires the
 //!   repairer through the take/put-back helper ([`with_repairer`], the
 //!   same shape `parser.rs` pins for its own repairer calls).
 //! - Python passes `None` schema slots into `repair_value`; the pinned Rust
 //!   signature takes `&Value`, and upstream's `resolve_schema(None) is True`
 //!   (no constraints) makes `Value::Bool(true)` the None spelling at that
-//!   boundary. JSON `null` in a schema slot IS Python's `None` and maps to
+//!   boundary. JSON `null` in a schema slot is Python's `None` and maps to
 //!   `Option::None` where slots flow onward.
 //! - `_resolve_array_item_schema`: Python dispatches on
 //!   `isinstance(items_schema, list)`; the pinned Rust config carries the
@@ -36,22 +36,22 @@
 //!   `items_schema`), the single-schema form as an object `items_schema`,
 //!   and every other spelling (absent included) is upstream's `true`.
 //! - `ObjectComparer.is_strictly_empty` is [`is_strictly_empty`] here: an
-//!   EMPTY CONTAINER only (str/list/dict — Python also set/tuple, outside
-//!   the Value domain); it is NOT `Value::is_truthy` (None/0/False are
-//!   NOT strictly empty and must survive the skip rule).
+//!   empty container only (str/list/dict: Python also set/tuple, outside
+//!   the Value domain); it is not `Value::is_truthy` (None/0/False are
+//!   not strictly empty and must survive the skip rule).
 //!
 //! # Test provenance
 //!
-//! The `#[cfg(test)]` batteries port the VALUE-level assertions of
+//! The `#[cfg(test)]` batteries port the value-level assertions of
 //! upstream's `tests/test_parse_array.py` (every case except the
 //! parenthesized-literal ones, which live in `parenthesized.rs`'s tests as
 //! the parser_parenthesized.py battery), driven through `Parser::parse`
 //! (what `repair_json(..., skip_json_loads=True, return_objects=True)`
 //! runs), plus the array-context strict case of
 //! `tests/test_strict_mode.py`-adjacent behavior (the contextual close in
-//! strict mode, which must NOT raise). The assertions that intentionally
-//! live ONLY in the pytest corpus (`tests/test_json_repair.py`, agent C's):
-//! the serialized-STRING forms of these inputs, the `logging=True`
+//! strict mode, which must not raise). The assertions that intentionally
+//! live only in the pytest corpus (`tests/test_json_repair.py`, agent C's):
+//! the serialized-string forms of these inputs, the `logging=True`
 //! log-text assertions (e.g. the missed-closing-bracket log), and every
 //! case whose behavior belongs to `string.rs`/`parser.rs`'s own batteries.
 
@@ -64,7 +64,7 @@ use crate::normalize_impl::is_py_whitespace;
 /// file (the landed helper is private to `parser`'s module): every
 /// schema-layer call needs `&mut SchemaRepairer` while the parser state
 /// around it needs `&mut self`, and the repairer must be back in place on
-/// every path — `repair()` still needs it for the final validation.
+/// every path: `repair()` still needs it for the final validation.
 fn with_repairer<T>(parser: &mut Parser, f: impl FnOnce(Option<&mut SchemaRepairer>) -> T) -> T {
     let mut taken = std::mem::take(&mut parser.schema_repairer);
     let out = f(taken.as_mut());
@@ -73,8 +73,8 @@ fn with_repairer<T>(parser: &mut Parser, f: impl FnOnce(Option<&mut SchemaRepair
 }
 
 /// `utils/object_comparer.py`'s `ObjectComparer.is_strictly_empty`: True
-/// only for an EMPTY CONTAINER (str/list/dict here); False for None, 0,
-/// False — the array skip rule must not eat falsy scalars.
+/// only for an empty container (str/list/dict here); False for None, 0,
+/// False: the array skip rule must not eat falsy scalars.
 fn is_strictly_empty(value: &Value) -> bool {
     match value {
         Value::Str(text) => text.is_empty(),
@@ -97,7 +97,7 @@ fn as_schema_slot(value: &Value) -> Result<Option<Value>, String> {
 }
 
 /// parse_array.py's `_resolve_array_item_schema`: the schema guiding item
-/// `idx` — the tuple form's per-index slot (then additionalItems, with the
+/// `idx`: the tuple form's per-index slot (then additionalItems, with the
 /// drop flag when it is `false`), the single-schema form for every index,
 /// or `true` when nothing narrows the items. Returns
 /// `(item_schema, drop_item)`.
@@ -118,7 +118,7 @@ fn resolve_array_item_schema(
         if idx < items_schema.len() {
             item_schema = as_schema_slot(&items_schema[idx])?;
         } else if matches!(schema_config.additional_items, Some(Value::Bool(false))) {
-            // additionalItems: false — extra tuple items are dropped.
+            // additionalItems: false: extra tuple items are dropped.
             drop_item = true;
             item_schema = None;
         } else if let Some(dict @ Value::Object(_)) = &schema_config.additional_items {
@@ -140,7 +140,7 @@ fn resolve_array_item_schema(
 
 impl Parser {
     /// parse_array.py's `parse_array`: the array main loop.
-    /// `<array> ::= '[' [ <json> *(', ' <json>) ] ']'` — a sequence of JSON
+    /// `<array> ::= '[' [ <json> *(', ' <json>) ] ']'`: a sequence of JSON
     /// values separated by commas. `closing_delimiter` generalizes the
     /// closer (`)` for the parenthesized form).
     pub(crate) fn parse_array(
@@ -162,7 +162,7 @@ impl Parser {
                 .is_some_and(|r| r.is_salvage());
         let array_is_object_value = self.ctx_current() == Some(Ctx::ObjectValue);
         // `with self.context.enter(ARRAY)`: parse_array_items is the whole
-        // with-region; the pop below runs on EVERY exit path (the `?`
+        // with-region; the pop below runs on every exit path (the `?`
         // included), exactly like the context manager's __exit__.
         self.ctx_push(Ctx::Array);
         let arr = self.parse_array_items(
@@ -199,7 +199,7 @@ impl Parser {
             let (item_schema, drop_item) = resolve_array_item_schema(schema_config, idx)?;
             let item_path = format!("{path}[{idx}]");
             // The active gate: the schema layer engages only when the
-            // resolver engaged it AND this item is not being dropped AND
+            // resolver engaged it and this item is not being dropped and
             // the repairer is not salvaging.
             let active = repairer_active && !drop_item && !salvage_mode;
             // Python's None schema slot resolves to `true` at the
@@ -234,9 +234,9 @@ impl Parser {
                         // Depth invariant: this direct parse_object call
                         // takes no enter_depth of its own (entering a
                         // nested object here does not consume the parser's
-                        // container budget by itself). That is safe ONLY
+                        // container budget by itself). That is safe only
                         // because every recursion cycle through this edge
-                        // also passes a guarded edge — the value position
+                        // also passes a guarded edge: the value position
                         // routes through parse_json's `[`/`{` branches,
                         // and the key-position '[' continuation through
                         // merge_object_array_continuation's guard (the
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn parse_array_contextually_closes_in_strict_mode() {
         // test_parse_array.py::test_parse_array_contextually_closes_in_strict_mode:
-        // the contextual close must NOT raise in strict mode
+        // the contextual close must not raise in strict mode
         assert_eq!(
             parse_strict(r#"{"outer": ["a", "b", "next": "value"}"#),
             Ok(obj(&[

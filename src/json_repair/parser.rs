@@ -1,12 +1,12 @@
 //! The repair parser core: a port of json_repair's `json_parser.py`
 //! (upstream: https://github.com/mangiucugna/json_repair, MIT, commit
-//! 251d141786d0f6ff561f6ec04d90188a338e2470). THIS file holds the shared
+//! 251d141786d0f6ff561f6ec04d90188a338e2470). This file holds the shared
 //! `Parser` state and the utility methods every sibling file drives
 //! (the `get`/`skip`/`scroll`/`skip_to_character` trio, the context stack,
 //! the whitespace scans); the parse methods themselves are split across the
 //! sibling files exactly like upstream split its modules:
 //!
-//! - HERE (agent A2's section, below the utilities): `parse_json`
+//! - here (agent A2's section, below the utilities): `parse_json`
 //!   (the dispatch loop + schema fast-path suffix probe), `parse`
 //!   /`parse_with_schema` (the top-level orchestration incl. the salvage
 //!   fragment loop), `parse_number` (parse_number.py), `parse_comment`
@@ -20,8 +20,8 @@
 //! # The pinned cross-file surface
 //!
 //! `impl Parser` blocks are split across this crate's files (legal in one
-//! crate); these are the signatures every cross-file call uses — port
-//! against them EXACTLY:
+//! crate); these are the signatures every cross-file call uses: port
+//! against them exactly:
 //!
 //! ```rust,ignore
 //! // parser.rs (A2):
@@ -55,14 +55,14 @@
 //!
 //! Python `with self.context.enter(X):` blocks port to explicit
 //! `self.ctx_push(X)` / `self.ctx_pop()` pairs bracketing the same region
-//! (including on the early-return paths — the Python context manager pops
+//! (including on the early-return paths: the Python context manager pops
 //! on every exit, so every `?`/early return inside such a region needs its
 //! pop; the simplest faithful shape is a closure or a guard run to the
 //! region's end, A3/A4's call).
 //!
-//! `self.log(...)` sites in the Python sources become rationale COMMENTS
+//! `self.log(...)` sites in the Python sources become rationale comments
 //! here (upstream's log texts are not ported; the diagnostics surface is
-//! schema-layer actions in v1 — see mod.rs's scope note).
+//! schema-layer actions in v1: see mod.rs's scope note).
 
 use super::{MAX_NESTING, NUMBER_CHARS, STRING_DELIMITERS, Value};
 use crate::json_schema_impl::{ResolvedSchema, SchemaRepairer};
@@ -76,18 +76,18 @@ pub(crate) enum Ctx {
     Array,
 }
 
-/// json_parser.py's `JSONParser` — the mutable repair machine. The input is
+/// json_parser.py's `JSONParser`: the mutable repair machine. The input is
 /// a `Vec<char>` (Python str indexing is codepoint indexing; exact parity,
-/// astral chars included) that STAYS MUTABLE: the duplicate-key split and
+/// astral chars included) that stays mutable: the duplicate-key split and
 /// the escaped-object reparse splice new text into it and rewind `index`
-/// (port those sites faithfully — they are rare, so the O(n) splice is
+/// (port those sites faithfully: they are rare, so the O(n) splice is
 /// fine).
 pub(crate) struct Parser {
     /// The input as codepoints; spliced by the object-repair heuristics.
     pub(crate) s: Vec<char>,
     /// The cursor, in codepoint units (Python's `self.index`).
     pub(crate) index: usize,
-    /// json_context.py's context stack: `context.current` is the LAST entry
+    /// json_context.py's context stack: `context.current` is the last entry
     /// (`ctx_current`), `ContextValues.X in self.context.context` is
     /// "anywhere in the stack" (`ctx_has`).
     pub(crate) context: Vec<Ctx>,
@@ -97,7 +97,7 @@ pub(crate) struct Parser {
     /// Strict mode: repair heuristics raise instead (the §8 catalog).
     pub(crate) strict: bool,
     /// json_fd is None for every tors input, so upstream's
-    /// `try_valid_json_suffix` is ALWAYS true here: after the parser has
+    /// `try_valid_json_suffix` is always true here: after the parser has
     /// skipped garbage to a `{`/`[`, one `raw_decode` probe may claim the
     /// rest as valid JSON (once per Parser).
     pub(crate) try_valid_json_suffix: bool,
@@ -110,24 +110,24 @@ pub(crate) struct Parser {
     pub(crate) schema_repairer: Option<SchemaRepairer>,
     /// Container-nesting depth for the MAX_NESTING guard: parse_json's `{`
     /// and `[` branches increment on entry and decrement on their way out,
-    /// as do the two continuation recursions — complete_object_parse's
+    /// as do the two continuation recursions: complete_object_parse's
     /// comma-merge and merge_object_array_continuation's array-merge
-    /// (object.rs) — so structural nesting and either kind of continuation
+    /// (object.rs), so structural nesting and either kind of continuation
     /// chain compete for one shared MAX_NESTING budget. Exceeding the cap
     /// raises the recursion-depth ValueError (upstream hits Python's
-    /// RecursionError at a comparable depth; tors normalizes it — see
+    /// RecursionError at a comparable depth; tors normalizes it: see
     /// mod.rs's docs).
     pub(crate) depth: usize,
     /// parse_comment's parse_json re-entry depth. Garbage-separated
     /// comment runs (`'/x' * n`) chain parse_json → parse_comment →
-    /// parse_json without unwinding — 2 stack frames per 2 input chars in
+    /// parse_json without unwinding: 2 stack frames per 2 input chars in
     /// tors (upstream's RecursionError fires at ~500 pairs and is
     /// normalized to the same ValueError); the cap keeps the chain from
     /// overflowing the native stack. Consecutive comment runs are absorbed
     /// by parse_comment's own loop and cost one re-entry, so legitimate
     /// inputs never approach the cap.
     comment_depth: usize,
-    /// The deadline clock, armed by `repair()` — it starts at the top of
+    /// The deadline clock, armed by `repair()`: it starts at the top of
     /// that call, so the budget covers the fence pre-pass and the strict
     /// fast path, not just this parser. `None` = unbounded (every
     /// existing caller): each check below is then a single `is_none`.
@@ -141,13 +141,13 @@ pub(crate) struct Parser {
     /// check short-circuits and this is the surfaced error.
     deadline_error: Option<String>,
     /// The lookahead memo for skip_to_character, keyed by target set and
-    /// LIVED AT THE PARSER LEVEL (a deliberate divergence from upstream,
+    /// lived at the parser level (a deliberate divergence from upstream,
     /// which scopes it to one string's parse state): entries are pure
-    /// buffer facts — (targets, start) -> first unescaped match, valid for
-    /// every anchored reader — so sharing them across the many short
+    /// buffer facts: (targets, start) -> first unescaped match, valid for
+    /// every anchored reader, so sharing them across the many short
     /// string parses of one repair (e.g. `'{' + 'a:b,'*n + '}'` parses n
     /// values, each with a fresh state and, upstream, a fresh O(n)-to-end
-    /// scan per comma) is exact. Cleared on the ONE buffer-mutating site
+    /// scan per comma) is exact. Cleared on the one buffer-mutating site
     /// (split_object_on_duplicate_key's `{` splice shifts every absolute
     /// position at/after the insert). Bounded per key (see string.rs's
     /// cache_put).
@@ -176,8 +176,8 @@ pub(crate) const DEADLINE_TAG: &str = "\u{0}tors-repair-deadline";
 /// ~256 × 1 KiB of short-scan work plus one long scan.
 pub(crate) const DEADLINE_FORCE_SCAN_CHARS: usize = 1024;
 
-/// The payload every abort site emits — the sticky error set here, and
-/// `repair()`'s post-fast-path check — in the same shape as
+/// The payload every abort site emits: the sticky error set here, and
+/// `repair()`'s post-fast-path check: in the same shape as
 /// `diff_opcodes`' TimeoutError, so the py layer only has to front it
 /// with the spelling's name.
 pub(crate) fn deadline_exceeded_payload(deadline_ms: f64, elapsed_ms: f64) -> String {
@@ -199,14 +199,14 @@ impl Parser {
         // ExactSizeIterator, so a bare collect() grows the Vec
         // logarithmically. `s.len()` is the exact char count for ASCII (the
         // overwhelmingly common JSON case) and a ≤4x over-estimate for
-        // multi-byte input — and the spare capacity is not waste: the
+        // multi-byte input, and the spare capacity is not waste: the
         // duplicate-key splice inserts `{` chars into this same buffer, so
         // headroom defers (often eliminates) its reallocation+copy.
         Parser {
             // One exact allocation instead of `collect`'s realloc ladder:
             // `chars()`' size hint floors at a quarter of the byte length,
-            // so a multi-MiB document paid two to three reallocations —
-            // each a full-buffer memmove — before reaching its final size.
+            // so a multi-MiB document paid two to three reallocations
+            // (each a full-buffer memmove) before reaching its final size.
             // `is_ascii` is one early-exit scan (the overwhelmingly common
             // JSON case) and gives the char count exactly; otherwise a
             // counting pass buys the exact size at a fraction of a
@@ -241,7 +241,7 @@ impl Parser {
         }
     }
 
-    /// json_parser.py's `get_char_at` — with PYTHON indexing semantics: the
+    /// json_parser.py's `get_char_at`: with Python indexing semantics: the
     /// position is `index + count` in codepoints; a negative position wraps
     /// from the end (`json_str[-1]` is the last character); out of range
     /// (either side) is `None` (upstream's IndexError -> None).
@@ -277,15 +277,15 @@ impl Parser {
         self.deadline = Some((started, ms));
     }
 
-    /// The sampled check for O(1)-iteration loops — `scan_string_body`'s
+    /// The sampled check for O(1)-iteration loops: `scan_string_body`'s
     /// char scan and (through [`Self::check_deadline`]) the `parse_json`
     /// dispatch loop. An `Instant::now` per iteration would dominate the
     /// char scan and cost one clock read per array item / object member
     /// in the dispatch case (an unsampled dispatch check measured +13%
     /// armed on a 3.8 MB repairable parse; sampled, ≤2%), so only every
-    /// 256th call reads the clock. The bound is therefore soft — up to
+    /// 256th call reads the clock. The bound is therefore soft: up to
     /// 256 iterations of O(1) work can run past an expired budget between
-    /// reads — and [`Self::force_deadline_check`] reclaims tightness
+    /// reads, and [`Self::force_deadline_check`] reclaims tightness
     /// wherever a single iteration can cost O(n).
     #[inline]
     pub(crate) fn deadline_expired(&mut self) -> bool {
@@ -304,10 +304,10 @@ impl Parser {
     }
 
     /// Force the next check to read the clock. Call after any work whose
-    /// cost is proportional to the remaining input — a buffer splice, a
+    /// cost is proportional to the remaining input: a buffer splice, a
     /// long scan, a long span build: the following parse always passes a
     /// check before the next such unit can run, so at most one O(n) unit
-    /// plus the work up to it slips between clock reads — the same
+    /// plus the work up to it slips between clock reads: the same
     /// tightness an unsampled dispatch check bought, at ~1/256 the clock
     /// reads on benign input.
     #[inline]
@@ -318,7 +318,7 @@ impl Parser {
     }
     /// The clock read behind every sampled check: reads the wall clock,
     /// and on expiry latches the sticky payload. Unsampled callers do not
-    /// exist — the two remaining uses are `deadline_expired`'s every-256th
+    /// exist: the two remaining uses are `deadline_expired`'s every-256th
     /// call and the forced reads after splices.
     #[inline]
     fn deadline_now_expired(&mut self) -> bool {
@@ -336,7 +336,7 @@ impl Parser {
     }
 
     /// The dispatch-loop check: sampled through [`Self::deadline_expired`],
-    /// `Err` carrying the sticky payload once the budget is exceeded — and
+    /// `Err` carrying the sticky payload once the budget is exceeded, and
     /// on every later call, so an abort can never be swallowed by a retry
     /// layer. The fallback arm is unreachable by construction
     /// (`deadline_now_expired` latches the payload before returning true)
@@ -354,7 +354,7 @@ impl Parser {
 
     /// Take the sticky abort. The scan loops break without an error
     /// channel of their own; their caller polls this once the loop exits.
-    /// The sticky flag makes a missed poll harmless — the next
+    /// The sticky flag makes a missed poll harmless: the next
     /// `check_deadline` fires instead.
     pub(crate) fn take_deadline_error(&mut self) -> Option<String> {
         self.deadline_error.take()
@@ -371,9 +371,9 @@ impl Parser {
         }
     }
 
-    /// json_parser.py's `scroll_whitespaces`: the non-advancing twin — how
+    /// json_parser.py's `scroll_whitespaces`: the non-advancing twin: how
     /// far (in codepoints, from `index`) the whitespace run at `index + idx`
-    /// extends. Returns the offset RELATIVE to `index` (idx plus the run).
+    /// extends. Returns the offset relative to `index` (idx plus the run).
     pub(crate) fn scroll_whitespaces(&self, idx: usize) -> usize {
         let mut idx = idx;
         while let Some(c) = self.s.get(self.index + idx) {
@@ -387,14 +387,14 @@ impl Parser {
     }
 
     /// json_parser.py's `skip_to_character`: advance a virtual cursor from
-    /// `index + idx` until an UNESCAPED target character (a target preceded
-    /// by an EVEN run of backslashes); returns the offset from `index` to
+    /// `index + idx` until an unescaped target character (a target preceded
+    /// by an even run of backslashes); returns the offset from `index` to
     /// that position, or the distance to the end when not found.
     ///
     /// Single-target scans (the engine's overwhelmingly common lookahead
     /// shape) take a branch-free scan loop: `position` to the next target
-    /// or backslash — a pattern the optimizer vectorizes over the u32 char
-    /// units, where the original branchy walk could not — then a bounded
+    /// or backslash: a pattern the optimizer vectorizes over the u32 char
+    /// units, where the original branchy walk could not: then a bounded
     /// walk back over the preceding backslash run for the escape parity.
     /// The walk-back's total cost is bounded by the runs the scan skipped
     /// in bulk, so even backslash-dense input stays linear. Multi-target
@@ -411,7 +411,7 @@ impl Parser {
                 i += rel;
                 if self.s[i] == t {
                     // The backslash run immediately before the candidate,
-                    // CLAMPED at the scan's start: the forward walk's
+                    // clamped at the scan's start: the forward walk's
                     // counter begins at zero there, so backslashes before
                     // the start never count against the first candidates.
                     let run_start = self.s[..i]
@@ -466,8 +466,8 @@ impl Parser {
     }
 
     /// A scan of [`DEADLINE_FORCE_SCAN_CHARS`] or more is O(remaining)
-    /// work between two sampled checks — the repeated-long-scan class the
-    /// parser's quadratics are made of — so it forces the next check to
+    /// work between two sampled checks: the repeated-long-scan class the
+    /// parser's quadratics are made of, so it forces the next check to
     /// read the clock (see `force_deadline_check`).
     #[inline]
     pub(crate) fn note_scan_distance(&self, traversed: usize) {
@@ -523,14 +523,14 @@ impl Parser {
 
     // =====================================================================
     // json_parser.py below the utility methods (plus parse_number.py and
-    // parse_comment.py): the parse orchestration — parse/parse_with_schema,
+    // parse_comment.py): the parse orchestration: parse/parse_with_schema,
     // the top-level multi-value loop, the salvage fragment loop, the
     // strict-suffix fast path, and the number/comment fallbacks. The
     // string/object/array/parenthesized parse methods live in the sibling
     // files, per this file's module docs.
     // =====================================================================
 
-    /// json_parser.py's `parse`: the plain top-level parse — no schema, the
+    /// json_parser.py's `parse`: the plain top-level parse: no schema, the
     /// default finalize/record flags (upstream passes the bound method with
     /// all-default arguments).
     pub(crate) fn parse(&mut self) -> Result<Value, String> {
@@ -562,9 +562,9 @@ impl Parser {
 
     /// json_parser.py's `_parse_top_level`: parse one element, and when the
     /// parser stopped early, keep collecting the sequential top-level values
-    /// that follow — a comma-separated sequence stays a list, a repeated
-    /// (non-comma-separated) object is an UPDATE that replaces the previous
-    /// value, falsy in-betweens are dropped — unwrapping back to the single
+    /// that follow: a comma-separated sequence stays a list, a repeated
+    /// (non-comma-separated) object is an update that replaces the previous
+    /// value, falsy in-betweens are dropped: unwrapping back to the single
     /// element when nothing more was found.
     fn parse_top_level(
         &mut self,
@@ -612,7 +612,7 @@ impl Parser {
     }
 
     /// json_parser.py's `_parse_top_level_salvage_with_schema`: return the
-    /// first top-level fragment that survives schema repair AND validation,
+    /// first top-level fragment that survives schema repair and validation,
     /// skipping (and remembering the error of) every fragment that does
     /// not. `parse_json` is what advances the cursor past each fragment,
     /// so the loop always makes progress.
@@ -671,7 +671,7 @@ impl Parser {
     }
 
     /// json_parser.py's `_next_top_level_value_is_comma_separated`: is the
-    /// next top-level value separated from the previous one by a comma —
+    /// next top-level value separated from the previous one by a comma:
     /// either one right after the cursor (across whitespace) or one right
     /// before it (a separator the previous value left dangling).
     fn next_top_level_value_is_comma_separated(&self) -> bool {
@@ -693,10 +693,10 @@ impl Parser {
 
     /// json_parser.py's `_initial_container_has_non_comma_trailing_content`:
     /// the gate for the strict-suffix fast path. It returns `true` unless
-    /// the cursor is at the very start of the input AND the first container
+    /// the cursor is at the very start of the input and the first container
     /// closes balanced with only a comma (or nothing but whitespace)
-    /// behind it — exactly the shapes where one `raw_decode` of the rest
-    /// would NOT capture the same value the multi-value top-level loop
+    /// behind it: exactly the shapes where one `raw_decode` of the rest
+    /// would not capture the same value the multi-value top-level loop
     /// should build. Mismatched or premature closers return `false` (the
     /// input is not "one valid value plus trailing junk"; let the repair
     /// parser handle it). Upstream also short-circuits to `true` for the
@@ -895,7 +895,7 @@ impl Parser {
                 self.index += 1;
                 continue;
             }
-            // <string> starts with a quote (or a bare word) — only inside a
+            // <string> starts with a quote (or a bare word): only inside a
             // container; at the top level those are prose to skip past.
             if !self.ctx_empty() && (STRING_DELIMITERS.contains(&ch) || ch.is_alphabetic()) {
                 let parsed = self.parse_string();
@@ -908,7 +908,7 @@ impl Parser {
                     record_top_level_value,
                 );
             }
-            // <number> starts with [0-9] or minus or '.' — likewise only
+            // <number> starts with [0-9] or minus or '.': likewise only
             // inside a container. isdigit is ASCII-only here (documented
             // divergence: non-ASCII digits never enter the number path).
             if !self.ctx_empty() && (ch.is_ascii_digit() || ch == '-' || ch == '.') {
@@ -924,7 +924,7 @@ impl Parser {
             }
             if matches!(ch, '#' | '/') {
                 let parsed = self.parse_comment(record_top_level_value);
-                // record_top_level_value is deliberately NOT forwarded: the
+                // record_top_level_value is deliberately not forwarded: the
                 // parse_json re-entry inside parse_comment already recorded
                 // whether a value was found behind the comments (and an
                 // empty-context comment-only result must not record one).
@@ -947,7 +947,7 @@ impl Parser {
     /// repairer engages only when real guidance was passed (None and a
     /// `true` schema mean "no constraints"); `$ref` chains resolve here so
     /// the container parsers see the target schema. Returns
-    /// (repairer-active, schema-to-use). The resolved schema is CLONED out
+    /// (repairer-active, schema-to-use). The resolved schema is cloned out
     /// of the repairer because a `$ref` target borrows the repairer's root
     /// while every consumer below needs `&mut self`.
     fn resolve_schema_for_parse(
@@ -967,7 +967,7 @@ impl Parser {
             // Resolved to `true`: no guidance. Upstream keeps the resolved
             // schema and drops the repairer; the schema value is dead
             // weight from here on either way. A `false` resolution has no
-            // ResolvedSchema variant — the repairer maps it to the
+            // ResolvedSchema variant: the repairer maps it to the
             // "Schema does not allow any values." Err carried by `?` above,
             // which is exactly upstream's raise for it.
             ResolvedSchema::True => Ok((false, Some(Value::Bool(true)))),
@@ -976,7 +976,7 @@ impl Parser {
     }
 
     /// json_parser.py's `_finalize_parsed_value`: the common tail of every
-    /// parse_json branch — record that a value was found (the salvage
+    /// parse_json branch: record that a value was found (the salvage
     /// loop's flag), and when schema-guided and finalizing, run the schema
     /// layer's repair over the value.
     fn finalize_parsed_value(
@@ -998,14 +998,14 @@ impl Parser {
             (Some(repairer), Some(schema)) => repairer.repair_value(value, schema, path),
             // Unreachable: the resolver only reports an active repairer
             // with a resolved schema in hand. Kept panic-free rather than
-            // unreachable!() — this parser is a fuzz target.
+            // unreachable!(): this parser is a fuzz target.
             _ => Ok(value),
         })
     }
 
     /// Take the schema repairer out of `self`, run `f` on it, put it back.
     /// Every schema-layer call needs `&mut SchemaRepairer` while the parser
-    /// state around it needs `&mut self` — take/put-back is the only shape
+    /// state around it needs `&mut self`: take/put-back is the only shape
     /// that satisfies both without cloning the repairer. Restoring it on
     /// every path (including `f`'s Err) matters: `repair()` still needs the
     /// repairer afterwards for its final validation.
@@ -1017,7 +1017,7 @@ impl Parser {
     }
 
     /// parse_number.py's `parse_number`: a "number" is whatever run of
-    /// NUMBER_CHARS sits at the cursor — then the fallbacks sort out the
+    /// NUMBER_CHARS sits at the cursor: then the fallbacks sort out the
     /// runs that only look like numbers (currency "1,000", fractions
     /// "1/2", ranges "10-20", trailing separators), which come back as
     /// strings.
@@ -1036,10 +1036,10 @@ impl Parser {
         }
         if self.cur().is_some_and(|ch| ch.is_alphabetic()) {
             // This was a string instead, sorry. Rewind over the accumulated
-            // characters — by len(number_str), NOT by the consumed-run
-            // length: the cursor lands len(underscores) PAST the run
+            // characters: by len(number_str), not by the consumed-run
+            // length: the cursor lands len(underscores) past the run
             // start, so skipped underscores end up inside the reparsed
-            // string ('{"k": 12_abc}' -> "2_abc") — upstream's exact
+            // string ('{"k": 12_abc}' -> "2_abc"): upstream's exact
             // arithmetic ('{"k": 12_abc}' keeps the underscore), kept.
             self.index -= number_str.chars().count();
             return self.parse_string();
@@ -1074,11 +1074,11 @@ impl Parser {
         }
     }
 
-    /// parse_comment.py's `parse_comment`: skip code-like comments —
-    /// `# ...`, `// ...`, `/* ... */` — and return an empty string so they
+    /// parse_comment.py's `parse_comment`: skip code-like comments:
+    /// `# ...`, `// ...`, `/* ... */`, and return an empty string so they
     /// do not interfere with the actual JSON elements. At the top level
     /// (empty context) all consecutive comments are consumed here and
-    /// `parse_json` is re-entered ONCE afterwards; inside a container the
+    /// `parse_json` is re-entered once afterwards; inside a container the
     /// comment is skipped and the caller carries on from the terminator.
     pub(crate) fn parse_comment(&mut self, record_top_level_value: bool) -> Result<Value, String> {
         self.comment_depth += 1;
@@ -1105,7 +1105,7 @@ impl Parser {
                 termination_characters.push(':');
             }
             match ch {
-                // Line comment starting with '#': runs to the newline or a
+                // Line comment starting with '#' runs to the newline or a
                 // container terminator (the terminator itself is left in
                 // place for the caller).
                 Some('#') => {
@@ -1125,14 +1125,14 @@ impl Parser {
                             self.index += 1;
                         }
                     }
-                    // Block comment '/* ... */' — or to the end of the
+                    // Block comment '/* ... */', or to the end of the
                     // string when the closer never comes.
                     Some('*') => {
                         self.index += 2;
                         // Upstream checks the accumulated comment text for
                         // endswith("*/"); tracking the previous character
                         // (seeded with the opener's '*') is that check
-                        // exactly — including the quirk that "/*/" closes
+                        // exactly: including the quirk that "/*/" closes
                         // on its third character.
                         let mut prev = '*';
                         // Unclosed block comment at end-of-string.
@@ -1173,7 +1173,7 @@ impl Parser {
         std::mem::take(&mut self.schema_repairer)
     }
 
-    /// `self.index < len(self.json_str)` — is there input left to parse?
+    /// `self.index < len(self.json_str)`: is there input left to parse?
     fn has_more_input(&self) -> bool {
         self.index < self.s.len()
     }
@@ -1184,7 +1184,7 @@ impl Parser {
 /// text (see `Value::BigInt`). A pure sign+digits run normalizes (optional
 /// '-', digits, no leading zeros, `-0`/all-zeros -> "0"); anything else
 /// (empty, a lone '-', interleaved garbage like "1-2") returns None so the
-/// caller falls back to the raw string — Python's ValueError branch.
+/// caller falls back to the raw string: Python's ValueError branch.
 /// Shared with the schema layer's exact string→integer coercion.
 pub(crate) fn normalize_big_int_text(number_str: &str) -> Option<String> {
     let (negative, digits) = match number_str.strip_prefix('-') {
@@ -1237,7 +1237,7 @@ mod tests {
         // Every string of length <= 6 over the lookahead-steering alphabet,
         // every start position, three single-target spellings (the ASCII
         // delimiter, the bracket, a smart-quote outer): the vectorized
-        // fast path must return the reference walk's exact position —
+        // fast path must return the reference walk's exact position:
         // same match, same not-found distance.
         let alphabet = ['[', ']', '{', '}', '"', '\\', 'x', '„', '”'];
         for len in 0..=6usize {
@@ -1564,12 +1564,12 @@ mod tests {
 
     #[test]
     fn garbage_separated_comment_runs_raise_instead_of_overflowing_the_stack() {
-        // '/x' chains parse_json ↔ parse_comment without unwinding — 2
+        // '/x' chains parse_json ↔ parse_comment without unwinding: 2
         // frames per 2 chars, unbounded in a naive port. Upstream's
         // RecursionError (→ ValueError) fires near 500 pairs; tors
         // normalizes at MAX_NESTING. Sizes chosen well past the crash
         // threshold a build without the guard would hit (~11k pairs).
-        // ('/ ' does NOT belong here: whitespace-separated runs are
+        // ('/ ' does not belong here: whitespace-separated runs are
         // absorbed by parse_comment's own loop and never recurse.)
         for pattern in ["/x", "/*", "a/"] {
             let payload = pattern.repeat(12_000);

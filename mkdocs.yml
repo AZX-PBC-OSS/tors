@@ -4,6 +4,10 @@ site_url: https://azx-pbc-oss.github.io/tors/
 repo_url: https://github.com/AZX-PBC-OSS/tors
 repo_name: AZX-PBC-OSS/tors
 
+# Historical design specs stay in the repo but off the published site.
+exclude_docs: |
+  superpowers/*
+
 theme:
   name: material
   palette:
@@ -24,6 +28,11 @@ theme:
 nav:
   - Home: index.md
   - API reference: api.md
+  - Documents: documents.md
+  - Performance: performance.md
+  - Async use: async.md
+  - Design and scope: design.md
+  - Dependencies and licensing: dependencies.md
   - Recipes:
       - Ingesting a real document: recipe-ingest.md
       - A lightweight retrieval/reranking pipeline: recipe-retrieval.md

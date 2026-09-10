@@ -1,7 +1,7 @@
 //! The parenthesized-value parser: a port of json_repair's
 //! `parser_parenthesized.py` (upstream:
 //! https://github.com/mangiucugna/json_repair by Stefano Baccianella, MIT,
-//! pinned at commit 251d141786d0f6ec04d90188a338e2470, version 0.63.4) —
+//! pinned at commit 251d141786d0f6ec04d90188a338e2470, version 0.63.4):
 //! the two quote/bracket/backslash classifier state machines that decide
 //! whether a `(` starts an explicit Python tuple literal or a standalone
 //! top-level value, and the parse entry that reuses the array loop with
@@ -13,7 +13,7 @@
 //! - The classifier counters are `isize` where upstream decrements
 //!   unconditionally (`top_level_parenthesized_can_start_value`'s `)` arm
 //!   can drive `nested_parentheses` negative when the `)` sits inside
-//!   brackets — plain Python ints upstream); the guarded decrements in
+//!   brackets: plain Python ints upstream); the guarded decrements in
 //!   `parenthesized_is_explicit_tuple` never go negative but use the same
 //!   type for symmetry.
 //! - `str.isdigit()` uses `char::is_ascii_digit` (documented divergence
@@ -21,19 +21,19 @@
 //!   uses `crate::normalize_impl::is_py_whitespace`; `.lower()` over the
 //!   inner-text tail is per-char `to_lowercase`.
 //! - The classifiers are read-only scans (`&self`); no context pushes live
-//!   here (the ARRAY context comes from the `parse_array` the parse entry
+//!   here (the array context comes from the `parse_array` the parse entry
 //!   calls, and the depth guard from `parse_json`'s `(` branch).
 //!
 //! # Test provenance
 //!
-//! The `#[cfg(test)]` battery ports the VALUE-level assertions of
+//! The `#[cfg(test)]` battery ports the value-level assertions of
 //! upstream's `tests/test_parse_array.py` that exercise
 //! `parser_parenthesized.py` (the Python tuple literals, the
 //! boolean/null-valued tuples, and the grouped-scalar unwrap cases, driven
-//! through `Parser::parse` — what `repair_json(..., skip_json_loads=True,
+//! through `Parser::parse`: what `repair_json(..., skip_json_loads=True,
 //! return_objects=True)` runs), plus the two direct classifier batteries.
-//! The assertions that intentionally live ONLY in the pytest corpus
-//! (`tests/test_json_repair.py`, agent C's): the serialized-STRING forms of
+//! The assertions that intentionally live only in the pytest corpus
+//! (`tests/test_json_repair.py`, agent C's): the serialized-string forms of
 //! these inputs and every case whose behavior belongs to
 //! `string.rs`/`parser.rs`/`object.rs`/`array.rs`'s own batteries.
 
@@ -115,7 +115,7 @@ impl Parser {
             } else if ch == '}' && braces > 0 {
                 braces -= 1;
             } else if ch == ',' && nested_parentheses == 0 && square_brackets == 0 && braces == 0 {
-                // A top-level comma IS the tuple separator.
+                // A top-level comma is the tuple separator.
                 return true;
             }
 
@@ -226,7 +226,7 @@ impl Parser {
                     }
                     return true;
                 }
-                // Upstream decrements unconditionally here — a ')' inside
+                // Upstream decrements unconditionally here: a ')' inside
                 // brackets can drive the counter negative (plain ints
                 // upstream, isize here).
                 nested_parentheses -= 1;

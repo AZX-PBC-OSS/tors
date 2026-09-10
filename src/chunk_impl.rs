@@ -3,30 +3,30 @@
 //! ingestion/RAG pipeline needs, both composing with the crate's merkle
 //! tree.
 //!
-//! [`chunk_text`] cuts TEXT at word/sentence boundaries into consecutive
-//! chunks under a CHARACTER budget: `truncate_to_bounds`'s own cut rule
+//! [`chunk_text`] cuts text at word/sentence boundaries into consecutive
+//! chunks under a character budget: `truncate_to_bounds`'s own cut rule
 //! (largest boundary end within the budget, hard-cut fallback, trailing
 //! whitespace trimmed at the cut) applied repeatedly across the whole
-//! text, computed against whole-text bounds ONCE (a per-chunk
+//! text, computed against whole-text bounds once (a per-chunk
 //! `truncate_to_bounds` call would re-segment its entire argument every
-//! time, O(text²) across a chunking, and its `trim_end` DELETES
+//! time, O(text²) across a chunking, and its `trim_end` deletes
 //! characters a covering chunking must keep).
 //!
 //! [`chunk_cdc`] wraps `fastcdc::v2020::FastCDC`, the crate's recommended
 //! implementation (same cut points as the 2016 paper, faster). Unlike
 //! every other segmentation primitive in this crate (`word_bounds`,
-//! `sentence_bounds`, `extract_code_blocks`), this operates on raw BYTES
-//! and returns BYTE offsets, not codepoints: content-defined chunking is
+//! `sentence_bounds`, `extract_code_blocks`), this operates on raw bytes
+//! and returns byte offsets, not codepoints: content-defined chunking is
 //! a byte-level dedup/incremental-sync primitive (its natural downstream
 //! is feeding `merkle_root`/`merkle_diff`'s `list[bytes]`), not a text
 //! operation, so there is no codepoint boundary to respect or preserve.
 //! The offset conventions are correct on their own sides of that line
 //! and neither function converts: `chunk_text`'s `text[start:end]` must
-//! BE the chunk for Python callers; `chunk_cdc`'s gear hash runs over a
+//! be the chunk for Python callers; `chunk_cdc`'s gear hash runs over a
 //! byte window and its chunks feed the byte-level tree.
 //!
-//! WHY content-defined rather than fixed-size cuts for the byte side: a
-//! cut point is a function of a bounded window of CONTENT, not of the
+//! Why content-defined rather than fixed-size cuts for the byte side: a
+//! cut point is a function of a bounded window of content, not of the
 //! input's offset, so an insert or append moves only the chunks whose
 //! content actually changed: after a bounded window the cuts re-anchor
 //! to the unchanged bytes and the rest of the chunk sequence is
@@ -34,7 +34,7 @@
 //! a short, local run of changed indices instead of "everything after
 //! the edit" (the stability tests pin this). `chunk_text`'s chunks
 //! compose with the same tree (encode each slice, hash, diff) but
-//! WITHOUT that stability property: its cuts are made greedily from the
+//! without that stability property: its cuts are made greedily from the
 //! start, so an early text edit can shift every later chunk: when the
 //! diffing property is the point, `chunk_cdc` is the shape.
 //!
@@ -46,10 +46,10 @@
 //! the argument boundary (the same discipline `is_grounded`'s `threshold`
 //! and `truncate_to_bounds`' `max_chars` already apply).
 //!
-//! The family's UNIT-COUNT chunkers, `tors.chunk_by_words`,
+//! The family's unit-count chunkers, `tors.chunk_by_words`,
 //! `tors.chunk_by_sentences`, `tors.chunk_by_paragraphs`, live in
 //! [`crate::chunk_by_segment_impl`], a separate file per the crate's
-//! "one concern per file" rule: those three window over a fixed COUNT
+//! "one concern per file" rule: those three window over a fixed count
 //! of segments rather than a character/byte budget, a different enough
 //! shape to deserve its own file.
 
@@ -65,10 +65,10 @@ use unicode_segmentation::UnicodeSegmentation;
 /// `truncate_impl::truncate_to_bounds`'s own hard-cut fallback applies
 /// (see that module's docs for the Thai SARA AM / combining-mark
 /// motivation this closes). Unlike `truncate_to_bounds`, a covering
-/// chunker cannot simply drop content that doesn't fit: if the ONLY
+/// chunker cannot simply drop content that doesn't fit: if the only
 /// grapheme boundary `<= limit` is `start` itself (a single cluster wider
 /// than the remaining budget: pathological, but possible, e.g. a long
-/// ZWJ emoji chain), that content still has to go in SOME chunk, so this
+/// ZWJ emoji chain), that content still has to go in some chunk, so this
 /// advances to the next grapheme boundary strictly after `start` instead:
 /// the chunk exceeds `max_chars` rather than split the cluster,
 /// correctness over the budget, forward progress unconditional either
@@ -122,7 +122,7 @@ fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
 }
 
 /// The end of the codepoint span `[grid[from_idx], grid[to_idx])` after
-/// `str::trim_end`'s rule, as a cluster-grid INDEX (`grid` the
+/// `str::trim_end`'s rule, as a cluster-grid index (`grid` the
 /// `grapheme_boundary_whitespace` starts, `to_idx` a cut the caller
 /// already knows is a cluster boundary, `from_idx` the current chunk
 /// start's own index): the largest end at or before the cut such that no
@@ -130,15 +130,15 @@ fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
 /// itself when the whole span is whitespace (the caller's empty-chunk
 /// case). Backs the cut off over trailing all-whitespace clusters.
 ///
-/// Backing off WHOLE CLUSTERS lands exactly where `str::trim_end` stops,
+/// Backing off whole clusters lands exactly where `str::trim_end` stops,
 /// whether trim_end is spelled over the byte slice between the two
 /// offsets or as the former char-by-char walk over a `Vec<char>`:
 /// whitespace codepoints are their own complete UTF-8 sequences, so the
-/// byte-slice and char-slice trims agree, and no cluster MIXES
+/// byte-slice and char-slice trims agree, and no cluster mixes
 /// whitespace and non-whitespace in a way that could separate them: a
 /// whitespace codepoint either starts its own cluster (whatever combines
 /// after it, e.g. NBSP + a combining accent, makes a mixed cluster whose
-/// LAST codepoint is that non-whitespace mark, exactly where trim_end
+/// last codepoint is that non-whitespace mark, exactly where trim_end
 /// stops) or is the LF of a CRLF pair (whose CR is whitespace too, an
 /// all-whitespace cluster trim_end removes whole). So trim_end's
 /// stopping point is always a cluster boundary with only all-whitespace
@@ -154,34 +154,34 @@ fn trimmed_end(cluster_whitespace: &[bool], from_idx: usize, to_idx: usize) -> u
 }
 
 /// Boundary-aware chunking of `text`: consecutive `(start, end)` pairs in
-/// PYTHON STR INDEX (codepoint) units: `text[start:end]` is the chunk:
+/// Python str index (codepoint) units: `text[start:end]` is the chunk:
 /// covering the whole text, each chunk at most `max_chars` codepoints,
 /// cut at `boundary` (word or sentence) wherever the budget allows.
 /// Empty text returns no chunks.
 ///
-/// The cut rule per chunk is `truncate_to_bounds`'s own, RE-DERIVED here:
-/// the largest word/sentence segment END in `(start, start + max_chars]`
+/// The cut rule per chunk is `truncate_to_bounds`'s own, re-derived here:
+/// the largest word/sentence segment end in `(start, start + max_chars]`
 /// (the `word_bounds`/`sentence_bounds` segment ends: the same UAX #29
-/// machinery `truncate_to_bounds` filters over), falling back to a HARD
+/// machinery `truncate_to_bounds` filters over), falling back to a hard
 /// cut at `start + max_chars` when no boundary fits (a single
 /// word/sentence longer than the budget, the truncation precedent; the
 /// budget is essentially never exceeded, see the grapheme-cluster
-/// exception below). The RULE is the same and so is the `Boundary` enum
+/// exception below). The rule is the same and so is the `Boundary` enum
 /// (reused from `truncate_impl`, not duplicated); the spelling here
-/// computes the whole-text bounds ONCE and cuts against them in codepoint
+/// computes the whole-text bounds once and cuts against them in codepoint
 /// space: a binary search per chunk over the ascending segment ends.
 ///
-/// Every accepted cut point (boundary end or hard cut) is ADDITIONALLY
+/// Every accepted cut point (boundary end or hard cut) is additionally
 /// grapheme-cluster-safe, the identical fix `truncate_to_bounds` applies
 /// (see that module's docs for the Thai SARA AM / combining-mark
 /// motivation): a word/sentence segment end that would split a cluster is
 /// never accepted, and the hard-cut fallback snaps to the nearest cluster
 /// boundary (`grapheme_safe_hard_cut`) rather than a raw codepoint offset.
-/// Like `truncate_to_bounds`, this is computed ONCE up front (the
+/// Like `truncate_to_bounds`, this is computed once up front (the
 /// whole-text grapheme boundary grid, `grapheme_boundary_whitespace`, one
 /// O(n) pass fused with the trim's per-cluster whitespace flags) and
 /// reused as an O(log n) lookup per chunk: no per-chunk
-/// re-scan. The one place this can still exceed `max_chars`: a SINGLE
+/// re-scan. The one place this can still exceed `max_chars`: a single
 /// grapheme cluster wider than the whole remaining budget (e.g. an
 /// oversized ZWJ emoji chain), where a covering chunker cannot drop content
 /// that doesn't fit, so that one chunk is allowed past the budget rather
@@ -193,14 +193,14 @@ fn trimmed_end(cluster_whitespace: &[bool], from_idx: usize, to_idx: usize) -> u
 /// least as large as trimming any smaller in-budget end would, so the
 /// largest cut first is always the most content kept.
 ///
-/// Trailing whitespace at each INTERIOR cut is trimmed exactly as
+/// Trailing whitespace at each interior cut is trimmed exactly as
 /// `truncate_to_bounds` trims; but a chunker cannot delete characters
 /// (the chunks must join back to the input), so the trim moves the cut
-/// BACK and the trimmed whitespace rides the head of the NEXT chunk.
+/// back and the trimmed whitespace rides the head of the next chunk.
 /// Two exceptions, both forced by the coverage invariant and pinned by
-/// the tests: (1) the FINAL chunk runs to the end of the text untrimmed:
+/// the tests: (1) the final chunk runs to the end of the text untrimmed:
 /// trailing whitespace there is input the chunks must cover; (2) a span
-/// that is ENTIRELY whitespace is emitted untrimmed: trimming it would
+/// that is entirely whitespace is emitted untrimmed: trimming it would
 /// empty the chunk (chunks are non-empty) or strand its characters.
 /// Unconditionally: chunks are non-empty (`start < end`), contiguous
 /// (the first starts at 0, each next start is the previous end), strictly
@@ -228,14 +228,14 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
         Boundary::Word => segmentation_impl::word_bounds(text),
         Boundary::Sentence => segmentation_impl::sentence_bounds(text),
     };
-    // The whole-text segment ends AND grapheme-cluster boundaries, each
-    // computed ONCE: word/sentence bounds are already in codepoint units,
+    // The whole-text segment ends and grapheme-cluster boundaries, each
+    // computed once: word/sentence bounds are already in codepoint units,
     // and every chunk's cut is a search over these ascending ends: the
     // per-suffix re-segmentation a truncate_to_bounds-per-chunk spelling
     // would pay is the cost this avoids. `ends` is additionally
     // intersected with grapheme-cluster boundaries up front (one O(n)
     // merge over the whole list, `truncate_impl::cluster_safe_ends`: the
-    // SAME shared helper `truncate_to_bounds`'s own cut filters through,
+    // same shared helper `truncate_to_bounds`'s own cut filters through,
     // not a per-chunk re-check or a second spelling) so every accepted
     // cut is cluster-safe by construction: see `grapheme_safe_hard_cut`
     // for the fallback's own cluster-safety. The grid walk replaces the
@@ -301,7 +301,7 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
 
 /// [`chunk_text`] with repeated trailing context: each chunk after the
 /// first starts `overlap` codepoints before the previous chunk's end,
-/// SNAPPED to the nearest `boundary` at or before that target: never
+/// snapped to the nearest `boundary` at or before that target: never
 /// starting mid-word/mid-sentence, same as every cut in [`chunk_text`]
 /// itself. `overlap == 0` degenerates to calling [`chunk_text`] directly
 /// (identical output, not just equivalent: the lossless-partition
@@ -312,13 +312,13 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
 /// still repeated at least once for `boundary`-safe overlap targets short
 /// of a run of oversized (hard-cut) chunks.
 ///
-/// Each chunk's own `(start, end)` is computed by the EXACT SAME cut+trim
+/// Each chunk's own `(start, end)` is computed by the exact same cut+trim
 /// rule as [`chunk_text`] (so within one call every chunk is still
 /// `<= max_chars` and never splits a word/sentence, or a grapheme
 /// cluster (see [`chunk_text`]'s docs for the same fix applied here),
-/// at its own edges); the overlap SNAP below reuses that same
+/// at its own edges); the overlap snap below reuses that same
 /// grapheme-cluster-filtered boundary list, so a snapped start is never
-/// mid-cluster either. Only where the NEXT chunk starts differs.
+/// mid-cluster either. Only where the next chunk starts differs.
 /// `overlap >= max_chars` is
 /// rejected by the pyo3 layer before this ever runs (no forward progress
 /// would be possible: an overlap at least as large as the budget means
@@ -329,17 +329,17 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
 /// either a boundary end `> start` or the hard-cut `start + max_chars`,
 /// and `max_chars >= 1`), and the next start is either that same
 /// `chunk_end` (the snap-collapsed-too-far fallback below) or a boundary
-/// STRICTLY between `start` and `chunk_end`, both `> start` by
+/// strictly between `start` and `chunk_end`, both `> start` by
 /// construction, so the loop always advances and terminates in at most
 /// `text.chars().count()` iterations (pinned by a hard iteration-count
 /// assertion in the tests, not just a slow-test timeout).
 ///
-/// The snap-collapse case: when a chunk is SHORTER than the requested
+/// The snap-collapse case: when a chunk is shorter than the requested
 /// `overlap` (a short trailing chunk, or a run of tight hard-cuts), the
 /// target `chunk_end - overlap` can land at or before `start`: snapping
 /// it there would either violate forward progress or claim overlap this
 /// chunk cannot actually provide. Rather than either, the overlap is
-/// silently reduced to zero for JUST that one transition (the next chunk
+/// silently reduced to zero for just that one transition (the next chunk
 /// starts at `chunk_end`, `chunk_text`'s own no-overlap rule), a
 /// documented degradation under the one invariant that must never break
 /// (forward progress), not a silent contract violation.
@@ -369,7 +369,7 @@ pub fn chunk_text_overlapping(
         Boundary::Sentence => segmentation_impl::sentence_bounds(text),
     };
     // Grapheme-cluster-safe, exactly as chunk_text's own `ends`: see that
-    // function's comments. The overlap SNAP below reuses this same
+    // function's comments. The overlap snap below reuses this same
     // cluster-safe `ends` list, so a snapped start is never mid-cluster
     // either.
     let (grapheme_starts, cluster_whitespace) = grapheme_boundary_whitespace(text);
@@ -466,7 +466,7 @@ fn validate(min_size: usize, avg_size: usize, max_size: usize) -> Result<(), Inv
     Ok(())
 }
 
-/// Content-defined chunk boundaries over `data`, `(start, end)` BYTE spans
+/// Content-defined chunk boundaries over `data`, `(start, end)` byte spans
 /// in document order, `end` exclusive, partitioning `data` exactly (no
 /// gaps, no overlaps, the last span's `end == data.len()`). Empty input
 /// yields `[]`. Input shorter than `min_size` yields exactly one span
@@ -498,7 +498,7 @@ mod tests {
         // word_bounds("cats are cute") ends: 4, 5, 8, 9, 13. Budget 9 from
         // 0: the largest end <= 9 is 9, the "are" + following-space
         // segment (truncate_to_bounds' own row), and the trim moves the
-        // cut back to 8, the space riding the NEXT chunk's head instead
+        // cut back to 8, the space riding the next chunk's head instead
         // of being deleted (a covering chunking keeps every character).
         let text = "cats are cute";
         let chars: Vec<char> = text.chars().collect();
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn greedy_sentence_cut_lands_on_whole_sentences() {
         // sentence_bounds("One. Two. Three.") ends: 5, 10, 16 (SB9-SB11
-        // put each inter-sentence space on the PRECEDING sentence).
+        // put each inter-sentence space on the preceding sentence).
         // Budget 10 from 0 lands exactly on end 10, trimmed to 9; the
         // remaining 7 codepoints fit the budget whole.
         let text = "One. Two. Three.";
@@ -585,7 +585,7 @@ mod tests {
         // "café 東京。" is 8 codepoints but 11 bytes (é and the han
         // characters are multibyte). word_bounds ends: 4, 5, then 7
         // and/or 8 (whether U+3002 rides the han word is the segmenter's
-        // call); either way budget 5 cuts after "café" at CODEPOINT 4
+        // call); either way budget 5 cuts after "café" at codepoint 4
         // (where a byte-offset chunker would say 5), and the rest fits.
         let text = "café 東京。";
         let chars: Vec<char> = text.chars().collect();
@@ -602,13 +602,13 @@ mod tests {
 
     #[test]
     fn never_splits_a_thai_sara_am_cluster_across_two_chunks() {
-        // "0" + SARA AM (U+0E33) is ONE grapheme cluster, but word_bounds
-        // scores it as TWO word segments, (3,4)="0", (4,5)="ำ", the exact
+        // "0" + SARA AM (U+0E33) is one grapheme cluster, but word_bounds
+        // scores it as two word segments, (3,4)="0", (4,5)="ำ", the exact
         // edge truncate_impl's grapheme-safety fix closes (see that
         // module's docs). Without that fix, chunk_text("ab 0ำ cd", 4, Word)
         // cuts exactly between them, [(0, 4)="ab 0", (4, 8)="ำ cd"]: the
         // base character and its combining mark silently separated into
-        // different chunks. The fix must keep the cluster whole in ONE
+        // different chunks. The fix must keep the cluster whole in one
         // chunk instead, even though that means backing the cut off
         // earlier (to the previous word boundary) rather than filling
         // the budget to 4.
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn a_single_cluster_wider_than_the_budget_is_kept_whole_rather_than_split() {
         // The pathological case grapheme_safe_hard_cut documents: the
-        // ENTIRE input is one grapheme cluster (2 codepoints) but
+        // entire input is one grapheme cluster (2 codepoints) but
         // max_chars=1 can't fit it. A covering chunker cannot drop
         // content, so correctness wins over the budget: the whole
         // cluster comes back as one (oversized) chunk rather than
@@ -686,9 +686,9 @@ mod tests {
                 // The one documented exception: a single grapheme cluster
                 // wider than the whole budget (e.g. a CRLF pair at
                 // max_chars=1) is kept whole rather than split: never
-                // any OTHER reason to exceed the budget. Confirm [a, b) is
+                // any other reason to exceed the budget. Confirm [a, b) is
                 // exactly one cluster: `a` is a cluster start and `b` is
-                // the VERY NEXT cluster start, nothing smaller possible.
+                // the very next cluster start, nothing smaller possible.
                 let a_idx = grapheme_starts
                     .iter()
                     .position(|&g| g == a)
@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn a_small_edit_near_the_start_only_perturbs_nearby_chunks() {
         // The whole point of content-defined over fixed-size chunking: an
-        // insertion shifts every FOLLOWING byte's absolute offset, but the
+        // insertion shifts every following byte's absolute offset, but the
         // cut points are chosen by local content, so chunks far past the
         // edit should reappear as identical (start, end) - offset pairs,
         // not reshuffle wholesale the way fixed-size chunking would.

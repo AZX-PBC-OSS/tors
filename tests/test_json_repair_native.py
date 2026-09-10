@@ -1,10 +1,10 @@
 """tors-native behavior pins for the JSON-repair surface.
 
-These tests pin tors's OWN extensions beyond upstream ``json_repair`` — no
+These tests pin tors's own extensions beyond upstream ``json_repair``: no
 upstream parity is asserted here. For context, upstream is ``json_repair``
 0.63.4 by Stefano Baccianella (MIT,
 https://github.com/mangiucugna/json_repair); tors's divergences from it are
-the documented classes in ``DESIGN-json-repair-port.md`` §9 and are re-pinned
+the documented classes in ``design-json-repair-port.md`` §9 and are re-pinned
 below as intentional behavior, not parity cases.
 """
 
@@ -43,7 +43,7 @@ _DATETIME_SCHEMA: dict[str, Any] = {"type": "string", "format": "date-time"}
 
 
 class TestFenceIntegration:
-    """Fence pre-pass (DESIGN §7): one wrapping fence unwraps before repair."""
+    """Fence pre-pass (design §7): one wrapping fence unwraps before repair."""
 
     def test_backtick_json_fence_unwraps(self) -> None:
         assert repair_json('```json\n{"a": 1}\n```') == '{"a": 1}'
@@ -79,7 +79,7 @@ class TestFenceIntegration:
 
 
 class TestKeyLadder:
-    """Key-normalization ladder + fuzzy remap tier (DESIGN §6.0–6.1)."""
+    """Key-normalization ladder + fuzzy remap tier (design §6.0–6.1)."""
 
     @pytest.mark.parametrize("typo", ["First Name", "first-name", "FIRST_NAME", "firstname"])
     def test_normalization_ladder_remaps_case_separator_variants(self, typo: str) -> None:
@@ -131,10 +131,10 @@ class TestKeyLadder:
         assert all(d["action"] != "remap_key" for d in diags)
 
     def test_no_remap_when_additional_properties_true(self) -> None:
-        # The two-tier split: the MECHANICAL fold tier remaps even on
+        # The two-tier split: the mechanical fold tier remaps even on
         # permissive schemas (deterministic match, data would otherwise be
-        # stranded on a dead key); the FUZZY tier is a guess and stays
-        # gated — "nam" against a permissive, non-required "name" keeps the
+        # stranded on a dead key); the fuzzy tier is a guess and stays
+        # gated: "nam" against a permissive, non-required "name" keeps the
         # key and only suggests.
         schema: dict[str, Any] = {
             "type": "object",
@@ -185,7 +185,7 @@ class TestEnumSuggestion:
 
 
 class TestDateNormalization:
-    """Date/datetime normalization (DESIGN §6.3)."""
+    """Date/datetime normalization (design §6.3)."""
 
     @pytest.mark.parametrize(
         ("raw", "want"),
@@ -221,8 +221,8 @@ class TestDateNormalization:
         ("raw", "want"),
         [
             ("2024-03-15 14:30", "2024-03-15T14:30:00"),
-            # Offset-bearing input normalizes to its UTC INSTANT (jiff's
-            # rendering): 14:30+05:30 IS 09:00Z.
+            # Offset-bearing input normalizes to its utc instant (jiff's
+            # rendering): 14:30+05:30 is 09:00Z.
             ("2024-03-15T14:30:00+0530", "2024-03-15T09:00:00Z"),
             ("2024-03-15T14:30:00Z", "2024-03-15T14:30:00Z"),
             ("2024-03-15T14:30:00.123Z", "2024-03-15T14:30:00.123Z"),
@@ -232,13 +232,13 @@ class TestDateNormalization:
         assert repair_json_loads(json.dumps(raw), schema=_DATETIME_SCHEMA) == want
 
     def test_time_format_normalizes(self) -> None:
-        # format: time — seconds always present, no offset invented.
+        # format: time: seconds always present, no offset invented.
         schema: dict[str, Any] = {"type": "string", "format": "time"}
         assert repair_json_loads(json.dumps("14:30"), schema=schema) == "14:30:00"
         assert repair_json_loads(json.dumps("14:30:00"), schema=schema) == "14:30:00"
 
     def test_uuid_format_lowercases(self) -> None:
-        # format: uuid — shape-gated canonical lowercase; non-uuids pass
+        # format: uuid: shape-gated canonical lowercase; non-uuids pass
         # through untouched for validation to judge.
         schema: dict[str, Any] = {"type": "string", "format": "uuid"}
         assert (
@@ -249,7 +249,7 @@ class TestDateNormalization:
 
 
 class TestCommaSplit:
-    """Comma-split array recovery (DESIGN §6.1b)."""
+    """Comma-split array recovery (design §6.1b)."""
 
     def test_comma_separated_string_splits_to_typed_array(self) -> None:
         # §9.7 divergence class: upstream raises here, while tors's
@@ -261,7 +261,7 @@ class TestCommaSplit:
 
     def test_comma_free_string_keeps_upstream_wrap_or_raise(self) -> None:
         # No commas, so the split cannot win: whichever the corpus pins
-        # (wrap-singleton or raise) stands — accept either without re-pinning
+        # (wrap-singleton or raise) stands: accept either without re-pinning
         # the corpus case itself.
         try:
             got = repair_json_loads('{"items": "not json"}', schema=_ITEMS_SCHEMA)
@@ -280,7 +280,7 @@ class TestSeparators:
 
 
 class TestDiagnosticsShape:
-    """Structured-diagnostics contract (DESIGN §6.4)."""
+    """Structured-diagnostics contract (design §6.4)."""
 
     _ACTIONS = frozenset(
         {
@@ -372,7 +372,7 @@ class TestArgumentContracts:
 
     def test_non_dict_schema_raises(self) -> None:
         # Plain non-dict, non-model schemas are rejected (pydantic v2 models
-        # are accepted — see the e2e suite).
+        # are accepted: see the e2e suite).
         with pytest.raises(
             ValueError,
             match=re.escape(
@@ -434,7 +434,7 @@ class TestTier4Ambiguity:
         assert value == {"n": 1234}
         suggests = [d for d in diags if d["action"] == "suggest"]
         assert len(suggests) == 1
-        # The suggestion names the DISCARDED reading's override — suggesting
+        # The suggestion names the discarded reading's override: suggesting
         # the winner's own locale would be a no-op.
         assert suggests[0]["suggestion"] == "locale='de-DE'"
 
@@ -450,7 +450,7 @@ class TestTier4Ambiguity:
 
     def test_integer_field_is_type_disambiguated_silently(self) -> None:
         # "1,234" has exactly one integral reading (1234); 1.234 is not an
-        # integer — the declared type alone resolves it.
+        # integer: the declared type alone resolves it.
         value, diags = repair_json_diagnostics('{"count": "1,234"}', schema=_COUNT_SCHEMA)
         assert value == {"count": 1234}
         assert all(d["action"] != "suggest" for d in diags)
@@ -484,7 +484,7 @@ class TestExtractionTiers:
 
     def test_whitespaced_number_keeps_the_declared_type(self) -> None:
         # Python's int()/float() accept surrounding whitespace: " 5" is an
-        # integer on integer fields and a FLOAT on number fields.
+        # integer on integer fields and a float on number fields.
         assert repair_json_loads('{"count": " 5"}', schema=_COUNT_SCHEMA) == {"count": 5}
         assert repair_json_loads('{"n": " 5"}', schema=_NUM_SCHEMA) == {"n": 5.0}
 
@@ -498,7 +498,7 @@ class TestExtractionTiers:
 
 
 class TestExactNumbers:
-    """Python's unbounded int() semantics — never a saturating cast."""
+    """Python's unbounded int() semantics: never a saturating cast."""
 
     _INT_SCHEMA: dict[str, Any] = {
         "type": "object",
@@ -511,7 +511,7 @@ class TestExactNumbers:
         assert repair_json_loads(raw, schema=self._INT_SCHEMA) == {"n": 12345678901234567890123}
 
     def test_big_integral_floats_convert_to_their_exact_decimal(self) -> None:
-        # int(1e30) in Python is the EXACT value of the binary float.
+        # int(1e30) in Python is the exact value of the binary float.
         raw = '{"n": 1e30}'
         assert repair_json_loads(raw, schema=self._INT_SCHEMA, skip_json_loads=True) == {
             "n": 1000000000000000019884624838656
@@ -547,7 +547,7 @@ class TestRobustness:
     """Adversarial-input regressions from the red-team review."""
 
     def test_garbage_separated_comment_runs_raise_instead_of_crashing(self) -> None:
-        # '/x' chains parse_json <-> parse_comment without unwinding — 2
+        # '/x' chains parse_json <-> parse_comment without unwinding: 2
         # stack frames per 2 chars; without the depth guard this segfaults
         # near 11k pairs.
         for pattern in ("/x", "/*", "a/"):
@@ -580,7 +580,7 @@ class TestRobustness:
     def test_comma_merged_fragments_below_the_cap_still_merge(self) -> None:
         # The guard must fire only past MAX_NESTING, never on an ordinary
         # merge chain: a regression that over-counts depth would raise early
-        # and silently change behavior on inputs upstream handles — the exact
+        # and silently change behavior on inputs upstream handles: the exact
         # parity-risk class this guard is scoped to avoid.
         payload = '{"a":1}' + "".join(f', "k{i}":1}}' for i in range(150))
         merged = repair_json_loads(payload, skip_json_loads=True)
@@ -589,12 +589,12 @@ class TestRobustness:
     def test_merged_array_continuation_chains_raise_instead_of_crashing(self) -> None:
         # `{"a":[0],` + `["b":[0],` * N nests through the array-continuation
         # merge: a '[' at the key position merges into the previous
-        # array-valued member, and the merged array's first item — a string
-        # followed by ':' — is a missing object start parsed by parse_object
+        # array-valued member, and the merged array's first item: a string
+        # followed by ':': is a missing object start parsed by parse_object
         # directly, whose key scan sees another '[' and merges again. That
         # cycle had no depth guard anywhere on it: it grew the native stack
-        # per fragment and overflowed — an uncatchable SIGSEGV around 8k
-        # fragments (main thread; fewer on worker-sized stacks) — instead of
+        # per fragment and overflowed: an uncatchable SIGSEGV around 8k
+        # fragments (main thread; fewer on worker-sized stacks): instead of
         # the documented catchable ValueError. The continuation guard caps
         # it like every other deep-recursion path.
         payload = '{"a":[0],' + '["b":[0],' * 2_000 + "1]"
@@ -616,7 +616,7 @@ class TestRobustness:
         # The guard must fire only past MAX_NESTING, never on an ordinary
         # merge chain: nested chains below the cap still merge every
         # fragment (an over-counting regression would raise early), and
-        # same-level sequential merges never accrue depth at all —
+        # same-level sequential merges never accrue depth at all:
         # enter/leave is balanced per continuation.
         assert repair_json_loads('{"a":[0],["b":[0],["b":[0],1]', skip_json_loads=True) == {
             "a": [0, {"b": [0, {"b": [0], "1": ""}]}]
@@ -633,10 +633,10 @@ class TestRobustness:
         # structural nesting. The comma chain spends 1 (the initial `{`) +
         # 1 per fragment (scalar values add nothing): 199 fragments parse
         # (depth 200), the 200th raises. The array-merge chain spends the
-        # same 1 + 1 per fragment PLUS 1 for the innermost fragment's
+        # same 1 + 1 per fragment plus 1 for the innermost fragment's
         # `[0]` value (a container nested inside every merge): 198
         # fragments parse, the 199th raises. Pinning the exact edges
-        # catches future accounting drift in either direction —
+        # catches future accounting drift in either direction:
         # over-counting an edge rejects inputs the cap admits, missing one
         # reopens the crash.
         comma_ok = '{"a":1}' + ', "k":1}' * 199
@@ -656,7 +656,7 @@ class TestRobustness:
             repair_json('{"a":[0],' + '["b":[0],' * 199 + "1]", skip_json_loads=True)
 
     def test_related_recursion_shapes_route_through_guarded_edges(self) -> None:
-        # Siblings of the continuation chains that DO pass guarded edges on
+        # Siblings of the continuation chains that do pass guarded edges on
         # every cycle: string-colon objects nested inside arrays (`["b": [`
         # per level, each through parse_json's '[' branch) and salvage-mode
         # comma-merging (every salvage fragment re-enters parse_json).
@@ -690,9 +690,9 @@ class TestRobustness:
     def test_escaped_delimiter_run_in_a_string_body_is_not_quadratic(self) -> None:
         # `{` + `{\"k\": 1}` * n + `}` puts 2n escaped quotes through
         # scan_string_body's escape normalizer; every pop-then-push repair
-        # used to rebuild the brace/class counters by rescanning the WHOLE
+        # used to rebuild the brace/class counters by rescanning the whole
         # accumulator (O(n^2): ~1.2s at 16k fragments, minutes at the MiB
-        # scale — 2.05e9 chars scanned for a 160 KB document, measured).
+        # scale: 2.05e9 chars scanned for a 160 KB document, measured).
         # The one-level undo record makes each repair O(1). Absolute wall
         # bound with a large margin over the linear cost (~8ms at 32k) and
         # far under the quadratic (~5s at 32k); the shape is pinned too, so
@@ -712,17 +712,17 @@ class TestRobustness:
 
     def test_recursion_class_grammar_sweep_stays_total(self) -> None:
         # A seeded sweep over a grammar of every stack-growing construct the
-        # parser has — both continuation merges (the array-merge chain
+        # parser has: both continuation merges (the array-merge chain
         # needs its array-valued head member `{"a":[0],` to arm the merge
         # hook; the bare fragment chain parses iteratively), structural
         # nesting, string-colon objects, comment runs, escaped keys, parens
-        # — at fragment counts far past every cap AND past the measured
+        #: at fragment counts far past every cap and past the measured
         # unguarded-crash thresholds (the array-merge chain SIGSEGVs around
         # 8k fragments on the main thread, the comma chain around 15k).
         # Every input must either parse or raise ValueError: a parse build
         # with an unguarded cycle anywhere in this grammar kills the
         # process (which is exactly the loud signal this pin exists to
-        # send). Over-aggressive guarding is NOT this pin's job — the
+        # send). Over-aggressive guarding is not this pin's job: the
         # below-cap and boundary tests assert the parses it would break.
         rng = random.Random(20260908)
         chains: list[tuple[str, Callable[[int], str]]] = [
@@ -738,7 +738,7 @@ class TestRobustness:
             name, build = chains[case % len(chains)]
             count = rng.randrange(250, 20_000)
             # Two thirds pure chains (the crash shapes), one third with
-            # junk spliced between fragments — the chains break, but the
+            # junk spliced between fragments: the chains break, but the
             # junk-with-fragments interaction stays covered at scale.
             if case % 3 == 2:
                 fragment = {"array_merge": '["b":[0],', "comma_merge": ', "k":1}'}.get(
@@ -754,7 +754,7 @@ class TestRobustness:
 
     def test_backslash_run_before_array_close_is_not_quadratic(self) -> None:
         # `'["' + ']'*n + '\\\\' + '" x'` (an even backslash run makes the
-        # close backslash-ADJACENT) still drove O(n^2) after the memoized
+        # close backslash-adjacent) still drove O(n^2) after the memoized
         # `]` lookahead: cached_skip_to_character's `s[m-1] != '\\'` write
         # guard suppressed the memo for exactly those matches, so every `]`
         # rescanned the remaining input (~12s at n=200k before the guard was
@@ -797,7 +797,7 @@ class TestRobustness:
         assert _time.perf_counter() - start < 3.0
         # The parity of the quote run decides the closer (the last quote
         # closes on odd runs, stays content on even ones): even n keeps
-        # every pair as content — `{"a": "[" + 'x"'*n}`.
+        # every pair as content: `{"a": "[" + 'x"'*n}`.
         assert result == {"a": "[" + ('x"' * n)}
 
     def test_object_key_colon_run_is_not_quadratic(self) -> None:
@@ -818,7 +818,7 @@ class TestRobustness:
     def test_internal_quote_run_in_array_string_is_not_quadratic(self) -> None:
         # `'["' + 'a"'*n + '"]'`: every internal quote candidate in an
         # array-context string body walked handle_right_delimiter_candidate's
-        # delimiter-PAIRING loop over all remaining quotes (~7s at n=100k
+        # delimiter-pairing loop over all remaining quotes (~7s at n=100k
         # before the walk outcomes were cached). The pin holds for every n:
         # the quote pairing keeps every internal quote as content and the
         # final quote closes the string.
@@ -833,8 +833,8 @@ class TestRobustness:
     def test_interleaved_close_and_escape_run_is_not_quadratic(self) -> None:
         # `'["' + (']' + '\\\\')*k + '" x'`: the interleaved even-backslash
         # runs made the escape normalizer rewrite the accumulator tail once
-        # per pair, and each rewrite REBUILT the whole accumulator
-        # (rebuild_unmatched_opening_braces) — O(k) per pair, O(k^2) total
+        # per pair, and each rewrite rebuilt the whole accumulator
+        # (rebuild_unmatched_opening_braces): O(k) per pair, O(k^2) total
         # (~12s at k=100k). The rewrite now pops the counter-neutral
         # backslash and appends through the incremental bookkeeping, O(1)
         # per pair. (Upstream rebuilds per rewrite and stays quadratic.)
@@ -967,7 +967,7 @@ class TestUnionDiagnosticsRollback:
         value, diags = repair_json_diagnostics(raw, schema=schema, skip_json_loads=True)
         # Branch 1 would coerce "5" -> 5 but fails on the required "z";
         # branch 2 wins unchanged, and the losing branch's records are
-        # rolled back — the diagnostics describe the returned value only.
+        # rolled back: the diagnostics describe the returned value only.
         assert value == {"v": {"x": "5", "y": 2}}
         assert diags == []
 
@@ -990,13 +990,13 @@ class TestDateShapesExtended:
         assert repair_json_loads(json.dumps(raw), schema=schema) == want
 
     def test_iso_dashes_require_two_digit_padding(self) -> None:
-        # jiff's ISO parser is strict on padding: "2024-3-5" stays
+        # jiff's iso parser is strict on padding: "2024-3-5" stays
         # untouched for validation to judge.
         assert repair_json_loads(json.dumps("2024-3-5"), schema=_DATE_SCHEMA) == "2024-3-5"
 
 
 class TestDiagnosticsVocabularyCompleteness:
-    """Every §6.4 action fires somewhere — the vocabulary is real."""
+    """Every §6.4 action fires somewhere: the vocabulary is real."""
 
     def test_wrap_array_is_recorded(self) -> None:
         schema: dict[str, Any] = {
@@ -1055,7 +1055,7 @@ class TestDiagnosticsVocabularyCompleteness:
         assert any(d["action"] == "skip_fragment" for d in diags)
 
     def test_fill_and_unwrap_string_actions(self) -> None:
-        # fill: a MISSING value (a member whose value position holds a
+        # fill: a missing value (a member whose value position holds a
         # separator) takes the schema's const.
         fill_schema: dict[str, Any] = {
             "type": "object",
@@ -1100,7 +1100,7 @@ class TestNothingRecoverableUnderSchema:
             repair_json_loads("plain prose, no braces at all", schema=_KEY_SCHEMA)
 
     def test_string_schema_accepts_the_sentinel(self) -> None:
-        # A string-typed schema legitimately accepts "" — the raise is the
+        # A string-typed schema legitimately accepts "": the raise is the
         # typed-schema behavior, not an unconditional one.
         assert repair_json_loads("no JSON anywhere", schema={"type": "string"}) == ""
 
@@ -1112,7 +1112,7 @@ class TestRepairDeadline:
 
     # Two distinct quadratics; unbounded, each runs for tens of seconds at
     # n=200k. dup-key and empty-object are bounded through the parse_json
-    # dispatch loop. (Two more went linear as their classes were fixed —
+    # dispatch loop. (Two more went linear as their classes were fixed:
     # the escaped-object-key splice rescan when #19 landed, the
     # backslash-adjacent string-scan when this branch lifted the memo's
     # write guard; both are pinned below / in TestRobustness as wall-time
@@ -1151,7 +1151,7 @@ class TestRepairDeadline:
     def test_the_backslash_string_scan_stays_linear(self) -> None:
         # `'["' + ']'*n + '\\\\' + '" x'` was the third bounded quadratic
         # (tens of seconds at n=200k) until the lookahead memo's write
-        # guard was lifted — backslash-adjacent matches memoize exactly for
+        # guard was lifted: backslash-adjacent matches memoize exactly for
         # anchored starts. Pin the wall so it stays that way (~4ms at
         # n=200k; TestRobustness carries the same shape with its
         # oracle-pinned output).
@@ -1175,7 +1175,7 @@ class TestRepairDeadline:
         assert _time.perf_counter() - start < 2.0
 
     def test_a_large_valid_input_does_not_trip_a_generous_deadline(self) -> None:
-        # The deadline distinguishes pathological SHAPE from benign SIZE: a
+        # The deadline distinguishes pathological shape from benign size: a
         # multi-MB well-formed document parses far under a generous budget
         # (an input-size cap could not tell the two apart).
         big = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(100_000)) + "]"
@@ -1218,7 +1218,7 @@ class TestRepairDeadline:
     def test_the_budget_includes_the_strict_fast_path(self) -> None:
         # The clock starts at the top of repair(), so the strict fast path
         # (json.loads attempt) burns the budget too: a multi-MB document
-        # whose fast path FAILS at the truncated tail must report the whole
+        # whose fast path fails at the truncated tail must report the whole
         # attempt as elapsed, not start a fresh clock at the repair parser.
         raw = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(400_000))[:-1]
         pattern = r"elapsed (\d+\.\d)ms > deadline_ms 1\.0ms"

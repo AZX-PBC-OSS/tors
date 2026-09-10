@@ -4,7 +4,7 @@
 //! Hand-rolled directly over byte positions rather than routed through
 //! `std::char::decode_utf16`'s iterator: that API reports an unpaired
 //! surrogate's raw `u16` value, not the byte-level distinction CPython's own
-//! decoder makes between four DIFFERENT error shapes (see [`DecodeError`]),
+//! decoder makes between four different error shapes (see [`DecodeError`]),
 //! so matching CPython exactly needs the same close-to-the-bytes control
 //! `decode_impl.rs` already uses for UTF-8.
 //!
@@ -21,13 +21,13 @@
 //!   `"unexpected end of data"`, spanning from the surrogate through the end
 //!   of the input (there is nothing left to do with the partial tail, so it
 //!   is folded into the one error rather than reported separately).
-//! - A high surrogate followed by a FULL code unit that is not a valid low
+//! - A high surrogate followed by a full code unit that is not a valid low
 //!   surrogate is `"illegal UTF-16 surrogate"`, spanning only the high
 //!   surrogate's two bytes; the following unit is reprocessed from scratch.
 //! - A lone low surrogate (reached other than as the second half of a valid
 //!   pair) is `"illegal encoding"`, spanning only its own two bytes.
 //!
-//! `.start`/`.end` are always offsets into the ORIGINAL input bytes
+//! `.start`/`.end` are always offsets into the original input bytes
 //! (including any stripped BOM), matching CPython's own `UnicodeDecodeError`
 //! fields exactly: verified directly, not assumed.
 //!
@@ -103,7 +103,7 @@ const HIGH_SURROGATE: std::ops::RangeInclusive<u16> = 0xD800..=0xDBFF;
 const LOW_SURROGATE: std::ops::RangeInclusive<u16> = 0xDC00..=0xDFFF;
 
 /// Resolve `byteorder` against a leading BOM in `raw`: `(little_endian,
-/// bom_len, encoding_label)`. `encoding_label` is the RESOLVED name CPython
+/// bom_len, encoding_label)`. `encoding_label` is the resolved name CPython
 /// reports as `UnicodeDecodeError.encoding`: always `"utf-16-le"` or
 /// `"utf-16-be"`, never the bare `"utf-16"` name, even for `Native`.
 fn resolve(raw: &[u8], byteorder: ByteOrder) -> (bool, usize, &'static str) {
@@ -142,9 +142,9 @@ enum Event {
 }
 
 /// The decode core shared by strict, replace, and validity modes: walks
-/// `body` (the input AFTER any BOM has been sliced off) two bytes at a
+/// `body` (the input after any BOM has been sliced off) two bytes at a
 /// time, calling `on_event` for each decoded scalar value or error span.
-/// `offset` is `body`'s start position in the ORIGINAL input, so reported
+/// `offset` is `body`'s start position in the original input, so reported
 /// spans land in the caller's coordinate system.
 ///
 /// `on_event` returns `true` to continue the walk (replace mode, or a
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn explicit_byteorder_never_strips_a_bom_like_prefix() {
-        // FF FE under an EXPLICIT little-endian order decodes as the
+        // FF FE under an explicit little-endian order decodes as the
         // literal BOM character U+FEFF, not a sniffed/stripped marker.
         assert_eq!(strict_le(b"\xff\xfeh\x00i\x00").unwrap(), "\u{feff}hi");
     }

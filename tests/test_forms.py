@@ -10,13 +10,13 @@ decomposable-codepoint and Hangul sweeps in tests/test_parity.py (every
 decomposable codepoint under all four forms, both raw and NFD-rendered inputs,
 per CI matrix leg), the hypothesis differentials below (arbitrary and
 pathological text, including strings whose NFD is 3x their composed size), and
-the behavioral pins that distinguish the FORMS from each other and from the
+the behavioral pins that distinguish the forms from each other and from the
 pipeline (compat decompositions fire under the K-forms and only under them).
 
 The exhaustive-sweep confound note, extended per form: the NFC sweep
 carves out {U+2000, U+2001} because ``tors.normalize`` strips whitespace-only
 results, the strip stage confounds raw NFC parity there. The standalone forms
-have NO strip stage, so the confound does not exist for them; that is pinned
+have no strip stage, so the confound does not exist for them; that is pinned
 explicitly in tests/test_parity.py (raw equality, whitespace preserved) rather
 than silently assumed.
 """
@@ -59,7 +59,7 @@ class TestHypothesisParity:
     def test_all_four_forms_agree_with_the_interpreter_on_arbitrary_assigned_text(
         self, text: str
     ) -> None:
-        """Uniform random unicode over the codepoints the RUNNING interpreter
+        """Uniform random unicode over the codepoints the running interpreter
         assigns (``Cn`` unassigned and ``Cs`` surrogates excluded; the
         latter because a lone surrogate is refused at the ``&str`` argument
         boundary by contract; hypothesis's charmap is built from this
@@ -68,13 +68,13 @@ class TestHypothesisParity:
         ``pathological_text``'s bias. Any assigned codepoint can appear, so
         this guards table entries the pathological strategy never draws.
 
-        The unassigned codepoints are intentionally OUT of this property's
+        The unassigned codepoints are intentionally out of this property's
         domain, and that is a measured finding, not a dodge: tors's tables
         (the ``unicode-normalization`` crate, 0.1.25) are Unicode 16.0.0,
-        the same UCD CPython 3.14 ships, while this suite also runs on legs
-        whose interpreters are behind (3.12 = UCD 15.0). Measured on the 3.12
-        leg, the ONLY divergences between tors and the interpreter, over every
-        non-surrogate codepoint, are on codepoints that leg leaves UNASSIGNED
+        the same ucd CPython 3.14 ships, while this suite also runs on legs
+        whose interpreters are behind (3.12 = ucd 15.0). Measured on the 3.12
+        leg, the only divergences between tors and the interpreter, over every
+        non-surrogate codepoint, are on codepoints that leg leaves unassigned
         (i.e. tors normalizes characters the interpreter does not know exist
         yet): 20 new canonical decompositions (NFD: Todhri U+105C9/U+105E4,
         whose compositions pair a new base with the ancient U+0307, plus
@@ -82,10 +82,10 @@ class TestHypothesisParity:
         new compatibility mappings (NFKC/NFKD: the Outlined Latin capital
         letters and digits, U+1CCD6-U+1CCF9, ``<font>``-decomposing to ASCII,
         plus U+A7F1), 57 total under NFKD, 0 under NFC for single characters.
-        No codepoint the interpreter ASSIGNS diverges in any form (pinned
+        No codepoint the interpreter assigns diverges in any form (pinned
         exhaustively by the confinement sweep in tests/test_parity.py), which
         is the load-bearing parity guarantee; a future crate or interpreter
-        change that breaks it fails these tests loudly. On UCD-16.0 legs
+        change that breaks it fails these tests loudly. On ucd-16.0 legs
         (CPython 3.14) the residual is empty and this property's domain is the
         full range."""
         for form in _FORMS:
@@ -139,7 +139,7 @@ class TestFormBehavior:
         """Every combining-mark case elsewhere in this suite (and in
         ``reference.py``'s ``pathological_text`` strategy) either uses a
         single mark or marks already in canonical-combining-class order --
-        the reordering ALGORITHM itself (UAX #15's stable sort by ccc) was
+        the reordering algorithm itself (UAX #15's stable sort by ccc) was
         never exercised on hand-built, out-of-order input.
         ``a`` + acute (U+0301, ccc 230) + dot-below (U+0323, ccc 220), in
         that (wrong) order: NFD/NFC must reorder to dot-below-then-acute,
@@ -185,7 +185,7 @@ class TestArgumentContract:
 
 class TestIdentityReturnContract:
     """The identity-return contract: when a form changes nothing, the
-    caller gets the ORIGINAL object back (``f(s) is s``), CPython's own
+    caller gets the original object back (``f(s) is s``), CPython's own
     ``unicodedata.normalize`` fast-path idiom (``is_normalized`` quick check ->
     return input). Zero allocation, zero copy, zero marshalling: the GIL model
     in the crate docs records this as the zero-cost path. Two lanes make the
@@ -196,7 +196,7 @@ class TestIdentityReturnContract:
 
     # Quick-check-Yes spellings per form: composed text for the C-forms,
     # decomposed text for the D-forms (each is that form's fixed point; the
-    # K-forms' fixed points are decomposed AND compat-free).
+    # K-forms' fixed points are decomposed and compat-free).
     _CLEAN: dict[str, str] = {
         "NFC": "caf\u00e9 na\u00efve composed text",
         "NFD": "cafe\u0301 na\u0301ve decomposed text",
@@ -233,7 +233,7 @@ class TestIdentityReturnContract:
     @settings(max_examples=500)
     def test_value_identity_implies_object_identity(self, text: str) -> None:
         # The complete contract as one property: whenever the form's output
-        # equals the input, the returned object IS the input; the two lanes
+        # equals the input, the returned object is the input; the two lanes
         # above are the mechanism, this is the promise.
         for form in _FORMS:
             result = _TORS_FORMS[form](text)

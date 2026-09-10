@@ -1,23 +1,23 @@
 """The randomized document generator for the cross-format validation suite:
 seeded, reproducible documents across every engine format with varying
-format, structure, columns, links, and formatting — each carrying its own
+format, structure, columns, links, and formatting: each carrying its own
 ground truth (the content units emitted), so the gates measure parse
-quality as ALIGNMENT: what went in must come out, nothing fabricated,
+quality as alignment: what went in must come out, nothing fabricated,
 structure rendered as structure.
 
 Two generation sources, by lane:
 
-- The RANDOMIZED lane (this module's ``GENERATORS``) writes documents with
-  the standard maintained WRITER libraries — fpdf2, python-docx, openpyxl,
-  python-pptx (dev-group only, nothing ships) — so the engines are measured
-  against REAL authoring-tool bytes: real Word styles and numbering, real
+- The randomized lane (this module's ``generators``) writes documents with
+  the standard maintained writer libraries (fpdf2, python-docx, openpyxl,
+  python-pptx (dev-group only, nothing ships)) so the engines are measured
+  against real authoring-tool bytes: real Word styles and numbering, real
   pptx layouts and notes parts, real xlsx workbooks, real PDF content
   streams with link annotations. Seeded via ``random.Random(seed)``; every
   failure reproduces from the seed in the test id. These documents are
   never committed (writer output is not byte-stable), so determinism is not
-  required — ground truth is recorded in memory at emission time.
-- The COMMITTED corpus (``documents.ENGINES_CORPUS``) keeps the
-  hand-built byte-deterministic fixtures for the pin tests — the minimal
+  required: ground truth is recorded in memory at emission time.
+- The committed corpus (``documents.ENGINES_CORPUS``) keeps the
+  hand-built byte-deterministic fixtures for the pin tests: the minimal
   subsets, pinned by regeneration, owned by the fixed-fixture lane.
 
 Ground truth is generator-vs-engine, never engine-vs-engine: the generator
@@ -88,7 +88,7 @@ _LINK_URLS = (
 @dataclass
 class GroundTruth:
     """What the generator emitted, as the alignment oracle. Units carry the
-    content as PLAIN TEXT; the gates normalize the engines' output before
+    content as plain TEXT; the gates normalize the engines' output before
     matching. ``blank_pages`` is 0-based PDF page indexing."""
 
     kind: str
@@ -404,7 +404,7 @@ def random_csv(seed: int) -> tuple[bytes, GroundTruth]:
 
 def random_rtf(seed: int) -> tuple[bytes, GroundTruth]:
     """A minimal well-formed RTF: fonttbl header, fs24 body, paragraphs as
-    ``text\\par``, cp1252 escapes for non-ASCII (CJK/emoji excluded — the
+    ``text\\par``, cp1252 escapes for non-ASCII (CJK/emoji excluded: the
     minimal subset cannot carry them)."""
     rng = random.Random(seed)
     truth = GroundTruth(kind="rtf")
@@ -413,7 +413,7 @@ def random_rtf(seed: int) -> tuple[bytes, GroundTruth]:
     for _ in range(rng.randint(1, 4)):
         paragraph = _sentence(rng, pool=pool)
         truth.paragraphs.append(paragraph)
-        # The trailing space is the RTF control-word DELIMITER: without it
+        # The trailing space is the RTF control-word delimiter: without it
         # "\par" + "Next" parses as one unknown control word "\parNext" and
         # the paragraph's first word is swallowed (measured: anydoc drops
         # the glued text). RTF consumes exactly one space after a control
@@ -432,8 +432,8 @@ def random_rtf(seed: int) -> tuple[bytes, GroundTruth]:
 # The macro-enabled / slide-show variants of the writer libraries' own
 # output: the same package with [Content_Types].xml's main-document
 # override respelled (the only difference between the containers), so the
-# fuzz lane measures the aliases over REAL writer bytes. Ground truth is
-# the base generator's unchanged — the alias IS the base document, only
+# fuzz lane measures the aliases over real writer bytes. Ground truth is
+# the base generator's unchanged: the alias is the base document, only
 # the container's content-type name differs.
 
 _CT_DOCX_MAIN = (
@@ -469,32 +469,32 @@ def _ooxml_alias(raw: bytes, base_ct: str, alias_ct: str) -> bytes:
 
 
 def random_docm(seed: int) -> tuple[bytes, GroundTruth]:
-    """random_docx's document in the macro-enabled container — the alias
+    """random_docx's document in the macro-enabled container: the alias
     the engines convert as docx on both lanes (anydoc and office_oxide)."""
     raw, truth = random_docx(seed)
     return _ooxml_alias(raw, _CT_DOCX_MAIN, _CT_DOCM_MAIN), truth
 
 
 def random_xlsm(seed: int) -> tuple[bytes, GroundTruth]:
-    """random_xlsx's workbook in the macro-enabled container — the alias
+    """random_xlsx's workbook in the macro-enabled container: the alias
     the engines convert as xlsx on both lanes (anydoc and office_oxide)."""
     raw, truth = random_xlsx(seed)
     return _ooxml_alias(raw, _CT_XLSX_MAIN, _CT_XLSM_MAIN), truth
 
 
 def random_ppsx(seed: int) -> tuple[bytes, GroundTruth]:
-    """random_pptx's deck in the slide-show container — the alias the
+    """random_pptx's deck in the slide-show container: the alias the
     auto/anydoc lane converts as pptx (office_oxide refuses the slideshow
     content type; the fuzz lane's auto conversion is the coverage)."""
     raw, truth = random_pptx(seed)
     return _ooxml_alias(raw, _CT_PPTX_MAIN, _CT_PPSX_MAIN), truth
 
 
-# --- html (string templates: generation IS the format) ------------------------
+# --- html (string templates: generation is the format) ------------------------
 
 
 def random_html(seed: int) -> tuple[bytes, GroundTruth]:
-    """The polluted-head shape (title/style/script — must never leak) plus a
+    """The polluted-head shape (title/style/script: must never leak) plus a
     random body: headings, adversarial paragraphs with strong/em/code
     spans, a nested list, a table, an optional link, an optional code
     block."""
@@ -527,8 +527,8 @@ def random_html(seed: int) -> tuple[bytes, GroundTruth]:
     truth.list_items.extend(items)
     nested = _sentence(rng, adversarial=False).removesuffix(".")
     truth.list_items.append(nested)
-    # Every flat item gets its own <li> (the emitted set IS the recorded
-    # set — the alignment gate exists to catch exactly this drift), with
+    # Every flat item gets its own <li> (the emitted set is the recorded
+    # set: the alignment gate exists to catch exactly this drift), with
     # the nested one inside the last.
     outer = "".join(f"<li>{_xml_escape(item)}</li>" for item in items[:-1])
     outer += f"<li>{_xml_escape(items[-1])}<ul><li>{_xml_escape(nested)}</li></ul></li>"

@@ -6,7 +6,7 @@ use crate::EagerIter;
 use crate::py::eager_iter_class;
 use crate::segmentation_impl;
 
-/// `tors.grapheme_count`: the number of UAX #29 EXTENDED grapheme clusters
+/// `tors.grapheme_count`: the number of UAX #29 extended grapheme clusters
 /// (the stdlib has no segmenter at all, which is the gap this fills). Backed
 /// by `unicode-segmentation` (Unicode 17.0.0 tables) and pinned by the
 /// hand-derived table plus structural properties in
@@ -23,16 +23,16 @@ pub fn grapheme_count(py: Python<'_>, text: &str) -> usize {
 }
 
 /// `tors.word_bounds`: the UAX #29 word-boundary segments as
-/// `(start, end)` pairs in PYTHON STR INDEX (codepoint) units, so
+/// `(start, end)` pairs in Python str index (codepoint) units, so
 /// `text[start:end]` is the segment; bounds cover `[0, len(text))` and
 /// joining the slices reproduces the input (pinned in
-/// tests/test_segmentation.py). OFFSETS, never string lists: marshalling
+/// tests/test_segmentation.py). Offsets, never string lists: marshalling
 /// thousands of small PyStrings under the GIL would eat the win.
 ///
-/// GIL model: the segmentation runs under `py.detach`, but the RETURN
+/// GIL model: the segmentation runs under `py.detach`, but the return
 /// marshalling constructs one 2-tuple of ints per segment under the GIL:
 /// O(number-of-segments), a measured cost that dominates at whole-file
-/// sizes; the README records the measured band and the streaming/iterator
+/// sizes; docs/performance.md records the measured band and the streaming/iterator
 /// API shape proposed as a v0.4 question.
 #[pyfunction]
 pub fn word_bounds(py: Python<'_>, text: &str) -> Vec<(usize, usize)> {
@@ -41,23 +41,23 @@ pub fn word_bounds(py: Python<'_>, text: &str) -> Vec<(usize, usize)> {
 
 eager_iter_class! {
     /// The streaming spelling of `tors.word_bounds` (v0.4): a lazy iterator
-    /// yielding the SAME `(start, end)` pairs, in the same order, as the list
+    /// yielding the same `(start, end)` pairs, in the same order, as the list
     /// API, pinned to sequence-parity by tests/test_segmentation.py over every
     /// UAX #29 tricky row and hypothesis text.
     ///
     /// GIL model: this is the design that answers the v0.3 marshalling cost
     /// (428-497ms of GIL-held 3.67M-tuple construction at 12 MiB, see
-    /// `word_bounds`' doc and the README). The whole segmentation, the same
+    /// `word_bounds`' doc and docs/performance.md). The whole segmentation, the same
     /// detached core pass the list API runs, fills an internal bounds buffer
-    /// under ONE `py.detach` when the iterator is constructed and stays GIL-free
+    /// under one `py.detach` when the iterator is constructed and stays GIL-free
     /// for its full duration (the buffer is 16 bytes per segment against the
     /// list shape's Python tuples). Each `__next__` then holds the GIL only to
-    /// construct ONE 2-tuple of ints, µs-scale, so the worst heartbeat gap stays
+    /// construct one 2-tuple of ints, µs-scale, so the worst heartbeat gap stays
     /// in the ping-floor band every str-in cell sits in (measured 15.4ms worst
     /// gap over a 327-358ms full-drain wall at 12 MiB, against the list shape's
     /// structurally-unattainable 428-567ms band).
     ///
-    /// The full drain is ~2.1x FASTER than the list API at 12 MiB (347ms vs
+    /// The full drain is ~2.1x faster than the list API at 12 MiB (347ms vs
     /// 724ms, min-of-3, same process: the per-`__next__` tuple path is cheaper
     /// per bound than the list-return conversion), so the iterator wins on both
     /// axes at whole-file sizes; the list API stays the right shape for small
@@ -101,7 +101,7 @@ pub fn word_bounds_iter(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<P
 }
 
 /// `tors.sentence_bounds(text)`: the UAX #29 sentence-boundary segments as
-/// `(start, end)` pairs in PYTHON STR INDEX (codepoint) units, so
+/// `(start, end)` pairs in Python str index (codepoint) units, so
 /// `text[start:end]` is the sentence; bounds cover `[0, len(text))` and
 /// joining the slices reproduces the input. The stdlib has no sentence
 /// segmenter either, the same gap `word_bounds` fills, over the same
@@ -110,7 +110,7 @@ pub fn word_bounds_iter(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<P
 /// plus structural properties, in tests/test_sentence_bounds.py; see
 /// `src/segmentation_impl.rs` for the rows cited per case. One presentation
 /// quirk to know (UAX #29 itself, pinned): trailing spaces after a sentence
-/// terminator belong to the PRECEDING sentence, so segments may carry
+/// terminator belong to the preceding sentence, so segments may carry
 /// trailing whitespace. Rule-based UAX #29 only, with no dictionary
 /// segmentation for spaceless scripts (Thai/Khmer/Burmese/Japanese word
 /// breaks are a different, dictionary-based problem; ICU4X is the

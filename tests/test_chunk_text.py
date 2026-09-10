@@ -3,8 +3,8 @@
 / ``tors.chunk_by_sentences`` / ``tors.chunk_by_paragraphs`` /
 ``tors.chunk_by_lines``.
 
-``chunk_text`` with ``overlap=0`` (the default) is a LOSSLESS COVERING
-PARTITION: chunks are non-empty, contiguous, strictly increasing, cover the
+``chunk_text`` with ``overlap=0`` (the default) is a lossless covering
+partition: chunks are non-empty, contiguous, strictly increasing, cover the
 whole text, and joining them reproduces the input exactly; the properties
 pinned below must hold for every case, matching the Rust-side contract this
 was unchanged from. ``overlap > 0`` trades that lossless-join guarantee for
@@ -13,13 +13,13 @@ split across a cut is still whole in at least one chunk), snapped to a real
 word/sentence boundary, never mid-word/mid-sentence.
 
 ``chunk_by_words``/``chunk_by_sentences`` measure chunks in UAX #29 segment
-COUNT rather than a character budget: each chunk spans exactly N consecutive
+count rather than a character budget: each chunk spans exactly N consecutive
 word/sentence segments (the last chunk may hold fewer), with Y segments of
 overlap repeated at the start of the next chunk.
 
 ``chunk_by_lines`` is the line-count sibling of that windowing (the
 transcript/log shape): a break is a ``\n``, a lone ``\r``, or a ``\r\n`` pair
-counted as ONE unit, and a line counts only when it carries content, so
+counted as one unit, and a line counts only when it carries content, so
 blank lines ride along inside a chunk's span rather than counting.
 
 Forward progress (no infinite loop) is the one invariant enforced most
@@ -100,8 +100,8 @@ class TestChunkTextNoOverlap:
         assert joined == text, "join-back broke"
 
     def test_never_splits_a_thai_sara_am_cluster_across_two_chunks(self) -> None:
-        # "0" + SARA AM (U+0E33) is ONE grapheme cluster, but the UAX #29
-        # word segmenter scores it as TWO word segments; the same edge
+        # "0" + SARA AM (U+0E33) is one grapheme cluster, but the UAX #29
+        # word segmenter scores it as two word segments; the same edge
         # tors.truncate_to_bounds guards against. A boundary-aware chunker
         # must never split the base character from its combining mark
         # into two different chunks, even when that means backing the cut
@@ -208,7 +208,7 @@ class TestChunkByWords:
 
     def test_worked_example_no_overlap(self) -> None:
         # "the cat sat on the mat" -> 6 real word tokens, 2 per chunk ->
-        # 3 chunks. Chunks are NOT necessarily contiguous (the space
+        # 3 chunks. Chunks are not necessarily contiguous (the space
         # between "cat" and "sat" belongs to neither chunk), so chunk_by_words
         # makes no covering-partition claim, unlike chunk_text.
         text = "the cat sat on the mat"
@@ -217,8 +217,8 @@ class TestChunkByWords:
 
     def test_counts_real_word_tokens_not_raw_word_bounds_segments(self) -> None:
         # The regression this pins: word_bounds gives an inter-word space
-        # run its OWN segment, so a naive "group N raw segments" reading
-        # of words_per_chunk would silently deliver roughly HALF as many
+        # run its own segment, so a naive "group N raw segments" reading
+        # of words_per_chunk would silently deliver roughly half as many
         # real words per chunk as requested on ordinary prose.
         text = "one two three four five six seven"
         chunks = chunk_by_words(text, 3)
@@ -277,7 +277,7 @@ class TestChunkByWords:
             assert a > prev_start
             assert b <= len(text)
             prev_start = a
-        # NOT a covering-partition contract (unlike chunk_text): trailing
+        # not a covering-partition contract (unlike chunk_text): trailing
         # whitespace, or text with no word tokens at all, means the last
         # chunk's end can legitimately fall short of len(text), or there
         # can be no chunks at all; only forward progress and in-bounds
@@ -287,7 +287,7 @@ class TestChunkByWords:
         # Raw word segmentation of "x0ำy0ำz" splits each "0" + SARA AM
         # (U+0E33) combining sequence into a base-segment and a lone
         # combining-mark segment (neither is whitespace), so the
-        # word-token filter alone would NOT catch this: without the
+        # word-token filter alone would not catch this: without the
         # grapheme-cluster merge, chunk_by_words(text, 1) would silently
         # return a chunk containing only the bare combining mark.
         text = "x0ำy0ำz"
@@ -377,8 +377,8 @@ class TestChunkBySentences:
 
 
 # ---------------------------------------------------------------------------
-# chunk_by_paragraphs: a HEURISTIC boundary (no Unicode Standard for
-# paragraphs), stated plainly: a run of 2+ consecutive newlines (\r\n
+# chunk_by_paragraphs: a heuristic boundary (no Unicode Standard for
+# paragraphs): a run of 2+ consecutive newlines (\r\n
 # counts as one unit) is a paragraph break, matching tors.normalize's own
 # "2+ newlines survive as the paragraph gap" convention. A single \n is
 # ordinary content, not a break.
@@ -430,8 +430,8 @@ class TestChunkByParagraphs:
 
     def test_a_whitespace_only_interior_paragraph_is_emitted_not_filtered(self) -> None:
         # docs/api.md's own claim, pinned: "Unlike the word/line twins,
-        # paragraphs have NO content filter here: a whitespace-only
-        # paragraph IS emitted as a chunk (only fully-empty spans are
+        # paragraphs have no content filter here: a whitespace-only
+        # paragraph is emitted as a chunk (only fully-empty spans are
         # dropped)". The middle paragraph of "x\n\n \n\ny" is a lone
         # space -- a content filter like the word/line twins' would drop
         # it; the paragraph heuristic emits it as a real chunk.
@@ -490,8 +490,8 @@ class TestChunkByParagraphs:
 
 # ---------------------------------------------------------------------------
 # chunk_by_lines: the transcript/log shape. A break is a \n, a lone \r,
-# or a \r\n pair counted as ONE unit (the same CR/CRLF folding as
-# chunk_by_paragraphs; str.splitlines' exotic separators are NOT breaks).
+# or a \r\n pair counted as one unit (the same CR/CRLF folding as
+# chunk_by_paragraphs; str.splitlines' exotic separators are not breaks).
 # A line counts only when it carries content, so blank lines ride inside
 # a chunk's span rather than counting, and a chunk ends at its last
 # line's end, never through the trailing break (non-covering, like
@@ -514,7 +514,7 @@ class TestChunkByLines:
         assert [text[a:b] for a, b in chunks] == ["l1\nl2", "l3\nl4", "l5"]
 
     def test_crlf_pair_is_one_unit_and_is_never_torn(self) -> None:
-        # \r\n folds into ONE break, so a 1-line window never treats the
+        # \r\n folds into one break, so a 1-line window never treats the
         # pair as a "\r" break plus a "\n" break and tears it across two
         # chunks' gap.
         text = "a\r\nb"
@@ -535,13 +535,13 @@ class TestChunkByLines:
         assert chunk_by_lines("a\x85b\u2028c\u2029d", 1) == [(0, 7)]
 
     def test_blank_line_judgement_is_the_unicode_white_space_property_not_str_isspace(self) -> None:
-        # WHICH lines carry content is judged by the Unicode White_Space
+        # which lines carry content is judged by the Unicode White_Space
         # property (Rust's char::is_whitespace), not str.isspace(): an
         # NBSP-only line is blank (White_Space=Yes, it rides inside a
         # chunk's span without counting, exactly like an empty line),
         # while the FS-US separator controls \x1c-\x1f are White_Space=No
         # even though str.isspace() accepts them, so an FS-only line
-        # carries CONTENT and counts toward the window like a visible
+        # carries content and counts toward the window like a visible
         # character. The one deliberate str.isspace divergence, pinned
         # truthfully as-is.
         assert chunk_by_lines("a\n\u00a0\nb", 1) == [(0, 1), (4, 5)]
@@ -561,7 +561,7 @@ class TestChunkByLines:
     def test_blank_lines_do_not_count_but_ride_inside_a_chunk_span(self) -> None:
         # A line counts only when it carries content: the blank line
         # between the two messages neither counts toward the window nor
-        # splits a chunk's interior — it rides along inside the chunk's
+        # splits a chunk's interior: it rides along inside the chunk's
         # span, exactly as inter-word whitespace rides along in
         # chunk_by_words.
         text = "msg one\n\nmsg two"
@@ -589,7 +589,7 @@ class TestChunkByLines:
     def test_worked_example_with_overlap(self) -> None:
         # The LangChain #34804-shaped regression the words/sentences/
         # paragraphs classes above already pin, mirrored here: overlap
-        # must repeat WHOLE lines (genuine shared content), never merely
+        # must repeat whole lines (genuine shared content), never merely
         # accept the parameter while sharing nothing or only break chars.
         text = "l1\nl2\nl3\nl4\nl5"
         chunks = chunk_by_lines(text, 2, overlap=1)
@@ -776,7 +776,7 @@ class TestStreamingIterParity:
 # Grapheme-boundary alignment for the unit-count chunkers, the invariant
 # their merge step (against the shared grapheme boundary index) must not
 # lose on arbitrary text: every chunk edge lands on a cluster boundary.
-# chunk_by_paragraphs is deliberately NOT here: its spans are line-run
+# chunk_by_paragraphs is deliberately not here: its spans are line-run
 # edges, documented as not necessarily cluster-aligned (a combining mark
 # after a newline joins the newline's own cluster, and the newline is
 # separator content no paragraph's caller would call "split").

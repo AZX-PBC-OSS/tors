@@ -1,7 +1,7 @@
 //! Phonetic-code primitives: the pure-Rust cores of `tors.soundex`,
 //! `tors.metaphone`, `tors.double_metaphone`, `tors.nysiis`, and
 //! `tors.daitch_mokotoff`, wrapping the `rphonetic` crate (an Apache
-//! Commons Codec port). All are classic, ENGLISH/Latin-script-specific
+//! Commons Codec port). All are classic, English/Latin-script-specific
 //! heuristics from the phonetic-matching literature (Soundex: 1918
 //! patent; NYSIIS: New York State Identification and Intelligence
 //! System, 1970; Double Metaphone: Lawrence Philips, 2000;
@@ -9,16 +9,16 @@
 //! surnames); not general Unicode phonetic analysis. They exist
 //! alongside `levenshtein`/`jaro_winkler` for the same lane: fast,
 //! deterministic, no-ML-model fuzzy name/word matching: phonetic codes
-//! group words that SOUND alike before or alongside an edit-distance
+//! group words that sound alike before or alongside an edit-distance
 //! score, the standard combination in name-matching/dedup pipelines.
 //!
-//! All codes are computed over the input's ASCII LETTERS ONLY: none of
+//! All codes are computed over the input's ASCII letters only: none of
 //! the algorithms is Unicode-aware beyond that (per Apache Commons
 //! Codec, which `rphonetic` faithfully ports, itself
 //! ASCII/English-oriented). This is enforced explicitly by
 //! [`ascii_alphabetic`], not left to the crate: a **real, verified
 //! upstream defect** in `rphonetic` 4.0.0 makes both `Soundex::encode`
-//! and `DoubleMetaphone::encode` PANIC on ordinary accented input:
+//! and `DoubleMetaphone::encode` panic on ordinary accented input:
 //! `Soundex`'s "clean" step filters by Unicode `char::is_alphabetic`
 //! (too broad: Cyrillic, CJK, Greek, and accented Latin like `'é'` all
 //! pass it) and then unconditionally indexes a 26-element mapping table
@@ -30,16 +30,16 @@
 //! `DoubleMetaphone::default().encode("café")`, and
 //! `DoubleMetaphone::default().encode("Björk")` all panic: i.e. this
 //! breaks on exactly the realistic accented-name inputs a
-//! name-matching consumer would actually pass. tors NEVER lets a Rust
+//! name-matching consumer would actually pass. tors never lets a Rust
 //! panic reach Python, so every call here pre-filters to ASCII letters
-//! FIRST: the same filter the crate's own "clean" step should have
+//! first: the same filter the crate's own "clean" step should have
 //! applied, and the already-documented scope of these algorithms
 //! regardless (non-ASCII input carries no phonetic meaning to a
 //! classic English-letters algorithm even when it doesn't crash). The
 //! filter is load-bearing for the newer three in different ways than
 //! panic-avoidance: `Nysiis`'s own clean step uses the same too-broad
 //! `is_alphabetic` test, so accented letters would otherwise leak
-//! verbatim INTO the returned code (a non-ASCII NYSIIS key, useless to
+//! verbatim into the returned code (a non-ASCII NYSIIS key, useless to
 //! a grouping consumer); `DaitchMokotoffSoundex` silently skips any
 //! character with no rule (harmless, but inconsistent) while its
 //! in-crate ASCII folding only covers the characters the rule table
@@ -72,13 +72,13 @@ pub fn soundex(text: &str) -> String {
     Soundex::default().encode(&ascii_alphabetic(text))
 }
 
-/// `rphonetic::DoubleMetaphone::default()`'s PRIMARY code: Lawrence
+/// `rphonetic::DoubleMetaphone::default()`'s primary code: Lawrence
 /// Philips' 2000 successor to classic Metaphone, chosen over the
 /// original Metaphone as the single exposed algorithm here because it is
 /// the more accurate, more widely-used modern default (and `rphonetic`
 /// exposes both through the identical `Encoder::encode(&str) -> String`
 /// shape, so there is no cost to picking the better one). Double
-/// Metaphone can also produce an ALTERNATE code for words with two
+/// Metaphone can also produce an alternate code for words with two
 /// plausible pronunciations: this function returns only the primary
 /// code, matching the scope of a single deterministic string-in
 /// string-out primitive; `rphonetic`'s `encode_alternate` is not
@@ -89,12 +89,12 @@ pub fn metaphone(text: &str) -> String {
     DoubleMetaphone::default().encode(&ascii_alphabetic(text))
 }
 
-/// `rphonetic::DoubleMetaphone::default()`'s PRIMARY and ALTERNATE codes
+/// `rphonetic::DoubleMetaphone::default()`'s primary and alternate codes
 /// as a pair. Lawrence Philips' 2000 successor to classic Metaphone; the
 /// alternate code is the algorithm's distinguishing feature: for words
 /// with two plausible pronunciations (typically a name that could be
 /// read in a Germanic/Slavic way or an Anglicized way) it emits a second
-/// key, so a match on EITHER key of two names counts as a phonetic
+/// key, so a match on either key of two names counts as a phonetic
 /// match. `tors.metaphone` exposes only the primary; this function
 /// exposes both because that dual-key matching is the point of the
 /// algorithm and the obvious Python shape for it is a 2-tuple
@@ -117,14 +117,14 @@ pub fn nysiis(text: &str) -> String {
 }
 
 /// `rphonetic::DaitchMokotoffSoundex::default()` (commons-codec rules,
-/// ASCII folding on) with BRANCHING: the 1985 Daitch-Mokotoff Soundex,
+/// ASCII folding on) with branching: the 1985 Daitch-Mokotoff Soundex,
 /// the standard code of Jewish-genealogy surname matching, designed for
 /// the Central/Eastern European surnames classic Soundex handles poorly
 /// (its digit table distinguishes sounds Soundex conflates, e.g.
-/// guttural vs sibilant). Its rule table BRANCHES on ambiguous
+/// guttural vs sibilant). Its rule table branches on ambiguous
 /// transliterations (a Cyrillic-derived spelling can transliterate
-/// multiple ways), so one name can legitimately encode to SEVERAL
-/// 6-digit codes: two names match if ANY of their codes intersect.
+/// multiple ways), so one name can legitimately encode to several
+/// 6-digit codes: two names match if any of their codes intersect.
 /// That multiple-candidate reality is why the return is a list, not a
 /// string: `inner_soundex(_, true)` gives the honest per-candidate
 /// shape without a `'|'`-joined round-trip through string parsing.
@@ -146,7 +146,7 @@ pub fn daitch_mokotoff(text: &str) -> Vec<String> {
 /// upstream panic class as classic `Soundex` (verified directly against
 /// the raw crate: `RefinedSoundex::default().encode("José")` panics with
 /// an out-of-bounds table index, the identical unguarded `ch as usize -
-/// 65` bug) — input is pre-filtered to ASCII letters for the same reason:
+/// 65` bug): input is pre-filtered to ASCII letters for the same reason:
 /// see the module docs.
 pub fn refined_soundex(text: &str) -> String {
     RefinedSoundex::default().encode(&ascii_alphabetic(text))
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn accented_names_do_not_panic_upstream_bug_regression() {
-        // THE regression this module's pre-filter exists for: rphonetic
+        // The regression this module's pre-filter exists for: rphonetic
         // 4.0.0's Soundex::encode and DoubleMetaphone::encode both panic
         // on these exact inputs when called directly (verified against
         // the raw crate, not assumed): ordinary accented names, not
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(metaphone("Ashcraft"), metaphone("Ashcraft"));
     }
 
-    // Vectors below were DERIVED by probing the built extension (and
+    // Vectors below were derived by probing the built extension (and
     // cross-checked against the vector tables in rphonetic's own test
     // suite, which ports Apache Commons Codec's test data verbatim):
     // no value below is pinned from memory or from the algorithm papers
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn double_metaphone_alternate_key_matches_schmidt_primary() {
         // The algorithm's headline demonstration, only expressible in
-        // the dual-key form: Smith and Schmidt match CROSS-KEY (Smith's
+        // the dual-key form: Smith and Schmidt match cross-key (Smith's
         // alternate equals Schmidt's primary), not primary-to-primary.
         assert_dm("Smith", ("SM0", "XMT"));
         assert_dm("Schmidt", ("XMT", "SMT"));
@@ -360,7 +360,7 @@ mod tests {
     fn new_algorithms_degrade_accented_input_like_the_existing_pair() {
         // The same partial-degradation contract as soundex/metaphone's
         // "Müller" -> "Mller": accents are dropped, the ASCII letters
-        // keep their code. For DM this deliberately BYPASSES the
+        // keep their code. For DM this deliberately bypasses the
         // crate's own in-crate ASCII folding (e.g. raw
         // DaitchMokotoffSoundex maps "ţamas" to "364000|464000"; tors
         // drops the ţ first, so "ţamas" encodes like "amas"): the

@@ -1,6 +1,6 @@
 //! The strict fast path: `json.loads` byte-parity over whole inputs, plus
 //! the `raw_decode` suffix probe the repair parser drives. Not a
-//! json_repair file — a CPython-stdlib parity layer the port needs
+//! json_repair file: a CPython-stdlib parity layer the port needs
 //! (json_repair.py's fast path calls `json.loads(json_str)`; json_parser's
 //! `_try_parse_valid_json_value` calls
 //! `json.JSONDecoder().raw_decode(json_str[index:])`), pinned to the
@@ -8,14 +8,14 @@
 //!
 //! - Whitespace is exactly CPython's JSON set (space, `\t`, `\n`, `\r`),
 //!   allowed around the whole document and between tokens, nothing else.
-//! - The constants `true`/`false`/`null` AND `NaN`/`Infinity`/`-Infinity`
+//! - The constants `true`/`false`/`null` and `NaN`/`Infinity`/`-Infinity`
 //!   are accepted anywhere a value is expected (CPython's scanner allows
 //!   them by default, not just at the top level).
 //! - Numbers follow the scanner regex `-?(0|[1-9][0-9]*)(\.[0-9]+)?
 //!   ([eE][-+]?[0-9]+)?`: the fraction requires at least one digit, so
 //!   `"1."`/`"1.e5"` are invalid ("Extra data"), as are `"01"`, `"1e"`,
 //!   `"-"`, `".5"`, `"+1"`. (The port design doc pins the fraction as
-//!   OPTIONAL with `"1."` valid — that is a mis-reading of the stdlib:
+//!   optional with `"1."` valid: that is a mis-reading of the stdlib:
 //!   every CPython 3.10-3.14, pure and C scanner alike, requires a digit
 //!   after the point, verified on 3.10/3.11/3.12/3.13/3.14. Following the
 //!   doc would also break differential parity: upstream json_repair
@@ -24,11 +24,11 @@
 //!   wins; the conflict is flagged to the lead.) Integers beyond i64
 //!   range become [`Value::BigInt`] (Python ints are unbounded); anything
 //!   with a fraction or exponent is an f64 (CPython's parse_float runs on
-//!   exactly these forms — Rust's f64 parser accepts every one of them).
+//!   exactly these forms: Rust's f64 parser accepts every one of them).
 //! - Strings take the full escape set including `\uXXXX` and surrogate
-//!   PAIRS combining to the astral char; a raw control char < 0x20
-//!   inside a string is rejected (the strict scanner's rule). A LONE
-//!   `\ud800`-`\udfff` escape maps to U+FFFD — a Rust `String` cannot
+//!   pairs combining to the astral char; a raw control char < 0x20
+//!   inside a string is rejected (the strict scanner's rule). A lone
+//!   `\ud800`-`\udfff` escape maps to U+FFFD: a Rust `String` cannot
 //!   hold a lone surrogate where CPython's can; this is the port's
 //!   documented divergence (design doc §9.2), and inputs containing lone
 //!   surrogates cannot reach tors through `&str` extraction anyway.
@@ -41,14 +41,14 @@
 //!   RecursionError near its own limit (divergence §9.6). Depth is
 //!   decremented on the success exits only; every `Err` path abandons
 //!   the Scanner for good (no caller reuses one after an error), so the
-//!   asymmetry is safe — pin it if a reuse ever appears.
+//!   asymmetry is safe: pin it if a reuse ever appears.
 
 use super::{MAX_NESTING, ObjectBuilder, Value};
 
-/// `json.loads(s)` parity over the WHOLE input: leading/trailing
+/// `json.loads(s)` parity over the whole input: leading/trailing
 /// whitespace (space/`\t`/`\n`/`\r` only) is fine, any trailing garbage
 /// fails, top-level scalars/strings are allowed, and every other rule is
-/// the scanner grammar in the module docs. `Err(())` on any failure —
+/// the scanner grammar in the module docs. `Err(())` on any failure:
 /// callers distinguish nothing, exactly like upstream catching
 /// `json.JSONDecodeError` and falling through to the repair parser.
 // The unit error type is the pinned cross-module contract (design doc
@@ -67,13 +67,13 @@ pub fn loads_strict(s: &str) -> Result<Value, ()> {
 }
 
 /// `json.JSONDecoder().raw_decode(&s[char_start..])` parity: skip leading
-/// whitespace, parse ONE value, return it plus the end index IN CODEPOINTS
-/// RELATIVE to `char_start` (upstream advances its codepoint cursor by
-/// exactly that amount). Content after the value is fine — that is the
+/// whitespace, parse one value, return it plus the end index in codepoints
+/// relative to `char_start` (upstream advances its codepoint cursor by
+/// exactly that amount). Content after the value is fine: that is the
 /// point: this is the "everything from here on is already valid JSON"
 /// probe. Depth-capped like [`loads_strict`].
 ///
-/// Divergence note: CPython's own `raw_decode` does NOT pre-skip
+/// Divergence note: CPython's own `raw_decode` does not pre-skip
 /// whitespace (`JSONDecoder.decode` does that before calling it), but
 /// upstream only ever invokes it with the cursor already sitting on a
 /// `{`/`[`, so the skip is unobservable through the repair flow and makes
@@ -117,7 +117,7 @@ impl<'a> Scanner<'a> {
         self.s.get(self.i).copied()
     }
 
-    /// CPython's WHITESPACE set, and only it.
+    /// CPython's whitespace set, and only it.
     fn skip_ws(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.i += 1;
@@ -165,7 +165,7 @@ impl<'a> Scanner<'a> {
             self.i += word.len();
             Ok(value)
         } else {
-            // "tru"/"True"/"nan"/... — no candidate matches, and the
+            // "tru"/"True"/"nan"/...: no candidate matches, and the
             // number regex cannot either.
             Err(())
         }
@@ -174,7 +174,7 @@ impl<'a> Scanner<'a> {
     /// The scanner's number regex, `-?(0|[1-9][0-9]*)(\.[0-9]+)?
     /// ([eE][-+]?[0-9]+)?`, consumed exactly as far as it matches (an
     /// optional group that lacks its required digits is not consumed at
-    /// all — that is what turns "01" into "0" + garbage and "1e" into "1"
+    /// all: that is what turns "01" into "0" + garbage and "1e" into "1"
     /// + garbage, CPython's "Extra data").
     fn parse_number(&mut self) -> Result<Value, ()> {
         let start = self.i;
@@ -292,7 +292,7 @@ impl<'a> Scanner<'a> {
                 if (0xd800..=0xdbff).contains(&cp) {
                     // High surrogate: combine with a directly following
                     // \uDC00-\uDFFF escape into the astral char. Anything
-                    // else leaves it LONE — and a lone surrogate maps to
+                    // else leaves it lone, and a lone surrogate maps to
                     // U+FFFD (a Rust String cannot hold it; documented
                     // divergence, see the module docs), with the lookahead
                     // unconsumed so the following escape is still
@@ -345,7 +345,7 @@ impl<'a> Scanner<'a> {
     fn parse_object(&mut self) -> Result<Value, ()> {
         self.enter_depth()?;
         self.i += 1; // '{'
-        // The builder's side index keeps duplicate-key updates O(1) —
+        // The builder's side index keeps duplicate-key updates O(1):
         // the linear object_insert scan is O(n²) on large objects.
         let mut obj = ObjectBuilder::new();
         self.skip_ws();
@@ -401,7 +401,7 @@ impl<'a> Scanner<'a> {
             items.push(self.parse_value()?);
             self.skip_ws();
             match self.peek() {
-                // A trailing comma leaves ']' where a value is expected —
+                // A trailing comma leaves ']' where a value is expected:
                 // rejected, exactly like CPython.
                 Some(b',') => self.i += 1,
                 Some(b']') => {
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn loads_whitespace_handling() {
-        // CPython's JSON whitespace set only — space, \t, \n, \r.
+        // CPython's JSON whitespace set only: space, \t, \n, \r.
         assert_eq!(loads_strict(" \t\n\r 7 \n").unwrap(), Value::Int(7));
         assert_eq!(loads_strict("\u{b}7"), Err(()));
         assert_eq!(loads_strict("\u{a0}7"), Err(()));
@@ -528,7 +528,7 @@ mod tests {
             loads_strict(r#""\u0000""#).unwrap(),
             Value::Str("\u{0}".into())
         );
-        // Surrogate PAIRS combine to the astral char.
+        // Surrogate pairs combine to the astral char.
         assert_eq!(
             loads_strict(r#""\ud83d\ude00""#).unwrap(),
             Value::Str("\u{1F600}".into())
@@ -563,7 +563,7 @@ mod tests {
             loads_strict(r#""\ud800\ud800""#).unwrap(),
             Value::Str("\u{FFFD}\u{FFFD}".into())
         );
-        // High surrogate followed by a NON-low escape: FFFD plus the
+        // High surrogate followed by a non-low escape: FFFD plus the
         // escape processed normally (CPython: lone surrogate + 'A').
         assert_eq!(
             loads_strict(r#""\ud83d\u0041""#).unwrap(),
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn loads_depth_cap() {
         // 200 nested containers fit; the 201st fails (Python would raise
-        // an uncaught RecursionError near its own limit — see mod.rs's
+        // an uncaught RecursionError near its own limit: see mod.rs's
         // MAX_NESTING docs).
         let ok = format!("{}0{}", "[".repeat(200), "]".repeat(200));
         assert!(loads_strict(&ok).is_ok());
@@ -644,8 +644,8 @@ mod tests {
 
     #[test]
     fn raw_decode_offsets() {
-        // The end index is in CODEPOINTS relative to char_start and
-        // INCLUDES the leading whitespace the skip consumed.
+        // The end index is in codepoints relative to char_start and
+        // includes the leading whitespace the skip consumed.
         assert_eq!(raw_decode("  42 rest", 0).unwrap(), (Value::Int(42), 4));
         assert_eq!(
             raw_decode("\t\n [1] x", 0).unwrap(),

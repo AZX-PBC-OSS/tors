@@ -5,20 +5,20 @@
 //! text needs before it is stored or served (a chatty or injected model
 //! cannot plant terminal control sequences in a row the UI renders).
 //! Three `ta_worker` prompt modules (`fit_prompts`, `enrich_prompts`,
-//! `derive_prompts`) each carried their own copy of this exact regex —
-//! `re.compile(r"[\x00-\x1f\x7f]+").sub(" ", ...)` — and this is that
+//! `derive_prompts`) each carried their own copy of this exact regex
+//! (`re.compile(r"[\x00-\x1f\x7f]+").sub(" ", ...)`) and this is that
 //! pattern as one GIL-free primitive, pinned byte-identical to it.
 //!
 //! Two deliberate scope cuts, both documented rather than hidden:
 //!
-//! * C1 controls (`U+0080`–`U+009F`) are NOT touched. The three call-site
+//! * C1 controls (`U+0080`–`U+009F`) are not touched. The three call-site
 //!   regexes do not cover them either (despite docstrings claiming "C0/C1"),
 //!   so covering them here would silently change adopted behavior: a value
 //!   the old regex passed through would come back scrubbed. If C1 scrubbing
 //!   is wanted it is a follow-up with its own contract, not a silent
 //!   extension of this one.
-//! * `\t`, `\n`, `\r` ARE C0 (`U+0009`, `U+000A`, `U+000D`) and are
-//!   therefore scrubbed like any other control run — newlines included.
+//! * `\t`, `\n`, `\r` are C0 (`U+0009`, `U+000A`, `U+000D`) and are
+//!   therefore scrubbed like any other control run: newlines included.
 //!   That matches the regex exactly, and matches the call sites (each
 //!   applies the scrub to single-line display text, then `.strip()`s): do
 //!   not reach for this on multi-line prose you want to keep line-shaped.
@@ -39,9 +39,9 @@ fn is_scrubbed(c: char) -> bool {
 
 /// Replace every maximal C0/DEL run in `text` with a single ASCII space.
 ///
-/// * No C0/DEL character anywhere: `text` comes back UNCHANGED
+/// * No C0/DEL character anywhere: `text` comes back unchanged
 ///   (`Cow::Borrowed`), the identity path.
-/// * Otherwise each maximal run — one control or a hundred adjacent ones —
+/// * Otherwise each maximal run (one control or a hundred adjacent ones)
 ///   becomes exactly one `" "`, including runs at either edge (no
 ///   strip: `"a\x00"` becomes `"a "`, and edge whitespace is the caller's
 ///   `.strip()` to own, the way the three adopted call sites already do).
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn c1_controls_pass_through_untouched() {
-        // U+0080–U+009F are NOT in the scrub set (the adopted regexes do
+        // U+0080–U+009F are not in the scrub set (the adopted regexes do
         // not cover them either): NEL, and the range endpoints, survive.
         assert!(matches!(strip_controls("\u{0080}"), Cow::Borrowed(_)));
         assert!(matches!(strip_controls("\u{0085}"), Cow::Borrowed(_)));

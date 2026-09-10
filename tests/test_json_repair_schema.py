@@ -5,13 +5,13 @@ https://github.com/mangiucugna/json_repair, commit
 251d141786d0f6ff561f6ec04d90188a338e2470 (= 0.63.4).
 Upstream source: json_repair's tests/test_schema_guided_parse.py
 (the machine-local clone is /tmp/opencode/json_repair at commit 251d141).
-Contract: DESIGN-json-repair-port.md sections 4, 6, 8, 9.
+Contract: design-json-repair-port.md sections 4, 6, 8, 9.
 
 Mapping: ``repair_json(raw, schema=s, skip_json_loads=True, return_objects=True)``
 is ``tors.repair_json_loads(raw, schema=s, skip_json_loads=True)``;
 ``schema_repair_mode="salvage"`` is ``salvage=True`` (default is standard).
 ``logging=`` variants, pydantic-model schemas, and monkeypatched internals are
-never ported (DESIGN section 9).
+never ported (design section 9).
 """
 
 from __future__ import annotations
@@ -252,7 +252,7 @@ class TestSchemaStandard:
             repair_json_loads("{}", schema={"$ref": 123})
 
     def test_unresolvable_ref_raises(self) -> None:
-        # No direct upstream fn; pinned by DESIGN section 8 catalog entry.
+        # No direct upstream fn; pinned by design section 8 catalog entry.
         schema = {"$ref": "#/definitions/missing"}
         with pytest.raises(ValueError, match=r"Unresolvable \$ref"):
             repair_json_loads("{}", schema=schema)
@@ -377,8 +377,8 @@ class TestSchemaSalvage:
 
     def test_bogus_type_raises(self) -> None:
         # Upstream: test_schema_salvage_mode_does_not_hide_schema_definition_errors.
-        # SALVAGE mode: a broken schema is the caller's bug, never
-        # salvageable data — the drop sites re-raise it.
+        # salvage mode: a broken schema is the caller's bug, never
+        # salvageable data: the drop sites re-raise it.
         with pytest.raises(ValueError, match="Unsupported schema type bogus"):
             repair_json_loads(
                 "[1]",
@@ -537,7 +537,7 @@ class TestRefEscapesAndUnions:
     """$ref pointer escapes, union degenerate forms, tuple validation."""
 
     def test_ref_pointer_escapes_unescape_in_order(self) -> None:
-        # `~1` (slash) before `~0` (tilde) — upstream's unescape order. The
+        # `~1` (slash) before `~0` (tilde): upstream's unescape order. The
         # defs carry literal "a/b" and "a~b" keys.
         schema: dict[str, Any] = {
             "$defs": {"a/b": {"type": "integer"}, "a~b": {"type": "string"}},
@@ -552,9 +552,9 @@ class TestRefEscapesAndUnions:
         assert repair_json_loads(raw, schema=schema) == {"n": 42, "s": "5"}
 
     def test_empty_one_of_and_type_list_both_raise(self) -> None:
-        # Degenerate unions: BOTH validators reject the schema itself at
+        # Degenerate unions: both validators reject the schema itself at
         # the API level (upstream: Python jsonschema's wording; tors: the
-        # Rust crate's) — the §8 validation-boundary divergence class, so
+        # Rust crate's): the §8 validation-boundary divergence class, so
         # the pin is the shared raise, not the message. ("No schema
         # matched the value" is repair_value's internal spelling, reached
         # only when a validator lets the schema through.)

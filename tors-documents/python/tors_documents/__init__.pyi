@@ -12,13 +12,13 @@ from enum import Enum
 
 __version__: str
 """The wheel's version, baked from the crate's Cargo.toml at build time
-(release-please bumps Cargo.toml and pyproject.toml together — one
-release, two wheels — so the two can never drift apart)."""
+(release-please bumps Cargo.toml and pyproject.toml together, one
+release and two wheels, so the two can never drift apart)."""
 
 class Backend(str, Enum):
     """The engine selector: ``AUTO`` routes by the measured table,
     ``OXIDE``/``ANYDOC`` force one engine and raise on a format it cannot
-    read — never a silent fallback. Members ARE their accepted strings, so
+    read, never a silent fallback. Members are their accepted strings, so
     ``backend="auto"`` and ``backend=Backend.AUTO`` are the same call."""
 
     AUTO = "auto"
@@ -68,14 +68,14 @@ class NeedsOcrError(ValueError):
     to ``pdf_classify``/``pdf_extract``."""
 
     pages: list[int]
-    """The 0-based page indices needing OCR — the same convention as
+    """The 0-based page indices needing OCR: the same convention as
     ``pages=`` and ``pages_needing_ocr``."""
     page_count: int
 
 class PdfClassification:
     """The ``pdf_classify`` result: the text-vs-image preflight's answer,
     with the routing rules (``has_text``/``image_only``) derived in the
-    native getters — exactly once."""
+    native getters, exactly once."""
     @property
     def page_count(self) -> int:
         """Pages in the document."""
@@ -85,14 +85,14 @@ class PdfClassification:
     @property
     def pages_needing_ocr(self) -> list[int]:
         """The 0-based indices of image-only pages (blank pages are
-        deliberately not listed — they are ``PageKind.EMPTY``)."""
+        deliberately not listed; they are ``PageKind.EMPTY``)."""
     @property
     def has_text(self) -> bool:
-        """At least one page carries a text layer — extraction will yield
+        """At least one page carries a text layer: extraction will yield
         something."""
     @property
     def image_only(self) -> bool:
-        """Every page is image-only — nothing local can read this
+        """Every page is image-only: nothing local can read this
         document; route it to an OCR stage."""
 
 def to_markdown(
@@ -112,7 +112,7 @@ def to_markdown(
     an explicit ``max_bytes=`` is binding on every engine lane, checked
     before a byte is read or copied, while ``None`` keeps the 32 MiB
     default (enforced after the read, on the anydoc/oxide lanes only).
-    Returns ``(Format, markdown)`` — the format the conversion actually
+    Returns ``(Format, markdown)``: the format the conversion actually
     used. The whole read+sniff+convert pass runs GIL-free."""
 
 def to_text(
@@ -126,7 +126,7 @@ def to_text(
 ) -> tuple[Format, str]:
     """The same conversion, routing, source, ``pages=``, ``password=``,
     and ``max_bytes=`` semantics as ``to_markdown``, with the markdown
-    normalized to plain text — one text shape for every format and
+    normalized to plain text: one text shape for every format and
     engine. Returns ``(Format, text)``."""
 
 def sniff(data: bytes) -> Format | None:
@@ -145,10 +145,10 @@ def pdf_classify(
     backend: Backend | str = ...,
     max_bytes: int | None = None,
 ) -> PdfClassification:
-    """The cheap text-vs-image preflight over an open PDF — no content
+    """The cheap text-vs-image preflight over an open PDF: no content
     conversion, no OCR, no rasterization. Encrypted documents fail closed
     (``ValueError``). ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide
-    lane; ``"anydoc"`` is a capability refusal — its PDF surface is the
+    lane; ``"anydoc"`` is a capability refusal: its PDF surface is the
     ``to_markdown``/``to_text`` conversion pair); an explicit
     ``max_bytes=`` binds before the read, ``None`` leaves the lane
     unmetered. Runs GIL-free."""
@@ -160,11 +160,11 @@ def pdf_extract(
     backend: Backend | str = ...,
     max_bytes: int | None = None,
 ) -> tuple[list[str], str]:
-    """Open a PDF and return ``(per_page_plain_text, markdown)`` — one
+    """Open a PDF and return ``(per_page_plain_text, markdown)``: one
     GIL-free pass over one open document (the parse is paid once for both
     outputs). An image-only page is an empty string, not an error; routing
     decisions are the caller's. ``backend=`` is ``"auto"``/``"oxide"``
-    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal — the
+    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal: the
     per-page probe is the OCR-routing signal and anydoc has none; its
     PDF surface is the ``to_markdown``/``to_text`` conversion pair); an
     explicit ``max_bytes=`` binds before the read, ``None`` leaves the
@@ -179,7 +179,7 @@ def pdf_page_count(
 ) -> int:
     """The page tree and nothing else: open + count, no content
     extraction, one GIL-free pass. ``backend=`` is ``"auto"``/``"oxide"``
-    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal — a count
+    (the pdf_oxide lane; ``"anydoc"`` is a capability refusal: a count
     its reader never returns on success; its PDF surface is the
     ``to_markdown``/``to_text`` conversion pair); an explicit
     ``max_bytes=`` binds before the read, ``None`` leaves the lane
@@ -193,10 +193,10 @@ def pdf_link_uris(
     max_bytes: int | None = None,
 ) -> list[list[str]]:
     """The ``/Annots`` link walk: for every page, the URIs of its link
-    annotations, in annotation order — the raw navigation surface no text
+    annotations, in annotation order: the raw navigation surface no text
     rendering carries. Verbatim (never deduped); URI actions only.
     ``backend=`` is ``"auto"``/``"oxide"`` (the pdf_oxide lane;
-    ``"anydoc"`` is a capability refusal — it has no annotation surface;
+    ``"anydoc"`` is a capability refusal: it has no annotation surface;
     its PDF surface is the ``to_markdown``/``to_text`` conversion pair);
     an explicit ``max_bytes=`` binds before the read, ``None`` leaves the
     lane unmetered."""

@@ -8,7 +8,7 @@
 //! cross-interpreter determinism guarantee carries over unchanged: same input
 //! -> same output on every supported Python. Parity with each interpreter's
 //! own `unicodedata` is pinned per CI matrix leg by the exhaustive sweeps in
-//! tests/test_parity.py (every decomposable codepoint, both canonical AND
+//! tests/test_parity.py (every decomposable codepoint, both canonical and
 //! compatibility, under all four forms, on both the raw character and its
 //! NFD rendering, plus every Hangul syllable) and by the hypothesis
 //! differentials in tests/test_forms.py.
@@ -16,16 +16,16 @@
 //! v0.4 identity-return contract: each form consults the crate's quick check
 //! first (`is_nfc_quick` etc., the same property data CPython's
 //! `unicodedata.normalize` fast path uses); a Yes proves the form is the
-//! identity and the input is returned BORROWED: the pyo3 wrapper then hands
-//! back the ORIGINAL `PyString` object, zero allocation and zero marshalling
+//! identity and the input is returned borrowed: the pyo3 wrapper then hands
+//! back the original `PyString` object, zero allocation and zero marshalling
 //! (CPython's own `if is_normalized(...): return input` idiom). A No/Maybe
 //! runs the full pass, and a final output==input comparison catches the
 //! Maybe-but-already-normalized class (e.g. canonically-ordered combining
 //! marks with no composable pair), so the contract is complete: the caller
 //! gets the same object back whenever the form changes nothing. The quick
 //! check's cost is the whole fast path: 2.4ms on 12 MiB ASCII prose,
-//! measured, against the 94ms NFC collect it skips (README performance
-//! section: the end-to-end before/after numbers).
+//! measured, against the 94ms NFC collect it skips (docs/performance.md:
+//! the end-to-end before/after numbers).
 //!
 //! Pure Rust, no pyo3 types: the criterion bench (benches/normalize.rs,
 //! benches/text.rs) drives these paths directly; the pyo3 wrappers in
@@ -220,7 +220,7 @@ mod tests {
         // The identity-return contract's core lane: the crate's quick check
         // proves the form is the identity, so the pass is skipped entirely and
         // the input is returned borrowed (the pyo3 layer hands back the
-        // ORIGINAL PyObject, as CPython's own `unicodedata.normalize` fast path does).
+        // original PyObject, as CPython's own `unicodedata.normalize` fast path does).
         for text in ["", "plain text", "caf\u{e9} na\u{ef}ve", "\u{ac00}"] {
             assert!(
                 matches!(nfc(text), Cow::Borrowed(s) if s == text),

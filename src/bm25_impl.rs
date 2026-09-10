@@ -1,16 +1,16 @@
 //! Okapi BM25: the pure-Rust core of `tors.bm25_rank`.
 //!
-//! # What this is: a RERANKING primitive, not a search index
+//! # What this is: a reranking primitive, not a search index
 //!
 //! `bm25_rank` scores every document in a caller-supplied `corpus` against
 //! one `query`, recomputing everything from scratch on every call. That is
-//! the right shape for the common RAG pattern of reranking a SMALL,
+//! the right shape for the common RAG pattern of reranking a small,
 //! already-retrieved candidate set (tens to a few hundred documents: a
 //! vector-search step's top-k, say) against one query: no state to manage,
 //! composes with the rest of the crate's flat, stateless primitives, and
 //! cheap enough at that scale to recompute per call.
 //!
-//! It is NOT a search engine: a corpus with thousands of
+//! It is not a search engine: a corpus with thousands of
 //! documents queried repeatedly wants a real inverted index built once and
 //! queried many times: tokenize-and-score-from-scratch on every call would
 //! waste the corpus-statistics work every single time. For that, reach for
@@ -18,13 +18,13 @@
 //! tors does not build persistent index objects, the same scope boundary
 //! that kept a Merkle inclusion-proof API out of this crate too.
 //!
-//! `tors` makes no claim about retrieval or relevance QUALITY for any
-//! particular corpus or query: BM25 is a well-specified ranking FORMULA,
+//! `tors` makes no claim about retrieval or relevance quality for any
+//! particular corpus or query: BM25 is a well-specified ranking formula,
 //! correctly implemented here, not a model-quality promise.
 //!
 //! # The formula
 //!
-//! For query `Q` (tokenized to a set of DISTINCT terms: a repeated query
+//! For query `Q` (tokenized to a set of distinct terms: a repeated query
 //! word does not multiply its own contribution, the standard Robertson/
 //! Spärck-Jones formulation) and document `D`:
 //!
@@ -39,8 +39,8 @@
 //! `N` = corpus size, `n(t)` = number of documents containing `t`, `f(t,D)`
 //! = `t`'s occurrence count in `D`, `|D|` = `D`'s token count, `avgdl` =
 //! the corpus's mean document length. `IDF` is the "+1" (Lucene-since-2011)
-//! variant, chosen DELIBERATELY over the classic `ln((N-n(t)+0.5)/(n(t)+0.5))`:
-//! the classic form goes NEGATIVE for a term appearing in more than half the
+//! variant, chosen deliberately over the classic `ln((N-n(t)+0.5)/(n(t)+0.5))`:
+//! the classic form goes negative for a term appearing in more than half the
 //! corpus, which can make a document's score fall as it gains an extra
 //! occurrence of a very common term: a surprising, unwanted answer for a
 //! reranking primitive with no stopword list to filter such terms out
@@ -64,7 +64,7 @@
 //! the caller's call), a ranking function comparing a query against a
 //! corpus should not silently miss "Rust" against "rust"; case
 //! sensitivity is not a knob this primitive exposes. `strip_accents`/
-//! `stemmer` ARE knobs (both default off), applied IDENTICALLY to the
+//! `stemmer` are knobs (both default off), applied identically to the
 //! query and every corpus document, since scoring a query normalized
 //! differently from its corpus produces meaningless scores, not just
 //! imprecise ones.
@@ -72,12 +72,12 @@
 //! # No `deadline_ms`
 //!
 //! Every deadline-bearing primitive in this crate protects against
-//! ADVERSARIAL-INPUT superlinear blowup (Levenshtein/Jaro's O(n·m) DP
+//! adversarial-input superlinear blowup (Levenshtein/Jaro's O(n·m) DP
 //! tables, the Myers scans behind `similarity_ratio`/`get_close_matches`).
 //! `bm25_rank` has no
 //! such shape: cost is linear in total corpus token count plus
 //! `corpus_size * distinct_query_terms` for scoring: both driven directly
-//! and proportionally by the SIZES of the caller's own arguments, not by
+//! and proportionally by the sizes of the caller's own arguments, not by
 //! adversarial structure within them. A caller already controls the one
 //! lever that bounds the cost (how large a `corpus` they pass), so no
 //! separate timeout knob is warranted.
@@ -101,7 +101,7 @@ fn term_counts(tokens: &[String]) -> HashMap<&str, usize> {
 }
 
 /// BM25-ranks every document in `corpus` against `query`: `(index, score)`
-/// pairs for EVERY document (no top-k cutoff: the caller composes that,
+/// pairs for every document (no top-k cutoff: the caller composes that,
 /// same "flat primitive" convention `find_patterns` follows), sorted by
 /// score descending, ties broken by original index ascending (a stable,
 /// documented, deterministic order: not sort-implementation-dependent).
@@ -115,7 +115,7 @@ fn term_counts(tokens: &[String]) -> HashMap<&str, usize> {
 /// the trusted core.
 ///
 /// `strip_accents`/`stemmer` are `tokenize_impl::normalized_word_tokens`'s
-/// opt-in knobs, applied IDENTICALLY to `query` and every `corpus`
+/// opt-in knobs, applied identically to `query` and every `corpus`
 /// document: a query normalized differently from the corpus it's scored
 /// against would make every score meaningless, not just imprecise.
 pub fn bm25_rank(
@@ -139,7 +139,7 @@ pub fn bm25_rank(
     let avgdl = doc_lens.iter().sum::<usize>() as f64 / n as f64;
 
     // Document frequency per term: how many documents contain it at least
-    // once (NOT total occurrences): one pass per document over its
+    // once (not total occurrences): one pass per document over its
     // distinct terms.
     let mut doc_freq: HashMap<&str, usize> = HashMap::new();
     let doc_term_counts: Vec<HashMap<&str, usize>> = doc_tokens
@@ -153,7 +153,7 @@ pub fn bm25_rank(
     }
 
     // Distinct query terms: a repeated query word contributes its IDF
-    // term ONCE (the module doc's Robertson/Spärck-Jones convention), not
+    // term once (the module doc's Robertson/Spärck-Jones convention), not
     // once per occurrence.
     let query_tokens = normalized_word_tokens(query, strip_accents, stemmer, lemma_dict);
     let mut seen = std::collections::HashSet::new();
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn scores_are_non_negative_for_the_plus_one_idf_variant() {
-        // A term in EVERY document (n(t) == N) is the classic-formula
+        // A term in every document (n(t) == N) is the classic-formula
         // negative-IDF case; the +1 variant must still stay >= 0.
         let corpus = [
             "common word here",

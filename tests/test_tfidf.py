@@ -1,8 +1,8 @@
-"""Contract gate for ``tors.tf_idf``: a STATELESS TF-IDF primitive; no
+"""Contract gate for ``tors.tf_idf``: a stateless TF-IDF primitive; no
 vocabulary/vectorizer object persists between calls. Tokenization is UAX #29
 word segments (non-whitespace only, lowercased; the near-universal
 case-folding convention). TF is the raw per-document term count. IDF is the
-scikit-learn-style SMOOTHED formula ``ln((1 + N) / (1 + df)) + 1``,
+scikit-learn-style smoothed formula ``ln((1 + N) / (1 + df)) + 1``,
 intentionally not the textbook ``ln(N / df)`` (which gives a term in every
 document an IDF of exactly 0). See ``src/tfidf_impl.rs`` for the exact
 formulas.
@@ -130,7 +130,7 @@ class TestNormalizationKnobs:
         assert terms == {"café"}
 
     def test_strip_accents_already_decomposed_input_still_strips(self) -> None:
-        # "e" + COMBINING ACUTE ACCENT (U+0301), not precomposed "é": the
+        # "e" + combining acute accent (U+0301), not precomposed "é": the
         # exact shape scikit-learn's own strip_accents_unicode gets wrong.
         already_decomposed = "éclair"
         result = tf_idf([already_decomposed], strip_accents=True)
@@ -169,11 +169,11 @@ class TestNormalizationKnobs:
 
 
 class TestLemmaDict:
-    """``lemma_dict``: a caller-supplied word -> lemma map, applied LAST
+    """``lemma_dict``: a caller-supplied word -> lemma map, applied last
     (after any stemming). tors does not bundle a lemma dictionary
     (out-of-scope, needs a per-language dataset or POS model, the same
-    boundary that kept schema-aware JSON/YAML coercion out of this crate)
-    It only APPLIES one supplied, the same shape ``replace_many`` takes
+    boundary that kept schema-aware JSON/yaml coercion out of this crate)
+    It only applies one supplied, the same shape ``replace_many`` takes
     a caller-supplied replacement map rather than a bundled one."""
 
     def test_none_or_empty_dict_is_a_true_no_op(self) -> None:
@@ -189,7 +189,7 @@ class TestLemmaDict:
 
     def test_lookup_is_on_the_stemmed_form(self) -> None:
         # english-stem("running") == "run"; the dict only has "run", not
-        # "running"; the lookup must happen AFTER stemming.
+        # "running"; the lookup must happen after stemming.
         result = tf_idf(["running"], stemmer="english", lemma_dict={"run": "MOVE"})
         terms = {t for t, _ in result[0]}
         assert terms == {"MOVE"}

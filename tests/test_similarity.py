@@ -5,36 +5,36 @@
 ``tors.similarity_ratio(a, b)`` is ``2.0 * M / T`` (``T = len(a) +
 len(b)``) with ``M`` the matched-character total over the Myers equal-ops
 (``difflib.SequenceMatcher(None, a, b).ratio()``'s formula) over a
-DIFFERENT alignment engine, so the parity contract is VALIDITY-FIRST, in
+different alignment engine, so the parity contract is validity-first, in
 three parts (the ``diff_opcodes`` discipline, no false parity: the
 algorithms are different and both are right):
 
 1. **Both engines' values are valid**: every ``M`` is realizable as a
    common subsequence of the two operands (``M <= LCS(a, b)``), and
-   tors's is MAXIMAL: ``M == LCS(a, b)`` exactly, pinned as a
+   tors's is maximal: ``M == LCS(a, b)`` exactly, pinned as a
    hypothesis differential against a pure-Python LCS oracle below (the
    minimal-edit-script consequence of the Myers engine: minimal edits
    ⟺ maximal matches).
-2. **Exact agreement where the alignment is FORCED**: identical operands,
+2. **Exact agreement where the alignment is forced**: identical operands,
    empty pairs, disjoint alphabets, and the pure insert/delete classes
    with differing flanks (verified, not assumed, by gating on difflib's
-   OWN canonical presentation (its opcode list carries exactly one
+   own canonical presentation (its opcode list carries exactly one
    non-equal op of the expected tag: where difflib itself is forced
    there, any two correct algorithms must agree). The
    ``tests/test_diff_opcodes.py`` assume-gating idiom, applied to the
    scalar.
 3. **Pinned divergence rows, both engines' values asserted with the
-   mechanism note**: difflib's longest-match recursion ANCHORS a match
+   mechanism note**: difflib's longest-match recursion anchors a match
    and splits the change around it, giving a smaller ``M`` than the
    maximal one on repeated-pattern contexts: ``"ppp"`` vs ``"pwpp"``:
    difflib ``4/7`` (its anchored ``"pp"`` splits the insert, ``M = 2``)
    vs tors ``6/7`` (``M = 3 = LCS``); ``"qpqpq"`` vs ``"qpwqpq"``:
-   difflib ``6/11`` (the anchored ROTATED equal block ``"qpq"``,
+   difflib ``6/11`` (the anchored rotated equal block ``"qpq"``,
    non-minimal insert+delete split, ``M = 3``) vs tors ``10/11``
    (``M = 5 = LCS``). Both values are valid similarity ratios; tors's
    is the minimal-edit one. Difflib's ratio is direction-symmetric on
-   these rows (measured), so both orders are pinned, but NOT in
-   general: its anchored ``M`` is direction-DEPENDENT
+   these rows (measured), so both orders are pinned, but not in
+   general: its anchored ``M`` is direction-dependent
    (``SequenceMatcher(None, "baab", "abab").ratio()`` is 0.75, the
    swapped order 0.5, measured and pinned below), and
    ``get_close_matches`` scores candidates as ``a=candidate, b=word``,
@@ -48,22 +48,22 @@ symmetric, and ``1.0`` iff ``a == b``, all pinned over hypothesis pairs.
 ``tors.get_close_matches(word, possibilities, n=3, cutoff=0.6)`` is
 difflib's shape over tors's own ratio: every candidate scoring ``>=
 cutoff`` is kept, and the top ``n`` come back sorted by
-``heapq.nlargest``'s TUPLE order (score descending, then candidate
-STRING descending), the stdlib quirk that puts ``"ca"`` before ``"ac"``
+``heapq.nlargest``'s tuple order (score descending, then candidate
+string descending), the stdlib quirk that puts ``"ca"`` before ``"ac"``
 for ``get_close_matches("ab", ["ac", "ca"], 2, 0.5)``. The returned
-elements are the ORIGINAL candidate objects (references, not copies).
+elements are the original candidate objects (references, not copies).
 Because the underlying ratio diverges from difflib's on the ambiguous
 classes (part 3), full-list parity with difflib is claimed only where
 the two score functions agree per candidate (assumed, then asserted);
-the nlargest SHAPE is pinned structurally against ``heapq.nlargest``
+the nlargest shape is pinned structurally against ``heapq.nlargest``
 over tors's own scores.
 
 Argument-boundary pins (measured, difflib's messages in mind):
 
-- ``n <= 0`` (zero OR negative) and an out-of-range ``cutoff`` raise
+- ``n <= 0`` (zero or negative) and an out-of-range ``cutoff`` raise
   ``ValueError`` with difflib's exact message, value interpolated
   (``"n must be > 0: 0"``, ``"n must be > 0: -1"``, ``"cutoff must be
-  in [0.0, 1.0]"``, measured on 3.10-3.15). ``n`` is taken SIGNED at
+  in [0.0, 1.0]"``, measured on 3.10-3.15). ``n`` is taken signed at
   the pyo3 boundary specifically so this validation runs before any
   unsigned-extraction failure could raise ``OverflowError`` instead,
   so a caller's ``except ValueError`` guard catches every ``n <= 0`` case
@@ -111,7 +111,7 @@ def _sole_non_equal_op(
     ops: list[tuple[str, int, int, int, int]], tag: str
 ) -> tuple[str, int, int, int, int] | None:
     """The canonical single-op shape predicate (the diff_opcodes gate's
-    idiom): ``ops`` carries EXACTLY ONE non-equal op, its tag is ``tag``,
+    idiom): ``ops`` carries exactly one non-equal op, its tag is ``tag``,
     every other op an equal, the canonical presentation of one
     contiguous change, where the minimal edit script is forced and any
     two correct algorithms must agree. ``None`` for any other shape,
@@ -182,7 +182,7 @@ _DIVERGENT_PAIRS = {("ppp", "pwpp"), ("qpqpq", "qpwqpq")}
 )
 def test_golden_battery(a: str, b: str, expected: float) -> None:
     """The fixed anchor: every row asserts tors's exact value, and the
-    UNAMBIGUOUS rows (everything except the pinned divergence pairs)
+    unambiguous rows (everything except the pinned divergence pairs)
     must also equal the running difflib's ratio, the scalar twin of the
     diff_opcodes battery discipline."""
     assert similarity_ratio(a, b) == expected
@@ -203,7 +203,7 @@ def test_the_documented_divergence_rows_both_engines_values_pinned() -> None:
     single insertion (``M = 3 = LCS`` → ``6/7``).
 
     ``"qpqpq"`` vs ``"qpwqpq"``: the repeated-flank rotation: the suffix
-    repeats the prefix's head, difflib anchors the ROTATED longer equal
+    repeats the prefix's head, difflib anchors the rotated longer equal
     block (``"qpq"``, non-minimal insert+delete split, ``M = 3`` →
     ``6/11``); tors emits the minimal contiguous insert (``M = 5 = LCS``
     → ``10/11``)."""
@@ -228,14 +228,14 @@ def test_the_documented_divergence_rows_both_engines_values_pinned() -> None:
 
 def test_difflibs_ratio_is_direction_dependent_and_tors_is_not() -> None:
     """The measured stdlib fact the get_close_matches differential below
-    had to respect: difflib's anchored ``M`` is NOT symmetric in its
+    had to respect: difflib's anchored ``M`` is not symmetric in its
     operands: ``SequenceMatcher(None, "baab", "abab").ratio()`` is 0.75
     while the swapped order gives 0.5 (the anchored recursion finds a
     different, equally valid, smaller-``M`` alignment from the other
     direction), and ``difflib.get_close_matches`` scores its candidates
     with ``a=candidate, b=word`` (``set_seq2(word)`` once, ``set_seq1(x)``
     per candidate), the direction a naive ``SequenceMatcher(None, word,
-    x)`` oracle gets WRONG. tors's LCS-based scalar is symmetric by
+    x)`` oracle gets wrong. tors's LCS-based scalar is symmetric by
     construction (pinned over hypothesis pairs below), which is also why
     full-list parity with difflib can only be claimed where the two
     engines' per-candidate scores agree in the direction
@@ -247,9 +247,9 @@ def test_difflibs_ratio_is_direction_dependent_and_tors_is_not() -> None:
 
 # --- The forced-class parity properties (the assume-gating idiom) ----------------------
 #
-# Generator alphabets are DISJOINT by class (context over one alphabet,
+# Generator alphabets are disjoint by class (context over one alphabet,
 # the changed content over another), so the changed block's content is
-# forced into the non-equal ops, but difflib's PRESENTATION is not
+# forced into the non-equal ops, but difflib's presentation is not
 # (repeated flanks let it anchor a rotated block and split the change,
 # the divergence rows' mechanism). The unambiguous class is
 # difflib's own answer, so exact parity is asserted only where difflib
@@ -281,7 +281,7 @@ def _pure_delete_pair(draw: st.DrawFn) -> tuple[str, str]:
 @settings(max_examples=400)
 def test_pure_inserts_match_difflib_where_the_alignment_is_forced(pair: tuple[str, str]) -> None:
     """Generated pure-insert pairs, gated to the unambiguous
-    subset: exact agreement is asserted ONLY where difflib's own answer
+    subset: exact agreement is asserted only where difflib's own answer
     carries the canonical single-insert shape: there ``M`` is forced
     (the whole inserted block is unmatched, everything else matches) and
     any two correct algorithms must produce the same ratio. The gate
@@ -320,7 +320,7 @@ def test_identical_pairs_agree_with_difflib(text: str) -> None:
 @settings(max_examples=300)
 def test_ratio_is_two_lcs_over_total_over_arbitrary_pairs(a: str, b: str) -> None:
     """The maximality differential, the strongest form of validity-first:
-    over ARBITRARY pairs (any alphabets, shared or disjoint), tors's
+    over arbitrary pairs (any alphabets, shared or disjoint), tors's
     matched total is exactly the LCS length (the minimal-edit-script
     consequence: minimal edits ⟺ maximal matches), so the scalar is
     ``2.0 * LCS(a, b) / (len(a) + len(b))`` with the empty pair's
@@ -377,7 +377,7 @@ class TestSimilarityRatioDeadline:
         )
 
     def test_a_generous_deadline_yields_the_identical_ratio(self) -> None:
-        """A deadline the search never reaches changes NOTHING: a
+        """A deadline the search never reaches changes nothing: a
         far-future budget saturates to unbounded and the scalar is
         byte-identical to the default call."""
         assert similarity_ratio("qpqpq", "qpwqpq", deadline_ms=60_000.0) == similarity_ratio(
@@ -413,7 +413,7 @@ class TestGetCloseMatches:
             ("Apple", keyword.kwlist, {}, []),
             ("accept", keyword.kwlist, {}, ["except"]),
             # The tie-order quirk: equal scores come back candidate-string
-            # DESCENDING (heapq.nlargest's tuple order): "ca" before "ac".
+            # descending (heapq.nlargest's tuple order): "ca" before "ac".
             ("ab", ["ac", "ca"], {"n": 2, "cutoff": 0.5}, ["ca", "ac"]),
             # n larger than the matching set returns every match.
             ("ab", ["ac", "ca"], {"n": 10, "cutoff": 0.5}, ["ca", "ac"]),
@@ -457,7 +457,7 @@ class TestGetCloseMatches:
 
     def test_returns_the_original_candidate_objects(self) -> None:
         """The zero-marshalling claim as an object-level fact: the
-        returned elements ARE the caller's candidate objects
+        returned elements are the caller's candidate objects
         (references, not copies or fresh equals), so identity-sensitive
         callers (interning assumptions, ``id`` keys) see their own
         objects come back."""
@@ -482,11 +482,11 @@ class TestGetCloseMatches:
     def test_matches_difflib_wherever_the_two_score_functions_agree(
         self, word: str, possibilities: list[str], n: int, cutoff: float
     ) -> None:
-        """The parity differential for the LIST, gated in the
+        """The parity differential for the list, gated in the
         direction that matters: difflib's ``get_close_matches`` scores
         each candidate as ``SequenceMatcher(None, candidate, word)``
         (``set_seq2(word)`` once, ``set_seq1(x)`` per candidate), and its
-        anchored ratio is direction-DEPENDENT (pinned above), so the gate
+        anchored ratio is direction-dependent (pinned above), so the gate
         compares against that exact spelling. Where the two score
         functions agree on every candidate (the forced-alignment
         classes), the selection, the order (ties included), and the
@@ -519,14 +519,14 @@ class TestGetCloseMatches:
     def test_is_nlargest_over_its_own_scores_with_the_difflib_filter(
         self, word: str, possibilities: list[str], n: int, cutoff: float
     ) -> None:
-        """The structural pin of the SELECTION SHAPE (no difflib needed):
+        """The structural pin of the selection shape (no difflib needed):
         the answer is exactly ``heapq.nlargest(n, [(score, candidate) for
-        candidate in possibilities if score >= cutoff])`` over tors's OWN
+        candidate in possibilities if score >= cutoff])`` over tors's own
         similarity_ratio, which is difflib's own construction
         (``result.append((s.ratio(), x))`` then ``_nlargest``), tie order
         and all: nlargest compares the tuples, so equal scores order by
-        candidate string DESCENDING. Where the score functions diverge
-        the two engines' lists diverge with them; the SHAPE never
+        candidate string descending. Where the score functions diverge
+        the two engines' lists diverge with them; the shape never
         does."""
         scored = [
             (similarity_ratio(word, candidate), candidate)
@@ -539,7 +539,7 @@ class TestGetCloseMatches:
     def test_n_zero_matches_difflibs_value_error_exactly(self) -> None:
         """``n = 0`` is refused with difflib's exact message, value
         interpolated: ``"n must be > 0: 0"`` (measured on 3.10-3.15
-        here). ``n`` is taken SIGNED specifically so this validation runs
+        here). ``n`` is taken signed specifically so this validation runs
         before any unsigned-extraction failure could pre-empt it (see the
         negative-``n`` test below)."""
         with pytest.raises(ValueError, match=r"^n must be > 0: 0$"):
@@ -549,7 +549,7 @@ class TestGetCloseMatches:
         """The negative-``n`` boundary now matches difflib exactly:
         both raise ``ValueError("n must be > 0: -1")``, so a caller's
         ``except ValueError`` guard catches it identically. Previously
-        tors's UNSIGNED argument extraction refused the negative int
+        tors's unsigned argument extraction refused the negative int
         before the ``n > 0`` check ran, surfacing ``OverflowError``
         instead; ``n`` is now taken signed at the pyo3 boundary so the
         stdlib-shaped validation runs first."""
@@ -561,10 +561,10 @@ class TestGetCloseMatches:
     @pytest.mark.parametrize("cutoff", [-0.1, 1.1, -1.0, 2.0])
     def test_out_of_range_cutoffs_raise_value_error(self, cutoff: float) -> None:
         """``cutoff`` outside ``[0.0, 1.0]`` is refused with difflib's own
-        message INCLUDING the interpolated value (verified against the
+        message including the interpolated value (verified against the
         running stdlib; the interpolation was added with the ``n``-validation
         fix, and both messages are now difflib-exact). The boundary values
-        0.0 and 1.0 are LEGAL, pinned by the battery's cutoff rows
+        0.0 and 1.0 are legal, pinned by the battery's cutoff rows
         above."""
         with pytest.raises(ValueError, match="^cutoff must be in \\[0.0, 1.0\\]: -?\\d"):
             get_close_matches("ab", ["abc"], cutoff=cutoff)
@@ -626,7 +626,7 @@ class TestGetCloseMatches:
         """``n`` and ``cutoff`` are the only two parameters of this function
                 without a type-boundary test (word, possibilities, and deadline_ms
         each have one above); ``n: isize`` is
-                extracted the same pyo3 way as everything else that IS tested."""
+                extracted the same pyo3 way as everything else that is tested."""
         with pytest.raises(TypeError):
             get_close_matches("ab", ["abc"], n=bad_n)  # type: ignore[arg-type]
 

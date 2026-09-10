@@ -1,10 +1,10 @@
 //! Lexical claim-grounding check: the pure-Rust core of `tors.is_grounded`.
 //!
-//! Answers one narrow question: does `source` actually CONTAIN `claim`, or
-//! something close enough to it? This is a LEXICAL check, not semantic:
+//! Answers one narrow question: does `source` actually contain `claim`, or
+//! something close enough to it? This is a lexical check, not semantic:
 //! there is no NLI/entailment model here, and the fuzzy path's score is a
-//! difflib-SHAPED character ratio (the `2*M/T` formula) against a bounded
-//! scan of `source`, not a general string-similarity oracle and NOT a
+//! difflib-shaped character ratio (the `2*M/T` formula) against a bounded
+//! scan of `source`, not a general string-similarity oracle and not a
 //! bit-exact difflib differential: `M` comes from `similar`'s Myers engine
 //! (the same maximal-LCS alignment `similarity_ratio` uses), which can pick
 //! a different, equally valid `M` than difflib's own anchored recursion on
@@ -17,16 +17,16 @@
 //! `fuzzy=False` is exact substring containment: the `memchr` crate's
 //! `memmem` search (two-way with SIMD-accelerated skipping, already a
 //! dependency of this crate). std's `str::contains` runs the same two-way
-//! algorithm WITHOUT the SIMD skip and measured 7x slower than CPython's
+//! algorithm without the SIMD skip and measured 7x slower than CPython's
 //! `in` on a degenerate single-byte-run source (239us vs 33us over 256
 //! KiB, the exact lane of tests/test_grounded_performance.py); a
 //! byte-level find is UTF-8-boundary-safe (a valid-UTF-8 needle can only
 //! match at a char boundary, UTF-8 being self-synchronizing).
 //!
-//! `fuzzy=True` reuses the ONLY diffing engine already in the crate
+//! `fuzzy=True` reuses the only diffing engine already in the crate
 //! (`similar`, backing `diff_opcodes`) rather than adding a fuzzy-string
 //! crate: `claim` is compared against overlapping same-length windows of
-//! `source` (stride `claim`'s length / 2), and the BEST window's difflib
+//! `source` (stride `claim`'s length / 2), and the best window's difflib
 //! ratio (`2 * matched_chars / (len(claim) + len(window))`) is the score.
 //! Windowing, not a single whole-string diff of `claim` against all of
 //! `source`, is the DoS-discipline choice: the realistic
@@ -42,13 +42,13 @@
 //! An exact-containment floor runs first: when `source` contains `claim`
 //! answer is `true` before any windowing or deadline setup, so a claim
 //! present verbatim is always grounded regardless of window alignment or
-//! `deadline_ms` (a verbatim substring is grounded by definition — the
+//! `deadline_ms` (a verbatim substring is grounded by definition: the
 //! windowed ratio is only consulted when there is no exact match to find).
 //!
-//! A bounded REFINEMENT pass closes the window-straddle recall gap the floor
+//! A bounded refinement pass closes the window-straddle recall gap the floor
 //! cannot (a near-match at an offset unaligned with the stride-`L/2` grid
 //! overlaps its nearest window by as little as ~`3L/4`, scoring ~`r - 1/4`
-//! for an aligned ratio `r` — one typo in a 41-char claim straddled to
+//! for an aligned ratio `r`: one typo in a 41-char claim straddled to
 //! ~0.73 and fell below the 0.85 default). The coarse scan tracks its
 //! best-scoring windows (the top [`REFINE_CANDIDATES`] windows scoring at
 //! least [`CANDIDATE_MIN_SCORE`], the truncated tail window competing like
@@ -57,11 +57,11 @@
 //! across its neighborhood. The guarantee, from the grid arithmetic and
 //! validated by a 6k-geometry brute-force differential search (5 claim
 //! lengths x 4 thresholds): a same-length source region with aligned
-//! ratio `r` is detected at ANY offset whenever
-//! `r >= max(0.75, threshold + 1/32)` — one substitution clears the 0.85
+//! ratio `r` is detected at any offset whenever
+//! `r >= max(0.75, threshold + 1/32)`: one substitution clears the 0.85
 //! default for any claim of 9+ characters, wherever it sits. Below
 //! `r = 0.75` detection is best-effort. The refinement's worst case is a
-//! CONSTANT number of extra window diffs (candidates x fine windows,
+//! constant number of extra window diffs (candidates x fine windows,
 //! independent of source length), so the scan's linear-in-`source` cost
 //! shape is unchanged; adversarially flooding the candidate band can
 //! still evict a genuine region from the top scores, the regime
@@ -88,11 +88,11 @@ use crate::diff_impl::{budget_from_ms, elapsed_exceeds};
 /// worth of fine-stride diffs beyond the coarse scan.
 const REFINE_CANDIDATES: usize = 64;
 
-/// The minimum coarse score for a FULL window to enter the candidate set.
+/// The minimum coarse score for a full window to enter the candidate set.
 /// Entry bound: a same-length region with aligned ratio `r` has its
 /// nearest full grid window scoring at least `r - 1/4` (the grid's spacing
 /// is `L/2`, so the nearest window misses at most `L/4` of the region), so
-/// every region with `r >= 0.75` is certain to enter — independent of
+/// every region with `r >= 0.75` is certain to enter: independent of
 /// `threshold`, which keeps the verdict monotonic in `threshold`.
 /// Random/unrelated text scores far below this, so ordinary ungrounded
 /// scans collect no candidates and pay nothing.
@@ -100,7 +100,7 @@ const CANDIDATE_MIN_SCORE: f64 = 0.5;
 
 /// The refinement stride divisor: fine windows step `max(1, L / 16)` chars,
 /// so a region's aligned window is never more than `1/32` of `L` away from
-/// a scanned start — the `threshold + 1/32` term of the guarantee.
+/// a scanned start: the `threshold + 1/32` term of the guarantee.
 const REFINE_STRIDE_DIV: usize = 16;
 
 /// The whole fuzzy scan exceeded its caller-supplied budget; the (possibly
@@ -132,7 +132,7 @@ pub fn is_grounded_exact(claim: &str, source: &str) -> bool {
 /// The difflib `2*M/T` ratio (`M` = total matched-char length across every
 /// `Equal` op, `T` = the combined length of both slices) between two char
 /// slices, `similar`'s Myers engine under `deadline` (an absolute instant,
-/// `None` = unbounded for THIS window: the caller still enforces the
+/// `None` = unbounded for this window: the caller still enforces the
 /// overall budget between windows). `1.0` for two empty slices, the same
 /// convention `difflib.SequenceMatcher([], []).ratio()` uses.
 fn ratio(a: &[char], b: &[char], deadline: Option<Instant>) -> f64 {
@@ -150,8 +150,8 @@ fn ratio(a: &[char], b: &[char], deadline: Option<Instant>) -> f64 {
 }
 
 /// A refinement candidate: one coarse window worth re-scanning at fine
-/// stride — its score (for priority and the top-K cut), its CHAR start
-/// (for the fine-range arithmetic) and BYTE start (the reposition anchor).
+/// stride: its score (for priority and the top-K cut), its char start
+/// (for the fine-range arithmetic) and byte start (the reposition anchor).
 /// The truncated tail window competes like any other (score-gated, top-K),
 /// with its range clamped to the last possible region start `n - L`.
 struct Candidate {
@@ -161,7 +161,7 @@ struct Candidate {
 }
 
 /// Insert into the bounded candidate set: the top `REFINE_CANDIDATES`
-/// entries by `(score, start)` — the streaming keep-K-largest discipline
+/// entries by `(score, start)`: the streaming keep-K-largest discipline
 /// (evict the minimum only when the newcomer beats it), which maintains
 /// exactly the top-K of everything seen under the strict total order
 /// `(score, start)` (starts are unique, so the order is strict with no
@@ -188,10 +188,10 @@ fn keep_candidate(candidates: &mut Vec<Candidate>, new: Candidate) {
     }
 }
 
-/// A sliding same-length window stream over `source`'s CHARACTERS with
+/// A sliding same-length window stream over `source`'s characters with
 /// O(window) memory: one reusable char buffer and a byte-offset deque, both
 /// exact-capacity and allocated once, sliding `stride` chars per window via
-/// a front drain (the drain's memmove is ~`L - stride` chars — tens of
+/// a front drain (the drain's memmove is ~`L - stride` chars: tens of
 /// nanoseconds against the microsecond Myers diff the window feeds). The
 /// byte offsets exist so each window's start can be recovered as an anchor
 /// (the refinement pass repositions on a candidate's byte start instead of
@@ -232,7 +232,7 @@ impl<'a> CharWindows<'a> {
     /// The next window: `(chars, byte offset of its first char, truncated)`.
     /// The first window after construction/reposition starts at the cursor;
     /// each later one advances the start by `stride` (the caller passes the
-    /// SAME advance it used for its own start arithmetic, so a capped grid
+    /// same advance it used for its own start arithmetic, so a capped grid
     /// walk cannot desync the window content from the caller's offsets).
     /// `None` once the source is exhausted (a truncated window is always
     /// the last).
@@ -271,7 +271,7 @@ impl<'a> CharWindows<'a> {
         Some((self.window.as_slice(), start, truncated))
     }
 
-    /// Whether the cursor sits at the source's end: the most recent FULL
+    /// Whether the cursor sits at the source's end: the most recent full
     /// window was the last window there is. (A truncated window sets
     /// `done` itself.)
     fn at_end(&self) -> bool {
@@ -293,14 +293,14 @@ fn back_char_boundary(source: &str, mut i: usize, mut chars_back: usize) -> usiz
     i
 }
 
-/// Is `claim` fuzzily grounded in `source`: does the BEST-matching
+/// Is `claim` fuzzily grounded in `source`: does the best-matching
 /// same-length window of `source` reach `threshold` ratio against `claim`
 /// (see the module docs for exactly what that ratio measures, why the
 /// scan is windowed rather than one whole-string diff, and the bounded
 /// refinement pass that makes a near-match's verdict independent of where
 /// it sits)? `claim` empty is vacuously `Ok(true)` (nothing to find, no
-/// scan needed). `deadline_ms` (`None` = unbounded) bounds the WHOLE scan
-/// — checked after every window diff, coarse and refinement alike; on
+/// scan needed). `deadline_ms` (`None` = unbounded) bounds the whole scan:
+/// checked after every window diff, coarse and refinement alike; on
 /// expiry the in-progress verdict is discarded and [`DeadlineExceeded`] is
 /// returned: the caller (the pyo3 layer) is guaranteed the same
 /// positive-finite precondition `diff_opcodes` already validates before
@@ -314,13 +314,13 @@ pub fn is_grounded_fuzzy(
     if claim.is_empty() {
         return Ok(true);
     }
-    // Exact-containment floor: a claim present VERBATIM in `source` is
-    // grounded by definition — it is exactly what `fuzzy=False` reports — so
+    // Exact-containment floor: a claim present verbatim in `source` is
+    // grounded by definition (it is exactly what `fuzzy=False` reports) so
     // short-circuit before the windowed scan. Without this, a verbatim claim
     // at an offset unaligned with the stride-`L/2` windows overlaps its
     // nearest window by only ~3L/4, scores ~0.75 < the 0.85 default, and is
-    // wrongly reported ungrounded. This runs BEFORE deadline setup, so a
-    // verbatim substring is grounded even under a tight `deadline_ms` —
+    // wrongly reported ungrounded. This runs before deadline setup, so a
+    // verbatim substring is grounded even under a tight `deadline_ms`:
     // intentional: exact containment holds independent of the budget.
     if is_grounded_exact(claim, source) {
         return Ok(true);
@@ -335,8 +335,8 @@ pub fn is_grounded_fuzzy(
 
     // The first window fill doubles as the source-length probe, so no
     // upfront O(source) char count and no second collection on any path:
-    // a TRUNCATED first fill means the source holds fewer than `L` chars
-    // and the window buffer already IS the whole source — the
+    // a truncated first fill means the source holds fewer than `L` chars
+    // and the window buffer already is the whole source: the
     // no-windowing direct comparison. A source of exactly `L` chars fills
     // the window full and takes the windowed path; its single window
     // scores the same direct ratio, so the verdict is the same either way.
@@ -423,7 +423,7 @@ pub fn is_grounded_fuzzy(
 }
 
 /// The bounded refinement pass: re-scan each candidate's neighborhood at
-/// fine stride `max(1, L / REFINE_STRIDE_DIV)` — starts across
+/// fine stride `max(1, L / REFINE_STRIDE_DIV)`: starts across
 /// `[w - L/2, min(w + L/2, n - L)]` (a truncated tail candidate's range
 /// clamps to `n - L`, the last possible region start). Every fine window
 /// is full-length and deadline-checked like a coarse one, and each range's
@@ -432,8 +432,8 @@ pub fn is_grounded_fuzzy(
 /// the grid arithmetic: a same-length region with aligned ratio `r` has
 /// its nearest full grid window scoring at least `r - 1/4` (candidate
 /// entry for `r >= 0.75`) and its aligned window within `1/32 * L` of a
-/// scanned fine start — so `r >= max(0.75, threshold + 1/32)` is detected
-/// at ANY offset. The guarantee band is where the verdict is
+/// scanned fine start, so `r >= max(0.75, threshold + 1/32)` is detected
+/// at any offset. The guarantee band is where the verdict is
 /// alignment-invariant; below `r = 0.75` detection is best-effort (the
 /// coarse pass or a candidate's neighborhood may still find it).
 struct Refinement<'a> {
@@ -454,15 +454,15 @@ impl Refinement<'_> {
     ) -> Result<(), DeadlineExceeded> {
         let l = self.claim_chars.len();
         // The source's char count, needed only for the range clamps. Paid
-        // HERE rather than up front: the refinement runs at most once, and
+        // here rather than up front: the refinement runs at most once, and
         // only after a coarse scan that already traversed the whole
-        // source, so this pass is noise on every path that reaches it —
+        // source, so this pass is noise on every path that reaches it:
         // and the early-exit paths never pay it at all.
         let n = self.source.chars().count();
         let mut all = candidates;
         // Best-first: highest coarse scores are the most likely regions, so
-        // the early break trips soonest. (The verdict is order-independent
-        // — best only rises — so this is a speed choice, not a semantic one.)
+        // the early break trips soonest. (The verdict is order-independent;
+        // best only rises, so this is a speed choice, not a semantic one.)
         all.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -482,7 +482,7 @@ impl Refinement<'_> {
             let anchor = back_char_boundary(self.source, cand.byte, cand.start - lo);
             walker.reposition(anchor);
             // Fine starts: the `fine` grid over [lo, hi], with `hi` itself
-            // always scanned — the advance passed to the walker is the
+            // always scanned: the advance passed to the walker is the
             // caller's own step (capped at hi), so window content and
             // start arithmetic cannot desync.
             let mut fstart = lo;
@@ -541,7 +541,7 @@ mod tests {
             }
         }
         // The floor runs before deadline setup, so a verbatim claim is
-        // grounded even under an effectively-zero budget — never DeadlineExceeded.
+        // grounded even under an effectively-zero budget: never DeadlineExceeded.
         let big = format!("{}cat{}", "y".repeat(200_000), "y".repeat(200_000));
         assert_eq!(is_grounded_fuzzy("cat", &big, 1.0, Some(0.0001)), Ok(true));
     }
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn fuzzy_empty_source_is_ungrounded_except_at_threshold_zero() {
         // The empty-source convention (the walker yields no window, `best`
-        // stays 0.0 — the same value the direct comparison produced): a
+        // stays 0.0: the same value the direct comparison produced): a
         // nonempty claim over "" is ungrounded at any positive threshold,
         // and vacuously grounded at exactly 0.0, where everything is.
         assert_eq!(is_grounded_fuzzy("x", "", 0.85, None), Ok(false));
@@ -635,10 +635,10 @@ mod tests {
 
     #[test]
     fn fuzzy_generous_deadline_never_expires() {
-        // A NEAR-match, deliberately not a verbatim substring, so the scan
+        // A near-match, deliberately not a verbatim substring, so the scan
         // still traverses the windowed path under the budget (the
         // exact-containment floor would return before deadline setup and
-        // the budget would never be exercised — the Python twin's own
+        // the budget would never be exercised: the Python twin's own
         // comment explains the same trap).
         assert_eq!(
             is_grounded_fuzzy("the cet sat", "the cat sat on the mat", 0.5, Some(60_000.0)),
@@ -651,7 +651,7 @@ mod tests {
         // The straddled one-typo geometry (lead 10: coarse best ~0.73 <
         // 0.85, only the refinement finds it) under a generous budget: the
         // refinement's own per-window deadline checks must all pass and the
-        // verdict arrive — the deadline plumbing on the refinement path,
+        // verdict arrive: the deadline plumbing on the refinement path,
         // which the zero-budget tests never reach (they expire at the
         // coarse stage). 60s against microsecond-scale work is
         // machine-speed-immune.
@@ -685,13 +685,13 @@ mod tests {
     #[test]
     fn fuzzy_one_typo_near_match_at_any_offset_clears_the_default() {
         // The refinement pass's headline guarantee: a same-length source
-        // region matching the claim with ratio r is detected at ANY offset
-        // whenever r >= max(0.75, threshold + 1/32) — one substitution at
+        // region matching the claim with ratio r is detected at any offset
+        // whenever r >= max(0.75, threshold + 1/32): one substitution at
         // L=41 gives r = 40/41 = 0.976, comfortably above 0.85 + 1/32, so
         // every offset must clear the default threshold. Before refinement,
         // stride-L/2 windowing straddled the region at unaligned offsets
         // (nearest window overlapping only ~3L/4, score ~0.73) and wrongly
-        // rejected it — the same defect class the exact-containment floor
+        // rejected it: the same defect class the exact-containment floor
         // fixed for the verbatim case, here fixed for near matches.
         let claim = "the bushing torque specifications changed"; // 41 chars
         let near = "the bushing torqxe specifications changed"; // one substitution
@@ -723,13 +723,13 @@ mod tests {
     #[test]
     fn fuzzy_the_detection_margin_is_pinned() {
         // The guarantee is sufficient, not necessary: r >= 0.85 + 1/32 is
-        // the WORST-CASE fine-grid misalignment bound, and at L=41 the fine
+        // the worst-case fine-grid misalignment bound, and at L=41 the fine
         // stride is 2, so a region whose start lands on the grid is scored
         // exactly aligned. Pinned at the measured edge: six substitutions
         // (r = 35/41 = 0.854, below the worst-case line) still clears 0.85
         // here; seven (r = 34/41 = 0.829, below the threshold outright)
         // does not, and clears 0.8 where the guarantee covers it. Positions
-        // k * (41 / d) for k in 0..d — the same rows the Python twin and
+        // k * (41 / d) for k in 0..d: the same rows the Python twin and
         // the differential oracle pin.
         let claim = "the bushing torque specifications changed";
         for (d, at_default, at_08) in [(6, true, true), (7, false, true)] {
@@ -761,8 +761,8 @@ mod tests {
         // score, or enters the candidate set with it and is found by its
         // clamped [w - L/2, n - L] refinement range. A brute-force
         // differential search over 6k geometries (5 claim lengths x 4
-        // thresholds) found NO guarantee-band region needing a dedicated
-        // forced/extended tail mechanism — one existed here briefly and
+        // thresholds) found no guarantee-band region needing a dedicated
+        // forced/extended tail mechanism: one existed here briefly and
         // was removed as unpinnable dead weight; these rows pin the
         // guarantee where the tail actually delivers it.
         let claim = "the bushing torque specifications changed";
@@ -812,13 +812,13 @@ mod tests {
         // see, so a real near-match whose straddled coarse score (~0.73
         // here) ranks below 64 decoys scoring above it (~0.829, seven-typo
         // variants placed at grid-aligned offsets) is evicted and the
-        // verdict is FALSE despite r = 40/41 >= the guarantee — the regime
+        // verdict is false despite r = 40/41 >= the guarantee: the regime
         // `deadline_ms` exists for. The boundary is exact: 63 decoys (64
         // band windows counting the real one's) still find it.
         let claim = "the bushing torque specifications changed";
         let real = "the bushing torqxe specifications changed"; // 1 typo
         // The measured decoy: seven substitutions at 2/8/14/20/26/32/38,
-        // r = 34/41 = 0.829 — in the candidate band, above the real
+        // r = 34/41 = 0.829: in the candidate band, above the real
         // region's straddled ~0.73, below the 0.85 coarse break.
         let decoy: String = claim
             .chars()

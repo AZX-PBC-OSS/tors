@@ -9,8 +9,8 @@ Baccianella (MIT, https://github.com/mangiucugna/json_repair) is context
 only: its ``schema=`` accepts pydantic v2 models too, but the agent
 round-trip pattern is tors-native scope (tors additionally injects field
 defaults/default-factories into the generated schema and skips the phantom
-alias-name entries upstream creates — see DESIGN §9). Contract:
-DESIGN-json-repair-port.md §§4, 6, 8.
+alias-name entries upstream creates: see design §9). Contract:
+design-json-repair-port.md §§4, 6, 8.
 """
 
 from __future__ import annotations
@@ -206,8 +206,8 @@ class TestModelEdgeCases:
 
     def test_aliased_field_default_pins_the_tors_divergence(self) -> None:
         # Upstream's schema_from_input creates a phantom entry for the
-        # FIELD NAME next to the alias; tors injects the default under the
-        # ALIAS only (the name validators actually accept) — DESIGN §9.
+        # field name next to the alias; tors injects the default under the
+        # alias only (the name validators actually accept): design §9.
         class Aliased(pydantic.BaseModel):
             name: str = pydantic.Field(default="x", alias="userName")
 
@@ -220,6 +220,6 @@ class TestModelEdgeCases:
         class Pick(pydantic.BaseModel):
             c: Color = Color.RED
 
-        # The Enum-member default is injected as its member VALUE (the
+        # The Enum-member default is injected as its member value (the
         # JSON spelling), not the member's repr.
         assert repair_json_loads("{", schema=Pick, skip_json_loads=True) == {"c": "red"}

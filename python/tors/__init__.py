@@ -159,8 +159,8 @@ __all__ = [
 
 def __getattr__(name: str) -> ModuleType:
     """The lazy ``documents`` door (PEP 562): ``tors.documents`` on an
-    imported base package imports the shim — and through it the
-    tors-documents payload wheel — on first touch, so a plain ``import
+    imported base package imports the shim (and through it the
+    tors-documents payload wheel) on first touch, so a plain ``import
     tors`` still loads no engine (the split-wheel doctrine, pinned by the
     laziness gate). A missing payload wheel answers with the shim's own
     ImportError install hint; every other name is the standard module

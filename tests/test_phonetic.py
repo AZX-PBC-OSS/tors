@@ -1,5 +1,5 @@
 """Contract gate for the ``tors`` phonetic-code algorithms (classic
-ENGLISH/Latin-script-oriented heuristics via ``rphonetic``, an Apache
+English/Latin-script-oriented heuristics via ``rphonetic``, an Apache
 Commons Codec port), at native speed with the GIL released: ``soundex``,
 ``metaphone``, ``double_metaphone``, ``nysiis``, and ``daitch_mokotoff``.
 
@@ -102,14 +102,14 @@ class TestNeverPanicsOverArbitraryInput:
     ``utf8_is_valid``, ``truncate_to_bounds``) backs its hand-picked
     regression cases with a wide-alphabet property battery so a future
     ``rphonetic`` upgrade or filter refactor reintroducing a panic on some
-    OTHER Unicode category doesn't go undetected between the three fixed
+    other Unicode category doesn't go undetected between the three fixed
     examples. This is that same battery for soundex/metaphone."""
 
     _WIDE_ALPHABET = st.one_of(
         st.sampled_from("Aa1 \n\t!?'-"),
         st.characters(min_codepoint=0x300, max_codepoint=0x36F),  # combining marks
         st.characters(min_codepoint=0x1F300, max_codepoint=0x1FAFF),  # astral emoji
-        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (RTL)
+        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (rtl)
         st.characters(min_codepoint=0x4E00, max_codepoint=0x9FFF),  # CJK
         st.characters(min_codepoint=0x00C0, max_codepoint=0x024F),  # accented Latin
         st.sampled_from(["​", "‌", "‍", "﻿"]),  # zero-width + BOM
@@ -154,9 +154,9 @@ class TestRefinedSoundex:
         assert refined_soundex("") == ""
 
     def test_accented_name_does_not_panic_upstream_bug_regression(self) -> None:
-        # THE regression this needs: RefinedSoundex::default().encode
+        # the regression this needs: RefinedSoundex::default().encode
         # panics on "José" when called directly against the raw crate
-        # (verified, not assumed) — an ordinary accented name, not
+        # (verified, not assumed): an ordinary accented name, not
         # adversarial input.
         assert refined_soundex("José") == "J403"
 
@@ -183,9 +183,9 @@ class TestDoubleMetaphone:
 
     def test_alternate_key_matches_schmidt_primary(self) -> None:
         # The algorithm's headline demonstration, only expressible in
-        # the dual-key form: Smith and Schmidt match CROSS-KEY (Smith's
-        # alternate equals Schmidt's primary "XMT"), not
-        # primary-to-primary ("SM0" vs "XMT").
+        # the dual-key form: Smith and Schmidt match cross-key (Smith's
+        # alternate equals Schmidt's primary "xmt"), not
+        # primary-to-primary ("sm0" vs "xmt").
         assert double_metaphone("Smith") == ("SM0", "XMT")
         assert double_metaphone("Schmidt") == ("XMT", "SMT")
 
@@ -224,11 +224,11 @@ class TestNysiis:
         assert nysiis("Phil") == "FAL"
 
     def test_strict_westerlund_and_washington(self) -> None:
-        # "Westerlund" -> "WASTAR" is the crate's own strict-mode doctest
-        # vector. "Washington" -> "WASANG" is hand-traced from the
+        # "Westerlund" -> "wastar" is the crate's own strict-mode doctest
+        # vector. "Washington" -> "wasang" is hand-traced from the
         # published procedure (the H-after-S step duplicates the S, and
-        # the strict 6-character cap trims "WASANGT") and probe-confirmed;
-        # the oft-quoted "WASAN" does not come out of the procedure as
+        # the strict 6-character cap trims "wasangt") and probe-confirmed;
+        # the oft-quoted "wasan" does not come out of the procedure as
         # reproduced by commons-codec/rphonetic.
         assert nysiis("Westerlund") == "WASTAR"
         assert nysiis("Washington") == "WASANG"
@@ -292,7 +292,7 @@ class TestDaitchMokotoff:
         assert all(type(code) is str for code in result)
 
     def test_no_encodable_letters_is_all_padding(self) -> None:
-        # Unlike the string-returning algorithms, DM pads every code to
+        # Unlike the string-returning algorithms, dm pads every code to
         # 6 digits, so letterless input is the all-padding code, not
         # "". Pinned crate behavior.
         assert daitch_mokotoff("") == ["000000"]
@@ -307,7 +307,7 @@ class TestDaitchMokotoff:
 class TestNewAlgorithmsAsciiScope:
     """The same ASCII-letters-only scope pins as the existing pair's
     ``TestAsciiOnlyScopeAndPanicAvoidance`` (not re-pinned there: those
-    tests belong to soundex/metaphone). For DM this deliberately
+    tests belong to soundex/metaphone). For dm this deliberately
     bypasses the crate's own per-character ASCII folding (raw
     ``DaitchMokotoffSoundex`` maps ``"ţamas"`` to ``"364000|464000"``;
     tors drops the ``ţ`` first, so it encodes like ``"amas"``): the
@@ -347,7 +347,7 @@ class TestNewAlgorithmsNeverPanicOverArbitraryInput:
         st.sampled_from("Aa1 \n\t!?'-"),
         st.characters(min_codepoint=0x300, max_codepoint=0x36F),  # combining marks
         st.characters(min_codepoint=0x1F300, max_codepoint=0x1FAFF),  # astral emoji
-        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (RTL)
+        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (rtl)
         st.characters(min_codepoint=0x4E00, max_codepoint=0x9FFF),  # CJK
         st.characters(min_codepoint=0x00C0, max_codepoint=0x024F),  # accented Latin
         st.sampled_from(["​", "‌", "‍", "﻿"]),  # zero-width + BOM

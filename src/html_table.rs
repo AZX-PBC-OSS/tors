@@ -11,7 +11,7 @@
 //! ``src/html_impl.rs`` (tied to these header numbers), so a regeneration
 //! against a changed table is visible even without a Python interpreter; and
 //! the Python-side contract gate (tests/test_html_unescape.py) re-verifies,
-//! per CI leg against the RUNNING interpreter's own tables, EVERY entry of
+//! per CI leg against the running interpreter's own tables, every entry of
 //! all three: the 2231 named entities (``TestFullHtml5Table``) and
 //! both numeric sets in both ``&#N;`` and ``&#xN;`` spellings
 //! (``TestNumericSets``). Those are the pins that actually matter: if a
@@ -22,12 +22,12 @@
 //! Layout: ``HTML5_ENTITIES`` is sorted by key for binary search (2231
 //! entries: 2125 with-semicolon + 106 legacy without-semicolon);
 //! ``INVALID_CHARREFS`` is the 34-entry Windows-1252/special remap,
-//! consulted BEFORE the surrogate/range guard exactly as
+//! consulted before the surrogate/range guard exactly as
 //! ``html._replace_charref`` does; ``INVALID_CODEPOINTS`` is the 126-member
-//! set mapping to the EMPTY string. Pure data, no code.
+//! set mapping to the empty string. Pure data, no code.
 
 /// Every HTML5 named character reference: ``(name, replacement)``; `name`
-/// INCLUDES the semicolon where the with-semicolon spelling exists. Sorted
+/// includes the semicolon where the with-semicolon spelling exists. Sorted
 /// by name for binary search.
 pub static HTML5_ENTITIES: &[(&str, &str)] = &[
     ("AElig", "\u{c6}"),
@@ -2304,7 +2304,7 @@ pub static INVALID_CHARREFS: &[(u32, &str)] = &[
 ];
 
 /// CPython's ``html._invalid_codepoints``: numeric references in this set map
-/// to the EMPTY string (the HTML5 "not allowed" list: C1 controls,
+/// to the empty string (the HTML5 "not allowed" list: C1 controls,
 /// noncharacters). Sorted.
 pub static INVALID_CODEPOINTS: &[u32] = &[
     0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xb, 0xe, 0xf, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,

@@ -1,4 +1,4 @@
-"""The cross-format eval runner: the engines matrix as a REPORT — every
+"""The cross-format eval runner: the engines matrix as a report: every
 fixture (the committed corpus and, with --fuzz, seeded randomized
 documents) through every offered backend and both output modes, timed, and
 held to the same gates as the pytest suite.
@@ -9,8 +9,8 @@ Usage (repo root):
     uv run --no-sync python tools/eval_documents.py --json     # machine-readable
     uv run --no-sync python tools/eval_documents.py --kind csv --backend auto
 
-Exit status: non-zero when any MUST-WORK cell (the ``auto`` routing lane)
-fails its gates — the runner is a gate, not just a report. Cells a forced
+Exit status: non-zero when any must-work cell (the ``auto`` routing lane)
+fails its gates: the runner is a gate, not just a report. Cells a forced
 backend does not offer record ``not offered`` (that is routing policy, not
 a failure); cells that answer are held to the full contract.
 
@@ -43,7 +43,7 @@ try:
     from tors_documents import NeedsOcrError, to_markdown, to_text
 except ImportError as exc:
     raise SystemExit(
-        "documents surface not built — build the payload first "
+        "documents surface not built: build the payload first "
         "(uv sync --reinstall-package tors-documents)"
     ) from exc
 
@@ -60,7 +60,7 @@ def _gate_cell(kind: str, backend: str, mode: str, path: str, truth=None) -> dic
             resolved, output = convert(path, backend=backend)
     except (ValueError, OSError, NeedsOcrError) as exc:
         # Every row carries the full shape the printer and --json readers
-        # expect — a partial dict here crashes the report on the first
+        # expect: a partial dict here crashes the report on the first
         # not-offered cell (measured: csv_rich x oxide x markdown, sorted
         # order, before any gated cell printed).
         return {
@@ -155,7 +155,7 @@ def run(
                 continue
             for seed in range(fuzz_seeds):
                 raw, truth = generator(seed)
-                # The fuzz file's extension must be the KIND's (sniff wins on
+                # The fuzz file's extension must be the kind's (sniff wins on
                 # content, but the name should not lie about what ran).
                 path = root / f"fuzz_{kind}_{seed}{FILE_EXTENSIONS.get(kind, '.bin')}"
                 path.write_bytes(raw)
@@ -179,7 +179,7 @@ def run(
             )
         print(f"\n{len(rows)} cells; must-work failures: {len(must_work)}")
         if not rows and kind_filter in GENERATORS and fuzz_seeds == 0:
-            print(f"note: {kind_filter!r} is a fuzz-only kind — pass --fuzz N to run its seeds")
+            print(f"note: {kind_filter!r} is a fuzz-only kind: pass --fuzz N to run its seeds")
     return 1 if must_work else 0
 
 

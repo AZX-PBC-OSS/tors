@@ -5,7 +5,7 @@
 //! input in one `feed(..., last = true)` call, then `guess`. This is a
 //! heuristic, not a validator: unlike `utf8_is_valid`/`decode_utf8`, there is
 //! no ground truth to be byte-exact against, and the detector always returns
-//! SOME encoding: confidence is not exposed by the crate beyond the single
+//! some encoding: confidence is not exposed by the crate beyond the single
 //! best guess, so neither is it here. The intended pipeline shape is
 //! `utf8_is_valid` first; only reach for `detect_encoding` on the bytes that
 //! already failed that check, then decode with the returned codec name.
@@ -16,7 +16,7 @@
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::Encoding;
 
-/// `chardetng::EncodingDetector::guess`'s `tld` argument PANICS (an
+/// `chardetng::EncodingDetector::guess`'s `tld` argument panics (an
 /// `assert!`, not a `Result`) if it contains an uppercase letter, a period,
 /// or any non-ASCII byte; so a caller passing the natural spellings
 /// `".jp"` or `"JP"` (rather than the crate's exact expected `"jp"`) would
@@ -117,7 +117,7 @@ mod tests {
         let without_hint = detect(raw, None);
         let with_hint = detect(raw, Some("jp"));
         // Both must be valid, non-empty guesses; the hint changing the
-        // OUTCOME on this specific ambiguous input is a bonus, not a
+        // outcome on this specific ambiguous input is a bonus, not a
         // contract this test enforces (chardetng's disambiguation logic is
         // its own to evolve); the contract pinned here is "doesn't panic,
         // always returns a name".

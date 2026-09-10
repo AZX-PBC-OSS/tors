@@ -20,7 +20,7 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// scikit-learn/numpy for a lightweight pipeline.
 ///
 /// Stateless: no vocabulary/vectorizer object persists between calls, each
-/// call computes fresh over exactly the `corpus` given. Output is SPARSE:
+/// call computes fresh over exactly the `corpus` given. Output is sparse:
 /// one `(term, score)` list per document, holding only that document's own
 /// terms, sorted alphabetically for determinism, never a
 /// vocabulary-size-by-corpus-size dense structure. An empty corpus returns
@@ -36,12 +36,12 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// `tokenize_impl::STEMMER_LANGUAGES` for the full list; an unrecognized
 /// name raises `ValueError` naming every valid choice) applied after
 /// lowercasing/accent-folding. `lemma_dict` is a caller-supplied
-/// `word -> lemma` map, applied LAST (after any stemming). tors doesn't
-/// bundle a lemma dictionary (that needs a per-language dataset or a POS
+/// `word -> lemma` map, applied last (after any stemming). tors doesn't
+/// bundle a lemma dictionary (that needs a per-language dataset or a pos
 /// model, out of scope, the same boundary that kept schema-aware JSON/YAML
 /// coercion out of this crate); it just applies one you supply, the same
 /// shape `replace_many` already takes a caller-supplied map instead of a
-/// bundled one. All three default OFF, reproducing the original
+/// bundled one. All three default off, reproducing the original
 /// lowercase-only tokenization exactly.
 ///
 /// `lemma_dict` accepts either a raw `dict[str, str]` (materialized into a
@@ -59,7 +59,7 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 ///
 /// GIL model: the list walk (borrowed `&str`s, zero-copy) and resolving
 /// `lemma_dict` (an `Arc::clone` for a `CompiledLemmaDict`, a fresh
-/// `HashMap` build for a raw `dict`, either way ONCE for the whole call,
+/// `HashMap` build for a raw `dict`, either way once for the whole call,
 /// the same amortization boundary as building the `Stemmer`) happen under
 /// the GIL; tokenization, counting, and scoring for the whole corpus run
 /// under one `py.detach`.

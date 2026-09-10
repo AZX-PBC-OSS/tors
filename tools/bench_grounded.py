@@ -1,36 +1,36 @@
 """Honest measurement: tors.is_grounded against the pure-stdlib composition
-a Python developer writes without it — ``claim in source`` for the exact
+a Python developer writes without it: ``claim in source`` for the exact
 path, and a windowed ``difflib.SequenceMatcher`` ratio scan for the fuzzy
 path (the same windowing recipe the crate documents: same-length windows,
 stride ``len(claim) // 2``, truncated tail window, early exit once the best
 ratio reaches the threshold; no exact-containment floor and no refinement
-pass — neither exists in the naive composition, and the verbatim cells
+pass: neither exists in the naive composition, and the verbatim cells
 price exactly that difference).
 
-Correctness is parity-gated against the FULL contract model —
-``tests/reference.py``'s ``reference_is_grounded_fuzzy`` (floor, windowing,
-bounded refinement, all modeled in pure Python with an LCS oracle) — not
+Correctness is parity-gated against the full contract model
+(``tests/reference.py``'s ``reference_is_grounded_fuzzy``: floor, windowing,
+bounded refinement, all modeled in pure Python with an LCS oracle), not
 against the naive composition: tors's refinement detects near-matches the
 naive scan misses by design, so the naive lane would report those as
 divergences. The parity gate runs tors vs the contract model at thresholds
 1.0 / 0.85 / 0.6 plus the exact lane vs ``in``; a cell whose verdicts
-differ is reported as divergent with its first differing claim and is NOT
+differ is reported as divergent with its first differing claim and is not
 timed. --check runs only that verification pass.
 
 Three corpus shapes, each five deterministic claims against prose sources
 at three sizes (4 KiB, 64 KiB, 256 KiB):
 
-- verbatim: claims present word-for-word in the source — the
+- verbatim: claims present word-for-word in the source: the
   exact-containment floor's lane (tors returns at the floor; the naive
   composition pays the full window scan).
-- near: each claim with one transposed letter pair, deliberately NOT a
-  substring — the windowed-ratio lane; tors's refinement also finds these
+- near: each claim with one transposed letter pair, deliberately not a
+  substring: the windowed-ratio lane; tors's refinement also finds these
   wherever they straddle the coarse grid.
-- unrelated: same-length claims built from words the corpus never contains
-  — the full-scan (nothing matches) DoS shape.
+- unrelated: same-length claims built from words the corpus never contains:
+  the full-scan (nothing matches) DoS shape.
 
 Timing is time.perf_counter min-of-N over five-claim passes, N sized so a
-cell accumulates at least 50 ms (at least 2 passes, GC disabled while
+cell accumulates at least 50 ms (at least 2 passes, gc disabled while
 measuring), reported as per-call microseconds (one call = one
 is_grounded(claim, source)). autojunk never engages: difflib only applies
 it to sequences of 200+ chars, and no window ever exceeds the claim length.
@@ -87,8 +87,8 @@ _VERBATIM_CLAIMS = (
     "intervals follow the field outage log",
 )
 
-# One transposed letter pair per verbatim claim: near-matches, NOT substrings.
-# The transposition is guaranteed (an adjacent DIFFERING pair at or past the
+# One transposed letter pair per verbatim claim: near-matches, not substrings.
+# The transposition is guaranteed (an adjacent differing pair at or past the
 # midpoint), so every near claim provably differs from its verbatim original
 # and cannot short-circuit tors's exact-containment floor.
 
@@ -129,9 +129,9 @@ def _claims(shape: str) -> list[str]:
 
 
 def upstream_fuzzy(claim: str, source: str, threshold: float) -> bool:
-    """The naive stdlib composition (the TIMING baseline): difflib ratios
+    """The naive stdlib composition (the timing baseline): difflib ratios
     over the documented windows, early exit at the threshold. No
-    exact-containment floor, no refinement pass — neither exists in the
+    exact-containment floor, no refinement pass: neither exists in the
     composition a Python developer writes, and the verbatim/near cells
     price exactly what tors's floor and refinement buy."""
     if not claim:

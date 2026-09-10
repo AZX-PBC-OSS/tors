@@ -3,10 +3,10 @@
 string-similarity scalars CPython has no stdlib spelling of, at native
 speed with the GIL released.
 
-All three are CHARACTER-LEVEL over ``str`` operands (a ``str`` IS a
+All three are character-level over ``str`` operands (a ``str`` is a
 character sequence here (the ``diff_opcodes``/``similarity_ratio``
 convention, and what makes the surrogate boundary the standard str-in
-one); SYMMETRIC in their operands, and pinned three ways:
+one); symmetric in their operands, and pinned three ways:
 
 1. **Known vectors** (the literature's and the strim crate's own): the
    classic Jaro/Jaro-Winkler pairs (MARTHA/MARHTA → jaro ≈ 0.944,
@@ -14,7 +14,7 @@ one); SYMMETRIC in their operands, and pinned three ways:
    Levenshtein anchors (kitten/sitting = 3, flaw/lawn = 2,
    gumbo/gambol = 2), plus the Winkler mechanics rows: the prefix bonus
    applies only above the 0.7 boost threshold and only over the first
-   FOUR shared characters (``café``/``cafe``: jw > jaro from the
+   four shared characters (``café``/``cafe``: jw > jaro from the
    3-character prefix; ``flaw``/``lawn``: no shared prefix, jw == jaro).
 2. **Independent pure-Python oracles over hypothesis pairs** (any
    script, any width, non-ASCII included): a two-row DP for
@@ -31,7 +31,7 @@ one); SYMMETRIC in their operands, and pinned three ways:
    disjoint alphabets → ``0.0``).
 
 ``deadline_ms`` (all three) bounds the whole DP pass with per-phase
-checks: a genuinely hard pair (~120k chars of char-shuffled prose,
+checks: a hard pair (~120k chars of char-shuffled prose,
 whose O(n*m) table is ~1.4e10 cells and minutes of work) raises
 ``TimeoutError`` at the 50 ms budget naming the elapsed time and the
 deadline; zero, negative, NaN and infinity raise ``ValueError`` (a
@@ -156,8 +156,8 @@ def _reference_jaro(a: str, b: str) -> float:
             if a[i] != b[k]:
                 transpositions += 1
             k += 1
-    # INTEGER division, matching strsim's own `transpositions /= 2` (verified
-    # against strsim 0.11.1's vendored source); the count is NOT always
+    # integer division, matching strsim's own `transpositions /= 2` (verified
+    # against strsim 0.11.1's vendored source); the count is not always
     # even (a matched-character cycle longer than a 2-cycle, e.g. a 3-cycle
     # rotation, yields an odd mismatch count: "102" vs "021000" is the
     # pinned adversarial case below), so this oracle must floor exactly like
@@ -207,7 +207,7 @@ def test_jaro_matches_the_pure_python_oracle(a: str, b: str) -> None:
 def test_jaro_odd_mismatch_count_floors_not_rounds() -> None:
     """``"102"`` vs ``"021000"``: the matched-character alignment is a
     3-cycle rotation (``'1','0','2'`` against ``'0','2','1'`` in b's
-    index order), giving an ODD transposition-mismatch count of 3, a
+    index order), giving an odd transposition-mismatch count of 3, a
     case hypothesis found that falsifies the tempting "always even"
     assumption. Both tors and strsim floor via integer division
     (``3 // 2 == 1``), landing on ``0.7222...``, not the ``0.6667...``
@@ -290,7 +290,7 @@ class TestDeadline:
         )
 
     def test_an_enormous_but_finite_deadline_saturates_to_unbounded(self) -> None:
-        """A huge-but-finite budget is LEGAL (not a ValueError class with
+        """A huge-but-finite budget is legal (not a ValueError class with
         infinity) and behaves as no deadline at all: identical results to
         the default call for every metric, the saturation pin the diff
         deadline contract set, applied to the DP family."""

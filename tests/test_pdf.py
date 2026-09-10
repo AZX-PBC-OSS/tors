@@ -1,44 +1,44 @@
 """The PDF surface (`tors.documents.pdf_extract`/`tors.documents.pdf_page_count`): correctness over
 real PDF bytes, the structure-preservation properties that motivated the
 surface (headings, links, column separation), error mapping, concurrent
-correctness under REAL parallelism (the GIL is released, so N threads run the
-native core simultaneously — the property pdfium does not have), and the
+correctness under real parallelism (the GIL is released, so N threads run the
+native core simultaneously: the property pdfium does not have), and the
 GIL-release band, pinned with the suite's shared heartbeat methodology.
 
-Why this surface exists (the caller's history, 2026-09): the knowledge-indexing
+Why this surface exists (the caller's history): the knowledge-indexing
 caller routed born-digital PDFs through pypdf (pure Python, GIL-held at
 bytecode granularity, no structure output, merges visual lines across column
 gaps) and pdfium entered its tree only as a transitive of the heavy OCR
 fallback, where it is lock-guarded inside that library and isolated in a child
-process — but pdfium itself is not thread-safe and its bindings hold the GIL
+process; but pdfium itself is not thread-safe and its bindings hold the GIL
 per call, so it could never be the fast path. pdf_oxide measured better on
 every axis that matters here (structure, links, columns, speed, 100% pass rate
-on the veraPDF/pdf.js/SafeDocs corpora) — and called directly from Rust under
+on the veraPDF/pdf.js/SafeDocs corpora); and called directly from Rust under
 ``py.detach``, its whole open+extract+convert pass is GIL-free.
 
 Fixtures are hand-built PDF bytes (the same byte-deterministic object-graph
-pattern as ``documents.generate_pdf``), so every property under test — a
+pattern as ``documents.generate_pdf``), so every property under test (a
 /Link annotation, a two-column content stream, a 24pt heading line, a
-contentless page — is visible and greppable in this file rather than hidden
+contentless page) is visible and greppable in this file rather than hidden
 inside a binary blob. The corpus document (``documents.generate_pdf()``) adds
 a FlateDecode + WinAnsi non-ASCII case the hand-built fixtures don't cover.
 
-GIL band (measured on the dev box, 2026-09-08, ambient load noted per cell,
+GIL band (measured on the dev box, ambient load noted per cell,
 the corrected ``_gap_and_wall_during`` harness, 5 samples):
 
 - ``pdf_extract`` over a ~470KB single-page document (6,000 lines): walls
-  130-160ms, worst gaps 10.7-13.9ms (ratio 0.07-0.10) — the 10ms ping floor
+  130-160ms, worst gaps 10.7-13.9ms (ratio 0.07-0.10): the 10ms ping floor
   plus the O(output) return marshalling (one str per page, here one, plus the
   markdown string), the same marshalling class as ``finalize``'s two output
   strings. A detach regression holds the whole ~140ms wall (ratio ~1.0) and
   fails both budgets by an order of magnitude; the red side was also measured
   directly against the official pdf_oxide pyo3 wheel (GIL-held per call:
-  worst gap 23.6ms on a 9-page/33KB document under a 10ms ping, 2026-09), the
+  worst gap 23.6ms on a 9-page/33KB document under a 10ms ping), the
   hazard this wrapper exists to remove.
 - Budgets: the suite's shared 0.30 ratio and 100ms ceiling hold ~3x margin on
   the worst measured ratio and ~7x on the worst measured gap.
 
-Concurrency: 8 threads, one ``pdf_extract`` each over the same file — with the
+Concurrency: 8 threads, one ``pdf_extract`` each over the same file: with the
 GIL released these are 8 simultaneously-running native extractions (pdfium
 cannot do this without an external global lock; its own bindings document the
 hazard). The assertion is not just "no crash": every thread's result must be
@@ -76,7 +76,7 @@ def _objects_pdf(objects: list[bytes]) -> bytes:
 
 
 def _page_objects(content: bytes, *, annots: bytes | None = None) -> list[bytes]:
-    """Catalog/pages/page/font/contents — one page, arbitrary content stream."""
+    """Catalog/pages/page/font/contents: one page, arbitrary content stream."""
     annot_entry = b" /Annots [6 0 R]" if annots is not None else b""
     return [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -110,7 +110,7 @@ def _blank_pdf() -> bytes:
 
 
 def _two_page_pdf(first: str, second: str) -> bytes:
-    """Two pages, one line each — pins page order and the per-page list shape."""
+    """Two pages, one line each: pins page order and the per-page list shape."""
     c1 = f"BT /F1 12 Tf 50 700 Td ({first}) Tj ET".encode("ascii")
     c2 = f"BT /F1 12 Tf 50 700 Td ({second}) Tj ET".encode("ascii")
     objects = [
@@ -128,7 +128,7 @@ def _two_page_pdf(first: str, second: str) -> bytes:
 
 
 def _two_column_pdf() -> bytes:
-    """A left column (x=50) and a right column (x=350), three lines each — the
+    """A left column (x=50) and a right column (x=350), three lines each: the
     layout where plain-text extraction interleaves columns into single visual
     lines and the markdown reading-order pass must not."""
     content = (
@@ -141,7 +141,7 @@ def _two_column_pdf() -> bytes:
 
 
 def _link_pdf() -> bytes:
-    """A page whose only text sits under a /Link annotation with a /URI action —
+    """A page whose only text sits under a /Link annotation with a /URI action:
     the fixture that pins [text](uri) in the markdown output."""
     content = b"BT /F1 12 Tf 72 700 Td (Visit the handbook) Tj ET"
     annot = (
@@ -153,7 +153,7 @@ def _link_pdf() -> bytes:
 
 
 def _heading_pdf() -> bytes:
-    """A 24pt line over 12pt body — heading detection keys off font size."""
+    """A 24pt line over 12pt body: heading detection keys off font size."""
     content = (
         b"BT /F1 24 Tf 50 700 Td (Quarterly Report) Tj ET\n"
         b"BT /F1 12 Tf 50 660 Td (Revenue grew twelve percent.) Tj ET"
@@ -162,7 +162,7 @@ def _heading_pdf() -> bytes:
 
 
 def _big_pdf(lines: int) -> bytes:
-    """One page, `lines` text-showing operators — the input-scaling cell for the
+    """One page, `lines` text-showing operators: the input-scaling cell for the
     GIL band (a ~80-byte sentence per line, so 6,000 lines is ~470KB of text)."""
     sentence = "The transformer maintenance schedule covers 138kV oil-filled units."
     moves = ["BT", "/F1 12 Tf 50 750 Td"]
@@ -187,7 +187,7 @@ class TestPdfExtract:
 
     def test_corpus_document_with_flate_and_winansi(self, tmp_path: Path) -> None:
         """The corpus fixture: FlateDecode content stream, WinAnsi font, non-ASCII
-        (e-acute) text — the encoded-stream path the bare fixtures don't cover."""
+        (e-acute) text: the encoded-stream path the bare fixtures don't cover."""
         path = _write(tmp_path, "corpus.pdf", generate_pdf())
         pages, markdown = pdf_extract(path)
         assert len(pages) == 1
@@ -204,7 +204,7 @@ class TestPdfExtract:
 
     def test_contentless_page_is_empty_not_an_error(self, tmp_path: Path) -> None:
         """The scanned-PDF routing case: an image-only page has no text layer, which
-        must read as empty output (the CALLER routes to OCR), never as a raise."""
+        must read as empty output (the caller routes to OCR), never as a raise."""
         path = _write(tmp_path, "blank.pdf", _blank_pdf())
         pages, markdown = pdf_extract(path)
         assert pages == [""]
@@ -231,13 +231,13 @@ class TestStructurePreservation:
         path = _write(tmp_path, "link.pdf", _link_pdf())
         pages, markdown = pdf_extract(path)
         assert "[Visit the handbook](https://handbook.example.com/guide)" in markdown
-        # Links are annotation-derived: the per-page PLAIN text carries the
+        # Links are annotation-derived: the per-page plain text carries the
         # label only, never the URI.
         assert "handbook.example.com" not in pages[0]
         assert "Visit the handbook" in pages[0]
 
     def test_markdown_keeps_columns_as_separate_blocks(self, tmp_path: Path) -> None:
-        """The measured failure mode this pins: whole-document PLAIN text joins a
+        """The measured failure mode this pins: whole-document plain text joins a
         left and right column into one visual line ("LEFT-A first line RIGHT-B
         first line"); the markdown reading-order pass must keep them apart."""
         path = _write(tmp_path, "twocol.pdf", _two_column_pdf())
@@ -266,7 +266,7 @@ class TestPdfPageCount:
 
 class TestConcurrency:
     def test_parallel_extracts_are_byte_identical(self, tmp_path: Path) -> None:
-        """8 threads, one pdf_extract each, GIL released for every native pass —
+        """8 threads, one pdf_extract each, GIL released for every native pass:
         simultaneously-running extractions, not GIL-serialized ones (the pdfium
         hazard this surface exists to be safe for). Every thread's answer must
         equal the single-threaded answer exactly."""
@@ -305,11 +305,11 @@ def test_pdf_extract_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     open+extract+convert pass runs under py.detach, so a caller that off-loads
     to a thread (tors.documents.aio.pdf_extract does exactly this) keeps a loop that ticks
     every ~10ms, where a GIL-held binding (the official pdf_oxide wheel,
-    measured 2026-09: worst gap ~= the whole call) blocks it for the full wall.
+    measured: worst gap ~= the whole call) blocks it for the full wall.
     The ~470KB single-page document keeps the wall an order of magnitude over
     the 10ms ping floor so the ratio resolves (the module docstring's guidance).
-    A TIMING-lane cell: the load-sensitive band measurement CI's matrix legs
-    deselect (`-m "not timing and not sweep"`), one 3.12 leg running it — the
+    A timing-lane cell: the load-sensitive band measurement CI's matrix legs
+    deselect (`-m "not timing and not sweep"`), one 3.12 leg running it: the
     marker-split contract every lane cell carries.
     """
     import asyncio

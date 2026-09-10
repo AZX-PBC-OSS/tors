@@ -15,11 +15,11 @@ records-array document with escaped prose values, and the fixed
 five-defect rotation (dropped brace, unquoted key, single quotes,
 dropped comma, truncation) applied to every other record.
 
-The continuation cells sit BELOW both engines' recursion caps (tors
+The continuation cells sit below both engines' recursion caps (tors
 raises past 200 fragments, the oracle past ~165 on the array-merge
 chain): the point is a fair wall comparison on inputs both parse. Past
 the caps the engines raise (tors ValueError at MAX_NESTING, the oracle
-its own ValueError near the interpreter recursion limit) — that
+its own ValueError near the interpreter recursion limit): that
 both-raise shape is the parity suite's job, not this lane's.
 """
 
@@ -136,7 +136,7 @@ def _assert_cell_beats_the_oracle(name: str, raw: str) -> None:
     [
         ("valid_fast_1mib", valid_json(1 * _MIB)),
         ("malformed_1mib", malformed_llm_output(1 * _MIB)),
-        # The continuation chains, below BOTH caps so both engines return:
+        # The continuation chains, below both caps so both engines return:
         # the array-merge chain (tors caps at 198 fragments, the oracle
         # near ~165) measured at 150.
         ("merge_chain_150", '{"a":[0],' + '["b":[0],' * 150 + "1]"),
@@ -166,7 +166,7 @@ def test_escaped_delimiter_run_wall_scales_linearly_not_quadratically() -> None:
     accumulator bookkeeping (see rewrite_escape_tail's docs), so
     quadrupling the escaped-delimiter count quadruples the work: the
     32k-fragment wall stays within a small factor of 4x the 8k-fragment
-    wall. The whole-accumulator rescan this gate pins out was O(n^2) —
+    wall. The whole-accumulator rescan this gate pins out was O(n^2):
     16x per quadrupling, ~1.2s at 16k fragments. Machine-speed-immune by
     construction: a ratio of two walls on the same box."""
     frag = r"{\"k\": 1}"
@@ -192,7 +192,7 @@ def test_sequential_merge_wall_scales_linearly_not_quadratically() -> None:
     appends), so quadrupling the merge count quadruples the work: the
     100k-merge wall stays within a small factor of 4x the 25k-merge wall.
     The rescan-the-whole-previous-array-per-merge shape this gate pins out
-    was O(M^2) — 16x per quadrupling, ~5s at 200k merges from 1.6 MB of
+    was O(M^2): 16x per quadrupling, ~5s at 200k merges from 1.6 MB of
     input. Machine-speed-immune by construction: the assertion is a ratio
     of two walls on the same box, never an absolute time."""
     small = _min_wall_ms(
@@ -214,11 +214,11 @@ def test_sequential_merge_wall_scales_linearly_not_quadratically() -> None:
 # The lookahead-shape section: the seven adversarial classes the
 # lookahead-memo work fixed (per-shape wall bounds and oracle-pinned
 # outputs live in test_json_repair_native's TestRobustness; these are the
-# SCALING gates — the class, not the instance). Every cell must stay
+# scaling gates: the class, not the instance). Every cell must stay
 # linear in its input, so doubling the input may at most double the wall
 # plus measurement slack; a quadratic regression was ~4x per doubling and
 # fails outright. Known and deliberately ungated: the duplicate-key
-# splice (`'[{' + '"a":1 '*n + '}]'`) is still O(n^2) — the Vec<char>
+# splice (`'[{' + '"a":1 '*n + '}]'`) is still O(n^2): the Vec<char>
 # insert memmove, tracked in issue #13; a ratio gate here would fail
 # today.
 

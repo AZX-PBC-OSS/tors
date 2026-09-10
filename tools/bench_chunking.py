@@ -1,6 +1,6 @@
 """Honest measurement: the chunking family's document-scale cost, the
 cells issue #22 reported plus the sibling unit-count chunkers that turned
-out to carry the same pathology, with each cell's PEAK RSS measured
+out to carry the same pathology, with each cell's peak RSS measured
 alongside its wall time.
 
 Cells (12 MiB unless noted, the issue's own scale):
@@ -28,11 +28,11 @@ Cells (12 MiB unless noted, the issue's own scale):
   runs the same budget over a deterministic CRLF-dense log (the break
   kinds the scan's CR/CRLF folding exists for, not prose-shaped text).
 - walks: the component scans (grapheme/word/sentence count) as reference
-  rows, the "what the residual IS" numbers.
+  rows, the "what the residual is" numbers.
 
-Wall timing is time.perf_counter min-of-N inside a FRESH CHILD PROCESS
+Wall timing is time.perf_counter min-of-N inside a fresh child process
 per cell (N sized so a cell accumulates >= 50 ms, at least 2 passes, at
-most 20, GC disabled while measuring, one warm-up pass before); each
+most 20, gc disabled while measuring, one warm-up pass before); each
 child hands its best time back through a temp file and the parent reaps
 it with os.wait4, so every row's peak RSS is that child's own high-water
 mark -- the interpreter plus the corpus string plus one call's transient
@@ -232,7 +232,7 @@ def _run_cell(kind: str, size: int, line: str) -> tuple[float, int]:
 
 
 def main() -> None:
-    # One no-call baseline child per DISTINCT (kind, size) corpus, so each
+    # One no-call baseline child per distinct (kind, size) corpus, so each
     # cell's "over baseline" number subtracts a same-corpus high-water
     # mark (a 1 MiB corpus child is naturally smaller than a 12 MiB one).
     baselines: dict[tuple[str, int], int] = {}

@@ -1,11 +1,11 @@
 """Honest measurement: tors's native `lemma_dict` substitution (inside
 `apply_pipeline`) against an idiomatic pure-Python equivalent, applied to
-the SAME token list so the comparison isolates lookup-application cost,
+the same token list so the comparison isolates lookup-application cost,
 not tokenization differences.
 
 The claim under test: tors's `lemma_dict` is faster because it avoids the
 GIL-hold and per-token Python bytecode-dispatch/call overhead of an
-equivalent Python loop, NOT because of a smarter lookup algorithm --- a
+equivalent Python loop, not because of a smarter lookup algorithm --- a
 dict lookup is O(1) on both sides. This script measures the real ratio
 rather than asserting it. Run with `uv run python tools/bench_lemma_dict.py`.
 """

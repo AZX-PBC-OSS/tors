@@ -11,7 +11,7 @@ use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
 /// max_size=65534) -> list[tuple[int, int]]`: FastCDC 2020 content-defined
-/// chunking. Produces `(start, end)` BYTE-offset spans (not codepoints; this
+/// chunking. Produces `(start, end)` byte-offset spans (not codepoints; this
 /// is a byte-level primitive, unlike `word_bounds`/`sentence_bounds`)
 /// partitioning `data` exactly, in one GIL-released native pass.
 /// Content-defined chunking's advantage over fixed-size chunking: a small
@@ -73,7 +73,7 @@ pub fn chunk_cdc(
 /// str index (codepoint) units, each chunk at most `max_chars`
 /// codepoints, cut at word or sentence boundaries wherever the budget
 /// allows. This is the context-window/RAG packing primitive: it cuts a
-/// document at a SAFE boundary under a token-proxy budget instead of the
+/// document at a safe boundary under a token-proxy budget instead of the
 /// naive mid-word slice. The cut rule is `truncate_to_bounds`'s own,
 /// applied repeatedly: the largest boundary end within the budget, with a
 /// grapheme-safe hard cut when a single word/sentence exceeds it. Every
@@ -82,18 +82,18 @@ pub fn chunk_cdc(
 /// emoji chain) wider than the remaining budget; ordinary text never hits
 /// this.
 ///
-/// `overlap=0` (the default): the ORIGINAL lossless-partition contract,
+/// `overlap=0` (the default): the original lossless-partition contract,
 /// byte-for-byte unchanged. Chunks are non-empty, contiguous, strictly
 /// increasing, cover `[0, len(text))`, and joining the slices reproduces
-/// the input exactly (interior-cut trailing whitespace rides the NEXT
+/// the input exactly (interior-cut trailing whitespace rides the next
 /// chunk's head rather than being dropped; the final chunk runs to the
 /// end untrimmed). See `src/chunk_impl.rs` for the full contract.
 ///
 /// `overlap > 0`: each chunk after the first starts `overlap` codepoints
-/// before the previous chunk's end, SNAPPED to the nearest `boundary`,
+/// before the previous chunk's end, snapped to the nearest `boundary`,
 /// never mid-word/mid-sentence: the RAG-retrieval shape where a fact
 /// split across a cut is still whole in at least one chunk. This trades
-/// the lossless-join guarantee for genuine overlap; every chunk's OWN
+/// the lossless-join guarantee for genuine overlap; every chunk's own
 /// `<= max_chars` and boundary-safety invariants still hold. `overlap`
 /// must be `< max_chars` (no forward progress otherwise), which raises
 /// `ValueError`; a chunk shorter than the requested overlap silently
@@ -185,7 +185,7 @@ pub fn chunk_text_iter(
 
 /// `tors.chunk_by_words(text, words_per_chunk, *, overlap=0)`:
 /// word-count-windowed chunking. Each chunk spans `words_per_chunk`
-/// consecutive REAL WORD TOKENS, not `word_bounds`' raw segment count:
+/// consecutive real word tokens, not `word_bounds`' raw segment count:
 /// `word_bounds` gives an inter-word space run its own segment, so
 /// grouping raw segments would silently mean "words_per_chunk roughly
 /// halved" on ordinary prose (see `chunk_by_segment_impl::chunk_by_words`'s doc for
@@ -193,7 +193,7 @@ pub fn chunk_text_iter(
 /// included token's start through the last's end, not through any
 /// trailing whitespace after it, so unlike `chunk_text` this is not a
 /// covering partition (chunks are not necessarily contiguous). `overlap`
-/// WORDS repeat at the start of the next chunk: the semantic-chunking
+/// words repeat at the start of the next chunk: the semantic-chunking
 /// RAG shape, measured in units rather than a character budget. The
 /// final chunk may hold fewer than `words_per_chunk` tokens when the
 /// total doesn't divide evenly. Empty text, or text with no word tokens
@@ -274,7 +274,7 @@ pub fn chunk_by_words_iter(
 /// `tors.chunk_by_sentences(text, sentences_per_chunk, *, overlap=0)`:
 /// [`chunk_by_words`]'s sentence-count twin. Each chunk spans
 /// `sentences_per_chunk` consecutive UAX #29 sentence segments
-/// (`sentence_bounds`), `overlap` SENTENCES repeated. Same argument
+/// (`sentence_bounds`), `overlap` sentences repeated. Same argument
 /// contract, same empty-input answer, same forward-progress-by-
 /// construction guarantee.
 ///
@@ -346,11 +346,11 @@ pub fn chunk_by_sentences_iter(
 /// `tors.chunk_by_paragraphs(text, paragraphs_per_chunk, *, overlap=0)`:
 /// [`chunk_by_words`]/[`chunk_by_sentences`]'s paragraph-count twin. Each
 /// chunk spans `paragraphs_per_chunk` consecutive paragraphs, `overlap`
-/// PARAGRAPHS repeated. A paragraph boundary here is a run of 2+
+/// paragraphs repeated. A paragraph boundary here is a run of 2+
 /// consecutive newline characters (`\r\n` counts as one unit, matching
 /// `tors.normalize`'s own CR/CRLF folding), the same "2+ newlines is the
 /// surviving paragraph gap" convention `normalize` already establishes.
-/// This is a HEURISTIC, not a Unicode Standard segmentation (there is no
+/// This is a heuristic, not a Unicode Standard segmentation (there is no
 /// UAX for paragraphs, unlike UAX #29 for words/sentences): a single `\n`
 /// is ordinary content, not a break. Same argument contract, same
 /// empty-input answer, same forward-progress-by-construction guarantee
@@ -388,36 +388,36 @@ pub fn chunk_by_paragraphs(
 /// `tors.chunk_hierarchical(text, max_chars, separators=None, *,
 /// overlap=0)`: priority-ordered fallback chunking. Produces `(start, end)`
 /// codepoint pairs, each chunk at most `max_chars` codepoints, cut at the
-/// COARSEST separator level that fits within budget, falling back to
+/// coarsest separator level that fits within budget, falling back to
 /// progressively finer levels only when a coarser one has no in-budget
 /// cut over the current window. This is the same pattern LangChain's
 /// `RecursiveCharacterTextSplitter` popularized (default separators
 /// `["\n\n", "\n", " ", ""]`), except tors's default hierarchy uses its
-/// OWN accurate UAX #29 segmenters instead of literal guesses.
+/// own accurate UAX #29 segmenters instead of literal guesses.
 ///
 /// `separators=None` (the default): paragraph → sentence → word → a
 /// grapheme-safe raw cut, always the final, unconditional fallback that
 /// never fails to produce a chunk. `separators=[...]`: a caller-supplied
-/// list of LITERAL strings (not regex; a documented scope line, see
+/// list of literal strings (not regex; a documented scope line, see
 /// `src/chunk_hierarchical_impl.rs`), coarsest first, e.g.
 /// `["\n## ", "\n\n", ". ", " "]` for markdown-header-aware chunking.
-/// This REPLACES the default hierarchy for the levels it specifies, but the
+/// This replaces the default hierarchy for the levels it specifies, but the
 /// grapheme-safe raw cut is still always appended as the final fallback
 /// regardless (unlike LangChain, no trailing `""` sentinel is required).
-/// A `None` ENTRY in an otherwise-literal list splices the default
+/// A `None` entry in an otherwise-literal list splices the default
 /// hierarchy's three accurate levels in at that position:
-/// `["\n", None]` is line → paragraph → sentence → word → raw cut — the
+/// `["\n", None]` is line → paragraph → sentence → word → raw cut: the
 /// line-oriented-text shape (a chat thread, one message per line, never
-/// split mid-line) whose oversized-line fallback is the REAL UAX #29
+/// split mid-line) whose oversized-line fallback is the real UAX #29
 /// segmenter rather than the `". "`/`" "` literal guesses an all-literal
 /// list would pin it to. `[None]` is identical to `separators=None`.
 ///
-/// UNLIKE `chunk_text`, this is NOT a lossless covering partition: at
-/// every level except the raw cut, the separator itself is DROPPED
+/// Unlike `chunk_text`, this is not a lossless covering partition: at
+/// every level except the raw cut, the separator itself is dropped
 /// between chunks (the same convention `chunk_by_paragraphs` already
-/// applies to blank-line runs), since a caller splitting ON a marker wants
+/// applies to blank-line runs), since a caller splitting on a marker wants
 /// it gone, not duplicated. `overlap` snaps the next chunk's start backward
-/// to the nearest GRAPHEME boundary (not necessarily a semantic
+/// to the nearest grapheme boundary (not necessarily a semantic
 /// paragraph/sentence/word boundary; a documented simplification of the
 /// single-hierarchy overlap snap `chunk_text_overlapping` uses), with the
 /// same snap-collapse-to-zero-overlap degradation when the grapheme-snapped
@@ -429,11 +429,11 @@ pub fn chunk_by_paragraphs(
 /// returns `[]`. An empty `separators` list is legal and skips straight to
 /// the raw-cut fallback for every chunk.
 ///
-/// Cost at document scale is the levels your budget actually CONSULTS:
+/// Cost at document scale is the levels your budget actually consults:
 /// each level's scan runs at most once per call, at its first
 /// consultation, so a budget that never falls past the paragraph level
 /// never pays the sentence or word walks at all, and duplicate entries
-/// (`None` or a repeated literal) are deduped — `[None] * 100` and
+/// (`None` or a repeated literal) are deduped: `[None] * 100` and
 /// `[" "] * 100` cost what the single entry does.
 ///
 /// GIL model: identical to `chunk_by_words`. The whole multi-level scan
@@ -468,7 +468,7 @@ pub fn chunk_hierarchical(
     // limitation forces (`Option<Vec<Option<&str>>>` cannot be extracted
     // directly: FromPyObject is not general enough over the borrowed
     // element lifetime): O(list) transient, owned Strings freed with the
-    // call. The slot list the core builds from it is O(DISTINCT entries)
+    // call. The slot list the core builds from it is O(distinct entries)
     // after the dedup, so the pathological `[None] * N` spellings pay
     // this pass and nothing beyond it.
     let seps: Option<Vec<Option<&str>>> = separators
@@ -482,11 +482,11 @@ pub fn chunk_hierarchical(
 /// `tors.chunk_by_lines(text, lines_per_chunk, *, overlap=0)`:
 /// [`chunk_by_words`]/[`chunk_by_sentences`]/[`chunk_by_paragraphs`]'s
 /// line-count twin. Each chunk spans `lines_per_chunk` consecutive lines,
-/// `overlap` LINES repeated at the start of the next chunk. A line break
-/// is a `\n`, a lone `\r`, or a `\r\n` pair counted as ONE unit (the same
+/// `overlap` lines repeated at the start of the next chunk. A line break
+/// is a `\n`, a lone `\r`, or a `\r\n` pair counted as one unit (the same
 /// CR/CRLF folding convention `chunk_by_paragraphs` and `normalize`'s own
-/// pipeline use; `str.splitlines`' exotic separators — `\v`, `\f`, NEL,
-/// LS, PS — are NOT breaks here). A line counts as a line only when it
+/// pipeline use; `str.splitlines`' exotic separators (`\v`, `\f`, NEL,
+/// LS, PS) are not breaks here). A line counts as a line only when it
 /// carries at least one non-whitespace codepoint, the same real-token
 /// discipline `chunk_by_words` applies to word segments: blank lines
 /// neither count toward `lines_per_chunk` nor split a chunk's interior
@@ -495,11 +495,11 @@ pub fn chunk_hierarchical(
 /// `lines_per_chunk=200` gets 200 content lines. "Non-whitespace" is
 /// definitional here: the Unicode `White_Space` property
 /// (`char::is_whitespace`), under which an NBSP-only line is blank and
-/// U+001C–U+001F (FS/GS/RS/US) count as line CONTENT, diverging from
+/// U+001C–U+001F (FS/GS/RS/US) count as line content, diverging from
 /// Python's `str.isspace()` (which treats those four as whitespace) and
 /// from `str.splitlines` (which even breaks on them; tors does not).
 /// `(start, end)` offsets span the first included line's start through
-/// the last included line's end (NOT through the trailing break after
+/// the last included line's end (not through the trailing break after
 /// it: non-overlapping chunks are not necessarily contiguous). The final
 /// chunk may hold fewer lines when the total doesn't divide evenly.
 /// Empty text, or text with no content lines at all, returns `[]`. A

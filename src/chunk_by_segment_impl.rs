@@ -2,7 +2,7 @@
 //! [`chunk_by_paragraphs`], and [`chunk_by_lines`], the
 //! `tors.chunk_text`/`tors.chunk_cdc` family's third shape: instead of a
 //! character budget ([`crate::chunk_impl::chunk_text`]) or byte-content
-//! anchoring (`chunk_cdc`), each chunk spans a fixed COUNT of consecutive
+//! anchoring (`chunk_cdc`), each chunk spans a fixed count of consecutive
 //! segments from one of the crate's segmenters: real word tokens
 //! ([`crate::segmentation_impl::word_bounds`], filtered), UAX #29
 //! sentences ([`crate::segmentation_impl::sentence_bounds`]),
@@ -10,13 +10,13 @@
 //! UAX exists for paragraphs), or newline-terminated lines ([`line_bounds`],
 //! the same CR/CRLF-folding convention). Split from `chunk_impl.rs` per the
 //! crate's own "one concern per file" rule: [`chunk_text`] and `chunk_cdc`
-//! are CHARACTER/BYTE-budget chunkers, these four are UNIT-COUNT chunkers, a
+//! are character/byte-budget chunkers, these four are unit-count chunkers, a
 //! different windowing shape sharing only the `Boundary`-safety discipline,
 //! not the cut logic.
 //!
 //! [`chunk_by_segments`] is the one windowing walk behind all four unit
 //! chunkers: "N segments per chunk, Y segments of overlap" over whatever
-//! `(start, end)` segment list the caller already produced: the DRY point
+//! `(start, end)` segment list the caller already produced: the dry point
 //! this file exists to keep in one place rather than copied per unit.
 //!
 //! [`crate::chunk_impl`]
@@ -26,28 +26,28 @@ use memchr::memchr2_iter;
 use crate::segmentation_impl;
 use crate::truncate_impl::{GraphemeIndex, char_count};
 
-/// Merge adjacent CONTIGUOUS segments (`bounds[i].1 == bounds[i + 1].0`:
+/// Merge adjacent contiguous segments (`bounds[i].1 == bounds[i + 1].0`:
 /// the `word_bounds`/`sentence_bounds` covering-partition contract) whose
-/// shared boundary is NOT a grapheme-cluster boundary, the same
+/// shared boundary is not a grapheme-cluster boundary, the same
 /// SARA-AM-shaped edge `crate::chunk_impl`'s hard-cut fallback guards
 /// against: UAX #29 word boundaries occasionally score a combining
 /// sequence (e.g. Thai SARA AM, U+0E33) as its own word-segment even
 /// though `unicode-segmentation`'s grapheme rules join it to the
 /// preceding base character into one cluster. [`chunk_by_segments`]
-/// windows over segment EDGES directly, so a chunk boundary landing
+/// windows over segment edges directly, so a chunk boundary landing
 /// exactly on such a split would silently divide the cluster between two
 /// returned chunks; merging the two segments before windowing removes the
 /// cut point rather than special-casing it per chunk. One forward pass,
 /// O(n), the membership question answered O(1) by the shared
 /// [`GraphemeIndex`] bitmap (the former `HashSet<usize>` built from the
-/// whole boundary list cost ~12.6M hashed inserts — ~1.2 s — on a 12 MiB
+/// whole boundary list cost ~12.6M hashed inserts (~1.2 s) on a 12 MiB
 /// document, the same #22 pathology `chunk_hierarchical` fixed).
 fn merge_mid_cluster_boundaries(
     bounds: Vec<(usize, usize)>,
     graphemes: &GraphemeIndex,
 ) -> Vec<(usize, usize)> {
     // Fast path: when no adjacent pair shares a mid-cluster edge, the
-    // merge would return the input unchanged — so it does, the input Vec
+    // merge would return the input unchanged, so it does, the input Vec
     // moving through with no copy. That is the common case (any text
     // without UAX-29/grapheme boundary divergence, e.g. pure-ASCII prose
     // with no CRLF pairs, where the merge pass would otherwise duplicate
@@ -72,8 +72,8 @@ fn merge_mid_cluster_boundaries(
     merged
 }
 
-/// `chunk_by_words`'s real-token filter — keep exactly the segments
-/// carrying at least one non-whitespace codepoint — as ONE streaming
+/// `chunk_by_words`'s real-token filter: keep exactly the segments
+/// carrying at least one non-whitespace codepoint: as one streaming
 /// decode pass over `text` instead of the former whole-text `Vec<char>`
 /// collect (4 bytes per codepoint materialized just to random-access
 /// slice each segment, the same #22 allocation class). `merged` is a
@@ -120,24 +120,24 @@ fn retain_non_whitespace_segments(text: &str, merged: Vec<(usize, usize)>) -> Ve
 }
 
 /// The shared "N segments per chunk, Y segments of overlap" walk behind
-/// all four unit chunkers — [`chunk_by_words`], [`chunk_by_sentences`],
+/// all four unit chunkers: [`chunk_by_words`], [`chunk_by_sentences`],
 /// [`chunk_by_paragraphs`], and [`chunk_by_lines`]: the only difference
 /// between them is which segmenter produced `bounds`, so the windowing
 /// logic itself is factored here once rather than duplicated per unit
 /// (the `elapsed_exceeds` precedent: factor a second consumer, don't copy
 /// it). `bounds` is an ascending, non-overlapping segment list; the four
-/// producers split on contiguity — the word/sentence producers
+/// producers split on contiguity: the word/sentence producers
 /// (`segmentation_impl::word_bounds`/`sentence_bounds`) are contiguous
 /// coverings of the whole text, while the paragraph/line producers
 /// ([`paragraph_bounds`]/[`line_bounds`]) are gapped (each excludes the
 /// break runs it splits on, so the span between two consecutive segments
 /// belongs to neither). The walk only ever reads `bounds[i].0` and
-/// `bounds[j - 1].1`, so contiguity is genuinely not required — only the
+/// `bounds[j - 1].1`, so contiguity is not required: only the
 /// ascending, non-overlapping part of the contract is. This function
 /// trusts that contract and does not re-validate it.
 ///
 /// Each chunk spans `per_chunk` consecutive segments, `[bounds[i].0,
-/// bounds[i + per_chunk - 1].1)`, except possibly the LAST chunk, which
+/// bounds[i + per_chunk - 1].1)`, except possibly the last chunk, which
 /// takes whatever remains when the segment count doesn't divide evenly.
 /// Consecutive chunks advance by `stride = per_chunk - overlap` segments
 /// (`overlap < per_chunk` is the caller's precondition, so
@@ -184,24 +184,24 @@ fn chunk_by_segments(
 }
 
 /// Word-count-windowed chunking: each chunk spans `words_per_chunk`
-/// consecutive WORD TOKENS, not `word_bounds`' raw segment
+/// consecutive word tokens, not `word_bounds`' raw segment
 /// count. `word_bounds` itself follows UAX #29 exactly, which gives an
-/// inter-word space run its OWN segment (`"one two"` is three segments:
+/// inter-word space run its own segment (`"one two"` is three segments:
 /// `"one"`, `" "`, `"two"`), the established convention `word_count`
-/// already carries. Grouping RAW segments here would silently mean
+/// already carries. Grouping raw segments here would silently mean
 /// "`words_per_chunk` roughly halved" for ordinary space-separated
 /// prose, the opposite of what a caller reaching for
 /// `words_per_chunk=100` (a "~100 word chunk" for an embedding budget)
 /// actually wants. So this filters `word_bounds`' output to segments
-/// that carry at least one non-whitespace codepoint FIRST, and only
+/// that carry at least one non-whitespace codepoint first, and only
 /// then windows over what remains: a "word" here is a real token, and
 /// the whitespace between two tokens in one chunk still rides along
-/// naturally (the span is a contiguous slice of the ORIGINAL text
+/// naturally (the span is a contiguous slice of the original text
 /// between two real absolute offsets, not a re-assembly of kept
 /// segments), exactly as it would if nothing had been filtered.
 ///
 /// `(start, end)` are codepoint offsets spanning the first included
-/// word token's start through the last included token's end (NOT
+/// word token's start through the last included token's end (not
 /// through any trailing whitespace after it: that whitespace belongs
 /// to neither this chunk nor the next one's word tokens, so
 /// non-overlapping chunks are no longer necessarily contiguous, unlike
@@ -222,7 +222,7 @@ fn chunk_by_segments(
 pub fn chunk_by_words(text: &str, words_per_chunk: usize, overlap: usize) -> Vec<(usize, usize)> {
     // Merge any word_bounds segment edge that would split a grapheme
     // cluster (the SARA AM edge, see `merge_mid_cluster_boundaries`)
-    // BEFORE filtering out whitespace-only segments: the merge relies on
+    // before filtering out whitespace-only segments: the merge relies on
     // `word_bounds`' raw covering-partition contiguity, which the
     // whitespace filter below would otherwise break (it opens gaps).
     let graphemes = GraphemeIndex::build(text, char_count(text));
@@ -250,32 +250,32 @@ pub fn chunk_by_sentences(
     chunk_by_segments(&bounds, sentences_per_chunk, overlap)
 }
 
-/// Paragraph boundaries: `text` split on maximal runs of 2+ NEWLINE
-/// UNITS: `\r\n` counts as ONE unit (matching `normalize`'s own
+/// Paragraph boundaries: `text` split on maximal runs of 2+ newline
+/// units: `\r\n` counts as one unit (matching `normalize`'s own
 /// CR/CRLF folding), a lone `\r` or `\n` also one unit each. This is
 /// the same "2+ newlines is the surviving paragraph gap" convention
 /// `normalize`'s own pipeline already establishes (it collapses 3+
 /// consecutive newlines down to exactly 2, never below: see
-/// `normalize_impl::flush`). There is NO Unicode Standard segmentation
+/// `normalize_impl::flush`). There is no Unicode Standard segmentation
 /// for paragraphs (unlike UAX #29 for words/sentences), so this is a
-/// heuristic, stated plainly, not a spec-backed segmenter: a single `\n`
+/// heuristic, not a spec-backed segmenter: a single `\n`
 /// is ordinary content here, not a break (`"A\nB"` is one paragraph),
 /// and a "blank-looking" line that holds only spaces/tabs between two
-/// LONE newlines does NOT qualify: only an actual run of 2+ newline
+/// lone newlines does not qualify: only an actual run of 2+ newline
 /// characters does. This operates on `text` as given, not on any prior
 /// `normalize` pass.
 ///
 /// Each returned span is one paragraph's content, `(start, end)`
-/// codepoint offsets, EXCLUDING the separating run itself (a paragraph's
+/// codepoint offsets, excluding the separating run itself (a paragraph's
 /// span shouldn't include the gap that separates it from the next one).
 /// A leading or trailing qualifying run produces an empty span at that
-/// edge, which is DISCARDED rather than emitted: an empty "paragraph"
+/// edge, which is discarded rather than emitted: an empty "paragraph"
 /// is not a useful chunk. Text with no qualifying run at all yields
 /// exactly one paragraph: the whole text. Empty input yields `[]`.
 ///
-/// UNLIKE `word_bounds`/`sentence_bounds`, this split point is
+/// Unlike `word_bounds`/`sentence_bounds`, this split point is
 /// structurally grapheme-safe with no merge step needed: every split
-/// happens strictly INSIDE a run of `\n`/`\r` characters (`\r\n` is
+/// happens strictly inside a run of `\n`/`\r` characters (`\r\n` is
 /// consumed as one unit, matching `normalize`'s own CRLF folding, so a
 /// CRLF pair is never itself torn in two), and neither character is a
 /// combining mark: a grapheme cluster spanning a newline would require a
@@ -287,8 +287,8 @@ pub fn chunk_by_sentences(
 pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
     // Two spellings of the same state machine, chosen by text class:
     // pure-ASCII text (the common corpus class) scans with a SIMD
-    // `memchr2` jump table between `\r`/`\n` bytes — byte index IS
-    // codepoint index on ASCII, so the offsets are exact — while
+    // `memchr2` jump table between `\r`/`\n` bytes: byte index is
+    // codepoint index on ASCII, so the offsets are exact, while
     // non-ASCII text keeps the streaming decode walk (the fast path
     // has no `char`-decode at all; both are pinned to the random-access
     // oracle in the tests, and the ASCII/char split is differential-
@@ -296,15 +296,15 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
     if text.is_ascii() {
         return paragraph_bounds_ascii(text);
     }
-    // The non-ASCII walk as ONE streaming decode pass — a three-flag
+    // The non-ASCII walk as one streaming decode pass: a three-flag
     // state machine (in-run, unit count, pending-CR) instead of the
     // former whole-text `Vec<char>` collect with random access and a
     // lookahead, the same #22 allocation class: O(text) time, O(1)
     // memory beyond the output. The codepoint total the end-of-text
-    // close needs is the loop's own counter, read once AFTER the loop
+    // close needs is the loop's own counter, read once after the loop
     // (the mid-loop `total = cp + 1` store the former spelling carried
     // was never read in-flight, and its dead store was codegen luck to
-    // eliminate — the counter is not). The pending-CR flag IS the
+    // eliminate: the counter is not). The pending-CR flag is the
     // lookahead: a '\r' counts one unit and stays pending; a following
     // '\n' completes the CRLF pair without adding a unit; anything
     // else leaves the '\r' standing as its own unit (already counted).
@@ -365,7 +365,7 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
         }
         seg_start = total;
     }
-    // The final paragraph is guarded by `seg_start < total` — KEPT,
+    // The final paragraph is guarded by `seg_start < total`: kept,
     // unlike `line_bounds`' content-filter guard: paragraph_bounds has
     // no has-content flag, so the guard is the only thing standing
     // between a trailing qualifying run's `seg_start = total` and a
@@ -378,14 +378,14 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
 }
 
 /// The ASCII spelling of [`paragraph_bounds`]' state machine: the same
-/// in-run/unit-count/pending-CR logic, visited only at break bytes —
+/// in-run/unit-count/pending-CR logic, visited only at break bytes:
 /// `memchr2(b'\r', b'\n')` hops between them over the content spans a
 /// paragraph scan has no per-byte work for at all (no content filter
 /// here), so a 12 MiB prose document costs the break hits, not 12M
 /// decode-and-match iterations. `after_break` (one past the last break
 /// byte) is the content-span edge the machine's non-break arm acts on:
 /// bytes between two hits are all non-break by construction, so
-/// `pos > after_break` IS "a content codepoint arrived", and the first
+/// `pos > after_break` is "a content codepoint arrived", and the first
 /// such byte after a run is where the machine moves `seg_start`.
 fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
@@ -401,7 +401,7 @@ fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
         if pos > after_break {
             // Content intervened: close any open run exactly as the
             // machine's non-break arm does (`seg_start` moves to the
-            // first content byte, which IS `after_break`).
+            // first content byte, which is `after_break`).
             if in_run && units >= 2 {
                 if seg_start < run_start {
                     bounds.push((seg_start, run_start));
@@ -438,8 +438,8 @@ fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
         after_break = pos + 1;
     }
     // Trailing content (text does not end on a break byte) closes any
-    // open run the same way the next break byte would have — the
-    // in-loop close only runs at a hit, and a run left open by the LAST
+    // open run the same way the next break byte would have: the
+    // in-loop close only runs at a hit, and a run left open by the last
     // hit is not a trailing break run unless the text really ends on
     // break bytes (`n == after_break`). The paragraph after that run is
     // the final `(after_break, n)` span.
@@ -468,11 +468,11 @@ fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
 
 /// [`chunk_by_words`]'s paragraph-count twin: each chunk spans
 /// `paragraphs_per_chunk` consecutive [`paragraph_bounds`] segments,
-/// `overlap` PARAGRAPHS repeated. Same contract, same preconditions,
+/// `overlap` paragraphs repeated. Same contract, same preconditions,
 /// same empty-input answer: see [`paragraph_bounds`] for exactly what
 /// counts as a paragraph boundary here (a heuristic, not a Unicode
-/// Standard segmentation). UNLIKE the word/line twins, paragraphs have
-/// NO content filter: a whitespace-only paragraph IS emitted as a chunk
+/// Standard segmentation). Unlike the word/line twins, paragraphs have
+/// no content filter: a whitespace-only paragraph is emitted as a chunk
 /// (only fully-empty spans are dropped), so an overlapping pair of
 /// chunks can share blank content.
 pub fn chunk_by_paragraphs(
@@ -484,19 +484,19 @@ pub fn chunk_by_paragraphs(
     chunk_by_segments(&bounds, paragraphs_per_chunk, overlap)
 }
 
-/// Line boundaries: `text` split on LINE-BREAK UNITS, where a unit is a
-/// `\n`, a lone `\r`, or a `\r\n` pair counted as ONE (the same
+/// Line boundaries: `text` split on line-break units, where a unit is a
+/// `\n`, a lone `\r`, or a `\r\n` pair counted as one (the same
 /// CR/CRLF-folding convention [`paragraph_bounds`] and `normalize`'s own
 /// pipeline already use; the exotic Unicode line separators
-/// `str.splitlines` also honors — `\v`, `\f`, NEL, LS, PS — are NOT line
+/// `str.splitlines` also honors (`\v`, `\f`, NEL, LS, PS) are not line
 /// breaks here, keeping this family's "what `normalize` folds is what
 /// splits" convention). Every break unit terminates exactly one line;
 /// each returned span is one line's content, `(start, end)` codepoint
-/// offsets EXCLUDING the break unit itself, and a trailing break at end
+/// offsets excluding the break unit itself, and a trailing break at end
 /// of text yields no trailing empty line (there is no content after it).
 ///
 /// A line counts as a line only when it carries at least one
-/// non-whitespace codepoint — the same real-token discipline
+/// non-whitespace codepoint: the same real-token discipline
 /// [`chunk_by_words`] applies to `word_bounds` segments (an inter-word
 /// space run is not a word, a blank line is not a line): one message per
 /// line (a chat thread), one record per line (a log), one cue per block
@@ -504,39 +504,39 @@ pub fn chunk_by_paragraphs(
 /// `lines_per_chunk=200` wants 200 content lines, not "200 lines, of
 /// which 40 are blank separators". "Non-whitespace" is definitional
 /// here: the Unicode `White_Space` property (`char::is_whitespace`),
-/// under which U+001C–U+001F (FS/GS/RS/US) count as CONTENT (Python's
+/// under which U+001C–U+001F (FS/GS/RS/US) count as content (Python's
 /// `str.isspace()` treats them as whitespace, and `str.splitlines`
 /// even breaks on them, so a ported expectation may differ) and NBSP
 /// counts as blank. The blank lines between two counted
-/// lines of the SAME chunk still ride along inside its span (the span is
-/// a contiguous slice of the ORIGINAL text between two absolute offsets,
+/// lines of the same chunk still ride along inside its span (the span is
+/// a contiguous slice of the original text between two absolute offsets,
 /// exactly as inter-word whitespace rides along in `chunk_by_words`);
 /// they belong to neither chunk when the counted lines land in different
 /// chunks. Whitespace-only text, or empty input, yields `[]`.
 ///
-/// UNLIKE the `word_bounds`/`sentence_bounds` spellings (but exactly like
+/// Unlike the `word_bounds`/`sentence_bounds` spellings (but exactly like
 /// [`paragraph_bounds`]), this split point is structurally grapheme-safe
 /// with no merge step: every split lands strictly between a break
 /// character and adjacent content, and the break characters are never
-/// combining marks. The one theoretical divergence — a combining mark
-/// immediately after a newline joins the NEWLINE's cluster, so the next
-/// line's span would start mid-cluster — is the same documented
+/// combining marks. The one theoretical divergence (a combining mark
+/// immediately after a newline joins the newline's cluster, so the next
+/// line's span would start mid-cluster) is the same documented
 /// non-issue [`paragraph_bounds`] carries: the "cluster" is a newline
 /// plus an orphan combining mark, not visible content any line's caller
 /// would call "split".
 pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
     // The same two-spelling split as `paragraph_bounds`: a SIMD
     // `memchr2` walk over break bytes on pure-ASCII text (byte index
-    // IS codepoint index, so offsets are exact), the streaming decode
+    // is codepoint index, so offsets are exact), the streaming decode
     // state machine on non-ASCII text. Both are pinned to the
     // random-access oracle in the tests.
     if text.is_ascii() {
         return line_bounds_ascii(text);
     }
-    // The non-ASCII scan as ONE streaming decode pass, the same shape
+    // The non-ASCII scan as one streaming decode pass, the same shape
     // as `paragraph_bounds`' state machine (no whole-text `Vec<char>`
     // collect, no `char_count` pre-pass, and no mid-loop `total` store
-    // either — the counter is read once after the loop, never stored
+    // either: the counter is read once after the loop, never stored
     // per codepoint): a `pending_cr` flag is the CRLF lookahead, and a
     // `has_non_ws` flag carries the real-line filter so the segment
     // list is built in the same pass that finds the breaks. O(text)
@@ -579,11 +579,11 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
         }
         cp += 1;
     }
-    // End of text closes the final line, and `has_non_ws` ALONE is the
+    // End of text closes the final line, and `has_non_ws` alone is the
     // phantom-line guarantee: it resets together with `seg_start` at
     // every break unit, and only a codepoint at `cp >= seg_start` can
     // set it after the last reset, so `has_non_ws` holding at end of
-    // text implies a real line at `(seg_start, total)` — the former
+    // text implies a real line at `(seg_start, total)`: the former
     // `seg_start < total` half of the guard was implied by exactly that
     // argument and is gone. A trailing break unit already reset
     // `has_non_ws`; empty text never enters the loop, so the flag stays
@@ -608,8 +608,8 @@ fn is_ascii_ws(b: u8) -> bool {
 }
 
 /// The ASCII spelling of [`line_bounds`]' state machine: `memchr2`
-/// hops between break bytes, and each hop's content span — the bytes
-/// since the last break unit's end, all non-break by construction —
+/// hops between break bytes, and each hop's content span: the bytes
+/// since the last break unit's end, all non-break by construction:
 /// is folded into the real-line flag with one contiguous slice scan
 /// (auto-vectorized by the same compiler that would have nothing to
 /// vectorize in a per-`char` decode loop). The break-byte handling
@@ -669,10 +669,10 @@ fn line_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
 
 /// [`chunk_by_words`]'s line-count twin: each chunk spans
 /// `lines_per_chunk` consecutive [`line_bounds`] segments, `overlap`
-/// LINES repeated at the start of the next chunk. Same contract, same
+/// lines repeated at the start of the next chunk. Same contract, same
 /// preconditions, same empty-input answer as its siblings; see
 /// [`line_bounds`] for exactly what counts as a line here (a
-/// content-carrying, newline-terminated segment — blank lines neither
+/// content-carrying, newline-terminated segment: blank lines neither
 /// count nor split a chunk's interior, "content" being the Unicode
 /// `White_Space` reading [`line_bounds`] pins, not Python's
 /// `str.isspace()` notion).
@@ -783,7 +783,7 @@ mod tests {
         bounds
     }
 
-    /// The differential corpus: word/sentence/paragraph shapes — prose,
+    /// The differential corpus: word/sentence/paragraph shapes: prose,
     /// CRLF and lone-CR runs (every unit-counting case the paragraph
     /// scanner has: CRLF pairs, mixed \n\r, trailing and leading runs),
     /// Thai SARA AM (the merge's reason to exist), whitespace-only and
@@ -858,7 +858,7 @@ mod tests {
         // scanner branches on (\r, \n, CRLF pairings, whitespace, and
         // one ordinary character), so the state machine's unit counting
         // is checked against the random-access oracle on runs no
-        // hand-written corpus anticipates — including runs that end at
+        // hand-written corpus anticipates: including runs that end at
         // end-of-text. The soup is pure ASCII, so every case exercises
         // the memchr2 fast path against the oracle's per-char
         // reference; the differential corpus above straddles the
@@ -871,7 +871,7 @@ mod tests {
     fn paragraph_state_machine_survives_a_200k_case_newline_soup() {
         // The committed shape of the "hundreds of thousands of probe
         // calls" a red-team pass runs ad hoc: same generator, same
-        // oracle, 200k cases — a couple of seconds in a debug build,
+        // oracle, 200k cases: a couple of seconds in a debug build,
         // which is why the default suite carries the 300-case cut and
         // this is the explicitly-invoked long form.
         newline_soup(200_000);
@@ -880,8 +880,8 @@ mod tests {
     /// The deterministic newline soup itself: a splitmix-style LCG over
     /// an alphabet of exactly the bytes both scanners branch on
     /// (`\r`, `\n`, space/tab, an ordinary character), each text 1-60
-    /// codepoints, every case checked against BOTH random-access
-    /// oracles — `paragraph_bounds`' unit counting AND `line_bounds`'
+    /// codepoints, every case checked against both random-access
+    /// oracles: `paragraph_bounds`' unit counting and `line_bounds`'
     /// blank-line/CRLF folding (its own reference, the same sweep the
     /// line differential corpus runs, at soup scale instead).
     fn newline_soup(cases: usize) {
@@ -913,10 +913,10 @@ mod tests {
     #[test]
     fn chunk_by_words_never_splits_a_thai_sara_am_cluster_across_two_words() {
         // Raw word_bounds("x0ำy0ำz") = [(0,2)="x0", (2,3)="ำ", (3,5)="y0",
-        // (5,6)="ำ", (6,7)="z"]: TWO combining sequences each split into
+        // (5,6)="ำ", (6,7)="z"]: two combining sequences each split into
         // a base-segment + a lone-combining-mark segment. Neither "ำ"
         // segment is whitespace, so a whitespace-only filter would
-        // NOT catch this: chunk_by_words(text, 1, 0) would silently
+        // not catch this: chunk_by_words(text, 1, 0) would silently
         // return a chunk containing only the bare combining mark. The
         // merge step must fuse each pair into one real word first.
         let text = "x0\u{0E33}y0\u{0E33}z";
@@ -959,11 +959,11 @@ mod tests {
         // word_bounds("the cat sat on the mat") segments: the/ /cat/ /sat/
         // /on/ /the/ /mat: 11 raw segments (6 real word tokens + 5
         // inter-word spaces, each its own WB segment), but chunk_by_words
-        // filters the whitespace-only segments out FIRST so "2 words per
+        // filters the whitespace-only segments out first so "2 words per
         // chunk" means 2 real tokens, not 2 raw segments (which would
         // silently be ~1 real word per chunk on ordinary prose). 2 words
         // per chunk, no overlap: 3 chunks of 2 real words each, spans
-        // still contiguous slices of the ORIGINAL text (inter-word space
+        // still contiguous slices of the original text (inter-word space
         // inside a chunk rides along naturally).
         let text = "the cat sat on the mat";
         let chunks = chunk_by_words(text, 2, 0);
@@ -973,7 +973,7 @@ mod tests {
         assert_eq!(slice(chunks[0]), "the cat");
         assert_eq!(slice(chunks[1]), "sat on");
         assert_eq!(slice(chunks[2]), "the mat");
-        // Non-overlapping in this overlap=0 case, but chunks are NOT
+        // Non-overlapping in this overlap=0 case, but chunks are not
         // necessarily contiguous any more (the space between "cat" and
         // "sat" belongs to neither chunk): this function makes no
         // covering-partition claim, unlike chunk_text.
@@ -985,8 +985,8 @@ mod tests {
     #[test]
     fn chunk_by_words_counts_real_tokens_not_raw_word_bounds_segments() {
         // The regression this pins: word_bounds gives an inter-word space
-        // run its OWN segment, so a naive "group N raw segments" reading
-        // of "words_per_chunk" would silently mean roughly HALF as many
+        // run its own segment, so a naive "group N raw segments" reading
+        // of "words_per_chunk" would silently mean roughly half as many
         // real words per chunk on ordinary space-separated prose.
         // "one two three four five six seven" has 7 real word tokens (13
         // raw word_bounds segments, 7 words + 6 spaces): 3 per chunk
@@ -1029,7 +1029,7 @@ mod tests {
         // LangChain issue #34804: chunk_overlap was silently a no-op
         // except when a size-overflow forced a merge: a real, shipped
         // bug in the most popular chunking library. The regression this
-        // pins: consecutive chunks must share GENUINE, non-empty text,
+        // pins: consecutive chunks must share genuine, non-empty text,
         // not merely satisfy a position check that happens to coincide
         // with hitting a size ceiling. 8 words, no chunk here divides
         // evenly to a size ceiling by coincidence; the overlap must still
@@ -1053,7 +1053,7 @@ mod tests {
                 w[0],
                 w[1]
             );
-            // The shared span reads identically from EITHER chunk's own
+            // The shared span reads identically from either chunk's own
             // text (it's the same underlying offsets on both sides).
             let from_prev = &slice((prev_start, prev_end))[(next_start - prev_start)..];
             let from_next = &slice((next_start, next_end))[..(prev_end - next_start)];
@@ -1196,7 +1196,7 @@ mod tests {
     fn chunk_by_paragraphs_groups_exact_paragraph_counts() {
         // Unlike chunk_by_sentences (whose UAX #29 segments already carry
         // their own trailing whitespace, so chunks stay contiguous),
-        // paragraph_bounds EXCLUDES the separating blank-line run from
+        // paragraph_bounds excludes the separating blank-line run from
         // each paragraph's span, so, like chunk_by_words, chunks here
         // are not necessarily contiguous; assert on content, not on
         // gapless coverage.
@@ -1334,7 +1334,7 @@ mod tests {
 
     /// The random-access `line_bounds` oracle: the whole-text `Vec<char>`
     /// collect with a one-codepoint CRLF lookahead, the pre-#22 spelling
-    /// style `paragraph_bounds_reference` keeps — the differential pin for
+    /// style `paragraph_bounds_reference` keeps: the differential pin for
     /// the streaming state machine above.
     fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
         let chars: Vec<char> = text.chars().collect();
@@ -1343,8 +1343,8 @@ mod tests {
             return Vec::new();
         }
         let is_break = |c: char| c == '\n' || c == '\r';
-        // A '\r' ALWAYS opens a unit (lone CR, or the first half of a CRLF
-        // pair); a '\n' opens one only when it did NOT ride in as the
+        // A '\r' always opens a unit (lone CR, or the first half of a CRLF
+        // pair); a '\n' opens one only when it did not ride in as the
         // second half of a pair (no '\r' immediately before it).
         let is_unit_start =
             |i: usize| chars[i] == '\r' || (chars[i] == '\n' && !(i > 0 && chars[i - 1] == '\r'));
@@ -1436,7 +1436,7 @@ mod tests {
     #[test]
     fn line_bounds_crlf_pair_is_one_unit_and_never_torn() {
         // "a\r\nb": the line ends at the '\r', the next begins after the
-        // '\n' — the pair is consumed as one break, and the '\n' is not a
+        // '\n': the pair is consumed as one break, and the '\n' is not a
         // second line ending that would mint an empty line between them.
         let text = "a\r\nb";
         assert_eq!(line_bounds(text), vec![(0, 1), (3, 4)]);
@@ -1444,8 +1444,8 @@ mod tests {
 
     #[test]
     fn line_bounds_blank_lines_are_not_lines() {
-        // The real-token discipline: blank lines neither count nor split —
-        // "a\n\nb" is TWO lines (the empty line between is dropped), and
+        // The real-token discipline: blank lines neither count nor split:
+        // "a\n\nb" is two lines (the empty line between is dropped), and
         // whitespace-only text is zero lines, the same answer
         // chunk_by_words gives pure-whitespace input.
         assert_eq!(line_bounds("a\n\nb"), vec![(0, 1), (3, 4)]);
@@ -1463,9 +1463,9 @@ mod tests {
 
     #[test]
     fn line_bounds_interior_blank_lines_ride_inside_a_chunk_span() {
-        // chunk spans are contiguous slices of the ORIGINAL text between
+        // chunk spans are contiguous slices of the original text between
         // the first and last counted line's absolute offsets: the blank
-        // line between two counted lines of the SAME chunk rides along
+        // line between two counted lines of the same chunk rides along
         // (exactly as inter-word whitespace rides along in chunk_by_words).
         let text = "msg one\n\nmsg two";
         let total = text.chars().count();
@@ -1526,7 +1526,7 @@ mod tests {
             );
             // The shared span must be real, extractable text (the
             // LangChain #34804 regression, line-count sibling), and it
-            // must be WHOLE lines: the overlap starts at a counted line's
+            // must be whole lines: the overlap starts at a counted line's
             // own start, never inside it.
             let shared = slice((next_start, prev_end));
             assert!(!shared.trim().is_empty());

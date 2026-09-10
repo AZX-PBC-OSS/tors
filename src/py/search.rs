@@ -14,7 +14,7 @@ use crate::search_impl;
 /// walk (its doc carries the handles-alive-across-the-detach soundness
 /// story, true by construction there), patterns refused empty with
 /// `ValueError("empty pattern")`, then `run` over the borrows and the text
-/// under ONE `py.detach` and a build failure mapped to a `ValueError`
+/// under one `py.detach` and a build failure mapped to a `ValueError`
 /// carrying the engine's message. One function, three spellings, so the
 /// walk and the run cannot drift apart.
 fn run_over_borrowed_patterns<R: Send>(
@@ -40,10 +40,10 @@ fn matches_into_triples(matches: Vec<search_impl::PatternMatch>) -> Vec<(usize, 
 
 eager_iter_class! {
     /// The streaming search (v0.9): the same iterator design over
-    /// `find_patterns`' matches, yielding the SAME `(start, end, pattern_index)`
+    /// `find_patterns`' matches, yielding the same `(start, end, pattern_index)`
     /// triples as the list API (pinned to sequence-parity), the whole search
     /// (pattern-list walk, automaton build, scan, byte→char conversion) under
-    /// ONE detach at construction, one 3-tuple of ints per `__next__`. See
+    /// one detach at construction, one 3-tuple of ints per `__next__`. See
     /// `find_patterns_iter`'s docs for the marshalling-caveat answer this is.
     FindPatternsIter, (usize, usize, usize);
 }
@@ -51,7 +51,7 @@ eager_iter_class! {
 /// `tors.find_patterns(patterns, text)`: leftmost-longest, non-overlapping
 /// multi-pattern substring search in one GIL-released native pass: every
 /// occurrence of every pattern, reported as `(start, end, pattern_index)`
-/// with `end` EXCLUSIVE, offsets in PYTHON `str` INDEX (codepoint) units:
+/// with `end` exclusive, offsets in Python `str` index (codepoint) units:
 /// `text[start:end] == patterns[pattern_index]` for every reported match.
 /// The engine is `aho-corasick`'s `MatchKind::LeftmostLongest` (see
 /// `src/search_impl.rs` for the semantics and the byte→char offset mapping;
@@ -60,18 +60,18 @@ eager_iter_class! {
 /// - **leftmost**: a match is reported at the earliest position any pattern
 ///   matches;
 /// - **longest**: among the patterns matching at that position, the longest
-///   wins regardless of list order (NOT regex-alternation leftmost-first
+///   wins regardless of list order (not regex-alternation leftmost-first
 ///   priority: a shorter earlier-listed pattern never beats a longer one);
 /// - **non-overlapping**: the scan resumes at each match's end; matches come
 ///   back in strictly increasing start order;
 /// - **duplicates report the first index**: identical pattern strings are
-///   legal, and a match of that string reports its LOWEST list index.
+///   legal, and a match of that string reports its lowest list index.
 ///
 /// Argument contract, each decision pinned in tests/test_find_patterns.py:
 /// `patterns` must be exactly a `list` of `str` (a tuple or a non-`str` entry
-/// raises `TypeError`); an empty pattern STRING raises
+/// raises `TypeError`); an empty pattern string raises
 /// `ValueError("empty pattern")`, since it would match at every position and
-/// has no leftmost-longest meaning; an empty patterns LIST returns `[]`
+/// has no leftmost-longest meaning; an empty patterns list returns `[]`
 /// immediately, without building an automaton; lone surrogates raise
 /// `UnicodeEncodeError` at the argument boundary (the standard str-in
 /// boundary). An automaton build can still fail on engine limits (a single
@@ -81,13 +81,13 @@ eager_iter_class! {
 /// GIL model: the argument side walks the pattern list once under the GIL,
 /// borrowing each entry's UTF-8 zero-copy (the standard str-in borrow class,
 /// O(patterns) handles; the one-time O(input) UTF-8 materialization applies
-/// per NON-ASCII pattern object on first call, and to `text` as usual); the
-/// WHOLE search (automaton build, scan, and the byte→char offset conversion,
+/// per non-ASCII pattern object on first call, and to `text` as usual); the
+/// whole search (automaton build, scan, and the byte→char offset conversion,
 /// with the `is_ascii` fast path) runs under one `py.detach`; the
-/// GIL-held residue is the return marshalling, ONE 3-TUPLE OF INTS PER MATCH,
+/// GIL-held residue is the return marshalling, one 3-tuple of ints per match,
 /// O(matches), the `word_bounds`/`diff_opcodes` list-shape class. The
-/// measured band (sparse vs matches-heavy 12 MiB cells) is recorded in the
-/// README and pinned by tests/test_gil_release.py.
+/// measured band (sparse vs matches-heavy 12 MiB cells) is recorded in
+/// docs/performance.md and pinned by tests/test_gil_release.py.
 #[pyfunction]
 pub fn find_patterns(
     py: Python<'_>,
@@ -101,7 +101,7 @@ pub fn find_patterns(
     Ok(matches_into_triples(matches))
 }
 
-/// `tors.count_matches(patterns, text)`: the COUNT spelling of
+/// `tors.count_matches(patterns, text)`: the count spelling of
 /// `find_patterns` (v0.9): the same leftmost-longest, non-overlapping
 /// search, answering just the number: `count_matches(p, t) ==
 /// len(find_patterns(p, t))`, pinned. Why a separate function: the count is
@@ -133,13 +133,13 @@ pub fn count_matches(py: Python<'_>, patterns: Bound<'_, PyList>, text: &str) ->
 
 /// `tors.find_patterns_iter(patterns, text)`: the streaming spelling of
 /// `find_patterns` (v0.9), the `word_bounds_iter` design over matches: a
-/// lazy iterator yielding the SAME `(start, end, pattern_index)` triples,
+/// lazy iterator yielding the same `(start, end, pattern_index)` triples,
 /// in the same order, as the list API (pinned to sequence-parity). The
 /// whole search (the pattern-list walk, automaton build, scan, and the
-/// byte→char offset conversion) fills an internal buffer under ONE
+/// byte→char offset conversion) fills an internal buffer under one
 /// `py.detach` at construction (the match buffer is 24 bytes per match
 /// against the list shape's Python tuples), and each `__next__` then holds
-/// the GIL only to construct ONE 3-tuple of ints, µs-scale. This is the
+/// the GIL only to construct one 3-tuple of ints, µs-scale. This is the
 /// streaming answer to the O(matches) list-marshalling caveat the v0.7
 /// section records: ~13 ms held per 100k matches in the list shape's tuple
 /// construction becomes ~nothing per item, and a whole-corpus sweep that
@@ -175,11 +175,11 @@ pub fn find_patterns_iter(
 
 /// `tors.replace_many(text, replacements)`: simultaneous multi-pattern
 /// replace in one GIL-released native pass (v0.8): every occurrence of every
-/// KEY in the dict is replaced by its VALUE, with `find_patterns`'s exact
+/// key in the dict is replaced by its value, with `find_patterns`'s exact
 /// search semantics: leftmost-longest (among the keys matching at a
-/// position, the longest wins regardless of dict order; NOT regex
+/// position, the longest wins regardless of dict order; not regex
 /// alternation's leftmost-first priority), non-overlapping (the scan resumes
-/// at each match's end), and the replacement output is NEVER re-scanned (a
+/// at each match's end), and the replacement output is never re-scanned (a
 /// value that itself contains a key does not cascade, the double-replace
 /// guard, the `&#38;amp;` discipline). No offset conversion exists here
 /// (the output is spliced strings, not reported offsets); one automaton
@@ -187,13 +187,13 @@ pub fn find_patterns_iter(
 ///
 /// This is the replace primitive CPython does not have: chained
 /// `str.replace` calls are N whole-text GIL-held passes, and `re.sub` with
-/// an alternation is leftmost-first AND rescans its own output, so neither
+/// an alternation is leftmost-first and rescans its own output, so neither
 /// has these semantics. The canonical consumers are redaction and
 /// normalization maps (a PII scrub list, a terminology rewrite table),
 /// exactly the `find_patterns` + replace pipeline in one call.
 ///
 /// Identity-return contract (the v0.4 idiom, complete form): a map whose
-/// keys never match returns the ORIGINAL input object, and so does a map
+/// keys never match returns the original input object, and so does a map
 /// whose net effect is the identity: `tors.replace_many(s, m) is s`
 /// exactly when `tors.replace_many(s, m) == s`.
 ///
@@ -202,12 +202,12 @@ pub fn find_patterns_iter(
 /// `str -> str` (a non-`str` key or value raises `TypeError`; a tuple or
 /// list of pairs raises `TypeError`, since the dict is the ergonomic shape
 /// and keys are unique by construction, which is what makes the semantics
-/// order-free); an EMPTY key raises `ValueError("empty pattern")` (it would
+/// order-free); an empty key raises `ValueError("empty pattern")` (it would
 /// match at every position, the `find_patterns` contract); an empty dict
 /// returns the input object immediately, without building an automaton;
 /// lone surrogates raise `UnicodeEncodeError` at the argument boundary (the
 /// standard str-in boundary, paid by the text and every key and value).
-/// Dict ORDER cannot matter (leftmost-longest, unique keys), pinned.
+/// Dict order cannot matter (leftmost-longest, unique keys), pinned.
 /// An automaton build can still fail on engine limits (a key spanning more
 /// than the engine's u32 offset budget, 4 GiB); that maps to a
 /// `ValueError` carrying the engine's message.
@@ -245,15 +245,15 @@ pub fn replace_many(
 }
 
 /// `tors.replace_many_masked(text, replacements, mask="*")`: the
-/// LENGTH-PRESERVING spelling of `replace_many`, the redaction shape: the
+/// length-preserving spelling of `replace_many`, the redaction shape: the
 /// same leftmost-longest, non-overlapping, never-rescanned scan, but every
-/// matched span of L characters is replaced by the value TRUNCATED to L
+/// matched span of L characters is replaced by the value truncated to L
 /// characters (value longer) or the value followed by `L − len(value)`
-/// copies of `mask` (value shorter), so the output's CHARACTER length and
+/// copies of `mask` (value shorter), so the output's character length and
 /// every non-matching span's offsets are exactly the input's, which is
 /// what redaction pipelines need (every offset computed before redaction,
 /// find_patterns results, word/sentence bounds, stays valid after it).
-/// BYTE length may change (a multibyte value/mask replaces the matched
+/// Byte length may change (a multibyte value/mask replaces the matched
 /// bytes); the guarantee is character/offset preservation, the
 /// Python-visible one. Worked rows: `{"cat": "[REDACTED]"}` mask `"*"` on
 /// `"the cat sat"` → `"the [RE sat"` (truncation, no `*` anywhere);

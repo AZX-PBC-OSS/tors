@@ -6,7 +6,7 @@
 //! Leaves hash as `SHA-256(0x00 || chunk)`; internal nodes hash as
 //! `SHA-256(0x01 || left || right)`: the RFC 6962 / Certificate
 //! Transparency convention. `rs_merkle`'s *built-in* `Sha256Algorithm`
-//! does NOT do this: its `hash()` is undifferentiated `SHA-256(data)`, and
+//! does not do this: its `hash()` is undifferentiated `SHA-256(data)`, and
 //! its default `Hasher::concat_and_hash` feeds `SHA-256(left || right)`
 //! through that same function; verified directly against the crate's
 //! vendored source (`hasher.rs`'s default `concat_and_hash`,
@@ -15,7 +15,7 @@
 //! same space: the exact ambiguity RFC 6962 domain separation exists to
 //! close (a forged proof could present an internal node's hash as if it
 //! were some leaf's digest). `merkle_root`/`merkle_diff` don't expose
-//! proof generation yet, but the hash SCHEME is part of the root's output
+//! proof generation yet, but the hash scheme is part of the root's output
 //! contract from v1 regardless: changing it later would silently change
 //! every previously-computed root, so it needs to be correct now rather
 //! than patched in when proofs are added. `DomainSeparatedSha256` below is
@@ -23,12 +23,12 @@
 //!
 //! # Odd-sized layers
 //!
-//! `rs_merkle`'s default `concat_and_hash` PROMOTES an unpaired left node
+//! `rs_merkle`'s default `concat_and_hash` promotes an unpaired left node
 //! to the next layer unchanged (its `None => *left` arm) rather than
 //! duplicating it against itself. Duplication is Bitcoin's original
 //! convention and the actual mechanism CVE-2012-2459 exploited: two
 //! differently-shaped leaf lists (one a duplicate-padded version of a
-//! shorter list) could produce the SAME root. tors keeps rs_merkle's
+//! shorter list) could produce the same root. tors keeps rs_merkle's
 //! promotion behavior (only the two-child case gets the domain-separating
 //! prefix), which is the standard mitigation and matches RFC 6962.
 
@@ -44,7 +44,7 @@ struct DomainSeparatedSha256;
 impl Hasher for DomainSeparatedSha256 {
     type Hash = [u8; 32];
 
-    // Required by the trait, but NOT part of this tree's construction path:
+    // Required by the trait, but not part of this tree's construction path:
     // `concat_and_hash` below is overridden instead of relying on the
     // default (the only caller of `hash` in rs_merkle's own tree-building
     // code). Kept as a plain, undifferentiated SHA-256 for trait
@@ -92,7 +92,7 @@ pub fn merkle_root(chunks: &[&[u8]]) -> Option<String> {
     Some(const_hex::encode(root))
 }
 
-/// Indices where `chunks_a[i] != chunks_b[i]`, comparing chunk DIGESTS
+/// Indices where `chunks_a[i] != chunks_b[i]`, comparing chunk digests
 /// (a fixed 32-byte cost per comparison) rather than raw chunk contents.
 /// Every index at or beyond the shorter list's length is reported: there
 /// is no counterpart chunk to compare against, so a length mismatch is, in
@@ -106,7 +106,7 @@ pub fn merkle_root(chunks: &[&[u8]]) -> Option<String> {
 /// A Merkle tree's "skip identical subtrees" advantage matters when the
 /// comparison itself is expensive to perform per-index (e.g. over a
 /// network, without transferring full subtrees); not here, where the
-/// O(n) hashing pass IS the entire cost and a tree buys nothing further.
+/// O(n) hashing pass is the entire cost and a tree buys nothing further.
 /// `merkle_root` still builds a real tree: that's its actual job;
 /// `merkle_diff` simply doesn't need one.
 pub fn merkle_diff(chunks_a: &[&[u8]], chunks_b: &[&[u8]]) -> Vec<usize> {

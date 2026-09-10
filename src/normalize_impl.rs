@@ -44,7 +44,7 @@ fn strip_bounds(s: &str) -> Option<(usize, usize)> {
 }
 
 /// The strip as a borrowed slice: the shape this module's unit tests use in their
-/// pure-Python-style reference pipeline. Production strips INSIDE the scan (the
+/// pure-Python-style reference pipeline. Production strips inside the scan (the
 /// leading run is dropped at the first non-whitespace char, the trailing run by the
 /// end-of-input truncate to `confirmed`), so this stays test-only.
 #[cfg(test)]
@@ -84,15 +84,15 @@ fn scan_is_verbatim(text: &str) -> bool {
     !is_py_whitespace(last)
 }
 
-/// The identity probe: `(qc_yes, identity)`. `identity` says the COMPLETE
+/// The identity probe: `(qc_yes, identity)`. `identity` says the complete
 /// pipeline is a no-op on `text`: NFC quick-check Yes (the crate's
 /// `is_nfc_quick`, the same property data CPython's
 /// `unicodedata.normalize` fast path consults; 2.4ms on 12 MiB ASCII
-/// prose, measured, against the 94ms collect it can skip) AND every scan
+/// prose, measured, against the 94ms collect it can skip) and every scan
 /// stage's fingerprint absent ([`scan_is_verbatim`]). `qc_yes` is returned
 /// alongside so the caller can reuse it for the scan-input-direct decision
 /// instead of consulting the quick check twice. The pyo3 layer returns the
-/// ORIGINAL input object on the identity path: zero allocation, zero
+/// original input object on the identity path: zero allocation, zero
 /// marshalling.
 fn probe(text: &str) -> (bool, bool) {
     let qc_yes = is_nfc_quick(text.chars()) == IsNormalized::Yes;
@@ -133,14 +133,14 @@ fn flush(out: &mut String, nl_run: &mut usize, pending_ws: &mut String) {
 /// reference-oracle battery and the Python-side exhaustive/hypothesis suites
 /// pin the equivalence):
 ///
-/// - The strip is FUSED into the scan instead of a post-pass: whitespace
+/// - The strip is fused into the scan instead of a post-pass: whitespace
 ///   emitted before the first non-whitespace char is dropped at that char
 ///   (the leading strip: `out.clear()`, free), and everything after the
 ///   last non-whitespace char is dropped by the end-of-input truncate to
 ///   `confirmed` (the trailing strip). `confirmed` is the byte length of the
 ///   output that can never be stripped: everything up to and including the
 ///   most recent non-whitespace char.
-/// - An optional SHA-256 is fed the confirmed bytes AS THEY ARE WRITTEN, in
+/// - An optional SHA-256 is fed the confirmed bytes as they are written, in
 ///   `HASH_CHUNK`-sized spans: finalize's digest is computed in the same pass
 ///   that builds the buffer, not a second walk of the finished output.
 fn scan(text: &str, mut hasher: Option<Sha256>) -> (String, Option<[u8; 32]>) {
@@ -173,7 +173,7 @@ fn scan(text: &str, mut hasher: Option<Sha256>) -> (String, Option<[u8; 32]>) {
                 // and the full property match runs only for candidates.
                 let is_ws = !('\u{21}'..='\u{7e}').contains(&c) && is_py_whitespace(c);
                 if is_ws {
-                    // Emitted like any char, but UNCONFIRMED: it may yet prove
+                    // Emitted like any char, but unconfirmed: it may yet prove
                     // to be part of the trailing strip.
                     flush(&mut out, &mut nl_run, &mut pending_ws);
                     out.push(c);
@@ -218,7 +218,7 @@ fn scan(text: &str, mut hasher: Option<Sha256>) -> (String, Option<[u8; 32]>) {
 /// The shared pipeline driver behind [`normalize`] / [`normalize_cow`] (no
 /// hasher) and `finalize_impl::finalize_checked` (hasher supplied): consult
 /// the quick check once; a Yes-with-clean-scan input returns the input
-/// BORROWED with the digest (when hashing) computed straight from the input
+/// borrowed with the digest (when hashing) computed straight from the input
 /// bytes: no output allocation at all; a Yes-with-dirty-scan input skips the
 /// NFC materialization and scans the input directly; anything else runs the
 /// NFC pass first. A final output==input comparison extends the identity

@@ -4,7 +4,7 @@
 //! out of `lib.rs` (which held every binding directly and had grown past
 //! 1900 lines) so each feature's binding code sits next to its own
 //! concerns rather than in one crate-wide file; `lib.rs` keeps only the
-//! genuinely cross-feature helpers (`detached_transform`, `EagerIter`,
+//! cross-feature helpers (`detached_transform`, `EagerIter`,
 //! `validate_deadline_ms`, `parse_boundary`) and the `#[pymodule]`
 //! registration. This layer's own cross-feature helpers live here:
 //! `_borrow` (the shared list/dict argument walks and validators, private
@@ -37,7 +37,7 @@ pub mod tfidf;
 pub mod truncate;
 pub mod url;
 
-/// Emits one eager-iterator `#[pyclass]`: the Python-visible class NAME,
+/// Emits one eager-iterator `#[pyclass]`: the Python-visible class name,
 /// its per-class doc comment (the payload's `#[doc]` attribute lands on
 /// the struct through pyo3's doc-attribute path, so the class `__doc__`
 /// is exactly a hand-written doc comment's), and the item type, wrapped

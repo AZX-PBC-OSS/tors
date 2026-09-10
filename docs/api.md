@@ -37,7 +37,7 @@ matter what thread it runs on.
 
 When the complete pipeline is a no-op on the input, i.e. already NFC (Unicode
 quick-check Yes), no CR, no spaces/tabs before a newline, no 3+ newline runs, and no
-whitespace at either end, `normalize` returns the ORIGINAL input object:
+whitespace at either end, `normalize` returns the original input object:
 
 ```python
 tors.normalize(s) is s  # True whenever the pipeline changes nothing
@@ -59,7 +59,7 @@ tors.normalize("line one  \n\n\n\nline two\r\n")
 # "line one\n\nline two"
 ```
 
-**Async**: `await tors.aio.normalize(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.normalize(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.finalize`
 
@@ -72,7 +72,7 @@ lowercase-hex SHA-256 of the normalized text's UTF-8 bytes: byte-identical to
 `hashlib.sha256(normalized.encode("utf-8")).hexdigest()`. It exists for pipelines that
 normalize then content-hash (dedupe gates), collapsing two whole-text passes into one.
 On the identity path the digest is computed straight from the borrowed input buffer and
-the string element is the ORIGINAL object (`tors.finalize(s)[0] is s` when the pipeline
+the string element is the original object (`tors.finalize(s)[0] is s` when the pipeline
 changes nothing). A `str` holding lone surrogates is refused at the argument boundary
 with `UnicodeEncodeError` ("surrogates not allowed"): pyo3's `&str` extraction
 behavior, the same boundary every str-in function here documents.
@@ -82,7 +82,7 @@ text, digest = tors.finalize("line one  \n\n\n\nline two\r\n")
 # ("line one\n\nline two", "e986ba08...f7b942a")
 ```
 
-**Async**: `await tors.aio.finalize(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.finalize(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.strip_controls`
 
@@ -97,11 +97,11 @@ scrub model-authored display text needs before it is stored or served (a chatty
 or injected model cannot plant terminal control sequences in a row the UI
 renders).
 
-Two scope cuts, both deliberate. C1 controls (`U+0080`–`U+009F`) pass through
+Two scope cuts. C1 controls (`U+0080`–`U+009F`) pass through
 untouched: the adopted call-site regexes do not cover them either, so covering
-them here would silently change adopted behavior — C1 scrubbing is a follow-up
+them here would silently change adopted behavior; C1 scrubbing is a follow-up
 with its own contract, not a silent extension of this one. And `\t`, `\n`,
-`\r` ARE scrubbed (they are C0): do not reach for this on multi-line prose you
+`\r` are scrubbed (they are C0): do not reach for this on multi-line prose you
 want to keep line-shaped. No edge strip either: a control run at either end
 becomes an edge space for the caller to `.strip()`.
 
@@ -112,7 +112,7 @@ tors.strip_controls("score: 4\x00\x01great\x7f")
 # "score: 4 great "
 ```
 
-**Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.nfc` / `tors.nfd` / `tors.nfkc` / `tors.nfkd`
 
@@ -131,7 +131,7 @@ identity-return contract as `normalize` (`tors.nfc(s) is s` whenever `tors.nfc(s
 s`). tors ships its own Unicode tables (Unicode 16.0.0, the same UCD CPython 3.14
 ships), so the same input produces the same output on every supported Python: on older
 interpreters the only divergences from that interpreter's own `unicodedata` are on
-codepoints it leaves unassigned; no ASSIGNED codepoint diverges in any form (pinned
+codepoints it leaves unassigned; no assigned codepoint diverges in any form (pinned
 exhaustively per interpreter by `tests/test_parity.py`).
 
 ## `tors.html_unescape`
@@ -140,7 +140,7 @@ exhaustively per interpreter by `tests/test_parity.py`).
 def html_unescape(text: str) -> str: ...
 ```
 
-`html.unescape(text)` over the FULL HTML5 named-entity table (all 2231 entries of
+`html.unescape(text)` over the full HTML5 named-entity table (all 2231 entries of
 `html.entities.html5`, with- and without-semicolon spellings) plus CPython's exact
 numeric-reference classification (the Windows-1252 remap, the 126
 invalid-codepoints-to-empty quirk, out-of-range to U+FFFD, the greedy-decimal
@@ -148,13 +148,13 @@ invalid-codepoints-to-empty quirk, out-of-range to U+FFFD, the greedy-decimal
 remainder). On text the unescape leaves unchanged it returns the input object itself
 (CPython's own no-`&` fast-path idiom).
 
-**Raises `ValueError` on CPython 3.11+** when a DECIMAL numeric reference's digit run
+**Raises `ValueError` on CPython 3.11+** when a decimal numeric reference's digit run
 exceeds `sys.get_int_max_str_digits()` (default 4300): the stdlib's own integer string
 conversion limit, with its exact message (`"Exceeds the limit (4300 digits) for integer
 string conversion: value has 4301 digits; use sys.set_int_max_str_digits() to increase
 the limit"`). Leading zeros count toward the run; the raise precedes every
 classification; the limit is read from the running interpreter once per call, so
-`sys.set_int_max_str_digits()` changes are honored on the next call. HEX references are
+`sys.set_int_max_str_digits()` changes are honored on the next call. Hex references are
 exempt (base 16 is a power of two: the limit applies only to non-power-of-two bases).
 CPython 3.10 has no limit at all, and tors matches it there: nothing raises.
 
@@ -169,7 +169,7 @@ tors.html_unescape("Tom &amp; Jerry &#233;")
 def grapheme_count(text: str) -> int: ...
 ```
 
-The number of UAX #29 EXTENDED grapheme clusters (ZWJ emoji sequences are one cluster,
+The number of UAX #29 extended grapheme clusters (ZWJ emoji sequences are one cluster,
 combining-mark chains join their base, CRLF is one cluster, regional-indicator pairs
 join). The stdlib has no segmenter at all: the gap this exists to fill. The return is
 a single `int`: no list marshalling class at all, the cleanest GIL cell in the suite.
@@ -187,12 +187,12 @@ def word_bounds(text: str) -> list[tuple[int, int]]: ...
 ```
 
 The UAX #29 word-boundary segments as `(start, end)` pairs in Python `str` index
-(codepoint) units: `text[start:end]` IS the segment; bounds cover `[0, len(text))` and
-joining the slices reproduces the input. OFFSETS, never string lists (marshalling
-thousands of small `PyString`s under the GIL would eat the win). One measured caveat,
-pinned openly: the return marshalling constructs one 2-tuple of ints per segment under
-the GIL, O(number-of-segments), a measured 428–567 ms hold at 12 MiB of prose
-(3.67 M segments). Fine at document scale; for whole-file sizes use the iterator
+(codepoint) units: `text[start:end]` is the segment; bounds cover `[0, len(text))` and
+joining the slices reproduces the input. Offsets, never string lists (marshalling
+thousands of small `PyString`s under the GIL would eat the win). One measured caveat:
+the return marshalling constructs one 2-tuple of ints per segment under the GIL,
+O(number-of-segments), a measured 428–497 ms hold at 12 MiB of prose
+(3.67M segments). Fine at document scale; for whole-file sizes use the iterator
 below.
 
 ```python
@@ -211,8 +211,8 @@ sequence-parity with the list API over every tricky row and hypothesis text), yi
 lazily. The segmentation runs under one GIL-released pass when the iterator is
 constructed, and each `__next__` holds the GIL only to construct one tuple (µs-scale):
 worst heartbeat gap 15.4 ms at 12 MiB, against the list shape's structurally
-unattainable 428–567 ms band; and the full drain is also ~2.1× FASTER in wall time
-than the list API (347 ms vs 724 ms at 12 MiB, measured). `__length_hint__` reports the
+unattainable 428–497 ms band; and the full drain is also ~2.1x faster in wall time
+than the list API (measured at 12 MiB). `__length_hint__` reports the
 remaining bound count and tracks partial consumption. The list API stays the right
 shape for small inputs and one-shot batch work.
 
@@ -248,7 +248,7 @@ closed-set convention). The argument must be exactly `bytes` (`bytearray`/`memor
 raise `TypeError`): the pass reads a zero-copy borrow of the immutable buffer with the
 GIL released, and a writable buffer would be a data race, not a semantic difference.
 
-**Async**: `await tors.aio.decode_utf8(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.decode_utf8(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.finalize_utf8`
 
@@ -265,7 +265,7 @@ extraction pipeline wants for its text reads. Strict (default) raises the stdlib
 substitutions through the pipeline. Same bytes-in GIL model as `decode_utf8`: no
 argument-materialization class at all.
 
-**Async**: `await tors.aio.finalize_utf8(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.finalize_utf8(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.b64_encode_bytes`
 
@@ -277,7 +277,7 @@ def b64_encode_bytes(raw: bytes) -> str: ...
 content-addressing paths that today hold the GIL for the whole encode. The argument
 contract matches the bytes-in surface (exactly `bytes`).
 
-**Async**: `await tors.aio.b64_encode_bytes(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.b64_encode_bytes(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.b64_decode`
 
@@ -286,12 +286,12 @@ def b64_decode(s: str, *, validate: bool = True) -> bytes: ...
 ```
 
 `base64.b64decode(s, validate=...)` over ASCII strings: same decoded bytes, same
-raised exception (the REAL `binascii.Error`, so `except binascii.Error` and
+raised exception (the real `binascii.Error`, so `except binascii.Error` and
 `except ValueError` both keep working), same messages, including all five strict-mode
 messages and the lenient mode's discard-non-alphabet rules (`'Zm9v=Zg=='` → `b'foof'`).
 The core is a line-for-line port of the post-gh-145264 `binascii_a2b_base64_impl`
 (CPython's 3.13/3.14 maintenance branches): in lenient mode, excess padding is ignored
-and data after a completed pad sequence is DECODED, not silently dropped
+and data after a completed pad sequence is decoded, not silently dropped
 (`'Zg==Zg=='` → `b'f\x06`'`). CPython before that fix truncated the trailing data
 there, a parser differential it fixed as a security issue, and tors ships the fixed
 machine on every interpreter it supports rather than matching each stdlib it happens
@@ -300,7 +300,7 @@ divergences). `validate=True` is the default (decode-side callers want invalid i
 to fail loudly); a non-ASCII `str` (including one holding lone surrogates) raises the
 stdlib's own plain `ValueError`; non-`str` input raises `TypeError`.
 
-**Async**: `await tors.aio.b64_decode(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.b64_decode(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.utf8_is_valid`
 
@@ -334,8 +334,8 @@ BOM: a leading BOM-like byte pair decodes as the literal U+FEFF character, match
 `"utf-16-le"`/`"utf-16-be"`.
 
 Strict mode raises CPython's own `UnicodeDecodeError`, including `.encoding` (always the
-RESOLVED label, `"utf-16-le"` or `"utf-16-be"`, never the bare `"utf-16"` name, even under
-`byteorder="native"`). UTF-16 has FOUR distinct reasons, all verified against a running
+resolved label, `"utf-16-le"` or `"utf-16-be"`, never the bare `"utf-16"` name, even under
+`byteorder="native"`). UTF-16 has four distinct reasons, all verified against a running
 interpreter:
 
 - `"truncated data"`: a lone trailing byte, one short of a full code unit, with no
@@ -362,7 +362,7 @@ tors.decode_utf16(b"\xff\xfeh\x00i\x00")  # "hi"
 tors.decode_utf16(b"h\x00i", errors="replace")  # "h�"
 ```
 
-**Async**: `await tors.aio.decode_utf16(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.decode_utf16(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.utf16_is_valid`
 
@@ -390,7 +390,7 @@ def detect_encoding(raw: bytes, *, tld: str | None = None) -> str: ...
 Best-guess character encoding for non-UTF8 legacy/OCR byte content, via `chardetng`
 (the detector Firefox ships), GIL-released. Unlike `utf8_is_valid`/`decode_utf8`
 there is no ground truth here: this is a heuristic guesser, not a validator, and it
-always returns SOME codec name rather than raising for well-formedness reasons. The
+always returns some codec name rather than raising for well-formedness reasons. The
 intended pipeline: call `utf8_is_valid` first, and only reach for `detect_encoding`
 on the bytes that already failed that check, then decode with the returned name.
 
@@ -405,7 +405,7 @@ an optional top-level-domain hint that
 disambiguates language-family-ambiguous input: accepted in whatever natural
 spelling a caller has (`".jp"`, `"JP"`, or `"jp"`; a full domain or non-ASCII input
 degrades to "no hint" rather than raising, since `chardetng`'s own `tld` parameter
-PANICS on anything but a bare lowercase ASCII label with no period: a caller
+panics on anything but a bare lowercase ASCII label with no period: a caller
 shouldn't crash over a hint spelled the normal way).
 
 ```python
@@ -421,16 +421,16 @@ def diff_opcodes(
 ) -> list[tuple[str, int, int, int, int]]: ...
 ```
 
-**Async**: `await tors.aio.diff_opcodes(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.diff_opcodes(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
-`difflib.SequenceMatcher(None, a, b).get_opcodes()`'s SHAPE at native speed:
+`difflib.SequenceMatcher(None, a, b).get_opcodes()`'s shape at native speed:
 `(tag, i1, i2, j1, j2)` tuples with `tag` in `{"equal", "replace", "delete",
 "insert"}`, ranges monotone/contiguous/covering both sides, adjacent delete+insert
 merged into `replace` exactly as difflib presents it, indices in Python `str`
-(codepoint) units. CHARACTER-level, like difflib on `str` operands: that is what
+(codepoint) units. Character-level, like difflib on `str` operands: that is what
 makes difflib the parity oracle; `tors.diff_opcodes_lines` (below) is the
 line-level spelling. Exact agreement with difflib is pinned on the classes whose
-canonical opcode list is FORCED: verified by difflib's own answer carrying the
+canonical opcode list is forced: verified by difflib's own answer carrying the
 canonical single-op shape (pure insert/delete, single-run replace, all-equal,
 empty operands); structural validity (the opcodes reconstruct both sides) is
 pinned by hypothesis over arbitrary pairs; and the boundary cases where the two
@@ -442,8 +442,7 @@ and tested, never silent. The four tag strings are interned once per call, so
 
 `deadline_ms` bounds the superlinear worst case: on hard inputs (few anchorable unique
 records: a character-level permutation is the measured shape) the Myers search's work
-grows roughly ~n² with size (measured: 50k chars 0.32 s, 200k 3.67 s, 400k 13.81 s, 1M
-183.6 s). On expiry the incomplete result is discarded and `TimeoutError` is raised
+grows roughly ~n² with size (measured: 50k chars 0.32 s, 1M chars 183.6 s). On expiry the incomplete result is discarded and `TimeoutError` is raised
 naming the elapsed cost and the deadline; `None` (the default) is the unbounded diff,
 unchanged; a non-positive or non-finite value raises `ValueError` before any work runs
 (an enormous-but-finite value is legal: it saturates to "unbounded" rather than
@@ -463,12 +462,12 @@ def diff_opcodes_lines(
 ) -> list[tuple[str, int, int, int, int]]: ...
 ```
 
-**Async**: `await tors.aio.diff_opcodes_lines(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.diff_opcodes_lines(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
-The LINE-level spelling of `diff_opcodes`: the same opcode shape, engine, validity
+The line-level spelling of `diff_opcodes`: the same opcode shape, engine, validity
 contract, boundary-class divergences, and `deadline_ms` machinery; but the operands
 are tokenized as lines (each line keeps its `\n`, the last may lack one) and the
-indices address LINES, so `a_lines[i1:i2]` slicing reconstructs. Measured on the
+indices address lines, so `a_lines[i1:i2]` slicing reconstructs. Measured on the
 12 MiB near-identical pair: 5 line-opcodes and 1.9–2.6 ms walls where the char-level
 spelling emits 235 opcodes over 76–88 ms: one call instead of a Python split
 round-trip plus the diff.
@@ -476,15 +475,15 @@ round-trip plus the diff.
 **The tokenization is `'\n'`-only, not full `str.splitlines()`.** `a_lines`/`b_lines`
 must be built as `a.split("\n")`-with-terminators-reattached (equivalently,
 `re.split(r"(?<=\n)", a)` with a trailing empty string dropped if `a` ends
-in `'\n'`) for the reconstruction contract above to hold: NOT
+in `'\n'`) for the reconstruction contract above to hold: not
 Python's `str.splitlines(keepends=True)`, which additionally breaks on `\r`,
 `\r\n` collapsed to one line, `\v`, `\f`, `\x1c`–`\x1e`, `\x85`, U+2028 LINE SEPARATOR, and U+2029 PARAGRAPH
 SEPARATOR. Text using any of those as its only line terminator (classic Mac
-`\r`-only line endings are the realistic case) tokenizes as ONE line under
+`\r`-only line endings are the realistic case) tokenizes as one line under
 `diff_opcodes_lines` where `str.splitlines()` would see several, a real,
 measured divergence. `'\n'` is the terminator every
-practical document/version-diff pipeline actually uses; the narrower contract is a
-documented choice, not an oversight.
+practical document/version-diff pipeline actually uses; the narrower contract is
+documented.
 
 ```python
 tors.diff_opcodes_lines("l1\nl2\nl3\n", "l1\nX\nl3\nl4\n")
@@ -503,16 +502,16 @@ CPython does not have: every occurrence of every key is replaced by its value wi
 `find_patterns`'s exact search semantics.
 
 - **leftmost-longest**: among the keys matching at a position, the longest wins
-  regardless of dict order (NOT `re.sub` alternation's leftmost-first priority);
+  regardless of dict order (not `re.sub` alternation's leftmost-first priority);
 - **non-overlapping**: the scan resumes at each match's end;
 - **never re-scanned**: a value that itself contains a key does not cascade:
   `replace_many("a", {"a": "ba"})` is `"ba"`, not `"baba"`.
 
 The alternatives are all worse: chained `str.replace` calls are N whole-text
-GIL-held passes, and `re.sub` alternation is leftmost-first AND rescans its own
+GIL-held passes, and `re.sub` alternation is leftmost-first and rescans its own
 output. The canonical consumers are redaction and normalization maps. Identity
 contract: `replace_many(s, m) is s` exactly when `replace_many(s, m) == s` (no
-match, net-identity, or the empty dict all return the ORIGINAL object). Argument
+match, net-identity, or the empty dict all return the original object). Argument
 contract: `replacements` must be exactly a `dict[str, str]` (a list/tuple of pairs
 raises `TypeError`; dict order cannot matter: pinned); an empty key raises
 `ValueError("empty pattern")`; lone surrogates raise `UnicodeEncodeError` at the
@@ -536,13 +535,13 @@ leftmost-longest, non-overlapping, never-rescanned scan, but each matched span's
 character length is never allowed to change. For a matched span of L characters
 and its key's replacement value of C characters, exactly one branch fires:
 
-- **C >= L (value at least as long) means TRUNCATION**: the value's first L characters
+- **C >= L (value at least as long) means truncation**: the value's first L characters
   are emitted; `mask` is never consulted.
-- **C < L (value shorter) means PADDING**: the whole value is emitted, followed by
+- **C < L (value shorter) means padding**: the whole value is emitted, followed by
   `L - C` copies of `mask`.
 
-The replacement VALUE is never ignored: it is truncated or padded to the
-MATCHED PATTERN's own character length, not masked outright. To redact a span
+The replacement value is never ignored: it is truncated or padded to the
+matched pattern's own character length, not masked outright. To redact a span
 completely, use `""` as the value: the empty value always takes the padding
 branch and becomes pure `mask * L`.
 
@@ -557,9 +556,9 @@ tors.replace_many_masked("the cat sat", {"cat": ""}, "*")
 
 Because every matched span is replaced by exactly as many characters as it
 matched, and every non-matching span is copied through untouched, the output's
-CHARACTER count and every non-matching span's offsets equal the input's:
+character count and every non-matching span's offsets equal the input's:
 offsets computed before redaction (`find_patterns` spans, word/sentence bounds,
-diff opcodes) stay valid against the redacted text. BYTE length may still change
+diff opcodes) stay valid against the redacted text. Byte length may still change
 (a multibyte value or mask replaces the matched key's bytes); only the
 character-unit guarantee is made, which is the unit every offset this crate
 reports uses.
@@ -572,7 +571,7 @@ contract is `replace_many`'s exactly: `replacements` must be a `dict[str, str]`,
 an empty key raises `ValueError("empty pattern")`, lone surrogates raise
 `UnicodeEncodeError`. Identity contract: `replace_many_masked(s, m, c) is s`
 exactly when `replace_many_masked(s, m, c) == s` (the empty dict, no match, or a
-net-identity mask/truncation/padding all return the ORIGINAL object).
+net-identity mask/truncation/padding all return the original object).
 
 ## `tors.sentence_bounds` / `tors.sentence_bounds_iter`
 
@@ -584,7 +583,7 @@ def sentence_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
 UAX #29 sentence segmentation (rules SB1–SB999) via the same `unicode-segmentation`
 tables as the word segmenter: the other segmenter the stdlib lacks. Offsets are
 Python `str` indices (`text[start:end]` IS the sentence); per the standard
-(SB10/SB11), trailing spaces after a terminator belong to the PRECEDING sentence.
+(SB10/SB11), trailing spaces after a terminator belong to the preceding sentence.
 Pinned by a hand-derived rule-cited table (`"3.4"` SB6, `"U.S.A"` SB7, `"etc. and
 so on"` SB8, the ideographic `。`, the degenerates) plus structural properties and
 list/iter sequence parity. Measured at 12 MiB of prose: 170,037 sentences (~1/22nd
@@ -625,7 +624,7 @@ pattern_index)` with `end` exclusive, offsets in Python `str` (codepoint) units:
 
 - **leftmost**: a match is reported at the earliest position any pattern matches;
 - **longest**: among the patterns matching at that position, the longest wins
-  regardless of list order (NOT regex-alternation leftmost-first priority);
+  regardless of list order (not regex-alternation leftmost-first priority);
 - **non-overlapping**: the scan resumes at each match's end; results come back in
   strictly increasing start order;
 - **duplicates report the first index** they occupy in the list.
@@ -650,7 +649,7 @@ def find_patterns_iter(patterns: list[str], text: str) -> Iterator[tuple[int, in
 
 The streaming spelling of `find_patterns`: the whole search (pattern-list walk,
 automaton build, scan, byte→char offset conversion) fills an internal buffer under
-ONE GIL-released pass at construction, and each `__next__` holds the GIL only for a
+one GIL-released pass at construction, and each `__next__` holds the GIL only for a
 single 3-tuple of ints: the streaming answer to the list shape's O(matches)
 tuple-marshalling caveat (~13 ms held per 100k matches in the list shape). Same
 match sequence as the list API, pinned to sequence parity.
@@ -667,7 +666,7 @@ def count_matches(patterns: list[str], text: str) -> int: ...
 ```
 
 The count spelling of `find_patterns`: the same leftmost-longest, non-overlapping
-search answering just the number, with NO match vector materialized (the list
+search answering just the number, with no match vector materialized (the list
 spelling would materialize ~250 MiB of matches on a 100 MiB dense corpus just to
 answer "how many") and no byte→char offset pass (counting is offset-free).
 `count_matches(p, t) == len(find_patterns(p, t))`, pinned. A single `int` return: no
@@ -695,22 +694,23 @@ class CompiledPatterns:
 
 The `re.compile()` answer to `find_patterns`/`replace_many`'s per-call automaton build
 (the same `tors.CompiledLemmaDict` pattern, applied to pattern search instead of
-lemmatization — see `tors.apply_pipeline`'s docs above): building the Aho-Corasick
+lemmatization; see `tors.apply_pipeline`'s docs below): building the Aho-Corasick
 automaton is the expensive part of every one of these calls, and a fixed vocabulary
 scanned over many documents (a redaction pipeline, a tagger) otherwise rebuilds it on
 every single call for no reason. `CompiledPatterns(patterns)` builds it once under one
-GIL-released pass; every method after that is the free function's exact scan MINUS the
-automaton build, sharing the compiled automaton by one `Arc` clone per call — sound to
+GIL-released pass; every method after that is the free function's exact scan minus the
+automaton build, sharing the compiled automaton by one `Arc` clone per call, sound to
 reuse across many calls and threads with no synchronization beyond that refcount.
 
 Each method mirrors its free-function twin exactly: `cp.find(text) ==
 tors.find_patterns(patterns, text)`, `cp.count(text) == tors.count_matches(patterns,
 text)`, and so on, for every method above. The two `replace_many*` methods validate
-their `replacements` dict at CALL time (values can change per call; only the pattern
-set is fixed at construction): it must key EXACTLY the compiled pattern set — every
-compiled pattern paired with a value, no extra keys — or `ValueError` names the unknown
-and missing keys. `len(cp)` is the number of compiled patterns. Construction takes the
-same argument contract as `find_patterns`' pattern list (`list[str]`, non-empty
+their `replacements` dict at call time (values can change per call; only the pattern
+set is fixed at construction): it must key exactly the compiled pattern set, every
+compiled pattern paired with a value and no extra keys, or `ValueError` names the
+unknown and missing keys. `len(cp)` is the number of compiled patterns. Construction
+takes the same argument contract as `find_patterns`' pattern list (`list[str]`,
+non-empty
 entries); the empty pattern list compiles successfully (every scan finds nothing) and
 then accepts only the empty replacements dict. Immutable once built: there is no way to
 add or remove a pattern from an existing `CompiledPatterns`.
@@ -822,21 +822,21 @@ Repairs malformed JSON from LLMs, APIs, logs, and user input, returning the
 repaired document as a JSON string: a Rust port of the Python library
 json_repair (Stefano Baccianella, MIT,
 [github.com/mangiucugna/json_repair](https://github.com/mangiucugna/json_repair)),
-with parity pinned to json-repair==0.63.4 — the upstream behavior corpus
+with parity pinned to json-repair==0.63.4: the upstream behavior corpus
 is ported into `tests/test_json_repair_{core,schema,parity}.py`, and a
 differential suite runs tors and json_repair over the same inputs, so the
 pin is proven, not asserted. The repair parser handles the failure modes model output actually
 exhibits: missing and trailing commas, unquoted keys and values,
 single-quoted and curly-quoted strings, truncated containers, comments,
 stray prose around the payload, Python-isms (`None`/`True`/`False`, tuple
-literals), doubled quotes, and broken escapes — in the default mode it
+literals), doubled quotes, and broken escapes. In the default mode it
 repairs instead of raising, whatever the input looks like.
 
 **The fast path.** Unless `skip_json_loads`, a strict `json.loads`-parity
 parse of the (fence-unwrapped, below) input runs first, and valid JSON
 short-circuits the repair parser. The result is re-serialized through a
 `json.dumps`-parity serializer either way, so valid-but-noncanonical input
-normalizes — `{ "a" : 1 }` comes back as `{"a": 1}` — exactly like
+normalizes (`{ "a" : 1 }` comes back as `{"a": 1}`), exactly like
 upstream, which also re-dumps. Under a `schema` the probe does not
 short-circuit: valid JSON is validated and repaired if noncompliant before
 any fallback to the schema-guided parser, so a schema is enforced on clean
@@ -844,27 +844,27 @@ input too.
 
 **The empty-string sentinel.** When nothing recoverable is found, the
 repaired value is the empty string and `repair_json` returns the empty
-string — not `"\"\""` — upstream's convention for never returning a bare
+string, not `"\"\""`: upstream's convention for never returning a bare
 pair of quotes. The price is an ambiguity shared with upstream: a
 legitimately repaired top-level empty-string value renders identically.
 Check `result == ""` for "nothing recoverable". **Under `schema=` the sentinel
 does not escape as a return**: the empty-string value is itself validated against
 the schema, so a non-string-typed schema answers the same `ValueError` every other
-nonconformant value does (an object schema: `"" is not of type "object"`) —
-"nothing recoverable" becomes a raise, not a sentinel — while a string-typed
+nonconformant value does (an object schema: `"" is not of type "object"`):
+"nothing recoverable" becomes a raise, not a sentinel. A string-typed
 schema accepts it, an empty string being a valid string. Pinned by
 `tests/test_json_repair_native.py`.
 
 **The fence pre-pass.** Before anything else, the whole input is tested
-against CommonMark's fenced-code-block grammar — the same single-block
+against CommonMark's fenced-code-block grammar, the same single-block
 unwrapping `tors.strip_code_fences` documents. If the trimmed input is
-EXACTLY one fenced block, its content is unwrapped and repaired: tilde
+exactly one fenced block, its content is unwrapped and repaired: tilde
 fences, closers longer than their openers, and indented fences are handled
 by the grammar rather than by the repair parser's garbage-skip reaching the
 same answer by accident, and fenced-but-valid JSON takes the fast path
 instead of the repair parser. The pre-pass also recovers fenced top-level
 scalars (a fence wrapping just `"hi"` yields `"hi"`) where upstream returns
-`""` — its one behavior change beyond parity, listed with the divergences
+`""`: its one behavior change beyond parity, listed with the divergences
 below. A response with prose around a fence, or multiple blocks, is not the
 single-block case; compose with `tors.extract_code_blocks` for those:
 
@@ -881,10 +881,10 @@ repaired = [tors.repair_json(code) for _, code, _, _ in blocks]
 ```
 
 **`skip_json_loads`** skips the upfront strict parse only, forcing the
-repair parser even on valid JSON — upstream's knob for callers who already
-know the input is broken. It does NOT skip the parser-internal suffix
+repair parser even on valid JSON: upstream's knob for callers who already
+know the input is broken. It does not skip the parser-internal suffix
 probe: after a prose prefix, once a top-level container starts, the parser
-still tries a targeted strict decode of the value from that point — that
+still tries a targeted strict decode of the value from that point; that
 probe is part of the repair parser proper and stays on, exactly as
 upstream behaves.
 
@@ -897,21 +897,21 @@ other pass-through kwargs (`indent`, `sort_keys`, ...) are not ported.
 first structural ambiguity instead of repairing past them: duplicate keys,
 empty keys, a missing `:` after a key, an empty parsed value, an object
 that parses empty but still carries characters, multiple top-level
-elements, doubled quotes. The mode for input that SHOULD be valid and whose
+elements, doubled quotes. The mode for input that should be valid and whose
 first real defect you want named rather than patched. `strict=True`
 together with `schema` raises
 `ValueError("schema and strict cannot be used together.")`.
 
 **`schema`** switches on schema-guided repair: the parsed value is aligned
-to the schema — scalar coercions (`"4"` → 4, `"yes"` → `true`), fills for
+to the schema (scalar coercions (`"4"` → 4, `"yes"` → `true`), fills for
 missing values, defaults inserted for absent properties, extra properties
 dropped where `additionalProperties` forbids them, union branches tried
-until one validates — then validated in full, with failures raising
+until one validates), then validated in full, with failures raising
 `ValueError` at the offending path (`"Expected string at $.name."`).
 Accepts a JSON Schema dict, a boolean schema, or a pydantic v2 model (class
 or instance): the model's `model_json_schema()` output is used directly,
 with field `default`s and `default_factory`s injected into it (factory
-first) and Enum-member defaults carried as their `.value` — so the
+first) and Enum-member defaults carried as their `.value`, so the
 model → schema → LLM → repair → `Model.model_validate` agent loop needs no
 manual schema step. Mutually exclusive with `strict` (above). See
 `tors.repair_json_diagnostics` for the action-by-action log of everything
@@ -928,31 +928,30 @@ It requires a schema: `salvage=True` without one raises
 **`deadline_ms`** (default `None` = unbounded) bounds the whole repair the
 way `diff_opcodes`' `deadline_ms` does: a positive-finite-or-`None` budget
 validated up front, `TimeoutError` on expiry. The clock starts at the top of
-the call — the fence pre-pass and the `json.loads` fast-path attempt burn
+the call: the fence pre-pass and the `json.loads` fast-path attempt burn
 the budget too, and a fast path that *completes* past the budget still
 returns its answer (the deadline stops further work; it does not nullify
 done work). It is a DoS backstop for the pathological O(n²) parser shapes
-`tors` shares with upstream `json_repair` — duplicate-key-in-array splices,
-empty-object splices, and a backslash-run string scan — a bounded *abort*,
-not a speed-up: a completing parse is
+`tors` shares with upstream `json_repair` (duplicate-key-in-array splices,
+empty-object splices, and a backslash-run string scan): a bounded *abort*,
+not a speed-up, since a completing parse is
 byte-identical whether or not a deadline is set, and a benign large document
 does not trip a generous budget (the deadline discriminates pathological
 *shape*, not *size*). It applies to all three spellings and is checked with
-the GIL released, so `TimeoutError` is raised after reacquiring it — the
+the GIL released, so `TimeoutError` is raised after reacquiring it, the
 same shape as `diff_opcodes`, including the message:
 `"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
 
-Two honest limits. The bound is *soft*: the tight loops sample the clock
-1-in-256, but every O(n) unit — a buffer splice, a long scan, a wide span
-build — forces the very next check to read it, so at most one such unit
+Two limits. The bound is *soft*: the tight loops sample the clock
+1-in-256, but every O(n) unit (a buffer splice, a long scan, a wide span
+build) forces the very next check to read it, so at most one such unit
 runs past an expired budget (measured worst overshoot ~8% at n=1M). And
 it bounds CPU *time*, not native stack growth: a runaway continuation
-recursion can still overflow the stack before the budget expires — that
+recursion can still overflow the stack before the budget expires; that
 class is depth-guarded separately (`MAX_NESTING`), not time-bounded.
 Cost when unset: nothing on the valid-JSON fast path, and one predicted
-branch per dispatch turn in the repair parser — measured ~+6% worst-case
-on a multi-MB `skip_json_loads=True` parse, ~+3% on a corrupt-document
-repair, within noise on the pathological shapes. Cost when set: ≤2% on
+branch per dispatch turn in the repair parser (measured ~+6% worst-case
+on a multi-MB `skip_json_loads=True` parse). Cost when set: ≤2% on
 top of that (the checks are sampled).
 
 Argument contract: a non-`str` `s` raises `TypeError` (pyo3 extraction); a
@@ -968,11 +967,11 @@ residue is the caller-supplied `schema` dict walk (converted into the
 internal value tree before the pass starts) and the return marshalling
 after it: one string for this spelling; for `tors.repair_json_loads` and
 `tors.repair_json_diagnostics`, the construction of the Python object tree
-and the diagnostics list, O(result) — the same disclosed marshalling class
+and the diagnostics list, O(result): the same disclosed marshalling class
 the list-returning search functions document (see `tors.find_patterns_iter`'s
-O(matches) note and the README's Performance section).
+O(matches) note and [Performance](performance.md)).
 
-**Divergences from upstream json_repair** — the complete list; the
+**Divergences from upstream json_repair**, the complete list; the
 differential suite pins everything else to json-repair==0.63.4:
 
 - **Not ported**: `stream_stable`, the text repair log (superseded by
@@ -981,17 +980,17 @@ differential suite pins everything else to json-repair==0.63.4:
   pass-through kwargs beyond `ensure_ascii`, and the `schema_repair_mode`
   string (the `salvage=` bool instead).
 - **Lone surrogates**: a `\uXXXX` escape that decodes to an unpaired
-  surrogate becomes U+FFFD — a Rust string cannot hold a lone surrogate,
-  and pyo3 could not return one anyway. Input text containing literal lone
+  surrogate becomes U+FFFD (a Rust string cannot hold a lone surrogate,
+  and pyo3 could not return one anyway). Input text containing literal lone
   surrogates never reaches the parser: it raises `UnicodeEncodeError` at
   the argument boundary, the same str-in convention every function here
   documents.
 - **Non-ASCII digits**: Unicode Nd digits beyond 0-9 (Arabic-Indic and
-  friends) do not enter the number path — upstream's `str.isdigit` is
+  friends) do not enter the number path: upstream's `str.isdigit` is
   Unicode-wide, tors's check is ASCII-only. Pure runs (like `"١٢٣"`) fail
-  to repair on both sides; a non-ASCII digit LEADING ASCII digits
+  to repair on both sides; a non-ASCII digit leading ASCII digits
   (`"²5"`) makes upstream abandon the value where tors skips the mark and
-  parses the digits — the one mixed-run shape where the classes differ.
+  parses the digits, the one mixed-run shape where the classes differ.
 - **Fenced top-level scalars** are recovered where upstream returns `""`
   (the fence pre-pass above).
 - **The validation boundary**: schema validation runs on the Rust
@@ -1000,23 +999,23 @@ differential suite pins everything else to json-repair==0.63.4:
   non-finite numbers under a schema raise `ValueError` where Python
   tolerates `NaN`; union branches are validated wrapped so `#/...` refs
   keep root scope (a pathological subschema-local `$defs` shadowing root
-  `$defs` diverges). `format` is unasserted on BOTH sides — upstream passes
+  `$defs` diverges). `format` is unasserted on both sides: upstream passes
   no `format_checker`, and tors matches it.
 - **Deep nesting**: `ValueError("Input nesting exceeds the supported parser
   recursion depth.")` at 200 nested containers, where upstream raises an
-  uncaught `RecursionError` at roughly its own recursion limit — the same
+  uncaught `RecursionError` at roughly its own recursion limit: the same
   failure normalized into the error catalog at a lower, pinned threshold.
 - **On by default, tors-native**: key-typo remap, enum "Did you mean ..."
-  suffixes, date/uuid normalization, numeric extraction tiers, and the
-  diagnostics output are extensions upstream does not have — see
+  suffixes,   date/uuid normalization, numeric extraction tiers, and the
+  diagnostics output are extensions upstream does not have; see
   `tors.repair_json_diagnostics`. One consequence: on the strict fast path
   tors normalizes already-valid values (date formats, fold-matching key
   spellings, directly-declared `properties` and `allOf` members) where
-  upstream's valid-JSON shortcut returns them untouched — matching what
+  upstream's valid-JSON shortcut returns them untouched, matching what
   upstream's own repair lane does with `skip_json_loads=True`, so tors is
   self-consistent across its two lanes for everything except
-  `oneOf`/`anyOf`-wrapped guidance, where the fast path deliberately does
-  not guess which branch applies (upstream's fast path has the same
+  `oneOf`/`anyOf`-wrapped guidance, where the fast path does not guess
+  which branch applies (upstream's fast path has the same
   reach).
 
 ## `tors.repair_json_loads`
@@ -1030,21 +1029,22 @@ def repair_json_loads(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
 ```
 
 The `json.loads` drop-in spelling of `tors.repair_json`: the same repair
 pipeline and the same knobs (`skip_json_loads`, `strict`, `schema`,
-`salvage` — see `tors.repair_json`'s docs above), with the decoded object
+`salvage`; see `tors.repair_json`'s docs above), with the decoded object
 returned directly instead of a re-serialized string, so a repaired document
 goes straight into use with no `json.loads` round trip. There is no
 `ensure_ascii` here because nothing is serialized. The empty-string
-sentinel carries over as a real `""` return — "nothing recoverable",
+sentinel carries over as a real `""` return ("nothing recoverable",
 ambiguous with a legitimately repaired top-level empty-string value, the
-same collapse upstream's `loads` has. Under `schema=` the sentinel is
+same collapse upstream's `loads` has). Under `schema=` the sentinel is
 schema-validated instead: a non-string-typed schema turns "nothing
 recoverable" into the same `ValueError` every other nonconformant value
-raises — see `tors.repair_json`'s sentinel paragraph above.
+raises; see `tors.repair_json`'s sentinel paragraph above.
 
 ```python
 tors.repair_json_loads("{'users': [{'name': 'Ada',}]}")
@@ -1062,12 +1062,13 @@ def repair_json_diagnostics(
     schema: dict[str, Any] | bool | type[Any] | None = None,
     salvage: bool = False,
     locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
 ) -> tuple[dict[str, Any] | list[Any] | str | int | float | bool | None, list[dict[str, Any]]]: ...
 ```
 
 The `(value, diagnostics)` spelling: `tors.repair_json_loads`'s exact
 result paired with one record per repair action taken. Upstream narrates
-these actions to its `logging` facility; tors does not port that text log —
+these actions to its `logging` facility; tors does not port that text log:
 this function is the replacement, the same narration as data. Each record
 carries `action` (from the closed vocabulary below), `path` (json_repair's
 path spelling: `"$"`, `"$.key"`, `"$.items[3]"`), `detail` (one human
@@ -1079,27 +1080,27 @@ and after) and `suggestion`. The vocabulary:
 | `coerce` | a scalar is converted to the schema's type: `"4"` → 4, `"4.0"` → 4, `4` → `"4"`, `"1.5"` → 1.5, `"yes"`/`"on"`/`"1"` → `true` and `"no"`/`"off"`/`"0"` → `false`, a number to its truthiness |
 | `fill` | a missing value (an object value slot that runs straight into `,` or `}`, e.g. `{"key":}`) is filled from the schema: `const`, else `enum[0]`, else `default`, else the type's empty value (`""`, `0`, `false`, `[]`, `{}`, `null`) |
 | `insert_default` | a property absent from the object whose subschema declares `default` (and is not `required`) gets that default |
-| `remap_key` | tors-native: a key matching no property is remapped to the closest property name — thresholds below |
-| `suggest` | tors-native, report-only: a near-miss that was NOT auto-corrected — a key, an enum member, an ambiguous date, or a disclosed numeric-format assumption, per the four features below |
+| `remap_key` | tors-native: a key matching no property is remapped to the closest property name; thresholds below |
+| `suggest` | tors-native, report-only: a near-miss that was not auto-corrected: a key, an enum member, an ambiguous date, or a disclosed numeric-format assumption, per the four features below |
 | `drop_property` | an extra property not covered by the schema is dropped (`additionalProperties` does not allow it) |
 | `drop_item` | an array item is dropped: invalid under its item schema while salvaging, or beyond tuple-form `items` not covered by `additionalItems` |
 | `unwrap_string` | a string value holding a JSON document is parsed and unwrapped to the object/array the schema expects (under salvage, repaired first if merely malformed) |
 | `wrap_array` | a non-array value is wrapped in a single-element array to match an array schema |
 | `fill_required` | salvage: a `required` property missing from the object is filled from its subschema's `default`/`const`/`enum[0]` |
-| `format_date` | tors-native: a date/date-time string is normalized to the RFC 3339 form — below |
+| `format_date` | tors-native: a date/date-time string is normalized to the RFC 3339 form; below |
 | `skip_fragment` | salvage: a top-level fragment that does not match the schema is skipped while hunting for one that does |
 | `map_array_to_object` | salvage: a list with exactly the schema's property count is mapped onto those property names, in order |
 | `unwrap_root_array` | salvage: a single-item root array `[{...}]` is unwrapped to `{...}` |
 
-**Scope of the log (v1).** Parser-level repair narration — the syntax-layer
-fixes `repair_json` performs without a schema — is not recorded yet, so a
+**Scope of the log (v1).** Parser-level repair narration (the syntax-layer
+fixes `repair_json` performs without a schema) is not recorded yet, so a
 schema-free call returns an empty list; the log covers schema-layer actions
 and the tors-native suggestions below.
 
 **Key-normalization ladder (deterministic tier).** A key that differs
 from a property only by case or separator style (`first-name`,
-`First Name`, `FIRST_NAME` → `first_name`) remaps with confidence 1.0 —
-the match is exact after folding, not a guess — so it fires even on
+`First Name`, `FIRST_NAME` → `first_name`) remaps with confidence 1.0
+(the match is exact after folding, not a guess), so it fires even on
 permissive schemas and on the valid-JSON fast path (the un-remapped shape
 strands real data on a dead key while the property takes its default).
 One guard keeps it safe: the rename is kept only when the value can live
@@ -1123,7 +1124,7 @@ through to upstream semantics: no remap, no drop, the key keeps its
 spelling.
 
 **Enum suggestions.** When a value fails an `enum` check (never `const`),
-the `ValueError` gains " Did you mean '...'?" naming the closest STRING
+the `ValueError` gains " Did you mean '...'?" naming the closest string
 enum member under the same jaro-winkler >= 0.60 threshold, plus a
 `suggest` diagnostic. Enum values are never auto-remapped: a near-miss is
 reported, not guessed.
@@ -1135,32 +1136,32 @@ or through an `allOf` member), accepted forms normalize: ISO dates
 padding-tolerant); date-times `<date>[T ]HH:MM[:SS[.frac]]` on either date
 spelling; month-name forms (`March 15, 2024`, `15 March 2024`,
 `15 Mar, 2024`, case-insensitive). Dates come out `YYYY-MM-DD`;
-date-times come out `YYYY-MM-DDTHH:MM:SS[.frac]` — seconds always
-emitted, the fractional part trimmed to its shortest exact form — and an
+date-times come out `YYYY-MM-DDTHH:MM:SS[.frac]` (seconds always
+emitted, the fractional part trimmed to its shortest exact form), and an
 input that carried an offset (Z or ±HH:MM/±HHMM) normalizes to its UTC
-INSTANT with a `Z` rendering (`2024-03-15T14:30:00+0530` →
+instant with a `Z` rendering (`2024-03-15T14:30:00+0530` →
 `2024-03-15T09:00:00Z`); a missing offset stays missing. `format: "time"`
 gains seconds (`14:30` → `14:30:00`); `format: "uuid"` canonicalizes to
 lowercase when the shape is a UUID (non-UUID strings pass through for
-validation to judge). Numeric `X/Y/YYYY` (or `YYYY/X/Y`) forms coerce ONLY
+validation to judge). Numeric `X/Y/YYYY` (or `YYYY/X/Y`) forms coerce only
 when a component over 12 disambiguates month from day; when both
-candidates are 12 or under (`03/04/2024`) the date is genuinely ambiguous
-and gets a `suggest` diagnostic instead of a guess. Invalid calendar dates
+candidates are 12 or under (`03/04/2024`) the date is ambiguous and gets a
+`suggest` diagnostic instead of a guess. Invalid calendar dates
 (month lengths, leap years) are left for validation. `format` is not
-otherwise enforced — upstream passes no `format_checker`, and tors matches
+otherwise enforced: upstream passes no `format_checker`, and tors matches
 it; this normalization is the one place `format` is consulted at all.
 
 **Numeric coercion ladder and `locale`.** String values under an
 `integer`/`number` property climb a four-tier ladder: (1) the whole
 trimmed string parses; (2) the string minus unambiguous noise (underscores,
-fullwidth and Arabic-Indic script digits, and — with a known locale — that
+fullwidth and Arabic-Indic script digits, and, with a known locale, that
 locale's own separators) parses; (3) exactly one number token in the prose
 extracts (`"USD 50"` → 50, `"$1,234.56"` → 1234.56, `-"50"` → -50), with
 percent suffixes read by the declared type (`"50%"` → 0.5 on `number`
 fields, the fraction; → 50 on `integer` fields, the percent count); (4)
 Auto mode's separator-ambiguity resolution, below. A dropped decimal
 marker never extracts (`.5` on an integer field refuses, never 5), and
-Python's unbounded integer semantics hold at any magnitude —
+Python's unbounded integer semantics hold at any magnitude:
 `"12345678901234567890123"` coerces exactly, never a saturating cast.
 
 `locale=` tells tors which separator convention the model uses: a BCP 47
@@ -1170,10 +1171,10 @@ tag string (`"de-DE"`, case-insensitive, `-` or `_`; region variants like
 one-character separators for conventions the table does not carry. With a
 known locale every form is deterministic: `"1,234"` reads 1.234 in German
 and 1234 in English, by data rather than by guess. The default (`locale=None`,
-Auto) assumes en-US for the separator-ambiguous shapes — but never
+Auto) assumes en-US for the separator-ambiguous shapes, but never
 silently: both readings are extracted and filtered by the declared type
 and the property schema, a single surviving reading is the deterministic
-answer (silent), and when both survive the en-US reading wins WITH a
+answer (silent), and when both survive the en-US reading wins with a
 `suggest` diagnostic naming the discarded reading's `locale=` override
 (`"1,234"` on a number field → 1234 plus `locale='de-DE'`). A single
 separated number whose readings all fail the declared type refuses with
@@ -1214,7 +1215,7 @@ invariant that never breaks either way: the result never exceeds `max_chars`
 codepoints. The cut point is then trimmed of trailing whitespace (`str.rstrip`-
 equivalent): cutting right after a word/sentence boundary can otherwise leave a
 dangling separator space, since `word_bounds` segments the inter-word space on its own
-and `sentence_bounds` carries a sentence-terminal's trailing space on the PRECEDING
+and `sentence_bounds` carries a sentence-terminal's trailing space on the preceding
 sentence (UAX #29 SB9-SB11).
 
 `tors.truncate_to_bounds(s, n) is s` exactly when `s` already has `<= n` codepoints
@@ -1228,8 +1229,6 @@ tors.truncate_to_bounds("One. Two. Three.", 10, boundary="sentence")
 # "One. Two."
 ```
 
-**Async**: `await tors.aio.truncate_to_bounds(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
-
 ## `tors.truncate_ellipsis`
 
 ```python
@@ -1238,7 +1237,7 @@ def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 
 The DB-column truncation shape: hard cut to at most `max_chars` codepoints plus
 a U+2026 `…` marker, one GIL-released native pass, never mid-grapheme-cluster.
-Unlike `truncate_to_bounds` there is no word/sentence awareness — a storage
+Unlike `truncate_to_bounds` there is no word/sentence awareness: a storage
 bound is positional, not semantic, and the marker tells the reader the value
 continues.
 
@@ -1250,7 +1249,7 @@ splitting it). On plain text the stored length is exactly the bound. No
 trailing-whitespace trim: the cut is positional.
 
 `tors.truncate_ellipsis(s, n) is s` exactly when `s` already has `<= n`
-codepoints. `max_chars == 0` yields `""` (no room for even the marker — the
+codepoints. `max_chars == 0` yields `""` (no room for even the marker; the
 naive `value[:0] + "…"` spelling answers `"…"` here, exceeding a zero bound);
 `max_chars < 0` raises `ValueError` before any work runs.
 
@@ -1259,7 +1258,7 @@ tors.truncate_ellipsis("hello world", 6)
 # "hello…"
 ```
 
-**Async**: `await tors.aio.truncate_ellipsis(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.truncate_ellipsis(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.is_grounded`
 
@@ -1274,41 +1273,41 @@ def is_grounded(
 ) -> bool: ...
 ```
 
-Checks whether `claim` is grounded in `source`: a LEXICAL check, not a semantic/NLI
-one; be precise about that boundary, this is not a hallucination-detection model.
+Checks whether `claim` is grounded in `source`: a lexical check, not a
+semantic/NLI one, and not a hallucination-detection model.
 
 `fuzzy=False` (the default) is exact substring containment: the `memchr` crate's
 SIMD-skipped two-way search (`memmem`, already a dependency), a byte-level find that is
 UTF-8-boundary-safe by construction. `fuzzy=True` compares `claim` against
 overlapping same-length windows of `source` (stride `claim`'s length / 2) using the
 only diffing engine already in the crate (the `similar` Myers engine backing
-`diff_opcodes`), and reports whether the BEST window's difflib-style ratio (`2 *
+`diff_opcodes`), and reports whether the best window's difflib-style ratio (`2 *
 matched_chars / (len(claim) + len(window))`) reaches `threshold`. `fuzzy=True` is a
 superset of `fuzzy=False`: an exact-containment floor runs first, so a claim present
 verbatim in `source` is grounded before any windowing (independent of window alignment,
-and before `deadline_ms` applies — a verbatim substring never times out). The windowed
+and before `deadline_ms` applies: a verbatim substring never times out). The windowed
 ratio is consulted only when there is no exact match.
 
 The floor guarantees the verbatim case unconditionally; near matches get a bounded
 guarantee band instead of raw window luck: a same-length source region whose aligned
-ratio is `r` is detected at ANY offset whenever `r >= max(0.75, threshold + 1/32)` —
+ratio is `r` is detected at any offset whenever `r >= max(0.75, threshold + 1/32)`:
 a bounded refinement pass re-scans the best coarse windows at a fine stride, a
 constant budget on top of the linear scan. One substitution in a 9+ character claim
 clears the `0.85` default wherever it sits. Below `r = 0.75` detection is
 best-effort (the recall floor of the DoS windowing), and a genuine region can be
-evicted from the 64 refinement candidates by adversarial decoy text scoring higher —
+evicted from the 64 refinement candidates by adversarial decoy text scoring higher,
 the regime `deadline_ms` exists for (both limits are pinned in `tests/test_grounded.py`).
 
 Windowing, rather than one whole-string diff of `claim` against all of `source`, is
 DoS discipline: the realistic RAG-grounding shape is a short claim against a
 long retrieved passage, so bounding each diff's operands to roughly `claim`'s length
 keeps the total work close to linear in `source`'s length instead of the O(source ×
-claim) a single unwindowed diff would cost — and windows slide through one reusable
+claim) a single unwindowed diff would cost, and windows slide through one reusable
 O(claim)-sized buffer, so a 12 MiB passage costs kilobytes rather than a
 whole-source char vector, and an early exit stops consuming input mid-source.
 `deadline_ms` (only accepted, and only
-meaningful, when `fuzzy=True`) bounds the WHOLE scan on top of that, the same
-discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has — checked after every window
+meaningful, when `fuzzy=True`) bounds the whole scan on top of that, the same
+discretionary escape hatch `diff_opcodes`'s `deadline_ms` already has, checked after every window
 diff, coarse and refinement alike: `TimeoutError`
 on expiry naming the elapsed cost and the deadline, a positive-finite-or-`None`
 precondition validated before any work runs. Even a single very large window's own
@@ -1345,28 +1344,28 @@ def get_close_matches(
 
 `difflib.SequenceMatcher(None, a, b).ratio()` and `difflib.get_close_matches()`'s
 shapes at native speed, over the same Myers engine `diff_opcodes` uses.
-`similarity_ratio` is `2.0 * M / T` (`T = len(a) + len(b)`, both in CHARACTER units)
+`similarity_ratio` is `2.0 * M / T` (`T = len(a) + len(b)`, both in character units)
 with `M` the matched-character total over the Myers equal-ops, difflib's own formula
-but over a DIFFERENT alignment: difflib's `M` comes from its longest-match recursion,
+but over a different alignment: difflib's `M` comes from its longest-match recursion,
 which anchors a match and splits the surrounding change around it, so on
 repeated-pattern inputs its `M` can be smaller than the maximal one. The pinned
 divergence rows (`tests/test_similarity.py`): `"ppp"` vs `"pwpp"`, difflib `4/7`
 (its anchored `"pp"` splits the insert, `M = 2`) vs tors `6/7` (`M = 3 = LCS`);
-and `"qpqpq"` vs `"qpwqpq"`, difflib `6/11` (the anchored ROTATED equal block
+and `"qpqpq"` vs `"qpwqpq"`, difflib `6/11` (the anchored rotated equal block
 `"qpq"`, a non-minimal insert+delete split, `M = 3`) vs tors `10/11` (`M = 5 =
 LCS`). tors's `M` is always maximal: `M == LCS(a,
 b)` exactly, the minimal-edit-script consequence of the Myers engine, so the two
-ratios agree exactly wherever the alignment is FORCED (identical operands, empty
-pairs, disjoint alphabets, pure insert/delete with differing flanks) and are BOTH
+ratios agree exactly wherever the alignment is forced (identical operands, empty
+pairs, disjoint alphabets, pure insert/delete with differing flanks) and are both
 valid but may diverge on repeated-flank contexts. difflib's anchored `M` is also
 direction-dependent (`similarity_ratio` is symmetric; difflib's `ratio()` is not, in
 general). `("", "")` is `1.0`, the convention both engines share.
 
 `get_close_matches` keeps every candidate scoring `similarity_ratio(candidate, word)
 >= cutoff` and returns the top `n` sorted by score descending, then by the candidate
-STRING descending: `heapq.nlargest`'s tuple order, the stdlib's own tie-break (`ac`
+string descending: `heapq.nlargest`'s tuple order, the stdlib's own tie-break (`ac`
 sorts after `ca`, so `get_close_matches("ab", ["ac", "ca"], 2, 0.5)` returns `["ca",
-"ac"]`). Returned elements are the ORIGINAL candidate objects, not copies. `n <= 0`
+"ac"]`). Returned elements are the original candidate objects, not copies. `n <= 0`
 and a `cutoff` outside `[0.0, 1.0]` raise `ValueError` with difflib's exact
 message, the offending value interpolated (`"n must be > 0: 0"`, `"cutoff must
 be in [0.0, 1.0]: -0.5"`, measured against the running stdlib on 3.10–3.15;
@@ -1396,15 +1395,15 @@ def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: 
 
 The classic edit-distance/similarity metrics CPython has no stdlib spelling of
 (`difflib`'s ratio is not a metric: see above; every real spelling is third-party).
-All three operate on CHARACTER sequences (Rust `char`s, i.e. Unicode scalar values:
+All three operate on character sequences (Rust `char`s, i.e. Unicode scalar values:
 the same unit a Python `str` index addresses), so an emoji or a combining-mark
 sequence costs what its codepoint count says, not its UTF-8 byte count.
 
 `levenshtein(a, b)` is the unit-cost edit distance (insert/delete/substitute each cost
 1) as an `int`: `levenshtein("kitten", "sitting") == 3`. Symmetric; `("", "")` is
 `0`; one empty operand is the other's character count. Implemented
-as a two-row DP (O(len(b)) space, not a full O(n·m) matrix), so memory stays LINEAR:
-not quadratic: in operand size even on adversarial multi-megabyte inputs; identical
+as a two-row DP (O(len(b)) space, not a full O(n·m) matrix), so memory stays
+linear in operand size even on adversarial multi-megabyte inputs; identical
 operands short-circuit to `0` via a single equality scan, without entering the DP at
 all.
 
@@ -1449,12 +1448,12 @@ these are one `py.detach`ed native pass each.
 
 `quote(text, safe="/")` never percent-encodes ASCII letters, digits, or `_.-~` (the RFC
 3986 unreserved set, the stdlib's `_ALWAYS_SAFE`), plus the ASCII members of `safe`;
-every other byte of `text`'s UTF-8 encoding becomes `%XX` with UPPERCASE hex. `safe` is
-BYTE-level and ASCII-only, exactly like the stdlib's own `safe.encode("ascii", "ignore")`
+every other byte of `text`'s UTF-8 encoding becomes `%XX` with uppercase hex. `safe` is
+byte-level and ASCII-only, exactly like the stdlib's own `safe.encode("ascii", "ignore")`
 normalization: a non-ASCII `safe` member is silently dropped (`tors.quote("é", "é") ==
 "%C3%A9"`, not `"é"`), and `%` in `safe` is honored like any other byte (stays literal).
-`quote_plus(text, safe="")` is NOT "quote, then replace `%20` with `+`": the stdlib
-quotes with `" "` APPENDED to `safe` (so a space never encodes at all) and then replaces
+`quote_plus(text, safe="")` is not "quote, then replace `%20` with `+`": the stdlib
+quotes with `" "` appended to `safe` (so a space never encodes at all) and then replaces
 every `" "` with `"+"`; the observable difference is a literal `+` in `text`, which
 escapes to `%2B` unless the caller puts `+` in `safe` (`tors.quote_plus("a+b") ==
 "a%2Bb"`).
@@ -1462,33 +1461,33 @@ escapes to `%2B` unless the caller puts `+` in `safe` (`tors.quote_plus("a+b") =
 `unquote(text)` decodes `%XX` (either hex case) as UTF-8 with `errors="replace"`
 (an invalid sequence becomes one or more U+FFFD, CPython's maximal-subpart rule); a `%`
 not followed by two hex digits (`%zz`, a trailing `%`, `%e` at end of input) stays
-VERBATIM. It also reproduces the stdlib's `_asciire` fragmentation exactly: each maximal
-ASCII run is unquoted and UTF-8-decoded INDEPENDENTLY, with non-ASCII segments passed
+verbatim. It also reproduces the stdlib's `_asciire` fragmentation exactly: each maximal
+ASCII run is unquoted and UTF-8-decoded independently, with non-ASCII segments passed
 through verbatim: so a multi-byte escape interrupted by a non-ASCII character is not an
 escape at all (`tors.unquote("%Cé3") == "%Cé3"`), and an escape split across an
 ASCII/non-ASCII boundary decodes as two independently-replaced fragments
-(`tors.unquote("%C3é%A9") == "�é�"`, NOT `"éé"`). `unquote_plus(text)` replaces
-every `+` with a space BEFORE unquoting: order is semantics, not an implementation
-detail: so an escaped `%2B` survives as a literal `+` while a raw `+` becomes a space
+(`tors.unquote("%C3é%A9") == "�é�"`, not `"é"`). `unquote_plus(text)` replaces
+every `+` with a space before unquoting (order is semantics, not an
+implementation detail), so an escaped `%2B` survives as a literal `+` while a raw `+` becomes a space
 (`tors.unquote_plus("%2B") == "+"`, `tors.unquote_plus("+") == " "`).
 
-On text the call leaves byte-for-byte unchanged, all four return the ORIGINAL input
-object: `quote`/`quote_plus` when no byte needs encoding, `unquote` when `text` has no
+On text the call leaves byte-for-byte unchanged, all four return the
+original input object: `quote`/`quote_plus` when no byte needs encoding, `unquote` when `text` has no
 `%`, `unquote_plus` when `text` has neither `+` nor `%`: CPython's own fast-path idiom,
 zero allocation, zero copy, zero marshalling. `unquote`'s borrow is narrower than a plain
 equality check would suggest: an input whose every `%` is invalid hex (`"%zz"`) decodes
-to an EQUAL but NEW string in the stdlib, not the original object, and `tors.unquote`
+to an equal-but-new string in the stdlib, not the original object, and `tors.unquote`
 matches that residue exactly rather than widening the identity lane past parity.
 
 **Known deviation: lone (unpaired) surrogates.** pyo3's `str` argument extraction
-(`PyUnicode_AsUTF8AndSize`) requires the WHOLE input to be valid UTF-8 up front, which a
+(`PyUnicode_AsUTF8AndSize`) requires the whole input to be valid UTF-8 up front, which a
 lone surrogate codepoint never is. `quote`/`quote_plus` are unaffected in practice: the
 stdlib's own encode-based implementation raises the identical `UnicodeEncodeError` for
-such input, so the two still agree: but `unquote`/`unquote_plus` diverge: CPython's
+such input, so the two still agree, but `unquote`/`unquote_plus` diverge: CPython's
 `unquote` only UTF-8-encodes the ASCII runs it is about to percent-decode and passes
 every non-ASCII character (surrogates included) through untouched, so it never raises
 for a lone surrogate anywhere in `text`. `tors.unquote`/`tors.unquote_plus` raise
-`UnicodeEncodeError` for ANY `text` containing a lone surrogate, even one nowhere near a
+`UnicodeEncodeError` for any `text` containing a lone surrogate, even one nowhere near a
 `%` escape, because the whole-string extraction fails before the Rust core ever runs.
 This is a real, narrow parity gap (native Rust `&str`/`String` cannot represent an
 unpaired surrogate at all, so silently downgrading to `errors="replace"`-style
@@ -1515,7 +1514,7 @@ def chunk_text(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_text(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 The context-window/RAG packing primitive: boundary-aware chunking of `text` into
 `(start, end)` pairs in Python `str` index (codepoint) units, each chunk at most
@@ -1528,7 +1527,7 @@ a single grapheme cluster (e.g. an oversized ZWJ emoji chain) wider than the rem
 budget: a covering chunker cannot drop content, so that one chunk goes out past
 `max_chars` rather than split the cluster; ordinary text never hits this.
 
-**`overlap=0`** (the default): the ORIGINAL lossless-partition contract, unchanged;
+**`overlap=0`** (the default): the original lossless-partition contract, unchanged;
 chunks are non-empty, contiguous, strictly increasing, cover `[0, len(text))`, and
 joining the slices reproduces the input exactly.
 
@@ -1572,8 +1571,8 @@ def chunk_text_iter(
 `chunk_text`'s streaming twin, the `word_bounds`/`word_bounds_iter` shape: the whole
 scan runs once under `py.detach` at iterator construction, and each `__next__` holds
 the GIL only to build one 2-tuple, rather than marshalling the whole result into a
-`list` under one GIL hold. Same sequence, same argument contract as `chunk_text`:
-worth reaching for over the list API once a document chunks into the hundreds of
+`list` under one GIL hold. Same sequence, same argument contract as `chunk_text`;
+prefer it over the list API once a document chunks into the hundreds of
 thousands of pieces, where the marshalling cost dominates.
 
 ```python
@@ -1589,25 +1588,25 @@ def chunk_by_words(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_by_words(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_by_words(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 The unit-count twin of `chunk_text`: instead of a character budget, each chunk spans
-exactly `words_per_chunk` consecutive WORD TOKENS, not `word_bounds`'
+exactly `words_per_chunk` consecutive word tokens, not `word_bounds`'
 raw segment count. `word_bounds` follows UAX #29 exactly, which gives an inter-word
 space run its own segment (`"one two"` is three segments: `"one"`, `" "`, `"two"`, the
 same convention `word_count` already carries): grouping *raw* segments here would
 silently mean "`words_per_chunk` roughly halved" for ordinary space-separated prose,
 the opposite of what a caller reaching for `words_per_chunk=100` (a "~100 word chunk"
 for an embedding budget) wants. So this filters to segments carrying at least one
-non-whitespace codepoint FIRST, and only then windows over what remains: a "word" is
+non-whitespace codepoint first, and only then windows over what remains: a "word" is
 a real token, and whitespace between two tokens *inside* one chunk still rides along
 naturally (each chunk's span is a contiguous slice of the original text between two
 real absolute offsets). `(start, end)` codepoint offsets span the first included word
-token's start through the last included token's end: NOT through any trailing
+token's start through the last included token's end, not through any trailing
 whitespace after it, so unlike `chunk_text`'s covering-partition contract,
 non-overlapping chunks here are not necessarily contiguous. The final chunk may hold
 fewer than `words_per_chunk` tokens when the total doesn't divide evenly. `overlap`
-WORDS repeat at the start of the next chunk. Empty text, or text with no word tokens
+words repeat at the start of the next chunk. Empty text, or text with no word tokens
 at all, returns `[]`.
 
 `words_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >= words_per_chunk`
@@ -1616,12 +1615,11 @@ unlike `chunk_text`'s character-granularity overlap this stride is always `>= 1`
 construction once validated, so forward progress needs no runtime fallback.
 
 Cost at document scale: one `word_bounds` walk, one grapheme boundary index (a
-one-bit-per-codepoint bitmap — on pure-ASCII text it is two SIMD byte scans, no
-segmentation walk — shared with `chunk_hierarchical` and `chunk_by_sentences`), a
+one-bit-per-codepoint bitmap; on pure-ASCII text it is two SIMD byte scans, no
+segmentation walk, shared with `chunk_hierarchical` and `chunk_by_sentences`), a
 zero-copy merge fast path when no boundary needs it, and one streaming decode pass
 for the token filter. Measured on 12 MiB of prose (min-of-3, `tools/bench_chunking.py`):
-~160 ms, ~90 MiB transient (the word-bounds list itself) — the word walk plus
-marginal machinery. Before this change it built a `HashSet` of every grapheme boundary
+~160 ms, ~90 MiB transient (the word-bounds list itself). Before this change it built a `HashSet` of every grapheme boundary
 plus a whole-text `Vec<char>` unconditionally: ~1.9 s and ~500 MiB on the same input.
 
 ```python
@@ -1656,10 +1654,10 @@ def chunk_by_sentences(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_by_sentences(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_by_sentences(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 `chunk_by_words`' sentence-count twin (`sentence_bounds`'s UAX #29 segmenter): each
-chunk spans `sentences_per_chunk` consecutive sentence segments, `overlap` SENTENCES
+chunk spans `sentences_per_chunk` consecutive sentence segments, `overlap` sentences
 repeated. Same argument contract, same empty-input answer, same
 forward-progress-by-construction guarantee as `chunk_by_words`.
 
@@ -1691,10 +1689,10 @@ def chunk_by_paragraphs(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_by_paragraphs(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_by_paragraphs(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 `chunk_by_words`/`chunk_by_sentences`'s paragraph-count twin: each chunk spans
-`paragraphs_per_chunk` consecutive paragraphs, `overlap` PARAGRAPHS repeated. A
+`paragraphs_per_chunk` consecutive paragraphs, `overlap` paragraphs repeated. A
 paragraph boundary here is a run of 2+ consecutive newlines (`\r\n` counts as one
 unit, matching `tors.normalize`'s own CR/CRLF folding): the same "2+ newlines
 survive as the paragraph gap" convention `normalize`'s own pipeline already uses (it
@@ -1727,25 +1725,25 @@ def chunk_by_lines(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_by_lines(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_by_lines(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 `chunk_by_words`/`chunk_by_sentences`/`chunk_by_paragraphs`'s line-count twin: each
-chunk spans `lines_per_chunk` consecutive lines, `overlap` LINES repeated at the start
+chunk spans `lines_per_chunk` consecutive lines, `overlap` lines repeated at the start
 of the next chunk. A line break is a `\n`, a lone `\r`, or a `\r\n` pair counted as
-ONE unit (the same CR/CRLF folding convention `chunk_by_paragraphs` and `normalize`'s
-own pipeline use; `str.splitlines`' exotic separators — `\v`, `\f`, NEL, LS, PS —
-are NOT breaks here). A line counts as a line only when it carries at least one
+one unit (the same CR/CRLF folding convention `chunk_by_paragraphs` and `normalize`'s
+own pipeline use; `str.splitlines`' exotic separators (`\v`, `\f`, NEL, LS, PS)
+are not breaks here). A line counts as a line only when it carries at least one
 non-whitespace codepoint, the same real-token discipline `chunk_by_words` applies to
 word segments: blank lines neither count toward `lines_per_chunk` nor split a chunk's
-interior — they ride along inside a chunk's span exactly as inter-word whitespace
+interior; they ride along inside a chunk's span exactly as inter-word whitespace
 rides along in `chunk_by_words`, so `lines_per_chunk=200` means 200 content lines.
 "Non-whitespace" is definitional here: the Unicode `White_Space` property
 (`char::is_whitespace`), under which an NBSP-only line is blank and
-U+001C–U+001F (FS/GS/RS/US) count as line CONTENT, diverging from
+U+001C–U+001F (FS/GS/RS/US) count as line content, diverging from
 Python's `str.isspace()` (which treats those four as whitespace) and from
 `str.splitlines` (which even breaks on them; tors does not).
 `(start, end)` codepoint offsets span the first included line's start through the
-last included line's end (NOT through the trailing break after it, so unlike
+last included line's end (not through the trailing break after it, so unlike
 `chunk_text`'s covering-partition contract, non-overlapping chunks here are not
 necessarily contiguous); a trailing break at end of text yields no trailing empty
 line. The final chunk may hold fewer lines when the total doesn't divide evenly.
@@ -1754,9 +1752,9 @@ contract, same empty-input answer, same forward-progress-by-construction guarant
 as its siblings.
 
 The line-oriented-text shape this exists for: one message per line (a chat thread),
-one record per line (a log), one cue per block. Cost at document scale: ONE
+one record per line (a log), one cue per block. Cost at document scale: one
 streaming decode pass (the line scan and the real-line filter fused, O(text) time,
-O(1) memory beyond the output) — no segmentation walk and no grapheme boundary
+O(1) memory beyond the output), no segmentation walk and no grapheme boundary
 index at all, unlike `chunk_by_words`/`chunk_by_sentences`: every split lands
 strictly between a break character and adjacent content, so the split point is
 structurally grapheme-safe with nothing to check.
@@ -1765,12 +1763,12 @@ structurally grapheme-safe with nothing to check.
 log = "INFO boot\nINFO ready\n\nWARN disk at 90%\nERROR io failure\nINFO retry ok\n\nINFO shutdown"
 
 tors.chunk_by_lines(log, 2)
-# [(0, 20), (22, 55), (56, 84)] — 6 content lines, 3 chunks of exactly 2: the
+# [(0, 20), (22, 55), (56, 84)]: 6 content lines, 3 chunks of exactly 2; the
 # blank between chunks 1 and 2 falls in the gap (chunk 2 starts at "WARN"),
 # while the blank inside the final chunk rides along, never counted
 tors.chunk_by_lines(log, 2, overlap=1)
-# [(0, 20), (10, 38), (22, 55), (39, 69), (56, 84)] — overlap repeats whole
-# LINES: (10, 38) is "INFO ready\n\nWARN disk at 90%", blank riding along
+# [(0, 20), (10, 38), (22, 55), (39, 69), (56, 84)]: overlap repeats whole
+# lines; (10, 38) is "INFO ready\n\nWARN disk at 90%", blank riding along
 ```
 
 ## `tors.chunk_by_lines_iter`
@@ -1784,11 +1782,11 @@ def chunk_by_lines_iter(
 `chunk_by_lines`' streaming twin, the same `chunk_text_iter` shape: one detached
 whole-text pass at construction, one 2-tuple per `__next__`, identical sequence to
 the list API. Like every `_iter` spelling it has no async twin (an iterator is not
-an awaitable shape; see the README's Async use section) — and it exists for the
+an awaitable shape; see [Async use](async.md)). It exists for the
 same reason as the other `_iter` twins: the list shape's GIL-held marshalling
 cost is measured for segment-count-heavy outputs (`word_bounds` on 12 MiB of
-prose, 3.67M segments, holds the GIL for 428–497 ms just marshalling the list,
-the README's disclosed numbers), and a line-oriented corpus (a multi-MiB log or
+prose, 3.67M segments, holds the GIL for 428–497 ms just marshalling the list;
+see [Performance](performance.md)), and a line-oriented corpus (a multi-MiB log or
 transcript) is in that piece-count class, chunking into hundreds of thousands
 of pieces.
 
@@ -1805,75 +1803,69 @@ def chunk_hierarchical(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_hierarchical(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_hierarchical(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 Priority-ordered fallback chunking: the `chunk_text`/`chunk_by_*` family's
 fourth shape, and the pattern LangChain's `RecursiveCharacterTextSplitter`
-popularized: a list of separator LEVELS, coarsest first, tried in order for
+popularized: a list of separator levels, coarsest first, tried in order for
 each chunk, falling back to the next level only when the coarser one has no
 in-budget cut over the current window.
 
-`separators=None` (the default) uses tors's OWN accurate hierarchy:
+`separators=None` (the default) uses tors's own accurate hierarchy:
 paragraph → sentence → word → a grapheme-safe raw cut, always the final,
 unconditional fallback (this never fails to produce a chunk); it reuses the
 same UAX #29 segmenters `chunk_by_sentences`/`chunk_by_words` do, rather
 than LangChain's own naive literal guesses (`"\n\n"`, `". "`, `" "`).
-`separators=[...]` is a caller-supplied list of LITERAL strings (**not
-regex**, a documented scope line: literals are LangChain's own default
+`separators=[...]` is a caller-supplied list of literal strings, not regex
+(a documented scope line: literals are LangChain's own default
 too, cover the motivating markdown-header case completely, and avoid
 reopening the regex-semantics question `re` support was already declined
 over), coarsest first, e.g. `["\n## ", "\n\n", ". ", " "]` for
-markdown-header-aware chunking. A custom list REPLACES the default
+markdown-header-aware chunking. A custom list replaces the default
 hierarchy for the levels it specifies, but the grapheme-safe raw cut is
 still always appended as the final fallback regardless; unlike LangChain,
 no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
 
 An entry in that list may also be `None`: it splices the default
-hierarchy's three accurate levels in AT THAT POSITION, the mix an
+hierarchy's three accurate levels in at that position, the mix an
 all-literal list could not express before. `["\n", None]` is
-line → paragraph → sentence → word → raw cut — the line-oriented-text
+line → paragraph → sentence → word → raw cut, the line-oriented-text
 shape (a chat thread, one message per line, never split mid-line) whose
-oversized-line fallback is the REAL UAX #29 sentence/word segmenter
+oversized-line fallback is the real UAX #29 sentence/word segmenter
 rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost stated plainly: every level — each of the three default walks,
-each distinct custom literal — pays its one whole-text walk AT MOST
-once per call, and ONLY when a window consults it: levels are built at
-their first consultation (the window loop walks the list strictly
-through `find_map`, in priority order), so a budget that answers every
-window at the paragraph level never runs the sentence or word walks at
-all, and duplicate entries — `None` or a repeated literal — are
+Cost: duplicate entries, `None` or a repeated literal, are
 recognized at list construction and skipped, inert (identical levels
-can never change the answer — the first occurrence of a level always
+can never change the answer; the first occurrence of a level always
 dominates its duplicate), so `[None] * 100` costs what `[None]` does
 (~1.7 ms at a 2000-codepoint budget over 6 MiB of prose, the paragraph
 walk alone) and `[" "] * 100` what `[" "]` does (~9 ms). The former
-spelling re-paid the walks per duplicate entry — walks plus ~45 MiB of
+spelling re-paid the walks per duplicate entry, walks plus ~45 MiB of
 cut vectors per duplicate on a 6 MiB document, a caller-controlled
 unbounded cost (`[None] * 100` measured 17.2 s and +3,120 MiB of peak
-RSS, `[" "] * 100` 790 ms and +1,560 MiB — OOM shapes) — closed by the
-construction-time dedup and the first-consultation deferral.
+RSS, `[" "] * 100` 790 ms and +1,560 MiB, OOM shapes), closed by the
+construction-time dedup.
 
 **Rust API note**: 0.6.0 changes the public `tors-core` crate's
-`chunk_hierarchical(text, max_chars, separators, overlap)` signature —
+`chunk_hierarchical(text, max_chars, separators, overlap)` signature:
 `separators` moved from `Option<&[&str]>` to `Option<&[Option<&str>]>`,
-the type the `None`-entry splice requires — which is breaking for direct
+the type the `None`-entry splice requires, which is breaking for direct
 Rust consumers of the separately-published crate at 0.x. Python callers
 are unaffected: an all-literal list behaves identically under either
 spelling. The merge that introduced it (#28) landed as a plain `feat:`
-with no `BREAKING CHANGE:` footer — release-please would not have
-surfaced it on its own — so the footer is restated on the follow-up fix
+with no `BREAKING CHANGE:` footer, which release-please would not have
+surfaced on its own, so the footer is restated on the follow-up fix
 commit (#31), which release-please will carry into the 0.6.0 changelog
-when that release lands, and this note is the docs-side record.
+when that release lands; this note is the docs-side record.
 
-**Unlike `chunk_text`, this is NOT a lossless covering partition**: at
-every level except the raw cut, the separator itself is DROPPED between
+**Unlike `chunk_text`, this is not a lossless covering partition**: at
+every level except the raw cut, the separator itself is dropped between
 chunks: the chunk ends where the separator starts, the next chunk begins
 where it ends, the same convention `chunk_by_paragraphs` already applies
-to blank-line runs. A caller splitting ON a marker wants it gone, not
+to blank-line runs. A caller splitting on a marker wants it gone, not
 duplicated.
 
 `overlap` snaps the next chunk's start backward to the nearest GRAPHEME
@@ -1891,40 +1883,42 @@ level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
 
-Cost at document scale: one scan per CONSULTED level — the default
+Cost at document scale: one scan per consulted level (the default
 hierarchy's paragraph/sentence/word walks, or one literal search per
-distinct custom separator — each paid at most once per call, at the
+distinct custom separator), each paid at most once per call, at the
 level's first consultation by the window loop; one branchless byte pass
-for the codepoint count; and one grapheme boundary index — a
-one-bit-per-codepoint bitmap built LAZILY, only when a consulted level
+for the codepoint count; and one grapheme boundary index, a
+one-bit-per-codepoint bitmap built lazily, only when a consulted level
 actually has cuts to filter, a window needs the raw-cut fallback, or
 `overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
-instead of a segmentation walk. A budget that answers every window at
+instead of a segmentation walk. Levels are built at their first
+consultation (the window loop walks the list strictly through
+`find_map`, in priority order), so a budget that answers every window at
 the paragraph level never runs the sentence or word walks; a custom
 hierarchy that never matches under a whole-document budget is one
-codepoint count and nothing else — no window consults a level, so not
-even the literal's own scan runs. Measured on 12 MiB
+codepoint count and nothing else, so not even the literal's own scan
+runs. Measured on 12 MiB
 (`tools/bench_chunking.py`): the default hierarchy at a 2000-codepoint
-budget over prose runs only its paragraph walk, ~3.4 ms — it was ~350
+budget over prose runs only its paragraph walk, ~3.4 ms (it was ~350
 ms when every level built eagerly, its word walk (~130 ms) plus
-sentence walk (~190 ms) scanned before the first window asked — and
+sentence walk (~190 ms) scanned before the first window asked), and
 budgets that fall further consult, and pay, more: ~192 ms at a
 500-codepoint budget (the sentence walk joins the paragraph walk; the
 word walk is still never consulted), ~385 ms at a 100-codepoint budget
-(all three walks, plus a 20× denser chunk loop) — the laziness prices
+(all three walks, plus a 20x denser chunk loop); the laziness prices
 consultation, it does not skip walks the answer needs; a never-matching
 custom hierarchy under a whole-document budget ~2.5 ms, the codepoint
 count. Before #22 an unconditional `Vec<char>` collect plus a `HashSet`
 of every grapheme boundary in the document ran before anything else:
 ~1.0-1.2 s for the never-matching case regardless of budget, ~3.0 s for
-the default hierarchy, superlinear in input size — #22 removed that
+the default hierarchy, superlinear in input size; #22 removed that
 unconditional grapheme structure, and this follow-up removed the
 unconditional level builds that had remained, which is what the
 ~350 ms → ~3.4 ms drop measures.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,
-genuine overlap, the right knobs), not an outcome it doesn't control. This
+genuine overlap, the right knobs). This
 is additive: `chunk_text`/`chunk_by_words`/`chunk_by_sentences`/
 `chunk_by_paragraphs`/`chunk_by_lines` remain the right choice for the
 common case; `chunk_hierarchical` is for custom, format-aware, or
@@ -1943,16 +1937,16 @@ thread = (
 )
 tors.chunk_hierarchical(thread, 60, ["\n", None])
 # [(0, 29), (30, 78), (78, 131), (132, 145)]
-#  -> whole lines where they fit; the oversized Priya line falls to REAL
+#  -> whole lines where they fit; the oversized Priya line falls to real
 #     sentence boundaries ("on the numbers. " / "meeting. The budget holds.")
 
 tors.chunk_hierarchical(thread, 40, ["\n", ". ", " "])[1]
-# (30, 55)  -> "Priya: We briefed the U.S" — the naive ". " list severs the name
+# (30, 55)  -> "Priya: We briefed the U.S"; the naive ". " list severs the name
 tors.chunk_hierarchical(thread, 40, ["\n", None])[1]
-# (30, 69)  -> "Priya: We briefed the U.S. team on the " — the splice does not
+# (30, 69)  -> "Priya: We briefed the U.S. team on the "; the splice does not
 
 tors.chunk_hierarchical(thread, 24, [None]) == tors.chunk_hierarchical(thread, 24)
-# True — [None] IS separators=None
+# True: [None] is separators=None
 ```
 
 ## `tors.chunk_cdc`
@@ -1963,7 +1957,7 @@ def chunk_cdc(
 ) -> list[tuple[int, int]]: ...
 ```
 
-**Async**: `await tors.aio.chunk_cdc(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.chunk_cdc(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 FastCDC 2020 content-defined chunking, one GIL-released native pass: `(start, end)`
 **byte** spans (not codepoints: unlike every other segmentation function here, this
@@ -2021,7 +2015,7 @@ hash and an internal-node hash live in the same output space: exactly the
 ambiguity behind **CVE-2012-2459**, the Bitcoin Merkle-tree bug class where a
 forged proof can present an internal node's hash as though it were some
 leaf's digest. `merkle_root`/`merkle_diff` don't expose proof generation
-yet, but the hash SCHEME is part of the root's output contract from v1
+yet, but the hash scheme is part of the root's output contract from v1
 regardless: roots are meant to be computed once and compared/stored across
 calls, and changing the scheme later would silently change every
 previously-computed root. It needs to be correct now, not patched in when
@@ -2032,7 +2026,7 @@ layer (rs_merkle's own default `concat_and_hash`, its `None => *left` arm),
 never duplicated against itself. Duplication is Bitcoin's original
 convention and the actual mechanism CVE-2012-2459 exploited: two
 differently-shaped chunk lists (one a duplicate-padded version of a shorter
-one) could otherwise produce the SAME root; promotion is the standard
+one) could otherwise produce the same root; promotion is the standard
 mitigation and matches RFC 6962. A single chunk's root is just its own leaf
 hash: no internal node is built for it.
 
@@ -2056,7 +2050,7 @@ def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 ```
 
 Indices where `chunks_a[i] != chunks_b[i]`, one GIL-released native pass.
-Comparison is over chunk DIGESTS, the same `0x00`-prefixed leaf hash
+Comparison is over chunk digests, the same `0x00`-prefixed leaf hash
 `merkle_root` uses at a fixed 32-byte cost per index, rather than raw chunk
 contents. Every index at or beyond the shorter list's length is reported:
 there is no counterpart chunk to compare against there, so a length
@@ -2079,7 +2073,7 @@ or a non-`bytes` list entry raises `TypeError`.
 tors.merkle_diff([b"a", b"b", b"c"], [b"a", b"X", b"c"])
 # [1]
 tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
-# [2, 3]  — every trailing index beyond the shorter list's length
+# [2, 3]: every trailing index beyond the shorter list's length
 ```
 
 ## `tors.simhash64`
@@ -2092,7 +2086,7 @@ A 64-bit SimHash fingerprint of `text`, one GIL-released native pass: the
 fuzzy near-duplicate gate that sits alongside `tors.finalize`'s exact
 SHA-256 gate. Charikar's weighted-bit-voting construction (the near-web-scale
 near-duplicate-detection shape Manku, Jain, and Das Sarma built at Google,
-WWW 2007): `text` is tokenized into words via the SAME UAX #29 word
+WWW 2007): `text` is tokenized into words via the same UAX #29 word
 segmentation `tors.word_bounds` drives (`split_word_bounds`, its sibling
 spelling over the same tables), skipping any segment that is entirely
 whitespace; each token's UTF-8 bytes are hashed with a deterministic
@@ -2102,17 +2096,17 @@ wherever the vote sums positive (ties, including the zero-token case,
 resolve to 0).
 
 **Why FNV-1a and not `std`'s `DefaultHasher`.** A dedupe fingerprint must be
-stable ACROSS PROCESSES and machines: `DefaultHasher` is seeded per process
+stable across processes and machines: `DefaultHasher` is seeded per process
 (`RandomState`), so a fingerprint it produced would silently change between
-runs, breaking any cross-run/cross-machine dedupe built on it. FNV-1a is
-deterministic forever and adequate for a VOTING hash: it only needs to
+runs, breaking any cross-run/cross-machine dedupe built on it. FNV-1a is deterministic forever and adequate for a
+voting hash: it only needs to
 spread tokens reasonably uniformly across the 64 bit positions, not resist
 adversarial collisions; a collision between two distinct tokens merely
 blurs one vote among 64 counters.
 
 **What this answers that `finalize` cannot.** `finalize`'s SHA-256 tail and
 `merkle_root` answer "is this text byte-identical": a single changed comma
-already fails that gate. `simhash64` answers "is this text NEARLY the
+already fails that gate. `simhash64` answers "is this text nearly the
 same": Hamming distance `(a ^ b).bit_count()` (a one-liner at the call
 site, which is why this returns the raw `int` rather than shipping a
 redundant distance function) grows slowly with edit distance, so
@@ -2121,9 +2115,9 @@ texts sit far apart. The realistic pipeline runs both gates off one store:
 exact dupes at Hamming distance 0 via `finalize`'s hash, near-dupes at
 small Hamming distance via `simhash64`, everything else far apart.
 
-**Bag of words: order does not matter.** The vote is over the MULTISET of
+**Bag of words: order does not matter.** The vote is over the multiset of
 tokens, not their sequence: `tors.simhash64("the quick brown fox")` and
-`tors.simhash64("fox brown quick the")` fingerprint IDENTICALLY. A repeated
+`tors.simhash64("fox brown quick the")` fingerprint identically. A repeated
 token votes once per occurrence, so frequency is still part of the bag:
 appending one more `"the"` to a sentence that already has several is a
 different multiset and (usually) a different fingerprint.
@@ -2163,7 +2157,7 @@ beyond the 64 vote counters: no intermediate token list is materialized.
 tors.simhash64("the quick brown fox jumps over the lazy dog")
 # 14607312263354641902
 tors.simhash64("the quick brown fox jumps over the lazy dog!")  # one edit
-# 14601682762745638348 — Hamming distance 6, not ~32 (unrelated-text scale)
+# 14601682762745638348: Hamming distance 6, not ~32 (unrelated-text scale)
 tors.simhash64("")
 # 0
 ```
@@ -2176,7 +2170,7 @@ def simhash128(text: str) -> int: ...
 
 The 128-bit spelling of `tors.simhash64`: identical tokenization, identical
 vote (each token's FNV-1a hash votes ±1 per bit, positive sum sets the bit),
-run at 128 bits instead of 64: genuinely twice the bit positions, not a
+run at 128 bits instead of 64: twice the bit positions, not a
 64-bit fingerprint zero-extended into a wider int (the FNV-1a offset basis
 and prime are the real 128-bit constants, and every one of the 128 bits gets
 its own independent vote). Use it for corpora where a 64-bit fingerprint's
@@ -2205,6 +2199,29 @@ tors.simhash128("")
 # 0
 ```
 
+## `tors.CompiledLemmaDict`
+
+```python
+class CompiledLemmaDict:
+    def __init__(self, mapping: dict[str, str]) -> None: ...
+    def __len__(self) -> int: ...
+```
+
+A pre-built `lemma_dict` mapping: the `re.compile()` answer to `tf_idf`/
+`bm25_rank`/`apply_pipeline`'s per-call dict-materialization cost (the
+measured cost and the loading recipes are in `tors.tf_idf`'s docs below).
+`CompiledLemmaDict(mapping)` extracts the mapping into a Rust `HashMap`
+once, under the GIL (the same linear-in-size walk `tf_idf`/`bm25_rank`/
+`apply_pipeline` pay per call for a raw `dict`: the whole point is paying
+it here, a single time, instead); every later call is an `Arc::clone`. The
+argument must be exactly a `dict[str, str]` (a non-`dict` argument, or one
+with a non-`str` key or value, raises `TypeError`); `len(cl)` is the
+number of entries. Immutable once built, and not a caching mechanism:
+nothing inside tors remembers a raw `dict` between calls, so a caller who
+mutates their `dict` and re-passes it is always honored — the handle is
+the caller's explicit opt-in to fixness, the same narrow shape
+`re.compile()` has in the stdlib.
+
 ## `tors.tf_idf`
 
 ```python
@@ -2217,7 +2234,7 @@ def tf_idf(
 ) -> list[list[tuple[str, float]]]: ...
 ```
 
-**Async**: `await tors.aio.tf_idf(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.tf_idf(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 Stateless TF-IDF over `corpus`, one GIL-released native pass: no
 vocabulary/vectorizer object persists between calls; every call scores
@@ -2236,18 +2253,18 @@ inter-word whitespace its own segment). Terms are lowercased with Rust's
 Unicode-correct `str::to_lowercase` (not an ASCII-only fold) before
 counting: `"Cat"` and `"cat"` are the same term.
 
-**TF** (per document `d`, term `t`): the RAW count of `t` in `d`, not
+**TF** (per document `d`, term `t`): the raw count of `t` in `d`, not
 length-normalized. A caller wanting `tf / len(d)` divides the returned raw
 count themselves; the raw count is the more broadly reusable number (a
 length-normalized score would silently discard the total-count information
 some callers want directly).
 
 **IDF** (term `t`, corpus size `N`, document frequency `df(t)` = number of
-documents containing `t` at least once): the SMOOTHED formula
+documents containing `t` at least once): the smoothed formula
 `ln((1 + N) / (1 + df(t))) + 1`: scikit-learn's own `smooth_idf=True`
 default (as if one extra document existed containing every term exactly
 once), not the textbook `ln(N / df(t))`. The textbook formula
-gives a term appearing in EVERY document an IDF of exactly `ln(1) = 0`, so
+gives a term appearing in every document an IDF of exactly `ln(1) = 0`, so
 its score is `0` regardless of how often it occurs: an unhelpfully sharp
 cliff for exactly the "practically universal term" case a caller most wants
 a small-but-nonzero weight for. The smoothed form stays strictly positive
@@ -2256,7 +2273,7 @@ there (`ln((1+N)/(1+N)) + 1 = 1` exactly, for the universal-term case
 
 **score**(t, d) = `tf(t, d) * idf(t)`.
 
-**Output is SPARSE**: one `(term, score)` list per input document,
+**Output is sparse**: one `(term, score)` list per input document,
 alphabetically sorted, holding only that document's own terms, never a
 vocabulary-size-by-corpus-size dense structure (wasteful for anything but a
 tiny shared vocabulary). An empty corpus returns `[]`. An empty-string
@@ -2278,7 +2295,7 @@ would also touch ligatures/width variants (`"ﬁ"` → `"fi"`), which
 accent-folding shouldn't. Default `False`: accents are preserved unless
 asked to fold them.
 
-A token made ENTIRELY of combining marks (a bare accent with no base
+A token made entirely of combining marks (a bare accent with no base
 letter, e.g. from already-decomposed input) strips down to the empty
 string; such tokens are dropped, never counted as a `""` term. This is
 the same structural exclusion `scikit-learn`'s default `token_pattern`
@@ -2298,16 +2315,16 @@ this crate). Stemming is cruder: it can't distinguish "better" the
 comparative from "better" the verb, but it's correct, deterministic, and
 dependency-light.
 
-**`lemma_dict`** is a caller-supplied `word -> lemma` map, applied LAST
+**`lemma_dict`** is a caller-supplied `word -> lemma` map, applied last
 (after any stemming): the fully-folded token is looked up, and its mapped
-value REPLACES it if present, else the folded token is kept as-is. tors
+value replaces it if present, else the folded token is kept as-is. tors
 does not bundle a lemma dictionary: full lemmatization needs a
 per-language dataset or a POS model, the same "no external model"
 boundary that kept stemming's own decision above. `lemma_dict` is the
 mechanism, not the data: the same shape `replace_many` already takes a
 caller-supplied replacement map instead of a bundled one. Combining
 `stemmer` and `lemma_dict` together is unusual but well-defined, not an
-error: the dict is consulted on the ALREADY-stemmed form. A non-`dict`
+error: the dict is consulted on the already-stemmed form. A non-`dict`
 argument, or one with a non-`str` key/value, raises `TypeError`. Default
 `None`: no substitution.
 
@@ -2331,26 +2348,26 @@ so any source you can turn into one works. Three common ones:
   each into its own `tf_idf`/`bm25_rank`/`apply_pipeline` call.
 
 **`lemma_dict`'s real cost, measured, and its fix.** A raw
-`dict[str, str]` marshals the WHOLE Python `dict` into a Rust
+`dict[str, str]` marshals the whole Python `dict` into a Rust
 `HashMap<String, String>` fresh on every call. For a small map (a handful
 of entries) that cost is negligible. For a realistically-sized lemma table
 (spaCy's own English lookup data is tens of thousands of entries), it is
-not. Measured on a 12-core dev box, a 20,000-entry `lemma_dict` costs
-roughly 1.4ms of marshalling PER CALL, independent of how much text that
+not. A 20,000-entry `lemma_dict` costs
+roughly 1.4ms of marshalling per call, independent of how much text that
 call processes. Called once over a large batch, that cost amortizes away.
 Called repeatedly (once per short text, the shape a naive loop reaches
 for), that fixed cost dominates and can make `apply_pipeline`/
-`tf_idf`/`bm25_rank` measurably SLOWER than an equivalent idiomatic Python
-loop (`tools/bench_lemma_dict.py` measured roughly 10-300x slower at small
+`tf_idf`/`bm25_rank` measurably slower than an equivalent idiomatic Python
+loop (`tools/bench_lemma_dict.py` measured roughly 10-460x slower at small
 per-call batch sizes with a 20,000-entry map).
 
 `tors.CompiledLemmaDict` is the fix: build the `HashMap` once, reuse it
 across every call. `lemma_dict` accepts either a raw `dict[str, str]` (the
 per-call cost above) or a `CompiledLemmaDict` (an `Arc::clone` per call
-after the one-time build: measured at roughly 57x faster than the raw-
+after the one-time build: measured at roughly 600x faster than the raw-
 `dict` path for a 20,000-entry map called repeatedly). Building a
-`CompiledLemmaDict` still costs the same materialization time; the whole
-point is paying it once instead of on every call:
+`CompiledLemmaDict` still costs the same materialization time; it pays
+that cost once instead of on every call:
 
 ```python
 compiled = tors.CompiledLemmaDict(lemma_dict)  # pay the cost once
@@ -2358,7 +2375,7 @@ for batch in many_batches:
     tors.apply_pipeline(batch, lowercase=True, lemma_dict=compiled)  # O(1) per call after
 ```
 
-`CompiledLemmaDict` is immutable once built and NOT a general
+`CompiledLemmaDict` is immutable once built and not a general
 caching mechanism (no identity-keyed cache lives inside tors, silently
 reusing a stale mapping if a caller mutated their `dict` between calls:
 that footgun is exactly what an explicit, caller-controlled handle avoids).
@@ -2366,16 +2383,16 @@ It does not reopen the case for a stateful pipeline object: it is scoped
 to this one parameter, on this one measured cost, the same narrow shape
 `re.compile()` has in the stdlib.
 
-**What this is for, and what it is NOT.** A lightweight keyword-weighting
+**What this is for, and what it is not.** A lightweight keyword-weighting
 and document-similarity primitive for pipelines that don't want an ML
 dependency: surfacing a document's most distinctive terms, or comparing
-documents by their score vectors. It is NOT a full NLP pipeline stage: no
+documents by their score vectors. It is not a full NLP pipeline stage: no
 lemmatization, no stop-word removal, no n-grams; stemming and accent-folding
 are opt-in, everything else stays case-folding only. And, matching this
-crate's stated posture throughout: this is a correctness/capability
+crate's posture: this is a correctness/capability
 primitive, not a retrieval- or model-quality promise; whether TF-IDF
 weighting helps a particular downstream task is the caller's question to
-answer, not a claim made here.
+answer.
 
 ```python
 tors.tf_idf(["the cat sat on the mat", "the dog sat on the log", "birds fly in the sky"])
@@ -2403,16 +2420,16 @@ def bm25_rank(
 ) -> list[tuple[int, float]]: ...
 ```
 
-**Async**: `await tors.aio.bm25_rank(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.bm25_rank(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 Okapi BM25 score for every document in `corpus` against `query`, one
-GIL-released native pass: `(index, score)` pairs for EVERY document: no
+GIL-released native pass: `(index, score)` pairs for every document: no
 top-k cutoff baked in, slice/sort the result yourself; sorted by score
 descending, ties broken by ascending original index.
 
-**A RERANKING primitive, not a search index.** `bm25_rank` recomputes
+**A reranking primitive, not a search index.** `bm25_rank` recomputes
 corpus statistics from scratch on every call. That is the right shape for
-the common RAG pattern of reranking a SMALL, already-retrieved candidate
+the common RAG pattern of reranking a small, already-retrieved candidate
 set (tens to a few hundred documents: a vector-search step's top-k, say)
 against one query: no state to manage, composes with the rest of tors's
 flat, stateless primitives, cheap enough at that scale to recompute per
@@ -2440,7 +2457,7 @@ IDF(t) = ln( (N - n(t) + 0.5) / (n(t) + 0.5) + 1 )
 `t`'s occurrence count in `D`, `|D|` = `D`'s token count, `avgdl` = the
 corpus's mean document length. `IDF` is the always-non-negative "+1"
 (Lucene-since-2011) variant, not the classic
-`ln((N-n(t)+0.5)/(n(t)+0.5))` form, which goes NEGATIVE for a term
+`ln((N-n(t)+0.5)/(n(t)+0.5))` form, which goes negative for a term
 appearing in more than half the corpus: a surprising, unwanted answer for
 a reranking primitive with no stopword list to filter such terms out
 first.
@@ -2455,7 +2472,7 @@ values raise `ValueError`.
 `tf_idf` uses (UAX #29 word segments, non-whitespace only). `strip_accents`/
 `stemmer`/`lemma_dict` are `tf_idf`'s exact same opt-in knobs (see its docs
 for the accent-folding/stemming/lemma-substitution details), applied
-IDENTICALLY to `query` and every `corpus` document, since scoring a query
+identically to `query` and every `corpus` document, since scoring a query
 normalized differently from its corpus produces meaningless scores, not
 just imprecise ones. All default off, reproducing the original
 lowercase-only tokenization exactly.
@@ -2473,12 +2490,12 @@ protects against adversarial-input superlinear blowup (`levenshtein`/
 `jaro`'s O(n·m) DP tables, `similarity_ratio`'s windowed Myers scans).
 `bm25_rank` has no such shape: cost is linear in total corpus token count
 plus `corpus_size * distinct_query_terms`, both driven directly and
-proportionally by the SIZES of the caller's own arguments, not by
+proportionally by the sizes of the caller's own arguments, not by
 adversarial structure within them. A caller already controls the one lever
 that bounds the cost (how large a `corpus` they pass).
 
-`tors` makes no claim about retrieval or relevance QUALITY for any
-particular corpus or query: BM25 is a well-specified ranking FORMULA,
+`tors` makes no claim about retrieval or relevance quality for any
+particular corpus or query: BM25 is a well-specified ranking formula,
 correctly implemented here, not a model-quality promise.
 
 ```python
@@ -2511,13 +2528,13 @@ def apply_pipeline(
 ) -> list[str]: ...
 ```
 
-**Async**: `await tors.aio.apply_pipeline(...)` runs this under `asyncio.to_thread` so the event loop stays responsive across the call — see the README's [Async use](https://github.com/AZX-PBC-OSS/tors#async-use) section.
+**Async**: `await tors.aio.apply_pipeline(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 A stateless, general-purpose batch text preprocessor: every requested step
-fused into ONE GIL-released native pass over the WHOLE `texts` list.
+fused into one GIL-released native pass over the whole `texts` list.
 
 **No pipeline object for the pipeline itself: pure function composition.**
-A `re.compile()`-style compiled-pipeline handle for the WHOLE pipeline
+A `re.compile()`-style compiled-pipeline handle for the whole pipeline
 (build once, `.apply()` many times) was considered and ruled out: tors
 does not build persistent Rust-side state, the same scope line that kept
 a Merkle inclusion-proof API and a real search index out of this crate.
@@ -2532,25 +2549,25 @@ for a general pipeline object: nothing else in `apply_pipeline` gets one.
 **Order of operations**: `nfd` → `lowercase` → `strip_accents` →
 (`stemmer` / `lemma_dict`) → `collapse_whitespace`, each step skipped
 entirely when its flag is off/`None`. `nfd`/`lowercase`/`strip_accents`
-are CODEPOINT-level transforms: they don't care about word boundaries,
+are codepoint-level transforms: they don't care about word boundaries,
 so they run over the whole text directly (reusing `tors.nfd`'s and
 `tf_idf`'s own accent-folding algorithm verbatim). `stemmer`/`lemma_dict`
-are WORD-level: the already-transformed text is walked segment-by-segment
+are word-level: the already-transformed text is walked segment-by-segment
 (the same UAX #29 `split_word_bounds` walk `tf_idf`/`bm25_rank` tokenize
 with), transforming only real-word segments and preserving every other
-segment (punctuation, whitespace) VERBATIM, so the output stays
+segment (punctuation, whitespace) verbatim, so the output stays
 readable prose, not a token list. `collapse_whitespace` runs last,
 reducing every run of Python-whitespace-equivalent codepoints to exactly
-one ASCII space, NOT `tors.normalize`'s full pipeline (no
+one ASCII space, not `tors.normalize`'s full pipeline (no
 CRLF folding, no blank-line-run collapsing, no leading/trailing strip),
 just whitespace-run collapsing.
 
 **Identity contract**: all six steps default off, and
 `apply_pipeline(texts)` with nothing else is a true identity: the
-original `texts` list OBJECT comes back unchanged, not just
+original `texts` list object comes back unchanged, not just
 content-equal output, matching the zero-allocation contract
 `normalize`/`quote`/`replace_many` already give for their own no-op case.
-Argument validation (every element genuinely a `str`) still runs even on
+Argument validation (every element a `str`) still runs even on
 this fast path: a non-`str` element always raises `TypeError`, never
 silently passes through untouched. Empty `texts` → `[]`.
 
@@ -2563,10 +2580,10 @@ without `lowercase=True` is not an error, but the stem quality degrades:
 this is not silently corrected, matching tors's "the caller composes"
 posture throughout.
 
-**Relationship to `tf_idf`/`bm25_rank`**: those two already fuse the SAME
+**Relationship to `tf_idf`/`bm25_rank`**: those two already fuse the same
 `strip_accents`/`stemmer`/`lemma_dict` knobs directly into their own
 tokenization. Calling `apply_pipeline` first and then `tf_idf`/`bm25_rank`
-on the result tokenizes TWICE for no benefit: reach for their own knobs
+on the result tokenizes twice for no benefit: reach for their own knobs
 when they're the only consumer; reach for `apply_pipeline` to preprocess
 text feeding anything else (`chunk_text`, `find_patterns`, your own
 logic).
@@ -2601,18 +2618,17 @@ def metaphone(text: str) -> str: ...
 Two classic phonetic-code algorithms, via `rphonetic` (an Apache Commons
 Codec port): `soundex` (a 1918-patent-era letter-plus-three-digits code,
 e.g. `"Robert"`/`"Rupert"` both encode to `"R163"`) and `metaphone` (the
-Double Metaphone PRIMARY code, Lawrence Philips' 2000 successor to
+Double Metaphone primary code, Lawrence Philips' 2000 successor to
 classic Metaphone, e.g. `"jumped"` → `"JMPT"`). Both are
-ENGLISH/Latin-script-oriented heuristics, not general Unicode phonetics:
-they group words that SOUND alike, typically alongside
+English/Latin-script-oriented heuristics, not general Unicode phonetics:
+they group words that sound alike, typically alongside
 `levenshtein`/`jaro_winkler` distance scoring rather than instead of it,
 for name-matching and dedup pipelines.
 
-**Input is pre-filtered to ASCII letters before encoding: a real
-correctness fix, not a style choice.** `rphonetic` 4.0.0's
-`Soundex::encode` and `DoubleMetaphone::encode` both PANIC on ordinary
+**Input is pre-filtered to ASCII letters before encoding.** `rphonetic` 4.0.0's
+`Soundex::encode` and `DoubleMetaphone::encode` both panic on ordinary
 accented input, confirmed directly against the raw crate: `Soundex`'s own
-"clean" step filters by the FULL-UNICODE `char::is_alphabetic` (too
+"clean" step filters by the full-Unicode `char::is_alphabetic` (too
 broad: Cyrillic, CJK, Greek, and accented Latin like `'é'` all pass it),
 then unconditionally indexes a 26-element ASCII mapping table with
 `ch as usize - 65`, out of bounds for anything outside plain `A`-`Z`;
@@ -2623,7 +2639,7 @@ exactly the realistic input a name-matching consumer would pass:
 `DoubleMetaphone::default().encode("Björk")` both panic on the raw crate.
 tors never lets a Rust panic reach Python, so `text` is filtered to ASCII
 letters (`char::is_ascii_alphabetic`) before either algorithm sees it:
-accents and non-Latin characters are DROPPED, not encoded, a documented
+accents and non-Latin characters are dropped, not encoded, a documented
 degradation consistent with these algorithms' documented English-only
 scope even where the upstream crate doesn't crash. Empty input, or input
 with no ASCII letters at all, → `""`.
@@ -2637,7 +2653,7 @@ tors.soundex("Robert"), tors.soundex("Rupert")
 tors.metaphone("jumped")
 # 'JMPT'
 tors.soundex("José"), tors.metaphone("café")
-# ('J200', 'KF')  — accents dropped, not crashed on
+# ('J200', 'KF'): accents dropped, not crashed on
 ```
 
 ## `tors.double_metaphone`
@@ -2647,11 +2663,11 @@ def double_metaphone(text: str) -> tuple[str, str]: ...
 ```
 
 The full dual-key form of `tors.metaphone`: `(primary, alternate)`. The
-alternate code is the algorithm's whole point — for names readable two
+alternate code is the algorithm's whole point: for names readable two
 ways (Germanic/Slavic vs. Anglicized) it carries the second
-pronunciation, so a name-matching pipeline scores a match when EITHER
+pronunciation, so a name-matching pipeline scores a match when either
 key of two names agrees; for words with one plausible pronunciation the
-two elements are equal. Same ENGLISH/Latin-script scope, ASCII-letters
+two elements are equal. Same English/Latin-script scope, ASCII-letters
 pre-filter, and upstream-panic-avoidance note as `soundex`/`metaphone`
 above. Empty input (or input with no ASCII letters) → `("", "")`.
 
@@ -2669,7 +2685,7 @@ def nysiis(text: str) -> str: ...
 The NYSIIS code (New York State Identification and Intelligence System,
 1970), via `rphonetic`'s strict commons-codec variant (codes capped at 6
 characters). A Soundex successor with better first-letter and vowel
-handling. Same scope/pre-filter/panic-avoidance note as `soundex` — the
+handling. Same scope/pre-filter/panic-avoidance note as `soundex`; the
 filter additionally keeps NYSIIS keys pure ASCII, since the crate's own
 clean step would otherwise let accented letters through into the code
 itself. Empty input (or input with no ASCII letters) → `""`.
@@ -2689,9 +2705,9 @@ The Daitch-Mokotoff Soundex codes (1985), via `rphonetic`'s port of
 Apache Commons Codec with branching enabled: 6-digit codes designed for
 Central/Eastern European surnames, the standard of Jewish-genealogy
 surname matching, distinguishing sounds (guttural vs. sibilant) classic
-Soundex conflates. Returns a LIST, not a single string: the rule table
+Soundex conflates. Returns a list, not a single string: the rule table
 branches on ambiguous transliterations, so one name can legitimately
-encode to several codes — two names match if ANY of their code lists
+encode to several codes; two names match if any of their code lists
 intersect. Each code is padded to 6 digits, so input with no encodable
 letters yields `["000000"]`, not `""`. Same
 scope/pre-filter/upstream-panic-avoidance note as `soundex`.
@@ -2708,9 +2724,9 @@ def refined_soundex(text: str) -> str: ...
 ```
 
 A Soundex variant with a finer-grained letter-to-digit mapping table
-than classic Soundex — more consonant classes distinguished, at the
+than classic Soundex (more consonant classes distinguished, at the
 cost of a longer, uncapped code rather than Soundex's fixed
-letter-plus-three-digit shape. A genuinely distinct mapping, not a
+letter-plus-three-digit shape). A distinct mapping, not a
 formatting variant of `tors.soundex` (confirmed: `"Robert"` encodes
 differently under each). Shares Soundex's exact upstream panic bug
 (confirmed directly against the raw crate: `RefinedSoundex::default()
@@ -2727,26 +2743,26 @@ tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 
 Document-format extraction: PDF, the office and text formats (doc/docx, xls/xlsx,
 ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv), and HTML, converted to GitHub-Flavored
-Markdown or plain text — one GIL-released native pass per call, the same discipline as
+Markdown or plain text, one GIL-released native pass per call, the same discipline as
 every function above.
 
 This surface ships in a second wheel: `pip install tors[documents]`. The base `tors`
 wheel re-exports it as `tors.documents` (an `ImportError` with the install hint fires
 when the payload is absent), and the payload (`tors-documents`) is version-locked to
-`tors` — same number, released together. The split is weight discipline: the engines
+`tors`: same number, released together. The split is weight discipline: the engines
 live in `tors-core` behind the cargo feature `documents`, default OFF, so the base
 build compiles none of them; only the payload wheel does.
 
-The split is also the lazy-import design, and the laziness is measured (2026-09,
-fresh processes, `/proc/self/status` `VmHWM` on this box): a bare `python` peaks at
+The split is also the lazy-import design, and the laziness is measured (fresh
+processes, `/proc/self/status` `VmHWM`): a bare `python` peaks at
 11.9 MB; `import tors` at 14.7 MB, with `tors.documents` absent from `sys.modules`
-— the base wheel carries no engine code at all, so the import has nothing to touch
-(a subprocess gate in the suite pins the absence); `import tors.documents` at
-18.7 MB despite all four engines being compiled into the one payload `.so` — demand
-paging: the engine code pages only materialize as conversions first run. You pay
-nothing for documents unless you install and import them.
+(the base wheel carries no engine code at all, so the import has nothing to touch;
+a subprocess gate in the suite pins the absence); `import tors.documents` at
+18.7 MB despite all four engines being compiled into the one payload `.so`, by
+demand paging: the engine code pages only materialize as conversions first run. You
+pay nothing for documents unless you install and import them.
 
-The engines are chosen per format family by head-to-head measurement (2026-09; the
+The engines are chosen per format family by head-to-head measurement (the
 comparison and its fixtures are documented in the `documents_impl` crate docs, and the
 suite that pins them is `tests/test_documents_engines.py`):
 
@@ -2755,10 +2771,10 @@ suite that pins them is `tests/test_documents_engines.py`):
 | PDF | pdf_oxide 0.3.78 | two-column layouts come back as separate reading-order blocks (not interleaved), `/Link` annotations render as `[text](uri)`, heading detection on |
 | HTML | html-to-markdown-rs 3.12 | drops `<script>`/`<style>` by construction (the disqualifying failure of the alternatives, which leak CSS/JS text into the body); padded GFM tables, indented nested lists, clean code fences |
 | office + text (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv/tsv) | anydoc 0.2.4 | renders style-based docx headings and list markers that office_oxide drops entirely; covers rtf/odt/epub/csv, which office_oxide cannot read at all |
-| `backend="oxide"` (caller-selectable) | office_oxide 0.1.10 | the alternative reader for the OOXML + legacy office formats: exact entity text (no `&`-escaping), against the heading/list losses above — a documented lane for diffing the two engines on your own corpus, never the default (decompression posture: 512 MiB per-part caps, no total-across-parts or output cap — the measured cases are in the `max_bytes=` paragraph below) |
+| `backend="oxide"` (caller-selectable) | office_oxide 0.1.10 | the alternative reader for the OOXML + legacy office formats: exact entity text (no `&`-escaping), against the heading/list losses above; a documented lane for diffing the two engines on your own corpus, never the default (decompression posture: 512 MiB per-part caps, no total-across-parts or output cap; the measured cases are in the `max_bytes=` paragraph below) |
 
 **The input is `path` OR `data`**: every path-taking function also accepts the
-document as `data=` bytes — the in-memory caller's entry, so an upload already held
+document as `data=` bytes, the in-memory caller's entry, so an upload already held
 as bytes converts with no temp-file roundtrip. Exactly one of the two (both →
 `ValueError`, neither → `TypeError`, a non-bytes `data=` → `TypeError`, all raised
 under the GIL before any work runs). A `data=` call has no file name, so format
@@ -2766,16 +2782,16 @@ resolution rests on `format=` and the content markers alone.
 
 **GIL model, every function in this section**: argument marshalling
 (validation) happens under the GIL; the one O(n) bytes copy a `data=` call
-pays (a borrow cannot cross `py.detach`) rides INSIDE the detach with the
-rest of the pass — measured 2026-09-09: a 400 MB `data=` call's max
+pays (a borrow cannot cross `py.detach`) rides inside the detach with the
+rest of the pass (a 400 MB `data=` call's max
 heartbeat gap is ~1.1 ms under a 1 ms ping, where a GIL-side copy starved
-the same ping for ~78 ms — and the WHOLE native pass — file read when
+the same ping for ~78 ms), and the whole native pass (file read when
 `path=`, format sniff, engine conversion, and for `to_text` the markdown
-strip — runs inside one `py.detach`, and exceptions are constructed after
+strip) runs inside one `py.detach`, and exceptions are constructed after
 the GIL is reacquired; nothing raises from inside the detached region. The
 hazard this removes is concrete: the official pdf_oxide pyo3 wheel
 measures as GIL-held per call (worst heartbeat gap 23.6ms on a 9-page
-document under a 10ms ping, 2026-09, growing with document size); this
+document under a 10ms ping, growing with document size); this
 payload calls the crate's Rust API directly under `py.detach` instead. The
 band is pinned by the suite
 (`tests/test_documents_engines.py` and `tests/test_pdf.py` hold the
@@ -2785,27 +2801,27 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 
 | exception | raised when |
 |---|---|
-| `OSError` | the file is missing or unreadable (IO) — a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
-| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the TYPE only — never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes — `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float — a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=` — all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"` — a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` — every entry fails closed, the door check raises at open; an input over `max_bytes=` (an EXPLICIT budget binds every lane — the PDF-only family included — checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=` — a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
-| `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages — route the document to an OCR stage |
+| `OSError` | the file is missing or unreadable (IO): a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
+| `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the type only, never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes: `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float; a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=`; all argument-contract failures, raised under the GIL before any work runs |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; the 32 MiB default, post-read, covers the anydoc and office_oxide lanes only); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages: route the document to an OCR stage |
 
-**Format resolution order** — a mislabeled or extensionless file (a temp-file download,
+**Format resolution order**: a mislabeled or extensionless file (a temp-file download,
 say) still converts, because content, not the name, picks the extractor:
 
 1. an explicit `format=` (extension spelling, no dot, case-insensitive);
 2. the content markers: the binary signatures first (PDF header, RTF open group, OLE
    stream names, ZIP package mimetype), then the HTML document marker (after a BOM and
    whitespace, the first markup is `<!DOCTYPE html` or `<html`, case-insensitive), then
-   the CSV heuristic — the last resort of content resolution: text, not markup, where
-   the first up-to-64 non-empty lines each carry the SAME count (≥1) of one delimiter
+   the CSV heuristic, the last resort of content resolution: text, not markup, where
+   the first up-to-64 non-empty lines each carry the same count (≥1) of one delimiter
    candidate (`,` / `;` / TAB, tried in that order), two lines minimum;
-3. the input name's extension — the `path=` when there was one (`data=` has no
+3. the input name's extension, the `path=` when there was one (`data=` has no
    name; a one-line `.tsv` or an `.xhtml` fragment resolve here, through the same
    name vocabulary `format=` uses);
-4. else `ValueError` — nothing names a format.
+4. else `ValueError`: nothing names a format.
 
-**The typed surface**: `Backend`/`Format`/`PageKind` are `str` enums — each member IS
+**The typed surface**: `Backend`/`Format`/`PageKind` are `str` enums: each member is
 its accepted string, so `format="docx"` and `format=Format.DOCX` are the same call, and
 plain strings the Rust validator accepts (container variants like `"docm"`/`"xlsm"`)
 keep working without enum churn. `to_markdown`/`to_text` return the resolved format as
@@ -2813,7 +2829,7 @@ a `Format` member; `sniff` returns `Format | None`. The rules live native; the t
 view adds typing only, never a second copy of a rule.
 
 **One page convention, everywhere**: every page number this surface names is a 0-based
-index — `pages=`, `PdfClassification.pages_needing_ocr`, `pdf_extract`'s list positions,
+index: `pages=`, `PdfClassification.pages_needing_ocr`, `pdf_extract`'s list positions,
 and `NeedsOcrError.pages`. anydoc internally reports 1-based page numbers; the core
 re-bases its list once, at the seam where the engine's answer crosses into this API, so
 a caller routing pages to OCR never has to remember which list carries which convention
@@ -2847,37 +2863,37 @@ def to_text(
 Convert any working-format document to GitHub-Flavored Markdown (`to_markdown`) or
 plain text (`to_text`), returning `(format, output)` where `format` is the format the
 conversion actually used (a `Format` member). The document is `path` (a file, the
-only positional — a REGULAR file: FIFOs/devices/sockets are refused before the read)
-or `data=` (its bytes — the same conversion, byte-identical output;
+only positional, a regular file: FIFOs/devices/sockets are refused before the read)
+or `data=` (its bytes: the same conversion, byte-identical output;
 no name to consult, so resolution rests on `format=` and the content markers).
 `format=` names the format explicitly (`"pdf"`, `"html"`/`"htm"`/`"xhtml"`,
 `"docx"`, `"xlsx"`, `"pptx"`, `"doc"`, `"xls"`, `"ppt"`, `"rtf"`, `"odt"`, `"ods"`,
 `"odp"`, `"epub"`, `"csv"`, `"tsv"`, plus the container variants
-`"docm"`/`"xlsm"`/`"ppsx"` mapping onto these — the same OOXML packages with the
+`"docm"`/`"xlsm"`/`"ppsx"` mapping onto these: the same OOXML packages with the
 content-type override naming the macro/show variant, resolved and sniffed as their
 base kinds; `"xlsb"` routes the Excel kind as vocabulary sugar, but genuine xlsb
-content is BIFF12 `.bin` sheets, not worksheet XML, and is REFUSED — the engines do
+content is BIFF12 `.bin` sheets, not worksheet XML, and is refused: the engines do
 not read it); `None` (the default) resolves
-it by the order above — content markers first, the input name's extension last.
+it by the order above, content markers first, the input name's extension last.
 
 `backend=` picks the engine where they overlap: `"auto"` (the default) routes by the
 measured table; `"oxide"` forces pdf_oxide for PDF and office_oxide for the
 OOXML/legacy office formats; `"anydoc"` forces anydoc. A forced backend raises
-`ValueError` on a format that engine cannot read — never a silent fallback.
+`ValueError` on a format that engine cannot read, never a silent fallback.
 
 `pages=` selects a PDF page subset, and is valid on the pdf_oxide lane only (any other
 format, or `backend="anydoc"` on a PDF, raises `ValueError`):
 
-- a single `int` — one 0-based page;
-- a `list` of ints — the explicit set;
-- a 2-tuple `(start, stop)` — a half-open range of 0-based page indices (`(0, 2)` on a
+- a single `int`: one 0-based page;
+- a `list` of ints: the explicit set;
+- a 2-tuple `(start, stop)`: a half-open range of 0-based page indices (`(0, 2)` on a
   two-page document is both pages; `(1, 3)` selects the pages at indices 1 and 2).
 
 The refusals split by Python's own convention, and the suite's red-team lane pins
-the split: a wrong TYPE is `TypeError` — a bool, float, or str where a page index
+the split: a wrong type is `TypeError`, a bool, float, or str where a page index
 belongs (`pages=[True]`, `[1.5]`, `["a"]`, `(True, 2)`; `range(1.0)` and `seq[1.5]`
 raise `TypeError` in the stdlib too, and a bool would otherwise launder through
-pyo3's i64 extraction as page 0 or 1); a wrong VALUE or SHAPE is `ValueError` — a
+pyo3's i64 extraction as page 0 or 1); a wrong value or shape is `ValueError`, a
 negative index, an empty list, an empty or backwards range, a tuple that is not the
 `(start, stop)` pair, an int too large for the i64 the binding extracts
 (`pages=[2**70]`). Both classes raise under the GIL, before any native work runs,
@@ -2887,81 +2903,81 @@ order (caller-supplied order and repeats are normalized away), the per-page
 conversions are joined with pdf_oxide's own inter-page separator, and a full range is
 byte-identical to the whole-document conversion.
 
-`password=` unlocks an encrypted PDF — the PDF kinds only (a password on any other
+`password=` unlocks an encrypted PDF, the PDF kinds only (a password on any other
 format is `ValueError`, "password= applies to PDF documents only": a
 silently-ignored password would leave the caller believing a document is protected
 on a lane that cannot know; a non-str `password=` is the same `TypeError`
 convention as every argument here). Without it, an encrypted PDF fails closed on
-EVERY entry: the door check raises at open — `ValueError`, "PDF is encrypted and
-requires a password" — never empty output masquerading as "no content" (the
+every entry: the door check raises at open, `ValueError`, "PDF is encrypted and
+requires a password", never empty output masquerading as "no content" (the
 pre-fix shape, measured on an RC4-128 fixture: `to_markdown`/`pdf_extract` returned
 `""` on a locked document while `pdf_classify` raised, the two entries disagreeing
 about the same bytes; the check now raises at open for all). A wrong password is its
-own clean `ValueError` — "the password did not unlock this PDF". The unlock rides
+own clean `ValueError`, "the password did not unlock this PDF". The unlock rides
 the pdf_oxide lane, the default `auto` and forced `oxide` both; `backend="anydoc"`
 on a PDF has no unlock and refuses encrypted documents outright.
 
-`max_bytes=` is the input ceiling, and its contract has two halves. An EXPLICIT
-`max_bytes` binds EVERY engine lane — pdf and HTML included — and is enforced
-BEFORE any work runs: the file's size at open (a `path=` call never reads an
+`max_bytes=` is the input ceiling, and its contract has two halves. An explicit
+`max_bytes` binds every engine lane, pdf and HTML included, and is enforced
+before any work runs: the file's size at open (a `path=` call never reads an
 over-budget byte), the buffer's length on entry (a `data=` call never copies
 one). `max_bytes=None` (the default) is the post-read doctrine: the 32 MiB
-default ceiling covers the anydoc AND office_oxide lanes only — the two lanes
-that amplify input into resident memory — because the lane is unknowable before
+default ceiling covers the anydoc and office_oxide lanes only, the two lanes
+that amplify input into resident memory, because the lane is unknowable before
 the container sniff, which is exactly why only the explicit budget can be
 pre-read. Over either, the call raises `ValueError` naming both sizes and the
 `max_bytes=` override.
 
-The anydoc amplification, restated at the measured worst case (2026-09-09, this
-box): a many-short-cells csv amplifies ~146× — a 24 MiB one peaked at 3.4 GiB
-RSS, stable across input sizes (the earlier "~36×" figure was a benign
-long-cell shape; short cells are the common upload and the expensive one), so
+The anydoc amplification, restated at the measured worst case: a many-short-cells
+csv amplifies ~146x (a 24 MiB one peaked at 3.4 GiB
+RSS, stable across input sizes; the earlier "~36x" figure was a benign
+long-cell shape, and short cells are the common upload and the expensive one), so
 the 32 MiB default budgets ~4.6 GiB of worst-case headroom on the converting
-worker — tighter is often right, and `max_bytes=` is the knob. The motivating
-integrator shape — a service capping uploads at 100 MB — passes
+worker; tighter is often right, and `max_bytes=` is the knob. The motivating
+integrator shape, a service capping uploads at 100 MB, passes
 `max_bytes=100 * 1024 * 1024` and must budget for the worst case at that
-ceiling: ~146× of 100 MiB is ~14 GiB of RSS headroom on the converting worker
-(benign csv shapes measure far lower, ~36×; budget for the worst case, not the
+ceiling: ~146x of 100 MiB is ~14 GiB of RSS headroom on the converting worker
+(benign csv shapes measure far lower, ~36x; budget for the worst case, not the
 benign one).
 
 The opt-in `backend="oxide"` lane's decompression posture, measured on
-office_oxide 0.1.10 (locked): per-part caps of 512 MiB — declared AND actual,
-refused pre-decompression (a 600 MiB declared part is refused in ~0.03s at
-~20 MiB RSS with "decompression limit exceeded: part 'word/document.xml'
-expands to more than 536870912 bytes") — plus an XML nesting cap of 256 on a
-16 MiB parse stack. It has NO total-across-parts cap and NO output cap: a
+office_oxide 0.1.10 (locked): per-part caps of 512 MiB, declared and actual,
+refused pre-decompression (a 600 MiB declared part is refused with
+"decompression limit exceeded: part 'word/document.xml'
+expands to more than 536870912 bytes"), plus an XML nesting cap of 256 on a
+16 MiB parse stack. It has no total-across-parts cap and no output cap: a
 399 KiB zip carrying a 400 MiB `word/document.xml` (under the per-part cap)
-converts at ~1.6 GiB peak RSS in ~0.9s, emitting ~400 MiB of markdown —
+converts at ~1.6 GiB peak RSS, emitting ~400 MiB of markdown, so
 multi-part and output blowups remain the caller's risk on that lane, which is
 one reason it is never the default. (The older "333 KiB zip-bomb docx →
-1.7 GiB" figure was office_oxide 0.1.9, before the per-part caps — history,
-not current posture. anydoc, by contrast, caps decompression engine-side:
-128 MiB per entry, 512 MiB total — a zip-bomb fixture lane in the suite pins
+1.7 GiB" figure was office_oxide 0.1.9, before the per-part caps, and is
+history, not current posture. anydoc, by contrast, caps decompression engine-side:
+128 MiB per entry, 512 MiB total; a zip-bomb fixture lane in the suite pins
 both engines' caps firing.)
 
 `to_text` is the same conversion, routing, and `pages=`/`password=`/`max_bytes=`
-semantics, with the markdown normalized to plain text — ONE text shape for every
+semantics, with the markdown normalized to plain text, one text shape for every
 format and engine: headings keep their text (markers dropped), list items keep
 indentation and numbering, table rows join their cells with `" | "`, code blocks
 keep their content without fences, links become `label (url)`. The normalization
-runs inside the same detached pass, over the markdown — deliberately, because each
+runs inside the same detached pass, over the markdown, because each
 engine's own plain-text surface differs (pdf_oxide's, measured, merges two-column
 layouts line-by-line; the strip preserves the markdown converter's reading-order
 blocks). The strip's inline machinery (link labels, image labels, emphasis)
 recurses per nesting level and is depth-bounded at 256: past the bound the
 remaining `[…](…)` machinery degrades to literal text instead of recursing toward
-a stack overflow — a 30,000-deep `[[[…x…]]()…]()` nest converts (exit 0,
+a stack overflow: a 30,000-deep `[[[…x…]]()…]()` nest converts (exit 0,
 non-empty output) where the unbounded strip crashed the process (the fix's
 subprocess pin is in `tests/test_documents_engines.py`; the exact degradation
 shape is unit-pinned in `src/gfm_strip_impl.rs`).
 
 A multi-sheet workbook renders whole: anydoc emits each sheet as its own
-`## <sheet name>` section — a measured two-sheet workbook (an `Alpha` table over a
-`Beta` one) comes back as `## Alpha\n\n|...|\n\n## Beta\n\n|...|` — so per-sheet
+`## <sheet name>` section (a measured two-sheet workbook, an `Alpha` table over a
+`Beta` one, comes back as `## Alpha\n\n|...|\n\n## Beta\n\n|...|`), so per-sheet
 output is the caller's split on the `## ` headings. A single-sheet workbook
-renders with no `##` heading at all — the table is the whole output (the
-committed engines_samples.xlsx does exactly that) — so that split must tolerate
-its absence. There is deliberately no
+renders with no `##` heading at all (the table is the whole output; the
+committed engines_samples.xlsx does exactly that), so that split must tolerate
+its absence. There is no
 sheet-selection argument: whole-document output is the shape downstream callers
 consume.
 
@@ -2974,7 +2990,7 @@ fmt, markdown = tors.documents.to_markdown("tests/engines_corpus/engines_page.ht
 
 fmt, text = tors.documents.to_text("tests/engines_corpus/engines_link.pdf")
 # (Format.PDF, "Visit the field handbook (https://handbook.example.com/guide)\n")
-#  the /Link annotation survived as `label (url)` — the plain-text link shape
+#  the /Link annotation survived as `label (url)`: the plain-text link shape
 
 fmt, text = tors.documents.to_text("tests/engines_corpus/engines_units.csv")
 # (Format.CSV, "unit | status\nT-101 | healthy\nT-102 | needs review\n")
@@ -2986,25 +3002,24 @@ fmt, md = tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf"
 tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf", pages=(0, 2))[
     1
 ] == tors.documents.to_markdown("tests/engines_corpus/engines_two_page.pdf")[1]
-# True — a full range is the whole document, byte-identical
+# True: a full range is the whole document, byte-identical
 ```
 
-A file with no usable extension still converts — the content markers decide:
+A file with no usable extension still converts; the content markers decide:
 
 ```python
 # engines_report.docx's bytes, saved with no extension (a temp-file download):
 tors.documents.to_markdown("upload.bin")
 # (Format.DOCX, "Quarterly Review Q3 2026\n\n...")
 
-# ...or never write the temp file at all — the bytes in, the same answer out:
+# ...or never write the temp file at all: the bytes in, the same answer out
 data = open("engines_report.docx", "rb").read()
 tors.documents.to_markdown(data=data) == tors.documents.to_markdown("engines_report.docx")
-# True — byte-identical, the pinned contract of the in-memory entry
+# True: byte-identical, the pinned contract of the in-memory entry
 ```
 
 **Async**: `await tors.documents.aio.to_markdown(...)` / `to_text(...)` run under
-`asyncio.to_thread` so the event loop stays responsive across the call — see
-[`tors.documents.aio`](#torsdocumentsaio) below.
+`asyncio.to_thread` (see [`tors.documents.aio`](#torsdocumentsaio) below).
 
 ## `tors.documents.sniff`
 
@@ -3012,19 +3027,19 @@ tors.documents.to_markdown(data=data) == tors.documents.to_markdown("engines_rep
 def sniff(data: bytes) -> Format | None: ...
 ```
 
-The standalone content-marker format detector — what `to_markdown`/`to_text` would
-resolve these BYTES to from content alone, with no path and no extension: the PDF
+The standalone content-marker format detector: what `to_markdown`/`to_text` would
+resolve these bytes to from content alone, with no path and no extension: the PDF
 header, the RTF open group, OLE stream names, the ZIP package mimetype, the HTML
-document marker. `sniff` OPENS AND PARSES THE CONTAINER: anydoc's detection reads
+document marker. `sniff` opens and parses the container: anydoc's detection reads
 the ZIP/OLE package's metadata (and the main part when the markers need it), so the
-call's cost is a package parse, not a marker scan — a 120 KiB zip measured 267 MiB
-peak RSS to answer docx (2026-09-09, this box). Budget accordingly when sniffing
+call's cost is a package parse, not a marker scan (a 120 KiB zip measured 267 MiB
+peak RSS to answer docx). Budget accordingly when sniffing
 untrusted leading bytes: the container is parsed before the format is named. (It
 still has no async twin: the call is a single short native pass, and the thread hop
-plus the parse would price the awaitable spelling above its value — the sync call
+plus the parse would price the awaitable spelling above its value; the sync call
 is the surface.)
 
-`None` is not an error: it is the answer "the content names no format" — a
+`None` is not an error: it is the answer "the content names no format", a
 signature-less text format such as CSV (name it via `format=` or let the extension),
 or not a document at all. The routing caller's mislabeled-download answer: the bytes'
 verdict overrides any label the download carried.
@@ -3041,24 +3056,24 @@ tors.documents.sniff(b"<!DOCTYPE html>\n<html><body>hi</body></html>")
 tors.documents.sniff(b"unit,status\nT-101,healthy\nT-102,failing\n")
 # Format.CSV (the content heuristic: two non-empty lines, same comma count)
 tors.documents.sniff(b"just some words\nover two lines\n")
-# None — prose: the content names no format
+# None: prose, the content names no format
 tors.documents.sniff(b'{"unit": "T-101", "ok": true}\n{"unit": "T-102", "ok": false}\n')
-# None — JSON-lines: the comma counts agree, but the record lines open with `{` —
+# None: JSON-lines. The comma counts agree, but the record lines open with `{`,
 #  declined by the CSV heuristic; not a documents format, `format=` the escape hatch
 ```
 
 Three doctrine notes, all probed and pinned. XHTML: an `<?xml version="1.0"?>`
 prologue before the doctype is skipped by the HTML marker (XHTML is HTML's XML
-serialization) — `sniff(b'<?xml version="1.0"?><!DOCTYPE html...')` is `Format.HTML`,
-while every OTHER XML vocabulary (`<svg`, DocBook) sniff-answers `None`. JSON-lines:
-record lines opening with `{` (or `[`) are declined by the CSV heuristic — their
-comma counts AGREE across lines (every record serializes the same keys), so the
+serialization), so `sniff(b'<?xml version="1.0"?><!DOCTYPE html...')` is `Format.HTML`,
+while every other XML vocabulary (`<svg`, DocBook) sniff-answers `None`. JSON-lines:
+record lines opening with `{` (or `[`) are declined by the CSV heuristic: their
+comma counts agree across lines (every record serializes the same keys), so the
 delimiter witness alone would claim them, and anydoc's csv parser would then mangle
 records that are not cells; json-lines is deliberately not a documents format,
-`None` is the honest answer, and `format=` is the escape hatch — the same hatch a
-csv whose FIRST field opens with a brace takes (the guard reads the first
-non-empty line). And the answer is the container-TRUE name a conversion would
-report: an OLE workbook sniffs `Format.XLS`, a ZIP-based one `Format.XLSX` —
+`None` is the answer, and `format=` is the escape hatch, the same hatch a
+csv whose first field opens with a brace takes (the guard reads the first
+non-empty line). And the answer is the container-true name a conversion would
+report: an OLE workbook sniffs `Format.XLS`, a ZIP-based one `Format.XLSX`, so
 `sniff` and `to_markdown` cannot disagree about what the bytes are.
 
 ## `tors.documents.pdf_extract`
@@ -3073,38 +3088,38 @@ def pdf_extract(
 ) -> tuple[list[str], str]: ...
 ```
 
-Read a PDF (`path`, or `data=` bytes) and return `(per_page_plain_text, markdown)` — one native pass over one
+Read a PDF (`path`, or `data=` bytes) and return `(per_page_plain_text, markdown)`, one native pass over one
 open document, the parse paid once for both outputs. `per_page_plain_text` is a
 `list[str]`, one entry per page in page order: the text-layer-probe view. An
-image-only/scanned page is an empty string, NOT an error, and a zero-page or textless
-document yields empty output — routing decisions ("this PDF needs OCR") are the
-CALLER's, made on these values (or on `pdf_classify`'s verdicts), never silently made
+image-only/scanned page is an empty string, not an error, and a zero-page or textless
+document yields empty output; routing decisions ("this PDF needs OCR") are the
+caller's, made on these values (or on `pdf_classify`'s verdicts), never silently made
 here. `markdown` is pdf_oxide's whole-document conversion: heading detection on,
 images off, Tagged-PDF structure-tree reading order falling back to XY-Cut on
 untagged documents, `/Link` annotations rendered as `[text](uri)`.
 
-**The PDF family's engine lanes and input budget** — `backend=` and `max_bytes=`
+**The PDF family's engine lanes and input budget**: `backend=` and `max_bytes=`
 on all four PDF-only functions, the same vocabulary the conversion pair takes.
-`backend="auto"` (the default) and `backend="oxide"` both run pdf_oxide — the same
+`backend="auto"` (the default) and `backend="oxide"` both run pdf_oxide, the same
 mapping the routing table makes for PDF ("oxide" is the oxide-family engine for
 this format), byte-identical output either way. `backend="anydoc"` is refused
-before any work runs with a named `ValueError`: a CAPABILITY refusal, not the
+before any work runs with a named `ValueError`: a capability refusal, not the
 format-level one (PDF+anydoc converts on `to_markdown`/`to_text`), because
-anydoc's entire PDF surface is whole-document markdown — `to_markdown(bytes)` is
-the one function its PDF module exposes (~anydoc-0.2.4/src/formats/pdf.rs), and
-its only per-page knowledge is the `NeedsOcr` refusal — while these four calls
-are the probe-rich ones: `pdf_extract`'s per-page plain text IS the OCR-routing
+anydoc's entire PDF surface is whole-document markdown (`to_markdown(bytes)` is
+the one function its PDF module exposes, ~anydoc-0.2.4/src/formats/pdf.rs), and
+its only per-page knowledge is the `NeedsOcr` refusal, while these four calls
+are the probe-rich ones: `pdf_extract`'s per-page plain text is the OCR-routing
 signal (an image-only page comes back as an empty string, the caller's
 route-to-OCR witness), `pdf_page_count` walks the page tree (a count its
 reader never returns on success), `pdf_classify` classifies per page,
 and `pdf_link_uris` walks `/Annots` (anydoc has no annotation surface at all).
 Whole-document markdown from anydoc is one `to_markdown(path, backend="anydoc")`
 call away. `max_bytes=` is the input budget: an explicit value binds pre-read
-exactly as on the conversion pair — the `path=`'s size at open, the `data=`
+exactly as on the conversion pair, the `path=`'s size at open, the `data=`
 length on entry, never an over-budget byte read or copied; `None` (the default)
 keeps the pdf lane unmetered (the 32 MiB default ceiling is the anydoc and
-office_oxide lanes' post-read check — lanes these PDF-only calls never run).
-`password=` unlocks an encrypted PDF; without it the entry fails closed —
+office_oxide lanes' post-read check, lanes these PDF-only calls never run).
+`password=` unlocks an encrypted PDF; without it the entry fails closed,
 `ValueError` at open, never empty output masquerading as "no content" (the empty
 strings above are for unlocked documents; a contract failure precedes the work,
 so an encrypted document under `backend="anydoc"` surfaces the capability
@@ -3123,7 +3138,7 @@ tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend=
     pages,
     markdown,
 )
-# True — the same pdf_oxide lane either way, byte-identical answers
+# True: the same pdf_oxide lane either way, byte-identical answers
 try:
     tors.documents.pdf_extract("tests/engines_corpus/engines_two_page.pdf", backend="anydoc")
 except ValueError as exc:
@@ -3150,7 +3165,7 @@ def pdf_page_count(
 ) -> int: ...
 ```
 
-The page tree and nothing else — no content extraction. For gating expensive
+The page tree and nothing else, no content extraction. For gating expensive
 downstream work (an OCR or conversion pass that scales with page count) without
 paying for any of it. `password=` unlocks an encrypted PDF; without it the entry
 fails closed (`ValueError` at open). `backend=`/`max_bytes=` follow the family's
@@ -3182,35 +3197,35 @@ def pdf_link_uris(
 ```
 
 The `/Annots` link walk: for every page, the URIs of its link annotations whose action
-is a URI, in annotation order — one `list[str]` per page, page order, empty lists for
+is a URI, in annotation order, one `list[str]` per page, page order, empty lists for
 pages without link annotations. This is the raw navigation surface, deliberately
 beside the markdown's inline `[text](uri)` links because the two answer different
 questions: the markdown carries links whose visible text belongs in prose; this walk
 carries every URI, including ones behind link rectangles whose text is not itself a
 link (a "click here" button, an image, a bare rectangle) which no text rendering
 surfaces at all. The caller that motivated it measured the difference on real
-resumes: 60 documents, 16 links from the text layer, 34 from the annotations — a
+resumes: 60 documents, 16 links from the text layer, 34 from the annotations, a
 quarter of candidates gained a LinkedIn/GitHub URL no text shape would show.
 
 Verbatim and narrow, both on purpose: the lists are never deduped or canonicalized
-(callers canonicalize differently — per-page review panels vs whole-document
+(callers canonicalize differently: per-page review panels vs whole-document
 projections), and only URI actions surface (`GoTo` is in-document navigation,
-`GoToR` a remote file — neither is a web URI, and neither is fabricated into one).
+`GoToR` a remote file; neither is a web URI, and neither is fabricated into one).
 Malformed annotation dictionaries are skipped by the engine's parser, not propagated
 as page failures. `backend=`/`max_bytes=` follow the family's shared lane note in
-the [`pdf_extract`](#torsdocumentspdf_extract) section above — the annotation walk
+the [`pdf_extract`](#torsdocumentspdf_extract) section above; the annotation walk
 is pdf_oxide's reader (auto/oxide byte-identically), and `backend="anydoc"` the
 capability refusal: anydoc has no annotation surface at all.
 `password=` unlocks an encrypted PDF; without it the entry fails closed
-(`ValueError` at open — never empty lists masquerading as "no links").
+(`ValueError` at open, never empty lists masquerading as "no links").
 
 ```python
 import tors.documents
 
 tors.documents.pdf_link_uris("tests/engines_corpus/engines_link.pdf")
-# [["https://handbook.example.com/guide"]]  — page 0's one link annotation
+# [["https://handbook.example.com/guide"]]: page 0's one link annotation
 tors.documents.pdf_link_uris("tests/engines_corpus/engines_two_page.pdf")
-# [[], []]  — no link annotations anywhere: empty lists, never fabricated
+# [[], []]: no link annotations anywhere, empty lists, never fabricated
 ```
 
 **Async**: `await tors.documents.aio.pdf_link_uris(...)` runs this under
@@ -3228,28 +3243,28 @@ def pdf_classify(
 ) -> PdfClassification: ...
 ```
 
-The cheap text-vs-image preflight over a PDF — no content conversion, no OCR,
+The cheap text-vs-image preflight over a PDF: no content conversion, no OCR,
 no rasterization. The answer to "does this PDF have a text layer, or is it an image
 we can do nothing with locally", as a `PdfClassification` (below): every page's
 `PageKind` verdict, the pages needing OCR, and the two derived routing booleans.
-Encrypted documents fail closed on every entry (`ValueError` at open — pdf_oxide's
+Encrypted documents fail closed on every entry (`ValueError` at open, pdf_oxide's
 security rule: a security state is never masked as "all pages empty");
 `password=` unlocks one. `backend=`/`max_bytes=` follow the family's shared lane
 note in the [`pdf_extract`](#torsdocumentspdf_extract) section above: auto/oxide
 run pdf_oxide byte-identically, `backend="anydoc"` the capability refusal
-(per-page classification — that engine's only per-page knowledge is the binary
+(per-page classification; that engine's only per-page knowledge is the binary
 needs-OCR refusal), an explicit budget binding pre-read.
 
 `PageKind` is the per-page vocabulary: `"text"` (a native text layer), `"scanned"`
-(image-dominated — OCR the page), `"image_text"` (hybrid), `"mixed"`, or `"empty"`.
-**`EMPTY` is distinct from `SCANNED`**, and the distinction is the point: a blank page
-is neither extractable nor an image to recover — it is not an error and not OCR work —
+(image-dominated: OCR the page), `"image_text"` (hybrid), `"mixed"`, or `"empty"`.
+**`"empty"` is distinct from `"scanned"`**, and the distinction is the point: a blank
+page is neither extractable nor an image to recover (not an error, not OCR work),
 so `pages_needing_ocr` deliberately excludes it. `has_text` is true when at least one
 page is `text`/`image_text`/`mixed` (extraction will yield something); `image_only` is
 true when every page is `scanned` and there is at least one page (route the whole
 document to an OCR stage).
 
-The indices here are 0-based, like every page number this surface names — see the
+The indices here are 0-based, like every page number this surface names; see the
 convention note in the [`tors.documents`](#torsdocuments) section above.
 
 ```python
@@ -3259,7 +3274,7 @@ cls = tors.documents.pdf_classify("tests/engines_corpus/engines_mixed.pdf")
 # PdfClassification(page_count=2, page_kinds=[<PageKind.TEXT: 'text'>,
 #                   <PageKind.SCANNED: 'scanned'>], pages_needing_ocr=[1])
 cls.has_text, cls.image_only, cls.pages_needing_ocr
-# (True, False, [1])   — page index 1 (0-based: the second page) is the scan
+# (True, False, [1]): page index 1 (0-based: the second page) is the scan
 
 cls = tors.documents.pdf_classify("tests/engines_corpus/engines_blank.pdf")
 # PdfClassification(page_count=1, page_kinds=[<PageKind.EMPTY: 'empty'>], pages_needing_ocr=[])
@@ -3275,7 +3290,7 @@ The `pdf_classify` result: the preflight's answer with the routing rules derived
 exactly once (the `has_text`/`image_only` rules live in the native getters; the typed
 view adds typing only). Attributes: `page_count: int`, `page_kinds: list[PageKind]`
 (every page's verdict, page order), `pages_needing_ocr: list[int]` (the 0-based
-indices of the image-only pages — empty for a born-digital document, every page for a
+indices of the image-only pages: empty for a born-digital document, every page for a
 scan, the difference for a mixed one), `has_text: bool`, `image_only: bool`. The
 `repr` is the construction shape shown above.
 
@@ -3288,8 +3303,8 @@ class NeedsOcrError(ValueError):
 ```
 
 Raised by `to_markdown`/`to_text` when the anydoc backend hits a PDF with
-scanned/image-only pages — the "route this document to an OCR stage" signal, as an
-exception because the conversion genuinely cannot proceed on those pages. A
+scanned/image-only pages: the "route this document to an OCR stage" signal, as an
+exception because the conversion cannot proceed on those pages. A
 `ValueError` subclass, so a broad `except ValueError` still catches it.
 `.pages` holds 0-based page indices, the same convention as `pages=` and
 `PdfClassification.pages_needing_ocr` (anydoc's 1-based numbers are re-based once, at
@@ -3302,12 +3317,29 @@ try:
     tors.documents.to_markdown("tests/engines_corpus/engines_scanned.pdf", backend="anydoc")
 except tors.documents.NeedsOcrError as exc:
     exc.pages, exc.page_count
-    # ([0], 1)  — page index 0 of 1 needs OCR
+    # ([0], 1): page index 0 of 1 needs OCR
 ```
 
 The default `"auto"` routing sends PDF to pdf_oxide, whose lane yields empty text for
 scanned pages instead (`pdf_extract`/`pdf_classify` are the preflight calls); the
 exception is the anydoc lane's answer.
+
+## `tors.documents.PageKind`
+
+```python
+class PageKind(str, Enum):
+    TEXT = "text"
+    SCANNED = "scanned"
+    IMAGE_TEXT = "image_text"
+    MIXED = "mixed"
+    EMPTY = "empty"
+```
+
+One page's `pdf_classify` verdict, a `str` enum whose members are their
+accepted strings. `"empty"` is deliberately distinct from `"scanned"` (see
+[`pdf_classify`](#torsdocumentspdf_classify) above): a blank page is
+neither extractable nor an image to recover, and `pages_needing_ocr`
+excludes it.
 
 ## `tors.documents.Backend` / `tors.documents.Format`
 
@@ -3336,34 +3368,34 @@ class Format(str, Enum):
     TSV = "tsv"  # name-only vocabulary: accepted as format= input, never a resolved or sniffed answer (tsv bytes resolve and sniff as csv)
 ```
 
-`str` enums: each member IS its accepted string (`Backend.AUTO == "auto"` is `True`),
-so every plain-string call keeps working and the enums cost nothing at the boundary —
+`str` enums: each member is its accepted string (`Backend.AUTO == "auto"` is `True`),
+so every plain-string call keeps working and the enums cost nothing at the boundary;
 the Rust validator remains the authority, and vocabulary the enums don't enumerate
 yet (container variants like `"docm"`/`"xlsm"`) stays accepted as plain strings. A
 resolved format outside the vocabulary is a bug and surfaces as `ValueError`.
 
 `tors.documents.__version__` (and `tors_documents.__version__`, its source) is the
-payload wheel's version, baked from the crate's `Cargo.toml` at build time — the
+payload wheel's version, baked from the crate's `Cargo.toml` at build time: the
 same number release-please bumps in lockstep across both wheels, so the two can
 never disagree.
 
 ## `tors.documents.aio`
 
-The awaitable spellings of the six path functions — `to_markdown`, `to_text`,
-`pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris` — each an
+The awaitable spellings of the six path functions (`to_markdown`, `to_text`,
+`pdf_classify`, `pdf_extract`, `pdf_page_count`, `pdf_link_uris`), each an
 unconditional `asyncio.to_thread` dispatch, signatures identical to the sync
 spellings, `path`/`data=` flowing through unchanged (pinned by the suite). The same doctrine as `tors.aio`: every one of these calls is a single
 native pass whose cost scales with the document (a small one is milliseconds, a large
 one hundreds), the exact class a thread hop pays for. `sniff` stays sync-only: its
 cost is a container parse (see its section above), but it remains a single short
-native pass a sync caller runs directly — no awaitable spelling ships. There is
+native pass a sync caller runs directly; no awaitable spelling ships. There is
 no size-based branching inside any wrapper, and the choice between the sync spelling
 and `tors.documents.aio` is the caller's, made once at the call site.
 
-**Cancellation semantics, stated because a caller can be hurt by them**:
-`asyncio.to_thread` cannot cancel the native pass. `wait_for`/`timeout()` on one of
-these awaitables cancels the FUTURE — the `asyncio` wrapper returns control at the
-deadline — while the underlying thread runs the conversion to completion, holding
+**Cancellation semantics**: `asyncio.to_thread` cannot cancel the native pass, and a
+caller can be hurt by that. `wait_for`/`timeout()` on one of
+these awaitables cancels the future (the `asyncio` wrapper returns control at the
+deadline) while the underlying thread runs the conversion to completion, holding
 its memory (the amplification lanes' worth: potentially gigabytes), and repeated
 timeouts pile up blocked threads on the shared default executor. Treat these
 awaitables as uncancellable work: size the input before the call (`max_bytes=` is

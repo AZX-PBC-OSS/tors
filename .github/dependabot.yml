@@ -1,7 +1,7 @@
 version: 2
 
 updates:
-  # Keeps the SHA pins in every workflow (ci.yml, publish.yml, docs.yml) current —
+  # Keeps the SHA pins in every workflow (ci.yml, publish.yml, docs.yml) current:
   # SHA-pinning actions without this entry means never receiving upstream security fixes.
   - package-ecosystem: github-actions
     directory: /
@@ -26,7 +26,7 @@ updates:
   # The payload crate resolves its own engine tree into its own lockfile:
   # tors-documents is deliberately NOT a cargo workspace member (its
   # Cargo.toml's header), so the root cargo entry above never sees
-  # tors-documents/Cargo.lock — the pyo3 and engine (pdf_oxide, anydoc,
+  # tors-documents/Cargo.lock: the pyo3 and engine (pdf_oxide, anydoc,
   # office_oxide, html-to-markdown-rs) bumps resolved there need this second
   # entry to arrive as PRs. The engines sit in BOTH lockfiles (root's as
   # tors-core's optional deps, the payload's as its resolved tree), so the two
@@ -46,7 +46,7 @@ updates:
 
   # The fuzz crate is the THIRD independent manifest (fuzz/Cargo.toml's own
   # header): not a cargo workspace member, resolving its own fuzz/Cargo.lock,
-  # so neither cargo entry above sees its bumps — libfuzzer-sys and arbitrary
+  # so neither cargo entry above sees its bumps; libfuzzer-sys and arbitrary
   # ride this lane. The tors-core line is a path dependency (".."), not a
   # registry dep, so it is never bumpable here either (the same reason the
   # /tors-documents entry never sees its own tors-core line). The three
@@ -54,7 +54,7 @@ updates:
   # hand-synced to the root Cargo.toml's own versions (fuzz/Cargo.toml's
   # oracle comment): dependabot bumps toward latest, not toward
   # "match the root crate", so an automated bump of any of the three would
-  # silently break that sync — they are ignored here and ride the root's
+  # silently break that sync; they are ignored here and ride the root's
   # bumps, which need the matching fuzz edit by hand anyway.
   - package-ecosystem: cargo
     directory: /fuzz
@@ -71,12 +71,12 @@ updates:
       - dependency-name: "unicode-segmentation"
 
   # `uv` is a first-class Dependabot ecosystem (understands pyproject.toml and uv.lock
-  # natively) — not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.
+  # natively), not `pip`, which reads pyproject.toml but doesn't maintain uv.lock.
   # Root pyproject.toml only: the uv workspace pulls the payload in, so its (empty)
   # Python side rides this entry's uv.lock too. No /tors-documents uv/pip entry:
-  # that pyproject.toml declares no dependencies at all — its only requirement is
+  # that pyproject.toml declares no dependencies at all; its only requirement is
   # the maturin build-backend pin, inert since the payload deliberately ships no
-  # sdist (publish.yml's documents jobs) — so a Python-side entry there would have
+  # sdist (publish.yml's documents jobs), so a Python-side entry there would have
   # nothing to bump.
   - package-ecosystem: uv
     directory: /
