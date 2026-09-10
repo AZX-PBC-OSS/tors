@@ -1815,7 +1815,17 @@ crate's other scanners use, plus a density guard this scan adds, so dense break
 runs never pay a hop), the real-line whitespace filter folded into the same pass,
 a per-codepoint fallback for non-ASCII segments, and ASCII certification batched
 as one 4 KiB stride per ~50 segments (a sliding certificate over the whole scan,
-not a per-segment `is_ascii` check); O(text) time, O(1) memory beyond the output
+not a per-segment `is_ascii` check). That structure is a disclosed trade against
+the simpler whole-text `is_ascii` gate a sparse scan could use (interleaved
+best-of-N, 12 MiB): +0.1–0.9 ms on pure-ASCII densities (`chunk_by_lines` ~0.45 ms
+on prose and ~2.2 ms on a one-line-per-~80-bytes log against the gate's ~0.4 and
+~1.2–1.3 ms; `chunk_by_paragraphs` ~1.5 vs ~1.3 ms on that log) and ~3 ms on a
+CJK-dense log (~23 vs ~20 ms, every segment taking the fallback), buying ~4× on
+break soup (~10 vs ~42 ms — the gate has no density guard), ~16× on mixed text
+(~0.46 vs ~7.6 ms — one non-ASCII byte no longer forfeits the document to a
+per-codepoint decoder), and the same wins on `chunk_by_paragraphs`' soup cell
+(~22 vs ~54 ms); outputs are differential-pinned identical across all of these
+shapes; O(text) time, O(1) memory beyond the output
 — no segmentation walk and no grapheme boundary
 index at all, unlike `chunk_by_words`/`chunk_by_sentences`: every split lands
 strictly between a break character and adjacent content, so the split point is
