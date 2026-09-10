@@ -145,6 +145,18 @@ jobs:
         with:
           name: sdist
           path: dist
+      - name: Assert all wheels and sdist downloaded
+        # Same silent-empty footgun publish-documents' count assert covers:
+        # an empty or short download must fail before `uv publish` says only
+        # "No files found". 4 wheels-linux + 4 wheels-other legs, one abi3
+        # wheel per leg, plus the sdist job's single tarball.
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          printf 'base wheels in dist/: %d, sdists: %d\n' "${#wheels[@]}" "${#sdists[@]}"
+          test "${#wheels[@]}" -eq 8
+          test "${#sdists[@]}" -eq 1
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Publish
@@ -203,10 +215,20 @@ jobs:
       # Named documents-wheels-* so the base publish job's "wheels-*" artifact
       # pattern cannot sweep these up: the two projects upload from separate
       # jobs, each with its own Trusted Publishing identity.
+      #
+      # tors-documents/dist, NOT the root dist/: maturin ran with
+      # working-directory tors-documents (the step above), so its `--out
+      # dist` lands inside that directory. upload-artifact treats an empty
+      # path as a WARNING, not a failure — a root-relative `dist` here is
+      # exactly how v0.6.0 produced eight green build jobs, zero
+      # documents-wheels-* artifacts, and a publish-documents run whose
+      # `uv publish` died on an empty dist/ ("No files found to publish")
+      # without ever reaching PyPI. The count assert in publish-documents
+      # is the backstop if this ever drifts again.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: documents-wheels-linux-${{ matrix.target }}-${{ matrix.manylinux }}
-          path: dist
+          path: tors-documents/dist
 
   wheels-other-documents:
     needs: wheels-linux-documents
@@ -240,10 +262,13 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           working-directory: tors-documents
+      # tors-documents/dist, not the root dist/ — same working-directory
+      # `--out dist` landing as the wheels-linux-documents upload above
+      # (see that step's note for the v0.6.0 empty-artifact failure).
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: documents-wheels-${{ matrix.os }}-${{ matrix.target }}
-          path: dist
+          path: tors-documents/dist
 
   publish-documents:
     name: Publish tors-documents to PyPI
@@ -291,6 +316,19 @@ jobs:
           pattern: "documents-wheels-*"
           path: dist
           merge-multiple: true
+      - name: Assert all payload wheels downloaded
+        # upload-artifact only warns on an empty path and download-artifact
+        # succeeds when its pattern matches nothing, so a build leg that
+        # shipped no artifact must die HERE, with a count, instead of
+        # downstream at `uv publish` with the opaque "No files found to
+        # publish" (the v0.6.0 failure mode). The count is the build matrix:
+        # 4 wheels-linux-documents + 4 wheels-other-documents legs, one
+        # abi3 wheel per leg; keep it in step when the platform set changes.
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          printf 'payload wheels in dist/: %d\n' "${#wheels[@]}"
+          test "${#wheels[@]}" -eq 8
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - name: Publish
