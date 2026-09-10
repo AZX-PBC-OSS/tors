@@ -7,6 +7,7 @@ use crate::chunk_by_segment_impl;
 use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
 use crate::parse_boundary;
+use crate::py::_borrow::{convert_str_arg, validate_count_overlap};
 use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
@@ -115,21 +116,7 @@ pub fn chunk_text(
     overlap: i64,
     boundary: &str,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if max_chars < 1 {
-        return Err(PyValueError::new_err(format!(
-            "max_chars must be >= 1, got {max_chars}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= max_chars {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < max_chars, got overlap={overlap}, max_chars={max_chars}"
-        )));
-    }
+    validate_count_overlap("max_chars", max_chars, overlap)?;
     let boundary = parse_boundary(boundary)?;
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
@@ -152,45 +139,34 @@ eager_iter_class! {
 /// `tors.chunk_text_iter(text, max_chars, *, overlap=0, boundary="word")`:
 /// [`chunk_text`]'s streaming spelling; see [`ChunkTextIter`]. Error
 /// precedence is [`chunk_text`]'s exactly, in the same order on every
-/// input: a `text` that fails UTF-8 conversion (a lone-surrogate `str`)
-/// raises `UnicodeEncodeError` FIRST — the same error, on the same
-/// input, that the list spelling's pyo3 `&str` argument extraction
-/// raises before its body even runs — then the `max_chars`/`overlap`
-/// `ValueError`s, then `parse_boundary`'s. `boundary` itself is a
-/// pyo3-extracted argument in both spellings, so its conversion cannot
-/// be reordered relative to anything; the body-internal order above is
-/// the whole of the contract (family-wide, the shape every `_iter`
-/// twin here now mirrors; pinned by
-/// tests/test_chunk_text.py::TestErrorPrecedence).
+/// input, for conversion errors and validation errors alike: the iter
+/// twin's pyo3 wrapper converts `text` with the same `&str` conversion
+/// the list spelling's wrapper applies to its own `text` argument (the
+/// shared `convert_str_arg` walk, in the same argument-0 slot, so a
+/// lone-surrogate `str` raises `UnicodeEncodeError` ahead of every
+/// other argument's error), then `max_chars`, then `overlap`, then
+/// `boundary`, in signature order -- the same conversions, in the same
+/// order, the list spelling's wrapper performs -- and the body then
+/// validates in the list spelling's own order (the count/overlap
+/// `ValueError`s, then `parse_boundary`'s). The two spellings cannot
+/// disagree on which error a bad call raises (family-wide contract,
+/// pinned by tests/test_chunk_text.py::TestErrorPrecedence).
 #[pyfunction(signature = (text, max_chars, *, overlap = 0, boundary = "word"))]
 pub fn chunk_text_iter(
     py: Python<'_>,
-    text: Bound<'_, PyString>,
+    #[pyo3(from_py_with = convert_str_arg)] text: Bound<'_, PyString>,
     max_chars: i64,
     overlap: i64,
     boundary: &str,
 ) -> PyResult<Py<ChunkTextIter>> {
-    // The str-in boundary first, the list spelling's own order: pyo3
-    // extracts its `text: &str` argument before the body runs, so a
-    // lone-surrogate input raises UnicodeEncodeError there ahead of every
-    // count check; the iter twin borrows inside the body, so the borrow
-    // goes FIRST to raise the same error on the same input.
+    // The text's UTF-8 was already forced by the wrapper's from_py_with
+    // walk (argument-0 position, the list spelling's own extraction
+    // slot), and every other argument was likewise pyo3-converted in
+    // signature order ahead of the body -- exactly the list spelling's
+    // wrapper -- so this re-borrow of the cached UTF-8 cannot fail and
+    // the checks below run in the list spelling's body order.
     let s = text.to_str()?;
-    if max_chars < 1 {
-        return Err(PyValueError::new_err(format!(
-            "max_chars must be >= 1, got {max_chars}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= max_chars {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < max_chars, got overlap={overlap}, max_chars={max_chars}"
-        )));
-    }
+    validate_count_overlap("max_chars", max_chars, overlap)?;
     let boundary_kind = parse_boundary(boundary)?;
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
@@ -231,21 +207,7 @@ pub fn chunk_by_words(
     words_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if words_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "words_per_chunk must be >= 1, got {words_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= words_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < words_per_chunk, got overlap={overlap}, words_per_chunk={words_per_chunk}"
-        )));
-    }
+    validate_count_overlap("words_per_chunk", words_per_chunk, overlap)?;
     let words_per_chunk = words_per_chunk as usize;
     let overlap = overlap as usize;
     Ok(py.detach(|| chunk_by_segment_impl::chunk_by_words(text, words_per_chunk, overlap)))
@@ -258,37 +220,30 @@ eager_iter_class! {
 
 /// `tors.chunk_by_words_iter(text, words_per_chunk, *, overlap=0)`:
 /// [`chunk_by_words`]'s streaming spelling; see [`ChunkByWordsIter`].
-/// Error precedence is [`chunk_by_words`]'s exactly: a `text` that fails
-/// UTF-8 conversion (a lone-surrogate `str`) raises `UnicodeEncodeError`
-/// FIRST — the same error, on the same input, that the list spelling's
-/// pyo3 `&str` argument extraction raises before its body even runs —
-/// then the count/overlap `ValueError`s, never the reverse (family-wide
-/// contract, pinned by tests/test_chunk_text.py::TestErrorPrecedence).
+/// Error precedence is [`chunk_by_words`]'s exactly, for conversion
+/// errors and validation errors alike: the iter twin's pyo3 wrapper
+/// converts `text` with the same `&str` conversion the list spelling's
+/// wrapper applies to its own `text` argument (the shared
+/// `convert_str_arg` walk, in the same argument-0 slot, so a
+/// lone-surrogate `str` raises `UnicodeEncodeError` ahead of every
+/// other argument's error), then `words_per_chunk`, then `overlap`, in
+/// signature order -- the same conversions, in the same order, the
+/// list spelling's wrapper performs -- and the body then validates in
+/// the list spelling's own order (the count/overlap `ValueError`s) --
+/// the list spelling's left-to-right argument extraction order,
+/// family-wide, pinned by tests/test_chunk_text.py::TestErrorPrecedence.
 #[pyfunction(signature = (text, words_per_chunk, *, overlap = 0))]
 pub fn chunk_by_words_iter(
     py: Python<'_>,
-    text: Bound<'_, PyString>,
+    #[pyo3(from_py_with = convert_str_arg)] text: Bound<'_, PyString>,
     words_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Py<ChunkByWordsIter>> {
-    // The str-in boundary first, the list spelling's own order (see
-    // chunk_text_iter's comment for the full rationale).
+    // The wrapper already ran the text's &str conversion in the list
+    // spelling's argument-0 slot (see chunk_text_iter's comment for the
+    // full rationale); this re-borrow of the cached UTF-8 cannot fail.
     let s = text.to_str()?;
-    if words_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "words_per_chunk must be >= 1, got {words_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= words_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < words_per_chunk, got overlap={overlap}, words_per_chunk={words_per_chunk}"
-        )));
-    }
+    validate_count_overlap("words_per_chunk", words_per_chunk, overlap)?;
     let words_per_chunk = words_per_chunk as usize;
     let overlap = overlap as usize;
     let chunks = py.detach(|| chunk_by_segment_impl::chunk_by_words(s, words_per_chunk, overlap));
@@ -310,21 +265,7 @@ pub fn chunk_by_sentences(
     sentences_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if sentences_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "sentences_per_chunk must be >= 1, got {sentences_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= sentences_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < sentences_per_chunk, got overlap={overlap}, sentences_per_chunk={sentences_per_chunk}"
-        )));
-    }
+    validate_count_overlap("sentences_per_chunk", sentences_per_chunk, overlap)?;
     let sentences_per_chunk = sentences_per_chunk as usize;
     let overlap = overlap as usize;
     Ok(py.detach(|| chunk_by_segment_impl::chunk_by_sentences(text, sentences_per_chunk, overlap)))
@@ -335,40 +276,33 @@ eager_iter_class! {
     ChunkBySentencesIter, (usize, usize);
 }
 
-/// `tors.chunk_by_sentences_iter(text, sentences_per_chunk, *, overlap=0)`:
-/// [`chunk_by_sentences`]'s streaming spelling; see
+/// `tors.chunk_by_sentences_iter(text, sentences_per_chunk, *,
+/// overlap=0)`: [`chunk_by_sentences`]'s streaming spelling; see
 /// [`ChunkBySentencesIter`]. Error precedence is
-/// [`chunk_by_sentences`]'s exactly: a `text` that fails UTF-8
-/// conversion (a lone-surrogate `str`) raises `UnicodeEncodeError`
-/// FIRST — the same error, on the same input, that the list spelling's
-/// pyo3 `&str` argument extraction raises before its body even runs —
-/// then the count/overlap `ValueError`s, never the reverse (family-wide
-/// contract, pinned by tests/test_chunk_text.py::TestErrorPrecedence).
+/// [`chunk_by_sentences`]'s exactly, for conversion errors and
+/// validation errors alike: the iter twin's pyo3 wrapper converts
+/// `text` with the same `&str` conversion the list spelling's wrapper
+/// applies to its own `text` argument (the shared `convert_str_arg`
+/// walk, in the same argument-0 slot, so a lone-surrogate `str`
+/// raises `UnicodeEncodeError` ahead of every other argument's
+/// error), then `sentences_per_chunk`, then `overlap`, in signature
+/// order -- the same conversions, in the same order, the list
+/// spelling's wrapper performs -- and the body then validates in the
+/// list spelling's own order (the count/overlap `ValueError`s) -- the
+/// list spelling's left-to-right argument extraction order,
+/// family-wide, pinned by tests/test_chunk_text.py::TestErrorPrecedence.
 #[pyfunction(signature = (text, sentences_per_chunk, *, overlap = 0))]
 pub fn chunk_by_sentences_iter(
     py: Python<'_>,
-    text: Bound<'_, PyString>,
+    #[pyo3(from_py_with = convert_str_arg)] text: Bound<'_, PyString>,
     sentences_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Py<ChunkBySentencesIter>> {
-    // The str-in boundary first, the list spelling's own order (see
-    // chunk_text_iter's comment for the full rationale).
+    // The wrapper already ran the text's &str conversion in the list
+    // spelling's argument-0 slot (see chunk_text_iter's comment for the
+    // full rationale); this re-borrow of the cached UTF-8 cannot fail.
     let s = text.to_str()?;
-    if sentences_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "sentences_per_chunk must be >= 1, got {sentences_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= sentences_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < sentences_per_chunk, got overlap={overlap}, sentences_per_chunk={sentences_per_chunk}"
-        )));
-    }
+    validate_count_overlap("sentences_per_chunk", sentences_per_chunk, overlap)?;
     let sentences_per_chunk = sentences_per_chunk as usize;
     let overlap = overlap as usize;
     let chunks =
@@ -397,21 +331,7 @@ pub fn chunk_by_paragraphs(
     paragraphs_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if paragraphs_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "paragraphs_per_chunk must be >= 1, got {paragraphs_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= paragraphs_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < paragraphs_per_chunk, got overlap={overlap}, paragraphs_per_chunk={paragraphs_per_chunk}"
-        )));
-    }
+    validate_count_overlap("paragraphs_per_chunk", paragraphs_per_chunk, overlap)?;
     let paragraphs_per_chunk = paragraphs_per_chunk as usize;
     let overlap = overlap as usize;
     Ok(py
@@ -436,37 +356,31 @@ eager_iter_class! {
 /// [`ChunkByParagraphsIter`]. Same `(start, end)` sequence, same
 /// argument contract, the [`EagerIter`] shape (whole scan under one
 /// `py.detach` at construction, one 2-tuple per `__next__`). Error
-/// precedence is [`chunk_by_paragraphs`]'s exactly: a `text` that fails
-/// UTF-8 conversion (a lone-surrogate `str`) raises `UnicodeEncodeError`
-/// FIRST — the same error, on the same input, that the list spelling's
-/// pyo3 `&str` argument extraction raises before its body even runs —
-/// then the count/overlap `ValueError`s, never the reverse (family-wide
-/// contract, pinned by tests/test_chunk_text.py::TestErrorPrecedence).
+/// precedence is [`chunk_by_paragraphs`]'s exactly, for conversion
+/// errors and validation errors alike: the iter twin's pyo3 wrapper
+/// converts `text` with the same `&str` conversion the list spelling's
+/// wrapper applies to its own `text` argument (the shared
+/// `convert_str_arg` walk, in the same argument-0 slot, so a
+/// lone-surrogate `str` raises `UnicodeEncodeError` ahead of every
+/// other argument's error), then `paragraphs_per_chunk`, then
+/// `overlap`, in signature order -- the same conversions, in the same
+/// order, the list spelling's wrapper performs -- and the body then
+/// validates in the list spelling's own order (the count/overlap
+/// `ValueError`s) -- the list spelling's left-to-right argument
+/// extraction order, family-wide, pinned by
+/// tests/test_chunk_text.py::TestErrorPrecedence.
 #[pyfunction(signature = (text, paragraphs_per_chunk, *, overlap = 0))]
 pub fn chunk_by_paragraphs_iter(
     py: Python<'_>,
-    text: Bound<'_, PyString>,
+    #[pyo3(from_py_with = convert_str_arg)] text: Bound<'_, PyString>,
     paragraphs_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Py<ChunkByParagraphsIter>> {
-    // The str-in boundary first, the list spelling's own order (see
-    // chunk_text_iter's comment for the full rationale).
+    // The wrapper already ran the text's &str conversion in the list
+    // spelling's argument-0 slot (see chunk_text_iter's comment for the
+    // full rationale); this re-borrow of the cached UTF-8 cannot fail.
     let s = text.to_str()?;
-    if paragraphs_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "paragraphs_per_chunk must be >= 1, got {paragraphs_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= paragraphs_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < paragraphs_per_chunk, got overlap={overlap}, paragraphs_per_chunk={paragraphs_per_chunk}"
-        )));
-    }
+    validate_count_overlap("paragraphs_per_chunk", paragraphs_per_chunk, overlap)?;
     let paragraphs_per_chunk = paragraphs_per_chunk as usize;
     let overlap = overlap as usize;
     let chunks =
@@ -536,21 +450,7 @@ pub fn chunk_hierarchical(
     separators: Option<Vec<Option<String>>>,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if max_chars < 1 {
-        return Err(PyValueError::new_err(format!(
-            "max_chars must be >= 1, got {max_chars}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= max_chars {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < max_chars, got overlap={overlap}, max_chars={max_chars}"
-        )));
-    }
+    validate_count_overlap("max_chars", max_chars, overlap)?;
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
     // The one intermediate materialization pyo3's borrowed-Vec
@@ -607,21 +507,7 @@ pub fn chunk_by_lines(
     lines_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Vec<(usize, usize)>> {
-    if lines_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "lines_per_chunk must be >= 1, got {lines_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= lines_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < lines_per_chunk, got overlap={overlap}, lines_per_chunk={lines_per_chunk}"
-        )));
-    }
+    validate_count_overlap("lines_per_chunk", lines_per_chunk, overlap)?;
     let lines_per_chunk = lines_per_chunk as usize;
     let overlap = overlap as usize;
     Ok(py.detach(|| chunk_by_segment_impl::chunk_by_lines(text, lines_per_chunk, overlap)))
@@ -641,37 +527,30 @@ eager_iter_class! {
 
 /// `tors.chunk_by_lines_iter(text, lines_per_chunk, *, overlap=0)`:
 /// [`chunk_by_lines`]'s streaming spelling; see [`ChunkByLinesIter`].
-/// Error precedence is [`chunk_by_lines`]'s exactly: a `text` that fails
-/// UTF-8 conversion (a lone-surrogate `str`) raises `UnicodeEncodeError`
-/// FIRST — the same error, on the same input, that the list spelling's
-/// pyo3 `&str` argument extraction raises before its body even runs —
-/// then the count/overlap `ValueError`s, never the reverse (family-wide
-/// contract, pinned by tests/test_chunk_text.py::TestErrorPrecedence).
+/// Error precedence is [`chunk_by_lines`]'s exactly, for conversion
+/// errors and validation errors alike: the iter twin's pyo3 wrapper
+/// converts `text` with the same `&str` conversion the list spelling's
+/// wrapper applies to its own `text` argument (the shared
+/// `convert_str_arg` walk, in the same argument-0 slot, so a
+/// lone-surrogate `str` raises `UnicodeEncodeError` ahead of every
+/// other argument's error), then `lines_per_chunk`, then `overlap`, in
+/// signature order -- the same conversions, in the same order, the
+/// list spelling's wrapper performs -- and the body then validates in
+/// the list spelling's own order (the count/overlap `ValueError`s) --
+/// the list spelling's left-to-right argument extraction order,
+/// family-wide, pinned by tests/test_chunk_text.py::TestErrorPrecedence.
 #[pyfunction(signature = (text, lines_per_chunk, *, overlap = 0))]
 pub fn chunk_by_lines_iter(
     py: Python<'_>,
-    text: Bound<'_, PyString>,
+    #[pyo3(from_py_with = convert_str_arg)] text: Bound<'_, PyString>,
     lines_per_chunk: i64,
     overlap: i64,
 ) -> PyResult<Py<ChunkByLinesIter>> {
-    // The str-in boundary first, the list spelling's own order (see
-    // chunk_text_iter's comment for the full rationale).
+    // The wrapper already ran the text's &str conversion in the list
+    // spelling's argument-0 slot (see chunk_text_iter's comment for the
+    // full rationale); this re-borrow of the cached UTF-8 cannot fail.
     let s = text.to_str()?;
-    if lines_per_chunk < 1 {
-        return Err(PyValueError::new_err(format!(
-            "lines_per_chunk must be >= 1, got {lines_per_chunk}"
-        )));
-    }
-    if overlap < 0 {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be >= 0, got {overlap}"
-        )));
-    }
-    if overlap >= lines_per_chunk {
-        return Err(PyValueError::new_err(format!(
-            "overlap must be < lines_per_chunk, got overlap={overlap}, lines_per_chunk={lines_per_chunk}"
-        )));
-    }
+    validate_count_overlap("lines_per_chunk", lines_per_chunk, overlap)?;
     let lines_per_chunk = lines_per_chunk as usize;
     let overlap = overlap as usize;
     let chunks = py.detach(|| chunk_by_segment_impl::chunk_by_lines(s, lines_per_chunk, overlap));
