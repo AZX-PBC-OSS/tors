@@ -529,10 +529,14 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
                 // paragraph — a trailing qualifying run already moved
                 // `seg_start` to cp (= total), which the close's
                 // `seg_start < cp` guard discards. Same covers-fast-path
-                // as the per-segment count: a trailing segment is
-                // usually inside the certificate already; the miss pays
-                // one final batch.
-                cp += if cert.covers(byte, n) || cert.certify(bytes, byte, n) {
+                // and same first-byte pre-probe as the per-segment
+                // count below: a trailing segment is usually inside the
+                // certificate already; the miss pays one final batch,
+                // and a non-ASCII first byte skips straight to the
+                // predicate count.
+                cp += if bytes[byte] < 0x80
+                    && (cert.covers(byte, n) || cert.certify(bytes, byte, n))
+                {
                     n - byte
                 } else {
                     bytes[byte..].iter().filter(|&x| (x & 0xC0) != 0x80).count()
@@ -552,7 +556,27 @@ pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
         // the `char_count` call it replaced; the inlined two-compare
         // makes the hit path call-free and leaves `certify`'s batch
         // machinery for the once-per-4 KiB miss.
-        cp += if cert.covers(byte, brk) || cert.certify(bytes, byte, brk) {
+        // The `bytes[byte] < 0x80` pre-probe: a non-ASCII byte at the
+        // segment's FIRST byte makes both arms behind it guaranteed
+        // failures — `covers` can only answer for a start already
+        // inside the proven range (an in-range byte IS ASCII), and
+        // `certify`'s batch would stop at byte 0, its locating scan
+        // find byte 0, and the query fail and reset — so on
+        // non-ASCII-starting segments (a CJK log's every segment) one
+        // compare skips the whole attempt and lands directly in the
+        // continuation-byte count the failure would have chosen
+        // anyway. Skipping the failed call is unobservable in the
+        // certificate's state: the reset it would perform moves the
+        // range to the empty range at `byte + 1`, and the next query
+        // starts past this whole segment — beyond both the stale and
+        // the reset range ends — so `covers`/`extends` answer
+        // identically either way (a reset only matters to a query at
+        // or before the skipped byte, and the cursor never returns
+        // there). Both queries here are non-empty (`brk > byte`
+        // always: the cursor sits on a non-break byte), so the empty-
+        // range `covers` corner (a == b == hi, where `hi` itself is
+        // NOT proven) cannot be reached behind the probe.
+        cp += if bytes[byte] < 0x80 && (cert.covers(byte, brk) || cert.certify(bytes, byte, brk)) {
             brk - byte
         } else {
             bytes[byte..brk]
@@ -929,10 +953,21 @@ pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
         // inside the stride), not a per-segment `is_ascii()` slice call
         // — the per-call overhead of that spelling dominated the
         // realistic-density lanes, and the certificate answers most
-        // segments with no call at all.
+        // segments with no call at all. The `bytes[byte] < 0x80`
+        // pre-probe is `paragraph_bounds`' segment count's (see there
+        // for the soundness argument): a non-ASCII first byte makes the
+        // `certify` attempt a guaranteed failure, and on a CJK-dense
+        // log (every segment starting with a multi-byte lead byte)
+        // that is every segment — one compare lands straight in the
+        // decode fold without paying the batch call, the locating scan,
+        // and the reset a failed attempt performs. The query is
+        // non-empty (`seg_end > byte` always — the window exhausted
+        // without a break, so at least one byte remains), so the
+        // empty-range `covers` corner cannot hide behind the probe
+        // here either.
         let limit = (byte + BREAK_WINDOW).min(n);
         let seg_end = memchr2(b'\r', b'\n', &bytes[limit..]).map_or(n, |rel| limit + rel);
-        if cert.certify(bytes, byte, seg_end) {
+        if bytes[byte] < 0x80 && cert.certify(bytes, byte, seg_end) {
             // The segment is certified pure ASCII (no break byte exists
             // in it — the window saw none and the hop found none — and
             // no byte above 0x7F), so the table's non-whitespace answer
