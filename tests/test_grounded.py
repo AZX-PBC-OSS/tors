@@ -17,6 +17,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
+    _lcs_len,
     reference_is_grounded_fuzzy,
 )
 from tors import is_grounded
@@ -38,6 +39,35 @@ def _spliced(draw):
     lead = draw(st.integers(0, 120))
     tail = draw(st.integers(0, 60))
     return claim, ("x" * lead) + claim + ("x" * tail)
+
+
+@st.composite
+def _tail_evidence(draw):
+    """Partial evidence flush with a source's end: the claim's first k chars
+    (k in [3L/4, L-1], issue #40's trigger band), padded with a filler
+    guaranteed absent from the claim (U+4E00 sits above `_TEXT`'s
+    `max_codepoint=0x2FFF`, so it can never match a claim char and inflate
+    M beyond the evidence), at a lead past the ``n <= L``
+    direct-comparison boundary so the end case is genuinely windowed."""
+    claim = draw(_TEXT.filter(lambda c: len(c) >= 32))
+    length = len(claim)
+    k = draw(st.integers(min_value=(3 * length + 3) // 4, max_value=length - 1))
+    lead = draw(st.integers(min_value=length - k + 1, max_value=length - k + 121))
+    return claim, k, lead
+
+
+@st.composite
+def _windowed_pair(draw):
+    """A claim and a source strictly longer than it, the source drawn from
+    the claim's own characters plus an inert filler: maximally hard LCS
+    shapes (the source is full of claim chars) inside the windowed regime
+    ``n > L`` where the region-score contract applies."""
+    claim = draw(_TEXT.filter(lambda c: 1 <= len(c) <= 36))
+    alphabet = sorted(set(claim)) + ["\u4e00"]
+    source = draw(
+        st.text(alphabet=alphabet, min_size=len(claim) + 1, max_size=len(claim) + 60)
+    )
+    return claim, source
 
 
 class TestExactContainment:
@@ -281,19 +311,23 @@ class TestFuzzy:
         (76) sits past the last full grid window (60) and 4 chars before
         the truncated tail window (80). No full window reaches it: the
         nearest, [60, 101), overlaps only 25 of the region's 41 chars and
-        scores ~0.49 (below the 0.5 candidate entry) so the full-grid
-        candidates never cover the region. The truncated tail window's own
-        score (~0.79: it holds 37 of the region's chars against the
-        denominator 41 + 40) puts it in the candidate band like any other,
-        and its refinement range clamps at the last possible region start
-        n - L = 79: covering the aligned start 76, which the fine grid
-        scans. n = 120: grid 0/20/40/60 full, truncated tail [80, 120);
-        region [76, 117). The tail competes like an ordinary candidate:
-        score-gated, evictable, no forced mechanism (one existed briefly
-        and was removed; the brute-force geometry search found no
-        guarantee-band region needing it). The flush variant (region
-        ending exactly at the source's end, start = n - L) is pinned
-        alongside so the two tail geometries stay distinguishable."""
+        scores 22/41 = 0.537 -- above the 0.5 candidate entry, so the
+        full-grid candidate's range also covers it -- but the truncated
+        tail window's own region score (33/41 = 0.805: it holds 37 of the
+        region's chars against the full claim-length denominator) puts it
+        in the candidate band like any other, and its refinement range
+        clamps at the last possible region start n - L = 79: covering the
+        aligned start 76, which the fine grid scans. n = 120: grid
+        0/20/40/60 full, truncated tail [80, 120); region [76, 117).
+        The tail competes like an ordinary candidate: score-gated,
+        evictable, no forced mechanism (one existed briefly and was
+        removed; the brute-force geometry search found no guarantee-band
+        region needing it). The flush variant (region ending exactly at
+        the source's end, start = n - L = 79) grounds directly through the
+        tail window's own region score (35/41 = 0.854, its 40 chars of the
+        region against the full denominator: the legit tail match keeps
+        its verdict under the #40 fix), pinned alongside so the two tail
+        geometries stay distinguishable."""
         claim = "the bushing torque specifications changed"
         near = "".join("Z" if i in (3, 11, 19, 27, 35) else c for i, c in enumerate(claim))
         near_tail = ("q" * 76) + near + ("q" * 3)
@@ -332,6 +366,78 @@ class TestFuzzy:
             assert got is expected, n
             assert got == reference_is_grounded_fuzzy(claim, source, 0.85), n
 
+    def test_partial_evidence_at_the_end_scores_like_the_same_evidence_mid_source(self) -> None:
+        """Issue #40's repro, pinned. The same 31-of-41 chars of evidence
+        must produce the same verdict wherever it sits: the pre-fix
+        truncated tail window was scored with the difflib
+        ``2*M/(len(claim) + len(window))`` denominator, so a source that
+        just ended partway through the evidence scored ``2*31/(41+31) =
+        0.861`` -- clearing the 0.85 default -- while the identical evidence
+        mid-source scored ``2*31/(41+41) = 0.756`` and was rejected: same
+        evidence, same matched chars, different answer depending on where
+        it sits. The tail window is now scored as the claim-length region
+        it truncates (the missing chars are mismatches: ``M/L``), so all
+        three placements score 0.756 and agree: ungrounded at the default.
+        ``threshold=1.0`` was never affected (nothing but containment
+        scores 1.0) and stays pinned alongside."""
+        claim = "the bushing torque specifications changed"  # 41 chars
+        frag = claim[:31]  # 76% of the claim, contiguous
+        at_end = ("q" * 60) + frag
+        mid_source = ("q" * 60) + frag + ("q" * 60)
+        at_start = frag + ("q" * 60)
+        for where, source in (("end", at_end), ("middle", mid_source), ("start", at_start)):
+            assert is_grounded(claim, source, fuzzy=True) is False, where
+            assert is_grounded(claim, source, fuzzy=True, threshold=1.0) is False, where
+            assert reference_is_grounded_fuzzy(claim, source, 0.85) is False, where
+
+    def test_the_tail_truncation_band_is_pinned(self) -> None:
+        """The trigger band swept, verdict by verdict: evidence of k of the
+        claim's 41 chars (k = 29..40), flush with the source's end (lead 60
+        lands the tail window exactly on the evidence for every k <= 40) vs
+        the same evidence mid-source. Post-fix both placements score exactly
+        ``k/41`` at the best window, so the verdict is ``k/41 >= threshold``
+        at every threshold, at every position. Pinned edges: k = 34
+        (34/41 = 0.829, below the default) must stay ungrounded at the end
+        -- pre-fix the discounted denominator scored it ``2*34/(41+34) =
+        0.907`` and grounded it -- and k = 35 (0.854) is grounded at every
+        position: legit tail matches keep their verdicts, only the
+        position-dependent inflation loses its. The oracle agrees on every
+        row, both placements."""
+        claim = "the bushing torque specifications changed"
+        for k in range(29, 41):
+            frag = claim[:k]
+            placements = {
+                "end": ("q" * 60) + frag,
+                "middle": ("q" * 60) + frag + ("q" * 60),
+            }
+            expected = (k / 41) >= 0.85
+            for where, source in placements.items():
+                got = is_grounded(claim, source, fuzzy=True)
+                assert got is expected, (k, where)
+                assert got == reference_is_grounded_fuzzy(claim, source, 0.85), (k, where)
+
+    def test_a_source_shorter_than_the_claim_keeps_the_whole_source_difflib_ratio(self) -> None:
+        """The boundary judgement call, pinned on both sides of the line.
+        ``len(source) < len(claim)`` is a different question -- "is this
+        whole short source close to the claim" -- answered by one direct
+        difflib ``2*M/(m + n)`` ratio (the unwindowed difflib-parity lane
+        above pins exact parity with difflib there, so its shorter-denominator
+        shape is the pinned convention, not an instance of the tail bug).
+        ``len(source) >= len(claim)`` is the containment question -- "is
+        there a claim-shaped region in here" -- where every window, the
+        truncated tail included, is scored against the full ``2*L``
+        denominator. The two rows use the same 31-char evidence: alone as
+        the whole source it grounds the claim at 0.85 (0.861), padded to
+        91 chars it does not (0.756). Pins the line so neither convention
+        can silently bleed into the other's regime."""
+        claim = "the bushing torque specifications changed"
+        short = claim[:31]  # the whole source: n = 31 < L = 41
+        padded = ("q" * 60) + short  # n = 91: the windowed regime
+        assert difflib.SequenceMatcher(None, claim, short).ratio() == pytest.approx(62 / 72)
+        assert is_grounded(claim, short, fuzzy=True, threshold=0.85) is True  # 0.8611
+        assert is_grounded(claim, short, fuzzy=True, threshold=0.87) is False
+        assert is_grounded(claim, padded, fuzzy=True, threshold=0.85) is False  # 0.7561
+
     @given(claim=_TEXT, index=st.data())
     @settings(max_examples=200)
     def test_a_one_substitution_near_match_at_any_offset_is_grounded(self, claim, index) -> None:
@@ -350,6 +456,78 @@ class TestFuzzy:
         tail = index.draw(st.integers(0, 60))
         source = ("q" * lead) + near + ("q" * tail)
         assert is_grounded(claim, source, fuzzy=True, threshold=0.85) is True, (claim, near, lead)
+
+    @given(tail_evidence=_tail_evidence())
+    @settings(max_examples=150)
+    def test_partial_tail_evidence_is_position_invariant(self, tail_evidence) -> None:
+        """Issue #40's class as a property: evidence shorter than the claim,
+        flush with the source's end, must score exactly like the same
+        evidence with the source continuing in filler. The end's truncated
+        tail window is scored as the claim-length region it truncates
+        (missing chars are mismatches), so the verdict cannot depend on
+        where the source stops. Checked at one threshold safely below the
+        evidence ratio (both grounded: the end's refinement always scans
+        the last full window ``[n-L, n)``, which holds all of the evidence
+        plus filler, and the interior's aligned window holds it exactly,
+        within the fine grid's 1/32 margin) and one safely above (both
+        ungrounded: no window can push M past the evidence against the full
+        ``2*L`` denominator when the filler matches nothing). Pre-fix, the
+        tail's ``L + len(window)`` denominator inflated the end's score by
+        up to ``k*(L-k)/(L*(L+k))`` -- +0.107 at k = 3L/4 -- flipping the
+        above-threshold rows to grounded wherever the tail window held the
+        whole evidence: the red this property was written to catch."""
+        claim, k, lead = tail_evidence
+        length = len(claim)
+        pad = "\u4e00"  # disjoint from _TEXT: matches nothing in the claim
+        frag = claim[:k]
+        at_end = (pad * lead) + frag
+        interior = (pad * lead) + frag + (pad * (length - k + 8))
+        for threshold in (k / length - 0.05, min(k / length + 0.05, 1.0)):
+            expected = threshold <= k / length
+            for where, source in (("end", at_end), ("interior", interior)):
+                got = is_grounded(claim, source, fuzzy=True, threshold=threshold)
+                assert got is expected, (k, lead, where, threshold)
+                assert got == reference_is_grounded_fuzzy(claim, source, threshold), (
+                    k,
+                    lead,
+                    where,
+                    threshold,
+                )
+
+    @given(pair=_windowed_pair())
+    @settings(max_examples=100)
+    def test_the_windowed_score_never_exceeds_the_ideal_region_score(self, pair) -> None:
+        """Issue #40's class pinned from above, semantics-independently of
+        the oracle (which models the scan, not the ideal): in the windowed
+        regime the best score tors can report is bounded by the ideal
+        region score -- the max, over every claim-length window start
+        ``s <= n - L``, of ``LCS(claim, source[s:s+L]) / L``. Every scanned
+        window obeys it: full windows are exactly ideal terms, and the
+        truncated tail window's ``LCS(claim, source[t:n])`` is dominated by
+        the last full window's (a suffix's LCS cannot exceed its
+        superstring-suffix's), so no window, however truncated, may ever
+        score above the evidence actually present. The pre-fix tail's
+        discounted denominator broke exactly this bound: ``2*31/(41+31) =
+        0.861`` against an ideal of ``31/41 = 0.756``. tors's best score is
+        recovered by threshold bisection (the verdict is a single scalar
+        compared against ``threshold``); any future inflation of any
+        window's denominator trips this row. The ``n <= L``
+        direct-comparison regime is out of scope by convention (its
+        shorter denominator is the pinned difflib parity, not an instance
+        of the bug)."""
+        claim, source = pair
+        if claim in source:
+            return  # the exact-containment floor's lane: best is 1.0 == ideal
+        m = len(claim)
+        ideal = max(_lcs_len(claim, source[s : s + m]) / m for s in range(len(source) - m + 1))
+        lo, hi = 0.0, 1.0
+        for _ in range(45):
+            mid = (lo + hi) / 2
+            if is_grounded(claim, source, fuzzy=True, threshold=mid):
+                lo = mid
+            else:
+                hi = mid
+        assert lo <= ideal + 1e-9, (claim, source, lo, ideal)
 
     def test_empty_source_is_ungrounded_except_at_threshold_zero(self) -> None:
         # The empty-source convention (no window to score, the verdict is

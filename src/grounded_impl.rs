@@ -25,9 +25,24 @@
 //!
 //! `fuzzy=True` reuses the only diffing engine already in the crate
 //! (`similar`, backing `diff_opcodes`) rather than adding a fuzzy-string
-//! crate: `claim` is compared against overlapping same-length windows of
-//! `source` (stride `claim`'s length / 2), and the best window's difflib
-//! ratio (`2 * matched_chars / (len(claim) + len(window))`) is the score.
+//! crate: `claim` is compared against overlapping windows of `source`
+//! (stride `claim`'s length / 2), and the best window's region score
+//! against the claim-length denominator — the difflib ratio
+//! `2 * matched_chars / (len(claim) + len(claim))` over equal-length
+//! operands — is the score. A window shorter than the claim
+//! (the source's truncated tail window) is scored as the claim-length
+//! region it truncates: the chars the source fails to provide past its
+//! end are mismatches, never the discounted `len(claim) + len(window)`
+//! denominator, which would inflate a source that just ends partway
+//! through the evidence above the same evidence sitting mid-source and
+//! make the verdict depend on where the evidence sits (issue #40: a
+//! 31-of-41-char tail scored 0.861 flush with the end, 0.756 in the
+//! interior). The one deliberate exception is the no-windowing regime,
+//! `source` shorter than `claim`: there is nothing to window over, so the
+//! whole source is the evidence and the score is one direct difflib
+//! `2*M/(m+n)` ratio — the convention the unwindowed difflib-parity
+//! contract pins; at `len(source) == len(claim)` the two formulas agree,
+//! so the boundary is continuous in score.
 //! Windowing, not a single whole-string diff of `claim` against all of
 //! `source`, is the DoS-discipline choice: the realistic
 //! RAG-grounding shape is a short claim against a long retrieved passage, so
@@ -52,11 +67,18 @@
 //! ~0.73 and fell below the 0.85 default). The coarse scan tracks its
 //! best-scoring windows (the top [`REFINE_CANDIDATES`] windows scoring at
 //! least [`CANDIDATE_MIN_SCORE`], the truncated tail window competing like
-//! any other); if the coarse best falls short of `threshold`, each
-//! candidate is re-scanned at a fine stride (`L / `[`REFINE_STRIDE_DIV`])
+//! any other at its region score: for a region flush with the source's
+//! end, the tail window or the last full grid window between them always
+//! clear the entry bound, and every candidate's fine range is clamped to
+//! reach `n - L`, whose window `[n - L, n)` holds any sub-`L` suffix of
+//! the source — so end-truncated evidence scores exactly like the same
+//! evidence mid-source, the region-score invariance above); if the coarse
+//! best falls short of `threshold`, each
+//! candidate is re-scanned at a fine stride (`L / `[`REFINE_STRIDE_DIV`]`)
 //! across its neighborhood. The guarantee, from the grid arithmetic and
-//! validated by a 6k-geometry brute-force differential search (5 claim
-//! lengths x 4 thresholds): a same-length source region with aligned
+//! validated by a brute-force differential geometry search (see
+//! `fuzzy_the_guarantee_band_survives_the_tail_region_score`'s comment for
+//! the post-#40 re-validation): a same-length source region with aligned
 //! ratio `r` is detected at any offset whenever
 //! `r >= max(0.75, threshold + 1/32)`: one substitution clears the 0.85
 //! default for any claim of 9+ characters, wherever it sits. Below
@@ -81,11 +103,11 @@ use similar::{Algorithm, DiffOp, capture_diff_slices_deadline};
 
 use crate::diff_impl::{budget_from_ms, elapsed_exceeds};
 
-/// Refinement candidates: the highest-scoring coarse windows (one slot
-/// reserved for the forced truncated-tail window) that the refinement pass
-/// may re-scan. Constant, so the refinement's worst-case add-on is bounded
-/// independently of source length: at most `REFINE_CANDIDATES` windows'
-/// worth of fine-stride diffs beyond the coarse scan.
+/// Refinement candidates: the highest-scoring coarse windows that the
+/// refinement pass may re-scan. Constant, so the refinement's worst-case
+/// add-on is bounded independently of source length: at most
+/// `REFINE_CANDIDATES` windows' worth of fine-stride diffs beyond the
+/// coarse scan.
 const REFINE_CANDIDATES: usize = 64;
 
 /// The minimum coarse score for a full window to enter the candidate set.
@@ -129,24 +151,50 @@ pub fn is_grounded_exact(claim: &str, source: &str) -> bool {
     memmem::find(source.as_bytes(), claim.as_bytes()).is_some()
 }
 
-/// The difflib `2*M/T` ratio (`M` = total matched-char length across every
-/// `Equal` op, `T` = the combined length of both slices) between two char
-/// slices, `similar`'s Myers engine under `deadline` (an absolute instant,
-/// `None` = unbounded for this window: the caller still enforces the
-/// overall budget between windows). `1.0` for two empty slices, the same
-/// convention `difflib.SequenceMatcher([], []).ratio()` uses.
-fn ratio(a: &[char], b: &[char], deadline: Option<Instant>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    let matched: usize = capture_diff_slices_deadline(Algorithm::Myers, a, b, deadline)
+/// `M`: the total matched-char length across every `Equal` op of a diff of
+/// two char slices, `similar`'s Myers engine under `deadline` (an absolute
+/// instant, `None` = unbounded for this window: the caller still enforces
+/// the overall budget between windows). The minimal-edit-script consequence
+/// of the Myers search is `M == LCS(a, b)` exactly, the invariant the
+/// Python oracle's independent DP checks.
+fn matched_len(a: &[char], b: &[char], deadline: Option<Instant>) -> usize {
+    capture_diff_slices_deadline(Algorithm::Myers, a, b, deadline)
         .into_iter()
         .map(|op| match op {
             DiffOp::Equal { len, .. } => len,
             _ => 0,
         })
-        .sum();
-    2.0 * matched as f64 / (a.len() + b.len()) as f64
+        .sum()
+}
+
+/// The difflib `2*M/T` ratio (`T` = the combined length of both slices)
+/// between two char slices: the score of the one direct comparison the
+/// `n < L` source-shorter-than-claim path makes, where there is nothing to
+/// window over and the whole source is the evidence (the convention the
+/// unwindowed difflib-parity contract pins). `1.0` for two empty slices,
+/// the same convention `difflib.SequenceMatcher([], []).ratio()` uses.
+fn ratio(a: &[char], b: &[char], deadline: Option<Instant>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    2.0 * matched_len(a, b, deadline) as f64 / (a.len() + b.len()) as f64
+}
+
+/// The windowed scan's score: one window of `source` against the
+/// claim-length denominator `2*L` — `2*M / (L + L)`, identical to [`ratio`]
+/// for a full window (whose length is `L`) and deliberately NOT the
+/// `2*M / (L + len(window))` a truncated tail window would get from
+/// [`ratio`]. The tail window is scored as the claim-length region it
+/// truncates: the chars the source fails to provide past its end are
+/// mismatches, never a discounted denominator, which would inflate a
+/// source that just ends partway through the evidence above the same
+/// evidence sitting mid-source (issue #40: a 31-of-41-char tail scored
+/// 0.861 flush with the end and 0.756 in the interior, flipping the
+/// verdict at the 0.85 default on position alone). Position-invariance is
+/// the point: the verdict depends on the evidence, not on where the source
+/// stops.
+fn region_ratio(claim: &[char], window: &[char], deadline: Option<Instant>) -> f64 {
+    matched_len(claim, window, deadline) as f64 / claim.len() as f64
 }
 
 /// A refinement candidate: one coarse window worth re-scanning at fine
@@ -293,9 +341,11 @@ fn back_char_boundary(source: &str, mut i: usize, mut chars_back: usize) -> usiz
     i
 }
 
-/// Is `claim` fuzzily grounded in `source`: does the best-matching
-/// same-length window of `source` reach `threshold` ratio against `claim`
-/// (see the module docs for exactly what that ratio measures, why the
+/// Is `claim` fuzzily grounded in `source`: does the best-matching window
+/// of `source` reach `threshold`'s region score against `claim` (see the
+/// module docs for exactly what that score measures — the claim-length
+/// denominator, the truncated tail window included, and the
+/// source-shorter-than-claim direct-comparison exception — why the
 /// scan is windowed rather than one whole-string diff, and the bounded
 /// refinement pass that makes a near-match's verdict independent of where
 /// it sits)? `claim` empty is vacuously `Ok(true)` (nothing to find, no
@@ -337,9 +387,12 @@ pub fn is_grounded_fuzzy(
     // upfront O(source) char count and no second collection on any path:
     // a truncated first fill means the source holds fewer than `L` chars
     // and the window buffer already is the whole source: the
-    // no-windowing direct comparison. A source of exactly `L` chars fills
+    // no-windowing direct comparison (`ratio`, the whole-source difflib
+    // convention). A source of exactly `L` chars fills
     // the window full and takes the windowed path; its single window
-    // scores the same direct ratio, so the verdict is the same either way.
+    // scores `M/L`, the same value the direct comparison would produce
+    // (`2*M/(L+L)`), so the verdict is the same either way and the
+    // boundary between the two conventions is continuous in score.
     // An empty source yields no window at all: nothing to match, `best`
     // stays 0.0 (still `true` at threshold 0.0, the empty-anything
     // convention).
@@ -376,7 +429,12 @@ pub fn is_grounded_fuzzy(
                 let Some((window, byte_start, truncated)) = walker.next(stride) else {
                     break;
                 };
-                let score = ratio(&claim_chars, window, deadline);
+                // Full windows and the truncated tail alike: the region
+                // score (the tail's missing chars are mismatches, never a
+                // discounted denominator). The tail competes as an
+                // ordinary candidate (its range clamps to `n - L` in the
+                // refinement below).
+                let score = region_ratio(&claim_chars, window, deadline);
                 best = best.max(score);
                 if let Some(exceeded) = exceeded_after(started, deadline_ms) {
                     return Err(exceeded);
@@ -488,7 +546,7 @@ impl Refinement<'_> {
             let mut fstart = lo;
             let mut advance = fine; // ignored until the second window
             while let Some((window, _, _)) = walker.next(advance) {
-                *best = best.max(ratio(self.claim_chars, window, self.deadline));
+                *best = best.max(region_ratio(self.claim_chars, window, self.deadline));
                 if let Some(exceeded) = exceeded_after(self.started, self.deadline_ms) {
                     return Err(exceeded);
                 }
@@ -757,14 +815,20 @@ mod tests {
     fn fuzzy_near_tail_regions_are_detected_through_the_tail_window_candidate() {
         // The two tail geometries, pinned behaviorally with the oracle's
         // agreement: a region hugging the source's end either clears via
-        // the truncated tail window's own (denominator-inflated) coarse
-        // score, or enters the candidate set with it and is found by its
-        // clamped [w - L/2, n - L] refinement range. A brute-force
-        // differential search over 6k geometries (5 claim lengths x 4
-        // thresholds) found no guarantee-band region needing a dedicated
-        // forced/extended tail mechanism: one existed here briefly and
-        // was removed as unpinnable dead weight; these rows pin the
-        // guarantee where the tail actually delivers it.
+        // the truncated tail window's own region score (the flush case:
+        // the tail holds 40 of the region's chars, M = 35, 35/41 = 0.854
+        // >= the default) or enters the candidate set with it (the
+        // adjacent case: the tail holds 40 chars with M = 34, 0.829 <
+        // 0.85, while the nearest full grid window [60, 101) scores only
+        // 17/41 = 0.41, below the 0.5 entry bound, so the tail candidate
+        // is the region's only lane into the refinement) and is found by
+        // its clamped [w - L/2, n - L] range, whose last full window
+        // [79, 120) scores the region's aligned r = 35/41 = 0.854. A
+        // brute-force differential search over geometries (5 claim lengths
+        // x 4 thresholds) found no guarantee-band region needing a
+        // dedicated forced/extended tail mechanism: one existed here
+        // briefly and was removed as unpinnable dead weight; these rows
+        // pin the guarantee where the tail actually delivers it.
         let claim = "the bushing torque specifications changed";
         // Six typos packed into the head (r = 35/41 = 0.854), region
         // starting one char before the truncated tail window: n = 120,
@@ -788,7 +852,7 @@ mod tests {
             Ok(true)
         );
         // The spread-typo variant further from the tail (16 chars past
-        // the last full grid window): found via the ordinary full-window
+        // 79 the last full grid window): found via the ordinary full-window
         // candidate's range.
         let spread: String = claim
             .chars()
@@ -803,6 +867,167 @@ mod tests {
             .collect();
         let via_band = format!("{}{}{}", "q".repeat(76), spread, "q".repeat(3));
         assert_eq!(is_grounded_fuzzy(claim, &via_band, 0.85, None), Ok(true));
+    }
+
+    #[test]
+    fn fuzzy_partial_tail_evidence_scores_position_invariant() {
+        // Issue #40's repro, pinned: the same 31-of-41 chars of evidence
+        // must produce the same verdict wherever it sits. The pre-fix
+        // truncated tail window was scored with the difflib
+        // `2*M/(len(claim) + len(window))` denominator, so a source that
+        // just ended partway through the evidence scored
+        // `2*31/(41+31)` = 0.861 (clearing the 0.85 default) while the
+        // identical evidence mid-source scored `2*31/(41+41)` = 0.756 and
+        // was rejected. The tail window is now scored as the claim-length
+        // region it truncates (missing chars are mismatches: `M/L`), so
+        // every placement scores 0.756: ungrounded at the default, and a
+        // 37-of-41 tail (0.902) grounded at every placement alike: the
+        // legit tail match keeps its verdict, only the position-dependent
+        // inflation loses its.
+        let claim = "the bushing torque specifications changed"; // 41 chars
+        assert_eq!(claim.chars().count(), 41);
+        for k in [31usize, 37] {
+            let frag: String = claim.chars().take(k).collect();
+            let at_end = format!("{}{}", "q".repeat(60), frag);
+            let mid = format!("{}{}{}", "q".repeat(60), frag, "q".repeat(60));
+            let at_start = format!("{}{}", frag, "q".repeat(60));
+            let expected = Ok(k as f64 / 41.0 >= 0.85);
+            for source in [&at_end, &mid, &at_start] {
+                assert!(!source.contains(claim)); // evidence, not containment
+                assert_eq!(
+                    is_grounded_fuzzy(claim, source, 0.85, None),
+                    expected,
+                    "k={k}"
+                );
+                // threshold=1.0 was never affected: nothing but verbatim
+                // containment scores 1.0 (the tail's M <= k < 41).
+                assert_eq!(is_grounded_fuzzy(claim, source, 1.0, None), Ok(false));
+            }
+        }
+    }
+
+    #[test]
+    fn fuzzy_the_tail_truncation_band_is_pinned() {
+        // The trigger band swept: evidence of k of the claim's 41 chars
+        // (k = 29..40) flush with the source's end (lead 60 lands the tail
+        // window exactly on the evidence for every k <= 40) vs the same
+        // evidence mid-source. Post-fix both placements score exactly
+        // `k/41`, so the verdict is `k/41 >= 0.85` at every position:
+        // k = 31..34 (0.756..0.829) flip from grounded-at-the-end to
+        // ungrounded everywhere (pre-fix `2*34/(41+34)` = 0.907), k >= 35
+        // (0.854+) stays grounded everywhere.
+        let claim = "the bushing torque specifications changed";
+        for k in 29..=40usize {
+            let frag: String = claim.chars().take(k).collect();
+            let at_end = format!("{}{}", "q".repeat(60), frag);
+            let mid = format!("{}{}{}", "q".repeat(60), frag, "q".repeat(60));
+            let expected = Ok(k as f64 / 41.0 >= 0.85);
+            assert_eq!(
+                is_grounded_fuzzy(claim, &at_end, 0.85, None),
+                expected,
+                "k={k} at the end"
+            );
+            assert_eq!(
+                is_grounded_fuzzy(claim, &mid, 0.85, None),
+                expected,
+                "k={k} mid-source"
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_a_source_shorter_than_the_claim_keeps_the_direct_difflib_ratio() {
+        // The boundary judgement call, pinned on both sides: n < L is the
+        // whole-source question, answered by one direct difflib
+        // `2*M/(m+n)` ratio (the unwindowed difflib-parity contract pins
+        // exact parity with difflib there, so its shorter denominator is
+        // the pinned convention, not the tail bug); n >= L is the
+        // containment question, where every window scores against the full
+        // `2*L` denominator. The same 31-char evidence: alone as the whole
+        // source it grounds at 0.85 (`2*31/(41+31)` = 0.861), padded into
+        // the windowed regime it does not (31/41 = 0.756).
+        let claim = "the bushing torque specifications changed";
+        let short = &claim[..31]; // n = 31 < 41: the direct comparison
+        let padded = format!("{}{}", "q".repeat(60), short); // n = 91: windowed
+        assert_eq!(is_grounded_fuzzy(claim, short, 0.85, None), Ok(true));
+        assert_eq!(is_grounded_fuzzy(claim, short, 0.87, None), Ok(false));
+        assert_eq!(is_grounded_fuzzy(claim, &padded, 0.85, None), Ok(false));
+    }
+
+    #[test]
+    fn fuzzy_the_guarantee_band_survives_the_tail_region_score() {
+        // Post-#40 re-validation of the refinement guarantee under the tail
+        // window's region score: the deflation could in principle have
+        // starved end-flush regions of their candidate entry, but the entry
+        // arithmetic holds -- the tail window and the last full grid window
+        // between them always clear the 0.5 entry bound for r >= 0.75 (the
+        // two windows' region overlaps tile 3L/2 of the region, so at least
+        // one holds >= (r - 1/4) * L matched chars), and every candidate's
+        // fine range is clamped to reach n - L, whose window [n - L, n)
+        // contains any sub-L suffix of the source: end-truncated evidence
+        // scores exactly like the same evidence mid-source. Brute-force
+        // sweep, the shape of the pre-#40 6k-geometry search: 5 claim
+        // lengths x 4 thresholds x two typo densities x every lead 0..=40,
+        // three geometries each -- the region interior, flush with the
+        // source's end, and truncated by it (k = L - 1 of the region's
+        // chars as the whole evidence, with its interior twin agreeing:
+        // the position-invariance the fix bought). Every row must ground.
+        for l in [12usize, 17, 25, 33, 41] {
+            // A claim over an alphabet disjoint from the 'q' pad and 'Z'
+            // typo chars, so matched chars are exactly the region's.
+            let claim: String = (0..l).map(|i| char::from(b'a' + (i % 13) as u8)).collect();
+            for threshold in [0.85f64, 0.8, 0.75, 0.7] {
+                for d in [1usize, l / 4] {
+                    let r = (l - d) as f64 / l as f64;
+                    if r < (0.75f64).max(threshold + 1.0 / 32.0) {
+                        continue; // outside the guarantee band: best-effort
+                    }
+                    let near: String = claim
+                        .chars()
+                        .enumerate()
+                        .map(|(i, c)| if d > 0 && i % (l / d) == 0 { 'Z' } else { c })
+                        .collect();
+                    assert!(!near.contains(claim.as_str()));
+                    for lead in 0..=40 {
+                        let interior = format!("{}{}{}", "q".repeat(lead), near, "q".repeat(50));
+                        let flush = format!("{}{}", "q".repeat(lead), near);
+                        for (what, source) in [("interior", &interior), ("flush", &flush)] {
+                            assert_eq!(
+                                is_grounded_fuzzy(&claim, source, threshold, None),
+                                Ok(true),
+                                "l={l} t={threshold} d={d} lead={lead} {what}"
+                            );
+                        }
+                    }
+                    // The truncated-tail geometry: the region's first L-1
+                    // chars are the whole evidence, flush with the end (n >
+                    // L required: the direct-comparison regime below n is a
+                    // different, pinned convention). Its interior twin must
+                    // agree: same evidence, same verdict.
+                    let k = l - 1;
+                    let partial: String = near.chars().take(k).collect();
+                    for lead in 1..=40 {
+                        let at_end = format!("{}{}", "q".repeat(lead), partial);
+                        let mid = format!("{}{}{}", "q".repeat(lead), partial, "q".repeat(50));
+                        let got_end = is_grounded_fuzzy(&claim, &at_end, threshold, None);
+                        let got_mid = is_grounded_fuzzy(&claim, &mid, threshold, None);
+                        assert_eq!(got_end, got_mid, "l={l} t={threshold} d={d} lead={lead}");
+                        // In the band only when the truncated region's own
+                        // ratio clears it; the r filter above used the full
+                        // region, so re-check the partial's (L-1-d)/(L)
+                        // against the band before demanding Ok(true).
+                        if ((l - 1 - d) as f64 / l as f64) >= (0.75f64).max(threshold + 1.0 / 32.0)
+                        {
+                            assert_eq!(
+                                got_end,
+                                Ok(true),
+                                "l={l} t={threshold} d={d} lead={lead} partial"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
