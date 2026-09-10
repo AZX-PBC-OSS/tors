@@ -2,12 +2,12 @@
 native speed, GIL-released.
 
 ``tors.diff_opcodes(a, b)`` returns ``difflib.SequenceMatcher(None, a, b)
-.get_opcodes()``'s SHAPE: ``(tag, i1, i2, j1, j2)`` tuples with ``tag`` in
+.get_opcodes()``'s shape: ``(tag, i1, i2, j1, j2)`` tuples with ``tag`` in
 ``{"equal", "replace", "delete", "insert"}``, ranges monotone, contiguous and
 covering both sides, adjacent delete+insert merged into ``replace`` exactly as
 difflib presents it, over a Myers diff (the ``similar`` crate) that runs as
-one native pass with the GIL released. CHARACTER-level, like difflib on
-``str`` operands (a ``str`` IS a character sequence to ``SequenceMatcher``):
+one native pass with the GIL released. Character-level, like difflib on
+``str`` operands (a ``str`` is a character sequence to ``SequenceMatcher``):
 that is what makes difflib the parity oracle, so character-level is the
 choice. Callers wanting line-level diffs split the operands themselves and diff
 the pieces; the opcode shape composes.
@@ -16,24 +16,24 @@ The parity contract, in three parts (no false parity: the algorithms are
 different and both are right):
 
 1. **Structural validity, over arbitrary pairs** (hypothesis): applying the
-   opcodes reconstructs BOTH ``a`` and ``b`` exactly; ranges are monotone,
+   opcodes reconstructs both ``a`` and ``b`` exactly; ranges are monotone,
    contiguous, covering; tags alternate equal/non-equal (difflib's opcode
    streams never put two non-equal ops adjacent (a delete next to an insert
    is a replace); equal ops carry equal-length, equal-content ranges.
 2. **Exact agreement with difflib on the classes whose canonical opcode
-   list is FORCED**: pure insert, pure delete, all-equal, single-run
+   list is forced**: pure insert, pure delete, all-equal, single-run
    replace, and empty operands in both directions. "Forced" is verified,
    not assumed: the hypothesis properties below assert exact agreement
-   only where difflib's OWN answer carries the canonical single-op shape
+   only where difflib's own answer carries the canonical single-op shape
    (exactly one non-equal op of the expected tag, plus an optional leading
    and trailing equal): where difflib itself presents the change that
    way, the minimal edit script is forced and any two correct algorithms
-   must emit the same list. Where difflib does NOT (the repeated-flank
+   must emit the same list. Where difflib does not (the repeated-flank
    class in part 3), the pair is excluded from the exact-parity pin and
    tors's own canonical shape is asserted instead, with no assume.
 3. **Documented boundary cases where they legitimately differ**, pinned so
    the differences are visible and intentional, never silent. The shared
-   mechanism: difflib's longest-match recursion ANCHORS a match and splits
+   mechanism: difflib's longest-match recursion anchors a match and splits
    the change around it, where Myers + run-maximization emits contiguous
    runs slid to one side. Three pinned shapes of it: on ``"a"`` vs
    ``"baa"`` the anchored middle ``'a'`` splits the insertion (``insert
@@ -42,10 +42,10 @@ different and both are right):
    boundary across a repeated-character insertion point (``insert 'pw',
    equal 'pp', delete 'p'`` vs ``equal 'p', insert 'w', equal 'pp'``); and
    on ``"qpqpq"`` vs ``"qpwqpq"`` the same anchored-split mechanism shows
-   up at a REPEATED-FLANK CONTEXT: the suffix repeats the prefix's head,
+   up at a repeated-flank context: the suffix repeats the prefix's head,
    so the change is not confined by the generators' one-character flank
-   guard, where difflib anchors a ROTATED longer equal block and emits a
-   NON-MINIMAL insert+delete split while tors emits the minimal
+   guard, where difflib anchors a rotated longer equal block and emits a
+   non-minimal insert+delete split while tors emits the minimal
    contiguous insert. Every side reconstructs both operands; the tors
    sides are minimal edit scripts. This class (a change surrounded by
    repeated patterns, where the equal-block alignment can legitimately
@@ -67,7 +67,7 @@ min-of-3 after one warm-up unless noted):
 - 256 KiB: tors 3.9 ms vs difflib 3,059 ms (ambient load 6.0), ratio
   0.0013; difflib is quadratic at character level and this is the size where
   it starts taking seconds.
-- 1 MiB: tors 2.0 ms (same load window); difflib measured ONCE at 59,001 ms
+- 1 MiB: tors 2.0 ms (same load window); difflib measured once at 59,001 ms
   (ambient load 5.6): a minute per call, which is why the 1 MiB cell asserts
   tors's absolute band and records difflib's number instead of racing it
   in-suite: running difflib per suite run at 1 MiB would cost a minute
@@ -102,7 +102,7 @@ _MIB = 1024 * 1024
 
 # The wall race's tolerance margin: tors's measured ratio at 256 KiB is ~0.001,
 # so 0.25 leaves ~250x headroom; the assertion pins the quadratic-vs-native
-# relationship, not a close race. difflib is sampled ONCE (at ~2.9 s per call,
+# relationship, not a close race. difflib is sampled once (at ~2.9 s per call,
 # extra samples are pure suite time; noise only ever adds time, so a single
 # sample is conservative for the ratio's denominator).
 _DIFF_WALL_MARGIN = 0.25
@@ -122,7 +122,7 @@ def _difflib_opcodes(a: str, b: str) -> list[tuple[str, int, int, int, int]]:
 def _sole_non_equal_op(
     ops: list[tuple[str, int, int, int, int]], tag: str
 ) -> tuple[str, int, int, int, int] | None:
-    """The canonical single-op shape predicate: ``ops`` carries EXACTLY ONE
+    """The canonical single-op shape predicate: ``ops`` carries exactly one
     non-equal op, its tag is ``tag``, and every other op is an equal (an
     optional leading and/or trailing equal), the canonical presentation of
     one contiguous change. Returns the op, or ``None`` for any other shape,
@@ -136,14 +136,14 @@ def _sole_non_equal_op(
 
 # --- Part 2: exact agreement on the unambiguous classes ----------------------------
 #
-# Generator alphabets are DISJOINT by class (context over one alphabet, the
-# changed content over others), so the changed block's CONTENT is forced into
+# Generator alphabets are disjoint by class (context over one alphabet, the
+# changed content over others), so the changed block's content is forced into
 # the non-equal ops: a context character can never pair with a changed
-# character inside an equal op. That alone does NOT force difflib's
-# PRESENTATION: when the context around the change repeats itself (the
+# character inside an equal op. That alone does not force difflib's
+# presentation: when the context around the change repeats itself (the
 # suffix repeating the prefix's head, as in the pinned "qpqpq" vs "qpwqpq"
-# boundary pair), difflib's find_longest_match can anchor a ROTATED longer
-# equal block and emit a NON-MINIMAL insert+delete split, while tors (Myers
+# boundary pair), difflib's find_longest_match can anchor a rotated longer
+# equal block and emit a non-minimal insert+delete split, while tors (Myers
 # + run-maximization) emits the minimal contiguous change. The
 # one-character flank guard (prefix's last != suffix's first) excludes the
 # adjacent-slide shape but not this repeated-flank one. So the
@@ -151,7 +151,7 @@ def _sole_non_equal_op(
 # exact-parity properties below gate on difflib emitting the canonical
 # single-op shape (exactly one non-equal op of the expected tag; where
 # difflib itself is forced there, any two correct algorithms must agree),
-# and separate no-assume properties pin that tors ALWAYS emits that
+# and separate no-assume properties pin that tors always emits that
 # canonical shape with exactly the generated changed block.
 #
 # Each generator returns ``(a, b, changed_block)``; the changed block is
@@ -234,7 +234,7 @@ _BOUNDARY_PAIRS = {("a", "baa"), ("ppp", "pwpp"), ("pXpp", "ppp"), ("qpqpq", "qp
 )
 def test_structural_validity_and_oracle_agreement_on_the_fixed_battery(a: str, b: str) -> None:
     """The fixed battery: every pair is checked for full structural validity,
-    and the UNAMBIGUOUS members (everything except the pinned boundary pairs)
+    and the unambiguous members (everything except the pinned boundary pairs)
     must match difflib's opcode list exactly; the fixed-case anchor of the
     hypothesis properties below. The boundary pairs are the documented
     legitimate differences, pinned by their own test."""
@@ -253,9 +253,9 @@ def test_the_documented_boundary_cases_differ_from_difflib_visibly() -> None:
     asserted independently.
 
     ``"a"`` vs ``"baa"``: the anchored-match split: difflib's
-    find_longest_match recursion anchors the MIDDLE ``'a'`` (the first
+    find_longest_match recursion anchors the middle ``'a'`` (the first
     maximal match it sees) and emits the insertion split around that anchor;
-    Myers plus similar's run-maximization emits the same edit volume as ONE
+    Myers plus similar's run-maximization emits the same edit volume as one
     contiguous insertion slid to the left.
 
     ``"ppp"`` vs ``"pwpp"``: the equal-run slide (and its delete-class twin
@@ -267,12 +267,12 @@ def test_the_documented_boundary_cases_differ_from_difflib_visibly() -> None:
     unambiguous-class generators exclude by pinning their flanks; pinned
     here so the exclusion is visible, not silent.
 
-    ``"qpqpq"`` vs ``"qpwqpq"``: the REPEATED-FLANK ROTATION, the same
+    ``"qpqpq"`` vs ``"qpwqpq"``: the repeated-flank rotation, the same
     anchored-split mechanism at a new class of inputs: a pure insert
     (``"w"`` between prefix ``"qp"`` and suffix ``"qpq"``) whose suffix
     repeats the prefix's head, so the one-character flank guard does not
-    exclude it. difflib's find_longest_match anchors the ROTATED longer
-    equal block ``a[0:3] == b[3:6]`` (``"qpq"``) and emits a NON-MINIMAL
+    exclude it. difflib's find_longest_match anchors the rotated longer
+    equal block ``a[0:3] == b[3:6]`` (``"qpq"``) and emits a non-minimal
     insert+delete split around it; tors emits the minimal contiguous insert
     between the unrotated equals. Exhaustive deterministic sweeps of the
     generator class found difflib non-canonical on ~0.2-2.4% of drawn pairs
@@ -336,9 +336,9 @@ def test_identical_inputs_return_one_equal_opcode(text: str) -> None:
 
 def test_the_empty_pair_returns_difflibs_empty_list() -> None:
     """``("", "")`` is the one degenerate spelling where the single-equal
-    contract does NOT apply: difflib's matching blocks for two empty operands
+    contract does not apply: difflib's matching blocks for two empty operands
     are the zero-size sentinel alone, so ``get_opcodes()`` emits nothing.
-    Pinned against the live oracle; the empty list IS the compatible answer."""
+    Pinned against the live oracle; the empty list is the compatible answer."""
     assert tors.diff_opcodes("", "") == []
     assert tors.diff_opcodes("", "") == _difflib_opcodes("", "")
 
@@ -376,7 +376,7 @@ def test_lone_surrogates_are_refused_at_the_argument_boundary() -> None:
 @settings(max_examples=400)
 def test_pure_inserts_match_difflib_exactly(case: tuple[str, str, str]) -> None:
     """Generated pure-insert pairs, gated to the unambiguous subset:
-    exact agreement with difflib is asserted ONLY where difflib's own answer
+    exact agreement with difflib is asserted only where difflib's own answer
     carries the canonical single-insert shape (exactly one insert op, plus
     optional leading/trailing equals); there the minimal edit script is
     forced and any two correct algorithms must emit the same list. The gate
@@ -398,7 +398,7 @@ def test_pure_inserts_match_difflib_exactly(case: tuple[str, str, str]) -> None:
 def test_canonical_single_insert_shape_holds_for_tors_on_every_pure_insert(
     case: tuple[str, str, str],
 ) -> None:
-    """tors's own canonical property, over EVERY generated pure-insert pair
+    """tors's own canonical property, over every generated pure-insert pair
     (no assume, the gate-free claim): exactly one insert op (plus optional
     equals), whose j-span content is exactly the inserted block: the
     minimal contiguous presentation. Verified before pinning over
@@ -421,7 +421,7 @@ def test_canonical_single_insert_shape_holds_for_tors_on_every_pure_insert(
 def test_pure_deletes_match_difflib_exactly(case: tuple[str, str, str]) -> None:
     """Generated pure-delete pairs, gated to the unambiguous subset,
     the mirror of the insert class: exact agreement with difflib is
-    asserted ONLY where difflib's own answer carries the canonical
+    asserted only where difflib's own answer carries the canonical
     single-delete shape, and the gate excludes the repeated-flank class
     where difflib anchors a rotated equal block and splits the deletion
     non-minimally. tors's answer there is pinned by the no-assume canonical
@@ -436,7 +436,7 @@ def test_pure_deletes_match_difflib_exactly(case: tuple[str, str, str]) -> None:
 def test_canonical_single_delete_shape_holds_for_tors_on_every_pure_delete(
     case: tuple[str, str, str],
 ) -> None:
-    """tors's own canonical property, over EVERY generated pure-delete pair
+    """tors's own canonical property, over every generated pure-delete pair
     (no assume): exactly one delete op (plus optional equals), whose i-span
     content is exactly the deleted block. Verified before pinning over the
     same exhaustive deterministic sweeps as the insert property; tors
@@ -458,7 +458,7 @@ def test_single_run_replacements_match_difflib_exactly(
 ) -> None:
     """Generated single-run-replace pairs, gated to the unambiguous
     subset: one contiguous run of ``a`` replaced by a same-position run of
-    disjoint-alphabet content; exact agreement is asserted ONLY where
+    disjoint-alphabet content; exact agreement is asserted only where
     difflib's own answer carries the canonical single-replace shape (the
     merged delete+insert presentation both implementations emit). The
     disjoint old/new alphabets keep difflib canonical on every swept pair
@@ -475,7 +475,7 @@ def test_single_run_replacements_match_difflib_exactly(
 def test_canonical_single_replace_shape_holds_for_tors_on_every_single_run_replace(
     case: tuple[str, str, str, str],
 ) -> None:
-    """tors's own canonical property, over EVERY generated single-run-replace
+    """tors's own canonical property, over every generated single-run-replace
     pair (no assume): exactly one replace op (plus optional equals), whose
     i-span content is exactly the old run and whose j-span content is
     exactly the new run. Verified before pinning over exhaustive
@@ -503,7 +503,7 @@ def test_all_equal_pairs_match_difflib_exactly(text: str) -> None:
 @given(st.text(max_size=24), st.text(max_size=24))
 @settings(max_examples=500)
 def test_opcodes_reconstruct_both_sides_over_arbitrary_pairs(a: str, b: str) -> None:
-    """Parity-contract part 1, over ARBITRARY pairs (any alphabets, shared or
+    """Parity-contract part 1, over arbitrary pairs (any alphabets, shared or
     disjoint, empty or not; the generator does not know about the
     unambiguous classes): the opcodes are a valid, difflib-shaped cover of both
     sides. Where the pair falls in an ambiguous region the two algorithms may
@@ -571,10 +571,10 @@ def test_diff_opcodes_absolute_wall_band_holds_at_1mib() -> None:
 # --- The deadline_ms parameter (bounding the superlinear worst case) -----------------
 #
 # The bounded Myers search's work on hard inputs grows superlinearly with size
-# (the char-shuffled corpus is the worst case; the README's diff
+# (the char-shuffled corpus is the worst case; the diff_opcodes deadline note
 # section records the measured ladder: 50k chars 0.32 s, 200k 3.67 s, 400k
 # 13.81 s, 1M 183.6 s on the dev box, ambient load 2.6-3.7, roughly ~n^2).
-# ``deadline_ms`` bounds the WHOLE call: on expiry the incomplete result is
+# ``deadline_ms`` bounds the whole call: on expiry the incomplete result is
 # discarded and ``TimeoutError`` is raised naming the elapsed time and the
 # deadline. The default (``None``) preserves the current unbounded behavior
 # exactly.
@@ -593,7 +593,7 @@ class TestDeadline:
     def test_a_slow_pair_exceeding_the_deadline_raises_timeout_error(self) -> None:
         """The contract: a diff that cannot finish inside ``deadline_ms``
         raises ``TimeoutError`` (the builtins type, pyo3's PyTimeoutError),
-        the message naming BOTH the elapsed cost and the deadline, and the
+        the message naming both the elapsed cost and the deadline, and the
         deadline actually bounds the call: the unbounded diff of this pair
         costs ~1.5 s (measured) while the call returns in well under a
         second."""
@@ -621,7 +621,7 @@ class TestDeadline:
         assert default_ops == explicit_none_ops
 
     def test_a_generous_deadline_yields_the_identical_opcodes(self) -> None:
-        """A deadline the search never reaches changes NOTHING: the opcodes
+        """A deadline the search never reaches changes nothing: the opcodes
         are byte-identical to the unbounded call (similar's preflight only
         *skips* work when a deadline has already expired (verified in its
         3.2.0 source), so a far-future deadline is the same code path)."""

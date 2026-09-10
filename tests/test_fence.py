@@ -3,7 +3,7 @@
 
 ``dedent`` has a stdlib twin (``textwrap.dedent``) and must be byte-exact with it:
 the same parity discipline as ``decode_utf8``/``b64_decode``/``html_unescape``,
-gated by a hypothesis differential against the RUNNING interpreter. The fence
+gated by a hypothesis differential against the running interpreter. The fence
 functions have no stdlib equivalent (the gap is the point); their contract is
 CommonMark §4.5's fenced-code-block grammar, hand-pinned by a rule-cited battery
 in the same spirit as ``tests/test_sentence_bounds.py``'s UAX #29 table.
@@ -26,7 +26,7 @@ class TestExtractCodeBlocks:
         got = extract_code_blocks(text)
         assert got == [("python", "print(1)\n", 7, 30)]
         start, end = got[0][2], got[0][3]
-        # end runs through the closing fence line's OWN terminator.
+        # end runs through the closing fence line's own terminator.
         assert text[start:end] == "```python\nprint(1)\n```\n"
 
     def test_no_info_string_is_none_language(self) -> None:
@@ -84,14 +84,14 @@ class TestExtractCodeBlocks:
         assert extract_code_blocks("```\n```") == [(None, "", 0, 7)]
 
     # Fence-forming characters plus a real slice of Unicode outside ASCII:
-    # combining marks, astral-plane codepoints (emoji), RTL script, and
+    # combining marks, astral-plane codepoints (emoji), rtl script, and
     # zero-width/BOM characters, not just the ASCII skeleton needed to
     # form fences at all.
     _WIDE_ALPHABET = st.one_of(
         st.sampled_from("`~abc \n\t123"),
         st.characters(min_codepoint=0x300, max_codepoint=0x36F),  # combining marks
         st.characters(min_codepoint=0x1F300, max_codepoint=0x1FAFF),  # astral emoji/symbols
-        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (RTL)
+        st.characters(min_codepoint=0x0600, max_codepoint=0x06FF),  # Arabic (rtl)
         st.sampled_from(["​", "‌", "‍", "﻿"]),  # zero-width + BOM
     )
 
@@ -113,7 +113,7 @@ class TestExtractCodeBlocks:
         assert got[0][1] == "code\n    ```\nstill code\n"
 
     def test_closing_fence_rejects_non_space_tab_trailing_whitespace(self) -> None:
-        # Form feed / vertical tab / NBSP are Unicode whitespace but are NOT
+        # Form feed / vertical tab / NBSP are Unicode whitespace but are not
         # "spaces or tabs" per CommonMark §4.5 -- must not close.
         for trailing in ("", "", " "):
             text = f"```\ncode\n```{trailing}\nmore\n```"
@@ -168,11 +168,11 @@ class TestStripCodeFences:
         assert strip_code_fences(text) == text
 
     def test_trailing_bom_prevents_the_single_block_unwrap(self) -> None:
-        # A cleanly closed fence (its OWN line is bare "```", nothing
-        # trailing) followed by a BOM on the line after. U+FEFF is NOT
+        # A cleanly closed fence (its own line is bare "```", nothing
+        # trailing) followed by a BOM on the line after. U+FEFF is not
         # Unicode whitespace (matches Python's own str.strip() semantics),
         # so text.trim() does not strip it -- the block no longer spans the
-        # ENTIRE trimmed input, and the no-op path correctly takes over.
+        # entire trimmed input, and the no-op path correctly takes over.
         text = "```py\nprint(1)\n```\n﻿"
         assert strip_code_fences(text) == text
 
@@ -181,7 +181,7 @@ class TestStripCodeFences:
     def test_never_panics_and_the_identity_contract_holds(self, text: str) -> None:
         """``strip_code_fences`` never panics over the same wide alphabet as
         its sibling ``extract_code_blocks`` (backticks/tildes, combining
-        marks, astral emoji, RTL script, zero-width/BOM), under the
+        marks, astral emoji, rtl script, zero-width/BOM), under the
         documented no-op contract (src/py/fence.rs, python/tors/__init__.pyi)
         documented contract the result is the input object itself (``is``, not just ``==``)
         whenever it isn't the single-wrapping-block unwrap case."""
@@ -189,7 +189,7 @@ class TestStripCodeFences:
         assert isinstance(result, str)
         if result == text:
             # The identity idiom this crate uses throughout: an unchanged
-            # result must be the SAME object, not a coincidentally-equal copy.
+            # result must be the same object, not a coincidentally-equal copy.
             assert result is text
 
     def test_identity_is_returned_object_for_a_concrete_no_op(self) -> None:
@@ -253,9 +253,9 @@ class TestDedentParityWithStdlib:
     whitespace set (which includes the four control separators
     ``\\x1c``-``\\x1f`` that Unicode's White_Space property excludes);
     every earlier release used ``[ \\t]``-only margins and left separator
-    characters ordinary. tors ships ONE machine: the 3.14 rule, on every
+    characters ordinary. tors ships one machine: the 3.14 rule, on every
     interpreter (the same one-behavior discipline as the b64 core). On
-    interpreters with the OLD stdlib the differential below therefore
+    interpreters with the old stdlib the differential below therefore
     excludes text containing any whitespace character of the changed
     class, and tors's own behavior is pinned on both stdlib generations
     by the rows in ``TestDedentPins``."""
@@ -263,7 +263,7 @@ class TestDedentParityWithStdlib:
     # The whitespace class whose handling differs between stdlib
     # generations: Python's isspace set beyond ASCII space/tab/newline
     # (the Unicode White_Space characters plus the four controls). The
-    # probe char is a VT, in both sets' changed region.
+    # probe char is a vt, in both sets' changed region.
     _CHANGED_WHITESPACE = (
         "\x0b\x0c\r\x1c\x1d\x1e\x1f\x85\u00a0\u1680"
         "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
@@ -328,7 +328,7 @@ class TestDedentPins:
 
     def test_controls_join_the_margin_per_pythons_strip_set(self) -> None:
         # The line-normalization set is Python's isspace (includes the
-        # \x1c-\x1f controls); the MARGIN set is exactly [ \t] (measured
+        # \x1c-\x1f controls); the margin set is exactly [ \t] (measured
         # on the running 3.14 stdlib: every other whitespace char leaves a
         # leading run untouched). Pin both sides of that line.
         assert dedent("\x1f") == ""

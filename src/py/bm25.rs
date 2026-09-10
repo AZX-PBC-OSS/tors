@@ -11,13 +11,13 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// `tors.bm25_rank(query, corpus, *, k1=1.5, b=0.75, strip_accents=False,
 /// stemmer=None) -> list[tuple[int, float]]`: Okapi BM25 score for every
 /// document in `corpus` against `query`, one GIL-released native pass.
-/// Returns `(index, score)` pairs for EVERY document (no top-k cutoff baked
+/// Returns `(index, score)` pairs for every document (no top-k cutoff baked
 /// in, slice/sort the result yourself), sorted by score descending, ties
 /// broken by ascending original index. See `src/bm25_impl.rs` for the
 /// exact formula (the always-non-negative `+1` IDF variant, not
 /// the classic form) and its full worked example.
 ///
-/// **This is a RERANKING primitive, not a search index.** It recomputes
+/// **This is a reranking primitive, not a search index.** It recomputes
 /// corpus statistics from scratch on every call, which is the right shape
 /// for scoring a small, already-retrieved candidate set (tens to a few
 /// hundred documents) against one query, and the wrong shape for a large
@@ -25,9 +25,9 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// For that, reach for a real search engine (`tantivy` is the mature
 /// choice in Rust); tors does not build persistent index objects, the
 /// same scope line that kept a Merkle inclusion-proof API out of this
-/// crate. tors makes no claim about retrieval/relevance QUALITY for any
+/// crate. tors makes no claim about retrieval/relevance quality for any
 /// particular corpus or query: this is a correct implementation of a
-/// well-known ranking FORMULA, not an AI/LLM performance promise.
+/// well-known ranking formula, not an AI/LLM performance promise.
 ///
 /// `k1` (>= 0, default 1.5) tunes term-frequency saturation; `b` (in
 /// `[0, 1]`, default 0.75) tunes length normalization. Both invalid
@@ -38,7 +38,7 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 ///
 /// `strip_accents`/`stemmer`/`lemma_dict` are `tf_idf`'s exact same opt-in
 /// normalization knobs (see its docs for the accent-folding/stemming/
-/// lemma-substitution details), applied IDENTICALLY to `query` and every
+/// lemma-substitution details), applied identically to `query` and every
 /// `corpus` document: required for the scores to mean anything, not just
 /// a style choice. All default off, reproducing the original
 /// lowercase-only tokenization. `lemma_dict` accepts a raw
@@ -48,9 +48,9 @@ use crate::tokenize_impl::parse_stemmer_algorithm;
 /// key/value, raises `TypeError`.
 ///
 /// GIL model: the corpus/query list walk (zero-copy `&str` borrows),
-/// building the `Stemmer` (cheap, built ONCE, reused for every document),
+/// building the `Stemmer` (cheap, built once, reused for every document),
 /// and resolving `lemma_dict` (an `Arc::clone` for a `CompiledLemmaDict`,
-/// a fresh `HashMap` build for a raw `dict`, either way ONCE for the whole
+/// a fresh `HashMap` build for a raw `dict`, either way once for the whole
 /// call) happen under the GIL; tokenization, corpus-statistics build, and
 /// scoring all run under one `py.detach`.
 #[pyfunction(signature = (query, corpus, *, k1 = 1.5, b = 0.75, strip_accents = false, stemmer = None, lemma_dict = None))]

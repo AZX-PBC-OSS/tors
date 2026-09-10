@@ -3,37 +3,37 @@
 //! overlap), `chunk_by_words`/`chunk_by_sentences` (the unit-count
 //! spellings whose merge step shares the same grapheme boundary index),
 //! and `chunk_by_paragraphs` (basic contract only: its paragraph spans
-//! are line-run edges, documented as not necessarily grapheme-aligned —
-//! a combining mark after a newline joins the newline's cluster, and the
+//! are line-run edges, documented as not necessarily grapheme-aligned: a
+//! combining mark after a newline joins the newline's cluster, and the
 //! newline is separator content no paragraph's caller would call "split").
 //!
 //! For the three cluster-safe chunkers, every chunk start and end must be
-//! a grapheme-cluster boundary per `unicode-segmentation` directly — the
-//! independent oracle for the shared `GraphemeIndex` bitmap (including
-//! its ASCII fast path), not the production code re-answering its own
-//! question — and a chunk exceeding `max_chars` is legal ONLY as exactly
+//! a grapheme-cluster boundary per `unicode-segmentation` directly (the
+//! independent oracle for the shared `GraphemeIndex` bitmap, including
+//! its ASCII fast path, not the production code re-answering its own
+//! question), and a chunk exceeding `max_chars` is legal only as exactly
 //! one whole grapheme cluster (the documented oversized-cluster
-//! exception). Starts strictly increase, and ends never move backward —
-//! NON-strictly: an overlapping window can legitimately re-offer the same
+//! exception). Starts strictly increase, and ends never move backward,
+//! non-strictly: an overlapping window can legitimately re-offer the same
 //! cut to two consecutive chunks, so equal ends are legal, only a
 //! regressing end is a bug. Forward progress at the sequence level.
 //!
-//! `chunk_by_lines` AND `chunk_by_paragraphs` carry more than
-//! structure: an inline random-access reference oracle EACH (the same
+//! `chunk_by_lines` and `chunk_by_paragraphs` carry more than
+//! structure: an inline random-access reference oracle each (the same
 //! whole-text-`Vec<char>` spellings the Rust unit tests keep as their
-//! own `#[cfg(test)]` oracles — tors-core is a path dep, so those are
+//! own `#[cfg(test)]` oracles; tors-core is a path dep, so those are
 //! unreachable from this crate and inlined here instead) plus a
 //! windower mirroring `chunk_by_segments`'s documented contract, a
-//! DIFFERENTIAL pin: wrong CRLF folding, a blank-line miscount, or a
+//! differential pin: wrong CRLF folding, a blank-line miscount, or a
 //! paragraph run-qualification drift now panics the fuzzer with the
 //! reproducing input, not just violates structure.
 //!
-//! Separator hierarchies fuzz in a two-shape x two-budget GRID over the
+//! Separator hierarchies fuzz in a two-shape x two-budget grid over the
 //! same body: the `SepEntry` alphabet below (shaped so the
 //! `None`-splice's interesting region is reached at useful rates) and
 //! the raw arbitrary needles (extraction shapes, odd literals, the
-//! plain `None` spelling), each at BOTH the raw byte-drain `max_chars`
-//! and a pressure-shaped budget in 1..=total — the raw budget lands at
+//! plain `None` spelling), each at both the raw byte-drain `max_chars`
+//! and a pressure-shaped budget in 1..=total: the raw budget lands at
 //! or above the text length for almost every input (struct fields drain
 //! the byte stream in order and `text` eats most of it, so the leftover
 //! bytes behind `max_chars` are few), and a budget that swallows the
@@ -53,12 +53,12 @@ struct Input {
     text: String,
     max_chars: std::num::NonZeroU16,
     overlap_raw: u16,
-    // The shaped list derives BEFORE the raw one: struct fields drain the
+    // The shaped list derives before the raw one: struct fields drain the
     // byte stream in order and `text` eats most of it, so the leftover
     // bytes should first buy the shapes that reach the splice's
-    // interesting region — short lists, each entry a one-discriminant
+    // interesting region (short lists, each entry a one-discriminant
     // variant, so even scraps yield [Line, Splice] / [Never, Splice] /
-    // [Splice, Splice] — leaving the remainders for the raw needles,
+    // [Splice, Splice]), leaving the remainders for the raw needles,
     // whose multi-byte junk rarely matched anything anyway (the
     // documented reason the shaped field exists).
     shaped_separators: Option<Vec<SepEntry>>,
@@ -66,21 +66,21 @@ struct Input {
 }
 
 /// Separators drawn from a shaped alphabet so the None-splice's
-/// semantically interesting region — a literal that actually FIRES
+/// semantically interesting region (a literal that actually fires
 /// above or below a `None` entry, on line-shaped text, at a budget
-/// that forces fallback — is reached at useful rates. Raw arbitrary
+/// that forces fallback) is reached at useful rates. Raw arbitrary
 /// string needles essentially never match raw arbitrary text (the
 /// multi-byte junk a byte-drain produces), so the unshaped field
 /// alone left the splice path unfuzzed where it matters. The same
-/// shaping argument covers two more literals: the EMPTY literal (the
-/// no-op level production drops at slot construction — this entry
-/// pins it inert in EVERY position, one discriminant away instead of
+/// shaping argument covers two more literals: the empty literal (the
+/// no-op level production drops at slot construction; this entry
+/// pins it inert in every position, one discriminant away instead of
 /// a zero-length-String derive the byte drain only happens to hit)
-/// and Thai SARA AM (a multi-byte literal that matches INSIDE a
-/// grapheme cluster — the exact shape the grapheme cut filter exists
+/// and Thai SARA AM (a multi-byte literal that matches inside a
+/// grapheme cluster, the exact shape the grapheme cut filter exists
 /// to drop; the Rust unit test covers that literal directly, but the
 /// fuzzer could not reach the cut-filter region without a shaped
-/// entry, since a raw needle must derive U+0E33's exact bytes AND the
+/// entry, since a raw needle must derive U+0E33's exact bytes and the
 /// text must carry them too).
 #[derive(Arbitrary, Debug)]
 enum SepEntry {
@@ -98,12 +98,12 @@ enum SepEntry {
     Never,
     /// "": the no-op level production drops at slot construction (an
     /// empty literal would match everywhere and cut nothing). Pins
-    /// that it stays inert in every position — above, below, and
-    /// between other levels — rather than trusting the raw field's
+    /// that it stays inert in every position (above, below, and
+    /// between other levels) rather than trusting the raw field's
     /// byte drain to derive an empty String.
     Empty,
     /// "\u{0E33}" (Thai SARA AM): a multi-byte literal whose matches
-    /// land INSIDE grapheme clusters ("0" + SARA AM is one cluster —
+    /// land inside grapheme clusters ("0" + SARA AM is one cluster:
     /// the UAX #29 word/sentence divergence the cut filter exists
     /// for). The Rust unit test pins this literal directly; a raw
     /// byte drain essentially never derives the needle, so this entry
@@ -186,15 +186,15 @@ fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
                 "{what}: starts not strictly increasing at {start}"
             );
         }
-        // Ends are monotone NON-strictly: the allowance exists for
-        // chunk_hierarchical's overlap re-offer — one cut can
-        // legitimately serve two consecutive windows (a "\n\n" firing
+        // Ends are monotone non-strictly: the allowance exists for
+        // chunk_hierarchical's overlap re-offer (one cut can
+        // legitimately serve two consecutive windows, a "\n\n" firing
         // at 22 under budget 22 and overlap 4 yields (0, 22), (18, 22))
-        // — so strict `>` would be WRONG here. The unit windowers are
+        // so strict `>` would be wrong here. The unit windowers are
         // not a second justification: chunk_by_segments' loop breaks
         // right after its single clamped final chunk, and every window
         // before it advances `stride >= 1` segments, so unit-chunker
-        // ends are always STRICTLY increasing — they merely happen to
+        // ends are always strictly increasing; they merely happen to
         // satisfy this looser bound. What must never happen anywhere
         // is an end moving backward.
         if let Some(prev) = prev_end {
@@ -211,17 +211,17 @@ fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
 /// The random-access `line_bounds` oracle, inlined from the same
 /// whole-text-`Vec<char>` spelling the Rust unit tests keep as their
 /// own `#[cfg(test)]` oracle (that one is invisible to this path-dep
-/// crate — the reason this copy exists): the whole-text `Vec<char>`
+/// crate: the reason this copy exists): the whole-text `Vec<char>`
 /// collect with a one-codepoint CRLF lookahead. A break unit is a `\n`
 /// (unless directly after a `\r`, whose CRLF pair it completes) or a
 /// `\r` (always opens a unit); a line is the maximal run between break
-/// units, KEPT only when it carries a non-whitespace codepoint;
+/// units, kept only when it carries a non-whitespace codepoint;
 /// trailing content after the last break is a line iff non-whitespace,
 /// and a trailing break yields no phantom line. Caveat: the oracle
 /// shares production's `char::is_whitespace()` content filter, so the
-/// differential below pins the two MACHINES (CRLF folding, break
-/// counting, windowing) against each other, NOT the whitespace
-/// definition itself — that one the Python suite pins
+/// differential below pins the two machines (CRLF folding, break
+/// counting, windowing) against each other, not the whitespace
+/// definition itself; that one the Python suite pins
 /// (tests/test_chunk_text.py, the White_Space-vs-`str.isspace` cells).
 fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
@@ -230,8 +230,8 @@ fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
         return Vec::new();
     }
     let is_break = |c: char| c == '\n' || c == '\r';
-    // A '\r' ALWAYS opens a unit (a lone CR, or the first half of a CRLF
-    // pair); a '\n' opens one only when it did NOT ride in as the
+    // A '\r' always opens a unit (a lone CR, or the first half of a CRLF
+    // pair); a '\n' opens one only when it did not ride in as the
     // second half of a pair (no '\r' immediately before it).
     let is_unit_start =
         |i: usize| chars[i] == '\r' || (chars[i] == '\n' && !(i > 0 && chars[i - 1] == '\r'));
@@ -260,15 +260,15 @@ fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
 /// The random-access `paragraph_bounds` oracle, inlined from the same
 /// whole-text-`Vec<char>` spelling the Rust unit tests keep as their
 /// own `#[cfg(test)]` oracle (that one is invisible to this path-dep
-/// crate — the same reason `line_bounds_reference` above is inlined):
-/// paragraphs split on maximal runs of 2+ NEWLINE UNITS, a `\r\n` pair
-/// counting as ONE unit (the CR/CRLF folding every scanner in this
+/// crate: the same reason `line_bounds_reference` above is inlined):
+/// paragraphs split on maximal runs of 2+ newline units, a `\r\n` pair
+/// counting as one unit (the CR/CRLF folding every scanner in this
 /// crate shares); a lone unit is ordinary content, and the empty spans
 /// a qualifying run would mint at the text's edges are discarded.
 /// Caveat, the line oracle's twin: the oracle shares production's
-/// 2+-unit/run-walk SHAPE, so the differential pins the two MACHINES
+/// 2+-unit/run-walk shape, so the differential pins the two machines
 /// (byte-level run walking, unit counting, windowing) against each
-/// other — the heuristic itself (no Unicode Standard behind "2+
+/// other; the heuristic itself (no Unicode Standard behind "2+
 /// newlines is a paragraph gap") is a contract stated in prose, not
 /// something either spelling could cross-check.
 fn paragraph_bounds_reference(text: &str) -> Vec<(usize, usize)> {
@@ -314,7 +314,7 @@ fn paragraph_bounds_reference(text: &str) -> Vec<(usize, usize)> {
 /// `[bounds[i].0, bounds[min(i + per_chunk, n) - 1].1)`, consecutive
 /// chunks advance `stride = per_chunk - overlap` segments, empty bounds
 /// yield `[]`. The two `assert!`s mirror the Rust side's own
-/// load-bearing preconditions verbatim — `stride`'s arithmetic
+/// load-bearing preconditions verbatim: `stride`'s arithmetic
 /// underflows without them.
 fn reference_window(
     bounds: &[(usize, usize)],
@@ -350,7 +350,7 @@ fuzz_target!(|input: Input| {
     // The raw byte-drain budget: struct fields drain the stream in
     // order and `text` eats most of it, so the leftover bytes behind
     // `max_chars` are few and it lands at or above the text length
-    // for almost every input — a budget that swallows the whole text
+    // for almost every input: a budget that swallows the whole text
     // never opens a second window, so the multi-window fallback walk
     // (the level consultation, a literal firing under pressure, the
     // overlap snap) ran in only a few percent of corpus inputs. The
@@ -360,12 +360,12 @@ fuzz_target!(|input: Input| {
     // `max_chars - 1` is non-negative (`NonZeroU16`), the modulus
     // `total.max(1)` never divides by zero, and `1 + x % total` with
     // `x % total < total` cannot exceed `total`. It lands on `total`
-    // — the ONE value in range with no budget pressure, since the
+    // (the one value in range with no budget pressure, since the
     // first window's `remaining <= max_chars` then swallows the text
-    // in one chunk — exactly when `max_chars` is a positive multiple
+    // in one chunk) exactly when `max_chars` is a positive multiple
     // of `total` (`1 + (k*total - 1) % total == total`); every other
     // derivation is strictly below `total`, so the first window has
-    // `remaining > max_chars` and the multi-window walk MUST run.
+    // `remaining > max_chars` and the multi-window walk must run.
     // Any input with `total > 1` therefore reaches the walk under at
     // least one of the two budgets in ~all derivations; the residue
     // is the exact-multiple corner and single-codepoint texts.
@@ -373,16 +373,16 @@ fuzz_target!(|input: Input| {
 
     // The line oracle's bounds list is text-only, so it is computed once
     // here and shared by every windowing below (each per_chunk value
-    // re-WINDOWS the list, never re-scans the text); the paragraph
+    // re-windows the list, never re-scans the text); the paragraph
     // oracle's list rides the same one-compute discipline.
     let reference_lines = line_bounds_reference(&input.text);
     let reference_paragraphs = paragraph_bounds_reference(&input.text);
 
     // The hierarchical body, parameterized on (separators, budget): the
     // functions' own precondition is `overlap < max_chars`, clamped
-    // rather than skipped so the harness still explores the boundary —
-    // derived PER budget, since the two budgets share only the raw
-    // byte. `assert_cluster_safe` gets the SAME budget the call used:
+    // rather than skipped so the harness still explores the boundary,
+    // derived per budget, since the two budgets share only the raw
+    // byte. `assert_cluster_safe` gets the same budget the call used:
     // the oversized-cluster exception is budget-relative.
     let run_hierarchical = |separators: Option<&[Option<&str>]>, budget: usize| {
         let overlap = input.overlap_raw as usize % budget.max(1);
@@ -398,9 +398,9 @@ fuzz_target!(|input: Input| {
         // that can only ever emit the single first window: `max_chars
         // >= total` makes the loop's first `remaining <= max_chars`
         // exit fire, so the answer is exactly [(0, total)] (or [] on
-        // empty text) REGARDLESS of separators and overlap. That
-        // trivial answer is the one output the codepoint total —
-        // `char_count`, pub(crate) and unreachable from this crate —
+        // empty text) regardless of separators and overlap. That
+        // trivial answer is the one output the codepoint total
+        // (`char_count`, pub(crate) and unreachable from this crate)
         // directly feeds: a byte-count regression (astral text, 4
         // UTF-8 bytes per emoji) would emit (0, byte_total) here and
         // fail this exact equality while every structure check above
@@ -422,14 +422,14 @@ fuzz_target!(|input: Input| {
     };
 
     // The grid: both separator shapes at both budgets. The shaped
-    // alphabet first (the point of the fix — the splice region, now
+    // alphabet first (the point of the fix: the splice region, now
     // under real pressure), then the raw arbitrary needles (extraction
     // shapes, odd literals, and the plain `None` default-hierarchy
     // spelling the raw field's Option carries). The two budgets
     // coincide exactly when the raw one already sits in 1..=total (the
     // shape is the identity there), so the grid's only duplicated work
-    // re-runs a combination one budget already covered — never a new
-    // cost class. The THIRD row is the whole-document budget
+    // re-runs a combination one budget already covered, never a new
+    // cost class. The third row is the whole-document budget
     // `total.max(1)`: the pressure row lands on `total` only for exact
     // multiples, so without this row the single-window path (and the
     // char_count total it rests on) ran in a few percent of inputs;
@@ -451,21 +451,21 @@ fuzz_target!(|input: Input| {
     // The unit-count chunkers over the same arbitrary text: same
     // per-chunk/overlap envelope (per_chunk in 1..=u16, overlap
     // clamped), cluster safety for the two merge-based spellings, and
-    // the DIFFERENTIAL pin for BOTH gapped scanners — the line scanner
+    // the differential pin for both gapped scanners: the line scanner
     // against its inline reference oracle (any divergence between the
-    // streaming state machine and the random-access spelling — wrong
-    // CRLF folding, a blank-line miscount, a windowing drift — panics
-    // here with the reproducing parameters in the message), and the
+    // streaming state machine and the random-access spelling: wrong
+    // CRLF folding, a blank-line miscount, a windowing drift) panics
+    // here with the reproducing parameters in the message, and the
     // paragraph scanner against its own (same machine class: byte-level
     // run walking and unit counting against the random-access
     // spelling; the paragraph spans are break-run edges, documented as
-    // not necessarily grapheme-aligned — a combining mark after a
+    // not necessarily grapheme-aligned: a combining mark after a
     // newline joins the newline's cluster, and the newline is
-    // separator content no paragraph's caller would call "split" — but
-    // the oracle checks WHERE those edges are, not just that they
-    // satisfy structure). This sweep is BUDGET-INDEPENDENT of the grid
-    // above (its per_chunk envelope is its own), so it runs ONCE — not
-    // per budget, not per shape — and the grid's added executions stay
+    // separator content no paragraph's caller would call "split"), but
+    // the oracle checks where those edges are, not just that they
+    // satisfy structure. This sweep is budget-independent of the grid
+    // above (its per_chunk envelope is its own), so it runs once, not
+    // per budget and not per shape, and the grid's added executions stay
     // hierarchical-only.
     let overlap = (input.overlap_raw as usize) % raw_budget.max(1);
     for per_chunk in [1usize, 2, 3, 7, raw_budget] {

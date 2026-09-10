@@ -6,9 +6,9 @@ use crate::encoding_impl;
 /// for non-UTF8 legacy/OCR byte content, via `chardetng` (the detector
 /// Firefox ships). The intended pipeline shape: `utf8_is_valid` first, and
 /// only reach for this on the bytes that already failed that check. This
-/// is a heuristic guesser, not a validator, and it always returns SOME
+/// is a heuristic guesser, not a validator, and it always returns some
 /// encoding, confidence unexposed by the underlying crate beyond the single
-/// best answer. `tld` is an optional top-level domain WITHOUT the leading
+/// best answer. `tld` is an optional top-level domain without the leading
 /// dot (`"jp"`, not `".jp"`) that disambiguates language-family-ambiguous
 /// input; an empty string or `None` both mean "no hint". Same bytes-only
 /// argument contract as `decode_utf8`/`utf8_is_valid` (`bytearray`/

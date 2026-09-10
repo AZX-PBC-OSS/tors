@@ -32,15 +32,15 @@
 //! fresh-object `str.encode("utf-8")` of the same corpus, the same conversion, costs
 //! 7.7-8.6 / 21.4-23.5ms). Callers that care keep a `to_thread` wrap.
 //! `tests/test_gil_release.py` pins both bands, the marshalling band on ASCII
-//! corpora and the first-call materialization on decomposed ones; and the README
-//! records their measured sizes.
+//! corpora and the first-call materialization on decomposed ones; and
+//! docs/performance.md records their measured sizes.
 //!
 //! The v0.2 bytes-in functions (`decode_utf8`, `finalize_utf8`, `b64_encode_bytes`)
-//! have NO argument-materialization class at all: pyo3's `&[u8]` extraction is
+//! have no argument-materialization class at all: pyo3's `&[u8]` extraction is
 //! `cast::<PyBytes>()?.as_bytes()`, a zero-copy borrow of the immutable bytes
 //! buffer, read verbatim in pyo3 0.29's source (src/conversions/std/slice.rs),
 //! for every input, ASCII or not. The only GIL-held residue of a bytes-in call is the
-//! return marshalling (O(output)); the one exception is the strict-decode ERROR
+//! return marshalling (O(output)); the one exception is the strict-decode error
 //! path, which additionally constructs the `UnicodeDecodeError` (its `.object` is
 //! a copy of the input, the same value CPython's own decoder sets there). The
 //! bytes-in cells of `tests/test_gil_release.py` pin this band, including the
@@ -54,7 +54,7 @@
 //!
 //! The v0.3 surface adds residue classes of its own, all measured and pinned
 //! by the same suite. The complete inventory of O(input) GIL-held scans
-//! OUTSIDE `py.detach` on the success path, reconciled to the v0.4 tree (the
+//! outside `py.detach` on the success path, reconciled to the v0.4 tree (the
 //! v0.2/v0.3 list's M6; v0.4 moved or converted some): (1) the argument
 //! borrow above, paid by every str-in function, and (2) `b64_decode`'s
 //! `s.is_ascii()`, a whole-string byte scan before the detach, measured
@@ -62,31 +62,31 @@
 //! cell's input), three orders of magnitude under the 10ms ping floor;
 //! negligible, but named here because it is the only such scan besides the
 //! borrow. (The html `&` sentinel scan does not belong on this list: the
-//! `detached_transform` restructure moved the memchr bail INSIDE the
+//! `detached_transform` restructure moved the memchr bail inside the
 //! detach.) The str-in functions (`nfc`/`nfd`/`nfkc`/`nfkd`,
 //! `html_unescape`) pay the v0.1 classes (zero-copy ASCII borrow or the
 //! one-time O(input) UTF-8 materialization; O(output) return marshalling);
-//! `html_unescape`'s zero-`&` fast path returns the INPUT `PyString` itself
+//! `html_unescape`'s zero-`&` fast path returns the input `PyString` itself
 //! (CPython's own `return s`), not a marshalled copy. `b64_decode` is str-in
-//! (ASCII-only, so the borrow of ACCEPTED input is always zero-copy; a
-//! non-ASCII input pays the extraction's one-time materialization BEFORE
+//! (ASCII-only, so the borrow of accepted input is always zero-copy; a
+//! non-ASCII input pays the extraction's one-time materialization before
 //! `is_ascii` rejects it, an error-path cost, paid once per object) with an
-//! O(decoded-bytes) bytes return, plus an ERROR path that imports `binascii`
+//! O(decoded-bytes) bytes return, plus an error path that imports `binascii`
 //! and constructs the real `binascii.Error` under the GIL: raise-time only.
 //! `grapheme_count` returns a single int (no marshalling class at all), but
-//! `word_bounds` returns the FULL bounds list: its GIL-held residue is
+//! `word_bounds` returns the full bounds list: its GIL-held residue is
 //! O(number-of-segments) tuple construction, measured at 428-497ms for 3.67M
 //! segments (12 MiB prose), a real cost of the list-returning shape, pinned
 //! as a regression band (the 1.0s ceiling plus the 0.85 detach-regression
 //! ratio) by `tests/test_gil_release.py`.
 //!
-//! The v0.4 surface adds the ZERO-COST identity path and the streaming answer to
+//! The v0.4 surface adds the zero-cost identity path and the streaming answer to
 //! the word_bounds marshalling cost, both measured and pinned. Every
 //! normalization entry (`normalize`, `finalize`, `finalize_utf8`, the four
 //! forms, `html_unescape`) consults the quick-check property data (the same
 //! data CPython's `unicodedata.normalize` fast path uses) plus, for the
 //! pipeline, SIMD sentinel scans of each scan stage's fingerprint; when the
-//! whole transform is provably a no-op the ORIGINAL input object is returned:
+//! whole transform is provably a no-op the original input object is returned:
 //! zero allocation, zero copy, zero marshalling (CPython's
 //! `unicode_result_unchanged` idiom), and `finalize` computes its digest
 //! straight from the borrowed input buffer. A post-pass output==input
@@ -95,7 +95,7 @@
 //! measured 2.89ms walls for `normalize` at 12 MiB of already-normalized
 //! prose (123.0ms on the v0.3 build), 7.72ms for `finalize` (126.3ms), the
 //! whole call cheaper than one 10ms heartbeat. `word_bounds_iter` fills its
-//! bounds buffer under ONE detach at construction (the same detached core
+//! bounds buffer under one detach at construction (the same detached core
 //! pass as the list API) and each `__next__` holds the GIL for a single
 //! 2-tuple: worst gap 15.4ms over a 327-358ms full drain at 12 MiB (0.04-0.05),
 //! inside the suite's shared budgets, where the list shape measured
@@ -107,7 +107,7 @@
 //!
 //! The v0.6 surface (`diff_opcodes`) adds its own marshalling class, the
 //! `word_bounds` list-shape family applied to a function whose output is a
-//! list by necessity: the return is ONE 5-TUPLE PER OPCODE, constructed under
+//! list by necessity: the return is one 5-tuple per opcode, constructed under
 //! the GIL, O(ops), with up to four fresh `PyLong`s each and the four tag
 //! strings (`"equal"`/`"replace"`/`"delete"`/`"insert"`) built once per call
 //! and shared by reference into every tuple (difflib's own interned-tag
@@ -118,50 +118,50 @@
 //! shuffled pair (103,421 opcodes) shows the band itself: worst gaps
 //! 20.4-26.3ms of 1554-1626ms walls, the ~10-15ms delta over the floor being
 //! the tuple construction, ~0.1-0.15µs per opcode. The argument side pays the
-//! standard str-in classes TWICE (one borrow per operand: zero-copy for
+//! standard str-in classes twice (one borrow per operand: zero-copy for
 //! ASCII/cached inputs, the one-time O(input) UTF-8 materialization on the
 //! first non-ASCII call), and the whole diff (both operands' `Vec<char>`
 //! materialization and the Myers search) runs under `py.detach`. The
 //! `deadline_ms` parameter (v0.6.1) changes none of that: the budget is
 //! checked in plain Rust inside the detached pass, and the `TimeoutError`
-//! on expiry is constructed AFTER the GIL is reacquired; nothing raises
+//! on expiry is constructed after the GIL is reacquired; nothing raises
 //! from inside the detached region.
 //!
 //! The v0.7 surface (`find_patterns`) adds the same list-shape marshalling
-//! class with a GIL-held ARGUMENT walk of its own: the pattern list is
+//! class with a GIL-held argument walk of its own: the pattern list is
 //! walked once under the GIL, borrowing each entry's UTF-8 zero-copy (the
 //! standard str-in borrow class, O(patterns) handles; the one-time O(input)
 //! materialization applies per non-ASCII pattern object on first call), then
-//! the WHOLE search (automaton build, scan, and the byte→char offset
+//! the whole search (automaton build, scan, and the byte→char offset
 //! conversion; an `is_ascii` fast path skips the conversion for ASCII text)
 //! runs under one `py.detach`, and the return marshalling constructs one
 //! 3-tuple of ints per match, O(matches), measured ~0.13µs per match. The
 //! sparse 12 MiB cell (a terminology scan with one occurrence) sits at the
-//! ping floor over a ~6ms scan, walls UNDER the 10ms ping floor, so that
+//! ping floor over a ~6ms scan, walls under the 10ms ping floor, so that
 //! cell is ceiling-only (the b64/utf8_is_valid precedent); while the dense
 //! 17-word cell (1,284,724 matches over 12 MiB prose) shows the band itself:
 //! worst gaps 171.0-174.7ms of 214-224ms walls (ratio 0.76-0.80: the
 //! marshalling is structurally the dominant share of a search call at
 //! whole-corpus match counts, because the search core is ~3.5x faster than
 //! segmentation), pinned by a bespoke 400ms ceiling and a 0.90 ratio budget
-//! in `tests/test_gil_release.py`; the README's Performance section records
+//! in `tests/test_gil_release.py`; docs/performance.md records
 //! the caller guidance (~13ms held at 100k matches, ~170ms at 1.28M).
 //!
 //! The v0.8 surface (`replace_many`, `sentence_bounds`/`sentence_bounds_iter`,
-//! `diff_opcodes_lines`) adds NO new residue class. `replace_many` is the
+//! `diff_opcodes_lines`) adds no new residue class. `replace_many` is the
 //! `find_patterns` argument shape over a dict: one GIL-held walk borrowing
 //! each key and value (the standard str-in borrow class, O(entries) handles),
 //! then automaton build + scan + splice under one `py.detach`, then either
 //! the identity return (no key matched, or the net effect is the identity:
-//! the ORIGINAL object, zero marshalling) or the O(output) string
+//! the original object, zero marshalling) or the O(output) string
 //! marshalling. `sentence_bounds` is the `word_bounds` pair exactly: the
 //! detached core, then either the list API's O(sentences) tuple marshalling
 //! (sentences are far sparser than words: measured 170,037 sentences
 //! against 3.67M word segments over the same 12 MiB prose, ~1/22nd the
-//! tuple count, so the list shape MEETS the shared GIL budgets where
+//! tuple count, so the list shape meets the shared GIL budgets where
 //! `word_bounds` structurally cannot) or the streaming iterator's one-detach
 //! buffer with a single 2-tuple per `__next__`. `diff_opcodes_lines` is the
-//! `diff_opcodes` marshalling applied to LINE indices, O(line-opcodes),
+//! `diff_opcodes` marshalling applied to line indices, O(line-opcodes),
 //! a count far below its char-level twin's on the same corpus, with the
 //! same `deadline_ms` machinery (the budget check in plain Rust inside the
 //! detached pass; the `TimeoutError` constructed after the GIL is
@@ -169,7 +169,7 @@
 //! of panicking, per `diff_impl::budget_from_ms`).
 //!
 //! The v0.9 surface (`word_count`, `sentence_count`, `count_matches`,
-//! `find_patterns_iter`) adds NO residue class at all: the three counts are
+//! `find_patterns_iter`) adds no residue class at all: the three counts are
 //! `grapheme_count`'s extreme point (a single int return, no marshalling
 //! class, and the cores allocate nothing where the list APIs materialize
 //! the full vector; counting is the common question, and O(1) memory is the
@@ -186,13 +186,13 @@
 //! residue shapes, both reusing shapes established earlier in this file.
 //! The percent-encoding quartet is
 //! the `detached_transform` classes over `url_impl`'s `Cow` cores (whole
-//! scan under `py.detach`; the identity lane returns the ORIGINAL object
+//! scan under `py.detach`; the identity lane returns the original object
 //! when nothing encodes/decodes; O(output) marshalling otherwise); the
 //! stdlib's own spellings are pure Python and GIL-held whole-text.
 //! `similarity_ratio` is the diff classes (two str-in borrows, the Myers
 //! search under `py.detach`, a single float out); `get_close_matches`
 //! walks the candidate list under the GIL (the standard borrow class) and
-//! returns REFERENCES to the original candidate str objects: zero
+//! returns references to the original candidate str objects: zero
 //! marshalling, difflib's own shape. The three fuzzy metrics are O(n·m)
 //! DP/Jaro passes under `py.detach` with a per-row/phase deadline check
 //! (the `deadline_ms` DoS discipline: the uninterruptible-`strsim` route
@@ -202,9 +202,9 @@
 //! GIL-held dict walk, the scan+splice under one detach, one string out).
 //!
 //! The JSON repair surface (`repair_json`/`repair_json_loads`/
-//! `repair_json_diagnostics`) runs the WHOLE repair detached — the strict
+//! `repair_json_diagnostics`) runs the whole repair detached: the strict
 //! fast path, the repair parser, the schema alignment, and the validator
-//! compile+check — so a malformed multi-megabyte model dump never holds
+//! compile+check, so a malformed multi-megabyte model dump never holds
 //! the GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
 //! handles; each dict/list entry pays the standard str-in borrow class)
 //! and the return marshalling: the O(output) string for `repair_json`, the
@@ -237,7 +237,7 @@ pub mod phonetic_impl;
 // (pdf_oxide, anydoc, office_oxide, html-to-markdown-rs) are optional deps
 // so the base build and the base PyPI wheel stay lean, and its pyo3
 // wrappers live in the separate `tors-documents` crate (the
-// `tors[documents]` payload wheel) — the extraction CORES stay here,
+// `tors[documents]` payload wheel): the extraction cores stay here,
 // behind the feature, as the single source of truth for Rust consumers
 // too. See each module's docs for the engine choices and their
 // measurements.
@@ -270,7 +270,7 @@ use pyo3::{Py, PyAny};
 /// argument's UTF-8 under the GIL (`to_str`: a zero-copy alias for
 /// ASCII/cached inputs, the one-time O(input) materialization on the first
 /// non-ASCII call), run the transform detached, and on the identity path
-/// return the ORIGINAL `PyString` object, CPython's own
+/// return the original `PyString` object, CPython's own
 /// `unicode_result_unchanged` idiom (`unicodedata.normalize`'s
 /// `is_normalized` fast path returns the input, `html.unescape`'s
 /// no-`&` path returns the input), zero allocation, zero copy, zero
@@ -321,10 +321,10 @@ use py::url::*;
 /// The shared core of every `*_iter` streaming iterator (the
 /// segmentation, find_patterns, and chunking families'): the input kept
 /// alive for the iterator's life, the full item sequence computed under
-/// ONE detach at construction, and a cursor. Generic over the item
+/// one detach at construction, and a cursor. Generic over the item
 /// (`Copy`: a 2-tuple of bounds or a 3-tuple of a match) so the
 /// `#[pyclass`] wrappers are thin and a future `*_iter` surface is one
-/// pyclass away (the class NAME is per-struct in pyo3; the logic is
+/// pyclass away (the class name is per-struct in pyo3; the logic is
 /// this one struct, DRY).
 pub(crate) struct EagerIter<T> {
     /// The input, kept alive for the iterator's life (its cached UTF-8 view
@@ -361,7 +361,7 @@ impl<T: Copy> EagerIter<T> {
 
 /// The `deadline_ms` validation shared by both diff spellings: `None` (the
 /// unbounded spelling) or a positive finite number of milliseconds. An
-/// enormous-but-finite value is LEGAL: the core saturates any `Duration`
+/// enormous-but-finite value is legal: the core saturates any `Duration`
 /// overflow to unbounded (`diff_impl::budget_from_ms`) instead of panicking
 /// in `Duration::from_secs_f64`.
 pub(crate) fn validate_deadline_ms(deadline_ms: Option<f64>) -> PyResult<()> {

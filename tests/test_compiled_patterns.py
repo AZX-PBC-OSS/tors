@@ -6,23 +6,23 @@ surface).
 Every free spelling (``find_patterns``, ``find_patterns_iter``,
 ``count_matches``, ``replace_many``, ``replace_many_masked``) builds its
 aho-corasick automaton and its duplicate-id remap from the pattern list on
-EVERY call. For a pipeline running the SAME fixed vocabulary (a redaction
+every call. For a pipeline running the same fixed vocabulary (a redaction
 list, a terminology rewrite table) over many texts, that build is a fixed
 cost re-paid per call; ``CompiledPatterns(patterns)`` pays it once (one
 detached build at construction) and every call afterwards runs the free
-function's OWN scan over the held automaton, so parity is by construction.
+function's own scan over the held automaton, so parity is by construction.
 
-The proof discipline here is PARITY WITH THE FREE FUNCTIONS as the
+The proof discipline here is parity with the free functions as the
 strongest available oracle (they are themselves pinned against the
 brute-force pure-Python references in tests/test_find_patterns.py and
 tests/test_replace_many.py): the free functions' own gate batteries and
 hypothesis strategies are re-run through compiled fixtures (imported from
-those modules, the SAME rows and the SAME strategies, no restatement), so
+those modules, the same rows and the same strategies, no restatement), so
 a compiled disagreement is loud against a pinned baseline.
 
 The one contract the compiled replace spellings add, pinned below: the
-``replacements`` dict is validated at CALL time (values change per call;
-the automaton is the compiled part) and must key EXACTLY the compiled
+``replacements`` dict is validated at call time (values change per call;
+the automaton is the compiled part) and must key exactly the compiled
 pattern set, every pattern paired with a value and no others, because a
 key the automaton cannot match could never be honored and a pattern with
 no value could never be spliced; the exact set is what makes
@@ -75,7 +75,7 @@ def test_golden_batteries_through_a_compiled_fixture(
     patterns: list[str], text: str, expected: list[tuple[int, int, int]]
 ) -> None:
     """The find-side golden batteries (the overlap semantics and the
-    byte→char mapping crux), the SAME rows the free spelling pins,
+    byte→char mapping crux), the same rows the free spelling pins,
     re-run through one compiled fixture per row: every spelling must
     answer the pinned expectation, agree with the free function, and
     agree with the brute-force oracle, and the empty-list row compiles
@@ -95,7 +95,7 @@ def test_golden_batteries_through_a_compiled_fixture(
 def test_find_parity_over_multibyte_alphabets(
     patterns_text: tuple[list[str], str],
 ) -> None:
-    """The multibyte differential, compiled side: the SAME strategy the
+    """The multibyte differential, compiled side: the same strategy the
     free spelling drives (pattern lists with duplicates over every UTF-8
     width, texts over the same alphabet), every compiled spelling against
     its free twin, exact list equality (the free functions' own
@@ -141,7 +141,7 @@ def test_find_parity_over_the_tiny_alphabet_sweep() -> None:
     """The deterministic exhaustive sweep, compiled side: every pattern
     list of size 0-3 over ``{"a", "ab", "b"}`` (duplicates included)
     crossed with every text over ``{"a", "b"}`` up to length 5 (2,520
-    pairs), each list compiled ONCE and all three compiled spellings run
+    pairs), each list compiled once and all three compiled spellings run
     against their free twins, no sampling at all."""
     pattern_pool = ["a", "ab", "b"]
     pattern_lists: list[list[str]] = [[]]
@@ -226,7 +226,7 @@ def test_replace_golden_rows_through_a_compiled_fixture(
     text: str, replacements: dict[str, str], expected: str
 ) -> None:
     """The replace semantic crux rows through a fixture compiled from the
-    dict's keys: the answer is the pinned expectation AND the free
+    dict's keys: the answer is the pinned expectation and the free
     function's answer, and the masked spelling agrees with the free
     masked spelling on the same row."""
     cp = CompiledPatterns(list(replacements))
@@ -240,7 +240,7 @@ def test_replace_golden_rows_through_a_compiled_fixture(
 def test_replace_parity_over_multibyte_alphabets(
     text_replacements: tuple[str, dict[str, str]],
 ) -> None:
-    """The multibyte differential, replace side: the SAME strategy the
+    """The multibyte differential, replace side: the same strategy the
     free spelling drives (deletion lanes, value-contains-key cascade
     lanes, every UTF-8 width), each dict's key set compiled once, both
     replace spellings against their free twins, exact string equality."""
@@ -296,7 +296,7 @@ def test_replace_parity_over_the_tiny_alphabet_sweep() -> None:
 class TestIdentityContract:
     def test_no_match_map_returns_the_same_object(self) -> None:
         """The zero-cost lane, compiled side: a fixture whose patterns
-        never match returns the ORIGINAL input object (the scan borrows
+        never match returns the original input object (the scan borrows
         the input when nothing splices)."""
         s = "nothing to see here"
         cp = CompiledPatterns(["xyz"])
@@ -304,8 +304,8 @@ class TestIdentityContract:
         assert cp.replace_many_masked(s, {"xyz": "Q"}) is s
 
     def test_net_identity_map_returns_the_same_object(self) -> None:
-        """The complete form, compiled side: keys that DO match but
-        re-emit their own text hand back the ORIGINAL object (a value
+        """The complete form, compiled side: keys that do match but
+        re-emit their own text hand back the original object (a value
         equal to its key; the masked spelling's length arithmetic
         regrowing the key exactly)."""
         s = "aaa"
@@ -327,7 +327,7 @@ class TestIdentityContract:
 
     def test_a_map_that_changes_anything_returns_a_new_object(self) -> None:
         """The contrapositive, compiled side: a real splice returns a
-        FRESH string, never the input object mutated or handed back
+        fresh string, never the input object mutated or handed back
         unequal."""
         cp = CompiledPatterns(["a"])
         result = cp.replace_many("a", {"a": "b"})
@@ -359,10 +359,10 @@ class TestReplacementsValidation:
 
     def test_an_empty_dict_on_a_nonempty_fixture_is_refused(self) -> None:
         """The one lane where the compiled contract deliberately differs
-        from the free function's empty-dict early exit: a NONEMPTY
+        from the free function's empty-dict early exit: a nonempty
         fixture has patterns that need values, so the empty dict is a
         missing-patterns refusal, not the identity return (the free
-        function has no such case: its automaton is built FROM the dict,
+        function has no such case: its automaton is built from the dict,
         and an empty dict has nothing to value)."""
         cp = CompiledPatterns(["cat"])
         with pytest.raises(ValueError, match="missing a value"):
@@ -384,9 +384,9 @@ class TestReplacementsValidation:
         )
 
     def test_duplicate_patterns_in_the_list_collapse_to_the_one_key(self) -> None:
-        """A duplicate pattern in the compiled LIST is one key in the set
+        """A duplicate pattern in the compiled list is one key in the set
         (the dict cannot carry it twice), and the find side still reports
-        the FIRST list index, the free function's own duplicate rule."""
+        the first list index, the free function's own duplicate rule."""
         cp = CompiledPatterns(["abc", "abc"])
         assert cp.find("abcabc") == [(0, 3, 0), (3, 6, 0)]
         assert cp.replace_many("abcabc", {"abc": "X"}) == "XX"
@@ -508,7 +508,7 @@ class TestArgumentContract:
     def test_an_invalid_mask_still_raises_before_the_replacements_check(self) -> None:
         """The free spelling's own ordering (the mask is validated before
         any dict handling), pinned compiled-side: an invalid mask raises
-        the mask ``ValueError`` even where the dict would ALSO fail
+        the mask ``ValueError`` even where the dict would also fail
         validation, so the mask check cannot silently move behind it."""
         cp = CompiledPatterns(["cat"])
         with pytest.raises(ValueError, match="^mask must be exactly one character"):
@@ -552,8 +552,8 @@ def _fixed_vocabulary(size: int) -> list[str]:
 
 
 # The amortization cell's shape: a fixed 10,000-pattern vocabulary (large
-# enough that the free spellings' per-call automaton build is the DOMINANT
-# share of a free call, the H5 shape) over a 256 KiB document corpus (a
+# enough that the free spellings' per-call automaton build is the dominant
+# share of a free call, the h5 shape) over a 256 KiB document corpus (a
 # large real document), N=25 calls. The measured numbers and the load at
 # measurement time live in the two tests' docstrings.
 _AMORTIZATION_VOCAB_SIZE = 10_000
@@ -596,12 +596,12 @@ def test_compiled_amortizes_the_build_over_a_fixed_vocabulary() -> None:
 
 
 def test_compiled_amortizes_the_build_on_the_replace_side() -> None:
-    """The same story, replace side (the H5 canonical consumer: a fixed
+    """The same story, replace side (the h5 canonical consumer: a fixed
     rewrite table over a document pipeline): the same 10,000-pattern
     vocabulary as a ``dict[str, str]`` rewrite table over the same 256 KiB
     corpus, N=25 ``replace_many`` calls. Measured on the dev box
     (same environment, ambient load 2.2): free total 127.7 ms min-of-3
-    (25 dict walks AND 25 automaton rebuilds), compiled total
+    (25 dict walks and 25 automaton rebuilds), compiled total
     (construction + 25 dict walks + 25 validations + 25 scans) 42.6 ms,
     ratio 0.33. Same generous 0.75 ceiling (~2.3x headroom)."""
     text = prose(_AMORTIZATION_TEXT_BYTES)
@@ -629,7 +629,7 @@ def test_compiled_amortizes_the_build_on_the_replace_side() -> None:
 
 def test_the_amortization_cell_load_is_disclosed() -> None:
     """The load disclosure companion: the two amortization cells above
-    assert WALL ratios, which load can shift, so the run's ambient load
+    assert wall ratios, which load can shift, so the run's ambient load
     is recorded here (printed with the suite output) rather than asserted
     on; the generous 0.5 ceilings keep ~2x headroom over the measured
     ratios, the wall-cell discipline the GIL cells use for loaded CI

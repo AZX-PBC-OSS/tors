@@ -1,6 +1,6 @@
 """Honest measurement: tors's native JSON repair against the pure-Python
 json_repair library it ports (upstream mangiucugna/json_repair, MIT, pinned
-json-repair==0.63.4), on the SAME input strings with the same call shape:
+json-repair==0.63.4), on the same input strings with the same call shape:
 tors.repair_json and tors.repair_json_loads vs json_repair.repair_json
 (str-out, default args; the schema cells pass the same fixed schema through).
 
@@ -10,7 +10,7 @@ three document sizes (1 KiB, 64 KiB, 1 MiB):
 - valid: canonical escaped-string-heavy documents (prose values with embedded
   quotes, backslashes, newlines and tabs, nested objects and arrays) --- the
   strict fast path both sides try first.
-- malformed: the SAME documents with a fixed defect rotation across the five
+- malformed: the same documents with a fixed defect rotation across the five
   docs (dropped closing braces, unquoted keys, single-quoted strings, dropped
   commas, 7/8 truncation) --- the repair heuristics.
 - fenced: the valid documents each wrapped in one ```json fence --- the
@@ -24,13 +24,13 @@ three document sizes (1 KiB, 64 KiB, 1 MiB):
 
 Every cell is parity-checked before it is timed: tors vs library output on
 each document, str and loads lanes. A cell whose outputs differ is reported
-as divergent with its first differing input and is NOT timed --- the
+as divergent with its first differing input and is not timed --- the
 tors-native schema behaviors (key-remap ladder, comma-split, date
 normalization, enum suggestion) are the intentional divergences that would
 surface that way. --check runs only that verification pass.
 
 Timing is time.perf_counter min-of-N over full-corpus passes, N sized so a
-cell accumulates at least 50 ms (at least 2 passes, GC disabled while
+cell accumulates at least 50 ms (at least 2 passes, gc disabled while
 measuring), reported as per-call microseconds (one call = one document).
 Run with `uv run --no-sync python tools/bench_json_repair.py`.
 """
@@ -259,7 +259,7 @@ def _schema_item(j: int) -> dict[str, Any]:
 
 
 def _schema_payload(target: int, variant: int) -> str:
-    """A malformed-ish single-quoted payload for SCHEMA, sized to ~target chars.
+    """A malformed-ish single-quoted payload for schema, sized to ~target chars.
 
     One dropped comma (after 'count') plus single quotes everywhere keeps the
     repair parser in play before the alignment layer runs; the omitted 'note'

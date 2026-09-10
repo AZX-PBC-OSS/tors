@@ -1,9 +1,9 @@
 //! Opt-in term-normalization knobs for `tf_idf`/`bm25_rank`: accent
 //! folding and Snowball stemming, shared by both rather than duplicated
-//! (the same DRY discipline that already put their base tokenization in
+//! (the same dry discipline that already put their base tokenization in
 //! `segmentation_impl::lowercased_word_tokens`/`real_word_segments`).
 //!
-//! # What this is NOT: lemmatization
+//! # What this is not: lemmatization
 //!
 //! Full lemmatization needs a per-language dictionary or a POS-tagging
 //! model. It is not an algorithm you hand-roll or a small crate you
@@ -22,7 +22,7 @@
 //! codepoint `unicode_normalization::char::is_combining_mark` reports
 //! (General_Category=Mark: Mn+Mc+Me) from the decomposed sequence. This is
 //! the standard technique (`scikit-learn`'s `strip_accents='unicode'` does
-//! the same decompose-then-drop). Order: lowercase FIRST, THEN decompose
+//! the same decompose-then-drop). Order: lowercase first, then decompose
 //! and strip, matching `pipeline_impl`'s documented `lowercase` ->
 //! `strip_accents` step order exactly, so the two normalization surfaces
 //! stay in lockstep. Case mapping and accent-stripping commute for every
@@ -31,10 +31,10 @@
 //! ordering choice is about keeping one documented order across the crate,
 //! not about avoiding a correctness hazard the other order would have.
 //!
-//! **Correctness note, NOT replicated here**: scikit-learn's
+//! **Correctness note, not replicated here**: scikit-learn's
 //! `strip_accents_unicode` (per its own issue tracker, gh-15087) has a
-//! real bug: it short-circuits with `if NFKD(s) == s: return s` BEFORE
-//! stripping, so a token that arrives ALREADY decomposed (e.g. `"e"` +
+//! real bug: it short-circuits with `if NFKD(s) == s: return s` before
+//! stripping, so a token that arrives already decomposed (e.g. `"e"` +
 //! U+0301 rather than precomposed `"é"`, plausible input from another
 //! normalization stage) silently keeps its combining mark: decomposing an
 //! already-decomposed string is a no-op, so the equality check is true and
@@ -44,15 +44,15 @@
 //! Decomposition being idempotent must never imply stripping is skippable
 //! too. Pinned by `already_decomposed_input_still_strips` below.
 //!
-//! NFD, not NFKD: NFKD's extra COMPATIBILITY decomposition also affects
+//! NFD, not NFKD: NFKD's extra compatibility decomposition also affects
 //! things accent-folding shouldn't touch (ligatures, width/font variants,
-//! `"ﬁ"` -> `"fi"`). NFD's purely CANONICAL decomposition is the
+//! `"ﬁ"` -> `"fi"`). NFD's purely canonical decomposition is the
 //! conservative, correct choice for "strip accents, change nothing else".
 //!
 //! # Stemming
 //!
 //! `stemmer`: an optional Snowball algorithm name (`rust-stemmers`, MIT/
-//! BSD-3-Clause, both allowed by `deny.toml`), applied AFTER lowercasing
+//! BSD-3-Clause, both allowed by `deny.toml`), applied after lowercasing
 //! and any accent-folding (the crate's own contract: `Stemmer::stem`
 //! expects already-lowercased input). `None` (the default) applies no
 //! stemming.
@@ -149,28 +149,28 @@ pub(crate) fn strip_accents_from(token: &str) -> Cow<'_, str> {
 /// The richer, opt-in-normalizing sibling of
 /// `segmentation_impl::lowercased_word_tokens`: the same real-word-segment
 /// walk, lowercased, with `strip_accents`/`stemmer`/`lemma_dict` applied in
-/// the SAME single pass (no second full-corpus scan). `strip_accents =
+/// the same single pass (no second full-corpus scan). `strip_accents =
 /// false`, `stemmer = None`, `lemma_dict = None` (the defaults every
 /// caller gets when not opting in) reproduce `lowercased_word_tokens`'
 /// exact output, pinned as a byte-identical regression test, not just
 /// assumed.
 ///
-/// `lemma_dict`, a caller-supplied `word -> lemma` mapping, is the LAST
+/// `lemma_dict`, a caller-supplied `word -> lemma` mapping, is the last
 /// step, looked up on the fully-folded token (after lowercase/
 /// strip_accents/stem, whichever ran): if the folded token is a key,
-/// its mapped value REPLACES it; otherwise the folded token is kept
+/// its mapped value replaces it; otherwise the folded token is kept
 /// as-is. This is mechanism, not data: tors does not bundle
 /// a lemma dictionary (full lemmatization needs a per-language dictionary
 /// or a POS-tagging model, the same "no external model" boundary that
 /// kept schema-aware JSON/YAML coercion and a heavy language-detection
-/// table out of this crate); it only APPLIES one, the same shape
+/// table out of this crate); it only applies one, the same shape
 /// `replace_many` already takes a caller-supplied replacement map rather
 /// than bundling one. Combining `stemmer` and `lemma_dict` together is
 /// unusual in practice but well-defined, not an error: the dict is
-/// consulted on the ALREADY-stemmed form (a caller wanting lemma-only
+/// consulted on the already-stemmed form (a caller wanting lemma-only
 /// normalization simply omits `stemmer`).
 /// Note on empty terms: `strip_accents` can reduce a segment to nothing
-/// (a token made ENTIRELY of combining marks, e.g. a bare combining
+/// (a token made entirely of combining marks, e.g. a bare combining
 /// accent with no base letter, NFD-decomposes to itself and every
 /// codepoint in it is a mark, so stripping marks removes the whole
 /// thing). Such a segment is dropped rather than yielding a `""` term:
@@ -180,7 +180,7 @@ pub(crate) fn strip_accents_from(token: &str) -> Cow<'_, str> {
 /// upstream because tors's tokenizer walks real-word segments rather than
 /// a regex over the raw text. An empty term would otherwise inflate
 /// `tf_idf`/`bm25_rank`'s vocabulary with a meaningless all-documents-
-/// tied entry. The filter runs on the FINAL folded form (after
+/// tied entry. The filter runs on the final folded form (after
 /// `strip_accents`/`stemmer`/`lemma_dict`, whichever ran), since any of
 /// those could in principle be the step that empties a token; it never
 /// fires on the `strip_accents = false` default path (nothing upstream of
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn already_decomposed_input_still_strips() {
-        // "e" + COMBINING ACUTE ACCENT (U+0301), NOT precomposed "é": the
+        // "e" + COMBINING ACUTE ACCENT (U+0301), not precomposed "é": the
         // exact shape sklearn's strip_accents_unicode gets wrong (its
         // NFKD(s)==s short-circuit sees this as already-decomposed and
         // skips stripping entirely). tors must strip it regardless.
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn lemma_dict_is_looked_up_on_the_stemmed_form() {
         // English-stem("running") == "run"; the dict only has "run", not
-        // "running", so the lookup must happen AFTER stemming, not before.
+        // "running", so the lookup must happen after stemming, not before.
         let stemmer = Stemmer::create(Algorithm::English);
         let mut dict = HashMap::new();
         dict.insert("run".to_string(), "MOVE".to_string());
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn lemma_dict_lookup_is_case_and_accent_sensitive_to_the_folded_form() {
-        // Lookup key must match the ALREADY lowercased+accent-folded
+        // Lookup key must match the already lowercased+accent-folded
         // token, not the original spelling.
         let mut dict = HashMap::new();
         dict.insert("cafe".to_string(), "COFFEE_SHOP".to_string());
@@ -377,7 +377,7 @@ mod tests {
         );
         // Without strip_accents, the folded token is "café" (only
         // lowercased), which the dict (keyed on unaccented "cafe") does
-        // NOT match; kept as-is.
+        // not match; kept as-is.
         assert_eq!(
             normalized_word_tokens("CAFÉ", false, None, Some(&dict)),
             vec!["café".to_string()]

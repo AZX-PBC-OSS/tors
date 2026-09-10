@@ -1,24 +1,24 @@
 """Contract gate for ``tors.truncate_ellipsis``: hard cut to at most
 ``max_chars`` codepoints plus a U+2026 ``…`` marker, never
-mid-grapheme-cluster — the DB-column truncation shape (a storage bound is
+mid-grapheme-cluster: the DB-column truncation shape (a storage bound is
 positional, not semantic, so unlike ``truncate_to_bounds`` there is no
 word/sentence awareness).
 
 What this gate pins:
 
-- IDENTITY: ``<= max_chars`` codepoints comes back as the original object
+- identity: ``<= max_chars`` codepoints comes back as the original object
   (``is``, not just ``==``).
-- EXACT BOUND: on plain text the stored length is exactly ``max_chars``
-  (``max_chars - 1`` kept + the marker), and it NEVER exceeds ``max_chars``
+- exact bound: on plain text the stored length is exactly ``max_chars``
+  (``max_chars - 1`` kept + the marker), and it never exceeds ``max_chars``
   on any input (hypothesis, over text rich in combining marks and format
   chars).
-- ASCII PARITY: on ASCII input graphemes are codepoints, so the result
-  equals the naive ``value[:max_chars - 1] + "…"`` spelling exactly — the
+- ASCII parity: on ASCII input graphemes are codepoints, so the result
+  equals the naive ``value[:max_chars - 1] + "…"`` spelling exactly: the
   ta_sync column-bound ``truncate`` this replaces, pinned byte-identical
   where the naive cut is already safe.
-- CLUSTER SAFETY: literal pins for combining accents, ZWJ sequences, and
+- cluster safety: literal pins for combining accents, ZWJ sequences, and
   regional-indicator flags (the classes where the naive cut corrupts).
-- EDGES: ``max_chars == 0`` yields ``""`` (no room for even the marker —
+- edges: ``max_chars == 0`` yields ``""`` (no room for even the marker:
   the naive spelling answers ``"…"`` here, exceeding a zero bound);
   negative raises ``ValueError``; no trailing-whitespace trim.
 """
@@ -85,7 +85,7 @@ class TestAsciiParity:
     @settings(max_examples=300)
     def test_ascii_matches_the_naive_spelling_exactly(self, text: str, max_chars: int) -> None:
         # On ASCII every cut is cluster-safe, so the two spellings agree
-        # wherever truncation happens — except max_chars == 0, where the
+        # wherever truncation happens: except max_chars == 0, where the
         # naive spelling wrongly emits the marker past a zero bound, and
         # inputs that already fit, which come back untouched.
         if max_chars == 0:
@@ -140,7 +140,7 @@ class TestClusterSafety:
     def test_thai_sara_am_backs_off(self) -> None:
         assert truncate_ellipsis("0\u0e33", 2) == "0\u0e33"
         # Budget 2 keeps one codepoint plus the marker, but the first
-        # cluster is TWO codepoints wide: keeping "0" alone would split
+        # cluster is two codepoints wide: keeping "0" alone would split
         # it, so the cut snaps back past the whole cluster ("0" without
         # its SARA AM renders differently) and only the marker remains.
         assert truncate_ellipsis("0\u0e33x", 2) == _ELLIPSIS

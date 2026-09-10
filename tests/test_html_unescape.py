@@ -1,5 +1,5 @@
 """Contract gate for ``tors.html_unescape``: indistinguishable from
-``html.unescape`` over the FULL HTML5 named-entity table (all 2231 entries of
+``html.unescape`` over the full HTML5 named-entity table (all 2231 entries of
 ``html.entities.html5``, with- and without-semicolon spellings), plus every
 numeric-reference class (decimal/hex, semicolon or not, the Windows-1252
 remap, the invalid-codepoint-to-empty quirk, out-of-range to U+FFFD) and the
@@ -15,14 +15,14 @@ sibling: unescaping VTT speaker-name tags
 speaker-email lookup, so a miss is data corruption), and none anywhere else.
 So this function ships as core-library surface with an explicit value
 statement: its measured value is the GIL release (``html.unescape`` is a
-regex-sub over the whole string with a PYTHON callback per entity, a
+regex-sub over the whole string with a Python callback per entity, a
 GIL-held whole-text pass) and throughput on large escaped documents, not a
 currently-measured pain site in those codebases.
 
 Crate decision, with evidence (the parity test as arbiter, pre-implementation,
 over this 4505-case oracle (every html5 key, a 52-case tricky battery, and a
 ~2200-case numeric sweep): ``htmlescape`` 0.3.6 fails 3609/4505 (incomplete
-entity table (``UnknownEntity`` on ``&Abreve;``) and hard ERRORS on
+entity table (``UnknownEntity`` on ``&Abreve;``) and hard errors on
 without-semicolon refs, where Python decodes); ``html_escape`` 0.2 fails
 1495/4505 (leaves legacy without-semicolon refs like ``&amp`` verbatim;
 truncates multi-char values (``&acE;`` decodes to ``∾`` losing the combining
@@ -30,10 +30,10 @@ U+0333); follows WHATWG numeric semantics where Python's differ, e.g.
 ``&#1;`` → ``\\x01`` where Python's ``_invalid_codepoints`` maps it to the
 EMPTY string). Neither achieves parity, so tors implements CPython's exact
 algorithm (the ``_charref`` regex + ``_replace_charref`` classification,
-Lib/html/__init__.py) over tables GENERATED from ``html.entities.html5`` /
+Lib/html/__init__.py) over tables generated from ``html.entities.html5`` /
 ``html._invalid_charrefs`` / ``html._invalid_codepoints``, pinned per CI leg
 by the full-table iteration and the numeric-set sweeps below, which re-verify
-every entry of all three tables against the RUNNING interpreter's own data.
+every entry of all three tables against the running interpreter's own data.
 
 Measured CPython 3.12.7 behaviors the port preserves, each pinned by name
 below: ``&#10FFFF;`` → ``"\\nFFFF;"`` (the decimal class stops at the first
@@ -71,7 +71,7 @@ _TRICKY: list[tuple[str, str]] = [
     ("&Amp;", "&Amp;"),  # case-sensitive: no such key
     ("&lt;tag&gt;", "<tag>"),
     ("&fjlig;", "fj"),  # a compat-mapping entity (multi-char value)
-    ("&acE;", "\u223e\u0333"),  # a TWO-char value: the truncation trap
+    ("&acE;", "\u223e\u0333"),  # a two-char value: the truncation trap
     ("&CounterClockwiseContourIntegral;", "\u2233"),  # the longest key, 31 chars
     # longest-prefix fallback with verbatim remainder
     ("&notit;", "\u00acit;"),
@@ -106,7 +106,7 @@ _TRICKY: list[tuple[str, str]] = [
     ("&#xD800;", "\ufffd"),  # surrogates -> FFFD
     ("&#x110000;", "\ufffd"),  # > U+10FFFF -> FFFD
     ("&#10FFFF;", "\nFFFF;"),  # (as above; the decimal quirk, hex would differ)
-    ("&#x10FFFF;", ""),  # the hex spelling DOES reach the codepoint, and it
+    ("&#x10FFFF;", ""),  # the hex spelling does reach the codepoint, and it
     # is a noncharacter (last two of the plane), so _invalid_codepoints maps
     # it to the EMPTY string, not the max scalar
     # degenerate refs left verbatim
@@ -131,10 +131,10 @@ _TRICKY: list[tuple[str, str]] = [
 
 class TestFullHtml5Table:
     def test_every_html5_entity_ref_decodes_to_its_table_value(self) -> None:
-        """THE headline pin: for every one of the 2231 keys of the RUNNING
+        """The headline pin: for every one of the 2231 keys of the running
         interpreter's ``html.entities.html5`` (2125 with-semicolon + 106
         without), ``tors.html_unescape('&' + key)`` must equal the table's own
-        value AND the interpreter's ``html.unescape`` of the same string, so
+        value and the interpreter's ``html.unescape`` of the same string, so
         tors's generated table is verified entry-by-entry against each leg's
         own table (a Python version that grows or changes the table fails here
         loudly instead of silently diverging)."""
@@ -157,19 +157,19 @@ class TestFullHtml5Table:
 
 
 class TestNumericSets:
-    """The two NUMERIC classification sets, swept per CI leg exactly like the
+    """The two numeric classification sets, swept per CI leg exactly like the
     named-entity table above: the html_table.rs header used to overclaim
     per-leg re-verification (only the named-entity sweep ran), so a
     regenerated table with stale numeric data would have passed every test;
     these sweeps close that gap. Every member of both sets, in
-    BOTH ``&#N;`` and ``&#xN;`` spellings, must agree with the RUNNING
+    both ``&#N;`` and ``&#xN;`` spellings, must agree with the running
     interpreter's ``html.unescape``, including the classification-order
-    subtlety that a codepoint in BOTH sets (the 0x80-0x9F C1 range is) takes
+    subtlety that a codepoint in both sets (the 0x80-0x9F C1 range is) takes
     the ``_invalid_charrefs`` remap, which comparing against the interpreter's
     own output settles without re-deriving. The two attributes are CPython
     implementation details (private but stable since 3.8, the exact data
     ``html.unescape`` itself consults); if a future Python removes them the
-    sweep skips LOUDLY and specifically instead of silently shrinking to
+    sweep skips loudly and specifically instead of silently shrinking to
     nothing."""
 
     _SKIP_CHARREFS = (
@@ -212,36 +212,36 @@ class TestNumericSets:
         "classifies numeric references of ANY length, tors matches that "
         "(no limit is read, nothing raises), so the limit-boundary pins "
         "cannot run on this interpreter; the difference is documented in "
-        "the pyi and the README"
+        "the pyi and the API reference"
     ),
 )
 class TestIntegerParseLimit:
     """CPython's integer string conversion limit
     (``sys.get_int_max_str_digits()``, default 4300, present on every 3.11+
-    AND on 3.10.7+ via the CVE-2020-10735 backport; only 3.10.0–3.10.6 lack
-    it) applies to ``html.unescape``'s DECIMAL numeric refs:
+    and on 3.10.7+ via the CVE-2020-10735 backport; only 3.10.0–3.10.6 lack
+    it) applies to ``html.unescape``'s decimal numeric refs:
     ``_replace_charref``'s ``int()`` raises ``ValueError("Exceeds the limit
-    (…) for integer string conversion: value has 4301 digits; ...")`` BEFORE
+    (…) for integer string conversion: value has 4301 digits; ...")`` before
     any classification, where tors previously classified the run to U+FFFD.
-    The wording is VERSION-DEPENDENT ("the limit (4300 digits)" on
+    The wording is version-dependent ("the limit (4300 digits)" on
     3.12+/late-3.11, "the limit (4300)" on 3.10.7–3.11.x), so tors raises
-    the running interpreter's OWN message (the error path replays ``int()``
-    on the offending digit run) and these pins assert the DIFFERENTIAL
+    the running interpreter's own message (the error path replays ``int()``
+    on the offending digit run) and these pins assert the differential
     (tors's exception equals the running stdlib's exception) with only the
     version-stable fragments spelled literally. Measured on 3.10.21,
     3.12.7 and 3.13.14: the boundary is the digit run's full length
-    INCLUDING leading zeros; ``n == limit`` passes, ``n == limit + 1``
-    raises; HEX refs are EXEMPT (base 16 is a power of two, and the limit
+    including leading zeros; ``n == limit`` passes, ``n == limit + 1``
+    raises; HEX refs are exempt (base 16 is a power of two, and the limit
     applies only to non-power-of-two bases, so arbitrarily long hex refs still
     classify, out-of-range to U+FFFD, never raising); and the raise happens
     before the Windows-1252 remap or the out-of-range guard could rescue the
-    value. tors reads the limit from the RUNNING interpreter once per call,
+    value. tors reads the limit from the running interpreter once per call,
     so a caller's ``sys.set_int_max_str_digits()`` change is honored on the
     very next call (pinned here at a lowered limit)."""
 
     def test_decimal_refs_at_the_boundary_pass_and_just_over_raises(self) -> None:
         """The boundary pins, differential against the running interpreter's
-        own ``html.unescape`` at BOTH edges: exactly-at-limit classifies
+        own ``html.unescape`` at both edges: exactly-at-limit classifies
         normally (out of range → U+FFFD), limit+1 raises the stdlib's own
         ValueError with the stdlib's own message, both with and without the
         trailing semicolon (the digit run is the same)."""
@@ -268,7 +268,7 @@ class TestIntegerParseLimit:
             assert stdlib_exc is not None, "the running stdlib did not raise; re-pin"
             assert tors_exc is not None, "tors classified an over-limit decimal ref"
             assert type(tors_exc) is ValueError
-            # THE pin: tors raises the running interpreter's OWN ValueError,
+            # the pin: tors raises the running interpreter's own ValueError,
             # obtained by replaying int() on the offending run, so the message
             # matches even where CPython's wording is version-dependent
             # ("limit (4300 digits)" on 3.12+/late-3.11, "limit (4300)" on
@@ -278,9 +278,9 @@ class TestIntegerParseLimit:
             assert f"value has {limit + 1} digits" in str(tors_exc)
 
     def test_leading_zeros_count_toward_the_limit(self) -> None:
-        """CPython's count is the digit RUN's full length (measured: a run of
+        """CPython's count is the digit run's full length (measured: a run of
         4800 zeros raises "value has 4800 digits"), so a 4301-zero run whose
-        VALUE is 0 still raises; tors must count the run, not the parsed
+        value is 0 still raises; tors must count the run, not the parsed
         value."""
         limit = sys.get_int_max_str_digits()
         if limit == 0:
@@ -292,16 +292,16 @@ class TestIntegerParseLimit:
     def test_hex_refs_are_exempt_no_matter_their_length(self) -> None:
         """The power-of-two-base exemption, pinned: ``int(s, 16)`` is not
         subject to the limit (measured on 3.12.7 and 3.13.14), so an
-        arbitrarily long hex ref still CLASSIFIES (out of range → U+FFFD)
+        arbitrarily long hex ref still classifies (out of range → U+FFFD)
         and never raises, at the default limit or a lowered one."""
         limit = sys.get_int_max_str_digits()
         over_hex = f"&#x{'f' * (max(limit, 1) + 500)};"
         assert html_unescape(over_hex) == html.unescape(over_hex) == "\ufffd"
 
     def test_the_raise_precedes_every_classification_rescue(self) -> None:
-        """CPython raises inside ``int()`` BEFORE ``_replace_charref``
+        """CPython raises inside ``int()`` before ``_replace_charref``
         classifies, so no classification can rescue an over-limit run: a ref
-        whose VALUE would Windows-1252-remap (128 padded past the limit with
+        whose value would Windows-1252-remap (128 padded past the limit with
         leading zeros) and one far out of range both raise the limit error,
         never €, never U+FFFD."""
         limit = sys.get_int_max_str_digits()
@@ -316,7 +316,7 @@ class TestIntegerParseLimit:
     def test_the_limit_is_read_from_the_running_interpreter_per_call(self) -> None:
         """The per-call read: with the limit lowered via
         ``sys.set_int_max_str_digits`` (restored in ``finally``), the NEXT
-        call honors it: exactly-at passes, one over raises with the LOWERED
+        call honors it: exactly-at passes, one over raises with the lowered
         limit interpolated, proving tors consults the running interpreter
         rather than a cached or compiled-in number."""
         original = sys.get_int_max_str_digits()
@@ -355,8 +355,8 @@ class TestTrickyBattery:
     def test_matches_the_recorded_and_running_interpreter_outcome(
         self, ref: str, expected: str
     ) -> None:
-        """Every battery row must equal BOTH the recorded literal (measured on
-        3.12.7 pre-implementation) and the RUNNING interpreter's
+        """Every battery row must equal both the recorded literal (measured on
+        3.12.7 pre-implementation) and the running interpreter's
         ``html.unescape``, result-identical on the tricky classes a
         longest-prefix + numeric-classification implementation gets wrong."""
         stdlib = html.unescape(ref)
@@ -366,7 +366,7 @@ class TestTrickyBattery:
 
 @st.composite
 def entity_text(draw: DrawFn) -> str:
-    """Entity-dense text: plain-unicode fragments, named refs from the RUNNING
+    """Entity-dense text: plain-unicode fragments, named refs from the running
     interpreter's table (both spellings), numeric refs in every spelling
     spanning the classification boundaries (valid, remapped, invalid-codepoint,
     surrogate, out-of-range, non-ASCII-max), and degenerate '&' shapes,
@@ -436,7 +436,7 @@ class TestArgumentContract:
 
 class TestIdentityReturnContract:
     """The generalization of the no-``&`` fast path: ``html_unescape``
-    returns the ORIGINAL object whenever the unescape changes nothing, not
+    returns the original object whenever the unescape changes nothing, not
     only when there is no ``&`` at all (CPython's own ``if '&' not in s:
     return s``), but also when ampersands are present and nothing decodes
     (failed refs, bare ``&``, degenerate shapes): the scan's output equals the

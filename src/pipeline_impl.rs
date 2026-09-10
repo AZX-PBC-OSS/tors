@@ -1,16 +1,16 @@
 //! Stateless batch text-preprocessing: the pure-Rust core of
 //! `tors.apply_pipeline`.
 //!
-//! # No pipeline OBJECT: pure function composition
+//! # No pipeline object: pure function composition
 //!
 //! This fuses NFD-normalize / lowercase / accent-fold / stem / lemma-
-//! substitute / whitespace-collapse into ONE GIL-released pass over a
-//! WHOLE list of texts. There is no `re.compile()`-style
+//! substitute / whitespace-collapse into one GIL-released pass over a
+//! whole list of texts. There is no `re.compile()`-style
 //! compiled-pipeline `#[pyclass]` handle (build once, `.apply()` many
 //! times); pure function composition only, no persistent Rust-side state.
 //! Every call re-describes and re-applies its steps fresh: `tf_idf`/
 //! `bm25_rank`'s own `lemma_dict` knob already amortizes a caller-supplied
-//! dict's Python->Rust marshalling once per WHOLE-corpus call, the same
+//! dict's Python->Rust marshalling once per whole-corpus call, the same
 //! shape `apply_pipeline` uses over a whole list; PyO3's dict `extract` is
 //! linear and realistically low-single-digit milliseconds even for tens of
 //! thousands of entries: not a bottleneck worth new object-state
@@ -20,16 +20,16 @@
 //!
 //! `nfd` -> `lowercase` -> `strip_accents` -> (`stemmer` / `lemma_dict`)
 //! -> `collapse_whitespace`, each step skipped entirely when its flag is
-//! off/`None`. `nfd`/`lowercase`/`strip_accents` are CODEPOINT-level
+//! off/`None`. `nfd`/`lowercase`/`strip_accents` are codepoint-level
 //! transforms: they don't care about word boundaries, so they run over
-//! the WHOLE text directly, reusing `forms_impl::nfd` and
+//! the whole text directly, reusing `forms_impl::nfd` and
 //! `tokenize_impl::strip_accents_from` verbatim (no reimplementation).
-//! `stemmer`/`lemma_dict` are WORD-level: only individual tokens can be
+//! `stemmer`/`lemma_dict` are word-level: only individual tokens can be
 //! meaningfully stemmed or looked up, so when either is requested the
 //! (already codepoint-transformed) text is walked segment-by-segment via
-//! `split_word_bounds`: the SAME UAX #29 walk `tokenize_impl`'s tokenizer
-//! is built on, but UNFILTERED: every non-word segment (punctuation,
-//! whitespace) is preserved VERBATIM between the transformed word
+//! `split_word_bounds`: the same UAX #29 walk `tokenize_impl`'s tokenizer
+//! is built on, but unfiltered: every non-word segment (punctuation,
+//! whitespace) is preserved verbatim between the transformed word
 //! segments, so the output is still readable prose with stemmed/
 //! lemma-substituted words, not a bare token list. A segment counts as a
 //! "real word" by the same predicate `segmentation_impl::real_word_segments`
@@ -38,14 +38,14 @@
 //! kept for consistency with `tf_idf`/`bm25_rank`'s own tokenization
 //! rather than special-cased away.
 //!
-//! `collapse_whitespace` runs LAST, over the fully-transformed text: every
+//! `collapse_whitespace` runs last, over the fully-transformed text: every
 //! run of Python-whitespace-equivalent codepoints
 //! (`normalize_impl::is_py_whitespace`: the same whitespace definition
 //! the rest of this crate uses, not Rust's narrower `char::is_whitespace`)
-//! becomes exactly one ASCII space. This is NOT
+//! becomes exactly one ASCII space. This is not
 //! `tors.normalize`'s full pipeline (no CRLF folding, no blank-line-run
 //! collapsing to two newlines, no leading/trailing strip); just
-//! whitespace-RUN collapsing, the one thing this flag promises.
+//! whitespace-run collapsing, the one thing this flag promises.
 //!
 //! **Note on `stemmer` and case**: `rust-stemmers`' `Stemmer::stem`
 //! expects already-lowercased input (its own documented contract). A
@@ -58,12 +58,12 @@
 //!
 //! # Relationship to `tf_idf`/`bm25_rank`
 //!
-//! Those two already fuse the SAME normalization knobs (`strip_accents`/
+//! Those two already fuse the same normalization knobs (`strip_accents`/
 //! `stemmer`/`lemma_dict`) directly into their own tokenization: calling
-//! `apply_pipeline` first and THEN `tf_idf`/`bm25_rank` on the result
+//! `apply_pipeline` first and then `tf_idf`/`bm25_rank` on the result
 //! would tokenize twice (once here, once inside them) for no benefit.
 //! `apply_pipeline` is the general-purpose preprocessing utility for
-//! everything ELSE (`chunk_text`, `find_patterns`, or a caller's own
+//! everything else (`chunk_text`, `find_patterns`, or a caller's own
 //! logic); reach for `tf_idf`/`bm25_rank`'s own knobs when those are the
 //! only consumer.
 
@@ -137,7 +137,7 @@ fn collapse_whitespace_runs(text: &str) -> String {
 
 /// One text's transform, per the module's documented step order. Returns
 /// `Cow::Borrowed` only when every requested step was a genuine no-op on
-/// THIS text (used by the batch entry point to decide per-text identity;
+/// this text (used by the batch entry point to decide per-text identity;
 /// see [`apply_pipeline`]).
 fn transform_one<'a>(
     text: &'a str,
@@ -183,11 +183,11 @@ fn transform_one<'a>(
 }
 
 /// `apply_pipeline(texts, ...)`: fuse every requested step into one pass
-/// over the WHOLE list, returning one transformed string per input text
+/// over the whole list, returning one transformed string per input text
 /// (position-matched, `texts.len()` entries out). When every step is
 /// off/`None` (the all-defaults call), every returned string is
 /// `Cow::Borrowed` of its input: the pyo3 layer uses this to return the
-/// caller's ORIGINAL list object unchanged (true identity), not just
+/// caller's original list object unchanged (true identity), not just
 /// content-equal output; see `src/py/pipeline.rs`. Empty `texts` -> `[]`.
 pub fn apply_pipeline<'a>(
     texts: &[&'a str],
@@ -272,7 +272,7 @@ mod tests {
         let out = run(&["café"], true, false, false, None, None, false);
         // NFD decomposes é into e + COMBINING ACUTE ACCENT: the combining
         // mark is still present (nfd, unlike strip_accents, never drops
-        // it), only the codepoint SEQUENCE changes.
+        // it), only the codepoint sequence changes.
         assert_eq!(out[0].chars().count(), 5); // c a f e U+0301
         assert!(out[0].chars().any(|c| c == '\u{0301}'));
     }
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn order_of_operations_lowercase_before_strip_accents_before_stem() {
         // "DÉCIDER" -> lowercase -> "décider" -> strip_accents -> "decider"
-        // -> French-stem -> "decid". A WRONG order (e.g. stemming before
+        // -> French-stem -> "decid". A wrong order (e.g. stemming before
         // lowercasing) would fail to match the Snowball algorithm's
         // lowercase-only rule tables and produce a different, wrong stem.
         let stemmer = Stemmer::create(Algorithm::French);

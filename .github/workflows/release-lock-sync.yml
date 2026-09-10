@@ -1,6 +1,6 @@
 # Keeps release-please PRs shippable: release-please bumps versions in
 # pyproject.toml/Cargo.toml (root and tors-documents/) without refreshing
-# uv.lock/Cargo.lock, so every release tag ships stale locks — which breaks
+# uv.lock/Cargo.lock, so every release tag ships stale locks, which breaks
 # docs CI (`uv sync --locked`) on the merge commit and trips `cargo publish`'s
 # clean-tree gate in publish.yml. Its extra-files bumps also never touch the
 # `tors-documents==X.Y.*` extra pin in pyproject.toml (jsonpath targets
@@ -43,8 +43,8 @@ jobs:
           # minor. ${base%.*} is the new version's major.minor (0.6.1 → 0.6),
           # the pin's own granularity; on a patch bump the rewrite is a
           # no-op, which the push step's diff check handles like any other
-          # no-op. (The pin is inert through the uv workspace — uv ignores
-          # the specifier for workspace members — so `uv lock` needs no
+          # no-op. (The pin is inert through the uv workspace: uv ignores
+          # the specifier for workspace members, so `uv lock` needs no
           # change for it; the rewrite is for the PUBLISHED wheel metadata,
           # where maturin bakes the pin in verbatim, and for the
           # publish.yml lockstep assert that gates on it.)
@@ -57,9 +57,9 @@ jobs:
           cargo check --all-targets
           # The payload's own lock, same doctrine: a resolving pass writes
           # tors-documents' version field into tors-documents/Cargo.lock.
-          # cargo metadata resolves without compiling anything — the payload
+          # cargo metadata resolves without compiling anything: the payload
           # pulls the whole engine tree, which check would pay for pointlessly
-          # here — and the lock is the only thing this pass is after (the
+          # here; and the lock is the only thing this pass is after (the
           # payload ships as a wheel, never via cargo publish, so nothing
           # ever gates on its lock beyond freshness).
           cargo metadata --manifest-path tors-documents/Cargo.toml --format-version 1 > /dev/null

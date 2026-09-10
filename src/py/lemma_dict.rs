@@ -43,7 +43,7 @@ impl CompiledLemmaDict {
     /// `tors.CompiledLemmaDict(mapping)`: extracts `mapping` (a
     /// `dict[str, str]`) into a Rust `HashMap` once, under the GIL (the
     /// same linear-in-size cost `apply_pipeline`/`tf_idf`/`bm25_rank`
-    /// already pay per call for a raw `dict`: the whole point is paying
+    /// already pay per call for a raw `dict`: this handle pays
     /// it here, a single time, instead). A non-`str` key or value raises
     /// `TypeError`, the same contract a raw `lemma_dict` argument has.
     #[new]

@@ -1,6 +1,6 @@
 """Contract gate for ``tors.chunk_cdc``: FastCDC 2020 content-defined
 chunking over raw bytes. Unlike every other segmentation primitive in this
-crate, offsets here are BYTE spans, not codepoints; there is no text to
+crate, offsets here are byte spans, not codepoints; there is no text to
 respect. The properties below pin: exact partitioning (no gaps, no overlaps,
 no chunk shorter than 0 or longer than ``max_size``), determinism, the
 empty/shorter-than-``min_size`` special cases, parameter validation, and the

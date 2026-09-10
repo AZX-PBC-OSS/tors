@@ -14,7 +14,7 @@
 //!
 //! `dedent` is a port of CPython 3.14's rewritten `textwrap.dedent`
 //! (Lib/textwrap.py, gh-131792): normalize whitespace-only lines to empty,
-//! then compute the longest common leading-whitespace-run STRING (not
+//! then compute the longest common leading-whitespace-run string (not
 //! count: `"  "` and `"\t"` share no common prefix), differential-tested
 //! against the running stdlib in tests/test_fence.py. tors ships the
 //! CPython 3.14 behavior on every supported Python version; see the
@@ -32,13 +32,13 @@ use crate::normalize_impl::is_py_whitespace;
 /// One fenced code block: `language` is the info string's first
 /// whitespace-delimited word (`None` if the info string is empty or
 /// absent); `code` is the dedented content between the fences; `start`/`end`
-/// are PYTHON STR INDEX (codepoint) offsets of the block's raw span in the
-/// ORIGINAL text: the opening fence line's first character through the end
+/// are Python str index (codepoint) offsets of the block's raw span in the
+/// original text: the opening fence line's first character through the end
 /// of the closing fence line's line terminator (or end of input, for an
 /// unterminated fence); `code_start`/`code_end` are the same-unit offsets of
-/// the RAW (undedented, terminator-preserving) content BETWEEN the fences —
+/// the raw (undedented, terminator-preserving) content between the fences:
 /// the span `code` was dedented from, exposed for callers that need the
-/// bytes verbatim (`json_repair_impl`'s fence pre-pass must NOT let the
+/// bytes verbatim (`json_repair_impl`'s fence pre-pass must not let the
 /// dedent rewrite JSON string content).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeBlock {
@@ -116,7 +116,7 @@ struct OpenFence {
 }
 
 /// Does `line` open a fence? CommonMark §4.5: up to 3 leading spaces, then
-/// 3+ of the SAME `` ` `` or `~`, then an info string. A backtick fence's
+/// 3+ of the same `` ` `` or `~`, then an info string. A backtick fence's
 /// info string must not itself contain a backtick (a tilde fence's may
 /// contain anything): a line that looks like a fence but violates this is
 /// ordinary content, not an opener.
@@ -151,7 +151,7 @@ fn match_open_fence(line: &str) -> Option<OpenFence> {
 /// then a run of `open.fence_char` of length >= `open.fence_len`, then only
 /// trailing whitespace: nothing else on the line.
 ///
-/// CommonMark §4.5 permits only spaces/tabs after the fence run: NOT the
+/// CommonMark §4.5 permits only spaces/tabs after the fence run: not the
 /// full Unicode `White_Space` set `char::is_whitespace` covers, which also
 /// matches form feed, vertical tab, NBSP, and line/paragraph separators.
 /// `\r` is the one addition beyond the spec text: `lines()` never
@@ -184,7 +184,7 @@ fn strip_indent(line: &str, indent: usize) -> &str {
 }
 
 /// The fenced-code-block scan behind [`extract_code_blocks`]: collects
-/// EVERY block (unfiltered); the `lang` filter is applied by the caller so
+/// every block (unfiltered); the `lang` filter is applied by the caller so
 /// this core has one job.
 fn scan(text: &str) -> Vec<CodeBlock> {
     let physical = lines(text);
@@ -247,7 +247,7 @@ fn scan(text: &str) -> Vec<CodeBlock> {
 
 /// `tors.extract_code_blocks`'s core: every fenced code block in `text`, in
 /// document order, optionally filtered to those whose language matches
-/// `lang` EXACTLY (case-sensitive: model output overwhelmingly emits
+/// `lang` exactly (case-sensitive: model output overwhelmingly emits
 /// lowercase info strings, and a silent case-fold would hide a caller's own
 /// typo). See the module docs for the scope this hand-rolled sub-grammar
 /// does not cover (indented code blocks, tab-expanded indents).
@@ -263,9 +263,9 @@ pub fn extract_code_blocks(text: &str, lang: Option<&str>) -> Vec<CodeBlock> {
 }
 
 /// `tors.strip_code_fences`'s core: if `text`, trimmed of leading/trailing
-/// whitespace, is EXACTLY one fenced code block (nothing before the opening
+/// whitespace, is exactly one fenced code block (nothing before the opening
 /// fence, nothing after the closing fence or EOF), return its dedented code
-/// content; otherwise return `text` UNCHANGED, not even whitespace-trimmed,
+/// content; otherwise return `text` unchanged, not even whitespace-trimmed,
 /// so this is a safe no-op on anything but the single-block-wraps-the-
 /// whole-response case it exists for. An unterminated fence counts too (the
 /// model forgot to close it): the block still runs to the trimmed text's end.
@@ -282,15 +282,15 @@ pub fn strip_code_fences(text: &str) -> Cow<'_, str> {
 }
 
 /// `tors.repair_json`'s fence pre-pass core: the single-fence unwrap in its
-/// RAW form. Same single-block-spans-the-whole-trimmed-input gate as
-/// [`strip_code_fences`], but the content comes back VERBATIM — undedented,
-/// CRLF-preserving — because the JSON repair that consumes it must see the
+/// raw form. Same single-block-spans-the-whole-trimmed-input gate as
+/// [`strip_code_fences`], but the content comes back verbatim: undedented,
+/// CRLF-preserving, because the JSON repair that consumes it must see the
 /// bytes the model actually emitted: the fence dedent strips up to three
 /// leading spaces per line, and inside a JSON *string value* those spaces
 /// are payload, not indentation. `None` for every non-single-block input
 /// (prose around the fence, multiple blocks, no fence). The CommonMark
 /// grammar (backtick or tilde fences, 3+ long, longer closers, tolerated
-/// fence indent) is the same scan `extract_code_blocks` runs — json_repair
+/// fence indent) is the same scan `extract_code_blocks` runs: json_repair
 /// itself reaches the embedded JSON by skipping the wrapper characters, which
 /// lands on the same result for container payloads; tors additionally runs
 /// its strict fast path over the unwrapped text and recovers fenced
@@ -318,10 +318,10 @@ pub fn unwrap_code_fence(text: &str) -> Option<&str> {
 
 /// `tors.dedent`'s core: `textwrap.dedent`'s CPython 3.14+ algorithm (see
 /// the module docs): whitespace-only lines normalize to empty, then the
-/// longest common leading-whitespace-run STRING among the remaining
+/// longest common leading-whitespace-run string among the remaining
 /// non-empty lines is computed and stripped from every line that starts
 /// with it. Returns `Cow::Borrowed(text)` only when the transform is a true
-/// no-op (no whitespace-only line to normalize AND nothing to strip), the
+/// no-op (no whitespace-only line to normalize and nothing to strip), the
 /// crate's `Cow` identity convention, checked by a final `out == text`
 /// comparison rather than short-circuited, so it is exact by construction
 /// rather than by a separate no-op detector that could drift from the
@@ -330,7 +330,7 @@ pub fn unwrap_code_fence(text: &str) -> Option<&str> {
 /// **Version note**: `textwrap.dedent` was rewritten in CPython 3.14
 /// (gh-131792), and the rewrite changed observable behavior, not just
 /// performance: the old implementation tested "is this line whitespace-
-/// only" with the regex `^[ \t]+$`, so a line made of some OTHER Unicode
+/// only" with the regex `^[ \t]+$`, so a line made of some other Unicode
 /// whitespace character (`\v`, `\f`, a non-breaking space, ...) was never
 /// recognized as blank and its (zero-length, since `[ \t]` doesn't match
 /// it) leading run collapsed the common margin to nothing. 3.14 tests
@@ -339,7 +339,7 @@ pub fn unwrap_code_fence(text: &str) -> Option<&str> {
 /// `[ \t]*`-anchored regex, so the leading run it credits toward the
 /// margin is any Unicode whitespace, not just space/tab. Following this
 /// crate's `b64_decode`-style convention for cross-version stdlib parity
-/// (see `src/b64_impl.rs`'s module doc), tors ships the FIXED, 3.14
+/// (see `src/b64_impl.rs`'s module doc), tors ships the fixed, 3.14
 /// behavior unconditionally on every Python version it supports (3.10+);
 /// callers on an older interpreter will see `tors.dedent` diverge from
 /// their own `textwrap.dedent` on inputs containing non-space/tab
@@ -348,7 +348,7 @@ pub fn unwrap_code_fence(text: &str) -> Option<&str> {
 pub fn dedent(text: &str) -> Cow<'_, str> {
     let raw_lines: Vec<&str> = text.split('\n').collect();
     // Step 1: whitespace-only lines (>=1 char, all Unicode-whitespace)
-    // normalize to "" — matches `str.strip()`'s truthiness test, not the
+    // normalize to "": matches `str.strip()`'s truthiness test, not the
     // old `[ \t]+` regex (see the version note above).
     let normalized: Vec<&str> = raw_lines
         .iter()
@@ -362,7 +362,7 @@ pub fn dedent(text: &str) -> Cow<'_, str> {
         .collect();
     // Step 2: the leading [ \t] run of every line that has a non-whitespace
     // char (i.e. every non-empty line post-normalization) contributes to
-    // the margin: EXACTLY space and tab, the CPython 3.14 stdlib's own
+    // the margin: exactly space and tab, the CPython 3.14 stdlib's own
     // margin set (measured: every other whitespace char, VT through
     // ideographic space, leaves a leading run untouched on the running
     // stdlib; only the step-1 line normalization uses the full isspace
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn strip_a_bare_empty_fence_is_the_degenerate_single_block_case() {
-        // "```" alone IS a single unterminated fence spanning the whole
+        // "```" alone is a single unterminated fence spanning the whole
         // (trimmed) input, with no content lines: the rule applies
         // consistently even at this degenerate edge, matching
         // unterminated_fence_runs_to_eof's semantics.
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn closing_fence_indented_four_or_more_spaces_does_not_close() {
         // 4+ leading spaces is content, not a (tolerated up-to-3) closer:
-        // the block runs to the next VALID closer instead.
+        // the block runs to the next valid closer instead.
         let text = "```\ncode\n    ```\nstill code\n```";
         let got = extract_code_blocks(text, None);
         assert_eq!(got.len(), 1);
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn closing_fence_tolerates_only_space_tab_cr_not_other_unicode_whitespace() {
         // Form feed, vertical tab, and NBSP are Unicode `White_Space` but are
-        // NOT "spaces or tabs" per CommonMark §4.5: a line with one of
+        // not "spaces or tabs" per CommonMark §4.5: a line with one of
         // these trailing the fence run must not close.
         for trailing in ['\u{000B}', '\u{000C}', '\u{00A0}'] {
             let text = format!("```\ncode\n```{trailing}\nmore\n```");
@@ -616,7 +616,7 @@ mod tests {
 
     #[test]
     fn eof_immediately_after_unterminated_opening_fence_line_with_no_newline() {
-        // The whole input IS the opening fence line, with no trailing \n at
+        // The whole input is the opening fence line, with no trailing \n at
         // all: zero content lines, not a panic on an empty line slice.
         let text = "```python";
         let got = extract_code_blocks(text, None);
@@ -654,7 +654,7 @@ mod tests {
         // block's opening fence line always sits at indent 0 and the raw
         // content keeps every content line's own leading whitespace
         // verbatim (which the JSON consumer tolerates as inter-token ws).
-        // The dedent-vs-raw DISTINCTION is exercised mid-document below.
+        // The dedent-vs-raw distinction is exercised mid-document below.
         let text = "  ```json\n  {\n    \"a\": 1\n  }\n  ```";
         let raw = unwrap_code_fence(text).unwrap();
         assert_eq!(raw, "  {\n    \"a\": 1\n  }\n");
@@ -675,8 +675,8 @@ mod tests {
     fn unwrap_handles_tilde_and_longer_closer_fences() {
         assert_eq!(unwrap_code_fence("~~~json\n[1]\n~~~"), Some("[1]\n"));
         // A 4-tick opener is not closed by a 3-tick line: that line is
-        // CONTENT, and the block runs to EOF (which still spans the whole
-        // input, so the unwrap applies with the stray fence verbatim —
+        // content, and the block runs to EOF (which still spans the whole
+        // input, so the unwrap applies with the stray fence verbatim:
         // here with no trailing newline, since the input has none).
         assert_eq!(
             unwrap_code_fence("````json\n{\"k\": \"v\"}\n```"),

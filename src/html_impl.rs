@@ -6,7 +6,7 @@
 //! as a single left-to-right scan, plus `_replace_charref`'s classification:
 //! exact-table lookup for named refs with the longest-matching-prefix fallback
 //! (prefix lengths 2..len-1, remainder verbatim), and for numeric refs the
-//! invalid-charref remap FIRST, then the surrogate/range guard to U+FFFD, then
+//! invalid-charref remap first, then the surrogate/range guard to U+FFFD, then
 //! the invalid-codepoint set to the empty string, else the codepoint. Both the
 //! named table and the two numeric sets are the generated data in
 //! `html_table.rs`, taken from the same interpreter the Python-side contract
@@ -15,23 +15,23 @@
 //! The integer string conversion limit (backported to 3.10.7+ as part of the
 //! CVE-2020-10735 fix, and in 3.11+ as `sys.get_int_max_str_digits()`,
 //! default 4300): `_replace_charref`'s `int()` raises a `ValueError` for a
-//! DECIMAL ref whose digit run exceeds the limit: BEFORE any classification.
+//! decimal ref whose digit run exceeds the limit: before any classification.
 //! `unescape_checked` replicates that: the limit is a per-call parameter the
 //! pyo3 layer reads from the running interpreter under the GIL (a Python call
-//! per REF would be a real cost on entity-dense text; per call it is
+//! per ref would be a real cost on entity-dense text; per call it is
 //! µs-scale), over-long decimal runs raise [`IntMaxStrDigits`] (counting the
 //! run's full length, leading zeros included, exactly CPython's count), and
-//! HEX refs are exempt (base 16 is a power of two; the limit applies only to
+//! hex refs are exempt (base 16 is a power of two; the limit applies only to
 //! non-power-of-two bases; measured on 3.12.7 and 3.13.14,
 //! arbitrarily long hex refs still classify). `None` is the no-limit spelling: 3.10.0–3.10.6
-//! (the last legs without `sys.get_int_max_str_digits`; 3.10.7+ DO have the
+//! (the last legs without `sys.get_int_max_str_digits`; 3.10.7+ do have the
 //! limit and the attribute, so tors enforces it there too) and a
 //! `sys.set_int_max_str_digits(0)`-disabled limit both map to it, matching
-//! the running stdlib exactly. The message's WORDING is version-dependent:
+//! the running stdlib exactly. The message's wording is version-dependent:
 //! 3.12+ and late 3.11.x say "Exceeds the limit (4300 digits) for integer
 //! string conversion: value has 4301 digits; ..." while 3.10.7–3.11.x say
 //! "Exceeds the limit (4300) for integer string conversion: ..." (no
-//! "digits" after the limit), which is why the pyo3 layer does NOT format
+//! "digits" after the limit), which is why the pyo3 layer does not format
 //! the message itself: it replays the interpreter's own `int()` over the
 //! error's [`IntMaxStrDigits::digit_run`] and raises the very `ValueError`
 //! that returns, exact on every interpreter; `IntMaxStrDigits::message()` is
@@ -59,7 +59,7 @@ use crate::html_table::{HTML5_ENTITIES, INVALID_CHARREFS, INVALID_CODEPOINTS};
 /// this call. Carries the limit plus the offending digit run itself.
 ///
 /// The run can be arbitrarily long (attacker input): carrying it is one
-/// O(run) copy on the ERROR path only, linear, the same order as the input
+/// O(run) copy on the error path only, linear, the same order as the input
 /// the caller already supplied, and CPython's own `html.unescape`
 /// materializes the same run inside `int()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,19 +69,19 @@ pub struct IntMaxStrDigits {
     pub limit: usize,
     /// The offending digit run, verbatim (ASCII digits): the payload the
     /// pyo3 layer replays through the running interpreter's `int()` to
-    /// raise THAT interpreter's exact ValueError.
+    /// raise that interpreter's exact ValueError.
     pub digit_run: String,
 }
 
 impl IntMaxStrDigits {
-    /// The run's FULL length: leading zeros included, exactly CPython's
-    /// count. The run is pure ASCII digits, so its byte length IS its char
+    /// The run's full length: leading zeros included, exactly CPython's
+    /// count. The run is pure ASCII digits, so its byte length is its char
     /// length.
     pub fn digits(&self) -> usize {
         self.digit_run.len()
     }
 
-    /// The FALLBACK message: the 3.12+/late-3.11 wording of the `ValueError`
+    /// The fallback message: the 3.12+/late-3.11 wording of the `ValueError`
     /// CPython's `int()` raises (the shape measured on 3.12.7 and 3.13.14,
     /// identical). Used only when the pyo3 layer's `int()` replay of
     /// [`Self::digit_run`] cannot run: e.g. the limit was disabled
@@ -98,8 +98,8 @@ impl IntMaxStrDigits {
 }
 
 /// The name-character exclusion set of the `_charref` regex's third
-/// alternative: a name is up to 32 CHARS of anything EXCEPT these (note \r is
-/// NOT excluded: it is a name char, matching the regex).
+/// alternative: a name is up to 32 chars of anything except these (note \r is
+/// not excluded: it is a name char, matching the regex).
 fn is_name_char(c: char) -> bool {
     !matches!(c, '\t' | '\n' | '\u{c}' | ' ' | '<' | '&' | '#' | ';')
 }
@@ -155,7 +155,7 @@ fn parse_saturating(digits: &str, base: u64) -> u64 {
     value
 }
 
-/// One matched reference after a `&`: how many BYTES of `rest` the group
+/// One matched reference after a `&`: how many bytes of `rest` the group
 /// consumed, and what it replaces to. `None` = no match at this position
 /// (the `&` is emitted verbatim and the scan resumes one char later, exactly
 /// as `re.sub` advances past a failed match attempt). `Err` = a decimal
@@ -166,7 +166,7 @@ fn parse_saturating(digits: &str, base: u64) -> u64 {
 /// This is the `_charref` regex's alternation in scan form: the numeric
 /// alternatives first (`#[0-9]+;?` and `#[xX][0-9a-fA-F]+;?`: the decimal
 /// class gives up at the first non-digit, which is the "&#10FFFF;" quirk),
-/// then the name class (`[^\t\n\f <&#;]{1,32};?`, up to 32 CHARS, `\r`
+/// then the name class (`[^\t\n\f <&#;]{1,32};?`, up to 32 chars, `\r`
 /// included as a name char, non-ASCII included).
 fn try_match_ref(
     rest: &str,
@@ -197,10 +197,10 @@ fn try_match_ref(
             return Ok(None);
         }
         let digits = &rest[digits_at..digits_at + digits_len];
-        // The integer string conversion limit (3.10.7+/3.11+), raised BEFORE
+        // The integer string conversion limit (3.10.7+/3.11+), raised before
         // any classification (`int()` runs first in `_replace_charref`, so
         // neither the remap nor the range guard can rescue the value).
-        // DECIMAL only: base 16 is a power of two and the limit applies to
+        // Decimal only: base 16 is a power of two and the limit applies to
         // non-power-of-two bases alone (measured; see the module docs). The
         // count is the run's full length: leading zeros included, exactly
         // CPython's count (measured: a run of 4800 zeros reports 4800). The
@@ -246,7 +246,7 @@ fn try_match_ref(
     }
 
     // Longest matching prefix, exactly Python's `for x in range(len(s)-1, 1,
-    // -1)`: prefix CHAR lengths from char_len-1 down to 2 (the full group
+    // -1)`: prefix char lengths from char_len-1 down to 2 (the full group
     // was just tried; length-1 prefixes are never tried: no 1-char keys
     // exist), remainder verbatim. No hit at all → '&' + group verbatim.
     // Enumerated as one reverse pass over the char boundaries, with no Vec
@@ -278,13 +278,13 @@ fn try_match_ref(
 /// The no-`&` bail is memchr (SIMD: measured 0.107ms vs 0.404ms for the
 /// slice `contains` it replaced, and vs 2.394ms for a manual byte loop, on
 /// 12 MiB prose; the no-amp bench cell measured 481µs -> 99µs end-to-end).
-/// The BETWEEN-entity hop STAYS a plain byte loop: on the
+/// The between-entity hop stays a plain byte loop: on the
 /// dense entities corpus the gaps average ~14 bytes, and a measured A/B
 /// (criterion, same box) showed memchr's per-call setup on slices that
-/// short COSTS ~5% of the whole unescape: the conversion does not move
+/// short costs ~5% of the whole unescape: the conversion does not move
 /// the needle where the needle is dense, only where it is absent or rare.
 ///
-/// The NO-LIMIT spelling (the 3.10.0–3.10.6 / disabled-limit semantics) delegates to
+/// The no-limit spelling (the 3.10.0–3.10.6 / disabled-limit semantics) delegates to
 /// [`unescape_checked`] with `None`, where the only error class is
 /// unreachable: benches and crate tests drive this path; the pyo3 layer
 /// calls the checked spelling with the running interpreter's limit.
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(unescape("&#41").as_ref(), ")");
         assert_eq!(unescape("&#00000065;").as_ref(), "A");
         assert_eq!(unescape("&#x00000041;").as_ref(), "A");
-        // U+10FFFF is a NONCHARACTER (last two of the plane): Python maps it
+        // U+10FFFF is a noncharacter (last two of the plane): Python maps it
         // to the empty string, not to the max scalar.
         assert_eq!(unescape("&#x10FFFF;").as_ref(), "");
     }
@@ -466,7 +466,7 @@ mod tests {
             unescape("\u{e9}&amp;\u{1f600}").as_ref(),
             "\u{e9}&\u{1f600}"
         );
-        // A non-ASCII char IS a name char per the regex's class; no key can
+        // A non-ASCII char is a name char per the regex's class; no key can
         // match it, so the group comes back verbatim.
         assert_eq!(unescape("&\u{e9};").as_ref(), "&\u{e9};");
     }
@@ -487,8 +487,8 @@ mod tests {
             assert_eq!(unescape(input).as_ref(), expected, "{input:?}");
         }
         // Every member of both numeric sets, in both spellings: respecting
-        // the classification ORDER: an invalid_charrefs remap (the C1 range
-        // 0x80-0x9F is in BOTH sets) wins over the invalid-codepoint-to-empty
+        // the classification order: an invalid_charrefs remap (the C1 range
+        // 0x80-0x9F is in both sets) wins over the invalid-codepoint-to-empty
         // mapping, exactly as _replace_charref checks them.
         for &(cp, value) in INVALID_CHARREFS {
             for input in [format!("&#{cp};"), format!("&#x{cp:x};")] {
@@ -508,7 +508,7 @@ mod tests {
     // --- the integer string conversion limit (unescape_checked) ----------
     //
     // The Python-side gate (tests/test_html_unescape.py::
-    // TestIntegerParseLimit) pins the boundary against the RUNNING
+    // TestIntegerParseLimit) pins the boundary against the running
     // interpreter at the default 4300 and at a lowered limit; these crate
     // rows pin the core mechanics without an interpreter, using small limits
     // and the default-shape (fallback) message rendering.

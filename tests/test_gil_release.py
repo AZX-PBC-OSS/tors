@@ -1,19 +1,19 @@
-"""THE GIL-release claim, as a test: ``tors.finalize``'s whole native pass runs under
+"""The GIL-release claim, as a test: ``tors.finalize``'s whole native pass runs under
 ``py.detach``, so a thread running it leaves the event loop schedulable at heartbeat
 granularity while megabytes of text are transformed and hashed.
 
 Methodology ported from the specification's loop-safety harness: a heartbeat
 task appends monotonic ticks every 10ms while the operation runs; the assertion is on the
-worst tick gap, and a sample is clean only when that gap is under BOTH budgets: the
+worst tick gap, and a sample is clean only when that gap is under both budgets: the
 ratio budget (worst gap < a fraction of the operation's wall) and a generous absolute
 ceiling. The test takes up to 3 samples (6 for the marshalling-heaviest members of
 the chunking family, where a 3-sample window can miss the end-of-call marshalling
-alignment — see that family's note below) and passes on the first clean one. A GIL-held
-whole-text pass blocks the loop in EVERY sample (the loop's thread cannot acquire the GIL
+alignment; see that family's note below) and passes on the first clean one. A GIL-held
+whole-text pass blocks the loop in every sample (the loop's thread cannot acquire the GIL
 while the C call holds it, so worst gap ~= wall, ratio ~= 1.0, every time), while
 transient whole-process CPU starvation on a shared runner reads as a block only in the
 sample it hits, so a single starved sample is retried rather than failing the test, and
-the multi-sample design is load-robust without weakening the red side (a genuine
+the multi-sample design is load-robust without weakening the red side (a
 regression dirties every sample, so it still fails). This file uses no
 async pytest plugin (tors has none and needs none): each test owns its loop via
 ``asyncio.run``.
@@ -46,11 +46,11 @@ absorbed):
   Even the 32 MiB first call is clean on both budgets (worst ratio 0.110 vs the 0.30
   budget, worst gap 44.1ms vs the 100ms ceiling), so these cells pass on sample 1; the
   pass-on-first-clean design also tolerates a loaded-box first sample, since samples 2+
-  sit in the cached band. The first call's WALL is ~20ms slower at 12 MiB (~30ms at
+  sit in the cached band. The first call's wall is ~20ms slower at 12 MiB (~30ms at
   32 MiB) than cached calls, but that extra is non-GIL first-call warm-up of the
   detached pass, so the loop never sees it; the gap delta and the encode
   anchor, not the wall delta, are the materialization's measure.
-- The pure-Python reference finalize (``reference_finalize``) in the SAME to_thread
+- The pure-Python reference finalize (``reference_finalize``) in the same to_thread
   placement, the red side: same work, same thread, but its whole-text GIL-held C calls
   (``unicodedata.normalize``, ``str.replace`` ×2, ``re.sub`` ×2, ``encode``) each hold
   the GIL for their full duration; only ``hashlib.sha256`` releases it (CPython drops
@@ -63,25 +63,25 @@ absorbed):
 - Budget margins: 0.30 sits ~3.2x above tors's worst measured ratio and ~1.8x below the
   reference's best; the 100ms ceiling sits ~4.8x above tors's worst measured gap (the
   32 MiB gap, under ambient load ~5; at 12 MiB it is ~7x).
-- What this suite pins: BOTH bands of the crate GIL model (src/lib.rs), the ASCII
+- What this suite pins: both bands of the crate GIL model (src/lib.rs), the ASCII
   marshalling band via the prose cells and the non-ASCII first-call materialization via
   the decomposed cells, not just the ASCII band.
 
 (quick-check fast paths + identity returns + the streaming iterator), and what
 they did to these cells, measured on the dev box, ambient load 4.4-5.7 unless noted:
 
-- The identity path's band (the zero-cost lane): on ALREADY-NORMALIZED 12 MiB prose
+- The identity path's band (the zero-cost lane): on already-normalized 12 MiB prose
   (``reference_normalize(prose(...))``, the pipeline's own output), ``tors.normalize``
   walls collapse to ~3-4ms and ``tors.finalize`` to ~9-10ms (the quick-check scan plus,
   for finalize, SHA-256 over the borrowed input, measured 2.89ms/7.72ms min-of-5 at
   load 4.6; the build measured 123.0ms/126.3ms at load 12.1, min-of-N robust on
-  this box). Those walls sit AT or UNDER the 10ms ping floor, so their gap/wall ratios
+  this box). Those walls sit at or under the 10ms ping floor, so their gap/wall ratios
   (~1.2-3.0) are the documented sub-ping artifact: the identity-path cells assert the
   100ms ceiling only (>=9x margin), exactly the b64 12 MiB precedent.
 - The QC-Yes-but-scan-dirty prose corpus keeps paying the scan but skips the NFC pass:
   ``finalize`` prose walls shrink ~3x (42-46ms at 12 MiB, 111-123ms at 32 MiB,
   measured) while the GIL-held residue (the O(output) marshalling) is unchanged,
-  so the residue/wall FRACTION structurally rose at 12 MiB: measured ratios 0.27-0.34.
+  so the residue/wall fraction structurally rose at 12 MiB: measured ratios 0.27-0.34.
   The shared 0.30 budget is therefore no longer attainable with margin on that one
   cell, and a budget that flakes is worse than a budget derived from the band: the
   12 MiB prose cells (finalize, finalize_utf8) move to a bespoke 0.60 ratio budget,
@@ -89,24 +89,24 @@ they did to these cells, measured on the dev box, ambient load 4.4-5.7 unless no
   regression shows (the whole 42-45ms transform held would fail it by far; the 100ms
   ceiling holds ~2.3x margin). The 32 MiB prose cells stay on the shared budget
   (measured 0.09-0.17).
-- The D-forms' full pass lost its corpus: plain decomposed prose carries NO
+- The D-forms' full pass lost its corpus: plain decomposed prose carries no
   compatibility mappings, so under NFKC/NFKD it now quick-checks Yes and comes back
   as the input object; ``nfkd(decomposed)`` walls collapse from 90-98ms to 10-23ms
   (measured; the residue is the str-in first-call materialization plus the quick-check
-  scan). The forms cells therefore moved to the NEW ``compat`` corpus (decomposed
+  scan). The forms cells therefore moved to the new ``compat`` corpus (decomposed
   accents + U+FB01 ligature + U+FF10 fullwidth digit per unit; the compatibility
-  mappings keep the quick check at No), whose measured bands sit inside BOTH shared
+  mappings keep the quick check at No), whose measured bands sit inside both shared
   budgets (nfc 12 MiB 16.8-17.4ms of 127-145ms walls, 0.10-0.13; nfkd 12 MiB
   14.7-17.8ms of 87-104ms, 0.14-0.20; nfc 32 MiB 36.3-40.1ms of 346-391ms, 0.10-0.12;
   nfkd 32 MiB 35.7-38.2ms of 240-263ms, 0.15-0.16). A separate ceiling-only cell pins
-  the D-form FAST PATH on the decomposed corpus (walls at the ping floor → ratio
+  the D-form fast path on the decomposed corpus (walls at the ping floor → ratio
   artifact, the b64 12 MiB precedent again).
 - The word_bounds streaming answer: ``tors.word_bounds_iter`` full drain at 12 MiB
   (3.67M bounds) measured worst gaps 15.4ms of 327-358ms walls (0.04-0.05), inside
-  both SHARED budgets, against the list shape's structurally-unattainable 428-567ms
+  both shared budgets, against the list shape's structurally-unattainable 428-497ms
   band. The wall surprise, recorded: the full drain measured 347ms min-of-3
   against the list API's 724ms in the same process; the per-``__next__`` path is
-  FASTER per bound than the list conversion (~47ns vs ~150ns per bound by
+  faster per bound than the list conversion (~47ns vs ~150ns per bound by
   subtraction of the shared ~175ms detached core), so the iterator wins on both axes
   at this size; the list API stays for small inputs and one-shot batch work.
 
@@ -122,7 +122,7 @@ str corpora rendered to UTF-8 bytes):
   both corpus kinds: prose 12 MiB 10.3-13.0ms of 113-143ms walls (0.08-0.10); decomposed
   12 MiB 10.3-13.0ms of 116-131ms (0.09-0.10); prose 32 MiB 13.5-20.7ms of 345-370ms
   (0.04-0.06); decomposed 32 MiB 17.6-26.7ms of 350-405ms (0.04-0.07). The decomposed
-  cells' SAMPLE-1 gaps sit in the same band as samples 2+: the one-time O(input) UTF-8
+  cells' sample-1 gaps sit in the same band as samples 2+: the one-time O(input) UTF-8
   materialization that the str-in ``finalize`` cells pay on their first sample
   (13.9-15.6ms at 12 MiB, 37.6-44.1ms at 32 MiB, above) does not exist for bytes-in:
   pyo3's ``&[u8]`` extraction is a zero-copy borrow of the immutable buffer (verified in
@@ -131,7 +131,7 @@ str corpora rendered to UTF-8 bytes):
 - ``tors.b64_encode_bytes`` via ``asyncio.to_thread``: the residue is the marshalling
   of the 4/3x-sized ASCII output: 12 MiB worst gaps 10.1-11.2ms against 5-9ms walls
   (wall under the ping floor: the ratio there is the sub-ping artifact, hence a ceiling-only
-  cell); 32 MiB 27.5-29.3ms of 48-50ms (0.57-0.58) on the dev box — ceiling-only
+  cell); 32 MiB 27.5-29.3ms of 48-50ms (0.57-0.58) on the dev box: ceiling-only
   since the 0.2.1 recalibration, because on a fast quiet box the walls collapse to
   12-19ms where the heartbeat's own wobble decides the ratio (same
   floor-resolution failure the diff cell recalibrated for); 96 MiB is the
@@ -156,10 +156,10 @@ measured on the dev box, ambient load 5.3-6.6, 3 samples per cell):
 - Near-identical (scattered line edits -> dozens of opcodes): at 12 MiB,
   worst gaps 10.5-11.2ms of 76-88ms walls (ratio 0.12-0.14): the ping floor
   plus the two zero-copy ASCII argument borrows and a ~0.05ms opcode-tuple
-  marshalling; inside both SHARED budgets with ~2x ratio margin. The pair
+  marshalling; inside both shared budgets with ~2x ratio margin. The pair
   is 32 MiB, not 12, deliberately: on a fast quiet box the 12 MiB walls
   (~30ms) sit inside the heartbeat floor's own run-to-run wobble (5-11ms
-  gaps: ratio 0.18 one run, 0.35 the next, same budget, no code change —
+  gaps: ratio 0.18 one run, 0.35 the next, same budget, no code change:
   the ratio stops resolving and the cell flakes). At 32 MiB the walls
   (~100ms on that box) restore ~5x margin (measured 0.06) while a detach
   regression still holds the whole wall at ~1.0 on every box; ceiling-only
@@ -176,7 +176,7 @@ measured on the dev box, ambient load 5.3-6.6, 3 samples per cell):
   gap ceiling (~2.3x above the measured worst, catching a several-fold
   marshalling blowout that the shared 100ms ceiling would let through at
   this op count) plus the shared 0.30 ratio (a detach regression holds the
-  whole ~1.6s wall). The op count is REPORTED, not asserted: it is the
+  whole ~1.6s wall). The op count is reported, not asserted: it is the
   algorithm's business (similar's bounded search trades minimality for speed
   on hard inputs, and a crate bump may change the count without changing
   validity).
@@ -188,7 +188,7 @@ the dev box, ambient load 6.9-7.3, 3 samples per cell):
 - Sparse (the diff near-identical pair's edited corpus, the terminology-scan
   shape: ``"monthly"`` occurs exactly once, the other two terms never):
   worst gaps 10.3-10.7ms of 6-7ms walls: the ping floor plus ~nothing (one
-  3-tuple). The pure scan is ~2 GiB/s, so the WALL sits under the 10ms ping
+  3-tuple). The pure scan is ~2 GiB/s, so the wall sits under the 10ms ping
   floor and any gap/wall ratio is the suite's documented sub-ping artifact;
   the cell asserts the 100ms ceiling only (the b64 12 MiB / utf8_is_valid
   precedent). A 6ms scan held or released is invisible under the
@@ -207,16 +207,16 @@ the dev box, ambient load 6.9-7.3, 3 samples per cell):
   marshalling blowout the shared 100ms ceiling is not sized for at this
   match count) plus a 0.90 ratio budget as the detach discriminator. Why
   0.90 and not word_bounds' 0.85: this cell's band sits structurally
-  HIGHER than word_bounds' 0.72-0.74, because the search core is ~3.5x
+  higher than word_bounds' 0.72-0.74, because the search core is ~3.5x
   faster than segmentation, so the marshalling is a larger share of the
   wall; 0.90 sits ~1.125x above the worst measured ratio and ~10% below
   the ~1.0 a detach regression shows (the whole ~215ms wall held). The
-  match count is REPORTED, not asserted (it is the corpus's business).
+  match count is reported, not asserted (it is the corpus's business).
   Guidance, the word_bounds finding's shape: the list-returning API
   holds ~0.13µs per match under the GIL: ~13ms at 100k matches (document
   scale), ~170ms at 1.28M (whole-corpus keyword sweeps); callers producing
   millions of matches are the streaming-API question the word_bounds
-  finding already raised, recorded again in the README's section.
+  finding already raised, recorded again in docs/async.md.
 
 cells (``replace_many`` dense, ``sentence_bounds`` list,
 ``diff_opcodes_lines`` near-identical, all at 12 MiB; measured on the dev
@@ -227,11 +227,11 @@ box, ambient load 2.0, 5 samples per cell, corpora from
   to a redaction token over the plain prose corpus, the redaction-map
   shape the function exists for): worst gaps 10.3-10.9ms of 47-60ms walls
   (ratio 0.18-0.23): the 10ms ping floor plus the O(entries) argument
-  walk and the O(output) marshalling of ONE ~10 MiB string, exactly the
+  walk and the O(output) marshalling of one ~10 MiB string, exactly the
   crate GIL model's prediction: the scan+splice is one detached pass and
   the return is a single string, so no list-shape class exists at all.
-  The wall clears the ping floor ~5x, so the ratio is NOT the sub-ping
-  artifact, and the cell takes the SHARED budgets (0.30 sits ~1.3x above the
+  The wall clears the ping floor ~5x, so the ratio is not the sub-ping
+  artifact, and the cell takes the shared budgets (0.30 sits ~1.3x above the
   worst measured ratio and ~70% below the ~1.0 a detach regression shows
   against these ~50ms walls; the 100ms ceiling holds ~9x).
 - ``sentence_bounds`` list (the word_bounds pair's list shape, sentences
@@ -239,16 +239,16 @@ box, ambient load 2.0, 5 samples per cell, corpora from
   word_bounds' 3.67M, even sparser than the ~1/10th design estimate in
   src/lib.rs): worst gaps 17.6-23.8ms of 185-190ms walls (ratio
   0.09-0.13): the ping floor plus the O(sentences) 2-tuple marshalling.
-  Every sample inside both SHARED budgets (~2.3x ratio margin, ~4.2x
+  Every sample inside both shared budgets (~2.3x ratio margin, ~4.2x
   ceiling margin); a detach regression holds the whole ~190ms wall at
-  ratio ~1.0 and fails by far. The list shape MEETS the shared budgets
+  ratio ~1.0 and fails by far. The list shape meets the shared budgets
   here (unlike word_bounds' 428-497ms band) precisely because the tuple
   count is ~20x smaller; the per-shape guidance, not a reason to
   skip the streaming spelling for whole-corpus sweeps.
 - ``diff_opcodes_lines`` on the near-identical pair (5 line-opcodes
   measured, the line-level Myers over ~37.8k mostly-distinct lines
   anchored to near-nothing): worst gaps 10.5-12.0ms against walls of only
-  1.9-2.6ms: the wall sits an order of magnitude UNDER the 10ms ping
+  1.9-2.6ms: the wall sits an order of magnitude under the 10ms ping
   floor, so the gap/wall ratio (4.2-6.4) is the suite's documented
   sub-ping artifact and the cell asserts the 100ms ceiling only (the b64
   12 MiB / utf8_is_valid / find_patterns-sparse precedent, ~8x margin).
@@ -271,19 +271,19 @@ prose corpus, 1,284,724 matches; measured on the dev box, ambient load 4.4,
   conversion pass, and a single int return): worst gaps 10.4-11.2ms of
   31.0-31.8ms walls: the ping floor plus ~nothing, the grapheme_count
   precedent's no-marshalling band. The budget consequence: the wall
-  clears the ping floor only ~3x, so gap/wall sits at 0.336-0.353 BY
-  ARITHMETIC and the shared 0.30 ratio budget is unattainable-by-
+  clears the ping floor only ~3x, so gap/wall sits at 0.336-0.353 by
+  arithmetic and the shared 0.30 ratio budget is unattainable-by-
   construction for this wall (the QC-Yes 12 MiB situation verbatim: a fast
   detached core makes the floor a large fraction of the wall); the cell
   takes a bespoke 0.60 ratio budget: ~1.7x above the worst measured ratio,
   ~40% below the ~1.0 a detach regression shows (a held scan pins the whole
   ~31ms wall), plus the shared 100ms ceiling (~9x). The inverse of the
   find_patterns-sparse limitation: a held ~31ms scan
-  passes the 100ms ceiling easily, so the RATIO budget is this cell's only
+  passes the 100ms ceiling easily, so the ratio budget is this cell's only
   detach discriminator.
 - ``find_patterns_iter`` dense drain (construction plus every ``__next__``,
   the streaming answer to the list shape's 171-175ms band): worst gaps
-  15.4ms of 129.0-132.0ms walls (ratio 0.116-0.119), inside BOTH shared
+  15.4ms of 129.0-132.0ms walls (ratio 0.116-0.119), inside both shared
   budgets (~2.5x ratio margin, ~6.5x ceiling margin), the word_bounds_iter
   band exactly (15.4ms there: the ping floor plus the two-thread GIL
   contention of the draining thread's per-``__next__`` bytecode). The wall
@@ -291,8 +291,8 @@ prose corpus, 1,284,724 matches; measured on the dev box, ambient load 4.4,
   drain 117.4ms against the list API's 211.1ms and the count core's
   28.3ms: the drain is the ~28-31ms construction scan plus ~86-90ms of
   1.28M per-``__next__`` 3-tuple handoffs (~70ns per match, against the
-  list shape's ~0.13µs per match of GIL-HELD marshalling), so the iterator
-  wins BOTH axes at this size (the word_bounds_iter finding's shape:
+  list shape's ~0.13µs per match of GIL-held marshalling), so the iterator
+  wins both axes at this size (the word_bounds_iter finding's shape:
   347ms vs 724ms there). A discrimination caveat: the construction pass is
   only ~31ms of the ~130ms wall, so a construction-only detach regression
   shows ~41ms gaps at ratio ~0.32; the 0.30 budget catches it, but
@@ -307,19 +307,19 @@ with both the default hierarchy and the line-first ``["\n", None]``
 splice, all at 12 MiB of the new ``chatlog`` corpus; the lazy levels and
 the certificate scanners moved several members' walls (the
 paragraph/line scans ~3x faster, the default hierarchy ~2x), so the
-bands below are the current tree's — 3 samples per member (the
+  bands below are the current tree's: 3 samples per member (the
 marshalling-heaviest members take 6: a 3-sample window can miss the
 end-of-call marshalling alignment):
 
 - The corpus, built local to this module (the ``_invalid_utf8_corpus``/
   ``_close_matches_corpus`` precedent): the line-heavy chat-thread shape
-  the streaming twins' docstrings justify themselves with — five
+  the streaming twins' docstrings justify themselves with: five
   rotating speakers' one-line messages (~66-68 bytes each), a blank line
   every 5 lines, so 12 MiB holds ~185k content lines in ~37k paragraphs.
   Pure ASCII, deterministic, no RNG, unit-quantized like every
   ``reference`` corpus.
 - Per-member parameters sized for piece-count-heavy outputs where the
-  O(chunks) marshalling is real but NOT word_bounds' 3.67M-segment
+  O(chunks) marshalling is real but not word_bounds' 3.67M-segment
   428-497ms list class: 37k-370k pieces (chunk_text 64,278 at
   ``max_chars=200``; chunk_by_words 129,528 at 20 words/chunk;
   chunk_by_sentences 44,410 at 5; chunk_by_paragraphs 37,008 at 1;
@@ -327,23 +327,23 @@ end-of-call marshalling alignment):
   ``max_chars=200`` / 370,080 line-first at ``max_chars=40``). The
   line-first leg's budget is 40, not the 200 its siblings use, because
   of what the lazy levels did to the 200-budget leg: every window of
-  this corpus was served by the "\n" literal level alone — no spliced
-  level ever consulted, none of the spliced walks built — so the wall
-  collapsed to ~13ms, where a FULL GIL-hold regression passes the
+  this corpus was served by the "\n" literal level alone (no spliced
+  level ever consulted, none of the spliced walks built), so the wall
+  collapsed to ~13ms, where a full GIL-hold regression passes the
   100ms ceiling and the member pins nothing; at 40 every ~66-68-byte
-  line is oversized, windows genuinely descend past the line literal
+  line is oversized, windows descend past the line literal
   into the spliced paragraph/sentence/word levels, and the leg is the
   family's heaviest again (~405-409ms, 370,080 pieces).
 - Ceiling-only everywhere (``ratio_budget=None``, the b64 12 MiB /
   utf8_is_valid precedent): the light members (paragraphs/lines + their
   ``_iter`` drains, single-pass newline scans behind the sliding ASCII
-  certificate) wall at ~3.4-5.5ms — UNDER the ping floor — where any
+  certificate) wall at ~3.4-5.5ms (under the ping floor), where any
   ratio is the documented sub-ping artifact (measured 2.0-3.2), and the
   heavy members' ~164-410ms walls are dominated by their detached
   cores, so a detach regression holds the whole wall and blows the
   100ms ceiling in every sample: the ceiling alone is the family's
   detach pin, and the red-side cell below now proves it mechanically
-  for five heavy members run INLINE on the loop (ratio ~1.00, over the
+  for five heavy members run inline on the loop (ratio ~1.00, over the
   ceiling in every sample). Measured worst gaps:
   chunk_text 10.2-13.1ms of 395-451ms (0.02-0.03); chunk_by_words
   10.4-19.4ms of 170-175ms (0.06-0.11); chunk_by_words_iter
@@ -390,9 +390,9 @@ from reference import (
     reference_normalize,
 )
 
-# The timing lane: every test in this module is a MEASUREMENT cell (worst
+# The timing lane: every test in this module is a measurement cell (worst
 # heartbeat-gap bands over multi-MiB corpora), slow and load-sensitive, so
-# CI's matrix legs deselect it (`-m "not timing"`) and ONE dedicated step on
+# CI's matrix legs deselect it (`-m "not timing"`) and one dedicated step on
 # the 3.12 leg runs it (`-m timing`): the GIL contracts still gate every
 # push, once, instead of being paid on all five legs. Locally a bare
 # ``pytest`` (and ``make test``) run everything, marker or not.
@@ -413,13 +413,13 @@ _MIB = 1024 * 1024
 # GIL-held pass shows in every sample.
 _B64_RATIO_BUDGET = 0.80
 
-# word_bounds's marshalling-band regression ceiling: NOT the suite's 100ms
+# word_bounds's marshalling-band regression ceiling: not the suite's 100ms
 # ceiling, which the list-returning API shape cannot meet at whole-file sizes
 # (measured: 428-497ms worst gaps at 12 MiB, 3.67M segments; see the cell's
-# docstring and the README's streaming-API answer). 1.0s is ~2x above
+# docstring and docs/async.md). 1.0s is ~2x above
 # the measured band, so it catches marshalling blowouts without pretending
 # the 100ms budget is attainable here. The streaming sibling
-# (word_bounds_iter, cell below) DOES meet the shared budgets; this cell
+# (word_bounds_iter, cell below) does meet the shared budgets; this cell
 # keeps the list shape's band pinned.
 _WORD_BOUNDS_CEILING_S = 1.0
 
@@ -428,7 +428,7 @@ _WORD_BOUNDS_CEILING_S = 1.0
 # a detach regression (the segmentation itself GIL-held) shows ratio ~1.0
 # with a gap of only ~0.4-0.6s at 12 MiB, which the 1.0s ceiling alone lets
 # through (a simulated regression measured 0.37-0.40s gaps at ratio 100%
-# PASSED the old ceiling-only assertion). 0.85 sits ~1.15x above the band's
+# passed the old ceiling-only assertion). 0.85 sits ~1.15x above the band's
 # worst measured ratio and well below the ~1.0 a detach regression shows.
 _WORD_BOUNDS_RATIO_BUDGET = 0.85
 
@@ -446,10 +446,10 @@ _QC_YES_12MIB_RATIO_BUDGET = 0.60
 # themselves with ("a line-oriented corpus (a multi-MiB log or transcript)
 # ... chunking into hundreds of thousands of pieces", chunk_by_lines_iter)
 # and the ["\n", None] hierarchy splice exists for ("a chat thread, one
-# message per line"). Five rotating speakers' short messages, ONE content
+# message per line"). Five rotating speakers' short messages, one content
 # line per ~66-68 bytes, a blank line (the paragraph gap) every 5 lines,
-# unit-quantized to the target bytes by repetition — the deterministic
-# no-RNG idiom every reference.py corpus uses, but LOCAL to this file (the
+# unit-quantized to the target bytes by repetition: the deterministic
+# no-RNG idiom every reference.py corpus uses, but local to this file (the
 # _invalid_utf8_corpus/_close_matches_corpus precedent: only this module's
 # cells consume it). Pure ASCII, as a real log/transcript overwhelmingly
 # is, so the str-in borrow is zero-copy and the cells' bands isolate the
@@ -484,13 +484,13 @@ _CORPORA: dict[str, Callable[[int], str]] = {
 
 
 def _chunk_family_calls(corpus: str) -> dict[str, Callable[[], object]]:
-    """The chunking family's member calls over ``corpus``, ONE shared
+    """The chunking family's member calls over ``corpus``, one shared
     definition so the green family cell and the red-side cell's inline
     rows run the same call at the same params (a red row that drifted
     from its green twin would prove nothing about the twin's budget).
     The line-first hierarchy leg's ``max_chars=40`` is sized with the
     lazy levels in mind: at 200 every chatlog window is served by the
-    "\n" literal alone (no spliced walk ever built, wall ~13ms — under
+    "\n" literal alone (no spliced walk ever built, wall ~13ms, under
     the ceiling even when held), at 40 the descent into the spliced
     levels makes it the family's heaviest member (~405ms, 370,080
     pieces); see the family cell's docstring for the full story."""
@@ -510,11 +510,11 @@ def _chunk_family_calls(corpus: str) -> dict[str, Callable[[], object]]:
     }
 
 
-# The family's marshalling-heaviest members — the ones whose end-of-call
-# O(pieces) 2-tuple construction is a real residue OVER the 10ms ping floor
+# The family's marshalling-heaviest members (the ones whose end-of-call
+# O(pieces) 2-tuple construction is a real residue over the 10ms ping floor
 # (the residue gradient's upper steps: chunk_text at 64,278 pieces,
 # chunk_by_words at 129,528, both chunk_hierarchical legs at 111,024 /
-# 370,080) — take a 6-sample window in the family cell below: whether a
+# 370,080) take a 6-sample window in the family cell below: whether a
 # sample's worst gap captures that residue depends on tick alignment
 # against the end-of-call marshalling window, so a 3-sample window can
 # miss the alignment. The floor-band members (chunk_by_sentences,
@@ -528,7 +528,7 @@ _FAMILY_MARSHALLING_HEAVY = frozenset(
 async def _gap_and_wall_during(op: Callable[[], Awaitable[object]]) -> tuple[float, float]:
     """Run ``op`` concurrently with a heartbeat; return ``(worst_tick_gap, op_wall)``.
 
-    The leading ``sleep(0)`` guarantees the heartbeat's first tick lands BEFORE the
+    The leading ``sleep(0)`` guarantees the heartbeat's first tick lands before the
     operation starts, so a fully blocking operation shows its whole duration as the worst
     gap. The wall ends the moment ``op`` returns, inside the ``try``, before the
     ``finally`` joins the heartbeat, so it is the operation's wall, not the operation
@@ -560,10 +560,10 @@ async def _gap_and_wall_during(op: Callable[[], Awaitable[object]]) -> tuple[flo
 
 def _budget_misses(gap: float, wall: float, ratio_budget: float | None) -> list[str]:
     """The budgets a sample missed: the single source for what "clean" means. A sample
-    is clean exactly when this list is empty (worst gap under BOTH the absolute
+    is clean exactly when this list is empty (worst gap under both the absolute
     ceiling and the ratio budget), and the failure detail reports the same list, so
     the check and the message can never disagree on the boundary. ``ratio_budget``
-    is ``None`` only for cells whose wall sits under the 10ms ping floor, where ANY
+    is ``None`` only for cells whose wall sits under the 10ms ping floor, where any
     ratio is an artifact (see the module docstring); there the ceiling alone is the
     assertion."""
     missed: list[str] = []
@@ -582,7 +582,7 @@ async def _assert_loop_stays_responsive(
     """Assert ``op`` leaves the event loop schedulable, over up to ``samples``
     measurements (default ``_SAMPLES``), passing on the first clean one (a
     sample is clean exactly when ``_budget_misses`` returns an empty list: the
-    worst tick gap under BOTH budgets). A genuine GIL-held whole-text pass
+    worst tick gap under both budgets). A GIL-held whole-text pass
     reproduces in every sample; whole-process CPU starvation does not, so a
     single starved sample is retried instead of failing the test outright.
     The absolute ceiling catches pathological regressions independently of
@@ -592,8 +592,8 @@ async def _assert_loop_stays_responsive(
     (the chunking family's heavy members take 6): whether a sample's worst
     gap captures the end-of-call marshalling residue depends on tick
     alignment against that marshalling window, so a 3-sample window can miss
-    the alignment — a wider window observes more alignments, which is a
-    STRICTER test (more chances to catch a dirty one), never a looser one
+    the alignment; a wider window observes more alignments, which is a
+    stricter test (more chances to catch a dirty one), never a looser one
     (the pass-on-first-clean semantics are unchanged)."""
     observed: list[tuple[float, float]] = []
     for _ in range(samples):
@@ -666,9 +666,9 @@ def test_finalize_utf8_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     corpus_kind: str, size_bytes: int, ratio_budget: float
 ) -> None:
     """The bytes-in claim: ``tors.finalize_utf8``'s ``PyBytes`` argument
-    extraction is a zero-copy borrow of the immutable buffer, so there is NO
+    extraction is a zero-copy borrow of the immutable buffer, so there is no
     argument-materialization class at all, so even the non-ASCII (decomposed)
-    corpus's FIRST call sits in the plain marshalling band, where the str-in
+    corpus's first call sits in the plain marshalling band, where the str-in
     ``finalize`` twin pays its one-time O(input) materialization (13.9-15.6ms
     first-call gap at 12 MiB, 37.6-44.1ms at 32 MiB, measured; see the
     module docstring). Measured bands (ambient load 4.3-5.6, 5 samples per cell):
@@ -704,20 +704,20 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
     size_bytes: int, ratio_budget: float | None
 ) -> None:
     """The b64 claim, in three cells with different jobs. The GIL-held residue
-    is the marshalling of the 4/3x-sized ASCII output, structurally a LARGER
+    is the marshalling of the 4/3x-sized ASCII output, structurally a larger
     fraction of the wall than finalize's residue, because the encode itself is so
     fast. Measured on the dev box (ambient load 4.3-5.6, 5 samples per cell,
     prose bytes):
 
     - 12 MiB: worst gaps 10.1-11.2ms (the ping floor plus ~1ms of marshalling a
-      16 MiB output) against walls of only 5-9ms, and the wall sits UNDER the 10ms
+      16 MiB output) against walls of only 5-9ms, and the wall sits under the 10ms
       ping floor, so the gap/wall ratio (1.0-2.3) is the artifact this suite
       already documents for sub-ping walls, not evidence of blocking; the cell
       asserts the 100ms ceiling (>=9x margin) and records the band.
     - 32 MiB: worst gaps 27.5-29.3ms of 48-50ms walls (ratio 0.57-0.58) on the
       dev box: the 43 MiB output's marshalling band at ~2.4GB/s under load.
       Ceiling-only since the 0.2.1 recalibration: on a fast quiet box the
-      walls collapse to 12-19ms — barely above the 10ms ping floor — where
+      walls collapse to 12-19ms (barely above the 10ms ping floor) where
       the heartbeat's own 5-11ms run-to-run wobble decides the ratio (whole
       samples at ~1.0 when no tick lands inside the marshal window, ~0.4
       when one does: flaky with no code change either way). The ratio at
@@ -745,7 +745,7 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
       a 100MB document cap that motivated the function. The red expression's
       ratio at 12 MiB is window-dependent (1.00 in the quiet window the band
       was first recorded in; 0.63 under load) and at 32 MiB measures
-      0.64-0.66, and both PASS this cell's budgets, a structural property of the
+      0.64-0.66, and both pass this cell's budgets, a structural property of the
       two-call expression (the eval loop can tick at the bytecode boundary
       between ``b64encode`` and ``decode("ascii")``, so the worst gap is the
       encode alone); the red-side cell below asserts the discriminating sizes
@@ -767,12 +767,12 @@ def _stdlib_b64_expression(raw: bytes) -> str:
 async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
     """The inline-run red idiom (the module docstring's reference-finalize
     "run inline on the loop instead, it is ratio ~1.0" note): call the
-    sync function DIRECTLY on the event loop's thread instead of in a
-    worker. The native pass still releases the GIL — but releasing the
-    GIL only lets OTHER threads run; it does not hand control back to
+    sync function directly on the event loop's thread instead of in a
+    worker. The native pass still releases the GIL, but releasing the
+    GIL only lets other threads run; it does not hand control back to
     the loop (tors/aio.py's module docstring is the whole writeup), so
     the call occupies the loop's own turn for its full wall and the
-    worst heartbeat gap IS the wall: the shape a lost ``py.detach``
+    worst heartbeat gap is the wall: the shape a lost ``py.detach``
     regression shows, which is what these red rows exist to trip."""
     return fn()
 
@@ -803,33 +803,33 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
 def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
     cell: str, size_bytes: int, ratio_budget: float | None
 ) -> None:
-    """The RED side, asserted mechanically: the same
-    budgets tors's cells above pass must be FAILED by the GIL-held
-    expressions those cells replace — or, for the chunking family's
+    """The red side, asserted mechanically: the same
+    budgets tors's cells above pass must be failed by the GIL-held
+    expressions those cells replace (or, for the chunking family's
     rows, by tors's own calls with their detach effectively undone, run
-    inline on the loop — otherwise the budgets would have no
+    inline on the loop), otherwise the budgets would have no
     discriminating power and a tors regression into GIL-held behavior would
     sail through the same numbers. Every sample of every parametrized red
-    cell must miss at least one budget, judged by the SAME
+    cell must miss at least one budget, judged by the same
     ``_budget_misses`` list the green cells use. The first two cell kinds
     measured on the dev box (ambient load ~3.5-5, 3 samples per cell):
 
     - ``reference_finalize`` (the pure-Python pipeline) in the same
       to_thread placement: at 12 MiB, 95.1-98.0ms gaps of 161-165ms walls
       (ratio 0.58-0.60), missing the 0.30 ratio budget by ~2x in every
-      sample; at 32 MiB, 238-259ms of 447-481ms (0.53-0.55), missing BOTH the
+      sample; at 32 MiB, 238-259ms of 447-481ms (0.53-0.55), missing both the
       ratio budget and the 100ms ceiling (~2.4x over).
     - The stdlib b64 expression at 96 MiB: 122.3-127.6ms of 188-194ms
       (ratio 0.65-0.66): the single C ``b64encode`` call alone exceeds the
       100ms ceiling in every sample (the motivating ~150ms@100MB
       observation's size class, reproduced).
-    - The chunking family's HEAVY members (``inline-*`` rows), run INLINE
-      on the event loop via ``_call_inline_on_the_loop`` — the green
+    - The chunking family's heavy members (``inline-*`` rows), run inline
+      on the event loop via ``_call_inline_on_the_loop``: the green
       family cell's own calls at its own params
       (``_chunk_family_calls``, chatlog 12 MiB), just placed on the loop
-      instead of in a worker thread: the worst gap IS the wall (ratio
-      ~1.00 every sample), so the 100ms ceiling — the family cell's
-      ONLY budget — is missed in every sample, which is the mechanical
+      instead of in a worker thread: the worst gap is the wall (ratio
+      ~1.00 every sample), so the 100ms ceiling (the family cell's
+      only budget) is missed in every sample, which is the mechanical
       proof that the ceiling-only design actually discriminates a lost
       detach. The rows carry ``ratio_budget=None`` to mirror the green
       cell's ceiling-only budgets exactly. Measured (3 samples per
@@ -838,21 +838,21 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
       (~1.7x); ``chunk_by_sentences`` 183.6-187.2ms of 183.6-187.1ms
       (~1.8x); ``chunk_hierarchical`` default 196.9-199.2ms of
       196.8-199.1ms (~2.0x); line-first ``["\n", None]`` at
-      ``max_chars=40`` 410.6-414.6ms of 410.6-414.4ms (~4.1x). The
-      LIGHT members (paragraphs/lines and their ``_iter`` drains,
-      ~3.4-5.5ms walls) are deliberately NOT rows here: an inline hold
+      ``max_chars=40`` 410.6-414.6ms of 410.6-414.4ms (~4.1x).       The
+      light members (paragraphs/lines and their ``_iter`` drains,
+      ~3.4-5.5ms walls) are deliberately not rows here: an inline hold
       of a sub-10ms wall passes the ceiling, so no budget the green
-      cell uses could discriminate their hold — the limitation the
-      green cell's docstring already states plainly.
+      cell uses could discriminate their hold, the limitation the
+      green cell's docstring already states.
 
-    Measured and NOT asserted: the 32 MiB b64 red side, 41.5-42.5ms of 63-65ms
+    Measured and not asserted: the 32 MiB b64 red side, 41.5-42.5ms of 63-65ms
     walls (ratio 0.64-0.66), and 12 MiB 15.3-16.5ms of 24-26ms (0.63);
-    both PASS the b64 cells' budgets. The structural reason, and why the
-    tors cells still discriminate: the stdlib expression is TWO C calls
+    both pass the b64 cells' budgets. The structural reason, and why the
+    tors cells still discriminate: the stdlib expression is two C calls
     with an eval-loop bytecode boundary between them, so the loop ticks
     between encode and ``decode("ascii")`` and the worst gap is the encode
     alone, under both budgets at those sizes. A tors detach regression is
-    ONE C call (encode and marshalling held together, no bytecode
+    one C call (encode and marshalling held together, no bytecode
     boundary), which pins the whole wall: the 96 MiB tors cell's measured
     band is 0.46-0.50 (dev box) and 0.23-0.33 (fast box) against its 0.80
     budget, and a one-call hold of such a wall shows ratio ~1.0, the shape
@@ -899,10 +899,10 @@ def test_standalone_forms_full_pass_on_the_compat_corpus_keep_the_loop_at_heartb
     """The standalone-forms GIL claim, on the corpus that still
     pays it: the whole transform runs under ``py.detach`` (same pattern as
     ``tors.normalize``), so the residue is the str-in call's two known bands:
-    the O(output) return marshalling, plus the ONE-TIME O(input) UTF-8
+    the O(output) return marshalling, plus the one-time O(input) UTF-8
     materialization on the first non-ASCII call. Measured on the dev box
     (ambient load 4.4-5.7, 3 samples per cell, compat corpus: decomposed
-    accents PLUS a compatibility ligature and fullwidth digit per unit, the
+    accents plus a compatibility ligature and fullwidth digit per unit, the
     input that keeps NFKC/NFKD's quick check at No):
 
     - ``nfc`` 12 MiB: 16.8-17.4ms of 127-145ms walls (0.10-0.13): the
@@ -912,7 +912,7 @@ def test_standalone_forms_full_pass_on_the_compat_corpus_keep_the_loop_at_heartb
     - ``nfc`` 32 MiB: 36.3-40.1ms of 346-391ms walls (0.10-0.12).
     - ``nfkd`` 32 MiB: 35.7-38.2ms of 240-263ms walls (0.15-0.16).
 
-    Every measured sample sits under BOTH shared budgets (worst ratio 0.20 vs
+    Every measured sample sits under both shared budgets (worst ratio 0.20 vs
     the 0.30 budget; worst gap 40.1ms vs the 100ms ceiling), and the red side
     is the whole reason the functions exist: ``unicodedata.normalize`` is one
     GIL-held C call for the entire text (the reference finalize's 91.6-271.5ms
@@ -933,12 +933,12 @@ def test_d_form_fast_path_on_the_decomposed_corpus_is_ceiling_only(
     size_bytes: int,
 ) -> None:
     """The quick-check fast path's own band: under NFKD the decomposed
-    corpus (decomposed accents, ASCII otherwise, NO compatibility mappings)
-    quick-checks Yes, so ``tors.nfkd`` returns the INPUT OBJECT; the
+    corpus (decomposed accents, ASCII otherwise, no compatibility mappings)
+    quick-checks Yes, so ``tors.nfkd`` returns the input object; the
     transform is the quick-check scan (2.4ms at 12 MiB, measured) plus the
     str-in first-call O(input) UTF-8 materialization, and nothing else.
     Measured on the dev box (ambient load 4.4-5.7, 3 samples): worst gaps
-    10.4-13.7ms of 10-23ms walls: the wall sits AT the 10ms ping floor, so
+    10.4-13.7ms of 10-23ms walls: the wall sits at the 10ms ping floor, so
     the gap/wall ratio (0.59-1.13) is the documented sub-ping artifact (the
     b64 12 MiB precedent), and the cell asserts the 100ms ceiling (~9x
     margin) only. ``nfc`` on the same corpus still pays its full pass (the
@@ -959,22 +959,22 @@ def test_identity_paths_on_already_normalized_prose_are_ceiling_only(
     fn_name: str, size_bytes: int
 ) -> None:
     """The identity-return contract's GIL band, the zero-cost path in
-    the crate GIL model: on ALREADY-NORMALIZED text (this corpus is the
+    the crate GIL model: on already-normalized text (this corpus is the
     pipeline's own output: ``reference_normalize(prose(...))``), the complete
     transform is provably a no-op (quick-check Yes + every scan stage's
-    fingerprint absent), so the ORIGINAL object comes back (no allocation,
+    fingerprint absent), so the original object comes back (no allocation,
     no copy, no marshalling), and the only GIL-held residue is the argument
     borrow itself (zero-copy for the ASCII corpus). ``finalize`` additionally
     computes SHA-256 over the borrowed input, detached.
 
     Measured on the dev box (ambient load 4.4-4.6, 3 samples per cell):
     ``normalize`` worst gaps 10.4-10.9ms of 3-4ms walls, ``finalize``
-    10.9ms of ~9ms walls, and the wall is AT or UNDER the 10ms ping floor (the
+    10.9ms of ~9ms walls, and the wall is at or under the 10ms ping floor (the
     whole call is now cheaper than one heartbeat), so the ratio is the
     documented sub-ping artifact and the cell asserts the 100ms ceiling
     (~9-10x margin) only. The wall collapse this pins, for the record:
     normalize 123.0ms -> 2.89ms, finalize 126.3ms -> 7.72ms (min-of-5,
-    build vs build; see the README's table for loads)."""
+    build vs build; see the ledger tables for loads)."""
     corpus = reference_normalize(prose(size_bytes))
     fn = {"normalize": tors.normalize, "finalize": tors.finalize}[fn_name]
     asyncio.run(
@@ -991,7 +991,7 @@ def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 ) -> None:
     """The html claim: the whole entity scan runs under ``py.detach``, where
     ``html.unescape`` is a GIL-held ``re.sub`` over the whole string
-    with a PYTHON callback invoked per entity. Measured on the dev box
+    with a Python callback invoked per entity. Measured on the dev box
     (ambient load 10.0, the heaviest window in this module's tables; 3
     samples per cell, entities corpus):
 
@@ -1001,13 +1001,13 @@ def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
       load, more when quiet).
     - 32 MiB: worst gaps 28.6-40.9ms of 223-225ms walls (ratio 0.13-0.18).
 
-    The red side, same placement, is NOT ratio ~1.0 like the other stdlib
+    The red side, same placement, is not ratio ~1.0 like the other stdlib
     red sides, and the reason is the function's own structure:
-    ``html.unescape``'s per-entity ``_replace_charref`` callback is PYTHON
+    ``html.unescape``'s per-entity ``_replace_charref`` callback is Python
     bytecode, and the eval loop checks the GIL drop request between
     bytecodes, so ~800k callbacks per 12 MiB give the interpreter frequent
     (if tiny) yield points; measured worst gaps 35.7-49.4ms of 236-250ms
-    walls (ratio 0.15-0.20). tors still roughly HALVES the worst gap
+    walls (ratio 0.15-0.20). tors still roughly halves the worst gap
     (16.4-17.6 vs 35.7-49.4ms) and is ~3x faster in wall time (the
     callbacks are the cost); the accurate statement is "half the block time,
     a third of the wall", not "unblocked vs fully blocked"."""
@@ -1044,7 +1044,7 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       shows ratio ~1.0 (the red side below) and fails this cell.
     - The red side, same placement: ``base64.b64decode`` holds the GIL for the
       whole C decode: 14.8-27.5ms gaps of 15.0-27.8ms walls (ratio 0.98-0.99)
-      in EVERY 12 MiB sample, measured alongside the tors cells above."""
+      in every 12 MiB sample, measured alongside the tors cells above."""
     corpus = corpus_b64("prose", size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -1058,13 +1058,13 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 def test_repair_json_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
-    """The json-repair claim: the whole repair pass — fence pre-pass, strict
-    probe, repair parser, serializer — runs under ``py.detach``, and the
+    """The json-repair claim: the whole repair pass (fence pre-pass, strict
+    probe, repair parser, serializer) runs under ``py.detach``, and the
     return is one string, so the loop stays at heartbeat granularity while
     megabytes of damaged JSON are repaired. Measured on the dev box
     (ambient load ~3, 3 samples per cell): prose 12 MiB of structurally
     damaged LLM-JSON (unterminated strings, missing commas and closers):
-    worst gap 10.2ms of a 122ms wall (0.08) — the ping floor plus the
+    worst gap 10.2ms of a 122ms wall (0.08): the ping floor plus the
     str-out marshalling band, deep inside both shared budgets (~3x on the
     ratio, ~8x on the ceiling)."""
     chunks, _remainder = divmod(size_bytes, 20_000)
@@ -1102,20 +1102,20 @@ def test_grapheme_count_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
 def test_word_bounds_marshalling_band_is_pinned_against_regression(
     size_bytes: int,
 ) -> None:
-    """The word_bounds MARSHALLING FINDING, as a regression ceiling:
-    NOT the suite's 100ms ceiling, which this API shape cannot
-    meet at whole-file sizes, and saying so is the point of this cell.
+    """The word_bounds marshalling finding, as a regression ceiling:
+    not the suite's 100ms ceiling, which this API shape cannot
+    meet at whole-file sizes, and this cell exists to say so.
 
     The measurement (dev box, ambient load 8.3, 3 samples, prose 12 MiB =
     12.58M chars = 3,665,242 word segments): worst gaps 428-497ms of
     591-671ms walls (ratio 0.72-0.74): the GIL-held construction of 3.67M
-    2-tuples and 7.33M ints DOMINATES the call. The segmentation itself runs
+    2-tuples and 7.33M ints dominates the call. The segmentation itself runs
     detached; it is the return marshalling that holds the loop, O(number of
     segments), so the 100ms ceiling is out of reach by ~4.5x for the
     list-returning shape at this size; a real, reported cost, not one to
     threshold away or hide.
 
-    The API question this raises (recorded in the README and the
+    The API question this raises (recorded in docs/async.md and the
     report): a streaming shape for large inputs, either a lazy iterator
     (pyo3 `PyIterator` yielding `(start, end)` tuples in chunks, so the GIL
     is held only per-chunk), or an explicit `word_bounds_into(text, chunk)`
@@ -1123,12 +1123,12 @@ def test_word_bounds_marshalling_band_is_pinned_against_regression(
     the measured band: fine at document scale (a 100KB chunk is ~30k
     segments, ~4ms held), a half-second GIL hold at 12 MiB.
 
-    The cell pins the band against regression with BOTH budgets, pass-on-
-    first-clean like every other cell in this file (a genuine regression
+    The cell pins the band against regression with both budgets, pass-on-
+    first-clean like every other cell in this file (a regression
     dirties every sample; a starved box dirties only the sample it hits):
-    a sample is clean when its worst gap is under BOTH the 1.0s
+    a sample is clean when its worst gap is under both the 1.0s
     marshalling-band ceiling (~2x above the measured 0.43-0.50s band; the
-    marshalling is allocation-bound and stable under load) AND the 0.85 ratio
+    marshalling is allocation-bound and stable under load) and the 0.85 ratio
     budget of its own wall. The ratio budget is the detach-regression
     discriminator: the measured band sits at
     ratio 0.72-0.74, while a detach regression (the segmentation itself
@@ -1166,33 +1166,33 @@ def test_word_bounds_iter_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
     size_bytes: int,
 ) -> None:
     """The streaming answer to the word_bounds marshalling finding: the
-    FULL consumption of ``tors.word_bounds_iter(text)`` over the same 12 MiB
+    full consumption of ``tors.word_bounds_iter(text)`` over the same 12 MiB
     prose corpus (3.67M segments; construction plus every ``__next__``)
-    against the suite's SHARED budgets (0.30 ratio, 100ms ceiling), which the
+    against the suite's shared budgets (0.30 ratio, 100ms ceiling), which the
     list-returning shape structurally could not meet (428-497ms held, the
     cell above).
 
     The design (src/lib.rs, ``WordBoundsIter``): the whole segmentation
     (the same detached core pass the list API runs) computes the bounds
-    Vec up front under ONE ``py.detach`` (GIL-free for its full duration;
+    Vec up front under one ``py.detach`` (GIL-free for its full duration;
     the Vec is 16 bytes per segment, ~59 MiB at this size, versus the list
     API's ~hundreds of MiB of Python tuples), and each ``__next__`` then
-    holds the GIL only to construct ONE 2-tuple (µs-scale), so the worst
+    holds the GIL only to construct one 2-tuple (µs-scale), so the worst
     heartbeat gap collapses back to the ping-floor band every other
     str-in cell sits in.
 
-    The tradeoff, recorded in the README's performance section,
+    The tradeoff, recorded in docs/performance.md,
     measured the opposite way round from the design's expectation: the
     full drain measured 347ms (min-of-3) against the list API's 724ms in
-    the same process; the per-``__next__`` tuple path is FASTER per bound
-    than the list-return conversion, so the iterator wins on BOTH axes at
+    the same process; the per-``__next__`` tuple path is faster per bound
+    than the list-return conversion, so the iterator wins on both axes at
     this size (gap band above, wall ~2.1x). The list API stays the right
     shape for small inputs and one-shot batch work; the iterator is the
     shape for whole-file segmentation on a live loop.
 
     Measured on the dev box (ambient load 4.4-4.6, 3 samples): construction
     plus full drain: worst gaps 15.4ms of 327-358ms walls (0.04-0.05),
-    inside both SHARED budgets; the construction's own detached pass is the
+    inside both shared budgets; the construction's own detached pass is the
     same ~175ms core the list API runs."""
     corpus = prose(size_bytes)
 
@@ -1203,7 +1203,7 @@ def test_word_bounds_iter_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
 
 
 def _invalid_utf8_corpus(size_bytes: int) -> bytes:
-    """The prose corpus as UTF-8 bytes with its FINAL byte replaced by 0xFF,
+    """The prose corpus as UTF-8 bytes with its final byte replaced by 0xFF,
     an invalid lead byte at the very end, so the validity scan still traverses
     the whole corpus before answering False (an invalid byte earlier in the
     buffer would let the validator stop early and hold proportionally less of
@@ -1231,12 +1231,12 @@ def test_utf8_is_valid_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     corpus_kind: str, size_bytes: int, ratio_budget: float | None
 ) -> None:
     """The validity claim: the whole SIMD scan runs under ``py.detach``,
-    and the call's GIL-held residue is the argument borrow ALONE: the bytes-in
+    and the call's GIL-held residue is the argument borrow alone: the bytes-in
     family's extreme point (a ``bool`` return, so no marshalling class at all)
     with no exception path either (invalid input answers False; nothing ever
-    raises), so the VALID and INVALID corpora's cells must sit in the same
+    raises), so the valid and invalid corpora's cells must sit in the same
     band. Both cells are ceiling-only by the b64 12 MiB precedent: validation
-    is SIMD-fast, so the wall at these sizes sits far UNDER the 10ms ping
+    is SIMD-fast, so the wall at these sizes sits far under the 10ms ping
     floor and any gap/wall ratio is the suite's documented sub-ping artifact;
     the 100ms ceiling alone is the assertion.
 
@@ -1266,7 +1266,7 @@ def test_utf8_is_valid_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
-    """The diff claim on the few-opcode shape: the WHOLE diff (both
+    """The diff claim on the few-opcode shape: the whole diff (both
     operands' ``Vec<char>`` materialization and the Myers search) runs under
     ``py.detach``, so a near-identical pair (six scattered line edits,
     dozens of opcodes) leaves the loop ticking at heartbeat granularity
@@ -1281,20 +1281,20 @@ def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbe
     the 10ms ping floor by a wide margin, and on a fast quiet box the 12
     MiB pair's ~30ms walls sit inside the heartbeat floor's own wobble
     (5-11ms gaps run to run: ratio 0.18 one run, 0.35 the next, against
-    the same 0.30 budget — a measurement-resolution failure, not a code
+    the same 0.30 budget: a measurement-resolution failure, not a code
     regression; tors's detach verified working throughout). At 32 MiB the
     walls (~100ms on that box, ~210ms implied for the dev box's pace)
     restore ~5x ratio margin (measured 0.06) on every box while a detach
     regression still holds the whole wall at ~1.0. The ceiling-only
     alternative was considered and rejected: on a fast box a held 30ms
     wall shows ~30ms gaps, under the 100ms ceiling, so ceiling-only would
-    go blind exactly where the ratio is weakest — enlargement keeps both
+    go blind exactly where the ratio is weakest: enlargement keeps both
     budgets discriminating everywhere."""
     a, b = diff_pair_near_identical(size_bytes)
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.diff_opcodes, a, b)))
 
 
-# The shuffled cell's marshalling-band regression ceiling: NOT the suite's
+# The shuffled cell's marshalling-band regression ceiling: not the suite's
 # 100ms ceiling, which a several-fold marshalling blowout at this op count
 # would still clear (measured band 20.4-26.3ms; ~5x the ~10-15ms marshalling
 # share lands at ~60-75ms < 100ms). 60ms sits ~2.3x above the measured worst
@@ -1328,8 +1328,8 @@ def test_diff_opcodes_shuffled_pair_marshalling_band_is_pinned_against_regressio
     The cell pins the band pass-on-first-clean over both budgets: the 60ms
     bespoke ceiling (the word_bounds-precedent marshalling-band pin, catching
     a several-fold marshalling blowout the shared 100ms ceiling would let
-    through at this op count) AND the shared 0.30 ratio (a detach regression
-    holds the whole ~1.6s wall). The op count is REPORTED in the failure
+    through at this op count) and the shared 0.30 ratio (a detach regression
+    holds the whole ~1.6s wall). The op count is reported in the failure
     detail, never asserted; it is the algorithm's business: similar's
     bounded search trades minimality for speed on hard inputs, and a crate
     bump may legitimately change the count without changing validity (the
@@ -1368,7 +1368,7 @@ def test_diff_opcodes_shuffled_pair_marshalling_band_is_pinned_against_regressio
 def test_find_patterns_sparse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
-    """The sparse-search claim: the WHOLE search (automaton build, scan,
+    """The sparse-search claim: the whole search (automaton build, scan,
     and the byte→char conversion, idle here since the corpus is ASCII) runs
     under ``py.detach``, over the diff near-identical pair's edited corpus
     with the sparse terminology-scan pattern set: ``"monthly"`` occurs
@@ -1379,10 +1379,10 @@ def test_find_patterns_sparse_in_a_thread_keeps_the_event_loop_at_heartbeat_gran
     one 3-tuple.
 
     Ceiling-only by the b64 12 MiB / utf8_is_valid precedent: the pure scan
-    is ~2 GiB/s, so the wall sits UNDER the 10ms ping floor and any
+    is ~2 GiB/s, so the wall sits under the 10ms ping floor and any
     gap/wall ratio is the suite's documented sub-ping artifact; the 100ms
-    ceiling alone is the assertion (~10x margin). A limitation, said
-    plainly: a ~6ms scan held or released is invisible under the floor
+    ceiling alone is the assertion (~10x margin). A limitation:
+    a ~6ms scan held or released is invisible under the floor
     either way, so this cell cannot by itself discriminate a detach
     regression; the dense cell below carries that (a held dense pass shows
     ratio ~1.0 against its ~215ms wall); this cell pins that the no-match
@@ -1428,14 +1428,14 @@ def test_find_patterns_dense_marshalling_band_is_pinned_against_regression(
     1.28M 3-tuples, ~0.13µs per match.
 
     The cell pins the band pass-on-first-clean over both budgets: the 400ms
-    bespoke ceiling (the word_bounds-precedent marshalling-band pin) AND the
+    bespoke ceiling (the word_bounds-precedent marshalling-band pin) and the
     0.90 ratio budget (the detach discriminator: a held search shows ratio
     ~1.0 against these ~215ms walls; see the constant's comment for why 0.90
-    and not word_bounds' 0.85). The match count is REPORTED in the failure
+    and not word_bounds' 0.85). The match count is reported in the failure
     detail, never asserted; it is the corpus's business, not a contract.
 
-    Guidance (the word_bounds finding's shape, recorded in the
-    README's section): ~0.13µs of GIL hold per match: ~13ms at 100k
+    Guidance (the word_bounds finding's shape, recorded in
+    docs/performance.md): ~0.13µs of GIL hold per match: ~13ms at 100k
     matches (document scale), ~170ms at 1.28M (whole-corpus keyword sweeps);
     callers producing millions of matches are the streaming-API question the
     word_bounds finding already raised."""
@@ -1477,20 +1477,20 @@ def test_replace_many_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     """The replace claim on the redaction-map shape the function exists
     for: the 17 dense prose words each mapped to a redaction token, over the
     plain 12 MiB prose corpus: one automaton build, one scan, one splice,
-    all detached, and the return is ONE ~10 MiB string, so the GIL-held
+    all detached, and the return is one ~10 MiB string, so the GIL-held
     residue is the O(entries) argument walk plus that single string's
     marshalling: the no-list-shape-class prediction of the crate GIL
     model, measured to be exactly the ping-floor band.
 
     Measured on the dev box (ambient load 2.0, 5 samples): worst gaps
     10.3-10.9ms of 47-60ms walls (ratio 0.18-0.23). The wall clears the
-    10ms ping floor ~5x, so the ratio is NOT the sub-ping artifact, and the
-    cell takes the SHARED budgets: the 0.30 ratio sits ~1.3x above the
+    10ms ping floor ~5x, so the ratio is not the sub-ping artifact, and the
+    cell takes the shared budgets: the 0.30 ratio sits ~1.3x above the
     worst measured ratio and ~70% below the ~1.0 a detach regression shows
     (a held scan+splice pins the whole ~50ms wall), and the 100ms ceiling
     holds ~9x over the worst gap. The residue band is the structural
     contrast with the find_patterns dense cell above (171.0-174.7ms for
-    the same 1.28M matches): reporting the matches as a LIST costs
+    the same 1.28M matches): reporting the matches as a list costs
     ~0.13µs of GIL hold per match, while splicing them into one output
     string costs ~nothing the loop can see."""
     text = prose(size_bytes)
@@ -1511,14 +1511,14 @@ def test_sentence_bounds_in_a_thread_keeps_the_event_loop_at_heartbeat_granulari
     model exactly), and the GIL-held residue is the O(sentences) 2-tuple
     marshalling: 170,037 segments measured at 12 MiB, ~1/22nd of
     word_bounds' 3.67M on the same corpus (even sparser than the ~1/10th
-    design estimate in src/lib.rs), which is why the list shape MEETS the
+    design estimate in src/lib.rs), which is why the list shape meets the
     shared budgets here where word_bounds' 428-497ms band could not.
 
     Measured on the dev box (ambient load 2.0, 5 samples): worst gaps
     17.6-23.8ms of 185-190ms walls (ratio 0.09-0.13): the ping floor
     plus ~8-14ms of 2-tuple construction for 170k segments (~0.05-0.08µs
     per segment, the word_bounds per-element band). Every sample inside
-    both SHARED budgets (~2.3x ratio margin, ~4.2x ceiling margin); a
+    both shared budgets (~2.3x ratio margin, ~4.2x ceiling margin); a
     detach regression (the segmentation itself GIL-held) shows ratio ~1.0
     against these ~190ms walls and fails by far. The streaming
     ``sentence_bounds_iter`` exists for whole-corpus sweeps that never
@@ -1570,64 +1570,64 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     function had a cell of its own, before or after #28. One parametrized
     cell over the family's members (the ``test_utf8_is_valid`` cell's
     corpus-kind parametrize grain, applied to API members), every member
-    over the SAME line-heavy chatlog corpus at 12 MiB — the
+    over the same line-heavy chatlog corpus at 12 MiB: the
     chat-thread/log shape the ``chunk_by_lines_iter``/``chunk_by_words_iter``
     docstrings justify the streaming spellings with and the ``["\n", None]``
     hierarchy splice exists for: ~185k content lines, ~37k blank-line-
     separated paragraphs, ~4.48M word segments, ~222k sentences.
 
     Per-member parameters (``_chunk_family_calls``), sized for
-    piece-count-heavy outputs where the O(chunks) marshalling is REAL
-    but NOT the word_bounds 428-497ms list-shape class (measured piece
+    piece-count-heavy outputs where the O(chunks) marshalling is real
+    but not the word_bounds 428-497ms list-shape class (measured piece
     counts at 12 MiB): ``chunk_text``/``chunk_hierarchical`` default at
     ``max_chars=200`` (64,278 / 111,024 pieces); ``chunk_by_words`` (and
     the ``_iter`` full drain) at 20 words per chunk (129,528 pieces,
-    1/28th of word_bounds' 3.67M — the sentence_bounds band class, not
+    1/28th of word_bounds' 3.67M: the sentence_bounds band class, not
     the list-shape blowout); ``chunk_by_sentences`` at 5 sentences per
     chunk (44,410); ``chunk_by_paragraphs`` (and the ``_iter`` full
     drain) at 1 paragraph per chunk (37,008: the corpus's coarsest unit
     is a 5-line ~340-byte block, so 1-per-chunk is its piece-heaviest
     legal setting); ``chunk_by_lines`` (and the ``_iter`` full drain) at
     5 lines per chunk (37,008); and the line-first hierarchy leg at
-    ``max_chars=40`` (370,080 pieces) — 40, not the 200 its siblings
+    ``max_chars=40`` (370,080 pieces): 40, not the 200 its siblings
     use, because the lazy levels emptied the 200-budget leg: at 200
     every chatlog window is served by the "\n" literal level alone (no
     spliced level ever consulted, none of the spliced
     paragraph/sentence/word walks built), so the wall collapses to
-    ~13ms — a FULL GIL-hold regression passes the 100ms ceiling there,
+    ~13ms: a full GIL-hold regression passes the 100ms ceiling there,
     and the member pins nothing; at 40 every ~66-68-byte line is
-    oversized, windows genuinely descend past the line literal into the
+    oversized, windows descend past the line literal into the
     spliced levels, and the leg is the family's heaviest member again
     (~405ms, 370,080 pieces).
 
-    Every member asserts the 100ms ceiling ONLY (``ratio_budget=None``),
+    Every member asserts the 100ms ceiling only (``ratio_budget=None``),
     the b64 12 MiB / utf8_is_valid / find_patterns-sparse precedent, for
     two documented reasons:
 
-    - The LIGHT members (``chunk_by_paragraphs``/``chunk_by_lines``,
+    - The light members (``chunk_by_paragraphs``/``chunk_by_lines``,
       each with its ``_iter`` full drain: single-pass newline scans
-      behind the sliding ASCII certificate) wall at ~3.4-5.5ms — UNDER
-      the 10ms ping floor — where any gap/wall ratio is the suite's
+      behind the sliding ASCII certificate) wall at ~3.4-5.5ms (under
+      the 10ms ping floor), where any gap/wall ratio is the suite's
       documented sub-ping artifact (measured 2.0-3.2). They carry the
-      sparse cell's stated limitation plainly: a wall this size held
+      sparse cell's limitation: a wall this size held
       passes the ceiling too, so these members pin that the scans leave
       the loop at the floor at all, not a detach regression by
       themselves.
-    - The HEAVY members (the UAX #29-backed ones: ``chunk_text``,
+    - The heavy members (the UAX #29-backed ones: ``chunk_text``,
       ``chunk_by_words`` (+``_iter``), ``chunk_by_sentences``, and both
       ``chunk_hierarchical`` hierarchies) have walls dominated by their
-      DETACHED cores with marshalling residues far under the ceiling
+      detached cores with marshalling residues far under the ceiling
       (bands below), so a detach regression holds the whole wall and
       blows the 100ms ceiling in every sample: the ceiling alone is the
       family's detach pin, which is what #30 item 5 asked this cell to
-      pin — and the red-side cell above now asserts that mechanically
-      for five of the six heavy spellings (run INLINE on the loop, they
+      pin, and the red-side cell above now asserts that mechanically
+      for five of the six heavy spellings (run inline on the loop, they
       hold at ratio ~1.00 and miss the ceiling in every sample; the
       ``_iter`` drain shares ``chunk_by_words``'s core, so the list
       spelling's row carries the pair). A fast-box caveat, the diff
       near-identical cell's shape, stated for the record:
       ``chunk_by_words`` (~170ms), ``chunk_by_sentences`` (~188ms), and
-      the default hierarchy (~200ms — the lazy levels halved it; a held
+      the default hierarchy (~200ms, the lazy levels halved it; a held
       wall is only ~2.0x the ceiling now, where the eager tree's
       347-416ms held ~3.5-4.2x) sit close enough that a box ~2x faster
       could pull a held wall under 100ms; ``chunk_text`` (~395-451ms)
@@ -1636,7 +1636,7 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       has measured.
 
     Measured (3 samples per member; the marshalling-heaviest members
-    take 6 — a 3-sample window can miss the end-of-call marshalling
+    take 6: a 3-sample window can miss the end-of-call marshalling
     alignment; worst gap of wall, ratio in parentheses):
 
     - ``chunk_text``: 10.2-13.1ms of 395-451ms walls (0.02-0.03): the
@@ -1653,15 +1653,15 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     - ``chunk_by_sentences``: 10.3-10.7ms of 187-190ms walls
       (0.05-0.06); margin ~9.3x.
     - ``chunk_by_paragraphs``: 10.1-11.0ms of 3.4-3.9ms walls
-      (2.7-3.2): the wall sits UNDER the ping floor, so the ratio is
-      the documented sub-ping artifact — the ceiling-only branch of
+      (2.7-3.2): the wall sits under the ping floor, so the ratio is
+      the documented sub-ping artifact: the ceiling-only branch of
       this cell's design, measured; margin ~9.1x on the gap itself.
     - ``chunk_by_paragraphs_iter`` full drain: 10.5-11.1ms of 3.4-4.0ms
       walls (2.8-3.1, the same sub-ping artifact): the drain skips the
       list spelling's O(pieces) marshalling, but at 37,008 pieces that
       marshalling was only ever ~1ms, and the certificate scanners
       collapsed the list twin's own wall from the former 12-13ms to
-      ~3.5ms, so the two spellings wall about the SAME here — the
+      ~3.5ms, so the two spellings wall about the same here; the
       word_bounds_iter finding's per-``__next__`` advantage needs the
       3.67M-piece scale to show; margin ~9.0x.
     - ``chunk_by_lines``: 10.6-11.0ms of 4.4-5.5ms walls (2.0-2.4, the
@@ -1670,14 +1670,14 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       walls (2.3-2.4, the same artifact); margin ~9.4x.
     - ``chunk_hierarchical`` default hierarchy: 10.3-15.3ms of
       194-204ms walls (0.05-0.08): the floor plus up to ~5ms for
-      111,024 pieces — the lazy levels HALVED this wall (windows at
+      111,024 pieces: the lazy levels halved this wall (windows at
       this budget are served by the paragraph scan or the sentence
       walk; the word walk is never built, where the eager tree ran all
       three, 347-416ms); margin ~6.5x, held margin ~2.0x.
     - ``chunk_hierarchical`` line-first ``["\n", None]`` at
       ``max_chars=40``: 30.7-41.8ms of 400-409ms walls (0.08-0.10):
       the floor plus ~20-31ms of 2-tuple construction for 370,080
-      pieces (~0.05-0.08µs per piece) — the family's MOST-marshalling
+      pieces (~0.05-0.08µs per piece): the family's most-marshalling
       member (a title the 200-budget leg's 92,520 pieces never held)
       and the residue gradient's top step; margin ~2.4x on the gap,
       ~4.1x held.
@@ -1685,7 +1685,7 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     The residue gradient across members is the O(pieces) marshalling
     band made visible at a sane piece count: the no-list-class floor
     (~10-11ms) where pieces are absent or few, up to ~9ms over the
-    floor at 64-130k pieces, ~20-31ms at 370k — every member far under
+    floor at 64-130k pieces, ~20-31ms at 370k; every member far under
     the ceiling, none anywhere near the word_bounds list shape's
     428-497ms at 3.67M."""
     corpus = _CORPORA["chatlog"](12 * _MIB)
@@ -1703,7 +1703,7 @@ def para_soup(target_bytes: int) -> str:
     """The paragraph-soup corpus for the paragraph scanner's heaviest drain
     cell below: one single-character paragraph per 3-byte unit ("a\\n\\n"),
     repeated to ``target_bytes`` (UTF-8, like every corpus builder's sizing),
-    so 12 MiB holds 4,194,304 paragraphs — word_bounds' 3.67M-segment
+    so 12 MiB holds 4,194,304 paragraphs: word_bounds' 3.67M-segment
     piece-count class, ~113x the chatlog corpus's 37k. Pure ASCII and
     deterministic like every corpus in this module; the break-soup shape (a
     blank-line run every 3 bytes) is the paragraph scanner's density guard
@@ -1718,20 +1718,20 @@ def test_chunk_by_paragraphs_iter_soup_drain_keeps_the_event_loop_at_heartbeat_g
 ) -> None:
     """The paragraph scanner's heaviest drain, the re-sized answer to the
     family cell's stated limitation: the chatlog corpus's by-paragraphs
-    members (list and ``_iter`` alike) wall at ~3.4-4.0ms — UNDER the 10ms
-    ping floor — where the family cell concedes they "pin that the scans
+    members (list and ``_iter`` alike) wall at ~3.4-4.0ms (under the 10ms
+    ping floor), where the family cell concedes they "pin that the scans
     leave the loop at the floor at all, not a detach regression by
     themselves". This cell takes the same member to a corpus where the
     drain's wall clears the floor by ~19x (the diff near-identical cell's
     enlargement precedent: when a wall sits under the floor, grow the
     input until the budgets resolve): ``chunk_by_paragraphs_iter`` at one
-    paragraph per chunk over 12 MiB of paragraph soup — 4,194,304 pieces,
-    the word_bounds piece-count class — fully drained.
+    paragraph per chunk over 12 MiB of paragraph soup (4,194,304 pieces,
+    the word_bounds piece-count class), fully drained.
 
     Why the ``_iter`` spelling and not the list twin: at this piece count
-    the list shape's O(pieces) GIL-held 2-tuple marshalling IS the
+    the list shape's O(pieces) GIL-held 2-tuple marshalling is the
     word_bounds list-shape class (~0.1µs per piece, a several-hundred-ms
-    hold), structurally over the 100ms ceiling in the green state — the
+    hold), structurally over the 100ms ceiling in the green state: the
     exact disclosed cost the streaming twins exist to avoid, so only the
     drain can take the shared budgets.
 
@@ -1739,7 +1739,7 @@ def test_chunk_by_paragraphs_iter_soup_drain_keeps_the_event_loop_at_heartbeat_g
     cores, ambient load ~4.8, 5 samples): the construction scan over the
     soup ~17ms (a one-chunk call over the same corpus, the density
     guard's per-boundary work at 8.4M break bytes); full drain walls
-    182-191ms; worst gaps 15.3-20.3ms (ratio 0.08-0.11), inside BOTH
+    182-191ms; worst gaps 15.3-20.3ms (ratio 0.08-0.11), inside both
     shared budgets (~2.7x ratio margin, ~5x ceiling margin). The gap band
     is the per-``__next__`` contention band the word_bounds_iter
     (15.4ms at 3.67M) and find_patterns_iter (15.4ms at 1.28M) cells
@@ -1749,14 +1749,14 @@ def test_chunk_by_paragraphs_iter_soup_drain_keeps_the_event_loop_at_heartbeat_g
     per-next chunk marshalling) holds ~the whole construction per
     ``__next__`` and blows the ceiling on its first dirty sample.
 
-    Limitations, said plainly (the sparse cell's discipline): the drain's
-    ~185-190ms wall is per-``__next__`` PYTHON bytecode, and the eval loop
+    Limitations (the sparse cell's discipline): the drain's
+    ~185-190ms wall is per-``__next__`` Python bytecode, and the eval loop
     drops the GIL between handoffs, so a construction-only detach
-    regression shows only ~17ms gaps (the soup scan, held) — under the
-    ceiling, not discriminated here — and a per-``__next__`` whole-text
-    re-scan holds only scan-sized gaps while exploding the WALL into
+    regression shows only ~17ms gaps (the soup scan, held; under the
+    ceiling, not discriminated here), and a per-``__next__`` whole-text
+    re-scan holds only scan-sized gaps while exploding the wall into
     CI-timeout territory, which the budgets cannot see. What the budgets
-    DO catch is the O(remaining)-per-``__next__`` class above. The
+    do catch is the O(remaining)-per-``__next__`` class above. The
     construction scan's ~17ms is the by-paragraphs scanner lane's
     business (a scanner retune moves the wall, not this band: the gap is
     the ping floor plus handoff contention, with ~5x/2.7x margins to
@@ -1773,7 +1773,7 @@ def test_chunk_by_paragraphs_iter_soup_drain_keeps_the_event_loop_at_heartbeat_g
 def test_diff_opcodes_lines_near_identical_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
-    """The line-diff claim on the near-identical pair: the WHOLE pass
+    """The line-diff claim on the near-identical pair: the whole pass
     (both operands' line split and the Myers search over the ~37.8k lines)
     runs under ``py.detach``, and the return is a 5-tuple list measured at
     just 5 opcodes for the pair's six scattered line edits (the line-level
@@ -1782,7 +1782,7 @@ def test_diff_opcodes_lines_near_identical_keeps_the_event_loop_at_heartbeat_gra
 
     Measured on the dev box (ambient load 2.0, 5 samples): worst gaps
     10.5-12.0ms against walls of only 1.9-2.6ms: the wall sits an order
-    of magnitude UNDER the 10ms ping floor (the line-level spelling is
+    of magnitude under the 10ms ping floor (the line-level spelling is
     ~30x cheaper in wall than its char-level twin's 76-88ms on the same
     pair, the cell, because the Myers search runs over lines, not
     characters), so the gap/wall ratio (4.2-6.4) is the suite's
@@ -1802,7 +1802,7 @@ def test_diff_opcodes_lines_near_identical_keeps_the_event_loop_at_heartbeat_gra
     )
 
 
-# count_matches's ratio budget: NOT the shared 0.30, which this wall cannot
+# count_matches's ratio budget: not the shared 0.30, which this wall cannot
 # attain by construction: the count core is a single detached scan with an
 # int return (no marshalling class at all), so the GIL-held residue is the
 # 10ms ping floor alone, but the wall (~31ms at 12 MiB dense) clears the
@@ -1810,7 +1810,7 @@ def test_diff_opcodes_lines_near_identical_keeps_the_event_loop_at_heartbeat_gra
 # derivation verbatim (_QC_YES_12MIB_RATIO_BUDGET's comment): 0.60 sits
 # ~1.7x above the worst measured ratio (0.353) and ~40% below the ~1.0 a
 # detach regression shows (a held scan pins the whole ~31ms wall). The 100ms
-# ceiling holds ~9x over the measured gaps, and it is NOT a
+# ceiling holds ~9x over the measured gaps, and it is not a
 # detach discriminator at this size (a held ~31ms wall passes it easily);
 # the ratio budget is this cell's only one.
 _COUNT_MATCHES_RATIO_BUDGET = 0.60
@@ -1832,7 +1832,7 @@ def test_count_matches_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granu
     Measured on the dev box (ambient load 4.4, 5 samples): worst gaps
     10.4-11.2ms of 31.0-31.8ms walls (ratio 0.336-0.353). The budget
     consequence: the wall clears the ping floor only ~3x,
-    so the gap/wall ratio sits at 0.34-0.35 BY ARITHMETIC; the shared 0.30
+    so the gap/wall ratio sits at 0.34-0.35 by arithmetic; the shared 0.30
     budget is unattainable for any sub-40ms wall with a floor-plus-nothing
     residue (a budget that flakes is worse than a budget derived from the
     band; see ``_QC_YES_12MIB_RATIO_BUDGET`` for the same recalibration
@@ -1840,7 +1840,7 @@ def test_count_matches_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granu
     regression holds the whole ~31ms wall at ratio ~1.0 and fails by far)
     plus the shared 100ms ceiling (~9x margin). The inverse of the sparse
     cell's limitation: a held ~31ms scan passes the ceiling easily,
-    so the RATIO budget is this cell's only detach discriminator."""
+    so the ratio budget is this cell's only detach discriminator."""
     text = prose(size_bytes)
     patterns = list(SEARCH_DENSE_PATTERNS)
     asyncio.run(
@@ -1857,15 +1857,15 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
 ) -> None:
     """The streaming answer to the find_patterns dense marshalling band
     (171.0-174.7ms of GIL hold for 1.28M 3-tuples, the cell above): the
-    FULL consumption of ``tors.find_patterns_iter(patterns, text)`` over the
+    full consumption of ``tors.find_patterns_iter(patterns, text)`` over the
     same dense corpus (construction plus every ``__next__``) against the
-    suite's SHARED budgets, which the list-returning shape structurally
+    suite's shared budgets, which the list-returning shape structurally
     could not meet.
 
     The design (the word_bounds_iter cell's, verbatim): the whole search
-    (automaton build, scan, conversion, buffer fill) runs under ONE
+    (automaton build, scan, conversion, buffer fill) runs under one
     ``py.detach`` when the iterator is constructed, and each ``__next__``
-    then holds the GIL only to construct ONE 3-tuple (µs-scale), so the
+    then holds the GIL only to construct one 3-tuple (µs-scale), so the
     worst heartbeat gap collapses back to the ping-floor band.
 
     Measured on the dev box (ambient load 4.4, 5 samples): worst gaps
@@ -1878,8 +1878,8 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
     3.1): full drain 117.4ms against the list API's 211.1ms and the count
     core's 28.3ms: the drain is the ~28-31ms construction scan plus
     ~86-90ms of 1.28M per-``__next__`` 3-tuple handoffs (~70ns per match,
-    against the list shape's ~0.13µs per match of GIL-HELD marshalling), so
-    the iterator wins BOTH axes at this size (the word_bounds_iter
+    against the list shape's ~0.13µs per match of GIL-held marshalling), so
+    the iterator wins both axes at this size (the word_bounds_iter
     finding's shape: 347ms vs 724ms there). A discrimination caveat: the
     construction pass is only ~31ms of the ~130ms wall, so a
     construction-only detach regression shows ~41ms gaps at ratio ~0.32;
@@ -1895,7 +1895,7 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
     asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(consume)))
 
 
-# tors.quote's 32 MiB ratio budget: NOT the shared 0.30, which this wall
+# tors.quote's 32 MiB ratio budget: not the shared 0.30, which this wall
 # cannot attain: the output is ~5/4 the input (roughly every sixth prose
 # char is a space escaping to %20), so the O(output) marshalling residue
 # is a structurally large share of a fast-scan wall, the b64_encode_bytes
@@ -1920,18 +1920,18 @@ def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 ) -> None:
     """The percent-encode claim: the whole escape scan runs under
     ``py.detach``, and the GIL-held residue is the argument borrow plus
-    the marshalling of ONE output string (~5/4 the input at this corpus),
+    the marshalling of one output string (~5/4 the input at this corpus),
     the no-list-shape class, ``replace_many``'s band shape.
 
     Measured on the dev box (ambient load 0.4-5.2, 3 samples per cell,
     prose corpus):
 
     - 12 MiB: worst gaps 10.1-10.8ms against walls of 10.1-23.5ms: the
-      wall STRADDLES the 10ms ping floor (a fast native pass: ~20ms
+      wall straddles the 10ms ping floor (a fast native pass: ~20ms
       inline), so any gap/wall ratio is the suite's documented sub-ping
       artifact and the cell asserts the 100ms ceiling only (the b64
       12 MiB precedent). A limitation: a held ~20ms encode passes
-      the ceiling too, so the RATIO discriminator for this function lives
+      the ceiling too, so the ratio discriminator for this function lives
       in the 32 MiB cell and the red-side cells below.
     - 32 MiB: worst gaps 24.3-28.8ms of 55.2-59.7ms walls (ratio
       0.44-0.48): the ping floor plus the ~43 MiB output's marshalling
@@ -1943,7 +1943,7 @@ def test_quote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
     The red side, same corpus and placement, is the whole reason the
     function exists: ``urllib.parse.quote`` is pure Python; its
-    measured bands and the structural surprise (the ≥200KB CHUNKED path
+    measured bands and the structural surprise (the ≥200KB chunked path
     gh-95865 added) are pinned by the red-side cells below."""
     corpus = prose(size_bytes)
     asyncio.run(
@@ -1966,7 +1966,7 @@ def test_unquote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     is ``tors.quote(prose(...))``, the canonical decoder input, its
     round trip pinned in tests/test_url_quote.py): the whole fragment
     walk + replace-decode runs under ``py.detach``, the residue is the
-    marshalling of ONE decoded string (3/4 the encoded size).
+    marshalling of one decoded string (3/4 the encoded size).
 
     Measured on the dev box (ambient load 0.4-5.2, 3 samples per cell):
 
@@ -1976,13 +1976,13 @@ def test_unquote_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       b64 12 MiB precedent).
     - 32 MiB decoded (43 MiB encoded): worst gaps 15.5-16.5ms of
       77.0-77.8ms walls (ratio 0.20-0.21): the floor plus the ~32 MiB
-      output's marshalling. Every sample inside BOTH shared budgets
+      output's marshalling. Every sample inside both shared budgets
       (~1.4x ratio margin, ~6x ceiling margin); a detach regression
       holds the whole ~77ms wall at ratio ~1.0 and fails by far.
 
     The red side: ``urllib.parse.unquote`` over the same encoded corpus
     measured worst gaps 50.5-52.0ms of 217.6-221.5ms walls (ratio
-    0.23-0.24): it PASSES both budgets (recorded in the red-side cells
+    0.23-0.24): it passes both budgets (recorded in the red-side cells
     below, with the structural reason), so the statement is the
     wall (~12x: ~18ms tors inline vs ~223ms stdlib) and the worst gap
     (~5x), not "blocked vs unblocked" (the html.unescape red-side
@@ -2005,7 +2005,7 @@ def _close_matches_corpus() -> tuple[str, list[str]]:
     length where difflib's quadratic char matcher costs seconds
     (measured ~3.4s) and tors's per-candidate Myers passes are real
     work (~65ms). The short-candidate alternative (every mutation of
-    the 23-word vocabulary (~7.9k × ~8 chars)) measures BOTH engines at
+    the 23-word vocabulary (~7.9k × ~8 chars)) measures both engines at
     ~7.5ms (difflib is fast on short candidates; the wall race's
     seconds live at sentence length), so the bulk cell's pool is this
     one."""
@@ -2028,13 +2028,13 @@ def test_get_close_matches_bulk_in_a_thread_keeps_the_event_loop_at_heartbeat_gr
     (the corpus builder above): the sweep's per-candidate Myers passes
     run under ``py.detach``, and the GIL-held residue is the O(candidates)
     argument walk plus the ping floor: the returned elements are the
-    ORIGINAL candidate objects (references, zero marshalling per hit,
+    original candidate objects (references, zero marshalling per hit,
     pinned in tests/test_similarity.py), so there is no list-shape class
     at all.
 
     Measured on the dev box (ambient load 4.1-5.2, 3 samples): worst
     gaps 10.6-11.3ms of 64.2-71.7ms walls (ratio 0.15-0.18): inside
-    BOTH shared budgets (~1.7x ratio margin, ~9x ceiling margin); a
+    both shared budgets (~1.7x ratio margin, ~9x ceiling margin); a
     detach regression (the sweep itself GIL-held) pins the whole ~65ms
     wall at ratio ~1.0 and fails by far. The wall race against difflib
     on the same input (~50x, single sample; the difflib precedent) is
@@ -2050,12 +2050,12 @@ def test_get_close_matches_bulk_in_a_thread_keeps_the_event_loop_at_heartbeat_gr
 def _quote_unchunked_core(text: str) -> str:
     """``urllib.parse.quote``'s per-byte core statement: the
     ``''.join(map(quoter, bytes))`` that ``quote_from_bytes`` runs for
-    inputs UNDER 200 KB, with the quoter table built here rather than
+    inputs under 200 KB, with the quoter table built here rather than
     reaching into ``urllib.parse``'s private ``_byte_quoter_factory``
     (absent on 3.10, measured): the stdlib's ``_Quoter`` is a dict
     subclass whose ``__getitem__`` this fully-populated table's is. The
     join over a C-callable mapper holds the GIL for its whole duration,
-    i.e. the GIL-held whole-text pass the stdlib spelling IS below the
+    i.e. the GIL-held whole-text pass the stdlib spelling is below the
     chunking threshold; the value-parity assert in the red-side cell
     proves the table is the stdlib's own."""
     always_safe = frozenset(string.ascii_letters + string.digits + "_.-~" + "/")
@@ -2064,19 +2064,19 @@ def _quote_unchunked_core(text: str) -> str:
 
 
 def test_the_gil_held_url_red_sides_fail_their_budgets_in_every_sample() -> None:
-    """The RED side, asserted mechanically: the per-byte join that IS
+    """The red side, asserted mechanically: the per-byte join that is
     ``urllib.parse.quote``'s core (the ``<200 KB`` statement; see
     ``_quote_unchunked_core``) holds the GIL for its whole duration, so
-    the budgets tors's quote cells above pass must be FAILED by it in
+    the budgets tors's quote cells above pass must be failed by it in
     every sample, judged by the same ``_budget_misses`` list the green
     cells use. Measured on the dev box (ambient load 4.1-11.8, 3
     samples, 12 MiB prose): worst gaps 179.8-187.8ms of 180.0-188.0ms
-    walls: ratio 0.999, the whole-text hold, missing BOTH budgets in
+    walls: ratio 0.999, the whole-text hold, missing both budgets in
     every sample (the single-C-hold shape the b64 96 MiB red side
     demonstrates for ``b64encode``).
 
-    Measured and NOT asserted: the two stdlib red
-    expressions that PASS the budgets at this size, with the structural
+    Measured and not asserted: the two stdlib red
+    expressions that pass the budgets at this size, with the structural
     reasons (the b64 12/32 MiB red-side precedent: record the shape,
     assert only what discriminates):
 
@@ -2084,13 +2084,13 @@ def test_the_gil_held_url_red_sides_fail_their_budgets_in_every_sample() -> None
       worst gaps 15.6-22.0ms of 163.9-183.0ms walls (ratio 0.09-0.12;
       ambient load 0.4-32 across the measurement windows).
       The surprise vs the whole-text-hold expectation: inputs ≥200 KB
-      take the CHUNKED path gh-95865 added (``chunk_size =
+      take the chunked path gh-95865 added (``chunk_size =
       isqrt(len)``), whose per-chunk joins hold only µs-bursts between
       the chunk comprehension's bytecode; the eval loop drops the GIL
       between chunks, so the worst gap is a burst, not the wall. The
       unchunked core above is what the function runs below the
       threshold and ran at every size before the chunking; the race in
-      WALL is unchanged (~8x: tors ~20ms inline vs stdlib 158-183ms).
+      wall is unchanged (~8x: tors ~20ms inline vs stdlib 158-183ms).
     - ``urllib.parse.unquote(encoded)`` (the 12 MiB percent-encoded
       corpus): worst gaps 50.5-65.0ms of 217.6-267.0ms walls (ratio
       0.23-0.25). Its ``_generate_unquoted_parts`` generator yields
@@ -2129,10 +2129,10 @@ def _measure_red(red: Callable[[str], str], corpus: str) -> list[tuple[float, fl
 
 
 def test_urllib_quote_and_unquote_red_sides_measured_value_parity_and_recorded() -> None:
-    """The stdlib red sides, measured LIVE in the same to_thread cell
-    style, recorded, NOT budget-asserted (both PASS the shared budgets
+    """The stdlib red sides, measured live in the same to_thread cell
+    style, recorded, not budget-asserted (both pass the shared budgets
     at this size; the structural reasons are in the asserted red-side
-    cell's docstring above). What IS asserted is the VALUE parity (the
+    cell's docstring above). What is asserted is the value parity (the
     12 MiB differential anchor for both directions, the same equality
     the hypothesis gates in tests/test_url_quote.py prove at small
     sizes, here at corpus scale), and the bands are printed so every
@@ -2178,7 +2178,7 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
     difflib's own GIL band, measured in the same to_thread placement:
     worst gaps 15.5-20.5ms of 3,346-3,931ms walls (~0.5%): the sweep
     is pure-Python bytecode, so the eval loop drops the GIL at switch
-    intervals and the loop stays schedulable; the WALL is the finding
+    intervals and the loop stays schedulable; the wall is the finding
     (~50x), not the blocking; recorded here so the race is not
     misread as a GIL claim. tors's GIL band is the green bulk cell
     above."""

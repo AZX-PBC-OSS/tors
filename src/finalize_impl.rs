@@ -39,7 +39,7 @@ pub fn finalize_checked(text: &str) -> (Cow<'_, str>, String) {
 /// pass, `(normalize(raw.decode("utf-8")), sha256-hex-of-the-result)` for valid
 /// input, or the CPython-parity `DecodeError` (no pipeline work happens) for
 /// invalid input. The extraction-pipeline shape: one `py.detach` call instead of a
-/// GIL-held decode followed by `finalize`. The decoded text is BORROWED from
+/// GIL-held decode followed by `finalize`. The decoded text is borrowed from
 /// the input bytes on the valid path, so an identity pipeline returns it
 /// borrowed: the wrapper marshals the output string straight from that
 /// borrow, with no owned intermediate.
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn finalize_utf8_strict_decodes_then_finalizes_in_one_pass() {
-        // The one-call shape an extraction pipeline wants: bytes in, the SAME
+        // The one-call shape an extraction pipeline wants: bytes in, the same
         // (normalized, sha256) pair finalize would produce on the decoded text.
         // "abc" survives the pipeline, so the FIPS vector must come back verbatim.
         assert_eq!(
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn finalize_checked_identity_input_hashes_the_borrowed_buffer() {
         // The complete pipeline is a no-op on this input: the string element
-        // comes back borrowed (the wrapper hands the ORIGINAL PyObject on)
+        // comes back borrowed (the wrapper hands the original PyObject on)
         // and the digest is of the input bytes; no output allocation, no
         // scan.
         let clean = "plain text\n\nwith paragraphs\n\ncaf\u{e9}";

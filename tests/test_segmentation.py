@@ -1,30 +1,30 @@
 """Contract gate for the segmentation surface: ``tors.grapheme_count``
 and ``tors.word_bounds``: UAX #29 extended-grapheme-cluster counting and
-word-boundary segmentation, the capability the stdlib LACKS (the gap is the
+word-boundary segmentation, the capability the stdlib lacks (the gap is the
 point: ``unicodedata`` exposes the properties but no segmenter, and every
 pure-Python grapheme/word segmenter is either a third-party dependency or a
 slow charclass walk).
 
 No stdlib oracle exists, so the pins are of a different shape than the parity
-gates: a HAND-DERIVED table of expected values for the tricky cases, each
+gates: a hand-derived table of expected values for the tricky cases, each
 derived from the Unicode segmentation rules (Unicode Standard Annex #29,
 "Unicode Text Segmentation"; grapheme-cluster rules GB1-GB999, word-boundary
 rules WB1-WB999; the crate backing this surface, unicode-segmentation 1.13.3,
 implements them over Unicode 17.0.0 tables, and every rule cited below has
-been stable across Unicode 11-17), plus STRUCTURAL properties over
+been stable across Unicode 11-17), plus structural properties over
 hypothesis-generated text that must hold for any conforming segmenter:
 monotonic strictly-increasing bounds, covering [0, len], a byte-exact
 round-trip (joining the sliced segments reproduces the input), and
-ADDITIVITY (grapheme clusters never span a word boundary, so the per-segment
+additivity (grapheme clusters never span a word boundary, so the per-segment
 grapheme counts sum to the whole-string count, the cross-function
 invariant).
 
 The API contract decisions pinned here (from the spec):
-- OFFSETS, never string lists: ``word_bounds`` returns ``(start, end)`` pairs
-  in PYTHON STR INDEX units (codepoints), so ``text[start:end]`` IS the
+- offsets, never string lists: ``word_bounds`` returns ``(start, end)`` pairs
+  in Python str index units (codepoints), so ``text[start:end]`` is the
   segment (marshalling thousands of small PyStrings under the GIL would eat
   the win, and byte offsets would make Python slicing wrong on non-ASCII).
-- ``grapheme_count`` counts EXTENDED grapheme clusters (``is_extended=true``
+- ``grapheme_count`` counts extended grapheme clusters (``is_extended=true``
   in the crate, the only spelling anyone means by "grapheme" post-Unicode 11).
 """
 
@@ -53,15 +53,15 @@ _RI_U = chr(0x1F1FA)
 _RI_S = chr(0x1F1F8)
 _RI_G = chr(0x1F1EC)
 _RI_B = chr(0x1F1E7)
-_L_JAMO = chr(0x1100)  # HANGUL CHOSEONG KIYEOK (L)
-_V_JAMO = chr(0x1161)  # HANGUL JUNGSEONG A (V)
-_T_JAMO = chr(0x11A8)  # HANGUL JONGSEONG KIYEOK (T)
-_SYL_GA = chr(0xAC00)  # HANGUL SYLLABLE GA (LV)
-_SYL_GAK = chr(0xAC01)  # HANGUL SYLLABLE GAK (LVT)
+_L_JAMO = chr(0x1100)  # hangul choseong kiyeok (L)
+_V_JAMO = chr(0x1161)  # hangul jungseong A (V)
+_T_JAMO = chr(0x11A8)  # hangul jongseong kiyeok (T)
+_SYL_GA = chr(0xAC00)  # hangul syllable ga (lv)
+_SYL_GAK = chr(0xAC01)  # hangul syllable gak (lvt)
 _SUN = chr(0x2600)
 
 # (text, expected grapheme count, expected word_bounds): every row's values
-# derived from the cited UAX #29 rules BEFORE running them against the crate.
+# derived from the cited UAX #29 rules before running them against the crate.
 _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     # --- simple text (GB999 / WB5-WB999) ---
     ("", 0, []),
@@ -70,7 +70,7 @@ _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     # --- combining-mark chains: one cluster per base (GB9: x Extend) ---
     ("e" + _COMBINING_ACUTE, 1, [(0, 2)]),  # WB4: the Extend joins its base's word
     ("e" + _COMBINING_ACUTE * 3, 1, [(0, 4)]),
-    # --- CRLF is ONE grapheme (GB4: CR x LF) and ONE word segment (WB3) ---
+    # --- CRLF is one grapheme (GB4: CR x LF) and one word segment (WB3) ---
     (_CRLF, 1, [(0, 2)]),
     ("a" + _CRLF + "b", 3, [(0, 1), (1, 3), (3, 4)]),
     ("\r\r", 2, [(0, 1), (1, 2)]),  # GB4/GB5: CR breaks before and after CR
@@ -83,11 +83,11 @@ _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     # --- ZWJ emoji sequences (GB11: ExtPict x ZWJ x ExtPict; WB3c) ---
     (_WOMAN + _ZWJ + _MICROSCOPE, 1, [(0, 3)]),  # woman-scientist: one cluster, one word
     (_MAN + _ZWJ + _WOMAN + _ZWJ + _GIRL + _ZWJ + _BOY, 1, [(0, 7)]),  # family
-    # The grapheme/word ASYMMETRY on ZWJ: GB11 requires ExtPict on BOTH
-    # sides, so 'a' ZWJ 'b' is TWO clusters (GB9 keeps the ZWJ with 'a';
+    # The grapheme/word asymmetry on ZWJ: GB11 requires ExtPict on both
+    # sides, so 'a' ZWJ 'b' is two clusters (GB9 keeps the ZWJ with 'a';
     # GB999 breaks before 'b'), but WB4 collapses the ZWJ into its base
     # (X (Extend | Format | ZWJ)* -> X) and WB5 then joins the letters, so
-    # it is ONE word segment.
+    # it is one word segment.
     ("a" + _ZWJ + "b", 2, [(0, 3)]),
     # an emoji sequence followed by a flag is two clusters (GB999 between them)
     (_WOMAN + _ZWJ + _MICROSCOPE + _RI_U + _RI_S, 2, [(0, 3), (3, 5)]),
@@ -95,11 +95,11 @@ _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     (_THUMBS_UP + _SKIN_TONE_3, 1, [(0, 2)]),  # GB9: emoji modifiers are Extend
     (_SUN + _VS16, 1, [(0, 2)]),  # VS16 is Extend
     ("1" + _VS16 + _KEYCAP, 1, [(0, 3)]),  # the keycap sequence: two Extends
-    # --- Hangul jamo (GB6: L x V; GB7: (LV|V) x T; GB8: (LVT|T) x T: a JOIN,
-    # the trailing T is part of the syllable term L*(V+|LV V*|LVT)T* in
+    # --- Hangul jamo (GB6: L x V; GB7: (LV|V) x T; GB8: (LVT|T) x T: a join,
+    # the trailing T is part of the syllable term L*(V+|lv V*|lvt)T* in
     # UAX #29 Table 1c) ---
-    (_SYL_GA, 1, [(0, 1)]),  # precomposed LV syllable
-    (_SYL_GAK, 1, [(0, 1)]),  # precomposed LVT syllable
+    (_SYL_GA, 1, [(0, 1)]),  # precomposed lv syllable
+    (_SYL_GAK, 1, [(0, 1)]),  # precomposed lvt syllable
     (_L_JAMO + _V_JAMO, 1, [(0, 2)]),  # GB6: L x V
     (_L_JAMO + _V_JAMO + _T_JAMO, 1, [(0, 3)]),  # GB6 then GB7: (LV|V) x T
     (_SYL_GA + _T_JAMO, 1, [(0, 2)]),  # GB7: LV x T
@@ -107,8 +107,8 @@ _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     (_L_JAMO + _V_JAMO + _L_JAMO + _V_JAMO, 2, [(0, 4)]),  # graphemes: V x L
     # breaks (no GB rule joins them); words: every jamo and syllable is
     # ALetter (Table 3: Alphabetic minus Hiragana/Katakana scripts), so WB5
-    # joins the whole run into ONE word.
-    (_SYL_GA + _SYL_GAK, 2, [(0, 2)]),  # two clusters (LV x LVT breaks), one
+    # joins the whole run into one word.
+    (_SYL_GA + _SYL_GAK, 2, [(0, 2)]),  # two clusters (lv x lvt breaks), one
     # word (ALetter x ALetter, WB5)
     # --- classic word-boundary shapes (WB5-WB999) ---
     ("Hello, world!", 13, [(0, 5), (5, 6), (6, 7), (7, 12), (12, 13)]),
@@ -122,11 +122,11 @@ _CASES: list[tuple[str, int, list[tuple[int, int]]]] = [
     ("\u3053\u3093\u306b\u3061\u306f", 5, [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]),
     # ...so each kana is its own word segment, while Katakana joins:
     ("\u30c6\u30b9\u30c8", 3, [(0, 3)]),
-    # --- the SARA AM edge: a grapheme cluster that SPANS a word boundary ---
+    # --- the SARA AM edge: a grapheme cluster that spans a word boundary ---
     # U+0E33 is General_Category=Other_Letter but GraphemeBreakProperty lists
     # it as SpacingMark (GB9a: joins '0' into one cluster), while
     # WordBreakProperty gives it no entry (ALetter excludes Complex_Context
-    # scripts), so WB999 splits it from '0'. One cluster, TWO word segments:
+    # scripts), so WB999 splits it from '0'. One cluster, two word segments:
     # the one shape where the two segmenters disagree, found by the
     # structural property and confirmed against the normative data files.
     ("0" + chr(0x0E33), 1, [(0, 1), (1, 2)]),
@@ -153,21 +153,21 @@ class TestHandDerivedTable:
 
 
 class TestStructuralProperties:
-    # The COMPLETE measured set of characters where a grapheme cluster CAN
+    # The complete measured set of characters where a grapheme cluster can
     # span a word boundary in UAX #29: three families, all for the same
     # structural reason (the two segmenters' property files disagree about
     # the character's class):
     #
-    # - the GB9b PREPEND class (GraphemeBreakProperty.txt Prepend: the mark
-    #   joins the FOLLOWING character into one cluster) whose WordBreak class
+    # - the GB9b prepend class (GraphemeBreakProperty.txt Prepend: the mark
+    #   joins the following character into one cluster) whose WordBreak class
     #   is Format/Other and splits anyway: the Arabic prepended number/sign
     #   marks (U+0600..U+0605, U+06DD, U+0890/U+0891, U+08E2), Syriac
     #   abbreviation mark (U+070F), Kaithi number signs (U+110BD/U+110CD),
     #   and the Kawi sign repha (U+11F02);
     # - the Other_Letter spacing marks the two property files classify
     #   differently (SARA AM: U+0E33/U+0EB3 are SpacingMark to graphemes,
-    #   GB9a joins them to the PRECEDING cluster, but no WordBreak entry,
-    #   so WB999 splits them: '0' + SARA AM is ONE cluster and TWO word
+    #   GB9a joins them to the preceding cluster, but no WordBreak entry,
+    #   so WB999 splits them: '0' + SARA AM is one cluster and two word
     #   segments);
     # - the Indic signs that are Prepend to graphemes but letters to words
     #   (Sharada jihvamuliya/upadhmaniya U+111C2/U+111C3, Malayalam dot reph
@@ -175,7 +175,7 @@ class TestStructuralProperties:
     #   Masaram Gondi repha U+11D46, and U+113D1, assigned in the crate's
     #   Unicode 17 tables).
     #
-    # DERIVED, not guessed: swept every non-surrogate codepoint with the two
+    # derived, not guessed: swept every non-surrogate codepoint with the two
     # probes '<cp>:' and 'a<cp>:b' against the shipped crate (29 violators,
     # the list below), including U+0D4E, which is not part of the SARA AM
     # pair. Every UAX #29-conforming segmenter has these edges; a crate
@@ -262,7 +262,7 @@ class TestStructuralProperties:
         Prepend marks, the SARA AM spacing marks, and the Indic
         Prepend-to-grapheme/letter-to-words signs), a grapheme cluster never
         spans a word boundary, so the grapheme counts of the word segments
-        sum EXACTLY to the whole string's count, and each word segment
+        sum exactly to the whole string's count, and each word segment
         therefore contains at least one grapheme. The scoping is a measured
         UAX #29 property, not a dodge: the excluded set is exactly the
         codepoints where the normative property files make the two
@@ -304,7 +304,7 @@ class TestArgumentContract:
 
 class TestWordBoundsIter:
     """The streaming spelling of ``word_bounds``: a lazy iterator yielding
-    the SAME ``(start, end)`` sequence, so whole-file segmentation stops paying
+    the same ``(start, end)`` sequence, so whole-file segmentation stops paying
     the list API's O(segments) GIL-held marshalling (measured at 428-497ms at
     12 MiB). The segmentation runs under one detached pass when the
     iterator is constructed, and each ``__next__`` holds the GIL only for one
@@ -337,7 +337,7 @@ class TestWordBoundsIter:
 
     def test_length_hint_tracks_partial_consumption(self) -> None:
         """``__length_hint__`` (what ``list()``/``tuple()`` preallocation and
-        the interpreter's own optimizations consult) is the REMAINING count:
+        the interpreter's own optimizations consult) is the remaining count:
         the full count at construction, decremented by each ``next()``, zero
         at exhaustion, never the original length after consumption."""
         expected = word_bounds("Hello, world!")
@@ -384,7 +384,7 @@ class TestWordBoundsIter:
 
 class TestWordCount:
     """The count spelling of the word contract: ``word_count(t) ==
-    len(word_bounds(t))``, the SAME UAX #29 word segmentation under the SAME
+    len(word_bounds(t))``, the same UAX #29 word segmentation under the same
     argument boundary, with none of the list API's O(segments) marshalling:
     the whole cluster walk runs detached and the return is one int (the
     ``grapheme_count`` no-marshalling shape; its GIL band is the ping floor,
@@ -425,8 +425,8 @@ class TestWordCount:
 
     def test_the_degenerates(self) -> None:
         """The fixed degenerate anchors: empty is 0; ``"Hello, world!"`` is
-        FIVE segments (the two words plus the comma, space, and bang,
-        ``word_bounds``'s own pinned row); whitespace-only is ONE segment
+        five segments (the two words plus the comma, space, and bang,
+        ``word_bounds``'s own pinned row); whitespace-only is one segment
         (WB999 joins Any × Any, so only WB1/WB2 bound the text; the count
         spelling must not silently re-scope "word" to "non-whitespace
         run")."""

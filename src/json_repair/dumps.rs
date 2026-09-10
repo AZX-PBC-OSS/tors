@@ -9,15 +9,15 @@
 //! suites pin the exact bytes. The escape tables are CPython's
 //! `Lib/json/encoder.py` (`ESCAPE` for the non-ascii path, `ESCAPE_ASCII`
 //! = `([\\"]|[^\ -~])` for the ascii path, with the `ESCAPE_DCT`
-//! replacements and `'\u{0:04x}'`-formatted leftovers — verified
+//! replacements and `'\u{0:04x}'`-formatted leftovers: verified
 //! byte-for-byte against the running stdlib on CPython 3.12 and 3.14).
 //! One consequence of that character class worth calling out: the ascii
-//! table escapes every char OUTSIDE space-through-tilde, which includes
-//! DEL (0x7f) — `json.dumps("\x7f")` is `"\"\\u007f\""` — while the
+//! table escapes every char outside space-through-tilde, which includes
+//! DEL (0x7f), `json.dumps("\x7f")` is `"\"\\u007f\""`, while the
 //! non-ascii path never touches it (its class is controls-and-quote-
 //! backslash only). The float presentation is `pystrtod.c`'s
 //! `format_float_short` repr mode, with the shortest round-trip digits
-//! taken from Rust's `{:e}` (Grisu/Dragon — the same digit string CPython's
+//! taken from Rust's `{:e}` (Grisu/Dragon: the same digit string CPython's
 //! dtoa emits, except on exact decimal ties; see [`py_float_repr`]).
 
 use super::Value;
@@ -25,11 +25,11 @@ use super::Value;
 /// `json.dumps(v)` byte-parity with CPython's defaults: `", "` between
 /// items, `": "` after keys, `true`/`false`/`null`, `Int` as digits,
 /// `BigInt` as its (normalized) decimal text verbatim, `Float` via
-/// [`py_float_repr`] — non-finite floats take CPython's `allow_nan=True`
-/// spellings `NaN`/`Infinity`/`-Infinity` — and strings through the exact
+/// [`py_float_repr`]: non-finite floats take CPython's `allow_nan=True`
+/// spellings `NaN`/`Infinity`/`-Infinity`, and strings through the exact
 /// escape table described in the module docs (`"`/`\`/`\b\t\n\f\r`
 /// always; other chars < 0x20 as lowercase `\u00xx`; in `ensure_ascii`
-/// mode every char above `~` — DEL included — as lowercase `\uxxxx`,
+/// mode every char above `~` (DEL included) as lowercase `\uxxxx`,
 /// astral chars as their surrogate pair; with `ensure_ascii: false` those
 /// pass through verbatim; `/` never escaped). Objects serialize in
 /// insertion order (the `Value::Object` vec order).
@@ -43,17 +43,17 @@ pub fn dumps(v: &Value, ensure_ascii: bool) -> String {
 }
 
 /// `float.__repr__` parity: the shortest round-trip decimal, presented per
-/// CPython's repr mode — positional iff `-4 <= exp10 < 16` (a value that
+/// CPython's repr mode: positional iff `-4 <= exp10 < 16` (a value that
 /// is all integer digits gains `.0`, so `1.0` never renders bare), else
-/// scientific with the mantissa as-is and a SIGNED, two-digit-minimum
+/// scientific with the mantissa as-is and a signed, two-digit-minimum
 /// exponent (`1e+16`, `1e-05`, `5e-324`). `-0.0` keeps its sign.
 ///
 /// The digit string comes from Rust's `{:e}` on the absolute value, which
 /// yields the same shortest round-tripping mantissa CPython's dtoa
-/// produces. The two disagree only on EXACT decimal ties — values whose
+/// produces. The two disagree only on exact decimal ties: values whose
 /// exact decimal expansion terminates on a `5` exactly one digit past the
 /// shortest, leaving the two shortest candidates equidistant: CPython's
-/// dtoa rounds the tie to the EVEN last digit, Rust's flt2dec rounds it
+/// dtoa rounds the tie to the even last digit, Rust's flt2dec rounds it
 /// up. The `is_decimal_tie` helper below detects that case exactly (a
 /// u128 odd-part/power-of-two comparison against the midpoint equation,
 /// no bignum) and steps an odd up-rounded mantissa back down to its even
@@ -62,7 +62,7 @@ pub fn dumps(v: &Value, ensure_ascii: bool) -> String {
 /// mismatches.
 ///
 /// Non-finite floats render Python's `repr` spellings (`nan`, `inf`,
-/// `-inf`) — total for any f64 — while `dumps` keeps its own
+/// `-inf`) (total for any f64) while `dumps` keeps its own
 /// `allow_nan` JSON spellings (`NaN`/`Infinity`/`-Infinity`).
 pub fn py_float_repr(f: f64) -> String {
     if f.is_nan() {
@@ -82,8 +82,8 @@ pub fn py_float_repr(f: f64) -> String {
         .parse()
         .expect("LowerExp exponent is a plain integer");
     let mut digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    // The tie correction: only an ODD up-rounded last digit can disagree
-    // with CPython (an even one IS the half-even choice), and a genuine
+    // The tie correction: only an odd up-rounded last digit can disagree
+    // with CPython (an even one is the half-even choice), and a genuine
     // tie is exactly characterized by the midpoint equation.
     let mut tie_corrected = false;
     let last_digit = digits.as_bytes()[digits.len() - 1] - b'0';
@@ -95,16 +95,16 @@ pub fn py_float_repr(f: f64) -> String {
         }
     }
     let mut out = render_float(neg, &digits, exp);
-    // Verify-and-correct, ONLY on the tie-corrected path: Rust's `{:e}`
+    // Verify-and-correct, only on the tie-corrected path: Rust's `{:e}`
     // shortest render round-trips by construction, but the step-down can
     // land one ulp away when only the odd sibling round-trips (2^-24's
     // exact expansion 5.9604644775390625e-08: the ...063 neighbor is the
     // only round-tripping 16-digit spelling). The rendered text must
-    // parse back to the SAME f64 (bit-for-bit) or the repr silently moves
-    // the value — on a broken round-trip, take the neighboring last digit
+    // parse back to the same f64 (bit-for-bit) or the repr silently moves
+    // the value: on a broken round-trip, take the neighboring last digit
     // (CPython's dtoa picks the round-tripping neighbor, which is what
     // "shortest" uniquely means there). Uncorrected renders skip the
-    // verification parse entirely — the hot path pays nothing.
+    // verification parse entirely: the hot path pays nothing.
     if tie_corrected && !round_trips(&out, f) {
         for delta in [1i64, -1] {
             if let Some(neighbor) = neighbor_digits(&digits, delta) {
@@ -201,8 +201,8 @@ fn neighbor_digits(digits: &str, delta: i64) -> Option<String> {
 /// parts and powers separately; the `5^u` factor lives entirely in the
 /// odd part, and a `5^u` that overflows u128 can never equal an odd part
 /// at most 2^53, so overflow cleanly means "not a tie". No false
-/// positives are possible because the equation is an exact identity —
-/// but a true midpoint does NOT imply both siblings round-trip (a
+/// positives are possible because the equation is an exact identity:
+/// but a true midpoint does not imply both siblings round-trip (a
 /// one-sided tie exists: 2^-24's midpoint rounds down to a value one
 /// ulp away), which is precisely the class the round-trip verify below
 /// corrects.
@@ -331,7 +331,7 @@ fn write_string(out: &mut String, s: &str, ensure_ascii: bool) {
     out.push('"');
 }
 
-/// CPython's `'\u{0:04x}'` replacement: `\u` plus exactly four LOWERCASE
+/// CPython's `'\u{0:04x}'` replacement: `\u` plus exactly four lowercase
 /// hex digits (`04x`, never `04X`).
 fn push_u4(out: &mut String, n: u32) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -364,7 +364,7 @@ mod tests {
     fn py_float_repr_exact_midpoint_ties_round_trip() {
         // 2^-24's exact decimal expansion is the 17-significant-digit
         // midpoint ...0625: the only 16-digit round-trip is ...063, which
-        // is what CPython's repr emits — and what verify-and-correct must
+        // is what CPython's repr emits, and what verify-and-correct must
         // land on (the naive half-even collapse produced ...062, one ulp
         // off: a one-sided tie, down-rounded sibling does not
         // round-trip).
@@ -409,14 +409,14 @@ mod tests {
         assert_eq!(py_float_repr(5e-324), "5e-324");
     }
 
-    // The tie literals are exact dyadics written out in full on purpose —
+    // The tie literals are exact dyadics written out in full on purpose:
     // the "excess" digit the lint would strip is the tie itself.
     #[allow(clippy::excessive_precision)]
     #[test]
     fn py_float_repr_breaks_decimal_ties_like_cpython() {
         // Exact value 1851373832709168.25: the 17-digit candidates ...82
         // and ...83 are equidistant and both round-trip; CPython's dtoa
-        // keeps the even one, Rust's flt2dec rounds up — the detector
+        // keeps the even one, Rust's flt2dec rounds up: the detector
         // steps back down.
         assert_eq!(py_float_repr(1851373832709168.25), "1851373832709168.2");
         assert_eq!(py_float_repr(1234567890123456.25), "1234567890123456.2");
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn dumps_control_char_escapes() {
-        // The named five plus the \u00xx leftover, lowercase hex —
+        // The named five plus the \u00xx leftover, lowercase hex:
         // identical in both ascii modes (controls escape either way).
         let v = Value::Str("a\u{08}b\tc\nd\u{0c}e\rf\u{1f}".into());
         let expected = "\"a\\bb\\tc\\nd\\fe\\rf\\u001f\"";
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn dumps_ensure_ascii_table() {
         // > 0x7e escapes as lowercase \uxxxx; astral chars as surrogate
-        // PAIRS.
+        // pairs.
         let v = Value::Str("value\u{263a}".into());
         assert_eq!(dumps(&v, true), "\"value\\u263a\"");
         let emoji = Value::Str("\u{1F600}".into());

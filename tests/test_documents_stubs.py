@@ -1,32 +1,32 @@
-"""The documents stubs' drift guard — the tors.documents layer's
-counterpart of test_pyi_drift.py (which holds the BASE wheel's stub to
+"""The documents stubs' drift guard: the tors.documents layer's
+counterpart of test_pyi_drift.py (which holds the base wheel's stub to
 ``tors.__all__`` and the live pyo3 functions). Two layers of stub, two
 pins:
 
-- The PAYLOAD stubs (``tors_documents/__init__.pyi`` and ``aio.pyi``) are
+- The payload stubs (``tors_documents/__init__.pyi`` and ``aio.pyi``) are
   held to the live typed surface: every ``__all__`` name appears in the
   stub (nothing ships untyped, nothing stale ships), the enum classes
-  carry the live members, and every stub ``def`` — package and aio alike
-  — is diffed against ``inspect.signature`` of the live function:
-  parameter names in order, kinds, defaults, and ANNOTATIONS. The
+  carry the live members, and every stub ``def`` (package and aio alike)
+  is diffed against ``inspect.signature`` of the live function:
+  parameter names in order, kinds, defaults, and annotations. The
   annotations are comparable here (unlike the base wheel's pyo3 surface,
   the documents functions are typed Python wrappers, so inspect sees the
-  full contract — the aio wrappers are ``wraps`` of the typed sync
+  full contract: the aio wrappers are ``wraps`` of the typed sync
   functions, and inspect follows the chain). Default semantics follow pyi
   convention: ``= ...`` means "optional, value deliberately not pinned"
-  (only the default's EXISTENCE is compared — the payload spells enum and
+  (only the default's existence is compared: the payload spells enum and
   None-machinery defaults the stub cannot), while a spelled literal
   (``= None``) is compared by value.
-- The SHIM stubs (``python/tors/documents/*.pyi``) are the payload stubs'
-  standalone twins — base-only type checks must resolve without the
-  payload wheel — so their bodies are compared node-for-node, modulo the
+- The shim stubs (``python/tors/documents/*.pyi``) are the payload stubs'
+  standalone twins (base-only type checks must resolve without the
+  payload wheel) so their bodies are compared node-for-node, modulo the
   deltas the mirror doctrine documents: each file's own header docstring;
   the ``__version__`` blocks (same declaration on both sides,
   deliberately different nuance docstrings); and, on the aio pair, the
   import line (the shim imports the names from ``tors.documents``, the
-  payload from ``tors_documents`` — the one line that IS the two-wheel
-  split). Everything else — classes, enum members, signatures, every
-  inner docstring — must be identical.
+  payload from ``tors_documents``: the one line that is the two-wheel
+  split). Everything else (classes, enum members, signatures, every
+  inner docstring) must be identical.
 - The sync-only rule, stub side: ``sniff`` present in both package stubs,
   absent from both aio stubs (the runtime side of the same rule is pinned
   by the engines suite's aio gate).
@@ -65,9 +65,9 @@ _PAYLOAD_AIO_STUB = _ROOT / "tors-documents" / "python" / "tors_documents" / "ai
 _SHIM_STUB = _ROOT / "python" / "tors" / "documents" / "__init__.pyi"
 _SHIM_AIO_STUB = _ROOT / "python" / "tors" / "documents" / "aio.pyi"
 
-# "No default at all", distinct from every legal default VALUE (``None`` is
+# "No default at all", distinct from every legal default value (``None`` is
 # a real default; Ellipsis is the pyi spelling of "optional, value not
-# pinned"), and from inspect's own ``Parameter.empty`` sentinel — unified
+# pinned"), and from inspect's own ``Parameter.empty`` sentinel: unified
 # on both sides of the comparison.
 _NO_DEFAULT = object()
 
@@ -90,7 +90,7 @@ def _stub_functions(path: Path) -> dict[str, ast.FunctionDef | ast.AsyncFunction
 
 
 def _annotation(annotation: ast.expr | None) -> str | None:
-    """The stub annotation's source text (``None`` = unannotated — a
+    """The stub annotation's source text (``None`` = unannotated: a
     typed-surface defect the signature test fails on)."""
     return None if annotation is None else ast.unparse(annotation)
 
@@ -99,7 +99,7 @@ def _stub_params(
     fn: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> list[tuple[str, str, Any, str | None]]:
     """The stub function's parameters as ``(name, kind, default,
-    annotation)`` — kind an inspect ``_ParameterKind`` spelling, default
+    annotation)``: kind an inspect ``_ParameterKind`` spelling, default
     ``_NO_DEFAULT`` when absent / Ellipsis when the pyi spells ``= ...`` /
     the ast constant's value otherwise, annotation per :func:`_annotation`.
     Any non-constant default raises: these stubs spell literals and
@@ -150,7 +150,7 @@ def _live_signature(
     """The live function's parameters and return in the stub's comparison
     shape, via ``inspect.signature`` (``Parameter.empty`` normalized to
     ``_NO_DEFAULT``/``None``; the annotations arrive as source text because
-    the payload's wrappers evaluate them lazily — and the aio wrappers'
+    the payload's wrappers evaluate them lazily; and the aio wrappers'
     ``wraps`` chain resolves to the typed sync signatures)."""
     sig = inspect.signature(fn)
     params: list[tuple[str, str, Any, str | None]] = []
@@ -164,7 +164,7 @@ def _live_signature(
 
 def _default_agrees(stub_default: Any, live_default: Any) -> bool:
     """The pyi default semantics: absent must match absent; ``...`` asserts
-    only that a default EXISTS (the value is the payload's own machinery,
+    only that a default exists (the value is the payload's own machinery,
     deliberately unpinned by the stub); a spelled literal is pinned by
     value."""
     if stub_default is _NO_DEFAULT or live_default is _NO_DEFAULT:
@@ -175,14 +175,14 @@ def _default_agrees(stub_default: Any, live_default: Any) -> bool:
 
 
 def _normalized_nodes(path: Path) -> list[str]:
-    """The stub's top-level nodes as comparable dumps, MODULO the deltas the
+    """The stub's top-level nodes as comparable dumps, modulo the deltas the
     mirror doctrine documents (see the module docstring): the module
     docstring and the ``from __future__`` import drop entirely; an import
     of the documents surface is canonicalized to the imported names alone;
     the ``__version__`` declaration keeps its target and annotation (both
     sides declare the same shape) but drops its docstring (the two sides
     carry deliberately different nuance text). Everything else dumps
-    verbatim — inner docstrings included — so wording drift anywhere else
+    verbatim (inner docstrings included) so wording drift anywhere else
     in the mirror fails."""
     out: list[str] = []
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
@@ -229,7 +229,7 @@ def test_the_payload_stubs_name_exactly_the_exported_surface(
     """The runtime ``__all__`` is the truth; the stub must carry exactly
     that set as top-level defs, classes, and declarations: no missing
     entries (a new export that ships untyped), no stale ones (a stub for a
-    name that no longer exists) — the name-set pin the base wheel's guard
+    name that no longer exists): the name-set pin the base wheel's guard
     runs, on both of this layer's stubs."""
     stubbed: set[str] = set()
     for node in ast.parse(stub.read_text(encoding="utf-8")).body:
@@ -246,8 +246,8 @@ def test_the_payload_stubs_name_exactly_the_exported_surface(
 
 def test_the_payload_stub_enums_carry_the_live_members() -> None:
     """The str enums are the accepted-string vocabulary: every stub enum's
-    members (names and VALUES, in declaration order) must be the live
-    enum's — a member drift here is wrong types at every call site that
+    members (names and values, in declaration order) must be the live
+    enum's: a member drift here is wrong types at every call site that
     spells the string."""
     tree = ast.parse(_PAYLOAD_STUB.read_text(encoding="utf-8"))
     for node in tree.body:
@@ -278,11 +278,11 @@ def test_every_payload_stub_signature_matches_the_live_typed_function(
     stub: Path, module: ModuleType
 ) -> None:
     """The full-signature pin: for every function in the payload stub, the
-    stub's parameter names IN ORDER and kinds, its defaults (by existence
+    stub's parameter names in order and kinds, its defaults (by existence
     where the pyi spells ``...``, by value where it spells a literal), and
-    its parameter and return ANNOTATIONS must equal the live function's
-    ``inspect.signature`` — the aio lane included (the live aio wrappers
-    are ``wraps`` of the typed sync functions, so their signatures ARE the
+    its parameter and return annotations must equal the live function's
+    ``inspect.signature``: the aio lane included (the live aio wrappers
+    are ``wraps`` of the typed sync functions, so their signatures are the
     typed surface's). A drift on any axis fails naming the function and
     the axis."""
     for name, stub_fn in _stub_functions(stub).items():
@@ -321,10 +321,10 @@ def test_the_shim_stubs_mirror_the_payload_stubs_modulo_the_documented_deltas(
     payload_stub: Path, shim_stub: Path
 ) -> None:
     """The standalone-mirror doctrine (the shim stub's own header): the
-    shim stub is the payload stub's twin, compared node-for-node —
+    shim stub is the payload stub's twin, compared node-for-node:
     signature, enum, class, and docstring drift between the two fails
     loudly instead of shipping a base-only stub that documents a different
-    API than the payload's. A NEW delta must be taught to
+    API than the payload's. A new delta must be taught to
     :func:`_normalized_nodes` deliberately, never absorbed silently."""
     payload_nodes = _normalized_nodes(payload_stub)
     shim_nodes = _normalized_nodes(shim_stub)
@@ -341,7 +341,7 @@ def test_the_shim_stubs_mirror_the_payload_stubs_modulo_the_documented_deltas(
 
 def test_sniff_is_package_only_in_the_stubs_as_it_is_at_runtime() -> None:
     """The sync-only rule, stub side: sniff's marker scan is
-    microsecond-scale, so neither aio stub carries it — and both package
+    microsecond-scale, so neither aio stub carries it; and both package
     stubs must (it is the surface's cheapest entry point and the bytes
     pipeline's first step). The runtime side of the same rule is pinned by
     the engines suite's aio gate (``"sniff" not in aio.__all__`` on both

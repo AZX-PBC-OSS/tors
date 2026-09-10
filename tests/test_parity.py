@@ -1,4 +1,4 @@
-"""Parity pins: tors's own Unicode tables against the RUNNING interpreter's.
+"""Parity pins: tors's own Unicode tables against the running interpreter's.
 
 tors ships its own tables (the ``unicode-normalization`` crate) precisely so its output is
 identical on every supported interpreter (3.10-3.14), the property that makes its hashes
@@ -6,8 +6,8 @@ safe for hash-gated dedupe, and one CPython's per-version ``unicodedata`` cannot
 These tests pin the other direction: parity with *each interpreter's own* tables, by
 exhausting every canonically-decomposable codepoint, every Hangul syllable, and every
 character of Python's ``str.isspace()`` set. Running on every CI matrix leg, each Python
-version pins its own version's parity: ZERO divergence on every codepoint that leg's UCD
-ASSIGNS, with the residual (mappings from newer UCDs than that leg's) confined to
+version pins its own version's parity: zero divergence on every codepoint that leg's ucd
+assigns, with the residual (mappings from newer UCDs than that leg's) confined to
 codepoints the leg leaves unassigned (measured per leg in the confinement test below).
 """
 
@@ -24,25 +24,25 @@ import tors
 # character). For their NFD forms the interpreter's raw NFC is whitespace-only, so the
 # pipeline's final ``strip()`` legitimately empties it while raw NFC keeps the space: the
 # naive ``tors.normalize(nfd) == unicodedata.normalize("NFC", nfd)`` is confounded by the
-# strip stage, NOT by a table divergence; tors's composition agrees with the
+# strip stage, not by a table divergence; tors's composition agrees with the
 # interpreter's here (the pure-Python oracle ``reference_normalize`` strips identically,
 # and the strip-set test below proves both agree on every whitespace char). The sweep
 # compares against the interpreter's NFC with that one documented adjustment, and asserts
-# the confounded set is EXACTLY these two codepoints: a future Unicode or crate version
+# the confounded set is exactly these two codepoints: a future Unicode or crate version
 # that grows it fails here loudly instead of being silently masked.
 _WHITESPACE_DECOMPOSING_CODEPOINTS = frozenset({0x2000, 0x2001})
 
-# Built from codepoints (pure-ASCII source): U+200B ZERO WIDTH SPACE, U+2060 WORD JOINER,
+# Built from codepoints (pure-ASCII source): U+200B zero width space, U+2060 word joiner,
 # U+FEFF BYTE ORDER MARK, all invisible, none Python-whitespace.
 _NON_WS_LOOKALIKES = [chr(0x200B), chr(0x2060), chr(0xFEFF)]
 
-# U+FB01 LATIN SMALL LIGATURE FI and kin, compatibility (not canonical) composites.
+# U+FB01 latin small ligature fi and kin, compatibility (not canonical) composites.
 _COMPAT_LIGATURES = [chr(0xFB01), chr(0xFB02), chr(0xFB00)]
 
 # tors's tables are Unicode 16.0 (the ``unicode-normalization`` crate, 0.1.25);
 # update the major with a crate bump. The residual bound in the confinement
-# test below scales with the UCD gap between tors's tables and the running
-# interpreter, so every matrix leg gets a bound calibrated for its own UCD
+# test below scales with the ucd gap between tors's tables and the running
+# interpreter, so every matrix leg gets a bound calibrated for its own ucd
 # rather than the newest one.
 _TORS_UCD_MAJOR = 16
 
@@ -68,7 +68,7 @@ def test_exhaustive_nfc_sweep_over_every_canonically_decomposable_codepoint() ->
         assert tors.normalize(nfd) == expected, (
             f"U+{cp:04X}: tors={tors.normalize(nfd)!r} py={expected!r}"
         )
-    assert checked > 2000  # the sweep must actually sweep (UCD 15.0 has 2061)
+    assert checked > 2000  # the sweep must actually sweep (ucd 15.0 has 2061)
     assert confounded == _WHITESPACE_DECOMPOSING_CODEPOINTS, (
         "codepoints whose canonical decomposition is entirely Python-whitespace changed: "
         f"{', '.join(f'U+{cp:04X}' for cp in sorted(confounded))}: a Unicode-version "
@@ -90,7 +90,7 @@ def test_every_hangul_syllable_composes_like_the_interpreter() -> None:
 
 
 def test_every_python_whitespace_char_strips_from_both_ends() -> None:
-    """For every character of the RUNNING interpreter's ``str.isspace()`` set (computed,
+    """For every character of the running interpreter's ``str.isspace()`` set (computed,
     not hardcoded, so a new Python version's set is swept automatically),
     ``normalize(ws + "x")`` and ``normalize("x" + ws)`` must both be ``"x"``.
 
@@ -100,14 +100,14 @@ def test_every_python_whitespace_char_strips_from_both_ends() -> None:
     and the Unicode space block members are not ``[ \\t]`` and not line endings, so only
     the end-strip removes them, which is exactly what the assertion needs at the ends."""
     whitespace = [chr(cp) for cp in range(0x110000) if chr(cp).isspace()]
-    assert len(whitespace) > 25  # the sweep must actually sweep (UCD 15.0 has 29)
+    assert len(whitespace) > 25  # the sweep must actually sweep (ucd 15.0 has 29)
     for ws in whitespace:
         assert tors.normalize(ws + "x") == "x", f"U+{ord(ws):04X} prefix"
         assert tors.normalize("x" + ws) == "x", f"U+{ord(ws):04X} suffix"
 
 
 def test_non_whitespace_lookalikes_are_preserved() -> None:
-    """U+200B ZERO WIDTH SPACE, U+2060 WORD JOINER and U+FEFF BYTE ORDER MARK look like
+    """U+200B zero width space, U+2060 WORD JOINER and U+FEFF BYTE ORDER MARK look like
     whitespace to humans and to some pipelines, but Python's ``str.strip()`` does not
     remove them, so tors must not either (a silent drop would change hashes and diverge
     from the reference pipeline)."""
@@ -118,7 +118,7 @@ def test_non_whitespace_lookalikes_are_preserved() -> None:
 
 def test_compat_ligatures_do_not_compose() -> None:
     """tors implements NFC, not NFKC: compatibility decompositions (``decomposition()``
-    starting with ``<``) must NOT fire: U+FB01 "ﬁ" stays one codepoint rather than
+    starting with ``<``) must not fire: U+FB01 "ﬁ" stays one codepoint rather than
     becoming "fi", and likewise the other Latin ligatures. A hash pipeline that quietly
     applied NFKC would produce different digests than every consumer that expects NFC."""
     for ligature in _COMPAT_LIGATURES:
@@ -128,30 +128,30 @@ def test_compat_ligatures_do_not_compose() -> None:
 
 # --- the standalone normalization forms (nfc / nfd / nfkc / nfkd) --------------
 
-# Every decomposable codepoint, BOTH decomposition classes, every form: the
+# Every decomposable codepoint, both decomposition classes, every form: the
 # sweep discipline extended per the spec ("every canonically-
-# decomposable codepoint for nfc/nfd; every COMPATIBILITY-decomposable
+# decomposable codepoint for nfc/nfd; every compatibility-decomposable
 # codepoint for nfkc/nfkd") and strengthened one step, because the K-forms
 # also transform canonically-decomposable codepoints (NFKD decomposes
-# canonically AND compatibly) and the C-forms must leave compat codepoints
-# alone: so EVERY decomposable codepoint is checked under ALL FOUR forms, on
+# canonically and compatibly) and the C-forms must leave compat codepoints
+# alone: so every decomposable codepoint is checked under all four forms, on
 # both the raw character and its NFD rendering (the composed-input and
 # decomposed-input shapes).
 
 
 def _forms() -> dict[str, Callable[[str], str]]:
-    """The four standalone forms, resolved at CALL time so every test in this
+    """The four standalone forms, resolved at call time so every test in this
     module is independently red until the surface exists (no shared module-level
     state, no test-ordering dependency)."""
     return {"NFC": tors.nfc, "NFD": tors.nfd, "NFKC": tors.nfkc, "NFKD": tors.nfkd}
 
 
 def test_standalone_forms_sweep_over_every_decomposable_codepoint() -> None:
-    """For every codepoint with ANY decomposition mapping (canonical or
+    """For every codepoint with any decomposition mapping (canonical or
     compatibility), each standalone form must agree with the running
     interpreter's ``unicodedata.normalize`` on both the raw character and its
     NFD rendering: tors's tables and its NFKC/NFKD compat mappings match this
-    Python's everywhere, not just on sampled characters. RAW equality, no
+    Python's everywhere, not just on sampled characters. Raw equality, no
     adjustment: the standalone forms have no strip stage (the pipeline sweep's
     confound carve-out does not apply; see the next test)."""
     forms = _forms()
@@ -173,7 +173,7 @@ def test_standalone_forms_sweep_over_every_decomposable_codepoint() -> None:
                 assert tors_form(text) == expected, (
                     f"U+{cp:04X} {form}({label}): tors={tors_form(text)!r} py={expected!r}"
                 )
-    # The sweep must actually sweep (UCD 15.0: 2061 canonical, 3796 compat).
+    # The sweep must actually sweep (ucd 15.0: 2061 canonical, 3796 compat).
     assert canonical > 2000
     assert compat > 3000
 
@@ -195,11 +195,11 @@ def test_every_hangul_syllable_matches_the_interpreter_in_every_form() -> None:
 
 def test_the_pipeline_strip_confound_does_not_apply_to_the_standalone_forms() -> None:
     """The NFC sweep's {U+2000, U+2001} carve-out exists because
-    ``tors.normalize`` strips whitespace-only RESULTS: for those two codepoints
+    ``tors.normalize`` strips whitespace-only results: for those two codepoints
     the interpreter's raw NFC of their NFD forms is whitespace-only (U+2002 /
     U+2003), so the pipeline legitimately empties it and the naive raw-equality
-    assertion is confounded by the strip stage. The standalone forms have NO
-    strip stage, so the confound VANISHES: raw parity must hold for exactly
+    assertion is confounded by the strip stage. The standalone forms have no
+    strip stage, so the confound vanishes: raw parity must hold for exactly
     these codepoints, with the whitespace result preserved, pinned explicitly
     so nobody carries the pipeline sweep's adjustment over to the forms, and so
     a future change that grows the confounded set stays caught by the sweep
@@ -208,7 +208,7 @@ def test_the_pipeline_strip_confound_does_not_apply_to_the_standalone_forms() ->
         nfd = unicodedata.normalize("NFD", chr(cp))
         for form, tors_form in _forms().items():
             expected = unicodedata.normalize(form, nfd)
-            assert expected  # whitespace-only, NOT empty; the strip is what emptied it
+            assert expected  # whitespace-only, not empty; the strip is what emptied it
             assert tors_form(nfd) == expected, f"U+{cp:04X} {form}"
 
 
@@ -217,22 +217,22 @@ def test_form_divergences_are_confined_to_codepoints_the_interpreter_does_not_kn
     codepoint (surrogates are refused at the ``&str`` argument boundary by
     contract; tests/test_forms.py's surrogate class): wherever a standalone
     form's output differs from the running interpreter's, the input codepoint
-    must be one that interpreter leaves UNASSIGNED (``unicodedata.name`` is
-    None). Zero divergences on ASSIGNED codepoints; that is the load-bearing
-    per-leg parity guarantee, true on every matrix leg regardless of UCD
+    must be one that interpreter leaves unassigned (``unicodedata.name`` is
+    None). Zero divergences on assigned codepoints; that is the load-bearing
+    per-leg parity guarantee, true on every matrix leg regardless of ucd
     version, and it fails loudly on a crate table defect or a Unicode change
     that makes tors disagree with an interpreter about a character that
     interpreter knows.
 
     Why divergences on unassigned codepoints exist at all (measured, not
     theoretical): tors's tables (the ``unicode-normalization`` crate, 0.1.25)
-    are Unicode 16.0.0 (the same UCD CPython 3.14 ships), while older legs
-    run older UCDs, so the residual is the newer-UCD mappings on codepoints
-    the leg's own UCD predates. Measured per leg with the real wheel
+    are Unicode 16.0.0 (the same ucd CPython 3.14 ships), while older legs
+    run older UCDs, so the residual is the newer-ucd mappings on codepoints
+    the leg's own ucd predates. Measured per leg with the real wheel
     (residual by form, {NFC, NFD, NFKC, NFKD}):
 
     ========= ======= ==================================
-    leg       UCD     residual
+    leg       ucd     residual
     ========= ======= ==================================
     3.10.21   13.0    356  {0, 20, 158, 178}
     3.11.16   14.0    238  {0, 20, 99, 119}
@@ -249,23 +249,23 @@ def test_form_divergences_are_confined_to_codepoints_the_interpreter_does_not_kn
     mappings (the Outlined Latin capital letters and digits U+1CCD6-U+1CCF9,
     ``<font>``-decomposing to ASCII, plus U+A7F1). The 3.14 residual is the
     one surprise: even on the matched-UCD leg, U+A7F1 (which CPython 3.14's
-    own 16.0 tables leave UNASSIGNED with no decomposition) carries an
+    own 16.0 tables leave unassigned with no decomposition) carries an
     NFKC/NFKD mapping to ``"S"`` in the crate's tables, so the crate's 16.0
     snapshot is not byte-identical to CPython's; still unassigned on the
     running interpreter, so the confinement guarantee holds. This also means
     the interpreter-assigned confinement is the correct per-leg statement of
     "parity with the running interpreter" for the forms; total raw equality
-    is provably unattainable on legs whose UCD lags tors's tables, without
+    is provably unattainable on legs whose ucd lags tors's tables, without
     giving up tors's own cross-interpreter determinism guarantee (same input
     -> same output on every supported Python, the reason tors ships its own
     tables at all).
 
-    The bound below therefore SCALES with the UCD gap between tors's tables
+    The bound below therefore scales with the ucd gap between tors's tables
     and the running interpreter (``60 + 130 * gap``), not a flat number
     calibrated on one leg: per leg it leaves 3.10 -> 450 vs 356 (~1.26x),
     3.11 -> 320 vs 238 (~1.34x), 3.12/3.13 -> 190 vs 114 (~1.67x), 3.14 ->
     60 vs 2; a residual beyond the leg's own gap-scaled bound is a crate
-    table defect or a UCD jump, not an older interpreter."""
+    table defect or a ucd jump, not an older interpreter."""
     forms = _forms()
     divergent_on_assigned: list[tuple[str, int]] = []
     residual_counts: dict[str, int] = {form: 0 for form in forms}
@@ -282,10 +282,10 @@ def test_form_divergences_are_confined_to_codepoints_the_interpreter_does_not_kn
         "tors disagrees with the running interpreter about an ASSIGNED codepoint: "
         + ", ".join(f"{form} U+{cp:04X}" for form, cp in divergent_on_assigned[:10])
     )
-    # The residual must be exactly the newer-UCD mappings, not noise: empty for
-    # NFC (no NEW canonical COMPOSITIONS fire on single characters; the
+    # The residual must be exactly the newer-ucd mappings, not noise: empty for
+    # NFC (no new canonical compositions fire on single characters; the
     # additions are decompositions of newly assigned codepoints), and bounded
-    # by the leg's own UCD-gap-scaled allowance (measured residuals and
+    # by the leg's own ucd-gap-scaled allowance (measured residuals and
     # headrooms in the docstring above).
     ucd_major = int(unicodedata.unidata_version.split(".")[0])
     ucd_gap = max(_TORS_UCD_MAJOR - ucd_major, 0)

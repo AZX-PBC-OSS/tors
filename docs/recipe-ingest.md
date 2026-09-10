@@ -1,7 +1,7 @@
 # Recipe: ingesting a real document
 
-The realistic shape of turning arbitrary bytes — an uploaded file, a scraped
-page, an OCR'd PDF's raw text layer — into clean, chunked text ready for
+The realistic shape of turning arbitrary bytes (an uploaded file, a scraped
+page, an OCR'd PDF's raw text layer) into clean, chunked text ready for
 downstream use (embedding, indexing, feeding to a model). Every step below
 composes functions documented individually in the [API reference](api.md);
 this page shows the pipeline shape and the real return value at each stage.
@@ -9,8 +9,8 @@ this page shows the pipeline shape and the real return value at each stage.
 ## 1. Establish the encoding
 
 Bytes from an upload or a scrape carry no reliable encoding metadata. Check
-UTF-8 validity first — it's the common case and the cheap check — and only
-reach for a heuristic guesser on the bytes that fail it:
+UTF-8 validity first (the common case, and the cheap check) and only reach
+for a heuristic guesser on the bytes that fail it:
 
 ```python
 import tors
@@ -27,25 +27,25 @@ text
 # "Café société — déjà vu"
 ```
 
-`tors.utf8_is_valid` costs nothing but the SIMD scan — no exception flow, no
+`tors.utf8_is_valid` costs nothing but the SIMD scan: no exception flow, no
 throwaway `str`. `tors.detect_encoding` is a heuristic guesser (`chardetng`,
 the detector Firefox ships), not a validator: it always returns some codec
 name, so it only belongs after `utf8_is_valid` has already ruled out the
 common case. The returned name is a real `bytes.decode()` codec name
 (`"windows-1252"` above), so the final decode is a plain stdlib call, not a
-`tors` function — `tors` doesn't ship a decoder for encodings it can only
-guess at, since a wrong guess should surface as normal `UnicodeDecodeError`
-behavior from the stdlib, not a silently-successful call into `tors`.
+`tors` function: `tors` doesn't ship a decoder for encodings it can only
+guess at, since a wrong guess should surface as a normal `UnicodeDecodeError`
+from the stdlib, not a silently-successful call into `tors`.
 
 If the source is already known-UTF-16 (a Windows-authored `.txt`, some SDK
 exports), `tors.decode_utf16(raw, byteorder=...)` is the equivalent entry
 point and takes the same `errors="strict"`/`"replace"` choice as
-`decode_utf8`. There's no `detect_encoding` step for UTF-16 — the BOM (or an
+`decode_utf8`. There's no `detect_encoding` step for UTF-16: the BOM (or an
 explicit `byteorder=`) is the only signal, and `tors.utf16_is_valid` answers
 the validity question the same way `utf8_is_valid` does for UTF-8.
 
 For a source that's reliably UTF-8 (an API response, a database column),
-skip the branch entirely and call `tors.decode_utf8` directly — the
+skip the branch entirely and call `tors.decode_utf8` directly. The
 `errors="strict"` default raises the same `UnicodeDecodeError` the stdlib
 would on malformed bytes, so nothing is silently swallowed.
 
@@ -54,7 +54,7 @@ would on malformed bytes, so nothing is silently swallowed.
 Whatever the source, run the decoded text through `tors.normalize` before
 anything else touches it. It folds `\r\n`/`\r` to `\n`, drops trailing
 whitespace before a newline, collapses 3+ blank lines to exactly 2, and NFC-
-normalizes — the shape PDF extraction and OCR output reliably need:
+normalizes, the shape PDF extraction and OCR output reliably need:
 
 ```python
 messy = "Line one   \n\n\n\nLine two\r\nLine three  "
@@ -63,8 +63,8 @@ tors.normalize(messy)
 ```
 
 If the input was already clean, `normalize` returns the original string
-object unchanged (`tors.normalize(s) is s`) rather than a fresh allocation —
-running it unconditionally on every document costs nothing extra when there
+object unchanged (`tors.normalize(s) is s`) rather than a fresh allocation,
+so running it unconditionally on every document costs nothing when there
 was nothing to fix.
 
 ## 3. Strip markdown wrapping, if the source might carry it
@@ -87,19 +87,19 @@ tors.strip_code_fences(only_fence)
 # "print('hi')\n"
 
 tors.strip_code_fences(md) == md
-# True — md has prose around its fence, so nothing is touched
+# True: md has prose around its fence, so nothing is touched
 ```
 
 `extract_code_blocks` is the tool when you want the code and the prose
 separately (e.g. code goes to one index, prose to another). `strip_code_fences`
 is the tool when you just want the fence gone from an otherwise-code
 response and don't want to write the "is this the single-fence case" check
-yourself. If neither applies to your source — plain text, no markdown —
+yourself. If neither applies to your source (plain text, no markdown)
 skip this step.
 
 JSON model output is the next lane over, same machinery:
-`tors.repair_json` / `tors.repair_json_loads` repair malformed JSON —
-missing commas and quotes, truncated containers, stray prose — in one call,
+`tors.repair_json` / `tors.repair_json_loads` repair malformed JSON (missing
+commas and quotes, truncated containers, stray prose) in one call,
 and unwrap the single-fence case themselves via this same fence grammar, so
 a response wrapped in exactly one json-tagged fence needs no extraction
 step at all. For multiple blocks, compose the two:
@@ -129,13 +129,13 @@ chunks = tors.chunk_hierarchical(doc, 80, ["\n## ", "\n\n", ". ", " "])
 ```
 
 `chunk_hierarchical` returns `(start, end)` codepoint offsets into the
-*original* string, not copies of the text — slice `doc` yourself as shown
+*original* string, not copies of the text; slice `doc` yourself as shown
 above. The separator itself is dropped between chunks (unlike
 `tors.chunk_text`'s lossless-partition contract), which is what you want
 when splitting on a header marker: the header text stays with the section
 it introduces, and the marker itself isn't duplicated into both chunks. A
 `separators` entry may also be `None`, splicing the default accurate
-hierarchy in at that position — the one-message-per-line shape
+hierarchy in at that position; the one-message-per-line shape
 `["\n", None]` is the subject of the
 [transcripts recipe](recipe-transcripts.md).
 
@@ -151,7 +151,7 @@ chunks = tors.chunk_by_sentences(prose, 2)
 #  'This is sentence three. This is sentence four.']
 ```
 
-Every chunker in this family returns offsets, not strings — the pipeline's
+Every chunker in this family returns offsets, not strings: the pipeline's
 last step is always "slice the normalized text with these pairs." None of
 these functions makes a retrieval-quality claim for any particular
 downstream task; they guarantee the mechanical contract (correct boundaries,

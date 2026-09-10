@@ -6,46 +6,46 @@
 //! `MatchKind::LeftmostLongest` (the engine's own words: "reports leftmost
 //! matches; when there are multiple possible leftmost matches, the longest
 //! match is chosen"). The scan proceeds left to right; at each position the
-//! longest matching pattern wins regardless of its position in the list (NOT
-//! regex-alternation leftmost-FIRST priority); the scan resumes at the end of
+//! longest matching pattern wins regardless of its position in the list (not
+//! regex-alternation leftmost-first priority); the scan resumes at the end of
 //! each reported match, so matches never overlap and are emitted in strictly
 //! increasing start order. Two distinct patterns can tie at a position only by
 //! being byte-identical (both must equal the same text), so "longest" always
 //! has a strict winner except for exact duplicates, and duplicates report
-//! the FIRST index they occupy in the list, made deterministic by a
+//! the first index they occupy in the list, made deterministic by a
 //! canonical-id remap (below) that does not care which duplicate id the
 //! automaton's internals hand back.
 //!
 //! The engine is `aho-corasick` 1.x (BurntSushi's Aho-Corasick automaton
 //! inside Rust's own `regex` crate; dual `Unlicense OR MIT`, MIT elected, the
-//! election recorded in the README's dependency table). The pure-Python
+//! election recorded in docs/dependencies.md). The pure-Python
 //! differential oracle and the golden battery live in
 //! tests/test_find_patterns.py; their crate-side mirrors live below so the
 //! two sides cannot drift independently.
 //!
 //! # Byte→char offset mapping
 //!
-//! The automaton runs on UTF-8 BYTES, so `Match::start()`/`end()` are byte
+//! The automaton runs on UTF-8 bytes, so `Match::start()`/`end()` are byte
 //! offsets, but the API reports Python `str` indices (codepoints). Two
 //! properties make the conversion exact and cheap:
 //!
-//! * Whole-pattern matches land on character boundaries BY CONSTRUCTION: a
+//! * Whole-pattern matches land on character boundaries by construction: a
 //!   valid UTF-8 sequence cannot begin mid-character (its first byte is a
 //!   lead byte, never a continuation byte), so a pattern occurrence in valid
 //!   UTF-8 text starts at a char boundary, and the pattern's own bytes being
 //!   valid UTF-8 make its end a boundary too. Every byte offset the
 //!   conversion pass touches is therefore slice-safe by an invariant, not by
 //!   a check.
-//! * The matches are non-overlapping and ordered, so ONE boundary-aware
+//! * The matches are non-overlapping and ordered, so one boundary-aware
 //!   forward pass converts them all: walk the gaps and spans between
 //!   successive match boundaries with `str::chars().count()`, carrying a
 //!   byte cursor and a char cursor; each byte of the text is visited at
 //!   most once across the whole pass.
 //!
-//! The ASCII fast path: `text.is_ascii()` means every byte offset IS a char
+//! The ASCII fast path: `text.is_ascii()` means every byte offset is a char
 //! offset, so the automaton's offsets pass through unconverted and the whole
 //! mapping pass is skipped (the one `is_ascii` scan replaces it; both are
-//! single byte-oriented passes over the text). Non-ASCII PATTERNS over ASCII
+//! single byte-oriented passes over the text). Non-ASCII patterns over ASCII
 //! text never match and cannot disturb this; they simply contribute no
 //! matches.
 //!
@@ -53,7 +53,7 @@
 //!
 //! [`replace_many`] (below) applies this module's exact
 //! search semantics to replacement: the same one-pass leftmost-longest scan,
-//! with each match spliced out and its key's VALUE emitted in its place, the
+//! with each match spliced out and its key's value emitted in its place, the
 //! simultaneous-replace primitive that is to `str.replace` what
 //! `find_patterns` is to `str.find`. Its full contract, including why it
 //! needs no byte→char pass of its own, and the `Cow` identity contract on its
@@ -62,14 +62,14 @@
 //! # The compiled spelling
 //!
 //! The free functions below build their automaton (and the duplicate-id
-//! remap, or the first-value map) from the pattern list on EVERY call:
+//! remap, or the first-value map) from the pattern list on every call:
 //! the right shape for a one-off call, the wrong shape for a pipeline
-//! that runs the SAME fixed vocabulary (a redaction list, a terminology
+//! that runs the same fixed vocabulary (a redaction list, a terminology
 //! rewrite table) over many texts or many times, where the per-call build
 //! is a fixed cost the work keeps re-paying for an automaton it already
 //! had. [`CompiledPatterns`] is the `re.compile()` answer: build once,
 //! hold the automaton and the remaps behind one `Arc`, and every scan
-//! afterwards is the free function's scan CLASSES minus the build (the
+//! afterwards is the free function's scan classes minus the build (the
 //! pyo3 wrapper `tors.CompiledPatterns` in `src/py/compiled_patterns.rs`
 //! holds it; its gate is tests/test_compiled_patterns.py, which re-runs
 //! the free functions' own batteries through a compiled fixture so the
@@ -85,7 +85,7 @@
 //! # Preconditions (enforced by the wrapper before this runs)
 //!
 //! The pattern list may be empty (answers empty, and building a zero-pattern
-//! automaton is legal), but every entry must be NON-EMPTY: an empty pattern
+//! automaton is legal), but every entry must be non-empty: an empty pattern
 //! would match at every position and has no leftmost-longest meaning; the
 //! wrapper refuses it with `ValueError("empty pattern")`. The build itself
 //! can still fail on engine limits (a pattern longer than the automaton's
@@ -112,7 +112,7 @@ pub struct PatternMatch {
     pub pattern: usize,
 }
 
-/// The ONE automaton every spelling in this module drives: built
+/// The one automaton every spelling in this module drives: built
 /// leftmost-longest over the pattern list (see the module docs for the
 /// semantics). Shared by the free functions' per-call build and by
 /// [`CompiledPatterns`]'s one-time build, so the two spellings drive the
@@ -125,9 +125,9 @@ fn build_leftmost(patterns: &[&str]) -> Result<aho_corasick::AhoCorasick, BuildE
 
 /// The canonical-id remap of the find side: one slot per pattern (indexed
 /// by automaton id, which is the pattern's position in the list the
-/// automaton was built over), holding the FIRST list index that pattern
+/// automaton was built over), holding the first list index that pattern
 /// string occupies. For duplicates (and only duplicates can tie, see the
-/// module docs), a match reports the FIRST index, and the remap makes
+/// module docs), a match reports the first index, and the remap makes
 /// that deterministic regardless of which duplicate id the automaton's
 /// internals hand back.
 fn first_id_remap(patterns: &[&str]) -> Vec<usize> {
@@ -139,11 +139,11 @@ fn first_id_remap(patterns: &[&str]) -> Vec<usize> {
     first_id
 }
 
-/// The first-value map of the replace side: key string to the FIRST pair's
+/// The first-value map of the replace side: key string to the first pair's
 /// value (a dict cannot produce duplicate keys, but the slice spelling
 /// can, and the first pair wins for the value the same way the find
 /// side's remap makes the first index win). Every value lookup the
-/// replace scans perform routes through this map, so the matched span IS
+/// replace scans perform routes through this map, so the matched span is
 /// the lookup key.
 fn first_values<'a>(replacements: &'a [(&'a str, &'a str)]) -> HashMap<&'a str, &'a str> {
     let mut values: HashMap<&str, &str> = HashMap::with_capacity(replacements.len());
@@ -165,7 +165,7 @@ fn scan_matches(
 ) -> Vec<PatternMatch> {
     let mut matches = Vec::new();
     if text.is_ascii() {
-        // Fast path: byte offsets ARE char offsets; nothing to convert.
+        // Fast path: byte offsets are char offsets; nothing to convert.
         for m in ac.find_iter(text) {
             matches.push(PatternMatch {
                 start: m.start(),
@@ -206,12 +206,12 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
 }
 
 /// The number of leftmost-longest, non-overlapping matches of `patterns`
-/// in `text`, the count spelling of [`find_patterns`]: the same ONE
+/// in `text`, the count spelling of [`find_patterns`]: the same one
 /// automaton over the patterns (`MatchKind::LeftmostLongest`), the same
 /// `find_iter(text)` scan (left to right, resume at each match's end),
-/// with the matches COUNTED instead of collected.
+/// with the matches counted instead of collected.
 ///
-/// WHY its own spelling: counting is the common question ("how many
+/// Why its own spelling: counting is the common question ("how many
 /// occurrences?"), and the list spelling answers it only by materializing
 /// the full answer first: a dense corpus fills a `Vec<PatternMatch>` at
 /// ~2.5 bytes of match record per input byte (the 100 MiB dense-corpus
@@ -222,7 +222,7 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
 ///
 /// # No offset mapping
 ///
-/// Counting is offset-FREE: the number of matches does not depend on the
+/// Counting is offset-free: the number of matches does not depend on the
 /// units the offsets would be reported in, so the byte→char conversion
 /// pass of [`find_patterns`] (and the `is_ascii` fast-path decision that
 /// gates it) is pure waste here and simply does not run; the automaton's
@@ -230,19 +230,19 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
 ///
 /// # Duplicates
 ///
-/// No canonical-id remap, and WHY: duplicates are the only patterns that
+/// No canonical-id remap, and why: duplicates are the only patterns that
 /// can tie at a position, and they tie only by being byte-identical:
-/// whichever duplicate id the automaton reports, the SPAN it reports is
+/// whichever duplicate id the automaton reports, the span it reports is
 /// the same text span, the scan consumes that span exactly once, and the
 /// count therefore cannot see which id won. `find_patterns` remaps ids to
-/// make its ANSWER deterministic; a count has no ids in its answer to be
+/// make its answer deterministic; a count has no ids in its answer to be
 /// non-deterministic about.
 ///
 /// # Preconditions (enforced by the pyo3 wrapper before this runs)
 ///
 /// The same ones as [`find_patterns`]: the pattern list may be empty (a
 /// zero-pattern automaton is legal and finds nothing, so the answer is 0),
-/// and every entry must be NON-EMPTY; the wrapper refuses an empty pattern
+/// and every entry must be non-empty; the wrapper refuses an empty pattern
 /// with `ValueError("empty pattern")`. The build itself can still fail on
 /// engine limits (a pattern longer than the automaton's u32 span budget,
 /// or more patterns than its ID space), hence the `Result`, mapped by
@@ -253,7 +253,7 @@ pub fn find_patterns(patterns: &[&str], text: &str) -> Result<Vec<PatternMatch>,
 ///
 /// `count_matches(patterns, text)? ==
 /// find_patterns(patterns, text)?.len()` for every legal input: the two
-/// spellings drive the identical scan, so a disagreement is a BUG, not a
+/// spellings drive the identical scan, so a disagreement is a bug, not a
 /// tolerance; pinned over the golden battery and the tiny-alphabet
 /// exhaustive sweep by the tests below.
 pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError> {
@@ -264,20 +264,20 @@ pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError>
 }
 
 /// The simultaneous-replace primitive: `text` with every occurrence of any
-/// KEY in `replacements` spliced out and that key's VALUE emitted in its
+/// key in `replacements` spliced out and that key's value emitted in its
 /// place. It applies [`find_patterns`]'s exact search semantics (one automaton over
 /// the keys, `MatchKind::LeftmostLongest`, scan left to right, resume at
-/// each match's end) with the matched span REPLACED instead of reported.
+/// each match's end) with the matched span replaced instead of reported.
 ///
 /// This is the multi-key `str.replace` CPython lacks: chained `str.replace`
-/// calls are one WHOLE-TEXT pass per key, and each pass rescans the previous
+/// calls are one whole-text pass per key, and each pass rescans the previous
 /// pass's output, so earlier replacements can expose later keys to text they
-/// were never meant to see. A `re.sub` alternation is leftmost-FIRST instead
-/// (the alternation's ORDER decides between same-start candidates, not their
+/// were never meant to see. A `re.sub` alternation is leftmost-first instead
+/// (the alternation's order decides between same-start candidates, not their
 /// lengths) and rescans its own output through the callback. This function
 /// does neither: a longer key beats a shorter one at the same position
 /// regardless of slice order, matches never overlap (the scan resumes at the
-/// match end), and the output is NEVER re-scanned. One pass over the INPUT
+/// match end), and the output is never re-scanned. One pass over the input
 /// decides every splice, so a value that itself contains a key does not
 /// cascade. The canonical
 /// self-feeding case: `{"&": "&amp;"}` over `"&amp;"` answers
@@ -285,20 +285,20 @@ pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError>
 ///
 /// # Identity-return contract
 ///
-/// The crate's `Cow` identity convention, complete form: when NO key matches, the answer is
+/// The crate's `Cow` identity convention, complete form: when no key matches, the answer is
 /// `Cow::Borrowed(text)` and nothing is allocated; and after the output is
 /// built, a final `out == text` comparison (one O(text) pass) catches every
 /// replacement whose net effect is the identity: a value equal to its key
 /// (`{"a": "a"}`), or splices that mutually cancel (`{"b": "", "a": "ba"}`
 /// over `"ba"` deletes the `b` and regrows it inside the `a`), and returns
 /// `Cow::Borrowed(text)` for those too. The caller-visible contract is
-/// therefore exact: `replace_many(s, m)` IS `s` (borrowed, the same bytes)
+/// therefore exact: `replace_many(s, m)` is `s` (borrowed, the same bytes)
 /// exactly when `replace_many(s, m) == s`.
 ///
 /// # Duplicates
 ///
 /// A dict cannot produce duplicate keys, but the slice spelling can. The
-/// FIRST occurrence of a duplicated key wins, for the automaton id and the
+/// first occurrence of a duplicated key wins, for the automaton id and the
 /// value alike: a `HashMap<&str, usize>` of key to first index (the
 /// replace-side mirror of `find_patterns`'s canonical-id remap), with every
 /// value lookup routed through it, pins that deterministically regardless of
@@ -307,17 +307,17 @@ pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError>
 /// # No offset mapping
 ///
 /// Unlike [`find_patterns`] there is no byte→char pass here: the automaton's
-/// byte offsets only ever SLICE `text` at match boundaries, which the module
+/// byte offsets only ever slice `text` at match boundaries, which the module
 /// docs' construction already guarantees are character boundaries. They are
 /// never reported to a caller, so there is nothing to convert. The output is
 /// spliced strings, not reported offsets.
 ///
 /// # Preconditions (enforced by the pyo3 wrapper before this runs)
 ///
-/// Every key must be NON-EMPTY: an empty key would match at every position
+/// Every key must be non-empty: an empty key would match at every position
 /// and has no leftmost-longest meaning; the wrapper refuses it. Keys and
 /// values are Python `str` objects borrowed to `&str` (UTF-8 by the borrow,
-/// so the splices below cannot panic on slicing). The map may be EMPTY: no
+/// so the splices below cannot panic on slicing). The map may be empty: no
 /// key exists, nothing matches, and the input comes back borrowed. The build
 /// itself can still fail on engine limits (a key longer than the
 /// automaton's u32 span budget, or more keys than its ID space), hence the
@@ -340,7 +340,7 @@ pub fn replace_many<'a>(
 
 /// The shared splice of the replace side: [`replace_many`]'s scan over a
 /// built automaton and a validated `values` map (key string to the first
-/// pair's value; the matched span IS the key's bytes, so the span itself
+/// pair's value; the matched span is the key's bytes, so the span itself
 /// is the lookup key, and the hit is guaranteed by construction: the
 /// automaton only matches keys the map carries). Driven identically by
 /// the free spelling and the compiled one, with the identity-return
@@ -379,16 +379,16 @@ fn scan_replace<'a>(
     Cow::Owned(out)
 }
 
-/// The length-preserving redaction spelling of [`replace_many`]: the SAME
+/// The length-preserving redaction spelling of [`replace_many`]: the same
 /// one-automaton leftmost-longest, non-overlapping, never-rescanned scan
 /// (the shared [`replace_automaton`] build, the same `find_iter(text)` walk,
 /// resume at each match's end, first-duplicate-wins value lookup), but each
-/// matched span is replaced by a MASKED value of exactly the span's
-/// CHARACTER count, and every non-matching span passes through untouched in
+/// matched span is replaced by a masked value of exactly the span's
+/// character count, and every non-matching span passes through untouched in
 /// place, so `out.chars().count() == text.chars().count()`, always.
 ///
-/// WHY this spelling exists: when text is redacted for logs, training
-/// corpora, or PII pipelines, every downstream offset computed BEFORE the
+/// Why this spelling exists: when text is redacted for logs, training
+/// corpora, or PII pipelines, every downstream offset computed before the
 /// redaction (`find_patterns` spans, word/sentence bound indices, diff
 /// opcodes) must still be valid on the redacted output. `replace_many`
 /// breaks that the moment any value's character length differs from its
@@ -398,20 +398,20 @@ fn scan_replace<'a>(
 /// # The mask rule (pinned)
 ///
 /// For a matched span of L characters and its key's value V of C
-/// characters, exactly ONE of two branches fires: they are mutually
+/// characters, exactly one of two branches fires: they are mutually
 /// exclusive, decided solely by which side of L the value's character count
 /// falls:
 ///
-/// * C >= L (value at least as long): TRUNCATION. The value's first L
+/// * C >= L (value at least as long): truncation. The value's first L
 ///   characters are emitted; the mask is never consulted.
-/// * C < L (value shorter): PADDING. The whole value is emitted, followed
+/// * C < L (value shorter): padding. The whole value is emitted, followed
 ///   by L − C copies of `mask`.
 ///
 /// Worked examples, the consumer row and its mirrors:
 ///
 /// * `replace_many_masked("the cat sat", &[("cat", "[REDACTED]")], '*')`
 ///   → `"the [RE sat"`: the span "cat" is 3 chars, the value is 10 ≥ 3, so
-///   its FIRST 3 chars "[RE" are emitted; no `'*'` appears in the output.
+///   its first 3 chars "[RE" are emitted; no `'*'` appears in the output.
 /// * the same call with `&[("cat", "X")]` → `"the X** sat"`: 1 < 3, so
 ///   "X" plus two masks.
 /// * the same call with `&[("cat", "")]` → `"the *** sat"`: the
@@ -429,37 +429,37 @@ fn scan_replace<'a>(
 /// therefore accounted for by an equal number of output characters, so
 /// the character count, and hence every character-unit offset, is preserved.
 ///
-/// The guarantee is in CHARACTERS, the Python-visible unit every offset
-/// this crate reports is in. BYTE length may change: a multibyte value or
+/// The guarantee is in characters, the Python-visible unit every offset
+/// this crate reports is in. Byte length may change: a multibyte value or
 /// mask replaces the matched key's bytes (`"a"` → `"é"` is 1 char to 1
-/// char but 1 byte to 2), so byte-unit arithmetic on the output is NOT
+/// char but 1 byte to 2), so byte-unit arithmetic on the output is not
 /// preserved. This is by design, because no byte-unit offset is ever reported.
 ///
 /// # Identity-return contract
 ///
-/// The same `Cow` identity convention, complete form: when NO key matches, the
+/// The same `Cow` identity convention, complete form: when no key matches, the
 /// answer is `Cow::Borrowed(text)` and nothing is allocated; and the final
 /// `out == text` comparison catches every masked replacement whose net
 /// effect is the identity: a value equal to its key (the mask never
-/// needed), a truncation whose first L chars ARE the key (`("ab", "abcd")`
+/// needed), a truncation whose first L chars are the key (`("ab", "abcd")`
 /// over `"ab"`), a padding that regrows it (`("ab", "a")` with mask `'b'`),
 /// returning the input borrowed for those too. The caller-visible
-/// contract is exact: `replace_many_masked(s, m, c)` IS `s` (borrowed, the
+/// contract is exact: `replace_many_masked(s, m, c)` is `s` (borrowed, the
 /// same bytes) exactly when it `== s`.
 ///
 /// # No offset mapping
 ///
 /// The same reasoning as [`replace_many`]: the automaton's byte offsets
-/// only ever SLICE `text` at match boundaries (character boundaries by the
+/// only ever slice `text` at match boundaries (character boundaries by the
 /// module docs' construction) and count the span's characters. They are
 /// never reported, so there is nothing to convert.
 ///
 /// # Preconditions (enforced by the pyo3 wrapper before this runs)
 ///
-/// Every key NON-EMPTY (an empty key would match at every position and has
+/// Every key non-empty (an empty key would match at every position and has
 /// no leftmost-longest meaning, the same refusal as `replace_many`); the
-/// map may be EMPTY (no key exists, nothing matches, the input comes back
-/// borrowed); and `mask` is exactly ONE character, by type here (a `char`
+/// map may be empty (no key exists, nothing matches, the input comes back
+/// borrowed); and `mask` is exactly one character, by type here (a `char`
 /// is one codepoint), enforced on the Python side by the wrapper (a
 /// single-character `str`; a multi-char mask would break the L − C padding
 /// arithmetic, which counts characters). The build itself can still fail
@@ -486,7 +486,7 @@ pub fn replace_many_masked<'a>(
 
 /// The shared masked splice: [`replace_many_masked`]'s scan over a built
 /// automaton and a validated `values` map, each matched span replaced by
-/// the masked value of exactly the span's CHARACTER count (the mask rule
+/// the masked value of exactly the span's character count (the mask rule
 /// documented on [`replace_many_masked`]), driven identically by the free
 /// and compiled spellings.
 fn scan_replace_masked<'a>(
@@ -536,7 +536,7 @@ fn scan_replace_masked<'a>(
 }
 
 /// The call-time replacements-validation failure: the dict handed to a
-/// compiled replace call must key EXACTLY the compiled pattern set (every
+/// compiled replace call must key exactly the compiled pattern set (every
 /// pattern paired with a value, no other keys), because the automaton is
 /// the compiled part and can only ever match that set; a key outside it
 /// could never be honored (the free function would have built it in), and
@@ -571,7 +571,7 @@ impl ReplacementsMismatch {
 }
 
 /// A pattern list compiled once (the module docs' compiled spelling): the
-/// ONE leftmost-longest automaton over the list, the owned pattern
+/// one leftmost-longest automaton over the list, the owned pattern
 /// strings, the find side's canonical-id remap, and the pattern-string to
 /// first-index map the replace side validates call-time dicts against.
 /// Immutable after [`CompiledPatterns::build`], so sharing one behind an
@@ -600,7 +600,7 @@ pub struct CompiledPatterns {
 
 impl CompiledPatterns {
     /// The one-time build: the automaton, the remaps, and the owned
-    /// pattern strings, from a NON-EMPTY-entry pattern list (the empty
+    /// pattern strings, from a non-empty-entry pattern list (the empty
     /// list is legal and compiles to a zero-pattern automaton that finds
     /// nothing; the entry-level refusal is the caller's, the same
     /// `ValueError("empty pattern")` contract the free functions' wrapper
@@ -709,7 +709,7 @@ mod tests {
             .unwrap_or_else(|err| panic!("automaton build failed: {err}"))
     }
 
-    /// The brute-force leftmost-longest reference, in CHARACTER space (a
+    /// The brute-force leftmost-longest reference, in character space (a
     /// Vec<char> view of the text, `str::starts_with` per position), the
     /// mirror of the Python oracle in tests/test_find_patterns.py, kept in
     /// lockstep with it so the two sides cannot drift independently.
@@ -739,7 +739,7 @@ mod tests {
         out
     }
 
-    /// The brute-force leftmost-longest REPLACE reference, in CHARACTER space
+    /// The brute-force leftmost-longest replace reference, in character space
     /// (a `Vec<char>` view of the text, `str::starts_with` per position), the
     /// replace-side mirror of `reference`, kept in the same lockstep
     /// discipline. The first occurrence of a duplicated key wins for the
@@ -790,7 +790,7 @@ mod tests {
             find(&["ab", "abc", "abcd"], "abcdabcab"),
             vec![(0, 4, 2), (4, 7, 1), (7, 9, 0)]
         );
-        // The longest that FITS, not the longest listed.
+        // The longest that fits, not the longest listed.
         assert_eq!(find(&["aaaa", "aa"], "aaa"), vec![(0, 2, 1)]);
         // Non-overlap: "aaaa" consumes four, then the tail matches "aa".
         assert_eq!(find(&["aa", "aaaa"], "aaaaaa"), vec![(0, 4, 1), (4, 6, 0)]);
@@ -809,7 +809,7 @@ mod tests {
 
     #[test]
     fn duplicate_patterns_report_the_first_index() {
-        // Identical patterns are legal; the FIRST index is the reported one,
+        // Identical patterns are legal; the first index is the reported one,
         // and the canonical-id remap makes that deterministic regardless of which
         // duplicate id the automaton's internals hand back.
         assert_eq!(find(&["abc", "abc"], "abcabc"), vec![(0, 3, 0), (3, 6, 0)]);
@@ -825,7 +825,7 @@ mod tests {
     fn count_matches_is_the_length_of_find_patterns_on_the_golden_battery() {
         // The count/list invariant over the module's existing golden battery:
         // the overlap pins and the multibyte mapping battery re-run as
-        // (patterns, text) pairs, each count checked against BOTH the list
+        // (patterns, text) pairs, each count checked against both the list
         // spelling and the char-space reference (the count of the oracle's
         // answer is the independent differential: the list spelling's own
         // rows above pin find == oracle, so a disagreement in either lane is
@@ -889,9 +889,9 @@ mod tests {
 
     #[test]
     fn offsets_are_characters_not_bytes_over_multibyte_text() {
-        // The mapping battery: every expectation is in CHARACTER units; a
+        // The mapping battery: every expectation is in character units; a
         // byte-identity bug misreports each one (e.g. "café" at char 0 would
-        // end at 5 in bytes instead of 4 in chars). Every row is ALSO checked
+        // end at 5 in bytes instead of 4 in chars). Every row is also checked
         // against the char-space reference: hand-pinned literal expectations
         // are error-prone (a mistyped text or a longest-that-fits miscount is
         // easy to write by hand), so a wrong row is caught by disagreement
@@ -923,8 +923,8 @@ mod tests {
             (vec![family], format!("hi{family}!"), vec![(2, 7, 0)]),
             // Emoji + variation selector (a combining mark): 2 chars / 7 bytes.
             (vec![crab], format!("{crab}!"), vec![(0, 2, 0)]),
-            // ASCII pattern over NON-ASCII text: the is_ascii fast path must
-            // NOT be taken (byte and char offsets diverge after the é).
+            // ASCII pattern over non-ASCII text: the is_ascii fast path must
+            // not be taken (byte and char offsets diverge after the é).
             (vec!["ab"], "éabéab".to_string(), vec![(1, 3, 0), (4, 6, 0)]),
             (vec!["éab"], "東京éab".to_string(), vec![(2, 5, 0)]),
             (
@@ -959,7 +959,7 @@ mod tests {
     fn the_ascii_fast_path_agrees_with_the_conversion_pass() {
         // The same pattern over an ASCII text (offsets pass through) and over
         // a non-ASCII text containing the same ASCII core (conversion pass)
-        // must produce the same CHARACTER answer.
+        // must produce the same character answer.
         assert_eq!(find(&["abc"], "xabcx"), vec![(1, 4, 0)]);
         assert_eq!(find(&["abc"], "éabcé"), vec![(1, 4, 0)]);
     }
@@ -1064,7 +1064,7 @@ mod tests {
             (vec![("aaaa", "z"), ("aa", "b")], "aaaaaa", "zb"),
             // Deletion via an empty value.
             (vec![("a", "")], "banana", "bnn"),
-            // The output is NEVER re-scanned: the "ba" emitted for "a" is not
+            // The output is never re-scanned: the "ba" emitted for "a" is not
             // itself matched, and the "&amp;" emitted for "&" does not grow.
             (vec![("a", "ba")], "a", "ba"),
             (vec![("&", "&amp;")], "&amp;", "&amp;amp;"),
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn duplicate_keys_report_the_first_pairs_value() {
         // A dict cannot produce duplicate keys, but the slice spelling can;
-        // the FIRST pair wins for the value: the remap routes every lookup
+        // the first pair wins for the value: the remap routes every lookup
         // through the first index, whatever id the automaton hands back.
         assert_eq!(&*replace(&[("a", "1"), ("a", "2")], "aa"), "11");
         assert_eq!(
@@ -1127,7 +1127,7 @@ mod tests {
             "XX"
         );
         assert_eq!(&*replace(&[("a", ""), ("a", "keep")], "banana"), "bnn");
-        // Duplicates of a key that LOSES to a longer one are inert either way.
+        // Duplicates of a key that loses to a longer one are inert either way.
         assert_eq!(
             &*replace(&[("ab", "1"), ("ab", "3"), ("abc", "2")], "abc"),
             "2"
@@ -1205,7 +1205,7 @@ mod tests {
 
     /// The pinned mask rule as a test-side spelling: the value's first `len`
     /// characters, or the value plus `len` − value_chars masks. Used to
-    /// reconstruct expected SPAN contents in the offsets test; the golden
+    /// reconstruct expected span contents in the offsets test; the golden
     /// literals and the oracle below stay independent of it.
     fn masked_value(value: &str, len: usize, mask: char) -> String {
         let value_chars = value.chars().count();
@@ -1218,10 +1218,10 @@ mod tests {
         }
     }
 
-    /// The brute-force leftmost-longest MASKED-replace reference, in
-    /// CHARACTER space (a `Vec<char>` view of the text, `str::starts_with`
+    /// The brute-force leftmost-longest masked-replace reference, in
+    /// character space (a `Vec<char>` view of the text, `str::starts_with`
     /// per position), the masked mirror of `reference_replace`, kept in
-    /// the same lockstep discipline, with the masking spelled INLINE (not
+    /// the same lockstep discipline, with the masking spelled inline (not
     /// via `masked_value`) so the differential is against an independent
     /// implementation. The first occurrence of a duplicated key wins for
     /// the value by the same strict `>` that keeps the first on length
@@ -1272,7 +1272,7 @@ mod tests {
     fn golden_masked_cases_are_pinned() {
         // Every row is checked against the masked oracle as well, the same
         // table discipline as the replace battery. The "[RE" row is the one
-        // the rule pins hardest: the value is LONGER than the span, so
+        // the rule pins hardest: the value is longer than the span, so
         // truncation fires and the mask is never consulted ("[RE", not
         // "[RE*" and not "[REDACTED]"); the "X**" row is the mirror.
         type MaskedCase<'a> = (Vec<(&'a str, &'a str)>, &'a str, char, &'a str);
@@ -1303,7 +1303,7 @@ mod tests {
             (vec![("a", "ba")], "aa", '*', "bb"),
             // Value == key: the mask is never needed; the text survives.
             (vec![("cat", "cat")], "the cat sat", '*', "the cat sat"),
-            // Multibyte MASK: padding counts characters, so a 2-byte mask
+            // Multibyte mask: padding counts characters, so a 2-byte mask
             // still pads one character per missing slot.
             (vec![("cat", "X")], "the cat sat", 'é', "the Xéé sat"),
             // CJK key over CJK text: a 2-char span, a 1-char value → 1 mask.
@@ -1334,9 +1334,9 @@ mod tests {
     fn masked_output_preserves_find_patterns_offsets() {
         // The spelling's whole point, made executable through the module's
         // own find_patterns the way a real pipeline runs it: compute the
-        // match spans on the ORIGINAL text FIRST, redact, then assert the
+        // match spans on the original text first, redact, then assert the
         // redacted output sliced at those same spans is the masked value of
-        // exactly the span's length, and every character OUTSIDE the spans
+        // exactly the span's length, and every character outside the spans
         // is the input's own, in place: the pre-redaction offsets stay
         // valid on the post-redaction text.
         type OffsetCase<'a> = (Vec<(&'a str, &'a str)>, &'a str, char);
@@ -1388,8 +1388,8 @@ mod tests {
 
     #[test]
     fn masked_length_invariant_holds_in_chars_and_byte_length_may_change() {
-        // The guarantee is CHARACTERS (the Python-visible unit); BYTE length
-        // is explicitly NOT preserved, pinned here so nobody mistakes the
+        // The guarantee is characters (the Python-visible unit); byte length
+        // is explicitly not preserved, pinned here so nobody mistakes the
         // contract. 1 char in → 1 char out, but 1 byte in → 2 bytes out.
         let out = replace_masked(&[("a", "é")], "a", '*');
         assert_eq!(&*out, "é");
@@ -1417,7 +1417,7 @@ mod tests {
             replace_masked(&[("a", "a")], "aaa", '*'),
             Cow::Borrowed(s) if s == "aaa"
         ));
-        // Truncation net-identity: the value's first L chars ARE the key,
+        // Truncation net-identity: the value's first L chars are the key,
         // including the canonical self-feeding pair, whose every "&" span
         // truncates "&amp;" back to "&".
         assert!(matches!(
@@ -1465,17 +1465,17 @@ mod tests {
 
     #[test]
     fn duplicate_keys_report_the_first_pairs_value_masked() {
-        // Mirror of replace_many's duplicate pin: the FIRST pair wins for
+        // Mirror of replace_many's duplicate pin: the first pair wins for
         // the value (the shared replace_automaton remap routes the lookup),
         // whatever id the automaton hands back for the duplicated key.
         assert_eq!(
             &*replace_masked(&[("cat", "dog"), ("cat", "XXXXX")], "the cat sat", '*'),
             "the dog sat"
         );
-        // Padding from the FIRST pair: ("a", "") pads each 1-char span to
+        // Padding from the first pair: ("a", "") pads each 1-char span to
         // one mask; the second pair's "ZZ" never fires.
         assert_eq!(&*replace_masked(&[("a", ""), ("a", "ZZ")], "aa", '#'), "##");
-        // Duplicates of a key that LOSES to a longer key are inert either
+        // Duplicates of a key that loses to a longer key are inert either
         // way: "abc" beats "ab", and its own value pads to the 3-char span.
         assert_eq!(
             &*replace_masked(&[("ab", "1"), ("ab", "3"), ("abc", "2")], "abc", '*'),
@@ -1494,7 +1494,7 @@ mod tests {
         // spelling is differentially pinned over every longest-wins /
         // resume / deletion / never-rescanned / duplicate interaction it
         // can have there (the sweep's values are all shorter-or-equal, so
-        // the TRUNCATION lane is carried by the golden battery and the
+        // the truncation lane is carried by the golden battery and the
         // offsets rows above). Each row asserts three things: the
         // differential against the char-space oracle, the length invariant
         // (out chars == text chars, the spelling's whole point, on every
@@ -1573,7 +1573,7 @@ mod tests {
         // The exhaustive sweep, compiled side: the same 2,520 pairs the
         // free spelling's own sweep covers (every pattern list of size 0-3
         // over {"a", "ab", "b"} × every text over {"a", "b"} up to length
-        // 5), each list compiled ONCE and both find spellings and both
+        // 5), each list compiled once and both find spellings and both
         // count spellings run over it, exact list/number equality with
         // the free functions and the char-space reference.
         let pool = ["a", "ab", "b"];
@@ -1666,7 +1666,7 @@ mod tests {
     fn compiled_replace_parity_over_the_tiny_alphabet_sweep() {
         // The exhaustive sweep, replace side: every replacement list of
         // size 0-2 over the keys {"a", "ab", "b"} with values {"X", ""},
-        // each list's KEY SET compiled once and the same pairs validated
+        // each list's key set compiled once and the same pairs validated
         // and spliced through the compiled route, exact equality with the
         // free replace and the char-space oracle, plus the Cow contract
         // (borrowed exactly when the oracle's answer equals the input).
@@ -1724,7 +1724,7 @@ mod tests {
     fn compiled_replace_validation_is_the_exact_key_set() {
         // The call-time contract, pinned on the error contents: unknown
         // keys and missing values are each refused, the exact key set
-        // passes, and duplicates in the compiled LIST collapse to the one
+        // passes, and duplicates in the compiled list collapse to the one
         // dict key (the set semantics, not list-position semantics).
         let cp = compiled(&["cat", "catalogue", "cat"]);
         // The exact set passes (order-free: the pairs are a slice, the
@@ -1756,7 +1756,7 @@ mod tests {
         // Duplicates in the pairs slice collapse to the one key (set
         // semantics), and first-pair-wins routing is pinned through the
         // parity sweep above (duplicate keys in the free slice spelling):
-        // here the duplicate-only pairing is a MISSING failure, because
+        // here the duplicate-only pairing is a missing failure, because
         // "catalogue" stays unvalued.
         assert_eq!(
             cp.replace_values(&[("cat", "first"), ("cat", "second")])

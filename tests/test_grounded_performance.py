@@ -1,33 +1,33 @@
-"""The is_grounded wall lane: pin the fuzzy scan's COST SHAPE with
+"""The is_grounded wall lane: pin the fuzzy scan's cost shape with
 machine-speed-immune ratios (never absolute times), each cell asserting its
 verdict in-cell so a perf gate can never silently diverge from the
 correctness contract.
 
 The shapes, from src/grounded_impl.rs's contract:
 
-- early-exit: a one-typo near-match at a grid-ALIGNED offset (its aligned
+- early-exit: a one-typo near-match at a grid-aligned offset (its aligned
   coarse window scores r = 40/41, so the coarse scan breaks within a few
   windows). The sliding-window walker means the call consumes only the
-  prefix it diffed — the only O(source) work left is the exact-containment
+  prefix it diffed: the only O(source) work left is the exact-containment
   floor's own containment pass. Gate: the fuzzy call's wall stays within a
   small factor of a bare `claim in source` on the same bytes; before this
   PR's search-engine and windowing work the same cell measured 7.6x that
   factor at 256 KiB (247us, an O(source) Vec<char> collect plus std
   contains' non-SIMD two-way scan).
 - full-scan: an unrelated claim (nothing matches, no candidates collected,
-  no refinement) — the linear-in-source coarse scan. Gate: quadrupling the
+  no refinement): the linear-in-source coarse scan. Gate: quadrupling the
   source quadruples the wall (linear), never superlinear.
-- band-flood: the adversarial shape — seven-typo decoys at grid-aligned
+- band-flood: the adversarial shape: seven-typo decoys at grid-aligned
   offsets keep every coarse window in the [0.5, 0.85) candidate band, so
-  the refinement runs its FULL constant budget (64 candidates x ~17 fine
+  the refinement runs its full constant budget (64 candidates x ~17 fine
   windows) on top of the coarse scan. Gate: quadrupling the source still
-  quadruples the wall — the refinement's add-on must stay constant, not
+  quadruples the wall: the refinement's add-on must stay constant, not
   per-window (a per-window refinement would blow past the slack a
   quadrupling allows). The cell's verdict is asserted too: past 64 band
-  windows the real region is evicted — the pinned adversarial limit
+  windows the real region is evicted: the pinned adversarial limit
   (test_grounded.py's eviction pin carries the oracle agreement on this
   shape at tractable sizes).
-- floor: a verbatim claim returns at the exact-containment floor — one
+- floor: a verbatim claim returns at the exact-containment floor: one
   `contains` pass, no windowing. Gate: the fuzzy call's wall stays within
   a small factor of a bare `claim in source`.
 
@@ -119,7 +119,7 @@ def test_early_exit_costs_little_more_than_the_floor_contains() -> None:
 def test_linear_shapes_stay_linear(name: str, build: Callable[[int], str], claim: str) -> None:
     """Quadrupling the source must quadruple the wall (within cache slack)
     on both the plain full scan (no candidates, no refinement) and the
-    adversarial band flood (the refinement's FULL constant budget runs on
+    adversarial band flood (the refinement's full constant budget runs on
     every call): a per-window refinement or a superlinear coarse pass
     would blow the 6x slack a quadrupling allows."""
     small, large = build(64), build(256)

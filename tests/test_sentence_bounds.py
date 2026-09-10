@@ -1,44 +1,44 @@
 """Contract gate for the sentence surface: ``tors.sentence_bounds`` and
 ``tors.sentence_bounds_iter``: UAX #29 sentence-boundary segmentation, the
-capability the stdlib LACKS (the gap is the point: ``unicodedata`` exposes
+capability the stdlib lacks (the gap is the point: ``unicodedata`` exposes
 the properties but no segmenter, exactly as for graphemes and words; the
 crate backing this surface, unicode-segmentation 1.13.3, implements rules
 SB1-SB999 over Unicode 17.0.0 tables, and every rule cited below has been
 stable across Unicode 11-17).
 
 No stdlib oracle exists, so the pins are the segmentation gate's shape
-(tests/test_segmentation.py): a HAND-DERIVED table of expected values for
-the tricky cases, each derived from its cited UAX #29 rule BEFORE running
+(tests/test_segmentation.py): a hand-derived table of expected values for
+the tricky cases, each derived from its cited UAX #29 rule before running
 it against the implementation (every row below was also verified against
 the crate-side battery in src/segmentation_impl.rs; no row disagreed),
-plus STRUCTURAL properties over hypothesis-generated text that must hold
+plus structural properties over hypothesis-generated text that must hold
 for any conforming segmenter, plus the list/iter sequence parity.
 
 Presentation quirks and limits, pinned rather than hidden:
 
-- **Trailing spaces belong to the PRECEDING sentence** (SB9-SB11): the
+- **Trailing spaces belong to the preceding sentence** (SB9-SB11): the
   boundary after a terminator lands only after the terminator's trailing
   ``Close* Sp*``; SB9/SB10 keep closing punctuation and spaces attached,
   SB11 then breaks before the next non-space. ``"One. Two."`` segments as
-  ``"One. "`` + ``"Two."``, the first sentence CARRYING the inter-sentence
-  space. That is what the rules say the boundary IS, not a crate artifact;
+  ``"One. "`` + ``"Two."``, the first sentence carrying the inter-sentence
+  space. That is what the rules say the boundary is, not a crate artifact;
   trim at the call site if trimmed sentences are wanted.
 - **Rule-based only**: UAX #29 sentence segmentation is rule-driven and
   carries no dictionary segmentation for spaceless scripts
   (Thai/Khmer/Burmese/Japanese sentence-adjacent shapes are a
   dictionary-based problem ICU4X addresses with a heavyweight model); the
   limitation note shared with ``word_bounds``, recorded here so no caller
-  mistakes this for an ICU-grade segmenter.
+  mistakes this for an icu-grade segmenter.
 
 The API contract decisions pinned here (from the segmentation
 precedents, reused verbatim):
 
-- OFFSETS, never string lists: ``(start, end)`` pairs in PYTHON STR INDEX
-  units (codepoints), so ``text[start:end]`` IS the sentence;
+- offsets, never string lists: ``(start, end)`` pairs in Python str index
+  units (codepoints), so ``text[start:end]`` is the sentence;
 - ``sentence_bounds_iter`` is the streaming spelling (the
   ``word_bounds_iter`` design): one detached whole-text pass at
-  construction, the SAME sequence as the list API per ``__next__``, and
-  ``__length_hint__`` reporting the REMAINING count, pinned to exact
+  construction, the same sequence as the list API per ``__next__``, and
+  ``__length_hint__`` reporting the remaining count, pinned to exact
   sequence parity below, its GIL band in tests/test_gil_release.py.
 """
 
@@ -51,18 +51,18 @@ from hypothesis import strategies as st
 from tors import sentence_bounds, sentence_bounds_iter, sentence_count
 
 # Built from codepoints (pure-ASCII source, per the suite's convention).
-_PS = chr(0x2029)  # PARAGRAPH SEPARATOR: SB4's Sep class
-_RDQ = chr(0x201D)  # RIGHT DOUBLE QUOTATION MARK: Close in SB9's sense
+_PS = chr(0x2029)  # paragraph separator: SB4's Sep class
+_RDQ = chr(0x201D)  # right double quotation mark: Close in SB9's sense
 _IDEOGRAPHIC_STOP = chr(0x3002)  # 。: STerm (Sentence_Terminal=Yes)
 _TOKYO = chr(0x6771) + chr(0x4EAC)  # 東京
 _OSAKA = chr(0x5927) + chr(0x962A)  # 大阪
 _CJK_ROW = _TOKYO + _IDEOGRAPHIC_STOP + _OSAKA + _IDEOGRAPHIC_STOP  # 東京。大阪。
 
 # (text, expected bounds): every row's value derived from the cited rule
-# BEFORE running it against the implementation, then verified crate-side
+# before running it against the implementation, then verified crate-side
 # (src/segmentation_impl.rs pins the same rows); no row disagreed.
 _CASES: list[tuple[str, list[tuple[int, int]]]] = [
-    # SB3: CR × LF: the CRLF never splits; SB4 then breaks AFTER the LF,
+    # SB3: CR × LF: the CRLF never splits; SB4 then breaks after the LF,
     # so the separator rides the first sentence and "b." is its own.
     ("a\r\nb.", [(0, 3), (3, 5)]),
     # SB4: a break after each paragraph separator (CR, LF, Sep): the
@@ -79,7 +79,7 @@ _CASES: list[tuple[str, list[tuple[int, int]]]] = [
     ("etc. and so on", [(0, 14)]),
     # SB9/SB10/SB11: the terminator's Close (the plain quote here, the
     # U+201D right double quotation mark below, Line_Break=Quotation, so
-    # Close in SB9's sense) and Sp* attach to the PRECEDING sentence; SB11
+    # Close in SB9's sense) and Sp* attach to the preceding sentence; SB11
     # breaks before "Now" (Upper, so SB8's lowercase continuation does not
     # apply). Both rows span (0, 16) / (16, 23): the quote at 14 and the
     # space at 15 ride sentence 1.
@@ -88,18 +88,18 @@ _CASES: list[tuple[str, list[tuple[int, int]]]] = [
     # The trailing-space presentation quirk, rule-derived and pinned:
     # SB10 keeps the inter-sentence space with sentence 1, and SB11 breaks
     # only before the non-space "T": "One. " + "Two.". The first segment
-    # CARRIES the space; that is the rule, not a bug.
+    # carries the space; that is the rule, not a bug.
     ("One. Two.", [(0, 5), (5, 9)]),
     # SB11 over an ideographic terminator: U+3002 is STerm
     # (Sentence_Terminal=Yes), so each 。 ends its sentence in place.
     (_CJK_ROW, [(0, 3), (3, 6)]),
-    # SB8a: SATerm Close* Sp* × (SContinue | SATerm): "?!" is ONE
+    # SB8a: SATerm Close* Sp* × (SContinue | SATerm): "?!" is one
     # terminator run, not two sentences; SB10/SB11 then attach the space
     # and break before "Yes".
     ("Wow?! Yes.", [(0, 6), (6, 10)]),
     ("Stop! Go.", [(0, 6), (6, 9)]),
     # Degenerates: empty is empty; spaces-only and terminator-free text
-    # are each ONE segment: SB998 joins Any × Any, and no interior rule
+    # are each one segment: SB998 joins Any × Any, and no interior rule
     # ever fires, so only SB1/SB2 bound the text.
     ("", []),
     ("   ", [(0, 3)]),
@@ -211,7 +211,7 @@ class TestSentenceBoundsIter:
 
     def test_length_hint_tracks_partial_consumption(self) -> None:
         """``__length_hint__`` (what ``list()``/``tuple()`` preallocation and
-        the interpreter's own optimizations consult) is the REMAINING count:
+        the interpreter's own optimizations consult) is the remaining count:
         the full count at construction, decremented by each ``next()``, zero
         at exhaustion, never the original length after consumption."""
         expected = sentence_bounds("One. Two. Three.")
@@ -259,8 +259,8 @@ class TestSentenceBoundsIter:
 
 class TestSentenceCount:
     """The count spelling of the sentence contract: ``sentence_count(t)
-    == len(sentence_bounds(t))``, the SAME UAX #29 sentence segmentation
-    under the SAME argument boundary, with none of the list API's
+    == len(sentence_bounds(t))``, the same UAX #29 sentence segmentation
+    under the same argument boundary, with none of the list API's
     O(sentences) marshalling: the whole rule walk runs detached and the
     return is one int (the ``grapheme_count`` no-marshalling shape; its GIL
     band is the ping floor, the grapheme_count cells' band, measured in
@@ -301,7 +301,7 @@ class TestSentenceCount:
 
     def test_the_degenerates(self) -> None:
         """The fixed degenerate anchors, the list battery's own rows: empty
-        is 0; spaces-only and terminator-free text are each ONE segment
+        is 0; spaces-only and terminator-free text are each one segment
         (SB998 joins Any × Any, and no interior rule ever fires, so only
         SB1/SB2 bound the text; the count spelling must not silently
         re-scope "sentence" to "terminator-delimited run", which would call

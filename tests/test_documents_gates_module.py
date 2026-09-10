@@ -1,16 +1,16 @@
 """Unit pins for the oracle library itself (tests/documents_gates.py):
 every normalization the aligner performs, every checker's verdict, and the
-raw-tier honesty rule — a unit with no escapable characters must appear in
-the output VERBATIM (whitespace-collapsed), not only through the aligned
+raw-tier honesty rule: a unit with no escapable characters must appear in
+the output verbatim (whitespace-collapsed), not only through the aligned
 comparison. The gates are the suite's definition of "good"; these tests are
 the gates' own contract. Pure Python, no payload needed.
 
 The raw tier exists because the aligned comparison is deliberately
 spelling-tolerant (both sides run through :func:`align`, whose fixpoint
 entity-unescape accepts any escape depth). That tolerance is right for
-units that CARRY escapable shapes as content, but for plain units it can
+units that carry escapable shapes as content, but for plain units it can
 mask an engine that HTML-escapes or mangles text it had no reason to
-touch — a plain unit has no legitimate alternative spelling."""
+touch: a plain unit has no legitimate alternative spelling."""
 
 from __future__ import annotations
 
@@ -125,8 +125,8 @@ def test_a_missing_unit_is_a_failure_that_names_it() -> None:
 
 
 def test_escapable_carrying_units_align_through_their_own_spelling() -> None:
-    # The unit's literal backtick/entity content is normalized on BOTH
-    # sides — the engine emitting it verbatim (or escaped) still aligns.
+    # The unit's literal backtick/entity content is normalized on both
+    # sides: the engine emitting it verbatim (or escaped) still aligns.
     truth = _Truth(paragraphs=["rate & yield", "literal `tick` mark"])
     output = "rate &amp; yield\n\nliteral `tick` mark\n"
     assert check_alignment(truth, output).passed
@@ -134,9 +134,9 @@ def test_escapable_carrying_units_align_through_their_own_spelling() -> None:
 
 def test_a_plain_unit_must_appear_verbatim_not_only_aligned() -> None:
     # The masking case the raw tier exists for: the aligned comparison
-    # unescapes entities on BOTH sides, so an engine that entity-encoded
-    # PLAIN text would still "align". A plain word has no legitimate
-    # alternative spelling — it must be present verbatim.
+    # unescapes entities on both sides, so an engine that entity-encoded
+    # plain text would still "align". A plain word has no legitimate
+    # alternative spelling: it must be present verbatim.
     truth = _Truth(paragraphs=["it's due for review"])
     encoded_output = "it&#39;s due for review"  # aligns, but is not the text
     result = check_alignment(truth, encoded_output)
@@ -150,7 +150,7 @@ def test_a_plain_unit_must_appear_verbatim_not_only_aligned() -> None:
 
 def test_the_raw_tier_tolerates_formatting_inserted_around_words() -> None:
     # Word-level on purpose: the engine may wrap plain words in autolink
-    # angle brackets or emphasis markers — the WORDS survive verbatim.
+    # angle brackets or emphasis markers: the words survive verbatim.
     truth = _Truth(paragraphs=["see https://example.com/x there", "urgent torque check"])
     output = "see <https://example.com/x> there\n\n**urgent** torque check\n"
     assert check_alignment(truth, output).passed
@@ -194,7 +194,7 @@ def test_the_link_gate_holds_only_where_asked() -> None:
 def test_autolink_brackets_unwrap_but_literal_angle_text_stays() -> None:
     assert align("see <https://example.com/x> now") == "see https://example.com/x now"
     assert align("mail <user@example.com> now") == "mail user@example.com now"
-    # entity-escaped angle brackets are LITERAL text, not autolink syntax
+    # entity-escaped angle brackets are literal text, not autolink syntax
     assert align("literal &lt;https://example.com/x&gt; text") == (
         "literal <https://example.com/x> text"
     )

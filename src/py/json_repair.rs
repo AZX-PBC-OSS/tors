@@ -8,7 +8,7 @@
 //! path, repair parser, schema repairer, and the jsonschema-crate
 //! validation all run under `py.detach`); the GIL-held residue is the
 //! schema argument walk (O(schema) handles, the standard str-in borrow
-//! class over each dict/list entry) and the return marshalling — O(output)
+//! class over each dict/list entry) and the return marshalling: O(output)
 //! string marshalling for `repair_json`, O(result) object-tree
 //! construction for the loads/diagnostics spellings (the `word_bounds`
 //! list-marshalling class), plus O(diagnostics) dict construction for the
@@ -42,11 +42,11 @@ const MAX_SCHEMA_WALK_DEPTH: usize = 200;
 
 /// A Python object -> [`Value`] walk for the `schema=` argument (and only
 /// it: the JSON under repair arrives as `str`). Accepts exactly the JSON
-/// types a schema is made of — `dict` (insertion order preserved), `list`
-/// AND `tuple` (json.dumps' own tuple tolerance), `str`, `int`, `float`,
-/// `bool`, `None` — with `bool` checked BEFORE `int` (Python `bool` is an
+/// types a schema is made of (`dict` (insertion order preserved), `list`
+/// and `tuple` (json.dumps' own tuple tolerance), `str`, `int`, `float`,
+/// `bool`, `None`), with `bool` checked before `int` (Python `bool` is an
 /// `int` subclass; the JSON meaning differs). `int` beyond i64 becomes the
-/// unbounded-int spelling via its decimal text. A non-JSON type at the TOP
+/// unbounded-int spelling via its decimal text. A non-JSON type at the top
 /// level gets the catalog's schema-rejection message; nested non-JSON
 /// types name the JSON types instead. A `str` holding lone surrogates
 /// fails the UTF-8 borrow (the standard str-in class: such strings cannot
@@ -134,7 +134,7 @@ fn normalize_int_text(text: &str) -> String {
 
 /// The int class for values past i64: pyo3 has no arbitrary-precision
 /// constructor, so the decimal text goes through the int builtin itself
-/// (`int(text, 10)` — exact, no float detour).
+/// (`int(text, 10)`: exact, no float detour).
 fn bigint_to_py(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     let builtins = PyModule::import(py, "builtins")?;
     let constructor = builtins.getattr("int")?;
@@ -142,10 +142,10 @@ fn bigint_to_py(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
 }
 
 /// [`Value`] -> Python object tree (the loads/diagnostics return): `dict`
-/// in insertion order, `list`, `str`, `bool`, `None`, `float`, `int` —
+/// in insertion order, `list`, `str`, `bool`, `None`, `float`, `int`:
 /// with the unbounded-int spelling reconstructed exactly. The repair core
 /// never lets the MISSING_VALUE sentinel escape (the schema layer
-/// normalizes it), so a defensive `""` render — its normalized form —
+/// normalizes it), so a defensive `""` render (its normalized form)
 /// stands in for the unreachable case rather than a panic.
 fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     match value {
@@ -175,9 +175,9 @@ fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
     }
 }
 
-/// One diagnostics entry -> `dict`, with ALL SIX keys present every time
+/// One diagnostics entry -> `dict`, with all six keys present every time
 /// (`from`/`to`/`suggestion` are `None` when the action did not move a
-/// value or offer a hint) — a stable shape consumers can index blindly.
+/// value or offer a hint): a stable shape consumers can index blindly.
 fn diagnostic_to_py(py: Python<'_>, diagnostic: &Diagnostic) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("action", diagnostic.action.clone())?;
@@ -200,8 +200,8 @@ fn diagnostic_to_py(py: Python<'_>, diagnostic: &Diagnostic) -> PyResult<Py<PyAn
 
 /// Resolve the `schema=` argument to a plain JSON `Value`: pydantic v2
 /// models (anything exposing `model_json_schema()`) are converted through
-/// their generated JSON Schema dict first, so the caller's round-trip —
-/// model -> schema -> LLM -> repair -> `Model.model_validate` — needs no
+/// their generated JSON Schema dict first, so the caller's round-trip
+/// (model -> schema -> LLM -> repair -> `Model.model_validate`) needs no
 /// manual `.model_json_schema()` step. Plain dicts/bools pass straight
 /// through to the JSON walk.
 fn resolve_schema_arg<'py>(
@@ -285,9 +285,9 @@ fn inject_model_defaults(
         if property_dict.contains("default")? {
             continue;
         }
-        // Upstream's exact order: the factory FIRST (a factory field's
+        // Upstream's exact order: the factory first (a factory field's
         // `default` is the PydanticUndefined sentinel, never a real value),
-        // then the plain default. A factory needing arguments raises here —
+        // then the plain default. A factory needing arguments raises here:
         // surfacing the misconfiguration instead of silently skipping.
         if let Ok(factory) = field.getattr("default_factory")
             && !factory.is_none()
@@ -323,7 +323,7 @@ fn enum_member_value<'py>(py: Python<'py>, obj: Bound<'py, PyAny>) -> PyResult<B
 /// "de-DE", case-insensitive, `-` or `_`) through the CLDR table, or a
 /// dict `{"decimal": ",", "grouping": "."}` of single-character
 /// separators for conventions the table does not carry. `None` selects
-/// Auto — assume en-US for the separator-ambiguous shapes, but only
+/// Auto: assume en-US for the separator-ambiguous shapes, but only
 /// schema-checked and disclosed (never a silent 1000x guess); shapes no
 /// locale could resolve refuse with the retry-able hint.
 fn resolve_locale_arg(obj: &Bound<'_, PyAny>) -> PyResult<NumericLocale> {
@@ -411,7 +411,7 @@ fn build_config(
     })
 }
 
-/// `tors.repair_json`: the repaired JSON as a STRING — a drop-in spelling
+/// `tors.repair_json`: the repaired JSON as a string: a drop-in spelling
 /// for the "give me valid JSON back" pipeline, re-serialized to
 /// `json.dumps`' canonical form exactly like upstream (so valid-but-
 /// noncanonical input normalizes; `ensure_ascii=False` keeps non-ASCII
@@ -450,7 +450,7 @@ pub fn repair_json(
     .map_err(|e| map_repair_err(e, "repair_json"))
 }
 
-/// `tors.repair_json_loads`: the repaired JSON as decoded OBJECTS — the
+/// `tors.repair_json_loads`: the repaired JSON as decoded objects: the
 /// `json.loads` drop-in. Returns `""` (the empty string, not `None`) when
 /// nothing is recoverable, exactly like upstream. The GIL-held residue is
 /// the O(result) object-tree construction (the `word_bounds`
@@ -484,8 +484,8 @@ pub fn repair_json_loads(
     value_to_py(py, &value.0)
 }
 
-/// `tors.repair_json_diagnostics`: the loads-mode value PLUS the structured
-/// action log — a list of `{action, path, detail, from, to, suggestion}`
+/// `tors.repair_json_diagnostics`: the loads-mode value plus the structured
+/// action log: a list of `{action, path, detail, from, to, suggestion}`
 /// dicts (the last three `None` when unused) covering every schema-layer
 /// repair, coercion, fill, drop, remap, and tors-native suggestion. The v1
 /// scope note: schema-free calls return an empty list (parser-level

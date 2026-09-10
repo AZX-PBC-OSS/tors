@@ -1,6 +1,6 @@
 //! Boundary-safe truncation, the pure-Rust core of `tors.truncate_to_bounds`.
 //!
-//! Composes the crate's OWN segmentation tables (`segmentation_impl::word_bounds`/
+//! Composes the crate's own segmentation tables (`segmentation_impl::word_bounds`/
 //! `sentence_bounds`, the UAX #29 machinery already shipped) rather than
 //! reimplementing any boundary logic: cut at the last word/sentence boundary
 //! at or before `max_chars`, so a context-window budget is never enforced by
@@ -10,7 +10,7 @@
 //! the naive `text[:max_chars]` a pipeline reaches for today risks cutting
 //! mid-word.
 //!
-//! A word/sentence boundary is NOT automatically a grapheme-cluster boundary:
+//! A word/sentence boundary is not automatically a grapheme-cluster boundary:
 //! `word_bounds` gives some combining sequences (e.g. Thai SARA AM, U+0E33)
 //! their own word-segment even though `unicode-segmentation`'s grapheme rules
 //! join them to the preceding base character into one cluster: cutting at
@@ -22,9 +22,9 @@
 //! for.
 //!
 //! This module is also the crate's shared home for the boundary-set
-//! MACHINERY the chunking family builds on: [`char_count`] (the
+//! machinery the chunking family builds on: [`char_count`] (the
 //! allocation-free codepoint count), [`GraphemeIndex`] (the boundary set
-//! as one bit per codepoint — membership, largest-at-or-before, and
+//! as one bit per codepoint: membership, largest-at-or-before, and
 //! first-after queries without the usize grid or hash set a
 //! document-scale input would otherwise pay for), and
 //! [`cluster_safe_ends`] (the single-ended intersection `chunk_text`
@@ -36,7 +36,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::segmentation_impl;
 
-/// The codepoint-index STARTS of every grapheme cluster in `text`, plus one
+/// The codepoint-index starts of every grapheme cluster in `text`, plus one
 /// final entry at `text`'s total codepoint length (the end-of-text
 /// boundary): the complete, sorted-ascending set of positions a cut is
 /// allowed to land on without splitting a cluster. One forward pass over
@@ -44,9 +44,9 @@ use crate::segmentation_impl;
 /// once across all clusters), not O(n) per cluster.
 ///
 /// Test-only since the [`GraphemeIndex`] bitmap replaced every production
-/// consumer: this Vec spelling is the differential ORACLE the bitmap (and
+/// consumer: this Vec spelling is the differential oracle the bitmap (and
 /// `chunk_impl::grapheme_safe_hard_cut`'s rule via
-/// `GraphemeIndex::hard_cut`) is pinned against — the semantic definition
+/// `GraphemeIndex::hard_cut`) is pinned against: the semantic definition
 /// in entries, the bitmap the compressed production spelling.
 #[cfg(test)]
 pub(crate) fn grapheme_boundary_chars(text: &str) -> Vec<usize> {
@@ -69,9 +69,9 @@ pub enum Boundary {
     Sentence,
 }
 
-/// Every grapheme-cluster boundary at or before `max_chars`, in BOTH
+/// Every grapheme-cluster boundary at or before `max_chars`, in both
 /// index units at once: parallel ascending arrays of each boundary's
-/// codepoint index and byte offset, from ONE forward pass that stops at
+/// codepoint index and byte offset, from one forward pass that stops at
 /// the budget. Every position a `truncate_to_bounds` cut can land on (a
 /// cluster-safe segment end, the hard-cut fallback, and the byte offset
 /// the final slice needs) is a cluster boundary inside that range, so
@@ -97,7 +97,7 @@ fn grapheme_boundary_offsets_within(text: &str, max_chars: usize) -> (Vec<usize>
     (char_starts, byte_starts)
 }
 
-/// The word/sentence segment ends that are ALSO grapheme-cluster
+/// The word/sentence segment ends that are also grapheme-cluster
 /// boundaries (the cluster-safety intersection every cut in this module
 /// and `chunk_impl` filters through), as one ascending `Vec<usize>`:
 /// `bounds`'s ends merged against `grapheme_starts`, both ascending, one
@@ -107,7 +107,7 @@ fn grapheme_boundary_offsets_within(text: &str, max_chars: usize) -> (Vec<usize>
 /// both spellings formerly built: a 12 MiB prose input holds millions of
 /// boundaries, where a multi-million-entry hash set costs an order of
 /// magnitude more memory than this flat `Vec<usize>` while answering the
-/// same membership question; the callers that need a RANGE (the largest
+/// same membership question; the callers that need a range (the largest
 /// end at or before a budget) binary-search it with `partition_point`,
 /// O(log n) per cut. `grapheme_starts` chooses the range: `chunk_text`
 /// passes every boundary of the text, `truncate_to_bounds` only those at
@@ -132,28 +132,28 @@ pub(crate) fn cluster_safe_ends(
 
 /// A text's codepoint count, ASCII-first: pure-ASCII text answers its
 /// own byte length (every ASCII byte is the one-byte UTF-8 encoding of
-/// exactly one codepoint, so bytes ARE codepoints there), and
-/// non-ASCII text pays the branchless byte pass — every UTF-8 codepoint
+/// exactly one codepoint, so bytes are codepoints there), and
+/// non-ASCII text pays the branchless byte pass: every UTF-8 codepoint
 /// begins at a byte that is not a continuation byte (`0b10xxxxxx`), so
-/// counting non-continuation bytes IS counting codepoints. The
+/// counting non-continuation bytes is counting codepoints. The
 /// allocation-free spelling of `text.chars().count()`'s answer for the
-/// callers that need the count WITHOUT the `Vec<char>`-class
+/// callers that need the count without the `Vec<char>`-class
 /// whole-text materialization a collect would pay (`chunk_hierarchical`'s
 /// budget arithmetic, the chunkers' grapheme index below): one pass,
 /// zero allocation.
 ///
-/// WHY the split, when the predicate count already answers every case:
+/// Why the split, when the predicate count already answers every case:
 /// the two passes are not the same speed on the input that dominates
-/// the callers' real traffic. `str::is_ascii` early-exits at the FIRST
+/// the callers' real traffic. `str::is_ascii` early-exits at the first
 /// non-ASCII byte, so pure-ASCII text (the overwhelming case: logs,
 /// transcripts, source code) pays one pass that LLVM vectorizes
-/// outright and returns the byte length — the same shape as std's own
+/// outright and returns the byte length, the same shape as std's own
 /// `chars().count()` ASCII path, which measures ~43 GB/s where the
 /// filter-and-count predicate measures ~5.1 GB/s (the per-byte
 /// `(b & 0xC0) != 0x80` test defeats the auto-vectorizer's lane
-/// packing) — and
+/// packing), and
 /// `chunk_by_words`/`chunk_by_sentences`/`chunk_hierarchical` call this
-/// on every document-scale text BEFORE their real work, so the count
+/// on every document-scale text before their real work, so the count
 /// was a measurable fixed tax on exactly the fastest-input case.
 /// Non-ASCII text pays a short prefix scan up to its first non-ASCII
 /// byte and then the existing exact predicate, so its cost is
@@ -161,7 +161,7 @@ pub(crate) fn cluster_safe_ends(
 /// The same `is_ascii()` fast-path idiom the neighboring
 /// [`GraphemeIndex::build`] already uses for its bitmap (with its own
 /// exhaustive table-level pin, the 128×128 adjacency test below); the
-/// correctness pin HERE is `char_count_matches_chars_count_over_the_corpus`,
+/// correctness pin here is `char_count_matches_chars_count_over_the_corpus`,
 /// whose corpus carries the non-ASCII shapes that would expose a
 /// miscount (Thai SARA AM, CJK, astral emoji, mixed-script soup).
 pub(crate) fn char_count(text: &str) -> usize {
@@ -177,7 +177,7 @@ pub(crate) fn char_count(text: &str) -> usize {
 
 /// A text's grapheme-cluster boundary set as one bit per codepoint: bit
 /// `i` set iff codepoint index `i` begins a cluster, bit 0 always set, and
-/// the end-of-text boundary `total` set too — exactly the entry set
+/// the end-of-text boundary `total` set too: exactly the entry set
 /// [`grapheme_boundary_chars`] materializes as a `Vec<usize>` (~8 bytes
 /// per codepoint), here as `total / 64 + 1` words of `u64` (~1.6 MB at a
 /// 12 MiB document, two orders of magnitude less) with O(1) cache-friendly
@@ -186,16 +186,16 @@ pub(crate) fn char_count(text: &str) -> usize {
 /// positional queries (largest boundary at or before `x`, first boundary
 /// after `x`) are word scans over the same bits. Shared by
 /// `chunk_hierarchical` (its cut filter, raw-cut fallback, and overlap
-/// snap — built lazily, at most once per call) and `chunk_by_segment`
+/// snap: built lazily, at most once per call) and `chunk_by_segment`
 /// (the mid-cluster segment merge), replacing the `HashSet<usize>` both
 /// formerly built from the whole `Vec<usize>`: a 12 MiB document holds
 /// ~12.6M boundaries, and ~12.6M hashed inserts cost ~1.2 s while being
 /// superlinear on top of it (#22).
 ///
-/// WHY a bitmap when [`cluster_safe_ends`] spells the cluster-safety
+/// Why a bitmap when [`cluster_safe_ends`] spells the cluster-safety
 /// intersection as a two-pointer merge over the `Vec<usize>`: that helper
-/// answers one question shape — which single-ended bounds are
-/// cluster-safe — while the chunkers' cuts are `(end, next_start)` PAIRS
+/// answers one question shape, which single-ended bounds are
+/// cluster-safe, while the chunkers' cuts are `(end, next_start)` pairs
 /// and their merge edges need arbitrary membership, and one bitmap
 /// answers every question those callers ask without the ~100 MB usize
 /// grid a 12 MiB document would materialize. `grapheme_safe_hard_cut`
@@ -204,7 +204,7 @@ pub(crate) fn char_count(text: &str) -> usize {
 /// [`GraphemeIndex::hard_cut`].
 pub(crate) struct GraphemeIndex {
     /// Bit `i` = "codepoint index `i` is a grapheme-cluster boundary".
-    /// `words.len() == total / 64 + 1`: one word PAST bit `total`'s own
+    /// `words.len() == total / 64 + 1`: one word past bit `total`'s own
     /// word, so the end-of-text boundary bit is always representable
     /// (`total.div_ceil(64)` would be one word short whenever `total` is
     /// an exact multiple of 64, since bit `total` lives in word
@@ -223,13 +223,13 @@ impl GraphemeIndex {
     /// other.
     ///
     /// Pure-ASCII text skips the segmentation walk: GB3 (CRLF) is the only
-    /// grapheme rule that joins two ASCII codepoints — no ASCII byte is
+    /// grapheme rule that joins two ASCII codepoints: no ASCII byte is
     /// Extend/ZWJ/SpacingMark/Prepend/Regional-Indicator, so every
-    /// codepoint starts a cluster except the LF of each CRLF pair — which
+    /// codepoint starts a cluster except the LF of each CRLF pair, which
     /// makes the bitmap all-ones with the CRLF LF bits cleared, buildable
     /// from one `is_ascii` pass plus one SIMD `\r` scan (char index and
     /// byte index coincide in ASCII). The sufficiency claim is pinned
-    /// EXHAUSTIVELY against the real segmenter by the 128×128 adjacency
+    /// exhaustively against the real segmenter by the 128×128 adjacency
     /// test in this module's tests, so a unicode-segmentation table
     /// change that ever touched ASCII clustering fails loudly instead of
     /// silently mis-bitting.
@@ -328,7 +328,7 @@ impl GraphemeIndex {
 
     /// The raw-cut fallback's end for the window `[start, limit]`:
     /// `chunk_impl::grapheme_safe_hard_cut`'s exact rule against the
-    /// bitmap — the largest boundary `<= limit` when that is genuine
+    /// bitmap: the largest boundary `<= limit` when that is genuine
     /// forward progress past `start`, otherwise the first boundary after
     /// `start` (a single cluster wider than the whole remaining budget is
     /// kept whole rather than split, the same documented exception
@@ -350,16 +350,16 @@ impl GraphemeIndex {
 /// and never mid-grapheme-cluster either (see the module docs).
 ///
 /// * If `text` already has `<= max_chars` codepoints, it comes back
-///   UNCHANGED, per the crate's `Cow` identity convention:
+///   unchanged, per the crate's `Cow` identity convention:
 ///   `tors.truncate_to_bounds(s, n) is s` exactly when no truncation
 ///   happens.
 /// * Otherwise the cut point is the largest `word_bounds`/`sentence_bounds`
-///   segment end `<= max_chars` that is ALSO a grapheme-cluster boundary
+///   segment end `<= max_chars` that is also a grapheme-cluster boundary
 ///   (a segment end that would split a cluster, e.g. a combining mark
 ///   `word_bounds` scores as its own word-segment, is not a valid cut
 ///   point, even if it's otherwise `<= max_chars`); if no such boundary
 ///   exists (a single word/sentence/cluster longer than `max_chars`, or
-///   `max_chars == 0`), the cut falls back to the largest GRAPHEME
+///   `max_chars == 0`), the cut falls back to the largest grapheme
 ///   boundary `<= max_chars`. This is a hard cut in codepoint terms, but
 ///   still cluster-safe, so a lone combining mark is never separated from
 ///   its base character. The one invariant that never breaks either way:
@@ -370,7 +370,7 @@ impl GraphemeIndex {
 ///   point (`str::trim_end`). Cutting exactly after a word boundary would
 ///   otherwise leave a dangling separator space (word boundaries include
 ///   the inter-word space as its own segment; sentence boundaries carry a
-///   trailing space on the PRECEDING sentence per UAX #29 SB9-SB11: see
+///   trailing space on the preceding sentence per UAX #29 SB9-SB11: see
 ///   `segmentation_impl::sentence_bounds`'s docs), which this trims away.
 ///   Trimming can only ever shrink the result further, so it cannot violate
 ///   the `max_chars` invariant above.
@@ -416,11 +416,11 @@ pub const ELLIPSIS: char = '\u{2026}';
 
 /// Truncate `text` to at most `max_chars` codepoints with an ellipsis
 /// marker: a hard cut (no word/sentence awareness, unlike
-/// `truncate_to_bounds` — this is the DB-column shape, where the bound is a
+/// `truncate_to_bounds`: this is the DB-column shape, where the bound is a
 /// storage limit, not a reading break), made grapheme-cluster-safe.
 ///
 /// * If `text` already has `<= max_chars` codepoints, it comes back
-///   UNCHANGED, per the crate's `Cow` identity convention:
+///   unchanged, per the crate's `Cow` identity convention:
 ///   `tors.truncate_ellipsis(s, n) is s` exactly when no truncation
 ///   happens.
 /// * Otherwise the kept prefix is the largest grapheme-cluster boundary at
@@ -431,7 +431,7 @@ pub const ELLIPSIS: char = '\u{2026}';
 ///   the whole cluster), correctness over filling the last codepoint.
 /// * `max_chars == 0` yields empty (there is no room for even the marker;
 ///   the naive `value[:0] + "…"` spelling answers `"…"` here, exceeding a
-///   zero bound — this does not repeat that).
+///   zero bound: this does not repeat that).
 /// * No trailing-whitespace trim: the cut is positional, not semantic, and
 ///   the caller asked for exactly the bound. `"abc   "` at `max_chars=5`
 ///   keeps its spaces then the marker.
@@ -523,8 +523,8 @@ mod tests {
             assert_eq!(index.last_at_or_before(total + 12345), total);
             assert!(!index.is_boundary(total + 1));
         }
-        // A 66-codepoint run of TWO-codepoint clusters ("0" + SARA AM),
-        // so boundaries sit at every EVEN index only: the multi-word
+        // A 66-codepoint run of two-codepoint clusters ("0" + SARA AM),
+        // so boundaries sit at every even index only: the multi-word
         // arithmetic (mask edges, the r == 63 seam, forward/backward
         // scans crossing a word boundary) is exercised on its own shape.
         // The 64-codepoint variant pins the exact-multiple-of-64 seam
@@ -549,13 +549,13 @@ mod tests {
     #[test]
     fn ascii_fast_path_condition_is_exhaustively_the_grapheme_tables_answer() {
         // `GraphemeIndex::build`'s ASCII fast path rests on one claim: GB3
-        // (CRLF) is the ONLY grapheme rule that joins two ASCII
+        // (CRLF) is the only grapheme rule that joins two ASCII
         // codepoints, so a break between adjacent ASCII chars happens
-        // everywhere except between \r and \n. Prove it EXHAUSTIVELY
-        // against the actual unicode-segmentation tables in use — every
+        // everywhere except between \r and \n. Prove it exhaustively
+        // against the actual unicode-segmentation tables in use: every
         // ordered pair of ASCII bytes, embedded in fixed ASCII context
         // (the context bytes cannot join anything themselves, so the only
-        // possible cluster spanning the pair's seam is the pair itself) —
+        // possible cluster spanning the pair's seam is the pair itself):
         // so a future table change that ever touched ASCII clustering
         // fails here loudly instead of silently mis-bitting the fast
         // path.
@@ -618,7 +618,7 @@ mod tests {
     fn grapheme_index_survives_a_deterministic_soup_sweep() {
         // Pseudo-random mixed-script text (the LCG from char_count's
         // soup test), so the index is checked against the Vec spelling on
-        // inputs no hand-written corpus anticipates — every position,
+        // inputs no hand-written corpus anticipates: every position,
         // every query, plus the hard-cut rule against
         // chunk_impl::grapheme_safe_hard_cut where its preconditions hold.
         use crate::chunk_impl::grapheme_safe_hard_cut;
@@ -662,8 +662,8 @@ mod tests {
             }
             // The hard-cut rule is grapheme_safe_hard_cut's rule: pin it
             // against the original over a strided (start, limit) window
-            // sweep (dense enough to hit every seam class — cluster
-            // interiors, tight windows, wide windows — without the full
+            // sweep (dense enough to hit every seam class: cluster
+            // interiors, tight windows, wide windows: without the full
             // O(total^2) cross product).
             for start in (0..total).step_by(3) {
                 for limit in (start..total).step_by(5).chain([total - 1]) {
@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn sentence_boundary_cuts_whole_sentences() {
         let text = "One. Two. Three.";
-        // "One. " (5) + "Two. " would be 10, but only a FULL sentence
+        // "One. " (5) + "Two. " would be 10, but only a full sentence
         // boundary end counts, so max_chars=8 (mid "Two.") falls back to a
         // hard cut, never exceeding 8 chars; max_chars=10 lands exactly on
         // the "Two." sentence boundary end and keeps the whole thing.
@@ -746,8 +746,8 @@ mod tests {
 
     #[test]
     fn never_splits_a_thai_sara_am_combining_cluster() {
-        // U+0E33 (SARA AM) combines with the preceding base into ONE
-        // grapheme cluster, but word_bounds scores it as its OWN
+        // U+0E33 (SARA AM) combines with the preceding base into one
+        // grapheme cluster, but word_bounds scores it as its own
         // word-segment. Budget 1 can't fit the 2-codepoint cluster at all,
         // so the correct, cluster-safe answer is empty; a codepoint-only
         // fallback would instead silently mangle the cluster by keeping
@@ -765,10 +765,10 @@ mod tests {
         // the hard-cut fallback applies, and must land on a grapheme
         // boundary (0 or 1, since "b́" is one cluster spanning chars
         // 1-3), never splitting the accent from "b". The safe answer at
-        // max_chars=2 is "a" (char 1 is INSIDE the b+accent cluster).
+        // max_chars=2 is "a" (char 1 is inside the b+accent cluster).
         let text = "ab\u{0301}cd";
         assert_eq!(word(text, 2), "a");
-        // A budget landing exactly ON a cluster boundary still works.
+        // A budget landing exactly on a cluster boundary still works.
         assert_eq!(word(text, 3), "ab\u{0301}");
     }
 
@@ -786,7 +786,7 @@ mod tests {
             );
             // The cluster is 3 codepoints wide as a `char` count (surrogate
             // pairs aren't a Rust `char` concern); if it appears at all in
-            // `got`, it must appear WHOLE (never just the ZWJ or just one
+            // `got`, it must appear whole (never just the ZWJ or just one
             // endpoint).
             let has_zwj = got.contains('\u{200d}');
             let has_woman = got.contains('\u{1f469}');
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn ellipsis_max_chars_zero_is_empty() {
-        // NOT "…": the marker alone would exceed a zero bound.
+        // Not "…": the marker alone would exceed a zero bound.
         assert_eq!(ellipsis("hello", 0), "");
     }
 

@@ -1,12 +1,12 @@
-"""Contract gate for ``tors.bm25_rank``: a RERANKING primitive over a
+"""Contract gate for ``tors.bm25_rank``: a reranking primitive over a
 caller-supplied ``corpus`` against one ``query``, recomputed from scratch
-every call, NOT a persistent search index (see ``src/bm25_impl.rs`` for the
+every call, not a persistent search index (see ``src/bm25_impl.rs`` for the
 explicit scope decline: a large, repeatedly-queried corpus wants a real
 search engine, e.g. ``tantivy``; this is for reranking a small,
 already-retrieved candidate set).
 
-The formula is Okapi BM25 with the always-non-negative "+1" IDF variant
-(``ln((N - df + 0.5) / (df + 0.5) + 1)``), NOT the classic form (which can
+The formula is Okapi bm25 with the always-non-negative "+1" IDF variant
+(``ln((N - df + 0.5) / (df + 0.5) + 1)``), not the classic form (which can
 go negative for a term in over half the corpus). Tokenization is the same
 "real word token, lowercased" convention ``tf_idf`` uses, with the same
 opt-in ``strip_accents``/``stemmer`` knobs, applied identically to `query`
@@ -171,7 +171,7 @@ class TestNormalizationKnobs:
         corpus = ["café société", "totally unrelated text"]
         # Without folding, an unaccented query misses the accented term.
         assert bm25_rank("cafe", corpus)[0][1] == 0.0
-        # With folding applied to BOTH query and corpus, it matches.
+        # With folding applied to both query and corpus, it matches.
         folded = dict(bm25_rank("cafe", corpus, strip_accents=True))
         assert folded[0] > 0.0
 
@@ -194,7 +194,7 @@ class TestNormalizationKnobs:
 
 class TestLemmaDict:
     """``lemma_dict``: tf_idf's exact same caller-supplied word -> lemma
-    map, applied IDENTICALLY to query and corpus (required for scores to
+    map, applied identically to query and corpus (required for scores to
     mean anything, not a style choice)."""
 
     def test_none_or_empty_dict_is_a_true_no_op(self) -> None:
@@ -207,7 +207,7 @@ class TestLemmaDict:
         corpus = ["the runner runs fast", "a cat sat"]
         # Without a lemma map, "move" (query) misses "runner"/"runs" entirely.
         assert bm25_rank("move", corpus)[0][1] == 0.0
-        # With stemming (-> "run") + a lemma map applied to BOTH query and
+        # With stemming (-> "run") + a lemma map applied to both query and
         # corpus, "move" and the stemmed corpus terms collapse to the same
         # substituted term.
         mapped = dict(bm25_rank("move", corpus, stemmer="english", lemma_dict={"run": "move"}))
@@ -272,7 +272,7 @@ class TestProperties:
         # tokens, `.split()` doesn't, which is a naive-oracle limitation,
         # not a tors bug (segmentation correctness itself is pinned
         # exhaustively in tests/test_segmentation.py, not re-litigated
-        # here; this test's job is the BM25 arithmetic).
+        # here; this test's job is the bm25 arithmetic).
         expected = _reference_score(query, corpus, 1.5, 0.75)
         ranked = dict(bm25_rank(query, corpus))
         for i, score in enumerate(expected):

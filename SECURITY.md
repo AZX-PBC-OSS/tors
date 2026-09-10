@@ -2,10 +2,10 @@
 
 ## Reporting a Vulnerability
 
-We take security vulnerabilities seriously. If you discover a security vulnerability in
-`tors`, please report it responsibly.
+If you discover a security vulnerability in `tors`, please report it
+responsibly.
 
-**Do NOT open a public GitHub issue for security vulnerabilities.**
+**Do not open a public GitHub issue for security vulnerabilities.**
 
 Instead, please use [GitHub Security Advisories](https://github.com/AZX-PBC-OSS/tors/security/advisories/new)
 to report vulnerabilities privately.
@@ -20,13 +20,13 @@ to report vulnerabilities privately.
 
 This policy covers `tors` itself (the Rust extension and its Python bindings), the
 second wheel `tors-documents` (the `tors.documents` payload and its engines), and
-their CI/CD pipeline. Vulnerabilities in third-party dependencies — PyO3,
+their CI/CD pipeline. Vulnerabilities in third-party dependencies (PyO3,
 `unicode-normalization`, the document engines (`pdf_oxide`, `anydoc`, `office_oxide`,
-`html-to-markdown-rs`), or others in `Cargo.lock`/`uv.lock` — should be reported to
+`html-to-markdown-rs`), or others in `Cargo.lock`/`uv.lock`) should be reported to
 their respective maintainers; if you're unsure who owns a dependency, report it to us
 and we'll help route it.
 
-Areas worth being precise about when reporting:
+When reporting, include:
 
 - **Memory safety** in the Rust extension, especially anything reachable from
   untrusted Python-side input (`tors`'s functions take arbitrary `str`/`bytes`).
@@ -38,19 +38,18 @@ Areas worth being precise about when reporting:
   surface: the explicit `max_bytes=` pre-read bound (every lane), the 32 MiB
   default post-read ceiling on the amplifying lanes (anydoc, office_oxide), and
   the engine-side decompression caps (anydoc's per-entry and total package
-  limits; office_oxide 0.1.10's 512 MiB per-part cap) — a bypass, degradation,
-  or regression of those caps is a security finding here, not just a bug. One
-  known limit is already tracked for an upstream fix and is not itself a
-  reportable finding: pdf_oxide 0.3.78's `parse_object`/`parse_array` recursion
-  has no depth cap (its `max_nesting` config is dead code), so a ~60 KB PDF with
-  a 30k-deep trailer array crashes every entry point — noted in
-  `src/pdf_impl.rs`'s docs and exercised by the `documents_markdown` fuzz target;
-  the real fix belongs upstream.
+   limits; office_oxide 0.1.10's 512 MiB per-part cap). A bypass, degradation,
+   or regression of those caps is a security finding here, not just a bug. One
+   known limit is already tracked for an upstream fix and is not itself a
+   reportable finding: pdf_oxide 0.3.78's `parse_object`/`parse_array` recursion
+   has no depth cap (its `max_nesting` config is dead code), so a ~60 KB PDF with
+   a 30k-deep trailer array crashes every entry point. It is noted in
+   `src/pdf_impl.rs`'s docs and exercised by the `documents_markdown` fuzz target;
+   the real fix belongs upstream.
 - **Supply chain**: the PyPI release pipeline (`publish.yml`, which builds and
-  publishes BOTH wheels — the base `tors` wheel and the `tors-documents` payload,
-  each through its own Trusted Publishing identity) uses PyPI Trusted Publishing
-  (OIDC) — there is no long-lived API token to leak, but a compromised GitHub
-  Actions dependency in that workflow's chain is in scope.
+  publishes both wheels, each through its own Trusted Publishing identity) uses
+  PyPI Trusted Publishing (OIDC): there is no long-lived API token to leak, but a
+  compromised GitHub Actions dependency in that workflow's chain is in scope.
 
 ## Disclosure
 

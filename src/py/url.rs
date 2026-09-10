@@ -27,7 +27,7 @@ pub fn quote(py: Python<'_>, text: Bound<'_, PyString>, safe: &str) -> PyResult<
 /// `tors.quote_plus(text, safe="")`: `urllib.parse.quote_plus` byte-exact.
 /// The quote semantics with every space becoming `+` (and a literal `+`
 /// escaping to `%2B` unless caller-safed; the stdlib quotes with space
-/// added to `safe`, then swaps, NOT "quote then replace `%20`", a quirk
+/// added to `safe`, then swaps, not "quote then replace `%20`", a quirk
 /// pinned in the gate). Default `safe=""` is the stdlib's own.
 #[pyfunction(signature = (text, safe = ""))]
 pub fn quote_plus(py: Python<'_>, text: Bound<'_, PyString>, safe: &str) -> PyResult<Py<PyAny>> {
@@ -37,10 +37,10 @@ pub fn quote_plus(py: Python<'_>, text: Bound<'_, PyString>, safe: &str) -> PyRe
 /// `tors.unquote(text)`: `urllib.parse.unquote(text)` byte-exact. `%XX`
 /// sequences (either hex case) decode as UTF-8 with `errors="replace"`
 /// (invalid sequences → U+FFFD); anything that is not a valid escape
-/// (`%zz`, a trailing `%`) stays verbatim; `+` is NOT special here. The
+/// (`%zz`, a trailing `%`) stays verbatim; `+` is not special here. The
 /// fragmentation quirk is pinned in the gate: each ASCII run unquotes
-/// independently, so `%C3é%A9` is NOT `éé`. Identity lane: no `%` at all
-/// returns the ORIGINAL object (exactly the stdlib's own `'%' not in
+/// independently, so `%C3é%A9` is not `éé`. Identity lane: no `%` at all
+/// returns the original object (exactly the stdlib's own `'%' not in
 /// string` fast path).
 #[pyfunction]
 pub fn unquote(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
@@ -48,10 +48,10 @@ pub fn unquote(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>>
 }
 
 /// `tors.unquote_plus(text)`: `urllib.parse.unquote_plus` byte-exact.
-/// Every `+` becomes a space FIRST (so `%2B` survives as a literal `+`
+/// Every `+` becomes a space first (so `%2B` survives as a literal `+`
 /// while a raw `+` becomes a space; order is semantics, pinned), then the
 /// unquote semantics. Identity lane: no `+` and no `%` returns the
-/// ORIGINAL object.
+/// original object.
 #[pyfunction]
 pub fn unquote_plus(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
     detached_transform(py, text, url_impl::unquote_plus)

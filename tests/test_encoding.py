@@ -5,7 +5,7 @@ ships).
 Unlike ``decode_utf8``/``utf8_is_valid``, there is no stdlib oracle to be
 byte-exact against here: encoding detection is inherently heuristic (the same
 bytes can be plausible under more than one codec), so this suite pins the
-CONTRACT: never raises for well-formedness reasons, always returns some
+contract: never raises for well-formedness reasons, always returns some
 codec name Python's own ``bytes.decode()`` accepts, and correctly identifies
 a battery of real, unambiguous encoding-specific fixtures, rather than
 claiming universal correctness on arbitrary input.
@@ -31,7 +31,7 @@ from tors import detect_encoding
 
 class TestReturnsADecodableCodecName:
     """Whatever name comes back must be one Python's own ``bytes.decode``
-    accepts, the contract that makes the return value USEFUL, not just
+    accepts, the contract that makes the return value useful, not just
     non-empty."""
 
     @given(raw=st.binary(max_size=4096))
@@ -57,7 +57,7 @@ class TestReturnsADecodableCodecName:
 class TestKnownEncodingFixtures:
     """Real, unambiguous byte sequences for a handful of legacy encodings:
     the deterministic floor under the hypothesis property above. Each fixture
-    round-trips through its OWN encoding (the ground truth) and is asserted
+    round-trips through its own encoding (the ground truth) and is asserted
     to decode cleanly under tors's guess, which is the property that
     actually matters for the ingestion pipeline this exists for: not "did it
     guess the exact codec name" (multiple names can be correct; cp1252 and
@@ -83,7 +83,7 @@ class TestKnownEncodingFixtures:
 
 
 class TestNeverPanicsOnArbitraryBytes:
-    """The whole point of a heuristic detector: SOME guess for any byte
+    """A heuristic detector answers with some guess for any byte
     string, well-formed UTF-8 or not, ASCII or not, empty or huge."""
 
     @given(raw=st.binary(min_size=0, max_size=8192))
@@ -98,7 +98,7 @@ class TestTldHint:
     """The ``tld`` parameter is threaded through to chardetng's own
     disambiguation logic; this suite pins that it's accepted and never
     breaks the "always returns a usable name" contract, not that it changes
-    any SPECIFIC outcome (that heuristic is chardetng's to evolve)."""
+    any specific outcome (that heuristic is chardetng's to evolve)."""
 
     def test_tld_hint_is_accepted_without_leading_dot(self) -> None:
         raw = "日本語のテキストです。".encode("shift_jis")

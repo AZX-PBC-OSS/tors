@@ -7,13 +7,13 @@ use pyo3::{Py, PyAny};
 
 use crate::html_impl;
 
-/// The running interpreter's integer string conversion limit for DECIMAL
-/// numeric refs, read ONCE per `html_unescape` call under the GIL. A Python
-/// call per REF would be a real cost on entity-dense text; per call it is a
+/// The running interpreter's integer string conversion limit for decimal
+/// numeric refs, read once per `html_unescape` call under the GIL. A Python
+/// call per ref would be a real cost on entity-dense text; per call it is a
 /// sys-module dict lookup plus one C call (µs-scale). The limit and the
-/// getter exist everywhere from 3.11 on AND on 3.10.7+ (the CVE-2020-10735
+/// getter exist everywhere from 3.11 on and on 3.10.7+ (the CVE-2020-10735
 /// backport); only 3.10.0–3.10.6 predate the attribute, and
-/// `sys.set_int_max_str_digits(0)` DISABLES the limit. The absent attribute
+/// `sys.set_int_max_str_digits(0)` disables the limit. The absent attribute
 /// and the disabled limit both spell `None` (no check), matching the running
 /// stdlib's `html.unescape` exactly. Any other failure importing sys or
 /// calling the getter propagates.
@@ -32,7 +32,7 @@ fn current_int_max_str_digits(py: Python<'_>) -> PyResult<Option<usize>> {
     })
 }
 
-/// `tors.html_unescape`: `html.unescape(text)` over the FULL HTML5 named
+/// `tors.html_unescape`: `html.unescape(text)` over the full HTML5 named
 /// entity table (all 2231 entries of `html.entities.html5`, with- and
 /// without-semicolon spellings) plus CPython's exact numeric-reference
 /// classification, in one GIL-released pass. The algorithm and the crate
@@ -41,20 +41,20 @@ fn current_int_max_str_digits(py: Python<'_>) -> PyResult<Option<usize>> {
 /// hypothesis over entity-bearing text).
 ///
 /// CPython's integer string conversion limit applies (3.11+, and 3.10.7+
-/// via the CVE-2020-10735 backport; only 3.10.0–3.10.6 lack it): a DECIMAL
+/// via the CVE-2020-10735 backport; only 3.10.0–3.10.6 lack it): a decimal
 /// numeric ref whose digit run exceeds `sys.get_int_max_str_digits()`
 /// (default 4300) raises the stdlib's own
 /// `ValueError("Exceeds the limit (…) for integer string conversion: …")`.
 /// The limit is read from the running interpreter once per call, so a
 /// caller's `sys.set_int_max_str_digits()` change is honored on the next
-/// call; HEX refs are exempt (power-of-two base). The raised message comes
-/// from the interpreter ITSELF (the error path replays `int()` on the
+/// call; hex refs are exempt (power-of-two base). The raised message comes
+/// from the interpreter itself (the error path replays `int()` on the
 /// offending digit run), because CPython's wording of the limit error is
 /// version-dependent and tors must match the running stdlib, not one
 /// branch of it.
 ///
 /// GIL model: str-in. The argument is taken as `Bound<PyString>` so the
-/// identity path can return the INPUT OBJECT itself, exactly as CPython's
+/// identity path can return the input object itself, exactly as CPython's
 /// `if '&' not in s: return s` does (returning a marshalled copy instead
 /// would turn a ~µs no-op into an O(n) copy of a 12 MiB string, measured
 /// 1.17ms vs 0.08ms). The limit read is one µs-scale sys call under the GIL
@@ -76,7 +76,7 @@ pub fn html_unescape(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<P
         Ok(Cow::Borrowed(_)) => Ok(text.into_any().unbind()),
         Ok(Cow::Owned(out)) => Ok(out.into_pyobject(py)?.into_any().unbind()),
         Err(err) => {
-            // Replay the RUNNING interpreter's own `int()` on the offending
+            // Replay the running interpreter's own `int()` on the offending
             // digit run and raise the very ValueError it returns. CPython's
             // wording of the limit error is version-dependent (3.12+ and late
             // 3.11.x interpolate "the limit (4300 digits)"; 3.10.7–3.11.x

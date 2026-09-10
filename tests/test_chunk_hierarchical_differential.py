@@ -1,16 +1,16 @@
 """Differential gate for ``tors.chunk_hierarchical`` against a committed
 pure-Python reference model, the port of the red-team audit's agent-B
-reference (an EAGER-semantics verbatim reading of
-``src/chunk_hierarchical_impl.rs`` — the pre-#30 spelling, kept because
+reference (an eager-semantics verbatim reading of
+``src/chunk_hierarchical_impl.rs``: the pre-#30 spelling, kept because
 eager and lazy builds are output-equal by #30's own differential, so the
-eager model pins the CURRENT function while describing the simpler
+eager model pins the current function while describing the simpler
 machine): paragraph ``windows(2)`` cuts, sentence/word cuts from
 ``tors.sentence_bounds``/``tors.word_bounds``, non-overlapping literal
 matches with the literal dropped, the grapheme-cut filter, the
 first-level-with-a-cut window walk, the grapheme-safe hard cut, and the
 overlap snap.
 
-Restricted to ASCII corpora the reference's grapheme model is EXACT:
+Restricted to ASCII corpora the reference's grapheme model is exact:
 below the extended-grapheme additions the only joining rule is GB3 (a
 ``\r`` immediately before an ``\n``), the same claim
 ``GraphemeIndex::build``'s ASCII fast path makes (pinned exhaustively by
@@ -18,19 +18,19 @@ the 128x128 adjacency test in ``truncate_impl.rs``), so for ASCII text
 (CRLF included) the Python boundary model is bit-exact with the Rust
 bitmap and the comparison is a real differential, not a restatement.
 
-Duplicates are deliberately NOT deduped in the reference (``[None] * 8``
+Duplicates are deliberately not deduped in the reference (``[None] * 8``
 splices the default hierarchy eight times, ``[" "] * 8`` keeps eight
 identical literal levels): a duplicate level is bit-identical to its
-original, so the first-match level walk answers identically — the
-reference thereby simultaneously pins the DEDUP INERTNESS the Rust side
+original, so the first-match level walk answers identically, and the
+reference thereby simultaneously pins the dedup inertness the Rust side
 relies on (a wrong dedup that dropped a level it should not, or kept one
 that changed the answer, breaks this equality).
 
 This is the pyo3/marshalling-layer pin the Rust-side differential cannot
 see: the Rust unit tests diff core against core, and the fuzz target
 diffs the path-dep crate's public Rust API, but only this file checks
-that the BOUNDARY function — argument extraction, the separators
-``list[str | None]`` shape, the tuple list marshalled back out — answers
+that the boundary function (argument extraction, the separators
+``list[str | None]`` shape, the tuple list marshalled back out) answers
 exactly what the semantics say.
 """
 
@@ -49,7 +49,7 @@ SEED = 20260909
 # ---------------------------------------------------------------------------
 # The eager-semantics reference (ported from the audit's agent-B
 # ref_impl.py, with the best-cut level scan served by bisect over each
-# level's cut-end array instead of a linear walk — same answer, the
+# level's cut-end array instead of a linear walk: same answer, the
 # runtime budget the audit ran at needs it).
 # ---------------------------------------------------------------------------
 
@@ -171,7 +171,7 @@ def _ref_chunk_hierarchical(
             chunks.append((start, total))
             break
         limit = start + max_chars
-        # The FIRST level whose largest in-limit cut is also past `start`
+        # The first level whose largest in-limit cut is also past `start`
         # supplies the cut; later levels stay unconsulted.
         cut = None
         for cut_list, end_list in zip(levels, ends, strict=True):
@@ -255,7 +255,7 @@ _SHAPES = [_markdown, _chat_log, _crlf_prose, _repeated_literal, _degenerate, _a
 # The separator pool: the default spelling, the empty hierarchy, plain
 # literals (matching and never-matching), None splices at every
 # interesting position, the LangChain-style "" sentinel, and the
-# DUPLICATE shapes (8x None, 8x " ", 3x "\n") whose dedup inertness the
+# duplicate shapes (8x None, 8x " ", 3x "\n") whose dedup inertness the
 # reference's no-dedup model pins.
 _SEPARATOR_POOL: list[list[str | None] | None] = [
     None,
@@ -286,7 +286,7 @@ _RANDOM_CASES = 3_000
 class TestAsciiDifferential:
     def test_randomized_ascii_shapes_match_the_eager_reference_exactly(self) -> None:
         # The committed differential sweep: every shape x budget x overlap
-        # x separator-list combination is an EXACT list equality against
+        # x separator-list combination is an exact list equality against
         # the eager reference, so any divergence in the pyo3 layer, the
         # level construction, the cut filter, the window walk, the hard
         # cut, or the overlap snap fails with the full case in the
@@ -343,13 +343,13 @@ class TestAsciiDifferential:
 
 # ---------------------------------------------------------------------------
 # Non-ASCII invariant checks. The ASCII reference's grapheme model does
-# not hold here, so these are INVARIANT pins (cluster-safe boundaries,
+# not hold here, so these are invariant pins (cluster-safe boundaries,
 # budget modulo the documented oversized-cluster exception) rather than
-# exact differentials — the cluster-safety predicate is deliberately
-# CONSERVATIVE and independent of tors's own grapheme machinery: a
+# exact differentials; the cluster-safety predicate is deliberately
+# conservative and independent of tors's own grapheme machinery: a
 # boundary that would start mid-cluster is caught by the Unicode
-# category of the character AT the boundary (a combining mark —
-# Mn/Mc/Me — never starts a cluster; neither does a ZWJ; and GB3's
+# category of the character at the boundary (a combining mark,
+# Mn/Mc/Me, never starts a cluster; neither does a ZWJ; and GB3's
 # CRLF join is checked directly), with shape-specific exact pins where
 # the cluster units are known by construction.
 # ---------------------------------------------------------------------------
@@ -366,9 +366,9 @@ def _assert_cluster_safe(text: str, chunks: list[tuple[int, int]]) -> None:
                 if prev == "\r" and ch == "\n":
                     raise AssertionError(f"boundary {p} splits a CRLF pair: {chunks}")
                 # A backwards-joining character (a combining mark, or a
-                # ZWJ) at a boundary is mid-cluster UNLESS GB4 just forced
+                # ZWJ) at a boundary is mid-cluster unless GB4 just forced
                 # a break: after a Control/CR/LF codepoint the mark is an
-                # orphan that legitimately STARTS its own cluster (the
+                # orphan that legitimately starts its own cluster (the
                 # documented newline-adjacent-mark non-issue), so the
                 # exemption is exactly "the previous codepoint is Cc".
                 joins_back = unicodedata.category(ch).startswith("M") or ch == "\u200d"
@@ -383,8 +383,8 @@ class TestNonAsciiInvariants:
         # "0" + SARA AM (U+0E33) is one cluster of exactly 2 codepoints
         # (the UAX #29 word/sentence divergence the merge steps and the
         # cut filter exist for): in a pure run of that unit every chunk
-        # boundary must land at an EVEN codepoint position — the exact
-        # expectation, stronger than the conservative check — and a
+        # boundary must land at an even codepoint position (the exact
+        # expectation, stronger than the conservative check), and a
         # chunk may exceed max_chars only by being exactly one cluster.
         text = "0ำ" * 40
         for max_chars in range(1, 12):
@@ -405,7 +405,7 @@ class TestNonAsciiInvariants:
     def test_zwj_emoji_sequences_keep_every_cluster_whole(self) -> None:
         # A ZWJ emoji family is one cluster of 5 codepoints (3 bases, 2
         # ZWJ); at budgets below 5 the oversized-cluster exception is
-        # the ONLY legal way past max_chars, and the excepted chunk must
+        # the only legal way past max_chars, and the excepted chunk must
         # be exactly the emoji unit.
         unit = "👨‍👩‍👧"
         text = unit + " " + unit + " end " + unit * 3
@@ -423,7 +423,7 @@ class TestNonAsciiInvariants:
 
     def test_cjk_text_respects_budgets_with_no_oversized_exception(self) -> None:
         # Every CJK character is its own cluster, so the documented
-        # oversized-cluster exception has NO room to fire: the budget
+        # oversized-cluster exception has no room to fire: the budget
         # holds unconditionally, the strongest budget statement any
         # non-ASCII text can make.
         text = "中文数据段落。中文数据段落。" * 6 + "\n\n第二段落中文。"

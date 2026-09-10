@@ -25,7 +25,7 @@ mod tests {
 
     /// The stdlib's own notion of well-formedness: `simdutf8::basic` must
     /// answer identically, which is the crate's headline guarantee and the
-    /// property the Python-side hypothesis pin re-runs against the RUNNING
+    /// property the Python-side hypothesis pin re-runs against the running
     /// interpreter's decoder.
     fn std_valid(raw: &[u8]) -> bool {
         core::str::from_utf8(raw).is_ok()
@@ -39,7 +39,7 @@ mod tests {
         // One anchor on each side of every exclusion zone: the 1/2/3/4-byte
         // range boundaries, the surrogate block's edges, and the U+10FFFF
         // ceiling: the cases a hand-rolled validator most easily rejects
-        // wrongly. U+FFFF is a noncharacter but a VALID encoding.
+        // wrongly. U+FFFF is a noncharacter but a valid encoding.
         assert!(is_valid(b"\x7f")); // U+007F, last 1-byte codepoint
         assert!(is_valid(b"\xc2\x80")); // U+0080, first 2-byte
         assert!(is_valid(b"\xdf\xbf")); // U+07FF, last 2-byte

@@ -1,7 +1,7 @@
 # Recipe: chunking threads and transcripts
 
-The realistic shape of splitting line-oriented conversational text — a chat
-thread one message per line, a WebVTT or SRT subtitle track — for embedding
+The realistic shape of splitting line-oriented conversational text (a chat
+thread one message per line, a WebVTT or SRT subtitle track) for embedding
 or context-window packing without cutting mid-message or mid-cue. `tors`
 cuts on lines and blank-line-separated blocks, does no format parsing (see
 the end), and shows the real return value at each step below.
@@ -33,18 +33,18 @@ chunks = tors.chunk_hierarchical(thread, 60, ["\n", None])
 ```
 
 Messages that fit stay whole; the oversized Priya message falls back to the
-REAL UAX #29 sentence segmenter (the `None` entry's doing), not to literal
-guesses — which matters the moment a message contains an abbreviation:
+UAX #29 sentence segmenter (the `None` entry's doing), not to literal
+guesses, which matters the moment a message contains an abbreviation:
 
 ```python
 tors.chunk_hierarchical(thread, 40, ["\n", ". ", " "])[1]
-# (30, 55)  -> "Priya: We briefed the U.S" — the naive ". " list severs the name
+# (30, 55)  -> "Priya: We briefed the U.S": the naive ". " list severs the name
 tors.chunk_hierarchical(thread, 40, ["\n", None])[1]
-# (30, 69)  -> "Priya: We briefed the U.S. team on the " — the splice does not
+# (30, 69)  -> "Priya: We briefed the U.S. team on the ": the splice does not
 ```
 
 For fixed windows of N messages regardless of budget, `chunk_by_lines` is
-the count-based twin — blank lines ride along but never count, so
+the count-based twin: blank lines ride along but never count, so
 `chunk_by_lines(thread, 2)` is two messages per window. At multi-MiB scale
 reach for `chunk_by_lines_iter` or `await tors.aio.chunk_by_lines(...)`.
 
@@ -56,7 +56,7 @@ tors.chunk_by_lines(thread, 2)
 ## 2. A WebVTT transcript
 
 Cue blocks are blank-line separated, and a run of 2+ newlines is exactly
-what the default hierarchy's paragraph level cuts on — so the default
+what the default hierarchy's paragraph level cuts on, so the default
 (`chunk_hierarchical(vtt, max)`, equivalently `[None]`) already makes
 cue-aligned cuts, falling back to sentences only inside an oversized cue:
 
@@ -84,13 +84,13 @@ chunks = tors.chunk_hierarchical(vtt, 120)
 
 Every cut except the one inside the oversized Priya cue lands on a cue gap;
 that cue falls to sentence boundaries, its timestamp line riding with the
-first piece. The `WEBVTT` header is ordinary text — strip it yourself first
+first piece. The `WEBVTT` header is ordinary text; strip it yourself first
 if you don't want it riding with the first chunk.
 
 ## 3. An SRT file
 
 The same blank-line cue structure, so the same default hierarchy gives
-cue-aligned cuts. The comma timestamps (`00:00:01,000`) are ordinary text —
+cue-aligned cuts. The comma timestamps (`00:00:01,000`) are ordinary text:
 nothing parses them; the alignment comes entirely from the cue gaps:
 
 ```python
@@ -114,7 +114,7 @@ chunks = tors.chunk_hierarchical(srt, 120)
 ## 4. One oversized cue, split at sentence boundaries
 
 When the application has already parsed the file and holds a single cue's
-text, `tors.sentence_bounds` is the whole job — UAX #29 boundaries as
+text, `tors.sentence_bounds` is the whole job: UAX #29 boundaries as
 offsets, trailing spaces attached to the preceding sentence per the standard:
 
 ```python
@@ -127,14 +127,14 @@ tors.sentence_bounds(cue)
 Slice the cue with the pairs, then re-attach whatever per-cue metadata
 (timestamp, speaker) only the application knows about.
 
-## What tors deliberately does not do
+## What tors does not do
 
-`tors` does not parse or validate cue formats: timestamps, `-->` arrows,
-sequence numbers, and `<v Speaker>` voice spans are ordinary text — a
+`tors` does not parse or validate cue formats. Timestamps, `-->` arrows,
+sequence numbers, and `<v Speaker>` voice spans are ordinary text: a
 malformed timestamp sails through as content. Voice spans and token counts
 are likewise out (grouping a speaker's turns is application-level work over
 parsed cues; every budget here is a codepoint budget). Format semantics
 belong to the application: parse with a real subtitle library and hand
-`tors` the payload for split points — the split the `cennan` transcript
-pipeline makes, `webvtt-py` for parsing and `tors.sentence_bounds` for the
-offsets.
+`tors` the payload for split points, the split the `cennan` transcript
+pipeline makes (`webvtt-py` for parsing, `tors.sentence_bounds` for the
+offsets).

@@ -4,7 +4,7 @@
 writeup). Same tokens (UAX #29 word segments), same bag-of-words vote,
 same FNV-1a-is-the-hash-function choice, twice the bit positions.
 
-This suite is NOT simhash64's suite copy-pasted unadapted: the pinned
+This suite is not simhash64's suite copy-pasted unadapted: the pinned
 literals below (the single-word vote-of-one hash, the document/sentence
 near-dup bounds, the unrelated floor) are independently measured at 128
 bits, not assumed equal to or exactly double the 64-bit anchors; see
@@ -42,7 +42,7 @@ class TestDegenerateInputs:
 
     def test_single_word_is_the_vote_of_one(self) -> None:
         # Same vote-of-one shape as simhash64, at 128 bits: with exactly one
-        # token, the fingerprint IS that token's FNV-1a-128 hash verbatim.
+        # token, the fingerprint is that token's FNV-1a-128 hash verbatim.
         # Pinned as the literal computed by the Rust implementation
         # (src/simhash_impl.rs's own degenerate-input test).
         assert simhash128("hello") == 0xE3E1EFD54283D94F7081314B599D31B3
@@ -82,7 +82,7 @@ class TestBagOfWords:
     def test_frequency_is_part_of_the_bag(self) -> None:
         # Frequency is part of the vote, but -- unlike simhash64's own pin
         # of this exact row (test_simhash.py) -- at 128 bits the wider
-        # margin can absorb a single extra occurrence for a SHORT text
+        # margin can absorb a single extra occurrence for a short text
         # without flipping any bit. Confirmed empirically, not assumed
         # equal to the 64-bit outcome: this row and the one below it are
         # a genuine 64-vs-128 divergence, not a copy-paste bug.
@@ -107,7 +107,7 @@ class TestBagOfWords:
 
 
 class TestLocalitySensitivity:
-    """The property the WIDE spelling exists for: better separation between
+    """The property the wide spelling exists for: better separation between
     the near-dup band and the unrelated floor than the 64-bit width gives.
     Bounds below are exact reproductions of src/simhash_impl.rs's measured,
     pinned anchors for the 128-bit width specifically -- not the 64-bit
@@ -170,7 +170,7 @@ class TestLocalitySensitivity:
         assert worst == 20
 
     def test_unrelated_sentences_sit_farther_apart_than_at_64_bits(self) -> None:
-        # The whole point of the wide spelling: the unrelated floor grows
+        # What the wide spelling buys: the unrelated floor grows
         # (roughly doubles per the module doc) relative to 64 bits, while
         # the near-dup band does not grow -- better separation, not a
         # uniform rescale of every number.
@@ -222,7 +222,7 @@ class TestUnicode:
 
 
 class TestIndependenceFromSimhash64:
-    """simhash128 is a genuinely separate fingerprint, not simhash64
+    """simhash128 is a separate fingerprint, not simhash64
     zero-extended or otherwise derived from it at the API boundary."""
 
     @given(text=_TEXT)

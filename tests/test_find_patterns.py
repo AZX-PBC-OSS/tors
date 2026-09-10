@@ -3,8 +3,8 @@ search at native speed, GIL-released.
 
 ``tors.find_patterns(patterns, text)`` finds the occurrences of a set of
 substring patterns in one pass, reporting one triple per match:
-``(start, end, pattern_index)`` where ``end`` is EXCLUSIVE, the offsets are
-PYTHON STR INDICES (codepoints), and ``text[start:end] == patterns[index]``.
+``(start, end, pattern_index)`` where ``end`` is exclusive, the offsets are
+python str indices (codepoints), and ``text[start:end] == patterns[index]``.
 
 Semantics, pinned precisely (aho-corasick ``MatchKind::LeftmostLongest``, the
 engine's documented "leftmost matches; when there are multiple possible
@@ -13,16 +13,16 @@ leftmost matches, the longest match is chosen"):
 1. **Leftmost**: the scan proceeds left to right; a match is reported at the
    earliest position any pattern matches.
 2. **Longest**: among the patterns matching at that position, the longest
-   wins, regardless of its position in the ``patterns`` list (NOT regex
-   alternation's leftmost-FIRST priority; a shorter earlier-listed pattern
+   wins, regardless of its position in the ``patterns`` list (not regex
+   alternation's leftmost-first priority; a shorter earlier-listed pattern
    never beats a longer one). Two distinct patterns can only tie at a
    position by being byte-identical (both must equal the same text), so
    "longest" is always a strict winner except for exact duplicates.
-3. **Non-overlapping**: the scan resumes at the END of each reported match;
+3. **Non-overlapping**: the scan resumes at the end of each reported match;
    no two reported matches overlap, and they are reported in strictly
    increasing start order.
 4. **Duplicates report the first index**: identical pattern strings are legal,
-   and a match of that string reports the LOWEST index it occupies in the
+   and a match of that string reports the lowest index it occupies in the
    list.
 5. **Offsets are characters, not bytes**: the automaton runs on UTF-8 bytes;
    whole-pattern matches land on character boundaries by construction (a
@@ -35,9 +35,9 @@ leftmost matches, the longest match is chosen"):
 
 Contract decisions at the argument boundary (each pinned below):
 
-- an empty pattern STRING raises ``ValueError("empty pattern")``: it would
+- an empty pattern string raises ``ValueError("empty pattern")``: it would
   match at every position and has no leftmost-longest meaning;
-- an empty patterns LIST returns ``[]`` immediately (no automaton build);
+- an empty patterns list returns ``[]`` immediately (no automaton build);
 - non-``str`` entries in ``patterns`` and a non-``str`` ``text`` raise
   ``TypeError`` (``patterns`` must be exactly a ``list``, the annotation's
   type, so a tuple raises too);
@@ -46,7 +46,7 @@ Contract decisions at the argument boundary (each pinned below):
   standard str-in boundary every tors function pays.
 
 No stdlib oracle exists for these semantics: ``re`` alternation is
-leftmost-FIRST (pattern priority), and leftmost-longest is precisely the
+leftmost-first (pattern priority), and leftmost-longest is precisely the
 property it does not promise, so the contract is proven three ways, the
 module decision's prescribed shape: (a) structural validity over arbitrary
 generated inputs, (b) a brute-force pure-Python leftmost-longest reference
@@ -61,13 +61,13 @@ dense 12 MiB cell, the ``word_bounds`` list-shape precedent) is pinned in
 ``tests/test_gil_release.py``; the criterion ladder for the Rust core alone
 is ``benches/search.rs``.
 
-The count and streaming spellings ride the SAME contract, no new
+The count and streaming spellings ride the same contract, no new
 semantics of their own; pinned below by parity with ``find_patterns``
 itself (the strongest available oracle, the ``word_bounds_iter`` precedent):
 
 - ``tors.count_matches(patterns, text) -> int``: the count spelling:
   ``count_matches(p, t) == len(find_patterns(p, t))`` over every input class
-  below, with the SAME argument boundary (empty pattern string, list-exactly
+  below, with the same argument boundary (empty pattern string, list-exactly
   ``patterns``, str-exactly ``text``, the surrogate refusal) and the same
   leftmost-longest non-overlapping semantics, but O(1) memory: no match
   vector is built and no byte→char conversion pass runs (the count needs
@@ -75,10 +75,10 @@ itself (the strongest available oracle, the ``word_bounds_iter`` precedent):
   ``grapheme_count`` no-marshalling shape, its GIL band the ping floor,
   measured in the cells of tests/test_gil_release.py).
 - ``tors.find_patterns_iter(patterns, text)``: the streaming spelling: the
-  whole scan runs eagerly under ONE detached pass when the iterator is
-  CONSTRUCTED, the buffer is drained one 3-tuple per ``__next__``
-  (µs-scale GIL holds), the yielded sequence is the list API's EXACT
-  sequence, and ``__length_hint__`` reports the REMAINING count.
+  whole scan runs eagerly under one detached pass when the iterator is
+  constructed, the buffer is drained one 3-tuple per ``__next__``
+  (µs-scale GIL holds), the yielded sequence is the list API's exact
+  sequence, and ``__length_hint__`` reports the remaining count.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _assert_matches_are_valid(
     """Contract part (a), the structural validity every answer must satisfy
     regardless of semantics: in-range offsets, in-range pattern indices,
     strictly ordered non-overlapping spans, and content equality:
-    ``text[start:end]`` IS ``patterns[idx]``."""
+    ``text[start:end]`` is ``patterns[idx]``."""
     prev_end = 0
     for start, end, idx in matches:
         assert 0 <= start < end <= len(text), f"span {(start, end)} outside the text"
@@ -119,7 +119,7 @@ def _assert_matches_are_valid(
 #
 # Both golden batteries live at module scope (the tests/test_segmentation.py
 # ``_CASES`` convention) so the count/iter classes below can cross-check
-# against the SAME rows without duplicating them.
+# against the same rows without duplicating them.
 
 
 _GOLDEN_OVERLAP_CASES: list[tuple[list[str], str, list[tuple[int, int, int]]]] = [
@@ -163,7 +163,7 @@ _GOLDEN_OVERLAP_IDS = [
 def test_golden_overlap_battery(
     patterns: list[str], text: str, expected: list[tuple[int, int, int]]
 ) -> None:
-    """The fixed anchor of the contract: every golden case asserts the EXACT
+    """The fixed anchor of the contract: every golden case asserts the exact
     expected list and the oracle's agreement, so a hand-computed expectation
     that disagreed with the brute-force reference would fail loudly here
     rather than silently laundering a wrong pin into the suite."""
@@ -228,13 +228,13 @@ _MULTIBYTE_MAPPING_IDS = [
 def test_offsets_are_characters_not_bytes_over_multibyte_text(
     patterns: list[str], text: str, expected: list[tuple[int, int, int]]
 ) -> None:
-    """THE mapping battery: every expected value was computed in CHARACTER
+    """The mapping battery: every expected value was computed in character
     units by hand; a byte-identity implementation (the bug class the module
     decision warns about) reports every one of these wrongly: e.g. ``"café"``
     matching at char 0 would report end 5 (bytes), not 4 (chars), and the
     ZWJ family (5 chars / 18 bytes) would report a 16-char span. The ASCII
     pattern over non-ASCII text row additionally proves the ``is_ascii`` fast
-    path is correctly NOT taken (byte offsets and char offsets diverge there
+    path is correctly not taken (byte offsets and char offsets diverge there
     even though the patterns are pure ASCII)."""
     assert not text.isascii(), "the mapping battery's texts must all be non-ASCII"
     matches = find_patterns(patterns, text)
@@ -247,7 +247,7 @@ def test_the_ascii_fast_path_agrees_with_the_conversion_pass() -> None:
     """The fast path and the conversion pass must answer identically: the same
     pattern over an ASCII text (fast path, offsets pass through) and over a
     non-ASCII text containing the same ASCII core (conversion pass) produce
-    the same CHARACTER answer."""
+    the same character answer."""
     assert find_patterns(["abc"], "xabcx") == [(1, 4, 0)]
     assert find_patterns(["abc"], "éabcé") == [(1, 4, 0)]
 
@@ -352,7 +352,7 @@ def test_matches_the_leftmost_longest_reference_over_multibyte_alphabets(
 ) -> None:
     """The differential proof of the offset mapping (part b): over the
     multi-byte alphabet, tors's answer must equal the brute-force char-space
-    oracle EXACTLY (list equality, not just validity) for every generated
+    oracle exactly (list equality, not just validity) for every generated
     pattern set and text. An offset-mapping bug of any kind (a boundary
     miscount, a fast path taken wrongly, a byte-for-char swap) breaks this
     property; the golden battery pins the individual shapes it finds."""
@@ -404,7 +404,7 @@ def _substring_patterns_and_text(
 ) -> tuple[list[str], str]:
     """Arbitrary-Unicode texts (hypothesis's full ``st.text`` alphabet: any
     script, any marks, no alphabet bias) with pattern lists biased toward
-    SUBSTRINGS of the text, so matches actually occur over text no small
+    substrings of the text, so matches actually occur over text no small
     alphabet can generate."""
     text = draw(st.text(max_size=50))
     patterns: list[str] = []
@@ -505,8 +505,8 @@ def test_find_patterns_absolute_wall_band_holds_at_1mib_dense() -> None:
 
 class TestCountMatches:
     """The count spelling of the find contract: ``count_matches(p, t) ==
-    len(find_patterns(p, t))``, the SAME leftmost-longest non-overlapping
-    semantics under the SAME argument boundary, with none of the list API's
+    len(find_patterns(p, t))``, the same leftmost-longest non-overlapping
+    semantics under the same argument boundary, with none of the list API's
     O(matches) marshalling: the automaton build and scan run detached, no
     match vector is filled, no byte→char conversion pass runs, and the whole
     return is one int (the ``grapheme_count`` no-marshalling shape; its GIL
@@ -529,7 +529,7 @@ class TestCountMatches:
         list spelling over every generated pattern set and text; the count
         inherits the byte→char offset mapping's correctness obligations
         (a mis-mapped match end shifts where the non-overlapping scan resumes,
-        so it changes the COUNT too, not just the offsets)."""
+        so it changes the count too, not just the offsets)."""
         patterns, text = patterns_text
         assert count_matches(patterns, text) == len(find_patterns(patterns, text))
 
@@ -561,7 +561,7 @@ class TestCountMatches:
         """The deterministic sweep, the list API's own exhaustive idiom: every
         pattern list of size 0-3 over ``{"a", "ab", "b"}`` (duplicates
         included) crossed with every text over ``{"a", "b"}`` up to length 5:
-        the count equals BOTH the list API's length and the brute-force
+        the count equals both the list API's length and the brute-force
         oracle's length for all 2,520 pairs, no sampling at all."""
         pattern_pool = ["a", "ab", "b"]
         pattern_lists: list[list[str]] = [[]]
@@ -586,7 +586,7 @@ class TestCountMatches:
     def test_count_matches_the_golden_batteries_expected_lengths(
         self, patterns: list[str], text: str, expected: list[tuple[int, int, int]]
     ) -> None:
-        """The golden cross-check: every hand-pinned row of BOTH batteries
+        """The golden cross-check: every hand-pinned row of both batteries
         (the overlap semantics and the byte→char mapping crux) must count to
         exactly the pinned list's length."""
         assert count_matches(patterns, text) == len(expected)
@@ -650,11 +650,11 @@ class TestCountMatches:
 class TestFindPatternsIter:
     """The streaming spelling of the find contract (the ``word_bounds_iter``
     design, reused verbatim): the whole search (automaton build, scan, offset
-    conversion, match buffer fill) runs under ONE detached pass when the
-    iterator is CONSTRUCTED, and each ``__next__`` then holds the GIL only to
-    hand back ONE ``(start, end, pattern_index)`` 3-tuple. The yielded
-    sequence is the list API's EXACT sequence, and ``__length_hint__`` reports
-    the REMAINING count, pinned against ``find_patterns`` itself, the
+    conversion, match buffer fill) runs under one detached pass when the
+    iterator is constructed, and each ``__next__`` then holds the GIL only to
+    hand back one ``(start, end, pattern_index)`` 3-tuple. The yielded
+    sequence is the list API's exact sequence, and ``__length_hint__`` reports
+    the remaining count, pinned against ``find_patterns`` itself, the
     strongest available oracle, over the same strategies, sweeps, and golden
     batteries as the list API (the count class above adds the same parity for
     ``count_matches``). The GIL band of construction-plus-drain is measured
@@ -666,7 +666,7 @@ class TestFindPatternsIter:
         self, patterns_text: tuple[list[str], str]
     ) -> None:
         """The multibyte differential: the materialized iterator sequence must
-        equal the list API's answer EXACTLY (list equality, not just element
+        equal the list API's answer exactly (list equality, not just element
         validity) for every generated pattern set and text."""
         patterns, text = patterns_text
         assert list(find_patterns_iter(patterns, text)) == find_patterns(patterns, text)
@@ -719,7 +719,7 @@ class TestFindPatternsIter:
     def test_yields_the_list_apis_exact_sequence_on_the_golden_batteries(
         self, patterns: list[str], text: str, expected: list[tuple[int, int, int]]
     ) -> None:
-        """The golden cross-check: every hand-pinned row of BOTH batteries
+        """The golden cross-check: every hand-pinned row of both batteries
         must stream back exactly the pinned list."""
         assert list(find_patterns_iter(patterns, text)) == find_patterns(patterns, text) == expected
 
@@ -736,7 +736,7 @@ class TestFindPatternsIter:
 
     def test_length_hint_tracks_partial_consumption(self) -> None:
         """``__length_hint__`` (what ``list()``/``tuple()`` preallocation and
-        the interpreter's own optimizations consult) is the REMAINING count:
+        the interpreter's own optimizations consult) is the remaining count:
         the full count at construction, decremented by each ``next()``, zero
         at exhaustion, never the original length after consumption."""
         patterns = ["a", "b"]
@@ -782,7 +782,7 @@ class TestFindPatternsIter:
 
     def test_empty_pattern_string_raises_value_error(self) -> None:
         """The list API's boundary, mirrored verbatim: an empty pattern is
-        refused at CONSTRUCTION time (the eager pass happens then), exactly
+        refused at construction time (the eager pass happens then), exactly
         ``ValueError("empty pattern")``."""
         with pytest.raises(ValueError, match="^empty pattern$"):
             find_patterns_iter(["ok", ""], "some text")

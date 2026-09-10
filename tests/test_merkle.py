@@ -4,14 +4,14 @@
 Merkle root over ``chunks``, RFC 6962 / Certificate-Transparency style:
 leaves hash as ``SHA-256(0x00 || chunk)``, internal (two-child) nodes hash as
 ``SHA-256(0x01 || left || right)``. An unpaired left node at any layer is
-PROMOTED unchanged to the next layer (rs_merkle's own default
+promoted unchanged to the next layer (rs_merkle's own default
 ``concat_and_hash``), not duplicated against itself.
 
 Why domain separation, named (the non-obvious design decision this module
 exists to get right): the crate underneath (``rs_merkle``) ships a *default*
 hasher whose ``hash()`` is plain undifferentiated ``SHA-256(data)`` and whose
 default ``concat_and_hash`` feeds ``SHA-256(left || right)`` through that
-SAME function, so no byte anywhere distinguishes "this is a leaf's preimage"
+same function, so no byte anywhere distinguishes "this is a leaf's preimage"
 from "this is two children's concatenation." That is precisely the
 ambiguity CVE-2012-2459 exploited in early Bitcoin Merkle trees: with no
 domain byte, a leaf hash and an internal-node hash live in the same output
@@ -23,7 +23,7 @@ prefixes every leaf hash with ``0x00`` and every two-child concatenation
 with ``0x01``, closing both holes, and keeps rs_merkle's promotion (not
 duplication) behavior for unpaired odd nodes, which is the standard
 mitigation for the second half of that CVE's shape. The hash scheme is part
-of the root's output CONTRACT from v1 (roots are meant to be stored/compared
+of the root's output contract from v1 (roots are meant to be stored/compared
 across calls), so it needs to be right before any proof-generation API is
 added on top, not patched in retroactively once one lands.
 
@@ -102,7 +102,7 @@ class TestMerkleRootDomainSeparation:
         assert merkle_root(chunks) == _reference_root(chunks)
 
     def test_leaf_hash_uses_zero_prefix(self) -> None:
-        # A single chunk's root IS its own leaf hash (no internal node).
+        # A single chunk's root is its own leaf hash (no internal node).
         assert merkle_root([b"abc"]) == _leaf_hash(b"abc").hex()
 
     def test_root_differs_from_plain_undifferentiated_sha256(self) -> None:
@@ -133,7 +133,7 @@ class TestMerkleRootDomainSeparation:
         self,
     ) -> None:
         """Even feeding an internal node's raw hash bytes back through the
-        LEAF-prefixed hash function (i.e. treating those 32 bytes as if they
+        leaf-prefixed hash function (i.e. treating those 32 bytes as if they
         were "a chunk") cannot land on any real leaf hash; the leaf and
         node hash spaces are prefix-disjoint, not merely different by
         chance."""
@@ -157,7 +157,7 @@ class TestMerkleRootOddEvenShapes:
         assert merkle_root(chunks) == _reference_root(chunks)
 
     def test_odd_count_root_differs_from_duplicate_padded_even_count(self) -> None:
-        # Promotion (tors's actual behavior) must NOT coincide with what
+        # Promotion (tors's actual behavior) must not coincide with what
         # Bitcoin-style duplication of the last leaf would produce; that
         # coincidence is exactly the CVE-2012-2459 malleability shape.
         odd = [b"a", b"b", b"c"]

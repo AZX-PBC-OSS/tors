@@ -14,11 +14,11 @@ use crate::fence_impl;
 /// the info string's first whitespace-delimited word or `None`; `code` is
 /// the content between the fences with the fence's own indentation (0-3
 /// leading spaces) stripped from every content line; `start`/`end` are
-/// PYTHON STR INDEX (codepoint) offsets of the block's raw span, from the
+/// Python str index (codepoint) offsets of the block's raw span, from the
 /// opening fence line's first character through the end of the closing
 /// fence line (or end of input, for an unterminated fence: a model that
 /// forgot to close its fence still yields a block). `lang=` filters to
-/// blocks whose language matches EXACTLY (case-sensitive).
+/// blocks whose language matches exactly (case-sensitive).
 ///
 /// Deliberately narrower than full CommonMark: no indented-code-block
 /// recognition (fenced blocks only, the shape LLM output actually uses),
@@ -43,7 +43,7 @@ pub fn extract_code_blocks(
 }
 
 /// `tors.strip_code_fences(text)`: if `text`, trimmed of leading/trailing
-/// whitespace, is EXACTLY one fenced code block, return its dedented code
+/// whitespace, is exactly one fenced code block, return its dedented code
 /// content; otherwise return `text` unchanged. The "whole response wrapped
 /// in one fence" cleanup is safe to call unconditionally on arbitrary model
 /// output, since anything that is not exactly the single-block case is a
@@ -53,7 +53,7 @@ pub fn extract_code_blocks(
 /// is s` exactly when the input is not the single-fenced-block case.
 ///
 /// GIL model: `detached_transform`'s shape, meaning the str-in argument borrow,
-/// the scan under `py.detach`, and either the ORIGINAL object back
+/// the scan under `py.detach`, and either the original object back
 /// (zero marshalling) or the O(output) unwrapped-code string.
 #[pyfunction]
 pub fn strip_code_fences(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
@@ -61,13 +61,13 @@ pub fn strip_code_fences(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<
 }
 
 /// `tors.dedent(text)`: `textwrap.dedent(text)` in one GIL-released pass:
-/// the longest common leading-whitespace-run STRING shared by every
+/// the longest common leading-whitespace-run string shared by every
 /// non-whitespace-only line is stripped from each line, and whitespace-only
 /// lines normalize to empty, matching CPython's exact algorithm (`src/fence_impl.rs`
 /// ports `Lib/textwrap.py`'s two-regex reduction; the parity gate is
 /// tests/test_fence.py's hypothesis differential against the running
 /// stdlib). Tabs and spaces are distinct characters for the common-prefix
-/// computation (NOT tab-expanded): `"  x"` and `"\tx"` share no margin,
+/// computation (not tab-expanded): `"  x"` and `"\tx"` share no margin,
 /// matching `textwrap.dedent`'s documented behavior exactly.
 ///
 /// Identity-return contract: `tors.dedent(s) is s` exactly when

@@ -4,12 +4,12 @@ literal README.md, docs/api.md, and docs/recipe-transcripts.md show for
 here against the built extension, the
 ``test_diff_opcodes_lines.py::TestReconstruction::test_readme_worked_example``
 discipline. The README says "the output above is what they actually
-return"; this file is what keeps that sentence true -- a behavior change
+return"; this file is what keeps that sentence true: a behavior change
 that would turn a documented example into a lie fails here first, before
 the docs drift. Literals are copied byte-exact from the docs, including
 the trailing spaces the docs show (the recipe's Priya sentence slice
 ends in one: UAX #29 SB10/SB11 attach a terminator's trailing space to
-the PRECEDING sentence). If one of these ever fails after an
+the preceding sentence). If one of these ever fails after an
 intentional change, the docs and this pin move together, in the same
 commit.
 """

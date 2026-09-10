@@ -1,13 +1,13 @@
 //! The multi-format document extraction core (the `tors-documents`
 //! payload crate's bindings): resolve a format, route it to the measured
 //! best engine, convert to GitHub-Flavored Markdown, and optionally
-//! normalize that markdown to plain text. Pure Rust, no pyo3 — the binding
+//! normalize that markdown to plain text. Pure Rust, no pyo3: the binding
 //! layer lives in `tors-documents/src/lib.rs`, which releases the GIL
 //! around this whole pass.
 //!
 //! # Engine routing, and why exactly this split
 //!
-//! Four engines, chosen per family by head-to-head measurement (2026-09, over
+//! Four engines, chosen per family by head-to-head measurement (over
 //! hand-built deterministic fixtures: two-column and link-annotation PDFs,
 //! style-bearing docx with numbering/hyperlink/table, pptx with speaker
 //! notes, odt, csv, a polluted-head HTML page, plus the `tests/documents.py`
@@ -18,7 +18,7 @@
 //!   blocks instead of an interleaved table; `/Link` annotations render as
 //!   `[text](uri)` instead of being dropped; line structure is preserved.
 //! - **HTML → html-to-markdown-rs** (`extract_metadata: false`). The only
-//!   measured engine that drops `<script>`/`<style>` BY CONSTRUCTION —
+//!   measured engine that drops `<script>`/`<style>` by construction:
 //!   htmd routes them through its generic block handler, leaking CSS/JS
 //!   text into the body markdown, which is disqualifying for web-page
 //!   ingestion; fast_html2md omits the GFM table delimiter row (tables
@@ -38,7 +38,7 @@
 //!   the OOXML + legacy office formats (docx/xlsx/pptx, doc/xls/ppt): it
 //!   is already compiled in via pdf_oxide's tree, so exposing it costs no
 //!   weight, and it measured one real win (exact entity text, no
-//!   `&`-escaping) against the heading/list losses above — a documented
+//!   `&`-escaping) against the heading/list losses above: a documented
 //!   alternative, never the default. `backend="oxide"` on any other format
 //!   is an error, never a silent fallback.
 //!
@@ -49,16 +49,16 @@
 //!
 //! # Format resolution
 //!
-//! An explicit format name (extension spelling, no dot, case-insensitive —
+//! An explicit format name (extension spelling, no dot, case-insensitive:
 //! anydoc's `Format::from_extension` vocabulary plus `html`/`htm`/`xhtml`
 //! and `tsv`, HTML's and the delimiter-separated family's name-only
 //! spellings) beats everything. Without one, the format is sniffed from
 //! the bytes' content markers (PDF header, RTF open group, OLE stream
-//! names, ZIP mimetype, HTML document marker) with the input NAME's
-//! extension as the last resort for signature-less formats (CSV) — the
+//! names, ZIP mimetype, HTML document marker) with the input name's
+//! extension as the last resort for signature-less formats (CSV): the
 //! `path=` the payload read, when there was one; the `data=` entry has no
 //! name and rests on `format=`/markers alone, the doctrine [`sniff`]
-//! encodes — and the extension resolves through the SAME [`Kind::from_name`]
+//! encodes, and the extension resolves through the same [`Kind::from_name`]
 //! vocabulary the
 //! explicit name uses, so one table owns both spellings. anydoc's
 //! doctrine, reused here so a mislabeled file still converts correctly.
@@ -68,7 +68,7 @@
 //! # Plain-text output
 //!
 //! `to_text` converts to markdown first and then normalizes via
-//! [`gfm_strip_impl::strip`] — one text shape for every format and engine,
+//! [`gfm_strip_impl::strip`]: one text shape for every format and engine,
 //! instead of each engine's ad-hoc plain-text surface (pdf_oxide's native
 //! plain text, measured, merges two-column layouts line-by-line; the strip
 //! keeps the markdown converter's reading-order blocks). The entity policy
@@ -80,7 +80,7 @@
 //!
 //! `pages=` (0-based PDF page indices, deduped, in document order, as the
 //! binding layer delivers them) converts each selected page and joins with
-//! pdf_oxide's own inter-page separator — measured, a full range is
+//! pdf_oxide's own inter-page separator: measured, a full range is
 //! byte-identical to the whole-document conversion. PDF on the pdf_oxide
 //! lane only: any other format, or `backend="anydoc"` on a PDF, is a
 //! `Pages` error, never a silent whole-document fallback.
@@ -114,8 +114,8 @@ fn backend_name(backend: Backend) -> &'static str {
 }
 
 /// The engine lane's own name for the ceiling refusal (and only there:
-/// routing answers speak in BACKEND terms, resource answers in ENGINE
-/// ones — the ceiling is an engine-lane property).
+/// routing answers speak in backend terms, resource answers in engine
+/// ones: the ceiling is an engine-lane property).
 fn engine_name(engine: Engine) -> &'static str {
     match engine {
         Engine::PdfOxide => "pdf_oxide",
@@ -127,7 +127,7 @@ fn engine_name(engine: Engine) -> &'static str {
 
 /// One size for the ceiling refusal, legible at every scale: MiB where
 /// that rounding stays honest, raw bytes below it (a 52 KiB refusal used
-/// to round to "0.0 MiB … 0.0 MiB" — two sizes, neither readable).
+/// to round to "0.0 MiB … 0.0 MiB": two sizes, neither readable).
 fn render_size(size: usize) -> String {
     let mib = size as f64 / (1024.0 * 1024.0);
     if mib < 0.1 {
@@ -138,9 +138,9 @@ fn render_size(size: usize) -> String {
 }
 
 /// The working-format vocabulary: anydoc's `Format` (which also names the
-/// OOXML container variants — `docm`/`xlsm`/`xlsb`/`ppsx` map onto these)
-/// plus HTML — XHTML included, it being HTML's XML serialization on the
-/// same engine — which no anydoc parser reads and the lane's own engine
+/// OOXML container variants: `docm`/`xlsm`/`xlsb`/`ppsx` map onto these)
+/// plus HTML: XHTML included, it being HTML's XML serialization on the
+/// same engine, which no anydoc parser reads and the lane's own engine
 /// serves. The names are the `format=`/`Format::from_extension` vocabulary
 /// and the spelling the resolved format is reported back as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,10 +181,10 @@ impl Kind {
 
     /// Resolve an explicit format name: HTML's, XHTML's, and TSV's names
     /// route here (HTML/XHTML have no anydoc parser and ride this lane's
-    /// own engine — XHTML is HTML's XML serialization, and its
+    /// own engine: XHTML is HTML's XML serialization, and its
     /// `<?xml …?>` prologue is the one prefix variant the content marker
     /// knows how to skip; TSV is the delimiter-separated family's other
-    /// half — anydoc's csv parser is delimiter-separated, and the content
+    /// half: anydoc's csv parser is delimiter-separated, and the content
     /// heuristic already resolves TSV bytes, so the name is vocabulary
     /// sugar mapping onto the csv kind), everything else through anydoc's
     /// `from_extension` (which also maps the container variants:
@@ -242,7 +242,7 @@ impl Kind {
 }
 
 /// One completed conversion: the format it actually was (the sniffed or
-/// explicit format name — the caller may have passed `format=None` and wants
+/// explicit format name: the caller may have passed `format=None` and wants
 /// to know what came back) and the converted output (markdown for
 /// `to_markdown`, plain text for `to_text`).
 #[derive(Debug)]
@@ -273,9 +273,9 @@ pub enum DocumentError {
     /// or empty selection.
     Pages(String),
     /// anydoc's page-precise signal that these pages are image-only and need
-    /// OCR — routing information, not a generic failure: the caller's chain
+    /// OCR: routing information, not a generic failure: the caller's chain
     /// should send this document to its OCR stage. `pages` holds 0-based
-    /// page INDICES (the surface-wide convention; anydoc's 1-based numbers
+    /// page indices (the surface-wide convention; anydoc's 1-based numbers
     /// are re-based once, in `anydoc_error`, where the engine's answer
     /// crosses the seam).
     NeedsOcr { pages: Vec<u32>, page_count: u32 },
@@ -284,11 +284,11 @@ pub enum DocumentError {
     Convert(String),
 }
 
-/// The error text — byte-equal to the strings the binding layer raises on
+/// The error text: byte-equal to the strings the binding layer raises on
 /// the Python side, so a Rust caller `?`-ing into `Box<dyn Error>`/anyhow
 /// sees exactly what the payload's user sees (the payload's mapping arms
 /// carry the same strings; its `UnknownFormat`/`Pages`/`Convert` arms
-/// could now collapse onto `to_string()` — noted for that crate, not
+/// could now collapse onto `to_string()`: noted for that crate, not
 /// changed here).
 impl std::fmt::Display for DocumentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -352,19 +352,19 @@ fn engine_for(kind: Kind, backend: Backend) -> Result<Engine, DocumentError> {
     }
 }
 
-/// The PDF-family payload calls' `backend="anydoc"` refusal — a
-/// CAPABILITY-level refusal, deliberately not the format-level
+/// The PDF-family payload calls' `backend="anydoc"` refusal: a
+/// capability-level refusal, deliberately not the format-level
 /// [`DocumentError::UnsupportedBackend`] (that one answers "can this
-/// engine read this format", and PDF+anydoc can — [`engine_for`] routes
-/// the pair; this one answers "can this engine serve this CALL"). The
+/// engine read this format", and PDF+anydoc can: [`engine_for`] routes
+/// the pair; this one answers "can this engine serve this call"). The
 /// four probe-rich calls need per-engine surfaces anydoc's PDF reader
 /// structurally lacks: its entire PDF surface is `to_markdown(bytes)`
-/// whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs — no
+/// whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs: no
 /// per-page text, no page-count success return, no per-page
 /// classification, no annotation walk), while `pdf_extract`'s per-page
-/// probe IS the OCR-routing signal, `pdf_page_count` walks the page
+/// probe is the OCR-routing signal, `pdf_page_count` walks the page
 /// tree, `pdf_classify` classifies per page, and `pdf_link_uris` walks
-/// `/Annots`. The doctrine text lives HERE, next to the routing table,
+/// `/Annots`. The doctrine text lives here, next to the routing table,
 /// so the four functions' messages cannot drift apart; the binding
 /// layer raises it under the GIL at argument-contract time, before any
 /// work runs. Message shape follows [`DocumentError::UnsupportedBackend`]'s
@@ -380,35 +380,35 @@ pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
 }
 
 /// The document-engine lanes' default input ceiling: 32 MiB, applied to
-/// the two lanes that AMPLIFY their input into resident memory — anydoc
-/// and office_oxide. anydoc AMPLIFIES at a measured ~146× worst case on
-/// adversarial delimiter formats (2026-09-09, this box: a 24 MiB csv of
+/// the two lanes that amplify their input into resident memory: anydoc
+/// and office_oxide. anydoc amplifies at a measured ~146× worst case on
+/// adversarial delimiter formats (this box: a 24 MiB csv of
 /// 1,258,291 rows × 10 one-char cells peaked at 3.42 GiB RSS through
-/// to_text in 6.4 s, and a 12 MiB one at 1.73 GiB in 3.1 s — the
+/// to_text in 6.4 s, and a 12 MiB one at 1.73 GiB in 3.1 s: the
 /// multiple is stable across sizes, a per-byte property: anydoc
-/// materializes row structures per cell. The earlier ~36× figure — a
-/// 100 MiB csv → 3.7 GiB — was a benign-shape measurement; cells per
+/// materializes row structures per cell. The earlier ~36× figure (a
+/// 100 MiB csv → 3.7 GiB) was a benign-shape measurement; cells per
 /// byte, not file size, drives the multiple) and additionally caps
 /// decompression engine-side (its own package limits: 128 MiB per entry,
-/// 512 MiB total, a 4M× expansion bound). office_oxide 0.1.10 (released
-/// 2026-09-09, its changelog #144/#151) now enforces MAX_PART_SIZE =
-/// 512 MiB per part — declared and actual bytes; XML nesting depth 256
-/// on its own 16 MB parse stack — but still has NO total-across-parts
-/// cap and NO output cap: measured the same day, a 399 KiB zip with a
+/// 512 MiB total, a 4M× expansion bound). office_oxide 0.1.10 (its
+/// changelog #144/#151) now enforces MAX_PART_SIZE =
+/// 512 MiB per part: declared and actual bytes; XML nesting depth 256
+/// on its own 16 MB parse stack, but still has no total-across-parts
+/// cap and no output cap: measured the same day, a 399 KiB zip with a
 /// 400 MiB word/document.xml converts successfully at 1.58 GiB peak RSS
 /// in under a second (the ~400 MiB markdown handed over whole), while a
 /// 598 KiB zip declaring a 600 MiB part is refused pre-decompression
 /// ("decompression limit exceeded … more than 536870912 bytes", 0.03 s,
 /// ~20 MiB RSS). That is why the oxide lane gets the same input-side
-/// bound even though the bound does not — cannot — cap what a compressed
+/// bound even though the bound does not (cannot) cap what a compressed
 /// container inflates to; selecting `backend="oxide"` accepts that risk
 /// (an opt-in lane, never the default). At the measured ~146×, the 32
 /// MiB default ceiling's honest worst case on the anydoc lane is ~4.6
-/// GiB — not a survivable spike on a small ingestion worker; callers
+/// GiB: not a survivable spike on a small ingestion worker; callers
 /// with tight budgets must lower [`ConvertOptions::max_bytes`] or split
-/// the file. The NAME stays anydoc-branded (history: the knob was born
+/// the file. The name stays anydoc-branded (history: the knob was born
 /// anydoc-only and the payload crate's docs reference it by this name);
-/// the SEMANTICS are both amplified lanes. The pdf_oxide and HTML lanes
+/// the semantics are both amplified lanes. The pdf_oxide and HTML lanes
 /// are unmetered here: pdf_oxide's own resource limits govern there, and
 /// the HTML lane converts text it can size directly.
 pub const DEFAULT_ANYDOC_INPUT_LIMIT: usize = 32 * 1024 * 1024;
@@ -424,11 +424,11 @@ fn is_ole_container(bytes: &[u8]) -> bool {
     bytes.starts_with(&OLE_MAGIC)
 }
 
-/// The name a resolved kind reports back as — the Excel kind's one
+/// The name a resolved kind reports back as: the Excel kind's one
 /// container-aware case: the OLE signature is legacy `xls`, anything else
 /// (a ZIP local-file header) is the `xlsx` family, so the reported name
 /// matches the container the bytes actually are (the same container check
-/// `office_markdown` makes for the engine choice, applied to the report —
+/// `office_markdown` makes for the engine choice, applied to the report:
 /// and to [`sniff`]'s answer, which routes through here for the same
 /// reason).
 fn resolved_name(kind: Kind, bytes: &[u8]) -> &'static str {
@@ -438,7 +438,7 @@ fn resolved_name(kind: Kind, bytes: &[u8]) -> &'static str {
     kind.name()
 }
 
-/// The caller-tuned conversion knobs beyond the routing arguments — one
+/// The caller-tuned conversion knobs beyond the routing arguments: one
 /// struct so later knobs (an HTML title mode, positioned-output shape,
 /// …) extend the surface without re-breaking every signature. `Default`
 /// is the measured-safe posture: no password, the default input ceiling.
@@ -449,24 +449,24 @@ pub struct ConvertOptions<'a> {
     /// document that stays locked fails its first content operation,
     /// never masked as empty output). Applies to the pdf_oxide lane only
     /// (`backend='auto'`/`'oxide'` on a PDF): a password on any other
-    /// FORMAT is a `Convert` error, and so is one on the anydoc PDF lane —
+    /// format is a `Convert` error, and so is one on the anydoc PDF lane:
     /// its reader takes no password, so a correct one would fail exactly
     /// like a wrong one, indistinguishable from ignored. Never a silently
     /// ignored argument.
     pub password: Option<&'a str>,
-    /// The engine-lane input ceiling, in bytes: it bounds INPUT size on
-    /// the two lanes that amplify input into resident memory — anydoc
+    /// The engine-lane input ceiling, in bytes: it bounds input size on
+    /// the two lanes that amplify input into resident memory: anydoc
     /// (~146× RSS worst case on adversarial delimiter formats: a 24 MiB
-    /// csv → 3.42 GiB peak, a 12 MiB one → 1.73 GiB, 2026-09-09) and
+    /// csv → 3.42 GiB peak, a 12 MiB one → 1.73 GiB) and
     /// office_oxide (a 399 KiB zip-bombed docx with a 400 MiB part →
     /// 1.58 GiB peak on that lane, same date). `None` is the default:
     /// the 32 MiB [`DEFAULT_ANYDOC_INPUT_LIMIT`]; `Some(n)` raises or
-    /// lowers it for callers with a bigger (or tighter) memory budget —
+    /// lowers it for callers with a bigger (or tighter) memory budget:
     /// at the measured multiple the default's anydoc-lane worst case is
     /// ~4.6 GiB, so tighter is often right. The honest limits of what it
-    /// bounds: anydoc additionally caps decompression ENGINE-SIDE (its
+    /// bounds: anydoc additionally caps decompression engine-side (its
     /// package limits), while office_oxide 0.1.10 caps 512 MiB per part
-    /// but has NO total-across-parts cap and NO output cap — an opt-in
+    /// but has no total-across-parts cap and no output cap: an opt-in
     /// lane whose caller accepts unbounded multi-part decompression risk
     /// by selecting it; the ceiling bounds the bytes handed in, never
     /// the bytes they inflate to. The pdf_oxide and HTML lanes are
@@ -475,8 +475,8 @@ pub struct ConvertOptions<'a> {
 }
 
 /// Convert document bytes to GitHub-Flavored Markdown on the routed (or
-/// forced) engine. `name_hint` is the input's name — the `path=` the
-/// payload read, when there was one — used ONLY by the extension fallback
+/// forced) engine. `name_hint` is the input's name: the `path=` the
+/// payload read, when there was one: used only by the extension fallback
 /// of format resolution (the `data=` entry passes `None`, and resolution
 /// then rests on the explicit `format=` or the content markers alone, the
 /// same doctrine [`sniff`] encodes). `pages` (a deduped, document-order
@@ -548,8 +548,8 @@ pub fn to_text_with<'a>(
 ) -> Result<Converted, DocumentError> {
     let (format, engine, markdown) = convert(bytes, name_hint, format, backend, pages, &options)?;
     // anydoc HTML-escapes `&` (and friends) in its markdown; the other three
-    // engines emit text literally — un-escaping theirs would corrupt text
-    // that genuinely contains `&amp;`.
+    // engines emit text literally: un-escaping theirs would corrupt text
+    // that contains `&amp;`.
     let unescape = engine == Engine::Anydoc;
     let text = gfm_strip_impl::strip(&markdown, unescape);
     Ok(Converted {
@@ -559,12 +559,12 @@ pub fn to_text_with<'a>(
 }
 
 /// The standalone content sniffer: what the conversion would resolve these
-/// bytes to from CONTENT alone — no path, no extension. The PDF header, the
+/// bytes to from content alone: no path, no extension. The PDF header, the
 /// RTF open group, OLE stream names, the ZIP package mimetype, and the HTML
 /// document marker. `None` = the content names no format (a signature-less
 /// text format such as CSV, or not a document at all). The reported name is
-/// the conversion's own [`resolved_name`] — Excel's one container-aware
-/// case included: an OLE workbook sniffs as `xls`, a ZIP one as `xlsx` —
+/// the conversion's own [`resolved_name`]: Excel's one container-aware
+/// case included: an OLE workbook sniffs as `xls`, a ZIP one as `xlsx`:
 /// so `sniff` and `to_markdown` can never disagree about what the bytes
 /// are.
 pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
@@ -572,8 +572,8 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// The shared spine of both public functions: resolve, route, convert. The
-/// bytes are already in hand — the payload read the `path=` (or took the
-/// caller's `data=`) before calling here — so no IO happens in this seam.
+/// bytes are already in hand: the payload read the `path=` (or took the
+/// caller's `data=`) before calling here, so no IO happens in this seam.
 fn convert(
     bytes: Vec<u8>,
     name_hint: Option<&str>,
@@ -618,7 +618,7 @@ fn convert(
     if options.password.is_some() && engine == Engine::Anydoc {
         // the anydoc PDF lane's reader takes no password at all: a correct
         // password would fail Convert("document is encrypted") exactly
-        // like a wrong one — indistinguishable from having been ignored.
+        // like a wrong one: indistinguishable from having been ignored.
         // Refuse up front, mirroring the pages= lane guard.
         return Err(DocumentError::Convert(
             "password= requires the pdf_oxide lane (backend='auto' or 'oxide'); \
@@ -626,15 +626,15 @@ fn convert(
                 .into(),
         ));
     }
-    // The input ceiling: BOTH document-holding lanes that AMPLIFY their
-    // input into resident memory — anydoc (~146x worst case on
+    // The input ceiling: both document-holding lanes that amplify their
+    // input into resident memory: anydoc (~146x worst case on
     // adversarial delimiter formats, and engine-side decompression caps
     // on top; see [DEFAULT_ANYDOC_INPUT_LIMIT]) and office_oxide (512
     // MiB per part since 0.1.10, but no total-across-parts cap and no
     // output cap: a 399 KiB zip-bomb docx with a 400 MiB part peaked at
-    // 1.58 GiB RSS on the oxide lane, measured 2026-09-09) — so the
+    // 1.58 GiB RSS on the oxide lane, measured), so the
     // opt-in lane gets the same input-side bound as the default one.
-    // What the ceiling does NOT do is bound office_oxide's DEcompression
+    // What the ceiling does not do is bound office_oxide's DEcompression
     // beyond that per-part cap: that lane's caller accepts unbounded
     // multi-part decompression risk by selecting it (the honest state,
     // stated in [`ConvertOptions::max_bytes`]'s docs).
@@ -653,7 +653,7 @@ fn convert(
             )));
         }
     }
-    // resolved BEFORE the engine match: the pdf lane moves the bytes
+    // resolved before the engine match: the pdf lane moves the bytes
     let resolved = resolved_name(kind, &bytes);
     let markdown = match engine {
         Engine::PdfOxide => pdf_impl::markdown_pages(bytes, pages.as_deref(), options.password)
@@ -668,13 +668,13 @@ fn convert(
 }
 
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
-/// the content markers, which beat the name hint's extension — and the
-/// extension resolves through the SAME [`Kind::from_name`] vocabulary the
+/// the content markers, which beat the name hint's extension, and the
+/// extension resolves through the same [`Kind::from_name`] vocabulary the
 /// explicit name uses, so `file.xhtml`/`file.tsv`/`file.html` work by
 /// extension exactly as `format="xhtml"`/`"tsv"`/`"html"` do by name, with
 /// no second spelling table to keep in step (anydoc's own extension
 /// vocabulary rides inside `from_name`; its `from_path` adds nothing to
-/// it). `UnknownFormat` carries what was tried — the name hint when there
+/// it). `UnknownFormat` carries what was tried: the name hint when there
 /// was one, the no-hint doctrine's fix (an explicit `format=`) when the
 /// bytes came in bare.
 fn resolve(
@@ -697,7 +697,7 @@ fn resolve(
     }
     let what = match name_hint {
         Some(hint) => format!("unrecognized content and extension: {hint}"),
-        // the data= entry: no name to consult — the fix is the explicit
+        // the data= entry: no name to consult: the fix is the explicit
         // name (or sniff() on the same bytes to see what the markers said)
         None => "unrecognized content and no name to consult: pass format= \
                  (or sniff(data) first)"
@@ -707,7 +707,7 @@ fn resolve(
 }
 
 /// The content-marker sniffer: anydoc's `from_bytes` first (its markers are
-/// unambiguous binary signatures), then the HTML document marker — an HTML
+/// unambiguous binary signatures), then the HTML document marker: an HTML
 /// page is text, so it can only be decided after the binary formats had
 /// their chance.
 fn sniff_kind(bytes: &[u8]) -> Option<Kind> {
@@ -720,17 +720,17 @@ fn sniff_kind(bytes: &[u8]) -> Option<Kind> {
     looks_like_csv(bytes).then_some(Kind::Csv)
 }
 
-/// The HTML document marker: after a UTF-8 BOM, whitespace, and ONE
+/// The HTML document marker: after a UTF-8 BOM, whitespace, and one
 /// optional XML declaration (XHTML's `<?xml version="1.0"…?>` prologue,
 /// which precedes the doctype and would hide it from a prefix-anchored
 /// check), the first markup is a document type declaration or the
-/// `<html>` element open (case-insensitive — both `<!DOCTYPE html…` and
-/// `<HTML…` are real-world spellings). A leading comment (`<!--`) is NOT
+/// `<html>` element open (case-insensitive: both `<!DOCTYPE html…` and
+/// `<HTML…` are real-world spellings). A leading comment (`<!--`) is not
 /// taken as a marker: it is not specific to HTML, and comment-prefixed
 /// non-HTML text is rare enough that the extension fallback should decide
-/// it. Nor is any leading `<tag`: an HTML FRAGMENT (no doctype, no
+/// it. Nor is any leading `<tag`: an HTML fragment (no doctype, no
 /// `<html>`, e.g. starting `<div>`/`<p>`) is deliberately not
-/// content-resolvable — every XML vocabulary opens with a tag (`<svg`,
+/// content-resolvable: every XML vocabulary opens with a tag (`<svg`,
 /// `<book`, …), so a fragment marker would claim all of them as HTML. A
 /// fragment needs `format="html"` or an `.html`-family extension, both of
 /// which resolve it through the shared name vocabulary.
@@ -748,7 +748,7 @@ fn looks_like_html(bytes: &[u8]) -> bool {
             .windows(2)
             .position(|w| w == b"?>")
         else {
-            // Unterminated declaration: malformed markup, not a marker —
+            // Unterminated declaration: malformed markup, not a marker:
             // the extension fallback decides.
             return false;
         };
@@ -762,25 +762,25 @@ fn looks_like_html(bytes: &[u8]) -> bool {
     window.starts_with("<!doctype html") || window.starts_with("<html")
 }
 
-/// The CSV heuristic — the LAST resort of content resolution, after every
+/// The CSV heuristic: the last resort of content resolution, after every
 /// binary marker and the HTML check declined: text, not markup, where the
-/// first up-to-64 non-empty lines each contain the SAME count (≥1) of one
-/// delimiter candidate (`,` / `;` / TAB, tried in that order). Two lines
+/// first up-to-64 non-empty lines each contain the same count (≥1) of one
+/// delimiter candidate (`,` / `;` / tab, tried in that order). Two lines
 /// minimum: a single line of comma-separated words is prose, not a table.
 /// The edge behavior, probed and pinned in the tests: a UTF-8 BOM rides
 /// the first field harmlessly (it is not a delimiter); `lines()` strips a
-/// trailing `\r`, so CRLF files count cleanly (a lone `\r` is NOT a line
-/// ending — classic-Mac files are not heuristically CSV); quoted commas
-/// that AGREE across lines route here (anydoc's quote-aware parser does
-/// the real reading — the heuristic's job is routing, not parsing), while
+/// trailing `\r`, so CRLF files count cleanly (a lone `\r` is not a line
+/// ending: classic-Mac files are not heuristically CSV); quoted commas
+/// that agree across lines route here (anydoc's quote-aware parser does
+/// the real reading: the heuristic's job is routing, not parsing), while
 /// quoted commas that differ are prose-shaped and rejected; a
 /// single-column file carries 0 delimiters on every line and is rejected
 /// (name it with `format=` if it is one); UTF-16 text fails the UTF-8
 /// gate, but the `format="csv"` escape hatch reaches anydoc's BOM-aware
 /// decoder. A false positive requires prose whose every line carries an
-/// identical comma count — the price of resolving signature-less CSV from
+/// identical comma count: the price of resolving signature-less CSV from
 /// content alone, which the no-extension routing doctrine (temp files with
-/// no suffix, so content — never the name — picks the extractor) demands;
+/// no suffix, so content, never the name, picks the extractor) demands;
 /// an explicit `format=` always overrides the heuristic, and every
 /// marker-bearing format was already ruled out before it runs.
 fn looks_like_csv(bytes: &[u8]) -> bool {
@@ -796,12 +796,12 @@ fn looks_like_csv(bytes: &[u8]) -> bool {
     if lines.len() < 2 {
         return false;
     }
-    // JSON-LINES is the one structured format whose comma counts AGREE
+    // JSON-Lines is the one structured format whose comma counts agree
     // across lines (every record serializes the same keys), so the
-    // delimiter witness alone would claim it — and anydoc's csv parser
+    // delimiter witness alone would claim it, and anydoc's csv parser
     // would then mangle records that are not cells. A record line opens
     // with `{` (or `[`): not this heuristic's format. The cost is the
-    // rare csv whose FIRST field opens with a brace — name it with
+    // rare csv whose first field opens with a brace: name it with
     // format=, the same escape hatch every other rejected shape has.
     if lines
         .first()
@@ -822,12 +822,12 @@ fn looks_like_csv(bytes: &[u8]) -> bool {
 /// The `backend="oxide"` office conversion: office_oxide's unified reader.
 /// Its `from_reader` takes the format explicitly, and anydoc's Excel kind
 /// covers both the xlsx family and legacy xls, so the shared container
-/// check ([`is_ole_container`] — the same one the reported name and sniff
+/// check ([`is_ole_container`]: the same one the reported name and sniff
 /// use) decides that one: the OLE signature is legacy, anything else (a
-/// ZIP local-file header) is OOXML. Takes the bytes OWNED: the container
-/// check borrows them, then they move into the `Cursor` whole — zero
+/// ZIP local-file header) is OOXML. Takes the bytes owned: the container
+/// check borrows them, then they move into the `Cursor` whole: zero
 /// copies (convert() already owns the Vec; `from_reader`'s `Read + Seek +
-/// 'static` bound demands ownership of the READER, not a second copy of
+/// 'static` bound demands ownership of the reader, not a second copy of
 /// the bytes).
 fn office_markdown(bytes: Vec<u8>, kind: Kind) -> Result<String, DocumentError> {
     let format = match kind {
@@ -857,12 +857,12 @@ fn office_markdown(bytes: Vec<u8>, kind: Kind) -> Result<String, DocumentError> 
 
 /// The HTML conversion: html-to-markdown-rs under the options the lane
 /// measured with. `extract_metadata: false` suppresses the YAML frontmatter
-/// its default configuration emits for `<title>`/`<meta>` — the body is the
+/// its default configuration emits for `<title>`/`<meta>`: the body is the
 /// IR, and the title is not body content (a document's own `<h1>` carries
 /// the identity). The UTF-8 BOM is stripped at the door: it is an encoding
 /// signature, not content, and left in place it rides into the markdown as
 /// an invisible U+FEFF (measured on a BOM-prefixed page: the output opened
-/// with one — and a BOM-only file converted to its BOM and nothing else).
+/// with one, and a BOM-only file converted to its BOM and nothing else).
 fn html_markdown(bytes: &[u8]) -> Result<String, DocumentError> {
     let html = String::from_utf8_lossy(
         bytes
@@ -901,7 +901,7 @@ fn anydoc_error(err: AnydocError) -> DocumentError {
         AnydocError::Io(io) => Io(io),
         AnydocError::NeedsOcr { pages, page_count } => {
             // anydoc reports 1-based page numbers; this surface names pages
-            // as 0-based indices everywhere, so the conversion lives here —
+            // as 0-based indices everywhere, so the conversion lives here:
             // the one place the engine's answer crosses the seam.
             // `saturating_sub`: a nonsense 0 from the engine maps to the
             // first page instead of wrapping.
@@ -920,7 +920,7 @@ mod tests {
     use super::*;
 
     /// The polluted-head HTML fixture: title, style, and script all noise a
-    /// web-page converter must NOT let into the body markdown, around a
+    /// web-page converter must not let into the body markdown, around a
     /// structure-bearing body.
     const POLLUTED_HTML: &str = "<!DOCTYPE html>\
 <html><head><title>Page Title</title>\
@@ -932,13 +932,13 @@ mod tests {
 <table><tr><th>Unit</th><th>Status</th></tr><tr><td>T-101</td><td>healthy</td></tr></table>\
 </body></html>";
 
-    /// A hand-built [MS-CFB] (OLE) compound file with one named stream —
+    /// A hand-built [MS-CFB] (OLE) compound file with one named stream:
     /// the minimal container: 512-byte header, one FAT sector, one
     /// directory sector (Root Entry + the stream), then 8 sectors of junk
     /// stream data (exactly the mini-stream cutoff, so the stream lives in
     /// regular sectors and no mini FAT is needed). The byte layout was
-    /// verified parseable by cfb — anydoc's OLE reader — through the
-    /// installed wheel before being pinned here; the stream's CONTENT is
+    /// verified parseable by cfb (anydoc's OLE reader) through the
+    /// installed wheel before being pinned here; the stream's content is
     /// junk on purpose: these pins are about container identity, not about
     /// any parser's success on fake BIFF bytes.
     fn ole_with_stream(name: &str) -> Vec<u8> {
@@ -1005,11 +1005,11 @@ mod tests {
         out
     }
 
-    /// A STORED (method 0, no compression) zip of the given parts — the
+    /// A stored (method 0, no compression) zip of the given parts: the
     /// container identity without any deflate dependency. CRC-32 is
     /// computed bitwise (no crc crate in the tree); correctness matters
     /// only so the archive reads as well-formed to anydoc's package
-    /// reader, which keys on part NAMES, never on file content.
+    /// reader, which keys on part names, never on file content.
     fn zip_of(parts: &[(&str, &[u8])]) -> Vec<u8> {
         fn crc32(data: &[u8]) -> u32 {
             let mut crc = 0xFFFF_FFFFu32;
@@ -1089,9 +1089,9 @@ mod tests {
         ])
     }
 
-    /// A minimal readable two-page PDF — the same hand-built object-graph
+    /// A minimal readable two-page PDF: the same hand-built object-graph
     /// byte layout `pdf_impl`'s test module writes (correct offsets, xref,
-    /// trailer; THAT module's pins defend the layout — this one only needs
+    /// trailer; that module's pins defend the layout: this one only needs
     /// a document the pdf lane can actually convert, for the lane guards
     /// and the entity-policy wiring).
     fn two_page_pdf(first: &str, second: &str) -> Vec<u8> {
@@ -1178,7 +1178,7 @@ mod tests {
         );
         // entities fully decoded: &#233; -> é
         assert!(converted.output.contains("café"));
-        // GFM table with a delimiter row — the bar the chunker keys on.
+        // GFM table with a delimiter row: the bar the chunker keys on.
         // Cell padding is the engine's choice, so the header row is matched
         // structurally (a pipe row carrying the cell texts) and the
         // delimiter row by its character class.
@@ -1206,7 +1206,7 @@ mod tests {
     #[test]
     fn html_sniffing_takes_the_markers_and_rejects_lookalikes() {
         assert_eq!(sniff(POLLUTED_HTML.as_bytes()), Some("html"));
-        // case-insensitive and whitespace-tolerant — the docstring's
+        // case-insensitive and whitespace-tolerant: the docstring's
         // claims, each pinned: uppercase element, uppercase doctype, a
         // BOM plus blank lines before the marker, mixed case
         assert_eq!(sniff(b"\n  <HTML lang=\"en\">"), Some("html"));
@@ -1232,10 +1232,10 @@ mod tests {
         assert_eq!(sniff(b"unit\tstatus\nT-101\thealthy\n"), Some("csv"));
         // two lines minimum: one line of comma-separated words is prose
         assert_eq!(sniff(b"one, line only"), None);
-        // and the counts must AGREE and be non-zero on every line: prose
+        // and the counts must agree and be non-zero on every line: prose
         // whose comma counts vary is not a table. (Prose whose counts never
-        // vary IS the documented false positive — the accepted price of
-        // content-only resolution — and is deliberately NOT asserted
+        // vary is the documented false positive (the accepted price of
+        // content-only resolution) and is deliberately not asserted
         // against: the contract is the delimiter agreement, not prose
         // immunity.)
         assert_eq!(sniff(b"one, line\nand another here\n"), None);
@@ -1246,11 +1246,11 @@ mod tests {
 
     #[test]
     fn json_lines_is_not_csv_no_matter_how_the_commas_agree() {
-        // The one structured format whose delimiter counts AGREE across
+        // The one structured format whose delimiter counts agree across
         // lines (every record serializes the same keys): the witness
         // alone would claim it, and anydoc's csv parser would mangle the
         // records. The record-open guard ({ or [) declines it; the fix is
-        // the caller's — json-lines is deliberately NOT a documents
+        // the caller's: json-lines is deliberately not a documents
         // format (name it and parse it as what it is).
         assert_eq!(sniff(b"{\"a\":1,\"b\":2}\n{\"a\":3,\"b\":4}\n"), None);
         assert_eq!(sniff(b"[{\"a\":1},{\"a\":2}]\n[{\"a\":3}]\n"), None);
@@ -1270,11 +1270,11 @@ mod tests {
     fn the_anydoc_lane_ceiling_is_a_clean_error_and_an_override() {
         // A tiny explicit ceiling (the same guard the 32 MiB default
         // runs, at fixture scale): over -> Convert naming both sizes and
-        // the override; under -> converts. The DEFAULT's value is pinned
-        // separately (the constant IS the policy). At this tiny scale the
-        // sizes print as RAW BYTES (the sub-0.1-MiB regime, where the old
-        // MiB rounding read "0.0 MiB … 0.0 MiB" — two sizes, neither
-        // legible) and must be TWO DISTINCT legible numbers.
+        // the override; under -> converts. The default's value is pinned
+        // separately (the constant is the policy). At this tiny scale the
+        // sizes print as raw bytes (the sub-0.1-MiB regime, where the old
+        // MiB rounding read "0.0 MiB … 0.0 MiB": two sizes, neither
+        // legible) and must be two distinct legible numbers.
         let rows = b"unit,status\nT-101,healthy\n".repeat(20);
         let over = to_markdown_with(
             rows.clone(),
@@ -1320,11 +1320,11 @@ mod tests {
 
     #[test]
     fn the_oxide_lane_shares_the_input_ceiling() {
-        // office_oxide had NO input bound of its own (measured 2026-09,
-        // against 0.1.9 — which had no decompression caps at all: a 333
+        // office_oxide had no input bound of its own (measured,
+        // against 0.1.9, which had no decompression caps at all: a 333
         // KiB zip-bombed docx peaked at 1.7 GiB RSS on that lane, before
         // the ceiling was extended to it), so the opt-in lane gets the
-        // same input-side guard as the default one — named for ITS
+        // same input-side guard as the default one: named for its
         // engine lane. What the guard does not do is bound decompression
         // beyond office_oxide 0.1.10's own 512 MiB-per-part cap: there is
         // no total-across-parts cap and no output cap (see
@@ -1411,9 +1411,9 @@ mod tests {
 
     #[test]
     fn a_password_on_the_anydoc_pdf_lane_is_refused_up_front() {
-        // The anydoc PDF lane's reader takes no password at all: a CORRECT
+        // The anydoc PDF lane's reader takes no password at all: a correct
         // password would fail Convert("document is encrypted") exactly
-        // like a wrong one — indistinguishable from having been ignored.
+        // like a wrong one: indistinguishable from having been ignored.
         // The guard fires before any parsing semantics (an unencrypted
         // fixture is enough to pin it: the refusal, not the parse, is the
         // behavior), mirroring the pages= lane guard.
@@ -1438,7 +1438,7 @@ mod tests {
              anydoc's PDF reader takes no password"
         );
         // and the pdf_oxide lanes take it as before: same bytes, same
-        // password, auto routing — an unencrypted document ignores the
+        // password, auto routing: an unencrypted document ignores the
         // password and converts
         let pdf = two_page_pdf("Alpha page text", "Beta page text");
         let converted = to_markdown_with(
@@ -1565,8 +1565,8 @@ mod tests {
     #[test]
     fn unknown_format_names_and_undetectable_files_fail_loudly() {
         const MYSTERY: &[u8] = b"just some bytes, no markers at all";
-        // and the errors NAME their input — the bogus format string, the
-        // name — so the caller can tell which one to fix; the data= shape
+        // and the errors name their input: the bogus format string, the
+        // name, so the caller can tell which one to fix; the data= shape
         // (no name at all) names its fix instead
         let Err(DocumentError::UnknownFormat(what)) = to_markdown(
             MYSTERY.to_vec(),
@@ -1618,7 +1618,7 @@ mod tests {
         // every tolerance at once: BOM, blank lines, declaration, doctype
         let bommed = format!("\u{feff}\n  {WITH_DOCTYPE}");
         assert_eq!(sniff(bommed.as_bytes()), Some("html"));
-        // the name spells it too — and only the real extension: "xhtm" is
+        // the name spells it too, and only the real extension: "xhtm" is
         // not a thing
         for name in ["xhtml", "XHTML", ".xhtml"] {
             assert_eq!(Kind::from_name(name), Some(Kind::Html), "name {name:?}");
@@ -1651,7 +1651,7 @@ mod tests {
 
     #[test]
     fn one_xml_declaration_is_skipped_but_the_marker_stays_strict() {
-        // The skip is ONE optional declaration, not "any leading XML":
+        // The skip is one optional declaration, not "any leading XML":
         // every XML vocabulary opens with a declaration-then-tag, and the
         // full-document markers must not claim the tag ones.
         for not_html in [
@@ -1669,9 +1669,9 @@ mod tests {
     #[test]
     fn html_fragments_need_a_name_or_an_extension() {
         // The fragment doctrine (see looks_like_html): markers are
-        // FULL-document only, because a leading `<tag` would claim every
+        // full-document only, because a leading `<tag` would claim every
         // XML vocabulary. An extensionless fragment is UnknownFormat; the
-        // escape hatches — format="html" and the .html-family extension —
+        // escape hatches (format="html" and the .html-family extension)
         // both convert it.
         const FRAGMENT: &str = "<div><p>fragment body</p></div>";
         assert_eq!(sniff(FRAGMENT.as_bytes()), None);
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[test]
     fn degenerate_extensionless_files_fail_loudly_not_weirdly() {
-        // Zero bytes, whitespace only, BOM only: no marker, no extension —
+        // Zero bytes, whitespace only, BOM only: no marker, no extension:
         // a clean UnknownFormat (the error, never a panic or a hang, and
         // each degenerate byte set runs its own full conversion).
         for (label, bytes) in [
@@ -1727,7 +1727,7 @@ mod tests {
     fn empty_files_with_extensions_pin_each_engine_honestly() {
         // Empty-by-extension reaches the named engine, and each engine's
         // own empty-input surface is the pinned behavior: anydoc's csv
-        // parser yields an empty document (empty output — a zero-record
+        // parser yields an empty document (empty output: a zero-record
         // table is a valid empty file, not an error), the HTML engine
         // converts "" to "", and pdf_oxide names its header failure.
         let converted =
@@ -1750,7 +1750,7 @@ mod tests {
     fn a_utf8_bom_never_leaks_into_html_output() {
         // The BOM is an encoding signature, not content: before the strip
         // it rode into the markdown as an invisible U+FEFF (measured on a
-        // BOM-prefixed page — the output OPENED with one). Stripped at the
+        // BOM-prefixed page: the output opened with one). Stripped at the
         // engine door, also for a BOM-only file whose whole output is "".
         let bommed = [b"\xef\xbb\xbf".as_slice(), POLLUTED_HTML.as_bytes()].concat();
         let converted = to_markdown(
@@ -1782,8 +1782,8 @@ mod tests {
     fn csv_heuristic_edges_are_pinned() {
         // BOM rides the first field (not a delimiter); lines() strips the
         // \r of a \r\n ending so CRLF counts stay clean; quoted commas that
-        // AGREE route to the csv kind (anydoc's quote-aware parser does the
-        // real reading — routing, not parsing, is the heuristic's job)
+        // agree route to the csv kind (anydoc's quote-aware parser does the
+        // real reading: routing, not parsing, is the heuristic's job)
         // while differing counts are prose-shaped and rejected.
         assert_eq!(
             sniff(b"\xef\xbb\xbfunit,status\nT-101,healthy\n"),
@@ -1798,7 +1798,7 @@ mod tests {
         // a lone \r is not a line ending for lines(): classic-Mac files
         // are not heuristically CSV
         assert_eq!(sniff(b"unit,status\rT-101,healthy\r"), None);
-        // UTF-16 text fails the UTF-8 gate — but the format= escape hatch
+        // UTF-16 text fails the UTF-8 gate, but the format= escape hatch
         // reaches anydoc's BOM-aware csv decoder (probed through the wheel
         // before being pinned here)
         let mut utf16 = vec![0xFF, 0xFE];
@@ -1819,7 +1819,7 @@ mod tests {
         // from_name the explicit format= name uses, so the name-only
         // spellings work from the file name too. A one-line .tsv (the
         // content heuristic demands two lines) and an .xhtml fragment (no
-        // full-document marker) both convert by extension — where a second
+        // full-document marker) both convert by extension, where a second
         // spelling table would have dropped them on the floor.
         let converted = to_markdown(
             b"unit\tstatus".to_vec(),
@@ -1845,13 +1845,13 @@ mod tests {
 
     #[test]
     fn the_name_hint_extension_fallback_handles_the_edge_spellings() {
-        // Probed 2026-09-09 (all four through the wheel before being
-        // pinned here): the extension is the text AFTER THE LAST DOT of
-        // the whole hint — which handles the hidden file (`.html`'s last
+        // Probed (all four through the wheel before being
+        // pinned here): the extension is the text after the last dot of
+        // the whole hint, which handles the hidden file (`.html`'s last
         // dot is its first), the uppercase spelling (case-insensitive
         // vocabulary), and declines the pseudo-extensions: a dot inside a
-        // DIRECTORY component (`dir.d/file` — "d/file" names nothing) and
-        // a real-but-unknown one (`archive.tar.gz` — "gz" names nothing),
+        // directory component (`dir.d/file`: "d/file" names nothing) and
+        // a real-but-unknown one (`archive.tar.gz`: "gz" names nothing),
         // where resolution falls to the content markers, never a bogus
         // claim.
         let fragment = b"<div><p>fragment body</p></div>".to_vec();
@@ -1885,12 +1885,12 @@ mod tests {
 
     #[test]
     fn to_text_entity_policy_follows_the_engine_lane() {
-        // The wiring pin for the per-engine entity flag (probed 2026-09-09
+        // The wiring pin for the per-engine entity flag (probed
         // through the wheel): anydoc escapes entity-shaped `&` in its
         // markdown (`a &amp; b` cell -> `a &amp;amp; b`), so the anydoc
-        // lane's strip un-escapes ONCE — the document's own text comes
+        // lane's strip un-escapes once: the document's own text comes
         // back. pdf_oxide emits text literally, so its lane never
-        // un-escapes — a PDF whose text layer genuinely contains `&amp;`
+        // un-escapes: a PDF whose text layer contains `&amp;`
         // keeps it (un-escaping would corrupt text that is not an escape).
         let csv = b"unit,note\nT-101,a &amp; b\n".to_vec();
         let markdown = to_markdown(csv.clone(), None, Some("csv"), Backend::Auto, None).unwrap();
@@ -1924,7 +1924,7 @@ mod tests {
     #[test]
     fn the_error_types_display_the_strings_the_payload_raises() {
         // Display + std::error::Error make the cores `?`-able into
-        // Box<dyn Error>/anyhow; the STRINGS are pinned byte-equal to the
+        // Box<dyn Error>/anyhow; the strings are pinned byte-equal to the
         // binding layer's, so a Rust caller reads exactly what the Python
         // side raises (the payload's mapping arms carry these same
         // literals).
@@ -1956,8 +1956,8 @@ mod tests {
     #[test]
     fn the_anydoc_capability_refusal_names_the_lack_and_the_alternative() {
         // The PDF-family payload calls' shared doctrine, pinned byte-equal
-        // (UnsupportedBackend's message shape — backend and value, the
-        // lack, the fix — with the capability named per call and the
+        // (UnsupportedBackend's message shape (backend and value, the
+        // lack, the fix) with the capability named per call and the
         // anydoc PDF surface pointed at): the binding layer raises this
         // exact text, under the GIL, for all four functions, so the
         // string is the contract and lives with the routing table.
@@ -1991,8 +1991,8 @@ mod tests {
     fn adversarial_containers_sniff_and_fail_honestly() {
         // A truncated header is still a PDF header: sniff says pdf (the
         // marker is honest about what the bytes open with), and the
-        // conversion then fails on the REAL reason downstream — pdf_oxide's
-        // parse — not on a misdetected format.
+        // conversion then fails on the real reason downstream (pdf_oxide's
+        // parse), not on a misdetected format.
         assert_eq!(sniff(b"%PDF-1.7"), Some("pdf"));
         let err = convert_err("truncated.pdf", b"%PDF-1.7");
         assert!(matches!(err, DocumentError::Convert(_)), "got {err:?}");
@@ -2022,7 +2022,7 @@ mod tests {
     fn an_ole_workbook_sniffs_as_its_container_true_name() {
         // sniff reports the same name a conversion would (resolved_name's
         // container-aware Excel case): a Workbook stream inside an OLE
-        // container is legacy xls, a ZIP-based one is the xlsx family —
+        // container is legacy xls, a ZIP-based one is the xlsx family:
         // sniff and to_markdown cannot disagree about what the bytes are.
         let workbook = ole_with_stream("Workbook");
         assert_eq!(sniff(&workbook), Some("xls"));
@@ -2030,7 +2030,7 @@ mod tests {
         assert_eq!(sniff(&zip_workbook), Some("xlsx"));
         // resolution works even when the parse of junk BIFF bytes cannot:
         // named .xlsx, the OLE container still picks the Excel kind, and
-        // the failure is anydoc's honest "not a readable workbook" — never
+        // the failure is anydoc's honest "not a readable workbook": never
         // a misdetected format (the mislabeled-extension doctrine).
         let err = convert_err("workbook.xlsx", &workbook);
         assert!(matches!(err, DocumentError::Convert(_)), "got {err:?}");

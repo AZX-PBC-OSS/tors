@@ -1,4 +1,4 @@
-"""Regenerate ``src/html_table.rs`` from the RUNNING interpreter's ``html`` module.
+"""Regenerate ``src/html_table.rs`` from the running interpreter's ``html`` module.
 
 Reads ``html.entities.html5``, ``html._invalid_charrefs`` and
 ``html._invalid_codepoints`` (private but stable since CPython 3.8; the exact
@@ -11,7 +11,7 @@ The generated counts are pinned crate-side by the length-pin test in
 ``src/html_impl.rs``, and every entry of all three tables is re-verified per CI
 leg against the running interpreter by ``tests/test_html_unescape.py``
 (``TestFullHtml5Table`` + ``TestNumericSets``). If a future Python grows or
-changes a table, THOSE fail loudly; re-run this generator (against that
+changes a table, those fail loudly; re-run this generator (against that
 interpreter) to bring the file up to date, and update the pin test's numbers
 as part of that change.
 """

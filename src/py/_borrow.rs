@@ -11,13 +11,13 @@
 //!
 //! The walks take a `run` closure rather than returning the borrows:
 //! pyo3's `&str`/`&[u8]` extraction hands back a borrow tied to the
-//! HANDLE it was extracted from (pyo3 0.29's
+//! handle it was extracted from (pyo3 0.29's
 //! `impl<'a> FromPyObject<'a, '_> for &'a str`), so a walk that returned
 //! `(handles, borrows-of-handles)` would be returning a value that
 //! references data it also owns, the self-referential-return shape safe
 //! Rust cannot express. Running `run` inside the walk's scope solves
 //! that and pays a safety dividend: the handles are alive across
-//! everything `run` does, any `py.detach` included, BY CONSTRUCTION
+//! everything `run` does, any `py.detach` included, by construction
 //! rather than by call-site discipline.
 
 use pyo3::exceptions::{PyTimeoutError, PyValueError};
@@ -56,7 +56,7 @@ pub(crate) enum EmptyPolicy {
 ///
 /// `run` also receives the handles themselves (the `[Bound]` slice)
 /// because one caller needs them after its detach: `get_close_matches`
-/// returns the ORIGINAL candidate objects, selected by index, so it must
+/// returns the original candidate objects, selected by index, so it must
 /// reach the handles on the marshalling side of the scan.
 pub(crate) fn borrow_str_list<R>(
     list: &Bound<'_, PyList>,
@@ -101,7 +101,7 @@ pub(crate) fn borrow_bytes_list<R>(
 /// `replace_many_masked`: the [`borrow_str_list`] shape over a dict's
 /// (key, value) pairs, keys refused empty (`ValueError("empty pattern")`,
 /// the same find_patterns contract an empty key would break: it would
-/// match at every position), values extracted AFTER the key's empty
+/// match at every position), values extracted after the key's empty
 /// check so a non-`str` value under an empty key reports the empty-key
 /// `ValueError` first, exactly the per-entry check order the inline walks
 /// had. Same soundness story as [`borrow_str_list`]: the caller's dict
@@ -144,18 +144,18 @@ pub(crate) fn validate_unit_interval(name: &str, value: f64, echo_value: bool) -
     Ok(())
 }
 
-/// The `from_py_with` extractor that gives an argument BOTH halves of the
+/// The `from_py_with` extractor that gives an argument both halves of the
 /// str-in contract at once: the `&str` conversion pyo3's wrapper would
-/// perform for a `&str`-typed parameter (the standard str-in class — a
+/// perform for a `&str`-typed parameter (the standard str-in class: a
 /// non-`str` object fails the `PyString` downcast, a lone-surrogate `str`
 /// fails the UTF-8 borrow, byte-identical errors either way, because this
-/// IS that code path) and the handle a `Bound<'_, PyString>` parameter
+/// is that code path) and the handle a `Bound<'_, PyString>` parameter
 /// carries, in one argument slot. The chunking `_iter` twins use it on
 /// their `text` so their wrappers run exactly the conversion the list
 /// spellings' `text: &str` parameters get, in the same argument-0 slot:
 /// the streaming spelling must hold the handle (the `EagerIter` keep-alive)
 /// but must not let its weaker no-conversion extraction reorder any other
-/// argument's error ahead of the text's — the error-precedence contract
+/// argument's error ahead of the text's, the error-precedence contract
 /// tests/test_chunk_text.py::TestErrorPrecedence pins, family-wide. The
 /// returned handle's UTF-8 is already validated (and cached on the object)
 /// by the time the body sees it, so the body's own `to_str` re-borrow
@@ -176,7 +176,7 @@ pub(crate) fn convert_str_arg<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'p
 /// no-negative-overlap floor, and the forward-progress ceiling
 /// (`overlap >= count` would give every chunk after the first a stride
 /// of `count - overlap <= 0`, an infinite loop by construction), in the
-/// order the eleven inline blocks this replaces all had, count first --
+/// order the eleven inline blocks this replaces all had, count first,
 /// and because every caller reaches it only after all of its arguments
 /// are converted (the `_iter` twins' wrappers included, via
 /// [`convert_str_arg`]), that order is what both spellings of a pair
@@ -206,9 +206,9 @@ pub(crate) fn validate_count_overlap(count_name: &str, count: i64, overlap: i64)
 /// metrics, `similarity_ratio`, `get_close_matches`, `is_grounded`): the
 /// deadline core's own message carried on the builtins `TimeoutError`
 /// type the tests pin (`type(excinfo.value) is TimeoutError`). The
-/// exception is always constructed AFTER the GIL is reacquired (nothing
+/// exception is always constructed after the GIL is reacquired (nothing
 /// raises from inside a detached region); the deadline cores are three
-/// deliberately distinct nominal types with no shared trait, so the
+/// distinct nominal types with no shared trait, so the
 /// message string, not the error value, is the shared currency, and this
 /// one construction spelling replaces the two (`PyTimeoutError::new_err`
 /// and `PyErr::new::<PyTimeoutError, _>`, the same exception either way)

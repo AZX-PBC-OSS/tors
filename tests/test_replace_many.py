@@ -2,20 +2,20 @@
 replace, leftmost-longest, GIL-released.
 
 ``tors.replace_many(text, replacements)`` applies a ``dict[str, str]`` of
-substring replacements in ONE native pass, with ``find_patterns``'s exact
+substring replacements in one native pass, with ``find_patterns``'s exact
 search semantics (the same aho-corasick ``LeftmostLongest`` engine, one
 automaton over the keys):
 
 1. **Leftmost-longest**: the scan proceeds left to right; at each position
-   the LONGEST matching key wins, regardless of its position in the dict
-   (NOT regex alternation's leftmost-FIRST priority; a shorter key never
-   beats a longer one, and dict ORDER cannot matter: two distinct keys of
+   the longest matching key wins, regardless of its position in the dict
+   (not regex alternation's leftmost-first priority; a shorter key never
+   beats a longer one, and dict order cannot matter: two distinct keys of
    the same length can never both match at one position, so "longest" is
    always a strict, order-free winner).
-2. **Non-overlapping**: the scan resumes at the END of each consumed span
+2. **Non-overlapping**: the scan resumes at the end of each consumed span
    (resume-at-match-end), so consumed spans never overlap and unmatched
    characters between adjacent matches pass through untouched.
-3. **No cascade**: replacement OUTPUT is never re-scanned: a value that
+3. **No cascade**: replacement output is never re-scanned: a value that
    itself contains a key is emitted verbatim and the scan moves on (the
    ``&#38;amp;`` double-replace discipline; ``re.sub`` rescans its own
    output and does not promise this).
@@ -23,20 +23,20 @@ automaton over the keys):
 This is the replace primitive CPython does not have: chained
 ``str.replace`` calls are N whole-text GIL-held passes with
 sequential-dependence semantics (a later pass sees earlier outputs), and
-``re.sub`` with an alternation is leftmost-FIRST and output-rescanning,
+``re.sub`` with an alternation is leftmost-first and output-rescanning,
 neither has these semantics, so (as with ``find_patterns``) no stdlib
 oracle exists and the contract is proven three ways: (a) golden battery
 rows with exact expected strings, every row cross-checked against the
 brute-force pure-Python oracle (``reference_replace_many``, in
 tests/reference.py, character-space, dict-order-agnostic by
 construction), (b) hypothesis differentials over multi-byte alphabets and
-arbitrary Unicode with substring-biased keys, plus the dict-ORDER
+arbitrary Unicode with substring-biased keys, plus the dict-order
 irrelevance property, and (c) the identity-return contract pinned as
 object identity.
 
 The identity contract (the idiom, complete form):
-``replace_many(s, m) is s`` EXACTLY when ``replace_many(s, m) == s``: a
-map whose keys never match returns the ORIGINAL input object, and so does
+``replace_many(s, m) is s`` exactly when ``replace_many(s, m) == s``: a
+map whose keys never match returns the original input object, and so does
 a map whose net effect is the identity (every match replaced by output
 that reconstructs the input, e.g. ``{"aa": "aa"}`` over ``"aaa"``); a map
 that changes anything returns a fresh string.
@@ -46,7 +46,7 @@ Contract decisions at the argument boundary (each pinned below):
 - an empty key raises ``ValueError("empty pattern")``: it would match at
   every position (the ``find_patterns`` contract), wherever it sits in the
   dict;
-- an empty dict returns the input OBJECT immediately (no automaton build);
+- an empty dict returns the input object immediately (no automaton build);
 - ``text`` must be exactly ``str`` and ``replacements`` exactly ``dict``:
   a non-``str`` key or value raises ``TypeError``, and a tuple or list of
   pairs raises ``TypeError`` too (the dict is the ergonomic shape and its
@@ -57,7 +57,7 @@ Contract decisions at the argument boundary (each pinned below):
 
 The GIL-release claim (automaton build + scan + splice under one
 ``py.detach``; the GIL-held residue is the O(entries) argument walk plus
-the O(output) marshalling of ONE string, so no list-shape class exists) is
+the O(output) marshalling of one string, so no list-shape class exists) is
 pinned in tests/test_gil_release.py.
 """
 
@@ -98,9 +98,9 @@ _FAMILY = (
         # overlapping into a leftover "a".
         ("aaaa", {"aa": "b"}, "bb"),
         # The chain that looks wrong but is right: "ab" matches at 0-2,
-        # the scan resumes at 2; the middle "c" is a GAP (neither "ab"
+        # the scan resumes at 2; the middle "c" is a gap (neither "ab"
         # nor "bc" matches there), passes through, and "bc" matches at
-        # 3-5. NOT "XY": leftmost-longest never backs up to re-match the
+        # 3-5. Not "xy": leftmost-longest never backs up to re-match the
         # "bc" a "b"-ending earlier match would have left behind.
         ("abcbc", {"ab": "X", "bc": "Y"}, "XcY"),
         # Deletion via empty value.
@@ -108,7 +108,7 @@ _FAMILY = (
         # No-rescan: the value's own "a" is emitted verbatim, never
         # re-replaced ("baba" would be the cascade tors does not do).
         ("a", {"a": "ba"}, "ba"),
-        # A value CONTAINING a key does not cascade either.
+        # A value containing a key does not cascade either.
         ("cat", {"cat": "catalogue"}, "catalogue"),
         ("the cat sat", {"cat": "catalogue"}, "the catalogue sat"),
         # Adjacent matches, mixed lengths.
@@ -131,7 +131,7 @@ _FAMILY = (
     ],
 )
 def test_golden_battery(text: str, replacements: dict[str, str], expected: str) -> None:
-    """The fixed anchor of the contract: every golden case asserts the EXACT
+    """The fixed anchor of the contract: every golden case asserts the exact
     expected string and the oracle's agreement, so a hand-computed
     expectation that disagreed with the brute-force reference would fail
     loudly here rather than silently laundering a wrong pin into the suite
@@ -195,14 +195,14 @@ def test_multibyte_keys_values_and_text(
 class TestIdentityContract:
     def test_no_match_map_returns_the_same_object(self) -> None:
         """The zero-cost lane: a map whose keys never match returns the
-        ORIGINAL input object (no allocation, no copy, no marshalling
+        original input object (no allocation, no copy, no marshalling
         (``Cow::Borrowed`` on the crate side)."""
         s = "nothing to see here"
         assert replace_many(s, {"xyz": "Q"}) is s
 
     def test_net_identity_map_returns_the_same_object(self) -> None:
-        """The complete form of the contract: a map whose keys DO match but
-        whose net effect is the identity still returns the ORIGINAL input
+        """The complete form of the contract: a map whose keys do match but
+        whose net effect is the identity still returns the original input
         object: the output is reconstructed equal and the implementation
         hands back the borrowed input rather than a fresh equal string.
         ``{"aa": "aa"}`` over ``"aaa"`` matches at 0-2, re-emits "aa",
@@ -225,7 +225,7 @@ class TestIdentityContract:
 
     def test_a_map_that_changes_anything_returns_a_new_object(self) -> None:
         """The contrapositive, pinned as an object-level fact: when the
-        output differs from the input, the result is a FRESH string (the
+        output differs from the input, the result is a fresh string (the
         input object is never mutated or handed back unequal)."""
         result = replace_many("a", {"a": "b"})
         assert result == "b"
@@ -320,7 +320,7 @@ def _replacements_and_text(
     lane) or key-containing (the cascade lane)) and texts over an alphabet
     spanning every UTF-8 width: 1-byte ``ab``, 2-byte ``é`` and the
     combining accent, 3-byte CJK, 4-byte emoji. Keys and values drawn from
-    the SAME alphabet as the text, so matches, deletions, and
+    the same alphabet as the text, so matches, deletions, and
     value-contains-key shapes all occur at every width combination."""
     replacements = draw(
         st.dictionaries(
@@ -340,7 +340,7 @@ def test_matches_the_reference_over_multibyte_alphabets(
     text_replacements: tuple[str, dict[str, str]],
 ) -> None:
     """The differential proof over the multi-byte alphabet: tors's answer
-    must equal the brute-force character-space oracle EXACTLY (string
+    must equal the brute-force character-space oracle exactly (string
     equality) for every generated dict and text. A span miscount, a
     wrongly-ordered key preference, a cascade slip, or a resume-position
     bug of any kind breaks this property; the golden battery pins the
@@ -354,7 +354,7 @@ def _substring_key_replacements_and_text(
     draw: st.DrawFn,
 ) -> tuple[str, dict[str, str]]:
     """Arbitrary-Unicode texts (hypothesis's full ``st.text`` alphabet: any
-    script, any marks, no alphabet bias) with keys biased toward SUBSTRINGS
+    script, any marks, no alphabet bias) with keys biased toward substrings
     of the text, so matches actually occur over text no small alphabet can
     generate; values are arbitrary short strings (empty allowed)."""
     text = draw(st.text(max_size=50))
@@ -387,7 +387,7 @@ def _key_value_pairs(
     draw: st.DrawFn,
 ) -> list[tuple[str, str]]:
     """2-6 distinct (key, value) pairs, the raw material for the
-    order-irrelevance property, held as a LIST so the same mapping can be
+    order-irrelevance property, held as a list so the same mapping can be
     rebuilt in different insertion orders."""
     pairs = draw(
         st.dictionaries(
@@ -405,9 +405,9 @@ def _key_value_pairs(
 def test_dict_insertion_order_cannot_matter(pairs: list[tuple[str, str]]) -> None:
     """The order-freedom property, structural on the semantics: the same
     mapping built in two different insertion orders (forward and reversed, with
-    >= 2 entries these differ) produces the IDENTICAL result string,
+    >= 2 entries these differ) produces the identical result string,
     and both agree with the oracle. Leftmost-longest over unique keys makes
-    this true by construction; a leftmost-FIRST implementation (regex
+    this true by construction; a leftmost-first implementation (regex
     alternation's priority, ``re.sub``'s semantics) breaks it on the first
     prefix-pair it generates."""
     assert len(pairs) >= 2
@@ -425,7 +425,7 @@ def test_every_replacement_map_over_a_tiny_alphabet_matches_the_reference() -> N
     """The deterministic sweep (the suite's exhaustive-small-alphabet idiom):
     every replacement dict over the keys ``{"a", "ab", "b"}`` (the prefix /
     overlap interactions) with values from ``{"X", "", "ba"}`` (a plain
-    value, the deletion lane, and a value CONTAINING a key (the cascade
+    value, the deletion lane, and a value containing a key (the cascade
     lane)): 64 dicts including the empty one, crossed with every text over
     ``{"a", "b"}`` up to length 5 (63 texts), the complete small space of
     prefix/overlap/duplicate-shaped interactions, no sampling at all."""
@@ -449,10 +449,10 @@ def test_every_replacement_map_over_a_tiny_alphabet_matches_the_reference() -> N
 # ``tors.replace_many_masked(text, replacements, mask="*")`` is
 # ``replace_many``'s exact scan (the same leftmost-longest,
 # resume-at-match-end, no-cascade automaton: one engine, one pass)
-# with the LENGTH GUARANTEE the redaction shape needs: every matched
+# with the length guarantee the redaction shape needs: every matched
 # span of L characters is replaced by its value truncated to L (longer
 # values) or right-padded with the mask (shorter), so the output's
-# CHARACTER count equals the input's, and every NON-matching offset
+# character count equals the input's, and every non-matching offset
 # addresses the same character it addressed before, so pre-computed
 # offsets (``find_patterns`` spans, tokenized positions) stay valid
 # after redaction. Chained ``str.replace`` cannot promise this (each
@@ -482,7 +482,7 @@ class TestReplaceManyMasked:
             # their offsets ("a" and "c" unchanged around the 1-char span).
             ("abc", {"b": "XY"}, "*", "aXc"),
             # Multi-byte text, keys, and values: the arithmetic is
-            # CHARACTER-level on every UTF-8 width.
+            # character-level on every UTF-8 width.
             ("café café", {"café": "C"}, "*", "C*** C***"),
             ("京都東京", {"東京": "TOKYO"}, "*", "京都TO"),
             (
@@ -491,7 +491,7 @@ class TestReplaceManyMasked:
                 "*",
                 "café* ok",
             ),
-            # A multi-byte MASK pads with its own single character.
+            # A multi-byte mask pads with its own single character.
             ("éaé cat", {"cat": "X"}, _E_ACUTE, "éaé X" + _E_ACUTE + _E_ACUTE),
             ("cat", {"cat": "XY"}, "東", "XY東"),
             # The no-match and empty lanes.
@@ -523,7 +523,7 @@ class TestReplaceManyMasked:
         self, text: str, replacements: dict[str, str], mask: str, expected: str
     ) -> None:
         """The fixed anchor of the length guarantee: every row asserts the
-        EXACT expected string, the output's character length equals the
+        exact expected string, the output's character length equals the
         input's, and the scan agrees with the brute-force oracle's spans
         (``reference_replace_many`` with each value pre-truncated or
         pre-padded to its key's length reproduces the output; the scan
@@ -546,8 +546,8 @@ class TestReplaceManyMasked:
     ) -> None:
         """The property the function exists for, over the module's own
         multi-byte strategy: every ``find_patterns`` span (the same
-        leftmost-longest scan, CHAR offsets) addresses in the output the
-        truncated-or-padded value of its key, and every character NOT
+        leftmost-longest scan, char offsets) addresses in the output the
+        truncated-or-padded value of its key, and every character not
         inside a matched span is identical at its own offset, so
         pre-computed offsets stay valid after redaction, by construction
         (the length arithmetic), not by coincidence. The mask is the
@@ -579,7 +579,7 @@ class TestReplaceManyMasked:
     ) -> None:
         """The length invariant over the module's multi-byte hypothesis
         strategy (every UTF-8 width, deletions, cascades): the output's
-        CHARACTER count equals the input's, always, the property a
+        character count equals the input's, always, the property a
         chained-``str.replace`` redaction cannot keep."""
         text, replacements = text_replacements
         assert len(replace_many_masked(text, replacements)) == len(text)
@@ -605,12 +605,12 @@ class TestReplaceManyMasked:
                 replace_many_masked("cat", {"cat": "X"}, bad)
 
     def test_identity_contract_is_the_net_identity_idiom(self) -> None:
-        """``replace_many_masked(s, m, mask) is s`` EXACTLY when the
+        """``replace_many_masked(s, m, mask) is s`` exactly when the
         output equals the input: the no-match map (nothing consumed),
         the empty dict (no automaton at all), and (the masked family's
         own interesting lane) a map whose values reconstruct the input
         through the length arithmetic (a value equal to its key pads
-        and truncates to the key itself), all return the ORIGINAL
+        and truncates to the key itself), all return the original
         object; a map that changes anything returns a fresh string."""
         s = "the cat sat"
         assert replace_many_masked(s, {"zzz": "QQQ"}) is s
@@ -668,7 +668,7 @@ class TestReplaceManyMasked:
 
     def test_lone_surrogates_are_refused_at_the_argument_boundary(self) -> None:
         """The standard str-in boundary, paid by the text, every key,
-        every value, AND the mask alike (the mask is a str-in argument
+        every value, and the mask alike (the mask is a str-in argument
         of the same class; the length arithmetic runs on characters)."""
         with pytest.raises(UnicodeEncodeError):
             replace_many_masked("abc\ud800", {"a": "b"})
@@ -680,7 +680,7 @@ class TestReplaceManyMasked:
             replace_many_masked("abc", {"a": "b"}, mask="\ud800")
 
     def test_an_invalid_mask_still_raises_with_an_empty_replacements_dict(self) -> None:
-        """The Rust wrapper (src/py/search.rs) validates ``mask`` BEFORE the
+        """The Rust wrapper (src/py/search.rs) validates ``mask`` before the
         empty-dict early return: ``replace_many_masked("abc", {}, mask="**")``
         raises ``ValueError``, not the identity-return every other empty-dict
         case gets (pinned above). Mask validation fires eagerly regardless
@@ -698,7 +698,7 @@ class TestReplaceManyMasked:
     def test_non_str_mask_raises_type_error(self, not_str: object) -> None:
         """``mask`` is an ordinary ``&str`` pyo3 parameter exactly like
         ``text``/keys/values, all three of which get a dedicated non-str
-        ``TypeError`` test above; ``mask``'s TYPE (as opposed to its
+        ``TypeError`` test above; ``mask``'s type (as opposed to its
         content/encoding, both already covered) never had one."""
         with pytest.raises(TypeError):
             replace_many_masked("abc", {"a": "b"}, mask=not_str)  # type: ignore[arg-type]

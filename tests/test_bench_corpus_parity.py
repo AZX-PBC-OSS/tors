@@ -1,4 +1,4 @@
-"""The bench↔test corpus identity, enforced. The README's performance tables (GIL
+"""The bench↔test corpus identity, enforced. The performance tables in docs/performance.md (GIL
 release, wall time vs the reference/stdlib, criterion throughput) cross-reference
 one another on the claim that the criterion benches' Rust-built corpora and the
 Python suites' ``tests/reference.py``-built corpora are the same bytes, and
@@ -10,7 +10,7 @@ byte-equality of both the sentence constants and the built corpora against
 ``reference``, which stays the single source.
 
 The shared recipes (``prose`` / ``decomposed`` / ``crlf`` and their sentence
-constants) live ONCE in ``benches/common/mod.rs`` (criterion's shared-module
+constants) live once in ``benches/common/mod.rs`` (criterion's shared-module
 pattern: every bench file declares ``mod common;``), so the cross-check parses
 that one source for them, and a separate wiring pin below requires every bench to
 build its corpora from the common module (a bench silently re-growing its own
@@ -20,10 +20,10 @@ pinned there. The bytes bench additionally has its UTF-8 rendering pinned:
 its measured corpora are the reference corpora encoded to UTF-8, exactly
 ``reference.corpus_utf8``, the same bytes the Python-side GIL/wall cells use. The
 text bench's b64-decode corpus rendering is pinned: the prose corpus through
-the same STANDARD engine ``b64_impl::encode`` uses, the same bytes as
+the same standard engine ``b64_impl::encode`` uses, the same bytes as
 ``reference.corpus_b64``.
 
-The diff bench's pair corpora are BUILT (mutated/shuffled), not repeated,
+The diff bench's pair corpora are built (mutated/shuffled), not repeated,
 so they cannot be rebuilt-in-Python from parsed constants the way the
 ``repeat_to`` recipes can; the parity mechanism there is three-layered: the
 shared constants (word swap, edit-position fractions, the LCG, the numbering
@@ -102,7 +102,7 @@ _REPEAT_TO = re.compile(
     r"unit\.repeat\(\(target_bytes / unit\.len\(\)\)\.max\(1\)\)\s*\}"
 )
 _SENTENCE = re.compile(r'const (?P<name>\w+): &str = "(?P<literal>[^"]*)";')
-# A corpus builder: repeat_to(target, &format!("{}{}", SENTENCE.repeat(n), "suffix")).
+# A corpus builder: repeat_to(target, &format!("{}{}", sentence.repeat(n), "suffix")).
 _BUILDER = re.compile(
     r"fn (?P<kind>\w+)\(target_bytes: usize\) -> String \{\s*"
     r'repeat_to\(\s*target_bytes,\s*&format!\("\{\}\{\}",\s*(?P<unit>\w+)\.repeat\((?P<count>\d+)\),'
@@ -116,7 +116,7 @@ _USES_COMMON = re.compile(r"^mod common;$", re.MULTILINE)
 # byte view of it.
 _BYTES_RENDER = re.compile(r"let bytes = corpus\.as_bytes\(\);")
 # The text bench's b64-decode corpus rendering, pinned textually: the prose
-# corpus encoded through the same STANDARD engine b64_impl::encode uses,
+# corpus encoded through the same standard engine b64_impl::encode uses,
 # exactly reference.corpus_b64's bytes.
 _B64_RENDER = re.compile(
     r"let b64 = base64::engine::general_purpose::STANDARD\.encode\(corpus\.as_bytes\(\)\);"
@@ -159,7 +159,7 @@ def test_bench_sentences_are_byte_identical_to_the_reference_sentences(
         name: text.encode("utf-8") for name, text in expected.items()
     }, (
         f"benches/{source}'s and reference.py's sentence constants drifted; every "
-        "README performance table cross-references on these being the same bytes"
+        "performance table cross-references on these being the same bytes"
     )
 
 
@@ -199,7 +199,7 @@ def test_bytes_bench_measures_the_utf8_rendering_of_the_built_corpus() -> None:
 
 def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
     """The text bench's b64-decode corpus must be the (pinned-identical) prose
-    corpus rendered through the same STANDARD engine ``b64_impl::encode``
+    corpus rendered through the same standard engine ``b64_impl::encode``
     uses, the exact bytes of ``reference.corpus_b64('prose', ...)``, which
     the Python-side b64_decode GIL/wall cells measure, so the bench numbers
     stay comparable with them."""
@@ -232,7 +232,7 @@ def test_bench_corpus_is_byte_identical_to_the_reference_corpus(
     source: str, kind: str, target_bytes: int
 ) -> None:
     """The 1B cell exercises the ``.max(1)`` floor (a target smaller than one unit); 1 KiB
-    and 12 MiB are the sizes the README's wall-time and criterion tables quote. The
+    and 12 MiB are the sizes the performance and criterion tables quote (docs/performance.md). The
     shared kinds are asserted against ``benches/common/mod.rs`` (the one source every
     bench builds them from); the text-bench-only kinds against ``benches/text.rs``
     (where those recipes live)."""
@@ -247,7 +247,7 @@ def test_bench_corpus_is_byte_identical_to_the_reference_corpus(
 
 # --- The diff bench's built pair corpora --------------------------------------
 #
-# The diff corpora are BUILT (line mutations, a shuffle), not repeated, so the
+# The diff corpora are built (line mutations, a shuffle), not repeated, so the
 # repeat_to rebuilding mechanism above cannot reach them. The mechanism here:
 # parse benches/diff.rs's shared constants and cross-check them against
 # reference.py's mirror constants, plus textual pins of the load-bearing
@@ -349,7 +349,7 @@ def test_diff_bench_shuffle_loop_and_edit_branches_are_pinned() -> None:
     mechanism): the Fisher-Yates loop (the exact u64 wrapping arithmetic and
     the modulo draw), the numbered-line format, and the near-identical pair's
     edit branches (replace wins over a colliding delete; the inserted line
-    lands AFTER the kept line), the semantics the constant cross-checks
+    lands after the kept line), the semantics the constant cross-checks
     above cannot see on their own."""
     source = _BENCH_SOURCES["diff.rs"]
     for pin in (
@@ -373,8 +373,8 @@ def test_diff_bench_shuffle_loop_and_edit_branches_are_pinned() -> None:
 
 # --- The search bench's pattern sets --------------------------------------------
 #
-# The search bench's corpora are the SHARED prose recipe (the wiring pin
-# above), so what can drift is the PATTERN SETS: the two arrays the cells
+# The search bench's corpora are the shared prose recipe (the wiring pin
+# above), so what can drift is the pattern sets: the two arrays the cells
 # scan with. They are parsed out of benches/search.rs and cross-checked
 # against reference.py's SEARCH_SPARSE_PATTERNS / SEARCH_DENSE_PATTERNS
 # mirrors, so the bench numbers and the Python-side GIL/wall cell numbers

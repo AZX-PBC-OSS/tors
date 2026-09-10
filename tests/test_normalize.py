@@ -43,7 +43,7 @@ class TestBehavioralCases:
             assert normalize(text) == "", repr(text)
 
     def test_pins_the_pattern_semantics_on_the_boundary_cases(self) -> None:
-        # A tab before a newline is trimmed; a THREE-newline run collapses to two.
+        # A tab before a newline is trimmed; a three-newline run collapses to two.
         assert normalize("a\t\nb\n\n\nc") == "a\nb\n\nc"
 
     def test_composes_decomposed_sequences_before_collapsing(self) -> None:
@@ -53,7 +53,7 @@ class TestBehavioralCases:
         assert normalize(text) == "caf" + _E_ACUTE_PRECOMPOSED + "\n\nwater"
 
     def test_entirely_decomposed_string(self) -> None:
-        # A string built ONLY from decomposed base+combining-mark pairs, with no ordinary
+        # A string built only from decomposed base+combining-mark pairs, with no ordinary
         # ASCII interspersed, must still fully compose under NFC.
         decomposed = ("e" + _COMBINING_ACUTE) * 20
         composed = _E_ACUTE_PRECOMPOSED * 20
@@ -179,9 +179,9 @@ class TestExhaustiveSmallAlphabet:
 
 class TestIdentityReturnContract:
     """The identity-return contract for ``tors.normalize``: when the
-    COMPLETE pipeline is a no-op: NFC quick-check Yes AND no CR AND no
-    ``[ \\t]`` run before a newline AND no 3+ newline run AND no strip delta,
-    the ORIGINAL object comes back (``normalize(s) is s``): the identity probe
+    complete pipeline is a no-op: NFC quick-check Yes and no CR and no
+    ``[ \\t]`` run before a newline and no 3+ newline run and no strip delta,
+    the original object comes back (``normalize(s) is s``): the identity probe
     is a handful of SIMD sentinel scans, no allocation at all. Inputs the
     probe cannot prove clean still run the scan, and an output==input
     comparison after it extends the same guarantee to them, so the complete

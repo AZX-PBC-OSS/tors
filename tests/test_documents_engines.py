@@ -3,26 +3,26 @@ contract over generated documents of every working format.
 
 Three generation lanes, one set of gates (tests/documents_gates.py):
 
-- FIXED FIXTURES (tests/documents.py's ``ENGINES_CORPUS``, committed under
+- fixed fixtures (tests/documents.py's ``ENGINES_CORPUS``, committed under
   tests/engines_corpus/ and byte-pinned): one structurally rich document
   per format family, plus PDF structural variants (link annotation,
   two-column, oversize heading, blank page, two pages). These gate the
-  MEASURED structural facts — style-based docx headings, link rendering,
-  GFM table delimiter rows, column separation, NeedsOcr routing — the
+  measured structural facts (style-based docx headings, link rendering,
+  GFM table delimiter rows, column separation, NeedsOcr routing) the
   properties the engine choice was made on.
-- FUZZ (tests/docgen.py, seeded): randomized real-writer documents — fpdf2,
-  python-docx, openpyxl, python-pptx — with varying structure, columns,
+- fuzz (tests/docgen.py, seeded): randomized real-writer documents (fpdf2,
+  python-docx, openpyxl, python-pptx) with varying structure, columns,
   links, and formatting, each carrying its ground truth. These gate
-  ALIGNMENT: every emitted content unit must survive conversion (markdown
+  alignment: every emitted content unit must survive conversion (markdown
   and plain-text modes), nothing fabricated, deterministic across calls.
-- MUTATION: corrupted bytes (truncation, flips, splices) must end in a
-  typed error or a usable result — never a crash, never a hang.
+- mutation: corrupted bytes (truncation, flips, splices) must end in a
+  typed error or a usable result: never a crash, never a hang.
 
-The API contract is gated where it exists today and SKIPPED WITH A LOUD
-REASON where a surface has not landed yet: the skips disappear the moment the
+The API contract is gated where it exists today and skipped with A loud
+reason where a surface has not landed yet: the skips disappear the moment the
 implementation arrives, and the tests then hold it. The suite imports the payload surface
 from ``tors_documents`` (the tors-documents wheel) with a fallback to
-in-base wrappers — whichever wiring ships, the gates are the same.
+in-base wrappers: whichever wiring ships, the gates are the same.
 """
 
 from __future__ import annotations
@@ -107,16 +107,16 @@ def _materialize(tmp_path: Path, kind: str) -> str:
 
 def _format_name(kind: str) -> str:
     """The format= spelling for a corpus kind: its fixture filename's
-    extension (every kind's extension IS a name in the format vocabulary)."""
+    extension (every kind's extension is a name in the format vocabulary)."""
     return Path(ENGINES_FILENAMES[kind]).suffix.lstrip(".")
 
 
 def _resolved_name(kind: str) -> str:
-    """The format name a conversion of this corpus kind RESOLVES to. The
+    """The format name a conversion of this corpus kind resolves to. The
     OOXML alias containers (docm_rich/xlsm/ppsx_rich) resolve onto their
-    base kinds — one OOXML package each, the [Content_Types].xml override
+    base kinds (one OOXML package each, the [Content_Types].xml override
     names the macro/show variant and the engines read the same parts the
-    base carries — so the resolved (and sniffed) name is the container's
+    base carries) so the resolved (and sniffed) name is the container's
     own (docx/xlsx/pptx), never the alias; every other kind's is its
     extension."""
     return {"docm_rich": "docx", "xlsm": "xlsx", "ppsx_rich": "pptx"}.get(
@@ -161,7 +161,7 @@ def test_auto_backend_converts_every_format_and_aligns(tmp_path: Path, kind: str
 def _oracle_lines(kind: str) -> list[str]:
     """The content every conversion of the fixed fixtures must carry: the
     corpus five carry EXPECTED_TEXT's lines (their own extraction oracle);
-    the shared-vocabulary fixtures (docx_rich/odt_rich/html_rich — built
+    the shared-vocabulary fixtures (docx_rich/odt_rich/html_rich: built
     from the RICH_* constants) carry that vocabulary plus their per-fixture
     extras; the OOXML aliases (docm_rich/xlsm/ppsx_rich) carry their base
     fixtures' lines (the container is the base's, only the content-type
@@ -211,16 +211,16 @@ def _oracle_lines(kind: str) -> list[str]:
 def test_the_oxide_forced_backend_converts_the_ooxml_family_and_aligns(
     tmp_path: Path, kind: str
 ) -> None:
-    """The oxide family's WORKING overlap, content-gated: backend="oxide"
+    """The oxide family's working overlap, content-gated: backend="oxide"
     forces office_oxide over the OOXML containers, and the auto lane's
-    choice for the office family is anydoc — so without this pin the
+    choice for the office family is anydoc: so without this pin the
     oxide lane's only pytest coverage is its refusals. The same alignment
     gate as the auto lane's matrix (every oracle line survives) plus the
     resolved name; the structural gates stay on the auto lane (lean by
-    design — the overlap is content parity, not a second structure
+    design: the overlap is content parity, not a second structure
     contract). The macro-enabled aliases (docm_rich/xlsm) are part of the
     working overlap (office_oxide reads the macroEnabled main+xml content
-    type); ppsx_rich is deliberately absent — office_oxide REFUSES the
+    type); ppsx_rich is deliberately absent: office_oxide refuses the
     slideshow content type, a divergence the alias class below pins."""
     path = _materialize(tmp_path, kind)
     resolved, markdown = to_markdown(path, backend="oxide")
@@ -230,9 +230,9 @@ def test_the_oxide_forced_backend_converts_the_ooxml_family_and_aligns(
 
 
 class TestStructureGates:
-    """The measured structural facts per format family — the properties the
+    """The measured structural facts per format family: the properties the
     engine stack was chosen on (see tors-core's documents_impl docs). The
-    asserts are SEMANTIC (a heading LINE containing the text, the URL
+    asserts are semantic (a heading line containing the text, the URL
     present, nesting indented), not exact-shape: any engine spelling that
     carries the semantics passes."""
 
@@ -287,7 +287,7 @@ class TestStructureGates:
 
     def test_classify_separates_empty_blank_from_scanned_image_pages(self, tmp_path: Path) -> None:
         """The classify seam's whole point: a contentless page is ``empty``
-        (neither extract nor OCR — NOT in the OCR list); an image-only page
+        (neither extract nor OCR: not in the OCR list); an image-only page
         is ``scanned`` (in the OCR list, 0-based); a mixed document names
         both kinds and lists only its image page."""
         blank = pdf_classify(_materialize(tmp_path, "pdf_blank"))
@@ -306,9 +306,9 @@ class TestStructureGates:
         assert mixed.has_text and not mixed.image_only
 
     def test_blank_and_scanned_routing_aligns_with_anydoc(self, tmp_path: Path) -> None:
-        """Cross-engine routing alignment: both engines name the SAME pages
-        as needing OCR, in the SAME 0-based convention (anydoc's 1-based
-        numbers are re-based at the core's seam — one convention across the
+        """Cross-engine routing alignment: both engines name the same pages
+        as needing OCR, in the same 0-based convention (anydoc's 1-based
+        numbers are re-based at the core's seam: one convention across the
         whole surface). (A blank/contentless page is the documented
         divergence: pdf_oxide says empty/not-OCR, anydoc says NeedsOcr;
         that difference is pinned in the blank test, not here.)"""
@@ -326,7 +326,7 @@ class TestStructureGates:
 
     def test_blank_pdf_reads_empty_and_anydoc_flags_ocr(self, tmp_path: Path) -> None:
         """The contentless-page routing case: the pdf_oxide path returns
-        empty output (the CALLER routes — classify says ``empty``, neither
+        empty output (the caller routes: classify says ``empty``, neither
         extract nor OCR); the anydoc backend raises the typed NeedsOcr
         signal (the documented cross-engine divergence, pinned as a fact)."""
         path = _materialize(tmp_path, "pdf_blank")
@@ -360,10 +360,10 @@ class TestStructureGates:
         """TSV: the delimiter-separated family's other half. anydoc's csv
         parser is delimiter-separated, so the engine lane's one-line
         vocabulary mapping (``tsv`` → the csv kind) is all that stands
-        between here and support. This gate SKIPS WITH THIS REASON until
+        between here and support. This gate skips with this reason until
         the name resolves, then holds it to the same table contract. The
-        resolved name is pinned EXACTLY as csv — the README's "always csv,
-        never tsv" contract (probed 2026-09-09 before pinning: the mapping
+        resolved name is pinned exactly as csv, the docs/documents.md "always csv,
+        never tsv" contract (probed before pinning: the mapping
         lands, the resolved answer is Format.CSV)."""
         path = tmp_path / "engines_units.tsv"
         path.write_bytes(b"unit\tstatus\nT-101\thealthy\nT-102\tneeds review\n")
@@ -439,9 +439,9 @@ def test_random_documents_align_in_both_modes(tmp_path: Path, kind: str, seed: i
 @pytest.mark.parametrize("kind", sorted(ENGINES_CORPUS), ids=lambda kind: kind)
 def test_corrupted_documents_fail_typed_or_succeed(tmp_path: Path, kind: str) -> None:
     """Robustness: truncation, byte flips, and splices must end in a typed
-    error (ValueError/OSError/NeedsOcrError) or a usable result — never an
-    untyped crash. Content is NOT gated on corrupted input (partial output
-    from a damaged file is legitimate); only the failure TYPE is."""
+    error (ValueError/OSError/NeedsOcrError) or a usable result: never an
+    untyped crash. Content is not gated on corrupted input (partial output
+    from a damaged file is legitimate); only the failure type is."""
     rng = random.Random(20260909)
     raw = ENGINES_CORPUS[kind]
     for corruption in range(CORRUPTIONS_PER_FIXTURE):
@@ -501,11 +501,11 @@ class TestApiContract:
         resolves to nothing, are IO failures: OSError (never ValueError,
         never a crash), with the cause named in the message, in both
         modes. The landed shape (the io::Error → errno mapping the
-        engine-lane handoff delivered): the errno-matched OSError SUBCLASS
-        — IsADirectoryError, FileNotFoundError — so a caller's ``except
+        engine-lane handoff delivered): the errno-matched OSError subclass
+        (IsADirectoryError, FileNotFoundError) so a caller's ``except
         FileNotFoundError`` catches, with the errno text carried in the
         message; ``.errno`` itself is None on the mapped subclass (the
-        mapping constructs the subclass without the errno attribute — the
+        mapping constructs the subclass without the errno attribute: the
         message, not ``.errno``, is where the cause lives)."""
         cases = [
             (str(tmp_path), "Is a directory"),
@@ -521,7 +521,7 @@ class TestApiContract:
 def test_sniff_exposes_magic_byte_detection(tmp_path: Path) -> None:
     """API contract: sniff(data) names the format from content markers alone
     (the extension-independent signal), None for the signature-less and the
-    unrecognized. SKIPPED WITH THIS REASON until the surface lands."""
+    unrecognized. Skipped with this reason until the surface lands."""
     import tors_documents as payload
 
     sniff = getattr(payload, "sniff", None) or getattr(payload, "sniff_format", None)
@@ -544,15 +544,15 @@ def test_sniff_exposes_magic_byte_detection(tmp_path: Path) -> None:
     assert sniff(b"plain text, no markers") is None
     assert sniff(b"plain prose, no markers and no delimiter structure") is None
     # CSV is signature-less by anydoc's own docs, but the engine's sniffer
-    # may heuristically name delimiter-separated bytes as csv — either
-    # answer is its documented behavior; the CONTRACT is that sniff never
+    # may heuristically name delimiter-separated bytes as csv: either
+    # answer is its documented behavior; the contract is that sniff never
     # names a format the bytes are not (pinned by every other row above).
 
 
 def test_truncated_magic_bytes_sniff_to_none() -> None:
     """A truncated prefix of a magic is not the format: the empty bytes,
     a two-byte ZIP head, a three-byte PDF head, and a JSON fragment all
-    sniff to None — never a guess from a partial signature. The whole
+    sniff to None: never a guess from a partial signature. The whole
     markers those prefixes truncate are the contrast rows: sniff answers
     them, so the None answers are about truncation, not about sniff never
     answering."""
@@ -566,9 +566,9 @@ def test_truncated_magic_bytes_sniff_to_none() -> None:
 def test_a_generic_zip_is_not_an_office_document(tmp_path: Path) -> None:
     """The OOXML formats are ZIP packages, but a ZIP package is not
     therefore an OOXML document: a generic zip (one .txt member, no
-    [Content_Types].xml) must not be claimed as docx/xlsx/pptx — sniff
-    says None — and converting it is a typed ValueError under its own
-    extension AND under a lying .docx extension (the extension fallback
+    [Content_Types].xml) must not be claimed as docx/xlsx/pptx (sniff
+    says None) and converting it is a typed ValueError under its own
+    extension and under a lying .docx extension (the extension fallback
     engages, then the docx parse refuses cleanly: the fallback path, the
     one no corpus kind exercises because every corpus kind's content is
     marker-named)."""
@@ -587,8 +587,8 @@ def test_a_generic_zip_is_not_an_office_document(tmp_path: Path) -> None:
 
 # The formats whose EMPTY bytes are themselves a valid empty document, so
 # an empty file converts (to empty output) instead of refusing: the two
-# text formats with no required structure (measured 2026-09-09; every
-# other kind refuses — see the empty-file gate below).
+# text formats with no required structure (measured; every
+# other kind refuses: see the empty-file gate below).
 _EMPTY_READS_AS_A_DOCUMENT = {"csv", "html"}
 
 
@@ -596,8 +596,8 @@ _EMPTY_READS_AS_A_DOCUMENT = {"csv", "html"}
 def test_an_empty_file_is_a_typed_refusal_or_an_empty_document(tmp_path: Path, kind: str) -> None:
     """A 0-byte file never crashes and never raises OSError: the
     structured formats (pdf/docx/xlsx/pptx/odt/rtf) refuse it with a
-    typed ValueError naming the malformed container; csv and html — whose
-    empty bytes ARE a valid empty document — convert to exactly empty
+    typed ValueError naming the malformed container; csv and html (whose
+    empty bytes are a valid empty document) convert to exactly empty
     output (the typed current behavior, pinned as a fact; if the contract
     wants a refusal there too, that is an engine-lane decision and this
     gate is where it lands). Both modes, every corpus kind."""
@@ -631,10 +631,10 @@ def test_a_forced_backend_refuses_a_format_it_cannot_read(
 ) -> None:
     """A forced backend never silently falls back: every (backend, format)
     pair outside the engine's lane refuses with a ValueError naming the
-    incompatibility — oxide on the anydoc-lane formats (rtf/odt/csv) and
+    incompatibility: oxide on the anydoc-lane formats (rtf/odt/csv) and
     on html (the html engine's own lane), anydoc on html. (The odt pair
-    is also pinned by test_pdf_backend_choice_is_real; the WORKING
-    overlaps — anydoc on pdf, oxide on the OOXML family — by the same
+    is also pinned by test_pdf_backend_choice_is_real; the working
+    overlaps (anydoc on pdf, oxide on the OOXML family) by the same
     test, the structure gates, and the forced-oxide alignment matrix.)"""
     path = _materialize(tmp_path, kind)
     with pytest.raises(ValueError, match="cannot read"):
@@ -644,22 +644,22 @@ def test_a_forced_backend_refuses_a_format_it_cannot_read(
 # --- the OOXML alias containers (docm / xlsm / ppsx) ------------------------------
 #
 # The macro-enabled (docm/xlsm) and slide-show (ppsx) variants are genuine
-# aliases: the SAME OOXML packages as docx/xlsx/pptx with
+# aliases: the same OOXML packages as docx/xlsx/pptx with
 # [Content_Types].xml's main-document override naming the variant (the
-# only difference between the containers — tests/documents.py's
+# only difference between the containers: tests/documents.py's
 # `_ooxml_alias_container` builds the committed fixtures by exactly that
 # rewrite, and docgen.py's `_ooxml_alias` does the same over the writer
-# libraries' own output for the fuzz lane). xlsb is NOT an alias and is
+# libraries' own output for the fuzz lane). xlsb is not an alias and is
 # pinned as refused below; the legacy OLE trio (doc/xls/ppt) stays
-# honestly uncovered (no fixture can hand-generate OLE compound files —
-# the README discloses them).
+# uncovered (no fixture can hand-generate OLE compound files;
+# docs/documents.md discloses them).
 
 
 class TestOoxmlAliasContainers:
-    """The alias contract: the conversion IS the base format's —
+    """The alias contract: the conversion is the base format's:
     byte-identical output, the base kind's resolved name, reachable by the
-    alias EXTENSION (the routing caller's file naming) and the alias NAME
-    (the format= vocabulary) — plus the honest lane divergence (oxide
+    alias extension (the routing caller's file naming) and the alias name
+    (the format= vocabulary): plus the honest lane divergence (oxide
     refuses ppsx's slideshow content type) and the xlsb disclosure (the
     name routes the Excel kind; genuine BIFF12 content is refused)."""
 
@@ -671,7 +671,7 @@ class TestOoxmlAliasContainers:
     def test_the_alias_container_converts_as_its_base_byte_identically(
         self, tmp_path: Path, kind: str, base: str
     ) -> None:
-        """The alias's whole contract: same parts, same conversion — both
+        """The alias's whole contract: same parts, same conversion: both
         modes byte-identical to the base fixture's, and the resolved name
         the container's own (docx/xlsx/pptx), never the alias."""
         alias_path = _materialize(tmp_path, kind)
@@ -683,7 +683,7 @@ class TestOoxmlAliasContainers:
     def test_the_alias_names_route_their_base_kinds(self, tmp_path: Path) -> None:
         """format="docm"/"xlsm"/"ppsx" are vocabulary spellings of the base
         kinds: the explicit name resolves the base kind and converts
-        byte-identically to the sniffed call — a routing instruction, never
+        byte-identically to the sniffed call: a routing instruction, never
         a different conversion (the doctrine the explicit-name matrix holds
         for every kind, held here for the alias spellings specifically)."""
         for kind in ("docm_rich", "xlsm", "ppsx_rich"):
@@ -695,10 +695,10 @@ class TestOoxmlAliasContainers:
 
     def test_the_oxide_lane_refuses_ppsx_cleanly(self, tmp_path: Path) -> None:
         """The honest lane divergence: office_oxide checks the presentation
-        content type and refuses the slide-show variant — a typed
+        content type and refuses the slide-show variant: a typed
         ValueError naming what the package holds and what was expected,
         never a silent fallback and never a crash. (docm/xlsm are in the
-        oxide lane's working overlap — the forced-oxide matrix above.)"""
+        oxide lane's working overlap: the forced-oxide matrix above.)"""
         path = _materialize(tmp_path, "ppsx_rich")
         with pytest.raises(ValueError, match="format mismatch") as raised:
             to_markdown(path, backend="oxide")
@@ -707,10 +707,10 @@ class TestOoxmlAliasContainers:
         assert "expected a PresentationML presentation" in message, message
 
     def test_genuine_xlsb_content_is_refused_not_mangled(self, tmp_path: Path) -> None:
-        """The xlsb disclosure, pinned: "xlsb" IS a name in the format
-        vocabulary (it routes the Excel kind — OOXML Excel bytes under
+        """The xlsb disclosure, pinned: "xlsb" is a name in the format
+        vocabulary (it routes the Excel kind: OOXML Excel bytes under
         format="xlsb" convert, vocabulary sugar), but the format itself is
-        a DIFFERENT binary container (BIFF12 .bin sheet streams, not
+        a different binary container (BIFF12 .bin sheet streams, not
         worksheet XML): a zip carrying the genuine shape is refused with a
         typed ValueError, never silently empty output pretending to be a
         read. The engines do not read xlsb, and this pin holds them to
@@ -747,13 +747,13 @@ class TestOoxmlAliasContainers:
 def test_an_explicitly_named_format_matches_the_sniffed_conversion(
     tmp_path: Path, kind: str
 ) -> None:
-    """format= names the format instead of sniffing it — a routing
+    """format= names the format instead of sniffing it: a routing
     instruction, never a different conversion: for every corpus kind the
     output is byte-identical to the sniffed default's. The resolved name
     is the container's own (_resolved_name): the alias kinds' extensions
     (docm/xlsm/ppsx) spell names that route their base kinds, and the
-    resolved answer names the container (docx/xlsx/pptx), never the alias
-    — the same container-honesty the Excel family's xls/xlsx split carries."""
+    resolved answer names the container (docx/xlsx/pptx), never the alias:
+    the same container-honesty the Excel family's xls/xlsx split carries."""
     path = _materialize(tmp_path, kind)
     name = _format_name(kind)
     sniffed = to_markdown(path)
@@ -764,8 +764,8 @@ def test_an_explicitly_named_format_matches_the_sniffed_conversion(
 
 
 def test_pdf_blank_page_routing_aligns_on_the_oxide_probe(tmp_path: Path) -> None:
-    """Routing alignment for GENERATED PDFs (fpdf2's blank pages carry an
-    empty content stream, unlike the fixed fixtures' no-stream pages — a
+    """Routing alignment for generated PDFs (fpdf2's blank pages carry an
+    empty content stream, unlike the fixed fixtures' no-stream pages: a
     shape anydoc treats differently, pinned by the fixed-fixture lane): the
     pdf_oxide probe's empty-page list must be exactly the generated blank
     pages. The anydoc cross-check stays on the canonical fixtures, where
@@ -793,8 +793,8 @@ def test_pdf_blank_page_routing_aligns_on_the_oxide_probe(tmp_path: Path) -> Non
 def test_page_range_extraction(tmp_path: Path) -> None:
     """API contract: pages= selects 0-based PDF page indices, deduplicated,
     in document order, byte-identical to the whole document when the range
-    is every page; non-PDF formats and the anydoc backend refuse it. SKIPPED
-    WITH THIS REASON until the parameter lands."""
+    is every page; non-PDF formats and the anydoc backend refuse it. Skipped
+    with this reason until the parameter lands."""
     import inspect
 
     if "pages" not in inspect.signature(to_markdown).parameters:
@@ -815,9 +815,9 @@ def test_page_range_extraction(tmp_path: Path) -> None:
 
 
 def test_page_selection_is_deduped_into_document_order(tmp_path: Path) -> None:
-    """pages= is a SET of page positions, not a sequence of instructions:
+    """pages= is a set of page positions, not a sequence of instructions:
     duplicates collapse ([0, 0] is page 0 once) and the caller's ordering
-    is ignored — [1, 0] and [0, 1] both come back as the document's own
+    is ignored: [1, 0] and [0, 1] both come back as the document's own
     page order, byte-identical to the whole-document conversion, with
     page 0's content first."""
     path = _materialize(tmp_path, "pdf_two_page")
@@ -833,7 +833,7 @@ def test_page_selection_is_deduped_into_document_order(tmp_path: Path) -> None:
 def test_an_empty_or_negative_page_selection_is_a_typed_refusal(tmp_path: Path) -> None:
     """pages=[] names no page (never an empty-output success: pass None
     for the whole document) and a negative index names no page either (the
-    0-based contract has no Python-style negative indexing) — both are
+    0-based contract has no Python-style negative indexing): both are
     typed ValueError refusals. (Out-of-range indices are pinned by
     test_page_range_extraction's [17].)"""
     path = _materialize(tmp_path, "pdf_two_page")
@@ -844,8 +844,8 @@ def test_an_empty_or_negative_page_selection_is_a_typed_refusal(tmp_path: Path) 
 
 
 def test_the_int_and_range_page_spellings_select_the_same_pages(tmp_path: Path) -> None:
-    """The three accepted spellings — one int, the explicit list, the
-    half-open (start, stop) tuple — select the same pages: 1 and (1, 2)
+    """The three accepted spellings (one int, the explicit list, the
+    half-open (start, stop) tuple) select the same pages: 1 and (1, 2)
     both yield exactly page 1 (the tuple's stop is exclusive, Python
     convention), and the full-range tuple (0, 2) is byte-identical to the
     whole document."""
@@ -881,15 +881,15 @@ def test_text_mode_holds_the_same_page_selection_contract(tmp_path: Path) -> Non
 @pytest.mark.parametrize("kind", sorted(ENGINES_CORPUS), ids=lambda kind: kind)
 def test_content_markers_win_over_the_files_extension(tmp_path: Path, kind: str) -> None:
     """A mislabeled file still converts correctly (the native contract's
-    promise): with format=None the content markers decide — every corpus
-    kind's bytes under a deliberately WRONG extension resolve to their
-    TRUE format (the extension never wins) and carry the same oracle
+    promise): with format=None the content markers decide: every corpus
+    kind's bytes under a deliberately wrong extension resolve to their
+    true format (the extension never wins) and carry the same oracle
     content as the correctly-named file. The extension is only the
-    fallback for content no marker names — that path is pinned by the
+    fallback for content no marker names: that path is pinned by the
     generic-zip gate, not by any corpus kind (every kind's content is
     marker-named, csv included: the delimiter heuristic names it). The
     alias kinds resolve to their base names under the wrong extension
-    too — the markers name the CONTAINER (docx/xlsx/pptx), which is the
+    too: the markers name the container (docx/xlsx/pptx), which is the
     true format of the bytes."""
     name = _format_name(kind)
     wrong_extension = ".docx" if name == "pdf" else ".pdf"
@@ -907,7 +907,7 @@ def test_content_markers_win_over_the_files_extension(tmp_path: Path, kind: str)
 # measurement lane): they are load-sensitive band measurements over
 # generated multi-hundred-KB documents, the same class of cell as
 # tests/test_gil_release.py's, and CI's matrix legs deselect the lane
-# (`-m "not timing and not sweep"`) with one 3.12 leg running it — the
+# (`-m "not timing and not sweep"`) with one 3.12 leg running it: the
 # marker-split contract ci.yml's comments claim (every lane cell carries
 # its marker). The concurrency cells stay in the fast lane: they assert
 # byte-identical answers under threads, not gap bands, and are
@@ -921,7 +921,7 @@ def test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     """The GIL-release claim as a test, the suite's shared methodology: the
     whole read+sniff+convert pass runs under py.detach, so a to_thread wrap
     keeps a 10ms heartbeat alive through a ~470KB document conversion (the
-    official pdf_oxide wheel measures GIL-held per call instead — the
+    official pdf_oxide wheel measures GIL-held per call instead: the
     hazard this payload exists to remove)."""
     from test_gil_release import _assert_loop_stays_responsive
 
@@ -935,7 +935,7 @@ def test_to_markdown_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 
 
 def test_concurrent_conversions_are_identical(tmp_path: Path) -> None:
-    """8 threads, one conversion each over three formats — with the GIL
+    """8 threads, one conversion each over three formats: with the GIL
     released these run natively in parallel (the pdfium hazard this surface
     exists to be safe for); every thread's answer must equal the
     single-threaded answer byte-for-byte."""
@@ -970,8 +970,8 @@ def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 ) -> None:
     """The GIL-release claim holds in the TEXT lane too, the same shared
     methodology: the convert+strip pass runs under the same py.detach band
-    as to_markdown's (measured 2026-09-09: ~77ms wall over the ~470KB
-    document, against to_markdown's ~140ms — the strip rides inside the
+    as to_markdown's (measured: ~77ms wall over the ~470KB
+    document, against to_markdown's ~140ms: the strip rides inside the
     released band), so a to_thread wrap keeps the 10ms heartbeat alive in
     both modes."""
     from test_gil_release import _assert_loop_stays_responsive
@@ -989,12 +989,12 @@ def test_to_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
 def test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity(
     tmp_path: Path,
 ) -> None:
-    """The anydoc lane's heartbeat cell — the AMPLIFICATION lane, the one
+    """The anydoc lane's heartbeat cell: the amplification lane, the one
     the 32 MiB default input ceiling exists for (a many-short-cells csv
     holds a measured ~146x its input in resident memory at the worst case),
     and so the heaviest native pass per input byte. The same shared
-    methodology over a generated 2 MiB csv (measured 2026-09-09 on this
-    box: ~0.3s wall, ~190 MiB peak — an order of magnitude over the 10ms
+    methodology over a generated 2 MiB csv (measured on this
+    box: ~0.3s wall, ~190 MiB peak: an order of magnitude over the 10ms
     ping floor so the ratio resolves, while staying memory-sane for a
     measurement cell). The pdf-lane cells above hold the read+convert
     shape; this one holds the lane whose engine materializes row
@@ -1015,7 +1015,7 @@ def test_to_text_on_a_big_csv_keeps_the_event_loop_at_heartbeat_granularity(
 
 @pytest.mark.parametrize("kind", ("pdf_two_page", "docx_rich", "html_rich"), ids=lambda kind: kind)
 def test_concurrent_text_conversions_are_identical(tmp_path: Path, kind: str) -> None:
-    """8 threads, one to_text each over the SAME file — with the GIL
+    """8 threads, one to_text each over the same file: with the GIL
     released these run natively in parallel in the text lane exactly as
     in the markdown lane, and every thread's answer must equal the
     single-threaded answer byte-for-byte."""
@@ -1045,11 +1045,11 @@ def test_concurrent_text_conversions_are_identical(tmp_path: Path, kind: str) ->
 # --- payload adversarial surface (red-team lane) ----------------------------------
 #
 # One clearly-marked section, appended by the payload red-team lane
-# (2026-09): every adversarial input probed against the installed wheel,
-# pinned as a gate — the binding layer's refusal surface (wrong types ->
+# every adversarial input probed against the installed wheel,
+# pinned as a gate: the binding layer's refusal surface (wrong types ->
 # TypeError, wrong values/shapes -> ValueError, environment failures ->
 # OSError, each naming the argument it refused), the typed-enum identity
-# contract, and the aio parity. Findings that measured as BUGS on the
+# contract, and the aio parity. Findings that measured as bugs on the
 # pre-fix wheel are named on the tests that pin the fix: pages=True
 # silently selected page 1 (bools launder through pyo3's i64 extraction),
 # float indices surfaced as a bare "'float' object cannot be interpreted
@@ -1064,13 +1064,13 @@ class TestPayloadAdversarialSurface:
     """The binding layer's refusal surface and the typed surface's
     identity, held to Python's exception convention: type problems are
     TypeErrors, value/shape problems are ValueErrors, environment
-    failures are OSErrors — and every message names the argument."""
+    failures are OSErrors; and every message names the argument."""
 
     def test_pages_booleans_are_rejected_not_laundered_to_indices(self, tmp_path: Path) -> None:
         """pages=True on the pre-fix wheel converted page 1 silently
         (pyo3's i64 extraction accepts bool because isinstance(True, int)
         holds): booleans must be a TypeError naming them, in every
-        position they can appear — the scalar, a list item, a tuple item —
+        position they can appear (the scalar, a list item, a tuple item)
         and in both conversion modes (one shared parse_pages spine)."""
         path = _materialize(tmp_path, "pdf_two_page")
         for convert in (to_markdown, to_text):
@@ -1081,7 +1081,7 @@ class TestPayloadAdversarialSurface:
     def test_pages_floats_are_type_errors_naming_pages(self, tmp_path: Path) -> None:
         """A float index is a type problem (Python's own convention:
         range(1.0) and seq[1.0] raise TypeError), and the refusal must
-        name pages= and repr the value — the pre-fix wheel's bare
+        name pages= and repr the value: the pre-fix wheel's bare
         "'float' object cannot be interpreted as an integer" (list/tuple
         items) left a four-argument call site guessing which argument
         failed, and 1.0 as a scalar raised ValueError instead."""
@@ -1095,7 +1095,7 @@ class TestPayloadAdversarialSurface:
     def test_pages_wrong_container_types_are_type_errors(self, tmp_path: Path) -> None:
         """A str, dict, or set where the int/list/tuple selection belongs
         is a type problem: TypeError naming pages= and repr'ing the value
-        (the pre-fix wheel raised ValueError here — the wrong class for a
+        (the pre-fix wheel raised ValueError here: the wrong class for a
         type problem, per the convention this class pins)."""
         path = _materialize(tmp_path, "pdf_two_page")
         for bad in ("1", {0: 1}, {0, 1}):
@@ -1103,7 +1103,7 @@ class TestPayloadAdversarialSurface:
                 to_markdown(path, pages=bad)
 
     def test_pages_tuple_arity_is_a_value_error(self, tmp_path: Path) -> None:
-        """A 1-tuple or 3-tuple is the right TYPE in the wrong SHAPE: the
+        """A 1-tuple or 3-tuple is the right type in the wrong shape: the
         tuple lane is exactly the (start, stop) range, and the refusal
         points at the list spelling for an explicit page set."""
         path = _materialize(tmp_path, "pdf_two_page")
@@ -1123,7 +1123,7 @@ class TestPayloadAdversarialSurface:
     def test_pages_too_large_int_is_a_value_error_not_a_type_error(self, tmp_path: Path) -> None:
         """An int too large for the i64 the binding extracts (10**30) is
         type-correct and value-absurd: ValueError, not the TypeError a
-        non-int would get — the class distinction the convention draws
+        non-int would get: the class distinction the convention draws
         (pinned on both the scalar and the list-item paths)."""
         path = _materialize(tmp_path, "pdf_two_page")
         for bad in (10**30, [0, 10**30]):
@@ -1133,7 +1133,7 @@ class TestPayloadAdversarialSurface:
     def test_pages_out_of_bounds_names_the_page_count(self, tmp_path: Path) -> None:
         """Bounds are the core's to referee (only it knows the real page
         count), so the selection reaches the native pass and comes back
-        as a ValueError whose message names the count — the routing
+        as a ValueError whose message names the count: the routing
         caller's decision input, not just a bare 'bad index'."""
         path = _materialize(tmp_path, "pdf_two_page")
         with pytest.raises(ValueError, match=r"out of range for a 2-page document"):
@@ -1144,7 +1144,7 @@ class TestPayloadAdversarialSurface:
         tmp_path: Path,
     ) -> None:
         """format=123 / backend=123 on the pre-fix wheel raised pyo3's
-        bare "'int' object is not an instance of 'str'" — naming neither
+        bare "'int' object is not an instance of 'str'": naming neither
         the argument nor the vocabulary; the refusal must name both."""
         path = _materialize(tmp_path, "pdf_two_page")
         with pytest.raises(TypeError, match="(?i)format must be a format-name string"):
@@ -1165,7 +1165,7 @@ class TestPayloadAdversarialSurface:
 
     def test_sniff_refuses_str_and_answers_none_for_unmarked_bytes(self) -> None:
         """sniff's input contract is bytes: a str is a TypeError (the
-        pyo3 extraction's own refusal — acceptable because there is only
+        pyo3 extraction's own refusal: acceptable because there is only
         one bytes-ish argument to blame), and empty or BOM-only bytes are
         not errors but None (the content names no format)."""
         with pytest.raises(TypeError, match="bytes"):
@@ -1177,7 +1177,7 @@ class TestPayloadAdversarialSurface:
         """Environment failures are OSErrors on every path-taking entry
         point (the shared parse_path spine): a directory path and a
         missing one, in the convert lane and the PDF-only lane alike. On
-        Linux the matched subclass is pinned too — pyo3's io::Error
+        Linux the matched subclass is pinned too: pyo3's io::Error
         mapping raises IsADirectoryError/FileNotFoundError where the
         pre-fix wheel raised a plain OSError with the errno buried in
         the message."""
@@ -1199,13 +1199,13 @@ class TestPayloadAdversarialSurface:
 
         with pytest.raises(OSError) as excinfo:
             to_markdown(str(tmp_path))
-        if sys.platform == "linux":  # EISDIR: the matched OSError subclass (probed 2026-09)
+        if sys.platform == "linux":  # EISDIR: the matched OSError subclass (probed)
             assert isinstance(excinfo.value, IsADirectoryError)
 
     def test_lone_surrogate_path_is_a_value_error_naming_path(self) -> None:
         """A path with a lone surrogate (a filename that escaped a
         POSIX-only tool) cannot become a Rust String: the pre-fix wheel
-        surfaced pyo3's bare UnicodeEncodeError — 'utf-8' codec, no
+        surfaced pyo3's bare UnicodeEncodeError: 'utf-8' codec, no
         argument named, reading like an engine conversion bug. The
         refusal must be a ValueError naming path; the parse_path spine
         raises before any file is touched, so no fixture is needed."""
@@ -1238,11 +1238,11 @@ class TestPayloadAdversarialSurface:
         self,
         tmp_path: Path,
     ) -> None:
-        """The str-enum contract: every member IS its accepted string, so
+        """The str-enum contract: every member is its accepted string, so
         plain-string call sites and enum call sites are the same call; a
-        resolved format from to_markdown is a Format member by IDENTITY
+        resolved format from to_markdown is a Format member by identity
         (not just equality) while still being a str; and sniff answers
-        Format members or None — never a bare string."""
+        Format members or None: never a bare string."""
         import tors_documents as payload
 
         assert payload.Format("docx") is payload.Format.DOCX
@@ -1258,16 +1258,16 @@ class TestPayloadAdversarialSurface:
         assert payload.sniff(b"plain text, no markers") is None
 
     def test_aio_returns_the_typed_surface_and_sniff_stays_sync_only(self, tmp_path: Path) -> None:
-        """aio parity: the async spellings wrap the TYPED wrappers, so
+        """aio parity: the async spellings wrap the typed wrappers, so
         asyncio.run(aio.to_markdown(...)) resolves a Format member too;
-        the kwargs forward through the thread hop unchanged — pages=
+        the kwargs forward through the thread hop unchanged: pages=
         selects the same page subset the sync call selects,
         byte-identical (the forwarding pin beyond the path/data/password
         trio the other aio gates cover); and sniff has no async twin in
         either the payload's aio or the base shim's re-export, per the
         house rule that the thread hop must pay for itself (sniff's cost
-        is a container parse, not a marker scan — measured 267 MiB peak
-        RSS on a 120 KiB zip — but it stays a sync caller's call: no
+        is a container parse, not a marker scan: measured 267 MiB peak
+        RSS on a 120 KiB zip; but it stays a sync caller's call: no
         awaitable spelling ships)."""
         from tors_documents import Format
         from tors_documents import aio as payload_aio
@@ -1287,7 +1287,7 @@ class TestPayloadAdversarialSurface:
     def test_payload_version_matches_the_installed_wheel(self) -> None:
         """tors_documents.__version__ is baked from the crate's
         Cargo.toml at build time (release-please bumps it together with
-        pyproject.toml — one release, two wheels): the pin is that the
+        pyproject.toml: one release, two wheels): the pin is that the
         baked constant equals the wheel metadata's version, which is
         exactly the lockstep the release process promises."""
         from importlib.metadata import version
@@ -1302,18 +1302,18 @@ class TestPayloadAdversarialSurface:
 
 class TestPdfFamilyBackendAndBudget:
     """The four PDF-only entry points join the conversion pair's parameter
-    vocabulary — ``backend=`` and ``max_bytes=`` — with honest engine
+    vocabulary (``backend=`` and ``max_bytes=``) with honest engine
     routing: ``"auto"``/``"oxide"`` are the pdf_oxide lane (the mapping
     ``engine_for`` makes for PDF, byte-identical either way), and
-    ``"anydoc"`` is a CAPABILITY refusal raised under the GIL before any
+    ``"anydoc"`` is a capability refusal raised under the GIL before any
     work runs. Red, captured verbatim on this tree before the params
     existed: ``pdf_extract(path, backend="anydoc")`` died as
     ``TypeError: pdf_extract() got an unexpected keyword argument
-    'backend'`` — all four functions, ``max_bytes=`` the same shape — the
-    vocabulary was simply absent. The refusal is deliberately NOT the
+    'backend'`` (all four functions, ``max_bytes=`` the same shape) the
+    vocabulary was simply absent. The refusal is deliberately not the
     format-level UnsupportedBackend (PDF+anydoc is a usable conversion
     pair, pinned elsewhere in this suite): anydoc's entire PDF surface
-    is whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs — no
+    is whole-document markdown (~anydoc-0.2.4/src/formats/pdf.rs: no
     per-page text, no page-count success return, no per-page
     classification, no annotation walk), and each of these calls needs
     exactly one of those surfaces."""
@@ -1326,7 +1326,7 @@ class TestPdfFamilyBackendAndBudget:
         conversion pair as the anydoc PDF surface (with NeedsOcrError as
         that lane's scanned-page signal), and names the lanes that serve
         this call. On both source spellings (``path=`` and ``data=``) and
-        through the enum member — the doctrine text is one helper in the
+        through the enum member: the doctrine text is one helper in the
         core (next to the routing table), so one full pin plus the
         capability names for the other three calls."""
         from tors_documents import Backend, pdf_link_uris
@@ -1349,14 +1349,14 @@ class TestPdfFamilyBackendAndBudget:
                 assert "to_markdown/to_text" in message, message
                 assert "NeedsOcrError" in message, message
                 assert "backend='auto' or 'oxide'" in message, message
-        # the enum member IS its string: the same refusal
+        # the enum member is its string: the same refusal
         with pytest.raises(ValueError, match="cannot serve the per-page text probe"):
             pdf_extract(path=path, backend=Backend.ANYDOC)
 
     def test_the_refusal_precedes_the_encrypted_door_check(self) -> None:
         """A contract failure precedes work: on a locked PDF the
-        ``backend="anydoc"`` call surfaces the CAPABILITY refusal, never
-        the door-check error — the refusal is raised under the GIL, ahead
+        ``backend="anydoc"`` call surfaces the capability refusal, never
+        the door-check error: the refusal is raised under the GIL, ahead
         of the detach where the door check lives, so the caller learns
         the argument is wrong, not that a document they never asked to
         convert is encrypted."""
@@ -1371,7 +1371,7 @@ class TestPdfFamilyBackendAndBudget:
     def test_the_refusal_precedes_the_missing_path_check(self, tmp_path: Path) -> None:
         """Refusal-before-IO, the ``path=`` spelling (the ``data=`` rows
         above): on a path that does not exist the ``backend="anydoc"``
-        call surfaces the CAPABILITY ValueError, never FileNotFoundError —
+        call surfaces the capability ValueError, never FileNotFoundError:
         the argument contract is checked under the GIL, ahead of the read
         the missing path would fail, so the caller learns the argument is
         wrong, not that a file they cannot use is also absent."""
@@ -1383,14 +1383,14 @@ class TestPdfFamilyBackendAndBudget:
     def test_the_same_bytes_convert_on_the_pair_and_refuse_on_the_probe(
         self, tmp_path: Path
     ) -> None:
-        """The surface's shape in ONE test, on one byte set (the corpus's
+        """The surface's shape in one test, on one byte set (the corpus's
         engines_report.pdf): the conversion pair's anydoc lane converts it
-        — ``Format.PDF``, real markdown — while the probe's anydoc call
+        (``Format.PDF``, real markdown) while the probe's anydoc call
         refuses with the capability message pointing at that pair. The two
         halves are pinned separately elsewhere (the backend matrix's
         overlap cell, this class's refusal pin); held together they are
-        the doctrine itself: the refusal is about the CALL's surface, not
-        the format's — PDF+anydoc is a usable pair, and the probe is not
+        the doctrine itself: the refusal is about the call's surface, not
+        the format's: PDF+anydoc is a usable pair, and the probe is not
         the pair."""
         from tors_documents import Format
 
@@ -1403,12 +1403,12 @@ class TestPdfFamilyBackendAndBudget:
         assert "to_markdown/to_text" in str(raised.value)
 
     def test_oxide_is_the_default_lane_byte_identically(self, tmp_path: Path) -> None:
-        """"oxide" is the oxide-family engine for PDF — the same mapping
-        ``engine_for`` makes — so forcing it changes nothing: byte-identical
+        """"oxide" is the oxide-family engine for PDF (the same mapping
+        ``engine_for`` makes) so forcing it changes nothing: byte-identical
         outputs on all four calls, both source spellings where cheap (the
         default's preference for pdf_oxide is a routing choice, never a
         behavior difference between the two spellings). The link walk's
-        identity pin rides the LINK-BEARING fixture — the real URI list,
+        identity pin rides the link-bearing fixture: the real URI list,
         not the link-less empty shape the bytes-input suite already
         holds."""
         from tors_documents import pdf_link_uris
@@ -1432,8 +1432,8 @@ class TestPdfFamilyBackendAndBudget:
 
     def test_auto_and_the_enum_members_are_the_default_lane(self, tmp_path: Path) -> None:
         """"auto" spelled explicitly, and the ``Backend.AUTO``/
-        ``Backend.OXIDE`` members (each member IS its accepted string), are
-        the default lane on the whole family — the enum vocabulary costs
+        ``Backend.OXIDE`` members (each member is its accepted string), are
+        the default lane on the whole family: the enum vocabulary costs
         nothing at the boundary and never introduces a second routing
         rule."""
         from tors_documents import Backend, pdf_link_uris
@@ -1453,11 +1453,11 @@ class TestPdfFamilyBackendAndBudget:
 
     def test_backend_argument_convention_on_the_pdf_family(self) -> None:
         """The type-vs-value convention, shared with the conversion pair's
-        ``parse_backend``: a non-str ``backend=`` (bool, int, float, bytes
-        — ``b"anydoc"`` is a str-shaped value of the wrong type, not a
+        ``parse_backend``: a non-str ``backend=`` (bool, int, float, bytes;
+        ``b"anydoc"`` is a str-shaped value of the wrong type, not a
         lane name) is a TypeError naming the argument and repr'ing the
         value; a str outside the vocabulary (the empty string included) is
-        a ValueError naming it — raised under the GIL before any work runs,
+        a ValueError naming it: raised under the GIL before any work runs,
         so arbitrary bytes carry the pin, no fixture needed."""
         from tors_documents import pdf_link_uris
 
@@ -1473,9 +1473,9 @@ class TestPdfFamilyBackendAndBudget:
         """The ceiling knob's convention, the conversion pair's pins
         mirrored (``TestAnydocInputCeiling``'s): 0 and -1 are value
         problems ("must be positive"); True, "64KB", and 1.5 are type
-        problems naming ``max_bytes=`` (True FIRST, as a type — a bool
+        problems naming ``max_bytes=`` (True first, as a type: a bool
         launders through an int extraction as 1); a 10**30 int is
-        type-correct, value-absurd — the too-large ValueError."""
+        type-correct, value-absurd: the too-large ValueError."""
         from tors_documents import pdf_link_uris
 
         for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
@@ -1492,13 +1492,13 @@ class TestPdfFamilyBackendAndBudget:
         """The shared source-spine gate, extended to the pdf family: the
         two-page fixture (859 bytes) under ``max_bytes=1`` refuses on
         every call, both source spellings, with the binding's own message
-        naming both sizes — the same pre-read refusal the hardening suite
+        naming both sizes: the same pre-read refusal the hardening suite
         pins on the conversion pair (the pdf lane's read path,
         ``into_bytes``, now carries the same over-ceiling gate
         ``into_input`` always had). ``max_bytes=None`` converts the same
-        fixture unmolested — the unmetered pin: the 32 MiB default is
+        fixture unmolested (the unmetered pin: the 32 MiB default is
         the core's post-read check on the anydoc/office_oxide lanes only,
-        lanes these PDF-only calls never run — and a roomy budget is
+        lanes these PDF-only calls never run) and a roomy budget is
         byte-identical to None."""
         from tors_documents import pdf_link_uris
 
@@ -1516,8 +1516,8 @@ class TestPdfFamilyBackendAndBudget:
         assert pdf_page_count(data=data) == 2
 
     def test_the_ceiling_is_inclusive_at_the_boundary(self) -> None:
-        """``max_bytes == len(data)`` converts — the off-by-one guard on
-        the pre-read gate: a budget exactly the document's size is NOT
+        """``max_bytes == len(data)`` converts: the off-by-one guard on
+        the pre-read gate: a budget exactly the document's size is not
         over it (the comparison is ``size > ceiling``, never ``>=``), one
         byte under is the refusal, both sizes named in the message."""
         data = ENGINES_CORPUS["pdf_two_page"]
@@ -1533,13 +1533,13 @@ class TestPdfFamilyBackendAndBudget:
         self, tmp_path: Path
     ) -> None:
         """The budget doctrine's headline pin: ``max_bytes=None`` (the
-        default) leaves the pdf lane UNMETERED — a PDF just over the 32
+        default) leaves the pdf lane unmetered: a PDF just over the 32
         MiB default ceiling (the GIL heartbeat cells' own generator, sized
         at 410_000 lines ≈ 33.6 MB to stay fast) page-counts fine with
-        both params at rest, while the SAME file under
+        both params at rest, while the same file under
         ``max_bytes=<size-1>`` refuses with the ceiling ValueError. The
-        32 MiB default is the anydoc/office_oxide lanes' post-read check —
-        lanes these PDF-only calls never run — so a regression that wires
+        32 MiB default is the anydoc/office_oxide lanes' post-read check
+        (lanes these PDF-only calls never run) so a regression that wires
         it into the pdf lane (pre-read or post) fails here."""
         path = tmp_path / "big.pdf"
         path.write_bytes(generate_pdf_big(410_000))
@@ -1557,7 +1557,7 @@ class TestPdfFamilyBackendAndBudget:
         all four functions: ``backend="oxide"`` through the hop is the
         default lane's byte-identical answer, ``backend="anydoc"`` the
         same capability refusal (each call's own capability named), and
-        an explicit budget the same pre-read ceiling — the awaitable
+        an explicit budget the same pre-read ceiling: the awaitable
         spellings wrap the typed wrappers, so the contract rides along
         unchanged."""
         from tors_documents import aio as payload_aio
@@ -1586,21 +1586,20 @@ class TestPdfFamilyBackendAndBudget:
 
 
 class TestBytesInputAndLinkWalk:
-    """The ``data=`` entry and ``pdf_link_uris`` — the two surfaces the
+    """The ``data=`` entry and ``pdf_link_uris``: the two surfaces the
     downstream audit demanded (the bytes-in pipeline caller holds uploads
     in memory and pays a temp-file roundtrip per document against a
     path-only API; the link walk is the raw URI surface no text rendering
-    carries). ``data=`` IS the same conversion: byte-identical output, the
-    same typed answers, the same error taxonomy — only the source differs.
+    carries). ``data=`` is the same conversion: byte-identical output, the
+    same typed answers, the same error taxonomy: only the source differs.
     The O(n) copy a ``data=`` call pays rides inside the detach with the
     rest of the pass (a 400 MB call's max heartbeat gap measured ~1.1 ms,
-    2026-09-09 — pinned red-green by the hardening suite's probe).
-    """
+    pinned red-green by the hardening suite's probe).    """
 
     def test_data_conversions_are_byte_identical_to_path_conversions(self, tmp_path: Path) -> None:
         """The in-memory entry is not a second implementation: for a
         marker-bearing format (docx) and a PDF alike, the ``data=`` call
-        returns exactly the ``path=`` call's pair — same resolved Format
+        returns exactly the ``path=`` call's pair: same resolved Format
         member, byte-identical output, in both output modes."""
         from tors_documents import Format  # noqa: F401 - assertion clarity
 
@@ -1616,7 +1615,7 @@ class TestBytesInputAndLinkWalk:
         """A ``data=`` call has no file name to consult: the content
         markers carry it alone, the markerless formats name themselves via
         ``format=``, and an undetectable byte set's error names the fix
-        (``format=``) instead of a path — the bytes-in half of the
+        (``format=``) instead of a path: the bytes-in half of the
         resolution doctrine, pinned end to end."""
         from tors_documents import Format
 
@@ -1637,8 +1636,8 @@ class TestBytesInputAndLinkWalk:
 
     def test_the_pdf_family_takes_data_everywhere(self, tmp_path: Path) -> None:
         """All four PDF-only entry points take ``data=`` with the same
-        answers as ``path=`` — the probe, the page tree, the preflight,
-        and the link walk — one source-resolution spine, four functions."""
+        answers as ``path=`` (the probe, the page tree, the preflight,
+        and the link walk) one source-resolution spine, four functions."""
         from tors_documents import pdf_link_uris
 
         path = _materialize(tmp_path, "pdf_link")
@@ -1656,7 +1655,7 @@ class TestBytesInputAndLinkWalk:
     def test_exactly_one_of_path_or_data(self, tmp_path: Path) -> None:
         """Both is a ValueError, neither a TypeError (the
         missing-required-argument convention), a non-bytes ``data=`` a
-        TypeError naming the argument — on the convert lane and the PDF
+        TypeError naming the argument: on the convert lane and the PDF
         lane alike, raised under the GIL before any work runs."""
         path = _materialize(tmp_path, "pdf_two_page")
         data = Path(path).read_bytes()
@@ -1678,7 +1677,7 @@ class TestBytesInputAndLinkWalk:
     def test_pdf_link_uris_walk_the_annotations_per_page(self, tmp_path: Path) -> None:
         """The raw URI surface: the link-annotation fixture's page carries
         its URI in annotation order (the generator wrote exactly one), a
-        document without link annotations yields empty lists per page —
+        document without link annotations yields empty lists per page:
         never fabricated navigation, never deduped (the verbatim walk is
         the honest output; canonicalization is the caller's)."""
         from tors_documents import pdf_link_uris
@@ -1692,10 +1691,10 @@ class TestBytesInputAndLinkWalk:
 
     def test_sniff_then_data_is_the_bytes_pipeline_shape(self, tmp_path: Path) -> None:
         """The upload route's two-step: sniff the leading bytes (the true
-        cost is a container parse, not a marker scan — anydoc's detect
+        cost is a container parse, not a marker scan: anydoc's detect
         opens the ZIP/OLE package and reads its metadata; a 120 KiB zip
         measured 267 MiB peak RSS to answer docx), then convert the full
-        body in memory — no temp file anywhere in the flow, and both
+        body in memory: no temp file anywhere in the flow, and both
         halves agree on what the bytes are."""
         from tors_documents import Format
 
@@ -1708,7 +1707,7 @@ class TestBytesInputAndLinkWalk:
     def test_aio_carries_data_and_the_link_walk(self, tmp_path: Path) -> None:
         """The async twins pass the source pair through unchanged (a
         thread hop must not reintroduce a temp file) and carry the new
-        link walk: ``data=`` in, typed answers out — both the payload's
+        link walk: ``data=`` in, typed answers out: both the payload's
         aio and the base shim's re-export."""
         from tors_documents import Format, pdf_link_uris
         from tors_documents import aio as payload_aio
@@ -1728,10 +1727,10 @@ class TestBytesInputAndLinkWalk:
 
 def _encrypted_pdf(password: str = "torque") -> bytes:
     """A one-page RC4-128-encrypted PDF carrying exactly one line of text:
-    fpdf2 writes the page, pypdf rewrites it encrypted — RC4-128 because
+    fpdf2 writes the page, pypdf rewrites it encrypted: RC4-128 because
     it is pure-python in pypdf (AES would drag in the cryptography
     package, which the dev group does not carry). pypdf salts the
-    encryption randomly per call, so no test may assert on these BYTES —
+    encryption randomly per call, so no test may assert on these bytes:
     only on behavior."""
     import io
 
@@ -1753,18 +1752,18 @@ def _encrypted_pdf(password: str = "torque") -> bytes:
 class TestEncryptedPdfs:
     """The password door, held to the fail-closed doctrine: a locked PDF
     is a typed refusal on every entry point until the right password is
-    named — never empty output (the pre-fix masking: to_markdown and
+    named: never empty output (the pre-fix masking: to_markdown and
     pdf_extract silently returned "" on a locked PDF while classify
     raised, so a routing caller read "no text" where the truth was "no
     access"; the door check now sits in front of every engine lane)."""
 
     def test_every_entry_fails_closed_without_a_password(self) -> None:
-        """All six entries — both convert modes and all four PDF-only
-        calls — refuse a locked PDF with pdf_oxide's ValueError naming the
+        """All six entries (both convert modes and all four PDF-only
+        calls) refuse a locked PDF with pdf_oxide's ValueError naming the
         encryption, before any engine work. The defect this gate makes
         impossible to regress: the pre-fix wheel's to_markdown/pdf_extract
         returned EMPTY output on these same bytes (the empty-string
-        masking — indistinguishable from a blank document); today no entry
+        masking: indistinguishable from a blank document); today no entry
         returns at all."""
         from tors_documents import pdf_link_uris
 
@@ -1776,7 +1775,7 @@ class TestEncryptedPdfs:
 
     def test_a_wrong_password_is_refused_not_treated_as_none(self) -> None:
         """A wrong password must be distinguishable from no password:
-        pdf_oxide's authenticate() refusal — "did not unlock" — on the
+        pdf_oxide's authenticate() refusal ("did not unlock") on the
         convert lane and the probe lanes alike (a wrong password laundered
         into the generic no-access error would send the caller hunting
         the wrong knob)."""
@@ -1787,7 +1786,7 @@ class TestEncryptedPdfs:
 
     def test_the_right_password_converts_every_lane(self) -> None:
         """The unlock: with the right password the document is exactly the
-        document — markdown carries the cell text, classify says one TEXT
+        document: markdown carries the cell text, classify says one TEXT
         page, the count is 1, the link walk says no links, and extract's
         pages carry the text: no lane answers empty-on-success once
         unlocked."""
@@ -1809,7 +1808,7 @@ class TestEncryptedPdfs:
     def test_password_on_a_non_pdf_format_is_refused_not_ignored(self, tmp_path: Path) -> None:
         """A password on a docx is not a no-op: the caller believes the
         document is protected, and the docx lane is not the lane that
-        would know — the refusal names the parameter and the format the
+        would know: the refusal names the parameter and the format the
         password does not apply to, in both convert modes."""
         path = _materialize(tmp_path, "docx_rich")
         for convert in (to_markdown, to_text):
@@ -1821,7 +1820,7 @@ class TestEncryptedPdfs:
     def test_password_must_be_a_str_not_an_int(self) -> None:
         """password=123 is a type problem (the exception convention this
         suite pins everywhere): TypeError naming password=, raised in the
-        binding before any bytes are sniffed or read — so arbitrary bytes
+        binding before any bytes are sniffed or read: so arbitrary bytes
         carry the pin, no fixture needed."""
         with pytest.raises(TypeError, match="password must be a str"):
             to_markdown(data=b"junk bytes", password=123)
@@ -1829,9 +1828,9 @@ class TestEncryptedPdfs:
             pdf_page_count(data=b"junk bytes", password=123)
 
     def test_password_on_the_anydoc_pdf_lane_is_refused_not_ignored(self, tmp_path: Path) -> None:
-        """anydoc's PDF reader takes no password, so a CORRECT password on
+        """anydoc's PDF reader takes no password, so a correct password on
         backend="anydoc" would otherwise fail as a bare "document is
-        encrypted" — indistinguishable from having passed nothing, the
+        encrypted": indistinguishable from having passed nothing, the
         silently-ignored-argument shape. The refusal names the lane the
         password needs instead (the guard fires before any parsing, so an
         ordinary PDF carries the pin)."""
@@ -1847,7 +1846,7 @@ class TestEncryptedPdfs:
     def test_aio_carries_the_password_door_unchanged(self) -> None:
         """The async twins pass password= through the thread hop with the
         door intact: locked bytes still fail closed without the password,
-        and unlock with the right one — in the payload's aio AND the base
+        and unlock with the right one: in the payload's aio and the base
         shim's re-export, the same loop pattern the data= aio gate uses."""
         from tors_documents import Format
         from tors_documents import aio as payload_aio
@@ -1880,19 +1879,19 @@ _CEILING_CSV = (
 class TestAnydocInputCeiling:
     """The anydoc lane's memory posture as a caller-facing contract: that
     engine amplifies input into resident memory at ~36x on benign
-    delimiter shapes and ~146x at the measured worst case (2026-09-09,
-    this box: a 24 MiB many-short-cells csv peaked 3.4 GiB, stable across
-    sizes — the old "~36x" figure was a benign long-cell shape), so the
-    lane carries a DEFAULT 32 MiB input ceiling (a crate-side constant,
-    pinned in the Rust tests — no 33 MB fixture is built here; at the
+    delimiter shapes and ~146x at the measured worst case (this box: a
+    24 MiB many-short-cells csv peaked 3.4 GiB, stable across
+    sizes (the old "~36x" figure was a benign long-cell shape), so the
+    lane carries a default 32 MiB input ceiling (a crate-side constant,
+    pinned in the Rust tests) no 33 MB fixture is built here; at the
     worst-case multiple that default budgets ~4.6 GiB) and max_bytes= is
-    the per-call override — a typed refusal naming both sizes, never a
+    the per-call override: a typed refusal naming both sizes, never a
     silent OOM."""
 
     def test_a_document_over_the_ceiling_is_refused_naming_both_sizes(self) -> None:
         """Over the ceiling is a ValueError naming the engine lane, the
-        knob (max_bytes), and BOTH sizes — the document's and the
-        ceiling's — at fixture scale (the ~118-byte csv against 64, raw
+        knob (max_bytes), and both sizes (the document's and the
+        ceiling's) at fixture scale (the ~118-byte csv against 64, raw
         byte counts: sub-0.1-MiB figures render as bytes, never the
         rounded-away "0.0 MiB vs 0.0 MiB") in both convert modes, and at
         a scale where the two figures differ (a 1.1 MiB csv against a
@@ -1912,10 +1911,10 @@ class TestAnydocInputCeiling:
         assert "1.1 MiB" in message and "1.0 MiB" in message
 
     def test_max_bytes_overrides_the_default_ceiling_per_call(self) -> None:
-        """The override semantics, pinned WITHOUT a 33 MB fixture: the
-        same 1.2 MB csv sits far under the lane's DEFAULT ceiling (it
+        """The override semantics, pinned without a 33 MB fixture: the
+        same 1.2 MB csv sits far under the lane's default ceiling (it
         converts, resolved csv), and max_bytes= pulls the ceiling under it
-        (the same call now refuses) — a per-call knob, not a global
+        (the same call now refuses): a per-call knob, not a global
         reset."""
         from tors_documents import Format
 
@@ -1928,7 +1927,7 @@ class TestAnydocInputCeiling:
 
     def test_a_document_under_the_ceiling_converts(self) -> None:
         """The ceiling refuses nothing it should not: the same csv with a
-        roomy max_bytes converts — resolved csv, content intact."""
+        roomy max_bytes converts: resolved csv, content intact."""
         from tors_documents import Format
 
         resolved, markdown = to_markdown(data=_CEILING_CSV, max_bytes=1_000_000)
@@ -1938,19 +1937,19 @@ class TestAnydocInputCeiling:
     def test_an_explicit_max_bytes_binds_every_lane_not_just_the_anydoc_one(
         self, tmp_path: Path
     ) -> None:
-        """The REPINNED contract (the input-side hardening's deliberate
-        change; the new-contract pins also live in the hardening suite —
+        """The repinned contract (the input-side hardening's deliberate
+        change; the new-contract pins also live in the hardening suite:
         this is the engines suite's own hold on it). Red, captured verbatim
-        on this tree before the repin: this test's old pin — max_bytes=1
-        over real PDF bytes CONVERTS, "the knob simply does not apply to
-        that lane" — failed as
+        on this tree before the repin: this test's old pin (max_bytes=1
+        over real PDF bytes converts, "the knob simply does not apply to
+        that lane") failed as
         ``ValueError: the document is 859 bytes and the input ceiling is
-        1 bytes (an explicit max_bytes is binding on every engine lane —
+        1 bytes (an explicit max_bytes is binding on every engine lane;
         pdf and HTML included ...)``. Green now pins the new doctrine: an
-        EXPLICIT max_bytes refuses the PDF on both source lanes (data= and
+        explicit max_bytes refuses the PDF on both source lanes (data= and
         path=, the pre-read/pre-copy check) with the input-ceiling
         ValueError naming both sizes, while max_bytes=None keeps the
-        default doctrine exactly — the 32 MiB default is the post-read
+        default doctrine exactly: the 32 MiB default is the post-read
         check on the anydoc/oxide lanes only, so the same PDF converts
         unmolested without a budget (the lane is unknowable before the
         container sniff, which is exactly why only the explicit budget
@@ -1976,8 +1975,8 @@ class TestAnydocInputCeiling:
 
     def test_max_bytes_must_be_a_positive_int(self) -> None:
         """0 and -5 are value problems ("must be positive"); True, "64KB",
-        and 1.5 are type problems naming max_bytes= — and True is checked
-        FIRST, as a TYPE (a bool launders through an int extraction as 1,
+        and 1.5 are type problems naming max_bytes=; and True is checked
+        first, as a type (a bool launders through an int extraction as 1,
         the same hazard the pages= lane's bool gate pins), so it gets the
         TypeError, never the value refusal. Both convert modes."""
         for convert in (to_markdown, to_text):
@@ -1994,12 +1993,12 @@ class TestAnydocInputCeiling:
 # The gfm strip's SIGSEGV fix, pinned at the Python layer: the inline
 # machinery (link labels, image labels, emphasis) recurses per nesting
 # level, so a sufficiently deep `[…](…)` nest overflowed the stack and
-# killed the PROCESS — the crash shape a subprocess probe exists to catch
+# killed the process: the crash shape a subprocess probe exists to catch
 # (the pre-fix behavior must never run in the pytest runner). The bound is
 # MAX_INLINE_DEPTH=256, Rust-pinned in src/gfm_strip_impl.rs (the exact
-# degradation — past 256 the remaining machinery degrades to literal text
+# degradation: past 256 the remaining machinery degrades to literal text
 # instead of recursing); this is the loose lane pin: the conversion
-# SURVIVES the input and answers non-empty, in a child, on a bounded
+# survives the input and answers non-empty, in a child, on a bounded
 # budget.
 
 _RECURSION_DEPTH = 30_000  # ~120 KB of paragraph text: the nest, fast to build
@@ -2010,15 +2009,15 @@ class TestInlineRecursionBound:
     lane: red (measured on the pre-fix tree) the process SIGSEGVed; green
     it converts, exit 0, non-empty output. The exact degradation shape is
     the Rust unit pins' to hold (don't double-pin brittle exactness here);
-    this pin holds the SURVIVAL contract at the entry-point layer."""
+    this pin holds the survival contract at the entry-point layer."""
 
     def test_a_30k_deep_link_label_nest_converts_in_a_subprocess(self, tmp_path: Path) -> None:
-        """A docx (python-docx, the dev group's writer — docgen.py's lane)
+        """A docx (python-docx, the dev group's writer: docgen.py's lane)
         whose one paragraph is the nest, converted by `to_text(
-        backend="oxide")` in a SUBPROCESS: the pre-fix shape is a SIGSEGV
+        backend="oxide")` in a subprocess: the pre-fix shape is a SIGSEGV
         (a dead child, nonzero exit), so the probe must never run
         in-process. The child prints a bounded summary (resolved name,
-        output length — never the ~120 KB output itself); the parent
+        output length: never the ~120 KB output itself); the parent
         asserts exit 0 and the non-empty answer the child reports."""
         import subprocess
         import sys
@@ -2056,7 +2055,7 @@ class TestInlineRecursionBound:
 # --- zip-bomb refusal: the engine-side decompression caps ------------------------
 #
 # The regression net the PR description claimed but never had: the caps
-# FIRE. Both fixtures are runtime-generated (never committed binaries —
+# fire. Both fixtures are runtime-generated (never committed binaries;
 # the encrypted-PDF lane's precedent) under tmp_path, and both stream
 # their part content in bounded chunks so the test never holds the
 # inflated part in one bytes object. The refusals are asserted, never RSS
@@ -2068,7 +2067,7 @@ _MIB = 1024 * 1024
 def _zip_bomb_docx(path: Path, inflated_mib: int) -> None:
     """A valid docx container whose one word/document.xml declares and
     inflates to `inflated_mib` MiB: the part is a single compressible text
-    run (a real zip bomb's shape — hundreds of MiB inside a few hundred
+    run (a real zip bomb's shape: hundreds of MiB inside a few hundred
     KiB of stored zip) streamed in 1 MiB chunks, wrapped in enough XML to
     be the part it claims."""
     content_types = (
@@ -2110,13 +2109,13 @@ def _zip_bomb_docx(path: Path, inflated_mib: int) -> None:
 
 class TestZipBombRefusals:
     """The two decompression caps a zip-bombed OOXML container must hit,
-    each pinned as the typed refusal it is (the caps' EXISTENCE is the
-    pin — an RSS bound would flake on memory accounting, so none is
-    asserted). Measured on this tree, 2026-09-09: the anydoc lane refuses
+    each pinned as the typed refusal it is (the caps' existence is the
+    pin: an RSS bound would flake on memory accounting, so none is
+    asserted). Measured on this tree: the anydoc lane refuses
     a 400 MiB part on its declared size at the zip directory, before an
     inflate; the oxide lane refuses a 600 MiB declared part
     pre-decompression in ~0.03s at ~20 MiB RSS (asserted here only as a
-    typed refusal plus a sub-second wall — the speed IS the
+    typed refusal plus a sub-second wall: the speed is the
     pre-decompression proof: an inflated refusal would take seconds and
     gigabytes)."""
 
@@ -2124,9 +2123,9 @@ class TestZipBombRefusals:
         """anydoc's engine-side package caps (128 MiB per entry, 512 MiB
         total across entries): a ~400 KiB zip whose word/document.xml
         declares ~400 MiB is refused by `to_markdown` (the docx auto lane
-        IS anydoc) with the typed ValueError naming the cap and the entry
-        — NOT the lane's input-ceiling message (the zip itself is far
-        under the 32 MiB default; the ENGINE-side cap is what fires), the
+        is anydoc) with the typed ValueError naming the cap and the entry:
+        not the lane's input-ceiling message (the zip itself is far
+        under the 32 MiB default; the engine-side cap is what fires), the
         discriminator this pin exists to hold."""
         path = tmp_path / "bomb_anydoc.docx"
         _zip_bomb_docx(path, inflated_mib=400)
@@ -2143,9 +2142,9 @@ class TestZipBombRefusals:
     def test_the_oxide_lane_refuses_a_600_mib_declared_part_pre_decompression(
         self, tmp_path: Path
     ) -> None:
-        """office_oxide 0.1.10's per-part cap (512 MiB, declared AND
-        actual): the refusal fires on the DECLARED size in the zip
-        directory, before a single byte is inflated — pinned as the typed
+        """office_oxide 0.1.10's per-part cap (512 MiB, declared and
+        actual): the refusal fires on the declared size in the zip
+        directory, before a single byte is inflated: pinned as the typed
         refusal naming the part and the cap's own number, plus a
         sub-second wall (measured 0.03s on this box; inflating 600 MiB
         and parsing it would cost seconds and ~1.6 GiB, so the wall band
@@ -2175,15 +2174,15 @@ class TestJsonLinesIsNotCsv:
     """The delimiter witness alone would claim JSON-lines records as csv
     (their comma counts agree line over line), so the sniffer carries a
     record-shape guard: a line opening with { or [ is a record, not a
-    field row. The guard is the sniffer's honesty — sniff never names a
-    format the bytes are not — and the convert lane leans on it: unnamed
+    field row. The guard is the sniffer's honesty (sniff never names a
+    format the bytes are not) and the convert lane leans on it: unnamed
     JSON-lines is a refusal naming format=, and the explicit name is the
     caller's escape hatch."""
 
     def test_record_lines_sniff_to_none_while_real_csv_sniffs_csv(self) -> None:
         """{ and [ records sniff to None even though the delimiter witness
         alone would claim them (the comma counts agree); the contrast row
-        — real delimiter-separated bytes — still sniffs csv, so the None
+        (real delimiter-separated bytes) still sniffs csv, so the None
         answers are the record-shape guard at work, not sniff refusing
         csv ever."""
         from tors_documents import Format
@@ -2194,10 +2193,10 @@ class TestJsonLinesIsNotCsv:
 
     def test_unnamed_jsonl_is_refused_naming_format_and_csv_is_the_escape_hatch(self) -> None:
         """The convert lane inherits the guard: JSON-lines bytes with no
-        name are a ValueError naming format= (the no-name fix — the call
+        name are a ValueError naming format= (the no-name fix: the call
         must not guess csv from the same witness the guard overruled), in
         both record shapes and both modes; with format="csv" the caller
-        owns the decision and it converts — resolved csv is pinned, the
+        owns the decision and it converts: resolved csv is pinned, the
         output shape deliberately is not (the escape hatch is a
         resolution contract, not a rendering promise)."""
         from tors_documents import Format
@@ -2215,18 +2214,18 @@ class TestJsonLinesIsNotCsv:
 
 class TestImportLaziness:
     """The split-wheel design's whole point, pinned as the structural
-    property: the BASE wheel (tors) carries only the lazy re-export shim,
+    property: the base wheel (tors) carries only the lazy re-export shim,
     so importing it never loads the engines (tors.documents /
-    tors_documents — the anydoc + pdf_oxide stack); they load on first
-    touch of the documents attribute. Measured in a fresh interpreter —
-    which modules the import touched — and deliberately NOT in megabytes
+    tors_documents: the anydoc + pdf_oxide stack); they load on first
+    touch of the documents attribute. Measured in a fresh interpreter
+    (which modules the import touched) and deliberately not in megabytes
     (load-size numbers vary across platforms and flake; the module-touched
     assert is the design invariant)."""
 
     def test_importing_the_base_wheel_never_touches_the_engines(self) -> None:
         """A fresh interpreter (this venv's own python) imports tors and
         must not carry tors.documents or tors_documents in sys.modules. If
-        this regresses — an eager import creeps into the base package —
+        this regresses (an eager import creeps into the base package)
         every base-wheel consumer pays the engines' load cost on import,
         and the failure reports the subprocess's own stderr (the
         assertion that fired)."""
@@ -2249,15 +2248,15 @@ class TestImportLaziness:
         assert "lazy" in done.stdout
 
     def test_the_documents_attribute_is_the_lazy_door_to_the_payload(self) -> None:
-        """The ergonomic half of the split-wheel design (what the README
+        """The ergonomic half of the split-wheel design (what docs/documents.md
         examples' ``tors.documents`` spelling rides on): the base package
         carries a PEP 562 ``__getattr__``, so ``tors.documents`` on an
-        imported-but-untouched base package imports the shim — and through
-        it the payload — on FIRST touch, and the returned object re-exports
+        imported-but-untouched base package imports the shim (and through
+        it the payload) on first touch, and the returned object re-exports
         the payload's surface by identity
         (``tors.documents.to_markdown is tors_documents.to_markdown``).
-        The laziness gate still holds BEFORE the access (both engine
-        modules untouched by the plain import — the same fresh-interpreter
+        The laziness gate still holds before the access (both engine
+        modules untouched by the plain import: the same fresh-interpreter
         measurement as the gate above), and any other missing name keeps
         the standard module AttributeError."""
         import subprocess
@@ -2286,16 +2285,16 @@ class TestImportLaziness:
         import tors
 
         with pytest.raises(AttributeError):
-            tors.definitely_not_an_attribute  # noqa: B018 -- the access IS the point
+            tors.definitely_not_an_attribute  # noqa: B018 -- the access is the point
 
     def test_the_sync_shim_re_exports_the_whole_payload_surface(self, tmp_path: Path) -> None:
-        """The base wheel's tors.documents shim IS the payload's public
+        """The base wheel's tors.documents shim is the payload's public
         surface, never a subset or a re-wrap: ``__all__`` equal name for
-        name (``__version__`` included), every name the very SAME object
-        tors_documents exports (an identity re-export — a divergence would
+        name (``__version__`` included), every name the very same object
+        tors_documents exports (an identity re-export: a divergence would
         mean a second implementation hiding behind the door), and one full
-        conversion through the shim path end to end — the spelling the
-        README examples use, exercised the way callers spell it."""
+        conversion through the shim path end to end, the spelling the
+        docs examples use, exercised the way callers spell it."""
         import tors_documents as payload
 
         import tors.documents as shim

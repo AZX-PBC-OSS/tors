@@ -915,7 +915,7 @@ class TestCorpusLoads:
       }
     }
   ]
-}"""  # upstream test_repair_json_with_objects (FHIR bundle)
+}"""  # upstream test_repair_json_with_objects (fhir bundle)
         assert repair_json_loads(raw_fhir) == {
             "resourceType": "Bundle",
             "id": "1",

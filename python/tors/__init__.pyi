@@ -44,7 +44,7 @@ def nfd(text: str) -> str: ...
 def nfkc(text: str) -> str: ...
 def nfkd(text: str) -> str: ...
 
-# Raises ValueError on CPython 3.11+ when a DECIMAL numeric reference's digit
+# Raises ValueError on CPython 3.11+ when a decimal numeric reference's digit
 # run exceeds sys.get_int_max_str_digits() (default 4300): the stdlib's own
 # int-parse limit, with its exact message ("Exceeds the limit (4300 digits)
 # for integer string conversion: value has 4301 digits; use
@@ -64,7 +64,7 @@ def word_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
 # holds the GIL for a single 2-tuple). Sentence counts are ~1/10th word
 # counts on prose, so the list API's marshalling is proportionally cheaper
 # here. UAX #29 rule-based segmentation only: no dictionary segmentation
-# for spaceless scripts (Thai/Khmer/Burmese/Japanese); see the README.
+# for spaceless scripts (Thai/Khmer/Burmese/Japanese); see docs/api.md.
 def sentence_bounds(text: str) -> list[tuple[int, int]]: ...
 def sentence_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
 def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
@@ -92,25 +92,25 @@ def utf16_is_valid(
 
 # A heuristic guess, not a validator: the intended pipeline is utf8_is_valid
 # first, and detect_encoding only on bytes that already failed that check.
-# Always returns SOME codec name (WHATWG Encoding Standard labels, e.g.
+# Always returns some codec name (WHATWG Encoding Standard labels, e.g.
 # "windows-1252" / "Shift_JIS" / "UTF-8": case-insensitively valid for
 # bytes.decode()), never raises for well-formedness reasons. tld is an
-# ASCII top-level domain WITHOUT the leading dot ("jp", not ".jp").
+# ASCII top-level domain without the leading dot ("jp", not ".jp").
 def detect_encoding(raw: bytes, *, tld: str | None = None) -> str: ...
 
 # GIL note (the word_bounds list-shape precedent): the diff itself runs with
 # the GIL released, but building the returned list constructs one 5-tuple per
 # opcode under the GIL: O(number of opcodes), measured ~0.1-0.15 µs/op (a
 # ~10-15 ms hold above the ping floor for the 103,421-opcode 12 MiB
-# shuffled-pair cell in tests/test_gil_release.py; see the README's diff
-# section for the measured band).
+# shuffled-pair cell in tests/test_gil_release.py; see docs/performance.md
+# for the measured band).
 #
-# deadline_ms bounds the WHOLE call (default None = the unbounded diff,
+# deadline_ms bounds the whole call (default None = the unbounded diff,
 # unchanged). The Myers search's work on hard inputs (few anchorable unique
 # records, e.g. a character-level permutation) grows superlinearly with size
 # (measured on the dev box, ambient load 2.6-3.7: 50k chars 0.32 s, 200k
-# 3.67 s, 400k 13.81 s, 1M 183.6 s, roughly ~n^2; see the README's diff
-# section for the ladder). On expiry the
+# 3.67 s, 400k 13.81 s, 1M 183.6 s, roughly ~n^2; see docs/performance.md
+# for the ladder). On expiry the
 # incomplete result is discarded and TimeoutError is raised naming the
 # elapsed cost and the deadline; the exception is constructed after the GIL
 # is reacquired, so nothing raises from inside the GIL-released region. A
@@ -122,9 +122,9 @@ def diff_opcodes(
 # GIL note: identical to diff_opcodes' classes: the whole line split +
 # Myers search runs with the GIL released (the deadline_ms budget checked
 # inside the detached region; TimeoutError constructed after the GIL is
-# reacquired), and the return marshalling constructs one 5-tuple per LINE
-# opcode with INTERNED tag strings (op[0] is "equal" holds, exactly as it
-# does for difflib's own tuples). Indices address LINES in
+# reacquired), and the return marshalling constructs one 5-tuple per line
+# opcode with interned tag strings (op[0] is "equal" holds, exactly as it
+# does for difflib's own tuples). Indices address lines in
 # splitlines(keepends=True) shape (each line keeps its \n, the last may
 # lack one); a line diff's op count sits far below its char-level twin's.
 def diff_opcodes_lines(
@@ -137,20 +137,20 @@ def diff_opcodes_lines(
 # net effect is the identity: tors.replace_many(s, m) is s exactly when
 # tors.replace_many(s, m) == s) or the O(output) string marshalling. No
 # list-shape class: the return is one string. Leftmost-longest semantics
-# (NOT re.sub's leftmost-first), non-overlapping, replacements never
+# (not re.sub's leftmost-first), non-overlapping, replacements never
 # re-scanned; dict order cannot matter.
 def replace_many(text: str, replacements: dict[str, str]) -> str: ...
 
 # GIL note (the word_bounds list-shape precedent, again): the automaton build,
 # the scan, and the byte→char offset conversion all run with the GIL released,
 # but building the returned list constructs one 3-tuple of ints per match under
-# the GIL: O(number of matches). See the README's Performance section and
+# the GIL: O(number of matches). See docs/performance.md and
 # tests/test_gil_release.py for the measured sparse/dense bands.
 def find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]: ...
 
 # GIL note: the streaming spelling of find_patterns: the whole search
 # (pattern-list walk, automaton build, scan, byte→char conversion) fills an
-# internal buffer under ONE GIL-released pass at construction, and each
+# internal buffer under one GIL-released pass at construction, and each
 # __next__ holds the GIL only for a single 3-tuple of ints. The streaming
 # answer to the list shape's O(matches) tuple-marshalling caveat (~13 ms
 # held per 100k matches in the list shape). Same sequence as the list API,
@@ -159,21 +159,21 @@ def find_patterns_iter(patterns: list[str], text: str) -> Iterator[tuple[int, in
 
 # GIL note: the count spelling of find_patterns: the same
 # leftmost-longest, non-overlapping search answering just the number, with
-# NO match vector (the list spelling materializes ~250 MiB of matches on a
+# no match vector (the list spelling materializes ~250 MiB of matches on a
 # 100 MiB dense corpus just to answer "how many") and no byte→char pass
 # (counting is offset-free). count_matches(p, t) == len(find_patterns(p, t)),
 # pinned. A single int return: no marshalling class at all.
 def count_matches(patterns: list[str], text: str) -> int: ...
 
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
-# pattern list compiled ONCE (one detached build at construction), then
-# every call is the free function's scan classes MINUS the per-call
+# pattern list compiled once (one detached build at construction), then
+# every call is the free function's scan classes minus the per-call
 # automaton build: one Arc refcount bump, the scan under one detach, the
 # same marshalling as the free spelling. Immutable after construction, so
 # sharing one across many calls and threads is sound with no
 # synchronization beyond the refcount. The replace spellings validate the
-# replacements dict at CALL time (values change per call; the automaton is
-# the compiled part): it must key EXACTLY the compiled pattern set, every
+# replacements dict at call time (values change per call; the automaton is
+# the compiled part): it must key exactly the compiled pattern set, every
 # pattern paired with a value and no others (ValueError otherwise, naming
 # the unknown keys and the missing count), which is what makes
 # cp.replace_many(text, m) == tors.replace_many(text, m) hold by
@@ -224,19 +224,19 @@ def extract_code_blocks(
     text: str, lang: str | None = None
 ) -> list[tuple[str | None, str, int, int]]: ...
 
-# If text, trimmed of leading/trailing whitespace, is EXACTLY one fenced
+# If text, trimmed of leading/trailing whitespace, is exactly one fenced
 # code block (including the unterminated-fence case), return its dedented
-# code content; otherwise return text UNCHANGED (not even
+# code content; otherwise return text unchanged (not even
 # whitespace-trimmed). tors.strip_code_fences(s) is s exactly when s is not
 # the single-fenced-block case.
 #
 # GIL note: the detached_transform shape shared by normalize/nfc/etc: str-in
-# argument borrow, the scan with the GIL released, then either the ORIGINAL
+# argument borrow, the scan with the GIL released, then either the original
 # object back (zero marshalling) or the O(output) unwrapped string.
 def strip_code_fences(text: str) -> str: ...
 
 # textwrap.dedent(text), byte-for-byte: the longest common leading
-# whitespace-run STRING (tabs and spaces are distinct characters: "  x"
+# whitespace-run string (tabs and spaces are distinct characters: "  x"
 # and "\tx" share no margin) is stripped from every line, and
 # whitespace-only lines normalize to empty. tors.dedent(s) is s exactly
 # when tors.dedent(s) == s.
@@ -246,25 +246,25 @@ def dedent(text: str) -> str: ...
 
 # Repair malformed JSON (the LLM-output shape: missing commas/quotes/
 # brackets, truncated values, stray prose, comments, Python-isms) and
-# return the repaired document as a STRING, re-serialized to json.dumps'
+# return the repaired document as a string, re-serialized to json.dumps'
 # canonical form exactly like the json_repair port this implements
 # (upstream: mangiucugna/json_repair, MIT): valid-but-noncanonical input
 # normalizes; the nothing-recoverable sentinel renders as the bare empty
 # string. Whole-input single-fence payloads unwrap first via the CommonMark
 # fence grammar (~~~, longer closers, indented fences included).
 #
-# GIL note: the whole repair — strict fast path, repair parser, schema
-# alignment, validator — runs with the GIL released; the residue is the
+# GIL note: the whole repair (strict fast path, repair parser, schema
+# alignment, validator) runs with the GIL released; the residue is the
 # schema-argument walk plus the O(output) string marshalling.
 #
 # deadline_ms (default None = unbounded) bounds the whole repair the way
 # diff_opcodes' deadline_ms does: a positive-finite-or-None budget validated
 # up front, TimeoutError on expiry ("<spelling> deadline exceeded: elapsed
-# Xms > deadline_ms Yms"). The clock starts at the top of the call — the
+# Xms > deadline_ms Yms"). The clock starts at the top of the call: the
 # fence pre-pass and the json.loads fast-path attempt burn the budget too
 # (a fast path that completes past the budget still returns its answer).
 # It is a DoS backstop for the quadratic parser shapes shared with upstream
-# json_repair (splice rescans and the backslash-run string scan) — a
+# json_repair (splice rescans and the backslash-run string scan): a
 # bounded abort, not a speed-up; a completing parse is byte-identical
 # whether or not a deadline is set. The bound is soft (the tight loops
 # sample the clock 1-in-256, re-tightened after every O(n) splice/scan)
@@ -286,7 +286,7 @@ def repair_json(
     deadline_ms: float | None = None,
 ) -> str: ...
 
-# The loads-mode spelling: the repaired document as decoded OBJECTS, the
+# The loads-mode spelling: the repaired document as decoded objects, the
 # json.loads drop-in (the "" sentinel, not None, when nothing is
 # recoverable). No ensure_ascii (no serialization happens).
 #
@@ -306,7 +306,7 @@ def repair_json_loads(
 ) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
 
 # The diagnostics spelling: the loads-mode value plus the structured action
-# log — a list of {action, path, detail, from, to, suggestion} dicts (the
+# log: a list of {action, path, detail, from, to, suggestion} dicts (the
 # last three None when unused) over the closed action vocabulary
 # (coerce/fill/insert_default/remap_key/suggest/drop_property/drop_item/
 # unwrap_string/wrap_array/fill_required/format_date/skip_fragment/
@@ -339,14 +339,14 @@ def repair_json_diagnostics(
 # single word/sentence longer than the budget, or max_chars == 0), the
 # fallback is a hard cut at the largest grapheme boundary <= max_chars
 # (still cluster-safe, so it can land short of max_chars when the budget
-# would otherwise split a cluster); the result NEVER exceeds max_chars
+# would otherwise split a cluster); the result never exceeds max_chars
 # codepoints either way. The cut point is then trimmed of trailing
 # whitespace. max_chars < 0 and an unrecognized boundary both raise
 # ValueError. tors.truncate_to_bounds(s, n) is s exactly when s already has
 # <= n codepoints.
 #
 # GIL note: detached_transform's shape: the segmentation scan and cut run
-# with the GIL released, then either the ORIGINAL object back (zero
+# with the GIL released, then either the original object back (zero
 # marshalling) or the O(output) truncated string.
 def truncate_to_bounds(
     text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"
@@ -357,7 +357,7 @@ def truncate_to_bounds(
 # accents, ZWJ sequences, flag pairs snap back past the whole cluster). No
 # word/sentence awareness (unlike truncate_to_bounds): a storage bound is
 # positional, not semantic. At most max_chars - 1 codepoints are kept plus
-# the one-codepoint marker, so the result NEVER exceeds max_chars (it falls
+# the one-codepoint marker, so the result never exceeds max_chars (it falls
 # short when cluster backoff requires it); no trailing-whitespace trim.
 # tors.truncate_ellipsis(s, n) is s exactly when s already has <= n
 # codepoints. max_chars == 0 yields "" (no room for even the marker);
@@ -368,7 +368,7 @@ def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 
 # Is claim grounded in source: fuzzy=False (default) is source.contains(claim)
 # exactly; fuzzy=True is a windowed difflib-ratio scan of source against
-# threshold (a LEXICAL check: no NLI/semantic model; see the crate's
+# threshold (a lexical check: no NLI/semantic model; see the crate's
 # grounded_impl module docs for exactly what the score measures and its
 # DoS-bounded windowing over long sources). fuzzy=True is a superset of
 # fuzzy=False: a verbatim substring is grounded before windowing and before
@@ -378,8 +378,8 @@ def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 # offset whenever r >= max(0.75, threshold + 1/32) (a bounded refinement
 # pass over the best coarse windows; one typo in a 9+ char claim clears the
 # 0.85 default wherever it sits), best-effort below r = 0.75, and evictable
-# from the 64 refinement candidates by adversarial decoys — the regime
-# deadline_ms exists for. An empty claim is vacuously
+# from the 64 refinement candidates by adversarial decoys (the regime
+# deadline_ms exists for). An empty claim is vacuously
 # grounded in anything on both paths. threshold must be in [0.0, 1.0].
 # deadline_ms is only accepted (and only meaningful) when fuzzy=True; it
 # bounds the whole fuzzy scan the same way diff_opcodes' deadline_ms does:
@@ -411,7 +411,7 @@ def unquote_plus(text: str) -> str: ...
 
 # GIL note: difflib's ratio/get_close_matches shape over the same Myers
 # engine as diff_opcodes: two str-in borrows, the search GIL-released, a
-# single float out. get_close_matches returns the ORIGINAL candidate
+# single float out. get_close_matches returns the original candidate
 # objects (references, zero marshalling). Validity-first parity (difflib's
 # M is anchoring-dependent): exact agreement on the forced-alignment
 # classes, the divergence rows pinned. deadline_ms bounds the whole call
@@ -439,11 +439,11 @@ def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: 
 
 # GIL note: replace_many's classes exactly (one GIL-held dict walk, the
 # scan+splice GIL-released, one string out), with the length guarantee: for
-# each matched span of L characters, its replacement VALUE is truncated to
+# each matched span of L characters, its replacement value is truncated to
 # its first L characters if the value has >= L characters, or emitted in
 # full and padded with copies of `mask` out to L characters if it has fewer
 # (mask is never consulted on the truncation branch), so the output's
-# CHARACTER count and every non-matching span's offsets equal the input's
+# character count and every non-matching span's offsets equal the input's
 # (redaction that keeps pre-computed offsets valid). Pass "" as a value to
 # force pure masking. mask must be exactly one character (one codepoint;
 # ValueError otherwise). Identity contract: is s exactly when == s.
@@ -455,7 +455,7 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 
-# FastCDC 2020 content-defined chunking: (start, end) BYTE spans (not
+# FastCDC 2020 content-defined chunking: (start, end) byte spans (not
 # codepoints: a byte-level primitive, unlike word_bounds/sentence_bounds),
 # partitioning data exactly. Empty input -> []; input shorter than min_size
 # -> one chunk covering the whole input. Deterministic; a small edit only
@@ -471,7 +471,7 @@ def chunk_cdc(
 # GIL note: the context-window/RAG packing primitive: boundary-aware cuts
 # under a character budget (truncate_to_bounds' own cut rule applied
 # repeatedly; the whole-text bounds computed once, GIL-released). Offsets
-# are Python str indices. overlap=0 (default): the ORIGINAL lossless-
+# are Python str indices. overlap=0 (default): the original lossless-
 # partition contract, unchanged; chunks are non-empty, contiguous,
 # covering, each <= max_chars codepoints, joining them reproduces the
 # input exactly; a grapheme-safe hard cut applies when a single
@@ -510,12 +510,12 @@ def chunk_text_iter(
 ) -> Iterator[tuple[int, int]]: ...
 
 # GIL note: word-count-windowed chunking: the semantic-chunking RAG
-# shape, measured in real WORD TOKENS (word_bounds' segments filtered to
+# shape, measured in real word tokens (word_bounds' segments filtered to
 # non-whitespace-only ones: word_bounds itself gives an inter-word space
-# run its own segment, so grouping RAW segments would silently mean
+# run its own segment, so grouping raw segments would silently mean
 # "words_per_chunk roughly halved" on ordinary prose) rather than a
 # character budget. Each chunk spans `words_per_chunk` consecutive word
-# tokens, its span the first token's start through the last's end (NOT
+# tokens, its span the first token's start through the last's end (not
 # through trailing whitespace after it, so unlike chunk_text this is not
 # a covering partition: chunks are not necessarily contiguous); `overlap`
 # words repeat at the start of the next chunk. The final chunk may hold
@@ -558,10 +558,10 @@ def chunk_by_sentences_iter(
 # one unit, matching normalize's own CR/CRLF folding): the "2+ newlines
 # survive as the paragraph gap" convention normalize's own pipeline
 # already uses (it collapses 3+ down to exactly 2, never below). This is
-# a HEURISTIC, not a Unicode Standard segmentation (there is no UAX for
+# a heuristic, not a Unicode Standard segmentation (there is no UAX for
 # paragraphs): a single \n is ordinary content, not a break. Unlike the
-# word/line twins, paragraphs have NO content filter: a whitespace-only
-# paragraph IS emitted as a chunk (only fully-empty spans are dropped),
+# word/line twins, paragraphs have no content filter: a whitespace-only
+# paragraph is emitted as a chunk (only fully-empty spans are dropped),
 # so an overlapping pair of chunks can share blank content. Same
 # contract, same argument validation, same empty-input answer as its
 # siblings.
@@ -573,8 +573,8 @@ def chunk_by_paragraphs(
 # and the same rationale as every other _iter spelling: the list shape's
 # GIL-held marshalling cost is measured for segment-count-heavy outputs
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
-# 328-344 ms -- box-pace-dependent, ~0.72 of the call's wall is the
-# constant -- just marshalling the list), and a paragraph-heavy corpus (a
+# 328-344 ms, box-pace-dependent; ~0.72 of the call's wall is the
+# constant, just marshalling the list), and a paragraph-heavy corpus (a
 # multi-MiB article dump or report batch) is in that piece-count class,
 # chunking into hundreds of thousands of pieces. Error precedence matches
 # the list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
@@ -585,9 +585,9 @@ def chunk_by_paragraphs_iter(
 ) -> Iterator[tuple[int, int]]: ...
 
 # chunk_by_words/chunk_by_sentences/chunk_by_paragraphs' line-count twin.
-# A line break is a \n, a lone \r, or a \r\n pair counted as ONE unit
+# A line break is a \n, a lone \r, or a \r\n pair counted as one unit
 # (the same CR/CRLF folding convention; str.splitlines' exotic separators
-# -- \v, \f, NEL, LS, PS -- are NOT breaks here). A line counts as a line
+# \v, \f, NEL, LS, PS are not breaks here). A line counts as a line
 # only when it carries at least one non-whitespace codepoint, the same
 # real-token discipline chunk_by_words applies to word segments: blank
 # lines neither count toward lines_per_chunk nor split a chunk's interior
@@ -595,14 +595,14 @@ def chunk_by_paragraphs_iter(
 # rides along in chunk_by_words), so lines_per_chunk=200 means 200
 # content lines. "Non-whitespace" is definitional: the Unicode
 # White_Space property (char::is_whitespace), under which an NBSP-only
-# line is blank and U+001C-U+001F (FS/GS/RS/US) count as line CONTENT,
+# line is blank and U+001C-U+001F (FS/GS/RS/US) count as line content,
 # diverging from Python's str.isspace() (which treats those four as
 # whitespace) and from str.splitlines (which even breaks on them; tors
 # does not). Spans run first included line's start through last
-# included line's end, NOT through the trailing break (not a covering
+# included line's end, not through the trailing break (not a covering
 # partition); a trailing break at end of text yields no trailing empty
 # line. Final chunk may hold fewer lines; empty or no-content-line text
-# -> []. overlap repeats whole LINES at the next chunk's start and must
+# -> []. overlap repeats whole lines at the next chunk's start and must
 # be < lines_per_chunk (ValueError otherwise; the stride
 # lines_per_chunk - overlap is always >= 1 once validated). GIL-released
 # whole pass; O(chunks) 2-tuple marshalling.
@@ -614,8 +614,8 @@ def chunk_by_lines(
 # and the same rationale as every other _iter spelling: the list shape's
 # GIL-held marshalling cost is measured for segment-count-heavy outputs
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
-# 328-344 ms -- box-pace-dependent, ~0.72 of the call's wall is the
-# constant -- just marshalling the list), and a line-oriented corpus (a
+# 328-344 ms, box-pace-dependent; ~0.72 of the call's wall is the
+# constant, just marshalling the list), and a line-oriented corpus (a
 # multi-MiB log or transcript) is in that piece-count class, chunking into
 # hundreds of thousands of pieces. Error precedence matches the
 # list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
@@ -626,24 +626,24 @@ def chunk_by_lines_iter(
 ) -> Iterator[tuple[int, int]]: ...
 
 # Priority-ordered fallback chunking (LangChain's RecursiveCharacterTextSplitter
-# pattern): cut at the COARSEST level that fits max_chars, falling back to
+# pattern): cut at the coarsest level that fits max_chars, falling back to
 # finer levels only when a coarser one has no in-budget cut. separators=None
 # uses tors's own accurate hierarchy (paragraph -> sentence -> word -> a
 # grapheme-safe raw cut, always the final unconditional fallback).
-# separators=[...] is a caller-supplied SEQUENCE of LITERAL strings (not
-# regex) -- any Sequence (list or tuple) of literals and None entries; str,
-# dict, set, and generators raise TypeError at extraction -- coarsest first,
+# separators=[...] is a caller-supplied sequence of literal strings (not
+# regex), any Sequence (list or tuple) of literals and None entries; str,
+# dict, set, and generators raise TypeError at extraction, coarsest first,
 # e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
-# appended. A None ENTRY in an otherwise-literal sequence splices the default
+# appended. A None entry in an otherwise-literal sequence splices the default
 # hierarchy's three accurate levels in at that position: ["\n", None] is
 # line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
 # shape (a chat thread, one message per line, never split mid-line) whose
 # oversized-line fallback is the real UAX #29 segmenter rather than the
 # ". "/" " literal guesses an all-literal list pins it to; [None] is
-# identical to separators=None. NOT a lossless partition (unlike
+# identical to separators=None. Not a lossless partition (unlike
 # chunk_text): the separator itself is dropped between chunks, the same
-# chunk_by_paragraphs convention. overlap snaps to the nearest GRAPHEME
+# chunk_by_paragraphs convention. overlap snaps to the nearest grapheme
 # boundary (not necessarily a semantic one, a documented simplification of
 # chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
@@ -679,13 +679,13 @@ def simhash128(text: str) -> int: ...
 
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased
-# (Unicode-correct str.lower, not ASCII-only). TF is the RAW term count
+# (Unicode-correct str.lower, not ASCII-only). TF is the raw term count
 # per document (not length-normalized). IDF is the scikit-learn-style
-# SMOOTHED formula ln(N / (1 + df)) + 1 (N = corpus size, df = document
+# smoothed formula ln((1 + N) / (1 + df)) + 1 (N = corpus size, df = document
 # frequency): not the textbook ln(N/df), which gives a
 # term in every document an IDF of exactly 0; smoothing keeps that case
 # strictly positive while still favoring rarer terms. score(t, d) =
-# tf(t, d) * idf(t). Output is SPARSE: one (term, score) list per
+# tf(t, d) * idf(t). Output is sparse: one (term, score) list per
 # document, alphabetically sorted, holding only that document's own
 # terms, never a vocabulary-size-by-corpus-size dense structure. Empty
 # corpus -> []; an empty-string document -> [] at its position (the
@@ -695,10 +695,10 @@ def simhash128(text: str) -> int: ...
 # decomposed-input bug scikit-learn's own strip_accents_unicode has).
 # stemmer names a Snowball algorithm applied after lowercasing/accent-
 # folding; an unrecognized name raises ValueError naming every valid
-# choice. lemma_dict is a caller-supplied word -> lemma map applied LAST
+# choice. lemma_dict is a caller-supplied word -> lemma map applied last
 # (after stemming, if any): tors does not bundle a lemma dictionary (that
 # needs a per-language dataset or POS model, out of scope); it only
-# APPLIES one you supply, the same shape replace_many takes a
+# applies one you supply, the same shape replace_many takes a
 # caller-supplied replacement map instead of a bundled one. All three
 # default off, reproducing the original lowercase-only tokenization
 # exactly. No stop-word removal or n-grams.
@@ -725,26 +725,26 @@ def tf_idf(
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[list[tuple[str, float]]]: ...
 
-# A RERANKING primitive, not a search index: recomputes corpus statistics
+# A reranking primitive, not a search index: recomputes corpus statistics
 # from scratch every call, the right shape for scoring a small,
 # already-retrieved candidate set (tens to a few hundred documents) against
 # one query: the wrong shape for a large corpus queried repeatedly (reach
 # for a real search engine, e.g. tantivy, for that; tors does not build
-# persistent index objects). Okapi BM25, the always-non-negative "+1" IDF
+# persistent index objects). Okapi bm25, the always-non-negative "+1" IDF
 # variant (ln((N - df + 0.5) / (df + 0.5) + 1), not the classic form, which
 # goes negative for a term in over half the corpus). k1 (>= 0, default 1.5)
 # tunes term-frequency saturation; b (in [0, 1], default 0.75) tunes length
 # normalization: both are Lucene/Elasticsearch's own defaults. Returns
-# (index, score) for EVERY document (no top-k cutoff: slice/sort
+# (index, score) for every document (no top-k cutoff: slice/sort
 # yourself), sorted by score descending, ties broken by ascending original
 # index. Tokenization: the same "real word token, lowercased" convention
 # tf_idf uses. Empty corpus -> []; empty query -> every document scores
-# 0.0 (not an error). No claim about retrieval/relevance QUALITY for any
+# 0.0 (not an error). No claim about retrieval/relevance quality for any
 # particular corpus or query: a correct implementation of a well-known
 # ranking formula, not a model-quality promise.
 #
 # strip_accents/stemmer/lemma_dict: tf_idf's exact same opt-in knobs,
-# applied IDENTICALLY to query and every corpus document (required for the
+# applied identically to query and every corpus document (required for the
 # scores to mean anything, not just a style choice), all default off.
 def bm25_rank(
     query: str,
@@ -757,9 +757,9 @@ def bm25_rank(
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
 
-# A stateless, GENERAL-PURPOSE batch text preprocessor: every requested
-# step fused into ONE GIL-released pass over the WHOLE texts list. Pure
-# function composition, NOT a re.compile()-style compiled-
+# A stateless, general-purpose batch text preprocessor: every requested
+# step fused into one GIL-released pass over the whole texts list. Pure
+# function composition, not a re.compile()-style compiled-
 # pipeline object (a stateful handle was considered and explicitly ruled
 # out: every call re-describes and re-applies its steps fresh). Order:
 # nfd -> lowercase -> strip_accents -> (stemmer / lemma_dict) ->
@@ -769,21 +769,21 @@ def bm25_rank(
 # transforming only real-word segments, preserving every other segment
 # (punctuation, whitespace) verbatim, so the output stays readable prose).
 # collapse_whitespace runs last, reducing every run of Python-whitespace-
-# equivalent codepoints to one ASCII space (NOT tors.normalize's full
+# equivalent codepoints to one ASCII space (not tors.normalize's full
 # pipeline: no CRLF folding, no blank-line collapsing, no strip).
 #
 # All six steps default off: apply_pipeline(texts) with nothing else is a
-# true IDENTITY: the original texts list OBJECT comes back unchanged, not
+# true identity: the original texts list object comes back unchanged, not
 # just content-equal output, the same zero-allocation contract normalize/
 # quote/replace_many already give for their own no-op case. Empty texts ->
 # []. A non-list argument or non-str element raises TypeError; an invalid
 # stemmer name raises ValueError naming every valid choice; a non-dict
 # lemma_dict, or one with a non-str key/value, raises TypeError.
 #
-# Relationship to tf_idf/bm25_rank: those two already fuse the SAME
+# Relationship to tf_idf/bm25_rank: those two already fuse the same
 # strip_accents/stemmer/lemma_dict knobs into their own tokenization:
 # calling apply_pipeline first and then tf_idf/bm25_rank on the result
-# tokenizes TWICE for no benefit. Reach for their own knobs when they're
+# tokenizes twice for no benefit. Reach for their own knobs when they're
 # the only consumer; reach for apply_pipeline to preprocess text feeding
 # anything else (chunk_text, find_patterns, your own logic).
 def apply_pipeline(
@@ -798,7 +798,7 @@ def apply_pipeline(
 ) -> list[str]: ...
 
 # Classic phonetic-code algorithms (rphonetic, an Apache Commons Codec
-# port): ENGLISH/Latin-script-oriented heuristics, not general Unicode
+# port): English/Latin-script-oriented heuristics, not general Unicode
 # phonetics. Input is pre-filtered to ASCII letters before encoding
 # (accents/non-Latin characters dropped, not encoded): this also works
 # around a real, verified panic in rphonetic 4.0.0 on ordinary accented
@@ -812,7 +812,7 @@ def metaphone(text: str) -> str: ...
 
 # The full dual-key form of metaphone: Double Metaphone's alternate code
 # carries the second plausible (typically non-Anglicized) pronunciation,
-# so a name match on EITHER key counts; two equal elements when there is
+# so a name match on either key counts; two equal elements when there is
 # only one pronunciation.
 def double_metaphone(text: str) -> tuple[str, str]: ...
 
@@ -821,7 +821,7 @@ def double_metaphone(text: str) -> tuple[str, str]: ...
 def nysiis(text: str) -> str: ...
 
 # Daitch-Mokotoff Soundex (1985), the Jewish-genealogy standard for
-# Central/Eastern European surnames. A LIST because the rule table
+# Central/Eastern European surnames. A list because the rule table
 # branches on ambiguous transliterations: one name can encode to
 # several 6-digit codes, and two names match if their lists intersect.
 # Unlike soundex/metaphone, no-letters input is ["000000"] (each code
@@ -830,8 +830,8 @@ def daitch_mokotoff(text: str) -> list[str]: ...
 
 # A Soundex variant with a finer-grained letter-to-digit mapping than
 # classic soundex (more consonant classes distinguished, an uncapped
-# code rather than soundex's fixed letter-plus-3-digit shape) — a
-# genuinely distinct algorithm, not a formatting variant. Same
+# code rather than soundex's fixed letter-plus-3-digit shape): a
+# distinct algorithm, not a formatting variant. Same
 # ASCII-letters-only pre-filter and upstream-panic-avoidance note as
 # soundex.
 def refined_soundex(text: str) -> str: ...

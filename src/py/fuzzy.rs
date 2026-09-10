@@ -10,7 +10,7 @@ use crate::validate_deadline_ms;
 
 /// `tors.similarity_ratio(a, b, *, deadline_ms=None)`:
 /// `difflib.SequenceMatcher(None, a, b).ratio()`'s shape at native speed:
-/// `2.0*M/T` with M the matched total over THE SAME Myers equal-ops
+/// `2.0*M/T` with M the matched total over the same Myers equal-ops
 /// `diff_opcodes` emits (see `src/diff_impl.rs`'s similarity docs for the
 /// validity-first parity contract: difflib's M is anchoring-dependent, so
 /// exact agreement is pinned on the forced-alignment classes and the
@@ -39,20 +39,20 @@ pub fn similarity_ratio(
 /// deadline_ms=None)`: `difflib.get_close_matches`' shape at native speed:
 /// every candidate scoring `similarity_ratio >= cutoff`, best first,
 /// truncated to `n`. The sort is difflib's own `heapq.nlargest` tuple order:
-/// score descending, then the candidate STRING descending (a stdlib
+/// score descending, then the candidate string descending (a stdlib
 /// quirk probed and pinned in the gate: `get_close_matches("ab",
 /// ["ac", "ca"], 2, 0.5)` → `["ca", "ac"]`); equal (score, string) pairs
-/// keep input order. The returned strings are the ORIGINAL candidate
+/// keep input order. The returned strings are the original candidate
 /// objects: references, zero marshalling, exactly what the stdlib hands
 /// back. `n` must be `> 0` and `cutoff` in `[0.0, 1.0]` (difflib's own
-/// `ValueError` messages, pinned). `deadline_ms` bounds the WHOLE call
+/// `ValueError` messages, pinned). `deadline_ms` bounds the whole call
 /// across every candidate pair (`TimeoutError` on expiry, partial results
 /// discarded).
 ///
 /// GIL model: one GIL-held walk borrowing the candidate list (the standard
 /// str-in class; empty candidate strings are legal here, unlike search
 /// patterns), the whole scoring under `py.detach`, and the O(matches)
-/// return marshalling is REFERENCE COUNTING ONLY (the original objects,
+/// return marshalling is reference counting only (the original objects,
 /// difflib's own shape).
 #[pyfunction(signature = (word, possibilities, n = 3, cutoff = 0.6, *, deadline_ms = None))]
 pub fn get_close_matches(
@@ -64,7 +64,7 @@ pub fn get_close_matches(
     deadline_ms: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
     // difflib's own validation, verbatim message shape (difflib.py: "n must
-    // be > 0: %r" % (n,)): `n` is taken SIGNED specifically so a negative
+    // be > 0: %r" % (n,)): `n` is taken signed specifically so a negative
     // caller value reaches this check as a normal Python int rather than
     // failing pyo3's argument extraction into an unsigned type first, which
     // would raise OverflowError instead of stdlib's ValueError.
@@ -75,16 +75,16 @@ pub fn get_close_matches(
     validate_unit_interval("cutoff", cutoff, true)?;
     validate_deadline_ms(deadline_ms)?;
     // The shared candidate walk (`_borrow.rs`'s soundness story: handles
-    // alive across the detach by construction), with NO empty-refusal
+    // alive across the detach by construction), with no empty-refusal
     // (an empty candidate is legal, difflib scores it 0.0 unless word is
     // empty too); the handles are still in scope on the marshalling side
-    // because the ORIGINAL candidate objects are what the return hands
+    // because the original candidate objects are what the return hands
     // back, selected by index.
     let out = borrow_str_list(&possibilities, EmptyPolicy::Allow, |items, candidates| {
         let indices = py
             .detach(|| diff_impl::close_matches(word, candidates, n, cutoff, deadline_ms))
             .map_err(|err| timeout_err(err.message()))?;
-        // Indices → the ORIGINAL candidate objects (references, zero copy).
+        // Indices → the original candidate objects (references, zero copy).
         let picked = indices
             .into_iter()
             .map(|idx| items[idx].clone())
@@ -95,7 +95,7 @@ pub fn get_close_matches(
 }
 
 /// `tors.levenshtein(a, b, *, deadline_ms=None)`: the unit-cost edit
-/// distance (insert/delete/substitute = 1), CHARACTER-level, as a single
+/// distance (insert/delete/substitute = 1), character-level, as a single
 /// int: the metric CPython has no stdlib spelling of (difflib's ratio is
 /// not a metric; the third-party spellings are third-party). The classic
 /// vectors are pinned crate-side (kitten→sitting = 3) with `strsim 0.11`
@@ -118,7 +118,7 @@ pub fn levenshtein(py: Python<'_>, a: &str, b: &str, deadline_ms: Option<f64>) -
 
 /// `tors.jaro(a, b, *, deadline_ms=None)`: the Jaro similarity
 /// (window-matched chars + transpositions, `[0.0, 1.0]`, `("", "")` →
-/// `1.0`), CHARACTER-level: pinned to `strsim 0.11` over a generated
+/// `1.0`), character-level: pinned to `strsim 0.11` over a generated
 /// battery plus the literature vectors (MARTHA/MARHTA ≈ 0.944). The
 /// matching window makes the worst case O(n·m); `deadline_ms` bounds it
 /// (checked per phase, `TimeoutError` on expiry).

@@ -8,55 +8,55 @@ Why error-path parity is the product: the decoded bytes are stored and compared
 see the same ``binascii.Error`` messages any log scraping, retry logic, or test
 suite already matches on, not just the same bytes on the happy path.
 
-The implementation is a line-for-line port of the POST-gh-145264
+The implementation is a line-for-line port of the post-gh-145264
 ``binascii_a2b_base64_impl`` (Modules/binascii.c on CPython's 3.13 and 3.14
 maintenance branches, identical there by the backport commits 1f9958f9 /
 e31c5512), the algorithm ``base64.b64decode`` has delegated to since 3.11.
 gh-145264 (March 2026) changed the machine in two ways, both pinned below:
 
-- LENIENT MODE no longer stops at the first completed pad sequence: excess
+- lenient mode no longer stops at the first completed pad sequence: excess
   pads are ignored per RFC 4648 §3.3 and later data chars resume decoding
   (``'Zg==Zg=='`` → ``b'f\\x06`'`` where the pre-fix machine returned
-  ``b'f'``, silently DROPPING the second block). That truncation was a
+  ``b'f'``, silently dropping the second block). That truncation was a
   parser-differential CPython fixed as a security issue; tors ships the fixed
   machine on every interpreter it supports.
-- STRICT MODE classifies a pad at quad position 1 as the end-of-input length
+- strict mode classifies a pad at quad position 1 as the end-of-input length
   error (``'Z=g='`` → "number of data characters (1)" where the pre-fix
   machine raised "Discontinuous padding not allowed"), and a third pad beyond
   a quad is "Excess padding" rather than "Excess data after padding"
   (``'Zg==='``). Data-after-padding and discontinuous-padding remain distinct,
   reachable messages (``'Zg==Z'``, ``'Zg=g'``).
 
-ONE behavior, by design: tors's output does NOT depend on the interpreter.
+one behavior, by design: tors's output does not depend on the interpreter.
 The recorded literals below are the post-fix machine's outputs, measured on
 CPython 3.13.14 and byte-identical on 3.15.0b2 (both measured pre-implementation
-on this box). The LIVE differential against the running stdlib is gated on the
+on this box). The live differential against the running stdlib is gated on the
 stdlib actually having the fix: asserted where it does, recorded-not-asserted
 where it does not (every divergence printed for the record). The gate is a
-BEHAVIORAL probe of the running ``base64.b64decode``, not a version tuple;
-measured on this box, 3.14.0 does NOT have the fix (the e31c5512 backport
+behavioral probe of the running ``base64.b64decode``, not a version tuple;
+measured on this box, 3.14.0 does not have the fix (the e31c5512 backport
 arrives in later 3.14.x patch releases) while 3.13.14 does, so a
 ``sys.version_info >= (3, 13, 14) or >= (3, 14)`` gate would misfire on
 exactly the patch levels a version gate exists to get right.
 
 Documented divergences, named (the parity discipline):
 
-- PRE-FIX stdlib (CPython ≤3.12.x, 3.13.0–3.13.13, 3.14.0 measured here): the
+- pre-fix stdlib (CPython ≤3.12.x, 3.13.0–3.13.13, 3.14.0 measured here): the
   lenient truncation and the two strict message changes above: tors keeps the
   fixed machine; the battery prints each divergence instead of asserting.
-- CPython 3.10: ``base64.b64decode(validate=True)`` is NOT the binascii
+- CPython 3.10: ``base64.b64decode(validate=True)`` is not the binascii
   strict machine at all (3.11 added ``strict_mode``); it is a regex validator
-  with its own messages ("Non-base64 digit found") that even ACCEPTS inputs
+  with its own messages ("Non-base64 digit found") that even accepts inputs
   the machine rejects (``'Zm9v='`` → ``b'foo'``). tors ships the 3.11+
   machine on 3.10 too; the stdlib comparison is recorded, never asserted,
   there.
 
 Decisions pinned here (from the spec, unchanged by the retarget):
-- ``validate=True`` is the DEFAULT (the spec's signature; stdlib's default is
+- ``validate=True`` is the default (the spec's signature; stdlib's default is
   False; the delta is intentional: decode-side callers want invalid input to
   fail loudly, and every encode-side caller already produced strict-valid
   output).
-- The raised class is the REAL ``binascii.Error``, constructed via pyo3's
+- The raised class is the real ``binascii.Error``, constructed via pyo3's
   ``PyErr::from_value`` on the class imported from the ``binascii`` module at
   raise time (pyo3 0.29 has no ``PyBinasciiError`` (``binascii.Error`` is a
   module-level C exception outside the ``PyExc_*`` table), but any exception
@@ -67,10 +67,10 @@ Decisions pinned here (from the spec, unchanged by the retarget):
   ``memoryview`` → ``TypeError``): the signature's contract. stdlib also
   accepts bytes-likes; callers holding bytes already have the stdlib spelling
   and ``b64_encode_bytes`` is the bytes-side of this pair.
-- A non-ASCII ``str`` raises PLAIN ``ValueError("string argument should
+- A non-ASCII ``str`` raises plain ``ValueError("string argument should
   contain only ASCII characters")`` (from ``base64.py``'s
   ``_bytes_from_decode_data``, before any decoding), not ``binascii.Error``.
-  The same holds for a str holding LONE SURROGATES: the stdlib's
+  The same holds for a str holding lone surrogates: the stdlib's
   ``s.encode("ascii")`` fails inside ``_bytes_from_decode_data`` and is
   converted to that same plain ``ValueError``, so tors pre-checks and raises
   it rather than letting pyo3's UTF-8 borrow surface its own
@@ -89,10 +89,10 @@ from hypothesis import strategies as st
 
 from tors import b64_decode, b64_encode_bytes
 
-# The measured malformed battery, recorded on the POST-gh-145264 machine
+# The measured malformed battery, recorded on the post-gh-145264 machine
 # (CPython 3.13.14; byte-identical outputs and messages on 3.15.0b2, both
 # measured on this box before the retarget): (input, validate) →
-# (expected bytes | (exception qualname, message)). Rows whose literal CHANGED
+# (expected bytes | (exception qualname, message)). Rows whose literal changed
 # from the pre-fix battery carry a comment naming the change; the rows new to
 # this battery pin behaviors only the fixed machine has.
 _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
@@ -150,7 +150,7 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     ("Zg===", True, ("Error", "Excess padding not allowed")),
     ("Zm9vYg===", True, ("Error", "Excess padding not allowed")),
     ("Zm9vYg====", True, ("Error", "Excess padding not allowed")),
-    # Input continuing past a completed pad sequence with DATA: unchanged.
+    # Input continuing past a completed pad sequence with data: unchanged.
     ("Zg==Zg==", True, ("Error", "Excess data after padding")),
     ("Zm9vYg==Zg==", True, ("Error", "Excess data after padding")),
     ("Zg==Z", True, ("Error", "Excess data after padding")),
@@ -186,7 +186,7 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
             "cannot be 1 more than a multiple of 4",
         ),
     ),
-    # A data char after ONE pad at quad position 2: still discontinuous.
+    # A data char after one pad at quad position 2: still discontinuous.
     ("Zg=g", True, ("Error", "Discontinuous padding not allowed")),
     ("Zm8=g", True, ("Error", "Excess data after padding")),
     ("====", True, ("Error", "Leading padding not allowed")),
@@ -194,7 +194,7 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     ("Zm9v=", True, ("Error", "Excess padding not allowed")),
     ("Zm9v=Zg==", True, ("Error", "Excess padding not allowed")),
     # --- lenient-mode: non-alphabet discarded, excess pads ignored, data
-    # --- after padding RESUMES decoding (the gh-145264 fix itself) ---
+    # --- after padding resumes decoding (the gh-145264 fix itself) ---
     (
         "Z",
         False,
@@ -238,7 +238,7 @@ _BATTERY: list[tuple[str, bool, bytes | tuple[str, str]]] = [
     ("Zm 9v\nYg==", False, b"foob"),
     ("Zm9vYg=\n=", False, b"foob"),
     ("Zg==\n", False, b"f"),
-    # The security fix: data after a completed pad sequence is DECODED, not
+    # The security fix: data after a completed pad sequence is decoded, not
     # dropped (each of these was truncated at the pad pre-fix).
     ("Zg==!Zg==", False, b"f\x06`"),
     ("Zg==Zg==", False, b"f\x06`"),
@@ -270,12 +270,12 @@ def _tors_outcome(s: str, validate: bool) -> bytes | tuple[str, str]:
 
 
 def _stdlib_has_the_security_fix() -> bool:
-    """Does the RUNNING ``base64.b64decode`` carry the gh-145264 machine?
+    """Does the running ``base64.b64decode`` carry the gh-145264 machine?
 
     Probed behaviorally, not by version tuple: the pre-fix machine truncates
     lenient decoding at the first completed pad sequence (``b'f'``), the
     fixed machine decodes the trailing block (``b'f\\x06`'``). Measured on
-    this box: fixed in 3.13.14 and 3.15.0b2, NOT in 3.14.0 (the e31c5512
+    this box: fixed in 3.13.14 and 3.15.0b2, not in 3.14.0 (the e31c5512
     backport arrives in later 3.14.x) nor in any 3.12.x, so a version gate keyed
     on ">= (3, 13, 14) or >= (3, 14)" would misfire on 3.14.0, and patch
     levels are exactly where version gates lie. The probe reads the behavior
@@ -306,9 +306,9 @@ class TestBatteryAgainstTheStdlib:
         self, s: str, validate: bool, expected: bytes | tuple[str, str]
     ) -> None:
         """Every battery row must equal the recorded post-fix literal (tors
-        ships ONE behavior on every interpreter: output must not depend on
-        the Python it runs under), and must equal the RUNNING interpreter's
-        own ``base64.b64decode`` outcome WHERE THE STDLIB HAS THE FIX. On
+        ships one behavior on every interpreter: output must not depend on
+        the Python it runs under), and must equal the running interpreter's
+        own ``base64.b64decode`` outcome where the stdlib has the fix. On
         pre-fix stdlibs the comparison is recorded, not asserted: each
         divergence is printed with the gh-145264 note (the 3.10 leg diverges
         on far more: its regex validator is a different machine entirely)."""
@@ -346,7 +346,7 @@ class TestErrorPathTypeParity:
         pyo3's PyErr machinery from the class imported from the ``binascii``
         module, so existing ``except binascii.Error`` handlers keep working,
         and ``except ValueError`` catches it too (the subclass relation the
-        spec's parity requirement rests on). The MESSAGE is tors's recorded
+        spec's parity requirement rests on). The message is tors's recorded
         literal (the fixed machine) on every interpreter; it equals the
         running stdlib's message only where the stdlib has the fix."""
         with pytest.raises(binascii.Error) as excinfo:
@@ -362,7 +362,7 @@ class TestErrorPathTypeParity:
         """The one parameterized message: the count is derived from emitted
         bytes (complete quads × 4 + 1), so a 5-data-char string reports 5, a
         9-data-char string 9, the count a caller's log scraping keys on.
-        The formula is UNCHANGED by the gh-145264 retarget."""
+        The formula is unchanged by the gh-145264 retarget."""
         for data_chars in (1, 5, 9):
             count = data_chars  # a bare data run has no complete quads before it
             s = "A" * data_chars
@@ -377,12 +377,12 @@ class TestErrorPathTypeParity:
     def test_the_pad_at_quad_position_one_is_the_length_error(self) -> None:
         """The gh-145264 strict-mode change, pinned by name: a pad arriving
         at quad position 1 breaks to the end-of-input count error (count 1,
-        no complete quad was emitted), NOT the pre-fix machine's
+        no complete quad was emitted), not the pre-fix machine's
         "Discontinuous padding" classification of the following data char."""
         for s in ("Z=g=", "Z==g="):
             with pytest.raises(binascii.Error, match=r"data characters \(1\)"):
                 b64_decode(s, validate=True)
-        # The contrast row: a data char after ONE pad at quad position 2 is
+        # The contrast row: a data char after one pad at quad position 2 is
         # still "Discontinuous padding"; the two classes stay distinct.
         with pytest.raises(binascii.Error, match="Discontinuous padding"):
             b64_decode("Zg=Zg==", validate=True)
@@ -396,7 +396,7 @@ class TestValidateFalseLenientParity:
         corrupted: whitespace and junk chars injected between the alphabet
         characters, plus truncated/padded variants: the lenient discard
         rules must agree with the post-fix ``a2b_base64`` on every shape.
-        Runs only where the running stdlib HAS the fix: on a pre-fix stdlib
+        Runs only where the running stdlib has the fix: on a pre-fix stdlib
         the machines diverge by design (tors decodes past padding), so
         there is nothing to assert; the battery's recorded leg carries the
         pre-fix signal."""
@@ -492,7 +492,7 @@ class TestArgumentContract:
     def test_non_ascii_str_raises_value_error_before_any_decoding(self, validate: bool) -> None:
         """``base64.b64decode`` refuses a non-ASCII ``str`` with plain
         ``ValueError`` from ``_bytes_from_decode_data``, before binascii is
-        ever reached, so tors must too: same type (NOT binascii.Error), same
+        ever reached, so tors must too: same type (not binascii.Error), same
         message, in both validate modes."""
         ascii_only = "string argument should contain only ASCII"
         with pytest.raises(ValueError, match=ascii_only) as excinfo:
@@ -507,7 +507,7 @@ class TestArgumentContract:
         """A ``str`` holding lone surrogates (possible in CPython, impossible
         in UTF-8) meets the stdlib's ``s.encode("ascii")`` inside
         ``_bytes_from_decode_data``, whose handler converts the encode
-        failure to the SAME plain ``ValueError`` every other non-ASCII str
+        failure to the same plain ``ValueError`` every other non-ASCII str
         gets, measured on 3.12.7 and 3.13.14, and the same on every
         supported interpreter. tors raises that ValueError at the argument
         boundary instead of letting the UTF-8 borrow surface pyo3's own

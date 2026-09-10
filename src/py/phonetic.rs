@@ -5,7 +5,7 @@ use crate::phonetic_impl;
 /// `tors.soundex(text: str) -> str`: the classic Soundex phonetic code (a
 /// letter followed by three digits, e.g. `"Robert"` and `"Rupert"` both
 /// encode to `"R163"`), via `rphonetic`'s port of Apache Commons Codec's
-/// implementation. A 1918-patent-era, ENGLISH/Latin-script-oriented
+/// implementation. A 1918-patent-era, English/Latin-script-oriented
 /// heuristic, not a general Unicode phonetic algorithm; input is
 /// pre-filtered to ASCII letters before encoding (accents/non-Latin
 /// characters are dropped, not encoded), which also works around a real,
@@ -22,12 +22,12 @@ pub fn soundex(py: Python<'_>, text: &str) -> String {
     py.detach(|| phonetic_impl::soundex(text))
 }
 
-/// `tors.metaphone(text: str) -> str`: the Double Metaphone PRIMARY code
+/// `tors.metaphone(text: str) -> str`: the Double Metaphone primary code
 /// (Lawrence Philips' 2000 successor to classic Metaphone, e.g.
 /// `"jumped"` → `"JMPT"`), via `rphonetic`. The same
-/// ENGLISH/Latin-script-oriented scope, ASCII-letters-only pre-filter, and
+/// English/Latin-script-oriented scope, ASCII-letters-only pre-filter, and
 /// upstream-panic-avoidance note as `soundex` applies. Double Metaphone
-/// can also produce an ALTERNATE code for words with two plausible
+/// can also produce an alternate code for words with two plausible
 /// pronunciations; only the primary code is exposed here (a compatible,
 /// additive future addition, not exposed because no consumer has asked
 /// for it yet). Empty input (or input with no ASCII letters) → `""`.
@@ -40,14 +40,14 @@ pub fn metaphone(py: Python<'_>, text: &str) -> String {
 }
 
 /// `tors.double_metaphone(text: str) -> tuple[str, str]`: the Double
-/// Metaphone PRIMARY and ALTERNATE codes as `(primary, alternate)` (the
+/// Metaphone primary and alternate codes as `(primary, alternate)` (the
 /// full dual-key form of what `tors.metaphone` returns, e.g.
 /// `"jumped"` → `("JMPT", "AMPT")`), via `rphonetic`. The alternate key
 /// is the algorithm's whole point: for names readable two ways
 /// (Germanic/Slavic vs Anglicized) it carries the second pronunciation,
-/// so a name-matching pipeline scores a match when EITHER key of two
+/// so a name-matching pipeline scores a match when either key of two
 /// names agrees; for words with one pronunciation the two elements are
-/// equal. The same ENGLISH/Latin-script-oriented scope,
+/// equal. The same English/Latin-script-oriented scope,
 /// ASCII-letters-only pre-filter, and upstream-panic-avoidance note as
 /// `soundex` applies (see `src/phonetic_impl.rs`). Empty input (or
 /// input with no ASCII letters) → `("", "")`.
@@ -64,7 +64,7 @@ pub fn double_metaphone(py: Python<'_>, text: &str) -> (String, String) {
 /// capped at 6 characters, e.g. `"Washington"` → `"WASANG"`), via
 /// `rphonetic`'s port of Apache Commons Codec. A Soundex successor with
 /// better first-letter and vowel handling for name matching. The same
-/// ENGLISH/Latin-script-oriented scope, ASCII-letters-only pre-filter,
+/// English/Latin-script-oriented scope, ASCII-letters-only pre-filter,
 /// and upstream-panic-avoidance note as `soundex` applies (see
 /// `src/phonetic_impl.rs`; the filter additionally keeps NYSIIS keys
 /// pure ASCII, since the crate's own clean step would let accented
@@ -83,13 +83,13 @@ pub fn nysiis(py: Python<'_>, text: &str) -> String {
 /// Commons Codec with branching enabled, e.g. `"Peters"` →
 /// `["734000", "739400"]`). The standard code of Jewish-genealogy
 /// surname matching, designed for the Central/Eastern European
-/// surnames classic Soundex conflates. Returns a LIST because the rule
+/// surnames classic Soundex conflates. Returns a list because the rule
 /// table branches on ambiguous transliterations (one name can encode
 /// to several codes; a single code per name is commons-codec's
 /// non-branching convenience, not the algorithm): match two names when
 /// their code lists intersect. Each code is padded to 6 digits, so
 /// input with no encodable letters yields `["000000"]` (not `""`).
-/// The same ENGLISH/Latin-script-oriented scope and ASCII-letters-only
+/// The same English/Latin-script-oriented scope and ASCII-letters-only
 /// pre-filter as `soundex` applies (see `src/phonetic_impl.rs`).
 ///
 /// GIL model: the whole encode under `py.detach`; a `list` of `str`
@@ -103,9 +103,9 @@ pub fn daitch_mokotoff(py: Python<'_>, text: &str) -> Vec<String> {
 /// finer-grained letter-to-digit mapping than classic Soundex (more
 /// consonant classes distinguished, at the cost of a longer, uncapped
 /// code rather than Soundex's fixed 1-letter-plus-3-digit shape), via
-/// `rphonetic`'s port of Apache Commons Codec. A genuinely distinct
+/// `rphonetic`'s port of Apache Commons Codec. A distinct
 /// mapping table, not a formatting variant of `tors.soundex`. The same
-/// ENGLISH/Latin-script-oriented scope, ASCII-letters-only pre-filter,
+/// English/Latin-script-oriented scope, ASCII-letters-only pre-filter,
 /// and upstream-panic-avoidance note as `soundex` applies (see
 /// `src/phonetic_impl.rs`). Empty input (or input with no ASCII
 /// letters) → `""`.

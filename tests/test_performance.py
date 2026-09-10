@@ -22,9 +22,9 @@ The CI assertion covers 1 MiB and 12 MiB over all three corpora with a tolerant
 ``tors < 0.9 x reference`` margin: the measured ratios sit at 0.45-0.67, so the margin
 absorbs a loaded 2-vCPU CI runner. The one observed flake class (a 1 MiB
 decomposed leg at ratio 1.02 under concurrent compile load) is asymmetric
-contention, not symmetric noise: a ~10ms native sample can have ONE preempted
+contention, not symmetric noise: a ~10ms native sample can have one preempted
 run set its min-of-3, while the reference's 13-17ms samples amortize the same
-preemption — "both sides inflate together" only holds when neither side's
+preemption: "both sides inflate together" only holds when neither side's
 samples are short enough for a single scheduler hit to dominate their minimum.
 The fast cells therefore draw min-of-7 (``_FAST_CELL_SAMPLES``), giving the
 native side enough draws to find an uncontended window; the 12 MiB cells keep
@@ -107,7 +107,7 @@ _SAMPLES = 3
 # The fast-cell sample count (see the module docstring's flake-class note):
 # a 1 MiB cell's ~10ms native samples are short enough that one preempted
 # run can set min-of-3 while the pure-Python side's longer samples amortize
-# the same preemption — min-of-7 gives the native side enough draws to find
+# the same preemption; min-of-7 gives the native side enough draws to find
 # an uncontended window under concurrent load.
 _FAST_CELL_SAMPLES = 7
 # Cells at or above this many bytes draw _SAMPLES; smaller cells draw
@@ -338,9 +338,9 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 
 # ---------------------------------------------------------------------------
 # The chunking family's document-scale cost shape (#22, then #30): the
-# per-call cost must be the segmentation walks the function is FOR, not
-# per-codepoint structures built unconditionally — and, since #30's lazy
-# levels, only the walks a call actually CONSULTS. Load-fair ratios (both
+# per-call cost must be the segmentation walks the function is for, not
+# per-codepoint structures built unconditionally, and, since #30's lazy
+# levels, only the walks a call actually consults. Load-fair ratios (both
 # sides measured in the same process, min-of-3 after warmup), so a
 # shared-runner slowdown inflates both sides together.
 #
@@ -351,7 +351,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #     never-matching separators, whole-document budget: ~1048ms -> ~2.6ms
 #     after #22 (the unconditional grapheme HashSet + Vec<char> collect;
 #     ~400x); after #30's lazy levels the same call pays only the
-#     codepoint count — the literal scan itself is skipped, since no
+#     codepoint count: the literal scan itself is skipped, since no
 #     window ever opens a level
 #
 #     chunk_hierarchical, 12 MiB prose, default hierarchy: ~2996ms ->
@@ -359,8 +359,8 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #     levels (every window is served by the paragraph level alone on this
 #     corpus, so the sentence/word walks are never built), ~0.1ms under a
 #     whole-document budget (no level consulted at all; ~340ms before,
-#     ~176ms at 6 MiB), and ~396ms at a 100-char budget that genuinely
-#     descends to the word level — the word (~132ms) plus sentence
+#     ~176ms at 6 MiB), and ~396ms at a 100-char budget that descends
+#     to the word level: the word (~132ms) plus sentence
 #     (~188ms) walks it actually uses, the accurate UAX #29 hierarchy
 #     the function exists to provide
 #
@@ -392,7 +392,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures() -> None:
     """The whole-document-budget custom-hierarchy cell from #22: a
     never-matching separator list under a budget that swallows the whole
-    text must cost ONE CODEPOINT COUNT and nothing else. Under the
+    text must cost one codepoint count and nothing else. Under the
     lazy-level pass the level is never consulted (the first window fits
     the entire document), so it is never built and never scanned -- the
     literal's scan does not run at all, where the pre-lazy spelling paid
@@ -406,15 +406,15 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
     after #22, when the scan still ran on top). The pre-#22 spelling
     measured ~700x.
 
-    The absolute ceiling (0.8ms) is the fast path's OWN pin, which the
+    The absolute ceiling (0.8ms) is the fast path's own pin, which the
     8x scan race above cannot provide: a char_count reverted to the
     predicate-only spelling (no ``is_ascii`` gate) measures ~2.5ms on
-    this corpus (red-proofed: that revert fails this cell) — which still
+    this corpus (red-proofed: that revert fails this cell), which still
     passes 8x an ~8ms scan, so the race is blind to exactly the
     fast-path loss. 0.8ms sits ~3-5x above the measured band
     (0.15-0.25ms, min-of-3 after warmup on the box this ceiling was
     calibrated on) and ~3x below the predicate-only spelling, so the
-    gate's loss FAILS this cell while CI load does not."""
+    gate's loss fails this cell while CI load does not."""
     q = "q" * (12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 12 * _MIB, ["xyz"]), q)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, q)
@@ -433,7 +433,7 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
 
 def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii() -> None:
     """The laziness contract, on the input where it is load-bearing: for
-    NON-ASCII text a whole-text level build is a full segmentation walk
+    non-ASCII text a whole-text level build is a full segmentation walk
     (the grapheme index ~150ms at 12 MiB), so a call that never consults
     a level (never-matching separators, whole-document budget: no cuts
     to filter, no raw-cut window, no overlap snap) must build nothing.
@@ -461,7 +461,7 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
     """The #30 lazy-level headline cell: a whole-document budget consults
     no level at all -- the loop's first iteration takes its own
     ``remaining <= max_chars`` exit before any level is realized -- so
-    the DEFAULT hierarchy must cost the same nothing the never-matching
+    the default hierarchy must cost the same nothing the never-matching
     custom one does: one codepoint count, one chunk out. Ratioed against
     CPython's own ``in`` (a C-speed scan of the same text): measured
     ~0.1ms vs ~2ms (ratio ~0.05) after the lazy levels; the eager
@@ -475,7 +475,7 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
     the measured band (0.16-0.33ms, min-of-3 after warmup on the box
     this ceiling was calibrated on) and ~3x below the predicate-only
     spelling (red-proofed: that revert fails this cell), so the
-    ``is_ascii`` gate's loss FAILS this cell."""
+    ``is_ascii`` gate's loss fails this cell."""
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s)), corpus)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, corpus)
@@ -496,9 +496,9 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
 def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() -> None:
     """The default hierarchy's per-call cost contract: no more than its
     own UAX #29 walks (word_count + sentence_count on the same corpus,
-    measured in-process), at a budget that genuinely descends to the
+    measured in-process), at a budget that descends to the
     word level so every walk is consulted and the contract has teeth.
-    The hierarchy IS those walks; everything around them -- level
+    The hierarchy is those walks; everything around them -- level
     realization, the cut filter, the chunk loop, marshalling -- must be
     marginal. Measured ~396ms against a ~310ms reference sum (ratio
     ~1.3) at a 100-codepoint budget (at a 2000-codepoint budget on this
@@ -508,7 +508,7 @@ def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() ->
     against a tighter reference); the pre-#22 spelling measured ~9.4x
     (the grapheme hash set dominated the segmentation it was
     filtering). The assertion is the standing ceiling in the other
-    direction: whatever levels a budget DOES consult, the machinery
+    direction: whatever levels a budget does consult, the machinery
     around the walks must not dominate them."""
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 100), corpus)
@@ -527,7 +527,7 @@ def test_chunk_hierarchical_default_hierarchy_builds_only_the_levels_the_budget_
     walks -- the expensive lower levels of the default hierarchy -- must
     never run at all. The load-fair reference is ``["\\n\\n"]``, a custom
     hierarchy whose single literal supplies an equivalent top level
-    WITHOUT the default hierarchy's lower levels: both sides pay the
+    without the default hierarchy's lower levels: both sides pay the
     same paragraph scan plus the same windowing, so the default spelling
     may only add marginal spec-construction cost, never two more
     whole-text walks. Measured (min-of-3 after warmup): ~1.5ms default
@@ -554,7 +554,7 @@ def test_chunk_hierarchical_duplicate_separator_entries_are_deduped_not_rebuilt(
     built -- a second ``None`` never re-splices the default hierarchy, a
     repeated literal never re-pays its scan -- so ``[None] * 8`` must
     cost one spliced hierarchy and ``[" "] * 8`` one literal level, not
-    eight of either. The budget is DESCENDING (8 codepoints: windows
+    eight of either. The budget is descending (8 codepoints: windows
     inside long words exhaust the ``" "`` level down to the raw cut),
     which is where a lazy spelling without the dedup would still re-pay
     a duplicate -- the find_map only reaches one after its original
@@ -570,7 +570,7 @@ def test_chunk_hierarchical_duplicate_separator_entries_are_deduped_not_rebuilt(
     ``[" "] * 100`` spelling was a 1.69 GiB peak OOM shape
     (``[None] * 100`` its splice twin) without them. The
     structural teeth wall time cannot see -- that a duplicate after a
-    CONSULTED level adds no BUILDS at all -- are the Rust seam pins
+    consulted level adds no builds at all -- are the Rust seam pins
     (the build_seam LEVELS_BUILT counts in
     src/chunk_hierarchical_impl.rs)."""
     corpus = prose(6 * _MIB)
@@ -594,24 +594,24 @@ def test_chunk_hierarchical_none_splice_duplicates_are_inert_at_documented_budge
     """The ``[None] * 100`` dedup contract at the budget the docs disclose
     (the README's and api.md's "~0.5 ms at a 2000-codepoint budget over
     6 MiB of prose, the paragraph walk alone" parenthetical): at a
-    paragraph-scale budget every window is answered by the FIRST paragraph
+    paragraph-scale budget every window is answered by the first paragraph
     slot, so the 99 duplicate splices are never consulted at all (the
-    find_map dominance argument — the FIRST slot supplying a cut wins) and
+    find_map dominance argument: the first slot supplying a cut wins) and
     the ``*100`` spelling must cost exactly the lone spelling: one spliced
     hierarchy, one paragraph walk. Measured (min-of-3 after warmup, 6 MiB
-    prose, the box this cell was written on — Linux, 32 logical cores,
-    ambient load ~5): ~0.50 ms for BOTH spellings, ratio 1.00-1.01.
+    prose, the box this cell was written on: Linux, 32 logical cores,
+    ambient load ~5): ~0.50 ms for both spellings, ratio 1.00-1.01.
 
-    That same dominance argument is the @2000 leg's limit, said plainly:
-    a lost dedup is INVISIBLE at this budget, because the duplicate slots
-    a lost dedup would leave in the list are never consulted — measured
+    That same dominance argument is the @2000 leg's limit:
+    a lost dedup is invisible at this budget, because the duplicate slots
+    a lost dedup would leave in the list are never consulted; measured
     directly, with the slot-construction dedup disabled in a scratch
     build, the @2000 pair still measures ratio ~1.0 (green). The teeth
-    therefore live in the second leg, the DESCENDING budget the sibling
+    therefore live in the second leg, the descending budget the sibling
     cell above established (@8, ``[None] * 8``): at 8 codepoints over
     1 MiB of prose, windows inside long words exhaust every spliced level
-    down to the raw cut, so the find_map walks PAST every slot and each
-    duplicate splice re-pays the three walks — with the dedup disabled,
+    down to the raw cut, so the find_map walks past every slot and each
+    duplicate splice re-pays the three walks; with the dedup disabled,
     that scratch build measured the ``*100`` spelling at ~3.6 s against
     ~48 ms (ratio ~75x) at this exact leg, where the pristine tree
     measures ~48 ms for both spellings (ratio ~1.0). The ``*100`` scale
@@ -622,9 +622,9 @@ def test_chunk_hierarchical_none_splice_duplicates_are_inert_at_documented_budge
 
     Budgets: the @2000 leg takes the docs-claim ratio (1.3x, ~1.3x above
     the worst measured ratio) plus an absolute 2.5 ms ceiling (~5x above
-    the measured 0.50 ms, CI-load headroom; the regression this leg IS
-    positioned to catch — levels built EAGERLY again, every duplicate
-    paying its walks up front, the 17.2 s class — blows through it by
+    the measured 0.50 ms, CI-load headroom; the regression this leg is
+    positioned to catch (levels built eagerly again, every duplicate
+    paying its walks up front, the 17.2 s class) blows through it by
     ~7000x). The descending leg takes the sibling cell's 1.5x margin.
     The @2000 wall is the paragraph walk, so a paragraph-scanner retune
     moves the ceiling's headroom, not the ratio legs (both sides pay the
@@ -655,7 +655,7 @@ def test_chunk_hierarchical_none_splice_duplicates_are_inert_at_documented_budge
 
 
 def test_chunk_by_words_is_its_own_word_walk() -> None:
-    """chunk_by_words' per-call cost contract: the word walk it is FOR,
+    """chunk_by_words' per-call cost contract: the word walk it is for,
     plus only marginal machinery (the grapheme index build, the merge, the
     streaming token filter). Measured ~165ms against ~132ms of word_count
     (ratio ~1.25) after the fix; the former spelling measured ~14.6x."""
@@ -693,7 +693,7 @@ def test_chunk_by_paragraphs_absolute_band_holds() -> None:
     measured ~10.4ms at the same corpus on the box that calibrated this
     cell, and 12.8ms on a CRLF-dense log there). The ceiling is 10ms
     (~20x margin over the current measurement), positioned so that a
-    regression back to the per-char decode loop FAILS this cell: the old
+    regression back to the per-char decode loop fails this cell: the old
     spelling's ~10.4ms blows straight through 10ms, where the former
     30ms ceiling would have absorbed it silently. This cell exists
     because the #28 codegen change moved this function's wall by +23-28%
@@ -720,7 +720,7 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
     the same corpus on the box that calibrated this cell (a CRLF-dense
     log ran 12.8ms there). Ceiling 10ms (~16x margin over the current
     measurement), positioned so that a regression back to the per-char
-    decode loop FAILS it: the old spelling's ~13.6ms blows straight
+    decode loop fails it: the old spelling's ~13.6ms blows straight
     through 10ms,
     where the former 40ms ceiling would have absorbed it silently. The
     scan and the real-line filter are one pass with O(1) memory beyond

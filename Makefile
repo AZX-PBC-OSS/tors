@@ -32,7 +32,7 @@ check: lint test
 # documents extra is always synced: the pytest suite's documents gates
 # (tests/test_documents_engines.py) run against the tors.documents payload
 # (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
-# is EXACT — it would uninstall the payload and silently skip those gates.
+# is exact: it would uninstall the payload and silently skip those gates.
 install:
 	uv sync --locked --extra documents
 
@@ -44,17 +44,17 @@ install:
 # abi3 one, the dev-loop landmine tests/conftest.py fails loudly on): after
 # `make dev` exactly one fresh _tors.abi3.so remains, and plain `pytest`
 # (without the preload runner) binds it. --extra documents: same reason as
-# `install` — the payload must stay installed for the documents gates.
+# `install`: the payload must stay installed for the documents gates.
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
 	uv sync --locked --extra documents --reinstall-package tors
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
-# crate — not a workspace member, so root cargo fmt never sees it; without
+# crate (not a workspace member, so root cargo fmt never sees it); without
 # this line the fuzz targets rot silently, truncate_ellipsis.rs had
 # already drifted), clippy in BOTH feature configs plus the documents
 # config (pyo3's cfg flags differ between them, and the documents surface
-# is cfg-gated code the other configs never compile — the same reason the
+# is cfg-gated code the other configs never compile; the same reason the
 # two-config pass exists), and ruff over the Python side (tests/, tools/,
 # python/; config in pyproject.toml, the dev-group ruff runs it).
 lint:
@@ -68,8 +68,8 @@ lint:
 	uv run --no-sync ruff check .
 
 # Rust unit tests (extension-module off: it doesn't link libpython) in BOTH
-# feature configs — the documents lane is the engine surface's crate-side
-# tests (routing table, separator pin, classify semantics) — and the pytest
+# feature configs; the documents lane is the engine surface's crate-side
+# tests (routing table, separator pin, classify semantics), and the pytest
 # suite. Depends on `dev` so pytest always imports the extension built from
 # the current tree, never a stale wheel. NOTE: unlike ci.yml's matrix legs
 # (which deselect the timing lane and run it in ONE dedicated 3.12 step), this
@@ -92,7 +92,7 @@ fmt:
 # The licensing gate (the ci.yml lint job's two Cargo deny steps): the
 # permissive-only license allowlist, the advisory policy, and the ban
 # policy live in deny.toml. BOTH lockfiles are gated: tors-documents
-# resolves its own independent Cargo.lock (not a workspace member — its
+# resolves its own independent Cargo.lock (not a workspace member; its
 # Cargo.toml's header) whose package set is not a subset of the root
 # lock's (deny.toml's [graph] comment), so the payload manifest gets its
 # own pass. Requires cargo-deny on PATH
@@ -113,7 +113,7 @@ gen-html-table:
 	cargo fmt
 
 # cargo-fuzz (libFuzzer): raw adversarial byte/string input straight into the
-# *_impl.rs cores, no pyo3 boundary — a different bug class than the
+# *_impl.rs cores, no pyo3 boundary: a different bug class than the
 # hypothesis-based Python tests (panics, cross-function invariant breaks) over
 # an input space they don't shape. Requires nightly (`rustup install nightly`)
 # and `cargo install cargo-fuzz --locked`; the fuzz/ crate is intentionally
@@ -123,7 +123,7 @@ gen-html-table:
 # (hours, one target, targeted at a specific area of suspicion) is
 # `cargo +nightly fuzz run <target>` run directly, not through this target.
 # The wired-in list, kept identical to ci.yml's fuzz-smoke loop and
-# fuzz.yml's weekly pass — the two CI loops had drifted from this one
+# fuzz.yml's weekly pass; the two CI loops had drifted from this one
 # (truncate_ellipsis, controls, json_repair were Makefile-only).
 #
 # gfm_strip joined the run lists 2026-09-09: the byte-counted fence

@@ -1,16 +1,16 @@
 # release-type is `python`: it bumps pyproject.toml's [project].version and CHANGELOG.md
-# from Conventional Commits — never hand-edit either. release-please-config.json's
+# from Conventional Commits; never hand-edit either. release-please-config.json's
 # `extra-files` entries additionally bump, to the same value in the same release PR:
 # Cargo.toml's [package].version (the `tors-core` crate published to crates.io),
 # tors-documents/Cargo.toml's and tors-documents/pyproject.toml's versions (the
-# `tors-documents` payload wheel, version-locked to `tors` — one release, two wheels;
+# `tors-documents` payload wheel, version-locked to `tors`: one release, two wheels;
 # publish.yml's publish-documents job asserts the lockstep before uploading), so the
 # registries never drift apart. The two Cargo.locks' own version fields for their
 # packages self-heal on the next `cargo build` (nothing in this repo builds Rust with
 # `--locked`), and release-lock-sync.yml refreshes them on the release PR itself.
 #
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
-# a tag released this way will NOT auto-trigger publish.yml's `push: tags` step — see that
+# a tag released this way will not auto-trigger publish.yml's `push: tags` step; see that
 # workflow's header. The App path below is optional; without it, run publish.yml manually
 # (workflow_dispatch) after a release PR merges. Set both or neither:
 #   vars.RELEASE_PLEASE_APP_ID              App ID of the installed GitHub App
@@ -50,7 +50,7 @@ jobs:
           # config-file/manifest-file (not a bare release-type input): the extra-files
           # entries in release-please-config.json are what bump Cargo.toml's,
           # tors-documents/Cargo.toml's, and tors-documents/pyproject.toml's versions
-          # alongside pyproject.toml's — that customization needs manifest mode.
+          # alongside pyproject.toml's; that customization needs manifest mode.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
         run: |
           echo "::warning::Release ${TAG_NAME} was published with GITHUB_TOKEN, which cannot start workflow runs. publish.yml's tag-push trigger did NOT fire. Run it manually: Actions -> publish -> Run workflow, using tag ${TAG_NAME}."
           {
-            echo "### Release ${TAG_NAME} published — PyPI publish NOT triggered automatically"
+            echo "### Release ${TAG_NAME} published: PyPI publish not triggered automatically"
             echo
             echo "**Action required:** Actions -> publish -> Run workflow (workflow_dispatch)."
             echo
