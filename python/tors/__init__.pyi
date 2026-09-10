@@ -373,7 +373,13 @@ def truncate_ellipsis(text: str, max_chars: int) -> str: ...
 # DoS-bounded windowing over long sources). fuzzy=True is a superset of
 # fuzzy=False: a verbatim substring is grounded before windowing and before
 # deadline_ms applies (so threshold=1.0 fuzzy subsumes exact containment, and
-# a verbatim claim never times out). Near matches are alignment-independent
+# a verbatim claim never times out). Every windowed score uses the
+# claim-length denominator 2*L -- a truncated tail window's missing chars
+# are mismatches, never a discounted denominator, so the verdict never
+# depends on where the evidence sits relative to the source's end (issue
+# #40); a source shorter than the claim is the one exception, scored as one
+# direct whole-source difflib 2*M/(m+n) ratio. Near matches are
+# alignment-independent
 # in the guarantee band: a region with aligned ratio r is detected at any
 # offset whenever r >= max(0.75, threshold + 1/32) (a bounded refinement
 # pass over the best coarse windows; one typo in a 9+ char claim clears the

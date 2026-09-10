@@ -1281,14 +1281,27 @@ semantic/NLI one, and not a hallucination-detection model.
 `fuzzy=False` (the default) is exact substring containment: the `memchr` crate's
 SIMD-skipped two-way search (`memmem`, already a dependency), a byte-level find that is
 UTF-8-boundary-safe by construction. `fuzzy=True` compares `claim` against
-overlapping same-length windows of `source` (stride `claim`'s length / 2) using the
+overlapping windows of `source` (stride `claim`'s length / 2) using the
 only diffing engine already in the crate (the `similar` Myers engine backing
-`diff_opcodes`), and reports whether the best window's difflib-style ratio (`2 *
-matched_chars / (len(claim) + len(window))`) reaches `threshold`. `fuzzy=True` is a
+`diff_opcodes`), and reports whether the best window's region score —
+`2 * matched_chars / (len(claim) + len(claim))`, the difflib ratio over
+equal-length operands — reaches `threshold`. Every window is scored against
+that claim-length denominator: a window truncated by the source's end (its
+last, shorter window) is scored as the claim-length region it truncates —
+the missing characters are mismatches, never a discounted
+`len(claim) + len(window)` denominator, which would inflate a source that
+just ends partway through the evidence above the identical evidence sitting
+mid-source and make the verdict depend on where the evidence sits. The one
+exception is a `source` shorter than the claim: there is nothing to window
+over, so the whole source is the evidence and the score is one direct
+difflib `2 * matched / (len(claim) + len(source))` ratio (the unwindowed
+convention `tests/test_grounded.py` pins to exact difflib parity); the two
+formulas agree at `len(source) == len(claim)`, so the boundary is continuous.
+`fuzzy=True` is a
 superset of `fuzzy=False`: an exact-containment floor runs first, so a claim present
 verbatim in `source` is grounded before any windowing (independent of window alignment,
 and before `deadline_ms` applies: a verbatim substring never times out). The windowed
-ratio is consulted only when there is no exact match.
+score is consulted only when there is no exact match.
 
 The floor guarantees the verbatim case unconditionally; near matches get a bounded
 guarantee band instead of raw window luck: a same-length source region whose aligned
