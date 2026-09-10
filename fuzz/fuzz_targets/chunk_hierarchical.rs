@@ -18,14 +18,15 @@
 //! cut to two consecutive chunks, so equal ends are legal, only a
 //! regressing end is a bug. Forward progress at the sequence level.
 //!
-//! `chunk_by_lines` carries more than structure: an inline random-access
-//! reference oracle (the same whole-text-`Vec<char>` spelling the Rust
-//! unit tests keep as their own `#[cfg(test)]` oracle — tors-core is a
-//! path dep, so that one is unreachable from this crate and inlined here
-//! instead) plus a windower mirroring `chunk_by_segments`'s documented
-//! contract, a DIFFERENTIAL pin: wrong CRLF folding or a blank-line
-//! miscount now panics the fuzzer with the reproducing input, not just
-//! violates structure.
+//! `chunk_by_lines` AND `chunk_by_paragraphs` carry more than
+//! structure: an inline random-access reference oracle EACH (the same
+//! whole-text-`Vec<char>` spellings the Rust unit tests keep as their
+//! own `#[cfg(test)]` oracles — tors-core is a path dep, so those are
+//! unreachable from this crate and inlined here instead) plus a
+//! windower mirroring `chunk_by_segments`'s documented contract, a
+//! DIFFERENTIAL pin: wrong CRLF folding, a blank-line miscount, or a
+//! paragraph run-qualification drift now panics the fuzzer with the
+//! reproducing input, not just violates structure.
 //!
 //! Separator hierarchies fuzz in a two-shape x two-budget GRID over the
 //! same body: the `SepEntry` alphabet below (shaped so the
@@ -256,6 +257,57 @@ fn line_bounds_reference(text: &str) -> Vec<(usize, usize)> {
     bounds
 }
 
+/// The random-access `paragraph_bounds` oracle, inlined from the same
+/// whole-text-`Vec<char>` spelling the Rust unit tests keep as their
+/// own `#[cfg(test)]` oracle (that one is invisible to this path-dep
+/// crate — the same reason `line_bounds_reference` above is inlined):
+/// paragraphs split on maximal runs of 2+ NEWLINE UNITS, a `\r\n` pair
+/// counting as ONE unit (the CR/CRLF folding every scanner in this
+/// crate shares); a lone unit is ordinary content, and the empty spans
+/// a qualifying run would mint at the text's edges are discarded.
+/// Caveat, the line oracle's twin: the oracle shares production's
+/// 2+-unit/run-walk SHAPE, so the differential pins the two MACHINES
+/// (byte-level run walking, unit counting, windowing) against each
+/// other — the heuristic itself (no Unicode Standard behind "2+
+/// newlines is a paragraph gap") is a contract stated in prose, not
+/// something either spelling could cross-check.
+fn paragraph_bounds_reference(text: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut bounds = Vec::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if chars[i] == '\n' || chars[i] == '\r' {
+            let run_start = i;
+            let mut units = 0usize;
+            while i < n && (chars[i] == '\n' || chars[i] == '\r') {
+                if chars[i] == '\r' && i + 1 < n && chars[i + 1] == '\n' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                units += 1;
+            }
+            if units >= 2 {
+                if seg_start < run_start {
+                    bounds.push((seg_start, run_start));
+                }
+                seg_start = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if seg_start < n {
+        bounds.push((seg_start, n));
+    }
+    bounds
+}
+
 /// The tiny windower mirroring `chunk_by_segments`'s documented contract
 /// (src/chunk_by_segment_impl.rs, inlined for the same `#[cfg(test)]`
 /// reachability reason as `line_bounds_reference`): chunk i spans
@@ -321,8 +373,10 @@ fuzz_target!(|input: Input| {
 
     // The line oracle's bounds list is text-only, so it is computed once
     // here and shared by every windowing below (each per_chunk value
-    // re-WINDOWS the list, never re-scans the text).
+    // re-WINDOWS the list, never re-scans the text); the paragraph
+    // oracle's list rides the same one-compute discipline.
     let reference_lines = line_bounds_reference(&input.text);
+    let reference_paragraphs = paragraph_bounds_reference(&input.text);
 
     // The hierarchical body, parameterized on (separators, budget): the
     // functions' own precondition is `overlap < max_chars`, clamped
@@ -340,6 +394,31 @@ fuzz_target!(|input: Input| {
         );
         assert_basic_contract(&chunks, total, "chunk_hierarchical");
         assert_cluster_safe(&chunks, &input.text, budget, "chunk_hierarchical");
+        // The whole-document-budget oracle, folded in at every budget
+        // that can only ever emit the single first window: `max_chars
+        // >= total` makes the loop's first `remaining <= max_chars`
+        // exit fire, so the answer is exactly [(0, total)] (or [] on
+        // empty text) REGARDLESS of separators and overlap. That
+        // trivial answer is the one output the codepoint total —
+        // `char_count`, pub(crate) and unreachable from this crate —
+        // directly feeds: a byte-count regression (astral text, 4
+        // UTF-8 bytes per emoji) would emit (0, byte_total) here and
+        // fail this exact equality while every structure check above
+        // still passes, which is why the row exists as equality and
+        // not as another invariant.
+        if budget >= total {
+            let expected: Vec<(usize, usize)> = if total == 0 {
+                Vec::new()
+            } else {
+                vec![(0, total)]
+            };
+            assert_eq!(
+                chunks, expected,
+                "whole-document budget {budget} must emit the single (0, total) window: \
+                 text={:?} separators={separators:?} overlap={overlap}",
+                input.text
+            );
+        }
     };
 
     // The grid: both separator shapes at both budgets. The shaped
@@ -350,7 +429,12 @@ fuzz_target!(|input: Input| {
     // coincide exactly when the raw one already sits in 1..=total (the
     // shape is the identity there), so the grid's only duplicated work
     // re-runs a combination one budget already covered — never a new
-    // cost class.
+    // cost class. The THIRD row is the whole-document budget
+    // `total.max(1)`: the pressure row lands on `total` only for exact
+    // multiples, so without this row the single-window path (and the
+    // char_count total it rests on) ran in a few percent of inputs;
+    // `.max(1)` keeps the empty-text case a legal budget (its oracle
+    // answer is []).
     let shaped: Option<Vec<Option<&'static str>>> = input
         .shaped_separators
         .as_ref()
@@ -359,26 +443,30 @@ fuzz_target!(|input: Input| {
         .separators
         .as_ref()
         .map(|v| v.iter().map(|entry| entry.as_deref()).collect());
-    for budget in [raw_budget, pressure_budget] {
+    for budget in [raw_budget, pressure_budget, total.max(1)] {
         run_hierarchical(shaped.as_deref(), budget);
         run_hierarchical(raw.as_deref(), budget);
     }
 
     // The unit-count chunkers over the same arbitrary text: same
     // per-chunk/overlap envelope (per_chunk in 1..=u16, overlap
-    // clamped), cluster safety for the two merge-based spellings,
-    // basic contract for the line-run paragraph heuristic (its
-    // spans are break-run edges, documented as not necessarily
-    // grapheme-aligned — a combining mark after a newline joins the
-    // newline's cluster, and the newline is separator content no
-    // paragraph's caller would call "split"), and the line scanner
-    // basic contract PLUS the differential pin against the inline
-    // reference oracle — its spans carry the same break-run-edge
-    // caveat, but the oracle checks WHERE those edges are, not just
-    // that they satisfy structure. This sweep is BUDGET-INDEPENDENT
-    // of the grid above (its per_chunk envelope is its own), so it
-    // runs ONCE — not per budget, not per shape — and the grid's
-    // added executions stay hierarchical-only.
+    // clamped), cluster safety for the two merge-based spellings, and
+    // the DIFFERENTIAL pin for BOTH gapped scanners — the line scanner
+    // against its inline reference oracle (any divergence between the
+    // streaming state machine and the random-access spelling — wrong
+    // CRLF folding, a blank-line miscount, a windowing drift — panics
+    // here with the reproducing parameters in the message), and the
+    // paragraph scanner against its own (same machine class: byte-level
+    // run walking and unit counting against the random-access
+    // spelling; the paragraph spans are break-run edges, documented as
+    // not necessarily grapheme-aligned — a combining mark after a
+    // newline joins the newline's cluster, and the newline is
+    // separator content no paragraph's caller would call "split" — but
+    // the oracle checks WHERE those edges are, not just that they
+    // satisfy structure). This sweep is BUDGET-INDEPENDENT of the grid
+    // above (its per_chunk envelope is its own), so it runs ONCE — not
+    // per budget, not per shape — and the grid's added executions stay
+    // hierarchical-only.
     let overlap = (input.overlap_raw as usize) % raw_budget.max(1);
     for per_chunk in [1usize, 2, 3, 7, raw_budget] {
         let overlap = overlap % per_chunk;
@@ -394,13 +482,16 @@ fuzz_target!(|input: Input| {
         let paragraphs =
             tors::chunk_by_segment_impl::chunk_by_paragraphs(&input.text, per_chunk, overlap);
         assert_basic_contract(&paragraphs, total, "chunk_by_paragraphs");
+        assert_eq!(
+            paragraphs,
+            reference_window(&reference_paragraphs, per_chunk, overlap),
+            "chunk_by_paragraphs diverged from the reference oracle: text={:?} \
+             per_chunk={per_chunk} overlap={overlap}",
+            input.text
+        );
 
         let lines = tors::chunk_by_segment_impl::chunk_by_lines(&input.text, per_chunk, overlap);
         assert_basic_contract(&lines, total, "chunk_by_lines");
-        // The differential pin: any divergence between the streaming
-        // state machine and the random-access oracle — wrong CRLF
-        // folding, a blank-line miscount, a windowing drift — panics
-        // here with the reproducing parameters in the message.
         assert_eq!(
             lines,
             reference_window(&reference_lines, per_chunk, overlap),
