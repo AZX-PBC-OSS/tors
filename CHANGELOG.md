@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.5.0...v0.6.0) (2026-09-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* chunk_hierarchical's Rust signature separators is now Option<&[Option<&str>]> (landed in #28; restated here because #28's squash carried no footer and release-please would not surface it). Python callers are unaffected: all-literal lists behave identically.
+
+### Features
+
+* add chunk_by_lines and None-entry hierarchy splicing to chunk_hierarchical ([#28](https://github.com/AZX-PBC-OSS/tors/issues/28)) ([b5a7d66](https://github.com/AZX-PBC-OSS/tors/commit/b5a7d6678fb0bc9d14d1a8d349a3659a5202570d))
+* document-format extraction as tors.documents (second wheel, GIL-free) ([#27](https://github.com/AZX-PBC-OSS/tors/issues/27)) ([eade003](https://github.com/AZX-PBC-OSS/tors/commit/eade003156bc705a3aa29b04b59c7cf7d44f1146))
+* memchr line/paragraph scans, lazy hierarchy levels, chunk_by_paragraphs_iter, iter error precedence ([#30](https://github.com/AZX-PBC-OSS/tors/issues/30)) ([#34](https://github.com/AZX-PBC-OSS/tors/issues/34)) ([48e91bc](https://github.com/AZX-PBC-OSS/tors/commit/48e91bcd94967efcb625de1d17cf35ed9b3656bf))
+
+
+### Bug Fixes
+
+* dedup None splices, single-pass the line/paragraph scans, pin [#28](https://github.com/AZX-PBC-OSS/tors/issues/28)'s contracts ([#31](https://github.com/AZX-PBC-OSS/tors/issues/31)) ([3fd4291](https://github.com/AZX-PBC-OSS/tors/commit/3fd42915e152ed46ccd8b334013f93e1c2e2f923))
+
+
+### Performance Improvements
+
+* build levels on first consultation, memchr2 the ASCII line/paragraph scans ([#32](https://github.com/AZX-PBC-OSS/tors/issues/32)) ([e955e9b](https://github.com/AZX-PBC-OSS/tors/commit/e955e9b37fe254b37fe819983e900b11a2915a9a))
+
+
+### Documentation
+
+* improve documentation clarity ([#35](https://github.com/AZX-PBC-OSS/tors/issues/35)) ([aa4ebe8](https://github.com/AZX-PBC-OSS/tors/commit/aa4ebe8dd4ae5a305272597389a016f1662d490e))
+
 ## [0.5.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.4.1...v0.5.0) (2026-09-09)
 
 
