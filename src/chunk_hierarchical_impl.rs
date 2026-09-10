@@ -93,9 +93,11 @@
 //! walks nothing: one codepoint count, one chunk out). Building each chunk is one
 //! `partition_point` binary search per level: O(n × levels) total, levels
 //! bounded by the small, caller-supplied list length. The codepoint `total`
-//! the budget arithmetic needs is one branchless byte pass (every UTF-8
-//! codepoint starts at a non-continuation byte), not a materialized
-//! `Vec<char>`. The one other whole-text structure is the grapheme boundary
+//! the budget arithmetic needs is [`char_count`]'s one ASCII-first pass
+//! (pure-ASCII text answers its own byte length; non-ASCII text pays the
+//! branchless non-continuation-byte count — [`char_count`]'s own docs carry
+//! why the split exists), not a materialized `Vec<char>`. The one other
+//! whole-text structure is the grapheme boundary
 //! index (see [`GraphemeIndex`]): ONE `graphemes(true)` walk emitting one
 //! bit per codepoint on non-ASCII text — or, on pure-ASCII text, an
 //! all-ones bitmap plus the CRLF fixup, two SIMD byte scans, no
@@ -459,14 +461,15 @@ pub fn chunk_hierarchical(
     // bare "attempt to divide by zero": the same discipline `chunk_text`'s
     // own `max_chars > 0` assert applies.
     assert!(max_chars > 0, "max_chars must be at least 1, got 0");
-    // The codepoint count as one branchless byte pass — every UTF-8
-    // codepoint begins at a byte that is not a continuation byte
-    // (`0b10xxxxxx`), so counting non-continuation bytes IS counting
-    // codepoints — instead of the former whole-text `Vec<char>` collect
-    // (4 bytes per codepoint materialized before anything else could
-    // run, the same O(source) allocation class #17 removed from
+    // The codepoint count as `char_count`'s ASCII-first pass — pure-ASCII
+    // text answers its own byte length (the `is_ascii` gate, which LLVM
+    // vectorizes outright), non-ASCII text pays the branchless count of
+    // non-continuation bytes — instead of the former whole-text `Vec<char>`
+    // collect (4 bytes per codepoint materialized before anything else
+    // could run, the same O(source) allocation class #17 removed from
     // `is_grounded_fuzzy` and `chunk_text`'s grapheme grid before that).
-    // `total` was the only thing that collect was ever read for.
+    // `total` was the only thing that collect was ever read for; see
+    // `char_count`'s own docs for the fast-path split's rationale.
     let total = char_count(text);
 
     // The hierarchy as SPECS — no walk paid yet. Every slot is realized

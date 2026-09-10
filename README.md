@@ -621,12 +621,12 @@ default paragraph→sentence→word hierarchy and a 2000-codepoint budget — wh
 window is answered at the paragraph level — only the paragraph walk runs: ~3.4 ms,
 against ~350 ms for the eager level builds it replaced, which scanned its word walk
 (~130 ms) plus sentence walk (~190 ms) up front whatever the budget asked. Duplicate
-separators are deduped at list construction — `None` and repeated literals both — so
-`[None] * 100` costs what `[None]` does (~1.7 ms at a 2000-codepoint budget over
+separators are deduped at slot construction — `None` and repeated literals both — so
+`[None] * 100` costs what `[None]` does (~0.5 ms at a 2000-codepoint budget over
 6 MiB; the per-duplicate spelling measured 17.2 s and +3,120 MiB of peak RSS) and
 `[" "] * 100` what `[" "]` does (~9 ms; was 790 ms and +1,560 MiB). A custom
 hierarchy whose separators never match, under a whole-document budget, is one
-codepoint count and nothing else (~2.5 ms): no window consults a level, so not even
+codepoint count and nothing else (~0.15 ms): no window consults a level, so not even
 the literal's scan runs. The line and paragraph twins are byte-level scans — an
 inline density window before each `memchr2` hop so break soup never pays a hop, and
 a sliding ASCII certificate that batches purity checks one 4 KiB stride per ~50
@@ -654,8 +654,11 @@ iterator); `utf8_is_valid` has no stdlib boolean primitive to race at all, so it
 is absolute throughput: up to ~95 GiB/s at 12 MiB, memory-bound above L3 cache.
 
 **List-returning functions have a real, disclosed cost at scale.** `word_bounds` on
-12 MiB of prose (3.67M segments) holds the GIL for 428–497 ms just marshalling the
-returned list: a genuine cost of the list shape, not a bug. The `_iter` twins
+12 MiB of prose (3.67M segments) holds the GIL for 328–344 ms just marshalling the
+returned list (measured worst-gap band; the absolute band moves with box pace — the
+dev box the test ledger records measured 428–497 ms, and the load-stable constant is
+the ratio, ~0.72 of the call's wall): a genuine cost of the list shape, not a bug.
+The `_iter` twins
 (`word_bounds_iter`, `chunk_text_iter`, `find_patterns_iter`, and friends) exist for
 exactly this: the same sequence, streamed, with each `__next__` holding the GIL for one
 tuple instead of the whole list at once, and 2.1× faster in wall time as well, in the

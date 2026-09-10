@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any, Literal
 
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
@@ -499,8 +499,8 @@ def chunk_text(
 # one 2-tuple per __next__): avoids materializing a list for documents
 # that chunk into the hundreds of thousands of pieces. Error precedence
 # matches the list spelling exactly: a lone-surrogate str raises
-# UnicodeEncodeError (the text conversion) before any count/overlap
-# ValueError, list and iter alike.
+# UnicodeEncodeError (the text conversion) before any other argument's
+# conversion or validation error, list and iter alike.
 def chunk_text_iter(
     text: str,
     max_chars: int,
@@ -532,8 +532,8 @@ def chunk_by_words(
 
 # The streaming twin of chunk_by_words: same shape as chunk_text_iter.
 # Error precedence matches the list spelling exactly: a lone-surrogate str
-# raises UnicodeEncodeError (the text conversion) before any
-# count/overlap ValueError, list and iter alike.
+# raises UnicodeEncodeError (the text conversion) before any other
+# argument's conversion or validation error, list and iter alike.
 def chunk_by_words_iter(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -547,8 +547,8 @@ def chunk_by_sentences(
 
 # The streaming twin of chunk_by_sentences: same shape as chunk_text_iter.
 # Error precedence matches the list spelling exactly: a lone-surrogate str
-# raises UnicodeEncodeError (the text conversion) before any
-# count/overlap ValueError, list and iter alike.
+# raises UnicodeEncodeError (the text conversion) before any other
+# argument's conversion or validation error, list and iter alike.
 def chunk_by_sentences_iter(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -573,12 +573,13 @@ def chunk_by_paragraphs(
 # and the same rationale as every other _iter spelling: the list shape's
 # GIL-held marshalling cost is measured for segment-count-heavy outputs
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
-# 428-497 ms just marshalling the list), and a paragraph-heavy corpus (a
+# 328-344 ms -- box-pace-dependent, ~0.72 of the call's wall is the
+# constant -- just marshalling the list), and a paragraph-heavy corpus (a
 # multi-MiB article dump or report batch) is in that piece-count class,
 # chunking into hundreds of thousands of pieces. Error precedence matches
 # the list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
-# (the text conversion) before any count/overlap ValueError, list and iter
-# alike.
+# (the text conversion) before any other argument's conversion or
+# validation error, list and iter alike.
 def chunk_by_paragraphs_iter(
     text: str, paragraphs_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -613,12 +614,13 @@ def chunk_by_lines(
 # and the same rationale as every other _iter spelling: the list shape's
 # GIL-held marshalling cost is measured for segment-count-heavy outputs
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
-# 428-497 ms just marshalling the list), and a line-oriented corpus (a
-# multi-MiB log or transcript) is in that piece-count class, chunking
-# into hundreds of thousands of pieces. Error precedence matches the
+# 328-344 ms -- box-pace-dependent, ~0.72 of the call's wall is the
+# constant -- just marshalling the list), and a line-oriented corpus (a
+# multi-MiB log or transcript) is in that piece-count class, chunking into
+# hundreds of thousands of pieces. Error precedence matches the
 # list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
-# (the text conversion) before any count/overlap ValueError, list and
-# iter alike.
+# (the text conversion) before any other argument's conversion or
+# validation error, list and iter alike.
 def chunk_by_lines_iter(
     text: str, lines_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -628,10 +630,12 @@ def chunk_by_lines_iter(
 # finer levels only when a coarser one has no in-budget cut. separators=None
 # uses tors's own accurate hierarchy (paragraph -> sentence -> word -> a
 # grapheme-safe raw cut, always the final unconditional fallback).
-# separators=[...] is a caller-supplied list of LITERAL strings (not regex),
-# coarsest first, e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
+# separators=[...] is a caller-supplied SEQUENCE of LITERAL strings (not
+# regex) -- any Sequence (list or tuple) of literals and None entries; str,
+# dict, set, and generators raise TypeError at extraction -- coarsest first,
+# e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
-# appended. A None ENTRY in an otherwise-literal list splices the default
+# appended. A None ENTRY in an otherwise-literal sequence splices the default
 # hierarchy's three accurate levels in at that position: ["\n", None] is
 # line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
 # shape (a chat thread, one message per line, never split mid-line) whose
@@ -643,12 +647,12 @@ def chunk_by_lines_iter(
 # boundary (not necessarily a semantic one, a documented simplification of
 # chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
-# returns []; an empty separators list is legal and skips straight to the
+# returns []; an empty separators sequence is legal and skips straight to the
 # raw-cut fallback.
 def chunk_hierarchical(
     text: str,
     max_chars: int,
-    separators: list[str | None] | None = None,
+    separators: Sequence[str | None] | None = None,
     *,
     overlap: int = 0,
 ) -> list[tuple[int, int]]: ...

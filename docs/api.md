@@ -191,8 +191,10 @@ The UAX #29 word-boundary segments as `(start, end)` pairs in Python `str` index
 joining the slices reproduces the input. OFFSETS, never string lists (marshalling
 thousands of small `PyString`s under the GIL would eat the win). One measured caveat,
 pinned openly: the return marshalling constructs one 2-tuple of ints per segment under
-the GIL, O(number-of-segments), a measured 428–567 ms hold at 12 MiB of prose
-(3.67 M segments). Fine at document scale; for whole-file sizes use the iterator
+the GIL, O(number-of-segments), a measured 328–344 ms hold at 12 MiB of prose
+(3.67 M segments; worst-gap band, box-pace-dependent — the dev box the test ledger
+records measured 428–497 ms, and the load-stable constant is the ratio, ~0.72 of the
+call's wall). Fine at document scale; for whole-file sizes use the iterator
 below.
 
 ```python
@@ -211,7 +213,7 @@ sequence-parity with the list API over every tricky row and hypothesis text), yi
 lazily. The segmentation runs under one GIL-released pass when the iterator is
 constructed, and each `__next__` holds the GIL only to construct one tuple (µs-scale):
 worst heartbeat gap 15.4 ms at 12 MiB, against the list shape's structurally
-unattainable 428–567 ms band; and the full drain is also ~2.1× FASTER in wall time
+unattainable 328–344 ms band; and the full drain is also ~2.1× FASTER in wall time
 than the list API (347 ms vs 724 ms at 12 MiB, measured). `__length_hint__` reports the
 remaining bound count and tracks partial consumption. The list API stays the right
 shape for small inputs and one-shot batch work.
@@ -1751,7 +1753,7 @@ paragraph in `chunk_text_iter`'s section included). Like every `_iter` spelling 
 has no async twin (an iterator is not an awaitable shape; see the README's Async
 use section) — and it exists for the same reason as the other `_iter` twins: the
 list shape's GIL-held marshalling cost is measured for segment-count-heavy outputs
-(`word_bounds` on 12 MiB of prose, 3.67M segments, holds the GIL for 428–497 ms
+(`word_bounds` on 12 MiB of prose, 3.67M segments, holds the GIL for 328–344 ms
 just marshalling the list, the README's disclosed numbers), and a paragraph-heavy
 corpus (a multi-MiB article dump or report batch, one blank line per record) is in
 that piece-count class, chunking into hundreds of thousands of pieces.
@@ -1847,7 +1849,7 @@ the list API. Like every `_iter` spelling it has no async twin (an iterator is n
 an awaitable shape; see the README's Async use section) — and it exists for the
 same reason as the other `_iter` twins: the list shape's GIL-held marshalling
 cost is measured for segment-count-heavy outputs (`word_bounds` on 12 MiB of
-prose, 3.67M segments, holds the GIL for 428–497 ms just marshalling the list,
+prose, 3.67M segments, holds the GIL for 328–344 ms just marshalling the list,
 the README's disclosed numbers), and a line-oriented corpus (a multi-MiB log or
 transcript) is in that piece-count class, chunking into hundreds of thousands
 of pieces.
@@ -1861,7 +1863,7 @@ list(tors.chunk_by_lines_iter(log, 2))
 
 ```python
 def chunk_hierarchical(
-    text: str, max_chars: int, separators: list[str | None] | None = None, *, overlap: int = 0
+    text: str, max_chars: int, separators: Sequence[str | None] | None = None, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 ```
 
@@ -1878,18 +1880,22 @@ paragraph → sentence → word → a grapheme-safe raw cut, always the final,
 unconditional fallback (this never fails to produce a chunk); it reuses the
 same UAX #29 segmenters `chunk_by_sentences`/`chunk_by_words` do, rather
 than LangChain's own naive literal guesses (`"\n\n"`, `". "`, `" "`).
-`separators=[...]` is a caller-supplied list of LITERAL strings (**not
+`separators=[...]` is a caller-supplied sequence (a list or a tuple) of
+LITERAL strings (**not
 regex**, a documented scope line: literals are LangChain's own default
 too, cover the motivating markdown-header case completely, and avoid
 reopening the regex-semantics question `re` support was already declined
 over), coarsest first, e.g. `["\n## ", "\n\n", ". ", " "]` for
-markdown-header-aware chunking. A custom list REPLACES the default
+markdown-header-aware chunking. Any `Sequence` of literals and `None` entries
+is accepted — `("\n", None)` behaves identically to `["\n", None]` — while
+`str`, `dict`, `set`, and other non-`Sequence` inputs (generators included)
+raise `TypeError` at argument extraction. A custom sequence REPLACES the default
 hierarchy for the levels it specifies, but the grapheme-safe raw cut is
 still always appended as the final fallback regardless; unlike LangChain,
 no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
 
-An entry in that list may also be `None`: it splices the default
+An entry in that sequence may also be `None`: it splices the default
 hierarchy's three accurate levels in AT THAT POSITION, the mix an
 all-literal list could not express before. `["\n", None]` is
 line → paragraph → sentence → word → raw cut — the line-oriented-text
@@ -1907,10 +1913,10 @@ through `find_map`, in priority order), so a budget that answers every
 window at the paragraph level never runs the sentence or word walks at
 all — a `["\n", None]` thread whose every line fits the budget builds
 none of the spliced levels — and duplicate entries — `None` or a
-repeated literal — are recognized at list construction and skipped,
+repeated literal — are recognized at slot construction and skipped,
 inert (identical levels can never change the answer — the first
 occurrence of a level always dominates its duplicate), so `[None] * 100`
-costs what `[None]` does (~1.7 ms at a 2000-codepoint budget over
+costs what `[None]` does (~0.5 ms at a 2000-codepoint budget over
 6 MiB of prose, the paragraph walk alone) and `[" "] * 100` what
 `[" "]` does (~9 ms). Two former spellings paid more: before the dedup,
 every duplicate entry re-paid the walks plus ~45 MiB of cut vectors per
@@ -1950,7 +1956,7 @@ silently degrades to zero overlap for just that one transition, the same
 snap-collapse `chunk_text` already applies.
 
 `max_chars < 1` or `overlap < 0` raise `ValueError`; `overlap >= max_chars`
-raises `ValueError`. Empty `text` returns `[]`. An empty `separators` list
+raises `ValueError`. Empty `text` returns `[]`. An empty `separators` sequence
 is legal and skips straight to the raw-cut fallback for every chunk. Every
 level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
