@@ -842,8 +842,9 @@ impl Parser {
     ///
     /// The memo lives on the parser (upstream scopes it to one string's
     /// parse state): entries are pure buffer facts, so sharing them across
-    /// the many short string parses of one repair is exact, and the single
-    /// buffer-mutating site (split_object_on_duplicate_key) clears it.
+    /// the many short string parses of one repair is exact, and both
+    /// buffer-mutating sites (split_object_on_duplicate_key's insert and
+    /// repair_empty_object_result's normalization splice) clear it.
     fn cached_skip_to_character(&mut self, targets: &[char], idx: usize) -> usize {
         let key = lookahead_key(targets);
         let start_index = self.index + idx;

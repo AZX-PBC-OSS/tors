@@ -62,6 +62,8 @@ _BASE_RAWS: list[str] = [
     '{"a": ""hi""}',  # doubled quotes: member value
     '{"a": "x\\qy"}',  # escape: invalid \\q escape
     '{"a": "\\u41"}',  # escape: truncated \\u escape
+    '[{\\"\\":]w]"',  # escaped-key splice: ']' kept in value (issue #39)
+    '[{\\"\\":]x]}"',  # escaped-key splice: ']' and '}' kept in value (issue #39)
     '```json\n{"a": 1}\n```',  # fenced payload: object (no top-level scalar)
     "```json\n[1, 2]\n```",  # fenced payload: array (no top-level scalar)
     '~~~json\n{"a": 1}\n~~~',  # fenced payload: tilde fence object
@@ -478,6 +480,46 @@ class TestExhaustiveStructuralSweep:
     """
 
     @pytest.mark.parametrize("raw", _sweep_raws())
+    def test_engine_lane_parity(self, raw: str) -> None:
+        got = tors.repair_json(raw, skip_json_loads=True)
+        want = json_repair_lib.repair_json(raw, skip_json_loads=True)
+        assert got == want
+        got_loads = tors.repair_json_loads(raw, skip_json_loads=True)
+        want_loads = json_repair_lib.loads(raw, skip_json_loads=True)
+        assert got_loads == want_loads
+
+
+# The issue #39 escaped-key-splice grid: the three ingredients around the
+# minimal repro — escaped object keys (enter the normalization-splice
+# path), a bracket wrapper (give the ']' scan its context), and a bracket
+# in the value (the cached target) — every combination.
+_SPLICE_OPENERS = ["[", "{", "x [", "[["]
+_SPLICE_VALUES = ["]w", "w]", "]]", "]x]", "w", "]", "}"]
+_SPLICE_CLOSERS = ["]", "}", '"', "", ']"', '}"', '"}', '}']
+
+
+def _splice_grid_raws() -> list[str]:
+    return [
+        opener + '{\\"\\":' + value + closer
+        for opener, value, closer in itertools.product(
+            _SPLICE_OPENERS, _SPLICE_VALUES, _SPLICE_CLOSERS
+        )
+    ]
+
+
+@pytest.mark.sweep
+class TestEscapedObjectSpliceGrid:
+    """The escaped-key normalization splice against the oracle.
+
+    The committed form of the issue #39 differential: the splice rewrites
+    the char buffer in place, so a parser-level lookahead-memo entry that
+    survives it (its positions are absolute) reads a stale offset and
+    silently drops the bracket from the value. 27 of these 224 shapes
+    diverged before the splice learned to clear the memo; any future
+    memo/splice interaction regression diverges on at least one of them.
+    """
+
+    @pytest.mark.parametrize("raw", _splice_grid_raws())
     def test_engine_lane_parity(self, raw: str) -> None:
         got = tors.repair_json(raw, skip_json_loads=True)
         want = json_repair_lib.repair_json(raw, skip_json_loads=True)

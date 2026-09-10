@@ -147,10 +147,11 @@ pub(crate) struct Parser {
     /// every anchored reader, so sharing them across the many short
     /// string parses of one repair (e.g. `'{' + 'a:b,'*n + '}'` parses n
     /// values, each with a fresh state and, upstream, a fresh O(n)-to-end
-    /// scan per comma) is exact. Cleared on the one buffer-mutating site
-    /// (split_object_on_duplicate_key's `{` splice shifts every absolute
-    /// position at/after the insert). Bounded per key (see string.rs's
-    /// cache_put).
+    /// scan per comma) is exact. Cleared at both buffer-mutating sites
+    /// (split_object_on_duplicate_key's `{` insert and
+    /// repair_empty_object_result's normalization splice: each rewrites
+    /// the buffer, shifting every absolute position at/after it). Bounded
+    /// per key (see string.rs's cache_put).
     pub(crate) lookahead_cache: Vec<(LookaheadKey, LookaheadEntry)>,
     /// Scratch for string.rs's array_pairing_walk (one walk's outer-target
     /// positions and per-interval stop chars): owned by the parser, taken
