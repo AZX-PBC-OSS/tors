@@ -629,7 +629,8 @@ impl Parser {
     /// container re-parses the tail as a fresh object. The insert shifts
     /// every absolute position at/after it, so the parser-level lookahead
     /// memo (pure buffer facts keyed by absolute positions) is cleared
-    /// here: the only buffer-mutating site.
+    /// here: with repair_empty_object_result's normalization splice, one
+    /// of the two buffer-mutating sites.
     fn split_object_on_duplicate_key(&mut self, rollback_index: usize) {
         self.index = rollback_index - 1;
         // Python's json_str[:index+1] + "{" + json_str[index+1:]: an insert
@@ -639,7 +640,8 @@ impl Parser {
         // clock, keeping the splice-rescan bound tight. It also shifts
         // every absolute position at/after it, so the parser-level
         // lookahead memo (pure buffer facts keyed by absolute positions)
-        // is cleared here: the only buffer-mutating site.
+        // is cleared here: with repair_empty_object_result's normalization
+        // splice, one of the two buffer-mutating sites.
         self.force_deadline_check();
         self.lookahead_cache.clear();
     }
@@ -773,8 +775,13 @@ impl Parser {
             self.s
                 .splice(start_index - 1..end_index, normalized_object.chars());
             // An O(n) buffer splice: the next deadline check must read the
-            // clock, keeping the reparse bound tight.
+            // clock, keeping the reparse bound tight. It also rewrites the
+            // buffer in place, so the parser-level lookahead memo (pure
+            // buffer facts keyed by absolute positions) is cleared here:
+            // with split_object_on_duplicate_key's insert, one of the two
+            // buffer-mutating sites.
             self.force_deadline_check();
+            self.lookahead_cache.clear();
             self.index = start_index;
             self.ctx_push(Ctx::ObjectKey);
             let repaired = self.parse_object(schema, path);
@@ -1261,6 +1268,29 @@ mod tests {
     fn parse_object_empty_object_array_fallback_preserves_legacy_key_context() {
         // test_parse_object.py::test_parse_object_empty_object_array_fallback_preserves_legacy_key_context
         assert_eq!(parse_ok("[{5}s "), a(vec![a(vec![Value::Int(5)])]));
+    }
+
+    #[test]
+    fn escaped_object_splice_clears_the_parser_lookahead_memo() {
+        // issue #39: repair_empty_object_result's normalization splice
+        // rewrites the char buffer in place, so a parser-level lookahead
+        // memo entry (absolute positions) that survives it steers a later
+        // ']' scan at a stale offset and silently drops the bracket from
+        // the spliced object's value. The shape needs all three
+        // ingredients: escaped object keys (enter the splice path), a
+        // bracket wrapper (give the ']' scan its context), and a bracket
+        // in the value (the cached target). Upstream keeps the bracket.
+        assert_eq!(parse_ok(r#"[{\"\":]w]""#), a(vec![obj(&[("", s("w]"))])]));
+        assert_eq!(parse_ok(r#"[{\"\":]w}""#), a(vec![obj(&[("", s("w}"))])]));
+        assert_eq!(parse_ok(r#"[{\"\":w]}""#), a(vec![obj(&[("", s("w]}"))])]));
+        assert_eq!(parse_ok(r#"[{\"\":]x]]""#), a(vec![obj(&[("", s("x]]"))])]));
+        assert_eq!(parse_ok(r#"[{\"\":]x]}""#), a(vec![obj(&[("", s("x]}"))])]));
+        // a deeper wrapper and a prose prefix keep the same value
+        assert_eq!(
+            parse_ok(r#"[[{\"\":]w]""#),
+            a(vec![a(vec![obj(&[("", s("w]"))])])])
+        );
+        assert_eq!(parse_ok(r#"x [{\"\":]w]""#), a(vec![obj(&[("", s("w]"))])]));
     }
 
     #[test]
