@@ -1,6 +1,6 @@
 //! The string-repair heuristics: a port of json_repair's `parse_string.py`
 //! plus its `parse_string_helpers/` (object_value_context.py,
-//! parse_boolean_or_null.py, parse_json_llm_block.py) — upstream:
+//! parse_boolean_or_null.py, parse_json_llm_block.py): upstream:
 //! https://github.com/mangiucugna/json_repair by Stefano Baccianella, MIT,
 //! pinned at commit 251d141786d0f6ff561f6ec04d90188a338e2470 (version
 //! 0.63.4). This is the heart of the repair parser: the 900-odd lines of
@@ -10,7 +10,7 @@
 //!
 //! # Porting notes (the decisions this file's dynamics forced)
 //!
-//! - `self.log(...)` sites upstream become rationale COMMENTS here (the log
+//! - `self.log(...)` sites upstream become rationale comments here (the log
 //!   text is not ported; the heuristic it explained gets the comment), per
 //!   the port contract in `parser.rs`'s docs.
 //! - Python's `NO_DIRECT_RESULT` sentinel object becomes the [`StringEntry`]
@@ -21,12 +21,12 @@
 //! - `stream_stable` is not ported (design doc §9.1) and upstream defaults
 //!   it to `False`, so every `not self.stream_stable` guard here is
 //!   constantly true and the one `if self.stream_stable and ...` tail-trim
-//!   is constantly false — both kept in code as [`STREAM_STABLE`] reads so
+//!   is constantly false: both kept in code as [`STREAM_STABLE`] reads so
 //!   the branch structure stays upstream's.
-//! - Python truthiness on `get_char_at()` results: `None` is falsy and ANY
-//!   one-character string is truthy — including `"\0"` (a non-empty str is
+//! - Python truthiness on `get_char_at()` results: `None` is falsy and any
+//!   one-character string is truthy: including `"\0"` (a non-empty str is
 //!   truthy in CPython). Every `while char and ...` / `if char:` site is
-//!   therefore ported as `Option::is_some`/`is_some_and` with NO '\0'
+//!   therefore ported as `Option::is_some`/`is_some_and` with no '\0'
 //!   exclusion; a NUL in the input is an ordinary character exactly as
 //!   upstream treats it.
 //! - `str.isdigit()` sites use `char::is_ascii_digit` (documented divergence
@@ -36,7 +36,7 @@
 //! - `\uXXXX` escapes decoding to lone surrogates become U+FFFD (§9.2: a
 //!   Rust `String` cannot hold a lone surrogate); every other 4-hex-digit
 //!   value is a valid codepoint.
-//! - parse_string.py contains no `with self.context.enter(...)` regions —
+//! - parse_string.py contains no `with self.context.enter(...)` regions:
 //!   all context usage here is read-only (`ctx_current`/`ctx_has`); the
 //!   pushes live in the object/array callers.
 //! - Python's `char` local is `ch` here (naming only).
@@ -45,7 +45,7 @@ use super::Value;
 use super::parser::{Ctx, LookaheadEntry, LookaheadKey, Parser};
 use crate::normalize_impl::is_py_whitespace;
 
-/// parse_string.py's `stream_stable` — not ported (§9.1) and always `False`
+/// parse_string.py's `stream_stable`: not ported (§9.1) and always `False`
 /// upstream, so the guards that read it are constant. Kept as a named const
 /// so each guard site stays visibly upstream's branch.
 const STREAM_STABLE: bool = false;
@@ -56,12 +56,12 @@ const INLINE_CONTAINER_OPENERS: [char; 3] = ['[', '{', '('];
 
 /// parse_string.py's `LOW_SMART_QUOTE_SENTINEL`: the rstring-delimiter stack
 /// entry marking an open `„...”` span. '\0' is safe as the sentinel because
-/// no scan target is ever '\0' (and because a NUL in the INPUT is just an
-/// ordinary character — see the truthiness note in the module docs).
+/// no scan target is ever '\0' (and because a NUL in the input is just an
+/// ordinary character: see the truthiness note in the module docs).
 const LOW_SMART_QUOTE_SENTINEL: char = '\0';
 
 /// parse_json_llm_block.py's literal opener match: `json_str[index..index+7]
-/// == "```json"`, case-sensitive, no space. Deliberately NOT
+/// == "```json"`, case-sensitive, no space. Deliberately not
 /// CommonMark-ified (documented non-divergence: upstream's own rule).
 const JSON_LLM_BLOCK_OPENER: [char; 7] = ['`', '`', '`', 'j', 's', 'o', 'n'];
 
@@ -81,8 +81,8 @@ fn inline_container_closer(c: char) -> Option<char> {
     }
 }
 
-/// parse_string.py's `_matching_string_delimiter`: the LEFT curly quote's
-/// match is the RIGHT curly quote; every other delimiter matches itself.
+/// parse_string.py's `_matching_string_delimiter`: the left curly quote's
+/// match is the right curly quote; every other delimiter matches itself.
 fn matching_string_delimiter(delimiter: char) -> char {
     if delimiter == '\u{201C}' {
         '\u{201D}'
@@ -113,9 +113,9 @@ struct StringParseState {
     doubled_quotes: bool,
     lstring_delimiter: char,
     /// Upstream models this as a `str` that grows/shrinks: element 0 is the
-    /// string's OUTER right delimiter; `_push_low_smart_quote_span` appends
-    /// `'\0'` sentinel entries while inside `„...”` spans and the ACTIVE
-    /// delimiter is always the LAST element. A `Vec<char>` with the same
+    /// string's outer right delimiter; `_push_low_smart_quote_span` appends
+    /// `'\0'` sentinel entries while inside `„...”` spans and the active
+    /// delimiter is always the last element. A `Vec<char>` with the same
     /// push/pop semantics is the Rust shape.
     rstring_delimiter: Vec<char>,
     string_acc: String,
@@ -125,12 +125,12 @@ struct StringParseState {
     object_value_has_no_future_delimiter: bool,
     object_value_unmatched_opening_braces: usize,
     /// Lazy whitespace probe for the open regex character class: the
-    /// accumulator is scanned for py-whitespace ONLY from
+    /// accumulator is scanned for py-whitespace only from
     /// `class_ws_probed` (the byte length already probed) forward, at
     /// query time in quote_belongs_to_regex_character_class, OR-ing into
     /// `class_ws_found`. The class region is exactly
-    /// `[class_start, string_acc.len())` — it only ever grows by
-    /// appends — so probing the new tail per query is amortized O(1) and
+    /// `[class_start, string_acc.len())`: it only ever grows by
+    /// appends, so probing the new tail per query is amortized O(1) and
     /// the append path stays byte-for-byte upstream's (upstream rescans
     /// the whole tail per closing-quote candidate, O(n^2) on
     /// `'{"a": "[' + 'x"'*n + '"}'`; an eagerly maintained flag was
@@ -140,7 +140,7 @@ struct StringParseState {
     class_ws_found: bool,
     class_ws_probed: usize,
     /// Offset just past the last `[` in `string_acc`. Upstream tracks
-    /// CODEPOINT indices; we track BYTE offsets into the `String` — a
+    /// codepoint indices; we track byte offsets into the `String`: a
     /// representation-only choice: every producer and consumer of this
     /// index (append, rebuild, the whitespace probe in
     /// quote_belongs_to_regex_character_class) uses the same unit, so the
@@ -150,18 +150,18 @@ struct StringParseState {
     /// delimiter-pairing: candidate quote position (absolute, the parser's
     /// index at the candidate) -> the `even_delimiters` verdict a fresh
     /// pairing walk from there would return. Populated by every walk for
-    /// each quote it passes, so an internal-quote run costs ONE walk
+    /// each quote it passes, so an internal-quote run costs one walk
     /// instead of one per quote (`'["' + 'a"'*n + '"]'` was O(n^2)).
     /// Validity: the verdict is a pure function of (buffer, position,
-    /// outer, the frozen context stack) — all fixed for one string parse
+    /// outer, the frozen context stack): all fixed for one string parse
     /// (the context stack never changes inside scan_string_body, and the
     /// buffer is only spliced by parse_object after the state is dropped),
     /// so an entry is exact whenever its position becomes a candidate.
     /// Not ported from upstream (upstream re-walks per quote; see the
     /// array_pairing_walk docs for why the memo is exact).
     ///
-    /// Shape: a position-sorted Vec, binary-searched — candidates are
-    /// consulted on EVERY array-context delimiter candidate (HashMap
+    /// Shape: a position-sorted Vec, binary-searched: candidates are
+    /// consulted on every array-context delimiter candidate (HashMap
     /// hashing measurably taxed the fenced-repair benchmark), and the
     /// entries of one walk append in ascending order, so the common
     /// insert is a plain push and the empty case (most strings never
@@ -224,7 +224,7 @@ impl StringParseState {
     }
 
     /// Binary-search the pairing-outcome memo (see the field docs: entries
-    /// are position-sorted; the empty case — most strings — is one check).
+    /// are position-sorted; the empty case, most strings, is one check).
     fn pairing_outcome(&self, pos: usize) -> Option<bool> {
         let idx = self.pairing_outcomes.partition_point(|(p, _)| *p < pos);
         self.pairing_outcomes
@@ -237,7 +237,7 @@ impl StringParseState {
 /// The pairing-outcome memo's write side (field docs on
 /// `StringParseState::pairing_outcomes`): a walk's records arrive in
 /// ascending position order, so the common case extends the vec; a
-/// defensively unsorted position (no reachable case is known — within one
+/// defensively unsorted position (no reachable case is known: within one
 /// string parse, walk-start candidates sit past every recorded position)
 /// falls back to a sorted insert rather than breaking the search order.
 fn record_pairing_outcome(entries: &mut Vec<(usize, bool)>, pos: usize, verdict: bool) {
@@ -268,7 +268,7 @@ fn lookahead_key(targets: &[char]) -> LookaheadKey {
 }
 
 /// parse_string.py's `NO_DIRECT_RESULT` flow: `_prepare_string_entry`
-/// returns either a finished value (upstream's non-sentinel results — see
+/// returns either a finished value (upstream's non-sentinel results: see
 /// the module docs) or the state that `parse_string` keeps scanning with.
 enum StringEntry {
     Direct(Value),
@@ -278,7 +278,7 @@ enum StringEntry {
 /// parse_string.py's `_append_string_content`: append content to the
 /// accumulator while maintaining the unmatched-brace count and the regex
 /// character-class start (see the field docs for the byte-unit choice).
-/// The class's whitespace probe is deliberately NOT maintained here —
+/// The class's whitespace probe is deliberately not maintained here:
 /// see `class_ws_found`'s docs for the lazy incremental design.
 fn append_string_content(state: &mut StringParseState, content: &[char]) {
     let start_byte = state.string_acc.len();
@@ -308,10 +308,10 @@ fn append_string_content(state: &mut StringParseState, content: &[char]) {
 /// parse_string.py's `_rebuild_unmatched_opening_braces`: recompute the
 /// brace count and class start from the whole accumulator. (After the
 /// escape normalizer switched to incremental tail rewrites, every live
-/// caller is gone — this remains for the const-false STREAM_STABLE tail
+/// caller is gone: this remains for the const-false STREAM_STABLE tail
 /// trim, keeping the ported shape.) The probe resets to "nothing probed
 /// within the recomputed class", so a next query would rescan the whole
-/// class region — correct if ever reached.
+/// class region: correct if ever reached.
 fn rebuild_unmatched_opening_braces(state: &mut StringParseState) {
     state.object_value_unmatched_opening_braces = 0;
     state.regex_character_class_start = None;
@@ -335,11 +335,11 @@ fn rebuild_unmatched_opening_braces(state: &mut StringParseState) {
 }
 
 /// The escape normalizer's tail rewrite: pop the just-appended backslash
-/// (counter-neutral — a backslash affects no brace/class/whitespace
+/// (counter-neutral: a backslash affects no brace/class/whitespace
 /// bookkeeping) and push the replacement through append_string_content,
 /// which maintains every accumulator-derived counter incrementally in
 /// O(push). Upstream (and the old port) rebuilt the whole accumulator per
-/// rewrite (`_rebuild_unmatched_opening_braces`), O(n) per escape —
+/// rewrite (`_rebuild_unmatched_opening_braces`), O(n) per escape:
 /// O(n^2) on escape-dense input like `'["' + (']' + '\\\\')*k + '" x'`,
 /// where the interleaved backslash runs normalize once per pair.
 fn rewrite_escape_tail(state: &mut StringParseState, replacement: &[char]) {
@@ -355,7 +355,7 @@ fn rewrite_escape_tail(state: &mut StringParseState, replacement: &[char]) {
 /// `classify_object_value_comma`/`_bare_member_has_recoverable_value`:
 /// upstream's callable is the lookahead-cached flavor from
 /// `_scan_string_body` when the string state is at hand, else the parser's
-/// plain method. tors's lookahead memo lives on the PARSER (see
+/// plain method. tors's lookahead memo lives on the parser (see
 /// cached_skip_to_character's docs), so the two flavors collapse into one
 /// always-memoized callable and the state-vs-default distinction
 /// disappears; the struct remains the ported call shape.
@@ -369,11 +369,11 @@ impl CommaSkip<'_> {
     }
 }
 
-/// `[*STRING_DELIMITERS, "}"]` — the member-recovery lookahead target set
+/// `[*STRING_DELIMITERS, "}"]`: the member-recovery lookahead target set
 /// (upstream builds this list inline; mirrored here in the same order).
 const DELIMITERS_PLUS_CLOSE_BRACE: [char; 5] = ['"', '\'', '\u{201C}', '\u{201D}', '}'];
 
-/// `[*STRING_DELIMITERS, "{", "["]` — the next-special lookahead target set.
+/// `[*STRING_DELIMITERS, "{", "["]`: the next-special lookahead target set.
 const DELIMITERS_PLUS_OPENERS: [char; 6] = ['"', '\'', '\u{201C}', '\u{201D}', '{', '['];
 
 /// object_value_context.py's `_bare_member_has_recoverable_value`: can the
@@ -428,7 +428,7 @@ fn bare_member_has_recoverable_value(parser: &mut Parser, value_idx: usize) -> b
 /// object_value_context.py's `classify_object_value_comma`, returning one of
 /// upstream's literal classification strings. (Upstream threads the string
 /// state through for the lookahead cache; tors's parser-level memo makes
-/// that threading unnecessary — see CommaSkip's docs.)
+/// that threading unnecessary: see CommaSkip's docs.)
 fn classify_object_value_comma(parser: &mut Parser) -> &'static str {
     let next_idx = parser.scroll_whitespaces(1);
     let next_c = parser.get(next_idx as isize);
@@ -439,8 +439,8 @@ fn classify_object_value_comma(parser: &mut Parser) -> &'static str {
     if let Some(c) = next_c
         && is_string_delimiter(c)
     {
-        // Upstream uses the parser's PLAIN skip_to_character here (not the
-        // threaded callable) — kept distinct below, where the callable runs.
+        // Upstream uses the parser's plain skip_to_character here (not the
+        // threaded callable): kept distinct below, where the callable runs.
         let key_end_idx = parser.skip_to_character(&[c], next_idx + 1);
         if parser.get(key_end_idx as isize).is_none() {
             return "string";
@@ -555,7 +555,7 @@ impl Parser {
         };
         let ch = self.scan_string_body(&mut state);
         // Before finalize: a deadline abort broke the scan mid-string, and
-        // the sticky error — not the partial state — is the answer.
+        // the sticky error (not the partial state) is the answer.
         if let Some(err) = self.take_deadline_error() {
             return Err(err);
         }
@@ -565,9 +565,9 @@ impl Parser {
     /// parse_string_helpers/parse_json_llm_block.py's
     /// `parse_json_llm_block`: extract and normalize JSON enclosed in
     /// ```json ... ``` blocks. Python returns `False` when no block was
-    /// found — `Ok(None)` here; a block that parses returns its value.
+    /// found: `Ok(None)` here; a block that parses returns its value.
     pub(crate) fn parse_json_llm_block(&mut self) -> Result<Option<Value>, String> {
-        // The opener is the LITERAL match rule (see JSON_LLM_BLOCK_OPENER);
+        // The opener is the literal match rule (see JSON_LLM_BLOCK_OPENER);
         // a short tail of input simply fails the comparison, as upstream's
         // slice compare does.
         if self.s.get(self.index..self.index + 7) == Some(&JSON_LLM_BLOCK_OPENER[..]) {
@@ -642,8 +642,8 @@ impl Parser {
                 Some(value) if !matches!(value, Value::Bool(false)) => {
                     return Ok(StringEntry::Direct(value));
                 }
-                // Python's `ret_val is not False` is an IDENTITY check:
-                // a fenced block that parses to the VALUE False is
+                // Python's `ret_val is not False` is an identity check:
+                // a fenced block that parses to the value False is
                 // indistinguishable from "no block found" (upstream
                 // returns the same False singleton for both), so the
                 // string parse continues past it.
@@ -789,9 +789,9 @@ impl Parser {
     /// parse_string.py's `_quote_belongs_to_regex_character_class`: is the
     /// current quote inside a compact `[...]` character class (no
     /// whitespace since the last unmatched `[`, and an unescaped `]`
-    /// ahead)? The whitespace half runs as the state's LAZY incremental
+    /// ahead)? The whitespace half runs as the state's lazy incremental
     /// probe (see the class_ws_found field docs), and the `]` lookahead
-    /// runs through the parser-level lookahead memo — together they turn
+    /// runs through the parser-level lookahead memo: together they turn
     /// the per-candidate cost from O(accumulator + to-end-of-input)
     /// upstream into amortized O(new tail).
     fn quote_belongs_to_regex_character_class(&mut self, state: &mut StringParseState) -> bool {
@@ -800,7 +800,7 @@ impl Parser {
         };
         // The lazy whitespace probe: scan only the unprobed accumulator
         // tail (the class region only ever grows by appends, so this is
-        // amortized O(1) per query — upstream rescans the whole
+        // amortized O(1) per query: upstream rescans the whole
         // string_acc[start:] per closing-quote candidate, O(n^2) on
         // `'{"a": "[' + 'x"'*n + '"}'`).
         if state.class_ws_probed < state.string_acc.len() {
@@ -820,34 +820,34 @@ impl Parser {
     /// the far-quote corpus depends on:
     ///
     /// - a cached `(start, None)` entry means "no unescaped target anywhere
-    ///   at or after `start`" — any later scan starting at or past `start`
+    ///   at or after `start`": any later scan starting at or past `start`
     ///   returns the to-end distance without rescanning;
     /// - a cached `(start, Some(match))` entry covers every start in
-    ///   `[start, match]` — the first unescaped match from any of those
+    ///   `[start, match]`: the first unescaped match from any of those
     ///   positions is still `match`;
     /// - every match is cached, backslash-adjacent ones included. Upstream
     ///   guards writes with `json_str[match_index - 1] != "\\"`, which
     ///   suppresses the memo exactly on the inputs where it is needed most
     ///   (`'["' + ']'*n + '\\\\' + '" x'` stays O(n^2) upstream); tors drops
     ///   the guard. Safety: a target's escape parity only depends on the
-    ///   scan start when the start sits INSIDE the backslash run immediately
-    ///   preceding the target, and EVERY caller of this function is
-    ///   anchored — it starts on a non-backslash char, or on the FIRST
+    ///   scan start when the start sits inside the backslash run immediately
+    ///   preceding the target, and every caller of this function is
+    ///   anchored: it starts on a non-backslash char, or on the first
     ///   backslash of a run whose preceding char is a known non-backslash
     ///   (`}`, `]`, `:`, `,`, a delimiter, whitespace, or the scan's own
     ///   previous match). No anchored start can land mid-run, so parity is
     ///   start-independent for all readers of a key and the memo is
-    ///   uncached-exact for them. Do NOT add a cached call at a
+    ///   uncached-exact for them. Do not add a cached call at a
     ///   non-anchored site.
     ///
-    /// The memo lives on the PARSER (upstream scopes it to one string's
+    /// The memo lives on the parser (upstream scopes it to one string's
     /// parse state): entries are pure buffer facts, so sharing them across
     /// the many short string parses of one repair is exact, and the single
     /// buffer-mutating site (split_object_on_duplicate_key) clears it.
     fn cached_skip_to_character(&mut self, targets: &[char], idx: usize) -> usize {
         let key = lookahead_key(targets);
         let start_index = self.index + idx;
-        // Any COVERING entry answers exactly (entry claim ranges are
+        // Any covering entry answers exactly (entry claim ranges are
         // non-conflicting: two entries covering one start would both claim
         // its first unescaped match, forcing the matches to be equal).
         let cached = self
@@ -880,12 +880,12 @@ impl Parser {
     }
 
     /// Upstream's `lookahead_cache[targets] = entry` is a dict
-    /// insert-or-replace. tors keeps a bounded per-key LIST instead (see
+    /// insert-or-replace. tors keeps a bounded per-key list instead (see
     /// the field docs): every write appends (a covering entry would have
     /// produced a hit, so no write is redundant), a not-found write
     /// retires the older not-found entries it dominates (it starts before
-    /// them — it missed — so it covers everything they did), and the list
-    /// is capped per key — on overflow the entry with the smallest match
+    /// them, it missed, so it covers everything they did), and the list
+    /// is capped per key: on overflow the entry with the smallest match
     /// (the least forward coverage for the scan cursor's mostly-forward
     /// motion) is dropped, bounding both the read scan and memory. A drop
     /// costs one rescan, never an asymptotic regression.
@@ -920,7 +920,7 @@ impl Parser {
     }
 
     /// parse_string.py's `_normalize_escape_sequence`, called with the char
-    /// FOLLOWING a just-appended backslash. Returns
+    /// following a just-appended backslash. Returns
     /// `(handled, next_char)`.
     fn normalize_escape_sequence(
         &mut self,
@@ -985,8 +985,8 @@ impl Parser {
             let hi = lo + num_chars;
             if hi <= self.s.len() && self.s[lo..hi].iter().all(|c| c.is_ascii_hexdigit()) {
                 // Upstream logs "Found a unicode escape sequence,
-                // normalizing it". Lone surrogates become U+FFFD (§9.2 — a
-                // Rust String cannot hold them); a WELL-FORMED pair
+                // normalizing it". Lone surrogates become U+FFFD (§9.2: a
+                // Rust String cannot hold them); a well-formed pair
                 // combines to its astral scalar (Python strings hold both
                 // halves and json.dumps re-emits the pair verbatim, so
                 // combining is the byte-identical port).
@@ -1023,7 +1023,7 @@ impl Parser {
     /// The well-formed half of a `\udXXX` surrogate escape: when `code` is
     /// a high surrogate immediately followed by a `\udCXX` low-surrogate
     /// escape, combine the pair into its astral scalar and report how many
-    /// input codepoints the low half consumed (`\`, `u`, 4 hex — `hi` is
+    /// input codepoints the low half consumed (`\`, `u`, 4 hex: `hi` is
     /// already past the high half). Anything else is a lone surrogate
     /// (§9.2 → U+FFFD): None.
     fn decode_surrogate_pair(&self, code: u32, hi: usize) -> Option<(char, usize)> {
@@ -1089,7 +1089,7 @@ impl Parser {
     }
 
     /// parse_string.py's `_bare_key_is_followed_by_colon`. Note the entry
-    /// check allows only alnum/`_`, while the walk also allows `-` —
+    /// check allows only alnum/`_`, while the walk also allows `-`:
     /// upstream's own asymmetry, kept.
     fn bare_key_is_followed_by_colon(&self, key_idx: usize) -> bool {
         let key_char = self.get(key_idx as isize);
@@ -1127,8 +1127,8 @@ impl Parser {
     }
 
     /// parse_string.py's `_starts_nested_inline_container`: does the opener
-    /// at `idx` start a container NESTED in the current one (vs. prose that
-    /// merely looks like one)? `idx` and the backward scan are RELATIVE
+    /// at `idx` start a container nested in the current one (vs. prose that
+    /// merely looks like one)? `idx` and the backward scan are relative
     /// offsets from `self.index` (upstream's `get_char_at(prev_idx)`), and
     /// the scan never goes before the cursor.
     fn starts_nested_inline_container(&self, idx: usize) -> bool {
@@ -1152,7 +1152,7 @@ impl Parser {
                 if matches!(opening_delimiter, Some('[') | Some('(')) {
                     // Python's membership list: ["]", ")", *STRING_DELIMITERS,
                     // "-", *INLINE_CONTAINER_OPENERS, "t", "f", "n"], then
-                    // `next_char.isdigit()` — ASCII digits here (§9.3).
+                    // `next_char.isdigit()`: ASCII digits here (§9.3).
                     return match next_char {
                         Some(c) => {
                             c == ']'
@@ -1180,7 +1180,7 @@ impl Parser {
     }
 
     /// parse_string.py's `_skip_inline_container`: skip a balanced inline
-    /// container starting at `idx` (a RELATIVE offset), returning the
+    /// container starting at `idx` (a relative offset), returning the
     /// relative offset just past its closer, or `None` when it never
     /// balances. Non-openers return `idx` itself.
     fn skip_inline_container(&self, idx: usize) -> Option<usize> {
@@ -1220,7 +1220,7 @@ impl Parser {
             i += 1;
         }
 
-        None // upstream: # pragma: no cover — the loop only exits by return
+        None // upstream: # pragma: no cover; the loop only exits by return
     }
 
     /// parse_string.py's `_scroll_comment_prefixed_member_start`: advance
@@ -1315,9 +1315,9 @@ impl Parser {
 
     /// The Array-context delimiter-pairing walk of
     /// handle_right_delimiter_candidate. `stop_idx` is the pre-walk's stop
-    /// offset (relative to the cursor): an UNESCAPED `outer` (the 1271-gate
+    /// offset (relative to the cursor): an unescaped `outer` (the 1271-gate
     /// guarantees it on entry). The walk pairs up the following unescaped
-    /// `[outer, ']']` targets — the first non-`outer` one at an ODD chain
+    /// `[outer, ']']` targets: the first non-`outer` one at an odd chain
     /// index (1-based) makes the verdict false; at an even index (or the
     /// end of input, which acts as an even-index terminator) it stays true.
     ///
@@ -1327,14 +1327,14 @@ impl Parser {
     /// total instead of one walk per quote. The derivation for the quote
     /// at chain position `t_j` (j = 0 is the pre-walk stop itself):
     ///
-    /// - that candidate's OWN pre-walk stops at the first stop-worthy char
-    ///   after `t_j` — any-parity `outer`/`lstring`, plus `}`/`:` per the
-    ///   frozen context stack — which is either an in-interval stop `e_j`
+    /// - that candidate's own pre-walk stops at the first stop-worthy char
+    ///   after `t_j`: any-parity `outer`/`lstring`, plus `}`/`:` per the
+    ///   frozen context stack, which is either an in-interval stop `e_j`
     ///   or the next chain target `t_{j+1}` (both `outer` and `]` are
     ///   stop-worthy);
     /// - if that stop char is not an unescaped `outer`, the candidate never
     ///   reaches the pairing branch (the 1271 gate fails) and nothing is
-    ///   recorded — its natural path is already O(1);
+    ///   recorded: its natural path is already O(1);
     /// - otherwise its walk pairs the same remaining chain, shifted by one
     ///   element when the stop was an in-interval `e_j` (the chain from
     ///   `e_j` starts at `t_{j+1}`, from `t_{j+1}` at `t_{j+2}`), so the
@@ -1361,8 +1361,8 @@ impl Parser {
         };
 
         // One pass over one interval (prev, target): the next unescaped
-        // [outer, ']'] target, and the first stop-worthy char (ANY escape
-        // parity — the pre-walk does not skip escapes) strictly before it.
+        // [outer, ']'] target, and the first stop-worthy char (any escape
+        // parity: the pre-walk does not skip escapes) strictly before it.
         let scan_interval = |from: usize| -> (Option<usize>, Option<usize>) {
             let mut backslashes = 0usize;
             let mut stop = None;
@@ -1426,7 +1426,7 @@ impl Parser {
                         continue;
                     }
                 }
-                // No in-interval stop: the next chain target is the stop —
+                // No in-interval stop: the next chain target is the stop:
                 // an unescaped `outer` whenever it exists (j + 1 < m), and
                 // t_m (non-outer, or the end of input) otherwise, which
                 // fails the gate. Its chain starts at t_{j+2}: index m-j-1.
@@ -1465,7 +1465,7 @@ impl Parser {
 
         if state.missing_quotes && self.ctx_current() == Some(Ctx::ObjectValue) {
             // A delimiter in an unquoted object value might actually be the
-            // OPENING quote of the next key.
+            // opening quote of the next key.
             let mut i: usize = 1;
             let mut next_c = self.get(1);
             while next_c.is_some()
@@ -1577,7 +1577,7 @@ impl Parser {
                 if next_c != Some(':') {
                     // Upstream logs "a misplaced quote ... different meaning
                     // here, ignoring it"; flipping the unmatched flag keeps
-                    // the NEXT delimiter candidate in the string.
+                    // the next delimiter candidate in the string.
                     state.unmatched_delimiter = !state.unmatched_delimiter;
                     let next_char = self.append_literal_char(state, ch);
                     return (true, next_char, false);
@@ -1587,8 +1587,8 @@ impl Parser {
                 // prose inside the string, an odd count means it closes.
                 // The verdict is memoized per candidate position: without
                 // the memo, an internal-quote run (`'["' + 'a"'*n + '"]'`)
-                // re-walks the remaining quotes once per candidate (O(n^2)
-                // — upstream's own behavior; see array_pairing_walk).
+                // re-walks the remaining quotes once per candidate (O(n^2);
+                // upstream's own behavior; see array_pairing_walk).
                 let even_delimiters = match state.pairing_outcome(self.index) {
                     Some(cached) => cached,
                     None => self.array_pairing_walk(state, i, outer),
@@ -1656,7 +1656,7 @@ impl Parser {
             if c == '\u{201E}' && (state.string_acc.is_empty() || !state.string_acc.ends_with('\\'))
             {
                 // An unescaped low smart quote opens a span where even the
-                // OUTER delimiter is ordinary content until the span closes.
+                // outer delimiter is ordinary content until the span closes.
                 state.push_low_smart_quote_span();
                 ch = self.append_literal_char(state, c);
                 continue;
@@ -1794,20 +1794,20 @@ impl Parser {
                 //
                 // Parity-safety of sharing the `[outer]` memo key: every
                 // reader/writer of that key starts its scan one past a
-                // non-backslash char — this `]` site (idx 0, after `]`), the
+                // non-backslash char: this `]` site (idx 0, after `]`), the
                 // sibling `}` probe above (idx 1, after `}`), and
                 // classify_object_value_comma's CommaSkip `[next_special]`
                 // scan (after a quote). None starts inside a backslash run, so
                 // escape parity is fixed and the memo is uncached-exact for all
                 // of them (verified: zero divergences vs json-repair 0.63.4 over
-                // an exhaustive `]`/`}`/`\`/`"` sweep). This is NOT
-                // "cached == uncached" in general — a scan starting inside a
-                // backslash run can flip escape parity — so do NOT add a cached
+                // an exhaustive `]`/`}`/`\`/`"` sweep). This is not
+                // "cached == uncached" in general: a scan starting inside a
+                // backslash run can flip escape parity, so do not add a cached
                 // [outer] call at a non-anchored site.
                 //
                 // The write guard upstream keeps here (matches preceded by
-                // a backslash are found but not memoized) is LIFTED in
-                // tors's cached_skip_to_character — every caller of a key
+                // a backslash are found but not memoized) is lifted in
+                // tors's cached_skip_to_character: every caller of a key
                 // is anchored, so backslash-adjacent matches memoize
                 // exactly and `'["' + ']'*n + '\\\\' + '" x'` is linear
                 // here too (upstream stays O(n^2) on it; see #13).
@@ -2011,7 +2011,7 @@ impl Parser {
 mod tests {
     use super::*;
 
-    /// The naive whole-accumulator scan — upstream's
+    /// The naive whole-accumulator scan: upstream's
     /// `_rebuild_unmatched_opening_braces`, kept verbatim as the oracle
     /// for the incremental twin's differential test below.
     fn oracle_scan(acc: &str) -> (usize, Option<usize>) {
@@ -2032,8 +2032,8 @@ mod tests {
     }
 
     /// Differential proof of the incremental counters: replay seeded
-    /// random push / pop-then-push / slice-append sequences — the exact
-    /// mutation shapes the escape normalizer performs — and assert the
+    /// random push / pop-then-push / slice-append sequences (the exact
+    /// mutation shapes the escape normalizer performs) and assert the
     /// maintained (brace balance, class start) equals the oracle's full
     /// rescan after every step, on accumulators built from the characters
     /// that actually drive the counters (`{`, `}`, `[`, `]`, letters,
@@ -2058,8 +2058,8 @@ mod tests {
                     }
                     5..=7 => {
                         // The escape-repair shape: rewrite_escape_tail's
-                        // contract is popping a just-appended BACKSLASH
-                        // (counter-neutral — no real call site ever pops
+                        // contract is popping a just-appended backslash
+                        // (counter-neutral: no real call site ever pops
                         // anything else), so the grammar mirrors that
                         // precondition exactly: rewrite only when the
                         // accumulator ends in a backslash.
@@ -2634,7 +2634,7 @@ mod tests {
             parse_string_in(r#""\u0076alue""#, Ctx::ObjectValue),
             Ok(str_value("value"))
         );
-        // escaped WRONG delimiter: the escape is removed
+        // escaped wrong delimiter: the escape is removed
         assert_eq!(
             parse_string_in(r#""valu\'e""#, Ctx::ObjectValue),
             Ok(str_value("valu'e"))
@@ -2689,7 +2689,7 @@ mod tests {
             Ok(str_value("a „ b"))
         );
         // test_parse_string_keeps_multiline_curly_quoted_prose_after_comma
-        // (a LEFT curly quote inside the value is ordinary content)
+        // (a left curly quote inside the value is ordinary content)
         assert_eq!(
             parse_string_in(
                 "\"a,\n \u{201C}term\u{201D}: explanation\", \"y\": 2",
@@ -2972,7 +2972,7 @@ mod tests {
     #[test]
     fn parse_string_object_value_comma_without_future_delimiter() {
         // test_object_value_comma_without_future_delimiter_scans_once:
-        // upstream asserts exactly ONE skip_to_character call — the
+        // upstream asserts exactly one skip_to_character call: the
         // lookahead cache answers every later comma probe in O(1); the call
         // count itself is not observable from the Rust port.
         let mut parser = Parser::new("\"value,fragment,fragment,fragment", false, None);

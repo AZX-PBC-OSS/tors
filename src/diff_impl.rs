@@ -4,7 +4,7 @@
 //! tuples, `tag` in {equal, replace, delete, insert}, ranges monotone,
 //! contiguous and covering both sides, adjacent delete+insert merged into
 //! replace the way `difflib.get_opcodes` presents it. Indices are Python
-//! `str` indices (codepoints): the diff runs over `char`s; a Rust `char` IS
+//! `str` indices (codepoints): the diff runs over `char`s; a Rust `char` is
 //! a Unicode scalar value, exactly what a Python `str` index addresses, so
 //! `a[i1:i2]` is the slice an op describes. Why character level:
 //! `difflib.SequenceMatcher(None, a, b)` on `str` operands diffs characters,
@@ -18,7 +18,7 @@
 //! (tests/test_diff_opcodes.py):
 //!
 //! * on hard inputs the bounded search accepts a good non-minimal split, so
-//!   the edit script is not guaranteed minimal; it is always VALID (the
+//!   the edit script is not guaranteed minimal; it is always valid (the
 //!   opcodes reconstruct both sides; the structural property is pinned by
 //!   hypothesis over arbitrary pairs);
 //! * where the input is ambiguous, Myers + run-maximization can pick a
@@ -35,20 +35,20 @@
 //! the measured shape), the bounded search's work grows ~n^2 with
 //! size (measured on the dev box via `reference.diff_pair_char_shuffled`,
 //! ambient load 2.6-3.7: 50k chars 0.32 s, 200k 3.67 s, 400k 13.81 s, 1M
-//! 183.6 s; the ladder the README's diff section records).
+//! 183.6 s; the ladder docs/performance.md records).
 //! `diff_opcodes_deadline` bounds the whole call with similar's deadline
-//! mechanism (`capture_diff_slices_deadline`, which makes the search BAIL
+//! mechanism (`capture_diff_slices_deadline`, which makes the search bail
 //! at the deadline instead of running on) plus an expiry check of our own:
-//! similar 3.2.0 has NO error surface for expiry (verified in its source:
+//! similar 3.2.0 has no error surface for expiry (verified in its source:
 //! `deadline_exceeded` only makes the algorithm fall back to an
 //! approximation), so the core checks the elapsed wall against the budget
 //! after the call returns and reports [`DeadlineExceeded`]; the pyo3 layer
 //! maps that to `TimeoutError`, constructed after the GIL is reacquired.
 //!
 //! The line-level spelling (v0.8): [`diff_opcodes_lines_deadline`] diffs the
-//! SAME operands as LINE sequences (`split_inclusive('\n')`; each line
+//! same operands as line sequences (`split_inclusive('\n')`; each line
 //! keeps its terminator, the last line may lack one) and reports the same
-//! opcode shape with LINE indices, so `a.splitlines(keepends=True)`-style
+//! opcode shape with line indices, so `a.splitlines(keepends=True)`-style
 //! reconstruction composes in Python. The char-level spelling remains the
 //! difflib-parity oracle; the line-level one is the shape document/version
 //! tooling wants (`difflib` on `splitlines` operands), at the same native
@@ -169,7 +169,7 @@ fn map_op(op: DiffOp) -> Opcode {
 
 /// Saturating milliseconds → `Duration`. The pyo3 layer validates
 /// positive-and-finite before calling, but an enormous-but-finite budget
-/// (e.g. `1e300` ms) overflows `Duration::from_secs_f64` and PANICS
+/// (e.g. `1e300` ms) overflows `Duration::from_secs_f64` and panics
 /// (`cannot convert float seconds to Duration`). Saturation
 /// maps any out-of-range value to `Duration::MAX` (unbounded by the heat
 /// death of the universe, the only sensible reading of a caller-supplied
@@ -219,11 +219,11 @@ pub fn diff_opcodes(a: &str, b: &str) -> Vec<Opcode> {
 }
 
 /// The deadline-bounded spelling of [`diff_opcodes`]: `deadline_ms` bounds the
-/// WHOLE call (the `Vec<char>` materialization, the Myers search, and the
+/// whole call (the `Vec<char>` materialization, the Myers search, and the
 /// identical-input equality scan alike: one clock, started at entry). The
 /// caller guarantees a positive finite value where `Some` (the pyo3 layer
 /// validates before calling). On expiry the approximated result similar's
-/// deadline mechanism produces is DISCARDED and [`DeadlineExceeded`] is
+/// deadline mechanism produces is discarded and [`DeadlineExceeded`] is
 /// returned: an expired budget is a caller-visible `TimeoutError`, never a
 /// silently degraded diff. `None` is exactly [`diff_opcodes`]. A
 /// finite-but-out-of-range budget saturates to unbounded (the core is
@@ -271,13 +271,13 @@ pub fn diff_opcodes_deadline(
 }
 
 /// Split `text` into lines, each keeping its own `'\n'` terminator: a line
-/// is the span through its own `'\n'`, and the LAST line may lack one; `""`
+/// is the span through its own `'\n'`, and the last line may lack one; `""`
 /// yields no lines. This is `str.splitlines(keepends=True)` restricted to
 /// the `'\n'` terminator, the single convention document tooling actually
 /// wants (`difflib` users diff `splitlines(keepends=True)` operands), kept
 /// explicit and simple rather than tolerant of every Unicode line boundary.
 /// The terminator scan is memchr (SIMD), not `split_inclusive`'s
-/// byte-at-a-time char search: the identical-operand fast path pays ONLY
+/// byte-at-a-time char search: the identical-operand fast path pays only
 /// this split, and 12 MiB documents make the difference measurable.
 pub fn split_keepend_lines(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
@@ -297,8 +297,8 @@ pub fn split_keepend_lines(text: &str) -> Vec<&str> {
 /// The line-level spelling of [`diff_opcodes_deadline`]: the same engine
 /// (similar's Myers), the same deadline machinery (one clock bounding the
 /// whole call; the identical-input fast path and the empty pair behave the
-/// same), but the operands are tokenized as LINES ([`split_keepend_lines`])
-/// and the returned [`Opcode`] indices are LINE indices: `i1/i2` address
+/// same), but the operands are tokenized as lines ([`split_keepend_lines`])
+/// and the returned [`Opcode`] indices are line indices: `i1/i2` address
 /// `a`'s line vector and `j1/j2` address `b`'s, so
 /// `a.splitlines(keepends=True)[i1:i2]`-style reconstruction composes in
 /// Python. `map_op` is token-type-agnostic (old/new indices and lengths), so
@@ -347,11 +347,11 @@ pub fn diff_opcodes_lines_deadline(
 // `difflib.get_close_matches()` at native speed over the same vendored
 // Myers engine: difflib's spellings are pure Python and O(n^2)-worst-case,
 // a famous pain point. The governing caveat: difflib's ratio is 2.0*M/T
-// over ITS OWN anchored alignment (M the sum of the matching blocks'
-// sizes, difflib.py:597-620), an anchoring-dependent number, NOT a
+// over its own anchored alignment (M the sum of the matching blocks'
+// sizes, difflib.py:597-620), an anchoring-dependent number, not a
 // canonical metric; this surface's contract is
 // validity-first, the diff_opcodes boundary-class lesson over again:
-// `similarity_ratio` is 2.0*M/T over THE SAME Myers equal-ops this crate's
+// `similarity_ratio` is 2.0*M/T over the same Myers equal-ops this crate's
 // `diff_opcodes` emits (M the sum of the equal ops' lengths), with exact
 // difflib parity pinned only on the forced-alignment classes, namely
 // identical operands (1.0), the empty-pair classes, disjoint alphabets
@@ -361,16 +361,16 @@ pub fn diff_opcodes_lines_deadline(
 // difflib value cited in the docs and tests below was cross-checked
 // against the running stdlib (python3.12 difflib) before pinning.
 //
-// M is accumulated by a counting hook driven through the SAME Myers
+// M is accumulated by a counting hook driven through the same Myers
 // entry point the capture spelling uses (see [`matched_and_total`]): a
 // scored pair allocates at most its two `Vec<char>` tokenizations (no op
 // vector, no per-op enum traffic), which is what makes a 10k-candidate
 // `close_matches` scan pay the search itself, not 10k op-vector
 // materializations; a pure-ASCII pair skips even the tokenization (see
-// [`matched_and_total`]'s ASCII fast path): every byte IS a character,
+// [`matched_and_total`]'s ASCII fast path): every byte is a character,
 // so the engine runs over the two borrowed byte slices, zero allocation.
 // The bulk spelling (`close_matches`) layers a provable length-ratio
-// prefilter on top: a candidate whose ratio ceiling is STRICTLY under the
+// prefilter on top: a candidate whose ratio ceiling is strictly under the
 // cutoff is skipped before any tokenization (see [`ratio_ceiling`]), so
 // the all-miss scan class runs no searches at all, and the prefilter's
 // per-candidate length pass takes the same ASCII shortcut (see
@@ -389,13 +389,13 @@ fn ratio_from_matches(matches: usize, total: usize) -> f64 {
     }
 }
 
-/// The provable ceiling on a pair's ratio from the two CHAR lengths alone:
+/// The provable ceiling on a pair's ratio from the two char lengths alone:
 /// `2.0 * min(len_a, len_b) / (len_a + len_b)`. The proof is three lines:
 /// a match consumes one char from each side, so the matched total M can
 /// never exceed the shorter operand, `M <= min(len_a, len_b)`; the ratio
 /// is `2.0*M/T` with `T = len_a + len_b` (difflib.py:39-42); therefore
 /// `ratio <= 2.0*min(len_a, len_b)/T`, the ceiling. The skip rule in
-/// [`close_matches`] is STRICT: `ceiling < cutoff` skips (every
+/// [`close_matches`] is strict: `ceiling < cutoff` skips (every
 /// realizable ratio is strictly under the cutoff, so the `>=` gate at
 /// difflib.py:706 can never fire), `ceiling >= cutoff` searches, because
 /// at equality the candidate can still qualify: `M == min_len` realizes
@@ -411,7 +411,7 @@ fn ratio_ceiling(len_a: usize, len_b: usize) -> f64 {
 /// similarity surface is defined over: the sum of the equal ops' lengths,
 /// the matched-char total M. `delete`/`insert`/`replace` contribute nothing
 /// to M and `finish` carries no payload, so the trait's default no-op
-/// implementations ARE the hook's behavior there; only `equal` is
+/// implementations are the hook's behavior there; only `equal` is
 /// overridden. The error type is `Infallible` because a counting sink
 /// cannot fail: the driven diff's `Result` is a formality.
 struct CountEqualHook(usize);
@@ -430,7 +430,7 @@ impl DiffHook for CountEqualHook {
     }
 }
 
-/// A char count with the ASCII shortcut: an ASCII `str`'s characters ARE
+/// A char count with the ASCII shortcut: an ASCII `str`'s characters are
 /// its bytes (`chars().count() == len()`), so the byte length answers
 /// directly after the one `is_ascii` scan, and only a non-ASCII operand
 /// pays the `chars()` decode walk. The same number either way; a speed
@@ -444,18 +444,18 @@ fn char_len(s: &str) -> usize {
 }
 
 /// The shared M and T computation, the spine of both similarity spellings:
-/// the matched-char total M over THE SAME Myers equal-ops [`diff_opcodes`]
+/// the matched-char total M over the same Myers equal-ops [`diff_opcodes`]
 /// emits, accumulated by [`CountEqualHook`] through `diff_slices_deadline`
 /// (the very dispatcher call (`algorithms::diff_deadline` on the full
 /// `0..len` ranges, hence the same `myers::diff_deadline` search, preflight,
 /// and deadline-bail checks) that `capture_diff_slices_deadline` drives its
-/// `Compact`/`Replace`/`Capture` chain through, so the count IS the capture
+/// `Compact`/`Replace`/`Capture` chain through, so the count is the capture
 /// spelling's equal-op sum without materializing the op vector), plus the
 /// pair's total char count T as a byproduct of the same pass, so
 /// [`similarity_ratio_deadline`] never re-counts operands it just
 /// tokenized. The identical-input fast path counts `a`'s chars and doubles
 /// them (exactly the single equal op's length over both sides), no search.
-/// The ASCII fast path: when BOTH operands are pure ASCII, every byte IS
+/// The ASCII fast path: when both operands are pure ASCII, every byte is
 /// a character, so the `u8` sequence over `a.as_bytes()` holds exactly the
 /// same elements, in the same order, under the same equality, with the
 /// same element count, as the `Vec<char>` tokenization of the same text;
@@ -471,8 +471,8 @@ fn char_len(s: &str) -> usize {
 /// the hook count now takes the byte route on ASCII pairs while the
 /// capture side stays on chars, so every disagreement is loud).
 /// `deadline` is similar's absolute bail Instant, passed through verbatim;
-/// the expiry verdict is the CALLER's, because the two spellings budget
-/// differently: one clock per pair for [`similarity_ratio_deadline`], ONE
+/// the expiry verdict is the caller's, because the two spellings budget
+/// differently: one clock per pair for [`similarity_ratio_deadline`], one
 /// shared clock for the whole candidate scan in [`close_matches`].
 fn matched_and_total(a: &str, b: &str, deadline: Option<Instant>) -> (usize, usize) {
     if a == b {
@@ -511,7 +511,7 @@ fn matched_chars(a: &str, b: &str, deadline: Option<Instant>) -> usize {
 
 /// `difflib.SequenceMatcher(None, a, b).ratio()` at native speed: `2.0*M/T`
 /// with `T` the total char length of both operands and `M` the matched
-/// total over THE SAME Myers equal-ops [`diff_opcodes`] emits on the pair
+/// total over the same Myers equal-ops [`diff_opcodes`] emits on the pair
 /// (the shared [`matched_chars`] spine). Bounded to `[0.0, 1.0]`, symmetric,
 /// and exactly `1.0` iff `a == b`.
 ///
@@ -523,10 +523,10 @@ fn matched_chars(a: &str, b: &str, deadline: Option<Instant>) -> usize {
 /// same fast path the opcode spellings take).
 ///
 /// The parity caveat: difflib's ratio is anchoring-dependent, not a
-/// canonical metric. Its `M` sums ITS OWN longest-match blocks
+/// canonical metric. Its `M` sums its own longest-match blocks
 /// (difflib.py:597-620), so on repeated-flank/ambiguous inputs the two
 /// algorithms' `M` can differ (both valid alignments, both ratios in
-/// `[0,1]`). Exact parity holds where the alignment is FORCED (identical
+/// `[0,1]`). Exact parity holds where the alignment is forced (identical
 /// operands, the empty-pair classes, disjoint alphabets, pure
 /// insert/delete with differing flanks), and where the placement of
 /// matches diverges but the total does not, the ratios still agree (the
@@ -541,14 +541,14 @@ pub fn similarity_ratio(a: &str, b: &str) -> f64 {
 }
 
 /// The deadline-bounded spelling of [`similarity_ratio`]: `deadline_ms`
-/// bounds the WHOLE call (the `Vec<char>` materialization on non-ASCII
+/// bounds the whole call (the `Vec<char>` materialization on non-ASCII
 /// pairs, the Myers search, and the identical-input fast path alike, one
 /// clock started at entry), with the same saturating arithmetic and expiry
 /// tail as [`diff_opcodes_deadline`] ([`budget_from_ms`]/[`exceeded_after`],
 /// the same bail-then-verdict two-step over similar's deadline mechanism).
 /// The caller guarantees a positive finite value where `Some` (the pyo3
 /// layer validates before calling). On expiry the approximated M similar's
-/// deadline mechanism produces is DISCARDED and [`DeadlineExceeded`] is
+/// deadline mechanism produces is discarded and [`DeadlineExceeded`] is
 /// returned: the `TimeoutError` contract, never a silently degraded
 /// score. `None` is exactly [`similarity_ratio`]. The O(ND) worst case on
 /// hard pairs (the character-permutation shape, the same DoS class the
@@ -573,10 +573,10 @@ pub fn similarity_ratio_deadline(
 /// difflib's ordering-and-truncation tail (difflib.py:707, difflib.py:710):
 /// `heapq.nlargest` over the `(ratio, candidate)` tuples, whose documented
 /// equivalence is `sorted(iterable, reverse=True)[:n]`: score descending,
-/// then the candidate itself descending, exact duplicates (equal score AND
+/// then the candidate itself descending, exact duplicates (equal score and
 /// equal string) stable in input order, truncated to `n` and projected to
 /// the candidate indices. Shared by [`close_matches`] and the test
-/// module's unfiltered differential spelling, so the two can differ ONLY
+/// module's unfiltered differential spelling, so the two can differ only
 /// in the prefilter.
 fn best_first(mut scored: Vec<(f64, usize)>, candidates: &[&str], n: usize) -> Vec<usize> {
     scored.sort_by(|&(score_a, idx_a), &(score_b, idx_b)| {
@@ -589,7 +589,7 @@ fn best_first(mut scored: Vec<(f64, usize)>, candidates: &[&str], n: usize) -> V
     scored.into_iter().map(|(_, idx)| idx).collect()
 }
 
-/// The test-only counting seam behind the skip-fires pins: a per-THREAD
+/// The test-only counting seam behind the skip-fires pins: a per-thread
 /// counter of the `matched_chars` calls [`close_matches`] issues, so the
 /// tests can assert exactly which candidates were searched. Per-thread
 /// because the suite's tests run in parallel: each test's calls bump its
@@ -617,7 +617,7 @@ mod search_seam {
 }
 
 /// `difflib.get_close_matches(word, possibilities, n, cutoff)` at native
-/// speed, returning the INDICES of the matched candidates (best-first)
+/// speed, returning the indices of the matched candidates (best-first)
 /// rather than the strings: the pyo3 layer maps indices back to the
 /// original `str` objects, zero-copy. Every candidate is scored by
 /// [`similarity_ratio`] over char tokens; candidates scoring `>= cutoff`
@@ -626,7 +626,7 @@ mod search_seam {
 ///
 /// The scan is prefILTERED by a provable ceiling before any search (see
 /// [`ratio_ceiling`] for the three-line proof): a candidate whose length
-/// ratio `2.0*min(len_word, len_cand)/(len_word + len_cand)` is STRICTLY
+/// ratio `2.0*min(len_word, len_cand)/(len_word + len_cand)` is strictly
 /// below `cutoff` can never reach the cutoff, so its Myers search is pure
 /// waste, exactly the under-cutoff miss class a bulk scan against a
 /// short-word dictionary measures (the bench's own shape: a 41-char query
@@ -638,21 +638,21 @@ mod search_seam {
 /// happen, so a 10k-candidate miss scan runs zero searches and zero
 /// token-vector allocations.
 ///
-/// The order is difflib's ACTUAL rule, not input order: difflib appends
+/// The order is difflib's actual rule, not input order: difflib appends
 /// `(ratio, x)` pairs (difflib.py:707) and takes `heapq.nlargest(n, ...)`
 /// (difflib.py:710, the import at difflib.py:33), whose documented
-/// equivalence is `sorted(iterable, reverse=True)[:n]`: the WHOLE tuple
+/// equivalence is `sorted(iterable, reverse=True)[:n]`: the whole tuple
 /// compares, so equal scores are broken by the candidate itself in
-/// DESCENDING order (for `str`, code-point order; Rust's `str` ordering is
+/// descending order (for `str`, code-point order; Rust's `str` ordering is
 /// the same bytes-equal-codepoints order), and exact duplicates (equal
-/// score AND equal string) stay in input order. Probe-verified against the
+/// score and equal string) stay in input order. Probe-verified against the
 /// running stdlib: `get_close_matches("ab", ["ac", "ca"], 2, 0.5)` →
-/// `['ca', 'ac']`. Input order is NOT the tie rule.
+/// `['ca', 'ac']`. Input order is not the tie rule.
 ///
-/// One `deadline_ms` bounds the WHOLE scan: every candidate's search bails
+/// One `deadline_ms` bounds the whole scan: every candidate's search bails
 /// at the same absolute Instant, and the expiry verdict is re-checked after
-/// each candidate, searched or skipped alike: a budget spent mid-list STOPS
-/// the scan, the partial result list is DISCARDED, and [`DeadlineExceeded`]
+/// each candidate, searched or skipped alike: a budget spent mid-list stops
+/// the scan, the partial result list is discarded, and [`DeadlineExceeded`]
 /// is returned
 /// (the `TimeoutError` contract: a truncated close-matches list would look
 /// like a real answer). `None` is unbounded.
@@ -670,21 +670,21 @@ pub fn close_matches(
     deadline_ms: Option<f64>,
 ) -> Result<Vec<usize>, DeadlineExceeded> {
     let started = Instant::now();
-    // The same saturating clock as the pair spellings, but ONE budget for
+    // The same saturating clock as the pair spellings, but one budget for
     // the whole scan: every candidate's search bails at the same absolute
     // Instant, and the expiry verdict is re-checked after each candidate.
     let deadline = deadline_ms.and_then(|ms| started.checked_add(budget_from_ms(ms)));
     let word_len = char_len(word);
     let mut scored: Vec<(f64, usize)> = Vec::new();
     for (idx, candidate) in candidates.iter().enumerate() {
-        // The cheap length pass FIRST: one scan of the candidate's bytes
+        // The cheap length pass first: one scan of the candidate's bytes
         // (the [`char_len`] ASCII shortcut included), no allocation,
         // feeding the ceiling test before any tokenization.
         let cand_len = char_len(candidate);
         let score = if ratio_ceiling(word_len, cand_len) < cutoff {
             // The provable skip: this candidate's ratio cannot reach the
             // cutoff (see [`ratio_ceiling`]), so its Myers search is pure
-            // waste. A skipped candidate allocates NOTHING, not even the
+            // waste. A skipped candidate allocates nothing, not even the
             // two `Vec<char>` tokenizations a searched pair pays.
             None
         } else {
@@ -896,7 +896,7 @@ mod tests {
     //
     // The hard shape a deadline exists for: a character permutation of a
     // small-alphabet text has almost no anchorable unique records, so the
-    // bounded search's work grows superlinearly (the README's diff section
+    // bounded search's work grows superlinearly (docs/performance.md
     // records the measured ladder). Built here with a deterministic
     // xorshift Fisher-Yates over a 3-char alphabet: small enough to build
     // in microseconds, hard enough that its unbounded diff costs far more
@@ -926,7 +926,7 @@ mod tests {
     #[test]
     fn a_generous_deadline_yields_the_identical_opcodes() {
         // A budget the search never reaches changes nothing: similar's
-        // preflight only SKIPS work once a deadline has expired (verified in
+        // preflight only skips work once a deadline has expired (verified in
         // its 3.2.0 source), so a far-future deadline is the same code path.
         let a = "the quick brown fox";
         let b = "the quick brown dog";
@@ -940,7 +940,7 @@ mod tests {
     fn an_out_of_range_finite_budget_saturates_to_unbounded() {
         // 1e300 ms is positive and finite (so it passes the pyo3 layer's
         // validation) but overflows Duration::from_secs_f64, which would
-        // PANICK ("cannot convert float seconds to Duration"). Saturation
+        // panick ("cannot convert float seconds to Duration"). Saturation
         // maps it to Duration::MAX (unbounded), so the opcodes are
         // exactly the plain diff's.
         let a = "abcabcabcXdefdefdef";
@@ -1010,7 +1010,7 @@ mod tests {
     //
     // The same engine and structural contract as the char-level battery
     // above, with the operands tokenized as split_keepend_lines lines and
-    // every index a LINE index.
+    // every index a line index.
 
     fn line_ops(a: &str, b: &str) -> Vec<(&'static str, usize, usize, usize, usize)> {
         diff_opcodes_lines_deadline(a, b, None)
@@ -1036,7 +1036,7 @@ mod tests {
         // The pinned narrower-than-splitlines contract (see the
         // module docs and docs/api.md): only '\n' is a terminator. Python's
         // str.splitlines(keepends=True) also breaks on lone '\r', '\v',
-        // '\f', U+2028, U+2029, etc.; text using ONLY those never splits
+        // '\f', U+2028, U+2029, etc.; text using only those never splits
         // here, where a caller assuming full splitlines() semantics would
         // expect multiple lines. Regression-pinned so a future change to
         // this behavior is a visible diff, not silent.
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn line_opcodes_pin_the_golden_shapes() {
-        // Identical operands: one equal op over the LINE count (the fast
+        // Identical operands: one equal op over the line count (the fast
         // path counts lines, not chars).
         assert_eq!(
             line_ops("l1\nl2\n", "l1\nl2\n"),
@@ -1079,7 +1079,7 @@ mod tests {
         // A one-line replacement: the merged presentation, never a delete
         // next to an insert.
         assert_eq!(line_ops("x\n", "y\n"), vec![("replace", 0, 1, 0, 1)]);
-        // An insert and a delete at DIFFERENT positions (the "abXcd"-style
+        // An insert and a delete at different positions (the "abXcd"-style
         // shape at line grain): delete 'b' early, insert 'Z' at the far
         // end, the shared flanks equal.
         assert_eq!(
@@ -1124,7 +1124,7 @@ mod tests {
     /// The line-level twin of [`assert_valid`]: the same structural
     /// contract (contiguity, coverage, alternation, per-tag nonemptiness,
     /// equal-content equal-length equals, full reconstruction of both
-    /// sides), checked over the CANONICAL line tokenization of the texts:
+    /// sides), checked over the canonical line tokenization of the texts:
     /// the indices address `split_keepend_lines` output, so the ground
     /// truth is that split, not any equivalent segmentation.
     fn assert_valid_lines(text_a: &str, text_b: &str) {
@@ -1254,7 +1254,7 @@ mod tests {
     // --- the similarity surface (difflib's ratio / get_close_matches) ------
     //
     // Every difflib value cited below was cross-checked by computing it
-    // with the running stdlib (python3.12 difflib) BEFORE pinning: the
+    // with the running stdlib (python3.12 difflib) before pinning: the
     // rows are derived, not laundered.
 
     #[test]
@@ -1284,10 +1284,10 @@ mod tests {
 
     #[test]
     fn ratio_agrees_with_difflib_where_only_the_match_placement_differs() {
-        // "a" vs "baa" is a PINNED opcode boundary case above (difflib
+        // "a" vs "baa" is a pinned opcode boundary case above (difflib
         // anchors the middle 'a' and splits the insertion around it;
         // Myers slides one contiguous insertion to the side), but the
-        // matched TOTAL is forced to 1 either way, so both algorithms'
+        // matched total is forced to 1 either way, so both algorithms'
         // ratio is 0.5 (probe-verified): placement divergence, score
         // agreement.
         assert_eq!(similarity_ratio("a", "baa"), 0.5);
@@ -1298,7 +1298,7 @@ mod tests {
     fn the_ratio_boundary_rows_where_difflibs_anchored_m_diverges() {
         // The divergence rows, the ratio twin of the opcode boundary pins:
         // difflib's M is anchoring-dependent, ours is the Myers equal-op
-        // total; both valid, both ratios in [0,1], the NUMBERS differ.
+        // total; both valid, both ratios in [0,1], the numbers differ.
         //
         // "ppp" vs "pwpp": difflib anchors the earliest "pp" at
         // a[0..2] ↔ b[2..4] and starves the flanks (M = 2 → 4/7 ≈ 0.5714,
@@ -1322,7 +1322,7 @@ mod tests {
         // of strings on {'a', 'b'} up to length 4 (625 pairs): the ratio
         // stays in [0, 1], is symmetric, is exactly 1.0 iff the operands
         // are equal, and (the contract tie) decomposes as 2.0*M/T with M
-        // the equal-op length sum of diff_opcodes' OWN output on the pair.
+        // the equal-op length sum of diff_opcodes' own output on the pair.
         let mut strings = Vec::new();
         for len in 0..=4 {
             let mut bucket = Vec::new();
@@ -1357,14 +1357,14 @@ mod tests {
 
     #[test]
     fn the_hook_count_is_the_capture_sum_everywhere_the_batteries_reach() {
-        // The differential gate on the counting-hook spelling of M: the OLD
+        // The differential gate on the counting-hook spelling of M: the old
         // spelled-out computation (materialize the full Vec<DiffOp> from
         // capture_diff_slices_deadline, sum the equal lengths) must equal
         // matched_chars' hook count on every input: the two paths drive the
-        // SAME myers::diff_deadline on the same operands, and the capture
+        // same myers::diff_deadline on the same operands, and the capture
         // path's Compact/Replace presentation hooks only merge/shift ops,
         // which cannot change the equal-length total. Asserted over the
-        // exhaustive two-letter-alphabet all-pairs sweep AND the golden rows
+        // exhaustive two-letter-alphabet all-pairs sweep and the golden rows
         // (the opcode boundary pins, the ratio parity/divergence rows, the
         // non-ASCII pairs, and an identical pair through the fast path).
         let capture_m = |a: &str, b: &str| {
@@ -1427,7 +1427,7 @@ mod tests {
         // get_close_matches("appel", ["ape", "apple", "peach", "puppy"]) →
         // ['apple', 'ape'] (the stdlib's own docstring): apple scores 0.8,
         // ape 0.75, peach and puppy 0.4; under the default 0.6 cutoff only
-        // the first two survive, best-first. We return the INDICES: apple
+        // the first two survive, best-first. We return the indices: apple
         // is 1, ape is 0.
         let candidates = ["ape", "apple", "peach", "puppy"];
         assert_eq!(
@@ -1443,10 +1443,10 @@ mod tests {
 
     #[test]
     fn close_matches_breaks_score_ties_by_candidate_descending() {
-        // difflib's ACTUAL tie rule (difflib.py:707 appends (ratio, x);
+        // difflib's actual tie rule (difflib.py:707 appends (ratio, x);
         // difflib.py:710 takes heapq.nlargest over the pairs, documented as
         // sorted(iterable, reverse=True)[:n]): the whole tuple compares, so
-        // equal scores break by the candidate itself DESCENDING, NOT input
+        // equal scores break by the candidate itself descending, not input
         // order. Probe: get_close_matches("ab", ["ac", "ca"], 2, 0.5) →
         // ['ca', 'ac']: "ca" wins the tie despite being second.
         let candidates = ["ac", "ca"];
@@ -1454,7 +1454,7 @@ mod tests {
             close_matches("ab", &candidates, 2, 0.5, None),
             Ok(vec![1, 0])
         );
-        // Exact duplicates (equal score AND equal string) keep input order
+        // Exact duplicates (equal score and equal string) keep input order
         // : the stability of the descending sort. Probe:
         // get_close_matches("ab", ["ac", "ac"], 2, 0.5) → ['ac', 'ac'].
         let duplicates = ["ac", "ac"];
@@ -1538,10 +1538,10 @@ mod tests {
 
     #[test]
     fn an_expired_close_matches_deadline_discards_the_partial_results() {
-        // ONE budget bounds the whole scan: the identical first candidate
+        // One budget bounds the whole scan: the identical first candidate
         // scores 1.0 through the fast path (kept even at cutoff 0.0); the
         // hard second candidate's search blows the budget: the scan
-        // STOPS, the partial list is discarded, and DeadlineExceeded is
+        // stops, the partial list is discarded, and DeadlineExceeded is
         // returned (a truncated close-matches list would look like a real
         // answer).
         let base: String = "abc".repeat(20_000);
@@ -1569,11 +1569,11 @@ mod tests {
     // --- the close-matches prefilter (the provable length-ratio skip) ---
     //
     // Three gates: the differential (the prefiltered scan equals the
-    // UNFILTERED spelling everywhere, exact index lists), the seam count
+    // unfiltered spelling everywhere, exact index lists), the seam count
     // (the skip actually fires), and the strictness boundary (a candidate
     // at exactly the ceiling is still searched, and can still qualify).
 
-    /// The UNFILTERED spelling `close_matches` had before the prefilter:
+    /// The unfiltered spelling `close_matches` had before the prefilter:
     /// every candidate searched and scored, the identical gate, the shared
     /// [`best_first`] tail. Kept test-side so the differential battery
     /// isolates the prefilter's effect exactly: any disagreement between
@@ -1624,7 +1624,7 @@ mod tests {
         // three-letter-alphabet strings), at cutoffs {0.4, 0.6, 0.8} and
         // both n regimes (difflib's default 3 and the whole-list
         // no-truncation n). The battery saturates under-ceiling rows in
-        // BOTH directions (short candidates under long words, long
+        // both directions (short candidates under long words, long
         // candidates under short words) and includes exact ceiling ==
         // cutoff boundaries (word 3 vs candidate 12 at cutoff 0.4, word
         // 60 vs candidate 15 at 0.4: both 2*3/15 and 30/75 are exactly
@@ -1653,7 +1653,7 @@ mod tests {
         // The seam-measured pin that the skip actually fires: the counter
         // tallies the matched_chars calls close_matches issues, so a
         // battery mixing over-ceiling and impossible-length candidates
-        // must search EXACTLY the over-ceiling ones. "zqx" against a
+        // must search exactly the over-ceiling ones. "zqx" against a
         // 40-char word has ceiling 6/43 ≈ 0.14 and the empty candidate
         // 0.0, both under every cutoff in use; the word itself and a
         // second 40-char string have ceiling 1.0.
@@ -1679,7 +1679,7 @@ mod tests {
     fn a_candidate_at_exactly_the_ceiling_is_searched_and_can_qualify() {
         // The strictness boundary of the skip rule: "abc" (3 chars) vs a
         // 12-char candidate containing it has ceiling 2*3/15 = 0.4
-        // EXACTLY, and M = 3 (the whole word matched) realizes ratio ==
+        // exactly, and M = 3 (the whole word matched) realizes ratio ==
         // 0.4, which the >= gate (difflib.py:706) keeps at a 0.4 cutoff.
         // An off-by-one skip rule (skipping at equality) would silently
         // drop this candidate; the seam confirms the search happened.
@@ -1692,7 +1692,7 @@ mod tests {
             1,
             "the at-ceiling candidate must be searched"
         );
-        // A hair over the line and the SAME candidate is skipped (ceiling
+        // A hair over the line and the same candidate is skipped (ceiling
         // 0.4 < 0.41), its would-be score 0.4 failing the gate anyway, so
         // the counter must not move.
         assert_eq!(

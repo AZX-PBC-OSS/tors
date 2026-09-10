@@ -27,7 +27,7 @@ jobs:
     # builds unchanged for wasm32-unknown-emscripten, and the resulting wheel
     # imports and passes a functional smoke test in Pyodide 314.x under node
     # (verified locally during the spike). This job re-proves the build on
-    # every push; the wheel is attached as an artifact only — publishing
+    # every push; the wheel is attached as an artifact only; publishing
     # Pyodide wheels (PEP 783 PyEmscripten tags on PyPI, or the pyodide
     # package registry) is deliberately out of scope.
     runs-on: ubuntu-latest
@@ -39,7 +39,7 @@ jobs:
         # derives the whole cross-build matrix from the driving interpreter,
         # and 3.14 selects Pyodide 314.x / pyemscripten_2026_0 / Emscripten
         # 5.0.3 plus a stable Rust toolchain (1.93.0) that clears the crate's
-        # 1.90 MSRV — driving from 3.13 would pin a Rust nightly below MSRV.
+        # 1.90 MSRV: driving from 3.13 would pin a Rust nightly below MSRV.
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           python-version: "3.14"

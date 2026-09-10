@@ -8,9 +8,9 @@ use crate::py::_borrow::timeout_err;
 use crate::validate_deadline_ms;
 
 /// The shared marshalling tail of `tors.diff_opcodes` and
-/// `tors.diff_opcodes_lines`: ONE 5-tuple per opcode with up to four fresh
+/// `tors.diff_opcodes_lines`: one 5-tuple per opcode with up to four fresh
 /// `PyLong`s, constructed under the GIL: O(ops), the `word_bounds`
-/// list-shape class. The four tag strings are INTERNED once per call and
+/// list-shape class. The four tag strings are interned once per call and
 /// shared by reference into every tuple: `op[0] is "equal"` holds exactly as
 /// it does for difflib's own tuples (which all carry the same interned
 /// literals), and constructing a fresh `PyString` per op would multiply the
@@ -38,10 +38,10 @@ fn opcodes_into_pytuples(py: Python<'_>, opcodes: Vec<diff_impl::Opcode>) -> PyR
 }
 
 /// `tors.diff_opcodes(a, b, *, deadline_ms=None)`: `difflib.SequenceMatcher(None, a, b)
-/// .get_opcodes()`'s SHAPE at native speed: `(tag, i1, i2, j1, j2)` tuples,
+/// .get_opcodes()`'s shape at native speed: `(tag, i1, i2, j1, j2)` tuples,
 /// `tag` in {`"equal"`, `"replace"`, `"delete"`, `"insert"`}, ranges
 /// monotone/contiguous/covering both sides, adjacent delete+insert merged
-/// into `"replace"` exactly as difflib presents it. CHARACTER-level: a
+/// into `"replace"` exactly as difflib presents it. Character-level: a
 /// `str` is a character sequence to `SequenceMatcher`, which is what makes
 /// difflib the parity oracle; callers wanting line-level diffs split the
 /// operands themselves. The engine is `similar`'s Myers; see
@@ -54,10 +54,10 @@ fn opcodes_into_pytuples(py: Python<'_>, opcodes: Vec<diff_impl::Opcode>) -> PyR
 /// boundary sliding across a repeated flank).
 ///
 /// `deadline_ms` (default `None`, the previous behavior exactly) bounds the
-/// WHOLE call: the Myers search's work on hard inputs (few anchorable unique
+/// whole call: the Myers search's work on hard inputs (few anchorable unique
 /// records, where a character-level permutation is the measured shape)
 /// grows superlinearly with size, and an unbounded 1M-char pair of that
-/// shape measured ~145 s on the dev box (the README's diff section records
+/// shape measured ~145 s on the dev box (docs/performance.md records
 /// the ladder). On expiry the incomplete result is discarded and
 /// `TimeoutError` is raised naming the elapsed cost and the deadline.
 /// similar's own deadline mechanism makes the search bail at the budget (it
@@ -66,14 +66,14 @@ fn opcodes_into_pytuples(py: Python<'_>, opcodes: Vec<diff_impl::Opcode>) -> PyR
 /// from inside the detached region. A non-positive or non-finite
 /// `deadline_ms` is refused with `ValueError` before any work runs.
 ///
-/// GIL model: the WHOLE diff, meaning the `Vec<char>` materialization of both
+/// GIL model: the whole diff, meaning the `Vec<char>` materialization of both
 /// operands and the Myers search over them, runs under `py.detach`; the
 /// GIL-held residue is the two str-in argument borrows (each the standard
 /// zero-copy alias for ASCII/cached inputs, or the one-time O(input) UTF-8
 /// materialization on the first non-ASCII call) plus the return
-/// marshalling: ONE 5-tuple with up to four fresh `PyLong`s per opcode,
+/// marshalling: one 5-tuple with up to four fresh `PyLong`s per opcode,
 /// O(ops), the `word_bounds` list-shape class. The four tag strings are
-/// INTERNED once per call and shared by reference into every tuple, so
+/// interned once per call and shared by reference into every tuple, so
 /// `op[0] is "equal"` holds exactly as it does for difflib's own tuples,
 /// and constructing a fresh `PyString` per op would multiply the marshalling
 /// cost several-fold. The measured band lives in the crate GIL model above
@@ -93,17 +93,17 @@ pub fn diff_opcodes(
     opcodes_into_pytuples(py, opcodes)
 }
 
-/// `tors.diff_opcodes_lines(a, b, *, deadline_ms=None)`: the LINE-level
+/// `tors.diff_opcodes_lines(a, b, *, deadline_ms=None)`: the line-level
 /// spelling of `tors.diff_opcodes` (v0.8): the same `(tag, i1, i2, j1, j2)`
-/// opcode shape, but the operands are tokenized as LINES (each line keeps
+/// opcode shape, but the operands are tokenized as lines (each line keeps
 /// its `\n`, the last may lack one; `split_keepend_lines` in
-/// `src/diff_impl.rs`) and the indices address LINES, so `a_lines[i1:i2]`
+/// `src/diff_impl.rs`) and the indices address lines, so `a_lines[i1:i2]`
 /// slicing reconstructs, where `a_lines` is `a` split on `'\n'` with each
 /// piece's terminator reattached (`re.split(r"(?<=\n)", a)`, dropping a
-/// trailing empty string if `a` ends in `'\n'`). This is NOT
+/// trailing empty string if `a` ends in `'\n'`). This is not
 /// `a.splitlines(keepends=True)`, which also breaks on `\r`, `\v`, `\f`,
 /// `\x1c`-`\x1e`, `\x85`, and the Unicode line/paragraph separators: text
-/// using one of those as its only line terminator tokenizes as ONE line
+/// using one of those as its only line terminator tokenizes as one line
 /// here where `str.splitlines()` would see several. This is a
 /// narrower-than-splitlines contract, not an oversight. This is the
 /// document/version-diff shape: doing the split in Rust removes the Python round-trip, and a
@@ -111,7 +111,7 @@ pub fn diff_opcodes(
 /// corpus, so its walls sit proportionally lower. Same engine (`similar`'s
 /// Myers), same validity contract, same boundary-class divergences from
 /// difflib as the char-level spelling, same `deadline_ms` machinery (bounds
-/// the WHOLE call; `TimeoutError` on expiry, constructed after the GIL is
+/// the whole call; `TimeoutError` on expiry, constructed after the GIL is
 /// reacquired).
 ///
 /// GIL model: the `word_bounds`/`diff_opcodes` classes, meaning the two str-in

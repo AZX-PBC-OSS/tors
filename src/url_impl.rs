@@ -1,12 +1,12 @@
 //! CPython-parity percent encoding: the pure-Rust core of `tors.quote`,
 //! `tors.quote_plus`, `tors.unquote`, and `tors.unquote_plus`, the
-//! `urllib.parse` pair CPython implements in PURE PYTHON (Lib/urllib/parse.py,
+//! `urllib.parse` pair CPython implements in pure Python (Lib/urllib/parse.py,
 //! `quote`/`quote_from_bytes`/`quote_plus`/`unquote`/`unquote_plus`). The
 //! whole-text pass holds the GIL from end to end, which makes it the
 //! single most-used encoding operation in web/ingestion pipelines and a
 //! worst offender for the crate's GIL model. The semantics below are
 //! derived from that source, including its quirks, and pinned against
-//! the RUNNING interpreter per CI leg; the crate-side battery mirrors the
+//! the running interpreter per CI leg; the crate-side battery mirrors the
 //! literals the Python gate differentials over.
 //!
 //! # Parity contract
@@ -16,11 +16,11 @@
 //! for `str` inputs, utf-8 only: the never-quoted set is the RFC 3986
 //! unreserved characters (`A-Z a-z 0-9 _ . - ~`, the stdlib's
 //! `_ALWAYS_SAFE`) plus the ASCII members of `safe`; every other byte of
-//! the input's utf-8 encoding becomes `%XX` with UPPERCASE hex.
+//! the input's utf-8 encoding becomes `%XX` with uppercase hex.
 //! `unquote(text)` equals `urllib.parse.unquote(text)` with the default
 //! `encoding='utf-8', errors='replace'`, and `unquote_plus(text)` equals
 //! `unquote_plus(text)` with the same defaults. The stdlib's `encoding`/
-//! `errors` parameters are OUT OF SCOPE and documented as such: the encode
+//! `errors` parameters are out of scope and documented as such: the encode
 //! side is always utf-8-strict (an in-memory `&str` cannot fail to encode),
 //! the decode side always utf-8-replace.
 //!
@@ -38,9 +38,9 @@
 //! `quote`/`quote_plus` borrow when no byte needs encoding (output is then
 //! byte-equal to the input, so the iff holds both ways). `unquote` borrows
 //! when the input contains no `%`: exactly CPython's `'%' not in string`
-//! early return, which is where it returns the ORIGINAL object; note the
+//! early return, which is where it returns the original object; note the
 //! asymmetric residue: an input whose every `%` is invalid hex (e.g.
-//! `"%zz"`) decodes to an EQUAL but NEW string in CPython, so the core
+//! `"%zz"`) decodes to an equal but new string in CPython, so the core
 //! mirrors that with `Owned` rather than widening the borrow lane past
 //! parity. `unquote_plus` borrows when the input contains neither `+` nor
 //! `%`.
@@ -48,37 +48,37 @@
 //! # Stdlib quirks pinned here (a naive RFC 3986 implementation gets
 //! these wrong)
 //!
-//! * `safe` is BYTE-level and ASCII-only: the stdlib normalizes str `safe`
-//!   with `safe.encode('ascii', 'ignore')`, silently DROPPING non-ASCII
+//! * `safe` is byte-level and ASCII-only: the stdlib normalizes str `safe`
+//!   with `safe.encode('ascii', 'ignore')`, silently dropping non-ASCII
 //!   members: `quote("é", "é")` is `"%C3%A9"`, not `"é"`. (A byte-table
 //!   built from `safe.as_bytes()` without the `< 0x80` filter would let
 //!   the utf-8 bytes of a non-ASCII `safe` char leak in and keep it
 //!   unquoted: the exact wrong answer.)
 //! * `%` in `safe` is honored like any other byte: it stays literal.
-//! * `quote_plus` is NOT "quote then swap `%20` for `+`": the stdlib
-//!   quotes with `' '` APPENDED to `safe` (so spaces never encode at all)
+//! * `quote_plus` is not "quote then swap `%20` for `+`": the stdlib
+//!   quotes with `' '` appended to `safe` (so spaces never encode at all)
 //!   and then replaces every `' '` with `'+'`: same output for valid
 //!   input, but it also means a literal `'+'` in the text is escaped to
-//!   `%2B` unless the CALLER put `+` in `safe`.
-//! * `unquote` accepts LOWERCASE hex (`%c3%a9` → `é`), not just the
+//!   `%2B` unless the caller put `+` in `safe`.
+//! * `unquote` accepts lowercase hex (`%c3%a9` → `é`), not just the
 //!   uppercase a quoter emits.
 //! * A `%` not followed by two hex digits: `%zz`, a trailing `%`, `%e`
-//!   at end of input, `%%41`'s first pair: stays VERBATIM; `%%41` is
+//!   at end of input, `%%41`'s first pair stays verbatim; `%%41` is
 //!   `"%A"`, not `"%A"`-by-way-of-`%25`-then-reparse or an error.
-//! * The stdlib unquotes and utf-8-decodes each MAXIMAL ASCII RUN of the
-//!   input INDEPENDENTLY (its `_asciire` fragmentation), passing non-ASCII
+//! * The stdlib unquotes and utf-8-decodes each maximal ASCII run of the
+//!   input independently (its `_asciire` fragmentation), passing non-ASCII
 //!   segments through verbatim. Consequences a whole-string decoder gets
-//!   wrong: a multi-byte escape INTERRUPTED by a non-ASCII character is
+//!   wrong: a multi-byte escape interrupted by a non-ASCII character is
 //!   not an escape at all (`unquote("%Cé3")` → `"%Cé3"`), and an escape
-//!   split across an ASCII/non-ASCII boundary decodes as TWO fragments
+//!   split across an ASCII/non-ASCII boundary decodes as two fragments
 //!   each with their own `errors='replace'` verdict
-//!   (`unquote("%C3é%A9")` → `"\u{FFFD}é\u{FFFD}"`, NOT `"éé"`).
+//!   (`unquote("%C3é%A9")` → `"\u{FFFD}é\u{FFFD}"`, not `"éé"`).
 //! * Invalid utf-8 from escapes decodes with the replace handler:
 //!   `%e2%28%a1` → `"\u{FFFD}(\u{FFFD}"`, via
 //!   [`crate::decode_impl::decode_replace`], whose maximal-subpart
 //!   substitution was already measured byte-exact against CPython's
 //!   `decode("utf-8", "replace")` for this crate's `decode_utf8` family.
-//! * `unquote_plus` replaces `'+'` with `' '` BEFORE unquoting, so an
+//! * `unquote_plus` replaces `'+'` with `' '` before unquoting, so an
 //!   escaped `%2B` survives as a literal `'+'` (`unquote_plus("%2B")` →
 //!   `"+"`) while a raw `'+'` becomes a space: the order is the
 //!   semantics, not an implementation detail.
@@ -229,7 +229,7 @@ fn unquote_run(run: &[u8]) -> Cow<'_, [u8]> {
 ///
 /// Walks the input the way the stdlib's `_asciire` fragmentation does:
 /// each maximal ASCII run is unquoted and then utf-8-decoded with the
-/// replace handler INDEPENDENTLY, non-ASCII segments pass through
+/// replace handler independently, non-ASCII segments pass through
 /// verbatim. A `%` without two hex digits stays verbatim. Returns
 /// [`Cow::Borrowed`] when the input contains no `%`: CPython's own
 /// early-return lane, where it returns the original object.
@@ -260,7 +260,7 @@ pub fn unquote(text: &str) -> Cow<'_, str> {
 
 /// `urllib.parse.unquote_plus(text)`: utf-8, `errors='replace'`.
 ///
-/// Every `'+'` becomes a space FIRST (the stdlib's ordering), so an
+/// Every `'+'` becomes a space first (the stdlib's ordering), so an
 /// escaped `%2B` decodes to a literal `'+'` while a raw `'+'` becomes a
 /// space. Returns [`Cow::Borrowed`] when the input contains neither `'+'`
 /// nor `'%'`.
@@ -367,7 +367,7 @@ mod tests {
         // %%41: the first pair is '%' + '%' (not hex), verbatim; the
         // second % pairs with 41.
         assert_eq!(unquote("%%41"), "%A");
-        // Verbatim-but-equal still allocates: CPython returns a NEW
+        // Verbatim-but-equal still allocates: CPython returns a new
         // string here (only the no-'%' lane returns the original object).
         assert!(matches!(unquote("%zz"), Cow::Owned(_)));
     }
@@ -388,7 +388,7 @@ mod tests {
         // A non-ASCII char interrupts an escape: it is not an escape.
         assert_eq!(unquote("%Cé3"), "%Cé3");
         // An escape split across an ASCII/non-ASCII boundary decodes as
-        // two fragments, each with its own replace verdict: NOT éé.
+        // two fragments, each with its own replace verdict: not éé.
         assert_eq!(unquote("%C3é%A9"), "\u{fffd}é\u{fffd}");
         // Non-ASCII text passes verbatim; escapes around it still decode.
         assert_eq!(unquote("é%41"), "éA");
@@ -405,7 +405,7 @@ mod tests {
     fn unquote_plus_swaps_plus_before_unquoting() {
         assert_eq!(unquote_plus("a+b"), "a b");
         assert_eq!(unquote_plus("a+b%41"), "a bA");
-        // The ordering: '+' becomes a space BEFORE unquote, so an escaped
+        // The ordering: '+' becomes a space before unquote, so an escaped
         // %2B survives as a literal '+'.
         assert_eq!(unquote_plus("%2B"), "+");
         assert_eq!(unquote_plus("+%2B"), " +");
@@ -470,7 +470,7 @@ mod tests {
             // And the decode direction closes the loop per character.
             assert_eq!(unquote(&encoded), s, "U+{cp:04X}");
         }
-        // Spot rows beyond the sweep: BMP symbol, astral plane, the max.
+        // Spot rows beyond the sweep: bmp symbol, astral plane, the max.
         for c in ['\u{2028}', '\u{1f600}', '\u{10ffff}'] {
             let s = c.to_string();
             let encoded = quote(&s, "");

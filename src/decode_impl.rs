@@ -34,7 +34,7 @@ pub enum DecodeError {
     /// valid continuation consumed, the maximal subpart; decoding resumes at the
     /// failing byte) or the first continuation violated the lead's range
     /// constraint (E0/overlong, ED/surrogates, F0/overlong, F4/range), where
-    /// CPython reports the LEAD byte alone and re-processes the violating byte.
+    /// CPython reports the lead byte alone and re-processes the violating byte.
     /// CPython reason: "invalid continuation byte".
     InvalidContinuation { start: usize, end: usize },
     /// The input ended inside a multi-byte sequence. Span: every byte of the
@@ -73,7 +73,7 @@ impl DecodeError {
 /// Map a `core::str::Utf8Error` to CPython's exact error shape. The span rule is
 /// the one pyo3's `PyUnicodeDecodeError::new_utf8` itself uses (`start +
 /// error_len`, or the input end when the input was truncated); the reason
-/// classification (which pyo3 does NOT do; its generic reason "invalid utf-8"
+/// classification (which pyo3 does not do; its generic reason "invalid utf-8"
 /// diverges from CPython on every error) is the lead-byte test below, verified
 /// against CPython 3.12 on 13,658 invalid inputs (0 mismatches).
 fn classify(raw: &[u8], err: core::str::Utf8Error) -> DecodeError {
@@ -190,9 +190,9 @@ mod tests {
 
     #[test]
     fn strict_constraint_violations_report_the_lead_byte_alone_as_invalid_continuation() {
-        // A valid lead byte whose FIRST continuation violates its range constraint
+        // A valid lead byte whose first continuation violates its range constraint
         // (E0's A0-BF overlong range, ED's 80-9F surrogate ceiling, F0's 90-BF
-        // overlong range, F4's 80-8F ceiling above U+10FFFF) is reported AT the
+        // overlong range, F4's 80-8F ceiling above U+10FFFF) is reported at the
         // lead with a 1-byte span; the violating byte is re-processed (a lone
         // continuation becomes its own "invalid start byte"), so replace emits
         // one U+FFFD per byte of the sequence. Measured CPython behavior, not
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn strict_non_continuation_after_valid_continuations_spans_the_maximal_subpart() {
         // When the failing byte is simply not a continuation byte (0x00-0x7F,
-        // 0xC2-0xFF), the span covers the lead plus every VALID continuation
+        // 0xC2-0xFF), the span covers the lead plus every valid continuation
         // consumed so far (the maximal subpart), and decoding resumes at the
         // failing byte. Spans measured: F0 9F 41 -> 0..2, F0 9F 98 41 -> 0..3.
         assert!(matches!(
@@ -288,7 +288,7 @@ mod tests {
             decode_replace(b"\xfc\x84\x80\x80\x80\x80"),
             "\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}"
         );
-        // Maximal subparts: ONE U+FFFD for lead+valid-continuations, the
+        // Maximal subparts: one U+FFFD for lead+valid-continuations, the
         // non-continuation byte kept.
         assert_eq!(decode_replace(b"\xf0\x9f\x41"), "\u{fffd}A");
         assert_eq!(decode_replace(b"\xf0\x9f\x98\x41"), "\u{fffd}A");

@@ -41,13 +41,13 @@ def _stdlib_finalize(text: str) -> tuple[str, str]:
 
 class TestFinalizeContract:
     def test_empty_string_hashes_to_the_known_sha256_of_empty(self) -> None:
-        # FIPS 180-4 test vector for the empty string, pinned literally so a wrong hash
+        # fips 180-4 test vector for the empty string, pinned literally so a wrong hash
         # wiring cannot hide behind a self-consistent-but-wrong digest compared only
         # against itself.
         assert finalize("") == ("", _SHA256_OF_EMPTY)
 
     def test_plain_ascii_matches_the_known_sha256_vector(self) -> None:
-        # "abc" is unchanged by the pipeline, so finalize must return the FIPS test
+        # "abc" is unchanged by the pipeline, so finalize must return the fips test
         # vector for "abc" verbatim.
         assert finalize("abc") == ("abc", _SHA256_OF_ABC)
 
@@ -117,7 +117,7 @@ class TestFinalizeProperty:
 
 
 class TestSurrogateBehavior:
-    """Pins the OBSERVED behavior at the pyo3 argument boundary for strings CPython can
+    """Pins the observed behavior at the pyo3 argument boundary for strings CPython can
     hold but UTF-8 cannot encode: lone surrogates (e.g. from ``surrogatepass`` decoders
     or hand-built strings). pyo3's ``&str`` extraction refuses them with
     ``UnicodeEncodeError`` before any Rust code runs, measured, not assumed (see the
@@ -152,7 +152,7 @@ class TestArgumentContract:
 
 class TestIdentityReturnContract:
     """The identity-return contract for ``tors.finalize``: on an input
-    the whole pipeline leaves untouched, the STRING element is the ORIGINAL
+    the whole pipeline leaves untouched, the string element is the original
     object (``finalize(s)[0] is s``) and the hash still computes, from the
     borrowed input buffer, with no output allocation at all (the integrated
     hash and the identity probe live in normalize_impl/finalize_impl; the

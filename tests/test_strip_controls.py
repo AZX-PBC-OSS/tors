@@ -1,23 +1,23 @@
 """Contract gate for ``tors.strip_controls``: every maximal run of C0
 controls (U+0000-U+001F, tabs and newlines included) and DEL (U+007F)
-becomes a single ASCII space — the scrub model-authored display text
+becomes a single ASCII space: the scrub model-authored display text
 needs before it is stored or served.
 
 What this gate pins:
 
-- REGEX PARITY: byte-identical to
+- regex parity: byte-identical to
   ``re.compile(r"[\\x00-\\x1f\\x7f]+").sub(" ", text)`` over a hypothesis
-  corpus spanning C0, C1, DEL, multibyte text, and emoji — the three
+  corpus spanning C0, C1, DEL, multibyte text, and emoji: the three
   ta_worker call sites (fit/enrich/derive prompts) this replaces, so
   adoption changes no stored value.
-- RUN COLLAPSE: one control or a hundred adjacent ones yield exactly one
+- run collapse: one control or a hundred adjacent ones yield exactly one
   space, including the full C0 range plus DEL in a single run.
-- SCOPE CUTS: C1 controls (U+0080-U+009F) pass through untouched
+- scope cuts: C1 controls (U+0080-U+009F) pass through untouched
   (deliberate: the adopted regexes do not cover them either); tab,
-  newline, and CR ARE scrubbed (they are C0) — pinned literally, since
+  newline, and CR are scrubbed (they are C0): pinned literally, since
   that surprises callers reaching for this on multi-line prose.
-- NO EDGE STRIP: edge runs become edge spaces; stripping is the caller's.
-- IDENTITY: no C0/DEL anywhere returns the original object (``is``).
+- no edge strip: edge runs become edge spaces; stripping is the caller's.
+- identity: no C0/DEL anywhere returns the original object (``is``).
 """
 
 from __future__ import annotations

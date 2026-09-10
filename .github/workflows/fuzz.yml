@@ -48,13 +48,13 @@ jobs:
 
       - name: Fuzz (30s per target)
         # The same list as the Makefile's FUZZ_TARGETS and ci.yml's
-        # fuzz-smoke loop — this pass had drifted from both
+        # fuzz-smoke loop; this pass had drifted from both
         # (truncate_ellipsis, controls, json_repair never ran here).
         # gfm_strip joined the lists when its char-boundary fence-trim
         # panic was fixed (strip_fence_content, unit-pinned).
         # documents_markdown stays deliberately absent: it SIGSEGVs on a
         # KNOWN upstream bug (pdf_oxide 0.3.78 parse_object/parse_array
-        # recursion, no depth cap) — the Makefile's FUZZ_TARGETS comment
+        # recursion, no depth cap); the Makefile's FUZZ_TARGETS comment
         # carries the repro. It stays built and committed as the repro
         # harness, joining the run lists when pdf_oxide ships a cap.
         working-directory: fuzz

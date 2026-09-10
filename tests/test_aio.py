@@ -5,26 +5,26 @@ twin).
 
 What this gate pins:
 
-- COVERAGE: the facade exports exactly ``tors.aio._WRAPPED``, no more, no
+- coverage: the facade exports exactly ``tors.aio._WRAPPED``, no more, no
   less. A function added to the curated set fails this gate until the
   facade and the generated stub pick it up.
-- SIGNATURE PARITY: each async wrapper accepts exactly what its sync
+- signature parity: each async wrapper accepts exactly what its sync
   spelling accepts, parameter names in order, kinds, and defaults
   (``inspect`` against the live function, the ``test_pyi_drift.py``
   method applied across the facade).
-- STUB FRESHNESS: ``aio.pyi`` is the exact output of
+- stub freshness: ``aio.pyi`` is the exact output of
   ``tools/gen_aio_stub.py`` over the current ``__init__.pyi`` (a stale
   stub fails loudly; regenerate with the tool as part of the change).
-- NO HIDDEN BRANCH: every wrapper is a coroutine function that
-  unconditionally awaits ``asyncio.to_thread`` — there is no code path
+- no hidden branch: every wrapper is a coroutine function that
+  unconditionally awaits ``asyncio.to_thread``: there is no code path
   where a wrapper runs its work inline on the caller's own turn, which
   would make it lie about being async.
-- AWAIT CORRECTNESS: results equal the sync spellings, keyword-only
+- await correctness: results equal the sync spellings, keyword-only
   parameters pass through, and the event loop stays responsive during a
   whole-corpus call: a heartbeat coroutine keeps ticking with worst gaps
   well under the call's own wall while a large ``diff_opcodes`` await
   runs in the worker thread. That is the facade's whole reason to exist,
-  asserted directly — the exact property whose absence (an async wrapper
+  asserted directly: the exact property whose absence (an async wrapper
   that silently blocks the loop) is a real, previously-shipped bug in at
   least one other GIL-releasing native-extension library's own async
   wrapper.
@@ -64,7 +64,7 @@ class TestCoverage:
     def test_no_wrapper_ever_runs_inline_regardless_of_input_size(self) -> None:
         """The design requirement, asserted structurally: the wrapper's
         body is exactly one unconditional ``await asyncio.to_thread(fn,
-        ...)``, no branch on argument size or shape anywhere in it — the
+        ...)``, no branch on argument size or shape anywhere in it: the
         facade never silently decides to run inline."""
         source = inspect.getsource(tors.aio._make_async)  # noqa: SLF001
         wrapper_body = source.split("async def wrapper")[1].split("wrapper.__qualname__")[0]
@@ -115,7 +115,7 @@ class TestStubFreshness:
 
     def test_no_stub_signature_uses_the_wrong_awaitable_wrapper(self) -> None:
         """An ``async def`` function's return annotation is what awaiting
-        it resolves to, never ``Awaitable[T]`` — that describes the
+        it resolves to, never ``Awaitable[T]``: that describes the
         coroutine object itself. A regression here would silently mistype
         every caller of the facade. Checked against the actual parsed
         signatures, not a substring scan of the file (the module
@@ -195,7 +195,7 @@ class TestAwaitCorrectness:
             # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
             # loaded CI runner, right at the razor's edge of the "must cost
             # something" floor below and prone to landing under it on a
-            # faster or differently-loaded box — exactly what happened here.
+            # faster or differently-loaded box: exactly what happened here.
             # 16 MiB gives real margin toward the docstring's own "tens of
             # milliseconds or more" claim rather than a threshold this test
             # can trip on jitter alone.

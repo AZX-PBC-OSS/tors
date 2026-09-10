@@ -15,16 +15,16 @@
 //! exception type, and messages; the exception is the real `binascii.Error`,
 //! constructed by the pyo3 layer), pinned by the battery + differentials in
 //! tests/test_b64_decode.py. `decode` is a line-for-line port of the
-//! POST-gh-145264 `binascii_a2b_base64_impl` (Modules/binascii.c on CPython's
+//! post-gh-145264 `binascii_a2b_base64_impl` (Modules/binascii.c on CPython's
 //! 3.13 and 3.14 maintenance branches: identical there by the backports
 //! 1f9958f9 / e31c5512; gh-145264, March 2026). The retarget is
-//! security-motivated: the PRE-fix machine (which CPython 3.12.x,
+//! security-motivated: the pre-fix machine (which CPython 3.12.x,
 //! 3.13.0–3.13.13 and 3.14.0 run; measured on this box) stopped lenient
-//! decoding at the first completed pad sequence and silently DROPPED the rest
+//! decoding at the first completed pad sequence and silently dropped the rest
 //! of the input, a parser differential CPython fixed as a security issue; a
 //! decoder that returns `b'f'` for `"Zg==Zg=="` on one interpreter and
 //! `b'f\x06`'` on another is a version-dependent parser, which is exactly
-//! what a content-addressing pair must never be. tors ships the FIXED machine
+//! what a content-addressing pair must never be. tors ships the fixed machine
 //! on every interpreter it supports (output does not depend on the Python it
 //! runs under), with the pre-fix stdlibs (and 3.10's entirely different regex
 //! validator, which pre-dates the `strict_mode` machine) recorded as
@@ -33,19 +33,19 @@
 //! What the fixed machine changes, both pinned crate-side and in the Python
 //! battery (literals recorded on CPython 3.13.14, byte-identical on 3.15.0b2):
 //!
-//! * LENIENT mode ignores excess pads (RFC 4648 §3.3 "MAY ignore") and
-//!   DECODES data chars that follow a completed pad sequence, instead of
+//! * lenient mode ignores excess pads (RFC 4648 §3.3 "MAY ignore") and
+//!   decodes data chars that follow a completed pad sequence, instead of
 //!   truncating: `"Zg==Zg=="` → `b"f\x06\x60"`, `"Zm9vYg==Zg=="`
 //!   → `b"foob\x06\x60"`. A stray mid-string pad at a quad boundary still
 //!   starts a fresh quad (`Zm9v=Zg==` → `foof`).
-//! * STRICT mode: a pad arriving at quad position 1 breaks to the end-of-input
+//! * strict mode: a pad arriving at quad position 1 breaks to the end-of-input
 //!   length error (`Z=g=` → count 1) instead of raising "Discontinuous
 //!   padding" at the following data char; a third pad beyond a quad is
 //!   "Excess padding" (`Zg===`) instead of "Excess data after padding"; a
 //!   non-alphabet char after a completed pad sequence is "Only base64 data"
 //!   (`Zm9vYg==\n`): the pad no longer ends the parse, so the non-alphabet
 //!   check fires first. "Discontinuous padding" remains reachable (a data
-//!   char after ONE pad at quad position 2, `Zg=g`), as does "Excess data
+//!   char after one pad at quad position 2, `Zg=g`), as does "Excess data
 //!   after padding" (a data char after a completed quad of pads, `Zg==Z`),
 //!   and "Leading padding" is now classified in-loop (`=` as the very first
 //!   input char) rather than by a pre-loop check.
@@ -55,7 +55,7 @@
 //!   modes), and "Incorrect padding" for quad positions 2/3 whose pads do
 //!   not complete the quad.
 //!
-//! The base64 crate's own `decode` could NOT be used here (unchanged from the
+//! The base64 crate's own `decode` could not be used here (unchanged from the
 //! pre-fix decision): its default engine rejects non-canonical trailing bits
 //! (`InvalidLastSymbol`), which CPython accepts, and its error taxonomy does
 //! not map onto CPython's strict messages.
@@ -94,7 +94,7 @@ pub enum DecodeError {
     /// Strict mode, any non-alphabet char (whitespace included):
     /// "Only base64 data is allowed".
     OnlyBase64Data,
-    /// Strict mode, a data char after ONE pad at quad position 2 (`Zg=g`):
+    /// Strict mode, a data char after one pad at quad position 2 (`Zg=g`):
     /// "Discontinuous padding not allowed". (A pad at quad position 1 no
     /// longer lands here post-fix; it breaks to the count error below.)
     DiscontinuousPadding,
@@ -147,7 +147,7 @@ const fn a2b_table() -> [u8; 256] {
 
 static A2B_TABLE: [u8; 256] = a2b_table();
 
-/// A line-for-line port of the POST-gh-145264 `binascii_a2b_base64_impl`
+/// A line-for-line port of the post-gh-145264 `binascii_a2b_base64_impl`
 /// (Modules/binascii.c, CPython 3.13/3.14 branches); see the module docs for
 /// the parity contract and the retarget's security rationale. The caller
 /// guarantees `s` is ASCII (the pyo3 wrapper enforces `base64.b64decode`'s
@@ -170,8 +170,8 @@ pub fn decode(s: &str, strict: bool) -> Result<Vec<u8>, DecodeError> {
                 continue;
             }
             // RFC 4648 §3.3: a pad before the end of the encoded data and
-            // excess pads MAY be ignored. Lenient mode does exactly that, and
-            // (the gh-145264 change) decoding CONTINUES with later data
+            // excess pads may be ignored. Lenient mode does exactly that, and
+            // (the gh-145264 change) decoding continues with later data
             // chars instead of truncating at the first pad sequence.
             if !strict {
                 continue;
@@ -314,7 +314,7 @@ mod tests {
             ("Zm9vYmFy", Ok(b"foobar")),
             ("Zg==", Ok(b"f")),
             ("Zm9=", Ok(b"fo")),
-            // Non-canonical trailing bits: ACCEPTED (the base64 crate's default
+            // Non-canonical trailing bits: accepted (the base64 crate's default
             // engine would reject `Zh==`; this is the reason the port exists).
             ("Zh==", Ok(b"f")),
             ("ABCDEFGH", Ok(b"\x00\x10\x83\x10Q\x87")),
@@ -344,14 +344,14 @@ mod tests {
             ("Zm9vYg====", DecodeError::ExcessPadding),
             ("Zm9v!", DecodeError::OnlyBase64Data),
             ("Zm 9v\nYg==", DecodeError::OnlyBase64Data),
-            // The non-alphabet check fires BEFORE the pending-pads check, so a
+            // The non-alphabet check fires before the pending-pads check, so a
             // newline after a pad is "Only base64 data is allowed", and
-            // post-fix a newline after a COMPLETED pad sequence is too (the
+            // post-fix a newline after a completed pad sequence is too (the
             // pad no longer ends the parse).
             ("Zm9vYg=\n=", DecodeError::OnlyBase64Data),
             ("Zm9vYg==\n", DecodeError::OnlyBase64Data),
             ("Zg==\n", DecodeError::OnlyBase64Data),
-            // A pad at quad position 1: post-fix the end-of-input COUNT error,
+            // A pad at quad position 1: post-fix the end-of-input count error,
             // not "Discontinuous padding" (which now needs a data char after
             // one pad at quad position 2).
             ("Z=g=", DecodeError::InvalidCharCount(1)),
@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn decode_reports_the_interpolated_data_char_count_from_emitted_bytes() {
-        // quad_pos == 1 at END OF INPUT: count = complete quads × 4 + 1, in
-        // BOTH modes (padding does not rescue a 1-data-char quad; a lenient
+        // quad_pos == 1 at end of input: count = complete quads × 4 + 1, in
+        // both modes (padding does not rescue a 1-data-char quad; a lenient
         // run of pads after one data char never resumes, so qp is still 1).
         for &(s, count) in &[
             ("Z", 1),
@@ -422,9 +422,9 @@ mod tests {
                 );
             }
         }
-        // STRICT-only: a pad arriving AT quad position 1 breaks to this same
+        // strict-only: a pad arriving at quad position 1 breaks to this same
         // count error (the post-fix change); the lenient spelling of the
-        // same inputs ignores the pads and the following data char RESUMES
+        // same inputs ignores the pads and the following data char resumes
         // the quad, so it fails with "Incorrect padding" instead (pinned in
         // the lenient battery below).
         for &(s, count) in &[("Z=g=", 1), ("Z==g=", 1)] {
@@ -449,14 +449,14 @@ mod tests {
     #[test]
     fn decode_lenient_mode_discards_non_alphabet_and_decodes_past_padding() {
         // The gh-145264 fix itself: excess pads are ignored and later data
-        // chars DECODE, where the pre-fix machine silently dropped everything
+        // chars decode, where the pre-fix machine silently dropped everything
         // after the first completed pad sequence.
         let cases: &[(&str, Result<&[u8], DecodeError>)] = &[
             ("Zm9v!", Ok(b"foo")),
             ("Zm 9v\nYg==", Ok(b"foob")),
             ("Zm9vYg=\n=", Ok(b"foob")),
             ("Zg==\n", Ok(b"f")),
-            // Data after a completed pad sequence is DECODED, not dropped.
+            // Data after a completed pad sequence is decoded, not dropped.
             ("Zg==Zg==", Ok(b"f\x06`")),
             ("Zg==!Zg==", Ok(b"f\x06`")),
             ("Zg==Zg==Zg==", Ok(b"f\x06`f")),

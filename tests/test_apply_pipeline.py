@@ -1,5 +1,5 @@
-"""Contract gate for ``tors.apply_pipeline``: a STATELESS, general-purpose
-batch text preprocessor: every requested step fused into ONE GIL-released
+"""Contract gate for ``tors.apply_pipeline``: a stateless, general-purpose
+batch text preprocessor: every requested step fused into one GIL-released
 pass over the whole ``texts`` list. The pipeline itself is pure function
 composition, not a stateful object. ``lemma_dict`` is the one narrow
 exception: it accepts either a raw ``dict[str, str]`` (materialized fresh
@@ -55,7 +55,7 @@ class TestIndividualSteps:
     def test_nfd_decomposes_without_dropping_combining_marks(self) -> None:
         out = apply_pipeline(["café"], nfd=True)
         assert out[0] == unicodedata.normalize("NFD", "café")
-        assert len(out[0]) == 5  # c a f e COMBINING-ACUTE
+        assert len(out[0]) == 5  # c a f e combining-acute
 
     def test_lowercase_is_unicode_correct(self) -> None:
         assert apply_pipeline(["HELLO Straße"], lowercase=True) == ["hello straße"]
@@ -90,7 +90,7 @@ class TestIndividualSteps:
 
 class TestOrderOfOperations:
     def test_lowercase_before_strip_accents_before_stem(self) -> None:
-        # "DÉCIDER" -> lowercase -> "décider" -> strip_accents -> "decider"
+        # "DÉcider" -> lowercase -> "décider" -> strip_accents -> "decider"
         # -> French-stem -> "decid". A wrong order (e.g. stemming before
         # lowercasing) would miss the Snowball algorithm's lowercase-only
         # rule tables and produce a different result.

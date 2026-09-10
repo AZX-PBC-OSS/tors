@@ -1,10 +1,10 @@
 """Contract gate for the UTF-16 bytes-in surface: ``tors.decode_utf16`` and
 ``tors.utf16_is_valid`` must be indistinguishable from the stdlib expressions
 they replace: ``raw.decode("utf-16", errors=...)`` / ``"utf-16-le"`` /
-``"utf-16-be"``, over ARBITRARY bytes, the same byte-exact bar
+``"utf-16-be"``, over arbitrary bytes, the same byte-exact bar
 ``decode_utf8`` already holds.
 
-Unlike UTF-8, UTF-16 has FOUR distinct ``UnicodeDecodeError`` reason strings
+Unlike UTF-8, UTF-16 has four distinct ``UnicodeDecodeError`` reason strings
 CPython produces depending on exactly where and how a code-unit sequence goes
 wrong (see ``src/utf16_impl.rs``'s module docs for the full derivation,
 verified against a running interpreter, not assumed from the codec's
@@ -25,7 +25,7 @@ name) sniffs a leading BOM and strips it from the output, falling back to
 the host's own endianness when none is present; ``"little"``/``"big"``
 (matching ``"utf-16-le"``/``"utf-16-be"``) never sniff or strip a BOM; a
 leading BOM-like byte pair decodes as the literal U+FEFF character instead.
-``.encoding`` on a raised error is always the RESOLVED label
+``.encoding`` on a raised error is always the resolved label
 (``"utf-16-le"``/``"utf-16-be"``), never the bare ``"utf-16"`` name, matching
 CPython exactly.
 

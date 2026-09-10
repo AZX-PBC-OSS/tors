@@ -1,9 +1,9 @@
 """The deterministic real-document corpus: five documents in the
 formats downstream pipelines actually hold (markdown, RTF, DOCX, XLSX, PDF),
-GENERATED here byte-deterministically and extracted here with readers
+generated here byte-deterministically and extracted here with readers
 built from the standard library alone (zipfile + xml.etree for the OOXML
-pair, zlib for the PDF's FlateDecode stream, plain text for RTF/MD). No new
-dependencies: the point is to prove tors's surface over REAL document bytes
+pair, zlib for the PDF's FlateDecode stream, plain text for RTF/md). No new
+dependencies: the point is to prove tors's surface over real document bytes
 and really-extracted text, not to ship a document parser.
 
 Determinism contract (pinned by tests/test_documents.py): every generator is
@@ -12,21 +12,21 @@ byte-stable: fixed zip metadata (``ZipInfo`` with ``date_time`` pinned to
 do not depend on the building platform), the PDF's xref offsets computed
 programmatically from its own fixed objects, so regenerating the corpus is
 byte-identical, and the committed files under ``tests/corpus/`` are exactly
-``CORPUS`` (a test re-derives and byte-compares them).
+``corpus`` (a test re-derives and byte-compares them).
 
-DRY spine: each document's TEXT is defined ONCE as module constants (pure
+dry spine: each document's TEXT is defined once as module constants (pure
 ASCII source; every non-ASCII character built from ``chr()`` (the repo
 convention, because visually-ambiguous literals are how pins rot) and both
 the generator and ``EXPECTED_TEXT`` (the extraction oracle) derive from the
-SAME constants, so a generator edit that changed the text would fail the
+same constants, so a generator edit that changed the text would fail the
 extraction pin instead of silently laundering through.
 
 Extractor scope: each reader covers exactly the subset its
 generator emits (the RTF control words below; ``w:p``/``w:r``/``w:t``/
 ``w:tab``/``w:br``; shared-string cells; one ``Tj`` per line with
-``\\( \\) \\\\`` and octal escapes in WinAnsi). They are NOT general
+``\\ (\\) \\\\`` and octal escapes in WinAnsi). They are not general
 parsers for those formats. One intentional content split: CJK and emoji live
-in every format EXCEPT the PDF: WinAnsi-encoded Helvetica cannot
+in every format except the PDF: WinAnsi-encoded Helvetica cannot
 represent them (the constraint of the minimal-PDF subset), so the
 PDF carries ASCII + latin-1 text only.
 """
@@ -98,7 +98,7 @@ MARKDOWN_TEXT = "\n".join(
 # two, strip the trailing whitespace incl. the NBSP): the pinned normalize
 # expectation, kept beside its input so the two cannot drift apart. Note the
 # blank line between the CRLF block and the sloppy block: the block's own
-# trailing \r\n plus the joining \n is a legitimate TWO-newline run, which
+# trailing \r\n plus the joining \n is a legitimate two-newline run, which
 # the collapse stage (3+ only) correctly leaves alone.
 MARKDOWN_NORMALIZED = "\n".join(
     [
@@ -149,7 +149,7 @@ RTF_DOCUMENT = (
 
 
 def _rtf_unescape(text: str) -> str:
-    """The RTF subset extractor: control words are consumed WITH their
+    """The RTF subset extractor: control words are consumed with their
     optional numeric parameter and their single delimiter whitespace (the
     RTF rule: ``\\rtf1`` and ``\\par `` never leak their parameter or
     delimiter into the text), ``\\par`` breaks lines, ``\\uN?`` becomes
@@ -283,13 +283,13 @@ _CT_XLSX_MAIN = (
     '<Override PartName="/xl/workbook.xml" ContentType='
     '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
 )
-# The macro-enabled / slide-show container variants — the genuine OOXML
-# aliases: docm/xlsm/ppsx are the SAME packages as docx/xlsx/pptx (every
+# The macro-enabled / slide-show container variants: the genuine OOXML
+# aliases: docm/xlsm/ppsx are the same packages as docx/xlsx/pptx (every
 # part identical) with [Content_Types].xml's main-document override naming
 # the variant, so the engines convert them as their base kinds. xlsb is
-# NOT one (its sheets are BIFF12 .bin streams, not worksheet XML): the
-# name routes the Excel kind, but genuine xlsb content is refused — pinned
-# in the engines suite, disclosed in the README.
+# not one (its sheets are BIFF12 .bin streams, not worksheet XML): the
+# name routes the Excel kind, but genuine xlsb content is refused: pinned
+# in the engines suite, disclosed in docs/documents.md.
 _CT_DOCM_MAIN = (
     '<Override PartName="/word/document.xml" ContentType='
     '"application/vnd.ms-word.document.macroEnabled.main+xml"/>'
@@ -560,7 +560,7 @@ def _pdf_unescape(literal: bytes) -> bytes:
         if token == b"f":
             return b"\f"
         if token.isdigit():  # type: ignore[union-attr]
-            return bytes([int(token, 8)])  # PDF \ddd literals are OCTAL (\351 = 233)
+            return bytes([int(token, 8)])  # PDF \ddd literals are octal (\351 = 233)
         return token
 
     return _PDF_ESCAPE.sub(replace, literal)
@@ -569,7 +569,7 @@ def _pdf_unescape(literal: bytes) -> bytes:
 def extract_pdf(raw: bytes) -> str:
     """The minimal-PDF reader: every FlateDecode stream is decompressed and
     its Tj literals become lines (one Tj per line is the generator's shape).
-    Scoped to that subset: no TJ arrays, no font encodings beyond the
+    Scoped to that subset: no tj arrays, no font encodings beyond the
     WinAnsi bytes the generator emits."""
     lines: list[str] = []
     for match in re.finditer(rb"stream\r?\n(.*?)\n?endstream", raw, re.DOTALL):
@@ -595,7 +595,7 @@ CORPUS: dict[str, bytes] = {
 
 # The five-document corpus's extraction oracle (each generator's text,
 # cross-pinned by extract()). The engines matrix's own kinds join this table
-# further down (see the registry section) as content oracles — no stdlib
+# further down (see the registry section) as content oracles: no stdlib
 # reader exists for them, but the same table is where the matrix's
 # _oracle_lines looks first.
 EXPECTED_TEXT: dict[str, str] = {
@@ -633,7 +633,7 @@ def extract(kind: str) -> str:
 
 def write_corpus(directory: Path = CORPUS_DIR) -> None:
     """Materialize the five documents (the committed copies under
-    tests/corpus/ are exactly CORPUS; the pin test re-derives and
+    tests/corpus/ are exactly corpus; the pin test re-derives and
     byte-compares them)."""
     directory.mkdir(parents=True, exist_ok=True)
     for kind, raw in CORPUS.items():
@@ -644,10 +644,10 @@ def write_corpus(directory: Path = CORPUS_DIR) -> None:
 # The engines-suite fixture matrix: the cross-format validation suite's
 # corpus (tests/test_documents_engines.py, tools/eval_documents.py). Every
 # generatable working-format family × a structural variant rich enough to
-# gate on — style-based headings, hyperlinks, numbered/nested lists, tables,
+# gate on: style-based headings, hyperlinks, numbered/nested lists, tables,
 # speaker notes, code, the HTML noise elements that must never leak, the
 # ODF spreadsheet/presentation flavors, and the epub container. A separate
-# registry from CORPUS on purpose: the five-document corpus above is pinned
+# registry from corpus on purpose: the five-document corpus above is pinned
 # by tests/test_documents.py; this matrix is pinned by
 # tests/test_documents_engines.py, and its committed copies live under
 # tests/engines_corpus/. The same determinism contract applies: the
@@ -705,7 +705,7 @@ _DOCX_NUMBERING = (
 
 def _docx_rich_paragraph(text: str, *, style: str | None = None, ilvl: int | None = None) -> str:
     """The rich builder's w:p: optional pStyle heading, optional numbering
-    level (the base corpus's _docx_paragraph handles tab/br runs instead —
+    level (the base corpus's _docx_paragraph handles tab/br runs instead:
     same name family, different subset, and no shadowing)."""
     props = ""
     if style:
@@ -852,8 +852,8 @@ def generate_pptx_rich() -> bytes:
 #
 # The genuine aliases as [Content_Types].xml rewrites of the base generators
 # above: the macro-enabled (docm/xlsm) and slide-show (ppsx) variants are
-# the same packages with the one main-document override respelled — the
-# ONLY difference between the containers. The rewrite is byte-stable (a
+# the same packages with the one main-document override respelled: the
+# only difference between the containers. The rewrite is byte-stable (a
 # no-op rewrite round-trips the base bytes exactly, probed), so the
 # committed fixtures hold the same determinism contract as their bases.
 
@@ -874,20 +874,20 @@ def _ooxml_alias_container(raw: bytes, base_ct: str, alias_ct: str) -> bytes:
 
 
 def generate_docm_rich() -> bytes:
-    """generate_docx_rich's package as a docm — the macro-enabled alias the
+    """generate_docx_rich's package as a docm: the macro-enabled alias the
     engines convert as docx on both lanes (anydoc and office_oxide)."""
     return _ooxml_alias_container(generate_docx_rich(), _CT_DOCX_MAIN, _CT_DOCM_MAIN)
 
 
 def generate_xlsm() -> bytes:
-    """generate_xlsx's package as an xlsm — the macro-enabled alias the
+    """generate_xlsx's package as an xlsm: the macro-enabled alias the
     engines convert as xlsx on both lanes (anydoc and office_oxide)."""
     return _ooxml_alias_container(generate_xlsx(), _CT_XLSX_MAIN, _CT_XLSM_MAIN)
 
 
 def generate_ppsx_rich() -> bytes:
-    """generate_pptx_rich's package as a ppsx — the slide-show alias the
-    auto/anydoc lane converts as pptx (office_oxide REFUSES the slideshow
+    """generate_pptx_rich's package as a ppsx: the slide-show alias the
+    auto/anydoc lane converts as pptx (office_oxide refuses the slideshow
     content type: an honest clean-refusal divergence the engines suite
     pins, never a silent fallback)."""
     return _ooxml_alias_container(generate_pptx_rich(), _CT_PPTX_MAIN, _CT_PPSX_MAIN)
@@ -895,7 +895,7 @@ def generate_ppsx_rich() -> bytes:
 
 # --- the ODF family (odt / ods / odp) + epub, the OCF sibling ------------------
 #
-# One container contract (the mimetype entry STORED and first — `_odf_bytes`)
+# One container contract (the mimetype entry stored and first: `_odf_bytes`)
 # and one content-part skeleton (`_odf_content`); the flavors differ only in
 # the body element and the namespaces they need. epub rides the same
 # container contract: OCF is ODF's zip sibling, mimetype stored first there
@@ -908,8 +908,8 @@ _ODT_DRAW = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
 
 
 def _odf_bytes(mimetype: str, entries: list[tuple[str, bytes]]) -> bytes:
-    """A byte-deterministic ODF/OCF container: the mimetype entry STORED and
-    first (the ODF spec requirement, and OCF's for epub — same rule), every
+    """A byte-deterministic ODF/OCF container: the mimetype entry stored and
+    first (the ODF spec requirement, and OCF's for epub: same rule), every
     entry on a pinned ZipInfo (the `_zip_bytes` determinism contract)."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -928,7 +928,7 @@ def _odf_bytes(mimetype: str, entries: list[tuple[str, bytes]]) -> bytes:
 
 
 def _odt_bytes(entries: list[tuple[str, bytes]]) -> bytes:
-    """The ODT container — the ODF text flavor of `_odf_bytes` (kept as its
+    """The ODT container: the ODF text flavor of `_odf_bytes` (kept as its
     own name: tests/docgen.py's odt generator builds on it)."""
     return _odf_bytes("application/vnd.oasis.opendocument.text", entries)
 
@@ -946,7 +946,7 @@ def _odf_content(namespaces: str, body: str) -> str:
 
 def generate_odt_rich() -> bytes:
     """A style-bearing odt: outline-level headings, a hyperlink, a nested
-    list, and a table — the ODF text flavor of the shared rich vocabulary."""
+    list, and a table: the ODF text flavor of the shared rich vocabulary."""
     body = (
         "<office:text>"
         f'<text:h text:outline-level="1">{RICH_H1}</text:h>'
@@ -989,7 +989,7 @@ def _ods_cell(text: str) -> str:
 
 
 def generate_ods_rich() -> bytes:
-    """The ODF spreadsheet: the units table (header + two data rows) — the
+    """The ODF spreadsheet: the units table (header + two data rows): the
     csv fixture's story in spreadsheet flavor, sniffed by the ZIP mimetype
     entry and rendered as a GFM table by the engine."""
     rows = "".join(
@@ -1020,8 +1020,8 @@ def _odp_text_box(paragraphs: tuple[str, ...]) -> str:
 
 
 def generate_odp_rich() -> bytes:
-    """The ODF presentation: two draw:page elements — a title box plus a
-    two-paragraph body box, then a second title — the pptx fixture's story
+    """The ODF presentation: two draw:page elements (a title box plus a
+    two-paragraph body box, then a second title) the pptx fixture's story
     in the ODF presentation flavor."""
     content = _odf_content(
         f'xmlns:office="{_ODT_OFFICE}" xmlns:text="{_ODT_TEXT}" xmlns:draw="{_ODT_DRAW}"',
@@ -1049,10 +1049,10 @@ _EPUB_BOOK_ID = "urn:uuid:00000000-0000-0000-0000-000000000001"
 
 
 def generate_epub_rich() -> bytes:
-    """An OCF container: the mimetype entry STORED first (OCF's rule, the
+    """An OCF container: the mimetype entry stored first (OCF's rule, the
     same one as ODF's), META-INF/container.xml naming the OPF, the OPF
     manifesting one chapter, and the chapter carrying the shared rich
-    vocabulary (headings, hyperlink, nested list) as XHTML."""
+    vocabulary (headings, hyperlink, nested list) as xhtml."""
     container = _XML_DECL + (
         f'<container version="1.0" xmlns="{_EPUB_CONTAINER_NS}">'
         '<rootfiles><rootfile full-path="OEBPS/content.opf"'
@@ -1164,7 +1164,7 @@ PDF_LINK_LABEL = f"Visit the {RICH_LINK_LABEL}"
 
 def generate_pdf_link() -> bytes:
     """A page whose only text sits under a /Link annotation with a /URI
-    action — pins [text](uri) in markdown output."""
+    action: pins [text](uri) in markdown output."""
     content = f"BT /F1 12 Tf 72 700 Td ({PDF_LINK_LABEL}) Tj ET".encode("ascii")
     annot = (
         b"<< /Type /Annot /Subtype /Link /Rect [72 695 200 715]"
@@ -1175,7 +1175,7 @@ def generate_pdf_link() -> bytes:
 
 
 def generate_pdf_twocol() -> bytes:
-    """A left column (x=50) and a right column (x=350), three lines each —
+    """A left column (x=50) and a right column (x=350), three lines each:
     the layout where weak reading order interleaves columns into single
     visual lines; the gate demands the columns as separate blocks in
     document order."""
@@ -1189,7 +1189,7 @@ def generate_pdf_twocol() -> bytes:
 
 
 def generate_pdf_heading() -> bytes:
-    """A 24pt line over 12pt body — heading detection keys off font size."""
+    """A 24pt line over 12pt body: heading detection keys off font size."""
     content = (
         f"BT /F1 24 Tf 50 700 Td ({RICH_H1}) Tj ET\n".encode("ascii")
         + b"BT /F1 12 Tf 50 660 Td (Revenue grew twelve percent.) Tj ET"
@@ -1198,7 +1198,7 @@ def generate_pdf_heading() -> bytes:
 
 
 def generate_pdf_blank() -> bytes:
-    """A single page with no content stream at all — the contentless shape:
+    """A single page with no content stream at all: the contentless shape:
     pdf_oxide's classify says ``"empty"`` (neither extract nor OCR), the
     anydoc backend says NeedsOcr. The gate pins the divergence as a
     documented fact, never a crash, never fabricated content."""
@@ -1213,10 +1213,10 @@ def generate_pdf_blank() -> bytes:
 
 def generate_pdf_scanned() -> bytes:
     """A single image-only page: a 64x64 grayscale FlateDecode image XObject
-    with VARYING pixel values (a deterministic gradient — a uniform raster
+    with varying pixel values (a deterministic gradient: a uniform raster
     reads as near-empty to the classifier, which is correct behavior, not
     the scanned shape), drawn by a `/Im0 Do` content stream, no text
-    operators — the scanned shape every engine must route to OCR
+    operators: the scanned shape every engine must route to OCR
     (pdf_oxide classify: ``"scanned"``, in ``pages_needing_ocr``; the anydoc
     backend: NeedsOcr naming it)."""
     image = zlib.compress(bytes((index * 7) % 256 for index in range(64 * 64)), 9)
@@ -1237,7 +1237,7 @@ def generate_pdf_scanned() -> bytes:
 
 
 def generate_pdf_mixed() -> bytes:
-    """Page 1 born-digital text, page 2 image-only — the mixed document:
+    """Page 1 born-digital text, page 2 image-only: the mixed document:
     classify must say ``["text", "scanned"]`` with ``pages_needing_ocr ==
     [1]`` (0-based), ``has_text`` true, ``image_only`` false; the text page
     still extracts locally."""
@@ -1263,7 +1263,7 @@ def generate_pdf_mixed() -> bytes:
 
 
 def generate_pdf_two_page() -> bytes:
-    """Two pages, one line each — pins page order, per-page text, and the
+    """Two pages, one line each: pins page order, per-page text, and the
     page_count probe."""
     c1 = "BT /F1 12 Tf 50 700 Td (first page line) Tj ET".encode("ascii")
     c2 = "BT /F1 12 Tf 50 700 Td (second page line) Tj ET".encode("ascii")
@@ -1282,8 +1282,8 @@ def generate_pdf_two_page() -> bytes:
 
 
 def generate_pdf_big(lines: int = 6000) -> bytes:
-    """One page, `lines` text-showing operators (~80 bytes each) — the
-    input-scaling cell for GIL bands and the eval runner's timing lane. NOT
+    """One page, `lines` text-showing operators (~80 bytes each): the
+    input-scaling cell for GIL bands and the eval runner's timing lane. Not
     committed to the corpus; built on demand."""
     sentence = "The transformer maintenance schedule covers 138kV oil-filled units."
     moves = ["BT", "/F1 12 Tf 50 750 Td"]
@@ -1297,27 +1297,27 @@ def generate_pdf_big(lines: int = 6000) -> bytes:
 
 # --- the registry ------------------------------------------------------------
 #
-# The CORPUS's five documents ride along (same bytes, no duplication) so the
+# The corpus's five documents ride along (same bytes, no duplication) so the
 # engine matrix covers every format the suite can build; the rich variants
 # add the structural depth the gates need. Markdown is deliberately absent:
-# it is already IR, not an engine format. The OOXML alias containers
-# (docm_rich/xlsm/ppsx_rich — the [Content_Types].xml rewrites above) are
+# it is already ir, not an engine format. The OOXML alias containers
+# (docm_rich/xlsm/ppsx_rich: the [Content_Types].xml rewrites above) are
 # fixture-covered: the engines convert them as their base kinds, resolved
-# under the base names. xlsb is deliberately NOT among them — its sheets
+# under the base names. xlsb is deliberately not among them: its sheets
 # are BIFF12 .bin streams, not worksheet XML, so genuine xlsb content is
 # refused (the name routes the Excel kind, vocabulary sugar only; the
 # refusal is pinned in the engines suite). The remaining vocabulary gap is
 # the legacy MS-binary trio (doc/xls/ppt): OLE compound files are not
-# hand-generatable without an Office writer, so no fixture pins them —
+# hand-generatable without an Office writer, so no fixture pins them:
 # their coverage rests on the crate-side routing-table test
 # (src/documents_impl.rs) and the mutation lane's typed-error contract,
-# and the README discloses them as uncovered.
+# and docs/documents.md discloses them as uncovered.
 #
 # The engines kinds' content oracle: EXPECTED_TEXT began as the five-document
 # corpus's extraction oracle; the matrix's own kinds (no stdlib reader, no
-# extract()) join it here as pure content oracles — the lines every
+# extract()) join it here as pure content oracles: the lines every
 # conversion must carry. tests/test_documents_engines.py's _oracle_lines
-# reads EXPECTED_TEXT FIRST, so these entries gate the kinds through the
+# reads EXPECTED_TEXT first, so these entries gate the kinds through the
 # existing matrix with no test-file edits. The update sits here, after the
 # RICH_* vocabulary the lines cite.
 
@@ -1381,9 +1381,9 @@ ENGINES_FILENAMES: dict[str, str] = {
     "pdf_two_page": "engines_two_page.pdf",
 }
 
-# The engines matrix's committed home: its own directory (NOT under
+# The engines matrix's committed home: its own directory (not under
 # tests/corpus/, whose pin test asserts that directory holds exactly the
-# five-document CORPUS — a sibling keeps both registries' pins independent).
+# five-document corpus: a sibling keeps both registries' pins independent).
 ENGINES_DIR = CORPUS_DIR.parent / "engines_corpus"
 
 

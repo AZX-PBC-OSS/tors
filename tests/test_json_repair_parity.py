@@ -5,10 +5,10 @@ https://github.com/mangiucugna/json_repair) pinned to json-repair==0.63.4
 (commit 251d141786d0f6ff561f6ec04d90188a338e2470). The pin is deliberate: a
 version bump is a parity re-sync request, not a drive-by upgrade. Mapping:
 ``tors.repair_json(raw, **kw) == json_repair.repair_json(raw, **kw)`` (and
-likewise for ``repair_json_loads``). This file owns the DESIGN §10
+likewise for ``repair_json_loads``). This file owns the design §10
 differential + hypothesis lanes: corpus equality over repair shapes, schema
 and strict-mode differentials, and seed-free hypothesis invariants over
-small deterministic mutations. Tors-native divergences (DESIGN §9) are never
+small deterministic mutations. Tors-native divergences (design §9) are never
 oracle-compared here; each exclusion cites its §9 number.
 """
 
@@ -93,7 +93,7 @@ _BASE_RAWS: list[str] = [
     r'{"bs": "\\\\", "m": "\\"k\\" \u201e x"}',  # backslash run +
     # delimiter unescape + smart quote in one body: exercises every
     # acc_pop repair arm against the oracle.
-    "[" + r"{\"k\": \"v\"}" * 48 + "]",  # escaped key AND value run
+    "[" + r"{\"k\": \"v\"}" * 48 + "]",  # escaped key and value run
     # in an array body: the heaviest escape-repair density, pinned.
     '{"n": {"d": {"x": True}}}',  # nested damage: deep Python literal
     'Answer is: [1, {"a": None}]',  # prose prefix: nested literal array
@@ -115,23 +115,23 @@ _BASE_RAWS: list[str] = [
     # lookahead memo shared across the run's many short string parses.
 ]
 
-# NOTE (§9.4): no fenced TOP-LEVEL SCALAR lives in _BASE_RAWS — tors recovers
+# note (§9.4): no fenced top-level scalar lives in _BASE_RAWS: tors recovers
 # them while the oracle returns "", so they can never be oracle-compared.
 CORPUS: list[tuple[str, dict[str, Any]]] = [(raw, {}) for raw in _BASE_RAWS] + [
     (raw, {"skip_json_loads": True}) for raw in _BASE_RAWS
 ]
 
-# Deliberately EXCLUDED from every schema differential below (§9.7 tors-native
+# Deliberately excluded from every schema differential below (§9.7 tors-native
 # behavior changes, pinned tors-side elsewhere, never oracle-compared here):
-# - typo keys remapped via the key-normalization/fuzzy ladder (§6.0-1) — §9.7
-# - date/date-time format normalization schemas (§6.3) — §9.7
-# - comma-split strings ("1, 2, 3" -> [1, 2, 3], oracle raises) (§6.1b) — §9.7
-# - digit-group separator strings ("1,234" -> 1234, oracle raises) (§6.1c) — §9.7
-# - string-enum near-misses (tors appends "Did you mean ...") (§6.2) — §9.7
+# - typo keys remapped via the key-normalization/fuzzy ladder (§6.0-1): §9.7
+# - date/date-time format normalization schemas (§6.3): §9.7
+# - comma-split strings ("1, 2, 3" -> [1, 2, 3], oracle raises) (§6.1b): §9.7
+# - digit-group separator strings ("1,234" -> 1234, oracle raises) (§6.1c): §9.7
+# - string-enum near-misses (tors appends "Did you mean ...") (§6.2): §9.7
 # - percent / currency / prose single-number extraction ("50%" -> 0.5 or 50
-#   by declared type, "USD 50" -> 50, oracle raises) (§6.1c tiers) — §9.7
+#   by declared type, "USD 50" -> 50, oracle raises) (§6.1c tiers): §9.7
 # - separator-ambiguous numerics under Auto (assume-en-US schema-checked;
-#   "1,234" on a number field -> 1234 + disclosure, oracle raises) — §9.7
+#   "1,234" on a number field -> 1234 + disclosure, oracle raises): §9.7
 SCHEMA_CORPUS: list[tuple[str, dict[str, Any]]] = [
     # coercion: integer 1 -> string "1"
     ('{"a": 1}', {"type": "object", "properties": {"a": {"type": "string"}}}),
@@ -191,8 +191,8 @@ SCHEMA_CORPUS: list[tuple[str, dict[str, Any]]] = [
 ]
 
 SCHEMA_VALUE_RAISE_CORPUS: list[tuple[str, dict[str, Any]]] = [
-    # pattern: "abc" violates "^\\d+$" — both raise ValueError; the validation
-    # message WORDING differs (§9.5 jsonschema-crate texts), so only the raise
+    # pattern: "abc" violates "^\\d+$": both raise ValueError; the validation
+    # message wording differs (§9.5 jsonschema-crate texts), so only the raise
     # itself is compared, never the message.
     (
         '{"a": "abc"}',
@@ -214,8 +214,8 @@ def _deep_schema(depth: int) -> dict[str, Any]:
 DEEP_SCHEMA: dict[str, Any] = _deep_schema(_DEEP_DEPTH)
 
 STRICT_CORPUS: list[str] = [
-    # The REAL upstream strict corpus (test_strict_mode.py): strict mode
-    # rejects structural ambiguity, not ordinary repairable damage —
+    # The real upstream strict corpus (test_strict_mode.py): strict mode
+    # rejects structural ambiguity, not ordinary repairable damage:
     # single quotes, trailing commas, truncation and plain-object
     # duplicate keys all repair fine upstream and are corpus cases, not
     # strict errors.
@@ -276,7 +276,7 @@ class TestDifferentialParity:
 
     def test_pattern_properties_extras_keep_input_order(self) -> None:
         # Extras emit at their input positions (upstream's value.items()
-        # pass) — pattern folds inline with kept extras, never regrouped.
+        # pass): pattern folds inline with kept extras, never regrouped.
         schema: dict[str, Any] = {"patternProperties": {"^x-": {"type": "string"}}}
         raw = '{"b": 1, "x-1": "a"}'
         assert tors.repair_json(raw, schema=schema, skip_json_loads=True) == (
@@ -308,7 +308,7 @@ class TestDifferentialParity:
     def test_deep_recursion_both_raise(self) -> None:
         # §9.6: tors normalizes deep nesting to ValueError at depth 200 while
         # the oracle raises RecursionError (uncaught) near the interpreter
-        # limit — both raise, types differ, so only the both-raise shape is
+        # limit: both raise, types differ, so only the both-raise shape is
         # compared, never messages.
         pytest.importorskip("jsonschema")
         with pytest.raises(ValueError):
@@ -320,10 +320,10 @@ class TestDifferentialParity:
         # §9.6 both-raise pin for the array-continuation merge chain
         # (`{"a":[0],` + `["b":[0],` * N): tors caps it at MAX_NESTING
         # fragments and the oracle at its own recursion limit, so at a size
-        # far past both thresholds each engine raises a ValueError — the
+        # far past both thresholds each engine raises a ValueError: the
         # differential signal that neither crashes. (A tors build without
         # the continuation guard dies with SIGSEGV here, which kills the
-        # process rather than failing the assertion — the native suite's
+        # process rather than failing the assertion: the native suite's
         # sub-2k sizes fail cleanly instead.)
         merge_chain = '{"a":[0],' + '["b":[0],' * 2_000 + "1]"
         with pytest.raises(ValueError):
@@ -336,9 +336,9 @@ class TestDifferentialParity:
     )
     def test_error_parity(self, raw: str) -> None:
         # skip_json_loads=True matches upstream's own strict-test spellings:
-        # duplicate-keys-in-array and empty-key inputs are VALID json.loads
+        # duplicate-keys-in-array and empty-key inputs are valid json.loads
         # input (last-wins duplicate handling; an empty key is legal JSON),
-        # so the strict raise only fires from the repair parser — the fast
+        # so the strict raise only fires from the repair parser: the fast
         # path would return them repaired on both sides. Types only, never
         # messages (§9.5 wording).
         with pytest.raises(ValueError):
@@ -352,8 +352,8 @@ class TestDifferentialParity:
 
 
 _base_text = st.text(
-    # BMP-only, no backslash: astral chars dump as surrogate-PAIR escapes
-    # and a mutation landing inside one leaves a LONE surrogate escape —
+    # bmp-only, no backslash: astral chars dump as surrogate-pair escapes
+    # and a mutation landing inside one leaves a lone surrogate escape:
     # the documented §9.2 divergence (Rust str cannot hold lone surrogates;
     # upstream preserves and re-emits them), unreachable by design here so
     # the mutation differential stays an honest port-bug detector. Escape
@@ -409,7 +409,7 @@ _QUOTEISH = ("'", '"', "`")
 
 
 def _mutate(s: str, seed: int) -> str:
-    """Apply ONE small deterministic damage step driven by ``seed``."""
+    """Apply one small deterministic damage step driven by ``seed``."""
     if not s:
         return s
     rng = random.Random(seed)
@@ -472,7 +472,7 @@ class TestExhaustiveStructuralSweep:
     lookahead-memo fixes were verified with: sharing one memo key across the
     `}`/`]`/ObjectKey/comma-classify sites, dropping upstream's
     backslash-adjacent write guard, and caching pairing-walk outcomes are
-    each only exact for ANCHORED scan starts — and the anchored-start
+    each only exact for anchored scan starts; and the anchored-start
     argument is over exactly these chars. A memo bug that flips one verdict
     diverges tors from the oracle on at least one of these raws.
     """
@@ -498,13 +498,13 @@ class TestHypothesisInvariants:
     @given(ascii_json_strategy)
     @settings(max_examples=200, deadline=None)
     def test_valid_input_serializer_parity(self, value: Any) -> None:
-        # WHY byte-exact: json.dumps with default separators (", ", ": ") and
+        # why byte-exact: json.dumps with default separators (", ", ": ") and
         # ensure_ascii=True already emits canonical JSON, and tors
         # re-serializes through its own canonical dumps, so valid canonical
         # input round-trips unchanged.
-        # The top-level EMPTY STRING is excluded: its canonical form '""'
-        # repairs to the bare '' sentinel — the nothing-recoverable
-        # spelling — which is upstream's own ambiguity (json_repair's
+        # The top-level EMPTY string is excluded: its canonical form '""'
+        # repairs to the bare '' sentinel: the nothing-recoverable
+        # spelling: which is upstream's own ambiguity (json_repair's
         # `if parsed_json == "": return ""` shortcut returns '' for '""'
         # too), not a serializer defect.
         assume(value != "")
@@ -523,7 +523,7 @@ class TestHypothesisInvariants:
     @given(json_strategy, st.integers(min_value=0, max_value=2**31 - 1))
     @settings(max_examples=100, deadline=None)
     def test_differential_on_mutations(self, value: Any, seed: int) -> None:
-        # RED-GREEN PROTOCOL: a failure here is either a port bug (fix in the
+        # red-green protocol: a failure here is either a port bug (fix in the
         # Rust repair parser/serializer) or a newly-classified divergence
         # (move the shape to an explicit exclusion with a §9 comment, the way
         # fenced scalars are excluded below for the §9.4 split).

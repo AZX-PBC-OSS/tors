@@ -1,7 +1,7 @@
 """Contract gate for the bytes-in surface: ``tors.decode_utf8`` and
 ``tors.finalize_utf8`` must be indistinguishable from the stdlib expressions they
 replace: ``raw.decode("utf-8", errors=...)`` and
-``finalize(raw.decode("utf-8", errors=...))``, over ARBITRARY bytes, including
+``finalize(raw.decode("utf-8", errors=...))``, over arbitrary bytes, including
 every ill-formed class (truncated tails, overlongs, lone continuations,
 surrogate-encoded sequences).
 
@@ -26,7 +26,7 @@ Decisions pinned here (the errors= contract, from the spec):
 - An ``errors`` value outside ``{"strict", "replace"}`` raises ``ValueError``:
   the closed-set-of-strings convention of ``unicodedata.normalize`` ("invalid
   normalization form"), not ``TypeError``: the value has the right type.
-- ``finalize_utf8`` accepts BOTH ``"strict"`` (default) and ``"replace"``: the
+- ``finalize_utf8`` accepts both ``"strict"`` (default) and ``"replace"``: the
   spec's own rationale is that this is "the shape an extraction pipeline wants
   (tolerant text reads use ``errors="replace"``)"; a strict-only ``finalize_utf8``
   would force replace reads back into the two-call shape the function exists to
@@ -34,7 +34,7 @@ Decisions pinned here (the errors= contract, from the spec):
   ``errors: "strict" = "strict"``; the deviation is documented in the report.)
 - The argument must be exactly ``bytes`` (``bytearray`` / ``memoryview`` / ``str``
   → ``TypeError``): pyo3's ``&[u8]`` extraction is a zero-copy borrow of an
-  IMMUTABLE ``PyBytes`` buffer, and the whole pass runs GIL-released, so a writable
+  immutable ``PyBytes`` buffer, and the whole pass runs GIL-released, so a writable
   buffer could be mutated by another thread mid-read, which is a data race, not a
   semantic difference. (``bytes.decode`` accepting bytearray is a GIL-held call;
   tors is not.)
@@ -103,7 +103,7 @@ class TestStrictParityOverArbitraryBytes:
         """The strict contract in one property: for any bytes, either both the
         stdlib and tors return the identical str, or both raise ``UnicodeDecodeError``
         with identical ``start`` / ``end`` / ``reason`` / ``str()`` / ``object`` /
-        ``encoding``: byte-exact results AND exception-exact failures."""
+        ``encoding``: byte-exact results and exception-exact failures."""
         try:
             expected = raw.decode("utf-8")
         except UnicodeDecodeError as expected_exc:
@@ -124,7 +124,7 @@ class TestStrictParityOverArbitraryBytes:
     @given(st.binary(max_size=64))
     @settings(max_examples=500)
     def test_replace_decode_is_byte_exact_with_stdlib_replace(self, raw: bytes) -> None:
-        """``errors="replace"`` parity: identical str, which pins the U+FFFD COUNT
+        """``errors="replace"`` parity: identical str, which pins the U+FFFD count
         and placement (the maximal-subpart semantics), not just "some
         replacement happened"."""
         assert decode_utf8(raw, errors="replace") == raw.decode("utf-8", "replace")
@@ -140,7 +140,7 @@ class TestMalformedShapeBattery:
         self, raw: bytes, because: str
     ) -> None:
         """Every ill-formed class, one pin per shape: tors's exception matches the
-        RUNNING interpreter's own ``decode`` exception field-for-field (so each
+        running interpreter's own ``decode`` exception field-for-field (so each
         CI matrix leg pins its own CPython's behavior), with the type pinned
         explicitly; raising some other exception, or returning wrong data, fails
         here."""
@@ -183,7 +183,7 @@ class TestMalformedShapeBattery:
     ) -> None:
         """``finalize_utf8`` relies only on the 300-example hypothesis
         property for its adversarial coverage, plausible but not
-        guaranteed to reproduce every SPECIFIC named ill-formed shape (the
+        guaranteed to reproduce every specific named ill-formed shape (the
         CESU-8 surrogate pair, the legacy 5-byte lead, ...). This runs the
         same deterministic battery ``decode_utf8`` is pinned against, so a
         regression scoped to ``finalize_utf8``'s own wrapper can't hide
@@ -212,8 +212,8 @@ class TestMalformedShapeBattery:
 
     def test_replace_counts_replacement_chars_like_cpython(self) -> None:
         # The measured CPython layouts: constraint violations (overlong,
-        # surrogate, out-of-range) emit ONE U+FFFD per byte; maximal subparts
-        # emit ONE for the whole subpart and keep the terminating byte.
+        # surrogate, out-of-range) emit one U+FFFD per byte; maximal subparts
+        # emit one for the whole subpart and keep the terminating byte.
         assert decode_utf8(_OVERLONG_THREE, errors="replace") == "\ufffd" * 3
         assert decode_utf8(_SURROGATE_ENCODED, errors="replace") == "\ufffd" * 3
         assert decode_utf8(_CESU8_SURROGATE_PAIR, errors="replace") == "\ufffd" * 6
@@ -324,7 +324,7 @@ class TestFinalizeUtf8Contract:
         assert finalize_utf8(text.encode("utf-8")) == finalize(text)
 
     def test_finalize_utf8_hash_is_of_the_normalized_decoded_text(self) -> None:
-        # The tail must hash the pipeline output over the DECODED text, not the
+        # The tail must hash the pipeline output over the decoded text, not the
         # raw bytes: "a \t\n" decodes and normalizes to "a", so the digest is
         # sha256("a"), pinned against the stdlib expression.
         normalized, digest = finalize_utf8(b"a \t\n")

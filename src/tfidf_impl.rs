@@ -23,7 +23,7 @@
 //! counting, the near-universal TF-IDF convention: `"Cat"` and `"cat"` are
 //! the same term.
 //!
-//! **TF** (per document `d`, term `t`): the RAW count of `t` in `d`,
+//! **TF** (per document `d`, term `t`): the raw count of `t` in `d`,
 //! `tf(t, d) = count of t in d`. Not length-normalized; a caller wanting
 //! `tf / len(d)` divides the returned raw count themselves (the raw count
 //! is the more broadly reusable primitive; normalizing here would silently
@@ -31,13 +31,13 @@
 //! itself useful).
 //!
 //! **IDF** (per term `t`, corpus size `N`, document frequency `df(t)` = the
-//! number of documents `t` appears in at least once): the SMOOTHED formula
+//! number of documents `t` appears in at least once): the smoothed formula
 //! `idf(t) = ln((1 + N) / (1 + df(t))) + 1`, scikit-learn's own default
 //! (`smooth_idf=True`: "the constant 1 is added to the numerator and
 //! denominator... as if an extra document was seen containing every term
 //! in the collection exactly once") rather than the textbook
 //! `ln(N / df(t))`. The unsmoothed formula gives a term
-//! appearing in EVERY document an IDF of exactly `ln(1) = 0`, so its
+//! appearing in every document an IDF of exactly `ln(1) = 0`, so its
 //! TF-IDF score is `0` regardless of how often it occurs, an unhelpfully
 //! sharp cliff for exactly the "practically universal term" case a caller
 //! most wants a small-but-nonzero weight for. Smoothing keeps that case
@@ -53,7 +53,7 @@
 //! document's list is alphabetical (`String`'s own `Ord`), a deterministic
 //! tie-break independent of any hash-map iteration order.
 //!
-//! What this is NOT: no stemming, no lemmatization, no stop-word removal,
+//! What this is not: no stemming, no lemmatization, no stop-word removal,
 //! no n-grams. It is a lightweight keyword-weighting/document-similarity
 //! primitive over real (lowercased) word tokens, not a full NLP pipeline
 //! stage.
@@ -89,7 +89,7 @@ fn term_counts(
 /// output always has `corpus.len()` entries).
 ///
 /// `strip_accents`/`stemmer` are `tokenize_impl::normalized_word_tokens`'s
-/// opt-in normalization knobs, both OFF by default (`false`/`None`
+/// opt-in normalization knobs, both off by default (`false`/`None`
 /// reproduce the original lowercase-only tokenization exactly).
 pub fn tf_idf(
     corpus: &[&str],

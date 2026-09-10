@@ -11,7 +11,7 @@ use crate::truncate_impl;
 /// `boundary="sentence"`, sentence) boundary at or before `max_chars`
 /// instead of mid-word/mid-sentence. Composes the crate's own
 /// `word_bounds`/`sentence_bounds` segmentation (`src/truncate_impl.rs`), no
-/// new dependency. The cut is ALSO never mid-grapheme-cluster: a
+/// new dependency. The cut is also never mid-grapheme-cluster: a
 /// word/sentence boundary that would split a cluster (e.g. Thai SARA AM,
 /// combining accents, ZWJ emoji sequences, regional-indicator flag pairs;
 /// `word_bounds` can score a combining mark as its own word-segment even
@@ -19,8 +19,8 @@ use crate::truncate_impl;
 /// valid cut point, so the result never separates a combining mark from its
 /// base. If no boundary fits at or before `max_chars` (a single
 /// word/sentence longer than the budget, or `max_chars == 0`), the fallback
-/// is a hard cut at the largest GRAPHEME boundary `<= max_chars`, still
-/// documented, not a surprise, and still cluster-safe. The result NEVER
+/// is a hard cut at the largest grapheme boundary `<= max_chars`, still
+/// documented, not a surprise, and still cluster-safe. The result never
 /// exceeds `max_chars` codepoints either way, though it can fall short of
 /// the budget when respecting a cluster boundary requires backing off
 /// further. The cut point is then trimmed of trailing whitespace
@@ -34,7 +34,7 @@ use crate::truncate_impl;
 /// before any work runs.
 ///
 /// GIL model: `detached_transform`'s shape. The str-in argument borrow, the
-/// segmentation scan and cut under `py.detach`, then either the ORIGINAL
+/// segmentation scan and cut under `py.detach`, then either the original
 /// object back (zero marshalling) or the O(output) truncated string.
 #[pyfunction(signature = (text, max_chars, boundary = "word"))]
 pub fn truncate_to_bounds(
@@ -54,17 +54,17 @@ pub fn truncate_to_bounds(
 }
 
 /// `tors.truncate_ellipsis(text, max_chars)`: the DB-column truncation
-/// shape — hard cut to at most `max_chars` codepoints plus a U+2026
+/// shape: hard cut to at most `max_chars` codepoints plus a U+2026
 /// `…` marker, never mid-grapheme-cluster. Unlike `truncate_to_bounds`
 /// there is no word/sentence awareness: a storage bound is positional, not
 /// semantic, and the marker tells the reader the value continues.
 ///
 /// Contract (`src/truncate_impl.rs`): `<= max_chars` codepoints comes back
-/// UNCHANGED (identity return, `is s` exactly when no truncation happens);
+/// unchanged (identity return, `is s` exactly when no truncation happens);
 /// otherwise the kept prefix is the largest cluster boundary at or before
 /// `max_chars - 1` plus the marker, so the result never exceeds
 /// `max_chars` (it falls short when cluster backoff requires it).
-/// `max_chars == 0` yields `""` — there is no room for even the marker —
+/// `max_chars == 0` yields `""` (there is no room for even the marker)
 /// and `max_chars < 0` raises `ValueError` before any work runs. No
 /// trailing-whitespace trim: the cut is positional.
 ///

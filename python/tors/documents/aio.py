@@ -1,15 +1,15 @@
 """The awaitable spellings of the documents surface, re-exported from the
 payload wheel (``tors_documents.aio``): the sync/async choice discipline is
-the base ``tors.aio``'s — the input-scaling functions (file read + parse +
+the base ``tors.aio``'s; the input-scaling functions (file read + parse +
 conversion) get ``asyncio.to_thread`` twins because a large document costs
-hundreds of milliseconds and the loop must never feel it; ``sniff``
-stays sync-only — a single short native pass (a container parse, not a
+hundreds of milliseconds and the loop must never feel it. ``sniff``
+stays sync-only: a single short native pass (a container parse, not a
 marker scan), where the thread hop would price the awaitable spelling
 above its value.
 
 Cancellation semantics (the payload aio module's, stated here because this
 re-export is the surface base-wheel callers hold): ``asyncio.to_thread``
-is uncancellable mid-pass — cancelling the awaiting task (or a
+is uncancellable mid-pass: cancelling the awaiting task (or a
 ``wait_for`` timeout) detaches the await only, while the underlying
 thread runs the native pass to completion, holding its memory, because
 the engines have no cancellation cooperation. Repeated timeouts against

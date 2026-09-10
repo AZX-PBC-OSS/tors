@@ -1,6 +1,6 @@
 //! Schema-guided repair and alignment: a port of json_repair's
 //! `schema_repair.py` + `parser_schema.py` + `utils/pattern_properties.py`
-//! with `json_repair`'s standard AND salvage modes (upstream:
+//! with `json_repair`'s standard and salvage modes (upstream:
 //! https://github.com/mangiucugna/json_repair by Stefano Baccianella, MIT,
 //! commit 251d141786d0f6ff561f6ec04d90188a338e2470), plus tors-native
 //! extensions and a different choice of validation engine.
@@ -25,7 +25,7 @@
 //!   package; tors uses the Rust `jsonschema` crate (drafts 4-2020-12,
 //!   auto-detected like upstream's `validator_for`). Each call compiles one
 //!   root validator plus fresh allOf-wrapped branch validators (union
-//!   branches keep `#/...` ref scope — the Python side's `evolve`
+//!   branches keep `#/...` ref scope: the Python side's `evolve`
 //!   equivalent); the prepared-for-validation schema normalizes draft-07
 //!   `items`-lists to `prefixItems` exactly like upstream's normalization.
 //!   Wording of validation failures follows the Rust crate (not the Python
@@ -33,7 +33,7 @@
 //!   schema mode (the Python side tolerates `NaN`, but JSON and serde_json
 //!   cannot represent it); `BigInt` beyond `u64` validates through `f64`
 //!   (lossy at the boundary only); `format` is never asserted (upstream
-//!   passes no `format_checker` either — parity).
+//!   passes no `format_checker` either: parity).
 //! - **tors-native repairs** (all recorded as diagnostics, all opt-out by
 //!   simply not using schema mode): the key-normalization ladder
 //!   (case/`snake`/`kebab`/`spaces` folding to an exact property) ahead of
@@ -52,8 +52,8 @@
 //! The repairer holds the root schema, the salvage flag, a
 //! `RefCell`-guarded diagnostics recorder, and the compiled root validator.
 //! All repair methods take `&self`: the `&mut`-through-`RefCell` recorder
-//! keeps the borrow checker satisfied WITHOUT cloning subschemas out of the
-//! tree — a line-by-line port would clone the schema at every `repair_value`
+//! keeps the borrow checker satisfied without cloning subschemas out of the
+//! tree: a line-by-line port would clone the schema at every `repair_value`
 //! call (`&mut` cannot coexist with the `&self.root` borrows), which would
 //! cost O(schema x nodes) memory on every repair. The recorder is a
 //! `RefCell` (not thread-shared: each repair constructs its own repairer
@@ -80,7 +80,7 @@ use crate::json_repair::{
 const MAX_SCHEMA_DEPTH: usize = 200;
 
 /// jaro-winkler score for the fuzzy key ladder (unique-best, target absent,
-/// loss-or-failure gating — see the repair_object docs), and the lower
+/// loss-or-failure gating: see the repair_object docs), and the lower
 /// report-only bar for both keys and enum members.
 const TYPO_REMAP_MIN: f64 = 0.75;
 const TYPO_REMAP_MARGIN: f64 = 0.05;
@@ -89,13 +89,13 @@ const SUGGEST_MIN: f64 = 0.60;
 // ============================================================
 // Locale-aware numeric coercion: CLDR separator data, two compiled
 // grammars, and the single-number extraction tier. Design invariants:
-// the value's separators resolve by WHICH grammar arm matched (never
+// the value's separators resolve by which grammar arm matched (never
 // post-hoc text guessing); a known locale's own separators are
 // normalized onto '.'/',' before parsing (data, not guessing); the
 // Auto default assumes en-US for the separator-ambiguous shapes, but
 // only schema-checked and disclosed (a reading the type or schema
 // rejects is not a candidate, and `locale=` always overrides), while
-// shapes no locale could resolve refuse with an actionable error — a
+// shapes no locale could resolve refuse with an actionable error: a
 // mis-fixed value silently corrupts by 1000x, so nothing is guessed
 // silently.
 // ============================================================
@@ -108,8 +108,8 @@ pub(crate) enum GroupSeparator {
     Space,
 }
 
-/// One resolved locale's number-separator convention — CLDR's decimal
-/// mark and grouping separator for the tag, or a caller's explicit dict —
+/// One resolved locale's number-separator convention (CLDR's decimal
+/// mark and grouping separator for the tag, or a caller's explicit dict),
 /// plus the locale's month-name table for date normalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocaleSpec {
@@ -119,7 +119,7 @@ pub struct LocaleSpec {
 
 impl LocaleSpec {
     /// The default convention (dot decimal, comma groups, English month
-    /// names) — the JSON spelling every locale shares.
+    /// names): the JSON spelling every locale shares.
     const DOT_COMMA: LocaleSpec = LocaleSpec {
         decimal: '.',
         grouping: GroupSeparator::Char(','),
@@ -143,7 +143,7 @@ impl LocaleSpec {
 /// the dot/comma convention; Lakh-style grouping (en-IN, en-PK) is
 /// unsupported and refused loudly rather than mis-read. The table is the
 /// CLDR number-symbols data for the locales LLMs actually emit numbers
-/// in — standard data, not a two-way invention.
+/// in: standard data, not a two-way invention.
 pub fn locale_spec_from_tag(tag: &str) -> Option<LocaleSpec> {
     let tag = tag.trim().to_lowercase().replace('_', "-");
     let mut parts = tag.split('-');
@@ -161,7 +161,7 @@ pub fn locale_spec_from_tag(tag: &str) -> Option<LocaleSpec> {
             grouping: GroupSeparator::Char('\u{2019}'),
         }),
         ("es", "419") | ("es", "mx") | ("es", "us") => Some(LocaleSpec::DOT_COMMA),
-        // Lakh grouping is a different grouping SHAPE, not a different
+        // Lakh grouping is a different grouping shape, not a different
         // separator: unsupported, and the error says so.
         ("en", "in") | ("en", "pk") => None,
         _ => match language {
@@ -189,7 +189,7 @@ pub fn locale_spec_from_tag(tag: &str) -> Option<LocaleSpec> {
 
 /// The shared script normalization: CJK fullwidth forms and Arabic-Indic
 /// digits onto ASCII, digit-group underscores dropped. An explicit table
-/// of the forms that ARE unambiguous digits and punctuation — not an
+/// of the forms that are unambiguous digits and punctuation: not an
 /// NFKC pass, which would also fold superscripts ("5²" -> "52") and
 /// corrupt values.
 fn normalize_script(text: &str) -> String {
@@ -210,10 +210,10 @@ fn normalize_script(text: &str) -> String {
         .collect()
 }
 
-/// Locale-aware normalization: the script pass, then the locale's OWN
+/// Locale-aware normalization: the script pass, then the locale's own
 /// decimal mark onto '.' and its grouping separator onto ','. After this,
 /// every locale's numbers are in the one canonical shape the grammars
-/// below parse — German "1,234" becomes "1.234" (the comma WAS the
+/// below parse: German "1,234" becomes "1.234" (the comma was the
 /// decimal), French "1 234,56" becomes "1,234.56".
 fn normalize_locale(text: &str, spec: &LocaleSpec) -> String {
     normalize_script(text)
@@ -236,16 +236,16 @@ fn normalize_locale(text: &str, spec: &LocaleSpec) -> String {
 }
 
 /// The number-token grammars, compiled once into linear-time automata
-/// (the `regex` crate: no backtracking class exists for these). STRUCTURAL
+/// (the `regex` crate: no backtracking class exists for these). Structural
 /// arms run in every mode because structure beats locale: repeated comma
-/// groups with an optional dot fraction (`1,234,567.89` — repetition
+/// groups with an optional dot fraction (`1,234,567.89`: repetition
 /// proves grouping, a decimal mark appears exactly once), one comma group
-/// plus a dot fraction (`1,234.56` — the dot proves the commas group),
-/// and the European mirror (`1.234,56` — dot groups, comma decimal).
-/// The KNOWN grammar adds the single comma group: with a locale in hand
+/// plus a dot fraction (`1,234.56`: the dot proves the commas group),
+/// and the European mirror (`1.234,56`: dot groups, comma decimal).
+/// The known grammar adds the single comma group: with a locale in hand
 /// the ambiguity is already resolved (its decimal mark was normalized),
-/// so `1,234` is one token. The plain arm runs LAST in both so ambiguous
-/// shapes fall through it and split into two tokens — the Auto refusal
+/// so `1,234` is one token. The plain arm runs last in both so ambiguous
+/// shapes fall through it and split into two tokens: the Auto refusal
 /// that keeps a wrong 1000x reading impossible.
 static NUMBER_TOKEN_AUTO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
@@ -268,9 +268,9 @@ static NUMBER_TOKEN_KNOWN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// One extracted number: the token with its separators resolved by the
-/// ARM that matched (the European arm drops dot groups and turns the
+/// arm that matched (the European arm drops dot groups and turns the
 /// comma into the decimal point; every other arm drops comma groups),
-/// and whether a `%` qualifies it — percent values coerce as fractions
+/// and whether a `%` qualifies it: percent values coerce as fractions
 /// ("50%" is 0.5, "200%" is 2).
 struct ExtractedNumber {
     token: String,
@@ -278,11 +278,11 @@ struct ExtractedNumber {
 }
 
 /// The single-number extraction tier: when a number-typed field holds a
-/// string that is not a number even modulo formatting, look for EXACTLY
-/// ONE number token in it — the model's answer with prose or symbols
+/// string that is not a number even modulo formatting, look for exactly
+/// one number token in it: the model's answer with prose or symbols
 /// around it ("$1,234.56", "USD 50", "about 50 dollars"). Zero tokens or
-/// more than one is genuinely ambiguous data ("between 10 and 20") and
-/// returns None — the value stays a string for validation to judge,
+/// more than one is ambiguous data ("between 10 and 20") and
+/// returns None: the value stays a string for validation to judge,
 /// never a guess. A lone `-` between prose and the token (after currency
 /// symbols and whitespace) negates it ("-$50.0" -> -50), the one sign
 /// position the grammar itself cannot see.
@@ -299,9 +299,9 @@ fn extract_single_number(text: &str, locale: NumericLocale) -> Option<ExtractedN
     let whole = first.get(0).expect("group 0 is the whole match");
     // A separator immediately before the match means the grammar dropped
     // a decimal marker (".5" -> "5"): the token is not the number the
-    // text carried — ".5" must never coerce to 5 on an integer field —
+    // text carried (".5" must never coerce to 5 on an integer field)
     // so no single number exists. (Grouping arms match their separators
-    // INSIDE the token, so this only fires on the dropped-marker shape.)
+    // inside the token, so this only fires on the dropped-marker shape.)
     if normalized[..whole.start()].ends_with(['.', ',']) {
         return None;
     }
@@ -326,14 +326,14 @@ fn extract_single_number(text: &str, locale: NumericLocale) -> Option<ExtractedN
     Some(ExtractedNumber { token, percent })
 }
 
-/// The European mirror convention (comma decimal, dot groups) — the
+/// The European mirror convention (comma decimal, dot groups): the
 /// second candidate in Auto mode's schema-checked ambiguity resolution.
 const EU_MIRROR: LocaleSpec = LocaleSpec {
     decimal: ',',
     grouping: GroupSeparator::Char('.'),
 };
 
-/// The regex metacharacters upstream's patternProperties subset does NOT
+/// The regex metacharacters upstream's patternProperties subset does not
 /// support: any pattern whose literal remainder uses one is skipped and
 /// reported through the unsupported list.
 const UNSUPPORTED_REGEX_TOKENS: [char; 14] = [
@@ -360,7 +360,7 @@ enum ExpectedType {
 
 /// The fate of one array item under schema repair: kept (the repaired
 /// value), dropped (salvage only, recorded), or failed (standard mode,
-/// the error propagates — upstream raises here).
+/// the error propagates: upstream raises here).
 enum ItemFate {
     Keep(Value),
     Drop,
@@ -446,7 +446,7 @@ impl SchemaRepairer {
     /// its own handle for the fast-path calls), diagnostics are recorded
     /// only when asked, and the draft-normalized root validator compiles
     /// once up front (compile failures surface as validation errors with
-    /// the compile message — the upstream "evolve lazily, surface late"
+    /// the compile message: the upstream "evolve lazily, surface late"
     /// shape, without the lazy machinery).
     pub(crate) fn new(
         root: Value,
@@ -454,7 +454,7 @@ impl SchemaRepairer {
         diagnostics: bool,
         locale: NumericLocale,
     ) -> Self {
-        // Upstream's deep-schema failures surface from VALIDATION recursion
+        // Upstream's deep-schema failures surface from validation recursion
         // (a 550-deep schema raises RecursionError inside is_valid/validate,
         // never inside repair): gate the schema's own nesting here so the
         // validator carries the normalized error from the start.
@@ -569,7 +569,7 @@ impl SchemaRepairer {
         match value {
             Value::Object(entries) => {
                 let config = object_schema_config(resolved);
-                // Properties first (present keys only — absent keys have no
+                // Properties first (present keys only: absent keys have no
                 // value to normalize).
                 for (key, prop) in &config.properties {
                     if let Some(slot) = entries.iter_mut().find(|(k, _)| k == key) {
@@ -629,7 +629,7 @@ impl SchemaRepairer {
 
     /// Suggest-only scan over a value that already validates: unknown keys
     /// with a confident ladder match are reported as hints, never remapped
-    /// (the value is valid as-is — additionalProperties allows them — so
+    /// (the value is valid as-is, additionalProperties allows them, so
     /// silence would hide probable typos, but rewriting valid input would
     /// break the is_valid contract). The repair path records its own
     /// suggests inline, so this covers exactly the fast-path-valid shape;
@@ -646,7 +646,7 @@ impl SchemaRepairer {
         // like the parent's own (pydantic v2 emits this shape for model
         // inheritance). oneOf/anyOf are deliberately not reached here:
         // which branch applies is value-dependent, and the fast path does
-        // not guess (upstream's fast path has the same reach — DESIGN §9).
+        // not guess (upstream's fast path has the same reach: design §9).
         for member in all_of_members(resolved) {
             self.suggest_scan(value, member, path, depth + 1);
         }
@@ -738,13 +738,13 @@ impl SchemaRepairer {
     }
 
     /// Drain the recorded diagnostics for `repair()`'s return (empty when
-    /// recording was off). Takes `&self` like every other method — the
+    /// recording was off). Takes `&self` like every other method: the
     /// recorder is interior-mutable by design.
     pub(crate) fn take_diagnostics(&self) -> Vec<Diagnostic> {
         self.recorded.borrow_mut().take().unwrap_or_default()
     }
 
-    /// Run `f` with the diagnostics log rolled back afterwards —
+    /// Run `f` with the diagnostics log rolled back afterwards:
     /// speculative repairs (fold-tier compatibility probes, union branches
     /// that may fail validation) must not leave records of actions whose
     /// result was discarded.
@@ -820,7 +820,7 @@ impl SchemaRepairer {
 
     /// The parser-facing resolver: `false` raises, `true` passes unguided,
     /// dicts return borrowed (borrowing `schema` when it has no `$ref`,
-    /// borrowing `self.root` through the chain otherwise — either way the
+    /// borrowing `self.root` through the chain otherwise: either way the
     /// lifetime is the caller's).
     pub(crate) fn resolve_schema<'a>(
         &'a self,
@@ -835,7 +835,7 @@ impl SchemaRepairer {
 
     /// Upstream's `is_object_schema`: the `type` keyword (string or list
     /// form) or the object-shape keywords. `true`/`false`/scalars are not
-    /// object schemas (never raises — the chain's `False` is a shape miss).
+    /// object schemas (never raises: the chain's `False` is a shape miss).
     pub(crate) fn is_object_schema(&self, schema: &Value) -> bool {
         let resolved = match self.resolve_chain(schema) {
             Ok(Chain::Schema(resolved)) => resolved,
@@ -870,8 +870,8 @@ impl SchemaRepairer {
         entries.iter().any(|(k, _)| k == "items")
     }
 
-    /// Upstream's `repair_value`: apply schema rules to a parsed value —
-    /// unions, coercions, containers, fills — then the enum/const tail.
+    /// Upstream's `repair_value`: apply schema rules to a parsed value:
+    /// unions, coercions, containers, fills: then the enum/const tail.
     pub(crate) fn repair_value(
         &self,
         value: Value,
@@ -961,7 +961,7 @@ impl SchemaRepairer {
     }
 
     /// Upstream's `_repair_union` (oneOf/anyOf): the first branch whose
-    /// repaired candidate also VALIDATES wins; each branch works on its own
+    /// repaired candidate also validates wins; each branch works on its own
     /// clone (upstream's per-branch deepcopy).
     fn repair_union(
         &self,
@@ -1032,7 +1032,7 @@ impl SchemaRepairer {
     }
 
     /// The repair side of double-serialized containers: a `Str` that parses
-    /// (strictly) to the expected container type is unwrapped in BOTH modes;
+    /// (strictly) to the expected container type is unwrapped in both modes;
     /// salvage additionally re-repairs a malformed string through the plain
     /// repair flow and takes the result when it lands the right shape.
     fn load_json_string_container(
@@ -1090,7 +1090,7 @@ impl SchemaRepairer {
 
     /// Upstream's `_repair_array`: string-container unwrapping, the
     /// non-list wrap, the single/tuple items pipeline, salvage item
-    /// dropping, the `minItems` gate — plus the tors-native comma-split
+    /// dropping, the `minItems` gate: plus the tors-native comma-split
     /// recovery, which wins only when upstream's wrap-singleton does not
     /// validate and the split does (tie: parity's wrap).
     fn repair_array(
@@ -1116,8 +1116,8 @@ impl SchemaRepairer {
                 let wrapped = pipeline(vec![other.clone()]);
                 // Tors-native 1b: the value stayed a string (it did not
                 // unwrap as a JSON container) and carries commas. If the
-                // schema actually guides items AND the split validates where
-                // upstream's wrap fails, the model meant a list — take the
+                // schema actually guides items and the split validates where
+                // upstream's wrap fails, the model meant a list: take the
                 // split. When both validate, parity's wrap wins; when
                 // neither does, the wrap's error propagates, also parity.
                 if let Value::Str(text) = &other
@@ -1199,7 +1199,7 @@ impl SchemaRepairer {
                     }
                     Some(Value::Bool(true)) | None => {
                         // Upstream extends with the normalized tail when
-                        // additionalItems is true OR ABSENT (only `false`
+                        // additionalItems is true or absent (only `false`
                         // drops tuple overflow).
                         out.extend(
                             tail.iter()
@@ -1248,7 +1248,7 @@ impl SchemaRepairer {
     }
 
     /// The repair-or-drop primitive for array items: salvage drops failures
-    /// (recorded), every other mode propagates them — upstream's exact
+    /// (recorded), every other mode propagates them: upstream's exact
     /// rule, with schema-definition errors always propagating.
     fn repair_or_drop(
         &self,
@@ -1276,11 +1276,11 @@ impl SchemaRepairer {
 
     /// Upstream's `_repair_object`: salvage list-to-object salvage + the
     /// root single-item unwrap, string-container unwrapping, the salvage
-    /// required-fills, the required gate, then the object assembly —
-    /// restructured in one deliberate way: extra-key RESOLUTION (pattern
+    /// required-fills, the required gate, then the object assembly:
+    /// restructured in one deliberate way: extra-key resolution (pattern
     /// matches, the normalization ladder, the fuzzy ladder, and the
-    /// additionalProperties keeps/drops) runs BEFORE the properties pass,
-    /// so a remapped typo lands on its property INSTEAD of being dropped
+    /// additionalProperties keeps/drops) runs before the properties pass,
+    /// so a remapped typo lands on its property instead of being dropped
     /// while the (absent) property takes a default. For every non-remap
     /// input the observable behavior is upstream's exactly.
     fn repair_object(
@@ -1293,8 +1293,8 @@ impl SchemaRepairer {
         let mut value = value;
         // Salvage list-to-object: upstream tries the positional map first
         // and falls back to the root single-item unwrap when the map
-        // refuses (same count required, per-key repair must succeed) —
-        // the `elif` belongs to the MAP ATTEMPT, not to the shape gate.
+        // refuses (same count required, per-key repair must succeed):
+        // the `elif` belongs to the map attempt, not to the shape gate.
         if self.salvage
             && let Value::Array(items) = &value
             && self.can_map_list_to_object(schema)
@@ -1361,9 +1361,9 @@ impl SchemaRepairer {
             }
         }
         // Extra-key resolution first (patterns, normalization ladder,
-        // fuzzy ladder, additionalProperties keeps/drops) — see the method
+        // fuzzy ladder, additionalProperties keeps/drops): see the method
         // docs for why this precedes the properties pass. The plan keeps
-        // INPUT order so the emission pass below reproduces upstream's
+        // input order so the emission pass below reproduces upstream's
         // value.items() ordering exactly (pattern folds inline with kept
         // extras, at their input positions).
         let mut extras: Vec<(String, Value, ExtraPlan)> = Vec::new();
@@ -1545,7 +1545,7 @@ impl SchemaRepairer {
     }
 
     /// Whether a list may salvage-map to an object: the schema allows
-    /// object, does NOT allow array. (Upstream's `_can_salvage_list_as_object`.)
+    /// object, does not allow array. (Upstream's `_can_salvage_list_as_object`.)
     fn can_map_list_to_object(&self, schema: &Value) -> bool {
         self.is_object_schema(schema) && !self.is_array_schema(schema)
     }
@@ -1588,16 +1588,16 @@ impl SchemaRepairer {
         Ok(Some(mapped))
     }
 
-    /// The two-tier key ladder (tors-native). Tier one is MECHANICAL: the
+    /// The two-tier key ladder (tors-native). Tier one is mechanical: the
     /// normalization fold (case + separator style) matching exactly one
     /// property is deterministic confidence, so it remaps whenever the
-    /// target is absent — permissive schemas included, because the
+    /// target is absent: permissive schemas included, because the
     /// un-remapped outcome strands real data on a dead key while the
     /// property takes its default. The rename is kept only when the value
-    /// can LIVE under the property (a speculative repair through the
+    /// can live under the property (a speculative repair through the
     /// property's schema succeeds): an incompatible value stays on its
-    /// original key — upstream's permissive-schema outcome — instead of
-    /// turning valid input into a coercion failure. Tier two is a GUESS
+    /// original key (upstream's permissive-schema outcome) instead of
+    /// turning valid input into a coercion failure. Tier two is a guess
     /// (jaro-winkler), so it remaps only when the alternative is loss or
     /// failure (`additionalProperties: false` would drop the key, or the
     /// property is required and the repair would fail); otherwise it
@@ -1664,9 +1664,9 @@ impl SchemaRepairer {
         Ladder::Nothing
     }
 
-    /// The fuzzy tier's remap gate: upstream would DROP the key
-    /// (`additionalProperties: false`) or FAIL the repair outright (the
-    /// property is required) — only then does a guess beat the default.
+    /// The fuzzy tier's remap gate: upstream would drop the key
+    /// (`additionalProperties: false`) or fail the repair outright (the
+    /// property is required): only then does a guess beat the default.
     /// (The mechanical fold tier is ungated by design; see `key_ladder`.)
     fn remap_allowed(
         &self,
@@ -1678,15 +1678,15 @@ impl SchemaRepairer {
             || required.iter().any(|name| name == target)
     }
 
-    /// The mechanical key pass for the strict fast path: walk a VALID value
+    /// The mechanical key pass for the strict fast path: walk a valid value
     /// alongside the schema and rename fold-matching keys onto their
-    /// properties (the deterministic tier only — fuzzy guessing never
+    /// properties (the deterministic tier only: fuzzy guessing never
     /// rewrites input that already validates). Without this pass, a
     /// permissive schema would shortcut `{"First Name": ...}` as "already
     /// valid" and strand the data on a dead key; with it, the model's
     /// separator/case slop is repaired on every path. A rename is kept
     /// only when the value is valid under the target property, so the
-    /// pass can never reduce validity — an incompatible value keeps its
+    /// pass can never reduce validity: an incompatible value keeps its
     /// original (valid) key.
     pub(crate) fn normalize_keys(
         &self,
@@ -1711,11 +1711,11 @@ impl SchemaRepairer {
             Value::Object(entries) => {
                 let config = object_schema_config(resolved);
                 // Collect renames before mutating: the target must be
-                // absent BOTH in the original keys and among earlier
+                // absent both in the original keys and among earlier
                 // renames (two slop spellings of one property must not
-                // create a duplicate key — first spelling wins, in
-                // document order). The value must also be VALID under the
-                // target property — this pass runs on already-valid input,
+                // create a duplicate key: first spelling wins, in
+                // document order). The value must also be valid under the
+                // target property: this pass runs on already-valid input,
                 // so a rename that would break validity (an incompatible
                 // type) is skipped and the key stays a valid extra,
                 // exactly upstream's permissive-schema outcome.
@@ -2139,7 +2139,7 @@ impl SchemaRepairer {
                     }
                     return Err(format!("Expected boolean at {path}."));
                 }
-                // Int/Float in (0, 1) — upstream compares Python-equality to
+                // Int/Float in (0, 1): upstream compares Python-equality to
                 // 0 and 1 (so 1.0 counts, 1.5 does not).
                 if let Some(number) = as_number(&value) {
                     if number == 0.0 {
@@ -2182,14 +2182,14 @@ impl SchemaRepairer {
     }
 
     /// The shared string-to-numeric coercion ladder for the integer and
-    /// number arms — one typed helper instead of two duplicated tails.
+    /// number arms: one typed helper instead of two duplicated tails.
     /// Tier 1: the whole string is the number. Tier 2: the string minus
-    /// unambiguous noise (underscores, script forms, and — with a known
-    /// locale — the locale's own separators normalized onto `.`/`,`).
+    /// unambiguous noise (underscores, script forms, and, with a known
+    /// locale, the locale's own separators normalized onto `.`/`,`).
     /// Tier 3: exactly one number token in the prose, percent suffixes
     /// coercing as fractions. Every tier records its action; the refusal
     /// that reaches the caller carries the retry-able reason (the error
-    /// is designed to be fed back to the model: WHAT failed, WHERE, and
+    /// is designed to be fed back to the model: what failed, where, and
     /// the disambiguation knob that would fix it).
     fn coerce_numeric_string(
         &self,
@@ -2288,11 +2288,11 @@ impl SchemaRepairer {
             }
         }
         // Tier 3: exactly one number token; a percent suffix is read by the
-        // DECLARED type — number fields hold the fraction ("50%" -> 0.5),
+        // declared type: number fields hold the fraction ("50%" -> 0.5),
         // integer fields hold the percent count ("50%" -> 50, the
         // progress-integer convention), and plain tokens keep the declared
         // type's spelling (an integer field gets the integer, a number
-        // field the float — Python's int()/float() typing).
+        // field the float: Python's int()/float() typing).
         if let Some(found) = extract_single_number(text, self.locale) {
             if !found.percent
                 && integral
@@ -2350,18 +2350,18 @@ impl SchemaRepairer {
             }
         }
         // Tier 4 (Auto only): the ambiguous shapes the strict grammar
-        // refuses. Assume en-US — the convention LLM output overwhelmingly
-        // follows — but let the schema CHECK the assumption first: both
+        // refuses. Assume en-US: the convention LLM output overwhelmingly
+        // follows, but let the schema check the assumption first: both
         // separator readings are extracted, parsed under the declared
         // type, and validated against the property schema; a reading the
         // type or schema rejects is not a candidate. One survivor is the
-        // deterministic answer; two survivors take the US reading WITH a
-        // disclosure diagnostic naming the DISCARDED reading's locale (the
+        // deterministic answer; two survivors take the US reading with a
+        // disclosure diagnostic naming the discarded reading's locale (the
         // assumption is never silent, and `locale=` always overrides it).
         if matches!(self.locale, NumericLocale::Auto) && text.chars().any(|c| c.is_ascii_digit()) {
             let mut candidates: Vec<(Value, &'static str)> = Vec::new();
             // Whether any grammar saw exactly one separated number token
-            // whose readings the declared type rejected — the only inputs
+            // whose readings the declared type rejected: the only inputs
             // where the locale knob could change the outcome (and so the
             // only ones the refusal suffix names it for).
             let mut separated_token_seen = false;
@@ -2457,7 +2457,7 @@ impl SchemaRepairer {
     }
 
     /// Upstream's `_apply_enum_const`: const is strict equality; enum is
-    /// membership (Python `==` via `py_eq` — so `1` satisfies `enum:
+    /// membership (Python `==` via `py_eq`, so `1` satisfies `enum:
     /// [1.0]`, upstream's real semantics). The tors-native "did you mean"
     /// suffix fires on enum misses against string members.
     fn apply_enum_const(&self, value: Value, schema: &Value, path: &str) -> Result<Value, String> {
@@ -2499,11 +2499,11 @@ impl SchemaRepairer {
 
 impl SchemaRepairer {
     /// Validate one instance against one (sub)schema. The resolved schema
-    /// that IS the root rides the precompiled root validator; every other
+    /// that is the root rides the precompiled root validator; every other
     /// subschema compiles fresh inside the root's `#/...` scope wrapper.
     /// Non-finite numbers reject (the boundary cannot represent them);
     /// compile failures surface their message. The final error carries the
-    /// instance path — the "why and where" reasoning over upstream's bare
+    /// instance path: the "why and where" reasoning over upstream's bare
     /// message.
     pub(crate) fn validate(&self, value: &Value, schema: &Value) -> Result<(), String> {
         match self.resolve_chain(schema) {
@@ -2568,7 +2568,7 @@ impl SchemaRepairer {
 }
 
 /// The enriched failure message: the crate's message plus the instance
-/// path (empty for root-level failures), so callers see what failed WHERE.
+/// path (empty for root-level failures), so callers see what failed where.
 fn validation_message(err: &jsonschema::ValidationError<'_>) -> String {
     let message = format!("{err}");
     let location = err.instance_path().to_string();
@@ -2579,7 +2579,7 @@ fn validation_message(err: &jsonschema::ValidationError<'_>) -> String {
     }
 }
 
-/// Closest STRING enum member by jaro-winkler at the report-only bar, or
+/// Closest string enum member by jaro-winkler at the report-only bar, or
 /// nothing (never auto-remap: an enum miss is the caller's data to fix,
 /// the suggestion is the help).
 fn closest_enum_member(value: &Value, members: &[Value]) -> Option<String> {
@@ -2633,7 +2633,7 @@ fn copy_json_value(value: &Value, path: &str, label: &str) -> Result<Value, Stri
 
 /// parser_schema.py's object config builder: owned clones keep the repairer
 /// borrows out of the parser's `&mut` (schemas are small; the cost is one
-/// compact clone per container parse — noted, accepted).
+/// compact clone per container parse: noted, accepted).
 pub(crate) fn object_schema_config(schema: &Value) -> ObjectSchemaConfig {
     let Value::Object(entries) = schema else {
         return ObjectSchemaConfig::default();
@@ -2647,7 +2647,7 @@ pub(crate) fn object_schema_config(schema: &Value) -> ObjectSchemaConfig {
         _ => None,
     };
     let additional_properties = get(entries, "additionalProperties").cloned();
-    // Upstream stores required as a Python set — duplicates collapse.
+    // Upstream stores required as a Python set: duplicates collapse.
     // The Vec keeps first-occurrence order (stable error messages) with
     // the same collapse.
     let required = match get(entries, "required") {
@@ -2672,7 +2672,7 @@ pub(crate) fn object_schema_config(schema: &Value) -> ObjectSchemaConfig {
     }
 }
 
-/// parser_schema.py's array config builder: the LIST-form `items` (draft-07
+/// parser_schema.py's array config builder: the list-form `items` (draft-07
 /// tuple validation) lands in `items_list`; the single-schema form in
 /// `items_schema`; neither is the "no guidance" case the parser treats as
 /// plain repair.
@@ -2761,7 +2761,7 @@ pub(crate) fn resolve_parser_array_schema<'r>(
 
 /// pattern_properties.py's port: the safe literal-plus-anchor subset.
 /// Anchored `^token` matches starts, `token$` ends, `^token$` equality, a
-/// bare token matches containment — anything whose literal remainder uses
+/// bare token matches containment: anything whose literal remainder uses
 /// regex metacharacters is skipped and reported through the unsupported
 /// list for the caller to note.
 pub(crate) fn match_pattern_properties(
@@ -2864,7 +2864,7 @@ fn synthesize_branch(schema: &Value, kind: &str) -> Value {
 
 /// The schema's own nesting depth (dict/array levels): upstream's
 /// deep-schema failures come from validation-side recursion, so the
-/// constructor gates the tree itself — a schema deeper than the cap can
+/// constructor gates the tree itself: a schema deeper than the cap can
 /// never validate, and carries the normalized error from the start.
 fn schema_nesting(value: &Value, depth: usize) -> usize {
     match value {
@@ -2922,7 +2922,7 @@ fn schema_type_allows(entries: &[(String, Value)], kind: &str) -> bool {
 /// The normalization fold behind the deterministic key ladder: lowercase,
 /// then drop every separator and whitespace char, so `first_name`,
 /// `first-name`, `First Name` and `FIRSTNAME` all fold to `firstname`.
-/// Only the exact one-property fold match remaps — everything else falls
+/// Only the exact one-property fold match remaps: everything else falls
 /// through to the fuzzy tier.
 fn fold_key(key: &str) -> String {
     key.to_lowercase()
@@ -2933,7 +2933,7 @@ fn fold_key(key: &str) -> String {
 
 /// The tors-native comma-split candidate parts: split on top-level commas,
 /// trimmed; empty parts stay (they fail validation naturally unless the
-/// items schema genuinely allows empty strings).
+/// items schema allows empty strings).
 fn comma_parts(text: &str) -> Vec<String> {
     text.split(',')
         .map(|part| part.trim().to_string())
@@ -2964,7 +2964,7 @@ fn rename_entry(value: &mut Value, from: &str, to: &str) {
 
 /// The emission plan for one non-property extra key, resolved during
 /// the resolution pre-pass (so key-ladder renames land before the
-/// properties pass) and consumed by the emission pass in INPUT order —
+/// properties pass) and consumed by the emission pass in input order:
 /// upstream's `value.items()` ordering, pattern folds inline.
 enum ExtraPlan {
     /// patternProperties matched: fold through the first schema, then the
@@ -2989,7 +2989,7 @@ fn extra_plan(config: &ObjectSchemaConfig) -> ExtraPlan {
 }
 
 /// Upstream re-raises `SchemaDefinitionError` (a ValueError subclass)
-/// out of its salvage-drop sites — a broken schema is the caller's bug,
+/// out of its salvage-drop sites: a broken schema is the caller's bug,
 /// not salvageable data. The Rust port carries errors as strings, so the
 /// §8 catalog's schema-definition messages are matched by prefix; the
 /// catalog is closed and pinned by tests.
@@ -3009,7 +3009,7 @@ fn is_schema_definition_error(message: &str) -> bool {
 }
 
 /// The effective-schema fan-out for the fast-path pre-passes: a resolved
-/// schema's `allOf` members — conjunctive guidance that applies exactly
+/// schema's `allOf` members: conjunctive guidance that applies exactly
 /// like the parent's own (pydantic v2 emits this shape for model
 /// inheritance). Empty for schemas without `allOf`.
 fn all_of_members(schema: &Value) -> Vec<&Value> {
@@ -3077,7 +3077,7 @@ fn date_format_of(format: &str) -> Option<DateFormat> {
 }
 
 /// The date parser's verdict: a successful parse (compare against the input
-/// to find the no-op case — the caller owns that comparison), an
+/// to find the no-op case: the caller owns that comparison), an
 /// irresolvable month/day ambiguity, or a non-date.
 enum DateOutcome {
     Normalized(String),
@@ -3085,14 +3085,14 @@ enum DateOutcome {
     Invalid,
 }
 
-/// The date/time normalization engine: jiff does ALL parsing and every
+/// The date/time normalization engine: jiff does all parsing and every
 /// calendar/clock validation (`strtime::parse` per shape, the civil
 /// `FromStr` parsers for ISO, `BrokenDownTime::to_date`/`to_time` as the
 /// validators, the civil types' ISO `Display` as the canonical output).
 /// tors contributes only the accept-list (a declarative table of shapes)
 /// and the one policy jiff cannot have: US vs day-first numeric dates,
-/// where BOTH shapes parsing is the ambiguity (jiff's own `%m` validation
-/// already rejects month 13, so "13/04/2024" only parses day-first — the
+/// where both shapes parsing is the ambiguity (jiff's own `%m` validation
+/// already rejects month 13, so "13/04/2024" only parses day-first: the
 /// \>12 disambiguation falls out of the library for free). Offset-bearing
 /// date-times normalize to UTC (the same instant, `Z` rendering);
 /// no-offset inputs keep their no-offset civil rendering; nothing is
@@ -3110,7 +3110,7 @@ static DATE_SHAPES: &[&str] = &[
 ];
 static US_SHAPE: &str = "%m/%d/%Y";
 static DAY_FIRST_SHAPE: &str = "%d/%m/%Y";
-// Space-separated date + clock, in EITHER date spelling (dash or slash).
+// Space-separated date + clock, in either date spelling (dash or slash).
 static DATETIME_SHAPES: &[&str] = &[
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d %H:%M:%S",
@@ -3128,8 +3128,8 @@ fn normalize_date(text: &str, format: DateFormat) -> DateOutcome {
     match format {
         DateFormat::Date => {
             // ISO first (jiff's own FromStr: strict two-digit padding,
-            // so "2024-3-5" stays untouched — while the strtime shapes
-            // below ARE padding-tolerant, so "2024/3/5" normalizes).
+            // so "2024-3-5" stays untouched, while the strtime shapes
+            // below are padding-tolerant, so "2024/3/5" normalizes).
             if let Ok(date) = text.parse::<jiff::civil::Date>() {
                 return DateOutcome::Normalized(date.to_string());
             }
@@ -3140,7 +3140,7 @@ fn normalize_date(text: &str, format: DateFormat) -> DateOutcome {
                     return DateOutcome::Normalized(broken.to_date().expect("checked").to_string());
                 }
             }
-            // Both numeric shapes parsing IS the ambiguity ("03/04/2024");
+            // Both numeric shapes parsing is the ambiguity ("03/04/2024");
             // jiff's %m validation already resolved every >12 case.
             let us = parse_shape(US_SHAPE, text).filter(|b| b.to_date().is_ok());
             let day_first = parse_shape(DAY_FIRST_SHAPE, text).filter(|b| b.to_date().is_ok());
@@ -3213,7 +3213,7 @@ fn normalize_uuid(text: &str) -> Option<String> {
 
 /// An integral f64 as its exact integer Value: within i64 range the cast
 /// is exact; beyond it, the exact decimal expansion of the binary value
-/// (Python's unbounded `int(float)` — `int(1e30)` is
+/// (Python's unbounded `int(float)`: `int(1e30)` is
 /// 1000000000000000019884624838656, never a saturating cast).
 /// Non-integral or non-finite input is None.
 fn integral_value(f: f64) -> Option<Value> {
@@ -3260,7 +3260,7 @@ fn parse_extracted(found: &ExtractedNumber, integral: bool) -> Option<Value> {
 
 /// Numeric value of an int/float-carrying `Value` for the boolean-coercion
 /// membership test (`1.0` counts as `1`; `True` reaches here only via the
-/// int lane — upstream excludes `bool` before this).
+/// int lane: upstream excludes `bool` before this).
 fn as_number(value: &Value) -> Option<f64> {
     match value {
         Value::Int(n) => Some(*n as f64),
@@ -3324,8 +3324,8 @@ fn to_serde(value: &Value, depth: usize) -> Result<serde_json::Value, String> {
 /// Upstream's `_prepare_schema_for_validation_node`, run over the schema
 /// `Value` into the validator's `serde_json` form: draft-07 `items`-lists
 /// become `prefixItems` (with `additionalItems` hoisted into `items`),
-/// everything else converts verbatim. This copy exists ONLY for
-/// validation — the repairer keeps the draft-07 spelling throughout.
+/// everything else converts verbatim. This copy exists only for
+/// validation: the repairer keeps the draft-07 spelling throughout.
 fn prepare_for_validation(schema: &Value, depth: usize) -> Result<serde_json::Value, String> {
     if depth > MAX_SCHEMA_DEPTH {
         return Err("Input schema nesting exceeds the supported schema recursion depth.".into());
@@ -3427,7 +3427,7 @@ mod tests {
                 .unwrap(),
             Value::Int(1)
         );
-        // Tier 2: unambiguous noise (underscores only — a comma that is not
+        // Tier 2: unambiguous noise (underscores only: a comma that is not
         // a proper group is the extraction tier's ambiguity to refuse).
         assert_eq!(
             r.repair_value(Value::Str("82_461_110".into()), &schema, "$")
@@ -3477,7 +3477,7 @@ mod tests {
                 .unwrap(),
             Value::Int(200)
         );
-        // Tier 4 (Auto): the type itself disambiguates — "1,234" has only
+        // Tier 4 (Auto): the type itself disambiguates: "1,234" has only
         // one integral reading (1234; 1.234 is not an integer).
         assert_eq!(
             r.repair_value(Value::Str("1,234".into()), &schema, "$")
@@ -3497,7 +3497,7 @@ mod tests {
         assert!(err.starts_with("Expected integer at $."));
         assert!(err.contains("ambiguous numeric format"));
         // Prose with several numbers (or none) gets upstream's plain
-        // rejection — the locale knob cannot change the outcome, so it
+        // rejection: the locale knob cannot change the outcome, so it
         // is not named.
         for plain in ["between 10 and 20", "0x10"] {
             let err = r
@@ -3505,7 +3505,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err, "Expected integer at $.", "{plain}: {err}");
         }
-        // Exactness: Python's int() is unbounded — big strings and big
+        // Exactness: Python's int() is unbounded: big strings and big
         // floats become exact BigInts, never saturating casts.
         let big_str_schema = obj(vec![("type", Value::Str("integer".into()))]);
         assert_eq!(
@@ -3578,7 +3578,7 @@ mod tests {
             Value::Float(1000.5)
         );
         // ...and "1,234" (both readings coherent) takes the disclosed
-        // en-US assumption, with the suggestion naming the DISCARDED
+        // en-US assumption, with the suggestion naming the discarded
         // reading's locale (suggesting the winner's own is a no-op).
         let r_fresh = SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Auto);
         let value = r_fresh
@@ -4219,7 +4219,7 @@ mod tests {
         }
         let diags = salvage.take_diagnostics();
         assert!(diags.iter().filter(|d| d.action == "remap_key").count() >= 4);
-        // A genuinely unknown key with no confident match drops cleanly.
+        // An unknown key with no confident match drops cleanly.
         let dropped = obj(vec![
             ("zzqx", Value::Str("x".into())),
             ("first_name", Value::Str("Ada".into())),
@@ -4341,7 +4341,7 @@ mod tests {
                 "$"
             )
             .unwrap(),
-            // Offset-bearing input normalizes to its UTC INSTANT: the
+            // Offset-bearing input normalizes to its UTC instant: the
             // same moment, jiff's rendering (minimal subsecond, Z).
             Value::Str("2024-03-15T09:00:00.5Z".into())
         );

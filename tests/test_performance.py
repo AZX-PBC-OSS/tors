@@ -306,7 +306,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 
 # ---------------------------------------------------------------------------
 # The chunking family's document-scale cost shape (#22): the per-call cost
-# must be the segmentation walks the function is FOR, not per-codepoint
+# must be the segmentation walks the function is for, not per-codepoint
 # structures built unconditionally. Load-fair ratios (both sides measured
 # in the same process, min-of-3 after warmup), so a shared-runner slowdown
 # inflates both sides together.
@@ -339,7 +339,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures() -> None:
     """The whole-document-budget custom-hierarchy cell from #22: a
     never-matching separator list under a budget that swallows the whole
-    text must cost ONE CODEPOINT COUNT and nothing else. Under the
+    text must cost one codepoint count and nothing else. Under the
     lazy-level pass the level is never consulted (the first window fits
     the entire document), so it is never built and never scanned -- the
     literal's scan does not run at all, where the pre-lazy spelling paid
@@ -366,7 +366,7 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
 
 def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii() -> None:
     """The laziness contract, on the input where it is load-bearing: for
-    NON-ASCII text a whole-text level build is a full segmentation walk
+    non-ASCII text a whole-text level build is a full segmentation walk
     (the grapheme index ~150ms at 12 MiB), so a call that never consults
     a level (never-matching separators, whole-document budget: no cuts
     to filter, no raw-cut window, no overlap snap) must build nothing.
@@ -393,7 +393,7 @@ def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii
 def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() -> None:
     """The default hierarchy's per-call cost contract: no more than its
     own UAX #29 walks (word_count + sentence_count on the same corpus,
-    measured in-process). The hierarchy IS those walks; everything around
+    measured in-process). The hierarchy is those walks; everything around
     them -- level construction, the cut filter, the chunk loop,
     marshalling -- must be marginal. Measured on this box (Linux, CPython
     3.13, ambient load 42-85, min-of-3 after warmup): ~3.6ms against a
@@ -405,7 +405,7 @@ def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() ->
     reference sum (ratio ~1.1), and the original pre-#22 spelling ~9.4x
     (the grapheme hash set dominated the segmentation it was filtering).
     The assertion is kept as the standing ceiling in the other direction:
-    whatever levels a budget DOES consult, the machinery around the
+    whatever levels a budget does consult, the machinery around the
     walks must not dominate them."""
     corpus = prose(12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
@@ -424,7 +424,7 @@ def test_chunk_hierarchical_default_hierarchy_builds_only_the_levels_the_budget_
     walks -- the expensive lower levels of the default hierarchy -- must
     never run at all. The load-fair reference is ``["\n\n"]``, a custom
     hierarchy whose single literal supplies an equivalent top level
-    WITHOUT the default hierarchy's lower levels: both sides pay the
+    without the default hierarchy's lower levels: both sides pay the
     same paragraph scan plus the same windowing, so the default spelling
     may only add marginal construction cost, never two more whole-text
     walks. Measured on this box (Linux, CPython 3.13, ambient load
@@ -476,7 +476,7 @@ def test_chunk_hierarchical_duplicate_separator_entries_are_deduped_not_rebuilt(
 
 
 def test_chunk_by_words_is_its_own_word_walk() -> None:
-    """chunk_by_words' per-call cost contract: the word walk it is FOR,
+    """chunk_by_words' per-call cost contract: the word walk it is for,
     plus only marginal machinery (the grapheme index build, the merge, the
     streaming token filter). Measured ~165ms against ~132ms of word_count
     (ratio ~1.25) after the fix; the former spelling measured ~14.6x."""
@@ -515,7 +515,7 @@ def test_chunk_by_paragraphs_absolute_band_holds() -> None:
     pre-fast-path per-char spelling measured ~10.4ms on this box at the
     same corpus; a CRLF-dense log ran 12.8ms there). The ceiling is 10ms
     (~25x margin over the new measurement), positioned so that a
-    regression back to the per-char decode loop FAILS this cell: the old
+    regression back to the per-char decode loop fails this cell: the old
     spelling's ~10.4ms blows straight through 10ms, where the former
     30ms ceiling would have absorbed it silently. This cell exists
     because the #28 codegen change moved this function's wall by +23-28%
@@ -543,7 +543,7 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
     measured ~13.6ms on this box at the same corpus (a CRLF-dense log:
     12.8ms). Ceiling 10ms (~25x margin over the new measurement),
     positioned so that a regression back to the per-char decode loop
-    FAILS it: the old spelling's ~13.6ms blows straight through 10ms,
+    fails it: the old spelling's ~13.6ms blows straight through 10ms,
     where the former 40ms ceiling would have absorbed it silently. The
     scan and the real-line filter are one pass with O(1) memory beyond
     the output, so only a class regression (a per-line allocation, a

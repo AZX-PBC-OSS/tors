@@ -6,7 +6,7 @@ interpreter's* ``unicodedata`` and ``re`` (the pipeline's original pure-Python
 spelling, unchunked), so the oracle is fully self-contained while still pinning tors
 against each interpreter's own Unicode tables. ``reference_finalize`` appends the
 SHA-256 tail a normalize-then-hash dedupe gate computes. The corpus builders are
-deterministic (no RNG), so every gap/wall number quoted in the test docstrings is
+deterministic (no rng), so every gap/wall number quoted in the test docstrings is
 reproducible byte-for-byte.
 """
 
@@ -88,7 +88,7 @@ _PROSE_SENTENCE = (
 
 # Same sentence with three decomposed accents (base letter + U+0301, built by
 # concatenation so the source stays ASCII), the composition-heavy corpus planned for
-# the consumer's loop-safety re-measure at swap-in time (spec M3).
+# the consumer's loop-safety re-measure at swap-in time (spec m3).
 _DECOMPOSED_SENTENCE = (
     "The quarte"
     + _COMBINING_ACUTE
@@ -103,7 +103,7 @@ _DECOMPOSED_SENTENCE = (
 # The decomposed sentence plus a compatibility ligature (U+FB01) and a
 # fullwidth digit (U+FF10) per unit, the corpus for the K-forms' full-pass
 # cells. Why it exists (a finding): the plain decomposed corpus carries
-# NO compatibility mappings, so under NFKC/NFKD it quick-checks Yes and the
+# no compatibility mappings, so under NFKC/NFKD it quick-checks Yes and the
 # identity-return fast path hands it back unchanged, so the D-forms' transform
 # band needs input that still pays the pass.
 _LIGATURE_FI = chr(0xFB01)
@@ -125,9 +125,9 @@ _COMPAT_SENTENCE = (
 )
 
 # Entity-bearing prose for tors.html_unescape's cells: the prose sentence shape
-# with nine HTML5 entity refs per ~131 chars (~7% density, dense but the
+# with nine html5 entity refs per ~131 chars (~7% density, dense but the
 # shape real escaped text produces). Pure ASCII on the wire (entities are);
-# the DECODED output is non-ASCII (e, copyright, nbsp, therefore), which is
+# the decoded output is non-ASCII (e, copyright, nbsp, therefore), which is
 # what makes the output-marshalling band of the GIL cells the interesting one.
 _ENTITY_SENTENCE = (
     "The quarterly &amp; field &lt;outage&gt; interval &quot;adjusted&quot; after "
@@ -163,7 +163,7 @@ def crlf(target_bytes: int) -> str:
 
 
 def entities(target_bytes: int) -> str:
-    """Prose dense with HTML5 entity refs (nine per sentence): the
+    """Prose dense with html5 entity refs (nine per sentence): the
     html_unescape corpus: ASCII in, non-ASCII decoded out."""
     return _repeat_to(target_bytes, _ENTITY_SENTENCE * 4 + "\n\n")
 
@@ -190,7 +190,7 @@ def corpus_utf8(kind: str, target_bytes: int) -> bytes:
 
 def corpus_b64(kind: str, target_bytes: int) -> str:
     """The ``kind`` corpus base64-encoded (standard alphabet, padded, ASCII), the
-    INPUT corpus for ``tors.b64_decode`` cells: decoding it yields the
+    input corpus for ``tors.b64_decode`` cells: decoding it yields the
     ``corpus_utf8`` bytes back, so the ``target_bytes`` semantics (the decoded
     size) stay comparable with every other corpus kind."""
     return base64.b64encode(corpus_utf8(kind, target_bytes)).decode("ascii")
@@ -200,7 +200,7 @@ def corpus_b64(kind: str, target_bytes: int) -> str:
 #
 # (a, b) string pairs for ``tors.diff_opcodes``'s wall and GIL cells, built from
 # the prose recipe so every size stays comparable with the rest of the suite's
-# corpora. ``benches/diff.rs`` builds the SAME pairs in Rust (from the shared
+# corpora. ``benches/diff.rs`` builds the same pairs in Rust (from the shared
 # ``prose`` recipe in ``benches/common/mod.rs``), and
 # tests/test_bench_corpus_parity.py pins the constants the two sides share, so
 # the bench numbers and the Python-side cell numbers cross-reference on the
@@ -212,7 +212,7 @@ def corpus_b64(kind: str, target_bytes: int) -> str:
 # different line.
 _DIFF_WORD_SWAP = ("quarterly", "monthly")
 
-# Edit positions as NON-dyadic line fractions, spelled as (numerator,
+# Edit positions as non-dyadic line fractions, spelled as (numerator,
 # denominator) pairs so the integer math mirrors the Rust side exactly:
 # n // 5, n // 3, (2 * n) // 3, (7 * n) // 9 for the four replaced lines,
 # n // 7 for the deleted line, (4 * n) // 9 for the inserted line. Dyadic
@@ -273,8 +273,8 @@ def diff_pair_shuffled(target_bytes: int) -> tuple[str, str]:
     lines permuted by the deterministic LCG Fisher-Yates shuffle. The
     many-opcode shape: the character-level diff of two same-content
     different-order corpora, which is what makes the O(ops) return-marshalling
-    band measurable (103,421 opcodes at 12 MiB, measured). NOTE: this pair is
-    EASY for the Myers engine: every line is unique (numbered), so the
+    band measurable (103,421 opcodes at 12 MiB, measured). Note: this pair is
+    easy for the Myers engine: every line is unique (numbered), so the
     preflight anchors them and the diff stays fast at every size."""
     a = prose(target_bytes)
     lines = [
@@ -291,13 +291,13 @@ def diff_pair_shuffled(target_bytes: int) -> tuple[str, str]:
 
 
 def diff_pair_char_shuffled(target_bytes: int) -> tuple[str, str]:
-    """``(a, b)``: the prose corpus vs the SAME CHARACTERS permuted by the
-    deterministic LCG Fisher-Yates, the genuinely HARD Myers shape. Where the
+    """``(a, b)``: the prose corpus vs the same characters permuted by the
+    deterministic LCG Fisher-Yates, the hard Myers shape. Where the
     line-shuffled pair's unique numbered lines give the preflight cheap
     anchors, a character permutation of prose has almost none (prose is
     dominated by a small alphabet), so the bounded search's work grows
     superlinearly with size; measured on the dev box, ambient load 2.7:
-    50k chars 0.33 s, 100k 1.06 s, and the ladder in the README's diff
+    50k chars 0.33 s, 100k 1.06 s, and the ladder in the api.md diff
     section (the cost curve ``deadline_ms`` exists to bound). The
     ``diff_opcodes`` deadline test's slow pair is built from this: small
     enough to build in milliseconds, hard enough that its unbounded diff
@@ -348,7 +348,7 @@ SEARCH_DENSE_PATTERNS: tuple[str, ...] = (
 # The sparse set: plausible terminology-scan words absent from the prose
 # sentence. Over the plain prose corpus nothing matches (the pure-scan shape
 # the bench measures); over the diff near-identical pair's edited side,
-# ``"monthly"`` (the swap word) appears exactly ONCE at 12 MiB (measured:
+# ``"monthly"`` (the swap word) appears exactly once at 12 MiB (measured:
 # the inserted line carries it; the builder's four replace positions all
 # land on the corpus's empty separator lines at that size, so they are
 # no-ops there; the diff builder's own fraction arithmetic, not a
@@ -359,10 +359,10 @@ SEARCH_SPARSE_PATTERNS: tuple[str, ...] = ("monthly", "weekly", "annually")
 # --- shared differential oracles -------------------------------------------------------
 #
 # The brute-force references and structural checkers that more than one gate
-# needs, in ONE place so the gates cannot drift apart: the leftmost-longest
-# search and replace oracles (pure-Python, CHARACTER space, independent of
+# needs, in one place so the gates cannot drift apart: the leftmost-longest
+# search and replace oracles (pure-Python, character space, independent of
 # every implementation detail on the tors side (bytes, automata, offset
-# mapping), and the difflib-shape opcode validity checker (works over ANY
+# mapping), and the difflib-shape opcode validity checker (works over any
 # token sequence: a ``str`` for the char-level diff, a ``list[str]`` of
 # lines for the line-level one).
 
@@ -371,7 +371,7 @@ def _lcs_len(a: str, b: str) -> int:
     """Longest-common-subsequence length by the classic O(len(a)·len(b))
     rolling-row DP: an algorithm sharing no machinery with ``similar``'s
     Myers engine, so agreement between the two is evidence about the
-    CONTRACT (M is maximal), not a shared bug."""
+    contract (M is maximal), not a shared bug."""
     if not a or not b:
         return 0
     prev = [0] * (len(b) + 1)
@@ -388,18 +388,18 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     """The pure-Python model of ``tors.is_grounded(fuzzy=True)``'s documented
     contract: the exact-containment floor, then the best ``2·M/T`` ratio over
     the same-length stride-``len(claim)//2`` windows of ``source`` (the
-    truncated tail window included), then — when the coarse best falls short
-    — the bounded refinement pass: the top 64 windows scoring >= 0.5 (by
+    truncated tail window included), then (when the coarse best falls short)
+    the bounded refinement pass: the top 64 windows scoring >= 0.5 (by
     ``(score, start)``, the streaming keep-K-largest set; the truncated tail
     competes like any other), each re-scanned at fine stride
     ``max(1, L // 16)`` across ``[w - L//2, min(w + L//2, n - L)]``, the grid
-    always extended to the range's upper end. Every coarse window is scored
-    — the implementation's early break at ``best >= threshold`` is
+    always extended to the range's upper end. Every coarse window is scored:
+    the implementation's early break at ``best >= threshold`` is
     verdict-equivalent, since ``best`` only ever rises and the comparison is
     the same at the end; likewise the refinement's best-first order and
     early break, so this model scans each candidate's full fine range and
     still lands on the identical verdict.
-    ``M`` here is the LCS length from the independent DP above, NOT
+    ``M`` here is the LCS length from the independent DP above, not
     difflib's anchored matching blocks: tors's ``M`` is the maximal one
     (``M == LCS`` exactly, the minimal-edit-script consequence of the
     Myers engine), so this oracle is exact on the repeated-character
@@ -428,7 +428,7 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
         start += stride
     if best >= threshold:
         return True
-    # The candidate set: top 64 by (score, start) — the same set the
+    # The candidate set: top 64 by (score, start): the same set the
     # implementation's streaming keep-K-largest maintains.
     candidates = sorted(band, key=lambda c: (c[0], c[1]), reverse=True)[:64]
     fine = max(m // 16, 1)
@@ -449,12 +449,12 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
 
 def reference_find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]:
     """The leftmost-longest oracle: a brute-force, non-overlapping reference,
-    O(len(text) · len(patterns)) over CHARACTER positions, pure Python ``str``
+    O(len(text) · len(patterns)) over character positions, pure Python ``str``
     operations (``startswith`` at an index is char-space by definition), so it is
     independent of every implementation detail on the tors side (bytes,
     automata, offset mapping). Among patterns matching at a position, the
     strictly-longer one replaces the current best, so an equal-length tie
-    (only possible for byte-identical duplicates) keeps the FIRST index."""
+    (only possible for byte-identical duplicates) keeps the first index."""
     matches: list[tuple[int, int, int]] = []
     pos = 0
     while pos < len(text):
@@ -474,8 +474,8 @@ def reference_find_patterns(patterns: list[str], text: str) -> list[tuple[int, i
 
 def reference_replace_many(text: str, replacements: dict[str, str]) -> str:
     """The simultaneous-replace oracle: brute-force leftmost-longest,
-    non-overlapping replacement over CHARACTER positions: at each position
-    the LONGEST key that matches wins (dict order cannot matter: two distinct
+    non-overlapping replacement over character positions: at each position
+    the longest key that matches wins (dict order cannot matter: two distinct
     keys of the same length can never both match at one position), the scan
     resumes at the consumed span, and replacement output is never re-scanned
     (the value is emitted and the scan moves on; the no-cascade rule).
@@ -506,14 +506,14 @@ def assert_opcodes_are_valid(
     b: str | list[str],
     ops: list[tuple[str, int, int, int, int]],
 ) -> None:
-    """The difflib-shape structural contract for an opcode list over ANY token
+    """The difflib-shape structural contract for an opcode list over any token
     sequence: ``a``/``b`` are the operands as sequences (a ``str`` for the
     character-level diff, a ``list[str]`` of lines for the line-level one;
     slicing and concatenation work identically for both): ranges monotone,
     contiguous and covering both sides, the tag set, difflib's alternation
     shape (never two non-equal ops adjacent), per-tag nonemptiness, equal ops
     carrying equal-length equal-content ranges, and full reconstruction of
-    BOTH operands from the ops."""
+    both operands from the ops."""
     rebuilt_a: list[str] = []
     rebuilt_b: list[str] = []
     prev_i = 0
@@ -552,8 +552,8 @@ def assert_opcodes_are_valid(
 
 def _joined(parts: list[str], whole: str | list[str]) -> bool:
     """Reconstruction check that works for both token shapes: char-level
-    (parts join to the whole STRING) and line-level (parts join to the whole
-    LINES list; a list operand's slices are themselves lists, so the parts
+    (parts join to the whole string) and line-level (parts join to the whole
+    lines list; a list operand's slices are themselves lists, so the parts
     are flattened one level first)."""
     if isinstance(whole, str):
         return "".join(parts) == whole

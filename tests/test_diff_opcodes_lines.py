@@ -1,20 +1,20 @@
-"""Contract gate for ``tors.diff_opcodes_lines``: the LINE-level spelling of
+"""Contract gate for ``tors.diff_opcodes_lines``: the line-level spelling of
 ``tors.diff_opcodes``: same engine (``similar``'s Myers), same opcode
 shape and validity contract, same ``deadline_ms`` machinery, but the operands
-are tokenized as LINES and the returned indices address lines, not characters.
+are tokenized as lines and the returned indices address lines, not characters.
 
-This function had NO dedicated Python-level test file before this one (a
+This function had no dedicated Python-level test file before this one (a
 coverage gap: only incidental coverage via the document corpus gate and the
 GIL-timing suite); this fills that gap directly, rather than trusting the
-Rust-internal battery alone to gate the PUBLIC contract.
+Rust-internal battery alone to gate the public contract.
 
-**The one contract detail worth stating loudly**: the tokenization is
+**The one contract detail to emphasize**: the tokenization is
 ``'\\n'``-only. ``a_lines``/``b_lines`` for reconstructing ``a[i1:i2]``-style
 slices from the returned indices must be built as ``a.split("\\n")`` with
-each piece's terminator reattached, NOT ``a.splitlines(keepends=True)``,
+each piece's terminator reattached, not ``a.splitlines(keepends=True)``,
 which additionally breaks on lone ``\\r``, ``\\v``, ``\\f``, and the Unicode
 line/paragraph separators. This is documented in ``docs/api.md``, the
-``lib.rs`` docstring, and the README; it is pinned here so the divergence is
+``lib.rs`` docstring, and the readme's quickstart; it is pinned here so the divergence is
 a visible, tested fact rather than a claim nobody checks.
 """
 
@@ -33,7 +33,7 @@ from reference import assert_opcodes_are_valid, diff_pair_near_identical
 
 def _tors_lines(text: str) -> list[str]:
     """The ``a_lines`` a caller must build to reconstruct ``diff_opcodes_lines``
-    indices: ``'\\n'``-terminated pieces, NOT ``str.splitlines()``.
+    indices: ``'\\n'``-terminated pieces, not ``str.splitlines()``.
 
     ``re.split(r"(?<=\\n)", text)`` is *almost* the recipe, but leaves a
     trailing empty string whenever ``text`` ends with ``'\\n'`` (the common
@@ -73,8 +73,8 @@ class TestReconstruction:
     def test_opcodes_reconstruct_both_sides_over_arbitrary_line_pairs(self, a: str, b: str) -> None:
         """The structural contract (contiguity, coverage, alternation,
         per-tag nonemptiness, equal-content equals, full reconstruction)
-        holds when ``a_lines``/``b_lines`` are built the WAY THE DOCS SAY
-        TO (``'\\n'``-split, not ``str.splitlines()``) over an alphabet
+        holds when ``a_lines``/``b_lines`` are built the way the docs say
+        to (``'\\n'``-split, not ``str.splitlines()``) over an alphabet
         that generates every line-boundary shape (empty lines, no trailing
         terminator, lines that are themselves just ``'\\n'``)."""
         ops = tors.diff_opcodes_lines(a, b)
@@ -97,7 +97,7 @@ class TestSplitlinesDivergenceIsReal:
     """The documented gap between tors's ``'\\n'``-only tokenization and
     Python's ``str.splitlines(keepends=True)``, demonstrated end-to-end: a
     caller who (incorrectly) reconstructs with ``str.splitlines()`` instead
-    of the documented recipe gets WRONG content back for non-LF line
+    of the documented recipe gets wrong content back for non-LF line
     terminators. This is not a bug; it is the pinned, intentional contract,
     but it must stay a *visible, tested* fact, not a silent trap."""
 
@@ -106,14 +106,14 @@ class TestSplitlinesDivergenceIsReal:
     ) -> None:
         a = "line1\rline2\rline3"
         b = "line1\rlineX\rline3"
-        # tors sees ONE line each (no '\n' anywhere) -> a single replace op
+        # tors sees one line each (no '\n' anywhere) -> a single replace op
         # spanning the whole (one-element) line vector.
         assert tors.diff_opcodes_lines(a, b) == [("replace", 0, 1, 0, 1)]
-        # Python's splitlines() sees THREE lines each.
+        # Python's splitlines() sees three lines each.
         assert a.splitlines(keepends=True) == ["line1\r", "line2\r", "line3"]
         assert b.splitlines(keepends=True) == ["line1\r", "lineX\r", "line3"]
         # A caller who reconstructs with splitlines() using tors's indices
-        # gets the WRONG slice: index (0, 1) over the 3-element splitlines()
+        # gets the wrong slice: index (0, 1) over the 3-element splitlines()
         # list is just "line1\r", not the whole text tors's op actually
         # describes. This is exactly why the docs say not to do that.
         wrong_reconstruction = "".join(a.splitlines(keepends=True)[0:1])
@@ -164,13 +164,13 @@ class TestDeterminism:
 # an expiry verdict afterward -- never a GIL reacquire in a polling loop,
 # since the whole call runs under one py.detach.
 #
-# The hard shape here is NOT diff_pair_char_shuffled's prose (that fixture
-# shuffles CHARACTERS of prose text -- a hard case for the CHAR-level
+# The hard shape here is not diff_pair_char_shuffled's prose (that fixture
+# shuffles characters of prose text -- a hard case for the char-level
 # engine, but character-shuffling also redistributes '\n' positions in a way
-# that tends to leave few, largely-distinct lines: easy at LINE grain, not
-# hard). The genuinely hard line-level shape -- mirrored from
-# src/diff_impl.rs's own line-level deadline test -- is many repeated SHORT
-# lines over a tiny alphabet, permuted at the CHARACTER level so the '\n'
+# that tends to leave few, largely-distinct lines: easy at line grain, not
+# hard). The hard line-level shape -- mirrored from
+# src/diff_impl.rs's own line-level deadline test -- is many repeated short
+# lines over a tiny alphabet, permuted at the character level so the '\n'
 # separators move too: almost no anchorable unique line records, the same
 # superlinear wall the char-level ladder measures, reached at a much smaller
 # corpus.
@@ -178,7 +178,7 @@ class TestDeterminism:
 
 def _line_shuffled_pair(repeats: int) -> tuple[str, str]:
     """``(a, b)``: ``"a\\nb\\nc\\n"`` repeated ``repeats`` times, and the same
-    text with every CHARACTER (including the ``'\\n'`` separators) permuted
+    text with every character (including the ``'\\n'`` separators) permuted
     by a deterministic LCG Fisher-Yates -- both sides tokenize to
     ``3 * repeats`` lines over a 3-character alphabet with almost no
     anchorable unique records, superlinear for the bounded Myers search."""

@@ -5,17 +5,17 @@
 //! The cost being amortized: each of `find_patterns` /
 //! `find_patterns_iter` / `count_matches` / `replace_many` /
 //! `replace_many_masked` builds its aho-corasick automaton (and the
-//! duplicate-id remap or first-value map) from the pattern list on EVERY
+//! duplicate-id remap or first-value map) from the pattern list on every
 //! call, linear in the total pattern bytes. For a one-off call that is
-//! the right shape; for a pipeline that runs the SAME fixed vocabulary
+//! the right shape; for a pipeline that runs the same fixed vocabulary
 //! (a redaction list, a terminology rewrite table) over many texts or
 //! many times, the build is a fixed cost the work keeps re-paying for an
 //! automaton it already had, and at a document scale with a large
 //! vocabulary it can dominate the scan itself. `CompiledPatterns` builds
-//! the automaton and the remaps ONCE (the same build, the same engine
+//! the automaton and the remaps once (the same build, the same engine
 //! configuration, `search_impl::CompiledPatterns`), holds them behind one
 //! `Arc`, and every call afterwards is the free function's scan classes
-//! MINUS the build: the scans are the free functions' own
+//! minus the build: the scans are the free functions' own
 //! (`search_impl::scan_matches` / the count scan /
 //! `scan_replace` / `scan_replace_masked`), driven over the held
 //! automaton, so parity is by construction and is pinned by
@@ -34,8 +34,8 @@
 //! question to get wrong.
 //!
 //! The one contract the compiled replace spellings add, validated at
-//! CALL time (values change per call; the automaton is the compiled
-//! part): the `replacements` dict must key EXACTLY the compiled pattern
+//! call time (values change per call; the automaton is the compiled
+//! part): the `replacements` dict must key exactly the compiled pattern
 //! set, every pattern paired with a value and no other keys. A key the
 //! automaton cannot match could never be honored (the free function
 //! would have built it in), and a pattern with no value could never be
@@ -61,9 +61,9 @@ use crate::search_impl;
 eager_iter_class! {
     /// `CompiledPatterns.find_iter(text)`: the streaming spelling of the
     /// compiled find (`find_patterns_iter`'s design over a compiled
-    /// fixture's matches: the whole scan under ONE detach at
+    /// fixture's matches: the whole scan under one detach at
     /// construction, one 3-tuple of ints per `__next__`,
-    /// `__length_hint__` the remaining count), yielding the SAME
+    /// `__length_hint__` the remaining count), yielding the same
     /// `(start, end, pattern_index)` triples as `find`, in the same order
     /// (pinned to sequence-parity by the compiled gate battery).
     CompiledFindIter, (usize, usize, usize)
@@ -86,9 +86,9 @@ pub struct CompiledPatterns {
 impl CompiledPatterns {
     /// `tors.CompiledPatterns(patterns)`: compiles `patterns` (exactly a
     /// `list` of `str`, the `find_patterns` argument contract: a tuple or
-    /// a non-`str` entry raises `TypeError`, an empty pattern STRING
+    /// a non-`str` entry raises `TypeError`, an empty pattern string
     /// raises `ValueError("empty pattern")`, lone surrogates raise
-    /// `UnicodeEncodeError` at the str-in boundary) ONCE: the automaton
+    /// `UnicodeEncodeError` at the str-in boundary) once: the automaton
     /// build, the remaps, and the owned pattern copies, under one
     /// `py.detach`. An empty list is legal and compiles to a
     /// zero-pattern fixture whose scans find nothing (the free
@@ -99,7 +99,7 @@ impl CompiledPatterns {
     fn new(py: Python<'_>, patterns: &Bound<'_, PyList>) -> PyResult<Self> {
         // The shared pattern-list walk (`_borrow.rs`'s soundness story:
         // handles alive across the detach by construction), patterns
-        // refused empty, then ONE detached build.
+        // refused empty, then one detached build.
         let core = borrow_str_list(patterns, EmptyPolicy::Refuse, |_items, borrowed| {
             py.detach(|| search_impl::CompiledPatterns::build(borrowed))
                 .map_err(|err| PyValueError::new_err(err.to_string()))
@@ -122,7 +122,7 @@ impl CompiledPatterns {
 
     /// `cp.find(text)`: `find_patterns(patterns, text)`'s exact answer
     /// over the held automaton: the same leftmost-longest,
-    /// non-overlapping matches, the same PYTHON `str` INDEX offsets (the
+    /// non-overlapping matches, the same Python `str` index offsets (the
     /// ASCII fast path and the byte→char conversion pass alike), the same
     /// first-index duplicate reporting. Argument contract:
     /// `find_patterns`' text side exactly (exactly `str`; lone surrogates
@@ -155,7 +155,7 @@ impl CompiledPatterns {
 
     /// `cp.find_iter(text)`: `find_patterns_iter(patterns, text)`'s exact
     /// sequence over the held automaton: the whole scan fills an internal
-    /// buffer under ONE detach at construction, then one 3-tuple of ints
+    /// buffer under one detach at construction, then one 3-tuple of ints
     /// per `__next__` (µs-scale GIL holds), `__length_hint__` the
     /// remaining count, the streaming answer to `find`'s O(matches)
     /// list-marshalling caveat.
@@ -177,12 +177,12 @@ impl CompiledPatterns {
 
     /// `cp.replace_many(text, replacements)`: `tors.replace_many(text,
     /// replacements)`'s exact answer over the held automaton, with the
-    /// SAME leftmost-longest, non-overlapping, never-rescanned splice and
-    /// the SAME identity contract (`cp.replace_many(s, m) is s` exactly
+    /// same leftmost-longest, non-overlapping, never-rescanned splice and
+    /// the same identity contract (`cp.replace_many(s, m) is s` exactly
     /// when `== s`), plus the one compiled-side contract: `replacements`
     /// (exactly a `dict` of `str -> str`, the free function's argument
-    /// contract) must key EXACTLY the compiled pattern set, validated at
-    /// CALL time (values change per call; the automaton is the compiled
+    /// contract) must key exactly the compiled pattern set, validated at
+    /// call time (values change per call; the automaton is the compiled
     /// part): an unknown key or a pattern left without a value raises
     /// `ValueError` naming them, the exact set makes the answer equal to
     /// the free function's by construction.
@@ -221,9 +221,9 @@ impl CompiledPatterns {
     }
 
     /// `cp.replace_many_masked(text, replacements, mask="*")`: the
-    /// LENGTH-PRESERVING spelling, `tors.replace_many_masked`'s exact
+    /// length-preserving spelling, `tors.replace_many_masked`'s exact
     /// answer over the held automaton: the same scan, each matched span
-    /// replaced by the value truncated to the span's CHARACTER count or
+    /// replaced by the value truncated to the span's character count or
     /// padded with `mask`, so every pre-computed offset stays valid.
     /// `mask` must be exactly one character (`ValueError` otherwise, the
     /// free function's own refusal); the replacements contract and the

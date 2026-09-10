@@ -1,19 +1,19 @@
 //! Hierarchical fallback chunking: the pure-Rust core of
 //! `tors.chunk_hierarchical`, the `chunk_text`/`chunk_by_*` family's fourth
-//! shape: a PRIORITY-ORDERED list of separator levels, coarsest first,
+//! shape: a priority-ordered list of separator levels, coarsest first,
 //! tried in order for each chunk: the same pattern LangChain's
 //! `RecursiveCharacterTextSplitter` popularized (default separators
 //! `["\n\n", "\n", " ", ""]`, literal strings, falling back to the next
 //! level only when the coarser one has no in-budget cut).
 //!
 //! Split into its own file rather than folded into [`crate::chunk_impl`] or
-//! [`crate::chunk_by_segment_impl`]: this is a genuinely different
-//! algorithm from both siblings, a MULTI-LEVEL search per chunk, not a
+//! [`crate::chunk_by_segment_impl`]: this is a different
+//! algorithm from both siblings, a multi-level search per chunk, not a
 //! single boundary list, and it earns its own "one concern per file" home
 //! the same separation unit-count chunking already has.
 //!
-//! DEFAULT hierarchy (`separators = None`): paragraph → sentence → word →
-//! grapheme-safe raw cut, reusing tors's OWN accurate segmenters
+//! Default hierarchy (`separators = None`): paragraph → sentence → word →
+//! grapheme-safe raw cut, reusing tors's own accurate segmenters
 //! ([`crate::chunk_by_segment_impl::paragraph_bounds`],
 //! [`crate::segmentation_impl::sentence_bounds`],
 //! [`crate::segmentation_impl::word_bounds`]) rather than the naive literal
@@ -21,39 +21,39 @@
 //! tors already has real UAX #29 segmentation, so the default hierarchy
 //! uses it.
 //!
-//! CUSTOM hierarchy (`separators = Some(list)`): a caller-supplied list of
-//! LITERAL strings (not regex, a documented scope line: literals are
+//! Custom hierarchy (`separators = Some(list)`): a caller-supplied list of
+//! literal strings (not regex, a documented scope line: literals are
 //! LangChain's own default too, cover the motivating markdown-header case
 //! completely, and avoid reopening the regex-semantics question this crate
-//! already navigated once for `re`). REPLACES the default hierarchy
+//! already navigated once for `re`). Replaces the default hierarchy
 //! entirely for the levels it specifies. The grapheme-safe raw cut is
-//! ALWAYS appended as an implicit final level regardless of what the
+//! always appended as an implicit final level regardless of what the
 //! caller passes: "never fails to produce a chunk" is an unconditional
 //! guarantee here, not something a caller can accidentally break by
 //! forgetting a sentinel (LangChain's own convention requires an explicit
 //! trailing `""`; tors does not require this, and ignores a trailing `""`
 //! if one is passed, since the raw cut already covers that case).
 //!
-//! A `None` ENTRY in an otherwise-literal list splices the default
-//! hierarchy's three accurate levels in AT THAT POSITION: the mix the
+//! A `None` entry in an otherwise-literal list splices the default
+//! hierarchy's three accurate levels in at that position: the mix the
 //! all-or-nothing custom list could not express before. The motivating
 //! shape is line-oriented text that must never split mid-line but whose
-//! oversized lines still deserve ACCURATE fallback cuts — a chat thread,
+//! oversized lines still deserve accurate fallback cuts: a chat thread,
 //! one message per line: `["\n", None]` is line → paragraph → sentence →
 //! word → raw cut, where the sentence/word levels below the line level
 //! are the real UAX #29 segmenters, not the `". "`/`" "` literal guesses
 //! an all-literal `["\n", ". ", " "]` list would pin them to (the guesses
-//! cut inside "U.S. team"; the segmenters do not — the exact reason the
+//! cut inside "U.S. team"; the segmenters do not: the exact reason the
 //! default hierarchy exists). `[None]` is therefore identical to
-//! `separators = None`. Cost stated plainly: every level — each of the
-//! three default walks, each distinct custom literal — pays its one
-//! whole-text walk AT MOST once per call, and ONLY when a window
+//! `separators = None`. Cost: every level (each of the
+//! three default walks, each distinct custom literal) pays its one
+//! whole-text walk at most once per call, and only when a window
 //! actually consults it: levels are built on first consultation (the
 //! window loop walks the list strictly through `find_map`, in priority
 //! order), so a budget that never falls past the paragraph level never
 //! runs the sentence or word walks at all, and a whole-document budget
 //! that never cuts pays nothing but the codepoint count. Duplicate
-//! entries — `None` or a repeated literal — are recognized at list
+//! entries (`None` or a repeated literal) are recognized at list
 //! construction and skipped, inert by the `find_map` dominance
 //! argument (identical levels can never change the answer: the first
 //! occurrence of a level always dominates its duplicate), so neither
@@ -63,18 +63,18 @@
 //! the dedup and the deferral close both spellings under the #21
 //! pathological-input discipline, memoized like #24's lazy bitmap.
 //!
-//! UNLIKE [`crate::chunk_impl::chunk_text`] (a lossless covering
-//! partition), this is NOT lossless: at every level except the raw-cut
-//! fallback, the separator itself is DROPPED between chunks (the chunk
+//! Unlike [`crate::chunk_impl::chunk_text`] (a lossless covering
+//! partition), this is not lossless: at every level except the raw-cut
+//! fallback, the separator itself is dropped between chunks (the chunk
 //! ends where the separator starts, the next chunk begins where it ends),
 //! the same convention [`crate::chunk_by_segment_impl::chunk_by_paragraphs`]
-//! already established for blank-line runs. Joining the chunks does NOT
+//! already established for blank-line runs. Joining the chunks does not
 //! reproduce the input; that was already true of the unit-count family and
-//! stays true here for the same reason (a caller asking to split ON a
+//! stays true here for the same reason (a caller asking to split on a
 //! marker wants it gone, not duplicated).
 //!
-//! Performance: every CONSULTED level's candidate cut-position list is
-//! computed at most once per call — at the level's FIRST consultation
+//! Performance: every consulted level's candidate cut-position list is
+//! computed at most once per call: at the level's first consultation
 //! (`find_map` reaches levels strictly in priority order, so a level no
 //! window ever needs is never scanned at all: one `paragraph_bounds`/
 //! `sentence_bounds`/`word_bounds` walk or one `memchr::memmem` pass
@@ -85,22 +85,22 @@
 //! the budget arithmetic needs is one branchless byte pass (every UTF-8
 //! codepoint starts at a non-continuation byte), not a materialized
 //! `Vec<char>`. The one other whole-text structure is the grapheme boundary
-//! index (see [`GraphemeIndex`]): ONE `graphemes(true)` walk emitting one
-//! bit per codepoint on non-ASCII text — or, on pure-ASCII text, an
+//! index (see [`GraphemeIndex`]): one `graphemes(true)` walk emitting one
+//! bit per codepoint on non-ASCII text: or, on pure-ASCII text, an
 //! all-ones bitmap plus the CRLF fixup, two SIMD byte scans, no
-//! segmentation walk at all — built at most once per call and ONLY when a
-//! call actually needs it — a consulted level with cuts to filter, the raw-cut
+//! segmentation walk at all: built at most once per call and only when a
+//! call actually needs it: a consulted level with cuts to filter, the raw-cut
 //! fallback, or an overlap snap; a custom hierarchy whose literals never
 //! match (the whole-document-budget case) builds none of it. The former
 //! spelling paid an unconditional `Vec<char>` collect plus a
-//! `HashSet<usize>` of every grapheme boundary in the document BEFORE
+//! `HashSet<usize>` of every grapheme boundary in the document before
 //! anything else could run, which dominated document-scale cost and was
 //! superlinear on top of it (#22: a 12 MiB document spent ~1.2 s in
 //! ~12.6M hashed inserts regardless of chunk budget or separator
 //! presence), and the eager level spelling paid every level's walk up
 //! front even when the budget never consulted it (a 2000-codepoint
 //! budget over 12 MiB of prose ran the sentence and word walks, ~190 ms
-//! and ~130 ms, to answer every window at the paragraph level — the
+//! and ~130 ms, to answer every window at the paragraph level: the
 //! deferral is what makes the default hierarchy at a paragraph-scale
 //! budget cost its paragraph walk and nothing else). Forward progress is pinned the
 //! same way [`crate::chunk_impl::chunk_text_overlapping`]'s is: a hard
@@ -124,7 +124,7 @@ struct Level {
 }
 
 impl Level {
-    /// The largest `(cut_end, next_start)` with `cut_end <= limit` AND
+    /// The largest `(cut_end, next_start)` with `cut_end <= limit` and
     /// `cut_end > after` (genuine forward progress): `None` if this level
     /// has no such candidate for the current window.
     fn best_cut(&self, after: usize, limit: usize) -> Option<(usize, usize)> {
@@ -148,9 +148,9 @@ fn level_from_contiguous_bounds(bounds: Vec<(usize, usize)>) -> Level {
 }
 
 /// [`paragraph_bounds`] into a [`Level`]: unlike word/sentence bounds,
-/// consecutive paragraph segments are NOT contiguous (the blank-line run
+/// consecutive paragraph segments are not contiguous (the blank-line run
 /// between them is excluded from both): the cut is the current
-/// paragraph's `end`, the next chunk resumes at the FOLLOWING paragraph's
+/// paragraph's `end`, the next chunk resumes at the following paragraph's
 /// `start`, dropping the gap. The last paragraph has no following segment
 /// and contributes no cut (nothing to fall back into past the end of the
 /// text; the caller's final-chunk case handles running to `total`).
@@ -167,7 +167,7 @@ fn level_from_paragraph_bounds(bounds: Vec<(usize, usize)>) -> Level {
 /// (the separator is not part of either chunk), the next chunk resumes at
 /// the match end (the separator is dropped, the same convention
 /// [`level_from_paragraph_bounds`] already applies to blank-line runs).
-/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way —
+/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way:
 /// std's `match_indices` runs the same algorithm without the SIMD skip
 /// and crawls on degenerate repeated-byte documents), converted from byte
 /// to codepoint offsets in the same forward walk (no second pass).
@@ -180,7 +180,7 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
         // than a pathological infinite-candidate one.
         return Level { cuts: Vec::new() };
     }
-    // Every match of a literal needle IS the needle: its char length is a
+    // Every match of a literal needle is the needle: its char length is a
     // loop-invariant, counted once.
     let sep_chars = separator.chars().count();
     let mut cuts = Vec::new();
@@ -198,18 +198,18 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 }
 
 /// The default hierarchy's three accurate levels, in coarsest-first
-/// order — the splice a `None` entry in a custom `separators` list
+/// order: the splice a `None` entry in a custom `separators` list
 /// inserts at its position, and the whole hierarchy when `separators` is
 /// `None`. One whole-text walk per level (`paragraph_bounds`, UAX #29
-/// `sentence_bounds`, UAX #29 `word_bounds`), each paid AT MOST once per
-/// call and only at its FIRST consultation — never per chunk, and never
+/// `sentence_bounds`, UAX #29 `word_bounds`), each paid at most once per
+/// call and only at its first consultation: never per chunk, and never
 /// at all for a level the budget never consults.
 ///
 /// The deferral is answer-neutral by construction: a level's cut vector
 /// is a pure function of (kind, text), the window loop consults levels
 /// strictly through `find_map` in list order, and nothing else reads
 /// the list, so building a level at its first consultation produces
-/// bit-identical answers to building it upfront — the differential
+/// bit-identical answers to building it upfront: the differential
 /// oracle in the tests (which keeps the eager spelling) pins that
 /// equivalence over the corpus × budget × overlap × hierarchy sweep.
 #[derive(Clone, Copy)]
@@ -223,7 +223,7 @@ enum SlotKind<'a> {
 /// One level's slot in the deferred list: still unbuilt, or built once
 /// and cached for the rest of the call. `Pending -> Ready` transitions
 /// at most once per slot, so a consulted level pays its scan exactly
-/// once however many windows reach it — the same memoization shape
+/// once however many windows reach it: the same memoization shape
 /// `GraphemeIndex`'s `Option` slot applies one structure over.
 enum Slot<'a> {
     Pending(SlotKind<'a>),
@@ -234,7 +234,7 @@ enum Slot<'a> {
 /// consultation point: `best_cut` walks the slots in order through
 /// `find_map`, building each visited slot on first visit. The
 /// grapheme-cluster cut filter the eager spelling applied to every
-/// level at list-construction time runs at the BUILD site instead, so
+/// level at list-construction time runs at the build site instead, so
 /// an unconsulted level never forces the grapheme index on its cuts'
 /// behalf either.
 struct Levels<'a> {
@@ -244,20 +244,20 @@ struct Levels<'a> {
 impl<'a> Levels<'a> {
     /// The deferred list from a `separators` value: `None` is the
     /// default hierarchy's three slots; a custom list is one deferred
-    /// literal slot per DISTINCT literal (`Some("")` stays the dropped
-    /// no-op it always was), with the FIRST `None` entry splicing the
+    /// literal slot per distinct literal (`Some("")` stays the dropped
+    /// no-op it always was), with the first `None` entry splicing the
     /// three default slots in at its position and every later `None`
-    /// skipped. Both dedups — `None` and literal — are provably inert
+    /// skipped. Both dedups (`None` and literal) are provably inert
     /// by the same `find_map` dominance argument: the window loop
-    /// consults slots only through `find_map` (the FIRST slot
+    /// consults slots only through `find_map` (the first slot
     /// supplying a cut wins; the list is never indexed positionally or
     /// counted), and a duplicate's level is bit-identical to its
     /// original's, so a duplicate can never change an answer its
     /// original didn't already give. Before the dedup, every duplicate
-    /// was a re-paid whole-text walk plus a full cut vector — ~45 MiB
+    /// was a re-paid whole-text walk plus a full cut vector: ~45 MiB
     /// per duplicate `None` on a 6 MiB document, the same for a
     /// repeated literal that matches often (`[" "] * 100` was the OOM
-    /// shape `[None; 100]` was) — a caller-controlled unbounded cost
+    /// shape `[None; 100]` was): a caller-controlled unbounded cost
     /// the #21 pathological-input discipline closes here, memoized
     /// like #24's lazy bitmap.
     fn new(separators: Option<&'a [Option<&'a str>]>) -> Levels<'a> {
@@ -327,11 +327,11 @@ impl<'a> Levels<'a> {
 /// chunk_text/chunk_by_* apply, extended here to custom literal
 /// separators too (a caller's separator could, in principle, land
 /// inside a cluster on pathological input), and the default hierarchy
-/// is NOT exempt: `word_bounds`/`sentence_bounds` follow UAX #29
+/// is not exempt: `word_bounds`/`sentence_bounds` follow UAX #29
 /// exactly, which scores some combining sequences (Thai SARA AM,
 /// U+0E33) as their own word/sentence segment even though the grapheme
-/// rules join them to the preceding base character into one cluster —
-/// `truncate_impl`'s module docs document the same divergence — so
+/// rules join them to the preceding base character into one cluster:
+/// `truncate_impl`'s module docs document the same divergence, so
 /// their cuts need this filter exactly like a custom literal's do. A
 /// level with no cuts filters nothing and builds nothing (a
 /// never-matching separator costs its one scan, no structure).
@@ -359,7 +359,7 @@ fn build_level(
 }
 
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
-/// pairs, each chunk at most `max_chars` codepoints, cut at the COARSEST
+/// pairs, each chunk at most `max_chars` codepoints, cut at the coarsest
 /// level (first in `levels`, excluding the always-appended grapheme-safe
 /// raw cut) that has an in-budget candidate, falling back to progressively
 /// finer levels only when a coarser one has none over the current window.
@@ -374,7 +374,7 @@ fn build_level(
 /// the `None`-entry splice, and the separator-dropped (not lossless)
 /// contract. `overlap` snaps the next
 /// chunk's start backward from the just-emitted chunk's end to the nearest
-/// GRAPHEME boundary at or before the target (never mid-cluster): NOT
+/// grapheme boundary at or before the target (never mid-cluster): not
 /// necessarily a semantic word/sentence/paragraph boundary the way
 /// `chunk_text_overlapping`'s single-hierarchy overlap snap is; a
 /// documented simplification of the general multi-level case, not a
@@ -398,10 +398,10 @@ pub fn chunk_hierarchical(
     // bare "attempt to divide by zero": the same discipline `chunk_text`'s
     // own `max_chars > 0` assert applies.
     assert!(max_chars > 0, "max_chars must be at least 1, got 0");
-    // The codepoint count as one branchless byte pass — every UTF-8
+    // The codepoint count as one branchless byte pass: every UTF-8
     // codepoint begins at a byte that is not a continuation byte
-    // (`0b10xxxxxx`), so counting non-continuation bytes IS counting
-    // codepoints — instead of the former whole-text `Vec<char>` collect
+    // (`0b10xxxxxx`), so counting non-continuation bytes is counting
+    // codepoints: instead of the former whole-text `Vec<char>` collect
     // (4 bytes per codepoint materialized before anything else could
     // run, the same O(source) allocation class #17 removed from
     // `is_grounded_fuzzy` and `chunk_text`'s grapheme grid before that).
@@ -409,15 +409,15 @@ pub fn chunk_hierarchical(
     let total = char_count(text);
 
     // The deferred level list: no walk, no scan, no cut vector exists
-    // yet — each level builds at its first consultation below, at most
+    // yet: each level builds at its first consultation below, at most
     // once per call, and a level no window consults never builds at
     // all (the answer-neutrality argument is on [`Levels`]; the eager
     // spelling built every level up front, which at a paragraph-scale
     // budget paid the sentence and word walks to answer every window
     // at the paragraph level).
     let mut levels = Levels::new(separators);
-    // The grapheme boundary index: built lazily, AT MOST ONCE per call, at
-    // the first site that actually needs it — a consulted level's cut
+    // The grapheme boundary index: built lazily, at most once per call, at
+    // the first site that actually needs it: a consulted level's cut
     // filter (the build site applies it, see [`build_level`]), the
     // raw-cut fallback, or the overlap snap. The former spelling built
     // the whole per-codepoint structure unconditionally before anything
@@ -483,7 +483,7 @@ mod tests {
     /// The pre-#22 implementation, kept verbatim as the differential
     /// oracle for the bitmap/lazy rewrite: every behavior-affecting line
     /// of the former code (the whole-text `Vec<char>` collect, the
-    /// UNCONDITIONAL `grapheme_boundary_chars` + `HashSet<usize>` filter
+    /// unconditional `grapheme_boundary_chars` + `HashSet<usize>` filter
     /// over every level, `grapheme_safe_hard_cut` over the usize grid, the
     /// `partition_point` overlap snap) runs against the new spelling over
     /// a corpus × budget × overlap × hierarchy sweep below. The rewrite
@@ -501,7 +501,7 @@ mod tests {
         let chars: Vec<char> = text.chars().collect();
         let total = chars.len();
 
-        // The oracle keeps its OWN inline level building (not the new
+        // The oracle keeps its own inline level building (not the new
         // deferred `Levels` slots) so the differential sweep below pins
         // the deferral and both dedups' output against this eager,
         // duplicate-rebuilding spelling, the same way it pins the bitmap
@@ -577,7 +577,7 @@ mod tests {
     }
 
     /// The differential corpus: every cluster shape the filter and the
-    /// hard cut have to get right — plain ASCII, CRLF/blank-line
+    /// hard cut have to get right: plain ASCII, CRLF/blank-line
     /// paragraphs, Thai SARA AM (the combining sequence UAX #29 word/
     /// sentence bounds split but grapheme rules join), ZWJ emoji chains,
     /// regional-indicator pairs, decomposed accents, and the degenerate
@@ -663,10 +663,10 @@ mod tests {
 
     #[test]
     fn custom_separator_matching_inside_a_cluster_never_cuts_there() {
-        // "0" + SARA AM is ONE grapheme cluster; a literal separator that
+        // "0" + SARA AM is one grapheme cluster; a literal separator that
         // matches the SARA AM codepoint alone would cut between the two
         // codepoints of that cluster. The filter must drop every such
-        // match — the case the filter exists for, pinned because the
+        // match: the case the filter exists for, pinned because the
         // bitmap membership query is what answers it now.
         let text = "0\u{0E33} 0\u{0E33} 0\u{0E33}";
         let boundaries: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
@@ -757,27 +757,27 @@ mod tests {
 
     #[test]
     fn none_entry_alone_reproduces_the_default_hierarchy_exactly() {
-        // [None] IS separators=None, and a never-matching literal above a
+        // [None] is separators=None, and a never-matching literal above a
         // None entry changes nothing (it can never supply a cut, so the
         // spliced levels answer every window the default hierarchy would):
         // exact-equality properties over the whole differential corpus and
         // a budget sweep, far stronger than a couple of spot cases.
-        // Duplicate inertness — of `None` AND of literals, both deduped at
-        // slot construction — is the same argument one level deeper: a
+        // Duplicate inertness (of `None` and of literals, both deduped at
+        // slot construction) is the same argument one level deeper: a
         // duplicate's level is identical to its first occurrence's, so
         // the find_map can never reach a duplicate that changes an answer
-        // its original didn't already give — [None, None] IS [None], and
+        // its original didn't already give: [None, None] is [None], and
         // the duplicated line-first list is the unduplicated one (the
-        // corpus texts contain "\n", so the literal genuinely matches:
+        // corpus texts contain "\n", so the literal matches:
         // the pin is meaningful, not vacuous). That inertness is also
-        // overlap-INDEPENDENT — the dedup happens in list construction,
-        // before any windowing or overlap snap — so every duplicate shape
+        // overlap-independent: the dedup happens in list construction,
+        // before any windowing or overlap snap, so every duplicate shape
         // is swept over the boundary-adjacent overlaps the bitmap
         // differential above uses, and an eightfold run pins that longer
         // duplicate lists stay inert, free now that the splice is built
-        // once per call regardless of list length. (The dedup's COST —
-        // what this output-equality sweep cannot see, since the
-        // undeduped spelling passes it too — is pinned by the timing
+        // once per call regardless of list length. (The dedup's cost,
+        // what this output-equality sweep cannot see since the
+        // undeduped spelling passes it too, is pinned by the timing
         // cells in tests/test_performance.py.)
         for text in differential_corpus() {
             let total = text.chars().count();
@@ -864,8 +864,8 @@ mod tests {
     #[test]
     fn line_first_splice_cuts_an_oversized_line_at_real_sentence_boundaries() {
         // The motivating shape for the None entry: a chat thread, one
-        // message per line, never split mid-line — and an oversized
-        // message falling back to the ACCURATE UAX #29 sentence level.
+        // message per line, never split mid-line, and an oversized
+        // message falling back to the accurate UAX #29 sentence level.
         // Every cut this budget produces must land either at a line break
         // or at a real sentence boundary, never anywhere else.
         let text = "Nathan: kicking off.\nPriya: We briefed the U.S. team on the numbers. \
@@ -905,12 +905,12 @@ mod tests {
     #[test]
     fn all_literal_fallbacks_sever_where_the_none_splice_does_not() {
         // The contrast the None entry exists for, pinned from both sides:
-        // the SAME thread and a budget below the first sentence boundary.
+        // the same thread and a budget below the first sentence boundary.
         // The all-literal [\"\\n\", \". \", \" \"] list's \". \" level has a
         // match after \"U.S.\" (a mid-name non-sentence), so it severs the
         // name; the spliced [\"\\n\", None] list has no in-budget sentence
-        // cut there and falls to the WORD level, whose cuts are UAX #29
-        // word boundaries — every piece still ends at a word boundary, and
+        // cut there and falls to the word level, whose cuts are UAX #29
+        // word boundaries: every piece still ends at a word boundary, and
         // the word walk never lands inside the name's letter sequence.
         let text = "Nathan: kicking off.\nPriya: We briefed the U.S. team on the numbers. \
                     They asked for a follow-up meeting. The budget holds.\nNathan: done.";
@@ -936,7 +936,7 @@ mod tests {
                 "the spliced hierarchy severed the name: {spliced_pieces:?}"
             );
         }
-        // And the name rides WHOLE inside one piece (the word-level cuts
+        // And the name rides whole inside one piece (the word-level cuts
         // walk past it, never through it).
         assert!(
             spliced_pieces.iter().any(|p| p.contains("U.S. team")),
@@ -961,7 +961,7 @@ mod tests {
     #[test]
     fn overlap_shares_genuine_content_langchain_34804_regression() {
         // The LangChain #34804-shaped regression: overlap must produce
-        // ACTUAL shared content between consecutive chunks, not merely be
+        // actual shared content between consecutive chunks, not merely be
         // accepted as a parameter.
         let text = "one two three four five six seven eight nine ten eleven twelve";
         let chunks = chunk_hierarchical(text, 20, None, 5);

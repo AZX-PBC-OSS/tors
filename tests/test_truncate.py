@@ -95,7 +95,7 @@ class TestGraphemeSafety:
     that could also be split."""
 
     def test_thai_sara_am_is_never_split_from_its_base(self) -> None:
-        # U+0E33 combines with the preceding base into ONE grapheme
+        # U+0E33 combines with the preceding base into one grapheme
         # cluster; budget 1 can't fit the 2-codepoint cluster at all, so
         # the cluster-safe answer is empty, not a mangled lone "0".
         text = "0" + chr(0x0E33)
@@ -103,7 +103,7 @@ class TestGraphemeSafety:
         assert truncate_to_bounds(text, 2, "word") == text
 
     def test_combining_accent_hard_cut_backs_off_rather_than_splitting(self) -> None:
-        # "ab" + COMBINING ACUTE ACCENT + "cd": "b" + the accent is one
+        # "ab" + combining acute accent + "cd": "b" + the accent is one
         # cluster spanning codepoints 1-3, so a budget of 2 must back off
         # to "a" rather than emitting "b" without its accent.
         text = "ab" + chr(0x0301) + "cd"
@@ -111,7 +111,7 @@ class TestGraphemeSafety:
         assert truncate_to_bounds(text, 3, "word") == "ab" + chr(0x0301)
 
     def test_zwj_emoji_sequence_is_never_partially_included(self) -> None:
-        # WOMAN + ZWJ + MICROSCOPE is one grapheme cluster; it must appear
+        # woman + ZWJ + microscope is one grapheme cluster; it must appear
         # whole or not at all in the result, at every budget.
         woman, zwj, microscope = chr(0x1F469), chr(0x200D), chr(0x1F52C)
         text = f"hi {woman}{zwj}{microscope} there"

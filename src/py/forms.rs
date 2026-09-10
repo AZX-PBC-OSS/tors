@@ -14,7 +14,7 @@ use crate::forms_impl;
 /// first non-ASCII call, O(output) return marshalling.
 ///
 /// v0.4 identity-return contract: a quick-check Yes (or an output==input
-/// pass) returns the ORIGINAL object: `tors.nfc(s) is s` whenever
+/// pass) returns the original object: `tors.nfc(s) is s` whenever
 /// `tors.nfc(s) == s`, CPython's own `unicodedata.normalize` fast-path
 /// behavior.
 #[pyfunction]
@@ -30,7 +30,7 @@ pub fn nfd(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
 }
 
 /// `tors.nfkc`: `unicodedata.normalize("NFKC", text)`, canonical composition
-/// WITH the compatibility (`<...>`) mappings applied (U+FB01 "ﬁ" -> "fi",
+/// with the compatibility (`<...>`) mappings applied (U+FB01 "ﬁ" -> "fi",
 /// fullwidth -> halfwidth). Same contract and GIL model as `tors.nfc`.
 #[pyfunction]
 pub fn nfkc(py: Python<'_>, text: Bound<'_, PyString>) -> PyResult<Py<PyAny>> {

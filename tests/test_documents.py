@@ -1,17 +1,17 @@
 """The real-document corpus gate: tors's whole surface proven over
-text extracted from REAL document formats: markdown, RTF, DOCX, XLSX, PDF
+text extracted from real document formats: markdown, RTF, DOCX, XLSX, PDF
 (``tests/documents.py`` generates them byte-deterministically and extracts
 them with stdlib-only readers), plus the raw-bytes surface over the
 document bytes themselves.
 
 What this gate buys, per format family:
 
-- EXTRACT → TRANSFORM: the extraction feeds every str-in surface
+- extract → transform: the extraction feeds every str-in surface
   (``normalize``: the messy-whitespace stages fire on real document
   shapes; ``html_unescape`` on entities pasted into documents;
   ``finalize``'s hash; segmentation; ``find_patterns``; ``replace_many``
   redaction; both diff spellings between two document versions).
-- RAW BYTES → THE BYTES SURFACE: real document bytes are arbitrary binary
+- raw bytes → the bytes surface: real document bytes are arbitrary binary
   (zips, compressed streams) or UTF-8 text depending on format, so the
   gate exercises ``utf8_is_valid``/``decode_utf8`` exactly where each
   format lands (differentially against the stdlib, which settles
@@ -65,7 +65,7 @@ _KINDS = sorted(CORPUS)
 
 
 def test_the_committed_corpus_is_exactly_the_generator_output() -> None:
-    """The five files under tests/corpus/ ARE ``CORPUS``; regenerating is
+    """The five files under tests/corpus/ are ``corpus``; regenerating is
     byte-identical (fixed zip metadata, programmatically computed xref), so
     the committed artifacts can never silently drift from the generator."""
     assert sorted(path.name for path in CORPUS_DIR.iterdir()) == sorted(_FILE_NAMES.values()), (
@@ -96,7 +96,7 @@ def test_extraction_reproduces_the_expected_text(kind: str) -> None:
 
 
 def test_normalize_cleans_the_real_markdown_shapes() -> None:
-    """THE headline pin: the markdown text carries every messy shape the
+    """The headline pin: the markdown text carries every messy shape the
     pipeline exists for (CRLF endings, [ \\t] before newlines, a 4-newline
     blank run, trailing NBSP) and ``normalize`` returns exactly the
     hand-derived cleaned spelling."""
@@ -151,9 +151,9 @@ def test_segmentation_is_structurally_sound_on_document_text(kind: str) -> None:
 def test_sentence_bounds_pin_real_document_rows() -> None:
     """The hand-derived sentence rows for the markdown text's head, each
     cited to its rule: the heading plus its line separator is one sentence
-    (SB4 breaks AFTER the separator, so the trailing \\n rides the sentence,
+    (sb4 breaks after the separator, so the trailing \\n rides the sentence,
     the same attachment quirk word spaces show), the blank line that
-    follows is a standalone segment (SB4 again; nothing joins two
+    follows is a standalone segment (sb4 again; nothing joins two
     separators), and the intro sentence after it is one unit ending at its
     own separator. Derived from the constants: the heading is 26 chars +
     '\\n' = (0, 27); the blank line's '\\n' = (27, 28); the intro (113
@@ -164,7 +164,7 @@ def test_sentence_bounds_pin_real_document_rows() -> None:
 def test_find_patterns_over_document_text() -> None:
     """A document-vocabulary scan over the extracted markdown: exact
     brute-oracle agreement, plus the hand-derived content pins: "quarterly"
-    (lowercase) matches exactly ONCE, in the intro (the heading's
+    (lowercase) matches exactly once, in the intro (the heading's
     "Quarterly" is capital-Q and case sensitivity is the contract, derived:
     28 chars of heading+blank line + "The " = offset 32); "Tokyo" never
     matches (the corpus's CJK is 東京, not the ASCII spelling); "figures"
@@ -179,10 +179,10 @@ def test_find_patterns_over_document_text() -> None:
 
 
 def test_replace_many_redacts_document_text() -> None:
-    """The redaction scenario over real document text: a PII/terminology map
-    applied in one native call: exact expected output AND brute-oracle
+    """The redaction scenario over real document text: a pii/terminology map
+    applied in one native call: exact expected output and brute-oracle
     agreement, plus the identity lane (a map whose keys never occur returns
-    the SAME object)."""
+    the same object)."""
     text = MARKDOWN_TEXT
     redactions = {"quarterly": "monthly", "bushing": "insulator", "outage": "incident"}
     assert tors.replace_many(text, redactions) == reference_replace_many(text, redactions)
@@ -194,9 +194,9 @@ def test_replace_many_redacts_document_text() -> None:
 
 def test_diff_opcodes_between_document_versions() -> None:
     """Two derived document versions (scattered word swaps, an inserted and a
-    deleted line) diffed at BOTH granularities: char-level validity over the
+    deleted line) diffed at both granularities: char-level validity over the
     strings, line-level validity over the splitlines lists, plus one pinned
-    golden line-level case. Exact difflib equality is NOT
+    golden line-level case. Exact difflib equality is not
     asserted (the documented boundary-class divergences)."""
     v1 = MARKDOWN_TEXT
     v2 = (
@@ -211,7 +211,7 @@ def test_diff_opcodes_between_document_versions() -> None:
     line_ops = tors.diff_opcodes_lines(v1, v2)
     assert_opcodes_are_valid(v1_lines, v2_lines, line_ops)
     # The golden: a one-line replacement in a two-line document (both
-    # operands are TWO lines, so the op list ends at the replace).
+    # operands are two lines, so the op list ends at the replace).
     a = "alpha\nbeta\n"
     b = "alpha\ngamma\n"
     assert tors.diff_opcodes_lines(a, b) == [("equal", 0, 1, 0, 1), ("replace", 1, 2, 1, 2)]

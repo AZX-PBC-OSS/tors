@@ -3,7 +3,7 @@
 //! those two list surfaces, `tors.word_count` and `tors.sentence_count`, via
 //! the `unicode-segmentation` crate (1.13.3, Unicode 17.0.0 tables): extended
 //! grapheme clusters (rules GB1-GB999), word boundaries (rules WB1-WB999),
-//! and sentence boundaries (rules SB1-SB999). The stdlib has NO equivalent
+//! and sentence boundaries (rules SB1-SB999). The stdlib has no equivalent
 //! for any of the three; the sentence rules are the same stdlib gap filled
 //! by the same crate, and the gap is the point of this surface.
 //!
@@ -17,33 +17,33 @@
 //! additivity of grapheme counts over word segments wherever that holds (all
 //! text except U+0E33/U+0EB3, the Other_Letter spacing marks the normative
 //! property files split across the two segmenters). The sentence side is
-//! pinned HERE, in this module's tests, as a battery whose every row was
-//! DERIVED from its cited UAX #29 rule BEFORE running, then verified against
+//! pinned here, in this module's tests, as a battery whose every row was
+//! derived from its cited UAX #29 rule before running, then verified against
 //! the crate, plus the same structural properties (monotonic, covering,
 //! round-tripping) over mixed non-ASCII text.
 //!
-//! One known sentence PRESENTATION quirk, verified against the rules and
+//! One known sentence presentation quirk, verified against the rules and
 //! pinned by the tests: per SB9-SB11 the boundary after a terminator only
 //! lands after the terminator's trailing Close* Sp* (SB9/SB10 keep the
 //! closing punctuation and spaces attached, SB11 then breaks), so trailing
-//! spaces after a sentence terminator belong to the PRECEDING sentence:
+//! spaces after a sentence terminator belong to the preceding sentence:
 //! "One. Two." segments as "One. " + "Two.", the first sentence carrying
 //! the inter-sentence space. Callers wanting trimmed sentences must strip
 //! their own ends; this function reports what UAX #29 says the boundary is.
 //!
-//! The offsets are PYTHON STR indices (codepoints), not Rust byte offsets:
+//! The offsets are Python str indices (codepoints), not Rust byte offsets:
 //! `word_bounds` and `sentence_bounds` each convert the segment byte spans
-//! to codepoint spans so `text[start:end]` in Python IS the segment. Slicing
+//! to codepoint spans so `text[start:end]` in Python is the segment. Slicing
 //! a non-ASCII text with byte offsets would silently mis-segment for every
 //! Python caller.
 //!
 //! Pure Rust, no pyo3 types: the pyo3 wrapper in `lib.rs` adds only the
 //! argument borrow and the return marshalling. That marshalling has a real
-//! cost, documented in the crate GIL model and the README: returning the
-//! FULL bounds list holds the GIL for O(number-of-segments) tuple
+//! cost, documented in the crate GIL model and docs/performance.md: returning the
+//! full bounds list holds the GIL for O(number-of-segments) tuple
 //! construction, fine for ordinary documents but a real cost at whole-file
 //! sizes (428-497ms at 12 MiB, 3.67M segments). `tors.word_bounds_iter`
-//! (the pyo3 iterator in `lib.rs`) addresses this: it drives THIS function
+//! (the pyo3 iterator in `lib.rs`) addresses this: it drives this function
 //! under one detach at construction and yields the same sequence with
 //! µs-scale GIL holds per item, pinned to sequence-parity with the list API
 //! by tests/test_segmentation.py, with its GIL band pinned by
@@ -65,7 +65,7 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// The number of EXTENDED grapheme clusters in `text` (UAX #29 GB1-GB999,
+/// The number of extended grapheme clusters in `text` (UAX #29 GB1-GB999,
 /// `is_extended=true`, the only spelling anyone means by "grapheme"
 /// post-Unicode 11).
 pub fn grapheme_count(text: &str) -> usize {
@@ -73,7 +73,7 @@ pub fn grapheme_count(text: &str) -> usize {
 }
 
 /// The word-boundary segments of `text` (UAX #29 WB1-WB999) as
-/// `(start, end)` pairs in PYTHON STR INDEX (codepoint) units: `text[start..end]`
+/// `(start, end)` pairs in Python str index (codepoint) units: `text[start..end]`
 /// is the segment, the bounds cover [0, codepoint_len), and joining the
 /// slices reproduces the input. The crate yields byte spans; each segment's
 /// codepoint span is accumulated in one pass (its own `chars().count()`, so
@@ -81,7 +81,7 @@ pub fn grapheme_count(text: &str) -> usize {
 pub fn word_bounds(text: &str) -> Vec<(usize, usize)> {
     // Capacity heuristic: prose measures ~3.4 bytes per segment (12 MiB ->
     // 3.67M segments), so len/4 lands close to the final count. Measured on
-    // this box (Linux/glibc) at PARITY, ±0.5% (p>0.1, criterion 12 MiB
+    // this box (Linux/glibc) at parity, ±0.5% (p>0.1, criterion 12 MiB
     // cells): glibc realloc serves the multi-MiB growth via mremap, so the
     // exponential-growth copying the heuristic targets is already near-free
     // here. mremap is a Linux allocator behavior, not a guarantee though
@@ -90,10 +90,10 @@ pub fn word_bounds(text: &str) -> Vec<(usize, usize)> {
     // standard reservation idiom with the parity recorded, not claimed as a
     // measured win: some reservations in this crate measurably reduce
     // allocation cost, others are merely neutral, and this one is neutral.
-    // CAPPED at 1<<20 tuples (16 MiB of 16-byte tuples): an uncapped len/4
+    // Capped at 1<<20 tuples (16 MiB of 16-byte tuples): an uncapped len/4
     // reserve of a single-token input is 4x its byte size in reserved
     // tuples (a 500MB
-    // one-token string would reserve ~2GB for ONE bound), while the cap
+    // one-token string would reserve ~2GB for one bound), while the cap
     // costs ordinary inputs nothing: 12 MiB of prose needs 3.67M tuples
     // (~59MB), so the cap only trades ~21 saved reallocs for standard
     // exponential growth past 16 MiB of bounds, the same growth every
@@ -114,7 +114,7 @@ pub fn word_bounds(text: &str) -> Vec<(usize, usize)> {
 /// spelling of [`word_bounds`]: the same `unicode-segmentation` word
 /// tables, the same single pass the pyo3 layer runs under one detach, and
 /// a single int return, the `grapheme_count` precedent applied to the
-/// word family. WHY its own spelling: counting is the common question,
+/// word family. Why its own spelling: counting is the common question,
 /// and `word_bounds(text).len()` answers it only by materializing the
 /// full answer (the 12 MiB document cell builds ~3.67M tuples, ~59 MB,
 /// just to have a number taken off its `len()`); counting the same
@@ -124,12 +124,12 @@ pub fn word_bounds(text: &str) -> Vec<(usize, usize)> {
 ///
 /// `word_count(text) == word_bounds(text).len()` for every input: the
 /// two spellings run the identical UAX #29 word segmentation, so a
-/// disagreement is a BUG, not a tolerance; pinned over the mixed battery
+/// disagreement is a bug, not a tolerance; pinned over the mixed battery
 /// by the tests below.
 pub fn word_count(text: &str) -> usize {
     // `split_word_bounds` is the same segmentation walk `word_bounds`
     // drives via its `_indices` sibling (same tables, same rules), with
-    // the segment STRINGS yielded instead of (byte offset, segment)
+    // the segment strings yielded instead of (byte offset, segment)
     // pairs; counting needs neither the offsets nor the spans, so this
     // is the cheapest spelling of the identical pass.
     text.split_word_bounds().count()
@@ -140,9 +140,9 @@ pub fn word_count(text: &str) -> usize {
 /// same walk `word_bounds`/`word_count` drive), restricted to segments
 /// carrying at least one non-whitespace codepoint. A "word" is a real
 /// token, not a raw `word_bounds` segment (which gives an inter-word
-/// whitespace RUN its own segment, per the WSegSpace rule). Exposed
+/// whitespace run its own segment, per the WSegSpace rule). Exposed
 /// separately so `tokenize_impl`'s richer, opt-in-normalizing tokenizer
-/// (accent-folding, stemming) can build on the SAME segment walk without
+/// (accent-folding, stemming) can build on the same segment walk without
 /// re-deriving it.
 pub(crate) fn real_word_segments(text: &str) -> impl Iterator<Item = &str> {
     text.split_word_bounds()
@@ -152,7 +152,7 @@ pub(crate) fn real_word_segments(text: &str) -> impl Iterator<Item = &str> {
 /// `real_word_segments`, each lowercased via Rust's Unicode-correct
 /// `str::to_lowercase` (not an ASCII-only fold), the near-universal
 /// term-matching convention: `"Cat"` and `"cat"` are the same term.
-/// `simhash64` does NOT reuse this (its bag-of-words
+/// `simhash64` does not reuse this (its bag-of-words
 /// fingerprint leaves case folding to the caller).
 ///
 /// Production code now calls `tokenize_impl::normalized_word_tokens(text,
@@ -167,24 +167,24 @@ pub(crate) fn lowercased_word_tokens(text: &str) -> Vec<String> {
 }
 
 /// The sentence-boundary segments of `text` (UAX #29 SB1-SB999) as
-/// `(start, end)` pairs in PYTHON STR INDEX (codepoint) units, the same
+/// `(start, end)` pairs in Python str index (codepoint) units, the same
 /// convention as `word_bounds`: `text[start..end]` is the sentence, the
 /// bounds cover [0, codepoint_len), and joining the slices reproduces the
 /// input. The crate yields byte spans; each segment's codepoint span is
 /// accumulated in one pass (its own `chars().count()`, so the total work
-/// stays O(text)). One PRESENTATION quirk the caller must know, pinned by
+/// stays O(text)). One presentation quirk the caller must know, pinned by
 /// the tests below: SB9-SB11 attach a terminator's trailing Close* Sp* to
-/// the PRECEDING sentence (the boundary lands only before the next
+/// the preceding sentence (the boundary lands only before the next
 /// non-space), so segments may carry trailing spaces: "One. Two." is
-/// `"One. "` + `"Two."`. That is what the rules say the boundary IS, not a
+/// `"One. "` + `"Two."`. That is what the rules say the boundary is, not a
 /// crate artifact; trim at the call site if trimmed sentences are wanted.
 pub fn sentence_bounds(text: &str) -> Vec<(usize, usize)> {
     // Capacity heuristic: sentences are far sparser than words. Prose runs
     // on the order of 30+ bytes per sentence, so len/24 lands in the right
     // decade where word_bounds uses len/4 (its ~3.4 bytes/segment cell).
-    // Unlike word_bounds' heuristic this is NOT a measured parity (no
+    // Unlike word_bounds' heuristic this is not a measured parity (no
     // sentence benchmark cells exist yet); it follows the word_bounds
-    // precedent as a heuristic, CAPPED at 1<<20 tuples (16 MiB of 16-byte
+    // precedent as a heuristic, capped at 1<<20 tuples (16 MiB of 16-byte
     // tuples) so a degenerate single-sentence input never reserves a
     // multiple of its own byte size, and needle-neutral at worst: a wrong
     // guess only pays the standard exponential growth every un-reserved Vec
@@ -206,20 +206,20 @@ pub fn sentence_bounds(text: &str) -> Vec<(usize, usize)> {
 /// count spelling of [`sentence_bounds`]: the same `unicode-segmentation`
 /// sentence tables, the same single pass the pyo3 layer runs under one
 /// detach, and a single int return, the `grapheme_count` precedent
-/// applied to the sentence family. WHY its own spelling: the same
+/// applied to the sentence family. Why its own spelling: the same
 /// memory-efficiency argument as [`word_count`] (a count answered by
 /// `sentence_bounds(text).len()` materializes the full bounds list to
 /// have a number taken), one degree sparser: sentences are the sparsest
 /// of the three families, but the waste is proportional, not different in
 /// kind. The SB9-SB11 trailing-space quirk documented on
-/// [`sentence_bounds`] does not affect a count: it shapes WHERE the
-/// boundaries land, and the count only asks HOW MANY landed.
+/// [`sentence_bounds`] does not affect a count: it shapes where the
+/// boundaries land, and the count only asks how many landed.
 ///
 /// # Invariant
 ///
 /// `sentence_count(text) == sentence_bounds(text).len()` for every input:
 /// the two spellings run the identical UAX #29 sentence segmentation,
-/// so a disagreement is a BUG, not a tolerance; pinned over the mixed
+/// so a disagreement is a bug, not a tolerance; pinned over the mixed
 /// battery by the tests below.
 pub fn sentence_count(text: &str) -> usize {
     // The same sentence segmentation walk `sentence_bounds` drives via
@@ -239,10 +239,10 @@ mod tests {
 
     #[test]
     fn sentence_bounds_matches_the_cited_uax29_rules() {
-        // Every row's expected value was DERIVED from the cited rule BEFORE
+        // Every row's expected value was derived from the cited rule before
         // running, then pinned to the crate's verified split (see the module
         // docs). No row disagreed with its derivation.
-        // SB3: CR × LF; the CRLF never splits. SB4 then breaks AFTER the
+        // SB3: CR × LF; the CRLF never splits. SB4 then breaks after the
         // LF, so the separator rides the first sentence and "b." is its own.
         assert_eq!(sentence_bounds("a\r\nb."), [(0, 3), (3, 5)]);
         // SB4: a break after each paragraph separator (CR, LF, Sep). The
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(sentence_bounds("etc. and so on"), [(0, 14)]);
         // SB9/SB10/SB11: the terminator's Close (plain quote and the U+201D
         // RIGHT DOUBLE QUOTATION MARK, Line_Break=Quotation) and Sp* attach
-        // to the PRECEDING sentence; SB11 breaks before "Now" (Upper, so
+        // to the preceding sentence; SB11 breaks before "Now" (Upper, so
         // SB8's lowercase continuation does not apply).
         assert_eq!(
             sentence_bounds("He said \"stop.\" Now go."),
@@ -272,7 +272,7 @@ mod tests {
         // The trailing-space presentation quirk, rule-derived and pinned:
         // SB10 keeps the inter-sentence space with sentence 1, and SB11
         // breaks only before the non-space "T": "One. " + "Two.". The
-        // first segment CARRIES the space; that is the rule, not a bug.
+        // first segment carries the space; that is the rule, not a bug.
         assert_eq!(sentence_bounds("One. Two."), [(0, 5), (5, 9)]);
         // SB11 over an ideographic terminator: U+3002 is STerm
         // (Sentence_Terminal=Yes), so each 。 ends its sentence in place.
@@ -280,13 +280,13 @@ mod tests {
             sentence_bounds("\u{6771}\u{4eac}\u{3002}\u{5927}\u{962a}\u{3002}"),
             [(0, 3), (3, 6)]
         );
-        // SB8a: SATerm Close* Sp* × (SContinue | SATerm): "?!" is ONE
+        // SB8a: SATerm Close* Sp* × (SContinue | SATerm): "?!" is one
         // terminator run, not two sentences; SB10/SB11 then attach the
         // space and break before "Yes".
         assert_eq!(sentence_bounds("Wow?! Yes."), [(0, 6), (6, 10)]);
         assert_eq!(sentence_bounds("Stop! Go."), [(0, 6), (6, 9)]);
         // Degenerates: empty is empty; spaces-only and terminator-free text
-        // are each ONE segment: SB998 joins Any × Any, and no interior
+        // are each one segment: SB998 joins Any × Any, and no interior
         // rule ever fires, so only SB1/SB2 bound the text.
         assert_eq!(sentence_bounds(""), Vec::<(usize, usize)>::new());
         assert_eq!(sentence_bounds("   "), [(0, 3)]);
@@ -325,7 +325,7 @@ mod tests {
             }
             assert_eq!(prev_end, cp.len(), "coverage broke for {case:?}");
             // Round trip: joining the codepoint slices reproduces the input,
-            // the Python contract that text[start:end] IS the segment.
+            // the Python contract that text[start:end] is the segment.
             let joined: String = bounds
                 .iter()
                 .map(|&(a, b)| cp[a..b].iter().collect::<String>())
@@ -352,7 +352,7 @@ mod tests {
         // Extend property value; the old GB10/E_Base/E_Modifier classes are
         // obsolete in current UAX #29).
         assert_eq!(grapheme_count("\u{1f44d}\u{1f3fd}"), 1);
-        // GB6/GB7/GB8: Hangul; GB8 is a JOIN: (LVT | T) x T, the
+        // GB6/GB7/GB8: Hangul; GB8 is a join: (LVT | T) x T, the
         // trailing T is part of the syllable term L*(V+|LV V*|LVT)T*.
         assert_eq!(grapheme_count("\u{1100}\u{1161}\u{11a8}"), 1);
         assert_eq!(grapheme_count("\u{ac00}\u{11a8}"), 1); // GB7: LV x T
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(word_bounds(""), Vec::<(usize, usize)>::new());
         // CRLF is one segment (WB3), in codepoint units.
         assert_eq!(word_bounds("a\r\nb"), [(0, 1), (1, 3), (3, 4)]);
-        // Non-ASCII: codepoint indices, NOT byte indices. The emoji row is
+        // Non-ASCII: codepoint indices, not byte indices. The emoji row is
         // 3 codepoints (0..3), where the byte span would be 0..11.
         assert_eq!(word_bounds(&format!("{WOMAN}{ZWJ}{MICROSCOPE}")), [(0, 3)]);
         assert_eq!(
@@ -381,7 +381,7 @@ mod tests {
             [(0, 4), (4, 5), (5, 7)]
         );
         // GB12/GB13 odd-count regional-indicator run (WB15/WB16): pairs as
-        // (RI RI)(RI); a 3rd, unpaired RI must NOT merge into the prior
+        // (RI RI)(RI); a 3rd, unpaired RI must not merge into the prior
         // pair or split off wrong; grapheme_count's sibling test pins this
         // count (2 clusters), this pins the actual word-segment shape.
         assert_eq!(
@@ -427,8 +427,8 @@ mod tests {
     #[test]
     fn word_count_and_sentence_count_are_the_bounds_lengths_over_the_battery() {
         // The count/list invariants over the two mixed batteries above:
-        // every count row is checked against its OWN bounds spelling, the
-        // invariant the two pub docs pin (a disagreement here is a BUG in
+        // every count row is checked against its own bounds spelling, the
+        // invariant the two pub docs pin (a disagreement here is a bug in
         // one of the two spellings, not a tolerance to adjust).
         let word_cases = [
             "",
@@ -469,9 +469,9 @@ mod tests {
         }
         // Named degenerates, values derived from the rules before running:
         // empty input has no segments (SB1/SB2 and WB1/WB2 bound nothing
-        // when there is nothing to bound); whitespace-only is ONE word
+        // when there is nothing to bound); whitespace-only is one word
         // segment (the WSegSpace rule, WSegSpace × WSegSpace, joins
-        // consecutive spaces) and ONE sentence (SB998, Any × Any);
+        // consecutive spaces) and one sentence (SB998, Any × Any);
         // "Hello, world!" is 5 word segments (Hello, comma, space, world,
         // bang; the word battery's own row); "One. Two." is 2 sentences
         // (the sentence battery's own row).

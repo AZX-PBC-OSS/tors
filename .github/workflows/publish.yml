@@ -1,23 +1,23 @@
 # Builds abi3 wheels (one per platform, valid for every Python 3.10+ per Cargo.toml's
-# `abi3-py310` feature — no per-Python-version build matrix needed) plus an sdist, then
+# `abi3-py310` feature: no per-Python-version build matrix needed) plus an sdist, then
 # publishes to PyPI via Trusted Publishing (OIDC) on a release-please tag. No PyPI API
-# token exists anywhere in this repo — `id-token: write` is the whole auth story.
+# token exists anywhere in this repo; `id-token: write` is the only auth it needs.
 # The same platform set builds the tors-documents payload wheel (the `tors[documents]`
 # extra's payload) in its own jobs, uploading from its own Trusted Publishing identity.
 #
 # Platform set is the mainstream cross-platform tier most serious PyO3 packages ship
 # (Linux manylinux + musllinux on x86_64/aarch64, macOS x86_64/aarch64, Windows x64/arm64)
-# — not maturin generate-ci's full exotic-target sprawl (32-bit x86, armv7, s390x, ppc64le,
+# (not maturin generate-ci's full exotic-target sprawl (32-bit x86, armv7, s390x, ppc64le,
 # emscripten, android), which stays out until a real user asks for one of those.
 #
 # Tag-trigger caveat: release-please publishes its tag using GITHUB_TOKEN by default, and
-# GitHub does not start workflow runs from GITHUB_TOKEN-authored events — so this workflow's
+# GitHub does not start workflow runs from GITHUB_TOKEN-authored events, so this workflow's
 # `push: tags` trigger will not fire automatically unless release-please.yml is given a
 # GitHub App token (see that workflow's header). Until one is configured, run this via
 # `workflow_dispatch` against the new tag after a release PR merges.
 #
 # Job order is deliberately cheapest-first: wheels-linux (and sdist) run on ubuntu-22.04,
-# by far the cheapest and fastest GitHub-hosted runner. wheels-other (macOS, Windows —
+# by far the cheapest and fastest GitHub-hosted runner. wheels-other (macOS, Windows,
 # both several times the per-minute cost of Linux, and macOS/Windows arm64 runners are
 # scarcer capacity) only starts once every Linux leg has passed, via `needs`. A correctness
 # bug that fails on Linux therefore never burns the expensive runners at all.
@@ -51,14 +51,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Every checkout in this workflow materializes the git-LFS
-          # fixtures (tests/corpus/, tests/engines_corpus/ — see
+          # fixtures (tests/corpus/, tests/engines_corpus/; see
           # .gitattributes and ci.yml's test-job note for the flag): the
           # sdist job packs the package tree and publish-crate packs the
           # crate, so both embed the fixture bytes, and a pointer-file
           # checkout would ship LFS pointers where those bytes belong.
           # The other jobs' artifacts embed no fixtures (wheels wrap
           # compiled code; the asserts read manifest text), but the flag
-          # costs seconds per job — one uniform policy beats per-job
+          # costs seconds per job: one uniform policy beats per-job
           # archaeology over what maturin/cargo will pack next.
           lfs: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -78,7 +78,7 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      # lfs: the sdist embeds the LFS fixture bytes — see the
+      # lfs: the sdist embeds the LFS fixture bytes; see the
       # wheels-linux checkout note.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,7 +113,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true # uniform policy — see the wheels-linux checkout note.
+          lfs: true # uniform policy; see the wheels-linux checkout note.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write # Trusted Publishing — no API token secret needed or used.
+      id-token: write # Trusted Publishing: no API token secret needed or used.
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -150,7 +150,7 @@ jobs:
       - name: Publish
         run: uv publish --trusted-publishing automatic dist/*
 
-  # The tors-documents payload wheel — the `pip install tors[documents]` extra's
+  # The tors-documents payload wheel: the `pip install tors[documents]` extra's
   # payload, built from tors-documents/ through that directory's own
   # pyproject.toml/Cargo.toml (maturin-action's working-directory input). The
   # payload crate is deliberately NOT a cargo workspace member and resolves
@@ -158,10 +158,10 @@ jobs:
   # engines compile here and nowhere else.
   #
   # VERSION LOCK: tors-documents carries the SAME version number as the base
-  # tors wheel, and the two release together — release-please bumps both
+  # tors wheel, and the two release together; release-please bumps both
   # pyproject.tomls (and both Cargo.tomls) in one release PR via
   # release-please-config.json's extra-files. The assert in publish-documents
-  # below turns any drift into a build failure before a file reaches PyPI —
+  # below turns any drift into a build failure before a file reaches PyPI.
   # the tors[documents] extra pins the payload by minor
   # (`tors-documents==X.Y.*`, rewritten on every bump by
   # release-lock-sync.yml), so a version drift beyond the minor, or a pin
@@ -169,7 +169,7 @@ jobs:
   #
   # No payload sdist, deliberately: the payload's tors-core dependency is a
   # PATH dependency outside the tors-documents/ package directory, and an
-  # sdist archives only the package — a tors-documents sdist could not build
+  # sdist archives only the package: a tors-documents sdist could not build
   # from source. The payload ships wheels; the base sdist plus the published
   # payload wheel is the full install story.
   wheels-linux-documents:
@@ -189,7 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true # uniform policy — see the wheels-linux checkout note.
+          lfs: true # uniform policy; see the wheels-linux checkout note.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -229,7 +229,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true # uniform policy — see the wheels-linux checkout note.
+          lfs: true # uniform policy; see the wheels-linux checkout note.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -247,7 +247,7 @@ jobs:
 
   publish-documents:
     name: Publish tors-documents to PyPI
-    # Trusted Publishing, the same story as the base publish job — the
+    # Trusted Publishing, the same mechanism as the base publish job; the
     # tors-documents PyPI project needs its own trusted publisher configured
     # (repo AZX-PBC-OSS/tors, workflow publish.yml, environment pypi; a
     # PENDING publisher can be set up before the first release, so no API
@@ -256,20 +256,20 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write # Trusted Publishing — no API token secret needed or used.
+      id-token: write # Trusted Publishing: no API token secret needed or used.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true # uniform policy — see the wheels-linux checkout note.
+          lfs: true # uniform policy; see the wheels-linux checkout note.
       - name: Assert version lockstep with base tors
         # The VERSION-LOCK rule enforced at the gate (see the documents-wheel
         # jobs' header comment): same version, one release, two wheels. Two
         # further couplings the version compare alone cannot see:
-        # (i) the extra's payload pin — pyproject.toml's
+        # (i) the extra's payload pin: pyproject.toml's
         # `tors-documents==X.Y.*` must track THIS release's version or pip
         # co-installs a stale payload (release-lock-sync.yml rewrites the
         # pin on every bump; this catches it missing the release PR);
-        # (ii) pyo3 parity — the base and payload manifests declare pyo3
+        # (ii) pyo3 parity: the base and payload manifests declare pyo3
         # independently and dependabot updates them as separate cargo
         # directories, so without this check nothing stops two pyo3
         # versions linking into the payload wheel's extension.
@@ -306,15 +306,15 @@ jobs:
     # crate that has never been published, so the very first `tors-core` release must be
     # `cargo publish`d manually (from a machine already `cargo login`-ed). Only after that
     # succeeds can a Trusted Publisher be configured in the crate's crates.io settings
-    # (GitHub owner `AZX-PBC-OSS`, repo `tors`, workflow `publish.yml`) — this job is that
+    # (GitHub owner `AZX-PBC-OSS`, repo `tors`, workflow `publish.yml`), and this job is that
     # configuration's target and does nothing until it exists.
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
-      id-token: write # Trusted Publishing (OIDC) — no API token secret needed or used.
+      id-token: write # Trusted Publishing (OIDC): no API token secret needed or used.
     steps:
       # lfs: `cargo publish` packs the crate the same way the sdist job
-      # packs the package tree — the fixture bytes must be real, not
+      # packs the package tree: the fixture bytes must be real, not
       # pointer files (see the wheels-linux checkout note).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -327,7 +327,7 @@ jobs:
       - name: Publish
         # --no-default-features: `extension-module` (the crate's default) doesn't link
         # libpython, which breaks a plain `cargo publish` verification build the same way
-        # it breaks `cargo test`/`cargo build` — see Cargo.toml's own feature comment.
+        # it breaks `cargo test`/`cargo build`; see Cargo.toml's own feature comment.
         #
         # Lockfile self-heal: a release tag can carry a Cargo.lock whose root-package
         # version predates the release PR's version bump (release-please bumps

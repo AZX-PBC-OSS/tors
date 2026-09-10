@@ -1,18 +1,18 @@
 """Contract gate for ``tors.chunk_hierarchical``: priority-ordered fallback
 chunking, the LangChain ``RecursiveCharacterTextSplitter`` pattern (cut at
 the coarsest level that fits the budget, fall back to progressively finer
-levels only when the coarser one has no in-budget cut), except the DEFAULT
+levels only when the coarser one has no in-budget cut), except the default
 hierarchy (``separators=None``) uses tors's own accurate UAX #29 segmenters
 (paragraph -> sentence -> word) rather than literal guesses, and a
-CUSTOM hierarchy (``separators=[...]``) takes caller-supplied LITERAL
+custom hierarchy (``separators=[...]``) takes caller-supplied literal
 strings (not regex, a scope line documented in ``src/chunk_hierarchical_impl.rs``).
-A ``None`` ENTRY in a custom list splices that same accurate default
+A ``None`` entry in a custom list splices that same accurate default
 hierarchy in at its position (``["\n", None]`` = line -> paragraph ->
 sentence -> word -> raw cut), so a caller-supplied literal shape keeps
 tors's real segmenters as its oversized-segment fallback instead of
 naive ``". "`` / ``" "`` literal guesses.
 
-UNLIKE ``chunk_text``, this is NOT a lossless covering partition: the
+unlike ``chunk_text``, this is not a lossless covering partition: the
 separator itself is dropped between chunks at every level except the final
 grapheme-safe raw cut, the same convention ``chunk_by_paragraphs`` already
 applies to blank-line runs.
@@ -101,7 +101,7 @@ class TestDefaultHierarchy:
         # paragraph nor one sentence-and-a-half forces a sentence cut.
         # sentence_bounds' own convention (used as-is here) folds the
         # trailing space after sentence-ending punctuation into the
-        # PRECEDING sentence's segment, so the cut lands right before the
+        # preceding sentence's segment, so the cut lands right before the
         # next sentence's first character, not right after the period.
         text = "This is sentence number one. This is sentence number two."
         chunks = chunk_hierarchical(text, 32)
@@ -242,9 +242,9 @@ class TestNoneEntrySplice:
     def test_spliced_sentence_fallback_keeps_the_us_team_whole(self) -> None:
         # The contrast that motivates the splice: on this thread with
         # max_chars=40, the naive literal hierarchy ["\n", ". ", " "] cuts
-        # right after "U.S" — the ". " matcher treats the period ending
+        # right after "U.S": the ". " matcher treats the period ending
         # "U.S." as a separator, severing the name and dropping the period
-        # — while the spliced hierarchy's word level walks past the name,
+        #: while the spliced hierarchy's word level walks past the name,
         # keeping "U.S. team" whole inside one piece.
         text = (
             "Nathan: kicking off.\n"
@@ -260,9 +260,9 @@ class TestNoneEntrySplice:
         assert not any(p.endswith("U.S") for p in spliced)
 
     def test_a_none_entry_between_literals_splices_at_its_position(self) -> None:
-        # Position is respected: ["---", None] puts the literal ABOVE the
+        # Position is respected: ["---", None] puts the literal above the
         # splice (it supplies the coarser cut and is consumed as a
-        # separator), while [None, "---"] puts the same literal BELOW the
+        # separator), while [None, "---"] puts the same literal below the
         # whole spliced hierarchy, where it can never fire (word-level
         # cuts already exist), so the "---" rides inside a piece as plain
         # text.
@@ -351,7 +351,7 @@ class TestGraphemeSafety:
 # The newline is deliberate: "\n" is category Cc, which the category
 # whitelist below never draws, so without it in the sampled set the
 # spliced-hierarchy property's ["\n", None] shape would carry a line
-# literal that can never FIRE -- dead weight above the splice, the same
+# literal that can never fire -- dead weight above the splice, the same
 # shape test_a_never_matching_literal_above_a_none_entry_changes_nothing
 # pins deliberately, exercising no line cut at all. Sampling "\n" (and
 # "." and " ", already reachable through the categories but weighted up
@@ -423,8 +423,8 @@ def test_chunk_starts_are_strictly_increasing(text: str, max_chars: int) -> None
 # Grapheme-boundary alignment, the invariant the #22 rewrite (the shared
 # GraphemeIndex bitmap behind the cut filter, the raw-cut fallback, and the
 # overlap snap) must not lose: every chunk edge lands on a cluster boundary
-# for BOTH hierarchies and under overlap. A codepoint index p is a cluster
-# boundary iff splitting there counts the same clusters on both sides — a
+# for both hierarchies and under overlap. A codepoint index p is a cluster
+# boundary iff splitting there counts the same clusters on both sides: a
 # cluster spanning p would be counted once per side.
 # ---------------------------------------------------------------------------
 
@@ -459,7 +459,7 @@ def test_chunk_edges_are_grapheme_boundaries_custom_separators_and_overlap(
     text: str, max_chars: int, overlap: int
 ) -> None:
     assume(overlap < max_chars)
-    # A clean literal, a literal that MATCHES INSIDE the SARA AM cluster,
+    # A clean literal, a literal that matches inside the SARA AM cluster,
     # a multi-level list, and a None-spliced list: the custom-hierarchy
     # filter's whole reason to exist is the second one, and the spliced
     # default hierarchy must survive the same filter unchanged.

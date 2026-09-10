@@ -1,9 +1,9 @@
 """Regenerate ``python/tors/aio.pyi`` from ``python/tors/__init__.pyi``.
 
 The async facade's signatures are the sync signatures with ``async def``
-in place of ``def`` and the SAME return annotation (an ``async def``
+in place of ``def`` and the same return annotation (an ``async def``
 function's annotation is what awaiting it resolves to, not
-``Awaitable[T]`` — that describes the coroutine object itself, not its
+``Awaitable[T]``; that describes the coroutine object itself, not its
 result); deriving the stub from the sync stub keeps the two from
 drifting apart, and ``tests/test_aio.py`` fails loudly if the committed
 artifact is stale (regenerate with this script as part of the same
@@ -11,9 +11,9 @@ change that touches the sync stub).
 
 Only the curated large-input functions named in ``tors.aio._WRAPPED``
 are translated (see ``tors/aio.py``'s module docstring for why the rest
-of ``tors`` intentionally has no async twin — most functions are cheap
+of ``tors`` intentionally has no async twin: most functions are cheap
 enough that a thread hop would cost more than the call itself). Only the
-SIGNATURES travel: the extraction is each function's ``def`` lines
+signatures travel: the extraction is each function's ``def`` lines
 (``lines[node.lineno - 1 : node.end_lineno]``), so the sync stub's
 comments stay in the sync stub and the generated ``aio.pyi`` carries no
 comments at all.
@@ -21,8 +21,8 @@ comments at all.
 The translated text is piped through ``ruff format`` (the repo's
 formatter, a dev-group dependency, invoked as ``python -m ruff``)
 before it is returned or written: the emitted artifact is
-ruff-format-clean BY CONSTRUCTION, so the committed stub, the
-generator, and the formatter can never disagree about style — the
+ruff-format-clean by construction, so the committed stub, the
+generator, and the formatter can never disagree about style: the
 freshness gate in ``tests/test_aio.py`` compares this function's output
 against the committed file, and both sides are the formatted spelling.
 """
@@ -45,7 +45,7 @@ def _ruff_format(text: str) -> str:
     blank lines between top-level defs) and the project's ``pyproject.toml``
     config, so the output is exactly what formatting the committed file in
     place would produce. Raises ``RuntimeError`` rather than emitting an
-    unformatted stub if ruff is missing or refuses the input — a stale or
+    unformatted stub if ruff is missing or refuses the input: a stale or
     malformed artifact must never be written silently.
     """
     # Fixed argv, no shell, the repo's own formatter.

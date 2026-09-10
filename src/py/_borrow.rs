@@ -9,13 +9,13 @@
 //!
 //! The walks take a `run` closure rather than returning the borrows:
 //! pyo3's `&str`/`&[u8]` extraction hands back a borrow tied to the
-//! HANDLE it was extracted from (pyo3 0.29's
+//! handle it was extracted from (pyo3 0.29's
 //! `impl<'a> FromPyObject<'a, '_> for &'a str`), so a walk that returned
 //! `(handles, borrows-of-handles)` would be returning a value that
 //! references data it also owns, the self-referential-return shape safe
 //! Rust cannot express. Running `run` inside the walk's scope solves
 //! that and pays a safety dividend: the handles are alive across
-//! everything `run` does, any `py.detach` included, BY CONSTRUCTION
+//! everything `run` does, any `py.detach` included, by construction
 //! rather than by call-site discipline.
 
 use pyo3::exceptions::{PyTimeoutError, PyValueError};
@@ -54,7 +54,7 @@ pub(crate) enum EmptyPolicy {
 ///
 /// `run` also receives the handles themselves (the `[Bound]` slice)
 /// because one caller needs them after its detach: `get_close_matches`
-/// returns the ORIGINAL candidate objects, selected by index, so it must
+/// returns the original candidate objects, selected by index, so it must
 /// reach the handles on the marshalling side of the scan.
 pub(crate) fn borrow_str_list<R>(
     list: &Bound<'_, PyList>,
@@ -99,7 +99,7 @@ pub(crate) fn borrow_bytes_list<R>(
 /// `replace_many_masked`: the [`borrow_str_list`] shape over a dict's
 /// (key, value) pairs, keys refused empty (`ValueError("empty pattern")`,
 /// the same find_patterns contract an empty key would break: it would
-/// match at every position), values extracted AFTER the key's empty
+/// match at every position), values extracted after the key's empty
 /// check so a non-`str` value under an empty key reports the empty-key
 /// `ValueError` first, exactly the per-entry check order the inline walks
 /// had. Same soundness story as [`borrow_str_list`]: the caller's dict
@@ -147,7 +147,7 @@ pub(crate) fn validate_unit_interval(name: &str, value: f64, echo_value: bool) -
 /// metrics, `similarity_ratio`, `get_close_matches`, `is_grounded`): the
 /// deadline core's own message carried on the builtins `TimeoutError`
 /// type the tests pin (`type(excinfo.value) is TimeoutError`). The
-/// exception is always constructed AFTER the GIL is reacquired (nothing
+/// exception is always constructed after the GIL is reacquired (nothing
 /// raises from inside a detached region); the deadline cores are three
 /// deliberately distinct nominal types with no shared trait, so the
 /// message string, not the error value, is the shared currency, and this
