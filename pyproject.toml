@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tors"
-version = "0.5.0"
+version = "0.6.0"
 description = "Fast, GIL-free text and document operations for Python — normalization, Unicode segmentation, diffing, fuzzy matching, chunking, encoding/near-dup detection, Merkle integrity, and URL/redaction utilities, backed by Rust."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,7 +53,7 @@ classifiers = [
 # release bump (release-please's extra-files only touches version lines,
 # not this one).
 [project.optional-dependencies]
-documents = ["tors-documents==0.5.*"]
+documents = ["tors-documents==0.6.*"]
 
 [project.urls]
 Homepage = "https://github.com/AZX-PBC-OSS/tors"
