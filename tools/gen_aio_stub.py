@@ -78,6 +78,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         "and checked against the sync stub by ``tests/test_aio.py``.",
         '"""',
         "",
+        "from collections.abc import Sequence",
         "from typing import Literal",
         "",
         "from tors import CompiledLemmaDict, _StemmerLanguage",
