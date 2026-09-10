@@ -146,8 +146,10 @@ str corpora rendered to UTF-8 bytes):
   held at 96 MiB, reproducing the ~150ms@100MB GIL-held b64encode observation that
   motivated the function; at 12/32 MiB the red expression measures ratio 0.63-0.66
   (window-dependent at 12) and passes those cells' budgets; the red-side cell below
-  records the structural reason and asserts the sizes where the budgets do
-  discriminate.
+  records the structural reason and runs the 96 MiB expression inline on the
+  loop (the to_thread placement's two-call boundary leaves the worst gap at
+  the encode alone, under the 0.80 budget, its ceiling margin
+  box-speed-dependent), asserting the budgets mechanically.
 
 diff_opcodes cells (the 32 MiB near-identical and 12 MiB shuffled pairs from
 ``reference.diff_pair_near_identical`` / ``reference.diff_pair_shuffled``;
@@ -748,8 +750,9 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
       0.64-0.66, and both pass this cell's budgets, a structural property of the
       two-call expression (the eval loop can tick at the bytecode boundary
       between ``b64encode`` and ``decode("ascii")``, so the worst gap is the
-      encode alone); the red-side cell below asserts the discriminating sizes
-      mechanically."""
+      encode alone); the red-side cell below therefore runs the expression
+      inline on the loop -- where the whole wall is the worst gap, ratio
+      ~1.0 in every sample -- and asserts both budgets mechanically."""
     corpus = corpus_utf8("prose", size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -792,7 +795,7 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
     ids=[
         "ref-finalize-12MiB",
         "ref-finalize-32MiB",
-        "stdlib-b64-96MiB",
+        "inline-stdlib-b64-96MiB",
         "inline-chunk_text-12MiB",
         "inline-chunk_by_words-12MiB",
         "inline-chunk_by_sentences-12MiB",
@@ -819,10 +822,21 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
       (ratio 0.58-0.60), missing the 0.30 ratio budget by ~2x in every
       sample; at 32 MiB, 238-259ms of 447-481ms (0.53-0.55), missing both the
       ratio budget and the 100ms ceiling (~2.4x over).
-    - The stdlib b64 expression at 96 MiB: 122.3-127.6ms of 188-194ms
-      (ratio 0.65-0.66): the single C ``b64encode`` call alone exceeds the
-      100ms ceiling in every sample (the motivating ~150ms@100MB
-      observation's size class, reproduced).
+    - The stdlib b64 expression at 96 MiB, run inline on the loop (the
+      family rows' idiom, not the finalize reds' to_thread placement):
+      the whole two-call wall is the worst gap, ratio ~1.0 in every
+      sample, missing both the 0.80 ratio budget and the 100ms ceiling
+      (walls 139-199ms measured) -- the one-call lost-detach shape the
+      96 MiB tors cell's budgets exist to discriminate. Why not
+      to_thread: the expression is two C calls with an eval-loop bytecode
+      boundary between them, so a worker thread's loop ticks between
+      encode and ``decode("ascii")`` and the worst gap is the encode
+      alone (122.3-127.6ms of 188-194ms walls, ratio 0.65-0.66, on the
+      dev box the row was first calibrated on; 94-95ms on fast CI
+      runners) -- structurally under the 0.80 budget at every size, which
+      left the 100ms ceiling as the row's only discriminator with a
+      box-speed-dependent margin, and the row measured a CLEAN sample on
+      CI twice with no code change: the flake that moved it inline.
     - The chunking family's heavy members (``inline-*`` rows), run inline
       on the event loop via ``_call_inline_on_the_loop``: the green
       family cell's own calls at its own params
@@ -859,9 +873,38 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
     the single-C-call reds above demonstrate directly. The b64 budget's
     discriminating power for tors's own shape is real, but it rests on the
     one-call structure, not on the stdlib red side's two-call shape at
-    small sizes; recorded here so the next reader does not mistake the
-    12/32 MiB b64 red sides for regression-proof."""
-    if cell.startswith("inline-"):
+    small sizes; the same bytecode boundary is why the asserted 96 MiB
+    row runs inline (the to_thread placement's worst gap is the encode
+    alone, under the 0.80 budget, its ceiling margin box-speed-dependent),
+    recorded here so the next reader does not mistake the 12/32 MiB b64
+    red sides for regression-proof."""
+    if cell == "stdlib-b64-encode":
+        # The b64 red side, inline on the loop (the family rows' idiom),
+        # not in the finalize reds' to_thread placement: the stdlib
+        # expression is two C calls with an eval-loop bytecode boundary
+        # between them, so a worker thread's loop ticks between encode
+        # and decode("ascii") and the worst gap is the encode alone --
+        # structurally ~0.5 of the wall, under this row's 0.80 ratio
+        # budget at every size, which left the 100ms ceiling as the row's
+        # only discriminator and its margin box-speed-dependent (122-127ms
+        # encodes on the dev box the row was calibrated on; 94-95ms on
+        # fast CI runners, where the row measured a CLEAN sample twice
+        # with no code change). Inline, the loop thread is inside the
+        # expression for its whole wall: the worst gap is the wall, ratio
+        # ~1.0 in every sample on every box, missing both the 0.80 budget
+        # and the 100ms ceiling (139-199ms walls measured) -- the
+        # one-call lost-detach shape the 96 MiB tors cell's budgets exist
+        # to discriminate.
+        corpus = corpus_utf8("prose", size_bytes)
+        observed = [
+            asyncio.run(
+                _gap_and_wall_during(
+                    lambda: _call_inline_on_the_loop(lambda: _stdlib_b64_expression(corpus))
+                )
+            )
+            for _ in range(_SAMPLES)
+        ]
+    elif cell.startswith("inline-"):
         # The family's inline-hold rows: the green cell's own call, at
         # the same params, run directly on the loop's thread (the lost-
         # detach shape _call_inline_on_the_loop's docs describe).
@@ -873,12 +916,9 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
             for _ in range(_SAMPLES)
         ]
     else:
-        corpus = (
-            corpus_utf8("prose", size_bytes) if cell == "stdlib-b64-encode" else prose(size_bytes)
-        )
-        red = _stdlib_b64_expression if cell == "stdlib-b64-encode" else reference_finalize
+        corpus = prose(size_bytes)
         observed = [
-            asyncio.run(_gap_and_wall_during(lambda: asyncio.to_thread(red, corpus)))
+            asyncio.run(_gap_and_wall_during(lambda: asyncio.to_thread(reference_finalize, corpus)))
             for _ in range(_SAMPLES)
         ]
     for gap, wall in observed:
