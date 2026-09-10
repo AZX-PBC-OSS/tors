@@ -43,40 +43,63 @@ otherwise use:
 
 Chunking costs the segmentation walks it actually consults, not per-codepoint
 bookkeeping or levels it never reaches. Measured on 12 MiB of prose
-(`tools/bench_chunking.py`):
+(`tools/bench_chunking.py`, `tests/test_performance.py`):
 
-- `chunk_hierarchical`, default hierarchy, 2000-codepoint budget: ~3.4 ms.
-  Only the paragraph walk runs; the eager level builds this replaced measured
-  ~350 ms. 500-codepoint budget: ~192 ms (sentence walk joins).
-  100-codepoint budget: ~385 ms (all three walks).
+- `chunk_hierarchical`, default hierarchy: a whole-document budget consults
+  no level at all and costs ~0.1 ms whatever the hierarchy (formerly ~340 ms:
+  the walks were built before any window asked). A 2000-codepoint budget
+  whose windows are all served by the paragraph level costs ~1.2 ms
+  (formerly ~350 ms: the eager build paid the sentence and word walks no
+  window consulted). Budgets that genuinely descend pay the walks they use:
+  ~190 ms at a 600-codepoint budget (paragraph plus sentence), ~400 ms at
+  100 (all three walks plus a denser chunk loop).
 - A custom hierarchy that never matches, under a whole-document budget, is
-  one codepoint count and nothing else (~2.5 ms): no window consults a level,
-  so not even the literal's scan runs.
-- Duplicate separators are deduped at list construction, so `[None] * 100`
-  costs what `[None]` does (~1.7 ms at a 2000-codepoint budget over 6 MiB)
+  one codepoint count and nothing else: no window consults a level, so not
+  even the literal's scan runs.
+- Duplicate separators are deduped at slot construction, so `[None] * 100`
+  costs what `[None]` does (~0.5 ms at a 2000-codepoint budget over 6 MiB)
   and `[" "] * 100` what `[" "]` does (~9 ms). Before that fix the
   per-duplicate spelling was an unbounded, caller-controlled cost
   (`[None] * 100` measured 17.2 s and +3,120 MiB peak RSS; `[" "] * 100`
-  790 ms and +1,560 MiB).
+  790 ms and +1,560 MiB), and between the dedup and the lazy levels a
+  single-chunk budget over 6 MiB still spent ~176 ms building levels that
+  supplied zero cuts.
 - The unconditional `Vec<char>` + grapheme-boundary `HashSet` the chunkers
   used to build up front is gone, replaced by a lazily-built
   one-bit-per-codepoint bitmap (two SIMD scans on pure-ASCII text):
   `chunk_by_words` over 12 MiB went from ~1.9 s and ~500 MiB transient to
   ~160 ms and ~90 MiB.
 
-The line and paragraph twins gained an ASCII `memchr2` fast path on top:
-`chunk_by_lines` over 12 MiB of prose at 50 lines/chunk went ~14 ms →
-~0.4 ms, and `chunk_by_paragraphs` at 5 went ~10 ms → ~0.5 ms (non-ASCII
-keeps the per-codepoint char machine; outputs are differential-pinned
-identical either way). The wall contracts gate in `tests/test_performance.py`.
+The line and paragraph twins are byte-level scans: `memchr2` hops between
+break bytes behind an 8-byte inline density window (dense break runs never
+pay a hop), with a per-codepoint fallback for non-ASCII segments and ASCII
+certification batched as one 4 KiB stride per ~50 segments. That structure
+trades a small constant against the simpler whole-text `is_ascii` gate on
+pure-ASCII densities and wins big on the shapes the gate leaves unguarded
+(the gate has no density guard, and one non-ASCII byte forfeits an entire
+document to the per-codepoint decoder):
+
+| input (12 MiB) | `is_ascii`-gated scan | windowed scan |
+|---|---|---|
+| `chunk_by_lines`, prose | ~0.4 ms | ~0.45 ms |
+| `chunk_by_lines`, log corpus (~80 B/line) | ~1.2-1.3 ms | ~2.2 ms |
+| `chunk_by_paragraphs`, log corpus | ~1.3 ms | ~1.5 ms |
+| `chunk_by_lines`, break soup (break unit every ~2.5 B) | ~42 ms | ~10 ms |
+| `chunk_by_paragraphs`, break soup | ~54 ms | ~22 ms |
+| `chunk_by_lines`, one non-ASCII byte anywhere | ~7.6 ms | ~0.46 ms (~16x) |
+| `chunk_by_lines`, CJK-dense (every segment non-ASCII) | ~20 ms | ~21 ms |
+| `chunk_by_paragraphs`, CJK-dense | ~9 ms | ~12 ms |
+
+Outputs are differential-pinned identical across every one of these shapes;
+the wall contracts gate in `tests/test_performance.py`.
 
 ## List returns have a cost at scale
 
 The list-returning functions marshal one tuple per segment under the GIL:
-`word_bounds` on 12 MiB of prose (3.67M segments) holds the GIL for 428-497
-ms just marshalling the list, roughly 0.72 of the call's wall (the ratio is
-the load-stable number; the absolute band moves with the box). The `_iter`
-twins (`word_bounds_iter`, `find_patterns_iter`, `chunk_text_iter`, and
-friends) exist for exactly this: the same sequence, streamed, each `__next__`
-holding the GIL for one tuple, and the full drain ~2.1x faster in wall time
-in the measured case.
+`word_bounds` on 12 MiB of prose (3.67M segments) holds the GIL for 328-344
+ms just marshalling the list (worst-gap band; the dev box the test ledger
+records measured 428-497 ms, and the load-stable constant is the ratio,
+~0.72 of the call's wall). The `_iter` twins (`word_bounds_iter`,
+`find_patterns_iter`, `chunk_text_iter`, and friends) exist for exactly this:
+the same sequence, streamed, each `__next__` holding the GIL for one tuple,
+and the full drain ~2.1x faster in wall time in the measured case.

@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any, Literal
 
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
@@ -497,7 +497,10 @@ def chunk_text(
 # The streaming twin of chunk_text: same sequence, same argument contract,
 # the word_bounds_iter shape (whole scan under one detach at construction,
 # one 2-tuple per __next__): avoids materializing a list for documents
-# that chunk into the hundreds of thousands of pieces.
+# that chunk into the hundreds of thousands of pieces. Error precedence
+# matches the list spelling exactly: a lone-surrogate str raises
+# UnicodeEncodeError (the text conversion) before any other argument's
+# conversion or validation error, list and iter alike.
 def chunk_text_iter(
     text: str,
     max_chars: int,
@@ -528,6 +531,9 @@ def chunk_by_words(
 ) -> list[tuple[int, int]]: ...
 
 # The streaming twin of chunk_by_words: same shape as chunk_text_iter.
+# Error precedence matches the list spelling exactly: a lone-surrogate str
+# raises UnicodeEncodeError (the text conversion) before any other
+# argument's conversion or validation error, list and iter alike.
 def chunk_by_words_iter(
     text: str, words_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -540,6 +546,9 @@ def chunk_by_sentences(
 ) -> list[tuple[int, int]]: ...
 
 # The streaming twin of chunk_by_sentences: same shape as chunk_text_iter.
+# Error precedence matches the list spelling exactly: a lone-surrogate str
+# raises UnicodeEncodeError (the text conversion) before any other
+# argument's conversion or validation error, list and iter alike.
 def chunk_by_sentences_iter(
     text: str, sentences_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -560,10 +569,25 @@ def chunk_by_paragraphs(
     text: str, paragraphs_per_chunk: int, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 
+# The streaming twin of chunk_by_paragraphs: same shape as chunk_text_iter,
+# and the same rationale as every other _iter spelling: the list shape's
+# GIL-held marshalling cost is measured for segment-count-heavy outputs
+# (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
+# 328-344 ms, box-pace-dependent; ~0.72 of the call's wall is the
+# constant, just marshalling the list), and a paragraph-heavy corpus (a
+# multi-MiB article dump or report batch) is in that piece-count class,
+# chunking into hundreds of thousands of pieces. Error precedence matches
+# the list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
+# (the text conversion) before any other argument's conversion or
+# validation error, list and iter alike.
+def chunk_by_paragraphs_iter(
+    text: str, paragraphs_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
+
 # chunk_by_words/chunk_by_sentences/chunk_by_paragraphs' line-count twin.
 # A line break is a \n, a lone \r, or a \r\n pair counted as one unit
 # (the same CR/CRLF folding convention; str.splitlines' exotic separators
-# -- \v, \f, NEL, LS, PS -- are not breaks here). A line counts as a line
+# \v, \f, NEL, LS, PS are not breaks here). A line counts as a line
 # only when it carries at least one non-whitespace codepoint, the same
 # real-token discipline chunk_by_words applies to word segments: blank
 # lines neither count toward lines_per_chunk nor split a chunk's interior
@@ -590,9 +614,13 @@ def chunk_by_lines(
 # and the same rationale as every other _iter spelling: the list shape's
 # GIL-held marshalling cost is measured for segment-count-heavy outputs
 # (word_bounds on 12 MiB of prose, 3.67M segments, holds the GIL for
-# 428-497 ms just marshalling the list), and a line-oriented corpus (a
-# multi-MiB log or transcript) is in that piece-count class, chunking
-# into hundreds of thousands of pieces.
+# 328-344 ms, box-pace-dependent; ~0.72 of the call's wall is the
+# constant, just marshalling the list), and a line-oriented corpus (a
+# multi-MiB log or transcript) is in that piece-count class, chunking into
+# hundreds of thousands of pieces. Error precedence matches the
+# list spelling exactly: a lone-surrogate str raises UnicodeEncodeError
+# (the text conversion) before any other argument's conversion or
+# validation error, list and iter alike.
 def chunk_by_lines_iter(
     text: str, lines_per_chunk: int, *, overlap: int = 0
 ) -> Iterator[tuple[int, int]]: ...
@@ -602,10 +630,12 @@ def chunk_by_lines_iter(
 # finer levels only when a coarser one has no in-budget cut. separators=None
 # uses tors's own accurate hierarchy (paragraph -> sentence -> word -> a
 # grapheme-safe raw cut, always the final unconditional fallback).
-# separators=[...] is a caller-supplied list of literal strings (not regex),
-# coarsest first, e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
+# separators=[...] is a caller-supplied sequence of literal strings (not
+# regex), any Sequence (list or tuple) of literals and None entries; str,
+# dict, set, and generators raise TypeError at extraction, coarsest first,
+# e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
-# appended. A None entry in an otherwise-literal list splices the default
+# appended. A None entry in an otherwise-literal sequence splices the default
 # hierarchy's three accurate levels in at that position: ["\n", None] is
 # line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
 # shape (a chat thread, one message per line, never split mid-line) whose
@@ -617,12 +647,12 @@ def chunk_by_lines_iter(
 # boundary (not necessarily a semantic one, a documented simplification of
 # chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
-# returns []; an empty separators list is legal and skips straight to the
+# returns []; an empty separators sequence is legal and skips straight to the
 # raw-cut fallback.
 def chunk_hierarchical(
     text: str,
     max_chars: int,
-    separators: list[str | None] | None = None,
+    separators: Sequence[str | None] | None = None,
     *,
     overlap: int = 0,
 ) -> list[tuple[int, int]]: ...

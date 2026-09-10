@@ -21,10 +21,9 @@
 //!
 //! [`crate::chunk_impl`]
 
-use memchr::memchr2_iter;
-
 use crate::segmentation_impl;
 use crate::truncate_impl::{GraphemeIndex, char_count};
+use memchr::memchr2;
 
 /// Merge adjacent contiguous segments (`bounds[i].1 == bounds[i + 1].0`:
 /// the `word_bounds`/`sentence_bounds` covering-partition contract) whose
@@ -284,184 +283,352 @@ pub fn chunk_by_sentences(
 /// content) is a non-printing control character, not text either
 /// paragraph's caller would consider "split". No visible content
 /// character is ever cut mid-cluster by this function.
-pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
-    // Two spellings of the same state machine, chosen by text class:
-    // pure-ASCII text (the common corpus class) scans with a SIMD
-    // `memchr2` jump table between `\r`/`\n` bytes: byte index is
-    // codepoint index on ASCII, so the offsets are exact, while
-    // non-ASCII text keeps the streaming decode walk (the fast path
-    // has no `char`-decode at all; both are pinned to the random-access
-    // oracle in the tests, and the ASCII/char split is differential-
-    // pinned by the corpus below, whose members straddle both paths).
-    if text.is_ascii() {
-        return paragraph_bounds_ascii(text);
+/// The density-guard window [`next_break`] scans inline before it will
+/// pay a `memchr2` call. 8 bytes: see [`next_break`]'s docs for the
+/// measurement-backed reasoning.
+const BREAK_WINDOW: usize = 8;
+
+/// The byte-level break search [`paragraph_bounds`] uses: the offset of
+/// the next `\r` or `\n` at or after `from`, or `None` when none
+/// remains. Every other scanner in this crate already finds its anchor
+/// bytes through memchr/memmem over the raw bytes (`fence_impl`'s
+/// fence-line scan, `diff_impl`'s terminator scan, `normalize_impl`'s
+/// stage sentinels, `truncate_impl`'s CRLF bit-clearing pass,
+/// `chunk_hierarchical_impl::level_from_literal`'s separator walk);
+/// `line_bounds` and `paragraph_bounds` were the last two per-`char`
+/// `match` scanners, and this hop retires that spelling, but not as a
+/// naive `memchr2` call per segment: on break soup (a break unit every
+/// ~2 bytes) one memchr2 call and its per-call setup per 1–2 scanned
+/// bytes loses to a plain byte loop, while the same per-segment
+/// formulation is a large win at realistic densities (a break every
+/// ~80 bytes). The density guard makes both regimes the cheap one: a
+/// bounded inline byte scan of [`BREAK_WINDOW`] first, `memchr2` (SIMD)
+/// from the window's end only when that comes up empty. A next break
+/// found inside the window costs zero memchr overhead: on soup the
+/// window finds every break within the first byte or two, the search
+/// degenerates to roughly the old per-byte cost, and no per-segment
+/// memchr2 call happens at all; a window that comes up empty pays the
+/// inline bytes as pure overhead on sparse text, which is where the
+/// constant's size is decided: 8 because the window's scalar bytes are
+/// the dominant per-segment cost on realistic densities once the SIMD
+/// fold takes the rest, while soup's breaks arrive within a byte or
+/// two, far inside any window in the 8–32 range. The trade 8 buys:
+/// densities between 8 and 16 bytes per break (very short lines)
+/// pay one hop per segment, at roughly the old per-`char` decoder's
+/// cost (never worse, just not won); everything denser stays inline,
+/// everything sparser was paying the hop anyway. [`line_bounds`] fuses
+/// this same window into its
+/// per-segment fold (same constant, same reasoning; a separate search
+/// would re-touch the window bytes the fold is already touching); this
+/// bare window-then-hop spelling is paragraph_bounds', whose
+/// per-segment work is only a codepoint count and needs no fold.
+fn next_break(bytes: &[u8], from: usize) -> Option<usize> {
+    let limit = (from + BREAK_WINDOW).min(bytes.len());
+    if let Some(rel) = bytes[from..limit]
+        .iter()
+        .position(|&b| matches!(b, b'\r' | b'\n'))
+    {
+        return Some(from + rel);
     }
-    // The non-ASCII walk as one streaming decode pass: a three-flag
-    // state machine (in-run, unit count, pending-CR) instead of the
-    // former whole-text `Vec<char>` collect with random access and a
-    // lookahead, the same #22 allocation class: O(text) time, O(1)
-    // memory beyond the output. The codepoint total the end-of-text
-    // close needs is the loop's own counter, read once after the loop
-    // (the mid-loop `total = cp + 1` store the former spelling carried
-    // was never read in-flight, and its dead store was codegen luck to
-    // eliminate: the counter is not). The pending-CR flag is the
-    // lookahead: a '\r' counts one unit and stays pending; a following
-    // '\n' completes the CRLF pair without adding a unit; anything
-    // else leaves the '\r' standing as its own unit (already counted).
-    let mut bounds = Vec::new();
-    let mut cp = 0usize;
-    let mut seg_start = 0usize;
-    let mut in_run = false;
-    let mut run_start = 0usize;
-    let mut units = 0usize;
-    let mut pending_cr = false;
-    for ch in text.chars() {
-        match ch {
-            '\r' => {
-                if !in_run {
-                    in_run = true;
-                    run_start = cp;
-                    units = 0;
-                }
-                units += 1;
-                pending_cr = true;
-            }
-            '\n' => {
-                if !in_run {
-                    in_run = true;
-                    run_start = cp;
-                    units = 0;
-                }
-                if pending_cr {
-                    // Completes the pending CRLF pair: one unit total.
-                    pending_cr = false;
-                } else {
-                    units += 1;
-                }
-            }
-            _ => {
-                if in_run {
-                    if units >= 2 {
-                        if seg_start < run_start {
-                            bounds.push((seg_start, run_start));
-                        }
-                        seg_start = cp;
-                    }
-                    // A single-unit run is ordinary content: no split.
-                    in_run = false;
-                    pending_cr = false;
-                }
-            }
-        }
-        cp += 1;
-    }
-    // End of text terminates a trailing run the same way: seg_start moves
-    // past the run whenever the run qualifies (the push itself is guarded
-    // by seg_start < run_start, the leading-empty-paragraph discard).
-    let total = cp;
-    if in_run && units >= 2 {
-        if seg_start < run_start {
-            bounds.push((seg_start, run_start));
-        }
-        seg_start = total;
-    }
-    // The final paragraph is guarded by `seg_start < total`: kept,
-    // unlike `line_bounds`' content-filter guard: paragraph_bounds has
-    // no has-content flag, so the guard is the only thing standing
-    // between a trailing qualifying run's `seg_start = total` and a
-    // phantom empty paragraph. Empty text falls out with no special
-    // case: the loop never runs, `total` stays 0, `0 < 0` is false.
-    if seg_start < total {
-        bounds.push((seg_start, total));
-    }
-    bounds
+    memchr2(b'\r', b'\n', &bytes[limit..]).map(|rel| limit + rel)
 }
 
-/// The ASCII spelling of [`paragraph_bounds`]' state machine: the same
-/// in-run/unit-count/pending-CR logic, visited only at break bytes:
-/// `memchr2(b'\r', b'\n')` hops between them over the content spans a
-/// paragraph scan has no per-byte work for at all (no content filter
-/// here), so a 12 MiB prose document costs the break hits, not 12M
-/// decode-and-match iterations. `after_break` (one past the last break
-/// byte) is the content-span edge the machine's non-break arm acts on:
-/// bytes between two hits are all non-break by construction, so
-/// `pos > after_break` is "a content codepoint arrived", and the first
-/// such byte after a run is where the machine moves `seg_start`.
-fn paragraph_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let n = bytes.len(); // == total codepoints: pure ASCII
-    let mut bounds = Vec::new();
-    let mut seg_start = 0usize;
-    let mut in_run = false;
-    let mut run_start = 0usize;
-    let mut units = 0usize;
-    let mut pending_cr = false;
-    let mut after_break = 0usize;
-    for pos in memchr2_iter(b'\r', b'\n', bytes) {
-        if pos > after_break {
-            // Content intervened: close any open run exactly as the
-            // machine's non-break arm does (`seg_start` moves to the
-            // first content byte, which is `after_break`).
-            if in_run && units >= 2 {
-                if seg_start < run_start {
-                    bounds.push((seg_start, run_start));
-                }
-                seg_start = after_break;
-            }
-            in_run = false;
-            pending_cr = false;
-        }
-        match bytes[pos] {
-            b'\r' => {
-                if !in_run {
-                    in_run = true;
-                    run_start = pos;
-                    units = 0;
-                }
-                units += 1;
-                pending_cr = true;
-            }
-            _ => {
-                if !in_run {
-                    in_run = true;
-                    run_start = pos;
-                    units = 0;
-                }
-                if pending_cr {
-                    // Completes the pending CRLF pair: one unit total.
-                    pending_cr = false;
-                } else {
-                    units += 1;
-                }
-            }
-        }
-        after_break = pos + 1;
+/// How far one batch [`AsciiCert::certify`] attempt scans before giving
+/// the next attempt a fresh start: 4 KiB. The batch exists to amortize
+/// the per-call cost of `is_ascii`; the certification itself is
+/// memory-bound and vectorized, but a slice call pays setup, bounds,
+/// and SIMD prologue/epilogue per invocation, and at realistic
+/// one-break-per-~80-bytes densities that per-call overhead dominates
+/// the per-segment cost of the byte scans; one batch per ~50 segments
+/// removes it. (A whole-text gate would amortize further but forfeits
+/// the byte paths entirely on the first non-ASCII byte, the trade
+/// this certificate exists to avoid.) 4 KiB keeps every batch inside
+/// L1 and the failure cost (a batch that stops at a non-ASCII byte
+/// plus the locating scan) bounded to a couple of cache lines past the
+/// offending byte.
+const CERT_CHUNK: usize = 4096;
+
+/// A sliding ASCII certificate for the two byte-level scanners: the
+/// range `lo..hi` is proven all-ASCII, advanced by one kind of evidence:
+/// explicit batched `is_ascii` calls over [`CERT_CHUNK`]-sized
+/// strides (`certify`). The query "is `a..b` pure ASCII" is then a
+/// two-compare range check (`covers`) instead of a slice call, which is
+/// what retires the per-segment `is_ascii`/`char_count` call the
+/// pre-certificate spelling paid per segment; at realistic densities
+/// that per-call overhead dominated the per-segment cost, and batching
+/// removes it while buying the same amortization a whole-text
+/// `is_ascii()` gate would, without the gate's forfeiture: a gate
+/// collapses the whole text to the per-`char` machine on the first
+/// non-ASCII byte, this certificate degrades one 4 KiB stride and
+/// keeps every ASCII segment on the byte path.
+///
+/// (Advancing by examination, the run walks vouching for the break
+/// bytes they `match`, is deliberately not done: on break soup the
+/// run walk fires per ~2-byte segment, so per-run bookkeeping costs
+/// more than the batches it would save, which already amortize 4096×
+/// without help; and every extra live value in a hot loop is a
+/// register the loop state can lose. Batch-only: one mechanism, fewer
+/// live values, and `certify`'s miss path is the only path that
+/// touches bytes.)
+///
+/// The range is deliberately not a prefix-invariant ("everything below
+/// `hi` is ASCII"): mixed text makes that unsound, because a known
+/// non-ASCII byte at `p` would block every later batch from starting at
+/// a frozen prefix forever. Instead the range slides: when a batch fails
+/// inside a queried range, the first non-ASCII byte `p` is located (one
+/// early-exit scan), the range is reset to the empty range at `p + 1`
+/// (`bytes[p]` is known-bad; no future batch may start on it), and the
+/// next query, whose cursor has by then moved past `p`, restarts
+/// cleanly from its own segment. Queries are monotone (the scanners'
+/// byte cursor only moves forward) and every query start is inside or
+/// ahead of the previous range's end, so a single sliding range is
+/// always sufficient and stale ranges behind the cursor are simply
+/// discarded on restart.
+struct AsciiCert {
+    /// Invariant: every byte in `bytes[lo..hi]` is ASCII (`lo <= hi`).
+    lo: usize,
+    hi: usize,
+}
+
+impl AsciiCert {
+    /// The empty range at 0: nothing certified, every query misses and
+    /// pays one batch.
+    #[inline]
+    fn new() -> Self {
+        AsciiCert { lo: 0, hi: 0 }
     }
-    // Trailing content (text does not end on a break byte) closes any
-    // open run the same way the next break byte would have: the
-    // in-loop close only runs at a hit, and a run left open by the last
-    // hit is not a trailing break run unless the text really ends on
-    // break bytes (`n == after_break`). The paragraph after that run is
-    // the final `(after_break, n)` span.
-    if n > after_break {
-        if in_run && units >= 2 {
+
+    /// Is `a..b` proven ASCII? A two-compare range check, no bytes
+    /// touched. The empty range (`a == b`) is trivially covered whenever
+    /// `a` itself is inside the certificate.
+    #[inline]
+    fn covers(&self, a: usize, b: usize) -> bool {
+        self.lo <= a && b <= self.hi
+    }
+
+    /// Certify `bytes[a..b]` (`a <= b <= bytes.len()`): `true` iff the
+    /// range is pure ASCII, answering from `covers` when it can and
+    /// otherwise extending the sliding range with batched `is_ascii`
+    /// strides until `b` is covered or a non-ASCII byte is proven inside
+    /// `a..b` itself (a non-ASCII byte beyond `b` does not fail the
+    /// query: the locating scan certifies `a..p` on the way, and `p >=
+    /// b` answers the query affirmatively). On a genuine failure the
+    /// range resets to the empty range past the offending byte so no
+    /// later batch can start on it: the one known-bad byte is skipped,
+    /// not forever-blocked (see the type docs for why that matters on
+    /// mixed text).
+    fn certify(&mut self, bytes: &[u8], a: usize, b: usize) -> bool {
+        debug_assert!(a <= b && b <= bytes.len());
+        if self.covers(a, b) {
+            return true;
+        }
+        // Extend from `hi` when the range already covers `a` (contiguous
+        // extension, `a..hi` already proven); otherwise start a fresh
+        // range at `a` and let the loop below set `lo` on success.
+        let extends = self.lo <= a && a <= self.hi;
+        let mut start = if extends { self.hi } else { a };
+        while start < b {
+            let chunk_end = (start + CERT_CHUNK).min(bytes.len());
+            debug_assert!(chunk_end > start);
+            if bytes[start..chunk_end].is_ascii() {
+                start = chunk_end;
+                continue;
+            }
+            // The batch stopped: locate the first non-ASCII byte. The
+            // scan itself certifies everything it walks past, so `p >=
+            // b` still answers this query; only a bad byte inside
+            // `a..b` is a failure.
+            let p = start
+                + bytes[start..chunk_end]
+                    .iter()
+                    .position(|&x| x >= 0x80)
+                    .expect("is_ascii failed, so a non-ASCII byte exists");
+            if p >= b {
+                if !extends {
+                    self.lo = a;
+                }
+                self.hi = p;
+                return true;
+            }
+            // A genuine failure: `a..b` holds a non-ASCII byte. Reset to
+            // the empty range past it: everything the failed batch and
+            // the locating scan walked is behind the cursor's future and
+            // will be re-derived by the fallback path that answers this
+            // segment exactly.
+            self.lo = p + 1;
+            self.hi = p + 1;
+            return false;
+        }
+        // `start` reached `b`: the whole range is certified.
+        if !extends {
+            self.lo = a;
+        }
+        self.hi = start;
+        true
+    }
+}
+
+pub(crate) fn paragraph_bounds(text: &str) -> Vec<(usize, usize)> {
+    // The scan as one byte-level walk over `text.as_bytes()`: the
+    // memchr-family discipline every other scanner in the crate already
+    // follows (see `next_break`'s docs for why this is not the naive
+    // memchr-per-segment loop): [`next_break`]'s density-guarded hop
+    // between break bytes, each inter-break segment's codepoint count
+    // through the sliding ASCII certificate ([`AsciiCert`]: byte length
+    // on the certified path, the continuation-byte predicate otherwise,
+    // no decode, no whole-text `Vec<char>` collect, the #22 allocation
+    // class stays retired, and certification batched one 4 KiB
+    // `is_ascii` stride per ~50 segments, never the per-segment
+    // `char_count` slice call), and each break run
+    // walked unit-by-unit at byte level with the CRLF pairing done by
+    // direct lookahead (`bytes[i] == b'\r' && bytes[i + 1] == b'\n'`)
+    // instead of the former `pending_cr` flag: a flag was only ever
+    // the streaming decode's substitute for the one-codepoint lookahead
+    // the random-access oracle always had, and at byte level the
+    // lookahead is free. O(text) time, O(1) memory beyond the output.
+    //
+    // The output is bit-identical to the former per-`char` state machine
+    // by construction: the unit counting (CRLF pair = one, everything
+    // else = one each), the 2+-unit run qualification, the
+    // leading/trailing empty-span discards (`seg_start < run_start` and
+    // the end-of-text close) are the same statements over the same
+    // units; only the spelling of "find the next unit" changed. The
+    // differential oracles in this module's tests (the corpus sweep and
+    // both soup generators, ASCII and non-ASCII; the non-ASCII sweeps
+    // exist to pin the codepoint-offset bookkeeping this walk now does
+    // in bytes) hold that equivalence.
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let mut bounds = Vec::new();
+    // The sliding ASCII certificate (see `AsciiCert`): certified
+    // segments answer their codepoint count as the byte length with no
+    // call at all, and certification itself is one batched `is_ascii`
+    // stride per ~CERT_CHUNK bytes instead of the per-segment
+    // `char_count` slice call the pre-certificate spelling paid; at
+    // realistic densities that per-call overhead was the scan's dominant
+    // per-segment cost (the same amortization on soup: the inlined
+    // `covers` check answers every ~2-byte segment with no call at all,
+    // and a batch fires only every 4 KiB).
+    let mut cert = AsciiCert::new();
+    // The byte cursor and the codepoint cursor advance together: every
+    // segment pays its count, every break unit advances cp by its
+    // byte count (1, or 2 for a CRLF pair; `\r` and `\n` are ASCII,
+    // one codepoint each), so at loop exit cp is the whole text's
+    // codepoint total, derived inside the walk rather than paid as a
+    // separate whole-text count pass, the same one-pass property the
+    // decode spelling had (`total = cp + 1` per codepoint).
+    let mut byte = 0usize;
+    let mut cp = 0usize;
+    let mut seg_start = 0usize;
+    while byte < n {
+        let brk = match next_break(bytes, byte) {
+            Some(brk) => brk,
+            None => {
+                // No further break: the final segment runs to end of
+                // text. Count it and let the close below emit the final
+                // paragraph: a trailing qualifying run already moved
+                // `seg_start` to cp (= total), which the close's
+                // `seg_start < cp` guard discards. Same covers-fast-path
+                // and same first-byte pre-probe as the per-segment
+                // count below: a trailing segment is usually inside the
+                // certificate already; the miss pays one final batch,
+                // and a non-ASCII first byte skips straight to the
+                // predicate count.
+                cp += if bytes[byte] < 0x80
+                    && (cert.covers(byte, n) || cert.certify(bytes, byte, n))
+                {
+                    n - byte
+                } else {
+                    bytes[byte..].iter().filter(|&x| (x & 0xC0) != 0x80).count()
+                };
+                break;
+            }
+        };
+        // The segment's codepoint count: byte length on the certified
+        // path (one ASCII byte is one codepoint), the continuation-byte
+        // predicate otherwise, inlined rather than delegated to
+        // `char_count`, which would re-attempt the very certification
+        // that just failed before reaching its own predicate branch.
+        // The `covers` pre-check is the soup path's cheapness: this
+        // loop runs once per ~2-byte segment on break soup (2.5M calls
+        // at 12 MiB), and a `certify` call per segment, even one that
+        // answers from its own internal covers check, costs more than
+        // the `char_count` call it replaced; the inlined two-compare
+        // makes the hit path call-free and leaves `certify`'s batch
+        // machinery for the once-per-4 KiB miss.
+        // The `bytes[byte] < 0x80` pre-probe: a non-ASCII byte at the
+        // segment's first byte makes both arms behind it guaranteed
+        // failures: `covers` can only answer for a start already
+        // inside the proven range (an in-range byte is ASCII), and
+        // `certify`'s batch would stop at byte 0, its locating scan
+        // find byte 0, and the query fail and reset, so on
+        // non-ASCII-starting segments (a CJK log's every segment) one
+        // compare skips the whole attempt and lands directly in the
+        // continuation-byte count the failure would have chosen
+        // anyway. Skipping the failed call is unobservable in the
+        // certificate's state: the reset it would perform moves the
+        // range to the empty range at `byte + 1`, and the next query
+        // starts past this whole segment (beyond both the stale and
+        // the reset range ends), so `covers`/`extends` answer
+        // identically either way (a reset only matters to a query at
+        // or before the skipped byte, and the cursor never returns
+        // there). Both queries here are non-empty (`brk > byte`
+        // always: the cursor sits on a non-break byte), so the empty-
+        // range `covers` corner (a == b == hi, where `hi` itself is
+        // not proven) cannot be reached behind the probe.
+        cp += if bytes[byte] < 0x80 && (cert.covers(byte, brk) || cert.certify(bytes, byte, brk)) {
+            brk - byte
+        } else {
+            bytes[byte..brk]
+                .iter()
+                .filter(|&x| (x & 0xC0) != 0x80)
+                .count()
+        };
+        // The run of break units from `brk`: a `\r` immediately followed
+        // by `\n` is one unit (the CRLF folding, matching `normalize`'s
+        // own), every other break byte one unit each. `i` lands on the
+        // first non-break byte or end of text (always a codepoint
+        // start, since break bytes are ASCII and a multi-byte sequence
+        // never begins with a continuation byte after one), and cp
+        // keeps pace, so cp at the run's end is the first post-run
+        // codepoint's index, the same index the per-`char` machine's
+        // `seg_start = cp` close used.
+        let run_start = cp;
+        let mut i = brk;
+        let mut units = 0usize;
+        while i < n && matches!(bytes[i], b'\r' | b'\n') {
+            if bytes[i] == b'\r' && i + 1 < n && bytes[i + 1] == b'\n' {
+                cp += 2;
+                i += 2;
+            } else {
+                cp += 1;
+                i += 1;
+            }
+            units += 1;
+        }
+        // Run qualification, the same statements as before. 2+ units
+        // split: the span before the run is emitted unless it is empty
+        // (the leading-run discard, `seg_start < run_start`), and a
+        // single-unit run is ordinary content, no split. A run that ran
+        // to end of text is qualified here, inside the loop, which is
+        // the former spelling's end-of-text close: nothing between the
+        // run's last byte and the loop's exit reads this state.
+        if units >= 2 {
             if seg_start < run_start {
                 bounds.push((seg_start, run_start));
             }
-            seg_start = after_break;
+            seg_start = cp;
         }
-        in_run = false;
+        byte = i;
     }
-    // End of text on a break-byte run terminates it the way the
-    // machine's loop-exit does.
-    if in_run && units >= 2 {
-        if seg_start < run_start {
-            bounds.push((seg_start, run_start));
-        }
-        seg_start = n;
-    }
-    if seg_start < n {
-        bounds.push((seg_start, n));
+    // The final paragraph, guarded by `seg_start < cp`, kept, unlike
+    // `line_bounds`' content-filter guard: paragraph_bounds has no
+    // has-content flag, so this guard is the only thing standing between
+    // a trailing qualifying run's `seg_start = cp` and a phantom empty
+    // paragraph. Empty text falls out with no special case: the loop
+    // never runs, cp stays 0, `0 < 0` is false.
+    if seg_start < cp {
+        bounds.push((seg_start, cp));
     }
     bounds
 }
@@ -524,145 +691,328 @@ pub fn chunk_by_paragraphs(
 /// non-issue [`paragraph_bounds`] carries: the "cluster" is a newline
 /// plus an orphan combining mark, not visible content any line's caller
 /// would call "split".
-pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
-    // The same two-spelling split as `paragraph_bounds`: a SIMD
-    // `memchr2` walk over break bytes on pure-ASCII text (byte index
-    // is codepoint index, so offsets are exact), the streaming decode
-    // state machine on non-ASCII text. Both are pinned to the
-    // random-access oracle in the tests.
-    if text.is_ascii() {
-        return line_bounds_ascii(text);
+/// The ASCII half of `char::is_whitespace` as one byte-membership
+/// table: `ASCII_WS[b]` is whether the codepoint `b` encodes is
+/// White_Space, true exactly for 0x09..=0x0D and 0x20, the set
+/// identity [`line_bounds`]'s docs state, built by the const block in
+/// exactly that spelling so the table cannot drift from the predicate
+/// it replaces (the break bytes 0x0A/0x0D are members but never reach
+/// the fold: the window stops at them first; the non-ASCII fallback
+/// below is what keeps the answer exact above 0x7F). A table, not the
+/// `matches!` range check, because that check compiles to a
+/// five-instruction compare/setcc chain per byte and in the hot window
+/// that chain is the largest per-content-byte cost on break soup; the
+/// one-load lookup hangs off the side of the compare-based break
+/// check, never on the loop's carried chain; routing the break check
+/// itself through a table load would put a load→load latency exactly
+/// on that chain.
+const ASCII_WS: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = b'\t';
+    while b <= b'\r' {
+        table[b as usize] = true;
+        b += 1;
     }
-    // The non-ASCII scan as one streaming decode pass, the same shape
-    // as `paragraph_bounds`' state machine (no whole-text `Vec<char>`
-    // collect, no `char_count` pre-pass, and no mid-loop `total` store
-    // either: the counter is read once after the loop, never stored
-    // per codepoint): a `pending_cr` flag is the CRLF lookahead, and a
-    // `has_non_ws` flag carries the real-line filter so the segment
-    // list is built in the same pass that finds the breaks. O(text)
-    // time, O(lines) memory.
+    table[b' ' as usize] = true;
+    table
+};
+
+pub(crate) fn line_bounds(text: &str) -> Vec<(usize, usize)> {
+    // The scan as one byte-level walk over `text.as_bytes()`, the same
+    // restructure [`paragraph_bounds`] above got, split into two regimes
+    // around the density guard (see `next_break`'s docs for the guard's
+    // measurement-backed reasoning):
+    //
+    // Hot (the no-call loop every segment starts in): the fold and the
+    // break search are the same inline pass over the first
+    // [`BREAK_WINDOW`] segment bytes, so a dense or short segment (a
+    // break within the window: soup's every segment, a short line's)
+    // is answered entirely by that one pass: no second scan, no slice,
+    // no call overhead, and back-to-back break units (a line's break
+    // run, soup's whole shape) are consumed by one inner walk: the
+    // first unit ends the line just folded, every further unit ends an
+    // empty line the real-line filter drops by construction, so the
+    // walk pushes nothing. Keeping every call out of this loop is a
+    // necessity, not style: a `memchr2` call site anywhere in it makes
+    // the compiler spill the loop state, and soup pays that spill per
+    // push; the hot/cold split exists for exactly that reason. (A
+    // flat per-byte loop, the old machine's rhythm with the escape
+    // check as its only per-segment logic, is no better: the per-
+    // segment state it must carry across the back edge (the segment's
+    // byte start, the non-ASCII flag) pushes the register allocation
+    // over its edge and every unit begins reloading `bytes`, `n` and
+    // `seg_start` from the stack; the window spelling keeps them in
+    // registers by scoping the per-segment locals to one iteration.)
+    //
+    // Cold, where a window comes up empty (a long segment, the
+    // realistic-density shape): one `memchr2` hop finds the break, and
+    // the fold restarts over the whole segment with the SIMD tools:
+    // the sliding certificate (`AsciiCert`) answers the purity question
+    // from batched 4 KiB `is_ascii` strides (one call per ~50 segments,
+    // extending from wherever the sliding range ended; the
+    // per-segment `is_ascii()` slice call this replaces paid its
+    // per-call setup on every segment, which dominated the lane), an
+    // early-exit `any()` finds the real-line answer at the first
+    // content byte (a content line answers within a byte or two; the
+    // discarded ≤BREAK_WINDOW window bytes are bounded waste, re-scanned
+    // L1-hot), and the codepoint count on that path is just the byte
+    // length. Cold then does its own line-close bookkeeping and hands
+    // the break byte back to hot, which begins on a break byte, folds
+    // an empty segment for free, and walks the unit run, so the walk
+    // exists in exactly one place.
+    //
+    // The byte-level whitespace check rests on a set identity:
+    // `char::is_whitespace` (the Unicode `White_Space` property the
+    // contract above pins) holds for an ASCII codepoint exactly when
+    // its byte is `\t`..=`\r` (0x09–0x0D) or a space; note 0x0B (VT)
+    // is `White_Space`, so std's `u8::is_ascii_whitespace` (which omits
+    // it) would silently mis-classify vertical-tab-only lines as
+    // content, and U+001C–U+001F are not (they stay content, the
+    // documented divergence from Python's `str.isspace()`). A segment
+    // that is not pure ASCII takes the per-codepoint fallback at its
+    // break (or at the end-of-text close): `char::is_whitespace` is
+    // asked directly over the whole segment, exactness winning over
+    // skipping a rare second pass; non-ASCII is detected per segment,
+    // so mixed text keeps the byte paths on its ASCII segments (no
+    // whole-text `is_ascii()` gate to forfeit them on any mixed
+    // document). The codepoint count is byte arithmetic on the ASCII
+    // paths (a pure-ASCII segment's byte length is its codepoint
+    // length) and a decode recount in the fallbacks: every
+    // non-continuation byte starts exactly one UTF-8 codepoint, so no
+    // path ever needs a separate counting pass.
+    //
+    // CRLF pairing is direct byte lookahead, not the former `pending_cr`
+    // flag (the flag was the streaming decode's substitute for the
+    // lookahead the random-access oracle always had): a `\r` immediately
+    // followed by `\n` is one unit, the line ending at the `\r` and the
+    // next beginning after the `\n`; a trailing `\r` with no following
+    // byte, or followed by anything but `\n`, stands alone.
+    //
+    // Bit-identical to the former per-`char` state machine by
+    // construction: the same break units (a `\r` always opens one,
+    // whether it stands alone or begins a CRLF pair; a `\n` opens one
+    // only when it did not ride in as a pair's second half; at byte
+    // level that is simply "the pair is consumed together"), the same
+    // `has_non_ws` resets at the same unit boundaries, the same
+    // end-of-text close. The differential oracles (corpus sweep plus
+    // the ASCII and non-ASCII soup generators, the latter pinning the
+    // fallback path and the codepoint bookkeeping) hold the equivalence.
+    let bytes = text.as_bytes();
+    let n = bytes.len();
     let mut bounds = Vec::new();
+    // The byte cursor and the codepoint cursor advance together; cp at
+    // each break is that break byte's own codepoint index, exactly
+    // where the per-`char` machine pushed the line's end. The table is
+    // held by reference so its address is one register held across the
+    // loops instead of a `lea` re-materialized per byte.
+    let ascii_ws = &ASCII_WS;
+    // The sliding ASCII certificate (see `AsciiCert`): cold segments
+    // answer `is this segment pure ASCII` as a two-compare range check
+    // served by one batched 4 KiB `is_ascii` stride per ~50 segments;
+    // the pre-certificate spelling paid the slice call per segment,
+    // whose per-call overhead dominated the realistic-density lanes.
+    // Only the cold path touches the certificate: the hot loop never
+    // does (its per-segment register budget is the tighter resource,
+    // see the window's comment), so dense text pays no certificate
+    // overhead at all.
+    let mut cert = AsciiCert::new();
+    let mut byte = 0usize;
     let mut cp = 0usize;
     let mut seg_start = 0usize;
     let mut has_non_ws = false;
-    let mut pending_cr = false;
-    for ch in text.chars() {
-        match ch {
-            '\r' => {
-                // Opens a break unit whether it stands alone or begins a
-                // CRLF pair: the current line ends at the '\r' itself.
-                if has_non_ws {
-                    bounds.push((seg_start, cp));
+    'outer: loop {
+        // ---- hot: segments whose break falls inside the window ----
+        // The live set here is deliberately minimal (fold straight into
+        // `has_non_ws`, no separate segment flag, no continuation
+        // counter; the per-segment locals are scoped to one iteration
+        // so they never cross the back edge): this loop runs once per
+        // soup segment, and every extra live value is a register the
+        // whole loop state can no longer stay in.
+        while byte < n {
+            // The fused window (the density guard): fold each byte and
+            // break-check it in one pass, up to BREAK_WINDOW bytes. The
+            // break check is compare-based (two immediates against the
+            // loaded byte) and the fold's table load hangs off the side
+            // of it; routing more of the loop through the table loses
+            // either way: a class-table `match` compiles to an indirect
+            // jump per byte, and a table-first spelling that skipped
+            // the compares for content bytes puts the load on the
+            // carried chain (the long-segment corpus runs every one of
+            // the BREAK_WINDOW content bytes through the window; soup
+            // runs one or two).
+            // `has_non_ws` is false at every segment start (reset below
+            // per break run, by cold, and at entry), so folding straight
+            // into it is the segment's fold; non-ASCII bytes only raise
+            // the fallback flag; they never fold, so the provisional
+            // answer is always the ASCII bytes' exact contribution and
+            // the fallback's recompute can only OR the same-or-truer
+            // value in.
+            let limit = (byte + BREAK_WINDOW).min(n);
+            let mut i = byte;
+            let mut saw_non_ascii = false;
+            let mut brk = None;
+            while i < limit {
+                let b = bytes[i];
+                if matches!(b, b'\r' | b'\n') {
+                    brk = Some(i);
+                    break;
                 }
-                seg_start = cp + 1;
-                has_non_ws = false;
-                pending_cr = true;
-            }
-            '\n' => {
-                if pending_cr {
-                    // Completes the CRLF pair: the line already ended at
-                    // the '\r'; the next line begins after this '\n'.
-                    seg_start = cp + 1;
-                    pending_cr = false;
+                if b < 0x80 {
+                    has_non_ws |= !ascii_ws[b as usize];
                 } else {
-                    if has_non_ws {
-                        bounds.push((seg_start, cp));
-                    }
-                    seg_start = cp + 1;
-                    has_non_ws = false;
+                    saw_non_ascii = true;
+                }
+                i += 1;
+            }
+            // Deliberately no certificate touch here: this loop runs
+            // once per soup segment, and every extra live value (the
+            // certificate's lo/hi) is a register the whole loop state
+            // can no longer stay in, the same failure mode the
+            // hot/cold split itself exists to avoid. The window's bytes
+            // are re-derived for free where they matter: cold's batch
+            // extends across them inside one vectorized stride, and a
+            // batch only fires once per ~CERT_CHUNK bytes regardless,
+            // so advancing here would save nothing.
+            let Some(brk) = brk else {
+                // Window exhausted without a break: a long segment.
+                // Escape to the cold path below (one pass through
+                // 'outer's tail) and let the SIMD tools fold it. Nothing
+                // has been folded into cp yet (cold recomputes the
+                // whole segment), so the window's partial work is simply
+                // dropped.
+                break;
+            };
+            if saw_non_ascii {
+                // The non-ASCII fallback: one decode pass answers the
+                // filter exactly (`char::is_whitespace`, NBSP and the
+                // U+2000..U+3000 spaces included) and recounts the
+                // codepoints; the continuation arithmetic the ASCII
+                // path gets for free (byte length is codepoint length
+                // there) is folded into the same rare pass instead of
+                // being paid per byte in the hot loop above.
+                let mut non_ws = false;
+                let mut cps = 0usize;
+                for ch in text[byte..brk].chars() {
+                    non_ws |= !ch.is_whitespace();
+                    cps += 1;
+                }
+                has_non_ws |= non_ws;
+                cp += cps;
+            } else {
+                cp += brk - byte;
+            }
+            if has_non_ws {
+                bounds.push((seg_start, cp));
+            }
+            // The break-unit walk: consume the unit at `brk` and any
+            // further back-to-back units: a `\r` immediately followed
+            // by `\n` is one unit of two bytes (both codepoints), every
+            // other break byte a single-byte unit. Each further unit
+            // ends an empty line (`has_non_ws` is false for it until the
+            // reset below, the same reset the per-`char` machine applied
+            // per unit), so nothing is pushed inside the walk; the next
+            // segment starts at a non-break byte by the exit check, so
+            // hot never folds an empty segment except after cold hands
+            // it a break byte. (Branches, deliberately: a branchless
+            // unit-length spelling forces the pair lookahead's loads
+            // unconditionally and tangles the walk's exit check into
+            // them.)
+            let mut j = brk;
+            loop {
+                if bytes[j] == b'\r' && j + 1 < n && bytes[j + 1] == b'\n' {
+                    cp += 2;
+                    j += 2;
+                } else {
+                    cp += 1;
+                    j += 1;
+                }
+                if j >= n || !matches!(bytes[j], b'\r' | b'\n') {
+                    break;
                 }
             }
-            _ => {
-                has_non_ws |= !ch.is_whitespace();
-                pending_cr = false;
-            }
+            seg_start = cp;
+            has_non_ws = false;
+            byte = j;
         }
-        cp += 1;
+        if byte >= n {
+            // Hot ran to end of text (a trailing short segment or break
+            // run); the close below emits the final line if it earned
+            // one. Cold cannot run: there is no segment left.
+            break 'outer;
+        }
+        // ---- cold: the window came up empty (a long segment) ----
+        // One vectorized hop for the break, then the fold over the
+        // whole segment (cp has not moved yet; cold recomputes the
+        // whole segment's count, and `has_non_ws |=` over the whole
+        // segment merely re-ORs the window's partial contribution, the
+        // same bytes) so the answers come from the SIMD pass instead of
+        // 80+ scalar iterations. `seg_end` is the hop's hit or end of
+        // text. The purity question is the certificate's (`certify`,
+        // one batched 4 KiB stride per ~50 segments, extending from
+        // wherever the sliding range ended so the window bytes ride
+        // inside the stride), not a per-segment `is_ascii()` slice
+        // call; the per-call overhead of that spelling dominated the
+        // realistic-density lanes, and the certificate answers most
+        // segments with no call at all. The `bytes[byte] < 0x80`
+        // pre-probe is `paragraph_bounds`' segment count's (see there
+        // for the soundness argument): a non-ASCII first byte makes the
+        // `certify` attempt a guaranteed failure, and on a CJK-dense
+        // log (every segment starting with a multi-byte lead byte)
+        // that is every segment; one compare lands straight in the
+        // decode fold without paying the batch call, the locating scan,
+        // and the reset a failed attempt performs. The query is
+        // non-empty (`seg_end > byte` always: the window exhausted
+        // without a break, so at least one byte remains), so the
+        // empty-range `covers` corner cannot hide behind the probe
+        // here either.
+        let limit = (byte + BREAK_WINDOW).min(n);
+        let seg_end = memchr2(b'\r', b'\n', &bytes[limit..]).map_or(n, |rel| limit + rel);
+        if bytes[byte] < 0x80 && cert.certify(bytes, byte, seg_end) {
+            // The segment is certified pure ASCII (no break byte exists
+            // in it, the window saw none and the hop found none, and
+            // no byte above 0x7F), so the table's non-whitespace answer
+            // is exactly the filter's; the early exit answers within a
+            // byte or two.
+            let seg = &bytes[byte..seg_end];
+            has_non_ws |= seg.iter().any(|&b| !ascii_ws[b as usize]);
+            cp += seg.len();
+        } else {
+            let mut non_ws = false;
+            let mut cps = 0usize;
+            for ch in text[byte..seg_end].chars() {
+                non_ws |= !ch.is_whitespace();
+                cps += 1;
+            }
+            has_non_ws |= non_ws;
+            cp += cps;
+        }
+        if seg_end == n {
+            // No further break: the final segment is folded, cp is the
+            // whole text's codepoint total, and the close below emits
+            // the line it earned (if any).
+            break 'outer;
+        }
+        if has_non_ws {
+            bounds.push((seg_start, cp));
+        }
+        // The line-close bookkeeping hot's walk tail applies, applied
+        // here too; the break run at `seg_end` is left for hot, whose
+        // next iteration begins on a break byte and folds an empty
+        // segment (free, and the one place the walk lives).
+        seg_start = cp;
+        has_non_ws = false;
+        byte = seg_end;
     }
     // End of text closes the final line, and `has_non_ws` alone is the
-    // phantom-line guarantee: it resets together with `seg_start` at
-    // every break unit, and only a codepoint at `cp >= seg_start` can
-    // set it after the last reset, so `has_non_ws` holding at end of
-    // text implies a real line at `(seg_start, total)`: the former
-    // `seg_start < total` half of the guard was implied by exactly that
-    // argument and is gone. A trailing break unit already reset
-    // `has_non_ws`; empty text never enters the loop, so the flag stays
-    // false and `[]` falls out with no special case.
-    let total = cp;
+    // phantom-line guarantee, the same argument as before in byte
+    // terms: the flag resets together with `seg_start` at every break
+    // run, and only a codepoint at or after `seg_start` can set it
+    // after the last reset (the final segment's fold), so the flag
+    // holding at end of text implies a real line at `(seg_start, cp)`.
+    // A trailing break unit already reset it; empty text never enters
+    // the loop; `[]` falls out with no special case.
     if has_non_ws {
-        bounds.push((seg_start, total));
-    }
-    bounds
-}
-
-/// ASCII's exact `char::is_whitespace` image: the Unicode `White_Space`
-/// property's ASCII members are 0x09-0x0D and 0x20, and nothing else in
-/// ASCII (NBSP U+00A0, NEL U+0085 and the other White_Space codepoints
-/// are non-ASCII and take the char-machine path instead, where the real
-/// property is applied). Break bytes never reach this predicate inside
-/// a content span, but the full set is stated for the definitional
-/// match with the property.
-#[inline]
-fn is_ascii_ws(b: u8) -> bool {
-    matches!(b, 0x09..=0x0D | 0x20)
-}
-
-/// The ASCII spelling of [`line_bounds`]' state machine: `memchr2`
-/// hops between break bytes, and each hop's content span: the bytes
-/// since the last break unit's end, all non-break by construction:
-/// is folded into the real-line flag with one contiguous slice scan
-/// (auto-vectorized by the same compiler that would have nothing to
-/// vectorize in a per-`char` decode loop). The break-byte handling
-/// itself is the machine verbatim: `\r` closes the line at itself,
-/// a `\n` either completes a pending CRLF or closes the line at
-/// itself.
-fn line_bounds_ascii(text: &str) -> Vec<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let n = bytes.len(); // == total codepoints: pure ASCII
-    let mut bounds = Vec::new();
-    let mut seg_start = 0usize;
-    let mut has_non_ws = false;
-    let mut pending_cr = false;
-    let mut after_break = 0usize;
-    for pos in memchr2_iter(b'\r', b'\n', bytes) {
-        if pos > after_break {
-            has_non_ws |= bytes[after_break..pos].iter().any(|&b| !is_ascii_ws(b));
-            pending_cr = false;
-        }
-        match bytes[pos] {
-            b'\r' => {
-                if has_non_ws {
-                    bounds.push((seg_start, pos));
-                }
-                seg_start = pos + 1;
-                has_non_ws = false;
-                pending_cr = true;
-            }
-            _ => {
-                if pending_cr {
-                    // Completes the CRLF pair: the line already ended at
-                    // the '\r'; the next line begins after this '\n'.
-                    seg_start = pos + 1;
-                    pending_cr = false;
-                } else {
-                    if has_non_ws {
-                        bounds.push((seg_start, pos));
-                    }
-                    seg_start = pos + 1;
-                    has_non_ws = false;
-                }
-            }
-        }
-        after_break = pos + 1;
-    }
-    // Trailing content after the last break byte closes the final line
-    // under the same flag the machine carries (an all-whitespace
-    // trailing span leaves it unset: no phantom line).
-    if n > after_break {
-        has_non_ws |= bytes[after_break..].iter().any(|&b| !is_ascii_ws(b));
-    }
-    if has_non_ws {
-        bounds.push((seg_start, n));
+        bounds.push((seg_start, cp));
     }
     bounds
 }
@@ -788,7 +1138,15 @@ mod tests {
     /// scanner has: CRLF pairs, mixed \n\r, trailing and leading runs),
     /// Thai SARA AM (the merge's reason to exist), whitespace-only and
     /// whitespace-heavy text (the token filter's drop-everything and
-    /// ride-along cases), and degenerate runs.
+    /// ride-along cases), degenerate runs, and the #30 non-ASCII shapes
+    /// (precomposed and combining accents, NBSP, an astral char, CJK)
+    /// that pin the byte-path scanners' per-segment non-ASCII fallback
+    /// and codepoint-offset bookkeeping: NBSP-only lines are blank to
+    /// `line_bounds` (White_Space) but ordinary content to
+    /// `paragraph_bounds` (no content filter), astral chars make byte
+    /// length != codepoint count, and the long mixed entry's ~19-byte
+    /// segments cross the density-guard window so the memchr hop and
+    /// the non-ASCII fold co-occur.
     fn differential_corpus() -> Vec<String> {
         vec![
             String::new(),
@@ -808,6 +1166,21 @@ mod tests {
             "para one\n\npara two\nsingle\n\npara three".to_string(),
             " \t \n\n \t ".to_string(),
             "e\u{0301}e\u{0301} words here".to_string(),
+            "\u{00E9}x\n\u{00E9}\u{0301}y\r\n\u{1F600}".to_string(),
+            "x\n\u{0301}y".to_string(),
+            "\u{00A0}\n\u{00A0}\u{00A0}\n".to_string(),
+            "\u{4E2D}\u{6587}\n\n\u{4E2D}\u{6587}".to_string(),
+            "\u{00E9}\u{0301} \u{4E2D}\u{00A0}\u{1F600}x\r\r\n\n\u{00E9}".to_string(),
+            "\u{00E9}\u{0301}\u{4E2D}x words here\r\n".repeat(40),
+            // The ASCII whitespace set's two members a `matches!` range
+            // check or std's `is_ascii_whitespace` (which omits VT)
+            // would drop: a VT-only and an FF-only line are blank lines
+            // (White_Space), pinned here because the mutation "drop
+            // 0x0B/0x0C from ASCII_WS" changes `chunk_by_lines` output
+            // and nothing else in this module's corpus would catch it.
+            "a\n\u{0B}\nb".to_string(),
+            "a\n\u{0C}\nb".to_string(),
+            "\u{0B}\n\u{0C}\n\u{0B}\u{0C}".to_string(),
             "q".repeat(300),
             "word ".repeat(120),
         ]
@@ -847,6 +1220,11 @@ mod tests {
                         chunk_by_segments(&paragraph_bounds_reference(&text), per_chunk, overlap),
                         "chunk_by_paragraphs divergence: text={text:?} per={per_chunk} ov={overlap}"
                     );
+                    assert_eq!(
+                        chunk_by_lines(&text, per_chunk, overlap),
+                        chunk_by_segments(&line_bounds_reference(&text), per_chunk, overlap),
+                        "chunk_by_lines divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
                 }
             }
         }
@@ -855,39 +1233,14 @@ mod tests {
     #[test]
     fn paragraph_state_machine_survives_a_deterministic_newline_soup() {
         // Pseudo-random text over exactly the alphabet the paragraph
-        // scanner branches on (\r, \n, CRLF pairings, whitespace, and
-        // one ordinary character), so the state machine's unit counting
-        // is checked against the random-access oracle on runs no
-        // hand-written corpus anticipates: including runs that end at
-        // end-of-text. The soup is pure ASCII, so every case exercises
-        // the memchr2 fast path against the oracle's per-char
-        // reference; the differential corpus above straddles the
-        // ASCII/char split with Thai and CJK members.
-        newline_soup(300);
-    }
-
-    #[test]
-    #[ignore] // the pre-PR long-run sweep: `cargo test -- --ignored` runs it
-    fn paragraph_state_machine_survives_a_200k_case_newline_soup() {
-        // The committed shape of the "hundreds of thousands of probe
-        // calls" a red-team pass runs ad hoc: same generator, same
-        // oracle, 200k cases: a couple of seconds in a debug build,
-        // which is why the default suite carries the 300-case cut and
-        // this is the explicitly-invoked long form.
-        newline_soup(200_000);
-    }
-
-    /// The deterministic newline soup itself: a splitmix-style LCG over
-    /// an alphabet of exactly the bytes both scanners branch on
-    /// (`\r`, `\n`, space/tab, an ordinary character), each text 1-60
-    /// codepoints, every case checked against both random-access
-    /// oracles: `paragraph_bounds`' unit counting and `line_bounds`'
-    /// blank-line/CRLF folding (its own reference, the same sweep the
-    /// line differential corpus runs, at soup scale instead).
-    fn newline_soup(cases: usize) {
+        // scanner branches on (\r, \n, CRLF pairings, whitespace riding
+        // inside segments, and one ordinary character), so the unit
+        // counting is checked against the random-access oracle on runs
+        // no hand-written corpus anticipates, including runs that end
+        // at end-of-text.
         let mut state = 0x853C49E6748FEA9Bu64;
         let alphabet = ['x', ' ', '\t', '\r', '\n'];
-        for _ in 0..cases {
+        for _ in 0..300 {
             let mut text = String::new();
             for _ in 0..(state % 60 + 1) as usize {
                 state = state
@@ -898,13 +1251,56 @@ mod tests {
             assert_eq!(
                 paragraph_bounds(&text),
                 paragraph_bounds_reference(&text),
-                "paragraph divergence on {text:?}"
+                "divergence on {text:?}"
             );
+        }
+        // The #30 byte-scan extension. The same soup discipline over a
+        // non-ASCII alphabet: a precomposed accent, a combining mark
+        // (also right after breaks, the documented orphan-cluster
+        // non-issue), NBSP (White_Space above 0x7F), an astral char
+        // (byte length != codepoint count) and CJK, so the per-segment
+        // codepoint-offset bookkeeping the byte walk now does in bytes
+        // is differentially pinned on shapes the ASCII alphabet cannot
+        // reach, with the unit-count chunker riding the same sweep over
+        // the oracle's bounds. Astral chars also stretch ordinary runs
+        // past the density-guard window, so the memchr-hop path
+        // and the inline path both take their turn under the oracle.
+        let mut state = 0x0D1B54A32B970E89u64;
+        let alphabet = [
+            'x',
+            '\r',
+            '\n',
+            '\u{00E9}',
+            '\u{0301}',
+            '\u{00A0}',
+            '\u{1F600}',
+            '\u{4E2D}',
+        ];
+        for _ in 0..300 {
+            let mut text = String::new();
+            for _ in 0..(state % 60 + 1) as usize {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                text.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
             assert_eq!(
-                line_bounds(&text),
-                line_bounds_reference(&text),
-                "line divergence on {text:?}"
+                paragraph_bounds(&text),
+                paragraph_bounds_reference(&text),
+                "divergence on {text:?}"
             );
+            for per_chunk in 1usize..=6 {
+                for overlap in [0usize, 1, per_chunk.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&o| o < per_chunk)
+                {
+                    assert_eq!(
+                        chunk_by_paragraphs(&text, per_chunk, overlap),
+                        chunk_by_segments(&paragraph_bounds_reference(&text), per_chunk, overlap),
+                        "chunk_by_paragraphs divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
+                }
+            }
         }
     }
 
@@ -1389,7 +1785,14 @@ mod tests {
         // character), so the unit counting is checked against the
         // random-access oracle on runs no hand-written corpus anticipates.
         let mut state = 0x9E3779B97F4A7C15u64;
-        let alphabet = ['x', '\r', '\n', ' '];
+        // VT and FF ride the alphabet alongside the space and tab: the
+        // ASCII whitespace members whose omission from the fold (a
+        // `matches!` range slip, or std's `is_ascii_whitespace`, which
+        // drops 0x0B) would silently reclassify blank lines as content:
+        // the exact mutation the corpus's VT/FF entries pin at
+        // hand-written shapes and this soup pins under arbitrary density
+        // and adjacency.
+        let alphabet = ['x', '\r', '\n', ' ', '\t', '\u{0B}', '\u{0C}'];
         for _ in 0..300 {
             let mut text = String::new();
             for _ in 0..(state % 60 + 1) as usize {
@@ -1418,6 +1821,91 @@ mod tests {
                     );
                 }
             }
+        }
+        // The #30 byte-scan extension, the paragraph soup's twin: the
+        // same discipline over a non-ASCII alphabet (with ' ' kept in, so
+        // ASCII whitespace and NBSP hit the filter from the same texts),
+        // pinning the non-ASCII fallback path (NBSP blank, accents and
+        // the astral char content) and the byte-vs-codepoint offset
+        // bookkeeping against the random-access oracle, with the
+        // unit-count chunker riding the sweep.
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let alphabet = [
+            'x',
+            '\r',
+            '\n',
+            ' ',
+            '\u{00E9}',
+            '\u{0301}',
+            '\u{00A0}',
+            '\u{1F600}',
+            '\u{4E2D}',
+        ];
+        for _ in 0..300 {
+            let mut text = String::new();
+            for _ in 0..(state % 60 + 1) as usize {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                text.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            assert_eq!(
+                line_bounds(&text),
+                line_bounds_reference(&text),
+                "divergence on {text:?}"
+            );
+            let bounds = line_bounds(&text);
+            for per_chunk in 1usize..=6 {
+                for overlap in [0usize, 1, per_chunk.saturating_sub(1)]
+                    .into_iter()
+                    .filter(|&o| o < per_chunk)
+                {
+                    assert_eq!(
+                        chunk_by_lines(&text, per_chunk, overlap),
+                        chunk_by_segments(&bounds, per_chunk, overlap),
+                        "chunk_by_lines divergence: text={text:?} per={per_chunk} ov={overlap}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // the pre-PR long-run sweep: `cargo test -- --ignored` runs it
+    fn both_scanners_survive_a_200k_case_whitespace_bearing_newline_soup() {
+        // The committed long-run artifact for the byte scans: a
+        // long-run claim needs a committed test, not a prose note.
+        // 200k pseudo-random
+        // cases over a whitespace-bearing alphabet: ' ' and '\t' join
+        // the breaks and the ordinary character, so blank runs, mixed
+        // content/blank segments, and every break density collide with
+        // the real-line filter's whitespace handling, the ASCII
+        // certificate's batch machinery, and the CRLF pairing
+        // at arbitrary adjacencies, with both scanners asserted
+        // against their random-access oracles per case. The in-suite
+        // soups above run the same generator logic at 300 cases each;
+        // this is the same contract at a length only a deliberate long
+        // run pays for.
+        let mut state = 0x853C49E6748FEA9Bu64;
+        let alphabet = ['x', ' ', '\t', '\r', '\n'];
+        for case in 0..200_000 {
+            let mut text = String::new();
+            for _ in 0..(state % 60 + 1) as usize {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                text.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+            }
+            assert_eq!(
+                paragraph_bounds(&text),
+                paragraph_bounds_reference(&text),
+                "paragraph divergence on case {case}: {text:?}"
+            );
+            assert_eq!(
+                line_bounds(&text),
+                line_bounds_reference(&text),
+                "line divergence on case {case}: {text:?}"
+            );
         }
     }
 
@@ -1542,5 +2030,562 @@ mod tests {
             chunk_by_lines(" \n \t\n  ", 3, 0),
             Vec::<(usize, usize)>::new()
         );
+    }
+
+    // ---- the committed audit harnesses ----
+    //
+    // The red-team differential audit (~1.2M probe cases) ran its
+    // harnesses as adhoc /tmp scripts against the installed extension;
+    // zero divergences found, but zero-divergence coverage that lives
+    // outside the repo protects nothing after /tmp is wiped. The tests
+    // below convert the audit's harness shapes into committed gates over
+    // the same two random-access oracles the corpus and soups already
+    // use: exhaustive short-string enumeration (every string over a
+    // break-bearing alphabet up to a length budget), certificate-boundary
+    // surgicals (non-ASCII bytes at exact CERT_CHUNK-multiple offsets on
+    // multi-KiB texts, the region the sub-4096-byte corpus cannot reach),
+    // a window-phase/density sweep, and the systematic White_Space zoo.
+    // The runtime budgets are measured, not guessed: the whole block is
+    // sized to keep `cargo test`'s debug-build wall time in the same
+    // ballpark as the suite it joins.
+
+    /// The audit's exhaustive-alphabet walker: every string over
+    /// `alphabet` from length 0 through `max_len`, shortlex order:
+    /// for {'\r','\n'} at 16 that is 2^0 + ... + 2^16 = 131,071
+    /// strings, the exact count the audit's A-exh-CR-LF probe ran. The
+    /// buffer is reused across cases so the sweep's own allocation cost
+    /// stays out of the differential measurement.
+    fn for_each_string_over(alphabet: &[char], max_len: usize, mut case: impl FnMut(&str)) {
+        let mut buf = String::new();
+        for len in 0..=max_len {
+            // An odometer over alphabet indices; the carry out of the
+            // first digit means every string of this length was visited.
+            let mut digits = vec![0usize; len];
+            loop {
+                buf.clear();
+                buf.extend(digits.iter().map(|&d| alphabet[d]));
+                case(&buf);
+                let mut carry = true;
+                for d in digits.iter_mut().rev() {
+                    if !carry {
+                        break;
+                    }
+                    *d += 1;
+                    carry = *d == alphabet.len();
+                    if carry {
+                        *d = 0;
+                    }
+                }
+                if carry {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The one assertion every audit shape reduces to: both byte
+    /// scanners against their random-access oracles.
+    fn assert_both_scanners_match_the_references(text: &str) {
+        assert_eq!(
+            line_bounds(text),
+            line_bounds_reference(text),
+            "line_bounds divergence on {text:?}"
+        );
+        assert_eq!(
+            paragraph_bounds(text),
+            paragraph_bounds_reference(text),
+            "paragraph_bounds divergence on {text:?}"
+        );
+    }
+
+    /// The unit-count windowers against `chunk_by_segments` over the
+    /// oracle bounds, the same differential spelling the corpus sweep
+    /// uses (the windower is shared, already-swept code; the scanner is
+    /// the thing under test), over the audit's per_chunk 1..=3 with
+    /// overlap 0 and per-1.
+    fn assert_windowing_matches_over_oracle_bounds(text: &str) {
+        let lines = line_bounds_reference(text);
+        let paras = paragraph_bounds_reference(text);
+        for per_chunk in 1usize..=3 {
+            let overlaps: &[usize] = if per_chunk == 1 {
+                &[0]
+            } else {
+                &[0, per_chunk - 1]
+            };
+            for &overlap in overlaps {
+                assert_eq!(
+                    chunk_by_lines(text, per_chunk, overlap),
+                    chunk_by_segments(&lines, per_chunk, overlap),
+                    "chunk_by_lines divergence: text={text:?} per={per_chunk} ov={overlap}"
+                );
+                assert_eq!(
+                    chunk_by_paragraphs(text, per_chunk, overlap),
+                    chunk_by_segments(&paras, per_chunk, overlap),
+                    "chunk_by_paragraphs divergence: text={text:?} per={per_chunk} ov={overlap}"
+                );
+            }
+        }
+    }
+
+    /// The audit's surgical-event builder: `events` are (byte offset,
+    /// token) pairs at strictly increasing byte offsets with 'a' fill
+    /// between them and up to `total`, so a two-byte 'é' placed at
+    /// offset k*4096 starts at exactly that byte, the placement
+    /// precision the certificate-boundary shapes exist for (an é one
+    /// byte off is a different case, not this one).
+    fn surgical_text(events: &[(usize, &str)], total: usize) -> String {
+        let mut text = String::with_capacity(total);
+        let mut prev = 0usize;
+        for &(off, token) in events {
+            text.push_str(&"a".repeat(off - prev));
+            text.push_str(token);
+            prev = off + token.len();
+        }
+        text.push_str(&"a".repeat(total - prev));
+        text
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_cr_lf_string_up_to_16_codepoints() {
+        // The audit's A-exh-CR-LF shape, every string over the two break
+        // bytes through length 16: every CRLF-pairing case (\r\n vs
+        // \n\r vs \r\r), every 2+-unit run-qualification case, leading
+        // and trailing runs, runs ending at end of text, so any
+        // unit-counting mutation with a witness of 16 codepoints or
+        // fewer is caught by construction, not by the luck of a
+        // 300-case soup draw sampling the same space. The count is
+        // asserted so a regressed alphabet or length budget fails the
+        // sweep itself. Windowing rides every 97th case: the walk over
+        // the oracle bounds is scanner-orthogonal, so a bounded sample
+        // buys the windowing differential without paying 131k × 5
+        // windower calls.
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n'], 16, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 131_071, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_three_symbol_string_up_to_9_codepoints() {
+        // The audit's B-exh-3 shape, every string over {\r, \n, x}
+        // through length 9 (29,524 cases): the CR/LF alphabet with one
+        // content byte, so break runs and content segments interleave at
+        // every adjacency, including the content-bearing single-unit
+        // runs the two-symbol alphabet cannot express (a lone \n between
+        // x's is a kept line and ordinary paragraph content at once).
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n', 'x'], 9, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 29_524, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_every_four_symbol_string_up_to_7_codepoints() {
+        // The audit's C-exh-4 shape, every string over {\r, \n, x, VT}
+        // through length 7 (21,845 cases): VT joins the alphabet
+        // because it is the one ASCII_WS member whose omission from the
+        // fold table is the corpus's own cited mutation pin, and here it
+        // rides at arbitrary adjacency to the break bytes and the
+        // content byte, not just the hand-written "a\n\x0b\nb" shape:
+        // blank-looking VT lines next to real lines, VT inside break
+        // runs, VT as a whole blank paragraph.
+        let mut cases = 0usize;
+        for_each_string_over(&['\r', '\n', 'x', '\u{0B}'], 7, |text| {
+            cases += 1;
+            assert_both_scanners_match_the_references(text);
+            if cases.is_multiple_of(97) {
+                assert_windowing_matches_over_oracle_bounds(text);
+            }
+        });
+        assert_eq!(cases, 21_845, "the sweep's own size regressed");
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_two_five_symbol_alphabets_up_to_6_codepoints() {
+        // The audit's C-exh-4 extension the runtime budget allows: the
+        // four-symbol alphabet grown to five twice, once with FF (the
+        // other ASCII_WS member below 0x20 the table must carry) and
+        // once with ' ' (the member at 0x20, so the fold answers from a
+        // different table cell than the 0x09..=0x0D run), at length 6,
+        // 19,531 strings each. The five-symbol product grows too fast to
+        // carry the full 7-length budget of the smaller alphabets; 6
+        // keeps the whole exhaustive block inside its measured seconds.
+        for alphabet in [
+            &['\r', '\n', 'x', '\u{0B}', '\u{0C}'][..],
+            &['\r', '\n', 'x', '\u{0B}', ' '][..],
+        ] {
+            let mut cases = 0usize;
+            for_each_string_over(alphabet, 6, |text| {
+                cases += 1;
+                assert_both_scanners_match_the_references(text);
+                if cases.is_multiple_of(97) {
+                    assert_windowing_matches_over_oracle_bounds(text);
+                }
+            });
+            assert_eq!(cases, 19_531, "the sweep's own size regressed");
+        }
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_certificate_boundary_straddles() {
+        // The AsciiCert arithmetic the sub-4096-byte corpus cannot see:
+        // a non-ASCII byte at k*4096 ± 2 straddles the exact stride a
+        // certify batch ends on, so the batch fails, the locating scan
+        // runs, and the reset-to-past-the-bad-byte (or the p >= b
+        // early-true) branch fires at every alignment a 4 KiB stride
+        // has, the audit's X-structured sweep, scaled to several k: k=1
+        // and k=2 are the first and second batch boundaries, k=31 puts
+        // the straddle ~128 KiB deep, past 31 batch boundaries the
+        // sliding range crossed by extension and reset in turn. Breaks
+        // sit ~104 bytes past the next batch boundary so the
+        // post-straddle segment is itself a second certificate case,
+        // and the trailing "\n\n" gives the paragraph scanner a real
+        // second paragraph; é (2 bytes), an astral emoji (4 bytes) and
+        // CJK (3 bytes) stress the byte-vs-codepoint bookkeeping at
+        // three different token widths.
+        for k in [1usize, 2, 3, 31] {
+            for ch in ["\u{00E9}", "\u{1F600}", "\u{4E2D}"] {
+                for delta in [-2isize, -1, 0, 1, 2] {
+                    let off = (k * CERT_CHUNK).saturating_add_signed(delta);
+                    let brk = (k + 1) * CERT_CHUNK + 104;
+                    let mut text = surgical_text(&[(off, ch)], brk);
+                    text.push('\n');
+                    text.push_str(&"b".repeat(100));
+                    text.push_str("\n\n");
+                    text.push_str(&"c".repeat(50));
+                    assert_both_scanners_match_the_references(&text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_certificate_reset_and_alternation_surgicals() {
+        // The certificate's reset/restart and alternation regimes at
+        // multi-KiB scale, the audit's S4/S5/S6/S7/S8 shapes:
+        // (1) the p >= b extend path: a long pure-ASCII segment
+        // certifies past the break, so the very next segment starts
+        // inside the certified range and its é must fail `covers` and
+        // re-batch from a mid-range start (pre swept across the
+        // 4095/4096/4097 and 8191/8192 batch-boundary values);
+        // (2) reset-then-long-run-then-restart, repeated: é, 4100 a's,
+        // é, 8192 a's, a break, then two more é's 4104 bytes apart,
+        // each rep forcing a failed batch, a reset, and a restart
+        // against a range the previous rep left behind;
+        // (3) alternation at the period the audit found interesting:
+        // é every 4104 bytes (4096+8, one batch plus the window) and
+        // every 4097, sustained for 32 periods (~131 KiB) so the
+        // certificate fails, resets, and re-derives continuously;
+        // (4) alternation with breaks: a 4100-byte segment, é, 3 a's,
+        // a break, 30 times, the reset/restart interleaved with the
+        // window and hop paths; and the extend-heavy twin (8200 a's,
+        // break, é, 10 a's, break) where the certificate succeeds on
+        // the long runs between hits.
+        for pre in [4095usize, 4096, 4097, 8191, 8192] {
+            let text = format!(
+                "{}\n\u{00E9}{}\n\n{}",
+                "a".repeat(pre),
+                "b".repeat(4100),
+                "c".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&text);
+        }
+        let reset_runs = format!(
+            "{}{}{}{}\n{}{}{}\n\n{}",
+            "\u{00E9}",
+            "a".repeat(4100),
+            "\u{00E9}",
+            "a".repeat(8192),
+            "x".repeat(4104),
+            "\u{00E9}",
+            "x".repeat(4104),
+            "y".repeat(7)
+        )
+        .repeat(6);
+        assert_both_scanners_match_the_references(&reset_runs);
+        let alt_4104 = format!("{}\u{00E9}", "a".repeat(4102)).repeat(32);
+        assert_both_scanners_match_the_references(&alt_4104);
+        let alt_4097 = format!("{}\u{00E9}", "a".repeat(4095)).repeat(32);
+        assert_both_scanners_match_the_references(&alt_4097);
+        let alt_with_breaks =
+            format!("{}\u{00E9}{}\n", "a".repeat(4100), "a".repeat(3)).repeat(30) + "end";
+        assert_both_scanners_match_the_references(&alt_with_breaks);
+        let alt_extend = format!("{}\n\u{00E9}{}\n", "a".repeat(8200), "a".repeat(10)).repeat(15);
+        assert_both_scanners_match_the_references(&alt_extend);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_batch_multiple_segments_and_crlf_straddles() {
+        // Segments whose lengths are exactly the batch arithmetic's
+        // interesting values, 4095/4096/4097 (one stride minus, on,
+        // plus) and 8191/8192/8193 (two strides minus, on, plus), under
+        // all three break-unit spellings (\n lines, \n\n paragraphs,
+        // \r\n\r\n CRLF-pair paragraphs), so a certify query's end lands
+        // on every side of a batch boundary the stride math has; plus
+        // the é-after-exact-length shape (the certificate succeeds on
+        // the whole segment, then the very next byte is non-ASCII). The
+        // CRLF straddles put a \r at byte 4095 with its \n at 4096 (a
+        // pair torn across the batch boundary in byte terms, one unit
+        // in codepoint terms) and the same at 8191/8192, repeated to
+        // ~128 KiB so the sliding range crosses dozens of straddles.
+        for seglen in [4095usize, 4096, 4097, 8191, 8192, 8193] {
+            let lines = format!("{}\n", "a".repeat(seglen)).repeat(4) + "end";
+            assert_both_scanners_match_the_references(&lines);
+            let paras = format!("{}\n\n", "a".repeat(seglen)).repeat(4) + "end";
+            assert_both_scanners_match_the_references(&paras);
+            let crlf_paras = format!("{}\r\n\r\n", "a".repeat(seglen)).repeat(3) + "end";
+            assert_both_scanners_match_the_references(&crlf_paras);
+            let after = format!(
+                "{}\u{00E9}{}\n{}",
+                "a".repeat(seglen),
+                "a".repeat(10),
+                "b".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&after);
+        }
+        let straddle_4096 = format!(
+            "a{}\r\nb{}\r\nc{}\nd{}",
+            "a".repeat(4094),
+            "a".repeat(4095),
+            "a".repeat(4096),
+            "3"
+        )
+        .repeat(8);
+        assert_both_scanners_match_the_references(&straddle_4096);
+        let straddle_8192 = format!(
+            "a{}\r\nb{}\n\nc{}",
+            "a".repeat(8190),
+            "b".repeat(10),
+            "5".repeat(5)
+        );
+        assert_both_scanners_match_the_references(&straddle_8192);
+        let crlf_para_straddle = format!(
+            "a{}\r\n\r\nb{}\r\rc{}",
+            "a".repeat(4094),
+            "b".repeat(99),
+            "7".repeat(6)
+        );
+        assert_both_scanners_match_the_references(&crlf_para_straddle);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_on_window_edge_and_post_break_non_ascii() {
+        // The BREAK_WINDOW edge from the non-ASCII side: é inside the
+        // first 8 window bytes (offsets 0..=9, both sides of the
+        // window's edge) with the break ~4200 bytes beyond, so the hot
+        // fold raises `saw_non_ascii` and the cold path's certificate
+        // must then fail the very range the window already folded, the
+        // audit's third X-structured sweep. Then non-ASCII immediately
+        // after a break run at cert scale (the first byte of the
+        // post-run segment is the bad byte, the certificate starts its
+        // very first batch on it), the short-segment-after-p shape (a
+        // 10-byte segment squeezed between two 5000-byte ones), and the
+        // cover-p/cover-p-para shapes: a query whose segment ends
+        // exactly at a known-bad byte (line) and its paragraph twin
+        // (the audit's S14/S14b/S14c/S14d).
+        for off in 0..=9usize {
+            let text = format!(
+                "{}\u{00E9}{}\n{}",
+                "a".repeat(off),
+                "a".repeat(4200),
+                "b".repeat(9)
+            );
+            assert_both_scanners_match_the_references(&text);
+        }
+        let after_break_run =
+            format!("{}\n\n\u{00E9}{}\n\n", "a".repeat(4096), "a".repeat(4096)).repeat(15) + "zz";
+        assert_both_scanners_match_the_references(&after_break_run);
+        let short_mid = format!(
+            "a{}\n\u{00E9}b{}\nc{}\nd{}",
+            "a".repeat(4999),
+            "b".repeat(9),
+            "c".repeat(4999),
+            "d".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&short_mid);
+        let cover_p = format!(
+            "a{}\nb{}\n\u{00E9}c{}",
+            "a".repeat(4999),
+            "b".repeat(99),
+            "c".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&cover_p);
+        let cover_p_para = format!(
+            "a{}\n\nb{}\n\n\u{00E9}c{}",
+            "a".repeat(4999),
+            "b".repeat(99),
+            "c".repeat(9)
+        );
+        assert_both_scanners_match_the_references(&cover_p_para);
+    }
+
+    #[test]
+    fn both_scanners_survive_an_eight_mib_single_line_with_surgical_non_ascii_bytes() {
+        // The one multi-MiB case the audit budget allows (the probe's
+        // S11 20-MiB family cut to 8 MiB, the mission budget's floor:
+        // measured to keep this test under ~1 s in a debug build): a
+        // single unbroken line, no break byte anywhere, so the line
+        // scanner pays one window, one memchr2 hop over 8 MiB, and
+        // 2048 certify batches; the paragraph scanner the same, with
+        // three surgical é's at 2 MiB+4095, 4 MiB+1 and 6 MiB+4097:
+        // two batch boundaries the sliding range must reset on, with
+        // ~2 MiB (512 batches) of pure-ASCII extension between them.
+        // The codepoint total is 8 MiB - 3 (three two-byte é's), so any
+        // byte-vs-codepoint drift anywhere in the walk lands in the
+        // final (0, total) span both scanners must emit.
+        let mib = 1024 * 1024;
+        let e1 = 2 * mib + 4095;
+        let e2 = 4 * mib + 1;
+        let e3 = 6 * mib + 4097;
+        let text = surgical_text(
+            &[(e1, "\u{00E9}"), (e2, "\u{00E9}"), (e3, "\u{00E9}")],
+            8 * mib,
+        );
+        assert_both_scanners_match_the_references(&text);
+    }
+
+    #[test]
+    fn both_scanners_match_the_references_across_break_phase_fill_and_unit_density() {
+        // The window-phase/density sweep: the first break at byte
+        // `phase` from the segment start for every phase 0..=24 (the
+        // density-guard window is 8 bytes, so phases 7/8/9 are the
+        // phases where the break crosses the window edge and the scan
+        // flips between the inline fold and the memchr2 hop, and the
+        // odd/even phases around them pin the edge under CRLF pairs,
+        // \r the last byte inside the window and \n the first beyond
+        // it) × the ASCII_WS fills as content ('x' the control, ' ',
+        // '\t', VT, FF) × the unit shapes (\n, \r, \r\n, and mixed
+        // runs of 2-5 units: the pairing and the 2+-unit paragraph
+        // threshold at every adjacency) × a short within-window tail
+        // and a long beyond-window tail with a second break. Then the
+        // density shape itself: (fill*k + unit)*6, segments of
+        // exactly k fill bytes for k 1..=12, the densities at and
+        // around the window, six in a row.
+        let fills = ['x', ' ', '\t', '\u{0B}', '\u{0C}'];
+        let units = [
+            "\n", "\r", "\r\n", "\n\n", "\r\r", "\n\r", "\r\n\r\n", "\n\r\n", "\r\n\n", "\r\r\n",
+            "\n\n\n", "\r\n\r", "\n\n\r\r",
+        ];
+        let mut cases = 0usize;
+        for phase in 0..=24usize {
+            for fill in fills {
+                for unit in units {
+                    for tail_len in [1usize, 40] {
+                        let mut text: String = std::iter::repeat_n(fill, phase).collect();
+                        text.push_str(unit);
+                        text.push_str(&"b".repeat(tail_len));
+                        if tail_len == 40 {
+                            text.push_str("\nccc");
+                        }
+                        assert_both_scanners_match_the_references(&text);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 3_250, "the sweep's own size regressed");
+        for k in 1..=12usize {
+            for fill in fills {
+                for unit in ["\n", "\r\n", "\n\r\n", "\r\n\r\n", "\r\r", "\n\n"] {
+                    let unit_text: String = std::iter::repeat_n(fill, k).collect::<String>() + unit;
+                    let text = unit_text.repeat(6) + "b";
+                    assert_both_scanners_match_the_references(&text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_bounds_classifies_the_full_white_space_zoo_and_its_content_lookalikes() {
+        // The systematic White_Space zoo, the audit's WS-ZOO category:
+        // each of the 25 Unicode White_Space codepoints as a line's
+        // sole content is a blank line (dropped by the real-line
+        // filter; the ASCII_WS table answers below 0x7F, the
+        // char::is_whitespace fallback above it), while U+001C..U+001F
+        // (FS/GS/RS/US: Python's str.isspace/splitlines treat them as
+        // whitespace/breaks; the Unicode White_Space property does not),
+        // ZWSP U+200B, U+180E (White_Space only up to Unicode 6.3) and
+        // the BOM U+FEFF are content, each its own counted line. The
+        // corpus pins VT/FF/NBSP at three hand-written shapes; this
+        // sweep is the systematic superset: every member once, in the
+        // sole-content position and as the blank line between two real
+        // lines, so a table or fallback mutation anywhere in the
+        // 25-member set lands here. The paragraph scanner has no
+        // content filter, so every zoo member is ordinary paragraph
+        // content: [(0, 2)] throughout, stated alongside so the
+        // no-filter contract is pinned by the same sweep. Expectations
+        // are stated, not derived from char::is_whitespace (the
+        // references share production's predicate and would happily
+        // agree with a mutated one); the reference agreement asserted
+        // after pins the non-ASCII members' fallback-path machinery,
+        // which the stated answers alone do not reach.
+        let white_space = [
+            '\u{0009}', '\u{000A}', '\u{000B}', '\u{000C}', '\u{000D}', '\u{0020}', '\u{0085}',
+            '\u{00A0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+            '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{2028}',
+            '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}',
+        ];
+        assert_eq!(white_space.len(), 25, "the White_Space set itself drifted");
+        // The two break bytes are White_Space members too, but they are
+        // the delimiters, not "a line's sole content": '{c}\n' with
+        // c='\n' is a 2-unit break run (a paragraph split, the shape the
+        // 131k exhaustive sweep pins at every length), not a blank
+        // paragraph. The zoo walks the 23 non-break members; the break
+        // pair's own arithmetic is what the CR/LF
+        // exhaustive sweep above covers.
+        let blank_content: Vec<char> = white_space
+            .iter()
+            .copied()
+            .filter(|&c| !matches!(c, '\n' | '\r'))
+            .collect();
+        assert_eq!(blank_content.len(), 23);
+        for c in blank_content {
+            let text = format!("{c}\n");
+            assert_eq!(
+                line_bounds(&text),
+                Vec::<(usize, usize)>::new(),
+                "White_Space {c:?} as sole line content must be blank"
+            );
+            assert_eq!(
+                paragraph_bounds(&text),
+                vec![(0, 2)],
+                "paragraph_bounds has no content filter: {c:?}"
+            );
+            let between = format!("a\n{c}\nb");
+            assert_eq!(
+                line_bounds(&between),
+                vec![(0, 1), (4, 5)],
+                "a blank {c:?} line between real lines must vanish"
+            );
+            assert_eq!(
+                paragraph_bounds(&between),
+                vec![(0, 5)],
+                "single lone newlines do not split paragraphs: {c:?}"
+            );
+            assert_both_scanners_match_the_references(&text);
+            assert_both_scanners_match_the_references(&between);
+        }
+        for c in [
+            '\u{001C}', '\u{001D}', '\u{001E}', '\u{001F}', '\u{200B}', '\u{180E}', '\u{FEFF}',
+        ] {
+            let text = format!("{c}\n");
+            assert_eq!(
+                line_bounds(&text),
+                vec![(0, 1)],
+                "content lookalike {c:?} must be a counted line"
+            );
+            assert_eq!(paragraph_bounds(&text), vec![(0, 2)], "{c:?}");
+            assert_both_scanners_match_the_references(&text);
+        }
     }
 }

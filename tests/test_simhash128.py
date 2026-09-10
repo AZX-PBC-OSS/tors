@@ -170,7 +170,7 @@ class TestLocalitySensitivity:
         assert worst == 20
 
     def test_unrelated_sentences_sit_farther_apart_than_at_64_bits(self) -> None:
-        # The whole point of the wide spelling: the unrelated floor grows
+        # What the wide spelling buys: the unrelated floor grows
         # (roughly doubles per the module doc) relative to 64 bits, while
         # the near-dup band does not grow -- better separation, not a
         # uniform rescale of every number.

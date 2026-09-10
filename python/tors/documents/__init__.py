@@ -4,7 +4,7 @@ The compiled surface ships in the separate `tors-documents` wheel
 (`tors[documents]`, a real PyPI extra): the base `tors` wheel carries this
 typed shim, which re-exports the payload's API when it is installed and
 raises the install hint when it is not: the base extension module stays
-engine-free, which is the whole point of the split.
+engine-free, which is why the split exists.
 
 Install: ``pip install tors[documents]``, or the payload directly,
 ``pip install tors-documents`` (kept in version lockstep with ``tors``).

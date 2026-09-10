@@ -138,7 +138,7 @@ The payload-manifest invocation (`cargo deny --manifest-path
 tors-documents/Cargo.toml check licenses advisories bans`) also passes at the
 current lock state, and it is not a redundant subset check: the payload
 resolves its own independent `tors-documents/Cargo.lock` whose package set
-carries crates and versions the root lock never resolves (measured 2026-09:
+carries crates and versions the root lock never resolves (measured:
 payload-only names, plus version-skewed pairs), so both lockfiles are gated
 (`deny.toml`'s `[graph]` comment records the same).
 

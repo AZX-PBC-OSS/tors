@@ -191,8 +191,10 @@ The UAX #29 word-boundary segments as `(start, end)` pairs in Python `str` index
 joining the slices reproduces the input. Offsets, never string lists (marshalling
 thousands of small `PyString`s under the GIL would eat the win). One measured caveat:
 the return marshalling constructs one 2-tuple of ints per segment under the GIL,
-O(number-of-segments), a measured 428–497 ms hold at 12 MiB of prose
-(3.67M segments). Fine at document scale; for whole-file sizes use the iterator
+O(number-of-segments), a measured 328–344 ms hold at 12 MiB of prose
+(3.67M segments; worst-gap band, box-pace-dependent: the dev box the test ledger
+records measured 428–497 ms, and the load-stable constant is the ratio, ~0.72 of the
+call's wall). Fine at document scale; for whole-file sizes use the iterator
 below.
 
 ```python
@@ -211,7 +213,7 @@ sequence-parity with the list API over every tricky row and hypothesis text), yi
 lazily. The segmentation runs under one GIL-released pass when the iterator is
 constructed, and each `__next__` holds the GIL only to construct one tuple (µs-scale):
 worst heartbeat gap 15.4 ms at 12 MiB, against the list shape's structurally
-unattainable 428–497 ms band; and the full drain is also ~2.1x faster in wall time
+unattainable 328–344 ms band; and the full drain is also ~2.1x faster in wall time
 than the list API (measured at 12 MiB). `__length_hint__` reports the
 remaining bound count and tracks partial consumption. The list API stays the right
 shape for small inputs and one-shot batch work.
@@ -1575,6 +1577,23 @@ the GIL only to build one 2-tuple, rather than marshalling the whole result into
 prefer it over the list API once a document chunks into the hundreds of
 thousands of pieces, where the marshalling cost dominates.
 
+The argument contract includes error precedence, stated here once for the whole
+chunking family (every list/`_iter` pair: `chunk_text`, `chunk_by_words`,
+`chunk_by_sentences`, `chunk_by_paragraphs`, `chunk_by_lines`, and each one's `_iter`
+twin): a `text` that fails UTF-8 conversion (a lone-surrogate `str`, buildable in
+CPython, impossible in UTF-8) raises `UnicodeEncodeError` before any
+count/overlap `ValueError`, identically in both spellings. The list functions take
+`text` as an already-converted argument, so the conversion error always fires first
+there; the `_iter` twins borrow the text before validating counts, so they raise the
+same error on the same call: the two spellings of a function never disagree on
+which error type a bad call raises (the one message-level divergence, a lone
+surrogate in both `text` and `boundary`, is frozen by test: both spellings raise
+`UnicodeEncodeError`, the list reporting the text's surrogate and the iter the
+boundary's, pyo3 extracting `boundary` ahead of the iter body but after the list's
+`text` extraction). For `chunk_text`/`chunk_text_iter` the
+unrecognized-`boundary` `ValueError` comes last of all, after the count/overlap
+checks, in both spellings.
+
 ```python
 list(tors.chunk_text_iter("cats are cute and cats are fun", 12))
 # [(0, 8), (8, 17), (17, 26), (26, 30)]
@@ -1701,20 +1720,56 @@ Standard segmentation** (there is no UAX for paragraphs, unlike UAX #29 for
 words/sentences): a single `\n` is ordinary content, not a break. A
 leading or trailing blank-line run is trimmed rather than emitted as an empty
 paragraph; text with no qualifying run at all is one paragraph. Unlike the
-word/line twins, paragraphs have NO content filter here: a whitespace-only
-paragraph IS emitted as a chunk (only fully-empty spans are dropped), so an
+word/line twins, paragraphs have no content filter here: a whitespace-only
+paragraph is emitted as a chunk (only fully-empty spans are dropped), so an
 overlapping pair of chunks can share blank content. Same argument contract,
 same empty-input answer, same forward-progress-by-construction guarantee
 as `chunk_by_words`/`chunk_by_sentences`.
 No retrieval or LLM-quality claim is made for any chunking strategy in this family:
 tors guarantees the mechanical contract (correct boundaries, genuine overlap, the
-right knobs), not an outcome it doesn't control.
+right knobs).
 
 ```python
 tors.chunk_by_paragraphs(
     "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph here.", 2
 )
 # [(0, 45), (47, 68)]
+```
+
+## `tors.chunk_by_paragraphs_iter`
+
+```python
+def chunk_by_paragraphs_iter(
+    text: str, paragraphs_per_chunk: int, *, overlap: int = 0
+) -> Iterator[tuple[int, int]]: ...
+```
+
+`chunk_by_paragraphs`' streaming twin, the same `chunk_text_iter` shape: one
+detached whole-text pass at construction, one 2-tuple per `__next__`, identical
+sequence to the list API, same argument contract (the family-wide error-precedence
+paragraph in `chunk_text_iter`'s section included). Like every `_iter` spelling it
+has no async twin (an iterator is not an awaitable shape; see [Async use](async.md)). It exists for the same reason as the other `_iter` twins: the
+list shape's GIL-held marshalling cost is measured for segment-count-heavy outputs
+(`word_bounds` on 12 MiB of prose, 3.67M segments, holds the GIL for 328–344 ms
+just marshalling the list; see [Performance](performance.md)), and a paragraph-heavy
+corpus (a multi-MiB article dump or report batch, one blank line per record) is in
+that piece-count class, chunking into hundreds of thousands of pieces.
+
+```python
+minutes = (
+    "Attendees: Ada, Grace, Edsger.\n\n"
+    "Grace: parser rewrite halves latency.\n\n"
+    "Edsger: spec drift question, unresolved.\n\n"
+    "Next sync moves to Thursday."
+)
+
+list(tors.chunk_by_paragraphs_iter(minutes, 2))
+# [(0, 69), (71, 141)]: 4 paragraphs, 2 chunks of exactly 2; the blank-line
+# gap between chunks belongs to neither (chunk 2 starts at "Edsger")
+list(tors.chunk_by_paragraphs_iter(minutes, 2, overlap=1))
+# [(0, 69), (32, 111), (71, 141)]: overlap repeats whole paragraphs;
+# (32, 111) is "Grace: parser rewrite halves latency.\n\nEdsger: spec drift
+# question, unresolved."
 ```
 
 ## `tors.chunk_by_lines`
@@ -1753,8 +1808,24 @@ as its siblings.
 
 The line-oriented-text shape this exists for: one message per line (a chat thread),
 one record per line (a log), one cue per block. Cost at document scale: one
-streaming decode pass (the line scan and the real-line filter fused, O(text) time,
-O(1) memory beyond the output), no segmentation walk and no grapheme boundary
+byte-level walk: `memchr2` hops between break bytes behind an 8-byte inline
+density window before each hop (so dense break runs never pay a hop), the
+real-line whitespace filter folded into the same pass, a per-codepoint fallback
+for non-ASCII segments, and ASCII certification batched as one 4 KiB stride per
+~50 segments (a sliding certificate over the whole scan, not a per-segment
+`is_ascii` check). The structure is a trade against the simpler whole-text
+`is_ascii` gate a sparse scan could use (interleaved best-of-N, 12 MiB):
++0.1-1.0 ms on pure-ASCII densities (`chunk_by_lines` ~0.45 ms on prose and
+~2.2 ms on a one-line-per-~80-bytes log against the gate's ~0.4 and ~1.2-1.3 ms;
+`chunk_by_paragraphs` ~1.5 vs ~1.3 ms on that log) and ~1-3 ms on a CJK-dense log
+(~21 vs ~20 ms by-lines, every segment taking the fallback; the by-paragraphs
+cell pays the most, ~12 vs ~9 ms, and wobbles ~10-12.5 ms with binary code layout
+across rebuilds). What it buys: ~4x on break soup (~10 vs ~42 ms; the gate has no
+density guard), ~16x on mixed text (~0.46 vs ~7.6 ms; one non-ASCII byte no longer
+forfeits the document to a per-codepoint decoder), and the same wins on
+`chunk_by_paragraphs`' soup cell (~22 vs ~54 ms). Outputs are differential-pinned
+identical across all of these shapes; O(text) time, O(1) memory beyond the output,
+no segmentation walk and no grapheme boundary
 index at all, unlike `chunk_by_words`/`chunk_by_sentences`: every split lands
 strictly between a break character and adjacent content, so the split point is
 structurally grapheme-safe with nothing to check.
@@ -1785,7 +1856,7 @@ the list API. Like every `_iter` spelling it has no async twin (an iterator is n
 an awaitable shape; see [Async use](async.md)). It exists for the
 same reason as the other `_iter` twins: the list shape's GIL-held marshalling
 cost is measured for segment-count-heavy outputs (`word_bounds` on 12 MiB of
-prose, 3.67M segments, holds the GIL for 428–497 ms just marshalling the list;
+prose, 3.67M segments, holds the GIL for 328–344 ms just marshalling the list;
 see [Performance](performance.md)), and a line-oriented corpus (a multi-MiB log or
 transcript) is in that piece-count class, chunking into hundreds of thousands
 of pieces.
@@ -1799,7 +1870,7 @@ list(tors.chunk_by_lines_iter(log, 2))
 
 ```python
 def chunk_hierarchical(
-    text: str, max_chars: int, separators: list[str | None] | None = None, *, overlap: int = 0
+    text: str, max_chars: int, separators: Sequence[str | None] | None = None, *, overlap: int = 0
 ) -> list[tuple[int, int]]: ...
 ```
 
@@ -1816,18 +1887,22 @@ paragraph → sentence → word → a grapheme-safe raw cut, always the final,
 unconditional fallback (this never fails to produce a chunk); it reuses the
 same UAX #29 segmenters `chunk_by_sentences`/`chunk_by_words` do, rather
 than LangChain's own naive literal guesses (`"\n\n"`, `". "`, `" "`).
-`separators=[...]` is a caller-supplied list of literal strings, not regex
+`separators=[...]` is a caller-supplied sequence (a list or a tuple) of
+literal strings, not regex
 (a documented scope line: literals are LangChain's own default
 too, cover the motivating markdown-header case completely, and avoid
 reopening the regex-semantics question `re` support was already declined
 over), coarsest first, e.g. `["\n## ", "\n\n", ". ", " "]` for
-markdown-header-aware chunking. A custom list replaces the default
+markdown-header-aware chunking. Any `Sequence` of literals and `None` entries
+is accepted: `("\n", None)` behaves identically to `["\n", None]`, while
+`str`, `dict`, `set`, and other non-`Sequence` inputs (generators included)
+raise `TypeError` at argument extraction. A custom sequence replaces the default
 hierarchy for the levels it specifies, but the grapheme-safe raw cut is
 still always appended as the final fallback regardless; unlike LangChain,
 no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
 
-An entry in that list may also be `None`: it splices the default
+An entry in that sequence may also be `None`: it splices the default
 hierarchy's three accurate levels in at that position, the mix an
 all-literal list could not express before. `["\n", None]` is
 line → paragraph → sentence → word → raw cut, the line-oriented-text
@@ -1837,17 +1912,26 @@ rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost: duplicate entries, `None` or a repeated literal, are
-recognized at list construction and skipped, inert (identical levels
-can never change the answer; the first occurrence of a level always
-dominates its duplicate), so `[None] * 100` costs what `[None]` does
-(~1.7 ms at a 2000-codepoint budget over 6 MiB of prose, the paragraph
-walk alone) and `[" "] * 100` what `[" "]` does (~9 ms). The former
-spelling re-paid the walks per duplicate entry, walks plus ~45 MiB of
-cut vectors per duplicate on a 6 MiB document, a caller-controlled
-unbounded cost (`[None] * 100` measured 17.2 s and +3,120 MiB of peak
-RSS, `[" "] * 100` 790 ms and +1,560 MiB, OOM shapes), closed by the
-construction-time dedup.
+Cost: every level (each of the three default walks, each distinct custom
+literal) pays its one whole-text walk at most once per call, and only when a
+window consults it: levels are built at their first consultation (the window
+loop walks the list strictly through `find_map`, in priority order), so a
+budget that answers every window at the paragraph level never runs the
+sentence or word walks at all, and a `["\n", None]` thread whose every line
+fits the budget builds none of the spliced levels. Duplicate entries, `None`
+or a repeated literal, are recognized at slot construction and skipped, inert
+(identical levels can never change the answer; the first occurrence of a level
+always dominates its duplicate), so `[None] * 100` costs what `[None]` does
+(~0.5 ms at a 2000-codepoint budget over 6 MiB of prose, the paragraph walk
+alone) and `[" "] * 100` what `[" "]` does (~9 ms). Two former spellings paid
+more: before the dedup, every duplicate entry re-paid the walks plus ~45 MiB
+of cut vectors per duplicate on a 6 MiB document, a caller-controlled
+unbounded cost (`[None] * 100` measured 17.2 s and +3,120 MiB of peak RSS,
+`[" "] * 100` 790 ms and +1,560 MiB, OOM shapes); and between the dedup and
+the lazy levels the walks were paid once per call even when no window ever
+consulted them, a single-chunk budget over 6 MiB spending ~176 ms building
+levels that supplied zero cuts. Both closed, by the construction-time dedup
+and the first-consultation deferral.
 
 **Rust API note**: 0.6.0 changes the public `tors-core` crate's
 `chunk_hierarchical(text, max_chars, separators, overlap)` signature:
@@ -1877,44 +1961,40 @@ silently degrades to zero overlap for just that one transition, the same
 snap-collapse `chunk_text` already applies.
 
 `max_chars < 1` or `overlap < 0` raise `ValueError`; `overlap >= max_chars`
-raises `ValueError`. Empty `text` returns `[]`. An empty `separators` list
+raises `ValueError`. Empty `text` returns `[]`. An empty `separators` sequence
 is legal and skips straight to the raw-cut fallback for every chunk. Every
 level's cut candidates are additionally grapheme-cluster-safe (the same
 Thai SARA AM / combining-mark fix applied crate-wide), including custom
 literal separators.
 
-Cost at document scale: one scan per consulted level (the default
-hierarchy's paragraph/sentence/word walks, or one literal search per
-distinct custom separator), each paid at most once per call, at the
-level's first consultation by the window loop; one branchless byte pass
-for the codepoint count; and one grapheme boundary index, a
-one-bit-per-codepoint bitmap built lazily, only when a consulted level
-actually has cuts to filter, a window needs the raw-cut fallback, or
-`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans
-instead of a segmentation walk. Levels are built at their first
-consultation (the window loop walks the list strictly through
-`find_map`, in priority order), so a budget that answers every window at
-the paragraph level never runs the sentence or word walks; a custom
-hierarchy that never matches under a whole-document budget is one
-codepoint count and nothing else, so not even the literal's own scan
-runs. Measured on 12 MiB
-(`tools/bench_chunking.py`): the default hierarchy at a 2000-codepoint
-budget over prose runs only its paragraph walk, ~3.4 ms (it was ~350
-ms when every level built eagerly, its word walk (~130 ms) plus
-sentence walk (~190 ms) scanned before the first window asked), and
-budgets that fall further consult, and pay, more: ~192 ms at a
-500-codepoint budget (the sentence walk joins the paragraph walk; the
-word walk is still never consulted), ~385 ms at a 100-codepoint budget
-(all three walks, plus a 20x denser chunk loop); the laziness prices
-consultation, it does not skip walks the answer needs; a never-matching
-custom hierarchy under a whole-document budget ~2.5 ms, the codepoint
-count. Before #22 an unconditional `Vec<char>` collect plus a `HashSet`
-of every grapheme boundary in the document ran before anything else:
-~1.0-1.2 s for the never-matching case regardless of budget, ~3.0 s for
-the default hierarchy, superlinear in input size; #22 removed that
-unconditional grapheme structure, and this follow-up removed the
-unconditional level builds that had remained, which is what the
-~350 ms → ~3.4 ms drop measures.
+Cost at document scale: one scan per consulted level (each level's walk or
+literal search runs at most once per call, at the first window that consults
+it: the default hierarchy's paragraph/sentence/word walks, or one literal
+search per distinct custom separator), so levels no window descends to are
+never scanned at all: a custom hierarchy that never matches under a
+whole-document budget is one codepoint count and nothing else, so not even
+the literal's own scan runs. The one other whole-text structure is the grapheme
+boundary index, a one-bit-per-codepoint bitmap built lazily, only when a
+realized level has cuts to filter, a window needs the raw-cut fallback, or
+`overlap` snaps; on pure-ASCII text the index is two SIMD byte scans instead
+of a segmentation walk, and a call that realizes no level with cuts and never
+falls back or snaps builds none of it. Measured on 12 MiB prose (min-of-3,
+`tests/test_performance.py` and `tools/bench_chunking.py`): a whole-document
+budget (`max_chars` at or above the text's length) consults no level at all
+and costs ~0.1 ms whatever the hierarchy, default, custom, or `None`-spliced
+(formerly ~340 ms for the default hierarchy); a 2000-codepoint budget whose
+windows are all served by the paragraph level costs ~1.2 ms (formerly ~350 ms:
+the eager build paid the sentence and word walks no window consulted); budgets
+that genuinely descend pay the walks they use, ~190 ms at a 600-codepoint
+budget (paragraph plus sentence), ~400 ms at 100 (all three levels plus a 20x
+denser chunk loop: the word walk ~130 ms plus sentence walk ~190 ms, the
+accurate UAX #29 segmentation the function exists to provide). The laziness
+prices consultation, it does not skip walks the answer needs. Before #22 an
+unconditional `Vec<char>` collect plus a `HashSet` of every grapheme boundary
+in the document ran before anything else (~1.0-1.2 s for the never-matching
+case regardless of budget, ~3.0 s for the default hierarchy, superlinear in
+input size), and until the lazy levels every level was built before the first
+window, consulted or not.
 
 No retrieval or LLM-quality claim is made for any chunking strategy in
 this family: tors guarantees the mechanical contract (correct boundaries,
@@ -2218,7 +2298,7 @@ argument must be exactly a `dict[str, str]` (a non-`dict` argument, or one
 with a non-`str` key or value, raises `TypeError`); `len(cl)` is the
 number of entries. Immutable once built, and not a caching mechanism:
 nothing inside tors remembers a raw `dict` between calls, so a caller who
-mutates their `dict` and re-passes it is always honored — the handle is
+mutates their `dict` and re-passes it is always honored: the handle is
 the caller's explicit opt-in to fixness, the same narrow shape
 `re.compile()` has in the stdlib.
 

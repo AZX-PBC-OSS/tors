@@ -30,6 +30,8 @@ a regression to a stalled/looping start fails fast rather than hanging.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -38,6 +40,7 @@ from tors import (
     chunk_by_lines,
     chunk_by_lines_iter,
     chunk_by_paragraphs,
+    chunk_by_paragraphs_iter,
     chunk_by_sentences,
     chunk_by_sentences_iter,
     chunk_by_words,
@@ -433,7 +436,7 @@ class TestChunkByParagraphs:
         # paragraphs have no content filter here: a whitespace-only
         # paragraph is emitted as a chunk (only fully-empty spans are
         # dropped)". The middle paragraph of "x\n\n \n\ny" is a lone
-        # space -- a content filter like the word/line twins' would drop
+        # space: a content filter like the word/line twins' would drop
         # it; the paragraph heuristic emits it as a real chunk.
         text = "x\n\n \n\ny"
         chunks = chunk_by_paragraphs(text, 1)
@@ -442,7 +445,7 @@ class TestChunkByParagraphs:
 
     def test_overlapping_chunks_can_share_blank_content(self) -> None:
         # The doc sentence's second half: "so an overlapping pair of
-        # chunks can share blank content" -- the overlap window repeats
+        # chunks can share blank content": the overlap window repeats
         # the whitespace-only paragraph itself, and the two chunks'
         # shared span is exactly the lone space.
         text = "x\n\n \n\ny"
@@ -651,7 +654,7 @@ class TestComposesAsDocumented:
 
 # ---------------------------------------------------------------------------
 # Streaming twins: chunk_text_iter / chunk_by_words_iter /
-# chunk_by_sentences_iter / chunk_by_lines_iter
+# chunk_by_sentences_iter / chunk_by_paragraphs_iter / chunk_by_lines_iter
 # ---------------------------------------------------------------------------
 
 
@@ -679,10 +682,45 @@ class TestStreamingIterParity:
         text = "l1\nl2\nl3\nl4\nl5"
         assert list(chunk_by_lines_iter(text, 2, overlap=1)) == chunk_by_lines(text, 2, overlap=1)
 
+    def test_chunk_by_paragraphs_iter_matches_the_list(self) -> None:
+        # the docs' worked example (docs/api.md's chunk_by_paragraphs_iter
+        # section, pinned byte-exact in tests/test_docs_examples.py): four
+        # paragraphs, two per chunk, then the overlap spelling repeating
+        # one whole paragraph, the literals, not just list parity.
+        text = (
+            "Attendees: Ada, Grace, Edsger.\n\n"
+            "Grace: parser rewrite halves latency.\n\n"
+            "Edsger: spec drift question, unresolved.\n\n"
+            "Next sync moves to Thursday."
+        )
+        assert list(chunk_by_paragraphs_iter(text, 2)) == chunk_by_paragraphs(text, 2)
+        assert list(chunk_by_paragraphs_iter(text, 2)) == [(0, 69), (71, 141)]
+        assert list(chunk_by_paragraphs_iter(text, 2, overlap=1)) == chunk_by_paragraphs(
+            text, 2, overlap=1
+        )
+        assert list(chunk_by_paragraphs_iter(text, 2, overlap=1)) == [
+            (0, 69),
+            (32, 111),
+            (71, 141),
+        ]
+
+    def test_chunk_by_paragraphs_iter_is_an_iterator_validating_at_construction(self) -> None:
+        # The iter-twin-specific bits beyond list parity: the constructor
+        # returns a real iterator (iter() of it is itself, ready for for
+        # loops and unpacking), and validation is eager: a bad count
+        # raises at construction, before the first __next__, the same
+        # fail-fast shape every eager _iter twin has.
+        it = chunk_by_paragraphs_iter("a\n\nb", 2)
+        assert iter(it) is it
+        assert it.__length_hint__() == 1
+        with pytest.raises(ValueError, match="paragraphs_per_chunk must be >= 1"):
+            chunk_by_paragraphs_iter("a\n\nb", 0)
+
     def test_empty_text_is_an_empty_iterator_not_an_error(self) -> None:
         assert list(chunk_text_iter("", 5)) == []
         assert list(chunk_by_words_iter("", 3)) == []
         assert list(chunk_by_sentences_iter("", 3)) == []
+        assert list(chunk_by_paragraphs_iter("", 3)) == []
         assert list(chunk_by_lines_iter("", 3)) == []
 
     def test_length_hint_counts_down_as_the_iterator_drains(self) -> None:
@@ -726,6 +764,24 @@ class TestStreamingIterParity:
         data=st.data(),
     )
     @settings(max_examples=200)
+    def test_chunk_by_paragraphs_iter_matches_the_list_property(
+        self, text: str, per_chunk: int, data: object
+    ) -> None:
+        # the same newline-run alphabet the lines property test uses: a
+        # paragraph needs a 2+ newline run, which "ab \n\r" generates
+        # freely, so this exercises multi-paragraph inputs, not just
+        # single-paragraph degenerates.
+        overlap = data.draw(st.integers(min_value=0, max_value=per_chunk - 1))  # type: ignore[attr-defined]
+        assert list(chunk_by_paragraphs_iter(text, per_chunk, overlap=overlap)) == (
+            chunk_by_paragraphs(text, per_chunk, overlap=overlap)
+        )
+
+    @given(
+        text=st.text(alphabet="ab \n\r", max_size=40),
+        per_chunk=st.integers(min_value=1, max_value=6),
+        data=st.data(),
+    )
+    @settings(max_examples=200)
     def test_chunk_by_lines_iter_matches_the_list_property(
         self, text: str, per_chunk: int, data: object
     ) -> None:
@@ -741,6 +797,8 @@ class TestStreamingIterParity:
             chunk_by_words_iter("abc", 0)
         with pytest.raises(ValueError, match="sentences_per_chunk must be >= 1"):
             chunk_by_sentences_iter("abc", 0)
+        with pytest.raises(ValueError, match="paragraphs_per_chunk must be >= 1"):
+            chunk_by_paragraphs_iter("a\n\nb", 0)
         with pytest.raises(ValueError, match="lines_per_chunk must be >= 1"):
             chunk_by_lines_iter("a\nb", 0)
 
@@ -750,7 +808,7 @@ class TestStreamingIterParity:
         # overlap >= the per-chunk count. Each iter twin rejects them
         # with the list spelling's own message, values included where
         # the family's wording carries them (chunk_by_lines' newer
-        # messages name the numbers; the older siblings' do not) -- the
+        # messages name the numbers; the older siblings' do not), the
         # same messages the list-level classes above pin.
         with pytest.raises(ValueError, match="overlap must be >= 0"):
             chunk_text_iter("abc def", 5, overlap=-1)
@@ -759,6 +817,8 @@ class TestStreamingIterParity:
         with pytest.raises(ValueError, match="overlap must be >= 0"):
             chunk_by_sentences_iter("One. Two.", 2, overlap=-1)
         with pytest.raises(ValueError, match="overlap must be >= 0"):
+            chunk_by_paragraphs_iter("a\n\nb", 2, overlap=-1)
+        with pytest.raises(ValueError, match="overlap must be >= 0"):
             chunk_by_lines_iter("a\nb", 2, overlap=-1)
         with pytest.raises(ValueError, match="overlap must be < max_chars"):
             chunk_text_iter("abc def", 5, overlap=5)
@@ -766,10 +826,248 @@ class TestStreamingIterParity:
             chunk_by_words_iter("one two three", 2, overlap=2)
         with pytest.raises(ValueError, match="overlap must be < sentences_per_chunk"):
             chunk_by_sentences_iter("One. Two.", 2, overlap=2)
+        with pytest.raises(ValueError, match="overlap must be < paragraphs_per_chunk"):
+            chunk_by_paragraphs_iter("a\n\nb\n\nc", 2, overlap=2)
         with pytest.raises(
             ValueError, match="overlap must be < lines_per_chunk, got overlap=2, lines_per_chunk=2"
         ):
             chunk_by_lines_iter("a\nb\nc", 2, overlap=2)
+
+
+# ---------------------------------------------------------------------------
+# Error precedence, family-wide: when a call is wrong on two axes at once
+# (a text that cannot cross the UTF-8 argument boundary, and an invalid
+# count), which error the caller sees first is part of the contract, and
+# the list spelling and its _iter twin must agree on it.
+# ---------------------------------------------------------------------------
+
+# A str CPython can build (lone surrogates survive str literals and
+# concatenation) but UTF-8 cannot encode: the input every str-in tors
+# function refuses at its argument boundary with UnicodeEncodeError.
+_LONE_SURROGATE_TEXT = "bad \udcff text"
+
+# The five list/iter pairs, one parametrize row each, so every precedence
+# test below runs against the whole family.
+_LIST_ITER_PAIRS = [
+    pytest.param(chunk_text, chunk_text_iter, id="chunk_text"),
+    pytest.param(chunk_by_words, chunk_by_words_iter, id="chunk_by_words"),
+    pytest.param(chunk_by_sentences, chunk_by_sentences_iter, id="chunk_by_sentences"),
+    pytest.param(chunk_by_paragraphs, chunk_by_paragraphs_iter, id="chunk_by_paragraphs"),
+    pytest.param(chunk_by_lines, chunk_by_lines_iter, id="chunk_by_lines"),
+]
+
+
+class TestErrorPrecedence:
+    """The #30 item-4 pin: a lone-surrogate text plus an invalid count used
+    to raise different exceptions by spelling: the list functions take
+    ``text`` as a pyo3 ``&str`` argument, so the conversion's
+    ``UnicodeEncodeError`` fires before the body (and its count checks)
+    even runs, while the ``_iter`` twins validated the counts first and
+    answered ``ValueError``. The list spelling is the older, shipped
+    contract and cannot change, so the iter twins now borrow the text
+    first: argument-conversion errors beat count/overlap ``ValueError``s
+    in every pair, identically. ``UnicodeEncodeError`` is a ``ValueError``
+    subclass, so a plain ``pytest.raises(ValueError)`` would pass either
+    way; the exact-type assertions are the actual pin, the same vacuity
+    guard tests/test_b64_decode.py's lone-surrogate gate names.
+
+    The second, conversion-order half of the same contract (the rows
+    below the original ones): #30's fix made the iter twins borrow the
+    text before validating, but left their remaining arguments as
+    pyo3-typed parameters extracted ahead of the body's text borrow, so
+    a call whose text is surrogate-broken and whose count/overlap/
+    boundary fails conversion still diverged: the list spelling's
+    pyo3 wrapper extracts ``text`` before every other argument, while
+    the iter twin's wrapper converted the other argument first. The
+    full pin: the iter spelling's wrapper performs the same conversions
+    the list spelling's does, in the same order (the text via the
+    shared str-in argument walk, in the same argument-0 slot), then the
+    body validates in the same order, for conversion and validation
+    errors alike, with byte-identical conversion messages across
+    spellings.
+    """
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    def test_bad_text_beats_bad_count_in_both_spellings(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object]
+    ) -> None:
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, 0)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    def test_bad_count_on_valid_text_is_exactly_value_error(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object]
+    ) -> None:
+        # UnicodeEncodeError is a ValueError subclass, so "raises
+        # ValueError" is not enough: the type must be exactly ValueError.
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(ValueError, match=" must be >= 1, got 0") as excinfo:
+                fn("a\n\nb\nc", 0)
+            assert type(excinfo.value) is ValueError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    def test_bad_text_with_a_valid_count_is_unicode_encode_error(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object]
+    ) -> None:
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, 2)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    def test_chunk_text_boundary_errors_wait_their_turn(self) -> None:
+        # chunk_text's body order, shared by both spellings: the text
+        # conversion, then the count/overlap checks, then parse_boundary.
+        # An unrecognized boundary string is the last error to fire, so a
+        # call that is also text-invalid raises UnicodeEncodeError and a
+        # call that is also count-invalid raises the count ValueError,
+        # never the boundary ValueError, in either spelling.
+        for fn in (chunk_text, chunk_text_iter):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, 5, boundary="paragraph")
+            assert type(excinfo.value) is UnicodeEncodeError
+        for fn in (chunk_text, chunk_text_iter):
+            with pytest.raises(ValueError, match="max_chars must be >= 1") as excinfo:
+                fn("hello world", 0, boundary="paragraph")
+            assert type(excinfo.value) is ValueError
+
+    def test_both_surrogates_corner_raises_the_type_in_both_spellings(self) -> None:
+        # The both-bad corner the family's precedence contract does not
+        # claim to settle at the message level: a lone surrogate in the
+        # text and a different lone surrogate in the boundary argument.
+        # The deliverable, asserted exactly: both spellings raise
+        # UnicodeEncodeError, and the two spellings of a function never
+        # disagree on which error type a bad call raises (the docs' scoped
+        # wording). Both spellings convert the text before the boundary
+        # now (the list spelling by pyo3's argument order, the iter twin
+        # by the same wrapper-side conversion through the shared str-in
+        # argument walk), so both report the text's surrogate and the
+        # messages are byte-identical, but the corner remains a pyo3
+        # extraction-order artifact rather than a contract to pin
+        # at the message level, so the loose provenance check below
+        # tolerates a future pyo3 that words the message differently
+        # while still catching a provenance swap.
+        bad_boundary = "wor\udced"
+        with pytest.raises(UnicodeEncodeError) as list_excinfo:
+            chunk_text(_LONE_SURROGATE_TEXT, 5, boundary=bad_boundary)
+        with pytest.raises(UnicodeEncodeError) as iter_excinfo:
+            chunk_text_iter(_LONE_SURROGATE_TEXT, 5, boundary=bad_boundary)
+        assert type(list_excinfo.value) is UnicodeEncodeError
+        assert type(iter_excinfo.value) is UnicodeEncodeError
+        list_msg = str(list_excinfo.value)
+        iter_msg = str(iter_excinfo.value)
+        # Current behavior: byte-identical, both naming the text's
+        # surrogate (\udcff).
+        assert list_msg == iter_msg or ("\\udcff" in list_msg and "\\udced" in iter_msg), (
+            f"the both-surrogates corner's message provenance moved: "
+            f"list {list_msg!r}, iter {iter_msg!r}"
+        )
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        "bad_count",
+        [
+            pytest.param(2.0, id="float"),
+            pytest.param("2", id="str"),
+            pytest.param(2**70, id="overflow"),
+        ],
+    )
+    def test_bad_text_beats_bad_count_conversion_in_both_spellings(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object], bad_count: object
+    ) -> None:
+        # The count argument can fail conversion (a float, a str, an
+        # oversized int), not just validation: pyo3 extracts the list
+        # spelling's text first, so the surrogate's UnicodeEncodeError
+        # wins there, and must in the iter twin too, which converts
+        # the text before any other argument, not just before the count
+        # validation.
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, bad_count)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        "bad_overlap",
+        [
+            pytest.param(1.0, id="float"),
+            pytest.param(None, id="none"),
+        ],
+    )
+    def test_bad_text_beats_bad_overlap_conversion_in_both_spellings(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object], bad_overlap: object
+    ) -> None:
+        # Same pin for the overlap argument, one row per conversion
+        # failure class: a float and a None both fail i64 conversion
+        # after a valid count.
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, 2, overlap=bad_overlap)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        ("args", "kwargs"),
+        [
+            pytest.param((2.0,), {}, id="float-count"),
+            pytest.param(("2",), {}, id="str-count"),
+            pytest.param((2**70,), {}, id="overflow-count"),
+            pytest.param((2,), {"overlap": 1.0}, id="float-overlap"),
+            pytest.param((2,), {"overlap": None}, id="none-overlap"),
+        ],
+    )
+    def test_conversion_errors_on_valid_text_match_byte_for_byte(
+        self,
+        list_fn: Callable[..., object],
+        iter_fn: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        # Message parity, not just type parity: the iter twin's wrapper
+        # now performs the same argument conversions the list spelling's
+        # does, in the same order, so the pin is that the conversion
+        # errors stay byte-identical across spellings (pyo3's own, on
+        # both sides).
+        with pytest.raises((TypeError, OverflowError)) as list_excinfo:
+            list_fn("a\n\nb\nc", *args, **kwargs)
+        with pytest.raises((TypeError, OverflowError)) as iter_excinfo:
+            iter_fn("a\n\nb\nc", *args, **kwargs)
+        assert type(list_excinfo.value) is type(iter_excinfo.value)
+        assert str(list_excinfo.value) == str(iter_excinfo.value)
+
+    def test_chunk_text_bad_text_beats_bad_boundary_conversion(self) -> None:
+        # chunk_text's boundary is the last argument, so its conversion
+        # error (a non-str: an int, a bytes) cannot beat the text's
+        # UnicodeEncodeError, in either spelling.
+        for bad_boundary in (5, b"x"):
+            for fn in (chunk_text, chunk_text_iter):
+                with pytest.raises(UnicodeEncodeError) as excinfo:
+                    fn(_LONE_SURROGATE_TEXT, 5, boundary=bad_boundary)
+                assert type(excinfo.value) is UnicodeEncodeError
+
+    def test_chunk_text_surrogate_boundary_on_valid_text_is_unicode_encode_error(self) -> None:
+        # The boundary argument's own str conversion: a lone surrogate
+        # in an otherwise-str boundary raises UnicodeEncodeError in both
+        # spellings, ahead of parse_boundary's unrecognized-name
+        # ValueError (which this call never reaches).
+        for fn in (chunk_text, chunk_text_iter):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn("hello world", 5, boundary="wor\udced")
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    def test_chunk_text_bad_boundary_type_on_valid_text_matches_byte_for_byte(self) -> None:
+        # The boundary conversion's message parity, the same pin as the
+        # count/overlap rows: pyo3's own &str extraction error,
+        # byte-identical across spellings, one row per failure class
+        # (int, bytes, None).
+        for bad_boundary in (5, b"x", None):
+            with pytest.raises(TypeError) as list_excinfo:
+                chunk_text("hello world", 5, boundary=bad_boundary)
+            with pytest.raises(TypeError) as iter_excinfo:
+                chunk_text_iter("hello world", 5, boundary=bad_boundary)
+            assert type(list_excinfo.value) is type(iter_excinfo.value)
+            assert str(list_excinfo.value) == str(iter_excinfo.value)
 
 
 # ---------------------------------------------------------------------------

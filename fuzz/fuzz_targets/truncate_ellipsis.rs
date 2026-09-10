@@ -36,7 +36,7 @@ fuzz_target!(|input: Input| {
         // marker/prefix checks apply only to a positive budget. The old
         // `max_chars > 0` assert fired on the CORRECT empty output for any
         // non-empty input at zero budget (CI's first run of this target,
-        // 2026-09-09: a 2-byte input, s="\n", budget=0, found in three
+        // A 2-byte input, s="\n", budget=0, found in three
         // executions from an empty corpus).
         if max_chars == 0 {
             assert!(

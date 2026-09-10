@@ -318,13 +318,14 @@ use py::tfidf::*;
 use py::truncate::*;
 use py::url::*;
 
-/// The shared core of the three streaming iterators (`word_bounds_iter`,
-/// `sentence_bounds_iter`, `find_patterns_iter`): the input kept alive for
-/// the iterator's life, the full item sequence computed under one detach at
-/// construction, and a cursor. Generic over the item (`Copy`: a 2-tuple of
-/// bounds or a 3-tuple of a match) so the three `#[pyclass`] wrappers are
-/// thin and a future `*_iter` surface is one pyclass away (the class name
-/// is per-struct in pyo3; the logic is this one struct, dry).
+/// The shared core of every `*_iter` streaming iterator (the
+/// segmentation, find_patterns, and chunking families'): the input kept
+/// alive for the iterator's life, the full item sequence computed under
+/// one detach at construction, and a cursor. Generic over the item
+/// (`Copy`: a 2-tuple of bounds or a 3-tuple of a match) so the
+/// `#[pyclass`] wrappers are thin and a future `*_iter` surface is one
+/// pyclass away (the class name is per-struct in pyo3; the logic is
+/// this one struct, DRY).
 pub(crate) struct EagerIter<T> {
     /// The input, kept alive for the iterator's life (its cached UTF-8 view
     /// with it), held for the drop side effect, never read after
@@ -437,6 +438,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_by_sentences, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_sentences_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_paragraphs, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_by_paragraphs_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_lines, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_lines_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;

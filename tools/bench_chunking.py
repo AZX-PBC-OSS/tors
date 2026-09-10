@@ -1,25 +1,45 @@
-"""Honest measurement: the chunking family's document-scale cost, the
-cells issue #22 reported plus the sibling unit-count chunkers that turned
-out to carry the same pathology, with each cell's peak RSS measured
-alongside its wall time.
+"""The chunking family's document-scale cost: the cells issue #22
+reported plus the sibling unit-count chunkers that turned out to carry
+the same pathology, with each cell's peak RSS measured alongside its
+wall time.
 
 Cells (12 MiB unless noted, the issue's own scale):
 
 - hierarchical-custom-miss: ``chunk_hierarchical`` over a degenerate
   single-character run with a never-matching custom separator list and a
-  whole-document budget -- the pure "per-call machinery" cost: one count
-  pass plus one scan pass, no grapheme structure at all after the fix.
-- hierarchical-custom-2000: the same input at a 2000-codepoint budget --
+  whole-document budget, the pure "per-call machinery" cost under the
+  lazy levels: the first window takes its own remaining-<=-max_chars
+  exit before any level is realized, so even the separator scan is
+  skipped and the call is one codepoint count plus one chunk out
+  (~0.1 ms at 12 MiB; formerly one count pass plus one scan pass, and
+  ~1.0-1.2 s before the #22 rewrite).
+- hierarchical-custom-2000: the same input at a 2000-codepoint budget:
   every window falls to the raw cut, the lazily-built grapheme index
   (ASCII fast path) plus ~6.3K hard cuts.
 - hierarchical-default-2000: real prose, the default paragraph -> word
-  hierarchy at a 2000-codepoint budget -- the segmentation walks the
-  function exists to provide, plus the cut filter and chunk walk.
-- hierarchical-none8/none100-2000 (6 MiB): the duplicate-entry dedup
-  story -- [None]*8 and [None]*100 against the lone-[None] cost; after
-  slot-construction dedup every spelling walks one spliced default
-  hierarchy, where the rebuild-per-entry spelling measured 1.3s and
-  17.2s per pass on main.
+  hierarchy at a 2000-codepoint budget, paragraph-walk-only under the
+  lazy levels: every window on this corpus is served by the paragraph
+  level alone, so the sentence and word walks are never built (~1.0 ms;
+  formerly ~350 ms, the segmentation walks the function exists to
+  provide paid for windows that never consulted them).
+- hierarchical-default-100: the descend-budget lane the default-2000
+  cell measured before the lazy levels: a 100-codepoint budget whose
+  windows fall through to the word level, so all three
+  hierarchy walks run (the paragraph scan plus the ~130-132 ms word
+  walk and ~178-187 ms sentence walk the walks rows carry), ~378-385 ms
+  and ~70-71 MiB of cut vectors at 12 MiB: the accurate UAX #29
+  segmentation the function exists to provide.
+- hierarchical-lone-none/none8-8 and lone-space/space8-8 (6 MiB, at a
+  descending 8-codepoint budget): the duplicate-entry dedup story,
+  [None]*8 and [" "]*8 against their lone-entry costs, at the budget
+  where a lazy spelling without the dedup would still re-pay a
+  duplicate (windows inside long words exhaust the first entry down to
+  the raw cut). After slot-construction dedup every spelling walks one
+  spliced hierarchy: [None] ~285-290 ms vs [None]*8 ~284-289 ms,
+  [" "] ~103-105 ms vs [" "]*8 ~102-103 ms (ratio ~1.0), where the
+  rebuild-per-entry spelling re-paid the walk per duplicate ([" "]*8
+  measured ~1.7x pre-dedup, and [None]*100 was an OOM shape). The
+  none100-8 row carries the 100x duplicate at the same budget.
 - by-words / by-sentences / by-paragraphs: the unit-count chunkers over
   the same prose at their natural window sizes.
 - by-lines: the merge-free sibling at 50 lines (mirroring the criterion
@@ -34,8 +54,8 @@ Wall timing is time.perf_counter min-of-N inside a fresh child process
 per cell (N sized so a cell accumulates >= 50 ms, at least 2 passes, at
 most 20, gc disabled while measuring, one warm-up pass before); each
 child hands its best time back through a temp file and the parent reaps
-it with os.wait4, so every row's peak RSS is that child's own high-water
-mark -- the interpreter plus the corpus string plus one call's transient
+  it with os.wait4, so every row's peak RSS is that child's own high-water
+  mark: the interpreter plus the corpus string plus one call's transient
 allocations, with the corpus-only baseline row subtracted in the reported
 number. Fresh child per cell is what makes the RSS number per-call: a
 long-lived parent's high-water mark would carry every earlier cell's
@@ -102,16 +122,40 @@ CELLS: list[tuple[str, str, int, str]] = [
         "lambda s: tors.chunk_hierarchical(s, 2000, overlap=200)",
     ),
     (
-        "hierarchical-none8-2000 6MiB",
+        "hierarchical-default-100 12MiB",
         "prose",
-        6 * MIB,
-        "lambda s: tors.chunk_hierarchical(s, 2000, [None] * 8)",
+        12 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 100)",
     ),
     (
-        "hierarchical-none100-2000 6MiB",
+        "hierarchical-lone-none-8 6MiB",
         "prose",
         6 * MIB,
-        "lambda s: tors.chunk_hierarchical(s, 2000, [None] * 100)",
+        "lambda s: tors.chunk_hierarchical(s, 8, [None])",
+    ),
+    (
+        "hierarchical-none8-8 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 8, [None] * 8)",
+    ),
+    (
+        "hierarchical-none100-8 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 8, [None] * 100)",
+    ),
+    (
+        "hierarchical-lone-space-8 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 8, [' '])",
+    ),
+    (
+        "hierarchical-space8-8 6MiB",
+        "prose",
+        6 * MIB,
+        "lambda s: tors.chunk_hierarchical(s, 8, [' '] * 8)",
     ),
     (
         "by-words 200 12MiB",
@@ -162,7 +206,7 @@ if kind == "prose":
 elif kind == "log":
     # Deterministic CRLF-dense log, ~100-char lines: a CRLF ending every
     # 7th line, a blank line every 13th, a whitespace-only line every
-    # 29th, a lone-\r ending every 41st -- the break kinds the by-lines
+    # 29th, a lone-\r ending every 41st; the break kinds the by-lines
     # scan's CR/CRLF folding and blank-line judgement exist for, rather
     # than prose-shaped text. No filesystem dependency.
     parts = []

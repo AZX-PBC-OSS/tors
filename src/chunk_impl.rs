@@ -946,7 +946,7 @@ mod tests {
 
     #[test]
     fn a_small_edit_near_the_start_only_perturbs_nearby_chunks() {
-        // The whole point of content-defined over fixed-size chunking: an
+        // What content-defined buys over fixed-size chunking: an
         // insertion shifts every following byte's absolute offset, but the
         // cut points are chosen by local content, so chunks far past the
         // edit should reappear as identical (start, end) - offset pairs,

@@ -83,7 +83,7 @@ class TestKnownEncodingFixtures:
 
 
 class TestNeverPanicsOnArbitraryBytes:
-    """The whole point of a heuristic detector: some guess for any byte
+    """A heuristic detector answers with some guess for any byte
     string, well-formed UTF-8 or not, ASCII or not, empty or huge."""
 
     @given(raw=st.binary(min_size=0, max_size=8192))

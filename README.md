@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-72 functions plus two small helper classes, grouped by what they do; the
+73 functions plus two small helper classes, grouped by what they do; the
 `documents` extra adds seven document-extraction functions and its own helper
 types. Full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
@@ -144,7 +144,7 @@ types. Full signatures, argument contracts, and edge cases are in the
 | JSON repair (json_repair port) | `repair_json`, `repair_json_loads`, `repair_json_diagnostics` |
 | Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded` |
 | URL encoding | `quote`, `quote_plus`, `unquote`, `unquote_plus` |
-| Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_lines`(+`_iter`), `chunk_by_paragraphs`, `chunk_hierarchical` |
+| Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical` |
 | Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `merkle_root`, `merkle_diff` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |
 | Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris` |

@@ -4,10 +4,6 @@ site_url: https://azx-pbc-oss.github.io/tors/
 repo_url: https://github.com/AZX-PBC-OSS/tors
 repo_name: AZX-PBC-OSS/tors
 
-# Historical design specs stay in the repo but off the published site.
-exclude_docs: |
-  superpowers/*
-
 theme:
   name: material
   palette:

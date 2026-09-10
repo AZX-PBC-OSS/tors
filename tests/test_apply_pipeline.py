@@ -176,7 +176,7 @@ class TestCompiledLemmaDict:
         assert out == ["this is good."]
 
     def test_reused_across_multiple_calls_without_rebuilding(self) -> None:
-        # The whole point: one CompiledLemmaDict, many calls, each call an
+        # The contract: one CompiledLemmaDict, many calls, each call an
         # Arc::clone rather than a fresh HashMap build.
         compiled = CompiledLemmaDict({"better": "good"})
         for _ in range(50):

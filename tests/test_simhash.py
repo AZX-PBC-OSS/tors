@@ -140,7 +140,7 @@ class TestLocalitySensitivity:
         assert min_seen == 23  # the exact measured value, pinned
 
     def test_near_duplicate_paragraph_beats_unrelated_paragraph(self) -> None:
-        # An end-to-end demonstration of the whole point: reordering two
+        # An end-to-end demonstration of the bag-of-words property: reordering two
         # sentences of a paragraph (near-dup) sits far closer than
         # swapping in an unrelated paragraph entirely.
         base = self._DOCUMENT

@@ -4,12 +4,12 @@ literal README.md, docs/api.md, and docs/recipe-transcripts.md show for
 here against the built extension, the
 ``test_diff_opcodes_lines.py::TestReconstruction::test_readme_worked_example``
 discipline. The README says "the output above is what they actually
-return"; this file is what keeps that sentence true -- a behavior change
+return"; this file is what keeps that sentence true: a behavior change
 that would turn a documented example into a lie fails here first, before
 the docs drift. Literals are copied byte-exact from the docs, including
 the trailing spaces the docs show (the recipe's Priya sentence slice
 ends in one: UAX #29 SB10/SB11 attach a terminator's trailing space to
-the PRECEDING sentence). If one of these ever fails after an
+the preceding sentence). If one of these ever fails after an
 intentional change, the docs and this pin move together, in the same
 commit.
 """
@@ -57,6 +57,29 @@ class TestApiReferenceExamples:
         # the overlap slice the doc calls out by content: the repeated
         # whole line plus the blank line riding along after it
         assert log[10:38] == "INFO ready\n\nWARN disk at 90%"
+
+    def test_chunk_by_paragraphs_iter_minutes_windows(self) -> None:
+        # docs/api.md's chunk_by_paragraphs_iter section, pinned the same
+        # way: the literals the doc shows, list and iter spelling alike.
+        minutes = (
+            "Attendees: Ada, Grace, Edsger.\n\n"
+            "Grace: parser rewrite halves latency.\n\n"
+            "Edsger: spec drift question, unresolved.\n\n"
+            "Next sync moves to Thursday."
+        )
+        assert tors.chunk_by_paragraphs(minutes, 2) == [(0, 69), (71, 141)]
+        assert list(tors.chunk_by_paragraphs_iter(minutes, 2)) == [(0, 69), (71, 141)]
+        assert list(tors.chunk_by_paragraphs_iter(minutes, 2, overlap=1)) == [
+            (0, 69),
+            (32, 111),
+            (71, 141),
+        ]
+        # the overlap slice the doc calls out by content: the repeated
+        # whole paragraph, the blank-line gap riding along after it, and
+        # the next chunk's first paragraph
+        assert minutes[32:111] == (
+            "Grace: parser rewrite halves latency.\n\nEdsger: spec drift question, unresolved."
+        )
 
     def test_chunk_hierarchical_thread(self) -> None:
         thread = (

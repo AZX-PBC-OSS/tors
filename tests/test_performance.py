@@ -20,7 +20,15 @@ box this test was written on (WSL2, 28 logical cores, ambient load ~3.5, CPython
 
 The CI assertion covers 1 MiB and 12 MiB over all three corpora with a tolerant
 ``tors < 0.9 x reference`` margin: the measured ratios sit at 0.45-0.67, so the margin
-absorbs a loaded 2-vCPU CI runner (min-of-3 on both sides; noise only ever adds time).
+absorbs a loaded 2-vCPU CI runner. The one observed flake class (a 1 MiB
+decomposed leg at ratio 1.02 under concurrent compile load) is asymmetric
+contention, not symmetric noise: a ~10ms native sample can have one preempted
+run set its min-of-3, while the reference's 13-17ms samples amortize the same
+preemption: "both sides inflate together" only holds when neither side's
+samples are short enough for a single scheduler hit to dominate their minimum.
+The fast cells therefore draw min-of-7 (``_FAST_CELL_SAMPLES``), giving the
+native side enough draws to find an uncontended window; the 12 MiB cells keep
+min-of-3 (a 100ms+ sample amortizes preemptions the way the reference's do).
 If tors ever fails to beat the reference at an asserted size, that is a design failure
 of the native pass, not something to threshold away; see the numbers above for what
 healthy looks like.
@@ -96,23 +104,44 @@ pytestmark = pytest.mark.timing
 _MIB = 1024 * 1024
 _MARGIN = 0.9
 _SAMPLES = 3
+# The fast-cell sample count (see the module docstring's flake-class note):
+# a 1 MiB cell's ~10ms native samples are short enough that one preempted
+# run can set min-of-3 while the pure-Python side's longer samples amortize
+# the same preemption; min-of-7 gives the native side enough draws to find
+# an uncontended window under concurrent load.
+_FAST_CELL_SAMPLES = 7
+# Cells at or above this many bytes draw _SAMPLES; smaller cells draw
+# _FAST_CELL_SAMPLES. 4 MiB: the 1 MiB cells flaked at 3, the 12 MiB cells
+# never have (100ms+ samples amortize scheduler hits symmetrically).
+_FAST_CELL_MAX = 4 * _MIB
 
 
 def _min_wall_ms(
-    op: Callable[[str | bytes], object], corpus: str | bytes, warmup: int = 1
+    op: Callable[[str | bytes], object],
+    corpus: str | bytes,
+    warmup: int = 1,
+    samples: int = _SAMPLES,
 ) -> float:
-    """Min-of-``_SAMPLES`` wall after warmup. The corpus parameter is ``str |
+    """Min-of-``samples`` wall after warmup. The corpus parameter is ``str |
     bytes`` because the suite measures both str-in functions (``finalize`` over
     the reference corpora) and bytes-in functions (the surface over
-    ``corpus_utf8``)."""
+    ``corpus_utf8``). ``samples`` is the fast-cell knob: see
+    ``_FAST_CELL_SAMPLES`` for why the 1 MiB native-vs-pure-Python cells draw
+    more samples than the rest."""
     for _ in range(warmup):
         op(corpus)
     best = float("inf")
-    for _ in range(_SAMPLES):
+    for _ in range(samples):
         started = time.monotonic()
         op(corpus)
         best = min(best, time.monotonic() - started)
     return best * 1000.0
+
+
+def _samples_for(size_bytes: int) -> int:
+    """The sample count for a cell of this size: ``_FAST_CELL_SAMPLES`` below
+    ``_FAST_CELL_MAX``, ``_SAMPLES`` at or above."""
+    return _FAST_CELL_SAMPLES if size_bytes < _FAST_CELL_MAX else _SAMPLES
 
 
 def _stdlib_b64(raw: bytes) -> str:
@@ -142,8 +171,9 @@ def test_finalize_beats_the_reference_pipeline_on_the_same_corpus(
     corpus_kind: str, size_bytes: int
 ) -> None:
     corpus = {"prose": prose, "decomposed": decomposed, "crlf": crlf}[corpus_kind](size_bytes)
-    tors_ms = _min_wall_ms(tors.finalize, corpus)
-    ref_ms = _min_wall_ms(reference_finalize, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.finalize, corpus, samples=samples)
+    ref_ms = _min_wall_ms(reference_finalize, corpus, samples=samples)
     assert tors_ms < _MARGIN * ref_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"reference {ref_ms:.1f}ms (ratio {tors_ms / ref_ms:.2f}): the native pass lost "
@@ -161,8 +191,9 @@ def test_b64_encode_bytes_beats_the_stdlib_expression_on_the_same_corpus(
     tors encodes detached and marshals one output. Measured ratios 0.31-0.84 (the
     worst a contended prose 12 MiB cell; see the module docstring)."""
     corpus = corpus_utf8(corpus_kind, size_bytes)
-    tors_ms = _min_wall_ms(tors.b64_encode_bytes, corpus)
-    std_ms = _min_wall_ms(_stdlib_b64, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.b64_encode_bytes, corpus, samples=samples)
+    std_ms = _min_wall_ms(_stdlib_b64, corpus, samples=samples)
     assert tors_ms < _MARGIN * std_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"stdlib {std_ms:.1f}ms (ratio {tors_ms / std_ms:.2f}): the native b64 pass "
@@ -179,8 +210,9 @@ def test_finalize_utf8_beats_the_decode_plus_reference_pipeline_on_the_same_corp
     pass vs the tail it replaces (a GIL-held decode plus the pure-Python
     reference finalize). Measured ratios 0.46-0.75."""
     corpus = corpus_utf8(corpus_kind, size_bytes)
-    tors_ms = _min_wall_ms(tors.finalize_utf8, corpus)
-    ref_ms = _min_wall_ms(_stdlib_decode_finalize, corpus)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.finalize_utf8, corpus, samples=samples)
+    ref_ms = _min_wall_ms(_stdlib_decode_finalize, corpus, samples=samples)
     assert tors_ms < _MARGIN * ref_ms, (
         f"{corpus_kind} {size_bytes // _MIB}MiB: tors {tors_ms:.1f}ms vs "
         f"decode+reference {ref_ms:.1f}ms (ratio {tors_ms / ref_ms:.2f}): the "
@@ -305,34 +337,55 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 
 
 # ---------------------------------------------------------------------------
-# The chunking family's document-scale cost shape (#22): the per-call cost
-# must be the segmentation walks the function is for, not per-codepoint
-# structures built unconditionally. Load-fair ratios (both sides measured
-# in the same process, min-of-3 after warmup), so a shared-runner slowdown
-# inflates both sides together.
+# The chunking family's document-scale cost shape (#22, then #30): the
+# per-call cost must be the segmentation walks the function is for, not
+# per-codepoint structures built unconditionally, and, since #30's lazy
+# levels, only the walks a call actually consults. Load-fair ratios (both
+# sides measured in the same process, min-of-3 after warmup), so a
+# shared-runner slowdown inflates both sides together.
 #
 # Measured on the dev box (Linux, CPython 3.12, min-of-3 after warmup),
 # before the fix -> after:
 #
 #     chunk_hierarchical, 12 MiB degenerate single-char run, custom
 #     never-matching separators, whole-document budget: ~1048ms -> ~2.6ms
-#     (the unconditional grapheme HashSet + Vec<char> collect; ~400x)
+#     after #22 (the unconditional grapheme HashSet + Vec<char> collect;
+#     ~400x); after #30's lazy levels the same call pays only the
+#     codepoint count: the literal scan itself is skipped, since no
+#     window ever opens a level
 #
-#     chunk_hierarchical, 12 MiB prose, default hierarchy, 2000-char
-#     budget: ~2996ms -> ~351ms; the residual is the word walk (~132ms)
-#     plus the sentence walk (~188ms) -- the accurate UAX #29 hierarchy
+#     chunk_hierarchical, 12 MiB prose, default hierarchy: ~2996ms ->
+#     ~351ms after #22; -> ~1.2ms at a 2000-char budget after #30's lazy
+#     levels (every window is served by the paragraph level alone on this
+#     corpus, so the sentence/word walks are never built), ~0.1ms under a
+#     whole-document budget (no level consulted at all; ~340ms before,
+#     ~176ms at 6 MiB), and ~396ms at a 100-char budget that descends
+#     to the word level: the word (~132ms) plus sentence
+#     (~188ms) walks it actually uses, the accurate UAX #29 hierarchy
 #     the function exists to provide
 #
 #     chunk_by_words, 12 MiB prose, 200 words/chunk: ~1923ms -> ~165ms
 #     chunk_by_sentences, 12 MiB prose, 10 sentences/chunk:
 #     ~1328ms -> ~200ms
 #
-# Follow-up pass (lazy level builds + ASCII scan fast paths; this box,
-# CPython 3.13): default hierarchy @2000 12 MiB prose ~351ms -> ~3.6ms
-# (a paragraph-scale budget consults only the paragraph level; the
-# sentence/word walks never run), by-lines @50 12 MiB ~13.6ms -> ~0.4ms
-# and by-paras @5 ~10.4ms -> ~0.4ms (ASCII memchr2 scan; non-ASCII keeps
-# the char machine). The docstrings below carry the detail.
+# Follow-up pass (lazy level builds, byte-level line/paragraph scans,
+# char_count ASCII fast path): default hierarchy @2000 12 MiB prose
+# ~351ms -> ~1.2ms (a paragraph-scale budget consults only the
+# paragraph level; the sentence/word walks never run), whole-document
+# budgets ~340ms -> ~0.1ms (one codepoint count, no level consulted,
+# and the count itself is the ASCII fast path), by-lines @50 12 MiB
+# ~8ms -> ~0.5ms and by-paras on a log-density corpus ~7.5ms -> ~1.4ms
+# (density-guarded byte scan with a sliding ASCII certificate;
+# non-ASCII segments keep the byte path per segment). The
+# dedup/laziness contract cells (min-of-3 after warmup): default
+# hierarchy @2000 over 12 MiB ~1.5ms vs ~1.5ms for a ["\n\n"]-only
+# custom hierarchy (ratio ~1.0; the eager pre-#30 spelling measured
+# ~351ms on the same corpus); and [None]*8 / [" "]*8 at a descending
+# 8-codepoint budget over 6 MiB each ~1.0x their lone-entry spellings
+# with the slot-construction dedups in the built extension (the
+# duplicated [" "] measured ~1.7x pre-dedup -- the literal spelling of
+# the [None]*8 walk re-payment the dedup closes). The docstrings below
+# carry the detail.
 # ---------------------------------------------------------------------------
 
 
@@ -347,13 +400,21 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
     ``in``, a C-speed scan of the same text, because the class of
     regression this cell guards (an unconditional per-codepoint
     structure or scan built before the budget is even examined) shows up
-    as wall time against exactly that reference. Measured on this box
-    (Linux, CPython 3.13, ambient load 42-85 in a shared-box burst
-    window, min-of-3 after warmup): ~2.6ms for the call, both builds in
-    the same 2.4-3.6ms noise-bound band -- no speedup is claimed for the
-    laziness change here, only the cheaper structural story (the bare
-    scan measured ~6.0ms in the same contended window). The former
-    pre-#22 spelling measured ~700x."""
+    as wall time against exactly that reference. With the char_count
+    ASCII fast path the count lane itself drops to ~0.1ms at 12 MiB, so
+    the measured ratio against ``in`` is ~0.05 (count pass only; ~2
+    after #22, when the scan still ran on top). The pre-#22 spelling
+    measured ~700x.
+
+    The absolute ceiling (0.8ms) is the fast path's own pin, which the
+    8x scan race above cannot provide: a char_count reverted to the
+    predicate-only spelling (no ``is_ascii`` gate) measures ~2.5ms on
+    this corpus (red-proofed: that revert fails this cell), which still
+    passes 8x an ~8ms scan, so the race is blind to exactly the
+    fast-path loss. 0.8ms sits ~3-5x above the measured band
+    (0.15-0.25ms, min-of-3 after warmup on the box this ceiling was
+    calibrated on) and ~3x below the predicate-only spelling, so the
+    gate's loss fails this cell while CI load does not."""
     q = "q" * (12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 12 * _MIB, ["xyz"]), q)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, q)
@@ -361,6 +422,12 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
         f"chunk_hierarchical no-match 12MiB took {tors_ms:.1f}ms against an "
         f"{scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); the lazily-built "
         "grapheme machinery regressed to an unconditional structure"
+    )
+    assert tors_ms < 0.8, (
+        f"chunk_hierarchical no-match 12MiB took {tors_ms:.2f}ms, over the "
+        "whole-budget absolute ceiling (measured ~0.15-0.25ms with the char_count "
+        "ASCII fast path, ceiling 0.8ms; the predicate-only spelling measures "
+        "~2.5ms and must fail this cell); the char_count ASCII fast path regressed"
     )
 
 
@@ -390,25 +457,61 @@ def test_chunk_hierarchical_custom_no_match_skips_the_grapheme_walk_on_non_ascii
     )
 
 
+def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
+    """The #30 lazy-level headline cell: a whole-document budget consults
+    no level at all -- the loop's first iteration takes its own
+    ``remaining <= max_chars`` exit before any level is realized -- so
+    the default hierarchy must cost the same nothing the never-matching
+    custom one does: one codepoint count, one chunk out. Ratioed against
+    CPython's own ``in`` (a C-speed scan of the same text): measured
+    ~0.1ms vs ~2ms (ratio ~0.05) after the lazy levels; the eager
+    spelling measured ~340ms here (~170x, and ~176ms at 6 MiB) -- the
+    three default walks paid for levels that supplied zero cuts.
+
+    The absolute ceiling (0.8ms) is the char_count ASCII fast path's pin
+    on this lane, the no-match cell's twin rationale: the 8x scan race
+    cannot see the fast path's loss (a predicate-only count ~2.5ms at
+    12 MiB still passes 8x an ~8ms scan), while 0.8ms sits ~2.4-5x above
+    the measured band (0.16-0.33ms, min-of-3 after warmup on the box
+    this ceiling was calibrated on) and ~3x below the predicate-only
+    spelling (red-proofed: that revert fails this cell), so the
+    ``is_ascii`` gate's loss fails this cell."""
+    corpus = prose(12 * _MIB)
+    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s)), corpus)
+    scan_ms = _min_wall_ms(lambda s: "xyz" in s, corpus)
+    assert tors_ms < 8.0 * scan_ms, (
+        f"chunk_hierarchical whole-document default 12MiB took {tors_ms:.1f}ms "
+        f"against an {scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); "
+        "levels are being built on a call that consults none of them"
+    )
+    assert tors_ms < 0.8, (
+        f"chunk_hierarchical whole-document default 12MiB took {tors_ms:.2f}ms, "
+        "over the whole-budget absolute ceiling (measured ~0.16-0.33ms with the "
+        "char_count ASCII fast path, ceiling 0.8ms; the predicate-only spelling "
+        "measures ~2.5ms and must fail this cell); the char_count ASCII fast "
+        "path regressed"
+    )
+
+
 def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() -> None:
     """The default hierarchy's per-call cost contract: no more than its
     own UAX #29 walks (word_count + sentence_count on the same corpus,
-    measured in-process). The hierarchy is those walks; everything around
-    them -- level construction, the cut filter, the chunk loop,
-    marshalling -- must be marginal. Measured on this box (Linux, CPython
-    3.13, ambient load 42-85, min-of-3 after warmup): ~3.6ms against a
-    ~316ms walk sum (ratio ~0.01) after the lazy-level pass -- at this
-    2000-codepoint budget only the paragraph level is ever consulted, so
-    the sentence and word walks never run at all (the dedicated
-    ["\n\n"]-ratio cell below pins that property against a tighter
-    reference); the pre-lazy spelling measured ~351ms against a ~320ms
-    reference sum (ratio ~1.1), and the original pre-#22 spelling ~9.4x
-    (the grapheme hash set dominated the segmentation it was filtering).
-    The assertion is kept as the standing ceiling in the other direction:
-    whatever levels a budget does consult, the machinery around the
-    walks must not dominate them."""
+    measured in-process), at a budget that descends to the
+    word level so every walk is consulted and the contract has teeth.
+    The hierarchy is those walks; everything around them -- level
+    realization, the cut filter, the chunk loop, marshalling -- must be
+    marginal. Measured ~396ms against a ~310ms reference sum (ratio
+    ~1.3) at a 100-codepoint budget (at a 2000-codepoint budget on this
+    corpus every window is served by the paragraph level alone, so the
+    same call drops to ~1.2ms -- the sentence/word walks are never
+    built; the dedicated ["\\n\\n"]-ratio cell below pins that property
+    against a tighter reference); the pre-#22 spelling measured ~9.4x
+    (the grapheme hash set dominated the segmentation it was
+    filtering). The assertion is the standing ceiling in the other
+    direction: whatever levels a budget does consult, the machinery
+    around the walks must not dominate them."""
     corpus = prose(12 * _MIB)
-    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
+    tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 100), corpus)
     walks_ms = _min_wall_ms(tors.word_count, corpus) + _min_wall_ms(tors.sentence_count, corpus)
     assert tors_ms < 2.0 * walks_ms, (
         f"chunk_hierarchical default 12MiB took {tors_ms:.0f}ms against "
@@ -422,17 +525,17 @@ def test_chunk_hierarchical_default_hierarchy_builds_only_the_levels_the_budget_
     paragraph-scale budget (2000 codepoints over 12 MiB of prose) every
     window is answered by the paragraph level, so the sentence and word
     walks -- the expensive lower levels of the default hierarchy -- must
-    never run at all. The load-fair reference is ``["\n\n"]``, a custom
+    never run at all. The load-fair reference is ``["\\n\\n"]``, a custom
     hierarchy whose single literal supplies an equivalent top level
     without the default hierarchy's lower levels: both sides pay the
     same paragraph scan plus the same windowing, so the default spelling
-    may only add marginal construction cost, never two more whole-text
-    walks. Measured on this box (Linux, CPython 3.13, ambient load
-    42-85, min-of-3 after warmup): 3.6ms default vs 3.7ms literal (ratio
-    ~1.0); on main the same pair measured ~332ms vs ~3.6ms (~92x,
-    failing the 3.0x ceiling) because the hierarchy built every level up
-    front -- the sentence walk (~186ms) and the word walk (~131ms) ran
-    on a call whose budget never consulted them."""
+    may only add marginal spec-construction cost, never two more
+    whole-text walks. Measured (min-of-3 after warmup): ~1.5ms default
+    vs ~1.5ms literal (ratio ~1.0). The eager pre-#30 spelling measured
+    ~351ms on the same corpus (the sentence walk ~188ms and the word
+    walk ~132ms ran on a call whose budget never consulted them, ~200x
+    this reference) -- the exact regression class the 3.0x ceiling is
+    positioned to catch."""
     corpus = prose(12 * _MIB)
     default_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000), corpus)
     literal_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, ["\n\n"]), corpus)
@@ -447,31 +550,107 @@ def test_chunk_hierarchical_default_hierarchy_builds_only_the_levels_the_budget_
 def test_chunk_hierarchical_duplicate_separator_entries_are_deduped_not_rebuilt() -> None:
     """The dedup contract at slot construction, load-fair ratios (both
     sides in the same process, min-of-3 after warmup): duplicate entries
-    in a custom separator list are collapsed, so ``[None] * 8`` must cost
-    one spliced default hierarchy, not eight, and ``[" "] * 8`` one
-    literal level, not eight. Measured on this box (Linux, CPython 3.13,
-    ambient load 42-85, min-of-3 after warmup; 6 MiB prose, budget 2000):
-    1.7ms for ``[None]`` vs 1.7ms for ``[None] * 8`` (ratio 1.0), 8.9ms
-    for ``[" "]`` vs 9.0ms for ``[" "] * 8`` (ratio 1.0). On main the
-    same cells measured ~8x and would fail this ceiling: the ``[None]``
-    pair measured 1347.1ms vs 169.2ms (~8x), the duplicate-``[" "]``
-    shape the same class (the ``[" "] * 100`` spelling measured 790.4ms
-    there vs 9.0ms now) -- each duplicate entry was rebuilt as its own
-    slot, eight whole-text walks for eight identical levels."""
+    in a custom separator list are collapsed when the slot list is
+    built -- a second ``None`` never re-splices the default hierarchy, a
+    repeated literal never re-pays its scan -- so ``[None] * 8`` must
+    cost one spliced hierarchy and ``[" "] * 8`` one literal level, not
+    eight of either. The budget is descending (8 codepoints: windows
+    inside long words exhaust the ``" "`` level down to the raw cut),
+    which is where a lazy spelling without the dedup would still re-pay
+    a duplicate -- the find_map only reaches one after its original
+    returned None for that window, so a budget whose every window is
+    answered by the first copy can never see the duplicates. Measured
+    (min-of-3 after warmup; 6 MiB prose): ``[None]`` ~350ms vs ``[None] * 8`` ~355ms
+    (ratio ~1.0), ``[" "]`` ~170ms vs ``[" "] * 8`` ~170ms (ratio
+    1.0) with the dedup in the built extension -- the same ``[" "]``
+    pair measures ~1.7x (~150ms vs ~258ms) without the dedup, the
+    seven extra duplicate scans and cut vectors the descent re-paid.
+    The eager spelling measured ~8x here outright (the ``[None]`` pair
+    1347.1ms vs 169.2ms on the pre-dedup build), and the
+    ``[" "] * 100`` spelling was a 1.69 GiB peak OOM shape
+    (``[None] * 100`` its splice twin) without them. The
+    structural teeth wall time cannot see -- that a duplicate after a
+    consulted level adds no builds at all -- are the Rust seam pins
+    (the build_seam LEVELS_BUILT counts in
+    src/chunk_hierarchical_impl.rs)."""
     corpus = prose(6 * _MIB)
-    lone_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None]), corpus)
-    eight_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None] * 8), corpus)
+    lone_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None]), corpus)
+    eight_none_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None] * 8), corpus)
     assert eight_none_ms < 1.5 * lone_none_ms, (
-        f"chunk_hierarchical [None]*8 @2000 6MiB took {eight_none_ms:.1f}ms against "
+        f"chunk_hierarchical [None]*8 @8 6MiB took {eight_none_ms:.1f}ms against "
         f"{lone_none_ms:.1f}ms for [None] ({eight_none_ms / lone_none_ms:.1f}x); "
         "duplicate separator entries are being rebuilt per slot instead of deduped"
     )
-    lone_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [" "]), corpus)
-    eight_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [" "] * 8), corpus)
+    lone_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [" "]), corpus)
+    eight_space_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [" "] * 8), corpus)
     assert eight_space_ms < 1.5 * lone_space_ms, (
-        f"chunk_hierarchical [' ']*8 @2000 6MiB took {eight_space_ms:.1f}ms against "
+        f"chunk_hierarchical [' ']*8 @8 6MiB took {eight_space_ms:.1f}ms against "
         f"{lone_space_ms:.1f}ms for [' '] ({eight_space_ms / lone_space_ms:.1f}x); "
         "duplicate separator entries are being rebuilt per slot instead of deduped"
+    )
+
+
+def test_chunk_hierarchical_none_splice_duplicates_are_inert_at_documented_budgets() -> None:
+    """The ``[None] * 100`` dedup contract at the budget the docs disclose
+    (the README's and api.md's "~0.5 ms at a 2000-codepoint budget over
+    6 MiB of prose, the paragraph walk alone" parenthetical): at a
+    paragraph-scale budget every window is answered by the first paragraph
+    slot, so the 99 duplicate splices are never consulted at all (the
+    find_map dominance argument: the first slot supplying a cut wins) and
+    the ``*100`` spelling must cost exactly the lone spelling: one spliced
+    hierarchy, one paragraph walk. Measured (min-of-3 after warmup, 6 MiB
+    prose, the box this cell was written on: Linux, 32 logical cores,
+    ambient load ~5): ~0.50 ms for both spellings, ratio 1.00-1.01.
+
+    That same dominance argument is the @2000 leg's limit:
+    a lost dedup is invisible at this budget, because the duplicate slots
+    a lost dedup would leave in the list are never consulted; measured
+    directly, with the slot-construction dedup disabled in a scratch
+    build, the @2000 pair still measures ratio ~1.0 (green). The teeth
+    therefore live in the second leg, the descending budget the sibling
+    cell above established (@8, ``[None] * 8``): at 8 codepoints over
+    1 MiB of prose, windows inside long words exhaust every spliced level
+    down to the raw cut, so the find_map walks past every slot and each
+    duplicate splice re-pays the three walks; with the dedup disabled,
+    that scratch build measured the ``*100`` spelling at ~3.6 s against
+    ~48 ms (ratio ~75x) at this exact leg, where the pristine tree
+    measures ~48 ms for both spellings (ratio ~1.0). The ``*100`` scale
+    (not the sibling's ``*8``) is the docs' own OOM shape: the pre-dedup
+    eager spelling measured 17.2 s and +3,120 MiB of peak RSS at 6 MiB.
+    The 1 MiB corpus (not the sibling's 6) keeps the leg at ~0.2 s of
+    measurement while the disabled-dedup red side still lands at ~75x.
+
+    Budgets: the @2000 leg takes the docs-claim ratio (1.3x, ~1.3x above
+    the worst measured ratio) plus an absolute 2.5 ms ceiling (~5x above
+    the measured 0.50 ms, CI-load headroom; the regression this leg is
+    positioned to catch (levels built eagerly again, every duplicate
+    paying its walks up front, the 17.2 s class) blows through it by
+    ~7000x). The descending leg takes the sibling cell's 1.5x margin.
+    The @2000 wall is the paragraph walk, so a paragraph-scanner retune
+    moves the ceiling's headroom, not the ratio legs (both sides pay the
+    same walk)."""
+    corpus = prose(6 * _MIB)
+    lone_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None]), corpus)
+    hundred_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None] * 100), corpus)
+    assert hundred_ms < 1.3 * lone_ms, (
+        f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms against "
+        f"{lone_ms:.2f}ms for [None] ({hundred_ms / lone_ms:.2f}x); duplicate None "
+        "splices are costing more than one spliced hierarchy at a budget that "
+        "never consults them"
+    )
+    assert hundred_ms < 2.5, (
+        f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms, over the "
+        "absolute ceiling (measured ~0.50ms, ceiling 2.5ms with ~5x load headroom); "
+        "duplicates are being built eagerly instead of deduped at slot construction"
+    )
+    small = prose(1 * _MIB)
+    lone8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None]), small)
+    hundred8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None] * 100), small)
+    assert hundred8_ms < 1.5 * lone8_ms, (
+        f"chunk_hierarchical [None]*100 @8 1MiB took {hundred8_ms:.1f}ms against "
+        f"{lone8_ms:.1f}ms for [None] ({hundred8_ms / lone8_ms:.1f}x); duplicate "
+        "None splices are being rebuilt per slot instead of deduped on the "
+        "descending budget that consults them"
     )
 
 
@@ -508,13 +687,12 @@ def test_chunk_by_paragraphs_absolute_band_holds() -> None:
     """``chunk_by_paragraphs`` has no stdlib comparator (a paragraph here
     is tors's own documented 2+-newline heuristic), so like
     ``grapheme_count`` its wall cell is an absolute regression ceiling
-    with generous margin, not a race. Measured on this machine (Linux,
-    CPython 3.13, ambient load 42-85 in a shared-box burst window,
-    min-of-3 after warmup, the helper's own sample count): ~0.4ms at
-    12 MiB of prose after the ASCII memchr2 scan fast path (the
-    pre-fast-path per-char spelling measured ~10.4ms on this box at the
-    same corpus; a CRLF-dense log ran 12.8ms there). The ceiling is 10ms
-    (~25x margin over the new measurement), positioned so that a
+    with generous margin, not a race. Measured (min-of-3 after warmup,
+    the helper's own sample count): ~0.5ms at 12 MiB of prose against
+    the current byte-level scanner (the pre-fast-path per-char spelling
+    measured ~10.4ms at the same corpus on the box that calibrated this
+    cell, and 12.8ms on a CRLF-dense log there). The ceiling is 10ms
+    (~20x margin over the current measurement), positioned so that a
     regression back to the per-char decode loop fails this cell: the old
     spelling's ~10.4ms blows straight through 10ms, where the former
     30ms ceiling would have absorbed it silently. This cell exists
@@ -527,8 +705,8 @@ def test_chunk_by_paragraphs_absolute_band_holds() -> None:
     took_ms = _min_wall_ms(lambda s: chunk_by_paragraphs(s, 200), corpus)
     assert took_ms < 10.0, (
         f"chunk_by_paragraphs 12MiB took {took_ms:.1f}ms, outside the absolute "
-        "band (measured ~0.4ms at 12 MiB, ceiling 10ms; the pre-fast-path "
-        "per-char spelling measured ~10.4ms on this box and must fail this "
+        "band (measured ~0.5ms at 12 MiB, ceiling 10ms; the pre-fast-path "
+        "per-char spelling measured ~10.4ms and must fail this "
         "cell); the paragraph scan regressed"
     )
 
@@ -536,14 +714,14 @@ def test_chunk_by_paragraphs_absolute_band_holds() -> None:
 def test_chunk_by_lines_absolute_band_holds() -> None:
     """``chunk_by_lines``' cell, same absolute-band shape as
     ``chunk_by_paragraphs``' (no stdlib comparator, one fused linear
-    scan): measured ~0.4ms at 12 MiB of prose on this machine (Linux,
-    CPython 3.13, ambient load 42-85 in a shared-box burst window,
-    min-of-3 after warmup, the helper's own sample count) after the
-    ASCII memchr2 scan fast path; the pre-fast-path per-char spelling
-    measured ~13.6ms on this box at the same corpus (a CRLF-dense log:
-    12.8ms). Ceiling 10ms (~25x margin over the new measurement),
-    positioned so that a regression back to the per-char decode loop
-    fails it: the old spelling's ~13.6ms blows straight through 10ms,
+    scan): measured ~0.6ms at 12 MiB of prose (min-of-3 after warmup,
+    the helper's own sample count) against the current byte-level
+    scanner; the pre-fast-path per-char spelling measured ~13.6ms at
+    the same corpus on the box that calibrated this cell (a CRLF-dense
+    log ran 12.8ms there). Ceiling 10ms (~16x margin over the current
+    measurement), positioned so that a regression back to the per-char
+    decode loop fails it: the old spelling's ~13.6ms blows straight
+    through 10ms,
     where the former 40ms ceiling would have absorbed it silently. The
     scan and the real-line filter are one pass with O(1) memory beyond
     the output, so only a class regression (a per-line allocation, a
@@ -552,7 +730,7 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
     took_ms = _min_wall_ms(lambda s: chunk_by_lines(s, 200), corpus)
     assert took_ms < 10.0, (
         f"chunk_by_lines 12MiB took {took_ms:.1f}ms, outside the absolute band "
-        "(measured ~0.4ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
-        "spelling measured ~13.6ms on this box and must fail this cell); the "
+        "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
+        "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
     )

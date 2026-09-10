@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn never_panics_on_arbitrary_bytes() {
-        // The whole point of a heuristic detector: it always answers
+        // A heuristic detector always answers
         // something for any byte string, valid UTF-8 or not.
         for raw in [
             &b"\xff\xfe\x00\x01"[..],

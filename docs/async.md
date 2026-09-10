@@ -33,7 +33,7 @@ await).
 
 The streaming iterator constructors (`word_bounds_iter` and siblings,
 including the chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/
-`chunk_by_sentences_iter`/`chunk_by_lines_iter`)
+`chunk_by_sentences_iter`/`chunk_by_paragraphs_iter`/`chunk_by_lines_iter`)
 have no async twin: an iterator is not an awaitable shape, and draining one to
 a list inside a worker thread is exactly what the already-covered
 list-returning sibling does. The eager construction pass is the GIL-released
