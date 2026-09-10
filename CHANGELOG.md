@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.6.0...v0.6.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* clear the lookahead memo at the empty-object splice too ([#39](https://github.com/AZX-PBC-OSS/tors/issues/39)) ([#42](https://github.com/AZX-PBC-OSS/tors/issues/42)) ([f735874](https://github.com/AZX-PBC-OSS/tors/commit/f735874b3ce00d026072086faba9f5576c83e861))
+* publish tors-documents wheels from tors-documents/dist, not the empty root dist ([#46](https://github.com/AZX-PBC-OSS/tors/issues/46)) ([e697686](https://github.com/AZX-PBC-OSS/tors/commit/e697686b34adf9fd108ed7349d94d2b8ebe830cb))
+* redact internal project codename from comment and docs ([#41](https://github.com/AZX-PBC-OSS/tors/issues/41)) ([18d2036](https://github.com/AZX-PBC-OSS/tors/commit/18d2036b3da9af73e4e1b71dd451053bba7080f8))
+* score is_grounded's truncated tail window against the claim-length denominator ([#44](https://github.com/AZX-PBC-OSS/tors/issues/44)) ([27e584c](https://github.com/AZX-PBC-OSS/tors/commit/27e584cdd8d693d71b5bbf97a0717439830837bd))
+* **tests:** run the stdlib-b64 red side inline on the loop, not in a thread ([#45](https://github.com/AZX-PBC-OSS/tors/issues/45)) ([cf3cd72](https://github.com/AZX-PBC-OSS/tors/commit/cf3cd726d5283ce0ce5da96c8b630e43dc1b37e4))
+
 ## [0.6.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.5.0...v0.6.0) (2026-09-10)
 
 
