@@ -630,11 +630,25 @@ codepoint count and nothing else (~2.5 ms): no window consults a level, so not e
 the literal's scan runs. The line and paragraph twins are byte-level scans — an
 inline density window before each `memchr2` hop so break soup never pays a hop, and
 a sliding ASCII certificate that batches purity checks one 4 KiB stride per ~50
-segments — so `chunk_by_lines` over 12 MiB of prose at 50 lines/chunk runs in
-~0.5 ms (formerly ~8 ms), ~2.3 ms on a one-line-per-~80-bytes log corpus (formerly
-~8.3 ms), and `chunk_by_paragraphs` ~1.4 ms on that log corpus (formerly ~7.5 ms);
-break soup is at parity with the old decoder, and non-ASCII segments keep the byte
-path through a per-segment fallback (outputs differential-pinned identical). These
+segments — and their cost record is a disclosed trade, stated against the right
+bar: the "~8 ms" whole-text figures these scans replaced were the pre-#32
+per-`char` decoder, but current main already ships an `is_ascii`-gated sparse
+`memchr2` scan, and against THAT design this one pays and wins in absolute terms
+(12 MiB, interleaved best-of-N): `chunk_by_lines` ~0.45 ms on prose and ~2.2 ms on
+a one-line-per-~80-bytes log corpus against the gate's ~0.4 and ~1.2–1.3 ms, and
+`chunk_by_paragraphs` ~1.5 ms on that log against ~1.3 ms — the per-segment window
+and certificate bookkeeping cost +0.1–0.9 ms at realistic pure-ASCII densities,
+the price of the two guards. What the guards buy, on exactly the shapes the gated
+design leaves unguarded (the worst-case-robustness posture `json_repair`'s
+`deadline_ms` established for pathological inputs): break soup (a break unit every
+~2.5 bytes) at ~10 ms by-lines and ~22 ms by-paragraphs where the gate pays ~42
+and ~54 ms (it has no density guard — one memchr call per 1–2 scanned bytes); a
+document with even one non-ASCII byte at ~0.46 ms where the gate forfeits the
+whole document to its per-codepoint decoder's ~7.6 ms (~16×); CJK-dense logs
+(every segment non-ASCII) at ~23 ms by-lines / ~10 ms by-paragraphs against the
+gate's ~20/~9 — the per-segment fallback's residual cost, reduced by a first-byte
+probe that skips the purity attempt a non-ASCII-leading segment would always fail.
+Outputs are differential-pinned identical across every one of these shapes. These
 functions used to build a
 `Vec<char>` of the whole text plus a `HashSet` of every grapheme boundary —
 unconditionally, before any early exit could matter — which dominated their cost and
