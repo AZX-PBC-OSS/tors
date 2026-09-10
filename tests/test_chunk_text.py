@@ -869,7 +869,23 @@ class TestErrorPrecedence:
     in every pair, identically. ``UnicodeEncodeError`` IS a ``ValueError``
     subclass, so a plain ``pytest.raises(ValueError)`` would pass either
     way -- the exact-type assertions are the actual pin, the same vacuity
-    guard tests/test_b64_decode.py's lone-surrogate gate names."""
+    guard tests/test_b64_decode.py's lone-surrogate gate names.
+
+    The second, conversion-order half of the same contract (the rows
+    below the original ones): #30's fix made the iter twins borrow the
+    text before VALIDATING, but left their remaining arguments as
+    pyo3-typed parameters extracted ahead of the body's text borrow, so
+    a call whose text is surrogate-broken AND whose count/overlap/
+    boundary fails CONVERSION still diverged -- the list spelling's
+    pyo3 wrapper extracts ``text`` before every other argument, while
+    the iter twin's wrapper converted the OTHER argument first. The
+    full pin: the iter spelling's wrapper performs the same conversions
+    the list spelling's does, in the same order (the text via the
+    shared str-in argument walk, in the same argument-0 slot), then the
+    body validates in the same order -- for conversion AND validation
+    errors alike, with byte-identical conversion messages across
+    spellings.
+    """
 
     @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
     def test_bad_text_beats_bad_count_in_both_spellings(
@@ -923,16 +939,15 @@ class TestErrorPrecedence:
         # The deliverable, asserted exactly: both spellings raise
         # UnicodeEncodeError -- the two spellings of a function never
         # disagree on which error TYPE a bad call raises (the docs' scoped
-        # wording). The message PROVENANCE differs by spelling, though:
-        # pyo3 extracts the list spelling's `text: &str` first (argument
-        # order), so it reports the text's surrogate, while the iter
-        # twin's `text` is an unconverted Bound[PyString] and its
-        # `boundary: &str` is extracted ahead of the body, so it reports
-        # the boundary's. Frozen as-is -- differ-or-match, not "fixed" --
-        # because the corner is a pyo3 extraction-order artifact, not a
-        # contract worth code to rearrange, and the loose provenance pin
-        # below tolerates a future pyo3 that unifies the messages while
-        # still catching a provenance SWAP while they differ.
+        # wording). Both spellings convert the text before the boundary
+        # now (the list spelling by pyo3's argument order, the iter twin
+        # by the same wrapper-side conversion through the shared str-in
+        # argument walk), so both report the text's surrogate and the
+        # messages are byte-identical -- but the corner remains a pyo3
+        # extraction-order artifact rather than a contract worth pinning
+        # at the message level, so the loose provenance check below
+        # tolerates a future pyo3 that words the message differently
+        # while still catching a provenance SWAP.
         bad_boundary = "wor\udced"
         with pytest.raises(UnicodeEncodeError) as list_excinfo:
             chunk_text(_LONE_SURROGATE_TEXT, 5, boundary=bad_boundary)
@@ -942,12 +957,117 @@ class TestErrorPrecedence:
         assert type(iter_excinfo.value) is UnicodeEncodeError
         list_msg = str(list_excinfo.value)
         iter_msg = str(iter_excinfo.value)
-        # Current behavior: they differ, the list naming the text's
-        # surrogate (\udcff) and the iter the boundary's (\udced).
+        # Current behavior: byte-identical, both naming the text's
+        # surrogate (\udcff).
         assert list_msg == iter_msg or ("\\udcff" in list_msg and "\\udced" in iter_msg), (
             f"the both-surrogates corner's message provenance moved: "
             f"list {list_msg!r}, iter {iter_msg!r}"
         )
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        "bad_count",
+        [
+            pytest.param(2.0, id="float"),
+            pytest.param("2", id="str"),
+            pytest.param(2**70, id="overflow"),
+        ],
+    )
+    def test_bad_text_beats_bad_count_conversion_in_both_spellings(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object], bad_count: object
+    ) -> None:
+        # The count argument can fail CONVERSION (a float, a str, an
+        # oversized int), not just validation: pyo3 extracts the list
+        # spelling's text first, so the surrogate's UnicodeEncodeError
+        # wins there -- and must in the iter twin too, which converts
+        # the text before ANY other argument, not just before the count
+        # validation.
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, bad_count)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        "bad_overlap",
+        [
+            pytest.param(1.0, id="float"),
+            pytest.param(None, id="none"),
+        ],
+    )
+    def test_bad_text_beats_bad_overlap_conversion_in_both_spellings(
+        self, list_fn: Callable[..., object], iter_fn: Callable[..., object], bad_overlap: object
+    ) -> None:
+        # Same pin for the overlap argument, one row per conversion
+        # failure class: a float and a None both fail i64 conversion
+        # after a valid count.
+        for fn in (list_fn, iter_fn):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn(_LONE_SURROGATE_TEXT, 2, overlap=bad_overlap)
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    @pytest.mark.parametrize(("list_fn", "iter_fn"), _LIST_ITER_PAIRS)
+    @pytest.mark.parametrize(
+        ("args", "kwargs"),
+        [
+            pytest.param((2.0,), {}, id="float-count"),
+            pytest.param(("2",), {}, id="str-count"),
+            pytest.param((2**70,), {}, id="overflow-count"),
+            pytest.param((2,), {"overlap": 1.0}, id="float-overlap"),
+            pytest.param((2,), {"overlap": None}, id="none-overlap"),
+        ],
+    )
+    def test_conversion_errors_on_valid_text_match_byte_for_byte(
+        self,
+        list_fn: Callable[..., object],
+        iter_fn: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        # Message parity, not just type parity: the iter twin's wrapper
+        # now performs the same argument conversions the list spelling's
+        # does, in the same order, so the pin is that the conversion
+        # errors stay byte-identical across spellings -- pyo3's own, on
+        # both sides.
+        with pytest.raises((TypeError, OverflowError)) as list_excinfo:
+            list_fn("a\n\nb\nc", *args, **kwargs)
+        with pytest.raises((TypeError, OverflowError)) as iter_excinfo:
+            iter_fn("a\n\nb\nc", *args, **kwargs)
+        assert type(list_excinfo.value) is type(iter_excinfo.value)
+        assert str(list_excinfo.value) == str(iter_excinfo.value)
+
+    def test_chunk_text_bad_text_beats_bad_boundary_conversion(self) -> None:
+        # chunk_text's boundary is the LAST argument, so its CONVERSION
+        # error (a non-str: an int, a bytes) cannot beat the text's
+        # UnicodeEncodeError, in either spelling.
+        for bad_boundary in (5, b"x"):
+            for fn in (chunk_text, chunk_text_iter):
+                with pytest.raises(UnicodeEncodeError) as excinfo:
+                    fn(_LONE_SURROGATE_TEXT, 5, boundary=bad_boundary)
+                assert type(excinfo.value) is UnicodeEncodeError
+
+    def test_chunk_text_surrogate_boundary_on_valid_text_is_unicode_encode_error(self) -> None:
+        # The boundary argument's own str conversion: a lone surrogate
+        # in an otherwise-str boundary raises UnicodeEncodeError in both
+        # spellings, ahead of parse_boundary's unrecognized-name
+        # ValueError (which this call never reaches).
+        for fn in (chunk_text, chunk_text_iter):
+            with pytest.raises(UnicodeEncodeError) as excinfo:
+                fn("hello world", 5, boundary="wor\udced")
+            assert type(excinfo.value) is UnicodeEncodeError
+
+    def test_chunk_text_bad_boundary_type_on_valid_text_matches_byte_for_byte(self) -> None:
+        # The boundary conversion's message parity, the same pin as the
+        # count/overlap rows: pyo3's own &str extraction error,
+        # byte-identical across spellings, one row per failure class
+        # (int, bytes, None).
+        for bad_boundary in (5, b"x", None):
+            with pytest.raises(TypeError) as list_excinfo:
+                chunk_text("hello world", 5, boundary=bad_boundary)
+            with pytest.raises(TypeError) as iter_excinfo:
+                chunk_text_iter("hello world", 5, boundary=bad_boundary)
+            assert type(list_excinfo.value) is type(iter_excinfo.value)
+            assert str(list_excinfo.value) == str(iter_excinfo.value)
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,10 @@
 //! The pyo3 layer's shared argument walks and argument validators, the
 //! code every list/dict-taking binding repeated per file until it had one
 //! home: the GIL-held collect-handles-then-borrow walks (`&str` lists,
-//! `&[u8]` lists, `&str` dict pairs), the `[0.0, 1.0]` closed-interval
-//! check, and the `TimeoutError` construction. The leading underscore
+//! `&[u8]` lists, `&str` dict pairs), the single-argument str-in
+//! conversion, the `[0.0, 1.0]` closed-interval check, the chunkers'
+//! count/overlap triple, and the `TimeoutError` construction. The leading
+//! underscore
 //! marks the module private to the py layer: nothing here is a binding,
 //! so nothing here belongs in the crate's public surface or in `lib.rs`'s
 //! cross-feature helper set.
@@ -20,7 +22,7 @@
 
 use pyo3::exceptions::{PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList};
+use pyo3::types::{PyAny, PyDict, PyList, PyString};
 
 /// The empty-entry contract of a `&str` list walk: a pattern list refuses
 /// an empty entry (`ValueError("empty pattern")`: an empty pattern would
@@ -138,6 +140,63 @@ pub(crate) fn validate_unit_interval(name: &str, value: f64, echo_value: bool) -
             message.push_str(&format!(": {value}"));
         }
         return Err(PyValueError::new_err(message));
+    }
+    Ok(())
+}
+
+/// The `from_py_with` extractor that gives an argument BOTH halves of the
+/// str-in contract at once: the `&str` conversion pyo3's wrapper would
+/// perform for a `&str`-typed parameter (the standard str-in class — a
+/// non-`str` object fails the `PyString` downcast, a lone-surrogate `str`
+/// fails the UTF-8 borrow, byte-identical errors either way, because this
+/// IS that code path) and the handle a `Bound<'_, PyString>` parameter
+/// carries, in one argument slot. The chunking `_iter` twins use it on
+/// their `text` so their wrappers run exactly the conversion the list
+/// spellings' `text: &str` parameters get, in the same argument-0 slot:
+/// the streaming spelling must hold the handle (the `EagerIter` keep-alive)
+/// but must not let its weaker no-conversion extraction reorder any other
+/// argument's error ahead of the text's — the error-precedence contract
+/// tests/test_chunk_text.py::TestErrorPrecedence pins, family-wide. The
+/// returned handle's UTF-8 is already validated (and cached on the object)
+/// by the time the body sees it, so the body's own `to_str` re-borrow
+/// cannot fail.
+pub(crate) fn convert_str_arg<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyString>> {
+    obj.extract::<&str>()?;
+    Ok(obj.cast::<PyString>()?.clone())
+}
+
+/// The `count >= 1` / `overlap >= 0` / `overlap < count` validation
+/// triple shared by every chunking binding's window arguments:
+/// `chunk_text`/`chunk_text_iter`/`chunk_hierarchical`'s `max_chars` and
+/// the four segment-count list/`_iter` pairs'
+/// `words_per_chunk`/`sentences_per_chunk`/`paragraphs_per_chunk`/
+/// `lines_per_chunk`, with the call site's own parameter name passed in
+/// as `count_name` so every message spells it (a caller knows which
+/// argument to fix). The three checks are the no-empty-chunk floor, the
+/// no-negative-overlap floor, and the forward-progress ceiling
+/// (`overlap >= count` would give every chunk after the first a stride
+/// of `count - overlap <= 0`, an infinite loop by construction), in the
+/// order the eleven inline blocks this replaces all had, count first --
+/// and because every caller reaches it only after all of its arguments
+/// are converted (the `_iter` twins' wrappers included, via
+/// [`convert_str_arg`]), that order is what both spellings of a pair
+/// observe, the family-wide error-precedence contract
+/// tests/test_chunk_text.py::TestErrorPrecedence pins.
+pub(crate) fn validate_count_overlap(count_name: &str, count: i64, overlap: i64) -> PyResult<()> {
+    if count < 1 {
+        return Err(PyValueError::new_err(format!(
+            "{count_name} must be >= 1, got {count}"
+        )));
+    }
+    if overlap < 0 {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be >= 0, got {overlap}"
+        )));
+    }
+    if overlap >= count {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be < {count_name}, got overlap={overlap}, {count_name}={count}"
+        )));
     }
     Ok(())
 }
