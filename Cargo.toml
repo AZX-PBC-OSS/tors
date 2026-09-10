@@ -167,8 +167,8 @@ office_oxide = { version = "0.1.10", optional = true }
 # GFM-table/blockquote/code-fence/entities/CJK/emoji): it drops <script>/
 # <style> BY CONSTRUCTION (htmd routes them through its generic block
 # handler, leaking CSS/JS text into the body markdown — architectural, not
-# a bugfix away; cennan ingests web pages, so noise text in the IR is
-# disqualifying), emits padded GFM tables WITH the `|---|` delimiter row
+# a bugfix away; downstream web-ingestion pipelines feed on this IR, so
+# noise text in it is disqualifying), emits padded GFM tables WITH the `|---|` delimiter row
 # (fast_html2md omits it — not valid GFM), indents nested lists, decodes
 # entities fully, and keeps code fences clean. Its two quirks are
 # option-level, not architectural, and both are handled at the call site:
