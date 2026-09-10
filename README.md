@@ -637,7 +637,7 @@ per-`char` decoder, but current main already ships an `is_ascii`-gated sparse
 (12 MiB, interleaved best-of-N): `chunk_by_lines` ~0.45 ms on prose and ~2.2 ms on
 a one-line-per-~80-bytes log corpus against the gate's ~0.4 and ~1.2–1.3 ms, and
 `chunk_by_paragraphs` ~1.5 ms on that log against ~1.3 ms — the per-segment window
-and certificate bookkeeping cost +0.1–0.9 ms at realistic pure-ASCII densities,
+and certificate bookkeeping cost +0.1–1.0 ms at realistic pure-ASCII densities,
 the price of the two guards. What the guards buy, on exactly the shapes the gated
 design leaves unguarded (the worst-case-robustness posture `json_repair`'s
 `deadline_ms` established for pathological inputs): break soup (a break unit every
@@ -645,9 +645,12 @@ design leaves unguarded (the worst-case-robustness posture `json_repair`'s
 and ~54 ms (it has no density guard — one memchr call per 1–2 scanned bytes); a
 document with even one non-ASCII byte at ~0.46 ms where the gate forfeits the
 whole document to its per-codepoint decoder's ~7.6 ms (~16×); CJK-dense logs
-(every segment non-ASCII) at ~23 ms by-lines / ~10 ms by-paragraphs against the
+(every segment non-ASCII) at ~21 ms by-lines / ~12 ms by-paragraphs against the
 gate's ~20/~9 — the per-segment fallback's residual cost, reduced by a first-byte
-probe that skips the purity attempt a non-ASCII-leading segment would always fail.
+probe that skips the purity attempt a non-ASCII-leading segment would always
+fail (the CJK-dense by-paragraphs cell additionally wobbles ~10–12.5 ms with
+binary code layout across rebuilds; the band, not either end, is the honest
+number).
 Outputs are differential-pinned identical across every one of these shapes. These
 functions used to build a
 `Vec<char>` of the whole text plus a `HashSet` of every grapheme boundary —

@@ -1819,10 +1819,12 @@ a per-codepoint fallback for non-ASCII segments, and ASCII certification batched
 as one 4 KiB stride per ~50 segments (a sliding certificate over the whole scan,
 not a per-segment `is_ascii` check). That structure is a disclosed trade against
 the simpler whole-text `is_ascii` gate a sparse scan could use (interleaved
-best-of-N, 12 MiB): +0.1–0.9 ms on pure-ASCII densities (`chunk_by_lines` ~0.45 ms
+best-of-N, 12 MiB): +0.1–1.0 ms on pure-ASCII densities (`chunk_by_lines` ~0.45 ms
 on prose and ~2.2 ms on a one-line-per-~80-bytes log against the gate's ~0.4 and
-~1.2–1.3 ms; `chunk_by_paragraphs` ~1.5 vs ~1.3 ms on that log) and ~3 ms on a
-CJK-dense log (~23 vs ~20 ms, every segment taking the fallback), buying ~4× on
+~1.2–1.3 ms; `chunk_by_paragraphs` ~1.5 vs ~1.3 ms on that log) and ~1–3 ms on a
+CJK-dense log (~21 vs ~20 ms by-lines, every segment taking the fallback; the
+by-paragraphs cell pays the most, ~12 vs ~9 ms, and wobbles ~10–12.5 ms with
+binary code layout across rebuilds), buying ~4× on
 break soup (~10 vs ~42 ms — the gate has no density guard), ~16× on mixed text
 (~0.46 vs ~7.6 ms — one non-ASCII byte no longer forfeits the document to a
 per-codepoint decoder), and the same wins on `chunk_by_paragraphs`' soup cell
