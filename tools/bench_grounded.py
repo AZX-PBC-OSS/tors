@@ -5,7 +5,11 @@ path (the same windowing recipe the crate documents: same-length windows,
 stride ``len(claim) // 2``, truncated tail window, early exit once the best
 ratio reaches the threshold; no exact-containment floor and no refinement
 pass: neither exists in the naive composition, and the verbatim cells
-price exactly that difference).
+price exactly that difference. One deliberate divergence: the naive lane
+scores its truncated tail window with difflib's own shorter-denominator
+ratio -- the exact inflation issue #40 removed from tors -- because that
+is what the naive composition naturally writes; it is a timing baseline,
+never a verdict target).
 
 Correctness is parity-gated against the full contract model
 (``tests/reference.py``'s ``reference_is_grounded_fuzzy``: floor, windowing,

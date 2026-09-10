@@ -386,10 +386,10 @@ def _lcs_len(a: str, b: str) -> int:
 
 def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bool:
     """The pure-Python model of ``tors.is_grounded(fuzzy=True)``'s documented
-    contract: the exact-containment floor, then the best ``2·M/T`` ratio over
-    the same-length stride-``len(claim)//2`` windows of ``source`` (the
-    truncated tail window included), then (when the coarse best falls short)
-    the bounded refinement pass: the top 64 windows scoring >= 0.5 (by
+    contract: the exact-containment floor, then the best region score over
+    the stride-``len(claim)//2`` windows of ``source`` (the truncated tail
+    window included), then (when the coarse best falls short) the bounded
+    refinement pass: the top 64 windows scoring >= 0.5 (by
     ``(score, start)``, the streaming keep-K-largest set; the truncated tail
     competes like any other), each re-scanned at fine stride
     ``max(1, L // 16)`` across ``[w - L//2, min(w + L//2, n - L)]``, the grid
@@ -399,6 +399,21 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     the same at the end; likewise the refinement's best-first order and
     early break, so this model scans each candidate's full fine range and
     still lands on the identical verdict.
+
+    Every window in the windowed regime (``len(source) > len(claim)``) is
+    scored as the claim-length region it truncates: ``2*M / (2*L)`` with
+    ``M`` the window's LCS length against the claim, so a full window scores
+    ``2*M/(L + L)`` (the difflib shape over equal-length operands) and the
+    truncated tail window scores the same ``M/L`` -- its missing chars are
+    mismatches, never a discounted ``L + len(window)`` denominator, which
+    would inflate a source that just ends partway through the evidence and
+    make the verdict depend on where the evidence sits (issue #40's
+    position-dependence: the same 76%-of-claim tail scored 0.861 flush with
+    the end and 0.756 mid-source). ``len(source) <= len(claim)`` keeps the
+    one direct whole-source difflib ratio ``2*M/(m + n)``: a different,
+    pinned convention (the unwindowed difflib-parity lane in
+    ``test_grounded.py``), the boundary between the two sitting exactly at
+    ``len(source) == len(claim)`` where both formulas agree.
     ``M`` here is the LCS length from the independent DP above, not
     difflib's anchored matching blocks: tors's ``M`` is the maximal one
     (``M == LCS`` exactly, the minimal-edit-script consequence of the
@@ -419,7 +434,9 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     start = 0
     while True:
         end = min(start + m, n)
-        score = 2 * _lcs_len(claim, source[start:end]) / (m + end - start)
+        # 2*M/(2*m): identical for full windows (end - start == m) and the
+        # truncated tail (missing chars are mismatches).
+        score = _lcs_len(claim, source[start:end]) / m
         best = max(best, score)
         if score >= 0.5:
             band.append((score, start))
@@ -443,7 +460,7 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
         if starts[-1] != hi:
             starts.append(hi)  # the grid alone could leave a fine-1 gap at hi
         for fstart in starts:
-            best = max(best, 2 * _lcs_len(claim, source[fstart : fstart + m]) / (2 * m))
+            best = max(best, _lcs_len(claim, source[fstart : fstart + m]) / m)
     return best >= threshold
 
 

@@ -24,7 +24,13 @@ use crate::validate_deadline_ms;
 /// runs first, so a claim present verbatim is grounded before any
 /// windowing: regardless of window alignment, and before `deadline_ms` is
 /// even set up (a verbatim substring never times out; `deadline_ms` bounds
-/// the windowed scan that runs only when there is no exact match). Near
+/// the windowed scan that runs only when there is no exact match). Every
+/// windowed score uses the claim-length denominator `2*L` — a truncated
+/// tail window's missing chars are mismatches, never a discounted
+/// denominator, so the verdict never depends on where the evidence sits
+/// relative to the source's end (issue #40); the one exception is a
+/// `source` shorter than the claim, where the whole source is the evidence
+/// and the score is one direct difflib `2*M/(m+n)` ratio. Near
 /// matches are alignment-independent in the guarantee band: a region with
 /// aligned ratio r is detected at any offset whenever
 /// r >= max(0.75, threshold + 1/32), via the bounded refinement pass;
