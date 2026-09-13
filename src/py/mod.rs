@@ -30,6 +30,7 @@ pub mod merkle;
 pub mod normalize;
 pub mod phonetic;
 pub mod pipeline;
+pub mod scan;
 pub mod search;
 pub mod segmentation;
 pub mod simhash;

@@ -165,6 +165,42 @@ def find_patterns_iter(patterns: list[str], text: str) -> Iterator[tuple[int, in
 # pinned. A single int return: no marshalling class at all.
 def count_matches(patterns: list[str], text: str) -> int: ...
 
+# The escape-parity byte scan: an occurrence of needle at offset i counts
+# only when the maximal run of b"\\" immediately before i has EVEN length
+# (0 is even, so an occurrence at offset 0 counts); an odd run means the
+# run's backslash pairs escape each other and the leftover one escapes the
+# occurrence's first byte, so the occurrence is literal text. The
+# motivating case is JSON's \u0000: a real NUL codepoint and the literal
+# six-character text render byte-ambiguously (the literal contains the
+# escape at +1, behind one backslash), and PostgreSQL jsonb rejects only
+# the real one (SQLSTATE 22P05) — parity settles it without re-parsing.
+#
+# BYTES IN, BYTE OFFSETS OUT — read this twice: find_unescaped's return
+# indexes the haystack's BYTES, never str codepoints. Over multibyte UTF-8
+# content the byte offset and the decoded text's character offset are
+# different numbers (find_patterns needed a byte→char mapping for exactly
+# this confusion; this API has none because the input is bytes and the
+# contract is byte-space end to end: haystack[i:i + len(needle)] is the
+# needle). find_unescaped returns -1 when no live occurrence exists
+# (bytes.find's own sentinel, kept over Optional[int] deliberately).
+# Rejected (odd-run) hits advance the scan one byte past the hit, not
+# past the whole match, so self-overlapping needles stay correct. An empty
+# needle raises ValueError("empty needle") (it would match at every
+# position, the find_patterns empty-pattern rationale). Exactly bytes on
+# both arguments (bytearray/memoryview/str -> TypeError): the bytes-in
+# surface's zero-copy immutable-borrow contract. No JSON knowledge lives
+# in the functions: parity is the mechanism, "needle is an escape
+# sequence" is the caller's reading of it.
+#
+# GIL note: utf8_is_valid's class exactly — two zero-copy PyBytes borrows,
+# the whole scan under one py.detach, bool/int returns so no marshalling
+# class exists, and no error path past the empty-needle ValueError (which
+# fires under the GIL, before the detach). Ceiling-only heartbeat budget;
+# no aio twin (a memchr-class scan at document scale is a
+# sub-heartbeat-floor call).
+def contains_unescaped(haystack: bytes, needle: bytes) -> bool: ...
+def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
+
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
 # pattern list compiled once (one detached build at construction), then
 # every call is the free function's scan classes minus the per-call

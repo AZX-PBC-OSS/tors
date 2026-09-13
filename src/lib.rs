@@ -9,7 +9,8 @@
 //! [`segmentation_impl`] (UAX #29 grapheme/word segmentation),
 //! [`utf8_impl`] (SIMD UTF-8 validity), [`diff_impl`] (character-level
 //! opcode diffs in difflib's shape), [`search_impl`] (leftmost-longest
-//! multi-pattern search), [`truncate_impl`] (boundary-safe and
+//! multi-pattern search), [`scan_impl`] (escape-parity byte scan),
+//! [`truncate_impl`] (boundary-safe and
 //! ellipsis-marked truncation), and [`controls_impl`] (C0/DEL control-run
 //! scrub); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
@@ -211,6 +212,17 @@
 //! O(result) object-tree construction for the loads/diagnostics spellings
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
+//!
+//! The escape-parity scan surface (`contains_unescaped`/`find_unescaped`)
+//! adds no residue class at all: it is `utf8_is_valid`'s extreme point
+//! applied to search — two zero-copy `PyBytes` borrows (the haystack and
+//! the needle), the whole memmem occurrence loop plus the parity walk
+//! under one `py.detach`, and a `bool`/`int` return, so there is no
+//! marshalling class and no error path past the empty-needle `ValueError`
+//! (raised under the GIL, before the detach). The whole pass at 12 MiB
+//! sits well under the 10 ms heartbeat floor (memchr-class throughput),
+//! so both corpus shapes' heartbeat cells are ceiling-only, the
+//! b64/utf8_is_valid budget class.
 
 pub mod b64_impl;
 pub mod bm25_impl;
@@ -248,6 +260,7 @@ pub mod gfm_strip_impl;
 #[cfg(feature = "documents")]
 pub mod pdf_impl;
 pub mod pipeline_impl;
+pub mod scan_impl;
 pub mod search_impl;
 pub mod segmentation_impl;
 pub mod simhash_impl;
@@ -311,6 +324,7 @@ use py::merkle::*;
 use py::normalize::*;
 use py::phonetic::*;
 use py::pipeline::*;
+use py::scan::*;
 use py::search::*;
 use py::segmentation::*;
 use py::simhash::*;
@@ -407,6 +421,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utf8_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(decode_utf16, m)?)?;
     m.add_function(wrap_pyfunction!(utf16_is_valid, m)?)?;
+    m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
+    m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes_lines, m)?)?;
