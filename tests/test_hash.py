@@ -507,6 +507,21 @@ class TestArgumentContract:
         with pytest.raises(TypeError):
             hmac_sha256_hex(b"key", not_str_or_bytes)  # type: ignore[arg-type]
 
+    def test_hmac_key_is_validated_before_data(self) -> None:
+        # The validation order the wrapper's nested borrows guarantee (the
+        # key is borrowed and validated first), pinned explicitly with BOTH
+        # arguments bad: the surrogate cells above pin the order only with
+        # the other argument valid. The key's error is the one that fires.
+        with pytest.raises(TypeError, match="^key must be str or bytes"):
+            hmac_sha256_hex(bytearray(b"k"), 123)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="^key must be str or bytes"):
+            hmac_sha256_hex(None, memoryview(b"d"))  # type: ignore[arg-type]
+        # A str key holding a lone surrogate (valid type, failed borrow)
+        # still raises before the data's TypeError: order is type-check and
+        # borrow of the key, then the data, exactly.
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            hmac_sha256_hex("k\ud800", 123)  # type: ignore[arg-type]
+
 
 class TestOutputInvariants:
     """Structural contracts that hold independent of the exact digest:
