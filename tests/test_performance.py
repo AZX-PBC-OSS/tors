@@ -84,7 +84,17 @@ from collections.abc import Callable
 import pytest
 
 import tors
-from reference import corpus_b64, corpus_utf8, crlf, decomposed, entities, prose, reference_finalize
+from reference import (
+    corpus_b64,
+    corpus_utf8,
+    crlf,
+    decomposed,
+    entities,
+    prose,
+    reference_finalize,
+    reference_scrub_log_text,
+    scrub_corpus,
+)
 from tors import (
     chunk_by_lines,
     chunk_by_paragraphs,
@@ -304,6 +314,45 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
     print(
         f"html_unescape no-& prose 12MiB: tors {tors_ms:.2f}ms "
         f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [1024, 100 * 1024], ids=["1KiB", "100KiB"])
+def test_scrub_log_text_beats_the_regex_chain_on_exception_text(size_bytes: int) -> None:
+    """The scrub wall cells, at the two sizes the consumer's error path
+    actually pays: a single failed job scrubs a message and a traceback at
+    up to ~100 KB scale, and the issue's own cost profile for the chain
+    (~20-35µs/KiB, ~2-3.4ms at 100 KB) is what these cells measure against
+    the corpus that fires every rule once per unit (the DETAIL line, both
+    credential shapes on the DSN, the repr()-flattened run).
+
+    The comparator is the pinned regex chain itself (the four TaskQ
+    patterns as compiled in ``tests/reference.py``, the same spellings the
+    differential suite races tors against), so the wall race and the parity
+    harness cross-reference on one oracle. Measured on the dev box (min-of-7
+    at 1 KiB, min-of-3 at 100 KiB, after warmup):
+
+        size    tors        chain      tors/chain
+        1 KiB   0.001ms     0.045ms    0.03
+        100 KiB 0.064ms     2.735ms    0.02
+
+    A ~30-40x win, asserted with the shared 0.9 margin: the chain is four
+    whole-text ``re.sub`` passes while tors is memchr/memmem scans plus one
+    splice. The 1 KiB cell is fast-cell territory (µs-scale samples) and
+    draws ``_FAST_CELL_SAMPLES`` accordingly; even at that scale the margin
+    absorbs a loaded runner many times over. The GIL-release side of the
+    same surface is pinned in tests/test_gil_release.py (the 96 MiB
+    heartbeat cell; the chain holds the loop for ~2.5s of a ~2.76s wall at
+    that size, the red side this port exists for)."""
+    corpus = scrub_corpus(size_bytes)
+    tors_ms = _min_wall_ms(tors.scrub_log_text, corpus, samples=_samples_for(size_bytes))
+    chain_ms = _min_wall_ms(
+        reference_scrub_log_text, corpus, samples=_samples_for(size_bytes)
+    )
+    assert tors_ms < _MARGIN * chain_ms, (
+        f"scrub_log_text {size_bytes}B: tors {tors_ms:.3f}ms vs chain "
+        f"{chain_ms:.3f}ms (ratio {tors_ms / chain_ms:.3f}): the hand-rolled "
+        "scan+splice lost the wall race it exists to win"
     )
 
 

@@ -454,6 +454,7 @@ from reference import (
     prose,
     reference_finalize,
     reference_normalize,
+    scrub_corpus,
     unescaped_false_positive,
 )
 
@@ -1774,6 +1775,43 @@ def test_replace_many_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.replace_many, text, replacements)
         )
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [96 * _MIB], ids=["96MiB"])
+def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The scrub claim, the replace_many dense cell's shape over the
+    surface it exists for: the whole four-pass rule chain (DETAIL line
+    scan, escaped-run scan, userinfo scan, query-param scan, plus the
+    splice) detached under one ``py.detach``, over the exception-shaped
+    scrub corpus where every rule fires once per unit, and the return is
+    one string, so the GIL-held residue is the argument borrow plus that
+    single string's marshalling — ``detached_transform``'s classes, the
+    no-list-shape prediction again.
+
+    The 96 MiB size is the cell's own derivation, not the suite's usual
+    12 MiB: the scrub core is memchr/memmem-scanned Rust, so 12 MiB walls
+    only 8-10ms — at the 10ms ping floor, where the ratio is the
+    documented sub-ping artifact (the b64 12 MiB precedent) and cannot
+    carry the shared budget. 96 MiB walls 56-72ms, clearing the floor ~6x.
+
+    Measured on the dev box (ambient load ~4, 3 samples per side): worst
+    gaps 11.1-13.6ms of 56-72ms walls (ratio 0.19-0.20) — the ping floor
+    plus the one output string's marshalling (the DETAIL deletions leave
+    the output ~87% of the input). The cell takes the shared budgets: the
+    0.30 ratio sits ~1.5x above the worst measured ratio and ~70% below
+    the ~1.0 a detach regression shows, and the 100ms ceiling holds ~7x
+    over the worst gap. The red side, measured in the same placement: the
+    four-pass ``re.sub`` chain this port replaces holds the loop for
+    2487-2489ms of 2759-2762ms walls (ratio 0.90) over the same corpus —
+    ``re.sub`` never releases the GIL, the exact GIL-tax the port exists
+    to remove (up to four passes per text and ~24 per failed job in the
+    consumer's error path)."""
+    text = scrub_corpus(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.scrub_log_text, text))
     )
 
 
