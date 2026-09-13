@@ -46,12 +46,12 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
-- `scrub_pii`, contact-dense prose (~119k matches at 12 MiB): ~7.5x faster
+- `scrub_pii`, contact-dense prose (~119k matches at 12 MiB): ~5.5x faster
   than the quoted chain it ports (two `re.sub` passes, one Python callback
-  per match — 0.003 ms vs 0.019 ms at 1 KiB, 0.283 ms vs 2.140 ms at
+  per match — 0.003 ms vs 0.019 ms at 1 KiB, 0.386 ms vs 2.140 ms at
   100 KiB; the callback count dominates, so the ratio is load-stable), and
   contact-free text costs two memchr probes and the identity return
-  (~0.002 ms at 100 KiB).
+  (~0.088 ms at 100 KiB).
 - `minhash_signature`, `num_perm=128`, vs the pure-Python MinHash loop it
   replaces (the same tokens, shingles, XXH64, and permutation arithmetic
   in Python): 0.02 ms vs 3.4 ms at 1 KiB (~170x), 1.6 ms vs 281 ms at

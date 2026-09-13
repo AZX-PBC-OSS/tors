@@ -59,25 +59,37 @@
 //!     `g`/`z`/`A`-`F` are clean and still match) — so a run starting inside
 //!     an email token's digest can never flow out through a separator
 //!     into following text and compose a fresh "number" out of hex
-//!     digits (`…~e292cb255128 4096` stays untouched); in real text a
+//!     digits (`…~e292cb255128 4096` stays untouched) — and a token span
+//!     itself (``~`` + 12 digest hex) is a breaker: runs never start
+//!     inside a digest (the scan resumes after the token instead of
+//!     spending a composed digest-plus-number run whole, which would
+//!     silently swallow the real number after it), and the byte after a
+//!     token is a clean boundary even when the digest ends hex-dirty, so
+//!     an adjacent number still scrubs exactly. In real text a
 //!     digit run glued to a letter or tilde is an identifier fragment,
 //!     the same reasoning as the bare cut. Third, no partial match
 //!     inside a longer run: twelve-plus digits is an id, not a phone.
 //!     Leading spaces are skipped (word separation); other leading
 //!     separators are part of the spelling; trailing separators
-//!     survive past the last digit, same as international; and non-NANP
-//!     un-plussed domestic (`020 …` shapes) is out of scope, the `+`
-//!     form being the international spelling of those.
+//!     survive past the last digit, same as international; and eleven
+//!     digits not led by ASCII `1` are excluded (the NANP trunk-prefix
+//!     shape) — ten-digit runs carry no leading-digit check at all, so a
+//!     `0`-led ten-digit shape (`020-794-6095`) scrubs like any other,
+//!     only its eleven-digit `0`-led spelling staying out (the `+` form
+//!     being the international spelling of those).
 //! * **Pass order** — email substitution over the whole string first,
 //!   then phone substitution over its result, each exactly once, no
 //!   cascade: an email's local part may itself contain a `+`-led digit
 //!   run (`user+14155552671@example.com` is one email), so the phone
 //!   rule must see the email tokens, never the addresses that produced
-//!   them. One reachable interaction is documented rather than fixed:
+//!   them. Two reachable interactions are documented rather than fixed:
 //!   an email token whose DOMAIN spells a domestic number
 //!   (`@5551234567.co~…`) has its digit half re-tokenized by the phone
-//!   pass — over-redaction in the safe direction, converging on the
-//!   second scrub like every other shape.
+//!   pass, and an email local removal can trim a too-long digit run into
+//!   exactly ten (or eleven-with-`1`) digits that then scrub (`1415 555
+//!   2671 12345a@b.co` scrubs the trimmed shape though the input run was
+//!   sixteen digits) — both over-redaction in the safe direction,
+//!   converging on the second scrub like every other shape.
 //! * **Tokens** — `@domain~<digest>` for an email match, and
 //!   `prefix~<digest>` for a phone match, where `prefix` is the match's
 //!   first three CODE POINTS (a canonical E.164's country code — `"+47"`
@@ -110,14 +122,16 @@
 //!   it so by construction: every phone match, international or
 //!   domestic, ENDS at its run's last digit (the run's remainder is
 //!   separator-only, holding no new match), no run can span a token
-//!   boundary (the `~` is not class), and a token's interior can hold
-//!   no domestic match — the prefix is at most three codepoints (under
-//!   ten digits), the digest hex carries no separator, and the
-//!   clean-boundary rule keeps a run that starts inside a digest from
-//!   flowing out into following text. The same rules are what make the
-//!   both-rules email-token corners converge: the domain that spells a
-//!   number leaves only letter-bearing fragments behind, and the
-//!   digest-tail-plus-adjacent-digits composition is unreachable.
+//!   boundary (the `~` is not class, and a `~` + 12-hex span is skipped
+//!   whole), and a token's interior can hold no domestic match — the
+//!   prefix is at most three codepoints (under ten digits), the digest
+//!   hex carries no separator, and a run starting inside a digest
+//!   resumes after the token instead of flowing out into following
+//!   text. The same rules are what make the both-rules email-token
+//!   corners converge: the domain that spells a number leaves only
+//!   letter-bearing fragments behind, and a digest tail followed by an
+//!   adjacent number splits at the token — the tail never composes, and
+//!   the number scrubs exactly.
 //! * **The salt.** `DEFAULT_SALT` is tors's own constant — the source
 //!   chain digests unsalted, and re-publishing that as a default would
 //!   re-publish its documented weakness (an enumerated E.164 space
@@ -506,6 +520,69 @@ fn has_separator_in(text: &str, start: usize, end: usize) -> bool {
     text[start..end].chars().any(is_phone_separator)
 }
 
+/// Whether `b` is a token-digest hex char: lowercase `[0-9a-f]`, exactly
+/// the alphabet `const_hex::encode` emits. Uppercase `A`-`F` never opens
+/// a token span (tokens are lowercase-only), so natural text holding one
+/// keeps the pre-breaker behavior.
+#[inline]
+fn is_token_hex(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f')
+}
+
+/// The end offset of the token span opening at `tilde` (`~` + 12 digest
+/// hex chars), or `None`. Both email and phone tokens end this way, and
+/// the digest half never holds a separator — so a span found here is
+/// always token interior, never a phone spelling.
+fn token_span_end_at(text: &str, tilde: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(tilde) != Some(&b'~') {
+        return None;
+    }
+    let end = tilde + 1 + TOKEN_HEX;
+    if end > bytes.len() {
+        return None;
+    }
+    if bytes[tilde + 1..end].iter().all(|&b| is_token_hex(b)) {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+/// The end offset of the token span covering `off`, or `None`: `off`
+/// sits strictly inside `~` + 12 hex. A phone-class run starting there
+/// is digest tail, not a number's head — the caller resumes after the
+/// token instead of spending the composed run whole (which would swallow
+/// the real number following it).
+fn token_span_containing(text: &str, off: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let lo = off.saturating_sub(TOKEN_HEX);
+    let hi = off.min(bytes.len().saturating_sub(1));
+    for tilde in lo..=hi {
+        if bytes.get(tilde) != Some(&b'~') {
+            continue;
+        }
+        if let Some(end) = token_span_end_at(text, tilde)
+            && tilde <= off
+            && off < end
+        {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Whether a token span ends exactly at `pos`: the byte after a token
+/// is a clean boundary (the token is a finished unit, like a word
+/// boundary), even when the digest's own last char is `~`-dirty hex.
+fn token_ends_at(text: &str, pos: usize) -> bool {
+    pos > TOKEN_HEX
+        && text.as_bytes().get(pos - 1 - TOKEN_HEX) == Some(&b'~')
+        && text.as_bytes()[pos - TOKEN_HEX..pos]
+            .iter()
+            .all(|&b| is_token_hex(b))
+}
+
 /// The phone pass: every leftmost match of the two phone grammars
 /// becomes `prefix~digest` (`prefix` = the match's first three code
 /// points). One linear scan over the class runs: a run preceded by a
@@ -516,17 +593,38 @@ fn has_separator_in(text: &str, start: usize, end: usize) -> bool {
 /// else is a documented non-match, and the domestic grammar never
 /// fires behind a `+`); an un-plussed run of exactly ten digits, or
 /// eleven with an ASCII leading `1`, carrying a separator, is a
-/// domestic match. Non-matching runs are spent whole — no partial
-/// match inside a longer run. `Cow::Borrowed` when nothing matches.
+/// domestic match — with token spans (`~` + 12 digest hex, either
+/// rule's token) acting as breakers: a run starting inside a digest
+/// resumes after the token (never a composed digest-plus-number run),
+/// and the byte after a token is a clean boundary. Non-matching runs
+/// are spent whole — no partial match inside a longer run.
+/// `Cow::Borrowed` when nothing matches.
 fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut pos = 0;
     let mut emitted = 0;
     let mut out: Option<String> = None;
     while pos < bytes.len() {
+        // A token span (`~` + 12 digest hex) is a breaker: runs never
+        // start inside a digest, so step over the whole span. The bytes
+        // stay in the `emitted` prefix and pass through verbatim.
+        if bytes[pos] == b'~'
+            && let Some(end) = token_span_end_at(text, pos)
+        {
+            pos = end;
+            continue;
+        }
         let Some(run_start) = next_phone_class(text, pos) else {
             break;
         };
+        // A run starting inside a token digest is digest tail, not a
+        // number's head: resume after the token so the composed run
+        // (digest hex flowing through a separator into following text)
+        // never forms and the real number keeps its own clean run.
+        if let Some(end) = token_span_containing(text, run_start) {
+            pos = end;
+            continue;
+        }
         let run = scan_phone_run(text, run_start);
         let plussed = run_start > 0 && bytes[run_start - 1] == b'+';
         let span = if plussed {
@@ -543,13 +641,17 @@ fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
             // or a lowercase `a`-`f` (hex `a`-`f` + `~`, exactly) — so
             // no run starting inside a token's digest can flow out
             // through a separator into following text and compose a
-            // fresh "number" out of hex digits. In real text a digit
+            // fresh "number" out of hex digits — unless the match starts
+            // exactly where a token span ends (the token is a finished
+            // unit, so the number after it is a new word, not an
+            // identifier fragment). In real text a digit
             // run glued to hex/tilde is an identifier fragment,
             // the same reasoning as the bare cut.
             let nanp_shape = run.digits == 10 || (run.digits == 11 && run.first_digit == Some('1'));
             let match_start = run_start + run.leading_spaces;
-            let clean_start =
-                match_start == 0 || !matches!(bytes[match_start - 1], b'~' | b'a'..=b'f');
+            let clean_start = match_start == 0
+                || !matches!(bytes[match_start - 1], b'~' | b'a'..=b'f')
+                || token_ends_at(text, match_start);
             if nanp_shape && clean_start && has_separator_in(text, match_start, run.last_digit_end)
             {
                 Some((match_start, run.last_digit_end))
@@ -746,14 +848,20 @@ mod tests {
         // C1/C2: RFC quoted-string locals and IP-literal/dotted-quad
         // domains never match — the whole address survives. No grammar
         // widening (parity): canonicalize before scrub.
-        let rules = PiiRules { email: true, phone: false };
+        let rules = PiiRules {
+            email: true,
+            phone: false,
+        };
         for text in [
             r#""user@name"@example.com"#,
             r#""a@b"@x.co"#,
             "user@[192.168.1.1]",
             "user@192.168.1.1",
         ] {
-            assert!(matches!(scrub_pii(text, rules, ""), Cow::Borrowed(_)), "{text}");
+            assert!(
+                matches!(scrub_pii(text, rules, ""), Cow::Borrowed(_)),
+                "{text}"
+            );
         }
     }
 
@@ -1064,6 +1172,36 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
             scrub_pii(&twice, PiiRules::BOTH, ""),
             Cow::Borrowed(_)
         ));
+    }
+
+    #[test]
+    fn an_email_token_is_a_breaker_before_an_adjacent_domestic_number() {
+        // P0: the email pass emits `@domain~<12hex>`; the digest tail
+        // must not compose with a following domestic number into one
+        // spent-whole run (silent under-redaction). The token is a
+        // breaker: each number scrubs exactly, and the output converges.
+        for (text, matched) in [
+            (
+                "candidate ada+tag@azx.io 415-555-2671 no answer",
+                "415-555-2671",
+            ),
+            ("fungai.chetima@example.com-415-555-2671", "-415-555-2671"),
+        ] {
+            let once = scrub(text, PiiRules::BOTH, "");
+            assert!(
+                !once.contains(matched),
+                "digest tail swallowed the adjacent number in {once:?}"
+            );
+            assert!(
+                once.contains(&format!("{}~", &matched[..3])),
+                "the number did not scrub exactly in {once:?}"
+            );
+            let twice = scrub(&once, PiiRules::BOTH, "");
+            assert!(
+                matches!(scrub_pii(&twice, PiiRules::BOTH, ""), Cow::Borrowed(_)),
+                "no convergence in {twice:?}"
+            );
+        }
     }
 
     #[test]

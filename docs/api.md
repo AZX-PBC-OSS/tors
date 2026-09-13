@@ -197,14 +197,24 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
     conjunction, not disjunction: either predecessor alone is dirty; not
     "letters" — `g`/`z`/`A`-`F` are clean and still match), so a run
     starting inside a token digest can never flow out through a separator
-    into following text (`…~e292cb255128 4096` stays untouched); and
+    into following text (`…~e292cb255128 4096` stays untouched) — and a
+    token span itself (`~` + 12 digest hex) is a breaker: runs never
+    start inside a digest (the scan resumes after the token instead of
+    spending a composed digest-plus-number run whole, which would
+    silently swallow the real number after it), and the byte after a
+    token is a clean boundary even when the digest ends hex-dirty, so
+    an adjacent number still scrubs exactly; and
     (3) no partial match inside a longer run — twelve-plus digits is an
     id, not a phone. Leading spaces are skipped (word separation); a
     leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
     the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
     whole); trailing separators survive past the last digit, same as
-    international; and non-NANP un-plussed domestic (`020 …` shapes) is
-    out of scope: the `+` form is the international spelling of those.
+    international; and eleven digits not led by ASCII `1` are excluded
+    (the NANP trunk-prefix shape) — ten-digit runs carry no
+    leading-digit check at all, so a `0`-led ten-digit shape
+    (`020-794-6095`) scrubs like any other and only its eleven-digit
+    `0`-led spelling stays out (the `+` form is the international
+    spelling of those).
     One reachable interaction is documented rather than fixed: an email
     token whose DOMAIN spells a domestic number (`user@555.1234567.co`)
     has its digit half re-tokenized by the phone pass — over-redaction
@@ -257,6 +267,16 @@ timestamps:
   (trailing separators survive; the extension is not part of the match).
 - NPA/NXX are unvalidated: any ten-digit NANP-width run with a separator
   matches — area/exchange codes are never checked against the NANP plan.
+- Email-then-phone composition over-redacts in the safe direction: the
+  email local removal can trim a too-long digit run into exactly ten
+  (or eleven-with-`1`) digits that then scrub (`1415 555 2671
+  12345a@b.co` scrubs the trimmed `1415 555 2671` though the input run
+  was sixteen digits). No digits leak; the id is partially tokenized.
+  The parity lanes route these inputs to the extension lane.
+- A natural (non-email) `~` + 12-lowercase-hex span is treated as a
+  token breaker: the number after it scrubs even when glued
+  hex-dirty. Over-redaction in the safe direction — and the reason a
+  digest tail can never suppress the number after it.
 
 If your threat includes adversarial formatting (an attacker choosing
 the spelling to dodge the scrubber), canonicalize BEFORE scrubbing —

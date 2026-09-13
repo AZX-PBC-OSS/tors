@@ -317,15 +317,34 @@ fn matches_of(s: &str, match_at: fn(&[char], usize) -> Option<usize>) -> Vec<(us
     found
 }
 
-/// Whether any of the input's matches survives verbatim in `out`.
-fn any_survivor(s: &str, out: &str, emails: &[(usize, usize)], phones: &[(usize, usize)]) -> bool {
-    for (start, end) in emails.iter().chain(phones.iter()) {
-        let matched: String = s.chars().skip(*start).take(end - start).collect();
-        if out.contains(matched.as_str()) {
-            return true;
-        }
+/// Positional survivor check: every match span of the input consumes
+/// exactly one verbatim occurrence of its string, and a replacement never
+/// reintroduces one (every token carries a `~` no grammar can span, and
+/// neither token half alone holds a match — the digest hex has no
+/// separator/`+`/`@`, the prefix at most three codepoints), so the output
+/// must hold exactly `input_occurrences - spans` copies per distinct
+/// string. A bare `contains` check false-positives on benign dual-copy
+/// inputs (`call (415) 555-2671 ref 999(415) 555-2671`: the standalone
+/// match scrubs while the id-embedded copy survives whole, and the
+/// substring still `contains`-matches); the accounting here separates the
+/// two. (`str::matches` counts leftmost-non-overlapping occurrences — a
+/// maximum-cardinality set — so the input count always covers the spans.)
+fn assert_no_survivors(s: &str, out: &str, spans: &[(usize, usize)], label: &str) {
+    use std::collections::HashMap;
+    let chars: Vec<char> = s.chars().collect();
+    let mut per_string: HashMap<String, usize> = HashMap::new();
+    for (start, end) in spans {
+        let matched: String = chars.iter().skip(*start).take(end - start).collect();
+        *per_string.entry(matched).or_insert(0) += 1;
     }
-    false
+    for (matched, n_spans) in &per_string {
+        let want = s.matches(matched.as_str()).count() - n_spans;
+        let got = out.matches(matched.as_str()).count();
+        assert!(
+            got == want,
+            "{label} on {s:?}: {matched:?} occurs {got}x in the output, want {want}x"
+        );
+    }
 }
 
 fuzz_target!(|s: &str| {
@@ -339,13 +358,15 @@ fuzz_target!(|s: &str| {
         // Pass one: phone matches never survive verbatim (a survivor
         // would be a phone match of the output, and no digit run can be
         // constructed across a token boundary: see the module docs).
-        for (start, end) in &phones {
-            let matched: String = s.chars().skip(*start).take(end - start).collect();
-            assert!(
-                !got.contains(matched.as_str()),
-                "a phone match of the input survived pass one on {s:?}: {matched:?}"
-            );
-        }
+        // Counted positionally per distinct string, so a benign dual-copy
+        // (a scrubbed standalone plus an id-embedded copy) is not a
+        // survivor.
+        assert_no_survivors(
+            s,
+            got,
+            &phones,
+            "a phone match of the input survived pass one",
+        );
 
         // The identity path never lies, in the stronger direction: a
         // borrowed return means NO match existed (a match that fired
@@ -366,9 +387,12 @@ fuzz_target!(|s: &str| {
         // by value equality alone.
         let twice = scrub_pii(got, PiiRules::BOTH, salt);
         let twice = twice.as_ref();
-        assert!(
-            !any_survivor(s, twice, &emails, &phones),
-            "a match of the input survived into the converged output on {s:?}"
+        let all: Vec<(usize, usize)> = emails.iter().chain(phones.iter()).copied().collect();
+        assert_no_survivors(
+            s,
+            twice,
+            &all,
+            "a match of the input survived into the converged output",
         );
         assert!(
             matches!(scrub_pii(twice, PiiRules::BOTH, salt), Cow::Borrowed(_)),
@@ -387,9 +411,11 @@ fuzz_target!(|s: &str| {
     };
     let once = scrub_pii(s, phone_only, "");
     let once = once.as_ref();
-    assert!(
-        !any_survivor(s, once, &[], &phones),
-        "a phone match survived phone-only pass one on {s:?}"
+    assert_no_survivors(
+        s,
+        once,
+        &phones,
+        "a phone match survived phone-only pass one",
     );
     assert!(
         matches!(scrub_pii(once, phone_only, ""), Cow::Borrowed(_)),

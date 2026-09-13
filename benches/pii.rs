@@ -70,9 +70,19 @@ fn bench_scrub_pii(c: &mut Criterion) {
         ("degenerate_domain_match", format!("x@{dots}zz")),
     ] {
         group.throughput(Throughput::Bytes(text.len() as u64));
-        group.bench_with_input(BenchmarkId::new(id, format!("{}B", text.len())), &text, |bench, text| {
-            bench.iter(|| scrub_pii(black_box(text), PiiRules::BOTH, tors::pii_impl::DEFAULT_SALT))
-        });
+        group.bench_with_input(
+            BenchmarkId::new(id, format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    scrub_pii(
+                        black_box(text),
+                        PiiRules::BOTH,
+                        tors::pii_impl::DEFAULT_SALT,
+                    )
+                })
+            },
+        );
     }
     group.finish();
 }

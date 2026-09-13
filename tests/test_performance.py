@@ -362,15 +362,15 @@ def test_scrub_pii_beats_the_quoted_chain_on_contact_prose(size_bytes: int) -> N
     unsalted) vs the quoted chain over the contacts corpus (one email and
     one human-spelled E.164 number per sentence). The chain's cost is
     structural: two whole-text ``re.sub`` passes whose every match invokes
-    a Python callback, so the native double scan wins ~7.5x regardless of
+    a Python callback, so the native double scan wins ~5.5x regardless of
     load (the callback count, not the machine, dominates). Measured on the
     dev box (ambient load ~3.5, min-of-7 after warmup):
 
         size     tors        chain       tors/chain
         1 KiB    0.003ms     0.019ms     0.13
-        100 KiB  0.283ms     2.140ms     0.13
+        100 KiB  0.386ms     2.140ms     0.18
 
-    Asserted with the same 0.9 margin as the other wall cells (~7x of
+    Asserted with the same 0.9 margin as the other wall cells (~5x of
     headroom). The default-salt spelling measures identically (0.279ms at
     100 KiB): the salt is digest material only, never a scan shape."""
     corpus = contacts(size_bytes)
@@ -388,7 +388,7 @@ def test_scrub_pii_beats_the_quoted_chain_on_contact_prose(size_bytes: int) -> N
 def test_scrub_pii_identity_path_is_measured_not_asserted() -> None:
     """The degenerate path, measured and not asserted (the no-``&``
     precedent): on contact-free prose the scrub is two memchr anchored
-    scans that find nothing (no ``@``, no ``+``), ~0.002ms at 100 KiB
+    scans that find nothing (no ``@``, no ``+``), ~0.088ms at 100 KiB
     measured, and the identity return hands back the input object with
     zero marshalling. The quoted chain pays the same nothing-plus-regex-
     overhead class (~0.1ms), so there is no race to assert here — the

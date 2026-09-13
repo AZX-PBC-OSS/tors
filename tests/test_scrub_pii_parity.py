@@ -17,9 +17,12 @@ entry point>(text)``.
 tors's phone rule carries one deliberate extension past that contract:
 the domestic NANP matcher (un-plussed shapes the source leaves
 untouched). The lanes are split accordingly: every QUOTED-PIN lane below
-guards on ``has_domestic_shape(text)`` — parity is asserted exactly where
-the source's own semantics apply — and ``TestDomesticExtension`` pins the
-other side in both directions (the oracle must leave the shape, tors must
+routes on the domestic guard — the input guard for single-rule lanes,
+the email-pass-output guard for BOTH-rules lanes (the matcher runs on
+the email pass's result, and the email local removal can trim a
+too-long digit run into a phone shape) — parity is asserted exactly
+where the source's own semantics apply — and ``TestDomesticExtension``
+pins the other side in both directions (the oracle must leave the shape, tors must
 scrub exactly the span), so a regression on either side of the extension
 fails loudly instead of surfacing as a parity mystery.
 
@@ -43,6 +46,7 @@ import hashlib
 import importlib.util
 import os
 import unicodedata
+from functools import cache
 from typing import Any
 
 import pytest
@@ -134,28 +138,96 @@ _SALT_LANES: list[str | None] = [None, "", "site-secret"]
 # class run of exactly ten Nd digits, or eleven with an ASCII leading
 # '1', carrying at least one separator inside the match span, starting
 # at a CLEAN boundary (the first char glued to neither `~` nor a lowercase
-# a-f, the token-interior alphabet) — used only to route inputs between
-# the parity lanes (conservative by design: an input this flags whose
-# domestic shape the email pass then consumes still agrees between the
-# engines, and is simply not asserted here). The clean-boundary clause
-# is load-bearing: without it hex-glued runs (`job255128-4096`,
+# a-f, the token-interior alphabet, unless a token span ends exactly
+# there) — used only to route inputs between the parity lanes
+# (conservative by design: an input this flags whose domestic shape the
+# email pass then consumes still agrees between the engines, and is
+# simply not asserted here). The clean-boundary clause is load-bearing:
+# without it hex-glued runs (`job255128-4096`,
 # `value~255-123-4567`) route to the extension lane even though both
-# engines leave them untouched, hiding parity agreement.
+# engines leave them untouched, hiding parity agreement. Token spans
+# (`~` + 12 digest hex) are breakers, mirroring the phone scan: a run
+# starting inside a digest resumes after the token, and the byte after a
+# token is clean even when the digest ends hex-dirty — so an adjacent
+# number routes to the extension lane instead of hiding as parity.
 _TOKEN_INTERIOR = frozenset("~abcdef")
+_TOKEN_HEX_LEN = 12
 _DOMESTIC_SEPARATORS = "-. ()"
 
 
+@cache
+def _tors_is_nd_codepoint(cp: int) -> bool:
+    """Whether tors's phone grammar treats `chr(cp)` as a digit,
+    observed through tors itself (`+`-anchored probe) rather than the
+    running interpreter's `unicodedata`: the crate pins Unicode 16.0.0
+    while the interpreter may run an older UCD (80 codepoints of skew on
+    3.12/13, 110 on 3.10), and the guard must follow the crate, not the
+    interpreter. ASCII answers directly (the crate's fast path)."""
+    if cp < 128:
+        return chr(cp).isdigit()
+    probe = "+" + chr(cp) * 8
+    try:
+        return tors.scrub_pii(probe, ["contact_phone"], salt="") != probe
+    except UnicodeEncodeError:
+        return False  # lone surrogates: no class contains them (pinned)
+
+
 def _is_nd(c: str) -> bool:
-    return unicodedata.category(c) == "Nd"
+    return _tors_is_nd_codepoint(ord(c))
+
+
+def _is_token_hex(ch: str) -> bool:
+    return "0" <= ch <= "9" or "a" <= ch <= "f"
+
+
+def _token_span_end_at(text: str, tilde: int) -> int | None:
+    """End offset of the token span opening at `tilde`, or None."""
+    if tilde >= len(text) or text[tilde] != "~":
+        return None
+    end = tilde + 1 + _TOKEN_HEX_LEN
+    if end > len(text):
+        return None
+    if all(_is_token_hex(ch) for ch in text[tilde + 1 : end]):
+        return end
+    return None
+
+
+def _token_span_containing(text: str, off: int) -> int | None:
+    """End offset of the token span strictly covering `off`, or None."""
+    for tilde in range(max(0, off - _TOKEN_HEX_LEN), min(off, len(text) - 1) + 1):
+        if text[tilde] != "~":
+            continue
+        end = _token_span_end_at(text, tilde)
+        if end is not None and tilde <= off < end:
+            return end
+    return None
+
+
+def _token_ends_at(text: str, pos: int) -> bool:
+    """Whether a token span ends exactly at `pos` (a clean boundary)."""
+    return (
+        pos >= 1 + _TOKEN_HEX_LEN
+        and text[pos - 1 - _TOKEN_HEX_LEN] == "~"
+        and all(_is_token_hex(ch) for ch in text[pos - _TOKEN_HEX_LEN : pos])
+    )
 
 
 def has_domestic_shape(text: str) -> bool:
     i = 0
     n = len(text)
     while i < n:
+        if text[i] == "~":
+            end = _token_span_end_at(text, i)
+            if end is not None:
+                i = end
+                continue
         c = text[i]
         if _is_nd(c) or c in _DOMESTIC_SEPARATORS:
             run_start = i
+            covering = _token_span_containing(text, run_start)
+            if covering is not None:
+                i = covering
+                continue
             j = i
             digits = 0
             first_digit: str | None = None
@@ -175,13 +247,33 @@ def has_domestic_shape(text: str) -> bool:
                 while k < n and text[k] == " ":
                     k += 1
                 if k < n and any(ch in _DOMESTIC_SEPARATORS for ch in text[k:last_digit]):
-                    clean = k == 0 or text[k - 1] not in _TOKEN_INTERIOR
+                    clean = (
+                        k == 0
+                        or text[k - 1] not in _TOKEN_INTERIOR
+                        or _token_ends_at(text, k)
+                    )
                     if clean:
                         return True
             i = j
         else:
             i += 1
     return False
+
+
+def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
+    """The BOTH-lane router: the matcher runs on the EMAIL-PASS OUTPUT,
+    not the input — the email local removal can trim a too-long digit run
+    into exactly 10 (or 11-with-1), e.g. `1415 555 2671 12345a@b.co`
+    (16 digits in, a phone shape out). Guarding the input alone routes
+    those to the parity lane where tors scrubs and the oracle leaves.
+    The email-pass spelling here is the reference transcription (the
+    email grammar is parity-pinned), at the lane's own salt (digests
+    shape the composition). Conservative on both sides: input-flagged
+    shapes the email pass consumes still skip."""
+    if has_domestic_shape(text):
+        return True
+    email_pass = reference_scrub_pii(text, ["contact_email"], salt=salt)
+    return has_domestic_shape(email_pass)
 
 
 @pytest.mark.parametrize("salt", _SALT_LANES, ids=["default-salt", "unsalted", "custom-salt"])
@@ -192,9 +284,21 @@ def test_quoted_pin_parity(text: str, salt: str | None) -> None:
     unsalted source-parity spelling, and a caller secret. Domestic-bearing
     inputs route to the extension lane (the source has no domestic
     grammar to be parity-checked against)."""
-    if has_domestic_shape(text):
+    if _both_lane_has_domestic_shape(text, salt):
         pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
     assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
+
+
+def _rules_lane_has_domestic_shape(text: str, rules: list[str] | None) -> bool:
+    """The rules-lane router: BOTH-rules lanes (None and both canonical
+    orders) route on the email-pass output — the matcher runs there, and
+    the email local removal can trim a too-long digit run into a phone
+    shape. Single-rule lanes run their matcher on the input (phone-only
+    never sees the email pass; email-only never runs the phone matcher),
+    and the identity lane skips nothing extra: the input guard stands."""
+    if rules is None or set(rules) == {"contact_email", "contact_phone"}:
+        return _both_lane_has_domestic_shape(text, "")
+    return has_domestic_shape(text)
 
 
 @pytest.mark.parametrize("rules", _RULES_LANES, ids=lambda r: f"rules-{r}")
@@ -203,7 +307,7 @@ def test_quoted_pin_rules_parity(text: str, rules: list[str] | None) -> None:
     """The rules lanes over the unsalted spelling (the source chain's own
     digest): both canonical orders, each subset, and the identity — the
     last one pinning that the oracle and tors agree on doing nothing."""
-    if has_domestic_shape(text):
+    if _rules_lane_has_domestic_shape(text, rules):
         pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
     assert tors.scrub_pii(text, rules, salt="") == reference_scrub_pii(text, rules, salt="")
 
@@ -239,7 +343,7 @@ class TestHypothesisDifferential:
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_both_rules_match_the_quoted_pin(self, text: str, salt: str | None) -> None:
-        assume(not has_domestic_shape(text))
+        assume(not _both_lane_has_domestic_shape(text, salt))
         assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
 
     @pytest.mark.parametrize(
@@ -355,7 +459,9 @@ class TestDomesticExtension:
         assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
 
     @pytest.mark.parametrize(
-        "text", _DOMESTIC_NON_MATCHES, ids=[f"shared-nonmatch-{i}" for i in range(len(_DOMESTIC_NON_MATCHES))]
+        "text",
+        _DOMESTIC_NON_MATCHES,
+        ids=[f"shared-nonmatch-{i}" for i in range(len(_DOMESTIC_NON_MATCHES))],
     )
     def test_the_discipline_cuts_are_shared_non_matches(self, text: str) -> None:
         assert reference_scrub_pii(text, None, salt="") == text
@@ -408,6 +514,108 @@ class TestDomesticExtension:
         assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
 
 
+_ARABIC_ONE = chr(0x0661)
+
+
+def _unsalted_token(prefix: str, matched: str) -> str:
+    return f"{prefix}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+
+
+class TestEmailTokenAdjacentNumbers:
+    """P0: the email pass emits `@domain~<12hex>`, and the digest tail
+    must not swallow an adjacent domestic number (silent
+    under-redaction). The token is a breaker — the number after it
+    scrubs exactly — pinned in both directions (the oracle, having no
+    domestic grammar, scrubs the email but leaves the number)."""
+
+    _CASES: list[tuple[str, str, str]] = [
+        # (input, the email address, the span tors scrubs)
+        (
+            "candidate ada+tag@azx.io 415-555-2671 no answer",
+            "ada+tag@azx.io",
+            "415-555-2671",
+        ),
+        (
+            "fungai.chetima@example.com-415-555-2671",
+            "fungai.chetima@example.com",
+            "-415-555-2671",
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        ("text", "email", "matched"), _CASES, ids=["space-separated", "dash-glued"]
+    )
+    def test_the_quoted_oracle_leaves_the_number(self, text: str, email: str, matched: str) -> None:
+        out = reference_scrub_pii(text, None, salt="")
+        assert email not in out  # the email still scrubs
+        assert matched in out  # but the number survives the oracle whole
+
+    @pytest.mark.parametrize(
+        ("text", "email", "matched"), _CASES, ids=["space-separated", "dash-glued"]
+    )
+    def test_tors_scrubs_the_number_exactly(self, text: str, email: str, matched: str) -> None:
+        domain = email.split("@")[1]
+        email_token = _unsalted_token(f"@{domain}", email)
+        phone_token = _unsalted_token(matched[:3], matched)
+        assert tors.scrub_pii(text, salt="") == text.replace(email, email_token).replace(
+            matched, phone_token
+        )
+        twice = tors.scrub_pii(tors.scrub_pii(text, salt=""), salt="")
+        assert tors.scrub_pii(twice, salt="") == twice
+
+    def test_unicode_nd_digits_after_a_token_scrub_exactly(self) -> None:
+        # The non-ASCII spelling of the same corner: an email token whose
+        # digest ends hex-dirty, glued to a dot-led ten-digit Nd run
+        # (mathematical bold digits + one Arabic-Indic one).
+        digits = "".join(chr(0x1D7D8 + i % 3) for i in range(9)) + _ARABIC_ONE
+        text = f"a@b.co.{digits}"
+        matched = f".{digits}"
+        out = reference_scrub_pii(text, None, salt="")
+        assert "a@b.co" not in out
+        assert matched in out
+        email_token = _unsalted_token("@b.co", "a@b.co")
+        phone_token = _unsalted_token(matched[:3], matched)
+        assert tors.scrub_pii(text, salt="") == email_token + phone_token
+
+
+class TestBothLaneTrimmedRuns:
+    """P1: the email local removal trims a too-long digit run into exactly
+    10 (or 11-with-1) — the matcher runs on the EMAIL-PASS OUTPUT, so
+    the BOTH lanes route there. Pinned in both directions."""
+
+    _CASES = ["1415 555 2671 12345a@b.co", "415 555 2671 123456a@b.co"]
+
+    @pytest.mark.parametrize("text", _CASES)
+    def test_the_input_guard_misses_but_the_email_pass_output_hits(self, text: str) -> None:
+        assert not has_domestic_shape(text)
+        assert _both_lane_has_domestic_shape(text, "")
+        assert _both_lane_has_domestic_shape(text, None)
+
+    @pytest.mark.parametrize("text", _CASES)
+    def test_the_oracle_leaves_the_trimmed_shape_tors_scrubs_it(self, text: str) -> None:
+        trimmed = text.split(" 123")[0]
+        oracle = reference_scrub_pii(text, None, salt="")
+        assert trimmed in oracle  # the oracle has no domestic grammar
+        got = tors.scrub_pii(text, salt="")
+        assert trimmed not in got  # tors scrubs the trimmed phone shape
+
+
+class TestZeroLedShapes:
+    """P2c: ten-digit runs carry no leading-digit check — a `0`-led
+    ten-digit shape scrubs like any other; only the eleven-digit
+    non-`1`-led spelling is excluded. Pinned in both directions."""
+
+    def test_ten_digit_zero_led_scrubs(self) -> None:
+        matched = "020-794-6095"
+        assert reference_scrub_pii(matched, None, salt="") == matched
+        assert tors.scrub_pii(matched, salt="") == _unsalted_token(matched[:3], matched)
+
+    def test_eleven_digit_zero_led_is_a_shared_non_match(self) -> None:
+        text = "0-415-555-2671"
+        assert reference_scrub_pii(text, None, salt="") == text
+        assert tors.scrub_pii(text, salt="") == text
+
+
 # Domestic-seeded convergence: compositions built from the extension
 # lane's own cases (plus separators and re-fire glue), so hypothesis
 # covers the domestic matcher structurally, not just via the generic
@@ -434,7 +642,9 @@ _DOMESTIC_SEEDS = [c[0] for c in _DOMESTIC_CASES] + [
     "415-555-267123",
     "415-555-267",
 ]
-_domestic_composed = st.lists(st.sampled_from(_DOMESTIC_SEEDS), min_size=0, max_size=12).map("".join)
+_domestic_composed = st.lists(
+    st.sampled_from(_DOMESTIC_SEEDS), min_size=0, max_size=12
+).map("".join)
 
 
 class TestDomesticSeededConvergence:
@@ -512,14 +722,14 @@ class TestLiveResyncLane:
     def test_the_corpus_matches_the_live_module(self) -> None:
         live = _live_oracle()
         for text in CORPUS:
-            if has_domestic_shape(text):
+            if _both_lane_has_domestic_shape(text, ""):
                 continue  # the extension lane's territory; the live module has no domestic grammar
             assert tors.scrub_pii(text, salt="") == live(text), text
 
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_compositions_match_the_live_module(self, text: str) -> None:
-        assume(not has_domestic_shape(text))
+        assume(not _both_lane_has_domestic_shape(text, ""))
         live = _live_oracle()
         assert tors.scrub_pii(text, salt="") == live(text)
 
@@ -559,11 +769,12 @@ class TestOracleFreshness:
         assert isinstance(reference.SCRUB_PII_ORACLE_UCD, str)
 
     def test_transcription_is_fresh(self) -> None:
-        import datetime
+        from datetime import date
+
         import reference
 
-        date = datetime.date.fromisoformat(reference.SCRUB_PII_ORACLE_DATE)
-        age = datetime.date.today() - date
+        today = date.today()
+        age = today - date.fromisoformat(reference.SCRUB_PII_ORACLE_DATE)
         assert age.days <= reference.SCRUB_PII_ORACLE_FRESH_DAYS, (
             f"scrub_pii oracle transcription is {age.days} days old "
             f"(limit {reference.SCRUB_PII_ORACLE_FRESH_DAYS}): re-sync against "
@@ -584,22 +795,33 @@ def _fuzz_domestic_match_present(text: str) -> bool:
     """H2 second mirror: an independent transcription of the fuzz target's
     `phone_matches_of` domestic branch (fuzz/fuzz_targets/pii.rs) — char
     space, per-position, greedy runs spent whole, leading spaces skipped,
-    separator required, never behind `+`, clean boundary `~`/a-f. The
+    separator required, never behind `+`, clean boundary `~`/a-f (or a
+    token span ending exactly there), token spans skipped whole. The
     parity guard `has_domestic_shape` must agree with it exactly; a drift
-    on either side fails loudly instead of hiding parity agreement."""
+    on either side fails loudly instead of hiding parity agreement. The
+    digit predicate is the same tors-observed `_is_nd` the guard uses."""
     seps = set("-. ()")
     n = len(text)
     i = 0
     while i < n:
+        if text[i] == "~":
+            end = _token_span_end_at(text, i)
+            if end is not None:
+                i = end
+                continue
         c = text[i]
-        if unicodedata.category(c) == "Nd" or c in seps:
+        if _is_nd(c) or c in seps:
             run_start = i
+            covering = _token_span_containing(text, run_start)
+            if covering is not None:
+                i = covering
+                continue
             j = i
             digits = 0
             first_digit: str | None = None
             last_digit = -1
-            while j < n and (unicodedata.category(text[j]) == "Nd" or text[j] in seps):
-                if unicodedata.category(text[j]) == "Nd":
+            while j < n and (_is_nd(text[j]) or text[j] in seps):
+                if _is_nd(text[j]):
                     digits += 1
                     if first_digit is None:
                         first_digit = text[j]
@@ -611,7 +833,11 @@ def _fuzz_domestic_match_present(text: str) -> bool:
                 while k < n and text[k] == " ":
                     k += 1
                 if k < n and any(ch in seps for ch in text[k : last_digit + 1]):
-                    clean = k == 0 or text[k - 1] not in _TOKEN_INTERIOR
+                    clean = (
+                        k == 0
+                        or text[k - 1] not in _TOKEN_INTERIOR
+                        or _token_ends_at(text, k)
+                    )
                     if clean:
                         return True
             i = j
@@ -633,6 +859,17 @@ class TestDomesticGuardMirror:
     @settings(max_examples=150, deadline=None)
     def test_guard_agrees_with_fuzz_mirror_over_seeds(self, text: str) -> None:
         assert has_domestic_shape(text) == _fuzz_domestic_match_present(text), text
+
+    def test_guard_nd_follows_tors_across_scripts(self) -> None:
+        """P2d: the guard's digit predicate is tors-observed, not the
+        interpreter's `unicodedata` (the crate pins Unicode 16.0.0 while
+        older interpreters run older UCDs) — spot-pinned per script,
+        with the non-Nd numerics and the surrogate boundary."""
+        for ch in ["0", "9", chr(0x0661), chr(0xFF19), chr(0x0968), chr(0x1D7CE), chr(0x1FBF7)]:
+            assert _is_nd(ch), f"U+{ord(ch):04X}"
+        for ch in ["a", "~", "+", " ", chr(0x00B2), chr(0x2169), chr(0xFF0B)]:
+            assert not _is_nd(ch), f"U+{ord(ch):04X}"
+        assert not _is_nd("\ud800")
 
 
 class TestDomesticSeedCoverage:
