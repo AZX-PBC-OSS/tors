@@ -354,12 +354,14 @@ pub fn utf8_byte_len(s: &str) -> usize {
 const UTF16_COUNT_CHUNK: usize = 16;
 
 /// The single narrowing step shared by the core below: `2 * (codepoints
-/// + astral)` as checked arithmetic, `None` on overflow instead of
-/// wrapping. `u64` inputs make the step injectable at small scale —
-/// synthetic counts exercise the boundary without a gigabyte
-/// allocation — and portable: the `try_from` narrow is the only
-/// target-width-dependent point, so the 32-bit overflow path is covered
-/// by unit (see the combine test) rather than by a gigabyte fixture.
+/// plus astral)` as checked arithmetic, `None` on overflow instead of
+/// wrapping.
+///
+/// - `u64` inputs make the step injectable at small scale —
+///   synthetic counts exercise the boundary without a gigabyte
+///   allocation — and portable: the `try_from` narrow is the only
+///   target-width-dependent point, so the 32-bit overflow path is covered
+///   by unit (see the combine test) rather than by a gigabyte fixture.
 ///
 /// Tier note: 32-bit targets are tier-3 for this function — the
 /// overflow leg past ~1 GiB of astral-dense text is contract-pinned by
@@ -553,7 +555,10 @@ mod utf16_byte_len_tests {
         assert_eq!(utf16_byte_len("\u{6771}\u{4eac}"), Some(4)); // UTF-8 answers 6
         assert_eq!(utf16_byte_len("\u{1f600}"), Some(4));
         assert_eq!(utf16_byte_len("e\u{301}"), Some(4));
-        assert_eq!(utf16_byte_len("\u{1f468}\u{200d}\u{1f469}"), Some(4 + 2 + 4));
+        assert_eq!(
+            utf16_byte_len("\u{1f468}\u{200d}\u{1f469}"),
+            Some(4 + 2 + 4)
+        );
         assert_eq!(utf16_byte_len("\u{0}"), Some(2)); // a real NUL: one unit
     }
 
@@ -574,7 +579,11 @@ mod utf16_byte_len_tests {
             "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
         ];
         for row in rows {
-            assert_eq!(utf16_byte_len(row), Some(naive_utf16_byte_len(row)), "{row:?}");
+            assert_eq!(
+                utf16_byte_len(row),
+                Some(naive_utf16_byte_len(row)),
+                "{row:?}"
+            );
         }
         let ascii = "k".repeat(1000);
         assert_eq!(utf16_byte_len(&ascii), Some(naive_utf16_byte_len(&ascii)));

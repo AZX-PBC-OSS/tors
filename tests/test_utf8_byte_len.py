@@ -1135,7 +1135,9 @@ def test_detach_is_statically_present_in_both_wrappers() -> None:
         # (guards against the slice running past the function when the
         # next-pub-fn search misses).
         assert "\n}" in body, f"{name} body has no closing brace"
-        assert f"py.detach(|| scan_impl::{name}" in body, f"{name} lost its py.detach-routed core call"
+        assert (
+            f"py.detach(|| scan_impl::{name}" in body
+        ), f"{name} lost its py.detach-routed core call"
 
 
 def test_cheap_utf16_differential_against_encode_utf16_count() -> None:
