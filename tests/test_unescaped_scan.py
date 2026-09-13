@@ -542,29 +542,34 @@ def _min_wall_ms(op: Callable[[], object], samples: int = 3, warmup: int = 1) ->
 
 
 # The no-match cell's ceiling vs the bare prefilter: the measured direction
-# on the calibration box is tors FASTER than CPython's `in` by ~20x (memchr's
-# memmem is SIMD-class where CPython's substring search is not: 0.25ms vs
-# 5.4ms at 12 MiB), so the 8x ceiling is not a "may pay a little more"
-# bound but the class pin with room for a box where the two engines' relative
-# speed sits differently — the chunk_hierarchical no-match precedent's margin
-# over the same `in` racer. The absolute companion (40ms, ~50x above the
-# measured wall) catches the quadratic and per-structure classes on every
-# box; a memchr scalar-fallback swap (~6-12ms here) is a memchr-version
-# event, not a tors code regression, and is recorded as out of this cell's
-# teeth rather than pretended caught.
+# is tors FASTER than CPython's `in` by ~20x (memchr's memmem is SIMD-class
+# where CPython's substring search is not: 0.26ms vs 5.4ms at 12 MiB), so
+# the 8x ceiling is not a "may pay a little more" bound but the class pin
+# with room for a box where the two engines' relative speed sits
+# differently — the chunk_hierarchical no-match precedent's margin over the
+# same `in` racer. The absolute companion (40ms, ~150x above the measured
+# wall) catches the per-byte classes — a quadratic scan, a per-byte
+# structure walk — on every box; per-HIT classes are invisible to this cell
+# by construction (a no-occurrence corpus never bills per-hit work), which
+# is why the dense cell below carries the tightened per-hit band; and a
+# memchr scalar-fallback swap (~6-12ms here) is a memchr-version event,
+# not a tors code regression, recorded as out of this cell's teeth rather
+# than pretended caught.
 _SCAN_VS_PREFILTER_CEILING = 8.0
 _SCAN_12MIB_CEILING_MS = 40.0
 
 
+@pytest.mark.timing
 def test_no_match_scan_stays_within_the_bare_prefilter_band_at_12mib() -> None:
     """The pure-scan shape (the sparse corpus: prose bytes, no backslash, no
     occurrence — the prefilter's own best case, no confirm walk would ever
     fire): one ``find_unescaped`` call vs one ``needle in data`` check over
-    the same 12 MiB. Measured on the calibration box (macOS, 16 cores,
-    ambient load ~17, min-of-5 after warm-up): tors 0.25ms against the
-    prefilter's 5.4ms — the native scan is ~20x FASTER than CPython's own
-    substring search, recorded, not thresholded away; the assertions pin
-    the class relationship (8x) and the absolute band (40ms)."""
+    the same 12 MiB. Measured on this 16-core macOS box (ambient load
+    ~9-11, min-of-3 after warm-up, the cells' own methodology): tors 0.26ms
+    against the prefilter's 5.4ms — the native scan is ~20x FASTER than
+    CPython's own substring search, recorded, not thresholded away; the
+    assertions pin the class relationship (8x) and the absolute band
+    (40ms)."""
     data = corpus_utf8("prose", 12 * _MIB)
     needle = UNESCAPED_NEEDLE
     tors_ms = _min_wall_ms(lambda: find_unescaped(data, needle))
@@ -584,24 +589,32 @@ def test_no_match_scan_stays_within_the_bare_prefilter_band_at_12mib() -> None:
 # The dense cell's margin: the stdlib-expression race idiom (tors < 0.9 x
 # the expression it replaces), the same _MARGIN as every test_performance.py
 # cell; the absolute companion catches the classes the load-fair race is
-# blind to (both sides slowing together).
+# blind to (both sides slowing together) AND the per-hit classes the
+# no-match cell's corpus can never bill: 4ms is ~5.7x above the measured
+# 0.70ms wall, so ~55ns of new per-hit work over this corpus's 72,520
+# rejected hits (one small heap allocation, say) already fails the band.
 _LOOP_WIN_MARGIN = 0.9
-_DENSE_12MIB_CEILING_MS = 40.0
+_DENSE_12MIB_CEILING_MS = 4.0
 
 
+@pytest.mark.timing
 def test_false_positive_scan_beats_the_manual_parity_loop_at_12mib() -> None:
     """The hit-dense shape (the false-positive corpus: one literal
     ``\\\\u0000`` per sentence, every occurrence behind an odd run, so the
     scan rejects every hit and runs to the end — the workload the
     confirm-by-reparse walk existed for, and the worst case for both wall
     time and GIL release): one ``find_unescaped`` call vs the manual parity
-    loop over the same bytes. Measured on the calibration box (macOS, 16
-    cores, ambient load ~17, min-of-5 after warm-up): tors 0.79ms (72,520
-    rejected hits) against the loop's 13.0ms, ratio 0.061 — the native scan
-    wins by ~16x, and the 0.9 margin absorbs any load that moves both sides
-    together. ``contains_unescaped`` measured 0.71ms on the same corpus
-    (the same scan by construction, pinned by the invariant test), so the
-    race answers for both spellings."""
+    loop over the same bytes. Measured on this 16-core macOS box (ambient
+    load ~9-11, min-of-3 after warm-up, the cells' own methodology): tors
+    0.70ms (72,520 rejected hits) against the loop's 13.2ms, ratio 0.053 —
+    the native scan wins by ~19x, and the 0.9 margin absorbs any load that
+    moves both sides together. ``contains_unescaped`` measured 0.71ms on
+    the same corpus (the same scan by construction, pinned by the
+    invariant test), so the race answers for both spellings. The tightened
+    4ms absolute band (was 40ms) is what makes the per-hit class catchable
+    at all: a no-occurrence corpus never bills per-hit work, and the
+    load-fair race stays quiet while both sides pay the same per-hit
+    cost."""
     data = unescaped_false_positive(12 * _MIB)
     needle = UNESCAPED_NEEDLE
     tors_ms = _min_wall_ms(lambda: find_unescaped(data, needle))
@@ -614,6 +627,7 @@ def test_false_positive_scan_beats_the_manual_parity_loop_at_12mib() -> None:
     )
     assert tors_ms < _DENSE_12MIB_CEILING_MS, (
         f"12 MiB false-positive scan: tors took {tors_ms:.1f}ms, over the "
-        f"absolute band (ceiling {_DENSE_12MIB_CEILING_MS:.0f}ms, ~50x above "
-        "the measured wall); the scan regressed out of its measured class"
+        f"absolute band (ceiling {_DENSE_12MIB_CEILING_MS:.0f}ms, ~5.7x "
+        "above the measured wall); the scan regressed out of its measured "
+        "class"
     )

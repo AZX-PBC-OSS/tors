@@ -382,7 +382,9 @@ def unescaped_false_positive(target_bytes: int) -> bytes:
     occurrence sits behind an odd backslash run, so the scan rejects every
     hit and runs to the end — the worst case for both wall time and GIL
     release (no early exit), at a realistic orjson false-positive density
-    (one per ~140-byte sentence)."""
+    (one literal per 166-byte prose sentence: 173.5 bytes of corpus per
+    injection once the seven-byte literal and the paragraph break are
+    amortized)."""
     return _repeat_to(target_bytes, (_PROSE_SENTENCE + _ESCAPE_LITERAL_TEXT) * 4 + "\n\n").encode(
         "utf-8"
     )
