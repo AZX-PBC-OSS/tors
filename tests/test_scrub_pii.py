@@ -99,7 +99,13 @@ class TestEmailZoo:
         )
 
     def test_plus_addressing_is_local_part_material(self) -> None:
+        # "+" is local-part class material: every plus-addressed spelling
+        # matches whole, the tag included — multiple tags, a trailing "+",
+        # and the bare-"+" local edge.
         assert scrub_pii("ada+tag@azx.io", salt="") == _email_token("ada+tag@azx.io")
+        assert scrub_pii("a+b+c@x.co", salt="") == _email_token("a+b+c@x.co")
+        assert scrub_pii("foo+@x.co", salt="") == _email_token("foo+@x.co")
+        assert scrub_pii("+@x.co", salt="") == _email_token("+@x.co")
 
     def test_trailing_punctuation_is_not_consumed(self) -> None:
         # The domain split backtracks to the largest dot with a two-letter

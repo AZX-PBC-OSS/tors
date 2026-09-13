@@ -15,10 +15,12 @@ lane below, and, on the live lane,
 entry point>(text)``.
 
 The live re-sync lane is env-gated and NEVER runs in CI:
-``TORS_SCRUB_PII_ORACLE`` must name a module FILE exposing that
-``scrub_contact_text(text) -> str`` entry point (a path on a private
-machine, never a repo path); unset, every live-lane test skips and the
-quoted pin above remains the CI oracle. The one pinned divergence is
+``TORS_SCRUB_PII_ORACLE`` carries the full locator —
+``path/to/module.py:entry_point``, a module file path and the scrub
+callable's name, split on the last colon — so nothing about the
+source's spelling lives in this repo. Unset, every live-lane test
+skips and the quoted pin above remains the CI oracle. The one pinned
+divergence is
 deliberate and documented in both directions: a str holding lone
 surrogates is refused by tors with ``UnicodeEncodeError`` (the crate-wide
 str contract) while the source chain — none of whose classes can match a
@@ -177,28 +179,40 @@ class TestHypothesisDifferential:
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
 #
-# TORS_SCRUB_PII_ORACLE names a module FILE (a private machine's path,
-# never committed): the telemetry-safety module whose free-text scrub
-# entry point the port pinned. Unset, every test below skips — the quoted
-# pin above is the CI oracle, so no CI lane ever references the source.
+# TORS_SCRUB_PII_ORACLE carries the full locator —
+# "path/to/module.py:entry_point" (a private machine's path and the
+# callable's name, never committed): the telemetry-safety module whose
+# free-text scrub entry point the port pinned. Unset, every test below
+# skips — the quoted pin above is the CI oracle, so no CI lane ever
+# references the source, and no spelling of the source's names lives in
+# this repo.
 
 
 def _live_oracle() -> Any:
-    path = os.environ.get("TORS_SCRUB_PII_ORACLE")
-    if not path:
+    locator = os.environ.get("TORS_SCRUB_PII_ORACLE")
+    if not locator:
         pytest.skip(
             "TORS_SCRUB_PII_ORACLE unset: the live re-sync lane is opt-in "
-            "(set it to the telemetry-safety module file path on a machine "
-            "that has one); the quoted pin in tests/reference.py is the CI oracle"
+            "(set it to 'path/to/module.py:entry_point' on a machine that "
+            "has the telemetry-safety module); the quoted pin in "
+            "tests/reference.py is the CI oracle"
+        )
+    path, sep, name = locator.rpartition(":")
+    if not sep or not path or not name.isidentifier():
+        pytest.fail(
+            "TORS_SCRUB_PII_ORACLE must be 'path/to/module.py:entry_point' "
+            "(a module file path, one colon, the callable's name): got "
+            f"{locator!r}"
         )
     spec = importlib.util.spec_from_file_location("tors_scrub_pii_live_oracle", path)
     if spec is None or spec.loader is None:
-        pytest.fail(f"TORS_SCRUB_PII_ORACLE is not a loadable module file: {path}")
+        pytest.fail(f"TORS_SCRUB_PII_ORACLE names an unloadable module file: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not callable(getattr(module, "scrub_contact_text", None)):
-        pytest.fail(f"{path} exposes no callable scrub_contact_text(text) entry point")
-    return module.scrub_contact_text
+    entry = getattr(module, name, None)
+    if not callable(entry):
+        pytest.fail(f"{path} exposes no callable {name}(text) entry point")
+    return entry
 
 
 class TestLiveResyncLane:

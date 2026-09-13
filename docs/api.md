@@ -160,7 +160,9 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
   matches; `a@.b.co` matches with the domain kept verbatim). URLs, `mailto:`
   links, and code spans get no special treatment: whatever email sits inside
   them matches — over-matching costs a token where a literal string would
-  have read fine, while under-matching leaks.
+  have read fine, while under-matching leaks. Plus-addressed spellings match
+  whole, the tag included: `ada+tag@azx.io` is one match, multiple tags and
+  a trailing `+` included (pinned in the battery).
 - `contact_phone` — anchored on a literal `+` because a bare digit run is an
   order number, byte count, or timestamp, and redacting that would destroy
   the diagnostic the scrubber exists to preserve; at least eight digits with
