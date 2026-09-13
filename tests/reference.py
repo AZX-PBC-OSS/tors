@@ -135,6 +135,18 @@ _ENTITY_SENTENCE = (
     "&#233; the bushing &copy; changed &nbsp; for torque &there4; specs. "
 )
 
+# Contact-bearing prose for tors.scrub_pii's cells: the error-excerpt shape the
+# function exists for (an upstream rejection echoing a candidate's address and
+# number), one email plus one human-spelled E.164 number per sentence, with a
+# bare digit run ("ticket 4096") riding along as the deliberate non-match the
+# phone rule's `+` anchoring must leave alone. ``benches/common/mod.rs`` builds
+# the same bytes (the CONTACTS_SENTENCE pin in tests/test_bench_corpus_parity.py),
+# so the bench numbers and the Python-side wall/GIL cells cross-reference.
+_CONTACTS_SENTENCE = (
+    "The intake desk rang fungai.chetima@example.com at +1 (415) 555-2671 "
+    "twice about ticket 4096, no answer. "
+)
+
 
 def _repeat_to(target_bytes: int, unit: str) -> str:
     return unit * max(1, target_bytes // len(unit.encode("utf-8")))
@@ -167,6 +179,13 @@ def entities(target_bytes: int) -> str:
     """Prose dense with html5 entity refs (nine per sentence): the
     html_unescape corpus: ASCII in, non-ASCII decoded out."""
     return _repeat_to(target_bytes, _ENTITY_SENTENCE * 4 + "\n\n")
+
+
+def contacts(target_bytes: int) -> str:
+    """Prose with one email and one human-spelled E.164 number per sentence
+    (plus a bare digit run per sentence the phone rule must leave alone):
+    the scrub_pii corpus, the contact-dense error-excerpt shape."""
+    return _repeat_to(target_bytes, _CONTACTS_SENTENCE * 4 + "\n\n")
 
 
 # Exception-shaped text for tors.scrub_log_text's cells: a rendered asyncpg-style
@@ -211,14 +230,15 @@ _CORPUS_BUILDERS: dict[str, Callable[[int], str]] = {
     "compat": compat,
     "crlf": crlf,
     "entities": entities,
+    "contacts": contacts,
     "scrub": scrub_corpus,
 }
 
 
 def corpus_utf8(kind: str, target_bytes: int) -> bytes:
     """The ``kind`` corpus (``prose`` / ``decomposed`` / ``compat`` / ``crlf``
-    / ``entities`` / ``scrub``) as UTF-8 bytes, the byte-compatible
-    counterpart of the str corpora, for the bytes-in API."""
+    / ``entities`` / ``contacts`` / ``scrub``) as UTF-8 bytes, the
+    byte-compatible counterpart of the str corpora, for the bytes-in API."""
     return _CORPUS_BUILDERS[kind](target_bytes).encode("utf-8")
 
 
@@ -754,6 +774,119 @@ def reference_find_unescaped(haystack: bytes, needle: bytes) -> int:
 
 
 _OPCODE_TAGS = frozenset({"equal", "replace", "delete", "insert"})
+
+
+# --- scrub_pii: the contact-rules scrub oracle -------------------------------------
+#
+# The quoted-pin oracle for ``tors.scrub_pii``: a private consumer's
+# telemetry-safety module, transcribed here as pure Python with the digest
+# salt parameterized. The source chain itself digests UNSALTED, so
+# ``salt=""`` reproduces its token values byte-for-byte (the migration lane:
+# a consumer swapping the source call for tors keeps every stored token by
+# passing ``salt=""``); tors's own default (``SCRUB_PII_DEFAULT_SALT`` below)
+# is a different, documented constant, so default-salt tokens differ from
+# the source's by design. The two pattern shapes and both token fields are
+# quoted as literals, never paraphrased: this file is the contract
+# ``tests/test_scrub_pii.py`` and ``tests/test_scrub_pii_parity.py``
+# differentially pin tors against, and the parity harness never imports the
+# source module (the optional live lane in test_scrub_pii_parity.py is the
+# only code that does, env-gated, never in CI).
+
+SCRUB_PII_DEFAULT_SALT = "tors/scrub_pii/v1"
+"""tors's documented default digest salt (mirrors ``pii_impl::DEFAULT_SALT``;
+the salt=None differential lane pins the two literals equal). A fixed,
+non-secret domain-separation tag, frozen: changing it would silently change
+every deployment's token values."""
+
+_SCRUB_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_SCRUB_PHONE_RE = re.compile(r"\+\d[\d\-. ()]{6,}\d")
+
+_SCRUB_TOKEN_HEX = 12
+
+# The zoo pieces the scrub gates compose from (tests/test_scrub_pii.py's
+# edge battery pins each shape literally; tests/test_scrub_pii_parity.py's
+# corpus and hypothesis lanes compose them structurally): representative
+# email spellings, phone spellings, and the separators real error excerpts
+# put between them.
+SCRUB_PII_EMAILS: tuple[str, ...] = (
+    "fungai.chetima@example.com",
+    "ada+tag@azx.io",
+    "ada@azx.test",
+    "a@b.co",
+    "A@B.CO",
+    "a%b@x.co",
+    "a_b@x.co",
+    "xxa@b.co",
+    "a@b.co.uk",
+    "a@.b.co",
+    "a@b..co",
+)
+SCRUB_PII_PHONES: tuple[str, ...] = (
+    "+14155552671",
+    "+1 (415) 555-2671",
+    "+1 415 555 2671",
+    "+4712345678",
+    "+44 20 7946 0958",
+    "+12345678",
+)
+SCRUB_PII_SEPARATORS: tuple[str, ...] = (" ", ", ", "\n", " - ", " | ", "")
+
+
+def _scrub_digest(value: str, salt: str) -> str:
+    """The token digest: ``sha256(salt + value)`` truncated to 12 hex chars.
+    ``salt=""`` is the source chain's unsalted digest exactly (the
+    concatenation is why: an empty salt leaves the value alone)."""
+    return hashlib.sha256((salt + value).encode("utf-8")).hexdigest()[:_SCRUB_TOKEN_HEX]
+
+
+def _scrub_email_token(value: str, salt: str) -> str:
+    """An email address as it may appear in a log line: ``@domain~digest``.
+    The domain (the non-identifying half an operator reasons about) plus a
+    digest of the whole address. A degenerate value with no ``@``, no local
+    part, or no domain gets the digest alone (the whole string is then the
+    local part, and echoing it would be the leak this exists to prevent)."""
+    local, sep, domain = value.rpartition("@")
+    if not sep or not local or not domain:
+        return f"~{_scrub_digest(value, salt)}"
+    return f"@{domain}~{_scrub_digest(value, salt)}"
+
+
+def _scrub_phone_token(value: str, salt: str) -> str:
+    """A phone number as it may appear in a log line: ``prefix~digest``. The
+    prefix is the first three CODE POINTS of the value, emitted only when it
+    starts with ``+`` (a canonical E.164, where those three are the country
+    code — coarse, operational, non-identifying); any other spelling gets the
+    digest alone."""
+    if value.startswith("+"):
+        return f"{value[:3]}~{_scrub_digest(value, salt)}"
+    return f"~{_scrub_digest(value, salt)}"
+
+
+def reference_scrub_pii(
+    text: str,
+    rules: list[str] | tuple[str, ...] | None = None,
+    *,
+    salt: str | None = None,
+) -> str:
+    """The scrub oracle: replace contact material inside free text with the
+    tokens above. ``rules=None`` applies both rules in the canonical order —
+    the email substitution over the whole string FIRST, then the phone
+    substitution over its result (each exactly once, no cascade) — because an
+    email's local part may contain the ``+``-led digit runs the phone rule
+    would otherwise eat. ``rules`` restricts to a subset (``[]`` is the
+    identity). ``salt=None`` is tors's documented default constant."""
+    effective_salt = SCRUB_PII_DEFAULT_SALT if salt is None else salt
+    wanted = {"contact_email", "contact_phone"} if rules is None else set(rules)
+    scrubbed = text
+    if "contact_email" in wanted:
+        scrubbed = _SCRUB_EMAIL_RE.sub(
+            lambda m: _scrub_email_token(m.group(0), effective_salt), scrubbed
+        )
+    if "contact_phone" in wanted:
+        scrubbed = _SCRUB_PHONE_RE.sub(
+            lambda m: _scrub_phone_token(m.group(0), effective_salt), scrubbed
+        )
+    return scrubbed
 
 
 def assert_opcodes_are_valid(

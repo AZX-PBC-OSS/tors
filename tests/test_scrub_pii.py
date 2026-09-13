@@ -1,0 +1,519 @@
+"""Contract gate for ``tors.scrub_pii``: replace contact material (email
+addresses, ``+``-led phone numbers) inside free text with correlation
+tokens, the scrub an error excerpt or rejection message needs before it
+reaches telemetry — the one store a data purge cannot reach.
+
+What this gate pins (the contract is a port of a private consumer's
+telemetry-safety module, pinned byte-identical to it at ``salt=""``):
+
+- the email rule's grammar: the deliberately permissive local part, the
+  greedy-backtracking domain split (``a@b.co9`` scrubs ``a@b.co`` and
+  leaves the ``9``; ``a@b.c.d`` never matches), domains kept verbatim
+  including their leading/doubled dots, and the fact that URLs, mailto
+  links, and code spans get NO special treatment (whatever sits inside
+  them matches).
+- the phone rule's grammar: anchored on a literal ``+`` (bare digit runs
+  are order numbers and byte counts, and must survive), at least eight
+  digits with the separators humans and upstream APIs use, the digit
+  class in the Python-regex sense (every Unicode Nd decimal digit, not
+  ASCII-only), and the token prefix being the match's first three CODE
+  POINTS — ``"+1 "`` for a domestic spelling, ``"+47"`` for a compact
+  one.
+- token shapes: ``@domain~<12 hex>`` for email, ``prefix~<12 hex>`` for
+  phone; the digest is ``sha256(salt + match)`` truncated to 12 hex
+  chars, so ``salt=""`` is the source chain's unsalted digest exactly.
+- the rules contract: ``None`` = both rules in the canonical order
+  (email substitution first, then phone over its result — an email's
+  local part may carry the ``+``-led runs the phone rule would eat);
+  ``[]`` = the identity (the original object); duplicates deduped and
+  order irrelevant; an unknown name is a ``ValueError`` naming the
+  accepted set.
+- the salt contract: ``None`` = tors's documented default constant (a
+  known, non-secret tag), ``""`` = unsalted (source parity), and the
+  digest is the only field a salt touches.
+- identity: no rule firing returns the original object.
+- idempotence, pinned as it true is: the output is a fixed point
+  UNLESS an email token is immediately followed by @-shaped text (two
+  reachable shapes: two adjacent email matches, and a match whose end
+  is followed by an unmatched `@`-run whose own local part the match
+  consumed) — a token's digest hex is local-part material, so a second
+  pass fires once more on that boundary; scrubbing twice always
+  converges (the second output is a fixed point), and phone-only is
+  strictly idempotent.
+- the argument boundary: lone surrogates are refused with
+  ``UnicodeEncodeError`` (the crate-wide str contract). The source chain
+  diverges there — its classes never match a surrogate, so it returns
+  such text unchanged — and this gate pins tors's divergence from it
+  deliberately.
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from reference import SCRUB_PII_EMAILS as EMAILS
+from reference import SCRUB_PII_PHONES as PHONES
+from reference import SCRUB_PII_SEPARATORS as SEPARATORS
+from tors import scrub_pii
+
+
+# The unsalted digest (salt=""), spelled directly against hashlib so the
+# expected tokens below are derived independently of both tors and the
+# reference oracle: a third transcription of the construction.
+def _hex12(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:12]
+
+
+def _email_token(match: str) -> str:
+    local, sep, domain = match.rpartition("@")
+    assert sep and local and domain  # a regex match is never degenerate
+    return f"@{domain}~{_hex12(match)}"
+
+
+def _phone_token(match: str) -> str:
+    return f"{match[:3]}~{_hex12(match)}"
+
+
+# Non-ASCII zoo pieces built from codepoints (pure-ASCII source, the
+# reference.py idiom): Arabic-Indic and fullwidth digit runs, and the
+# o-umlaut domain char.
+_ARABIC_TWELVE = "".join(chr(0x0660 + i % 10) for i in range(12))
+_FULLWIDTH_EIGHT = "".join(chr(0xFF10 + i) for i in range(8))
+_ARABIC_FIVE = "".join(chr(0x0665 + i) for i in range(5))
+_O_UMLAUT = chr(0x00F6)
+
+
+class TestEmailZoo:
+    def test_the_canonical_rejection_excerpt(self) -> None:
+        """The shape the function exists for: an upstream rejection echoing
+        a candidate's address and number into telemetry retention."""
+        text = "unknown candidate fungai.chetima@example.com called from +14155552671 twice"
+        assert scrub_pii(text, salt="") == (
+            "unknown candidate "
+            f"{_email_token('fungai.chetima@example.com')} "
+            f"called from {_phone_token('+14155552671')} twice"
+        )
+
+    def test_plus_addressing_is_local_part_material(self) -> None:
+        assert scrub_pii("ada+tag@azx.io", salt="") == _email_token("ada+tag@azx.io")
+
+    def test_trailing_punctuation_is_not_consumed(self) -> None:
+        # The domain split backtracks to the largest dot with a two-letter
+        # tail, so a trailing period/digit survives the match.
+        assert scrub_pii("a@b.co.", salt="") == f"{_email_token('a@b.co')}."
+        assert scrub_pii("a@b.co9", salt="") == f"{_email_token('a@b.co')}9"
+        assert scrub_pii("a@b.co.uk", salt="") == _email_token("a@b.co.uk")
+
+    def test_a_one_letter_tld_never_matches(self) -> None:
+        # "d" is one letter short of [A-Za-z]{2,}: no split exists, and the
+        # whole address survives (the documented non-match, pinned).
+        assert scrub_pii("a@b.c.d", salt="") == "a@b.c.d"
+
+    def test_degenerate_domain_dots_are_kept_verbatim(self) -> None:
+        # The domain run class includes '.', so ".b.co" and "b..co" are
+        # domains in their own right, echoed in the token as matched.
+        assert scrub_pii("a@.b.co", salt="") == _email_token("a@.b.co")
+        assert scrub_pii("a@b..co", salt="") == _email_token("a@b..co")
+
+    def test_uppercase_is_matched_and_preserved(self) -> None:
+        assert scrub_pii("A@B.CO", salt="") == _email_token("A@B.CO")
+
+    def test_local_part_class_edges(self) -> None:
+        # % _ . + - are all local-part material; the whole address is eaten.
+        assert scrub_pii("a%b@x.co", salt="") == _email_token("a%b@x.co")
+        assert scrub_pii("a_b@x.co", salt="") == _email_token("a_b@x.co")
+        assert scrub_pii("xxa@b.co", salt="") == _email_token("xxa@b.co")
+
+    def test_a_non_local_char_splits_the_match(self) -> None:
+        # "!" is not in the local class: the match starts at "b", and the
+        # "a!" prefix survives — the source's documented permissiveness
+        # trade-off (over-matching costs a token; under-matching leaks).
+        assert scrub_pii("a!b@x.co", salt="") == f"a!{_email_token('b@x.co')}"
+
+    def test_only_the_second_at_can_match(self) -> None:
+        # The first "@" has no dot in its domain run ("b" stops at "@"), so
+        # the match starts at "b" and "a@" survives.
+        assert scrub_pii("a@b@c.co", salt="") == f"a@{_email_token('b@c.co')}"
+
+    def test_a_resume_digit_becomes_the_next_local_part(self) -> None:
+        # The first match ends before "9"; scanning resumes there and the
+        # digit is a local part for the second match.
+        assert scrub_pii("a@b.co9@x.yz", salt="") == (
+            f"{_email_token('a@b.co')}{_email_token('9@x.yz')}"
+        )
+
+    def test_urls_mailto_and_code_spans_get_no_special_treatment(self) -> None:
+        assert scrub_pii("https://user@x.io/path", salt="") == (
+            f"https://{_email_token('user@x.io')}/path"
+        )
+        assert scrub_pii("mailto:a@b.co", salt="") == f"mailto:{_email_token('a@b.co')}"
+        assert scrub_pii("see `a@b.co` in code", salt="") == (
+            f"see `{_email_token('a@b.co')}` in code"
+        )
+
+    def test_non_ascii_domains_never_match(self) -> None:
+        # Every email class is ASCII: a non-ASCII domain char breaks the
+        # run and the address survives (the documented non-match).
+        assert scrub_pii("a@b.c" + _O_UMLAUT, salt="") == "a@b.c" + _O_UMLAUT
+        assert scrub_pii("a@" + _O_UMLAUT + ".co", salt="") == "a@" + _O_UMLAUT + ".co"
+
+    def test_long_fields_are_matched_whole(self) -> None:
+        # No length cap anywhere in the grammar: a maximal local part and
+        # a multi-label domain are one match, and the token's domain field
+        # carries the whole domain as matched.
+        match = f"{'ada.' * 32}@example.co.uk"
+        assert scrub_pii(match, salt="") == _email_token(match)
+
+    def test_email_shaped_text_inside_a_phone_match_is_eaten_by_the_email_pass(self) -> None:
+        # The email substitution runs first: "8901ada" is a local part, so
+        # the phone match ends at "557" and the two tokens stay separated
+        # by the surviving space (the phone match ends at a digit, never
+        # at the separator or the token that follows).
+        assert scrub_pii("+1 415 557 8901ada@x.co", salt="") == (
+            f"{_phone_token('+1 415 557')} {_email_token('8901ada@x.co')}"
+        )
+
+
+class TestPhoneZoo:
+    def test_compact_e164(self) -> None:
+        # The prefix is the first three code points: "+14" here.
+        assert scrub_pii("+14155552671", salt="") == _phone_token("+14155552671")
+
+    def test_domestic_spellings_and_the_space_in_the_prefix(self) -> None:
+        # "+1 (415) 555-2671" and "+1 415 555 2671" both match; their
+        # prefixes are "+1 " — the third code point is the space.
+        assert scrub_pii("+1 (415) 555-2671", salt="") == _phone_token("+1 (415) 555-2671")
+        assert scrub_pii("+1 415 555 2671", salt="") == _phone_token("+1 415 555 2671")
+        assert scrub_pii("+1 415 555 2671x", salt="") == f"{_phone_token('+1 415 555 2671')}x"
+
+    def test_the_plus_anchoring_spares_bare_digit_runs(self) -> None:
+        text = "read 4096 bytes across 3 pages in 1200 ms"
+        assert scrub_pii(text, salt="") is text
+
+    def test_a_separator_right_after_the_plus_never_matches(self) -> None:
+        # \d must follow the "+": "+ (415)..." and "+1-555-" both fail.
+        assert scrub_pii("+ (415) 555-2671", salt="") == "+ (415) 555-2671"
+        assert scrub_pii("+1-555-", salt="") == "+1-555-"
+
+    def test_the_minimum_is_eight_digits(self) -> None:
+        assert scrub_pii("+1234567", salt="") == "+1234567"
+        assert scrub_pii("+12345678", salt="") == _phone_token("+12345678")
+        # A leading zero is a \d like any other.
+        assert scrub_pii("+004155552671", salt="") == _phone_token("+004155552671")
+
+    def test_a_second_plus_starts_the_real_match(self) -> None:
+        # "+" is not in the separator class: the first attempt dies at the
+        # class run, the second "+4155552671" is the match, and "+1"
+        # survives.
+        assert scrub_pii("+1+4155552671", salt="") == f"+1{_phone_token('+4155552671')}"
+
+    def test_two_numbers_split_by_one_space_are_one_match(self) -> None:
+        # The space is a class char: the run spans both numbers, and one
+        # token covers the pair (the digest is of the whole run).
+        match = "+4712345678 1234567890"
+        assert scrub_pii(match, salt="") == _phone_token(match)
+
+    def test_a_tilde_breaks_the_run(self) -> None:
+        # "~" is not a class char (and not a \d): the match ends at "8",
+        # and the literal digit run after the tilde survives.
+        assert scrub_pii("+12345678~1234567890", salt="") == (
+            f"{_phone_token('+12345678')}~1234567890"
+        )
+
+    def test_the_final_digit_backtrack_leaves_trailing_separators(self) -> None:
+        # The match ends at the LAST digit in the run: the trailing space
+        # and the comma survive around it.
+        assert scrub_pii("call +1 (415) 555-2671 , ok", salt="") == (
+            f"call {_phone_token('+1 (415) 555-2671')} , ok"
+        )
+
+    def test_two_numbers_separated_by_a_comma_both_match(self) -> None:
+        text = "+1 415 555 2671, +1 415 555 2672"
+        assert scrub_pii(text, salt="") == (
+            f"{_phone_token('+1 415 555 2671')}, {_phone_token('+1 415 555 2672')}"
+        )
+
+    def test_unicode_nd_digits_match_and_set_a_multibyte_prefix(self) -> None:
+        # The digit class is the Python-regex sense: every Unicode Nd
+        # decimal digit. The prefix is the first three CODE POINTS, so a
+        # non-ASCII digit run carries its own spelling into the token.
+        arabic = "+" + _ARABIC_TWELVE
+        assert scrub_pii(arabic, salt="") == f"+{chr(0x0660)}{chr(0x0661)}~{_hex12(arabic)}"
+        fullwidth = "+" + _FULLWIDTH_EIGHT
+        assert scrub_pii(fullwidth, salt="") == (f"+{chr(0xFF10)}{chr(0xFF11)}~{_hex12(fullwidth)}")
+        mixed = "+1234" + _ARABIC_FIVE  # ASCII and Arabic-Indic in one run
+        assert scrub_pii(mixed, salt="") == f"+12~{_hex12(mixed)}"
+
+    def test_non_nd_numerics_do_not_match(self) -> None:
+        # Superscript two is No (not Nd): the class run dies at it, and a
+        # fullwidth "+" is not the literal "+" either.
+        assert scrub_pii("+12" + chr(0x00B2) + "45678", salt="") == "+12" + chr(0x00B2) + "45678"
+        assert scrub_pii(chr(0xFF0B) + "12345678", salt="") == chr(0xFF0B) + "12345678"
+
+    def test_a_phone_shaped_local_part_is_eaten_by_the_email_pass(self) -> None:
+        # The email rule runs first and its local class contains "+":
+        # "user+14155552671" is one local part, nothing remains for the
+        # phone rule to fire on.
+        assert scrub_pii("user+14155552671@example.com", salt="") == (
+            _email_token("user+14155552671@example.com")
+        )
+
+
+class TestRulesContract:
+    def test_none_is_both_rules_in_the_canonical_order(self) -> None:
+        text = "a@b.co +14155552671"
+        assert scrub_pii(text) == scrub_pii(text, ["contact_email", "contact_phone"])
+        # ...and the order the caller lists them in is irrelevant.
+        assert scrub_pii(text, ["contact_phone", "contact_email"]) == scrub_pii(text)
+
+    def test_empty_rules_is_the_identity_object(self) -> None:
+        text = "a@b.co +14155552671"
+        assert scrub_pii(text, []) is text
+
+    def test_a_tuple_is_accepted_like_a_list(self) -> None:
+        assert scrub_pii("a@b.co", ("contact_email",), salt="") == _email_token("a@b.co")
+
+    def test_duplicates_dedupe(self) -> None:
+        assert scrub_pii("a@b.co", ["contact_email", "contact_email"], salt="") == (
+            _email_token("a@b.co")
+        )
+
+    def test_unknown_names_name_the_accepted_set(self) -> None:
+        # The value's quoting is Rust's Debug rendering, the same spelling
+        # the errors=/byteorder= closed-set messages ship.
+        with pytest.raises(ValueError) as exc:
+            scrub_pii("a@b.co", ["emails"])
+        assert str(exc.value) == (
+            "rules must be one of ('contact_email', 'contact_phone'), not \"emails\""
+        )
+
+    def test_a_valid_name_plus_an_unknown_one_still_raises(self) -> None:
+        with pytest.raises(ValueError, match="contact_phone"):
+            scrub_pii("a@b.co", ["contact_email", "ssn"])
+
+    def test_phone_only_leaves_email_text_alone(self) -> None:
+        assert scrub_pii("+1 415 557 8901ada@x.co", ["contact_phone"], salt="") == (
+            f"{_phone_token('+1 415 557 8901')}ada@x.co"
+        )
+
+    def test_email_only_leaves_phone_text_alone(self) -> None:
+        assert scrub_pii("+1 415 557 8901ada@x.co", ["contact_email"], salt="") == (
+            f"+1 415 557 {_email_token('8901ada@x.co')}"
+        )
+
+
+class TestSaltContract:
+    def test_default_salt_is_the_documented_constant(self) -> None:
+        # The literal is pinned here in full: the default is a fixed,
+        # non-secret domain-separation tag, frozen because changing it
+        # would silently change every deployment's token values.
+        token = scrub_pii("a@b.co +14155552671")
+        assert token == (
+            f"@b.co~{_hex12('tors/scrub_pii/v1' + 'a@b.co')} "
+            f"+14~{_hex12('tors/scrub_pii/v1' + '+14155552671')}"
+        )
+
+    def test_empty_salt_is_the_unsalted_digest(self) -> None:
+        # salt="" is the migration lane: byte-identical token values with
+        # an unsalted upstream scrubber (the source chain's own digest).
+        token = scrub_pii("a@b.co +14155552671", salt="")
+        assert token == f"@b.co~{_hex12('a@b.co')} +14~{_hex12('+14155552671')}"
+
+    def test_same_input_and_salt_agree_across_calls(self) -> None:
+        assert scrub_pii("a@b.co", salt="secret") == scrub_pii("a@b.co", salt="secret")
+
+    def test_different_salts_change_only_the_digest_field(self) -> None:
+        one = scrub_pii("a@b.co +1 (415) 555-2671", salt="one")
+        two = scrub_pii("a@b.co +1 (415) 555-2671", salt="two")
+        assert one != two
+
+        # The kept-context fields are salt-independent: drop the 12 digest
+        # chars after every "~" (each tilde introduces exactly one digest)
+        # and the two outputs agree exactly — same domain, same dialling
+        # prefix, the space inside "+1 " included.
+        def strip_digests(out: str) -> str:
+            stripped = ""
+            while (cut := out.find("~")) >= 0:
+                stripped += out[: cut + 1]
+                out = out[cut + 13 :]
+            return stripped + out
+
+        assert strip_digests(one) == strip_digests(two) == "@b.co~ +1 ~"
+
+    def test_a_salt_is_utf8_material_like_the_text(self) -> None:
+        salt = "üñí/v1"
+        assert scrub_pii("a@b.co", salt=salt) == f"@b.co~{_hex12(salt + 'a@b.co')}"
+
+    def test_the_salt_applies_to_both_rules(self) -> None:
+        salt = "call-site"
+        assert scrub_pii("a@b.co +14155552671", salt=salt) == (
+            f"@b.co~{_hex12(salt + 'a@b.co')} +14~{_hex12(salt + '+14155552671')}"
+        )
+
+
+class TestIdentityContract:
+    def test_no_match_returns_the_original_object(self) -> None:
+        text = "read 4096 bytes across 3 pages in 1200 ms"
+        assert scrub_pii(text) is text
+
+    def test_empty_text_is_the_identity_object(self) -> None:
+        empty = ""
+        assert scrub_pii(empty) is empty
+
+    def test_the_documented_non_matches_are_all_identity(self) -> None:
+        for text in (
+            "a@b.c.d",
+            "a@" + _O_UMLAUT + ".co",
+            "+ (415) 555-2671",
+            "+1234567",
+            "not-an-address",
+        ):
+            assert scrub_pii(text, salt="") is text
+
+    def test_identity_holds_for_subset_rules_too(self) -> None:
+        text = "+14155552671"
+        assert scrub_pii(text, ["contact_email"], salt="") is text
+
+
+class TestTokenShape:
+    @pytest.mark.parametrize(
+        "text", ["a@b.co", "ada+tag@azx.io", "+14155552671", "+1 (415) 555-2671"]
+    )
+    def test_every_tilde_introduces_twelve_lowercase_hex(self, text: str) -> None:
+        out = scrub_pii(text, salt="")
+        fields = out.split("~")
+        assert len(fields) == 2
+        digest = fields[1]
+        assert len(digest) == 12
+        assert all(c in "0123456789abcdef" for c in digest)
+
+    def test_email_tokens_lead_with_the_domain_at(self) -> None:
+        assert scrub_pii("a@b.co", salt="").startswith("@b.co~")
+
+    def test_phone_tokens_lead_with_the_dialling_prefix(self) -> None:
+        assert scrub_pii("+4712345678", salt="").startswith("+47~")
+        assert scrub_pii("+1 (415) 555-2671", salt="").startswith("+1 ~")
+
+    def test_the_original_match_does_not_survive_its_token(self) -> None:
+        for text, match in (
+            ("a@b.co", "a@b.co"),
+            ("+14155552671", "+14155552671"),
+            ("+1 (415) 555-2671", "4155552671"),
+        ):
+            assert match not in scrub_pii(text, salt="")
+
+
+class TestIdempotence:
+    def test_zoo_outputs_are_fixed_points(self) -> None:
+        # An output re-fires only where an email token is immediately
+        # followed by @-shaped text; the zoo's compositions (contacts
+        # joined by separators, in both orders) never place an `@` right
+        # after a match, so every one of these outputs is a fixed point.
+        zoo = [
+            f"{email}{sep}{phone}" for email in EMAILS for phone in PHONES for sep in SEPARATORS
+        ] + [f"{phone}{sep}{email}" for email in EMAILS for phone in PHONES for sep in SEPARATORS]
+        for text in zoo:
+            once = scrub_pii(text, salt="")
+            assert scrub_pii(once, salt="") == once, text
+
+    def test_adjacent_email_matches_re_fire_once_then_converge(self) -> None:
+        # The re-fire corner, first shape, pinned literally: adjacent
+        # email matches ("a@b.co" ends where "9@x.yz" begins) produce
+        # back-to-back tokens, and the second pass re-fires on the
+        # boundary — the first token's digest hex is a local part for a
+        # fresh match of the second token's domain. Pass three is a
+        # fixed point.
+        text = "a@b.co9@x.yz"
+        once = scrub_pii(text, salt="")
+        assert once == f"{_email_token('a@b.co')}{_email_token('9@x.yz')}"
+        twice = scrub_pii(once, salt="")
+        assert twice == (f"@b.co~@x.yz~{_hex12(_hex12('a@b.co') + '@x.yz')}~{_hex12('9@x.yz')}")
+        assert scrub_pii(twice, salt="") is twice
+
+    def test_a_match_followed_by_an_unmatched_at_run_re_fires_once(self) -> None:
+        # The corner's second shape: "x@b.co" consumed the local-part
+        # material before the second "@", so "@w.vu" never matched on
+        # its own — but the token's digest hex is local-part material,
+        # and pass two fires on [hex + "@w.vu"] once, then holds.
+        text = "x@b.co@w.vu"
+        once = scrub_pii(text, salt="")
+        assert once == f"{_email_token('x@b.co')}@w.vu"
+        hex1 = _hex12("x@b.co")
+        twice = scrub_pii(once, salt="")
+        assert twice == f"@b.co~@w.vu~{_hex12(hex1 + '@w.vu')}"
+        assert scrub_pii(twice, salt="") is twice
+
+    def test_an_invalid_at_run_after_a_match_is_not_the_corner(self) -> None:
+        # "d4.e5" has a one-letter TLD: the second `@`-run cannot match
+        # in pass two either, so the output is a fixed point.
+        text = "x1@b2.co3@d4.e5"
+        once = scrub_pii(text, salt="")
+        assert once == _email_token("x1@b2.co") + "3@d4.e5"
+        assert scrub_pii(once, salt="") is once
+
+    def test_tokens_are_individually_fixed_points(self) -> None:
+        for token in (
+            _email_token("a@b.co"),
+            _phone_token("+14155552671"),
+            _phone_token("+1 (415) 555-2671"),
+            _phone_token("+4712345678"),
+        ):
+            assert scrub_pii(token, salt="") is token
+
+    def test_phone_only_is_strictly_idempotent(self) -> None:
+        # Phone tokens can never re-fire the phone rule (the "~" breaks
+        # every digit run three code points in), and no email pass runs
+        # to create the re-fire corner.
+        for text in (
+            "+14155552671 +14155552672",
+            "+1 415 555 2671, +44 20 7946 0958",
+            "+4712345678 1234567890",
+            "a@b.co9@x.yz +14155552671",
+            "x@b.co@w.vu +14155552671",
+        ):
+            once = scrub_pii(text, ["contact_phone"], salt="")
+            assert scrub_pii(once, ["contact_phone"], salt="") is once
+
+    @given(
+        pieces=st.lists(
+            st.sampled_from(
+                list(EMAILS)
+                + list(PHONES)
+                + ["9", "a", "@", ".", "~", "+", " ", "(", ")", "-", ","]
+            ),
+            max_size=25,
+        )
+    )
+    @settings(max_examples=300)
+    def test_scrubbing_twice_always_converges(self, pieces: list[str]) -> None:
+        text = "".join(pieces)
+        once = scrub_pii(text, salt="")
+        twice = scrub_pii(once, salt="")
+        assert scrub_pii(twice, salt="") == twice
+
+
+class TestArgumentBoundary:
+    def test_lone_surrogates_are_refused(self) -> None:
+        # The crate-wide str contract: the UTF-8 borrow refuses a str
+        # holding lone surrogates with UnicodeEncodeError before any Rust
+        # code runs. The source chain diverges here (its classes never
+        # contain a surrogate, so it returns such text unchanged); tors
+        # pins the crate contract, divergence and all.
+        with pytest.raises(UnicodeEncodeError):
+            scrub_pii("a\ud800b")
+
+    def test_surrogates_are_refused_even_when_no_rule_could_match(self) -> None:
+        with pytest.raises(UnicodeEncodeError):
+            scrub_pii("a\ud800b@x.co")
+
+    def test_surrogates_are_refused_for_subset_rules_too(self) -> None:
+        with pytest.raises(UnicodeEncodeError):
+            scrub_pii("a\ud800b", ["contact_phone"])
+
+    def test_a_surrogate_in_the_salt_is_refused(self) -> None:
+        with pytest.raises(UnicodeEncodeError):
+            scrub_pii("a@b.co", salt="\udcff")

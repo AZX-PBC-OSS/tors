@@ -15,10 +15,11 @@
 //! scrub), [`charset_impl`] (batch codepoint-set validation for
 //! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
 //! the TaskQ exception-text chain), [`hash_impl`] (the one-shot
-//! md5/sha1/sha256/sha512/hmac hashing surface), and [`random_impl`]
+//! md5/sha1/sha256/sha512/hmac hashing surface), [`random_impl`]
 //! (the random-generation family: random
-//! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7);
-//! they are
+//! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
+//! and [`pii_impl`] (contact-material scrub, the
+//! telemetry-safety port); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -219,6 +220,16 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The contact-scrub surface (`scrub_pii`, the telemetry-safety port)
+//! adds no residue class: `detached_transform`'s shape over a two-rule
+//! pass — the text borrow plus the `rules=`/`salt=` validation under the
+//! GIL, then the whole double scan (both grammars' matchers, both
+//! splices, every token digest) under one `py.detach`, then either the
+//! identity return (no active rule matched) or the O(output) string
+//! marshalling, pinned by `tests/test_gil_release.py` (worst gaps
+//! ~12ms of 36-40ms walls at 12 MiB of contact-dense text: the
+//! marshalling of a fast wall, the b64/QC-Yes budget shape).
+//!
 //! The random-generation surface (`random_string`/`random_hex`/
 //! `random_b62`/`random_b64url`/`uuid4`/`uuid7` and the uuids' bytes
 //! spellings `uuid4_bytes`/`uuid7_bytes`, `random_impl`) adds a new
@@ -413,6 +424,7 @@ pub mod merkle_impl;
 pub mod minhash_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
+pub mod pii_impl;
 // The documents surface is feature-gated (`documents`): its engines
 // (pdf_oxide, anydoc, office_oxide, html-to-markdown-rs) are optional deps
 // so the base build and the base PyPI wheel stay lean, and its pyo3
@@ -498,6 +510,7 @@ use py::merkle::*;
 use py::minhash::*;
 use py::normalize::*;
 use py::phonetic::*;
+use py::pii::*;
 use py::pipeline::*;
 use py::random::*;
 use py::scan::*;
@@ -624,6 +637,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(truncate_ellipsis, m)?)?;
     m.add_function(wrap_pyfunction!(strip_controls, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_log_text, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_pii, m)?)?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;

@@ -33,6 +33,7 @@ pub mod merkle;
 pub mod minhash;
 pub mod normalize;
 pub mod phonetic;
+pub mod pii;
 pub mod pipeline;
 pub mod random;
 pub mod scan;
