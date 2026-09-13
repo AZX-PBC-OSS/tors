@@ -1,14 +1,21 @@
 """Contract gate for tors's one-shot hashing surface: ``md5_hex``,
-``sha1_hex``, ``sha256_hex``, ``sha512_hex``, and ``hmac_sha256_hex``.
+``sha1_hex``, ``sha256_hex``, ``sha512_hex``, and ``hmac_sha256_hex``, and
+their raw-digest twins ``md5_digest``, ``sha1_digest``, ``sha256_digest``,
+``sha512_digest``, and ``hmac_sha256_digest``.
 
-The five functions are the request-signing / content-check primitives a
+The five algorithms are the request-signing / content-check primitives a
 text-operations library keeps getting asked for: webhook signature
 verification (HMAC-SHA-256 is the GitHub/Slack/Stripe convention), S3/HTTP
 ETag and Content-MD5 checks (md5), rsync-style quick content compares and
 legacy-interop digests (sha1), dedup-cache keys and general content
 addressing (sha256/sha512, the ``finalize`` family's hash without the
-normalize stage). Every one is a stateless one-shot: bytes (or a str,
-taken as its UTF-8 bytes) in, lowercase hex out, the whole digest
+normalize stage). Each algorithm comes in two output spellings over ONE
+digest computation: lowercase hex (the ``_hex`` names) and the raw digest
+bytes (the ``_digest`` names — the call sites that want the bytes
+themselves: webhook schemes that base64-encode the signature, key
+derivation chains that feed a digest back in as a key, digest-sliced
+advisory-lock ints, content thumbprints). Every one is a stateless
+one-shot: bytes (or a str, taken as its UTF-8 bytes) in, the whole digest
 computation under one ``py.detach``.
 
 Parity is the product and is pinned three ways:
@@ -16,10 +23,11 @@ Parity is the product and is pinned three ways:
 - exact differential against ``hashlib``/``hmac`` over hypothesis corpora
   (arbitrary bytes including NUL and high bytes; arbitrary Unicode text
   including multibyte, emoji, and combining marks; both str and bytes
-  spellings; ~15,000 generated cases across the cells below) — the stdlib
-  is the always-available oracle, and RustCrypto (tors's engines) is an
-  independent implementation from CPython's OpenSSL backend, so agreement
-  is two-implementation agreement, not self-consistency;
+  spellings; ~39,000 generated cases across the cells below, both output
+  spellings of every algorithm) — the stdlib is the always-available
+  oracle, and RustCrypto (tors's engines) is an independent implementation
+  from CPython's OpenSSL backend, so agreement is two-implementation
+  agreement, not self-consistency;
 - known-answer vectors transcribed verbatim from the primary sources:
   RFC 1321 (md5), FIPS 180-4 / RFC 3174 (sha1), FIPS 180-4 (sha256,
   sha512, including the two-block and million-'a' examples), and RFC 4231
@@ -43,13 +51,14 @@ exactly-``bytes`` doctrine of the bytes-in family
 ``memoryview`` raise TypeError, because the GIL-released read wants an
 immutable buffer.
 
-SECURITY: md5 and sha1 are checksum/legacy-interop primitives only
-(Content-MD5, S3 ETags, cache-busting, rsync-style quick compares). Both
-are broken for security purposes and have been since the 2000s (md5
-collisions since 2004, sha1's first practical collision 2017): never use
-either for signatures, certificates, or password handling. Every doc
-surface that names them carries this note; it is repeated here because
-this file is the contract of record.
+SECURITY: md5 and sha1, in either spelling (``*_hex`` and ``*_digest``),
+are checksum/legacy-interop primitives only (Content-MD5, S3 ETags,
+cache-busting, rsync-style quick compares). Both are broken for security
+purposes and have been since the 2000s (md5 collisions since 2004, sha1's
+first practical collision 2017): never use either for signatures,
+certificates, or password handling. Every doc surface that names them
+carries this note; it is repeated here because this file is the contract
+of record.
 """
 
 from __future__ import annotations
@@ -62,22 +71,66 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from reference import corpus_utf8  # noqa: I001 -- the shared oracle module (tests/reference.py)
-from tors import hmac_sha256_hex, md5_hex, sha1_hex, sha256_hex, sha512_hex
+from tors import (
+    hmac_sha256_digest,
+    hmac_sha256_hex,
+    md5_digest,
+    md5_hex,
+    sha1_digest,
+    sha1_hex,
+    sha256_digest,
+    sha256_hex,
+    sha512_digest,
+    sha512_hex,
+)
 
 _MIB = 1024 * 1024
 
-# The stdlib oracle each function must equal, keyed by the tors spelling.
+# The stdlib oracle each spelling must equal, keyed by the tors spelling:
+# the hex spellings compare against ``.hexdigest()``, the digest spellings
+# against ``.digest()`` — one table, so every battery below (the hypothesis
+# lanes, the block edges, the 0..131 sweep, the 12 MiB shot, the surrogate
+# and argument contracts) runs over both output spellings of the same five
+# algorithms.
 _STDLIB_DIGEST = {
-    md5_hex: hashlib.md5,
-    sha1_hex: hashlib.sha1,
-    sha256_hex: hashlib.sha256,
-    sha512_hex: hashlib.sha512,
+    md5_hex: lambda raw: hashlib.md5(raw).hexdigest(),
+    sha1_hex: lambda raw: hashlib.sha1(raw).hexdigest(),
+    sha256_hex: lambda raw: hashlib.sha256(raw).hexdigest(),
+    sha512_hex: lambda raw: hashlib.sha512(raw).hexdigest(),
+    md5_digest: lambda raw: hashlib.md5(raw).digest(),
+    sha1_digest: lambda raw: hashlib.sha1(raw).digest(),
+    sha256_digest: lambda raw: hashlib.sha256(raw).digest(),
+    sha512_digest: lambda raw: hashlib.sha512(raw).digest(),
 }
 _HEX_LENGTH = {md5_hex: 32, sha1_hex: 40, sha256_hex: 64, sha512_hex: 128}
+# The raw-digest spellings' exact byte lengths (hmac's digest is
+# sha256-sized, pinned in its own test below).
+_DIGEST_LENGTH = {md5_digest: 16, sha1_digest: 20, sha256_digest: 32, sha512_digest: 64}
+# The hex spelling of each algorithm over its digest spelling: the DRY
+# shape the Rust cores implement (ONE digest computation, two outputs),
+# pinned from the Python side in the battery below.
+_HEX_OF_DIGEST = {
+    md5_hex: md5_digest,
+    sha1_hex: sha1_digest,
+    sha256_hex: sha256_digest,
+    sha512_hex: sha512_digest,
+}
 
 
 def _stdlib_hmac(key: bytes, data: bytes) -> str:
     return hmac_module.new(key, data, hashlib.sha256).hexdigest()
+
+
+def _stdlib_hmac_digest(key: bytes, data: bytes) -> bytes:
+    return hmac_module.new(key, data, hashlib.sha256).digest()
+
+
+# The two HMAC spellings over their stdlib oracles: the request-signing
+# primitive in both output shapes, hex and raw bytes alike.
+_HMAC_SPELLINGS = {
+    hmac_sha256_hex: _stdlib_hmac,
+    hmac_sha256_digest: _stdlib_hmac_digest,
+}
 
 
 class TestKnownAnswerVectors:
@@ -269,6 +322,69 @@ class TestKnownAnswerVectors:
         # key+data-over-64-byte cases, and both 131-byte-key cases.
         assert hmac_sha256_hex(key, data) == expected
 
+    @pytest.mark.parametrize(
+        ("tors_fn", "data", "expected"),
+        [
+            (md5_digest, b"", bytes.fromhex("d41d8cd98f00b204e9800998ecf8427e")),
+            (md5_digest, b"abc", bytes.fromhex("900150983cd24fb0d6963f7d28e17f72")),
+            (sha1_digest, b"", bytes.fromhex("da39a3ee5e6b4b0d3255bfef95601890afd80709")),
+            (sha1_digest, b"abc", bytes.fromhex("a9993e364706816aba3e25717850c26c9cd0d89d")),
+            (
+                sha256_digest,
+                b"",
+                bytes.fromhex(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
+            ),
+            (
+                sha256_digest,
+                b"abc",
+                bytes.fromhex(
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                ),
+            ),
+            (
+                sha512_digest,
+                b"",
+                bytes.fromhex(
+                    "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                    "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+                ),
+            ),
+            (
+                sha512_digest,
+                b"abc",
+                bytes.fromhex(
+                    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+                ),
+            ),
+        ],
+        ids=[
+            "md5-empty",
+            "md5-abc",
+            "sha1-empty",
+            "sha1-abc",
+            "sha256-empty",
+            "sha256-abc",
+            "sha512-empty",
+            "sha512-abc",
+        ],
+    )
+    def test_digest_primary_source_vectors_verbatim(
+        self, tors_fn, data: bytes, expected: bytes
+    ) -> None:
+        # The same primary-source vectors (RFC 1321 / FIPS 180-4) through
+        # the raw-digest spellings: the expected bytes are the vectors'
+        # hex, decoded — the digest spelling is the same engine, pinned in
+        # its own output shape.
+        assert tors_fn(data) == expected
+
+    def test_hmac_digest_rfc4231_case2_verbatim(self) -> None:
+        assert hmac_sha256_digest(b"Jefe", b"what do ya want for nothing?") == bytes.fromhex(
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        )
+
 
 class TestDifferentialParity:
     """The star: exact parity with ``hashlib``/``hmac`` over generated
@@ -281,7 +397,7 @@ class TestDifferentialParity:
     @given(st.binary(max_size=512))
     @settings(max_examples=1500)
     def test_bytes_parity_with_hashlib(self, tors_fn, raw: bytes) -> None:
-        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw).hexdigest()
+        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw)
 
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     @given(st.text(max_size=400))
@@ -289,33 +405,56 @@ class TestDifferentialParity:
     def test_str_parity_with_hashlib_of_the_utf8_encoding(self, tors_fn, text: str) -> None:
         # The str-in convenience, differentially: hashing a str is hashing
         # its UTF-8 bytes, exactly what the caller would spell by hand.
-        assert tors_fn(text) == _STDLIB_DIGEST[tors_fn](text.encode("utf-8")).hexdigest()
+        assert tors_fn(text) == _STDLIB_DIGEST[tors_fn](text.encode("utf-8"))
 
+    @given(st.binary(max_size=512), st.text(max_size=400))
+    @settings(max_examples=1500)
+    def test_hex_spelling_is_the_digest_spelling_hex_encoded(
+        self, raw: bytes, text: str
+    ) -> None:
+        # The one-digest-two-spellings invariant, differentially over both
+        # input spellings: every _hex name is exactly its _digest twin,
+        # hex-encoded — the DRY shape the Rust cores implement (the hex
+        # path consumes the digest path), pinned from the Python side.
+        for hex_fn, digest_fn in _HEX_OF_DIGEST.items():
+            assert hex_fn(raw) == digest_fn(raw).hex()
+            assert hex_fn(text) == digest_fn(text).hex()
+        assert hmac_sha256_hex(b"k", raw) == hmac_sha256_digest(b"k", raw).hex()
+        assert hmac_sha256_hex("k", text) == hmac_sha256_digest("k", text).hex()
+
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     @given(st.binary(max_size=256), st.binary(max_size=256))
     @settings(max_examples=1200)
-    def test_hmac_bytes_parity_with_stdlib_hmac(self, key: bytes, data: bytes) -> None:
-        assert hmac_sha256_hex(key, data) == _stdlib_hmac(key, data)
+    def test_hmac_bytes_parity_with_stdlib_hmac(self, spelling, key: bytes, data: bytes) -> None:
+        assert spelling(key, data) == _HMAC_SPELLINGS[spelling](key, data)
 
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     @given(st.text(max_size=200), st.text(max_size=200))
     @settings(max_examples=1200)
     def test_hmac_str_parity_with_stdlib_hmac_of_the_utf8_encoding(
-        self, key: str, data: str
+        self, spelling, key: str, data: str
     ) -> None:
         # Both str arguments are their UTF-8 bytes, the webhook-signature
         # spelling where key and payload are both text.
-        assert hmac_sha256_hex(key, data) == _stdlib_hmac(
+        assert spelling(key, data) == _HMAC_SPELLINGS[spelling](
             key.encode("utf-8"), data.encode("utf-8")
         )
 
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     @given(st.text(max_size=200), st.binary(max_size=256))
     @settings(max_examples=600)
-    def test_hmac_mixed_str_key_bytes_data_parity(self, key: str, data: bytes) -> None:
-        assert hmac_sha256_hex(key, data) == _stdlib_hmac(key.encode("utf-8"), data)
+    def test_hmac_mixed_str_key_bytes_data_parity(
+        self, spelling, key: str, data: bytes
+    ) -> None:
+        assert spelling(key, data) == _HMAC_SPELLINGS[spelling](key.encode("utf-8"), data)
 
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     @given(st.binary(max_size=256), st.text(max_size=200))
     @settings(max_examples=600)
-    def test_hmac_mixed_bytes_key_str_data_parity(self, key: bytes, data: str) -> None:
-        assert hmac_sha256_hex(key, data) == _stdlib_hmac(key, data.encode("utf-8"))
+    def test_hmac_mixed_bytes_key_str_data_parity(
+        self, spelling, key: bytes, data: str
+    ) -> None:
+        assert spelling(key, data) == _HMAC_SPELLINGS[spelling](key, data.encode("utf-8"))
 
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     def test_every_single_byte_value(self, tors_fn) -> None:
@@ -323,7 +462,7 @@ class TestDifferentialParity:
         # bytes included, each pinned against hashlib.
         for value in range(256):
             raw = bytes([value])
-            assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw).hexdigest(), f"byte 0x{value:02x}"
+            assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw), f"byte 0x{value:02x}"
 
     @pytest.mark.parametrize(
         "text",
@@ -350,7 +489,7 @@ class TestDifferentialParity:
     )
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     def test_multibyte_str_parity(self, tors_fn, text: str) -> None:
-        assert tors_fn(text) == _STDLIB_DIGEST[tors_fn](text.encode("utf-8")).hexdigest()
+        assert tors_fn(text) == _STDLIB_DIGEST[tors_fn](text.encode("utf-8"))
 
     def test_str_and_bytes_spellings_agree_over_the_corpus(self) -> None:
         # The equivalence the convenience rests on: hash(s) == hash(s.encode()),
@@ -380,7 +519,7 @@ class TestBlockBoundaries:
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     def test_block_edge_lengths_match_hashlib(self, tors_fn, length: int) -> None:
         raw = bytes((i * 251 + 7) % 256 for i in range(length))
-        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw).hexdigest()
+        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw)
 
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     def test_every_length_up_to_131_matches_hashlib(self, tors_fn) -> None:
@@ -388,7 +527,7 @@ class TestBlockBoundaries:
         # every padding shape included, data that varies per length.
         for length in range(132):
             raw = bytes((i * 131 + 11) % 256 for i in range(length))
-            assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw).hexdigest(), f"length {length}"
+            assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw), f"length {length}"
 
     @pytest.mark.parametrize(
         ("key_len", "data_len"),
@@ -413,24 +552,28 @@ class TestBlockBoundaries:
             "hashed-key-multi-block-data",
         ],
     )
-    def test_hmac_block_edge_shapes_match_stdlib(self, key_len: int, data_len: int) -> None:
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_hmac_block_edge_shapes_match_stdlib(
+        self, spelling, key_len: int, data_len: int
+    ) -> None:
         # The HMAC-specific edges: key exactly at/over the 64-byte inner
         # block size (where the key itself gets hashed), data at the digest
         # block edges, and the empty-key/empty-data corners.
         key = bytes((i * 7 + 1) % 256 for i in range(key_len))
         data = bytes((i * 251 + 3) % 256 for i in range(data_len))
-        assert hmac_sha256_hex(key, data) == _stdlib_hmac(key, data)
+        assert spelling(key, data) == _HMAC_SPELLINGS[spelling](key, data)
 
     @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
     def test_twelve_mib_single_shot_matches_hashlib(self, tors_fn) -> None:
         # The size where the GIL story is told (tests/test_gil_release.py):
         # one 12 MiB shot, parity preserved, no chunking under the hood.
         raw = corpus_utf8("prose", 12 * _MIB)
-        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw).hexdigest()
+        assert tors_fn(raw) == _STDLIB_DIGEST[tors_fn](raw)
 
-    def test_twelve_mib_hmac_matches_stdlib(self) -> None:
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_twelve_mib_hmac_matches_stdlib(self, spelling) -> None:
         raw = corpus_utf8("prose", 12 * _MIB)
-        assert hmac_sha256_hex(b"corpus-key", raw) == _stdlib_hmac(b"corpus-key", raw)
+        assert spelling(b"corpus-key", raw) == _HMAC_SPELLINGS[spelling](b"corpus-key", raw)
 
 
 class TestStrInContract:
@@ -445,16 +588,18 @@ class TestStrInContract:
         with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
             tors_fn("x\ud800")
 
-    def test_hmac_lone_surrogate_in_key_raises_unicode_encode_error(self) -> None:
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_hmac_lone_surrogate_in_key_raises_unicode_encode_error(self, spelling) -> None:
         with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
-            hmac_sha256_hex("k\udfff", b"data")
+            spelling("k\udfff", b"data")
 
-    def test_hmac_lone_surrogate_in_data_raises_unicode_encode_error(self) -> None:
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_hmac_lone_surrogate_in_data_raises_unicode_encode_error(self, spelling) -> None:
         # The key is checked and borrowed first, so the surrogate in the
         # SECOND argument is what raises: pinned so the argument order of
         # the validation is a visible contract, not an accident.
         with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
-            hmac_sha256_hex(b"key", "d\ud800ata")
+            spelling(b"key", "d\ud800ata")
 
 
 class TestArgumentContract:
@@ -490,37 +635,40 @@ class TestArgumentContract:
         [bytearray(b"k"), memoryview(b"k"), 123, None, [b"k"]],
         ids=["bytearray", "memoryview", "int", "none", "list"],
     )
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     def test_hmac_non_str_or_bytes_key_raises_type_error(
-        self, not_str_or_bytes: object
+        self, spelling, not_str_or_bytes: object
     ) -> None:
         with pytest.raises(TypeError):
-            hmac_sha256_hex(not_str_or_bytes, b"data")  # type: ignore[arg-type]
+            spelling(not_str_or_bytes, b"data")  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
         "not_str_or_bytes",
         [bytearray(b"d"), memoryview(b"d"), 123, None, [b"d"]],
         ids=["bytearray", "memoryview", "int", "none", "list"],
     )
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
     def test_hmac_non_str_or_bytes_data_raises_type_error(
-        self, not_str_or_bytes: object
+        self, spelling, not_str_or_bytes: object
     ) -> None:
         with pytest.raises(TypeError):
-            hmac_sha256_hex(b"key", not_str_or_bytes)  # type: ignore[arg-type]
+            spelling(b"key", not_str_or_bytes)  # type: ignore[arg-type]
 
-    def test_hmac_key_is_validated_before_data(self) -> None:
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_hmac_key_is_validated_before_data(self, spelling) -> None:
         # The validation order the wrapper's nested borrows guarantee (the
         # key is borrowed and validated first), pinned explicitly with BOTH
-        # arguments bad: the surrogate cells above pin the order only with
-        # the other argument valid. The key's error is the one that fires.
+        # arguments bad: the key's error is the one that fires. The order
+        # holds for both spellings — they share the same wrapper contract.
         with pytest.raises(TypeError, match="^key must be str or bytes"):
-            hmac_sha256_hex(bytearray(b"k"), 123)  # type: ignore[arg-type]
+            spelling(bytearray(b"k"), 123)  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="^key must be str or bytes"):
-            hmac_sha256_hex(None, memoryview(b"d"))  # type: ignore[arg-type]
+            spelling(None, memoryview(b"d"))  # type: ignore[arg-type]
         # A str key holding a lone surrogate (valid type, failed borrow)
         # still raises before the data's TypeError: order is type-check and
         # borrow of the key, then the data, exactly.
         with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
-            hmac_sha256_hex("k\ud800", 123)  # type: ignore[arg-type]
+            spelling("k\ud800", 123)  # type: ignore[arg-type]
 
 
 class TestOutputInvariants:
@@ -545,7 +693,7 @@ class TestOutputInvariants:
         first = tors_fn(b"")
         assert first == tors_fn("")
         assert first == tors_fn(b"")
-        assert first == _STDLIB_DIGEST[tors_fn](b"").hexdigest()
+        assert first == _STDLIB_DIGEST[tors_fn](b"")
 
     @pytest.mark.parametrize("tors_fn", list(_HEX_LENGTH), ids=lambda f: f.__name__)
     def test_output_is_deterministic_across_calls(self, tors_fn) -> None:
@@ -563,3 +711,113 @@ class TestOutputInvariants:
         assert len(digest) == 64
         assert digest == digest.lower()
         assert all(c in "0123456789abcdef" for c in digest)
+
+
+class TestDigestOutputInvariants:
+    """The raw-digest spellings' structural contracts, the bytes twins of
+    ``TestOutputInvariants``' hex pins: exact byte length per algorithm
+    (16/20/32/64, hmac's 32), a true ``bytes`` return, empty-input
+    stability, and determinism."""
+
+    @pytest.mark.parametrize("tors_fn", list(_DIGEST_LENGTH), ids=lambda f: f.__name__)
+    def test_digest_is_exact_length_bytes(self, tors_fn) -> None:
+        for raw in (b"", b"x", b"a longer payload with multiple blocks" * 4):
+            digest = tors_fn(raw)
+            assert type(digest) is bytes
+            assert len(digest) == _DIGEST_LENGTH[tors_fn]
+
+    @pytest.mark.parametrize("tors_fn", list(_DIGEST_LENGTH), ids=lambda f: f.__name__)
+    def test_digest_empty_input_is_legal_and_stable(self, tors_fn) -> None:
+        # Empty input is legal on the digest spellings too — no ValueError
+        # paths anywhere on this surface — and the raw bytes match the
+        # stdlib oracle, str and bytes inputs agreeing.
+        first = tors_fn(b"")
+        assert first == tors_fn("")
+        assert first == tors_fn(b"")
+        assert first == _STDLIB_DIGEST[tors_fn](b"")
+
+    @pytest.mark.parametrize("tors_fn", list(_DIGEST_LENGTH), ids=lambda f: f.__name__)
+    def test_digest_is_deterministic_across_calls(self, tors_fn) -> None:
+        raw = b"determinism check payload"
+        assert tors_fn(raw) == tors_fn(raw)
+
+    def test_hmac_digest_is_32_bytes_and_matches_stdlib(self) -> None:
+        digest = hmac_sha256_digest(b"key", b"data")
+        assert type(digest) is bytes
+        assert len(digest) == 32
+        assert digest == _stdlib_hmac_digest(b"key", b"data")
+
+    def test_hmac_digest_empty_key_is_legal_and_matches_stdlib(self) -> None:
+        # The empty-key parity the hex spelling pins, in the raw shape.
+        assert hmac_sha256_digest(b"", b"data") == _stdlib_hmac_digest(b"", b"data")
+        assert hmac_sha256_digest("", "data") == _stdlib_hmac_digest(b"", b"data")
+
+
+class TestConsumerShapes:
+    """The raw-digest call sites the ``_digest`` spellings exist for,
+    pinned in the shapes real consumers use: the webhook scheme that
+    base64-encodes the HMAC digest and verifies with
+    ``hmac.compare_digest`` (never ``==`` — the comparison hygiene holds
+    in the examples too), the advisory-lock int sliced from a digest's
+    first 8 bytes, and the labelled HMAC derivation chain (a digest fed
+    back in as a key). Each is pinned differentially against the stdlib
+    chain it replaces."""
+
+    def test_webhook_style_b64_signature_verify(self) -> None:
+        # The Standard-Webhooks shape: the secret is the bytes after the
+        # "whsec_" prefix, the signed content is
+        # "{msg_id}.{timestamp}.{payload}", and the signature is the RAW
+        # digest, urlsafe-base64 — not the hex. compare_digest verifies.
+        import base64
+
+        secret = base64.b64decode("whsec_3f9d2a8c".partition("_")[2])
+        signed_content = (
+            b"msg_5fXn0.1731634200."
+            b'{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+        )
+        signature = base64.urlsafe_b64encode(hmac_sha256_digest(secret, signed_content)).decode(
+            "ascii"
+        )
+        expected = base64.urlsafe_b64encode(_stdlib_hmac_digest(secret, signed_content)).decode(
+            "ascii"
+        )
+        assert signature == expected
+        # The verify compare is compare_digest, never ==: the honest
+        # signature verifies True, a tampered payload's does not.
+        assert hmac_module.compare_digest(signature, expected)
+        tampered = base64.urlsafe_b64encode(
+            hmac_sha256_digest(secret, signed_content + b"!")
+        ).decode("ascii")
+        assert not hmac_module.compare_digest(signature, tampered)
+
+    def test_advisory_lock_int_from_digest_prefix(self) -> None:
+        # The advisory-lock shape: a stable 64-bit int for an arbitrary
+        # resource name, sliced off the digest's first 8 bytes (big-endian)
+        # — the spelling a caller uses to map names onto a database's
+        # signed-64-bit lock identifier space.
+        for name in ("tenant:42:resource:7", "db:migration:2026-09-13", "locks/shard/3"):
+            raw = name.encode("utf-8")
+            lock_id = int.from_bytes(sha256_digest(raw)[:8], "big")
+            assert lock_id == int.from_bytes(hashlib.sha256(raw).digest()[:8], "big")
+            assert 0 <= lock_id < 2**64
+            # a str name hashes to the same lock int as its UTF-8 bytes
+            assert lock_id == int.from_bytes(sha256_digest(name)[:8], "big")
+
+    def test_labelled_digest_chaining_derivation(self) -> None:
+        # The HKDF-style labelled derivation shape: a subkey is
+        # hmac(hmac(root, label), data) — a digest fed back in as the key,
+        # the chain key-derivation call sites build. The label is a str,
+        # the root key bytes: both spellings of the str|bytes contract in
+        # one consumer shape.
+        root = b"root-key-material-32-bytes-long!!"
+        label = "tors/db-session-key"
+        data = "user:42:session:8f3a"
+        derived = hmac_sha256_digest(hmac_sha256_digest(root, label), data)
+        stdlib = hmac_module.new(
+            hmac_module.new(root, label.encode("utf-8"), hashlib.sha256).digest(),
+            data.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        assert derived == stdlib
+        # domain separation: a different label derives a different subkey
+        assert derived != hmac_sha256_digest(hmac_sha256_digest(root, "tors/cache-key"), data)

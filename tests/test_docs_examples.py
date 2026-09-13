@@ -182,6 +182,45 @@ class TestHashingExamples:
         # the declared-ETag comparison the doc shows
         assert tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"
 
+    def test_webhook_b64_signature_example(self) -> None:
+        # the api.md raw-digest subsection's base64-signature webhook
+        # example, pinned the same way: the digest spelling,
+        # urlsafe-b64-encoded, and the compare_digest verification the doc
+        # shows (never ==, in any signature-verification example)
+        import base64
+        import hmac as hmac_module
+
+        secret = base64.b64decode("whsec_3f9d2a8c".partition("_")[2])
+        # the doc spells this as a str + .encode("utf-8"); the literal here
+        # is the same bytes
+        signed_content = (
+            b"msg_5fXn0.1731634200."
+            b'{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+        )
+        signature = base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content))
+        assert signature == b"q8IyxOXFC_mgdZj-GSqtTl2vj3eTIgMM0HQQ-FfRQVw="
+        assert hmac_module.compare_digest(
+            signature,
+            base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content)),
+        )
+
+    def test_advisory_lock_int_example(self) -> None:
+        # the api.md digest-sliced advisory-lock int, pinned to the doc's
+        # literal
+        lock_id = int.from_bytes(tors.sha256_digest("tenant:42:resource:7")[:8], "big")
+        assert lock_id == 15284293306093710542
+
+    def test_labelled_derivation_chain_example(self) -> None:
+        # the api.md labelled derivation chain, pinned to the doc's hex
+        # literal
+        root = b"root-key-material"
+        subkey = tors.hmac_sha256_digest(
+            tors.hmac_sha256_digest(root, "tors/db-session-key"), "user:42"
+        )
+        assert subkey.hex() == (
+            "cc3ccddeaa0718afe52e67b9011b49dfe29ae01571495a75e17eea1f59f6e7b6"
+        )
+
 
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:

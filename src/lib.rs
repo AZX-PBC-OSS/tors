@@ -217,18 +217,24 @@
 //! dicts for the diagnostics flavor.
 //!
 //! The one-shot hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/
-//! `sha512_hex`/`hmac_sha256_hex`) adds no residue class at all: each
-//! argument pays the standard str-in borrow class (zero-copy for
+//! `sha512_hex`/`hmac_sha256_hex` and their raw-digest twins
+//! `md5_digest`/`sha1_digest`/`sha256_digest`/`sha512_digest`/
+//! `hmac_sha256_digest`) adds no residue class at all: each argument
+//! pays the standard str-in borrow class (zero-copy for
 //! ASCII/cached str inputs, the one-time O(input) UTF-8 materialization on
 //! the first non-ASCII call) or the zero-copy immutable `PyBytes` borrow
 //! (the bytes-in family: no materialization class exists for bytes, and
 //! exactly-`bytes` is the doctrine — a `bytearray`/`memoryview` is a
 //! TypeError rather than a copy the detached read would race), then the
-//! whole digest computation AND the hex formatting run under one
-//! `py.detach`, and the residue reduces to marshalling one short `String`
-//! (O(32..128), fixed by algorithm, three orders of magnitude under the
-//! 10ms ping floor at every input size). `hmac_sha256_hex` borrows two
-//! arguments under the GIL and runs the keyed digest (key derivation
+//! whole digest computation runs under one `py.detach` — the hex
+//! spellings include the O(digest-size) hex formatting inside it, the
+//! digest spellings return the raw bytes — and the residue reduces to
+//! marshalling one short `String` (O(32..128), fixed by algorithm) or
+//! one fixed-size `PyBytes` (the `b64_decode` bytes-return class,
+//! 16/20/32/64 bytes), three orders of magnitude under the
+//! 10ms ping floor at every input size. `hmac_sha256_hex` and
+//! `hmac_sha256_digest` borrow two
+//! arguments under the GIL and run the keyed digest (key derivation
 //! included) under the same single detach. The honest hashlib
 //! comparison, measured: CPython's own `hashlib` releases the GIL for
 //! updates of 2048+ bytes (the `_hashlib` threshold), so at multi-MiB
@@ -545,6 +551,11 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
     m.add_function(wrap_pyfunction!(sha512_hex, m)?)?;
     m.add_function(wrap_pyfunction!(hmac_sha256_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(md5_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha1_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha256_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha512_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(hmac_sha256_digest, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_cdc, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text_iter, m)?)?;

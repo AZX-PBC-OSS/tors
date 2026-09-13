@@ -1,6 +1,8 @@
 //! One-shot text/byte hashing: the pure-Rust cores of `tors.md5_hex`,
 //! `tors.sha1_hex`, `tors.sha256_hex`, `tors.sha512_hex`, and
-//! `tors.hmac_sha256_hex`.
+//! `tors.hmac_sha256_hex`, and of their raw-digest twins `tors.md5_digest`,
+//! `tors.sha1_digest`, `tors.sha256_digest`, `tors.sha512_digest`, and
+//! `tors.hmac_sha256_digest`.
 //!
 //! # Why this module exists
 //!
@@ -13,7 +15,12 @@
 //! `finalize` already hashes, but only as the tail of its normalize
 //! pipeline; this module is the same digest computation without the
 //! transform, over exactly the bytes (or UTF-8 of the str) the caller
-//! supplies.
+//! supplies. Each algorithm computes its digest ONCE and offers two
+//! output spellings over that one computation: the raw bytes (the
+//! `*_digest` functions — the call sites that base64-encode a signature,
+//! chain a digest back in as a key, or slice a stable int off the front)
+//! and the lowercase hex (the `*_hex` functions, the cache-key/ETag/
+//! request-ID spelling).
 //!
 //! # Engines: RustCrypto, nothing hand-rolled
 //!
@@ -28,23 +35,24 @@
 //!
 //! # Security scope (md5 and sha1)
 //!
-//! `md5_hex` and `sha1_hex` are checksum/legacy-interop primitives only:
-//! Content-MD5, S3 ETags, cache-busting, quick equality checks. Both are
-//! broken for security purposes and have been since the 2000s (practical
-//! md5 collisions since 2004; sha1's first public collision in 2017).
-//! Never use either for signatures, certificates, or password handling:
-//! `sha256_hex`/`sha512_hex`/`hmac_sha256_hex` are the security side of
-//! this module. Every user-facing doc surface that names them carries
-//! this note.
+//! `md5_hex`/`md5_digest` and `sha1_hex`/`sha1_digest` are
+//! checksum/legacy-interop primitives only: Content-MD5, S3 ETags,
+//! cache-busting, quick equality checks. Both are broken for security
+//! purposes and have been since the 2000s (practical md5 collisions
+//! since 2004; sha1's first public collision in 2017). Never use either
+//! for signatures, certificates, or password handling:
+//! `sha256`/`sha512`/`hmac_sha256` (either spelling) are the security
+//! side of this module. Every user-facing doc surface that names them
+//! carries this note.
 //!
 //! # Stateless one-shot only
 //!
 //! Each function hashes its whole input in one call and returns the
-//! lowercase-hex digest. There is deliberately no streaming update
-//! surface and no hash object: tors is stateless by charter
-//! (docs/design.md), and a `hashlib`-style constructor object is exactly
-//! the persistent-handle shape that charter cuts (the two measured
-//! exceptions, `CompiledPatterns`/`CompiledLemmaDict`, exist for
+//! digest — raw bytes or lowercase hex. There is deliberately no
+//! streaming update surface and no hash object: tors is stateless by
+//! charter (docs/design.md), and a `hashlib`-style constructor object is
+//! exactly the persistent-handle shape that charter cuts (the two
+//! measured exceptions, `CompiledPatterns`/`CompiledLemmaDict`, exist for
 //! per-call re-materialization costs a digest object does not have:
 //! `hashlib.sha256()` construction is O(1)). A caller hashing a stream
 //! hashes chunk digests and combines them (the `merkle_root` shape), or
@@ -56,10 +64,12 @@
 //! The pyo3 wrappers (src/py/hash.rs) borrow the arguments under the GIL
 //! (the standard str-in class for a `str`, the zero-copy immutable
 //! `PyBytes` borrow for `bytes`) and run the whole digest computation —
-//! update, finalize, and the O(digest-size) hex formatting — under one
-//! `py.detach`, marshalling the hex `String` after. The GIL-held residue
-//! is the argument borrow plus O(output) marshalling; see the crate GIL
-//! model in src/lib.rs.
+//! update and finalize, plus the O(digest-size) hex formatting on the
+//! `*_hex` spellings — under one `py.detach`. The GIL-held residue is
+//! the argument borrow plus O(output) marshalling: one short `String`
+//! for the hex spellings, one fixed-size `PyBytes` for the digest
+//! spellings (the `b64_decode` bytes-return class, 16/20/32/64 bytes
+//! fixed by algorithm); see the crate GIL model in src/lib.rs.
 
 use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
@@ -70,41 +80,69 @@ use sha2::{Digest, Sha256, Sha512};
 /// AWS SigV4-style HMAC chains, API auth).
 type HmacSha256 = Hmac<Sha256>;
 
-/// MD5 of `data`, lowercase hex. CHECKSUM/ETAG/LEGACY-INTEROP ONLY, never
-/// security: see the module doc.
+/// MD5 raw digest of `data`, 16 bytes. CHECKSUM/ETAG/LEGACY-INTEROP
+/// ONLY, never security: see the module doc.
+pub fn md5_digest(data: &[u8]) -> [u8; 16] {
+    Md5::digest(data).into()
+}
+
+/// MD5 of `data`, lowercase hex: `md5_digest`, hex-encoded.
 pub fn md5_hex(data: &[u8]) -> String {
-    const_hex::encode(Md5::digest(data))
+    const_hex::encode(md5_digest(data))
 }
 
-/// SHA-1 of `data`, lowercase hex. CHECKSUM/LEGACY-INTEROP ONLY, never
-/// security: see the module doc.
+/// SHA-1 raw digest of `data`, 20 bytes. CHECKSUM/LEGACY-INTEROP ONLY,
+/// never security: see the module doc.
+pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
+    Sha1::digest(data).into()
+}
+
+/// SHA-1 of `data`, lowercase hex: `sha1_digest`, hex-encoded.
 pub fn sha1_hex(data: &[u8]) -> String {
-    const_hex::encode(Sha1::digest(data))
+    const_hex::encode(sha1_digest(data))
 }
 
-/// SHA-256 of `data`, lowercase hex: the same engine `finalize`'s tail and
-/// `merkle_root`'s leaves use, byte-identical to
-/// `hashlib.sha256(data).hexdigest()`.
+/// SHA-256 raw digest of `data`, 32 bytes: the same engine `finalize`'s
+/// tail and `merkle_root`'s leaves use, byte-identical to
+/// `hashlib.sha256(data).digest()`.
+pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
+}
+
+/// SHA-256 of `data`, lowercase hex: `sha256_digest`, hex-encoded —
+/// byte-identical to `hashlib.sha256(data).hexdigest()`.
 pub fn sha256_hex(data: &[u8]) -> String {
-    const_hex::encode(Sha256::digest(data))
+    const_hex::encode(sha256_digest(data))
 }
 
-/// SHA-512 of `data`, lowercase hex.
+/// SHA-512 raw digest of `data`, 64 bytes.
+pub fn sha512_digest(data: &[u8]) -> [u8; 64] {
+    Sha512::digest(data).into()
+}
+
+/// SHA-512 of `data`, lowercase hex: `sha512_digest`, hex-encoded.
 pub fn sha512_hex(data: &[u8]) -> String {
-    const_hex::encode(Sha512::digest(data))
+    const_hex::encode(sha512_digest(data))
 }
 
-/// HMAC-SHA-256 of `data` under `key`, lowercase hex: byte-identical to
-/// `hmac.new(key, data, hashlib.sha256).hexdigest()`. Any key length is
+/// HMAC-SHA-256 raw digest of `data` under `key`, 32 bytes: byte-identical
+/// to `hmac.new(key, data, hashlib.sha256).digest()`. Any key length is
 /// legal, empty included (parity with the stdlib spelling): HMAC pads
 /// short keys and hashes long ones (RFC 2104), so `new_from_slice` cannot
 /// fail for `Hmac` — the same expectation hmac's own `KeyInit::new` impl
 /// carries (verified against the vendored hmac 0.13.0 source, not just
 /// its docs).
-pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
+pub fn hmac_sha256_digest(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
     mac.update(data);
-    const_hex::encode(mac.finalize().into_bytes())
+    mac.finalize().into_bytes().into()
+}
+
+/// HMAC-SHA-256 of `data` under `key`, lowercase hex:
+/// `hmac_sha256_digest`, hex-encoded — byte-identical to
+/// `hmac.new(key, data, hashlib.sha256).hexdigest()`.
+pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
+    const_hex::encode(hmac_sha256_digest(key, data))
 }
 
 #[cfg(test)]
@@ -241,6 +279,67 @@ mod tests {
         assert_eq!(
             hmac_sha256_hex(&[0u8; 64], b"data"),
             hmac_sha256_hex(b"", b"data")
+        );
+    }
+
+    #[test]
+    fn hex_spellings_are_the_digest_spellings_hex_encoded() {
+        // The one-digest-two-spellings invariant this module's shape
+        // promises (the hex path consumes the digest path, no second
+        // computation): pinned crate-side over a small battery, the
+        // Python-side hypothesis lane pins it differentially.
+        let inputs: [&[u8]; 5] = [
+            b"",
+            b"a",
+            b"abc",
+            &[0x00, 0xff, 0x7f],
+            b"The quick brown fox jumps over the lazy dog",
+        ];
+        for raw in inputs {
+            assert_eq!(md5_hex(raw), const_hex::encode(md5_digest(raw)));
+            assert_eq!(sha1_hex(raw), const_hex::encode(sha1_digest(raw)));
+            assert_eq!(sha256_hex(raw), const_hex::encode(sha256_digest(raw)));
+            assert_eq!(sha512_hex(raw), const_hex::encode(sha512_digest(raw)));
+            assert_eq!(
+                hmac_sha256_hex(b"key", raw),
+                const_hex::encode(hmac_sha256_digest(b"key", raw))
+            );
+        }
+    }
+
+    #[test]
+    fn digest_spellings_pin_the_primary_source_vectors_raw() {
+        // The empty-input and "abc" vectors in their raw-byte form: the
+        // fixed-size return types are the length pins (16/20/32/64), and
+        // these bytes are the same RFC 1321 / FIPS 180-4 / RFC 4231
+        // constants the hex tests pin, decoded. (The decode result sits
+        // on the left of each compare: std implements
+        // `PartialEq<[u8; N]> for Vec<u8>`, not the reverse.)
+        assert_eq!(
+            const_hex::decode("d41d8cd98f00b204e9800998ecf8427e").unwrap(),
+            md5_digest(b"")
+        );
+        assert_eq!(
+            const_hex::decode("a9993e364706816aba3e25717850c26c9cd0d89d").unwrap(),
+            sha1_digest(b"abc")
+        );
+        assert_eq!(
+            const_hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap(),
+            sha256_digest(b"")
+        );
+        assert_eq!(
+            const_hex::decode(
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                 2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+            )
+            .unwrap(),
+            sha512_digest(b"abc")
+        );
+        assert_eq!(
+            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+                .unwrap(),
+            hmac_sha256_digest(b"Jefe", b"what do ya want for nothing?")
         );
     }
 }

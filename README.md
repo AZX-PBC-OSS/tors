@@ -128,7 +128,7 @@ actually return.
 
 ## What's inside
 
-88 functions plus two small helper classes and five pinned charset constants,
+93 functions plus two small helper classes and five pinned charset constants,
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
 edge cases are in the [API reference](docs/api.md).
@@ -137,7 +137,7 @@ edge cases are in the [API reference](docs/api.md).
 |---|---|
 | Unicode normalization & forms | `normalize`, `finalize`, `nfc`/`nfd`/`nfkc`/`nfkd`, `html_unescape`, `strip_controls` |
 | UTF-8 / UTF-16 / base64 codecs | `decode_utf8`, `finalize_utf8`, `utf8_is_valid`, `decode_utf16`, `utf16_is_valid`, `b64_encode_bytes`, `b64_decode`, `detect_encoding` |
-| Hashing & request signing | `md5_hex`, `sha1_hex`, `sha256_hex`, `sha512_hex`, `hmac_sha256_hex` (md5/sha1: checksum/legacy-interop only, broken for security since the 2000s — never signatures, certificates, or passwords) |
+| Hashing & request signing | `md5_hex`, `sha1_hex`, `sha256_hex`, `sha512_hex`, `hmac_sha256_hex` + raw-digest `_digest` twins (md5/sha1: checksum/legacy-interop only, broken for security since the 2000s — never signatures, certificates, or passwords) |
 | Text segmentation (UAX #29) | `grapheme_count`, `word_bounds`(+`_iter`), `word_count`, `sentence_bounds`(+`_iter`), `sentence_count` |
 | Diffing (`difflib`-compatible) | `diff_opcodes`, `diff_opcodes_lines` |
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |

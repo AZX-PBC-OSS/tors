@@ -103,7 +103,8 @@ otherwise use:
 ## One-shot hashing vs hashlib, honestly measured
 
 The hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
-`hmac_sha256_hex`) is the one tors family where the stdlib alternative is
+`hmac_sha256_hex`, each with a raw-digest `_digest` twin) is the one tors
+family where the stdlib alternative is
 C-native and fast, so the honest tables, measured (Apple Silicon, ambient
 load ~8-10, min-of-3 after warmup, prose corpus bytes; the ledger cells are
 `tests/test_performance.py`'s). `md5_hex` and `sha1_hex` are
@@ -111,7 +112,10 @@ checksum/legacy-interop primitives only, never security: both are broken
 for security since the 2000s (practical md5 collisions date to 2004,
 sha1's first public collision to 2017) — their cells below are the
 Content-MD5/ETag/quick-compare jobs, never signatures, certificates, or
-passwords.
+passwords. The `_digest` spellings are each `_hex` twin's computation
+minus the hex tail (same digest, the O(digest-size) hex formatting and
+its marshalling dropped for one fixed-size bytes return), so the tables
+below cover them unchanged — no separate cells.
 
 - Raw digest throughput, tors vs `hashlib` (OpenSSL, hardware SHA
   extensions): **hashlib wins or ties every engine-dominated cell** —

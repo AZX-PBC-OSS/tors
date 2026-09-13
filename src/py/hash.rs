@@ -4,8 +4,9 @@ use pyo3::types::{PyBytes, PyString};
 
 use crate::hash_impl;
 
-/// The str|bytes argument contract shared by all five hashing wrappers,
-/// in the `_borrow.rs` run-closure shape (the borrows pyo3's extraction
+/// The str|bytes argument contract shared by all ten hashing wrappers
+/// (the five `_hex` spellings and their `_digest` twins), in the
+/// `_borrow.rs` run-closure shape (the borrows pyo3's extraction
 /// hands back are tied to the handle they came from, so a helper that
 /// returned them would be returning a value referencing data it also
 /// owns — running `run` inside the scope that owns the handles solves
@@ -133,6 +134,100 @@ pub fn hmac_sha256_hex(
     with_str_or_bytes("key", &key, |key_bytes| {
         with_str_or_bytes("data", &data, |data_bytes| {
             Ok(py.detach(|| hash_impl::hmac_sha256_hex(key_bytes, data_bytes)))
+        })
+    })
+}
+
+/// `tors.md5_digest(data: str | bytes) -> bytes`: MD5 as the raw 16-byte
+/// digest, the same one-detach computation as `md5_hex` without the hex
+/// tail — the spelling for call sites that want the bytes themselves
+/// (content thumbprints, digest-sliced ints). **Checksum/ETag/
+/// legacy-interop only, never security**, exactly like `md5_hex` (md5
+/// has had practical collisions since 2004). Argument contract identical
+/// to `md5_hex`'s (str is its UTF-8 bytes; exactly-`bytes` in; a lone
+/// surrogate raises UnicodeEncodeError at the borrow).
+///
+/// GIL model: borrow under the GIL; the digest under one `py.detach`;
+/// the fixed 16-byte `PyBytes` marshalled after (the `b64_decode`
+/// bytes-return class).
+#[pyfunction]
+pub fn md5_digest(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+    with_str_or_bytes("data", &data, |bytes| {
+        let digest = py.detach(|| hash_impl::md5_digest(bytes));
+        Ok(PyBytes::new(py, &digest).unbind())
+    })
+}
+
+/// `tors.sha1_digest(data: str | bytes) -> bytes`: SHA-1 as the raw
+/// 20-byte digest, `sha1_hex`'s engine without the hex tail.
+/// **Checksum/legacy-interop only, never security**, exactly like
+/// `sha1_hex` (first practical collision published 2017). Argument
+/// contract identical to `md5_digest`'s.
+///
+/// GIL model: identical to `md5_digest`'s (20-byte marshalling).
+#[pyfunction]
+pub fn sha1_digest(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+    with_str_or_bytes("data", &data, |bytes| {
+        let digest = py.detach(|| hash_impl::sha1_digest(bytes));
+        Ok(PyBytes::new(py, &digest).unbind())
+    })
+}
+
+/// `tors.sha256_digest(data: str | bytes) -> bytes`: SHA-256 as the raw
+/// 32-byte digest — the same engine `finalize`'s hash tail and
+/// `merkle_root`'s leaves use, byte-identical to
+/// `hashlib.sha256(...).digest()`, without the hex tail. The spelling
+/// for the raw-digest call sites: signature schemes that base64-encode
+/// the digest, key-derivation chains that feed a digest back in as a
+/// key, advisory-lock ints sliced off the front. Argument contract
+/// identical to `md5_digest`'s.
+///
+/// GIL model: identical to `md5_digest`'s (32-byte marshalling).
+#[pyfunction]
+pub fn sha256_digest(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+    with_str_or_bytes("data", &data, |bytes| {
+        let digest = py.detach(|| hash_impl::sha256_digest(bytes));
+        Ok(PyBytes::new(py, &digest).unbind())
+    })
+}
+
+/// `tors.sha512_digest(data: str | bytes) -> bytes`: SHA-512 as the raw
+/// 64-byte digest, `sha512_hex`'s engine without the hex tail. Argument
+/// contract identical to `md5_digest`'s.
+///
+/// GIL model: identical to `md5_digest`'s (64-byte marshalling).
+#[pyfunction]
+pub fn sha512_digest(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+    with_str_or_bytes("data", &data, |bytes| {
+        let digest = py.detach(|| hash_impl::sha512_digest(bytes));
+        Ok(PyBytes::new(py, &digest).unbind())
+    })
+}
+
+/// `tors.hmac_sha256_digest(key: str | bytes, data: str | bytes) ->
+/// bytes`: HMAC-SHA-256 as the raw 32-byte digest, `hmac_sha256_hex`'s
+/// engine without the hex tail — the spelling the base64-encoding
+/// webhook schemes want (`urlsafe_b64encode(hmac_sha256_digest(key,
+/// body))`, compared with `hmac.compare_digest`) and the derivation
+/// chains feed back in as a key. Byte-identical to
+/// `hmac.new(key, data, hashlib.sha256).digest()`. Each argument gets
+/// `md5_digest`'s str|bytes contract independently; any key length is
+/// legal, empty included; the key is borrowed and validated before the
+/// data.
+///
+/// GIL model: both borrows under the GIL; the whole keyed digest (key
+/// derivation included) under one `py.detach`; the fixed 32-byte
+/// `PyBytes` marshalled after.
+#[pyfunction]
+pub fn hmac_sha256_digest(
+    py: Python<'_>,
+    key: Bound<'_, PyAny>,
+    data: Bound<'_, PyAny>,
+) -> PyResult<Py<PyBytes>> {
+    with_str_or_bytes("key", &key, |key_bytes| {
+        with_str_or_bytes("data", &data, |data_bytes| {
+            let digest = py.detach(|| hash_impl::hmac_sha256_digest(key_bytes, data_bytes));
+            Ok(PyBytes::new(py, &digest).unbind())
         })
     })
 }

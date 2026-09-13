@@ -2544,7 +2544,7 @@ tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
 # [2, 3]: every trailing index beyond the shorter list's length
 ```
 
-## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex`
+## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex` and their `_digest` twins
 
 ```python
 def md5_hex(data: str | bytes) -> str: ...        # 32 lowercase hex chars
@@ -2552,31 +2552,50 @@ def sha1_hex(data: str | bytes) -> str: ...       # 40
 def sha256_hex(data: str | bytes) -> str: ...     # 64
 def sha512_hex(data: str | bytes) -> str: ...     # 128
 def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...  # 64
+
+def md5_digest(data: str | bytes) -> bytes: ...   # 16 raw digest bytes
+def sha1_digest(data: str | bytes) -> bytes: ...  # 20
+def sha256_digest(data: str | bytes) -> bytes: ...  # 32
+def sha512_digest(data: str | bytes) -> bytes: ...  # 64
+def hmac_sha256_digest(key: str | bytes, data: str | bytes) -> bytes: ...  # 32
 ```
 
-The one-shot hashing primitives a text pipeline keeps reaching for:
-webhook signature verification and API auth (`hmac_sha256_hex` — the
-GitHub/Stripe/Slack HMAC-SHA-256 convention), ETag and Content-MD5 checks
-against object stores (`md5_hex`), quick content compares and
-legacy-interop digests (`sha1_hex`), and dedup-cache keys / content
-addressing (`sha256_hex`/`sha512_hex` — the same engine `finalize`'s hash
-tail and `merkle_root`'s leaves use, without the normalize stage). Every
+The one-shot hashing primitives a text pipeline keeps reaching for, each
+algorithm in two output spellings over ONE digest computation: the
+lowercase-hex `_hex` names and the raw-digest-bytes `_digest` names. The
+hex spellings are the cache-key/ETag/request-ID shapes: webhook signature
+verification and API auth (`hmac_sha256_hex`, the GitHub/Stripe/Slack
+HMAC-SHA-256 convention), ETag and Content-MD5 checks against object
+stores (`md5_hex`), quick content compares and legacy-interop digests
+(`sha1_hex`), and dedup-cache keys / content addressing
+(`sha256_hex`/`sha512_hex` — the same engine `finalize`'s hash tail and
+`merkle_root`'s leaves use, without the normalize stage). The digest
+spellings serve the call sites that want the bytes themselves: signature
+schemes that base64-encode the digest, key-derivation chains that feed a
+digest back in as a key, certificate/content thumbprints, advisory-lock
+ints sliced off the front — see
+[Raw digest bytes](#raw-digest-bytes-the-_digest-spellings). Every
 algorithm is the maintained RustCrypto implementation (`md-5`, `sha1`,
 `sha2`, `hmac`); nothing is hand-rolled, the same dependency policy as the
-rest of the crate. Byte-identical to the stdlib spellings —
+rest of the crate. Byte-identical to the stdlib spellings in both output
+shapes —
 `tors.sha256_hex(data) == hashlib.sha256(data).hexdigest()`,
+`tors.sha256_digest(data) == hashlib.sha256(data).digest()`,
 `tors.hmac_sha256_hex(key, data) == hmac.new(key, data,
-hashlib.sha256).hexdigest()` — pinned by exact differentials over
-hypothesis corpora plus the primary-source known-answer vectors (RFC 1321,
-FIPS 180-4, RFC 4231's every HMAC-SHA-256 case) in `tests/test_hash.py`.
+hashlib.sha256).hexdigest()` — and internally one computation:
+`tors.sha256_hex(data) == tors.sha256_digest(data).hex()`. All pinned by
+exact differentials over hypothesis corpora plus the primary-source
+known-answer vectors (RFC 1321, FIPS 180-4, RFC 4231's every
+HMAC-SHA-256 case) in `tests/test_hash.py`.
 
-**`md5_hex` and `sha1_hex` are checksum/legacy-interop primitives, never
-security primitives.** Both are broken and have been since the 2000s:
-practical md5 collisions date to 2004, sha1's first public collision to
-2017 (Google's SHAttered). Use them for Content-MD5, S3 ETags,
-cache-busting, rsync-style quick compares — never for signatures,
-certificates, or password handling. The security side of this surface is
-`sha256_hex`/`sha512_hex`/`hmac_sha256_hex`.
+**`md5_hex`/`md5_digest` and `sha1_hex`/`sha1_digest` are
+checksum/legacy-interop primitives, never security primitives — either
+spelling.** Both are broken and have been since the 2000s: practical md5
+collisions date to 2004, sha1's first public collision to 2017 (Google's
+SHAttered). Use them for Content-MD5, S3 ETags, cache-busting,
+rsync-style quick compares — never for signatures, certificates, or
+password handling. The security side of this surface is
+`sha256`/`sha512`/`hmac_sha256`, either spelling.
 
 **str input is its UTF-8 bytes, on purpose.** `hashlib` raises TypeError on
 str and makes every caller spell `s.encode("utf-8")` first; tors takes the
@@ -2591,10 +2610,12 @@ tests/test_b64.py). Any input length is legal, empty included (the
 empty-input digests are pinned known-answer vectors); there are no
 ValueError paths on this surface.
 
-**Stateless one-shot only.** No hash object, no streaming update surface:
-tors is stateless by charter ([Design and scope](design.md)), and a
-`hashlib`-style constructor object is exactly the persistent-handle shape
-that charter cuts (the two measured exceptions, `CompiledPatterns` and
+**Stateless one-shot only — streaming/incremental hashing is out of
+scope by charter.** No hash object, no streaming update surface: every
+spelling here hashes its whole input in one call, and tors is stateless
+by charter ([Design and scope](design.md)), so a `hashlib`-style
+constructor object is exactly the persistent-handle shape that charter
+cuts (the two measured exceptions, `CompiledPatterns` and
 `CompiledLemmaDict`, exist for per-call re-materialization costs a digest
 object doesn't have: `hashlib.sha256()` construction is O(1)). A caller
 hashing a stream hashes chunk digests and combines them (the
@@ -2602,9 +2623,12 @@ hashing a stream hashes chunk digests and combines them (the
 feeding, `hashlib`'s object API is the right tool and is not duplicated.
 
 **GIL model.** The argument borrow (zero-copy for ASCII/cached str, for
-bytes always) runs under the GIL; the whole digest computation — update,
-finalize, and the O(digest-size) hex formatting — runs under one
-`py.detach`; one short hex string is marshalled back. The honest
+bytes always) runs under the GIL; the whole digest computation — update
+and finalize, plus the O(digest-size) hex formatting on the `_hex`
+spellings — runs under one `py.detach`. The GIL-held residue is the
+marshalling of one short hex string (the `_hex` names) or one fixed-size
+`PyBytes` of 16/20/32/64 bytes (the `_digest` names — the
+`b64_decode` bytes-return class). The honest
 comparison with `hashlib`, measured (Apple Silicon, min-of-3):
 CPython's `hashlib` releases the GIL for digest updates of 2048+ bytes
 (the `_hashopenssl` threshold), so at multi-MiB sizes the stdlib is
@@ -2622,7 +2646,93 @@ cost the stdlib makes you pay), and HMAC at request-signature sizes at
 (`hmac.digest(key, data, "sha256").hex()`). Full tables:
 [Performance](performance.md).
 
-A webhook-verification shape (the `str` key and payload spell exactly how
+### Raw digest bytes: the `_digest` spellings
+
+The five `_digest` names return the digest as raw `bytes` — the same
+engines, the same single detach, the same contracts as their `_hex`
+twins (str input is its UTF-8 bytes; exactly-`bytes` in, so
+`bytearray`/`memoryview` raise TypeError; a lone surrogate raises
+UnicodeEncodeError at the borrow; any key length legal, empty included;
+the key borrowed and validated before the data; empty input legal) —
+without the hex tail. One digest computation per call, two output
+spellings to choose from; `tors.md5_digest(x)` is exactly
+`bytes.fromhex(tors.md5_hex(x))`.
+
+The raw bytes are what a second consumer layer wants, the shapes a
+hex string forces to decode first:
+
+- **Base64 webhook signatures.** The webhook schemes that sign with
+  HMAC and *base64*-encode the digest (not hex) need
+  `hmac_sha256_digest`: `urlsafe_b64encode` over the raw 32 bytes is
+  the signature, verified with `hmac.compare_digest` (below).
+- **Key derivation chains.** A labelled subkey is a digest fed back in
+  as an HMAC key — `hmac_sha256_digest(hmac_sha256_digest(root,
+  label), data)` — the HKDF-style extract/expand shape; a hex string
+  would have to be decoded before every link.
+- **Content/certificate thumbprints and digest-sliced ints.** A
+  stable identifier for an arbitrary name — an advisory-lock int
+  (`int.from_bytes(sha256_digest(name)[:8], "big")`) or a thumbprint
+  key — is a slice or re-encoding of the raw bytes.
+
+`md5_digest` and `sha1_digest` carry their twins' warning verbatim:
+checksum/legacy-interop only, never security. And the streaming
+boundary above is the whole family's: the `_digest` spellings are
+one-shot too — there is no incremental feeding surface on either
+spelling, by charter.
+
+A base64-signature webhook verification, the `hmac_sha256_digest`
+shape (the secret is the bytes after the `whsec_` prefix; the signed
+content is `"{msg_id}.{timestamp}.{payload}"`; the verify compare is
+`hmac.compare_digest`, never `==`):
+
+```python
+import base64
+import hmac as hmac_module
+import tors
+
+secret = base64.b64decode("whsec_3f9d2a8c".partition("_")[2])
+signed_content = (
+    "msg_5fXn0.1731634200."
+    '{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+).encode("utf-8")
+
+signature = base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content))
+# b'q8IyxOXFC_mgdZj-GSqtTl2vj3eTIgMM0HQQ-FfRQVw='
+
+hmac_module.compare_digest(
+    signature,
+    base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content)),
+)
+# True
+```
+
+A digest-sliced advisory-lock int (the stable-identifier shape: a
+64-bit int for an arbitrary resource name):
+
+```python
+import tors
+
+lock_id = int.from_bytes(tors.sha256_digest("tenant:42:resource:7")[:8], "big")
+# 15284293306093710542
+```
+
+A labelled derivation chain (the extract-then-expand shape: the label
+derives an intermediate key, the data expands it — both links consume
+the raw digest bytes):
+
+```python
+import tors
+
+root = b"root-key-material"
+subkey = tors.hmac_sha256_digest(
+    tors.hmac_sha256_digest(root, "tors/db-session-key"), "user:42"
+)
+subkey.hex()  # the 32 raw bytes, hex for inspection
+# "cc3ccddeaa0718afe52e67b9011b49dfe29ae01571495a75e17eea1f59f6e7b6"
+```
+
+A webhook-verification shape with the hex spelling, for the schemes that
+compare hex signatures (the `str` key and payload spell exactly how
 they arrive off the wire; `hmac.compare_digest` stays the right compare):
 
 ```python

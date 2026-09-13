@@ -75,7 +75,8 @@ The cuts below are decisions, not oversights:
   exception.
 - **Streaming hash objects / an open-ended digest registry.** The hashing
   surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
-  `hmac_sha256_hex`) is a closed set of named one-shot functions, not a
+  `hmac_sha256_hex`, each with a raw-digest `_digest` twin) is a closed
+  set of named one-shot functions, not a
   `hashlib`-style object API: tors is stateless by charter, and a
   constructor-plus-`update()` object is exactly the persistent-handle
   shape that charter cuts (`hashlib.sha256()` construction is O(1), so
@@ -85,8 +86,11 @@ The cuts below are decisions, not oversights:
   for incremental feeding `hashlib`'s object API already exists and is not
   duplicated. The algorithm set is closed for the same reason every
   surface here is: each addition is a permanent compatibility and
-  maintenance commitment, and the five cover the request-signing and
-  content-check jobs a text pipeline actually has (anything keyed to a
+  maintenance commitment, and the five algorithms — two output spellings
+  each, hex and raw digest bytes, the latter for the base64-signature,
+  derivation-chain, and thumbprint/lock-int call sites — cover the
+  request-signing and content-check jobs a text pipeline actually has
+  (anything keyed to a
   newer digest is a security-primitive decision, not a text-ops one). The
   engines are the maintained RustCrypto crates (`md-5`, `sha1`, `sha2`,
   `hmac`), nothing hand-rolled — a digest implementation is the worst
@@ -96,10 +100,11 @@ The cuts below are decisions, not oversights:
 
 ## Limitations
 
-- **`md5_hex` and `sha1_hex` are not security primitives.** Checksum /
+- **`md5_hex`/`md5_digest` and `sha1_hex`/`sha1_digest` are not security
+  primitives.** Checksum /
   ETag / legacy-interop only: md5 has had practical collisions since 2004
   and sha1 since 2017. The security side of the hashing surface is
-  `sha256_hex`/`sha512_hex`/`hmac_sha256_hex`.
+  `sha256`/`sha512`/`hmac_sha256`, either spelling.
 - **SimHash is not cryptographic.** It is a fast, uniformly-spreading voting
   hash, not a security primitive: two unrelated documents can coincidentally
   land close together, especially on short text, and there is no universal
