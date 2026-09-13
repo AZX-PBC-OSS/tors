@@ -95,4 +95,66 @@ fuzz_target!(|s: &str| {
         .collect();
     let escaped_in = format!("E('x\\nDETAIL:{escaped_payload}')");
     assert_eq!(scrub_log_text(&escaped_in, RuleSet::ALL).as_ref(), "E('x')");
+
+    // Coverage pins (fixed shapes, input-independent): the red-team battery.
+    // \b demote-mark: an Other_Alphabetic mark before the scheme IS a
+    // boundary, so the mask fires (a naive is_alphanumeric check would skip).
+    assert_eq!(
+        scrub_log_text("\u{093e}https://u:pw@h", RuleSet::ALL).as_ref(),
+        "\u{093e}https://u:***@h"
+    );
+    // \x1c..\x1f are Python-\s: they stop the username/password/value
+    // classes exactly where the chain stops.
+    assert_eq!(
+        scrub_log_text("a://u\x1cv:pw@h", RuleSet::ALL).as_ref(),
+        "a://u\x1cv:pw@h"
+    );
+    assert_eq!(
+        scrub_log_text("?password=a\x1cb", RuleSet::ALL).as_ref(),
+        "?password=***\x1cb"
+    );
+    // \r\n escaped DETAIL run twin.
+    assert_eq!(
+        scrub_log_text("E('x\\r\\nDETAIL:secret')", RuleSet::ALL).as_ref(),
+        "E('x')"
+    );
+    // DETAIL-eats-@: canonical order pin — the escaped deletion eats the
+    // `@`, the userinfo mask then has nothing to anchor on (kept for
+    // parity, NOT reordered).
+    assert_eq!(
+        scrub_log_text("pg://u:p\\nDETAIL:x@h')", RuleSet::ALL).as_ref(),
+        "pg://u:p')"
+    );
+    assert_eq!(
+        scrub_log_text("pg://u:p\\nDETAIL:x@h')", RuleSet::URI_USERINFO).as_ref(),
+        "pg://u:***@h')"
+    );
+    // Empty user is a real shape (masked); empty password is not a mask.
+    assert_eq!(
+        scrub_log_text("postgresql://:SECRET@host/db", RuleSet::ALL).as_ref(),
+        "postgresql://:***@host/db"
+    );
+    assert_eq!(
+        scrub_log_text("postgresql://user:@host/db", RuleSet::ALL).as_ref(),
+        "postgresql://user:@host/db"
+    );
+    assert_eq!(
+        scrub_log_text("?password=&x=1", RuleSet::ALL).as_ref(),
+        "?password=&x=1"
+    );
+    // Uppercase scheme alphabet.
+    assert_eq!(
+        scrub_log_text("HTTP://U:PW@H", RuleSet::ALL).as_ref(),
+        "HTTP://U:***@H"
+    );
+    // Uppercase scheme carrying the fuzzer payload.
+    let upper_in = format!("HTTP://U:{payload}@H");
+    assert_eq!(
+        scrub_log_text(&upper_in, RuleSet::ALL).as_ref(),
+        if payload.is_empty() {
+            "HTTP://U:@H"
+        } else {
+            "HTTP://U:***@H"
+        }
+    );
 });

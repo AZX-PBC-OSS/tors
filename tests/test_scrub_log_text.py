@@ -34,6 +34,8 @@ What this gate pins, oracle-derived literal by literal:
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -47,10 +49,7 @@ URI_QUERY = ["uri_query_creds"]
 
 class TestPgDetailLines:
     def test_detail_line_is_deleted_and_a_blank_line_is_left(self) -> None:
-        assert (
-            scrub_log_text("duplicate key\nDETAIL:  Key (id)=(9) exists.")
-            == "duplicate key\n"
-        )
+        assert scrub_log_text("duplicate key\nDETAIL:  Key (id)=(9) exists.") == "duplicate key\n"
 
     def test_crlf_detail_line_consumes_the_carriage_return(self) -> None:
         assert (
@@ -63,9 +62,7 @@ class TestPgDetailLines:
 
     def test_every_detail_line_goes_hint_and_context_stay(self) -> None:
         assert (
-            scrub_log_text(
-                "boom\nDETAIL: one\nHINT: keep\nCONTEXT: keep2\nDETAIL: two\nend"
-            )
+            scrub_log_text("boom\nDETAIL: one\nHINT: keep\nCONTEXT: keep2\nDETAIL: two\nend")
             == "boom\n\nHINT: keep\nCONTEXT: keep2\n\nend"
         )
 
@@ -77,10 +74,7 @@ class TestPgDetailLines:
         assert scrub_log_text("x\nDETAIL: tail") == "x\n"
 
     def test_the_whole_line_to_EOL_goes_not_just_the_word(self) -> None:
-        assert (
-            scrub_log_text("pre\nDETAIL: v and everything to EOL\nHINT: h")
-            == "pre\n\nHINT: h"
-        )
+        assert scrub_log_text("pre\nDETAIL: v and everything to EOL\nHINT: h") == "pre\n\nHINT: h"
 
     def test_detail_line_at_start_of_text(self) -> None:
         assert scrub_log_text("DETAIL: x\ny") == "\ny"
@@ -94,10 +88,7 @@ class TestPgDetailEscaped:
         )
 
     def test_escaped_crlf_boundary_is_consumed_too(self) -> None:
-        assert (
-            scrub_log_text("PostgresError('msg\\r\\nDETAIL: secret')")
-            == "PostgresError('msg')"
-        )
+        assert scrub_log_text("PostgresError('msg\\r\\nDETAIL: secret')") == "PostgresError('msg')"
 
     def test_consecutive_escaped_runs_each_terminate_the_previous(self) -> None:
         assert scrub_log_text("E('a\\nDETAIL: one\\nDETAIL: two')") == "E('a')"
@@ -336,9 +327,7 @@ class TestRulesParameter:
             scrub_log_text("postgres://u:pw@h", rules)  # type: ignore[arg-type]
 
     def test_rules_accepts_keyword_form(self) -> None:
-        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == (
-            "postgres://u:***@h"
-        )
+        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == ("postgres://u:***@h")
 
 
 class TestIdentityReturn:
@@ -408,8 +397,42 @@ _ANY_TEXT = st.text(
 
 def _legal_credential_payload(s: str) -> str:
     """A char run the password/value classes accept: no Python whitespace
-    (``str.isspace`` is exactly ``re.``'s ``\\s`` set), no ``&``, no ``@``."""
+    (``str.isspace`` is exactly ``re.``'s ``\\s`` set — pinned by
+    ``TestCredentialPayloadEquivalence`` below and exhaustively by
+    ``test_space_table_exhaustive`` in test_scrub_log_text_parity.py),
+    no ``&``, no ``@``."""
     return "".join(ch for ch in s if not ch.isspace() and ch not in "&@")
+
+
+class TestCredentialPayloadEquivalence:
+    def test_isspace_is_exactly_re_s_over_the_edge_alphabet(self) -> None:
+        """Pin the helper's core claim without re-paying the 1.1M-char
+        exhaustive loop (that lives in the parity file): over ASCII
+        whitespace, the U+001C..U+001F seam, NBSP/U+2028/ZWSP, and the
+        credential delimiters, ``ch.isspace()`` agrees with ``re \\s`` and
+        the helper keeps a char exactly when ``re``'s password/value
+        classes would accept it."""
+        pat = re.compile(r"\s")
+        edge = [
+            chr(cp)
+            for cp in list(range(0x00, 0x30))
+            + [0x7F, 0xA0, 0x1C, 0x1D, 0x1E, 0x1F, 0x2028, 0x2029, 0x200B, 0x3000, 0x093E, 0x24B6]
+        ]
+        edge += ["&", "@", "a", ":", "/", "?", "=", "*", "p"]
+        for ch in edge:
+            assert ch.isspace() == (pat.match(ch) is not None), repr(ch)
+            assert (ch in _legal_credential_payload(ch)) == (not ch.isspace() and ch not in "&@"), (
+                repr(ch)
+            )
+
+    @given(_ANY_TEXT)
+    @settings(max_examples=200)
+    def test_helper_matches_re_classes_char_by_char(self, text: str) -> None:
+        pat = re.compile(r"\s")
+        for ch in text:
+            assert (ch in _legal_credential_payload(ch)) == (
+                pat.match(ch) is None and ch not in "&@"
+            ), repr(ch)
 
 
 class TestHypothesisInvariants:

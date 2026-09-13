@@ -96,19 +96,19 @@ use memchr::{memchr, memchr2_iter, memmem, memrchr};
 /// "\\w")` (Unicode 16.0.0, the UCD revision this crate's own tables pin;
 /// the crate doctrine applies — on an older interpreter the only possible
 /// divergence is on codepoints that revision leaves unassigned). Regen
-/// recipe, run from the repo root against a new UCD:
+/// recipe (both files vendored under tools/): run step 1 against the
+/// pinned rustc, then step 2 to fold and diff:
 ///
 /// ```text
-/// rustc -O enum.rs   # for cp in 0..=0x10FFFF: if char::from_u32(cp)
-///                   # .is_some_and(|c| c.is_alphanumeric()) { println!("{cp}") }
-/// python - <<'EOF'   # rust set minus re \w set, folded to ranges
-/// import re
-/// word = re.compile(r"\w")
-/// rust = frozenset(int(l) for l in open("rust_alnum.txt"))
-/// demote = sorted((rust | {0x5F}) - {cp for cp in range(0x110000) if word.match(chr(cp))})
-/// # ... fold to (lo, hi) ranges and diff against this table
-/// EOF
+/// rustc -O tools/enum.rs -o /tmp/enum && /tmp/enum > /tmp/rust_alnum.txt
+/// python3 tools/gen_word_demote_table.py /tmp/rust_alnum.txt
 /// ```
+///
+/// Pinned inputs: rustc 1.98.1, UCD 16.0.0 (see PINNED_RUSTC /
+/// PINNED_UNIDATA in the script and the version-pin test in
+/// tests/test_scrub_log_text_parity.py — a toolchain or UCD jump that moves
+/// the recomputed ranges is a deliberate re-sync of the table, the pins,
+/// and the test together, never a silent edit.
 ///
 /// A rustc that adopts a newer UCD can classify newly-assigned
 /// Other_Alphabetic codepoints this table does not list; the crate-side
@@ -661,13 +661,34 @@ fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
 /// chain's exact treatment: masked, and not masked at all). Byte-identical
 /// to `re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@")
 /// .sub(r"\1:***@", text)`.
+///
+/// Linear in the input — the contract this pass owes the scrub API. The
+/// cursor advances only on match, so K failed anchors sharing one tail
+/// would each re-walk it: the password class `[^\s@]+` permits `:`/`/`/`?`
+//// `=`, so `"a://u:"*K + "p"*M` (no `@` anywhere) pays O(K*M) — ~486ms
+/// pre-fix at K=2000/M=200k where the chain's own `re` pays ~4s (also
+/// quadratic; availability wins over matching its complexity class). The
+/// fix is failure memoization: `fail_end` is the farthest tail position a
+/// failed anchor has already proven holds no `@` before its whitespace/end
+/// terminator, and any later anchor starting before it cannot match (its
+/// own password scan would stop at the same terminator without seeing an
+/// `@`, since passwords cannot cross whitespace). Anchors `< fail_end`
+/// are skipped; every byte of failed-tail scan is then charged once total
+/// (recompute windows tile disjointly, the escaped pass's memo discipline),
+/// while matches still advance `cursor` past the `@`. Skips are exact, not
+/// approximate: a skipped anchor's `@`-before-terminator set is a subset
+/// of the already-proven empty set, so parity with the chain is untouched.
 fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
     let mut cursor = 0usize;
+    let mut fail_end = 0usize;
     for anchor in memmem::find_iter(text.as_bytes(), b"://") {
         if anchor < cursor {
             continue; // inside a previous match (a password may hold "://")
+        }
+        if anchor < fail_end {
+            continue; // inside a previously failed tail (no @ before its end)
         }
         // The scheme char run ending at the anchor; the match can only
         // start at a letter inside it that sits behind a word boundary —
@@ -699,18 +720,28 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
         }
         let Some(p) = p else { continue };
         // Username: up to the first `:` (the separator the mask needs),
-        // `/`, `@`, or whitespace; empty is a real shape.
+        // `/`, `@`, or whitespace; empty is a real shape. `username_end`
+        // is the failure position the skip-ahead charges when no colon is
+        // found (a `://` holds a `:`, so a colon-less username region holds
+        // no later anchor either — the skip is vacuous there, exact).
         let mut colon = None;
+        let mut username_end = text.len();
         for (idx, c) in text[anchor + 3..].char_indices() {
+            let pos = anchor + 3 + idx;
             if c == ':' {
-                colon = Some(anchor + 3 + idx);
+                colon = Some(pos);
+                username_end = pos;
                 break;
             }
             if is_python_space(c) || c == '/' || c == '@' {
+                username_end = pos;
                 break;
             }
         }
-        let Some(colon) = colon else { continue };
+        let Some(colon) = colon else {
+            fail_end = fail_end.max(username_end);
+            continue;
+        };
         // Password: one or more chars that are neither whitespace nor `@`,
         // and then the `@` the mask anchors on.
         let mut end = colon + 1;
@@ -723,6 +754,10 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
             end += c.len_utf8();
         }
         if !nonempty || !text[end..].starts_with('@') {
+            // No `@` in (colon, end): any anchor starting before `end`
+            // would hit the same terminator first (passwords cannot cross
+            // whitespace), so it cannot match either — skip them.
+            fail_end = fail_end.max(end);
             continue;
         }
         let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
@@ -742,9 +777,11 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// The password-family parameter names, exact lowercase. At most one can
-/// match at any one position (their prefixes diverge by the fifth char),
-/// so the scan order among them is free.
+/// The password-family parameter names, exact lowercase. No name is a
+/// prefix of another and they diverge by the 6th char at the latest
+/// (`pwd` diverges at the 2nd, `passphrase` at the 5th, `password` vs
+/// `passwd` at the 6th), so at most one can match at any one position and
+/// the scan order among them is free.
 const PARAM_NAMES: [&str; 4] = ["password", "passphrase", "passwd", "pwd"];
 
 /// Mask the values of `[?&](password|passphrase|passwd|pwd)=` parameters:
@@ -877,6 +914,25 @@ mod tests {
         // Neither: ZWSP, word chars.
         for c in ['\u{200b}', 'a', '@'] {
             assert!(!is_python_space(c));
+        }
+    }
+
+    #[test]
+    fn space_table_exhaustive_definition_holds() {
+        // The definition exhaustive over 0..0x110000: is_python_space is
+        // exactly White_Space + U+001C..U+001F. Tautological against the
+        // definition by construction — its job is to fail if a future edit
+        // touches the definition without updating the seam docs and the
+        // Python-side exhaustive re-vs-isspace pin.
+        for cp in 0..=0x10FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            assert_eq!(
+                is_python_space(c),
+                c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}'),
+                "U+{cp:04X}"
+            );
         }
     }
 

@@ -20,7 +20,8 @@ batch pipeline, and the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
 ``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``); each a single native pass
-whose cost scales with its input, e.g. ``finalize`` over a 12 MiB
+whose cost scales with its input (``scrub_log_text``: four linear scans +
+splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
 document. Every other tors function keeps exactly one spelling
 (the sync one); call it directly from a coroutine when the input is
 small; a synchronous call that finishes in microseconds does not need
@@ -75,7 +76,8 @@ __all__: list[str] = []
 # the input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
 # truncate_ellipsis, strip_controls, scrub_log_text: each a single native pass whose cost
-# scales with its input, the 12 MiB-document shape this module exists
+# scales with its input (scrub_log_text: four linear scans + splice under
+# one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
 # forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
 # detect_encoding's guess) stay sync-only: the thread hop would cost more

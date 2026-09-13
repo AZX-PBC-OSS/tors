@@ -32,11 +32,15 @@ behavior change.
 Why the failure mode needs this file: silent under-redaction. A port bug
 that leaves a row value or a password in the output crashes nothing and
 fails no structural check; only equality against the exact chain the
-consumer runs can catch it, so that equality is asserted over a hand corpus
-(the rule cruxes and their adversarial combinations), generated grids, the
-suite's scrub corpus at three sizes, seed-free hypothesis lanes over four
-alphabets, and an exhaustive short-string sweep over the param-rule alphabet
-(the ``sweep`` lane, json_repair's precedent).
+consumer runs can catch it, so that equality is asserted over per-PR lanes
+(hand corpus, generated grids, needle-chain + userinfo-fail-chain parity
+shapes, the suite's scrub corpus at three sizes, seed-free hypothesis lanes
+over four alphabets) and nightly lanes (the exhaustive short-string sweep
+over the param-rule alphabet — 67,200 cells, the ``sweep`` lane,
+json_repair's precedent — and the ``timing`` wall/scaling cells). Lane
+counts are reported per lane, never as one combined headline presented as
+the per-PR gate: per-PR is the default selection (``-m "not timing and not
+sweep"``); sweep + timing run once on the 3.12 leg.
 
 The live-oracle lane is the ``test_json_repair_parity.py`` importorskip
 pattern adapted for a LOCAL repo rather than a pip package: TaskQ is not
@@ -80,9 +84,7 @@ from reference import (
 # strings, byte for byte, and both copies must stay that way.
 QUOTED_PATTERNS: dict[str, str] = {
     "_PG_DETAIL_RE": r"^[ \t]*DETAIL:.*$",
-    "_PG_DETAIL_ESCAPED_RE": (
-        r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)"
-    ),
+    "_PG_DETAIL_ESCAPED_RE": (r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)"),
     "_URI_CRED_RE": r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@",
     "_URI_PARAM_CRED_RE": r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)",
 }
@@ -120,6 +122,82 @@ class TestQuotedPin:
         # segmenters, userinfo, then query params. reference.py must carry
         # the same tuple tors spells.
         assert SCRUB_RULES == ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+
+
+# --- classification pins: the two CPython-re-vs-Rust-std seams ----------------------
+#
+# Lane split (M2): the per-PR differential corpus above runs by default
+# (`-m "not timing and not sweep"`); the 67,200-cell exhaustive sweep lane
+# (`-m sweep`, 3.12 leg only) and the timing lane (`-m timing`, 3.12 leg
+# only) are nightly/once-per-push, not per-PR. Headline cell counts must
+# name their lane (e.g. "67k sweep (nightly)" vs "per-PR corpus"), never a
+# combined total presented as the per-PR gate.
+PINNED_RUSTC = "1.98.1"
+PINNED_UNIDATA = "16.0.0"
+
+
+class TestClassificationPins:
+    def test_word_demote_toolchain_pins(self) -> None:
+        """H1 tripwire: WORD_DEMOTE_RANGES was generated against rustc
+        1.98.1 + UCD 16.0.0 (CPython 3.14). A toolchain/UCD jump that moves
+        the recomputed ranges is a deliberate re-sync — rerun
+        tools/enum.rs + tools/gen_word_demote_table.py and update the pins
+        here, the script, and the table together — never a silent edit."""
+        import unicodedata
+
+        assert unicodedata.unidata_version == PINNED_UNIDATA, (
+            f"UCD drift: running {unicodedata.unidata_version} vs pinned "
+            f"{PINNED_UNIDATA} — rerun tools/gen_word_demote_table.py; if the "
+            "ranges moved, re-sync the table and the pins together"
+        )
+        try:
+            out = subprocess.run(
+                ["rustc", "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            pytest.skip(f"rustc not available: {exc}")
+            return
+        assert PINNED_RUSTC in out, (
+            f"rustc drift: {out!r} vs pinned {PINNED_RUSTC} — rerun "
+            "tools/enum.rs + tools/gen_word_demote_table.py; if the ranges "
+            "moved, re-sync the table and the pins together"
+        )
+
+    def test_space_table_exhaustive(self) -> None:
+        """H2: pin the whole \\s seam, not just the spot checks — over every
+        codepoint, CPython ``re`` ``\\s`` agrees with ``str.isspace`` (which
+        is what the hypothesis ``_legal_credential_payload`` helper and the
+        Rust ``is_python_space`` close over: White_Space + U+001C..U+001F).
+        Any UCD change that moves this equivalence is a re-sync, not a
+        silent pass."""
+        pat = re.compile(r"\s")
+        bad: list[int] = []
+        for cp in range(0x110000):
+            if 0xD800 <= cp <= 0xDFFF:
+                continue
+            ch = chr(cp)
+            if (pat.match(ch) is not None) != ch.isspace():
+                bad.append(cp)
+                if len(bad) >= 8:
+                    break
+        assert not bad, (
+            f"\\s vs isspace diverged at {[hex(c) for c in bad]} "
+            f"(UCD {__import__('unicodedata').unidata_version}): the "
+            "is_python_space seam moved; re-sync src/scrub_impl.rs"
+        )
+
+    def test_file_separators_are_python_space(self) -> None:
+        """The documented seam inside the exhaustive pin: U+001C..U+001F are
+        ``\\s`` for the chain (and ``str.isspace``) — the chars Rust's
+        ``is_whitespace`` misses and ``is_python_space`` adds back."""
+        pat = re.compile(r"\s")
+        for cp in range(0x1C, 0x20):
+            ch = chr(cp)
+            assert pat.match(ch) is not None and ch.isspace(), hex(cp)
 
 
 # --- the hand corpus: every rule crux plus its adversarial combinations ---------------
@@ -333,20 +411,48 @@ def _needle_chain_cases() -> list[str]:
     return out
 
 
+# --- the userinfo fail-chain lane: K anchors sharing one tail -----------------------
+#
+# C1: mask_uri_userinfo's cursor advances only on match, so K failed anchors
+# each re-walk the same tail (the password class [^\s@]+ permits :/?=, so
+# "a://u:"*K + "p"*M has K anchors whose password scans all run to the end:
+# O(K*M), ~486ms pre-fix at K=2000/M=200k where a linear scan is <1ms).
+# The chain's own re is quadratic here too (~4s); availability wins over
+# matching its complexity class. Small-K shapes below join the per-PR
+# differential corpus (parity); the full-K wall + scaling cells are
+# timing-lane (nightly/3.12 leg), not per-PR.
+_USERINFO_FAIL_UNIT = "a://u:"
+
+
+def _userinfo_fail_chain(k: int, m: int) -> str:
+    return _USERINFO_FAIL_UNIT * k + "p" * m
+
+
+def _userinfo_fail_cases() -> list[str]:
+    return [
+        _userinfo_fail_chain(8, 64),
+        _userinfo_fail_chain(32, 256),
+        # No-@ with whitespace terminator (fail at ws, not at end).
+        _userinfo_fail_chain(16, 128) + " ",
+        # Fail with a trailing @ that still cannot match (empty password
+        # after the last colon is not a mask; earlier anchors see ws/end).
+        _userinfo_fail_chain(16, 128) + "@",
+    ]
+
+
 _CORPUS_CASES: list[str] = (
     _CORPUS
     + _userinfo_grid()
     + _escaped_grid()
     + _param_grid()
     + _needle_chain_cases()
+    + _userinfo_fail_cases()
     + [scrub_corpus(1024), scrub_corpus(100 * 1024), scrub_corpus(1024 * 1024)]
 )
 
 
 class TestCorpusDifferential:
-    @pytest.mark.parametrize(
-        ("lane", "rules"), RULE_LANES, ids=[lane for lane, _ in RULE_LANES]
-    )
+    @pytest.mark.parametrize(("lane", "rules"), RULE_LANES, ids=[lane for lane, _ in RULE_LANES])
     @pytest.mark.parametrize(
         "text", _CORPUS_CASES, ids=[f"case-{i}" for i in range(len(_CORPUS_CASES))]
     )
@@ -365,10 +471,7 @@ _ASCII_ALPHABET = st.text(
     max_size=48,
 )
 _UNICODE_EDGE_ALPHABET = st.text(
-    alphabet=(
-        "a:?&@/=up5_-.\\n'"
-        "\u093e\u00e9\u4e94\u2167\u24b6\u00a0\x1c\x1d\u2028"
-    ),
+    alphabet=("a:?&@/=up5_-.\\n'\u093e\u00e9\u4e94\u2167\u24b6\u00a0\x1c\x1d\u2028"),
     max_size=48,
 )
 _DETAIL_PIECES = st.lists(
@@ -505,6 +608,41 @@ def test_scrub_escaped_needle_chain_wall_stays_linear_on_the_ws_run_shape() -> N
     assert _min_wall_ms(lambda: tors.scrub_log_text(text)) < 60.0
 
 
+@pytest.mark.timing
+def test_scrub_userinfo_fail_chain_wall_stays_linear() -> None:
+    """C1 linearity contract as a wall band: K=2000 failed userinfo anchors
+    sharing one 200k tail (``"a://u:"*K + "p"*M``, no ``@`` anywhere) scrubs
+    inside 60ms. PRE-fix this shape cost ~486ms here (each of the K anchors
+    re-walks the tail: O(K*M)); the memoized/fail-skip pass is linear and
+    measures <1ms, so 60ms is a ~60x+ margin only a complexity regression
+    can reach. Timing-lane (``-m timing``): the 3.12 leg runs it, per-PR
+    legs deselect it."""
+    text = _userinfo_fail_chain(2000, 200_000)
+    # Parity first: the shape is a no-match (no @), so tors must agree with
+    # the chain exactly (identity), even though the chain itself is
+    # quadratic here (~4s) — availability wins, output stays identical.
+    assert tors.scrub_log_text(text, ["uri_userinfo"]) == reference_scrub_log_text(
+        text, ["uri_userinfo"]
+    )
+    assert _min_wall_ms(lambda: tors.scrub_log_text(text, ["uri_userinfo"])) < 60.0
+
+
+@pytest.mark.timing
+def test_scrub_userinfo_fail_chain_scales_linearly() -> None:
+    """C1 scaling contract: doubling the fail-chain input less than triples
+    the wall (linear scaling; a quadratic regression ~4x). Ratio-of-mins,
+    same process, back-to-back, so load noise divides out. Timing-lane."""
+    small = _userinfo_fail_chain(1000, 100_000)
+    large = _userinfo_fail_chain(2000, 200_000)
+    t_small = _min_wall_ms(lambda: tors.scrub_log_text(small, ["uri_userinfo"]))
+    t_large = _min_wall_ms(lambda: tors.scrub_log_text(large, ["uri_userinfo"]))
+    assert t_large < 3.0 * max(t_small, 0.05), (
+        f"userinfo fail-chain scaling regressed: 106KB {t_small:.2f}ms vs "
+        f"212KB {t_large:.2f}ms (ratio {t_large / max(t_small, 1e-9):.2f}x, "
+        "linear must stay <3x)"
+    )
+
+
 # --- the live-oracle re-sync lane (TaskQ checkout gated) ------------------------------
 
 
@@ -575,10 +713,14 @@ class TestLiveOracleResync:
         flag_before = module._redaction_enabled  # noqa: SLF001
         try:
             module._redaction_enabled = True  # noqa: SLF001
-            for text in _CORPUS + _needle_chain_cases() + [
-                scrub_corpus(1024),
-                scrub_corpus(100 * 1024),
-            ]:
+            for text in (
+                _CORPUS
+                + _needle_chain_cases()
+                + [
+                    scrub_corpus(1024),
+                    scrub_corpus(100 * 1024),
+                ]
+            ):
                 assert module._scrub_text(text) == reference_scrub_log_text(text)  # noqa: SLF001
         finally:
             module._redaction_enabled = flag_before  # noqa: SLF001
@@ -589,10 +731,14 @@ class TestLiveOracleResync:
         flag_before = module._redaction_enabled  # noqa: SLF001
         try:
             module._redaction_enabled = True  # noqa: SLF001
-            for text in _CORPUS + _needle_chain_cases() + [
-                scrub_corpus(1024),
-                scrub_corpus(100 * 1024),
-            ]:
+            for text in (
+                _CORPUS
+                + _needle_chain_cases()
+                + [
+                    scrub_corpus(1024),
+                    scrub_corpus(100 * 1024),
+                ]
+            ):
                 assert tors.scrub_log_text(text) == module._scrub_text(text)  # noqa: SLF001
         finally:
             module._redaction_enabled = flag_before  # noqa: SLF001

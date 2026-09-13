@@ -33,8 +33,8 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
     Ok(set)
 }
 
-/// `tors.scrub_log_text`: the TaskQ exception-text scrub chain as one
-/// GIL-released pass — drop PostgreSQL DETAIL lines (real-newline and
+/// `tors.scrub_log_text`: the TaskQ exception-text scrub chain as four
+/// linear scans + splice under one `py.detach` — drop PostgreSQL DETAIL lines (real-newline and
 /// repr()-flattened), mask `scheme://user:password@host` userinfo
 /// passwords, and mask password-family query parameters — byte-identical
 /// to the consumer's four compiled regexes (pinned by
