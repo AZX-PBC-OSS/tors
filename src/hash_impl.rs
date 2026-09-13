@@ -165,6 +165,17 @@ mod tests {
             "c3fcd3d76192e4007dfb496cca67e13b"
         );
         assert_eq!(
+            md5_hex(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
+            "d174ab98d277d9f5a5611c2c9f419d9f"
+        );
+        assert_eq!(
+            md5_hex(
+                b"123456789012345678901234567890123456789012345678901234567890\
+                  12345678901234567890"
+            ),
+            "57edf4a22be3c955ac49da2e2107b67a"
+        );
+        assert_eq!(
             md5_hex(b"The quick brown fox jumps over the lazy dog"),
             "9e107d9d372bb6826bd81d3542a419d6"
         );
@@ -176,8 +187,23 @@ mod tests {
         assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
         assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(
+            sha1_hex(b"a"),
+            "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8"
+        );
+        assert_eq!(
             sha1_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
             "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
+        assert_eq!(
+            sha1_hex(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+                  ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+            ),
+            "a49b2446a02c645bf419f995b67091253a04a259"
+        );
+        assert_eq!(
+            sha1_hex(b"The quick brown fox jumps over the lazy dog"),
+            "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
         );
     }
 
@@ -192,6 +218,10 @@ mod tests {
         assert_eq!(
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"a"),
+            "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
         );
         assert_eq!(
             sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
@@ -221,6 +251,24 @@ mod tests {
             sha512_hex(b"abc"),
             "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
              2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        assert_eq!(
+            sha512_hex(b"a"),
+            "1f40fc92da241694750979ee6cf582f2d5d7d28e18335de05abc54d0560e0f53\
+             02860c652bf08d560252aa5e74210546f369fbbbce8c12cfc7957b2652fe9a75"
+        );
+        assert_eq!(
+            sha512_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c335\
+             96fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445"
+        );
+        assert_eq!(
+            sha512_hex(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+                  ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+            ),
+            "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018\
+             501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
         );
         assert_eq!(
             sha512_hex(&[b'a'; 1_000_000]),

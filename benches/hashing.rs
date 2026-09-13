@@ -1,6 +1,7 @@
 //! Criterion benches for the one-shot hashing surface
 //! (`hash_impl::md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
-//! `hmac_sha256_hex`), the request-signing / content-check primitives.
+//! `hmac_sha256_hex` and their raw-digest `_digest` twins), the
+//! request-signing / content-check primitives.
 //!
 //! The digest ladder (1 KiB / 1 MiB / 12 MiB) measures the engines at the
 //! sizes the Python-side wall cells and docs/performance.md quote
@@ -8,7 +9,10 @@
 //! group measures the request-signature shapes: short payloads where the
 //! one-call overhead IS the cost (the RFC 4231 case-1 and case-6
 //! key/data shapes, 20B/8B and 131B/54B, plus a 1 MiB payload row for
-//! the engine-size end).
+//! the engine-size end) in BOTH output spellings — the `_digest` twin is
+//! the same computation minus the hex tail, and the `(32, 256)` digest
+//! row is the request shape `tests/test_performance.py`'s HMAC wall cell
+//! asserts, so the bench covers what the wall cell gates.
 //!
 //! No Rust-side opponent: the honest stdlib comparison (OpenSSL-backed
 //! hashlib, hardware SHA extensions) is a Python-interpreter
@@ -85,5 +89,28 @@ fn bench_hmac(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_digest, bench_hmac);
+fn bench_hmac_digest(c: &mut Criterion) {
+    // The raw-digest twin of the request-signing shapes: the same keyed
+    // computation without the hex tail. The (32, 256) row is the request
+    // shape tests/test_performance.py's HMAC wall cell asserts
+    // (`test_hmac_sha256_hex_beats_the_fastest_stdlib_hmac_spelling`'s
+    // "request" case), so the digest spelling's overhead-dominated shape
+    // is benched, not just claimed via the hex rows above.
+    let mut group = c.benchmark_group("hmac_sha256_digest");
+    for (key_len, data_len) in [(32, 256)] {
+        let key = vec![0x0bu8; key_len];
+        let data = prose(data_len + 1024).as_bytes()[..data_len].to_vec();
+        group.throughput(Throughput::Bytes(data_len as u64));
+        group.bench_with_input(
+            BenchmarkId::new("sign", format!("k{key_len}d{data_len}")),
+            &(key, data),
+            |bench, (key, data)| {
+                bench.iter(|| hash_impl::hmac_sha256_digest(black_box(key), black_box(data)))
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_digest, bench_hmac, bench_hmac_digest);
 criterion_main!(benches);

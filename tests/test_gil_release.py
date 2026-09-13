@@ -425,7 +425,9 @@ end-of-call marshalling alignment):
   sub-ceiling-wall limitation and the mid-weight members' fast-box
   caveat are stated in the cell's docstring.
 
-hashing cells (``sha256_hex``/``sha512_hex`` at 12 MiB, measured on the
+hashing cells (``sha256_hex``/``sha512_hex``/``sha256_digest`` plus
+``hmac_sha256_hex``/``hmac_sha256_digest`` with a short key, all at
+12 MiB, measured on the
 dev box this section was calibrated on, Apple Silicon, ambient load
 7.8-9.7, 3 samples per cell, the prose corpus's UTF-8 bytes):
 
@@ -2558,26 +2560,35 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
 
 # --- The one-shot hashing surface -------------------------------------------------
 #
-# sha256_hex/sha512_hex at 12 MiB: ceiling-only cells (walls at or under the
-# ping floor on the calibration hardware), plus the measured-not-asserted
-# hashlib red-side recording cell (the urllib red-side precedent: the
-# stdlib releases the GIL for 2048+-byte digest updates, so there is no
-# GIL-blocked red row to assert; see the module docstring's hashing
-# paragraph for the full measured story, including the 96 MiB inline
-# lost-detach discrimination measurements).
+# sha256_hex/sha512_hex/sha256_digest plus the HMAC spellings at 12 MiB:
+# ceiling-only cells (walls at or under the ping floor on the calibration
+# hardware), plus the measured-not-asserted hashlib red-side recording
+# cell (the urllib red-side precedent: the stdlib releases the GIL for
+# 2048+-byte digest updates, so there is no GIL-blocked red row to
+# assert; see the module docstring's hashing paragraph for the full
+# measured story, including the 96 MiB inline lost-detach discrimination
+# measurements). The digest and HMAC rows pin src/lib.rs's hashing
+# paragraph directly: the `_digest` spellings marshal a fixed-size
+# PyBytes instead of the hex string, and the HMAC spellings borrow two
+# arguments, all under the same single detach — measured here, not just
+# claimed for the hex spellings.
 
 
-@pytest.mark.parametrize("fn_name", ["sha256_hex", "sha512_hex"], ids=["sha256", "sha512"])
+@pytest.mark.parametrize(
+    "fn_name", ["sha256_hex", "sha512_hex", "sha256_digest"], ids=["sha256", "sha512", "sha256-digest"]
+)
 def test_hash_digest_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     fn_name: str,
 ) -> None:
     """The hashing surface's GIL claim, at the size the wall-vs-hashlib
     comparison is told (tests/test_performance.py): one 12 MiB digest in a
-    worker thread, the whole computation (hex formatting included) under
-    one ``py.detach``, and the loop ticks at the ping floor through it —
-    measured 10.1-10.7ms worst gaps (the floor plus the argument borrow
-    and the O(64..128) hex marshalling; the crate GIL model's
-    no-residue-class claim for this surface, measured directly).
+    worker thread, the whole computation (hex formatting included on the
+    `_hex` spellings) under one ``py.detach``, and the loop ticks at the
+    ping floor through it — measured 10.1-10.7ms worst gaps (the floor
+    plus the argument borrow and the O(64..128) hex marshalling, or the
+    fixed-size PyBytes on the `_digest` spelling; the crate GIL model's
+    no-residue-class claim for this surface, measured directly on hex,
+    digest, and HMAC rows alike).
 
     Ceiling-only (``ratio_budget=None``, the b64 12 MiB / find_patterns
     sparse precedent): the 12 MiB digest walls on the calibration hardware
@@ -2595,6 +2606,31 @@ def test_hash_digest_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(fn, corpus),
+            ratio_budget=None,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "fn_name", ["hmac_sha256_hex", "hmac_sha256_digest"], ids=["hmac-hex", "hmac-digest"]
+)
+def test_hmac_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    fn_name: str,
+) -> None:
+    """The HMAC spellings' GIL claim: a short key over 12 MiB of data in a
+    worker thread, the whole keyed digest (key derivation included, hex
+    formatting included on the hex spelling) under one ``py.detach`` —
+    both borrows under the GIL, nothing else held. Ceiling-only like the
+    digest cells above (the 12 MiB HMAC wall sits at the same
+    engine-dominated scale, at or under the ping floor); the 100ms
+    ceiling is the pin. The short key is the request-signing shape (a
+    webhook secret, bytes, not blocks)."""
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    fn = getattr(tors, fn_name)
+    key = b"corpus-key"
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(fn, key, corpus),
             ratio_budget=None,
         )
     )

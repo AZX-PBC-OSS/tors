@@ -2636,15 +2636,23 @@ loop-friendly too and tors's GIL release is uniformity, not a latency
 win; below the threshold `hashlib` holds the GIL but a sub-2048-byte
 digest is microseconds, immaterial either way. On raw throughput the
 OpenSSL engines (hardware SHA extensions) win or tie at engine-dominated
-sizes — sha256 12 MiB measured 4.3ms (tors) vs 3.8ms (hashlib), sha1
-4.2 vs 3.7, md5 and sha512 dead heats — recorded, not hidden. The wall
-wins tors can assert are the sizes this surface exists for, where
-per-call overhead dominates the engine: hashing a short str at 0.40-0.54
-of `hashlib.sha256(s.encode("utf-8")).hexdigest()` (the encode is a real
-cost the stdlib makes you pay), and HMAC at request-signature sizes at
-~0.31 of even the stdlib's fastest one-shot spelling
-(`hmac.digest(key, data, "sha256").hex()`). Full tables:
-[Performance](performance.md).
+  sizes — sha256 12 MiB ~4-5ms (tors) vs ~4ms (hashlib), ratio ~1.1-1.2x
+  (absolute figures move with box and load; the band is the statement),
+  sha1 ~1.06-1.11, md5 and sha512 dead heats — recorded, not hidden. The wall
+  wins tors can assert are the sizes this surface exists for, where
+  per-call overhead dominates the engine: hashing a short ASCII str at 0.40-0.54
+  of `hashlib.sha256(s.encode("utf-8")).hexdigest()` (the encode is a real
+  cost the stdlib makes you pay; non-ASCII str pays a one-time O(input)
+  UTF-8 materialization, so the win narrows there), and HMAC at request-signature sizes at
+  ~0.31 of even the stdlib's fastest one-shot spelling
+  (`hmac.digest(key, data, "sha256").hex()`). Full tables:
+  [Performance](performance.md).
+
+  **No `deadline_ms`.** Every deadline-bearing primitive in this crate
+  protects against an adversarial-input superlinear blowup. This surface
+  has no such shape: hashing cost is linear in the input length, with no
+  superlinear structure for an adversary to feed — a caller already
+  controls the one lever that bounds the cost (how many bytes they pass).
 
 ### Raw digest bytes: the `_digest` spellings
 

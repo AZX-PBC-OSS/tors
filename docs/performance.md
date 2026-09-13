@@ -119,15 +119,22 @@ below cover them unchanged — no separate cells.
 
 - Raw digest throughput, tors vs `hashlib` (OpenSSL, hardware SHA
   extensions): **hashlib wins or ties every engine-dominated cell** —
-  sha256 12 MiB 4.3 ms vs 3.8 ms (ratio 1.16), sha1 4.2 vs 3.7 (1.06),
-  md5 14.5 vs 13.9 (1.03), sha512 7.0 vs 7.7 (0.98). Recorded, asserted
+  sha256 12 MiB ~4-5 ms vs ~4 ms (ratio ~1.1-1.2x), sha1 4.2-4.4 vs
+  3.7-4.2 (~1.06-1.11), md5 ~15.0 vs ~14.5 (~1.03), sha512 ~7.2 vs ~7.4
+  (~0.98). Absolute figures move run to run (box, ambient load ~8-10,
+  min-of-3 after warmup); the load-stable statement is the band, not
+  any single pair. Recorded, asserted
   nowhere: at these sizes the surface's value is the parity digest, the
   str convenience, and the GIL uniformity, not throughput.
 - Short-str hashing (the cache-key/ETag/request-ID spelling, where
-  `hashlib` makes you encode first): **tors wins ~2x** —
+  `hashlib` makes you encode first): **tors wins ~2x on ASCII str** —
   `sha256_hex(s)` at 0.40-0.54 of `hashlib.sha256(s.encode("utf-8"))
   .hexdigest()` (0.17 µs vs 0.33 µs at 128 B; 0.28 vs 0.52 at 512 B),
-  asserted in the wall cells.
+  asserted in the wall cells. ASCII is the zero-copy lane (pyo3's
+  `to_str` borrow); non-ASCII str pays the one-time O(input) UTF-8
+  materialization on the first call, so the win narrows there — the
+  wall cells pin the ASCII band and record a non-ASCII micro-cell
+  alongside it.
 - HMAC at request-signature sizes: **tors wins ~3x against even the
   stdlib's fastest spelling** — 0.29 µs vs `hmac.digest(key, data,
   "sha256").hex()`'s 0.92 µs (ratio ~0.31; the idiomatic `hmac.new(...)

@@ -326,11 +326,15 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
 # The honest hashlib comparison, measured on the dev box (Apple Silicon,
 # ambient load 7.8-9.7): hashlib's digest engines are OpenSSL-backed with
 # hardware SHA extensions, and at throughput sizes they win or tie —
-# sha256 1.16-1.19 (a real stdlib win, recorded below and asserted
-# nowhere), sha1 1.06-1.11, md5 0.88-1.03 and sha512 ~0.98 (dead heats).
+# sha256 ~1.1-1.2x (a real stdlib win, recorded below and asserted
+# nowhere; absolute figures move with box and load, the band is the
+# statement), sha1 1.06-1.11, md5 0.88-1.03 and sha512 ~0.98 (dead heats).
 # tors's genuine wall wins are the sizes this surface exists for, where
-# per-call overhead dominates the engine: hashing a SHORT STR (the
-# cache-key/ETag spelling, where hashlib makes the caller encode first)
+# per-call overhead dominates the engine: hashing a SHORT ASCII STR (the
+# cache-key/ETag spelling, where hashlib makes the caller encode first;
+# ASCII is the zero-copy borrow lane, non-ASCII pays the one-time O(input)
+# UTF-8 materialization, so the win narrows there — the asserted cell pins
+# the ASCII band and a recorded micro-cell covers "é"*512 alongside it)
 # at 0.40-0.54 of the stdlib expression, and HMAC at request-signature
 # sizes at ~0.31-0.36 of even the stdlib's fastest one-shot spelling
 # (``hmac.digest(...).hex()``, measured against explicitly so the
@@ -353,17 +357,19 @@ def test_digest_wall_time_vs_hashlib_is_measured_not_asserted(
     and not asserted, the decode_utf8/b64_decode precedent: hashlib's
     OpenSSL engines (hardware SHA extensions) win or tie at every size
     where the engine dominates the call. Measured (min-of-3 after warmup,
-    prose corpus bytes):
+    prose corpus bytes; absolute figures move with box and ambient load,
+    the band — sha256 ~1.1-1.2x, sha1 ~1.06-1.11, md5/sha512 dead heats —
+    is the load-stable statement, not any single pair):
 
         algorithm   size    tors        hashlib     tors/hashlib
         md5         1 KiB   ~0.001ms    ~0.001ms    0.88
         sha1        1 KiB   ~0.001ms    ~0.001ms    0.69
         sha256      1 KiB   ~0.001ms    ~0.001ms    0.83
         sha512      1 KiB   ~0.001ms    ~0.001ms    0.74
-        md5         12 MiB  15.0ms      14.5ms      1.03
-        sha1        12 MiB  4.4ms       4.2ms       1.06
-        sha256      12 MiB  4.9ms       4.1ms       1.19
-        sha512      12 MiB  7.2ms       7.4ms       0.98
+        md5         12 MiB  ~15.0ms     ~14.5ms     ~1.03
+        sha1        12 MiB  ~4.4ms      ~4.2ms      ~1.06
+        sha256      12 MiB  ~4-5ms      ~4ms        ~1.1-1.2
+        sha512      12 MiB  ~7.2ms      ~7.4ms      ~0.98
 
     The sha256/sha1 losses are real and recorded, not thresholded away:
     the surface's value at these sizes is the parity digest (pinned
@@ -386,15 +392,18 @@ def test_digest_wall_time_vs_hashlib_is_measured_not_asserted(
 
 @pytest.mark.parametrize("size_bytes", [128, 512], ids=["128B", "512B"])
 def test_sha256_hex_beats_encode_plus_hashlib_on_short_strings(size_bytes: int) -> None:
-    """The short-str wall win, asserted: hashing a str directly vs the
+    """The short-str wall win, asserted on ASCII str: hashing a str directly vs the
     expression a hashlib caller must write
     (``hashlib.sha256(s.encode("utf-8")).hexdigest()``), the cache-key /
     ETag / request-ID spelling. tors pays one pyo3 call and the borrowed
-    UTF-8; the stdlib expression pays ``str.encode`` (a fresh bytes
-    object), the hash-object constructor, and the ``hexdigest`` call.
+    UTF-8 (zero-copy on ASCII/cached inputs); the stdlib expression pays
+    ``str.encode`` (a fresh bytes object), the hash-object constructor,
+    and the ``hexdigest`` call.
     Measured 0.17µs vs 0.33µs at 128B and 0.28µs vs 0.52µs at 512B
     (ratios 0.40-0.54, min-of-many at load ~10); asserted with the 0.9
-    margin, ~1.7-2.2x of headroom."""
+    margin, ~1.7-2.2x of headroom. ASCII-scoped on purpose: non-ASCII str
+    pays the one-time O(input) UTF-8 materialization (see the recorded
+    micro-cell below), so the win narrows there."""
     text = prose(4096)[:size_bytes]
     tors_ms = _min_wall_ms(tors.sha256_hex, text, samples=_HASH_MICRO_SAMPLES)
     std_ms = _min_wall_ms(
@@ -407,6 +416,29 @@ def test_sha256_hex_beats_encode_plus_hashlib_on_short_strings(size_bytes: int) 
         f"encode+hashlib {std_ms:.4f}ms (ratio {tors_ms / std_ms:.2f}): the "
         "one-call str spelling lost more than the tolerance margin to the "
         "encode-then-hash expression"
+    )
+
+
+def test_sha256_hex_non_ascii_short_str_is_measured_not_asserted() -> None:
+    """The non-ASCII companion to the asserted ASCII cell above, recorded
+    not asserted: ``"é" * 512`` (512 chars, 1024 UTF-8 bytes) pays the
+    one-time O(input) UTF-8 materialization through pyo3's ``to_str``
+    borrow on top of the digest, where the ASCII lane above is zero-copy
+    — so the ~2x win narrows and no threshold is pinned here. What IS
+    pinned is value parity (the digest equals the UTF-8-bytes spelling
+    on both sides); the walls are printed so the run's log carries the
+    recorded shape."""
+    text = "é" * 512
+    assert tors.sha256_hex(text) == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    tors_ms = _min_wall_ms(tors.sha256_hex, text, samples=_HASH_MICRO_SAMPLES)
+    std_ms = _min_wall_ms(
+        lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest(),
+        text,
+        samples=_HASH_MICRO_SAMPLES,
+    )
+    print(
+        f"sha256_hex non-ascii 512ch: tors {tors_ms:.4f}ms vs "
+        f"encode+hashlib {std_ms:.4f}ms ratio {tors_ms / std_ms:.2f}"
     )
 
 

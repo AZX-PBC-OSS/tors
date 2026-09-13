@@ -540,6 +540,7 @@ class TestBlockBoundaries:
             (65, 50),
             (131, 54),
             (131, 152),
+            (4096, 64),
         ],
         ids=[
             "empty-key-empty-data",
@@ -550,6 +551,7 @@ class TestBlockBoundaries:
             "over-block-key",
             "hashed-key-short-data",
             "hashed-key-multi-block-data",
+            "long-key-block-data",
         ],
     )
     @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
@@ -669,6 +671,29 @@ class TestArgumentContract:
         # borrow of the key, then the data, exactly.
         with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
             spelling("k\ud800", 123)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
+    def test_digest_bytes_subclass_is_accepted(self, tors_fn) -> None:
+        # A bytes SUBCLASS is accepted (pyo3's PyBytes borrow covers
+        # subclasses; the exactly-bytes doctrine refuses bytearray/
+        # memoryview, not subclasses): pinned so a tightening of the
+        # cast cannot silently start rejecting subclasses callers pass.
+
+        class Sub(bytes):
+            pass
+
+        assert tors_fn(Sub(b"abc")) == _STDLIB_DIGEST[tors_fn](b"abc")
+
+    @pytest.mark.parametrize("spelling", list(_HMAC_SPELLINGS), ids=lambda f: f.__name__)
+    def test_hmac_bytes_subclass_key_and_data_are_accepted(self, spelling) -> None:
+        # Both HMAC arguments take the same subclass-accepting borrow.
+
+        class Sub(bytes):
+            pass
+
+        assert spelling(Sub(b"key"), Sub(b"data")) == _HMAC_SPELLINGS[spelling](
+            b"key", b"data"
+        )
 
 
 class TestOutputInvariants:
