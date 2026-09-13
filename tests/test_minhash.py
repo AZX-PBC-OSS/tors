@@ -513,33 +513,65 @@ class TestBoundsContract:
         # HIGH1: a shingle wider than the token stream must answer the
         # sentinel WITHOUT retaining the stream. The pre-fix sweep grew the
         # window deque to min(tokens, shingle_size), so ~13.5MB of prose at
-        # shingle_size=10**9 retained ~2.7M token Strings (~116MB child peak
-        # on the dev box, macOS/arm64) for an answer that is always the
-        # sentinel. The fix counts tokens retention-free when the width
-        # exceeds the stream, so the child peak stays near the tokenizer
-        # transient. Peak RSS is read from the reaped child (POSIX
-        # RUSAGE_CHILDREN; bytes on darwin, KiB on linux), with a ~2x
-        # margin under the measured pre-fix peak.
-        import os
-        import resource
+        # shingle_size=10**9 retained ~2.7M token Strings (~116-145MB child
+        # self peak on the dev box, macOS/arm64) for an answer that is
+        # always the sentinel. The fix counts tokens retention-free when the
+        # width exceeds the stream, so the child peak stays near the
+        # tokenizer transient (~29MB dev-box self peak, vs ~29MB for the
+        # same text at the default width).
+        #
+        # Box-independence (CI #74: the previous revision read the parent's
+        # RUSAGE_CHILDREN ru_maxrss, which is the sticky MAX over every
+        # reaped child in the pytest process -- earlier document-engine
+        # subprocess probes set the watermark to ~818MB on the ubuntu
+        # runners, so the gate failed regardless of this probe. It also
+        # pinned an absolute 80MB ceiling, which is allocator/box
+        # dependent). Each probe now reports its OWN peak via
+        # RUSAGE_SELF printed to stdout, and the gate asserts:
+        #   (1) ratio huge-window / small-window < 2.0 -- the regression
+        #       pin (pre-fix ~116-145MB / ~29MB ~= 4-6x fails; fixed
+        #       ~29MB / ~29MB ~= 1.0 passes; interpreter baseline cancels,
+        #       so allocator/box scaling cancels too), and
+        #   (2) a generous absolute ceiling (300MB) as a backstop against
+        #       a joint blowup that preserves the ratio.
         import subprocess
         import sys
 
-        prog = (
-            "import tors; big = 'the quick brown fox jumps over the lazy dog. ' * 300_000; "
+        def _child_self_peak_mb(prog: str) -> float:
+            wrapper = (
+                "import resource; " + prog + "; "
+                "peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
+                "import os; "
+                "print(peak / (1024 * 1024) if os.uname().sysname == 'Darwin' else peak / 1024)"
+            )
+            done = subprocess.run(
+                [sys.executable, "-c", wrapper], capture_output=True, text=True
+            )
+            assert done.returncode == 0, done.stderr[-2000:]
+            return float(done.stdout.strip().split()[-1])
+
+        big_expr = "'the quick brown fox jumps over the lazy dog. ' * 300_000"
+        huge_prog = (
+            f"import tors; big = {big_expr}; "
             "sig = tors.minhash_signature(big, shingle_size=10**9); "
             "assert sig == [2**64 - 1] * 128, 'not sentinel'"
         )
-        started = time.perf_counter()
-        completed = subprocess.run(
-            [sys.executable, "-c", prog], capture_output=True, text=True
+        small_prog = (
+            f"import tors; big = {big_expr}; "
+            "sig = tors.minhash_signature(big); "
+            "assert len(sig) == 128"
         )
+        started = time.perf_counter()
+        huge_mb = _child_self_peak_mb(huge_prog)
+        small_mb = _child_self_peak_mb(small_prog)
         elapsed = time.perf_counter() - started
-        assert completed.returncode == 0, completed.stderr[-2000:]
-        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        peak_mb = peak / (1024 * 1024) if os.uname().sysname == "Darwin" else peak / 1024
         assert elapsed < 60.0, f"huge window over large text took {elapsed:.2f}s"
-        assert peak_mb < 80.0, f"huge window retained the stream: {peak_mb:.1f}MB child peak"
+        assert huge_mb < 300.0, f"huge window peak too high: {huge_mb:.1f}MB"
+        ratio = huge_mb / small_mb if small_mb > 0 else float("inf")
+        assert ratio < 2.0, (
+            f"huge window retained the stream: huge {huge_mb:.1f}MB vs "
+            f"default-width {small_mb:.1f}MB (ratio {ratio:.2f})"
+        )
 
     def test_values_are_in_the_affine_range_or_sentinel(self) -> None:
         # Every real minimum is an affine output in [0, 2^61 - 1); the only
