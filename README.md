@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-77 functions plus two small helper classes, grouped by what they do; the
+78 functions plus two small helper classes, grouped by what they do; the
 `documents` extra adds seven document-extraction functions and its own helper
 types. Full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
@@ -139,7 +139,7 @@ types. Full signatures, argument contracts, and edge cases are in the
 | Text segmentation (UAX #29) | `grapheme_count`, `word_bounds`(+`_iter`), `word_count`, `sentence_bounds`(+`_iter`), `sentence_count` |
 | Diffing (`difflib`-compatible) | `diff_opcodes`, `diff_opcodes_lines` |
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |
-| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `CompiledPatterns` |
+| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text`, `CompiledPatterns` |
 | Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
 | Byte lengths without the encode copy | `utf8_byte_len`, `utf16_byte_len` |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |

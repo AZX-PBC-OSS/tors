@@ -114,6 +114,79 @@ tors.strip_controls("score: 4\x00\x01great\x7f")
 
 **Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
+## `tors.scrub_log_text`
+
+```python
+def scrub_log_text(
+    text: str,
+    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+) -> str: ...
+```
+
+Named-rule log and exception-text scrubbing, one GIL-released pass: the
+TaskQ exception-text chain as a primitive (the scrub a worker applies to
+`str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
+line, a span, or an exported attribute), byte-identical to the consumer's
+four compiled regexes — pinned by a differential harness that races tors
+against the exact chain (see [Design and scope](design.md) for why this is
+a *named-rule* surface rather than a pattern parameter).
+
+Three rules, one closed set:
+
+- `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
+  values, so the whole line is dropped. Both separator spellings: real
+  newlines (line content deleted, the newline kept — a blank line is left
+  behind; a CRLF line's `\r` is consumed with the content), and the
+  `repr()`-flattened `\nDETAIL:` runs a traceback's final line carries
+  (consumed up to the next escaped separator or the closing quote, which is
+  preserved — `PostgresError('msg\nDETAIL: … exists.')` comes back as
+  `PostgresError('msg')`). Two shapes the source chain treats as
+  non-matches are pinned as specified behavior, not quietly fixed: an
+  escaped run with no closing quote and no trailing escaped newline is
+  left alone, and one terminated by a real newline with no quote before it
+  is left alone (both unreachable from `repr()` output).
+- `uri_userinfo` — `scheme://user:password@host` becomes
+  `scheme://user:***@host`: scheme and username preserved verbatim, empty
+  username handled, password ending at the first `@`.
+- `uri_query_creds` — `[?&](password|passphrase|passwd|pwd)=value` becomes
+  `[?&]name=***`: name preserved, exact lowercase, value running to
+  whitespace, `&`, or `@`.
+
+`rules=None` (the default) runs the full chain in canonical order:
+`pg_detail_lines` → `uri_userinfo` → `uri_query_creds`, each rule a whole
+pass over the current text before the next begins (a DETAIL deletion can
+eat the `@` a userinfo mask anchors on — rule interaction is why the order
+is a contract, not a caller choice). `rules=[]` is the identity; duplicates
+dedupe and caller order is irrelevant; an unknown name raises `ValueError`
+naming the accepted set. A pass never rescans its own output.
+
+`tors.scrub_log_text(s, rules) is s` exactly when no rule fires — including
+the `***` fixed points, where a rule fires and splices to an equal value:
+those return a fresh, equal string. Scrubbing the scrubbed output is a
+value no-op.
+
+```python
+tors.scrub_log_text(
+    "JobError: duplicate key\n"
+    "DETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\n"
+    "HINT: unchanged"
+)
+# "JobError: duplicate key\n\nHINT: unchanged"  (blank line left behind)
+tors.scrub_log_text(
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback"
+)
+# "connect dsn=postgresql://worker:***@db.internal:5432/prod?password=***"
+tors.scrub_log_text("JobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417) exists.')")
+# "JobError('duplicate key')"  (closing quote preserved)
+tors.scrub_log_text(
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod",
+    ["uri_userinfo"],
+)
+# "connect dsn=postgresql://worker:***@db.internal:5432/prod"  (one rule alone)
+```
+
+**Async**: `await tors.aio.scrub_log_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 ## `tors.nfc` / `tors.nfd` / `tors.nfkc` / `tors.nfkd`
 
 ```python

@@ -11,7 +11,7 @@ It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`, the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, and
-`truncate_ellipsis`/`strip_controls`. Thread dispatch costs on the order of
+`truncate_ellipsis`/`strip_controls`/`scrub_log_text`. Thread dispatch costs on the order of
 tens of microseconds: noise next to a millisecond-or-slower native pass over a
 real corpus or document, real overhead next to a microsecond-scale call over a
 short string. Wrapping every export would make the small, common calls slower

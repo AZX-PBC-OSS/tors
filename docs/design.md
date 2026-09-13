@@ -29,7 +29,14 @@ The cuts below are decisions, not oversights:
 - **General regex.** `find_patterns`/`replace_many` are leftmost-longest
   multi-pattern literal search, not a regex engine; `chunk_hierarchical`'s
   `separators` are literal strings (or `None`, splicing in the default
-  hierarchy), not patterns.
+  hierarchy), not patterns. The same cut is why `scrub_log_text`'s rules
+  are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
+  `uri_query_creds`), not patterns: each rule is a call-site regex the
+  scrub exists to port (TaskQ's exception-text chain), hand-rolled in Rust
+  and pinned byte-identical to it — a caller-supplied pattern language
+  would reopen the regex-semantics question this cut closes. New scrubs
+  arrive as new named rules with their own pinned contracts
+  (`strip_controls` is the family's first member), never as parameters.
 - **Schema-aware JSON/YAML coercion.** The JSON side moved IN with the
   `repair_json` family: syntax repair of malformed JSON and schema-guided
   alignment/coercion against a JSON Schema are algorithms (a repair parser's

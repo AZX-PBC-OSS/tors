@@ -37,6 +37,32 @@ class TestReadmeExamples:
 
 
 class TestApiReferenceExamples:
+    def test_scrub_log_text_detail_dsn_and_repr_examples(self) -> None:
+        # docs/api.md's scrub_log_text section, pinned the same way: the
+        # literals the doc shows, every rules= spelling included.
+        detail = (
+            "JobError: duplicate key\n"
+            "DETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\n"
+            "HINT: unchanged"
+        )
+        assert tors.scrub_log_text(detail) == "JobError: duplicate key\n\nHINT: unchanged"
+        dsn = (
+            "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback"
+        )
+        assert tors.scrub_log_text(dsn) == (
+            "connect dsn=postgresql://worker:***@db.internal:5432/prod?password=***"
+        )
+        assert (
+            tors.scrub_log_text(
+                "JobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417) exists.')"
+            )
+            == "JobError('duplicate key')"
+        )
+        assert tors.scrub_log_text(
+            "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod",
+            ["uri_userinfo"],
+        ) == "connect dsn=postgresql://worker:***@db.internal:5432/prod"
+
     def test_chunk_by_lines_log_windows(self) -> None:
         log = (
             "INFO boot\nINFO ready\n\nWARN disk at 90%\n"
