@@ -2518,6 +2518,66 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
     )
 
 
+# The UUIDv7 helper trio's fixed v7 (timestamp field 1_750_000_000_000 ms,
+# version 7, RFC 4122 variant; the same fixed UUID docs/api.md's example and
+# tests/test_uuid.py's doc-example pin use), in both accepted spellings.
+# Self-contained literals (no uuid import): the timing lane builds its own
+# corpora, the chatlog precedent.
+_UUID7_BATCH_BYTES = bytes.fromhex("01977420dc007abc9def98765432100f")
+_UUID7_BATCH_TEXT = "01977420-dc00-7abc-9def-98765432100f"
+
+# The trio's batch size: one call is ~0.2-0.4µs (16 bytes in, one int or one
+# 16-byte value out), so a single call sits four orders of magnitude under
+# the 10ms ping floor and no single-call cell can mean anything. The batch
+# loop is sized to a wall comfortably above the floor (~100-200ms measured,
+# calibrated below) where both shared budgets still discriminate the
+# regression class this cell CAN catch: a per-call GIL-held residue that
+# grows into the tens of milliseconds (an accidental lock, an error-path
+# import on the happy path, a marshalling blowout). The one regression it
+# honestly CANNOT catch is a lost py.detach on the int-out pair: the
+# extraction itself is a handful of nanoseconds, so holding it changes the
+# per-call GIL-held time by less than the call machinery's own jitter --
+# the detach on this surface is contract uniformity with the rest of the
+# crate, not a measurable GIL-release payoff (src/py/uuid.rs's doc comment
+# records the same reasoning from the implementation side).
+_UUID_BATCH_CALLS = 500_000
+
+
+@pytest.mark.parametrize(
+    "helper",
+    ["uuid7_timestamp_ms", "uuid_version", "uuid_parse"],
+)
+def test_uuid_helpers_batch_loop_keeps_the_event_loop_at_heartbeat_granularity(
+    helper: str,
+) -> None:
+    """The UUIDv7 helper trio's GIL claim, at its honest scale: every call's
+    GIL-held residue is sub-µs (the int-out pair's argument borrow plus one
+    int out, with the bit extraction detached; uuid_parse's whole 36-byte
+    parse, which runs GIL-held by design -- there is no int-out tail to
+    detach and a detach around a 36-byte scan would be overhead for its own
+    sake), so a batch loop of the calls in a worker thread leaves the loop
+    ticking at heartbeat granularity over a ~100-200ms wall.
+
+    Both shared budgets are asserted: the walls clear the 10ms ping floor by
+    ~10x, so the ratio is not the sub-ping artifact, and a per-call residue
+    regression of the tens-of-ms class (a tenth of the batch's wall held per
+    call in one burst) blows the 0.30 ratio and approaches the 100ms
+    ceiling. Measured on the dev box, 3 samples per helper: worst gaps at
+    the ping floor (the 10-11ms band every detached cell shows) of
+    ~100-200ms walls, ratio ~0.06-0.11."""
+    calls: dict[str, Callable[[], object]] = {
+        "uuid7_timestamp_ms": lambda: tors.uuid7_timestamp_ms(_UUID7_BATCH_BYTES),
+        "uuid_version": lambda: tors.uuid_version(_UUID7_BATCH_BYTES),
+        "uuid_parse": lambda: tors.uuid_parse(_UUID7_BATCH_TEXT),
+    }
+
+    def consume() -> int:
+        call = calls[helper]
+        return sum(1 for _ in range(_UUID_BATCH_CALLS) if call() is not None)
+
+    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(consume)))
+
+
 # The identifier rule's two halves (TaskQ's _IDENT_RE shape: letters and
 # underscore at position 0, digits joining after), the rule this module's
 # cell, the wall race in tests/test_performance.py, and the bench group in
