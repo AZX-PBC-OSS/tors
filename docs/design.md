@@ -62,12 +62,15 @@ The cuts below are decisions, not oversights:
   `random_b62`, `random_b64url`, `uuid4`, `uuid7` — over exactly two
   entropy spellings: fresh OS CSPRNG bytes per call (the default, the
   secrets-safe one), or a seed-keyed ChaCha20 stream for reproducible
-  tests and fixtures. tors does not expose a PRNG handle, a stream/next
-  API, or distribution samplers; `seed=` is a fixture tool, never an
-  entropy source. The hard parts are maintained crates under the
+  tests and fixtures. Every token spelling is length-first (the output
+  length IS the argument: "I want a base62 id 22 characters long"), with
+  `random_hex`/`random_b62`/`random_b64url` all one char-sampling engine
+  over their fixed alphabets. tors does not expose a PRNG handle, a
+  stream/next API, or distribution samplers; `seed=` is a fixture tool,
+  never an entropy source. The hard parts are maintained crates under the
   dependency policy (rand's `OsRng`, rand_chacha's stream, uuid's field
-  builders, const-hex, base64); what tors owns is the glue — the
-  block-buffered word sampler and Lemire's unbiased index draw.
+  builders); what tors owns is the glue — the block-buffered word sampler
+  and Lemire's unbiased index draw.
 - **Schema-aware JSON/YAML coercion.** The JSON side moved IN with the
   `repair_json` family: syntax repair of malformed JSON and schema-guided
   alignment/coercion against a JSON Schema are algorithms (a repair parser's

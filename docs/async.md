@@ -47,7 +47,8 @@ by `tools/gen_aio_stub.py`.
 
 The random-generation family (`random_string`, `random_hex`, `random_b62`,
 `random_b64url`, `uuid4`, `uuid7`) has no async twin either: every generator
-is a fast CPU/syscall call — one getrandom draw plus formatting, microseconds
-at real token/key sizes — not the detached-transform input class this module
-exists for. A thread hop would cost more than the call at every realistic
-size; call them directly from a coroutine.
+is a fast CPU/syscall call — a block-buffered getrandom draw plus
+sampling/formatting, microseconds at real token/key sizes — not the
+detached-transform input class this module exists for. A thread hop would
+cost more than the call at every realistic size; call them directly from a
+coroutine.

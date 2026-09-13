@@ -234,28 +234,43 @@ Measured on the dev box (Apple Silicon, quiet; min-of-25 after warm-up,
 `tests/test_performance.py`'s microsecond cells; criterion's
 `benches/random.rs` for the bench-side rows):
 
-- Against the stdlib expressions they replace — `secrets.token_hex`,
-  `secrets.token_urlsafe`, `uuid.uuid4` — the tors spellings win modestly at
-  every asserted size and sit at parity at the 64 B call-overhead floor:
-  hex 0.90-1.00x, urlsafe 0.78-0.92x, uuid4 0.85x (1.1µs vs 1.3µs). The
-  honest statement: both sides are one OS syscall plus SIMD-ish C
-  formatting, so the wall wins are small; the measured value of the tors
-  spelling is the GIL release (the generation cell in
-  `tests/test_gil_release.py`: a 1 MiB draw holds the loop's worst
-  heartbeat gap to ~11ms, the ping floor plus ~1ms of string marshalling)
-  and the seeded determinism, not a wall blowout.
-- The size ladder (criterion): `random_hex` ~1.0µs at 16-256 bytes (the
-  syscall floor), 4.1µs at 1 KiB, 260µs at 64 KiB; `random_b64url` within a
-  few percent of hex at every rung; `random_b62` (the char-sampling engine)
-  4.3µs for a 22-char id (one 1024-byte block fill for the whole id), 33µs
-  at 1 KiB, 2.1ms at 64 KiB chars.
+- The length-first refactor moved `random_hex`/`random_b64url` onto the
+  char-sampling engine (`random_string`/`random_b62`'s own), and the
+  honest consequence is a measured engine-class change, not a tuning: the
+  engine draws one u64 (8 stream bytes) per output character where the
+  old byte-fill+encode spellings consumed 0.5–0.75 bytes per character.
+  The new spellings' walls are b62-identical (criterion: hex 4.2µs for a
+  32-char key where b62 takes 4.4µs for a 22-char id; 4.25ms vs 2.13ms at
+  the 64 KiB-class rungs) and sit ~3.5x over the stdlib byte-fill+encode
+  expressions at real token sizes (4.3µs vs 1.2µs for a 32-char hex key —
+  both sides one syscall from the floor) and ~8–15x at bulk sizes
+  (131072-char hex 4.1ms vs `secrets.token_hex(65536)` 268µs; 87382-char
+  b64url 2.7ms vs `secrets.token_urlsafe(65536)` 339µs). tors no longer
+  wins these wall races and the ledger says so instead of thresholding
+  around it: the measured value of the tors spelling is the GIL release
+  (the generation cell in `tests/test_gil_release.py`: a 2 MiB hex draw
+  holds the loop's worst heartbeat gap to ~11ms, the ping floor), the
+  seeded determinism, and the uniform-per-character contract itself —
+  every position unconstrained at any length, which the byte-fill
+  spellings could not offer (odd hex lengths, non-multiple-of-4 b64url
+  lengths, unconstrained final characters). At token sizes the call is
+  still microseconds; at bulk encodable-material sizes, the stdlib
+  byte-fill expressions are the faster tool and nothing here pretends
+  otherwise.
+- The size ladder (criterion, characters emitted): `random_hex` ~4.2µs at
+  32–128 chars (the syscall floor), 16.8µs at 512, 66.6µs at 2048, 4.25ms
+  at 131072; `random_b64url` 4.6µs at 22, 14.8µs at 342, 46.1µs at 1366,
+  2.96ms at 87382; `random_b62` (the same engine, length-first all along)
+  4.4µs for a 22-char id, 33.8µs at 1 KiB, 2.13ms at 64 KiB chars —
+  reconfirmed unchanged by the refactor.
 - `uuid4` full path (fresh `OsRng` fill + builder + format) vs the uuid
-  crate's own `Uuid::new_v4()`: ~parity, 1.06µs vs 1.05µs — and that
-  comparator is itself getrandom-per-call in uuid 1.26 (verified in its
-  source; the thread-cached engine is the separate opt-in `fast-rng`
-  feature), so the pair measures tors's wrapper tax over the crate's
-  equivalent: zero.
-- `uuid7`: 0.79-0.9µs. Against `uuid_utils` (the Rust-extension
+  crate's own `Uuid::new_v4()`: ~parity, 1.03µs vs 1.01µs — the byte path
+  the refactor did not touch — and that comparator is itself
+  getrandom-per-call in uuid 1.26 (verified in its source; the
+  thread-cached engine is the separate opt-in `fast-rng` feature), so the
+  pair measures tors's wrapper tax over the crate's equivalent: zero.
+- `uuid7`: 0.89µs (re-confirmed 0.9–1.0µs by the wall cells; the recorded
+  band is 0.79–0.9µs). Against `uuid_utils` (the Rust-extension
   incumbent, measured in a throwaway venv on the same box and interpreter,
   3.14.7): `uuid_utils.uuid7` (native object return, process-local
   counter engine) 0.04µs and `uuid_utils.compat.uuid7` (str return) 0.21µs

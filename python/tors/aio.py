@@ -84,8 +84,9 @@ __all__: list[str] = []
 # one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
 # forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
-# detect_encoding's guess, the random generators — one syscall plus
-# formatting at every realistic token/key size) stay sync-only: the thread
+# detect_encoding's guess, the random generators — a block-buffered
+# syscall plus sampling/formatting at every realistic token/key size) stay
+# sync-only: the thread
 # hop would cost more than the call itself.
 _WRAPPED = (
     "apply_pipeline",
