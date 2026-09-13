@@ -34,6 +34,7 @@ pub mod minhash;
 pub mod normalize;
 pub mod phonetic;
 pub mod pipeline;
+pub mod random;
 pub mod scan;
 pub mod scrub;
 pub mod search;

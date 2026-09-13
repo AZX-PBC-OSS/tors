@@ -122,6 +122,31 @@ jsonschema = { version = "0.55", default-features = false }
 # criterion's transitive, so the direct edge adds no new package — the same
 # precedent as aho-corasick and encoding_rs.
 serde_json = "1"
+# The random-generation surface (`src/random_impl.rs`): OsRng, the per-call
+# OS CSPRNG source (getrandom/getentropy syscall) behind the unseeded
+# spelling of random_string/random_hex/random_b62/random_b64url/uuid4/uuid7.
+# default-features = false + os_rng only: none of rand's samplers,
+# distributions, thread-rng, or SmallRng machinery is used — tors owns the
+# u64 stream consumption (Lemire sampling, documented in random_impl.rs) and
+# needs only the OsRng type + its RngCore::fill_bytes. MIT OR Apache-2.0.
+# Already in the lock as the dev tree's transitive (criterion), so this
+# direct edge adds no new package to the tree at all — the aho-corasick/
+# serde_json precedent; what is new is only the base-build runtime reach:
+# rand, rand_core, getrandom (the os_rng feature's platform syscall crate).
+rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+# The seeded spelling's deterministic stream: ChaCha20Rng built via
+# rand_core's seed_from_u64 (the PCG32 derivation documented in
+# random_impl.rs and re-implemented by the tests' oracle). default-features
+# off (std unneeded — tors fills byte buffers, never samples the crate's
+# own distributions). MIT OR Apache-2.0; also already in the lock (the dev
+# tree's transitive), so no new package; pulls ppv-lite86 for the SSE2
+# backend in addition to rand_core.
+rand_chacha = { version = "0.9", default-features = false }
+# rand_core's traits directly (SeedableRng::seed_from_u64, RngCore/TryRngCore
+# for the two fill spellings): the engine code speaks rand_core's vocabulary,
+# not a re-export chain through rand or rand_chacha. No features (the trait
+# surface is core), no new package (already in the tree via both).
+rand_core = { version = "0.9", default-features = false }
 # The single-number extraction grammar behind schema-mode numeric coercion
 # ("$50.0", "USD 50", "1,234.789" — one token, maximal munch, percent
 # suffix). Already in the tree as the jsonschema crate's pattern-validation
@@ -162,9 +187,13 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash64",
 # expression evaluation with no config change. default-features = false:
 # parse_str/from_bytes/get_version_num/hyphenated().encode_lower need NO
 # features, verified `cargo tree` shows zero transitive dependencies in this
-# config; the generation features (v4/v7/rng) stay off — tors's surface has
-# no generator (every producer from uuid.uuid7() to uuid_utils already does
-# that job), it reads fields back out. The strict-canonical CONTRACT stays
+# config; the generation features (v4/v7/rng) stay off on the library path —
+# the random-generation family's uuid4/uuid7 draw their bytes from tors's
+# own rng and hand them to the crate's zero-feature builders
+# (`Builder::from_random_bytes` for v4, `Builder::from_unix_timestamp_millis`
+# for v7; the v4/v7/rng flags gate only the crate's own-rng `new_v4`/`now_v7`
+# constructors, which tors does not call), and the field-reading trio reads
+# fields back out with no generator at all. The strict-canonical CONTRACT stays
 # tors's own thin layer on top: the crate's parse_str deliberately accepts
 # the loose forms tors rejects (braces, urn:, hyphen-less, uppercase), so
 # tors enforces strictness by canonical-encoding equality — input must be
@@ -172,7 +201,9 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash64",
 # own error taxonomy/position finding (uuid_impl.rs's module doc). The caret
 # floor is 1.26 (caret + boundary-test posture: >=1.26, <2.0, with the
 # crate-adoption boundary pinned from both sides in src/uuid_impl.rs and
-# tests/test_uuid.py so a uuid 1.x grammar move fails as a boundary move).
+# tests/test_uuid.py so a uuid 1.x grammar move fails as a boundary move);
+# the random-generation branch's own `uuid = "1"` line — same zero features
+# — deduped into this one at the merge, the stricter floor subsuming it.
 uuid = { version = "1.26", default-features = false }
 # The whole PDF surface (`pdf_extract`/`pdf_page_count`, `src/pdf_impl.rs`):
 # open + per-page text + markdown conversion, called directly under

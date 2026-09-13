@@ -102,8 +102,10 @@ import hmac
 import html
 import json
 import re
+import secrets
 import string
 import time
+import uuid as stdlib_uuid
 from collections.abc import Callable
 
 import pytest
@@ -1279,6 +1281,140 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
         "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
         "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
+    )
+
+
+# --- The random-generation family ---------------------------------------------
+#
+# Microsecond-scale cells: unlike the module's multi-ms corpora cells, both
+# sides here are syscall-plus-format calls measured in single-digit
+# microseconds, so the draws are min-of-25 (both sides get plenty of windows
+# to find an uncontended run) and the margins are regression nets over a
+# measured win-or-parity, not close races. Measured on the dev box (Apple
+# Silicon, quiet, min-of-25 after warm-up):
+#
+#     n         tors.random_hex   secrets.token_hex   ratio
+#     64 B      1.5us             1.5us               1.00 (parity: the call
+#                                                          overhead is the
+#                                                          whole cost)
+#     1 KiB     4.4us             4.8us               0.92
+#     64 KiB    266us             296us               0.90
+#
+#     n         tors.random_b64url secrets.token_urlsafe
+#     64 B      1.2us             1.3us               0.92
+#     1 KiB     4.6us             5.9us               0.78
+#     64 KiB    278us             334us               0.83
+#
+#     tors.uuid4 1.1us   uuid.uuid4 1.3us             0.85
+#     tors.uuid7 0.9us   (no CI-safe comparator; absolute band below)
+#
+# The margin story, honestly: tors never loses a leg (the fused
+# one-syscall-plus-format pass beats the stdlib's urandom-object-then-format
+# chain at every size, parity at the overhead floor), but the wins are
+# modest at these sizes because both sides are one OS syscall plus SIMD-ish
+# C formatting -- the value proposition measured elsewhere in this module is
+# the GIL release (tests/test_gil_release.py) and the seeded determinism
+# (tests/test_random.py), not a wall blowout. The 1.5x margins therefore
+# catch class regressions (an extra syscall per call would put ~+1.2us on a
+# ~1.5us floor, ~2x, and a per-char draw regression on the sampler would
+# add tens of microseconds at the 64 KiB legs), not fine tunings.
+
+
+def _min_wall_us_fn(op: Callable[[], object], samples: int = 25, warmup: int = 3) -> float:
+    """Min-of-``samples`` wall in MICROSECONDS for a no-argument call: the
+    random family's calls take no corpus argument (they generate their own
+    bytes), so this is the family's local spelling of the module's
+    ``_min_wall_ms`` shape (the ``test_grounded_performance.py``
+    microsecond-cell precedent). 25 samples: a microsecond-scale sample is
+    one scheduler hit away from its worst run, so both sides of a race need
+    many more draws than the millisecond cells' 3-7 to find their floor."""
+    for _ in range(warmup):
+        op()
+    best = float("inf")
+    for _ in range(samples):
+        started = time.monotonic()
+        op()
+        best = min(best, time.monotonic() - started)
+    return best * 1e6
+
+
+@pytest.mark.parametrize("n_bytes", [64, 1024, 64 * 1024], ids=["64B", "1KiB", "64KiB"])
+def test_random_hex_keeps_parity_or_better_with_secrets_token_hex(n_bytes: int) -> None:
+    """``secrets.token_hex(n)`` is the exact expression ``random_hex``
+    replaces (same 2n lowercase-hex format, same OS entropy source); the
+    cell is the module's shared race shape at microsecond scale: 1.5x over
+    a measured 0.90-1.00 (the table in the family's section header)."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_hex(n_bytes))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_hex(n_bytes))
+    assert tors_us < 1.5 * stdlib_us, (
+        f"random_hex({n_bytes}): tors {tors_us:.1f}us vs secrets.token_hex "
+        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x): the native pass lost "
+        "the syscall-plus-format race by more than the regression margin"
+    )
+
+
+@pytest.mark.parametrize("n_bytes", [64, 1024, 64 * 1024], ids=["64B", "1KiB", "64KiB"])
+def test_random_b64url_keeps_parity_or_better_with_secrets_token_urlsafe(n_bytes: int) -> None:
+    """``secrets.token_urlsafe(n)`` is the unpadded urlsafe expression
+    ``random_b64url(n)`` replaces; measured 0.78-0.92 across the ladder
+    (the family section's table), same 1.5x regression margin."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_b64url(n_bytes))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_urlsafe(n_bytes))
+    assert tors_us < 1.5 * stdlib_us, (
+        f"random_b64url({n_bytes}): tors {tors_us:.1f}us vs "
+        f"secrets.token_urlsafe {stdlib_us:.1f}us "
+        f"({tors_us / stdlib_us:.2f}x): the native pass lost the "
+        "syscall-plus-format race by more than the regression margin"
+    )
+
+
+def test_uuid4_keeps_parity_or_better_with_the_stdlib_constructor() -> None:
+    """``uuid.uuid4()`` is the spelling ``tors.uuid4()`` replaces; measured
+    1.1us vs 1.3us (the stdlib builds a Python object and formats it through
+    the uuid module's own machinery). 2.0x margin: the stdlib floor wobbles
+    more than the byte codecs' (object construction), and the cell's teeth
+    are class regressions (a per-call engine rebuild, an extra syscall)."""
+    tors_us = _min_wall_us_fn(tors.uuid4)
+    stdlib_us = _min_wall_us_fn(stdlib_uuid.uuid4)
+    assert tors_us < 2.0 * stdlib_us, (
+        f"tors.uuid4: {tors_us:.1f}us vs uuid.uuid4 {stdlib_us:.1f}us "
+        f"({tors_us / stdlib_us:.2f}x): the native pass lost more than the "
+        "regression margin to the stdlib constructor"
+    )
+
+
+def test_the_no_stdlib_comparator_generators_absolute_bands_hold() -> None:
+    """``random_b62``/``random_string`` (no stdlib spelling exists for
+    base62/alphabetic sampling) and ``uuid7`` (no CI-safe comparator: the
+    stdlib has no v7, and uuid_utils is not a dependency this suite may
+    assume) take absolute ceilings over measured floors, the
+    ``chunk_by_paragraphs`` no-comparator shape at microsecond scale:
+
+    - ``random_b62(22)`` measured ~4.2us (one 1024-byte block fill for the
+      whole id, 22 Lemire draws). Ceiling 25us (~6x): the positioned
+      regression is a lost block buffer -- a per-draw syscall spelling
+      costs ~22 x 1.2us = ~26us of syscalls alone and trips it.
+    - ``random_string(22, "ab")`` measured ~4.1us, same engine, same
+      ceiling class (30us, a hair wider: the multibyte-capable push path).
+    - ``uuid7()`` measured ~0.9us. Ceiling 25us (~28x): catches a per-call
+      engine-class regression (a rebuilt ChaCha, a second syscall), not
+      tunings."""
+    b62_us = _min_wall_us_fn(lambda: tors.random_b62(22))
+    assert b62_us < 25.0, (
+        f"random_b62(22) took {b62_us:.1f}us, outside the absolute band "
+        "(measured ~4.2us, ceiling 25us; a per-draw-syscall spelling measures "
+        "~26us+ and must fail this cell); the block-buffered sampler regressed"
+    )
+    string_us = _min_wall_us_fn(lambda: tors.random_string(22, "ab"))
+    assert string_us < 30.0, (
+        f"random_string(22, 'ab') took {string_us:.1f}us, outside the absolute "
+        "band (measured ~4.1us, ceiling 30us); the block-buffered sampler "
+        "regressed"
+    )
+    uuid7_us = _min_wall_us_fn(tors.uuid7)
+    assert uuid7_us < 25.0, (
+        f"uuid7() took {uuid7_us:.1f}us, outside the absolute band (measured "
+        "~0.9us, ceiling 25us); the one-syscall-plus-format pass regressed"
     )
 
 

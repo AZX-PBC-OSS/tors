@@ -14,8 +14,11 @@
 //! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
 //! scrub), [`charset_impl`] (batch codepoint-set validation for
 //! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
-//! the TaskQ exception-text chain), and [`hash_impl`] (the one-shot
-//! md5/sha1/sha256/sha512/hmac hashing surface); they are
+//! the TaskQ exception-text chain), [`hash_impl`] (the one-shot
+//! md5/sha1/sha256/sha512/hmac hashing surface), and [`random_impl`]
+//! (the random-generation family: random
+//! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7);
+//! they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -208,13 +211,37 @@
 //! The JSON repair surface (`repair_json`/`repair_json_loads`/
 //! `repair_json_diagnostics`) runs the whole repair detached: the strict
 //! fast path, the repair parser, the schema alignment, and the validator
-//! compile+check, so a malformed multi-megabyte model dump never holds
-//! the GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
+//! compile+check, so a malformed multi-megabyte model dump never holds the
+//! GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
 //! handles; each dict/list entry pays the standard str-in borrow class)
 //! and the return marshalling: the O(output) string for `repair_json`, the
 //! O(result) object-tree construction for the loads/diagnostics spellings
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
+//!
+//! The random-generation surface (`random_string`/`random_hex`/
+//! `random_b62`/`random_b64url`/`uuid4`/`uuid7`, `random_impl`) adds a new
+//! axis rather than a new residue class: entropy. The default spelling has
+//! no input to borrow at all — the argument validation is the whole
+//! GIL-held prelude, and the entire draw (a fresh per-call OS fill via
+//! `rand`'s `OsRng`, no process or thread RNG state, hence fork-safe,
+//! `secrets`' own per-call semantics) plus the formatting run under one
+//! `py.detach`, with the O(output) string marshalling as the only other
+//! residue. The unseeded calls are the crate's fastest native passes
+//! (syscall + SIMD formatting, microseconds at real token/key sizes), so
+//! the GIL residue is a larger fraction of a smaller wall — the generation
+//! cell in `tests/test_gil_release.py` is therefore ceiling-only (the b64
+//! 12 MiB precedent: a sub-ping-floor wall makes the ratio an artifact).
+//! The seeded spelling is the deterministic twin (ChaCha20 via
+//! `seed_from_u64`): a pure function of (seed, arguments), fully
+//! predictable from the seed, never safe for secrets — the contract every
+//! surface of the family carries, pinned by `tests/test_random.py`. The
+//! char-sampling engine (`random_string`/`random_b62`) buffers its u64
+//! draws one 1024-byte block per OS fill (one syscall per 128 draws rather
+//! than one per draw); the buffering changes cost, never the word
+//! sequence, so seeded output is identical either way (the engine spec in
+//! `random_impl`'s docs). No `aio` twins: fast CPU/syscall calls, not the
+//! detached-transform input class (docs/async.md).
 //!
 //! The MinHash surface (`minhash_signature`) adds one list-returning shape
 //! with a structurally bounded marshalling class: the argument borrow plus
@@ -397,6 +424,7 @@ pub mod gfm_strip_impl;
 #[cfg(feature = "documents")]
 pub mod pdf_impl;
 pub mod pipeline_impl;
+pub mod random_impl;
 pub mod scan_impl;
 pub mod scrub_impl;
 pub mod search_impl;
@@ -467,6 +495,7 @@ use py::minhash::*;
 use py::normalize::*;
 use py::phonetic::*;
 use py::pipeline::*;
+use py::random::*;
 use py::scan::*;
 use py::scrub::*;
 use py::search::*;
@@ -641,6 +670,12 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
     m.add_function(wrap_pyfunction!(first_invalid_charset, m)?)?;
     m.add_function(wrap_pyfunction!(first_invalid_offender, m)?)?;
+    m.add_function(wrap_pyfunction!(random_string, m)?)?;
+    m.add_function(wrap_pyfunction!(random_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(random_b62, m)?)?;
+    m.add_function(wrap_pyfunction!(random_b64url, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid4, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7, m)?)?;
     m.add_function(wrap_pyfunction!(uuid7_timestamp_ms, m)?)?;
     m.add_function(wrap_pyfunction!(uuid_version, m)?)?;
     m.add_function(wrap_pyfunction!(uuid_parse, m)?)?;

@@ -1136,6 +1136,50 @@ def daitch_mokotoff(text: str) -> list[str]: ...
 # soundex.
 def refined_soundex(text: str) -> str: ...
 
+
+# The random-generation family. SECURITY CONTRACT, the same paragraph on
+# every seeded surface: the default (no seed) draws fresh bytes from the
+# operating system's CSPRNG on every call — no process or thread RNG state,
+# so it is fork-safe, matching secrets' own per-call semantics — safe for
+# keys, tokens, and secrets. seed= switches to a deterministic ChaCha20
+# stream: the output becomes a pure function of (seed, arguments), fully
+# predictable from the seed — a reproducible-test/fixture tool, NEVER safe
+# for secrets, keys, or tokens (any adversary who learns the seed can
+# reproduce the stream); the unseeded spelling is the secrets-safe one.
+# The seed is any int, reduced mod 2**64 (two's complement for negatives).
+# All six are one GIL-released pass (fill + formatting under py.detach).
+def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str: ...
+
+# secrets.token_hex(n_bytes) parity: 2*n_bytes lowercase hex characters.
+def random_hex(n_bytes: int, *, seed: int | None = None) -> str: ...
+
+# Exactly random_string(length, BASE62_CHARS): the [0-9A-Za-z] id spelling.
+def random_b62(length: int, *, seed: int | None = None) -> str: ...
+
+# RFC 4648 §5 urlsafe base64 (A-Za-z0-9-_, never + or /) of n_bytes fresh
+# bytes: secrets.token_urlsafe parity unpadded (the default), the '=' tail
+# per the RFC when padded=True.
+def random_b64url(
+    n_bytes: int, *, padded: bool = False, seed: int | None = None
+) -> str: ...
+
+# An RFC 4122 v4 UUID string (36 chars, lowercase, hyphens at 8/13/18/23):
+# 122 random bits, the uuid.uuid4() spelling. Deterministic under seed=
+# (predictable — the security contract above).
+def uuid4(*, seed: int | None = None) -> str: ...
+
+# An RFC 9562 v7 UUID string: 48-bit Unix-millisecond timestamp + 74 random
+# bits. No seed parameter: the timestamp is external state (a seeded uuid7
+# would still vary with the clock; the deterministic tool is uuid4(seed=...)).
+# Probabilistically unique, NOT counter-monotonic: same-millisecond calls
+# order by their random bits and a backwards clock step flows into the
+# timestamp (uuid_utils' strict monotonicity is a different product
+# promise). The caller-visible contract is the timestamp: the canonical
+# string's first two dash-free groups, int(u[:8] + u[9:13], 16), are the
+# call's Unix epoch milliseconds.
+def uuid7() -> str: ...
+
+
 # GIL note: one GIL-held walk of the items sequence (the standard str-in
 # borrow class, O(items) handles, over any Sequence), then the set builds
 # and the whole batch scan under one GIL-released pass, then a single int

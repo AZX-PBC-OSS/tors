@@ -2622,6 +2622,47 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "n_bytes",
+    [512 * 1024, 1024 * 1024],
+    ids=["512KiB-drawn", "1MiB-drawn"],
+)
+def test_random_hex_generation_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    n_bytes: int,
+) -> None:
+    """The random-generation claim, ceiling-only cells (the b64 12 MiB
+    precedent): the whole pass — the fresh OS-entropy fill (one getrandom
+    syscall per call, no process or thread RNG state) plus the hex
+    formatting — runs under one ``py.detach``, and the return is one string,
+    so the GIL-held residue is the O(output) marshalling alone (2x the drawn
+    bytes of ASCII here).
+
+    Measured on the dev box (Apple Silicon, quiet, 3 samples per cell):
+
+    - 512 KiB drawn (1 MiB output): worst gaps 10.7-11.0ms of 2.3-5.6ms
+      walls — the ping floor plus ~1ms of marshalling a 1 MiB string. The
+      wall sits under the 10ms ping floor, so the gap/wall ratio (1.9-4.7)
+      is this suite's documented sub-ping artifact, not evidence of
+      blocking; the cell asserts the 100ms ceiling (~9x margin) and records
+      the band. A detach regression (the fill held under the GIL) would
+      show the same wall but block the loop for it: 2-6ms held is under
+      the ping floor too, so the ceiling alone cannot separate that — the
+      cell's real regression teeth are at the 1 MiB-drawn size and in the
+      blowout class (a per-char syscall regression would put ~500ms of
+      held work behind one call and trip the ceiling by ~5x).
+    - 1 MiB drawn (2 MiB output): worst gaps 10.7-10.8ms of 4.5-4.8ms
+      walls, the same band.
+
+    The seeded spelling (ChaCha20 userspace, no syscall at all) is strictly
+    cheaper on the detached side; unseeded is the shape worth the cell."""
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.random_hex, n_bytes),
+            ratio_budget=None,
+        )
+    )
+
+
 @pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_minhash_signature_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
