@@ -260,6 +260,12 @@ mod tests {
         let mut haystack = emoji.to_vec();
         haystack.extend_from_slice(NUL_ESCAPE);
         assert_eq!(find_unescaped(&haystack, NUL_ESCAPE), Some(4));
+        // CJK row, mirroring the Python byte-offset battery: two CJK chars
+        // are six UTF-8 bytes, so the needle sits at byte 6 (char 2).
+        let cjk = "\u{6771}\u{4eac}".as_bytes();
+        let mut haystack = cjk.to_vec();
+        haystack.extend_from_slice(NUL_ESCAPE);
+        assert_eq!(find_unescaped(&haystack, NUL_ESCAPE), Some(6));
         let mut haystack = [b"\\", NUL_ESCAPE].concat().repeat(2);
         haystack.extend_from_slice(b"caf");
         haystack.extend_from_slice("\u{e9}".as_bytes());
@@ -416,6 +422,32 @@ mod tests {
             steps <= corpus.len(),
             "walked {steps} steps over {} bytes",
             corpus.len()
+        );
+        // The inside-run long shape: R = 99_999 backslashes then `u0000`
+        // spells the needle at 99_998 (run 99_998 before the hit, even).
+        let mut odd = vec![b'\\'; 99_999];
+        odd.extend_from_slice(b"u0000");
+        let (got, steps) = counted(&odd, NUL_ESCAPE);
+        assert_eq!(got, Some(99_998));
+        assert!(
+            steps <= odd.len(),
+            "walked {steps} steps over {} bytes",
+            odd.len()
+        );
+        // The backslash-u rejected chain: four all-rejected hits each
+        // behind exactly one backslash (runs 3, 1, 1, 1), the
+        // consecutive-rejected-hits boundary shape.
+        let mut chain = vec![b'\\'; 4];
+        for _ in 0..3 {
+            chain.extend_from_slice(b"u\\\\");
+        }
+        chain.extend_from_slice(b"u");
+        let (got, steps) = counted(&chain, b"\\u");
+        assert_eq!(got, None);
+        assert!(
+            steps <= chain.len(),
+            "walked {steps} steps over {} bytes",
+            chain.len()
         );
     }
 }
