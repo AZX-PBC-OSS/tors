@@ -163,13 +163,40 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
   have read fine, while under-matching leaks. Plus-addressed spellings match
   whole, the tag included: `ada+tag@azx.io` is one match, multiple tags and
   a trailing `+` included (pinned in the battery).
-- `contact_phone` — anchored on a literal `+` because a bare digit run is an
-  order number, byte count, or timestamp, and redacting that would destroy
-  the diagnostic the scrubber exists to preserve; at least eight digits with
-  the separators humans and upstream APIs use (`( ) - . ` and space — two
-  numbers split by one space are ONE match); the digit class is Unicode Nd
-  (every decimal-digit script), and a `~` or a second `+` breaks a run.
-  `ticket 4096` above survives untouched.
+- `contact_phone`, two matchers —
+  - *international*: anchored on a literal `+` because a bare digit run is an
+    order number, byte count, or timestamp, and redacting that would destroy
+    the diagnostic the scrubber exists to preserve. The grammar is the
+    ported `\+\d[\d\-. ()]{6,}\d`: a digit directly after the `+`, six or
+    more middle class characters, a final digit — the middle counts
+    separators, so a long spelling matches on seven digits
+    (`+1 415 555`) while `+1234567` never does. The separators are the ones
+    humans and upstream APIs use (`( ) - . ` and space — two numbers split
+    by one space are ONE match); the digit class is Unicode Nd (every
+    decimal-digit script); and a `~` or a second `+` breaks a run. A `+`
+    before a run marks international intent for the whole run: the grammar
+    matches, or the run is the ported non-match, and the domestic matcher
+    never fires behind a `+` — `+ (415) 555-2671` stays untouched, exactly
+    as the source leaves it. `ticket 4096` above survives untouched.
+  - *domestic* (the extension past the ported source): un-plussed NANP
+    shapes — a full run of exactly ten digits, or eleven with an ASCII
+    leading `1`, in any `( ) - . ` spelling, `1 (415) 555-2671` and
+    `1-415-555-2671` included. Two discipline rules, both load-bearing:
+    the match must carry at least one SEPARATOR, so a bare unseparated
+    digit run is never scrubbed even at exactly ten digits — it is an
+    order number or id (the same reasoning that anchors the
+    international matcher on `+`), and the requirement is also what
+    keeps a token's own digest hex unmatchable, so phone-only stays
+    strictly idempotent and scrub-twice convergence cannot be chained
+    adversarially through chosen digests; and no partial match inside a
+    longer run — twelve-plus digits is an id, not a phone. Leading
+    spaces are skipped, trailing separators survive, and non-NANP
+    un-plussed domestic (`020 …` shapes) is out of scope: the `+` form
+    is the international spelling of those. One reachable interaction
+    is documented rather than fixed: an email token whose DOMAIN spells
+    a domestic number (`user@555.1234567.co`) has its digit half
+    re-tokenized by the phone pass — over-redaction in the safe
+    direction, converging on the second scrub like every other shape.
 
 `rules=None` applies both rules in the canonical order — the email
 substitution over the whole string first, then the phone substitution over

@@ -14,6 +14,15 @@ lane below, and, on the live lane,
 ``tors.scrub_pii(text, salt="") == <the source module's free-text scrub
 entry point>(text)``.
 
+tors's phone rule carries one deliberate extension past that contract:
+the domestic NANP matcher (un-plussed shapes the source leaves
+untouched). The lanes are split accordingly: every QUOTED-PIN lane below
+guards on ``has_domestic_shape(text)`` — parity is asserted exactly where
+the source's own semantics apply — and ``TestDomesticExtension`` pins the
+other side in both directions (the oracle must leave the shape, tors must
+scrub exactly the span), so a regression on either side of the extension
+fails loudly instead of surfacing as a parity mystery.
+
 The live re-sync lane is env-gated and NEVER runs in CI:
 ``TORS_SCRUB_PII_ORACLE`` carries the full locator —
 ``path/to/module.py:entry_point``, a module file path and the scrub
@@ -33,10 +42,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
+import unicodedata
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 import tors
@@ -96,6 +106,14 @@ CORPUS: list[str] = (
     + [
         "unknown candidate fungai.chetima@example.com called from +14155552671 twice",
         "user+14155552671@example.com",
+        # The composition falsifier hypothesis found under the domestic
+        # extension: adjacent addresses whose email tokens' digest tails
+        # plus the following numbers would spell ten-digit runs — the
+        # clean-boundary rule keeps the phone pass off them, and the
+        # engines agree (a regression here is a token-digest mangle).
+        "fungai.chetima@example.comfungai.chetima@example.com"
+        "fungai.chetima@example.comread 4096 bytes in 1200 ms",
+        "a@b.co 4096-1200-4096 x",
     ]
 )
 
@@ -110,13 +128,64 @@ _RULES_LANES: list[list[str] | None] = [
 
 _SALT_LANES: list[str | None] = [None, "", "site-secret"]
 
+# The domestic guard: whether tors's domestic matcher (the extension
+# past the source's + anchored grammar) would fire anywhere in `text`.
+# A faithful test-side mirror of the landed grammar — a FULL un-plussed
+# class run of exactly ten Nd digits, or eleven with an ASCII leading
+# '1', carrying at least one separator inside the match span — used only
+# to route inputs between the parity lanes (conservative by design: an
+# input this flags whose domestic shape the email pass then consumes
+# still agrees between the engines, and is simply not asserted here).
+_DOMESTIC_SEPARATORS = "-. ()"
+
+
+def _is_nd(c: str) -> bool:
+    return unicodedata.category(c) == "Nd"
+
+
+def has_domestic_shape(text: str) -> bool:
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if _is_nd(c) or c in _DOMESTIC_SEPARATORS:
+            run_start = i
+            j = i
+            digits = 0
+            first_digit: str | None = None
+            last_digit = -1
+            while j < n and (_is_nd(text[j]) or text[j] in _DOMESTIC_SEPARATORS):
+                if _is_nd(text[j]):
+                    digits += 1
+                    if first_digit is None:
+                        first_digit = text[j]
+                    last_digit = j
+                j += 1
+            plussed = run_start > 0 and text[run_start - 1] == "+"
+            if not plussed and (
+                digits == 10 or (digits == 11 and first_digit == "1")
+            ):
+                k = run_start
+                while text[k] == " ":
+                    k += 1
+                if any(ch in _DOMESTIC_SEPARATORS for ch in text[k:last_digit]):
+                    return True
+            i = j
+        else:
+            i += 1
+    return False
+
 
 @pytest.mark.parametrize("salt", _SALT_LANES, ids=["default-salt", "unsalted", "custom-salt"])
 @pytest.mark.parametrize("text", CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))])
 def test_quoted_pin_parity(text: str, salt: str | None) -> None:
     """The CI oracle lane, both rules (the canonical order): every corpus
     shape at every salt spelling — tors's documented default, the
-    unsalted source-parity spelling, and a caller secret."""
+    unsalted source-parity spelling, and a caller secret. Domestic-bearing
+    inputs route to the extension lane (the source has no domestic
+    grammar to be parity-checked against)."""
+    if has_domestic_shape(text):
+        pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
     assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
 
 
@@ -126,6 +195,8 @@ def test_quoted_pin_rules_parity(text: str, rules: list[str] | None) -> None:
     """The rules lanes over the unsalted spelling (the source chain's own
     digest): both canonical orders, each subset, and the identity — the
     last one pinning that the oracle and tors agree on doing nothing."""
+    if has_domestic_shape(text):
+        pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
     assert tors.scrub_pii(text, rules, salt="") == reference_scrub_pii(text, rules, salt="")
 
 
@@ -160,6 +231,7 @@ class TestHypothesisDifferential:
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_both_rules_match_the_quoted_pin(self, text: str, salt: str | None) -> None:
+        assume(not has_domestic_shape(text))
         assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
 
     @pytest.mark.parametrize(
@@ -168,6 +240,7 @@ class TestHypothesisDifferential:
     @given(text=_composed_text)
     @settings(max_examples=150, deadline=None)
     def test_rule_subsets_match_the_quoted_pin(self, text: str, rules: list[str]) -> None:
+        assume(not has_domestic_shape(text))
         assert tors.scrub_pii(text, rules, salt="") == reference_scrub_pii(text, rules, salt="")
 
     @given(text=_composed_text)
@@ -175,6 +248,66 @@ class TestHypothesisDifferential:
     def test_scrubbing_twice_converges(self, text: str) -> None:
         twice = tors.scrub_pii(tors.scrub_pii(text, salt=""), salt="")
         assert tors.scrub_pii(twice, salt="") == twice
+
+
+# --- The extension lane: the domestic matcher past the source -----------------
+#
+# The source's phone grammar is + anchored, so it leaves every un-plussed
+# digit run untouched. tors scrubs the NANP shapes (maintainer-directed),
+# with the discipline rules tests/test_scrub_pii.py pins in full. This lane
+# pins the DELIBERATE divergence in both directions — the oracle must
+# leave the shape, tors must scrub exactly the span — so a regression on
+# either side of the extension fails with its own name on it.
+
+
+_DOMESTIC_CASES: list[tuple[str, str]] = [
+    # (input, the span tors scrubs)
+    ("(415) 555-2671", "(415) 555-2671"),
+    ("415-555-2671", "415-555-2671"),
+    ("415.555.2671", "415.555.2671"),
+    ("415 555 2671", "415 555 2671"),
+    ("1-415-555-2671", "1-415-555-2671"),
+    ("1 (415) 555-2671", "1 (415) 555-2671"),
+    ("1 415 555 2671", "1 415 555 2671"),
+    ("1415 555 2671", "1415 555 2671"),
+    ("call 415-555-2671 ok", "415-555-2671"),
+    ("415-555-2671 x1234", "415-555-2671"),
+]
+
+_DOMESTIC_NON_MATCHES: list[str] = [
+    # The discipline cuts, shared by BOTH engines (parity on the
+    # non-matches too): bare runs, wrong widths, wrong leading digit.
+    "4155552671",
+    "14155552671",
+    "order 1234567890 closed",
+    "415-555-267",
+    "415-555-267123",
+    "415-555-2671-555-123-4567",
+    "915-555-26712",
+]
+
+
+class TestDomesticExtension:
+    @pytest.mark.parametrize(
+        ("text", "matched"), _DOMESTIC_CASES, ids=[c[1] for c in _DOMESTIC_CASES]
+    )
+    def test_the_quoted_oracle_leaves_the_shape(self, text: str, matched: str) -> None:
+        assert reference_scrub_pii(text, None, salt="") == text
+
+    @pytest.mark.parametrize(
+        ("text", "matched"), _DOMESTIC_CASES, ids=[c[1] for c in _DOMESTIC_CASES]
+    )
+    def test_tors_scrubs_exactly_the_span(self, text: str, matched: str) -> None:
+        token = f"{matched[:3]}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+        assert text.count(matched) == 1
+        assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
+
+    @pytest.mark.parametrize(
+        "text", _DOMESTIC_NON_MATCHES, ids=[f"shared-nonmatch-{i}" for i in range(7)]
+    )
+    def test_the_discipline_cuts_are_shared_non_matches(self, text: str) -> None:
+        assert reference_scrub_pii(text, None, salt="") == text
+        assert tors.scrub_pii(text, salt="") == text
 
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
@@ -219,11 +352,14 @@ class TestLiveResyncLane:
     def test_the_corpus_matches_the_live_module(self) -> None:
         live = _live_oracle()
         for text in CORPUS:
+            if has_domestic_shape(text):
+                continue  # the extension lane's territory; the live module has no domestic grammar
             assert tors.scrub_pii(text, salt="") == live(text), text
 
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_compositions_match_the_live_module(self, text: str) -> None:
+        assume(not has_domestic_shape(text))
         live = _live_oracle()
         assert tors.scrub_pii(text, salt="") == live(text)
 

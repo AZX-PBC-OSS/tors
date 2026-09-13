@@ -28,20 +28,26 @@
 //! * The identity path never lies: a borrowed return implies no match
 //!   existed (a match that fired without allocating is silent
 //!   under-redaction by definition).
-//! * Phone-only is strictly idempotent, and its pass-one output is
-//!   unconditionally free of input phone-match survivors (no email pass
-//!   runs, so the reconstruction shape cannot arise).
+//! * Phone-only is strictly idempotent — with the domestic matcher in
+//!   the grammar, by construction rather than by luck: every phone
+//!   match ends at its run's last digit (the remainder is
+//!   separator-only), no run spans a token boundary (the `~` is not
+//!   class), and a token's interior can hold no domestic match — the
+//!   prefix is at most three codepoints and the digest hex carries no
+//!   separator, while every domestic match requires one. The bare-run
+//!   cut is what buys that: a ten-digit digest-hex run is not a match.
 //!
 //! The completeness checks need a matcher, and the transform is not one,
-//! so this target carries its own: a char-space, per-position
-//! transcription of the two quoted grammars (the regex engine's own
-//! order of operations — try every start, greedy runs, backtracked
-//! split/final-digit — spelled nothing like the byte scanners the
-//! transform drives). Agreement between the two spellings is exactly
-//! what the invariants assert. Both reachable reconstruction shapes
-//! were found by exactly this harness (an independent re-derivation of
-//! the body over corpus plus 500k deterministic random compositions)
-//! before the target ever ran under libFuzzer.
+//! so this target carries its own: char-space, per-position
+//! transcriptions of the quoted grammars plus the domestic extension
+//! (the regex engine's own order of operations — try every start,
+//! greedy runs, backtracked split/final-digit — spelled nothing like
+//! the byte scanners the transform drives). Agreement between the two
+//! spellings is exactly what the invariants assert. Both reachable
+//! reconstruction shapes were found by exactly this harness (an
+//! independent re-derivation of the body over corpus plus 500k
+//! deterministic random compositions) before the target ever ran under
+//! libFuzzer.
 
 #![no_main]
 
@@ -60,6 +66,10 @@ fn is_domain_char(c: char) -> bool {
 
 fn is_phone_class_char(c: char) -> bool {
     is_nd(c) || matches!(c, '-' | '.' | ' ' | '(' | ')')
+}
+
+fn is_phone_sep_char(c: char) -> bool {
+    matches!(c, '-' | '.' | ' ' | '(' | ')')
 }
 
 /// The email grammar at one start position: the maximal local run, a
@@ -94,11 +104,11 @@ fn email_match_at(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// The phone grammar at one start position: a literal `+`, an Nd digit,
-/// then the greedy class run backtracked to its last Nd digit at char
-/// index 6 or beyond (the middle holds at least six chars). Returns the
-/// match END (char index) on success.
-fn phone_match_at(chars: &[char], start: usize) -> Option<usize> {
+/// The INTERNATIONAL phone grammar at one start position: a literal `+`,
+/// an Nd digit, then the greedy class run backtracked to its last Nd
+/// digit at char index 6 or beyond (the middle holds at least six
+/// chars). Returns the match END (char index) on success.
+fn intl_match_at(chars: &[char], start: usize) -> Option<usize> {
     if chars[start] != '+' || start + 1 >= chars.len() || !is_nd(chars[start + 1]) {
         return None;
     }
@@ -112,6 +122,78 @@ fn phone_match_at(chars: &[char], start: usize) -> Option<usize> {
         .rev()
         .find(|&idx| is_nd(chars[idx]))
         .map(|idx| idx + 1)
+}
+
+/// The full phone match set: the international grammar at every `+`,
+/// and the domestic extension over un-plussed runs — a FULL class run
+/// of exactly ten Nd digits, or eleven with an ASCII leading `1`,
+/// carrying at least one separator inside the match span (the bare-run
+/// cut), never behind a `+` (international territory), leading spaces
+/// skipped. Char indices, never bytes: the grammars must agree on units
+/// with each other (never with the transform's byte offsets).
+fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '+' {
+            if let Some(end) = intl_match_at(&chars, i) {
+                found.push((i, end));
+                i = end;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if !is_phone_class_char(chars[i]) {
+            i += 1;
+            continue;
+        }
+        // A class run starting at i (never at a `+`: those broke above).
+        let run_start = i;
+        let mut j = i;
+        let mut digits = 0;
+        let mut first_digit: Option<char> = None;
+        let mut last_digit_idx = None;
+        let mut seen_non_space = false;
+        let mut leading_spaces = 0;
+        while j < chars.len() && is_phone_class_char(chars[j]) {
+            if is_nd(chars[j]) {
+                digits += 1;
+                if first_digit.is_none() {
+                    first_digit = Some(chars[j]);
+                }
+                last_digit_idx = Some(j);
+            }
+            if !seen_non_space {
+                if chars[j] == ' ' {
+                    leading_spaces += 1;
+                } else {
+                    seen_non_space = true;
+                }
+            }
+            j += 1;
+        }
+        let plussed = run_start > 0 && chars[run_start - 1] == '+';
+        if !plussed {
+            let nanp = digits == 10 || (digits == 11 && first_digit == Some('1'));
+            if nanp {
+                let start = run_start + leading_spaces;
+                let end = last_digit_idx.unwrap() + 1;
+                // The clean-boundary rule: the match's first char not
+                // glued to a `~` or a lowercase a-f (the token-interior
+                // alphabet), so no digest-born run can compose a match.
+                let clean = start == 0 || !matches!(chars[start - 1], '~' | 'a'..='f');
+                if clean && chars[start..end].iter().any(|&c| is_phone_sep_char(c)) {
+                    found.push((start, end));
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        i = j; // a non-matching run is spent whole: no partial matches
+    }
+    found
 }
 
 /// The non-overlapping leftmost match set over `s` for one grammar, in
@@ -148,7 +230,7 @@ fn any_survivor(s: &str, out: &str, emails: &[(usize, usize)], phones: &[(usize,
 
 fuzz_target!(|s: &str| {
     let emails = matches_of(s, email_match_at);
-    let phones = matches_of(s, phone_match_at);
+    let phones = phone_matches_of(s);
 
     for salt in ["", tors::pii_impl::DEFAULT_SALT] {
         let out = scrub_pii(s, PiiRules::BOTH, salt);
@@ -196,8 +278,9 @@ fuzz_target!(|s: &str| {
 
     // Phone-only: no email pass runs, so the reconstruction shape
     // cannot arise, no phone-match survivor is possible at all, and the
-    // pass is strictly idempotent (a phone token's `~` breaks every
-    // digit run three code points in).
+    // pass is strictly idempotent (every match ends at its run's last
+    // digit, no run spans a token's `~`, and the domestic separator
+    // requirement leaves a token's hex interior unmatchable).
     let phone_only = PiiRules {
         email: false,
         phone: true,

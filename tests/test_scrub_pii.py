@@ -12,13 +12,22 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
   including their leading/doubled dots, and the fact that URLs, mailto
   links, and code spans get NO special treatment (whatever sits inside
   them matches).
-- the phone rule's grammar: anchored on a literal ``+`` (bare digit runs
-  are order numbers and byte counts, and must survive), at least eight
-  digits with the separators humans and upstream APIs use, the digit
-  class in the Python-regex sense (every Unicode Nd decimal digit, not
-  ASCII-only), and the token prefix being the match's first three CODE
-  POINTS — ``"+1 "`` for a domestic spelling, ``"+47"`` for a compact
-  one.
+- the phone rule's grammar, two matchers: INTERNATIONAL, anchored on a
+  literal ``+`` (bare digit runs are order numbers and byte counts, and
+  must survive), a digit directly after the ``+``, six or more middle
+  class characters, and a final digit — the middle counts separators,
+  so a long spelling matches on seven digits while ``+1234567`` never
+  does — with the digit class in the Python-regex sense (every Unicode
+  Nd decimal digit, not ASCII-only) and the token prefix being the
+  match's first three CODE POINTS (``"+1 "`` for a domestic spelling,
+  ``"+47"`` for a compact one); and DOMESTIC (the extension past the
+  source), un-plussed NANP shapes — a full run of exactly ten digits,
+  or eleven with an ASCII leading ``1``, in any ``[-. ()]`` spelling,
+  carrying at least one separator (a bare digit run is an id even at
+  ten digits, and the requirement is what keeps a token's own digest
+  hex unmatchable, so phone-only stays strictly idempotent), no partial
+  match inside a longer run, and never firing behind a ``+``
+  (international territory: match or the source's non-match).
 - token shapes: ``@domain~<12 hex>`` for email, ``prefix~<12 hex>`` for
   phone; the digest is ``sha256(salt + match)`` truncated to 12 hex
   chars, so ``salt=""`` is the source chain's unsalted digest exactly.
@@ -545,3 +554,125 @@ class TestArgumentBoundary:
             scrub_pii(b"a@b.co")  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             scrub_pii("a@b.co", salt=42)  # type: ignore[arg-type]
+
+
+class TestDomesticPhoneZoo:
+    """The domestic matcher: the extension past the source's ``+``-anchored
+    grammar (the source leaves every un-plussed digit run untouched; tors
+    scrubs the NANP shapes, maintainer-directed). The discipline rules that
+    keep it safe are pinned here with the same literal thoroughness as the
+    source port: the separator requirement (a bare digit run is an id even
+    at exactly ten digits, and the requirement is what keeps a token's own
+    digest hex unmatchable, so phone-only stays strictly idempotent), the
+    full-run width rule (no partial match inside a longer run), and the
+    ``+``-territory rule (a run behind a ``+`` is international-only, never
+    a domestic fallback)."""
+
+    def test_every_separator_spelling_matches(self) -> None:
+        for matched in [
+            "(415) 555-2671",
+            "415-555-2671",
+            "415.555.2671",
+            "415 555 2671",
+            "1-415-555-2671",
+            "1 (415) 555-2671",
+            "1 415 555 2671",
+            "1415 555 2671",
+        ]:
+            assert scrub_pii(matched, ["contact_phone"], salt="") == _phone_token(matched)
+
+    def test_leading_spaces_are_skipped_and_trailing_separators_spared(self) -> None:
+        assert (
+            scrub_pii("call 415-555-2671 ok", ["contact_phone"], salt="")
+            == f"call {_phone_token('415-555-2671')} ok"
+        )
+        # A leading structural separator is part of the spelling.
+        assert (
+            scrub_pii("x -415-555-2671 , ok", ["contact_phone"], salt="")
+            == f"x {_phone_token('-415-555-2671')} , ok"
+        )
+        # Extensions survive past the last digit, same as international.
+        assert (
+            scrub_pii("415-555-2671 x1234", ["contact_phone"], salt="")
+            == f"{_phone_token('415-555-2671')} x1234"
+        )
+
+    def test_bare_digit_runs_never_match_even_at_ten_or_eleven(self) -> None:
+        # The documented cut: an unseparated digit run is an order number
+        # or id; the + form is the scrubbed spelling of the same digits.
+        for text in [
+            "4155552671",
+            "14155552671",
+            "ref 4155552671 x",
+            "id 4155552671 ",
+            "order 1234567890 closed",
+        ]:
+            assert scrub_pii(text, ["contact_phone"], salt="") == text
+
+    def test_the_width_rule_rejects_short_long_and_wrong_leading_digits(self) -> None:
+        for text in [
+            "415-555-267",  # nine
+            "415-555-267123",  # twelve: an id
+            "415-555-2671-555-123-4567",  # twenty in ONE run: an id
+            "915-555-26712",  # eleven, not led by ASCII '1'
+        ]:
+            assert scrub_pii(text, ["contact_phone"], salt="") == text
+        # The NANP trunk prefix is an ASCII artifact: an eleven-digit Nd
+        # run led by the Arabic-Indic ONE is not the shape.
+        arabic_eleven = (
+            "\U00000661\U00000661\U00000665 \U00000665\U00000665\U00000665"
+            " \U00000662\U00000666\U00000667\U00000661\U00000662"
+        )
+        assert scrub_pii(arabic_eleven, ["contact_phone"], salt="") == arabic_eleven
+
+    def test_unicode_nd_digits_spell_domestic_numbers(self) -> None:
+        arabic = (
+            "\U00000664\U00000661\U00000665 \U00000665\U00000665\U00000665"
+            " \U00000662\U00000666\U00000667\U00000661"
+        )
+        assert scrub_pii(arabic, ["contact_phone"], salt="") == _phone_token(arabic)
+
+    def test_a_plus_before_a_run_is_international_territory(self) -> None:
+        # Ten digits behind a + is the INTERNATIONAL match; a separator
+        # right after the +, or a run too short for the {6,} middle, is
+        # the source's own documented non-match — never a domestic
+        # fallback. The middle counts separators, so the long
+        # seven-digit spelling matches while the short one never does.
+        assert (
+            scrub_pii("+415-555-2671", ["contact_phone"], salt="")
+            == _phone_token("+415-555-2671")
+        )
+        assert (
+            scrub_pii("ring +1 415 555 now", ["contact_phone"], salt="")
+            == f"ring {_phone_token('+1 415 555')} now"
+        )
+        assert scrub_pii("+1415555", ["contact_phone"], salt="") == "+1415555"
+        assert scrub_pii("+ (415) 555-2671", ["contact_phone"], salt="") == "+ (415) 555-2671"
+        assert scrub_pii("+415-555", ["contact_phone"], salt="") == "+415-555"
+
+    def test_two_domestic_matches_with_a_break_both_scrub(self) -> None:
+        assert (
+            scrub_pii("415-555-2671, 415-555-2672", ["contact_phone"], salt="")
+            == f"{_phone_token('415-555-2671')}, {_phone_token('415-555-2672')}"
+        )
+
+    def test_an_email_token_domain_that_spells_a_number_is_re_tokenized(self) -> None:
+        # The documented over-redaction corner: the email pass tokens the
+        # whole address, then the phone pass re-tokens the domestic shape
+        # the DOMAIN spelled (the dot between the digit groups is the
+        # separator that makes it matchable). Safe direction; converges.
+        matched = "user@555.1234567.co"
+        once = scrub_pii(matched, salt="")
+        assert once == (
+            f"@555~{_hex12('555.1234567')}.co~{_hex12(matched)}"
+        )
+        twice = scrub_pii(once, salt="")
+        assert scrub_pii(twice, salt="") == twice
+
+    def test_phone_only_stays_strictly_idempotent_with_domestic_matches(self) -> None:
+        once = scrub_pii(
+            "(415) 555-2671 415-555-2672 +14155552673",
+            ["contact_phone"],
+            salt="",
+        )
+        assert scrub_pii(once, ["contact_phone"], salt="") == once

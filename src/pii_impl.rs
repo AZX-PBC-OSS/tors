@@ -25,23 +25,58 @@
 //!   the domain is the coarse, non-identifying half an operator reasons
 //!   about. No special treatment for URLs, `mailto:` links, or code
 //!   spans: whatever email sits inside them matches.
-//! * **Phone rule** — the pattern `\+\d[\d\-. ()]{6,}\d`: anchored on a
-//!   literal `+` (a bare digit run is an order number, byte count, or
-//!   timestamp, and redacting those would destroy the diagnostic this
-//!   scrubber exists to preserve), at least eight digits total with the
-//!   separators humans and upstream APIs spell numbers with, and the
-//!   digit class in the Python-regex sense: every Unicode Nd decimal
-//!   digit (Arabic-Indic, Devanagari, fullwidth, …), not ASCII-only. A
-//!   run of class characters between two numbers is ONE match
-//!   (`+4712345678 1234567890` scrubs as a unit), the match ends at the
-//!   run's last digit (trailing separators survive), and a `~` or a
-//!   second `+` breaks it.
+//! * **Phone rule, two matchers** —
+//!   * *international*: the source's `\+\d[\d\-. ()]{6,}\d`, anchored on a
+//!     literal `+` (a bare digit run is an order number, byte count, or
+//!     timestamp, and redacting those would destroy the diagnostic this
+//!     scrubber exists to preserve), a digit directly after the `+`, six
+//!     or more middle class characters, and a final digit — the middle
+//!     `{6,}` counts separators, so a long spelling matches on seven
+//!     digits (`+1 415 555 ` after an email pass eats its tail digits)
+//!     while `+1234567` never matches; the digit class is every Unicode
+//!     Nd codepoint, one space-bridged run is ONE match, the match ends
+//!     at the run's last digit, and a `~` or a second `+` breaks it. A
+//!     `+` before a run marks international intent for the whole run:
+//!     the grammar matches or the run is a documented non-match, and
+//!     the domestic matcher never fires behind a `+` (which is why
+//!     `+ (415) 555-2671` stays untouched, exactly as the source leaves
+//!     it).
+//!   * *domestic* (the extension past the source): un-plussed NANP
+//!     shapes, a FULL run of exactly ten digits, or eleven with an ASCII
+//!     leading `1`, in any `[\d\-. ()]` spelling — `(XXX) XXX-XXXX`,
+//!     `XXX-XXX-XXXX`, `XXX.XXX.XXXX`, `XXX XXX XXXX`, the 1-prefixed
+//!     variants — with three discipline rules the international
+//!     anchor's rationale demands. First, the match must carry at least
+//!     one separator: a BARE unseparated digit run is an order number
+//!     or id even at exactly ten digits, the same reasoning that
+//!     anchors the international matcher on `+`, and (the structural
+//!     consequence) it is what keeps a token's own digest hex
+//!     unmatchable from inside, so phone-only stays strictly idempotent
+//!     and scrub-twice convergence cannot be chained adversarially
+//!     through chosen digests. Second, the match must start at a CLEAN
+//!     boundary — its first char not glued to a `~` or a lowercase
+//!     `a`-`f`, the token-interior alphabet — so a run starting inside
+//!     an email token's digest can never flow out through a separator
+//!     into following text and compose a fresh "number" out of hex
+//!     digits (`…~e292cb255128 4096` stays untouched); in real text a
+//!     digit run glued to a letter or tilde is an identifier fragment,
+//!     the same reasoning as the bare cut. Third, no partial match
+//!     inside a longer run: twelve-plus digits is an id, not a phone.
+//!     Leading spaces are skipped (word separation); other leading
+//!     separators are part of the spelling; trailing separators
+//!     survive past the last digit, same as international; and non-NANP
+//!     un-plussed domestic (`020 …` shapes) is out of scope, the `+`
+//!     form being the international spelling of those.
 //! * **Pass order** — email substitution over the whole string first,
 //!   then phone substitution over its result, each exactly once, no
 //!   cascade: an email's local part may itself contain a `+`-led digit
 //!   run (`user+14155552671@example.com` is one email), so the phone
 //!   rule must see the email tokens, never the addresses that produced
-//!   them.
+//!   them. One reachable interaction is documented rather than fixed:
+//!   an email token whose DOMAIN spells a domestic number
+//!   (`@5551234567.co~…`) has its digit half re-tokenized by the phone
+//!   pass — over-redaction in the safe direction, converging on the
+//!   second scrub like every other shape.
 //! * **Tokens** — `@domain~<digest>` for an email match, and
 //!   `prefix~<digest>` for a phone match, where `prefix` is the match's
 //!   first three CODE POINTS (a canonical E.164's country code — `"+47"`
@@ -70,12 +105,18 @@
 //!   pass two would have fired on it), so scrubbing twice always
 //!   converges. `tests/test_scrub_pii.py` pins both shapes literally
 //!   and the fuzz target asserts convergence over arbitrary input.
-//!   Phone-only is strictly idempotent (a phone token's `~` breaks
-//!   every digit run three code points in), and a phone token can
-//!   never land flush against an email token because the email pass's
-//!   greedy local consumption guarantees a non-class character before
-//!   every email token while a phone match ends on a digit, which is
-//!   class.
+//!   Phone-only is strictly idempotent, and the domestic matcher keeps
+//!   it so by construction: every phone match, international or
+//!   domestic, ENDS at its run's last digit (the run's remainder is
+//!   separator-only, holding no new match), no run can span a token
+//!   boundary (the `~` is not class), and a token's interior can hold
+//!   no domestic match — the prefix is at most three codepoints (under
+//!   ten digits), the digest hex carries no separator, and the
+//!   clean-boundary rule keeps a run that starts inside a digest from
+//!   flowing out into following text. The same rules are what make the
+//!   both-rules email-token corners converge: the domain that spells a
+//!   number leaves only letter-bearing fragments behind, and the
+//!   digest-tail-plus-adjacent-digits composition is unreachable.
 //! * **The salt.** `DEFAULT_SALT` is tors's own constant — the source
 //!   chain digests unsalted, and re-publishing that as a default would
 //!   re-publish its documented weakness (an enumerated E.164 space
@@ -339,65 +380,176 @@ fn scrub_email_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
     }
 }
 
-/// The phone pass: every leftmost match of the phone pattern becomes
-/// `prefix~digest` (`prefix` = the match's first three code points, the
-/// E.164 dialling prefix). One linear scan anchored on `+` (memchr); the
-/// class run after the leading digit is walked once, recording the last
-/// Nd digit at char index 6 or beyond — the exact landing point of the
-/// regex's greedy `{6,}` backtracking. `Cow::Borrowed` when nothing
-/// matches.
+/// One maximal phone-class run, with the facts both phone grammars
+/// classify it by. `run_end` is one past the run's last class char;
+/// `last_digit_end` one past its last Nd digit and
+/// `last_digit_char_idx` that digit's index within the run (the
+/// international grammar's true test: the regex
+/// `\+\d[\d\-. ()]{6,}\d` needs a digit at the eighth class character
+/// or beyond — the middle `{6,}` counts separators too, so a long
+/// spelling matches on seven digits); `first_digit` is the run's first
+/// digit; `starts_with_digit` whether the run's first char is one (a
+/// digit directly after the `+`); `leading_spaces` the space chars at
+/// the head of the run, before the first non-space class char (a
+/// domestic match skips them: word separation, not spelling).
+struct PhoneRun {
+    run_end: usize,
+    digits: usize,
+    last_digit_end: usize,
+    last_digit_char_idx: usize,
+    first_digit: Option<char>,
+    starts_with_digit: bool,
+    leading_spaces: usize,
+}
+
+/// The next phone-class char (an Nd digit or a phone separator) at or
+/// after `from`, as a byte offset. ASCII answers directly; a non-ASCII
+/// byte costs one char decode, and only for the Nd check (every phone
+/// separator is ASCII).
+fn next_phone_class(text: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii() {
+            if b.is_ascii_digit() || matches!(b, b'-' | b'.' | b' ' | b'(' | b')') {
+                return Some(i);
+            }
+            i += 1;
+        } else {
+            let c = text[i..].chars().next().unwrap();
+            if is_nd(c) {
+                return Some(i);
+            }
+            i += c.len_utf8();
+        }
+    }
+    None
+}
+
+/// The maximal class run starting at `run_start`, walked once.
+fn scan_phone_run(text: &str, run_start: usize) -> PhoneRun {
+    let mut run = PhoneRun {
+        run_end: run_start,
+        digits: 0,
+        last_digit_end: run_start,
+        last_digit_char_idx: 0,
+        first_digit: None,
+        starts_with_digit: false,
+        leading_spaces: 0,
+    };
+    let bytes = text.as_bytes();
+    let mut i = run_start;
+    let mut char_idx = 0;
+    let mut seen_non_space = false;
+    while i < bytes.len() {
+        let c = text[i..].chars().next().unwrap();
+        let nd = is_nd(c);
+        if !nd && !is_phone_separator(c) {
+            break;
+        }
+        if char_idx == 0 {
+            run.starts_with_digit = nd;
+        }
+        if !seen_non_space {
+            if c == ' ' {
+                run.leading_spaces += 1;
+            } else {
+                seen_non_space = true;
+            }
+        }
+        i += c.len_utf8();
+        run.run_end = i;
+        if nd {
+            run.digits += 1;
+            if run.first_digit.is_none() {
+                run.first_digit = Some(c);
+            }
+            run.last_digit_end = i;
+            run.last_digit_char_idx = char_idx;
+        }
+        char_idx += 1;
+    }
+    run
+}
+
+/// Whether the match span `[start, end)` carries a phone separator: the
+/// domestic grammar's bare-run cut. Walked only for runs whose digit
+/// count already qualifies, so the amortized cost stays one pass.
+fn has_separator_in(text: &str, start: usize, end: usize) -> bool {
+    text[start..end].chars().any(is_phone_separator)
+}
+
+/// The phone pass: every leftmost match of the two phone grammars
+/// becomes `prefix~digest` (`prefix` = the match's first three code
+/// points). One linear scan over the class runs: a run preceded by a
+/// `+` is international territory (the `+` plus the run matches when
+/// the run starts with a digit and its last digit sits at the eighth
+/// class character or beyond — the regex's own `{6,}` middle counting
+/// separators, so a long spelling matches on seven digits; anything
+/// else is a documented non-match, and the domestic grammar never
+/// fires behind a `+`); an un-plussed run of exactly ten digits, or
+/// eleven with an ASCII leading `1`, carrying a separator, is a
+/// domestic match. Non-matching runs are spent whole — no partial
+/// match inside a longer run. `Cow::Borrowed` when nothing matches.
 fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut pos = 0;
     let mut emitted = 0;
     let mut out: Option<String> = None;
-    while let Some(rel) = memchr(b'+', &bytes[pos..]) {
-        let plus = pos + rel;
-        // The leading digit: any Nd char (ASCII or not) directly after
-        // the `+`; anything else is a documented non-match at this `+`.
-        let Some(d1) = text[plus + 1..].chars().next() else {
-            break; // the `+` is the last byte: nothing more to find
+    while pos < bytes.len() {
+        let Some(run_start) = next_phone_class(text, pos) else {
+            break;
         };
-        if !is_nd(d1) {
-            pos = plus + 1;
+        let run = scan_phone_run(text, run_start);
+        let plussed = run_start > 0 && bytes[run_start - 1] == b'+';
+        let span = if plussed {
+            if run.starts_with_digit && run.last_digit_char_idx >= 7 {
+                Some((run_start - 1, run.last_digit_end))
+            } else {
+                None
+            }
+        } else {
+            // Domestic: a full un-plussed run of exactly ten digits, or
+            // eleven with an ASCII leading `1`, carrying a separator (a
+            // bare digit run is an id, not a phone), and starting at a
+            // CLEAN boundary: the match's first char not glued to a `~`
+            // or a lowercase `a`-`f` — the token-interior alphabet — so
+            // no run starting inside a token's digest can flow out
+            // through a separator into following text and compose a
+            // fresh "number" out of hex digits. In real text a digit
+            // run glued to a letter or tilde is an identifier fragment,
+            // the same reasoning as the bare cut.
+            let nanp_shape = run.digits == 10 || (run.digits == 11 && run.first_digit == Some('1'));
+            let match_start = run_start + run.leading_spaces;
+            let clean_start =
+                match_start == 0 || !matches!(bytes[match_start - 1], b'~' | b'a'..=b'f');
+            if nanp_shape && clean_start && has_separator_in(text, match_start, run.last_digit_end)
+            {
+                Some((match_start, run.last_digit_end))
+            } else {
+                None
+            }
+        };
+        let Some((start, end)) = span else {
+            pos = run.run_end;
             continue;
-        }
-        // The class run after the leading digit, walked once: the run's
-        // end and the last qualifying digit land together (a digit at
-        // char index >= 6 is a match end; later digits overwrite, so the
-        // largest index wins, the backtracking's first success).
-        let run_start = plus + 1 + d1.len_utf8();
-        let mut offset = run_start;
-        let mut best_end: Option<usize> = None;
-        for (char_idx, c) in text[run_start..].chars().enumerate() {
-            let nd = is_nd(c);
-            if !nd && !is_phone_separator(c) {
-                break;
-            }
-            if char_idx >= 6 && nd {
-                best_end = Some(offset + c.len_utf8());
-            }
-            offset += c.len_utf8();
-        }
-        let Some(end) = best_end else {
-            pos = plus + 1;
-            continue; // fewer than 8 digits in the run: a non-match here
         };
-        // The token prefix: the match's first three code points. The
-        // match holds at least nine (`+`, the leading digit, six middle
-        // chars, the final digit), so three always exist.
-        let mut prefix_end = plus;
+        // The token prefix: the match's first three code points. Every
+        // match holds at least nine (a `+`, a digit, six more class
+        // chars, a final digit), so three always exist.
+        let mut prefix_end = start;
         for _ in 0..3 {
             prefix_end += text[prefix_end..].chars().next().unwrap().len_utf8();
         }
-        let matched = &text[plus..end];
+        let matched = &text[start..end];
         let token = format!(
             "{}~{}",
-            &text[plus..prefix_end],
+            &text[start..prefix_end],
             token_digest(salt, matched)
         );
         let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
-        buf.push_str(&text[emitted..plus]);
+        buf.push_str(&text[emitted..start]);
         buf.push_str(&token);
         emitted = end;
         pos = end;
@@ -655,6 +807,209 @@ mod tests {
             scrub("+1+4155552671", rules, ""),
             format!("+1+41~{}", digest("", "+4155552671"))
         );
+    }
+
+    // --- The domestic matcher (the extension past the source) --------------------
+
+    fn phone_only() -> PiiRules {
+        PiiRules {
+            email: false,
+            phone: true,
+        }
+    }
+
+    #[test]
+    fn domestic_shapes_match_in_every_separator_spelling() {
+        for (text, matched) in [
+            ("(415) 555-2671", "(415) 555-2671"),
+            ("415-555-2671", "415-555-2671"),
+            ("415.555.2671", "415.555.2671"),
+            ("415 555 2671", "415 555 2671"),
+            ("1-415-555-2671", "1-415-555-2671"),
+            ("1 (415) 555-2671", "1 (415) 555-2671"),
+            ("1 415 555 2671", "1 415 555 2671"),
+            ("1415 555 2671", "1415 555 2671"),
+        ] {
+            assert_eq!(
+                scrub(text, phone_only(), ""),
+                format!("{}~{}", &matched[..3], digest("", matched)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn domestic_matches_skip_leading_spaces_and_spare_trailing_separators() {
+        assert_eq!(
+            scrub("call 415-555-2671 ok", phone_only(), ""),
+            format!("call 415~{} ok", digest("", "415-555-2671"))
+        );
+        // A leading structural separator is part of the spelling.
+        assert_eq!(
+            scrub("x -415-555-2671 , ok", phone_only(), ""),
+            format!("x -41~{} , ok", digest("", "-415-555-2671"))
+        );
+        // Extensions survive past the last digit, same as international.
+        assert_eq!(
+            scrub("415-555-2671 x1234", phone_only(), ""),
+            format!("415~{} x1234", digest("", "415-555-2671"))
+        );
+    }
+
+    #[test]
+    fn bare_digit_runs_never_match_even_at_ten_or_eleven() {
+        // The documented cut: a bare unseparated digit run is an order
+        // number or id; the separator requirement is also what keeps a
+        // token's own digest hex unmatchable (strict idempotence).
+        for text in [
+            "4155552671",
+            "14155552671",
+            "ref 4155552671 x",
+            "id 4155552671 ",
+            "order 1234567890 closed",
+        ] {
+            assert_eq!(scrub(text, phone_only(), ""), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_width_discipline_rejects_nine_twelve_and_wrong_eleven() {
+        for text in [
+            "415-555-267",               // nine digits
+            "415-555-267123",            // twelve: an id, not a phone
+            "415-555-2671-555-123-4567", // twenty in ONE run: an id
+            "915-555-26712",             // eleven, but not led by ASCII '1'
+        ] {
+            assert_eq!(scrub(text, phone_only(), ""), text, "{text}");
+        }
+        // Eleven in Nd digits whose first is the Arabic-Indic ONE, not
+        // the ASCII '1': not the NANP trunk-prefix shape.
+        let arabic_eleven = "\u{0661}\u{0661}\u{0665} \u{0665}\u{0665}\u{0665} \u{0662}\u{0666}\u{0667}\u{0661}\u{0662}";
+        assert_eq!(scrub(arabic_eleven, phone_only(), ""), arabic_eleven);
+    }
+
+    #[test]
+    fn unicode_nd_digits_spell_domestic_numbers() {
+        // Ten Arabic-Indic digits, space-separated: a domestic match
+        // whose token prefix carries the script's own spelling.
+        let arabic =
+            "\u{0664}\u{0661}\u{0665} \u{0665}\u{0665}\u{0665} \u{0662}\u{0666}\u{0667}\u{0661}";
+        let prefix: String = arabic.chars().take(3).collect();
+        assert_eq!(
+            scrub(arabic, phone_only(), ""),
+            format!("{prefix}~{}", digest("", arabic))
+        );
+    }
+
+    #[test]
+    fn a_plus_before_a_run_is_international_territory_never_domestic() {
+        // Ten digits behind a + is the INTERNATIONAL match; a separator
+        // right after the +, or a run too short for the {6,} middle, is
+        // the source's documented non-match — never a domestic fallback.
+        assert_eq!(
+            scrub("+415-555-2671", phone_only(), ""),
+            format!("+41~{}", digest("", "+415-555-2671"))
+        );
+        assert_eq!(
+            scrub("+ (415) 555-2671", phone_only(), ""),
+            "+ (415) 555-2671"
+        );
+        assert_eq!(scrub("+415-555", phone_only(), ""), "+415-555");
+    }
+
+    #[test]
+    fn a_long_spelling_matches_on_seven_digits() {
+        // The regex's {6,} middle counts separators: the run
+        // "1 415 555 " holds seven digits across nine class chars, and
+        // its last digit sits at the eighth char or beyond — a match,
+        // the exact shape the parity corpus catches when an email pass
+        // eats a phone piece's tail digits.
+        let matched = "+1 415 555";
+        assert_eq!(
+            scrub("ring +1 415 555 now", phone_only(), ""),
+            format!("ring +1 ~{} now", digest("", matched))
+        );
+        // The short spelling of the same seven digits never matches.
+        assert_eq!(scrub("+1415555", phone_only(), ""), "+1415555");
+    }
+
+    #[test]
+    fn two_domestic_matches_with_a_break_both_scrub() {
+        let (a, b) = ("415-555-2671", "415-555-2672");
+        assert_eq!(
+            scrub("415-555-2671, 415-555-2672", phone_only(), ""),
+            format!("415~{}, 415~{}", digest("", a), digest("", b))
+        );
+    }
+
+    #[test]
+    fn an_email_token_domain_that_spells_a_number_is_re_tokenized() {
+        // The documented over-redaction corner: the email pass tokens
+        // the whole address, and the phone pass re-tokens the domestic
+        // shape the DOMAIN spelled (the dot between the digit groups is
+        // the separator that makes it matchable; digits before a final
+        // ".co" alone are not). Safe direction; converges.
+        let matched = "user@555.1234567.co";
+        let once = scrub(matched, PiiRules::BOTH, "");
+        assert_eq!(
+            once,
+            format!(
+                "@555~{}.co~{}",
+                digest("", "555.1234567"),
+                digest("", matched)
+            )
+        );
+        let twice = scrub(&once, PiiRules::BOTH, "");
+        assert!(matches!(
+            scrub_pii(&twice, PiiRules::BOTH, ""),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn a_match_start_glued_to_hex_or_tilde_is_an_identifier_fragment() {
+        // The clean-boundary rule: a domestic match's first char may not
+        // be glued to `~` or a lowercase a-f — the token-interior
+        // alphabet — so a run starting inside a token's digest can never
+        // flow out into following text and compose a fresh "number" out
+        // of hex digits.
+        for text in ["job255128-4096", "value~255-123-4567", "ref c415-555-2671"] {
+            assert_eq!(scrub(text, phone_only(), ""), text, "{text}");
+        }
+        // A clean boundary is anything else — letters outside the hex
+        // alphabet included, and every word-separated spelling.
+        assert_eq!(
+            scrub("item 415-555-2671", phone_only(), ""),
+            format!("item 415~{}", digest("", "415-555-2671"))
+        );
+    }
+
+    #[test]
+    fn an_email_tokens_digest_cannot_compose_a_domestic_number() {
+        // The parity suite's falsifier, verbatim: three adjacent
+        // addresses whose email pass leaves tokens whose digest tails
+        // plus the following numbers could spell ten-digit runs — the
+        // clean-boundary rule keeps the phone pass off them, exactly
+        // two email tokens fire, and the numbers survive untouched.
+        let text = "fungai.chetima@example.comfungai.chetima@example.com\
+fungai.chetima@example.comread 4096 bytes in 1200 ms";
+        let once = scrub(text, PiiRules::BOTH, "");
+        assert_eq!(once.matches('~').count(), 2, "{once}");
+        assert!(once.ends_with(" 4096 bytes in 1200 ms"), "{once}");
+        let twice = scrub(&once, PiiRules::BOTH, "");
+        assert!(matches!(
+            scrub_pii(&twice, PiiRules::BOTH, ""),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn phone_only_stays_strictly_idempotent_with_domestic_matches() {
+        let once = scrub("(415) 555-2671 415-555-2672 +14155552673", phone_only(), "");
+        assert!(matches!(
+            scrub_pii(&once, phone_only(), ""),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
