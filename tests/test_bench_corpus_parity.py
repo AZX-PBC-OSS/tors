@@ -57,10 +57,13 @@ from reference import (  # noqa: I001 -- the shared oracle module (tests/referen
     _DIFF_REPLACE_FRACTIONS,
     _DIFF_WORD_SWAP,
     _ENTITY_SENTENCE,
+    _ESCAPE_LITERAL_TEXT,
     _PROSE_SENTENCE,
     SEARCH_DENSE_PATTERNS,
     SEARCH_SPARSE_PATTERNS,
+    UNESCAPED_NEEDLE,
     corpus_utf8,
+    unescaped_false_positive,
 )
 
 _MIB = 1024 * 1024
@@ -400,4 +403,109 @@ def test_search_bench_pattern_sets_match_reference() -> None:
     )
     assert arrays["DENSE_PATTERNS"] == list(SEARCH_DENSE_PATTERNS), (
         "benches/search.rs's dense pattern set drifted from reference.py's SEARCH_DENSE_PATTERNS"
+    )
+
+
+# --- The unescaped-scan bench's needle and corpus ------------------------------------
+#
+# The escape-parity group's corpora are the shared prose recipe (the sparse
+# shape is the plain prose bytes, so the wiring pin and the corpus-identity
+# tests above already cover it) plus one search-bench-local constant pair:
+# the escape-text needle and the false-positive literal. What can drift is
+# those two constants and the corpus assembled from them, so the needle and
+# the literal are parsed out of benches/search.rs, decoded, and cross-checked
+# against reference.py's UNESCAPED_NEEDLE and _ESCAPE_LITERAL_TEXT, the
+# corpus is rebuilt in Python from the parsed constants and compared to
+# ``unescaped_false_positive``'s output, and the bench's driving statements
+# are pinned textually (the diff.rs pinned-statements precedent), so the
+# bench numbers and the Python-side GIL/wall cells cross-reference on the
+# same bytes.
+
+_UNESCAPED_NEEDLE_PIN = re.compile(r'const UNESCAPED_NEEDLE: &\[u8\] = b"(?P<literal>[^"]*)";')
+_FALSE_POSITIVE_LITERAL_PIN = re.compile(
+    r'const FALSE_POSITIVE_LITERAL: &str = "(?P<literal>[^"]*)";'
+)
+
+
+def _decode_rust_backslash_literal(literal: str) -> str:
+    """Decode the Rust escape subset the two scan constants use — ``\\\\``
+    (an escaped backslash) and plain characters, nothing else. A constant
+    that grows a new escape shape fails the assert rather than being
+    silently mis-decoded (the decoder must be taught first)."""
+    out: list[str] = []
+    i = 0
+    while i < len(literal):
+        if literal[i] == "\\":
+            assert i + 1 < len(literal) and literal[i + 1] == "\\", (
+                f"the pinned literal {literal!r} uses an escape shape the "
+                "decoder does not know; teach it the shape first"
+            )
+            out.append("\\")
+            i += 2
+        else:
+            out.append(literal[i])
+            i += 1
+    return "".join(out)
+
+
+def test_unescaped_scan_bench_constants_match_reference() -> None:
+    """The needle and the false-positive literal, parsed and decoded out of
+    the bench source, must equal reference.py's constants by value: the
+    needle is the six-byte escape text, the literal the seven-byte
+    backslash-escaped rendering of it, and any drift (a dropped backslash,
+    a swapped constant) would point the bench at a different escape-parity
+    question than every Python-side cell measures."""
+    source = (_BENCHES_DIR / "search.rs").read_text(encoding="utf-8")
+    needle_match = _UNESCAPED_NEEDLE_PIN.search(source)
+    literal_match = _FALSE_POSITIVE_LITERAL_PIN.search(source)
+    assert needle_match and literal_match, (
+        "benches/search.rs no longer declares the UNESCAPED_NEEDLE and "
+        "FALSE_POSITIVE_LITERAL constants the escape-parity group drives"
+    )
+    needle = _decode_rust_backslash_literal(needle_match["literal"]).encode("utf-8")
+    assert needle == UNESCAPED_NEEDLE, (
+        "benches/search.rs's UNESCAPED_NEEDLE drifted from reference.py's "
+        f"(decoded {needle!r})"
+    )
+    literal = _decode_rust_backslash_literal(literal_match["literal"])
+    assert literal == _ESCAPE_LITERAL_TEXT, (
+        "benches/search.rs's FALSE_POSITIVE_LITERAL drifted from reference.py's "
+        f"_ESCAPE_LITERAL_TEXT (decoded {literal!r})"
+    )
+
+
+@pytest.mark.parametrize("target_bytes", [1, 1024, 12 * _MIB], ids=["1B-floor", "1KiB", "12MiB"])
+def test_unescaped_scan_bench_corpus_is_byte_identical_to_reference(
+    target_bytes: int,
+) -> None:
+    """The dense corpus, rebuilt in Python from the bench's parsed constants
+    (the shared, already-pinned prose sentence plus the decoded literal, the
+    pinned 4x unit assembly and ``\\n\\n`` suffix, the pinned quantization),
+    must be byte-identical to ``reference.unescaped_false_positive`` — the
+    same identity the shared corpora carry, extended to the one
+    search-bench-local corpus."""
+    source = (_BENCHES_DIR / "search.rs").read_text(encoding="utf-8")
+    needle_match = _UNESCAPED_NEEDLE_PIN.search(source)
+    literal_match = _FALSE_POSITIVE_LITERAL_PIN.search(source)
+    assert needle_match and literal_match
+    literal = _decode_rust_backslash_literal(literal_match["literal"])
+    assert literal == _ESCAPE_LITERAL_TEXT  # the constants test, re-derived here
+    # The builder's load-bearing statements, pinned textually: the unit is
+    # the sentence + literal, assembled 4x with the "\n\n" suffix, and the
+    # bench drives find_unescaped with the pinned needle over both shapes.
+    for pin in (
+        'let unit = format!("{}{}", PROSE_SENTENCE, FALSE_POSITIVE_LITERAL).repeat(4) + "\\n\\n";',
+        "scan_impl::find_unescaped(black_box(data), black_box(UNESCAPED_NEEDLE))",
+    ):
+        assert pin in source, (
+            f"benches/search.rs no longer contains the pinned statement {pin!r}: "
+            "the escape-parity group's corpus or scan call is no longer built "
+            "the way the Python-side cells measure"
+        )
+    unit = (_PROSE_SENTENCE + literal) * 4 + "\n\n"
+    rebuilt = _rust_repeat_to(target_bytes, unit).encode("utf-8")
+    assert rebuilt == unescaped_false_positive(target_bytes), (
+        f"the unescaped-scan bench's dense corpus ({len(rebuilt)}B rebuilt from "
+        "parsed constants) is not reference.unescaped_false_positive's output "
+        "at the same target"
     )

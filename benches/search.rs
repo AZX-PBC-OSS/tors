@@ -57,6 +57,31 @@
 //! shape, and the same slow-iteration regime at 100 MiB (the ~10.7M masked
 //! matches) — 10 samples there, default elsewhere.
 //!
+//! The `unescaped_scan` group (the issue #50 surface,
+//! `scan_impl::find_unescaped`): the escape-parity byte scan over the same
+//! prose ladder, driven with the six-byte escape-text needle
+//! `UNESCAPED_NEEDLE` (mirroring `reference.UNESCAPED_NEEDLE`, cross-checked
+//! by tests/test_bench_corpus_parity.py so the bench numbers and the
+//! Python-side GIL/wall cells cross-reference on the same bytes). Two
+//! shapes:
+//!
+//! - `sparse`: the plain prose corpus as bytes — the needle never occurs
+//!   (the corpus holds no backslash at all), so the iteration is the pure
+//!   memmem scan with the parity walk never taken.
+//! - `dense`: the false-positive corpus — one literal escape TEXT per
+//!   sentence (`FALSE_POSITIVE_LITERAL`, the backslash itself escaped, so
+//!   every one of the needle's occurrences sits behind a single backslash:
+//!   an odd run, REJECTED) — the full scan plus the per-hit parity work
+//!   with no early exit, the workload a confirm-by-reparse walk existed
+//!   for. A corpus of REAL escapes would answer at its first hit and
+//!   measure an early exit, not the scan, which is why the hit-dense shape
+//!   is all-rejected by construction.
+//!
+//! Each iteration is the WHOLE core call, `find_unescaped` including the
+//! Finder build (the same shape as the Python call; the build is ns-scale
+//! for a six-byte needle). Iterations stay sub-10ms at every ladder size
+//! (memchr-class throughput), so every cell keeps default sampling.
+//!
 //! Run locally with `cargo bench --no-default-features --bench search` — the
 //! `--no-default-features` is required because `extension-module`
 //! deliberately does not link libpython, which a bench binary needs. CI only
@@ -71,10 +96,10 @@
 // lint says so). Same pattern as benches/diff.rs.
 mod common;
 
-use common::prose;
+use common::{PROSE_SENTENCE, prose, repeat_to};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use tors::search_impl;
+use tors::{scan_impl, search_impl};
 
 // The two pattern sets, mirroring tests/reference.py's SEARCH_SPARSE_PATTERNS
 // and SEARCH_DENSE_PATTERNS — cross-checked against the reference tuples by
@@ -105,6 +130,29 @@ const DENSE_PATTERNS: [&str; 17] = [
 // The v0.8 redaction token — the same "[REDACTED]" tests/test_gil_release.py's
 // dense replace cell maps the dense set's words to.
 const REDACTION_TOKEN: &str = "[REDACTED]";
+
+// The escape-parity scan's needle (the issue #50 surface), mirroring
+// tests/reference.py's UNESCAPED_NEEDLE — the six-byte escape text a JSON
+// serializer renders a NUL codepoint as. Cross-checked against the
+// reference constant by tests/test_bench_corpus_parity.py.
+const UNESCAPED_NEEDLE: &[u8] = b"\\u0000";
+
+// The false-positive corpus's injection unit, mirroring reference.py's
+// _ESCAPE_LITERAL_TEXT: the literal six-character TEXT of the same spelling
+// as a serializer renders it — the backslash itself escaped, seven bytes —
+// so the needle occurs once per injection, at +1, behind one backslash (an
+// odd run: rejected). Same cross-check.
+const FALSE_POSITIVE_LITERAL: &str = "\\\\u0000";
+
+// The false-positive corpus: the shared prose sentence with one literal
+// escape text appended per sentence, unit-quantized like every common
+// recipe — byte-identical to reference.unescaped_false_positive (pinned by
+// tests/test_bench_corpus_parity.py, which rebuilds it in Python from the
+// parsed constants).
+fn unescaped_false_positive(target_bytes: usize) -> Vec<u8> {
+    let unit = format!("{}{}", PROSE_SENTENCE, FALSE_POSITIVE_LITERAL).repeat(4) + "\n\n";
+    repeat_to(target_bytes, &unit).into_bytes()
+}
 
 fn bench_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_patterns");
@@ -217,10 +265,46 @@ fn bench_replace_many_masked(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_unescaped_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("unescaped_scan");
+    for target_bytes in [256 * 1024, 1024 * 1024, 12 * 1024 * 1024, 100 * 1024 * 1024] {
+        // The pure-scan shape: no occurrence, the parity walk never taken.
+        let sparse = prose(target_bytes).into_bytes();
+        group.throughput(Throughput::Bytes(sparse.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("sparse", format!("{}B", sparse.len())),
+            &sparse,
+            |bench, data| {
+                bench.iter(|| {
+                    scan_impl::find_unescaped(black_box(data), black_box(UNESCAPED_NEEDLE))
+                })
+            },
+        );
+        // The hit-dense all-rejected shape: every occurrence behind an odd
+        // run, so the scan runs to the end doing the per-hit parity work —
+        // the false-positive workload the surface exists for (a live-hit
+        // corpus would early-exit at its first occurrence and measure
+        // nothing).
+        let dense = unescaped_false_positive(target_bytes);
+        group.throughput(Throughput::Bytes(dense.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("dense", format!("{}B", dense.len())),
+            &dense,
+            |bench, data| {
+                bench.iter(|| {
+                    scan_impl::find_unescaped(black_box(data), black_box(UNESCAPED_NEEDLE))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_search,
     bench_replace_many,
-    bench_replace_many_masked
+    bench_replace_many_masked,
+    bench_unescaped_scan
 );
 criterion_main!(benches);

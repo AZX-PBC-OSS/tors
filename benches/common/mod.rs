@@ -18,7 +18,7 @@ pub const PROSE_SENTENCE: &str = "The quarterly oil sample interval for field ou
 // tests/reference.py's `_DECOMPOSED_SENTENCE` so bench and test numbers are comparable.
 const DECOMPOSED_SENTENCE: &str = "The quarte\u{0301}rly oil sa\u{0301}mple interval for field outa\u{0301}ges was adjusted after the bushing torque specifications changed. Maintenance windows now close within fourteen days. ";
 
-fn repeat_to(target_bytes: usize, unit: &str) -> String {
+pub fn repeat_to(target_bytes: usize, unit: &str) -> String {
     unit.repeat((target_bytes / unit.len()).max(1))
 }
 
