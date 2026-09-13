@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import base64
 import html
+import re
+import string
 import time
 from collections.abc import Callable
 
@@ -1097,4 +1099,61 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
         "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
         "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
+    )
+
+
+# --- The batch-charset validator wall race ---------------------------------------
+#
+# The batch-only design's premise, raced against the expression it replaces:
+# the per-item anchored-regex loop an enqueue path spells around identifier
+# validators (TaskQ's _IDENT_RE shape).
+
+# The identifier rule's two halves (letters and underscore at position 0,
+# digits joining after) and the equivalent anchored regex, rebuilt from the
+# same halves.
+_IDENT_FIRST = string.ascii_letters + "_"
+_IDENT_REST = string.ascii_letters + string.digits + "_"
+_IDENT_RE = re.compile(rf"\A[{_IDENT_FIRST}][{_IDENT_REST}]*\Z")
+
+
+def _ident_items(count: int) -> list[str]:
+    """``count`` deterministic identifier-shaped items (the job/queue/worker/
+    tag spellings an enqueue path validates): the all-valid batch, the shape
+    where both sides of the race do full work with no short-circuit."""
+    shapes = ("job_{n}", "queue_eu_{n}", "worker_{n}", "tag_{n}")
+    return [shapes[n % 4].format(n=n) for n in range(count)]
+
+
+@pytest.mark.parametrize("count", [100, 1000], ids=["100-items", "1000-items"])
+def test_first_invalid_charset_beats_the_per_item_regex_loop_on_the_same_batch(
+    count: int,
+) -> None:
+    """The whole-batch tors call vs ``all(_IDENT_RE.match(i) for i in
+    items)`` over the same all-valid identifier batch, min-of-7 per side
+    after warmup (the fast-cell discipline: the native samples are
+    µs-scale) with the suite's 0.9 margin.
+
+    Measured on the dev box (ambient load 5.5, min-of-7): 100 items tors
+    2.0 µs vs the regex loop's 9.7 µs (ratio 0.20); 1000 items 14.0 µs
+    vs 96.7 µs (0.14) — ~5-7x inside the margin. The honest other half,
+    recorded in docs/api.md's section and deliberately not asserted here
+    because it is a LOSS: a per-item tors call (one item per call)
+    measures ~0.25 µs against ~0.08 µs for one regex match — the detach
+    round trip paid per call — which is exactly why the API is
+    batch-only: the win exists only when one call covers the batch, and
+    the crossover is already at single-digit item counts (measured ~0.5
+    at a 10-item batch)."""
+    items = _ident_items(count)
+    tors_ms = _min_wall_ms(
+        lambda its: tors.first_invalid_charset(its, first=_IDENT_FIRST, rest=_IDENT_REST),
+        items,
+        samples=_FAST_CELL_SAMPLES,
+    )
+    re_ms = _min_wall_ms(
+        lambda its: all(_IDENT_RE.match(item) for item in its), items, samples=_FAST_CELL_SAMPLES
+    )
+    assert tors_ms < _MARGIN * re_ms, (
+        f"{count}-item identifier batch: tors {tors_ms * 1000:.1f}µs vs the "
+        f"per-item regex loop {re_ms * 1000:.1f}µs (ratio {tors_ms / re_ms:.2f}): the "
+        "batch call lost more than the tolerance margin to the regex loop it replaces"
     )

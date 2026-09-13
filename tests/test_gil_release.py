@@ -2516,3 +2516,63 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
         f"{difflib_wall * 1000:.0f}ms (ratio {tors_wall / difflib_wall:.4f}): the native "
         "sweep lost more than the tolerance margin to the quadratic stdlib matcher"
     )
+
+
+# The identifier rule's two halves (TaskQ's _IDENT_RE shape: letters and
+# underscore at position 0, digits joining after), the rule this module's
+# cell, the wall race in tests/test_performance.py, and the bench group in
+# benches/search.rs all drive.
+_IDENT_FIRST = string.ascii_letters + "_"
+_IDENT_REST = string.ascii_letters + string.digits + "_"
+
+
+def _ident_items(count: int) -> list[str]:
+    """A deterministic all-valid identifier batch (the job/queue/worker/tag
+    spellings an enqueue path validates), local to this module (the
+    chatlog/_close_matches_corpus precedent: only this module's cells
+    consume it)."""
+    shapes = ("job_{n}", "queue_eu_{n}", "worker_{n}", "tag_{n}")
+    return [shapes[n % 4].format(n=n) for n in range(count)]
+
+
+@pytest.mark.parametrize("count", [100_000, 1_000_000], ids=["100k-items", "1M-items"])
+def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    count: int,
+) -> None:
+    """The batch-validator claim: the whole batch pass (set builds + scan)
+    runs under one ``py.detach``, and the call's GIL-held residue is the
+    O(items) argument walk (the standard str-in borrow class, the
+    ``get_close_matches`` candidate-walk shape over a Sequence) plus a
+    single int return: no marshalling class at all.
+
+    Ceiling-only by the ``utf8_is_valid`` precedent, honestly so. The
+    function exists for batches of hundreds of items, where the whole
+    call measures ~2 µs (the wall race in tests/test_performance.py):
+    far under the 10 ms ping floor, no realistic batch can produce a
+    measurable gap at all. These cells pin the detach claim at batch
+    sizes a thousandfold and ten-thousandfold past realistic, and there
+    the measured worst gaps stay in the ping-floor band — the walk's
+    contiguous GIL hold never exceeds one ping period (even the 1M-item
+    walk's hold sits under the floor, so the worst gap is the floor
+    itself, not the walk) — so the 100 ms ceiling (~9x margin) is the
+    assertion and any ratio is the suite's documented sub-floor
+    artifact. A detach regression at these sub-ceiling walls would hold
+    the loop for the whole ~2-20 ms wall and still pass the ceiling:
+    the same can't-discriminate-a-held-sub-ceiling-wall limitation the
+    ``utf8_is_valid`` cells state for their own sub-floor walls,
+    recorded here rather than thresholded away; the wall race and the
+    bench carry the performance contract instead.
+
+    Measured on the dev box (ambient load 5.5-8.7, 3 samples per cell):
+    100k items worst gaps 11.0-11.1 ms of 1.7-3.0 ms walls; 1M items
+    10.5-11.4 ms of 16.4-19.7 ms walls (the floor band: the scan is
+    detached, the walk's hold is under the ping period)."""
+    items = _ident_items(count)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.first_invalid_charset, items, first=_IDENT_FIRST, rest=_IDENT_REST
+            ),
+            ratio_budget=None,
+        )
+    )
