@@ -57,6 +57,22 @@
 //! shape, and the same slow-iteration regime at 100 MiB (the ~10.7M masked
 //! matches) — 10 samples there, default elsewhere.
 //!
+//! The `first_invalid_charset` group benches the batch codepoint-set
+//! validator's core (`charset_impl::first_invalid_charset`, the scan
+//! surface's batch-only companion) over the identifier rule (TaskQ's
+//! `_IDENT_RE` shape: letters and underscore at position 0, digits
+//! joining after) on 1 / 10 / 100-item batches of identifier-shaped
+//! strings — the sizes bracketing the motivating consumer's batches
+//! (a 100-tag enqueue) and the bulk pre-flight shape. Every item is
+//! valid, so each iteration is the full-pass worst case (no
+//! short-circuit), and each iteration is the WHOLE core call, set builds
+//! included — the same shape as the Python call, whose per-call cost at
+//! these sizes is the wall race's measured band (tests/test_performance.py:
+//! ~0.5 µs at 10 items, ~2 µs at 100, scaling per item after). It lives
+//! in this file because no per-area bench file fits a validator (the
+//! search/integrity/text benches are all whole-corpus transforms), and
+//! the issue's direction names this as the fallback home.
+//!
 //! The `unescaped_scan` group (the issue #50 surface,
 //! `scan_impl::find_unescaped`): the escape-parity byte scan over the same
 //! prose ladder, driven with the six-byte escape-text needle
@@ -158,7 +174,7 @@ mod common;
 use common::{PROSE_SENTENCE, prose, repeat_to};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use tors::{scan_impl, search_impl};
+use tors::{charset_impl, scan_impl, search_impl};
 
 // The two pattern sets, mirroring tests/reference.py's SEARCH_SPARSE_PATTERNS
 // and SEARCH_DENSE_PATTERNS — cross-checked against the reference tuples by
@@ -324,6 +340,47 @@ fn bench_replace_many_masked(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_first_invalid_charset(c: &mut Criterion) {
+    // The identifier rule's two halves (the dense-patterns set's own
+    // provenance: mirrored from the TaskQ _IDENT_RE shape the Python-side
+    // race in tests/test_performance.py drives) and a deterministic
+    // 100-item identifier batch (the job/queue/worker/tag spellings an
+    // enqueue path validates; the _ident_items builders on the Python
+    // side use the same shapes), all valid: the full-pass worst case.
+    const IDENT_FIRST: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_";
+    const IDENT_REST: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
+    let items: Vec<String> = (0..100)
+        .map(|n| match n % 4 {
+            0 => format!("job_{n}"),
+            1 => format!("queue_eu_{n}"),
+            2 => format!("worker_{n}"),
+            _ => format!("tag_{n}"),
+        })
+        .collect();
+    let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+    let mut group = c.benchmark_group("first_invalid_charset");
+    for count in [1, 10, 100] {
+        let batch = &refs[..count];
+        group.throughput(Throughput::Elements(count as u64));
+        // The whole core call per iteration — set builds included, the
+        // same shape as the Python call — over the first `count` items.
+        group.bench_with_input(
+            BenchmarkId::new("valid", format!("{count}items")),
+            &batch,
+            |bench, batch| {
+                bench.iter(|| {
+                    black_box(charset_impl::first_invalid_charset(
+                        black_box(batch),
+                        Some(IDENT_FIRST),
+                        IDENT_REST,
+                    ))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_unescaped_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("unescaped_scan");
     for target_bytes in [256 * 1024, 1024 * 1024, 12 * 1024 * 1024, 100 * 1024 * 1024] {
@@ -424,6 +481,7 @@ criterion_group!(
     bench_search,
     bench_replace_many,
     bench_replace_many_masked,
+    bench_first_invalid_charset,
     bench_unescaped_scan,
     bench_utf8_byte_len,
     bench_utf16_byte_len
