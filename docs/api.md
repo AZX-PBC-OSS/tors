@@ -748,6 +748,81 @@ tests/test_unescaped_scan.py, same order as the ≈0.25/≈0.79 ms inline
 band in tests/test_gil_release.py), so the heartbeat cells are
 ceiling-only. No aio twin: a sub-millisecond call needs no thread hop.
 
+## `tors.utf8_byte_len`
+
+```python
+def utf8_byte_len(s: str) -> int: ...
+```
+
+The UTF-8 byte length of a `str`: `len(s.encode("utf-8"))` with the copy taken
+out. That expression allocates a full `bytes` object, measures it, and throws
+it away — pure waste whenever only the count is wanted, which is the shape of
+every size cap in front of a store. The motivating sites are TaskQ's:
+`client/_args.py` checks idempotency-key and scope byte caps on every enqueue,
+and `backend/_terminal.py` re-encodes a serialized result of up to
+64 KiB (`MAX_RESULT_BYTES`) on every success just to take its length — a
+genuine double pass, the byte count having existed inside the serializer's
+output and been discarded by the `.decode()` that produced the `str`.
+
+A companion, not a standalone motivation: this ships in the scan family's
+binding module as the pinned companion of `contains_unescaped`/
+`find_unescaped`, same module and same harness patterns — and honest sizing
+says it would not stand alone (a short-string encode is a few hundred
+nanoseconds; the win is large inputs and hot paths, where the copy is the
+cost — the 64 KiB terminal case is ~0.8 µs of pure alloc+memcpy per success).
+
+The implementation is the standard str borrow, not arithmetic over CPython's
+internal UCS storage: pyo3's `to_str` hands the core a Rust `&str`, whose
+`len()` IS its UTF-8 byte length — one field read, the mechanism dried into
+the language instead of hand-rolled (an unsafe `PyUnicode_KIND`/data walk with
+surrogate-pair arithmetic would exist only to avoid one cached materialization).
+The cost model that buys, measured (the full lane table is in
+`tests/test_performance.py`):
+
+- **ASCII** (serialized JSON with `ensure_ascii=True` is pure ASCII): compact
+  ASCII data is its own UTF-8, so the borrow is a zero-copy alias and the call
+  is O(1) with no allocation at all — measured flat ~0.1 µs from 1 KiB to
+  12 MiB, against the expression's alloc+memcpy every call (~0.9 µs at 64 KiB,
+  ~14 µs at 1 MiB, ~180 µs at 12 MiB).
+- **Non-ASCII, first call on the object**: CPython materializes and caches the
+  UTF-8 view on the `str` object (an internal cache, not a Python-visible
+  `bytes`), so the first call is O(n) — encode-parity in cost class (measured
+  within ~10-20% of a cold encode: the same encoder pass plus a malloc plus a
+  second memcpy into the permanent cache), with no Python-visible object to
+  allocate and collect. The cache is shared with every other str-in tors call
+  on the same object — and with `encode` itself, which consults it but never
+  fills it: after one `utf8_byte_len`, a subsequent `len(s.encode())` on the
+  same 12 MiB object dropped from ~4.9 ms to ~184 µs, measured.
+- **Non-ASCII, repeat calls on the same object**: O(1) — strictly better than
+  the expression, which re-copies on every call (measured ~0.1 µs against the
+  warm expression's 1.8 µs at 64 KiB and 196 µs at 12 MiB).
+
+```python
+tors.utf8_byte_len("café")  # 5: three ASCII bytes + one two-byte é
+tors.utf8_byte_len("\U0001f600")  # 4: one astral codepoint, four bytes
+# the byte-cap gate the TaskQ terminal spells on every success:
+if tors.utf8_byte_len(serialized_result) > 64 * 1024:
+    reject()  # over MAX_RESULT_BYTES — no bytes object built to find out
+```
+
+Error parity is exact: a `str` holding lone surrogates cannot be UTF-8-encoded,
+and the borrow raises CPython's own `UnicodeEncodeError` (pyo3 propagates it
+before any tors code runs) — the same exception `encode` raises, attributes
+included (`.encoding`, `.reason`, `.start`/`.end`, `.object`, pinned
+attribute-for-attribute in tests/test_utf8_byte_len.py); there is no
+tors-side error path. The argument takes exactly `str` (`bytes` /
+`bytearray` / `memoryview` / `int` raise `TypeError`).
+
+GIL behavior: a single `int` return, no marshalling class — and one honest
+difference from the scan twins: the call's only O(n) work is the borrow
+itself, which is GIL-held (a non-ASCII object's first call materializes the
+UTF-8 view under the GIL; there is no way to fill an object's cache without
+it). At 12 MiB that materialization measures ~5 ms, under the 10 ms heartbeat
+interval, so the heartbeat cells are ceiling-only; the linear envelope
+(~0.4-0.5 ms of GIL hold per MiB) puts a ~200 MiB non-ASCII string at the
+100 ms ceiling — the recorded scale guidance for this one heavy lane. No aio
+twin: an O(1)-to-borrow call needs no thread hop.
+
 ## `tors.CompiledPatterns`
 
 ```python

@@ -43,6 +43,21 @@ otherwise use:
   hand-rolled find-and-count-backslashes loop it replaces takes 13 ms (and
   the confirm-by-re-parse guard the algorithm was lifted from pays a full
   parse plus a recursive walk per prefilter hit).
+- `utf8_byte_len`: `len(s.encode("utf-8"))` allocates the full `bytes`
+  object just to count it; `tors` reads the count off the borrowed UTF-8
+  view — flat ~0.1 µs from 1 KiB to 12 MiB on ASCII (compact ASCII is its
+  own UTF-8, a zero-copy alias; the expression pays ~0.9 µs at 64 KiB, the
+  TaskQ result-cap size, and ~180 µs at 12 MiB) and ~0.1 µs on repeat calls
+  over a cached non-ASCII object, where even the warm expression pays a full
+  copy out of the same cache (~196 µs at 12 MiB). The honest lanes,
+  recorded: a fresh non-ASCII object's first call is encode-parity (the
+  cache materialization IS an encode — the encoder pass plus a malloc plus
+  a second memcpy, ~4.7 ms at 12 MiB against a cold encode's ~4.9 ms), and
+  1 KiB is a dead heat (pure call overhead on both sides). That first-call
+  materialization is the function's one GIL-held O(n) pass (~5 ms at
+  12 MiB, under the heartbeat interval); the full lane table is in
+  `tests/test_performance.py`, the criterion core-vs-copy group in
+  `benches/search.rs` (~0.5 ns flat against the copy's ~65 GiB/s).
 - The diffing and fuzzy functions bound their superlinear worst cases with
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a

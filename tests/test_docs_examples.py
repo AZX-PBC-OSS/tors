@@ -105,6 +105,18 @@ class TestApiReferenceExamples:
         assert tors.contains_unescaped(b'"a\\\\u0000b"', b"\\u0000") is False
         assert tors.contains_unescaped(b'"a\\u0000b"', b"\\u0000") is True
 
+    def test_utf8_byte_len_examples(self) -> None:
+        # docs/api.md's utf8_byte_len section, pinned directly (the
+        # literals the doc shows): the mixed-content example rows and the
+        # TaskQ byte-cap gate the section is motivated by, spelled at its
+        # 64 KiB MAX_RESULT_BYTES boundary.
+        assert tors.utf8_byte_len("caf\u00e9") == 5
+        assert tors.utf8_byte_len("\U0001f600") == 4
+        serialized_result = "k" * (64 * 1024 + 1)
+        assert tors.utf8_byte_len(serialized_result) > 64 * 1024  # the gate trips
+        serialized_result = "k" * 64 * 1024
+        assert tors.utf8_byte_len(serialized_result) <= 64 * 1024  # the gate passes
+
 
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:
