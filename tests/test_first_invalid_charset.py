@@ -355,21 +355,27 @@ def test_duplicate_codepoints_in_a_set_spelling_are_harmless() -> None:
     """A set spelled with duplicates is the same set: "aabb__" admits
     exactly what "ab_" admits (the first row: both items valid), and
     excludes exactly what it excludes (the second: "xa" offends at
-    position 0 either way)."""
-    assert first_invalid_charset(["ab_1", "_x"], first="aabb__", rest="aabb__11") == -1
+    position 0 either way). Cross-checked against the oracle so a wrong
+    hand-derived pin fails here instead of laundering through."""
+    assert first_invalid_charset(["ab_1", "_a"], first="aabb__", rest="aabb__11") == -1
+    assert reference_first_invalid_charset(["ab_1", "_a"], "aabb__", "aabb__11") == -1
     assert first_invalid_charset(["ab_1", "xa"], first="aabb__", rest="aabb__11") == 1
+    assert reference_first_invalid_charset(["ab_1", "xa"], "aabb__", "aabb__11") == 1
 
 
 def test_set_spelling_order_is_irrelevant() -> None:
     """Three permuted spellings of the same two sets answer identically;
     the expected index (1: "xa" is the first item "x" breaks) is
-    hand-derived, not computed from the call."""
+    hand-derived, not computed from the call, and cross-checked against
+    the oracle."""
     items = ["ab_1", "xa", "1a"]
     answers = [
         first_invalid_charset(items, first=fs, rest=rs)
         for fs, rs in (("ab_", "ab_1"), ("_ba", "1_ba"), ("a_b", "ba_1"))
     ]
     assert answers == [1, 1, 1]
+    for fs, rs in (("ab_", "ab_1"), ("_ba", "1_ba"), ("a_b", "ba_1")):
+        assert reference_first_invalid_charset(items, fs, rs) == 1
 
 
 # --- The argument-boundary contract -------------------------------------------
