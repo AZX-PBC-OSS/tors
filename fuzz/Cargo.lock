@@ -2534,6 +2534,9 @@ dependencies = [
  "office_oxide",
  "pdf_oxide",
  "pyo3",
+ "rand 0.9.5",
+ "rand_chacha",
+ "rand_core 0.9.5",
  "regex",
  "rphonetic",
  "rs_merkle",
@@ -2546,6 +2549,7 @@ dependencies = [
  "twox-hash",
  "unicode-normalization",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

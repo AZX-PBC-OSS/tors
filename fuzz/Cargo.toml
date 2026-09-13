@@ -219,3 +219,10 @@ path = "fuzz_targets/minhash.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "random"
+path = "fuzz_targets/random.rs"
+test = false
+doc = false
+bench = false
