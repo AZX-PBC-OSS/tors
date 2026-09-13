@@ -65,6 +65,13 @@ The cuts below are decisions, not oversights:
   already-retrieved candidate set, the wrong shape for querying a large
   corpus repeatedly. Reach for a real search engine (`tantivy`, in Rust) for
   that; `tors` does not build or expose index objects.
+- **An LSH banding index.** `minhash_signature` computes one document's
+  MinHash signature from scratch and keeps nothing across calls; the
+  banding table and candidate store a corpus-scale near-duplicate pipeline
+  builds on those signatures are caller state, the same boundary that
+  keeps `bm25_rank` index-free. A banding helper (cutting a signature into
+  `r`-element bands and hashing them for table keys) is a future
+  companion question, not a hidden commitment inside the signature core.
 - **A bespoke coroutine API.** Every function already releases the GIL for
   its native pass, so the async surface is one thread dispatch per call
   ([`tors.aio`](async.md)) rather than a purpose-built event-loop

@@ -3183,6 +3183,133 @@ tors.simhash128("")
 # 0
 ```
 
+## `tors.minhash_signature`
+
+```python
+def minhash_signature(
+    text: str,
+    *,
+    num_perm: int = 128,
+    shingle_size: int = 3,
+    seed: int = 0,
+) -> list[int]: ...
+```
+
+The MinHash signature of `text`, one GIL-released native pass: the
+recall-side near-duplicate complement to the SimHash family. `simhash64`/
+`simhash128` are the precision side — one compact fingerprint, cheap to
+store and compare, but a weak recall instrument at corpus scale (two
+paraphrased documents sit far apart in Hamming space however related
+their vocabulary). MinHash is the recall side: `num_perm` min-hashes per
+document, and the fraction of positions on which two signatures agree
+estimates the Jaccard similarity of the two documents' shingle sets — the
+quantity a corpus-scale ingestion pipeline (100k+ documents) bands into an
+LSH table and recalls candidate pairs on (Broder's MinHash, the primitive
+behind near-duplicate detection at web scale).
+
+**The estimator contract.** For shingle sets `A` and `B`, each position
+`i` of the two signatures agrees exactly when the shingle achieving the
+minimum of `h_i` over `A ∪ B` lies in `A ∩ B`, which happens with
+probability `J(A, B) = |A ∩ B| / |A ∪ B|`. So
+`E[agreement] = J` and the standard error over `k = num_perm` positions is
+`sqrt(J(1 - J) / k)` — `O(1/sqrt(k))`, about 0.044 at the default
+`num_perm = 128` at the worst case `J = 0.5`, halving with every 4x in
+`num_perm`. The comparison is one expression at the call site:
+
+```python
+sum(x == y for x, y in zip(sig_a, sig_b)) / len(sig_a)
+```
+
+**Tokenization and shingling.** Tokens are the same tokenizer
+`tf_idf`/`bm25_rank` ride: UAX #29 word segments (`word_bounds`' own
+segmentation), segments made entirely of whitespace skipped, each
+lowercased with Unicode-correct case folding — so `"Hello, WORLD!"` and
+`"hello, world!"` signature identically, and whitespace shape (tabs,
+newlines, runs) is invisible. A shingle is `shingle_size` consecutive
+tokens joined with U+001F; the join is injective because no UAX #29 token
+can contain U+001F (a C0 control is its own word segment). Word shingles,
+not character shingles: natural-text near-duplicates preserve word
+sequence far more often than exact character spans — a reflowed paragraph
+or a swapped word shifts character k-grams wholesale while word k-grams
+survive, which is what recall at corpus scale needs.
+
+**The pinned arithmetic (the determinism contract).** Every element is
+fixed, documented arithmetic, platform-independent (integer ops only), so
+the same text at the same parameters produces the identical signature
+across processes, versions, and machines — the same stability requirement
+the simhash family states for its FNV-1a:
+
+- each shingle is hashed with XXH64, seed 0: the frozen-spec algorithm
+  (final since xxHash 0.7.0 — the digest for a given seed and byte stream
+  is part of the spec, not an implementation detail), via `twox-hash`;
+- `signature[i] = min` over shingles of `(a_i * x + b_i) mod p`, with
+  `p = 2^61 - 1` (the Mersenne prime, the standard MinHash field) and the
+  `(a_i, b_i)` pairs derived from `seed` by a SplitMix64 stream — `a_i`
+  in `[1, p-1]` (a zero multiplier would collapse the permutation to a
+  constant), `b_i` in `[0, p-1)`, two draws per permutation in
+  permutation order (so a smaller `num_perm` yields a prefix of a larger
+  signature at the same seed). `rand` is deliberately not involved: it is
+  not in tors's dependency tree and its stream internals are not a
+  semver-stable contract, while the ~8-line SplitMix64 derivation is
+  golden-pinned on both the Rust and Python sides
+  (`tests/test_minhash.py`).
+
+This is fixture-grade determinism, not cryptography: nothing here resists
+an adversary crafting collisions, and nothing needs to.
+
+**The empty-shingle-set convention.** Empty text, whitespace-only text,
+or fewer tokens than `shingle_size` yields `num_perm` copies of the u64
+MAX sentinel (`2**64 - 1`): deterministic, seed-invariant, and unable to
+collide with any real minimum (the affine outputs live in
+`[0, 2**61 - 1)`, a disjoint range). Two empty documents agree at every
+position, an empty-vs-nonempty pair at none, and an all-sentinel
+signature is a stable digest an LSH table can bucket empty documents
+under.
+
+**The LSH table is caller state.** tors stays stateless
+([design.md](design.md)): this function computes one document's signature
+and keeps nothing; the banding table, the candidate store, and the
+threshold calibration are the caller's. A banding helper (cut a signature
+into `r`-element bands and hash them for table keys) is a future
+companion question, not something hidden inside this core.
+
+**Bounds.** `num_perm` must be in `[1, 1024]` and `shingle_size` at least
+1; each raises `ValueError` naming the bounds before any work runs.
+`seed` is any int, reduced mod `2**64` with two's-complement semantics
+for negatives (`seed=-1` is `seed=2**64 - 1`). A non-str `text` or
+non-int `seed` raises `TypeError`; text bearing lone surrogates raises
+`UnicodeEncodeError` (the crate-wide str-borrow contract). `O(shingles ×
+num_perm)` in the sweep with `O(num_perm)` extra memory — no token or
+shingle list is retained after hashing. No `aio` twin: a fast one-shot
+call.
+
+```python
+original = (
+    "The quarterly oil sample interval for field outages was adjusted after the bushing "
+    "torque specifications changed. Maintenance windows now close within fourteen days. "
+)
+edited = (
+    "The monthly oil sample interval for field outages was adjusted after the insulator "
+    "torque specifications changed. Maintenance windows now close within fourteen days. "
+)
+unrelated = "Pack my box with five dozen liquor jugs."
+
+a = tors.minhash_signature(original)
+b = tors.minhash_signature(edited)
+u = tors.minhash_signature(unrelated)
+a[:3]
+# [51021051529452558, 135255836154009735, 9126342164787069]
+sum(x == y for x, y in zip(a, b)) / len(a)
+# 0.671875: near-duplicates — the two-word swap leaves most 3-word
+# shingles intact, so the estimated shingle-set Jaccard stays high
+# (exact J here: 0.6429)
+sum(x == y for x, y in zip(a, u)) / len(a)
+# 0.0: an unrelated text agrees on no positions
+tors.minhash_signature("")[:3]
+# [18446744073709551615, 18446744073709551615, 18446744073709551615]:
+# the empty-shingle-set sentinel
+```
+
 ## `tors.CompiledLemmaDict`
 
 ```python

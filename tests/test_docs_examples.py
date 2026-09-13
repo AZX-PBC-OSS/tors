@@ -121,6 +121,35 @@ class TestApiReferenceExamples:
             (132, 145),
         ]
 
+    def test_minhash_near_dup_gate_example(self) -> None:
+        # docs/api.md's minhash_signature section, the near-dup-gate
+        # example: the agreement-fraction expression the doc shows, its
+        # three pinned outputs (the head elements, the near pair's
+        # estimate, the unrelated pair's zero), and the empty-set sentinel
+        # row, re-derived against the built extension.
+        original = (
+            "The quarterly oil sample interval for field outages was adjusted after the "
+            "bushing torque specifications changed. Maintenance windows now close within "
+            "fourteen days. "
+        )
+        edited = (
+            "The monthly oil sample interval for field outages was adjusted after the "
+            "insulator torque specifications changed. Maintenance windows now close within "
+            "fourteen days. "
+        )
+        unrelated = "Pack my box with five dozen liquor jugs."
+        a = tors.minhash_signature(original)
+        b = tors.minhash_signature(edited)
+        u = tors.minhash_signature(unrelated)
+        assert a[:3] == [51021051529452558, 135255836154009735, 9126342164787069]
+        assert sum(x == y for x, y in zip(a, b, strict=True)) / len(a) == 0.671875
+        assert sum(x == y for x, y in zip(a, u, strict=True)) / len(a) == 0.0
+        assert tors.minhash_signature("")[:3] == [
+            18446744073709551615,
+            18446744073709551615,
+            18446744073709551615,
+        ]
+
     def test_unescaped_scan_json_renderings(self) -> None:
         # docs/api.md's contains_unescaped/find_unescaped section, pinned
         # directly (the literals the doc shows, both spellings): the real

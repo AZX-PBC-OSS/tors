@@ -12,6 +12,9 @@ event loop's worst heartbeat gap to 10-14 ms; the pure-Python pipeline
 it for 92-108 ms, ~6-12x worse. At 32 MiB: 16-21 ms vs 250-272 ms. Every
 function holds the same discipline: one `py.detach` around the whole native
 pass, only the argument borrow and the return marshalling under the GIL.
+`minhash_signature`'s marshalling is bounded by contract (`num_perm` ints,
+≤ 1024): 11 ms worst gaps over ~460 ms walls at 12 MiB, the ping floor plus
+that bounded list, with no streaming twin warranted.
 
 ## Fast paths
 
@@ -34,6 +37,12 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
+- `minhash_signature`, `num_perm=128`, vs the pure-Python MinHash loop it
+  replaces (the same tokens, shingles, XXH64, and permutation arithmetic
+  in Python): 0.03 ms vs 3.2 ms at 1 KiB (~104x), 3.6 ms vs 274 ms at
+  100 KiB (~77x), 38.2 ms vs 2.83 s at 1 MiB (~74x). The sweep is
+  O(shingles × num_perm): ~100 ms at 1 MiB with `num_perm=512`, ~0.3 ms at
+  1 KiB with the default.
 - `first_invalid_charset`: a 1000-item identifier batch validates in ~14 µs
   against ~97 µs for the per-item anchored-regex loop (~7x), and the
   batch-only shape is the point — a per-item tors call (~0.25 µs) loses to

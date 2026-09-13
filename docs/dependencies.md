@@ -55,6 +55,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
 | regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package |
 | jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only, no TZDB backend: the accept-list shapes need none |
+| twox-hash | 2.1.4 | MIT | minhash_signature's XXH64 shingle hash: the frozen-spec algorithm (the digest for a given seed and byte stream is part of the xxHash spec, not the crate's to change), which is exactly the stability a cross-version signature contract needs; default-features off with xxhash64+std only, a zero-dependency leaf that way (the crate's defaults pull `rand` for a random-builder API tors never touches); 240M downloads, releases into 2026-08 |
 | uuid | 1.26.0 | Apache-2.0 OR MIT | uuid_parse/uuid_version/uuid7_timestamp_ms's hex-grammar engine (`src/uuid_impl.rs`): the uuid-rs org crate adopted for the structural parse + canonical encode (the strict-canonical layer on top stays tors's — the crate's parse_str deliberately accepts the loose forms tors rejects, so tors enforces byte-equality with the re-encoded canonical form); with default-features=false: parse/from_bytes/encode need no features and the bare-tree config pulls zero transitive dependencies (`cargo tree`-verified; the bare tree resolves defaults only through the documents engine tree's cfb/pdf_oxide edges, which are feature-gated out of the base wheel); already in the lock as cfb's and pdf_oxide's dependency (the documents engine tree), so the direct edge adds no new package (the aho-corasick/serde_json precedent) — the base wheel gains one zero-dependency crate, the documents wheel gains nothing |
 | pdf_oxide *(optional, `documents`)* | 0.3.78 | MIT OR Apache-2.0 | the documents payload's PDF engine (two-column reading order, link annotations, headings); default features only, and the caret bounds the 0.x line (see Cargo.toml's own comment for the measured rationale) |
 | anydoc *(optional, `documents`)* | 0.2.4 | MIT | the payload's office/text engine (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv) |
@@ -102,12 +103,13 @@ The full transitive closure is machine-checked by the gate; the dev tree
 
 ## Transitive closure
 
-At the current lock state (334 `Cargo.lock` entries including tors-core
-itself, i.e. 333 dependency packages incl. dev and the documents engine
+At the current lock state (335 `Cargo.lock` entries including tors-core
+itself, i.e. 334 dependency packages incl. dev and the documents engine
 tree, re-derived with `cargo metadata --all-features` over the current
 lock; the previous figure recorded here had drifted five entries behind
 the lock before the hashing surface re-derived it):
-181 `MIT OR Apache-2.0`, 59 MIT (fastcdc, strsim, and anydoc among them), 21
+181 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, anydoc, and twox-hash
+among them), 21
 `Apache-2.0 OR MIT` (chardetng, autocfg, uuid, and the hashing surface's
 ctutils/cmov arrivals), 13 `MIT/Apache-2.0` (version_check,
 winapi, siphasher) plus 2 `Apache-2.0/MIT` (rs_merkle, bytecount) and 1
@@ -158,7 +160,7 @@ and present in the payload's.
 `make deny` and CI's cargo-deny step run at the repo root and cover the full
 engine tree: `deny.toml`'s `[graph] all-features = true` resolves every cargo
 feature of the workspace into the checked graph, `documents` included. The
-root lock's 334 entries carry
+root lock's 335 entries carry
 pdf_oxide/anydoc/office_oxide/html-to-markdown-rs and their transitive trees,
 resolution is metadata-only (nothing links), and the check passes over all of
 them.
