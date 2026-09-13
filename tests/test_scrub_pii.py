@@ -295,6 +295,20 @@ class TestRulesContract:
         with pytest.raises(ValueError, match="contact_phone"):
             scrub_pii("a@b.co", ["contact_email", "ssn"])
 
+    def test_a_bare_string_is_not_a_rules_sequence(self) -> None:
+        # pyo3's sequence extraction refuses a str (it would iterate
+        # characters), so the Sequence[...] spelling means list or tuple
+        # and a bare string is a TypeError — the boundary on the accepted
+        # side of the set, pinned.
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", "contact_email")
+
+    def test_non_sequence_rules_arguments_are_type_errors(self) -> None:
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", 42)
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", {"contact_email"})
+
     def test_phone_only_leaves_email_text_alone(self) -> None:
         assert scrub_pii("+1 415 557 8901ada@x.co", ["contact_phone"], salt="") == (
             f"{_phone_token('+1 415 557 8901')}ada@x.co"
@@ -517,3 +531,11 @@ class TestArgumentBoundary:
     def test_a_surrogate_in_the_salt_is_refused(self) -> None:
         with pytest.raises(UnicodeEncodeError):
             scrub_pii("a@b.co", salt="\udcff")
+
+    def test_non_str_arguments_are_type_errors(self) -> None:
+        # The str-in/str-out boundary: bytes text and a non-str salt are
+        # TypeErrors, the same shape every str-in function here documents.
+        with pytest.raises(TypeError):
+            scrub_pii(b"a@b.co")  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", salt=42)  # type: ignore[arg-type]
