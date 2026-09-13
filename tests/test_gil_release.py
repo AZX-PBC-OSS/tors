@@ -471,7 +471,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import hashlib
 import itertools
+import json
 import string
 import time
 import urllib.parse
@@ -485,6 +487,7 @@ from reference import (
     SEARCH_SPARSE_PATTERNS,
     UNESCAPED_NEEDLE,
     compat,
+    content_object,
     corpus_b64,
     corpus_utf8,
     decomposed,
@@ -548,6 +551,21 @@ _WORD_BOUNDS_RATIO_BUDGET = 0.85
 # shows (the whole transform held); the 100ms ceiling independently holds
 # ~2.3x margin. Same derivation shape as _B64_RATIO_BUDGET below.
 _QC_YES_12MIB_RATIO_BUDGET = 0.60
+
+# content_hash's own ratio budget (the object-walk residue class, a new
+# class: the GIL-held walk materializes the whole value tree -- one borrow
+# plus copy per str, one i64 read per int, one repr call per float -- and
+# the canonical-form emission plus SHA-256 run detached under one
+# py.detach, so the residue is structurally ~half the call rather than a
+# small marshalling tail). Measured on the dev box over two load windows
+# (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
+# (reference.content_object) at 12 MiB, ~30.7k records): worst gaps
+# 23.3-32.2ms of 41.9-60.4ms walls, ratios 0.45-0.60, the loaded window's
+# 0.60 the worst observed. 0.80 sits ~1.3x above that worst ratio and
+# ~20% below the ~1.0 the lost-detach shape shows in every sample (the
+# red row below, measured 1.00-1.02); the 100ms ceiling holds ~3x margin
+# over the worst gap. Same derivation shape as _B64_RATIO_BUDGET.
+_CONTENT_HASH_RATIO_BUDGET = 0.80
 
 # The line-heavy corpus for the chunking family's cells (#30 item 5): the
 # chat-thread/log shape the streaming twins' own docstrings justify
@@ -873,6 +891,15 @@ def _stdlib_b64_expression(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+def _stdlib_content_hash_expression(obj: object) -> str:
+    """The stdlib expression ``tors.content_hash`` replaces (the red side):
+    the exact canonical-form spelling the contract defines, hashed with
+    hashlib."""
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
     """The inline-run red idiom (the module docstring's reference-finalize
     "run inline on the loop instead, it is ratio ~1.0" note): call the
@@ -892,6 +919,7 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
         ("reference-finalize", 12 * _MIB, _RATIO_BUDGET),
         ("reference-finalize", 32 * _MIB, _RATIO_BUDGET),
         ("stdlib-b64-encode", 96 * _MIB, _B64_RATIO_BUDGET),
+        ("stdlib-content-hash", 12 * _MIB, _CONTENT_HASH_RATIO_BUDGET),
         ("inline-chunk_text", 12 * _MIB, None),
         ("inline-chunk_by_words", 12 * _MIB, None),
         ("inline-chunk_by_sentences", 12 * _MIB, None),
@@ -902,6 +930,7 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
         "ref-finalize-12MiB",
         "ref-finalize-32MiB",
         "inline-stdlib-b64-96MiB",
+        "inline-stdlib-content-hash-12MiB",
         "inline-chunk_text-12MiB",
         "inline-chunk_by_words-12MiB",
         "inline-chunk_by_sentences-12MiB",
@@ -943,6 +972,24 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
       left the 100ms ceiling as the row's only discriminator with a
       box-speed-dependent margin, and the row measured a CLEAN sample on
       CI twice with no code change: the flake that moved it inline.
+    - The stdlib content_hash expression (``sha256(json.dumps(...,
+      sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()``
+      over the records corpus) at 12 MiB, run inline on the loop: worst
+      gaps 44.9-50.0ms of 44.8-49.4ms walls (ratio 1.00-1.02, measured
+      under ambient load 10-16), missing the 0.80 ratio budget in every
+      sample on any box speed -- ``json.dumps`` + ``str.encode`` are two
+      GIL-held C calls covering ~the whole wall, the one-call lost-detach
+      shape the green content_hash cell's budget exists to discriminate.
+      The 100ms ceiling does NOT discriminate here (walls ~45ms under it
+      even on this box), so the ratio budget is the row's only budget,
+      which is why the row carries the green cell's own 0.80 rather than
+      a ceiling-only ``None``: a tors detach regression pins the whole
+      walk+emit wall (the tors inline shape measured ratio 1.00 in every
+      sample) and fails it regardless of how fast the box runs the work.
+      In the to_thread placement the same expression measures ratio 0.89
+      (the worker's loop ticks between the three calls), under the 0.80
+      budget by only ~10%: box-dependent, which is why the row runs
+      inline (the b64 96 MiB row's rationale).
     - The chunking family's heavy members (``inline-*`` rows), run inline
       on the event loop via ``_call_inline_on_the_loop``: the green
       family cell's own calls at its own params
@@ -1006,6 +1053,23 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
             asyncio.run(
                 _gap_and_wall_during(
                     lambda: _call_inline_on_the_loop(lambda: _stdlib_b64_expression(corpus))
+                )
+            )
+            for _ in range(_SAMPLES)
+        ]
+    elif cell == "stdlib-content-hash":
+        # The stdlib content_hash expression, inline on the loop (the b64
+        # row's placement rationale): json.dumps and str.encode are
+        # GIL-held C calls covering ~the whole wall, so inline the worst
+        # gap IS the wall (ratio ~1.0 in every sample on every box,
+        # missing the 0.80 ratio budget), while the to_thread placement
+        # only reaches ~0.89 (the loop ticks between the three calls) --
+        # box-dependent margin, not a discriminator.
+        obj = content_object(size_bytes)
+        observed = [
+            asyncio.run(
+                _gap_and_wall_during(
+                    lambda: _call_inline_on_the_loop(lambda: _stdlib_content_hash_expression(obj))
                 )
             )
             for _ in range(_SAMPLES)
@@ -2555,6 +2619,51 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
         f"bulk get_close_matches: tors {tors_wall * 1000:.0f}ms vs difflib "
         f"{difflib_wall * 1000:.0f}ms (ratio {tors_wall / difflib_wall:.4f}): the native "
         "sweep lost more than the tolerance margin to the quadratic stdlib matcher"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The object-walk residue class, pinned: ``tors.content_hash``'s walk
+    materializes the whole value tree under the GIL (the standard arg-walk
+    class scaled to an object: one ``to_str`` borrow plus copy per str,
+    one i64 storage read per fast-path int, one Python ``repr`` call per
+    float or big int, one CPython sort per non-str/int-keyed dict), then
+    the canonical-form emission and the SHA-256 run under one
+    ``py.detach``. The residue is therefore structurally ~half the call,
+    not a small marshalling tail: measured on the dev box over two load
+    windows (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
+    (``reference.content_object``) at 12 MiB, ~30.7k records of str/int/
+    float/bool/list fields): worst gaps 23.3-32.2ms of 41.9-60.4ms walls,
+    ratios 0.45-0.60, every sample inside both budgets (the 0.80 ratio
+    budget ~1.3x above the worst observed ratio, the 100ms ceiling ~3x
+    above the worst gap). The corpus is all-ASCII, so no first-call
+    UTF-8-materialization band exists: every sample pays the same walk
+    (compact-ASCII ``to_str`` borrows are zero-copy aliases; the copy into
+    the owned tree is the cost).
+
+    What the detach buys, and what it cannot: the stdlib spelling
+    (``sha256(json.dumps(...).encode()).hexdigest()``) holds the GIL for
+    ``json.dumps`` plus ``str.encode``, ~the whole wall -- inline it
+    measures ratio 1.00-1.02 in every sample (the red row), and even in
+    this to_thread placement 0.89 -- where tors's worst is 0.60 under the
+    same load. The walk itself is irreducible without an interpreter-free
+    object format: every step is a CPython API call, so the O(tree) walk
+    is the documented price of the parity contract, and the emitted-bytes
+    half of the call is what the detach removes.
+
+    No 32 MiB twin: the wall cell (tests/test_performance.py) records the
+    size curve as a measured dead heat with the stdlib at 64 KiB-12 MiB,
+    and the residue/wall ratio is the load-stable constant this cell
+    pins, not a size-dependent quantity."""
+    obj = content_object(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.content_hash, obj),
+            ratio_budget=_CONTENT_HASH_RATIO_BUDGET,
+        )
     )
 
 

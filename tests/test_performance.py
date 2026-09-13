@@ -80,6 +80,7 @@ import base64
 import hashlib
 import hmac
 import html
+import json
 import re
 import string
 import time
@@ -89,6 +90,7 @@ import pytest
 
 import tors
 from reference import (
+    content_object,
     corpus_b64,
     corpus_utf8,
     crlf,
@@ -1256,6 +1258,56 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
         "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
         "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
+    )
+
+
+def _stdlib_content_hash(obj: object) -> str:
+    """The stdlib expression ``tors.content_hash`` replaces: the exact
+    canonical-form spelling the contract defines, hashed with hashlib."""
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "size_bytes", [64 * 1024, 1 * _MIB, 12 * _MIB], ids=["64KiB", "1MiB", "12MiB"]
+)
+def test_content_hash_wall_time_vs_the_stdlib_is_measured_not_asserted(
+    size_bytes: int,
+) -> None:
+    """``tors.content_hash`` vs the full stdlib spelling over the records
+    corpus (``reference.content_object``), measured and deliberately not
+    asserted: a structural dead heat, because the two sides do equivalent
+    work. CPython's C encoder builds the whole canonical string in one
+    GIL-held pass (fast: no Python-level per-value calls for str/int, the
+    same storage reads tors's walk makes), then pays ``str.encode`` (a
+    second full-size GIL-held copy) and a released-GIL ``sha256``; tors
+    pays the GIL-held walk (borrow+copy per str into the owned tree, i64
+    reads, one ``repr`` call per float) and a detached emit+hash. Measured
+    on the dev box (min-of-7 below 4 MiB, min-of-3 above, after warmup):
+
+        size     tors        stdlib     tors/stdlib
+        64 KiB   0.20ms      0.21ms     0.97
+        1 MiB    3.38ms      3.37ms     1.00
+        12 MiB   41.87ms     41.79ms    1.00
+
+    Every cell a dead heat (0.97-1.00): no wall win to assert, and none
+    pretended at -- the value is the GIL release (the stdlib holds the
+    loop for ``json.dumps`` + ``str.encode``, ~the whole wall, inline
+    ratio 1.00-1.02 vs tors's 0.45-0.60, pinned in tests/test_gil_release.
+    py), the byte-exact parity contract (tests/test_content_hash.py, whose
+    differential this cell re-asserts at each measured size), and the
+    detached half of the call. The same dead-heat precedent as
+    ``decode_utf8`` and ``b64_decode``: recorded, not thresholded away.
+    """
+    obj = content_object(size_bytes)
+    assert tors.content_hash(obj) == _stdlib_content_hash(obj)  # parity at the measured size
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.content_hash, obj, samples=samples)
+    std_ms = _min_wall_ms(_stdlib_content_hash, obj, samples=samples)
+    print(
+        f"content_hash {size_bytes // 1024}KiB: tors {tors_ms:.2f}ms "
+        f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
     )
 
 
