@@ -11,8 +11,9 @@
 //! opcode diffs in difflib's shape), [`search_impl`] (leftmost-longest
 //! multi-pattern search), [`scan_impl`] (escape-parity byte scan),
 //! [`truncate_impl`] (boundary-safe and
-//! ellipsis-marked truncation), and [`controls_impl`] (C0/DEL control-run
-//! scrub); they are
+//! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
+//! scrub), and [`scrub_impl`] (named-rule log scrubbing: the TaskQ
+//! exception-text chain); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -213,6 +214,21 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The scrub surface (`scrub_log_text`) adds no residue class: it is
+//! `detached_transform`'s shape over a multi-pass core. The argument
+//! borrow plus the O(rules) name walk (the standard str-in borrow class,
+//! three handles at most) and the ValueError construction on a bad name
+//! run under the GIL; then the whole rule chain — DETAIL line scan,
+//! escaped-run scan, userinfo scan, query-param scan, and the splice —
+//! runs under one `py.detach`; the residue is the single output string's
+//! marshalling on the fired lane, and nothing at all on the identity lane
+//! (no rule fired: the original object comes back). The surface it
+//! replaces is the worst GIL-tax offender in its consumer's error path
+//! (`re.sub` never releases the GIL; up to four passes per text and up to
+//! ~24 passes per failed job, all on the event loop), which is the whole
+//! case for the port: measured bands in `tests/test_gil_release.py` and
+//! `tests/test_performance.py`.
+//!
 //! The escape-parity scan surface (`contains_unescaped`/`find_unescaped`)
 //! adds no residue class at all: it is `utf8_is_valid`'s extreme point
 //! applied to search — two zero-copy `PyBytes` borrows (the haystack and
@@ -283,6 +299,7 @@ pub mod gfm_strip_impl;
 pub mod pdf_impl;
 pub mod pipeline_impl;
 pub mod scan_impl;
+pub mod scrub_impl;
 pub mod search_impl;
 pub mod segmentation_impl;
 pub mod simhash_impl;
@@ -347,6 +364,7 @@ use py::normalize::*;
 use py::phonetic::*;
 use py::pipeline::*;
 use py::scan::*;
+use py::scrub::*;
 use py::search::*;
 use py::segmentation::*;
 use py::simhash::*;
@@ -467,6 +485,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(truncate_to_bounds, m)?)?;
     m.add_function(wrap_pyfunction!(truncate_ellipsis, m)?)?;
     m.add_function(wrap_pyfunction!(strip_controls, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_log_text, m)?)?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;

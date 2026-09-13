@@ -39,6 +39,23 @@ def finalize(text: str) -> tuple[str, str]: ...
 #
 # GIL note: detached_transform's shape, the same as normalize.
 def strip_controls(text: str) -> str: ...
+
+# Named-rule log and exception-text scrubbing, byte-identical to the
+# TaskQ exception-text chain (the four compiled regexes this ports are
+# quoted in tests/reference.py and re-synced against the live source by
+# tests/test_scrub_log_text_parity.py). rules=None runs the full chain in
+# canonical order (pg_detail_lines -> uri_userinfo -> uri_query_creds);
+# [] is the identity; duplicates dedupe and caller order is irrelevant.
+# An unknown name raises ValueError naming the accepted set.
+# tors.scrub_log_text(s, rules) is s exactly when no rule fires (the ***
+# fixed points fire and return a fresh, equal string).
+#
+# GIL note: detached_transform's shape (the rules= name walk under the
+# GIL, the whole multi-rule pass under one detach).
+def scrub_log_text(
+    text: str,
+    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+) -> str: ...
 def nfc(text: str) -> str: ...
 def nfd(text: str) -> str: ...
 def nfkc(text: str) -> str: ...

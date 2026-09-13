@@ -31,6 +31,7 @@ pub mod normalize;
 pub mod phonetic;
 pub mod pipeline;
 pub mod scan;
+pub mod scrub;
 pub mod search;
 pub mod segmentation;
 pub mod simhash;
