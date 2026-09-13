@@ -59,6 +59,7 @@ from reference import (  # noqa: I001 -- the shared oracle module (tests/referen
     _ENTITY_SENTENCE,
     _ESCAPE_LITERAL_TEXT,
     _PROSE_SENTENCE,
+    _SCRUB_SENTENCE,
     SEARCH_DENSE_PATTERNS,
     SEARCH_SPARSE_PATTERNS,
     UNESCAPED_NEEDLE,
@@ -90,11 +91,12 @@ _EXPECTED_SENTENCES: dict[str, dict[str, str]] = {
     "text.rs": {
         "COMPAT_SENTENCE": _COMPAT_SENTENCE,
         "ENTITY_SENTENCE": _ENTITY_SENTENCE,
+        "SCRUB_SENTENCE": _SCRUB_SENTENCE,
     },
 }
 _EXPECTED_KINDS: dict[str, list[str]] = {
     "common/mod.rs": ["prose", "decomposed", "crlf"],
-    "text.rs": ["compat", "entities"],
+    "text.rs": ["compat", "entities", "scrub"],
 }
 
 # The bench's quantization, pinned textually: byte-length division (Rust ``str::len()`` is
@@ -127,10 +129,15 @@ _B64_RENDER = re.compile(
 
 
 def _decode_rust_literal(literal: str) -> str:
-    """Decode the Rust escape subset these literals use: ``\\u{…}`` plus ``\\t``, ``\\r``,
-    ``\\n``."""
+    """Decode the Rust escape subset these literals use: ``\\u{…}`` plus
+    ``\\t``, ``\\r``, ``\\n``, and ``\\\\`` (a literal backslash, protected
+    through a NUL sentinel so the control-char passes below leave it a
+    backslash — the scrub corpus's repr-flattened line needs it, and no
+    bench literal carries a real NUL)."""
     decoded = re.sub(r"\\u\{([0-9a-fA-F]+)\}", lambda m: chr(int(m.group(1), 16)), literal)
-    return decoded.replace("\\t", "\t").replace("\\r", "\r").replace("\\n", "\n")
+    decoded = decoded.replace("\\\\", "\x00")
+    decoded = decoded.replace("\\t", "\t").replace("\\r", "\r").replace("\\n", "\n")
+    return decoded.replace("\x00", "\\")
 
 
 def _bench_facts(source: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -222,6 +229,7 @@ def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
         ("common/mod.rs", "crlf"),
         ("text.rs", "compat"),
         ("text.rs", "entities"),
+        ("text.rs", "scrub"),
     ],
     ids=[
         "common-prose",
@@ -229,6 +237,7 @@ def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
         "common-crlf",
         "text-compat",
         "text-entities",
+        "text-scrub",
     ],
 )
 def test_bench_corpus_is_byte_identical_to_the_reference_corpus(

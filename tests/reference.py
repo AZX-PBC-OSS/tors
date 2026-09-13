@@ -210,13 +210,14 @@ _CORPUS_BUILDERS: dict[str, Callable[[int], str]] = {
     "compat": compat,
     "crlf": crlf,
     "entities": entities,
+    "scrub": scrub_corpus,
 }
 
 
 def corpus_utf8(kind: str, target_bytes: int) -> bytes:
-    """The ``kind`` corpus (``prose`` / ``decomposed`` / ``crlf`` / ``entities``)
-    as UTF-8 bytes, the byte-compatible counterpart of the str corpora, for the
-    bytes-in API."""
+    """The ``kind`` corpus (``prose`` / ``decomposed`` / ``compat`` / ``crlf``
+    / ``entities`` / ``scrub``) as UTF-8 bytes, the byte-compatible
+    counterpart of the str corpora, for the bytes-in API."""
     return _CORPUS_BUILDERS[kind](target_bytes).encode("utf-8")
 
 
