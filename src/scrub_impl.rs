@@ -76,7 +76,10 @@
 //! `memchr` (newline and delimiter positions), `memmem` (the literal
 //! `"://"`, `b"\n"`, and `"DETAIL:"` needles), and small class walks. The
 //! source chain's lookahead is the reason this cannot be a literal-pattern
-//! API port; hand-rolled is the point.
+//! API port; hand-rolled is the point. Every pass is linear in its input,
+//! a contract the escaped DETAIL pass upholds by memoizing its per-line
+//! scan state across the needle run — that pass's doc carries the war
+//! story of why the naive per-needle recomputation was not.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -525,10 +528,49 @@ fn trailing_ws_start(text: &str, line_start: usize, line_end: usize) -> usize {
 /// non-matches. Byte-identical to
 /// `re.compile(r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)",
 /// re.MULTILINE).sub("", text)`.
+///
+/// Linear in the input — the contract this pass's needle loop owes the
+/// scrub API, and the war story behind the line-state memo below. The
+/// terminator scan needs three per-LINE values: the line's end (the run
+/// cannot cross it), its start, and its trailing-whitespace run's start
+/// (the quote lookahead's `\s*$` reach). The naive spelling recomputed all
+/// three per needle — but the needles are not per-line: a flattened
+/// traceback line can carry thousands of `\nDETAIL:` needles, and on that
+/// one-line shape each recomputation is a full-line scan (the `memchr`
+/// runs to the text's end, the `memrchr` to its start: quadratic, ~480ms
+/// pre-fix on 704KB of chained needles where the chain's own lazy scan
+/// takes ~11ms) while a long trailing-whitespace run adds a per-needle
+/// backward walk over the same M chars (K·M). Byte-identity hid the whole
+/// cliff — the differential suite was green throughout — which on a scrub
+/// API is the worst kind of bug: nothing fails, the attacker-shaped log
+/// line just stops being answerable.
+///
+/// The memo is exact, not approximate, so match semantics are untouched:
+/// needles arrive sorted, and a needle that passes the `DETAIL:` check
+/// owns a needle/spaces/`DETAIL:` region holding no other needle's
+/// backslash, so content positions strictly increase — a memoized
+/// `line_end` (the first `\n` at or after an earlier content position in
+/// the same line) is therefore also the first `\n` at or after any later
+/// content position still inside it, and reusing `(line_start, line_end,
+/// ws_start)` while `content <= line_end` yields exactly the values the
+/// per-needle recomputation would produce. Recompute windows —
+/// `[prev_line_end, content)` for the start, `[content, line_end)` for
+/// the end — tile the text disjointly, so every byte of line state is
+/// scanned O(1) times total: the chain's own linearity class, pinned by
+/// the parity suite's needle-chain lane and its timing cell.
 fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
     let mut cursor = 0usize;
+    // The line state every needle's terminator scan consults, carried
+    // across the needle run instead of recomputed per needle: the
+    // (line_start, line_end) of the line holding the last needle's
+    // content, and that line's trailing-ws start once a quote candidate
+    // has first needed it. Valid to reuse while the current needle's
+    // content lies inside the memoized line (see the doc above for why
+    // that reuse is exact); reset per line crossing, the ws memo with it.
+    let mut line: Option<(usize, usize)> = None;
+    let mut ws_memo: Option<usize> = None;
     for nl in memmem::find_iter(text.as_bytes(), b"\\n") {
         // `nl` is the backslash of a literal `\n`. A literal `\r` directly
         // before it is consumed too: the chain's earliest-start preference
@@ -550,12 +592,26 @@ fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
         }
         let content = i + "DETAIL:".len();
         // The lazy run stops at the first lookahead hit; it cannot cross
-        // the line's real newline.
-        let line_end = memchr(b'\n', &bytes[content..]).map_or(bytes.len(), |k| content + k);
-        let line_start = memrchr(b'\n', &bytes[..content]).map_or(0, |k| k + 1);
-        // Per-line memo of the trailing-whitespace start, shared by every
-        // quote candidate in one run's scan.
-        let mut ws_memo: Option<usize> = None;
+        // the line's real newline. Same line as the memo (content inside
+        // the memoized line): reuse. A later line (content past the
+        // memoized end — a real `\n` was crossed): recompute, with the
+        // backward start-scan bounded by the newline the memo already
+        // proved, so the recompute windows stay disjoint.
+        let (line_start, line_end) = match line {
+            Some(cached) if content <= cached.1 => cached,
+            prev => {
+                let line_end =
+                    memchr(b'\n', &bytes[content..]).map_or(bytes.len(), |k| content + k);
+                let line_start = match prev {
+                    Some((_, prev_end)) => memrchr(b'\n', &bytes[prev_end + 1..content])
+                        .map_or(prev_end + 1, |k| prev_end + k + 2),
+                    None => memrchr(b'\n', &bytes[..content]).map_or(0, |k| k + 1),
+                };
+                ws_memo = None; // a new line's trailing-ws run is a new value
+                line = Some((line_start, line_end));
+                (line_start, line_end)
+            }
+        };
         let mut q = content;
         let mut terminator = None;
         while q <= line_end {
