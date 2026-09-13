@@ -47,6 +47,7 @@ import pytest
 
 from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
     _COMPAT_SENTENCE,
+    _CONTACTS_SENTENCE,
     _DECOMPOSED_SENTENCE,
     _DIFF_DELETE_FRACTION,
     _DIFF_INSERT_FRACTION,
@@ -71,18 +72,22 @@ _MIB = 1024 * 1024
 _BENCHES_DIR = Path(__file__).resolve().parent.parent / "benches"
 _BENCH_SOURCES: dict[str, str] = {
     # The one Rust-side source for the shared corpus recipes (every bench does
-    # `mod common;`), plus the text bench, the only one with recipes of its own.
+    # `mod common;`), plus the two benches with recipes of their own.
     "common/mod.rs": (_BENCHES_DIR / "common" / "mod.rs").read_text(encoding="utf-8"),
     "text.rs": (_BENCHES_DIR / "text.rs").read_text(encoding="utf-8"),
     # The diff bench: pair corpora built from the shared prose recipe (see the
     # module docstring for the built-corpus parity mechanism).
     "diff.rs": (_BENCHES_DIR / "diff.rs").read_text(encoding="utf-8"),
+    # The pii bench: its contacts corpus is bench-local (the text.rs
+    # precedent for a one-bench kind), pinned here against reference.py.
+    "pii.rs": (_BENCHES_DIR / "pii.rs").read_text(encoding="utf-8"),
 }
 
 # Each pinned source's expected sentence constants and corpus kinds: the shared
 # three in the common module; the text-bench-only two (the compat corpus that
 # still pays the K-forms' full pass under the quick-check fast paths, and
-# the entity-bearing prose corpus) in text.rs.
+# the entity-bearing prose corpus) in text.rs; the pii-bench-only contacts
+# corpus (the scrub_pii wall/GIL cells' recipe) in pii.rs.
 _EXPECTED_SENTENCES: dict[str, dict[str, str]] = {
     "common/mod.rs": {
         "PROSE_SENTENCE": _PROSE_SENTENCE,
@@ -93,10 +98,14 @@ _EXPECTED_SENTENCES: dict[str, dict[str, str]] = {
         "ENTITY_SENTENCE": _ENTITY_SENTENCE,
         "SCRUB_SENTENCE": _SCRUB_SENTENCE,
     },
+    "pii.rs": {
+        "CONTACTS_SENTENCE": _CONTACTS_SENTENCE,
+    },
 }
 _EXPECTED_KINDS: dict[str, list[str]] = {
     "common/mod.rs": ["prose", "decomposed", "crlf"],
     "text.rs": ["compat", "entities", "scrub"],
+    "pii.rs": ["contacts"],
 }
 
 # The bench's quantization, pinned textually: byte-length division (Rust ``str::len()`` is
@@ -159,7 +168,7 @@ def _rust_repeat_to(target_bytes: int, unit: str) -> str:
     return unit * max(1, target_bytes // len(unit.encode("utf-8")))
 
 
-@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs"])
+@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs", "pii.rs"])
 def test_bench_sentences_are_byte_identical_to_the_reference_sentences(
     source: str,
 ) -> None:
@@ -173,7 +182,7 @@ def test_bench_sentences_are_byte_identical_to_the_reference_sentences(
     )
 
 
-@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs"])
+@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs", "pii.rs"])
 def test_bench_quantization_semantics_are_pinned(source: str) -> None:
     assert _REPEAT_TO.search(_BENCH_SOURCES[source]), (
         f"benches/{source}'s repeat_to no longer matches the pinned quantization "
@@ -235,6 +244,7 @@ def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
         ("common/mod.rs", "prose"),
         ("common/mod.rs", "decomposed"),
         ("common/mod.rs", "crlf"),
+        ("pii.rs", "contacts"),
         ("text.rs", "compat"),
         ("text.rs", "entities"),
         ("text.rs", "scrub"),
@@ -243,6 +253,7 @@ def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
         "common-prose",
         "common-decomposed",
         "common-crlf",
+        "pii-contacts",
         "text-compat",
         "text-entities",
         "text-scrub",

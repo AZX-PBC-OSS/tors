@@ -366,3 +366,7 @@ harness = false
 [[bench]]
 name = "minhash"
 harness = false
+
+[[bench]]
+name = "pii"
+harness = false

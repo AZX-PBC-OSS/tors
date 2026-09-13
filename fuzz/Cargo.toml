@@ -226,3 +226,10 @@ path = "fuzz_targets/random.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pii"
+path = "fuzz_targets/pii.rs"
+test = false
+doc = false
+bench = false
