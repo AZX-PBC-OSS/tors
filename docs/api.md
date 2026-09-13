@@ -3971,8 +3971,12 @@ have this property). The uuids sample raw bytes, uniform by construction.
 
 Errors follow the repo taxonomy, uniformly across the four token spellings:
 a negative `length` raises `ValueError` naming the parameter and the accepted
-form; an empty alphabet raises `ValueError`; non-`str` alphabet, non-`int`
-length, and non-`int` non-`None` seed raise `TypeError`; an alphabet holding
+form; an empty alphabet raises `ValueError`; non-`str` alphabet and non-`int`
+length raise `TypeError`, as does a `seed` that is neither `None` nor int-like
+(an `int` instance — bools and `IntEnum`s ride along — or any `__index__`
+object: the same int-like convention `length` and every size param in the
+crate accept; an `__index__` that itself raises surfaces its own error); an
+alphabet holding
 lone surrogates raises `UnicodeEncodeError` (the repo-wide str contract).
 `0` is legal everywhere and returns `""` (`secrets.token_hex(0)`'s own
 shape). There is no size cap: memory is the only bound, and the bound is a

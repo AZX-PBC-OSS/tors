@@ -17,26 +17,37 @@
 //! detached-transform input class `tors.aio` exists for (a thread hop costs
 //! more than the call at every realistic token/key size); see docs/async.md.
 
-use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyAttributeError, PyMemoryError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyInt};
 
 use crate::random_impl::{self, RandomError};
 
 /// Reduce the `seed=` argument to the u64 the core keys its ChaCha20 stream
-/// with. Any Python int is legal and documented: the value is reduced mod
-/// 2^64 (two's complement for negatives — exactly what `seed &
-/// 0xFFFFFFFFFFFFFFFF` computes in Python). `|seed| < 2^63` takes the
-/// zero-conversion i64 path; anything wider (up from 2^63, down from -2^63,
-/// or arbitrarily huge) goes through Python's own `&` mask, one small-int
-/// C call under the GIL. `bool` rides along as the int it is (`True` is 1).
-/// Anything that is not `None` and not an `int` raises `TypeError` naming
-/// the parameter and the accepted forms.
+/// with. Any int-LIKE is legal and documented: an `int` instance (bool and
+/// IntEnum ride along as the ints they are, `True` is 1) or any object
+/// implementing `__index__` — the house convention for int-ish params
+/// (pyo3's `i64` extraction accepts exactly these, `length` already rides
+/// it, and the chunkers' size params and documents' `max_bytes=` keep the
+/// same rule; the strict int-instance-only gate this replaced was the
+/// family's one outlier). The gate is one normalization through
+/// `__index__` — identity on int instances, so both sides of the
+/// convention take the same path — and the value is reduced mod 2^64
+/// (two's complement for negatives — exactly what `seed & 0xFFFFFFFFFFFFFFFF`
+/// computes in Python). `|seed| < 2^63` takes the zero-conversion i64 path;
+/// anything wider (up from 2^63, down from -2^63, or arbitrarily huge) goes
+/// through Python's own `&` mask, one small-int C call under the GIL.
+/// Anything that is not `None` and not int-like raises `TypeError` naming
+/// the parameter and the accepted forms; an `__index__` that itself raises
+/// surfaces its own error (pyo3's `length` extraction does the same — the
+/// gate called the protocol and the protocol answered).
 fn seed_to_u64(seed: Option<Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
     let Some(seed) = seed else {
         return Ok(None);
     };
-    let value = seed.cast::<PyInt>().map_err(|_| {
+    let not_int_like = || {
         PyTypeError::new_err(format!(
             "seed must be an int or None, not {}",
             seed.get_type()
@@ -44,7 +55,21 @@ fn seed_to_u64(seed: Option<Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
                 .map(|name| name.to_string())
                 .unwrap_or_else(|_| "an unknown type".to_string())
         ))
+    };
+    // The int-like gate: `__index__` is identity on int instances and the
+    // whole protocol for everything else; a non-int-like answers the
+    // lookup with AttributeError and becomes the TypeError above.
+    let value = seed.call_method0("__index__").map_err(|err| {
+        if err.is_instance_of::<PyAttributeError>(seed.py()) {
+            not_int_like()
+        } else {
+            err
+        }
     })?;
+    // `__index__`'s return must BE an int (Python's own PyNumber_Index
+    // contract); a pathological implementation handing back something
+    // else is the same refusal as not being an int-like at all.
+    let value = value.cast::<PyInt>().map_err(|_| not_int_like())?;
     match value.extract::<i64>() {
         // The widening `as u64` IS the documented mod-2^64 reduction for
         // negatives (two's complement).

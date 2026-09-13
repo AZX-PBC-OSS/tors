@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import enum
 import hashlib
 import os
 import secrets
@@ -238,6 +239,25 @@ _TOKEN_CALLS: list[tuple[str, Callable[[int], str]]] = [
 ]
 
 
+class _IndexLike:
+    """A non-int object presenting an int through ``__index__`` (numpy's
+    typed-scalar shape, ``IntEnum`` minus the inheritance): the int-like
+    convention the family's int-ish params accept — pinned in
+    ``TestSeedDomain``, where the seed's alignment to it lives."""
+
+    def __init__(self, value: int) -> None:
+        self._value = value
+
+    def __index__(self) -> int:
+        return self._value
+
+
+class IntEnumLike(enum.IntEnum):
+    """The int-instance side of the int-like gate: subclasses int."""
+
+    X = 8
+
+
 class TestSeededConstructionMatchesTheOracle:
     """Every seeded function equals the documented construction at the pin
     parameters: seeds 0, 1 (the edge goldens), and 42, across sizes that
@@ -415,9 +435,13 @@ class TestOneEngineDelegation:
 
 
 class TestSeedDomain:
-    """The seed argument contract: any Python int (reduced mod 2^64, so
-    huge and negative seeds are legal and defined), bools ride along as the
-    ints they are, and anything else is a TypeError naming the parameter."""
+    """The seed argument contract: any int-LIKE — an ``int`` instance (bools
+    and IntEnums ride along as the ints they are) or any object implementing
+    ``__index__`` (the house convention for int-ish params: ``length``
+    already accepts these through pyo3's ``i64`` extraction, and the
+    chunkers' size params and documents' ``max_bytes=`` keep the same rule)
+    — reduced mod 2^64, so huge and negative seeds are legal and defined;
+    anything else is a TypeError naming the parameter."""
 
     def test_same_seed_same_output_repeatably(self) -> None:
         for _ in range(3):
@@ -459,6 +483,45 @@ class TestSeedDomain:
     def test_non_int_seed_raises_type_error(self, not_an_int: object) -> None:
         with pytest.raises(TypeError, match="seed must be an int or None"):
             random_hex(8, seed=not_an_int)  # type: ignore[arg-type]
+
+    def test_index_like_seed_is_the_int_it_indexes_to(self) -> None:
+        # The alignment pin (the finding: `length` accepted `__index__`
+        # objects through pyo3's i64 extraction while `seed`'s strict
+        # `cast::<PyInt>` refused them — the family's two int-ish params
+        # disagreed). The house convention is acceptance (every size param
+        # in the crate keeps it), so seed now rides the same gate: a
+        # non-int object presenting an int through `__index__` (numpy's
+        # scalar shape) is the seed it indexes to, on every seeded surface.
+        assert random_hex(8, seed=_IndexLike(0)) == random_hex(8, seed=0)
+        assert random_hex(8, seed=_IndexLike(42)) == random_hex(8, seed=42)
+        assert random_string(16, BASE62_CHARS, seed=_IndexLike(42)) == random_string(
+            16, BASE62_CHARS, seed=42
+        )
+        assert uuid4(seed=_IndexLike(42)) == uuid4(seed=42)
+
+    def test_index_like_seed_reduces_mod_2_64_like_the_plain_int(self) -> None:
+        # The mask path through the same gate: an `__index__` wider than
+        # i64 (or negative) reduces mod 2^64 exactly like the plain-int
+        # spelling of the same value.
+        assert random_hex(8, seed=_IndexLike(7 + (1 << 100))) == random_hex(8, seed=7)
+        assert random_hex(8, seed=_IndexLike(-1)) == random_hex(8, seed=-1)
+
+    def test_int_enum_seed_is_the_int_it_is(self) -> None:
+        # The int-instance side of the same gate: IntEnum subclasses int,
+        # so it has always ridden along and still does.
+        assert random_hex(8, seed=IntEnumLike.X) == random_hex(8, seed=8)
+
+    def test_a_raising_index_surfaces_its_own_error(self) -> None:
+        # An `__index__` that RAISES surfaces its own error — the length
+        # param's own behavior under pyo3 extraction — not a TypeError
+        # about seed: the gate called the protocol and the protocol
+        # answered.
+        class Raising:
+            def __index__(self) -> int:
+                raise ValueError("no int today")
+
+        with pytest.raises(ValueError, match="no int today"):
+            random_hex(8, seed=Raising())  # type: ignore[arg-type]
 
 
 class TestValueErrors:

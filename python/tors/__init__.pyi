@@ -1146,7 +1146,9 @@ def refined_soundex(text: str) -> str: ...
 # predictable from the seed — a reproducible-test/fixture tool, NEVER safe
 # for secrets, keys, or tokens (any adversary who learns the seed can
 # reproduce the stream); the unseeded spelling is the secrets-safe one.
-# The seed is any int, reduced mod 2**64 (two's complement for negatives).
+# The seed is any int-like — an int instance (bools, IntEnums) or any
+# __index__ object, the same convention length accepts — reduced mod 2**64
+# (two's complement for negatives).
 # Length-first, uniformly: the four token spellings take the OUTPUT length
 # ("I want a base62 id X characters long" is the whole call), and all four
 # are one char-sampling engine — random_hex/random_b62/random_b64url are
