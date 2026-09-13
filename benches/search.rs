@@ -116,6 +116,30 @@
 //! constants for that file to pin. Iterations are ns-scale (core) and
 //! µs-scale (baseline), so every cell keeps default sampling.
 //!
+//! The `utf16_byte_len` group (the interop twin's core, #52): the same
+//! two-cell shape over the same ladder, with both cells carrying real
+//! work this time — the twin's `core` cell is a flat field read, this
+//! one is the chunked byte-class scan (`UTF16_COUNT_CHUNK`-wide, the
+//! auto-vectorizing shape; see `src/scan_impl.rs` for the width's
+//! measurement and for the scalar spelling it exists to avoid, which
+//! measured slower than the expression the function replaces):
+//!
+//! - `core`: `scan_impl::utf16_byte_len(&text)` — the derived
+//!   arithmetic (the lead-byte and 4-byte-lead counts, doubled), one
+//!   pass over the corpus, no allocation.
+//! - `encode_baseline`: `text.encode_utf16().collect::<Vec<u16>>()` —
+//!   the 2n allocation plus the per-codepoint encode pass, the dominant
+//!   cost of `len(s.encode("utf-16-le"))` (CPython's codec is this
+//!   shape: an ASCII widen pass or a UCS2 near-memcpy, always with the
+//!   full output allocation). The true end-to-end lanes — the pyo3
+//!   borrow's cache classes — are measured Python-side by the
+//!   `utf16_byte_len` cells in tests/test_performance.py, same split
+//!   as the utf8 group.
+//!
+//! Same corpus reasoning as the utf8 group (representation-independent
+//! core over the pinned prose recipe), and iterations are µs-scale at
+//! the ladder top, so default sampling everywhere.
+//!
 //! Run locally with `cargo bench --no-default-features --bench search` — the
 //! `--no-default-features` is required because `extension-module`
 //! deliberately does not link libpython, which a bench binary needs. CI only
@@ -363,12 +387,43 @@ fn bench_utf8_byte_len(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_utf16_byte_len(c: &mut Criterion) {
+    let mut group = c.benchmark_group("utf16_byte_len");
+    for target_bytes in [64 * 1024, 1024 * 1024, 12 * 1024 * 1024] {
+        let text = prose(target_bytes);
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        // The core: the chunked byte-class scan — the derived arithmetic,
+        // one pass, no allocation (the twin's flat-field-read core is the
+        // contrast this group exists next to).
+        group.bench_with_input(
+            BenchmarkId::new("core", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| scan_impl::utf16_byte_len(black_box(text)));
+            },
+        );
+        // The encode baseline: the 2n allocation plus the per-codepoint
+        // encode pass the replaced expression pays (CPython's utf-16-le
+        // codec is this shape; the Python-side cells measure the live
+        // expression and the borrow's cache lanes this cannot see).
+        group.bench_with_input(
+            BenchmarkId::new("encode_baseline", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| black_box(text.encode_utf16().collect::<Vec<u16>>()));
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_search,
     bench_replace_many,
     bench_replace_many_masked,
     bench_unescaped_scan,
-    bench_utf8_byte_len
+    bench_utf8_byte_len,
+    bench_utf16_byte_len
 );
 criterion_main!(benches);

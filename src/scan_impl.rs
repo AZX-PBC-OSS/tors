@@ -333,8 +333,21 @@ pub fn utf8_byte_len(s: &str) -> usize {
 // "utf16_byte_len" section for the derivation (the identity, the two
 // byte classes, the additivity argument behind the exhaustive sweep),
 // the cache trade it inherits from the same str-in borrow, the
-// surrogate divergence, and the no-fuzz rationale; the wrapper in
+// surrogate refusal parity, and the no-fuzz rationale; the wrapper in
 // src/py/scan.rs carries the Python-facing contract.
+
+/// The chunk width of the counting loop below: 16. The two counts are
+/// summed per chunk into `u8` accumulators, and the width is where the
+/// measurement landed on the calibration box (arm64, baseline build):
+/// 8 and 32 both run ~16 GB/s, 16 runs ~31 GB/s — the sweet spot
+/// between per-chunk overhead and loop-carried latency, the same class
+/// of measurement-decided constant as the segment scanner's
+/// `BREAK_WINDOW`. The chunked spelling exists at all because the
+/// obvious `iter().filter().count()` closures do NOT auto-vectorize
+/// here (measured 4.2 GB/s scalar, slower than the expression the
+/// function exists to beat — the wall cells in
+/// tests/test_performance.py record both lanes).
+const UTF16_COUNT_CHUNK: usize = 16;
 
 /// The UTF-16 byte length of `s` — 2 bytes per BMP codepoint, 4 per
 /// astral codepoint (the surrogate pair) — the answer
@@ -346,12 +359,13 @@ pub fn utf8_byte_len(s: &str) -> usize {
 /// `utf16 bytes = 2 * (#codepoints + #astral)`, where over valid UTF-8
 /// `#codepoints` is the lead-byte count (`(b & 0xC0) != 0x80`) and
 /// `#astral` is the count of 4-byte leads (`b >= 0xF0`, exactly
-/// `0xF0..=0xF4` in valid UTF-8) — no decoding, no allocation, and the
-/// per-byte work is two compares a compiler can classify in vector
-/// width. The identity is proved against the `chars()`-based naive
-/// count over the boundary battery and an exhaustive length-<=3 sweep
-/// (both sides additive over concatenation, so the sweep is exhaustive)
-/// in `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
+/// `0xF0..=0xF4` in valid UTF-8) — no decoding, no allocation, summed
+/// in [`UTF16_COUNT_CHUNK`]-sized chunks (the auto-vectorizing shape;
+/// see that constant's docs for the measurement). The identity is
+/// proved against the `chars()`-based naive count over the boundary
+/// battery and an exhaustive length-<=3 sweep (both sides additive
+/// over concatenation, so the sweep is exhaustive) in
+/// `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
 ///
 /// The cost model is the borrow's, the utf8 twin's exactly (ASCII
 /// zero-copy alias; cold-cache first call materializes-and-caches the
@@ -363,14 +377,29 @@ pub fn utf8_byte_len(s: &str) -> usize {
 /// surrogatepass acceptance mode are the two honest differences — the
 /// wrapper's docs and the Python battery pin both).
 pub fn utf16_byte_len(s: &str) -> usize {
-    // The derivation's two counts in one fused pass: one unit per
+    // The derivation's two counts, one chunked pass: one unit per
     // codepoint (its lead byte), one more per astral codepoint (its
-    // 4-byte lead) — doubled at the end. See the module docs.
-    let mut units = 0usize;
-    for &b in s.as_bytes() {
-        units += usize::from((b & 0xC0) != 0x80) + usize::from(b >= 0xF0);
+    // 4-byte lead) — doubled at the end. See the module docs for the
+    // identity and UTF16_COUNT_CHUNK's docs for the width.
+    let bytes = s.as_bytes();
+    let (chunks, remainder) = bytes.as_chunks::<UTF16_COUNT_CHUNK>();
+    let mut codepoints = 0usize;
+    let mut astral = 0usize;
+    for chunk in chunks {
+        let mut leads = 0u8;
+        let mut four_byte_leads = 0u8;
+        for &b in chunk {
+            leads += ((b & 0xC0) != 0x80) as u8;
+            four_byte_leads += (b >= 0xF0) as u8;
+        }
+        codepoints += leads as usize;
+        astral += four_byte_leads as usize;
     }
-    2 * units
+    for &b in remainder {
+        codepoints += ((b & 0xC0) != 0x80) as usize;
+        astral += (b >= 0xF0) as usize;
+    }
+    2 * (codepoints + astral)
 }
 
 #[cfg(test)]

@@ -272,6 +272,17 @@ first-call lane):
   the GIL-held materialization), which is why this leg is ceiling-only
   like the D-form fast-path cell, not because the wall is sub-floor.
 
+utf16_byte_len cell (the interop twin, #52; same corpus shapes and
+fresh-object-per-sample design): both legs ceiling-only for the twin's
+two reasons, with the one honest structural difference — this core's
+detach carries REAL work (the O(n) byte-class scan, ~30 GB/s, ~0.4ms
+at 12 MiB — an order under the ping floor) where the twin's is nominal
+around a field read. The ASCII leg's whole call is the zero-copy alias
+borrow plus the detached scan, sub-floor end to end; the non-ASCII
+first-call leg's worst gap is the same GIL-held materialization as the
+twin's (~5ms at 12 MiB, under the ping interval), with the scan
+detached behind it.
+
 cells (``replace_many`` dense, ``sentence_bounds`` list,
 ``diff_opcodes_lines`` near-identical, all at 12 MiB; measured on the dev
 box, ambient load 2.0, 5 samples per cell, corpora from
@@ -1465,6 +1476,62 @@ def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
         asyncio.run(
             _assert_loop_stays_responsive(
                 lambda: asyncio.to_thread(tors.utf8_byte_len, next(copies)),
+                ratio_budget=ratio_budget,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("ascii", 12 * _MIB, None),
+        ("non-ascii-first-call", 12 * _MIB, None),
+    ],
+    ids=["ascii-12MiB-ceiling-only", "non-ascii-first-call-12MiB-ceiling-only"],
+)
+def test_utf16_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The interop twin's cell, and the one honest difference from the
+    utf8 twin's: the detach around this core carries REAL work (the
+    O(n) byte-class scan, ~30 GB/s — measured ~0.4ms at 12 MiB, an
+    order under the 10ms ping floor), where the twin's detach is
+    nominal around one field read. The GIL-held residue is the same
+    borrow class: the cold-cache first call's materialization of the
+    UTF-8 view (there is no way to fill an object's cache without
+    holding the GIL; a prior ``encode`` does not warm it), with the
+    scan detached behind it.
+
+    Two legs, both ceiling-only, the twin's reasons:
+
+    - ``ascii`` (prose): the borrow is a zero-copy alias and the scan
+      is detached, so the whole call's GIL-held residue is call
+      overhead — the wall (~0.4ms at 12 MiB) sits an order under the
+      ping floor, and the pin's limit is the utf8 twin's: a sub-floor
+      call cannot discriminate a detach regression by gap alone, it
+      pins that the call leaves the loop at the floor at all (the wall
+      cells in tests/test_performance.py carry the scan band).
+    - ``non-ascii-first-call`` (decomposed, a FRESH object per sample):
+      the materialization is GIL-held O(n) — the utf8 twin's measured
+      ~4.7-5.7ms inline class at 12 MiB — with the detached scan
+      (~0.4ms) behind it, so the worst gap is the materialization
+      itself, still under the 10ms ping interval; the 100ms ceiling
+      holds ~20x, and the linear envelope is the twin's (~0.4-0.5ms of
+      GIL hold per MiB, a ~200 MiB non-ASCII string at the ceiling).
+    """
+    if corpus_kind == "ascii":
+        corpus = _CORPORA["prose"](size_bytes)
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf16_byte_len, corpus),
+                ratio_budget=ratio_budget,
+            )
+        )
+    else:
+        copies = iter([_CORPORA["decomposed"](size_bytes) for _ in range(_SAMPLES)])
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf16_byte_len, next(copies)),
                 ratio_budget=ratio_budget,
             )
         )
