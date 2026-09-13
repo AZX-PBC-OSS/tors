@@ -1338,8 +1338,8 @@ def test_unescaped_scan_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     corpus_kind: str, size_bytes: int, ratio_budget: float | None
 ) -> None:
     """The escape-parity scan claim: the whole pass — the memmem occurrence
-    loop, the per-hit backward run walk, the carried run state — runs under
-    ``py.detach``, and the call's GIL-held residue is the two zero-copy
+    loop and the per-hit backward run walk — runs under ``py.detach``, and
+    the call's GIL-held residue is the two zero-copy
     ``PyBytes`` borrows alone (a ``bool``/``int`` return, so no marshalling
     class at all; the empty-needle ``ValueError`` is the only error path and
     it fires before the detach), the ``utf8_is_valid`` extreme point applied

@@ -222,9 +222,10 @@ _SELF_OVERLAP_CASES: list[tuple[bytes, bytes, int]] = [
     (b"\\abababab", b"abab", 3),
     (b"\\aaaaa", b"aaa", 2),
     # A chain of four ALL-REJECTED hits (every occurrence of ``\\u`` behind
-    # exactly one backslash: runs 3, 1, 1, 1), the carried-run-state boundary
-    # shape — then the same chain with a live occurrence appended behind a
-    # non-backslash, so the scan walks past every rejection to the live hit.
+    # exactly one backslash: runs 3, 1, 1, 1), the consecutive-rejected-hits
+    # boundary shape — then the same chain with a live occurrence appended
+    # behind a non-backslash, so the scan walks past every rejection to the
+    # live hit.
     (b"\\" * 4 + b"u\\\\" * 3 + b"u", b"\\u", -1),
     (b"\\" * 4 + b"u\\\\" * 3 + b"u" + b"x\\u", b"\\u", 15),
 ]
@@ -260,7 +261,7 @@ def test_self_overlapping_needles_advance_one_byte_past_rejected_hits(
     ``find_iter`` default — would skip it and answer ``-1``. The
     all-backslash-needle rows pin the other edge: an all-backslash needle's
     first occurrence always sits at a run start (an even, empty run before
-    it), so those scans answer at the first hit and never re-walk."""
+    it), so those scans answer at the first hit and never walk."""
     got = find_unescaped(haystack, needle)
     assert got == expected
     assert got == reference_find_unescaped(haystack, needle)

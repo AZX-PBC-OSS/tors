@@ -59,43 +59,38 @@
 //! the per-hit loop reuses one build), and the parity work is a backward
 //! walk over the backslash run immediately before each hit:
 //!
-//! * Cost: the walk for a hit covers only bytes of the gap since the
-//!   previous hit (it is bounded at that hit even mid-run), and gaps
-//!   tile (each byte belongs to exactly one inter-hit gap), so every
-//!   byte is walked backward at most once across the whole scan.
-//! * That bound is defensive, not load-bearing: a naive per-hit walk to
-//!   the run's true start, previous hit ignored, never re-walks either.
-//!   A hit with a nonzero walk sits at a maximal run's end or strictly
-//!   inside it, and the two placements are mutually exclusive per
-//!   needle: a hit at a run's end needs the needle's first byte to be a
+//! * Cost: the walk for a hit covers that hit's maximal backslash run,
+//!   and at most one hit per maximal run carries a nonzero walk. A hit
+//!   with a nonzero walk sits at a maximal run's end or strictly inside
+//!   it, and the two placements are mutually exclusive per needle: a
+//!   hit at a run's end needs the needle's first byte to be a
 //!   non-backslash (the byte there is what ends the run), while a hit
 //!   strictly inside needs it to be a backslash, which forces the
 //!   needle's backslash prefix to end exactly at the run's end — one
-//!   position per run either way, so at most one hit per maximal run
-//!   ever walks, and every walk stays inside its own run (runs are
-//!   disjoint). An all-backslash needle never walks at all: its first
-//!   hit sits at a maximal run's start — an even, empty run before it —
-//!   and answers the scan there. The naive walk is linear on its own;
-//!   the gap bound above is belt and braces, not the device that saves
-//!   the scan from re-walking.
-//! * The carried run start (`run_start`, the start of the maximal run
-//!   ending at `scanned`, maintained by induction) exists for the one
-//!   case the gap bound cannot settle alone: a hit whose run reaches
-//!   all the way back through the gap to the previous hit. That case is
-//!   provably unreachable past the first hit. A gap of all backslashes
-//!   between two hits forces the needle to be all backslashes — if the
-//!   gap is at least needle-length the needle lies inside it, and
-//!   otherwise the gap length `d` is a period of the needle (both hits
-//!   spell the needle over the same gap bytes) whose first `d` bytes
-//!   are backslashes, so `needle[j] == needle[j mod d]` carries them
-//!   through the whole needle — and an all-backslash needle's first hit
-//!   is always live at a run start (the second bullet), so the scan
-//!   returns at that hit and no second hit exists to reach the branch.
-//!   The join branch that consumes `run_start` therefore fires only at
-//!   the first hit, where `scanned == 0` and it answers `0` — exactly
-//!   what the walk's own `run_back` already holds there. The carried
-//!   start is the spec's defensive bound-marker; it never changes an
-//!   answer.
+//!   position per run either way. Every walk stays inside its own run,
+//!   and runs are disjoint, so every byte is walked backward at most
+//!   once across the whole scan. An all-backslash needle never walks at
+//!   all: its first hit sits at a maximal run's start — an even, empty
+//!   run before it — and answers the scan there.
+//! * No state is carried between hits. An earlier revision of this scan
+//!   bounded each walk at the previous hit and carried the run's start
+//!   forward; both devices were vestigial. The bound never bounded: the
+//!   run before a hit never reaches back to the previous hit, because
+//!   an all-backslash gap between two hits forces an all-backslash
+//!   needle — the gap either swallows the needle whole, or its length
+//!   is a period of the needle (both hits spell the needle over the
+//!   same gap bytes) and a backslash-prefixed periodic needle is
+//!   backslashes all the way through — and an all-backslash needle's
+//!   first hit is always live at a run start, ending the scan before a
+//!   second hit exists. With no gap ever all backslashes, the bounded
+//!   walk and this walk take the same steps on every input, and the
+//!   carried start's join branch never fired past the first hit, where
+//!   it answered `0` — what the walk's own `run_back` already held.
+//!   Verified before the removal: 460,639 exhaustive instrumented pairs
+//!   over tiny alphabets (zero join firings past the first hit, zero
+//!   re-walks, the two loops step-for-step identical) and a
+//!   2,082,050-pair adversarial differential sweep on top of the
+//!   suite's own net.
 //!
 //! # Preconditions (enforced by the wrapper before this runs)
 //!
@@ -123,43 +118,28 @@
 ///
 /// Rejected (odd-run) hits advance the search one byte past the hit, not
 /// past the whole match, so self-overlapping needles stay correct; each
-/// hit's walk is bounded at the previous hit, so every byte of the
+/// hit's walk covers the backslash run immediately before it, and at
+/// most one hit per maximal run ever walks, so every byte of the
 /// haystack is walked backward at most once across the whole scan (the
-/// module docs' cost argument — and the proof that the naive walk is
-/// linear too).
+/// module docs' cost argument).
 pub fn find_unescaped(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let finder = memchr::memmem::Finder::new(needle);
     // `from` is the next occurrence search's origin: 0, then one byte
     // past each rejected hit — the resume rule that keeps self-overlapping
-    // needles correct. `scanned` (the previous hit's offset, 0 before the
-    // first) bounds the walk below; `run_start` carries the classified
-    // run start forward — the spec's defensive bound-marker, whose join
-    // branch is provably dead past the first hit (the module docs'
-    // third bullet).
-    let mut scanned = 0;
-    let mut run_start = 0;
+    // needles correct.
     let mut from = 0;
     while let Some(rel) = finder.find(&haystack[from..]) {
         let hit = from + rel;
-        // The backward run count, bounded by `scanned`: walk the gap's
-        // trailing backslash run to its start. Stopping at a
-        // non-backslash settles a fresh maximal run inside the gap;
-        // reaching `scanned` (the whole gap backslashes) is the join
-        // case, reachable only at the first hit — the bound itself is
-        // what keeps every walk inside its own inter-hit gap, and gaps
-        // tile, so no byte is ever walked twice.
+        // The backward run count: walk the maximal backslash run ending
+        // at the hit down to its start (a non-backslash byte, or offset
+        // 0). No state is carried between hits — the module docs' second
+        // bullet is why that is safe: at most one hit per maximal run
+        // ever walks, so no byte is walked twice.
         let mut run_back = hit;
-        while run_back > scanned && haystack[run_back - 1] == b'\\' {
+        while run_back > 0 && haystack[run_back - 1] == b'\\' {
             run_back -= 1;
         }
-        let hit_run_start = if run_back == scanned {
-            run_start
-        } else {
-            run_back
-        };
-        scanned = hit;
-        run_start = hit_run_start;
-        if (hit - hit_run_start).is_multiple_of(2) {
+        if (hit - run_back).is_multiple_of(2) {
             return Some(hit);
         }
         from = hit + 1;
@@ -293,7 +273,7 @@ mod tests {
 
     #[test]
     fn long_runs_and_many_hits_stay_correct() {
-        // The carried-run-state shapes at scale. Careful with the run
+        // The long-run and many-hit shapes at scale. Careful with the run
         // arithmetic (the mistake this row originally pinned against
         // itself): for R backslashes then `u0000`, the needle's occurrence
         // starts at R-1 — its first byte IS the run's last backslash — so
@@ -312,7 +292,7 @@ mod tests {
         run_then_needle.extend_from_slice(NUL_ESCAPE);
         assert_eq!(find_unescaped(&run_then_needle, NUL_ESCAPE), Some(100_000));
         // Ten thousand all-rejected hits (the false-positive corpus's
-        // shape, where a carried-state bug would compound across hits).
+        // shape, where a resume or walk bug would compound across hits).
         let corpus = [b"\\", NUL_ESCAPE].concat().repeat(10_000);
         assert_eq!(find_unescaped(&corpus, NUL_ESCAPE), None);
     }

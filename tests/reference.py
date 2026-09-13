@@ -554,7 +554,7 @@ def reference_find_unescaped(haystack: bytes, needle: bytes) -> int:
     """The escape-parity oracle (the ``reference_find_patterns`` shape): a
     brute-force backward parity walk, pure-Python ``bytes`` operations only,
     independent of every implementation detail on the tors side (memmem
-    engine, carried run state, resume arithmetic). An occurrence of ``needle``
+    engine, resume arithmetic). An occurrence of ``needle``
     at offset ``i`` counts only when the maximal run of backslashes
     immediately before ``i`` has even length (0 is even: an occurrence at
     offset 0 is live); a rejected hit advances the scan one byte past the
