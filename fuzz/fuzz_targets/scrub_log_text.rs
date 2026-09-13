@@ -4,7 +4,10 @@
 //! password/value classes, planted in the userinfo, query-param, and
 //! DETAIL-line shapes, never survives the scrub — asserted as the exact
 //! masked template shape, the Rust twin of the battery's hypothesis
-//! invariants, over raw fuzzer strings.
+//! invariants, over raw fuzzer strings. The DETAIL shape has both
+//! spellings of the segmenter: the real-newline line template and the
+//! repr-flattened escaped-run template (`\nDETAIL:...`), the two passes
+//! the one rule name routes to.
 
 #![no_main]
 
@@ -74,4 +77,22 @@ fuzz_target!(|s: &str| {
     let detail_payload = s.replace('\n', "");
     let detail_in = format!("x\nDETAIL:{detail_payload}\ny");
     assert_eq!(scrub_log_text(&detail_in, RuleSet::ALL).as_ref(), "x\n\ny");
+
+    // The DETAIL template's escaped-segmenter twin: the repr()-flattened
+    // run. The payload may not hold a Python-`\s` char (a real newline
+    // ends the run's line, and other whitespace could hand an interior
+    // quote the `\s*$` lookahead tail) or a backslash (an interior escaped
+    // separator would end the run early and let the rest of the payload
+    // survive); quotes and `)` stay legal — inside the run the template's
+    // own closing `')` is the only quote whose tail is whitespace-to-EOL,
+    // so the run always dies whole and the closing `')` (the repr shape
+    // the lookahead's `\s*$` alternative exists to preserve) is what is
+    // left. An empty payload is the same shape: the run is still the whole
+    // `\nDETAIL:` stretch up to the quote.
+    let escaped_payload: String = s
+        .chars()
+        .filter(|c| !(c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}') || *c == '\\'))
+        .collect();
+    let escaped_in = format!("E('x\\nDETAIL:{escaped_payload}')");
+    assert_eq!(scrub_log_text(&escaped_in, RuleSet::ALL).as_ref(), "E('x')");
 });
