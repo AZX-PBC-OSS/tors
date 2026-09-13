@@ -455,6 +455,57 @@ class TestStdlibDivergencePins:
             uuid_parse(u.hex)
 
 
+class TestStrictnessLayerRoutes:
+    """The crate-adoption boundary, pinned: tors's parse delegates the hex
+    grammar to the Rust ``uuid`` crate and enforces strictness as a thin
+    layer on top (canonical-encoding equality), so every rejection travels
+    a named route -- the wrapper forms (braces, urn, hyphen-less) through
+    the length gate, structurally-broken 36-character text through the
+    crate's parser plus tors's position classification (message-pinned in
+    TestStrictCanonicalRejections), and uppercase through the encoding
+    comparison, the only loose form that is 36 characters and parses.
+    These pins hold each loose form to its route and message so the
+    layer's job -- rejecting exactly what the adopted crate accepts --
+    stays tested at the boundary itself (the Rust-side twins, calling the
+    crate directly, live in src/uuid_impl.rs's tests)."""
+
+    def test_the_wrapper_forms_reject_through_the_length_gate(self) -> None:
+        # Braces +2, the urn prefix +9, hyphen-less -4: each names its own
+        # count. (38 is the gap this fills: 45 and 32 were pinned, 38 not.)
+        with pytest.raises(ValueError, match="got 38"):
+            uuid_parse("{" + DOC_V7_TEXT + "}")
+        with pytest.raises(ValueError, match="got 45"):
+            uuid_parse("urn:uuid:" + DOC_V7_TEXT)
+        with pytest.raises(ValueError, match="got 32"):
+            uuid_parse(DOC_V7_TEXT.replace("-", ""))
+
+    def test_uppercase_rejects_through_the_canonical_encoding_comparison(self) -> None:
+        # The strictness layer's whole job in one pin: uppercase is the one
+        # loose form that is 36 characters, so it alone survives the length
+        # gate AND the crate's parser (uuid's parse_str accepts any-case
+        # hex, the same permissive union as the stdlib) -- only the
+        # re-encode-and-compare step (parsed value re-encoded lowercase !=
+        # input) rejects it, at the first uppercase position.
+        upper = DOC_V7_TEXT.upper()
+        assert len(upper) == 36
+        with pytest.raises(ValueError, match="uppercase 'D' at position 9"):
+            uuid_parse(upper)
+
+    def test_uppercase_at_every_letter_position_is_named_at_its_index(self) -> None:
+        # The encoding comparison reports the FIRST mismatch, which for a
+        # single-uppercase mutation is the mutation itself: one letter
+        # position per group (digits skipped: their uppercase is
+        # themselves), each named at its own index.
+        for position in (9, 15, 20, 35):
+            text = (
+                DOC_V7_TEXT[:position]
+                + DOC_V7_TEXT[position].upper()
+                + DOC_V7_TEXT[position + 1 :]
+            )
+            with pytest.raises(ValueError, match=f"position {position}"):
+                uuid_parse(text)
+
+
 class TestDocExamples:
     """docs/api.md's UUIDv7-helper example, pinned: the doc's literals are
     re-derived here against the built extension (the test_docs_examples.py
