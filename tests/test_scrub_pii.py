@@ -176,6 +176,25 @@ class TestEmailZoo:
         assert scrub_pii("a@b.c" + _O_UMLAUT, salt="") == "a@b.c" + _O_UMLAUT
         assert scrub_pii("a@" + _O_UMLAUT + ".co", salt="") == "a@" + _O_UMLAUT + ".co"
 
+    def test_rfc_quoted_locals_leak_whole(self) -> None:
+        # RFC quoted-string locals ("..."@domain, with @ inside the quotes)
+        # are NOT fragment-matches: `"` is outside the local class, and the
+        # quote before the real `@` blocks the match, so the whole address
+        # survives. No grammar widening (parity): canonicalize (strip RFC
+        # quotes / split display-names) before scrubbing if quoted locals
+        # are in threat.
+        for text in ('"user@name"@example.com', '"a@b"@x.co'):
+            assert scrub_pii(text, salt="") is text
+
+    def test_ip_literal_and_dotted_quad_domains_leak_whole(self) -> None:
+        # `user@[192.168.1.1]` (the `[` breaks the domain run) and
+        # `user@192.168.1.1` (the trailing quad has no two-letter tail)
+        # never match, so the whole address survives. Canonicalize
+        # (idna-to-punycode / IP-literal normalization) before scrubbing
+        # if these spellings are in threat; no grammar widening (parity).
+        for text in ("user@[192.168.1.1]", "user@192.168.1.1"):
+            assert scrub_pii(text, salt="") is text
+
     def test_long_fields_are_matched_whole(self) -> None:
         # No length cap anywhere in the grammar: a maximal local part and
         # a multi-label domain are one match, and the token's domain field

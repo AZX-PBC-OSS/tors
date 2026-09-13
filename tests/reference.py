@@ -780,7 +780,16 @@ _OPCODE_TAGS = frozenset({"equal", "replace", "delete", "insert"})
 #
 # The quoted-pin oracle for ``tors.scrub_pii``: a private consumer's
 # telemetry-safety module, transcribed here as pure Python with the digest
-# salt parameterized. The source chain itself digests UNSALTED, so
+# salt parameterized. Provenance (H1: the CI oracle is a transcription, and
+# the live lane never runs in CI, so the transcription carries its own
+# freshness pin):
+# source revision: scrub-pii-oracle-r1 (private telemetry-safety module,
+# grammar + token shape as transcribed; no source spelling lives in this
+# repo — the live locator stays env-gated in test_scrub_pii_parity.py).
+# transcription date: 2026-09-13 (bump on every re-sync; CI fails after
+# SCRUB_PII_ORACLE_FRESH_DAYS). UCD: 16.0.0 (the UCD CPython's `re` digit
+# class matches on; the Rust Nd tables pin the same UCD — a bump on either
+# side re-opens the re-sync). The source chain itself digests UNSALTED, so
 # ``salt=""`` reproduces its token values byte-for-byte (the migration lane:
 # a consumer swapping the source call for tors keeps every stored token by
 # passing ``salt=""``); tors's own default (``SCRUB_PII_DEFAULT_SALT`` below)
@@ -797,6 +806,15 @@ SCRUB_PII_DEFAULT_SALT = "tors/scrub_pii/v1"
 the salt=None differential lane pins the two literals equal). A fixed,
 non-secret domain-separation tag, frozen: changing it would silently change
 every deployment's token values."""
+
+# H1 provenance pin: the transcription's own freshness clock. The CI oracle
+# is a transcription and the live lane never runs in CI, so CI fails when
+# this goes stale (N-day freshness) or when the interpreter's UCD moves
+# past the pinned tables (see TestOracleFreshness).
+SCRUB_PII_ORACLE_REVISION = "scrub-pii-oracle-r1"
+SCRUB_PII_ORACLE_DATE = "2026-09-13"
+SCRUB_PII_ORACLE_UCD = "16.0.0"
+SCRUB_PII_ORACLE_FRESH_DAYS = 90
 
 _SCRUB_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _SCRUB_PHONE_RE = re.compile(r"\+\d[\d\-. ()]{6,}\d")

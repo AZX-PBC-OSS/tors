@@ -133,7 +133,7 @@ _SALT_LANES: list[str | None] = [None, "", "site-secret"]
 # A faithful test-side mirror of the landed grammar — a FULL un-plussed
 # class run of exactly ten Nd digits, or eleven with an ASCII leading
 # '1', carrying at least one separator inside the match span, starting
-# at a CLEAN boundary (the first char not glued to `~` or a lowercase
+# at a CLEAN boundary (the first char glued to neither `~` nor a lowercase
 # a-f, the token-interior alphabet) — used only to route inputs between
 # the parity lanes (conservative by design: an input this flags whose
 # domestic shape the email pass then consumes still agrees between the
@@ -382,7 +382,7 @@ class TestDomesticExtension:
     )
     def test_hex_or_tilde_glued_runs_are_shared_non_matches(self, text: str) -> None:
         # The clean-boundary rule (H2): a domestic match's first char may
-        # not be glued to `~` or a lowercase a-f. Both engines leave these
+        # not be glued to neither `~` nor a lowercase a-f. Both engines leave these
         # untouched, and the guard must NOT route them to the extension
         # lane (it mirrors clean, so parity is asserted here, not skipped).
         assert not has_domestic_shape(text)
@@ -420,6 +420,19 @@ _DOMESTIC_SEEDS = [c[0] for c in _DOMESTIC_CASES] + [
     "~",
     " ",
     ", ",
+    # H3: the disputable lanes — plus-led (international territory, never
+    # a domestic fallback), an email piece (the email pass eats `+`-led
+    # locals first), a non-ASCII Nd domestic spelling (Arabic-Indic ten),
+    # width-negative lanes (twelve- and nine-digit runs are ids, not
+    # phones), and a leading-space spelling (word separation, skipped).
+    "+14155552671",
+    "+ (415) 555-2671",
+    "user+14155552671@example.com",
+    "call 415-555-2671 ok",  # leading-space-adjacent word separation
+    " 415-555-2671",
+    "\u0664\u0661\u0665 \u0665\u0665\u0665 \u0662\u0666\u0667\u0661",
+    "415-555-267123",
+    "415-555-267",
 ]
 _domestic_composed = st.lists(st.sampled_from(_DOMESTIC_SEEDS), min_size=0, max_size=12).map("".join)
 
@@ -436,6 +449,15 @@ class TestDomesticSeededConvergence:
     def test_domestic_phone_only_is_idempotent(self, text: str) -> None:
         once = tors.scrub_pii(text, ["contact_phone"], salt="")
         assert tors.scrub_pii(once, ["contact_phone"], salt="") == once
+
+
+# --- Oracle freshness: the transcription pin, not a live contract ------------
+#
+# The CI oracle is a TRANSCRIPTION (tests/reference.py), and the live lane
+# never runs in CI — so the transcription itself must carry its provenance
+# (source revision/hash + transcription date + UCD) and CI must fail when
+# it goes stale (N-day freshness) or when the interpreter's UCD moves past
+# the pinned tables.
 
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
@@ -517,3 +539,117 @@ class TestLiveResyncLane:
         # the "b@x.co" around it still scrubs, unsalted digest and all.
         unsalted = hashlib.sha256(b"b@x.co").hexdigest()[:12]
         assert live(text) == f"a\ud800@x.co~{unsalted}"
+
+
+class TestOracleFreshness:
+    """H1: the CI oracle is a transcription, and the live lane never runs
+    in CI — so the transcription carries its provenance and CI fails when
+    it goes stale. Two independent trip-wires: (a) the transcription date
+    is at most _ORACLE_FRESH_DAYS old (a re-sync clock, not a grammar
+    check), and (b) the running interpreter's UCD still equals the UCD
+    the Rust Nd tables pin (a Unicode/dependency bump that could move
+    the `re` digit class re-opens the re-sync)."""
+
+    def test_provenance_constants_exist(self) -> None:
+        import reference
+
+        assert isinstance(reference.SCRUB_PII_ORACLE_REVISION, str)
+        assert reference.SCRUB_PII_ORACLE_REVISION
+        assert isinstance(reference.SCRUB_PII_ORACLE_DATE, str)
+        assert isinstance(reference.SCRUB_PII_ORACLE_UCD, str)
+
+    def test_transcription_is_fresh(self) -> None:
+        import datetime
+        import reference
+
+        date = datetime.date.fromisoformat(reference.SCRUB_PII_ORACLE_DATE)
+        age = datetime.date.today() - date
+        assert age.days <= reference.SCRUB_PII_ORACLE_FRESH_DAYS, (
+            f"scrub_pii oracle transcription is {age.days} days old "
+            f"(limit {reference.SCRUB_PII_ORACLE_FRESH_DAYS}): re-sync against "
+            "the live telemetry-safety module and bump SCRUB_PII_ORACLE_DATE"
+        )
+
+    def test_interpreter_ucd_matches_pinned_tables(self) -> None:
+        import reference
+
+        assert unicodedata.unidata_version == reference.SCRUB_PII_ORACLE_UCD, (
+            f"interpreter UCD {unicodedata.unidata_version} != pinned "
+            f"{reference.SCRUB_PII_ORACLE_UCD}: re-sync the scrub_pii oracle "
+            "(the Nd table the `re` digit class matches on may have moved)"
+        )
+
+
+def _fuzz_domestic_match_present(text: str) -> bool:
+    """H2 second mirror: an independent transcription of the fuzz target's
+    `phone_matches_of` domestic branch (fuzz/fuzz_targets/pii.rs) — char
+    space, per-position, greedy runs spent whole, leading spaces skipped,
+    separator required, never behind `+`, clean boundary `~`/a-f. The
+    parity guard `has_domestic_shape` must agree with it exactly; a drift
+    on either side fails loudly instead of hiding parity agreement."""
+    seps = set("-. ()")
+    n = len(text)
+    i = 0
+    while i < n:
+        c = text[i]
+        if unicodedata.category(c) == "Nd" or c in seps:
+            run_start = i
+            j = i
+            digits = 0
+            first_digit: str | None = None
+            last_digit = -1
+            while j < n and (unicodedata.category(text[j]) == "Nd" or text[j] in seps):
+                if unicodedata.category(text[j]) == "Nd":
+                    digits += 1
+                    if first_digit is None:
+                        first_digit = text[j]
+                    last_digit = j
+                j += 1
+            plussed = run_start > 0 and text[run_start - 1] == "+"
+            if not plussed and (digits == 10 or (digits == 11 and first_digit == "1")):
+                k = run_start
+                while k < n and text[k] == " ":
+                    k += 1
+                if k < n and any(ch in seps for ch in text[k : last_digit + 1]):
+                    clean = k == 0 or text[k - 1] not in _TOKEN_INTERIOR
+                    if clean:
+                        return True
+            i = j
+        else:
+            i += 1
+    return False
+
+
+class TestDomesticGuardMirror:
+    """H2: the parity guard is itself pinned — `has_domestic_shape` must
+    agree with the fuzz target's independent domestic matcher over every
+    corpus input plus the domestic seeds. Two mirrors, one grammar."""
+
+    @pytest.mark.parametrize("text", CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))])
+    def test_guard_agrees_with_fuzz_mirror_over_corpus(self, text: str) -> None:
+        assert has_domestic_shape(text) == _fuzz_domestic_match_present(text), text
+
+    @given(text=_domestic_composed)
+    @settings(max_examples=150, deadline=None)
+    def test_guard_agrees_with_fuzz_mirror_over_seeds(self, text: str) -> None:
+        assert has_domestic_shape(text) == _fuzz_domestic_match_present(text), text
+
+
+class TestDomesticSeedCoverage:
+    """H3: the domestic seeds must span the disputable lanes — plus-led,
+    @-bearing, non-ASCII Nd, width-negative, and leading-space — so the
+    seeded convergence lanes cannot pass while blind to them."""
+
+    def test_seeds_cover_the_disputable_lanes(self) -> None:
+        assert any("+" in s for s in _DOMESTIC_SEEDS), "no plus-led seed"
+        assert any("@" in s for s in _DOMESTIC_SEEDS), "no email/@ seed"
+        assert any(
+            any(unicodedata.category(c) == "Nd" and not c.isascii() for c in s)
+            for s in _DOMESTIC_SEEDS
+        ), "no non-ASCII Nd seed"
+        assert any(
+            sum(unicodedata.category(c) == "Nd" for c in s) == 12 for s in _DOMESTIC_SEEDS
+        ), "no 12-digit width-negative seed"
+        assert any(s.startswith(" ") or s.startswith("  ") for s in _DOMESTIC_SEEDS), (
+            "no leading-space seed"
+        )

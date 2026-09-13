@@ -37,6 +37,8 @@
 //!   separator, while every domestic match requires one. The bare-run
 //!   cut is what buys that: a ten-digit digest-hex run is not a match.
 //!
+//! Boundary: this target asserts STRUCTURAL invariants only (no match survives, converged output is a fixed point) — never exact token values, which tests/test_scrub_pii_parity.py pins byte-exact.
+//!
 //! The completeness checks need a matcher, and the transform is not one,
 //! so this target carries its own: char-space, per-position
 //! transcriptions of the quoted grammars plus the domestic extension

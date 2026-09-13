@@ -192,8 +192,9 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
     keeps a token's own digest hex unmatchable, so phone-only stays
     strictly idempotent and scrub-twice convergence cannot be chained
     adversarially through chosen digests; (2) the match must start at a
-    CLEAN boundary — its first char not glued to `~` or a lowercase
-    `a`-`f` (the token-interior alphabet: hex `a`-`f` + `~`, exactly, not
+    CLEAN boundary — its first char glued to neither `~` nor a lowercase
+    `a`-`f` (the token-interior alphabet: hex `a`-`f` plus `~`, exactly —
+    conjunction, not disjunction: either predecessor alone is dirty; not
     "letters" — `g`/`z`/`A`-`F` are clean and still match), so a run
     starting inside a token digest can never flow out through a separator
     into following text (`…~e292cb255128 4096` stays untouched); and
@@ -230,16 +231,57 @@ timestamps:
   `#`, `$`, `&`, `'`, `*`, `/`, `=`, `?`, `^`, `` ` ``, `{`, `|`, `}`,
   `~` split the local part, so `a!b@x.co` scrubs `b@x.co` and the `a!`
   survives (pinned in the battery).
+- RFC quoted-string locals leak WHOLE, not as fragments: `"user@name"@example.com`
+  and `"a@b"@x.co` never match at all — `"` is outside the local class,
+  and the quote immediately before the real `@` blocks the match, so the
+  whole address survives. Canonicalize (strip RFC quotes / split
+  display-names) before scrubbing if quoted locals are in threat; no
+  grammar widening — widening would break the `salt=""` byte-identical
+  contract.
+- IP-literal and dotted-quad domains leak WHOLE: `user@[192.168.1.1]`
+  never matches (`[` breaks the domain run) and `user@192.168.1.1` never
+  matches (the trailing quad has no two-letter ASCII tail), so the whole
+  address survives. Canonicalize (normalize IP literals / dotted quads to
+  a scrubbed spelling) before scrubbing if these spellings are in threat;
+  no grammar widening (parity).
+- IDN / non-ASCII domains leak whole: the email classes are ASCII-only,
+  so `a@exämple.com` never matches (the documented non-match). For
+  internationalized domains, idna-to-punycode BEFORE scrubbing
+  (`user@exämple.com` → `user@xn--exmple-cua.com`) so the ASCII grammar
+  can see it — and treat the pre-image as sensitive until that step runs.
 - Bare digit runs never match even at ten/eleven digits (`4155552671`,
   `14155552671` are order numbers), and short `+`-led runs never match
   (`+1234567`, seven digits, is the ported non-match).
+- Extensions survive past the last digit: `415-555-2671 x1234` scrubs
+  `415-555-2671` and leaves ` x1234` untouched, same as international
+  (trailing separators survive; the extension is not part of the match).
+- NPA/NXX are unvalidated: any ten-digit NANP-width run with a separator
+  matches — area/exchange codes are never checked against the NANP plan.
 
 If your threat includes adversarial formatting (an attacker choosing
-the spelling to dodge the scrubber), canonicalize BEFORE scrubbing:
-NFKC-normalize (folds fullwidth alphanumerics and compatibility spaces
-toward their ASCII spellings), then canonicalize separators/domains to
-the grammar above — and treat the scrub as one layer, not the whole
-control.
+the spelling to dodge the scrubber), canonicalize BEFORE scrubbing —
+and treat the scrub as one layer, not the whole control. `tors.nfkc`
+alone is insufficient: NFKC folds fullwidth alphanumerics and some
+compatibility spaces, but it does not fold every separator the phone
+grammar splits on. Map explicitly first:
+
+```python
+import re, unicodedata
+
+_SEP = re.compile(r"[\t\n\r\f\v\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+")
+
+def canonicalize_for_scrub(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    # Zs/Zl/Zp + \t\n\r\f\v -> U+0020: every Unicode space separator
+    # (Zs, Zl, Zp) plus ASCII whitespace the grammar does not class.
+    text = _SEP.sub(" ", text)
+    # Then canonicalize separators/domains to the grammar above:
+    # `/ : , ;` -> " " (or ""), fullwidth ＋ (U+FF0B) -> "+",
+    # IDN -> idna punycode, RFC quotes -> stripped.
+    return text
+```
+
+Then scrub the canonicalized text.
 
 `rules=None` applies both rules in the canonical order — the email
 substitution over the whole string first, then the phone substitution over
@@ -259,6 +301,13 @@ number appeared — and the same holds for EMAIL addresses (common
 local-parts on common domains are enumerable too) and for `salt=""`
 (the unsalted migration lane re-publishes the source chain's documented
 weakness by design: byte-identical tokens with an unsalted upstream).
+The digest is `sha256(salt + match)` with plain concatenation, so
+`salt`/`match` boundaries can alias (`salt="a"` + `match="bc"` digests
+like `salt="ab"` + `match="c"`) — a second reason the salt is
+domain-separation, not a key. The digest is 12 hex chars (48 bits):
+at ~119k distinct matches the birthday merge rate is ~2.5% — two
+different contacts sharing one token — frozen-for-stability (widening
+the digest would break the `salt=""` byte-identical contract).
 The tokens are redaction, not pseudonymization crypto;
 deployments that care pass their own secret salt, and a consumer migrating
 from an unsalted upstream scrubber passes `salt=""` to keep its token values
@@ -273,8 +322,10 @@ local-part material, so a second pass fires once more on that boundary and
 then holds: **scrubbing twice always converges**. If your excerpts can chain
 emails like that and you need a guaranteed fixed point, scrub twice
 (`scrub_pii(scrub_pii(x))` — the documented helper shape; the fuzz target
-and the hypothesis ports pin that the third pass is the identity);
-everything else is one pass. Phone-only is strictly idempotent.
+asserts convergence structurally — no input match survives verbatim into
+the converged output and the third pass is the identity — not token-exact
+values, which the parity gates pin; the hypothesis ports mirror that
+boundary); everything else is one pass. Phone-only is strictly idempotent.
 
 `tors.scrub_pii(s, ...) is s` exactly when no active rule matches. A `str`
 holding lone surrogates is refused at the argument boundary with
@@ -290,7 +341,7 @@ in `tests/reference.py` is the CI oracle; the live source module is
 re-checked manually whenever its grammar changes and at least once per
 Unicode/dependency bump (owner: the scrub_pii maintainer).
 
-**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The thread-hop costs tens of microseconds: noise next to a millisecond pass, real overhead next to a microsecond-scale excerpt — prefer the sync spelling below ~100KB of error-excerpt text, `tors.aio` above it.
 
 ## `tors.scrub_log_text`
 

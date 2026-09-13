@@ -54,7 +54,7 @@
 //!     unmatchable from inside, so phone-only stays strictly idempotent
 //!     and scrub-twice convergence cannot be chained adversarially
 //!     through chosen digests. Second, the match must start at a CLEAN
-//!     boundary — its first char not glued to a `~` or a lowercase
+//!     boundary — its first char glued to neither `~` nor a lowercase
 //!     `a`-`f` (the token-interior alphabet: hex `a`-`f` + `~`, exactly;
 //!     `g`/`z`/`A`-`F` are clean and still match) — so a run starting inside
 //!     an email token's digest can never flow out through a separator
@@ -150,11 +150,20 @@
 //! narrow grammars are the parity contract at `salt=""` (widening them
 //! silently would break byte-identity), so attacker-controlled
 //! formatting bypasses by design — `/ : , ;` split runs, fullwidth
-//! U+FF0B and fullwidth spaces bypass, IDN/non-ASCII domains leak whole,
+//! U+FF0B and fullwidth spaces bypass, IDN/non-ASCII domains leak whole
+//! (idna-to-punycode before scrub for IDN threat), IP-literal
+//! `user@[192.168.1.1]` and dotted-quad `user@192.168.1.1` leak whole,
+//! RFC quoted-string locals (`"user@name"@example.com`) leak whole (the
+//! quote before `@` blocks the match — not a fragment-leak),
 //! RFC local chars outside `[A-Za-z0-9._%+-]` fragment-leak (`a!`
-//! survives), bare 10/11-digit and short `+`-led runs never match. For
-//! adversarial threat, NFKC-normalize + canonicalize before scrub; see
-//! `docs/api.md`'s scrub_pii section for the full residual-risk list.
+//! survives), bare 10/11-digit and short `+`-led runs never match,
+//! extensions (`x1234`) survive past the last digit, NPA/NXX unvalidated,
+//! the digest is 48 bits (~2.5% merge at ~119k, frozen-for-stability) over
+//! plain `salt||match` (boundaries can alias). For
+//! adversarial threat, map Zs/Zl/Zp plus `\t\n\r\f\v` to U+0020 and
+//! canonicalize separators/domains before scrub (`tors.nfkc` alone is
+//! insufficient); see `docs/api.md`'s scrub_pii section for the full
+//! residual-risk list and the canonicalization code block.
 //!
 //! Performance: one linear `memchr`-anchored pass per rule, `Cow::Borrowed`
 //! identity when nothing matches, `py.detach` around the whole scan on
@@ -530,7 +539,7 @@ fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
             // Domestic: a full un-plussed run of exactly ten digits, or
             // eleven with an ASCII leading `1`, carrying a separator (a
             // bare digit run is an id, not a phone), and starting at a
-            // CLEAN boundary: the match's first char not glued to a `~`
+            // CLEAN boundary: the match's first char glued to neither `~`
             // or a lowercase `a`-`f` (hex `a`-`f` + `~`, exactly) — so
             // no run starting inside a token's digest can flow out
             // through a separator into following text and compose a
@@ -730,6 +739,22 @@ mod tests {
         };
         assert_eq!(scrub("a@b.cö", rules, ""), "a@b.cö");
         assert_eq!(scrub("a@ö.co", rules, ""), "a@ö.co");
+    }
+
+    #[test]
+    fn rfc_quoted_locals_and_ip_domains_leak_whole() {
+        // C1/C2: RFC quoted-string locals and IP-literal/dotted-quad
+        // domains never match — the whole address survives. No grammar
+        // widening (parity): canonicalize before scrub.
+        let rules = PiiRules { email: true, phone: false };
+        for text in [
+            r#""user@name"@example.com"#,
+            r#""a@b"@x.co"#,
+            "user@[192.168.1.1]",
+            "user@192.168.1.1",
+        ] {
+            assert!(matches!(scrub_pii(text, rules, ""), Cow::Borrowed(_)), "{text}");
+        }
     }
 
     #[test]
@@ -986,7 +1011,7 @@ mod tests {
     #[test]
     fn a_match_start_glued_to_hex_or_tilde_is_an_identifier_fragment() {
         // The clean-boundary rule: a domestic match's first char may not
-        // be glued to `~` or a lowercase a-f — the token-interior
+        // be glued to neither `~` nor a lowercase a-f — the token-interior
         // alphabet (hex a-f + `~`, exactly; NOT "letters" in general) —
         // so a run starting inside a token's digest can never flow out
         // into following text and compose a fresh "number" out of hex
