@@ -58,7 +58,8 @@ stale doc is treated as a defect, the same severity as a stale test.
 cores most exposed to raw adversarial input: `decode_utf8`, `decode_utf16`,
 `b64_decode`, `canon`, `html_unescape`, `fence`, `chunk_hierarchical`, `normalize`,
 `search`, `segmentation`, `diff`, `grounded`, `phonetic`, `bm25`, `tfidf`,
-`truncate_ellipsis`, `controls`, `json_repair`, `gfm_strip`, and `hash`
+`truncate_ellipsis`, `controls`, `scrub_log_text`, `json_repair`, `gfm_strip`,
+`unescaped`, `hash`, and `minhash`
 (the current
 list is `fuzz/Cargo.toml`'s `[[bin]]` entries; treat that file, not this one,
 as the source of truth if the two ever disagree). These call the `*_impl.rs`
