@@ -289,6 +289,15 @@ documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-mar
 [dev-dependencies]
 criterion = "0.8"
 strsim = "0.11.1"
+# The random bench's uuid4 comparator only: `Uuid::new_v4()` (the crate's
+# own getrandom-per-call rng path — verified in its source; the
+# thread-cached engine is the separate opt-in fast-rng feature) is what
+# benches/random.rs measures the per-call-OsRng design against. The v4
+# feature pulls only uuid's `rng` (getrandom, already in the lock) — and
+# because this is a dev-dependency, the features unify ONLY into
+# test/bench builds: the published crate's uuid stays the zero-feature
+# builder set the library path uses.
+uuid = { version = "1", features = ["v4"] }
 
 [[bench]]
 name = "normalize"
@@ -348,6 +357,10 @@ harness = false
 
 [[bench]]
 name = "json_repair"
+harness = false
+
+[[bench]]
+name = "random"
 harness = false
 
 [[bench]]
