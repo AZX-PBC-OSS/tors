@@ -2595,7 +2595,10 @@ collisions date to 2004, sha1's first public collision to 2017 (Google's
 SHAttered). Use them for Content-MD5, S3 ETags, cache-busting,
 rsync-style quick compares — never for signatures, certificates, or
 password handling. The security side of this surface is
-`sha256`/`sha512`/`hmac_sha256`, either spelling.
+`sha256`/`sha512`/`hmac_sha256`, either spelling. The HMAC key is held
+in memory for the call and is not zeroized on return — the same posture
+as the stdlib `hmac`/`hashlib` spelling, which likewise keeps key
+material in ordinary memory.
 
 **str input is its UTF-8 bytes, on purpose.** `hashlib` raises TypeError on
 str and makes every caller spell `s.encode("utf-8")` first; tors takes the
@@ -2606,7 +2609,8 @@ therefore raises `UnicodeEncodeError` at the argument boundary, the same
 crate-wide contract. bytes input is exactly `bytes`: `bytearray` and
 `memoryview` raise TypeError rather than being copied, the bytes-in
 family's immutable-buffer doctrine (`b64_encode_bytes`,
-tests/test_b64.py). Any input length is legal, empty included (the
+tests/test_b64.py) — callers holding one wrap it first,
+`tors.sha256_hex(bytes(buf))`, then hash. Any input length is legal, empty included (the
 empty-input digests are pinned known-answer vectors); there are no
 ValueError paths on this surface.
 
@@ -2623,7 +2627,11 @@ hashing a stream hashes chunk digests and combines them (the
 feeding, `hashlib`'s object API is the right tool and is not duplicated.
 
 **GIL model.** The argument borrow (zero-copy for ASCII/cached str, for
-bytes always) runs under the GIL; the whole digest computation — update
+bytes always; on the two-argument HMAC spellings the one-time O(input)
+UTF-8 materialization applies independently per str argument, so two
+non-ASCII str inputs pay two materializations — the measured HMAC wall
+cells use bytes key+data, equivalently the ASCII zero-copy lane) runs
+under the GIL; the whole digest computation — update
 and finalize, plus the O(digest-size) hex formatting on the `_hex`
 spellings — runs under one `py.detach`. The GIL-held residue is the
 marshalling of one short hex string (the `_hex` names) or one fixed-size
@@ -2659,7 +2667,8 @@ OpenSSL engines (hardware SHA extensions) win or tie at engine-dominated
 The five `_digest` names return the digest as raw `bytes` — the same
 engines, the same single detach, the same contracts as their `_hex`
 twins (str input is its UTF-8 bytes; exactly-`bytes` in, so
-`bytearray`/`memoryview` raise TypeError; a lone surrogate raises
+`bytearray`/`memoryview` raise TypeError — wrap first, `bytes(buf)`;
+a lone surrogate raises
 UnicodeEncodeError at the borrow; any key length legal, empty included;
 the key borrowed and validated before the data; empty input legal) —
 without the hex tail. One digest computation per call, two output
@@ -2772,6 +2781,11 @@ tors.md5_hex(body)
 tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"  # the declared ETag
 # True
 ```
+
+`==` is the correct compare here: an ETag is a non-secret checksum, so
+a timing side channel has nothing to leak. Secret comparisons (HMAC
+signatures, tokens) must use `hmac.compare_digest` as in the webhook
+cells above — never `==`.
 
 ## `tors.uuid7_timestamp_ms` / `tors.uuid_version` / `tors.uuid_parse`
 

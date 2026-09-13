@@ -424,7 +424,9 @@ def test_sha256_hex_non_ascii_short_str_is_measured_not_asserted() -> None:
     not asserted: ``"é" * 512`` (512 chars, 1024 UTF-8 bytes) pays the
     one-time O(input) UTF-8 materialization through pyo3's ``to_str``
     borrow on top of the digest, where the ASCII lane above is zero-copy
-    — so the ~2x win narrows and no threshold is pinned here. What IS
+    — so the ~2x win narrows and no threshold is pinned here. Kept
+    record-only by design: no regression band or ceiling is asserted on
+    this shape. What IS
     pinned is value parity (the digest equals the UTF-8-bytes spelling
     on both sides); the walls are printed so the run's log carries the
     recorded shape."""

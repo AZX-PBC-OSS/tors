@@ -222,17 +222,24 @@
 //! `hmac_sha256_digest`) adds no residue class at all: each argument
 //! pays the standard str-in borrow class (zero-copy for
 //! ASCII/cached str inputs, the one-time O(input) UTF-8 materialization on
-//! the first non-ASCII call) or the zero-copy immutable `PyBytes` borrow
+//! the first non-ASCII call — on the two-argument HMAC spellings that cost
+//! applies per str argument, so two non-ASCII str inputs pay two
+//! materializations; the measured HMAC wall cells use bytes, equivalently
+//! the ASCII zero-copy lane) or the zero-copy immutable `PyBytes` borrow
 //! (the bytes-in family: no materialization class exists for bytes, and
 //! exactly-`bytes` is the doctrine — a `bytearray`/`memoryview` is a
-//! TypeError rather than a copy the detached read would race), then the
+//! TypeError rather than a copy the detached read would race; callers
+//! holding one wrap it first, `tors.sha256_hex(bytes(buf))`, then hash),
+//! then the
 //! whole digest computation runs under one `py.detach` — the hex
 //! spellings include the O(digest-size) hex formatting inside it, the
 //! digest spellings return the raw bytes — and the residue reduces to
 //! marshalling one short `String` (O(32..128), fixed by algorithm) or
 //! one fixed-size `PyBytes` (the `b64_decode` bytes-return class,
 //! 16/20/32/64 bytes), three orders of magnitude under the
-//! 10ms ping floor at every input size. `hmac_sha256_hex` and
+//! 10ms ping floor at every input size. `md5_*`/`sha1_*` (either
+//! spelling) are checksum/legacy-interop only, never security (see
+//! `hash_impl`'s scope section). `hmac_sha256_hex` and
 //! `hmac_sha256_digest` borrow two
 //! arguments under the GIL and run the keyed digest (key derivation
 //! included) under the same single detach. The honest hashlib

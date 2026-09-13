@@ -613,7 +613,8 @@ def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 # hashlib.sha256(s.encode("utf-8")).hexdigest(); hashlib itself refuses
 # str — the convenience is deliberate). bytes input is exactly bytes
 # (bytearray/memoryview raise TypeError, the bytes-in family's
-# immutable-buffer doctrine); a lone surrogate raises UnicodeEncodeError
+# immutable-buffer doctrine — wrap first, bytes(buf), then hash); a lone
+# surrogate raises UnicodeEncodeError
 # at the argument boundary (the crate-wide str-in contract). Stateless
 # one-shot only: no hash object, no streaming surface (tors is stateless
 # by charter; for incremental feeding, hashlib's object API is the right
@@ -641,7 +642,12 @@ def sha512_digest(data: str | bytes) -> bytes: ...
 # shape the base64-encoding webhook schemes want). Each argument carries
 # the hashing family's str|bytes contract independently (a str key is
 # its UTF-8 bytes, the spelling a webhook secret arrives in); any key
-# length is legal, empty included (parity with stdlib hmac). GIL model:
+# length is legal, empty included (parity with stdlib hmac). The key is
+# held in memory for the call and is not zeroized on return — the same
+# posture as the stdlib hmac/hashlib spelling. A non-ASCII str argument
+# pays the one-time O(input) UTF-8 materialization independently per
+# argument; the measured HMAC wall cells use bytes key+data, equivalently
+# the ASCII zero-copy lane. GIL model:
 # both borrows under the GIL, the whole keyed digest (key derivation
 # included) plus hex formatting under one detach.
 def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...
@@ -678,6 +684,7 @@ def hmac_sha256_digest(key: str | bytes, data: str | bytes) -> bytes: ...
 def uuid7_timestamp_ms(value: bytes | str) -> int: ...
 def uuid_version(value: bytes | str) -> int: ...
 def uuid_parse(value: str) -> bytes: ...
+
 
 # FastCDC 2020 content-defined chunking: (start, end) byte spans (not
 # codepoints: a byte-level primitive, unlike word_bounds/sentence_bounds),

@@ -131,7 +131,9 @@ pub fn sha512_hex(data: &[u8]) -> String {
 /// short keys and hashes long ones (RFC 2104), so `new_from_slice` cannot
 /// fail for `Hmac` — the same expectation hmac's own `KeyInit::new` impl
 /// carries (verified against the vendored hmac 0.13.0 source, not just
-/// its docs).
+/// its docs). The key is held in memory for the call and is not zeroized
+/// on return — the same posture as the stdlib `hmac`/`hashlib` spelling,
+/// which likewise keeps key material in ordinary memory.
 pub fn hmac_sha256_digest(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
     mac.update(data);
@@ -140,7 +142,9 @@ pub fn hmac_sha256_digest(key: &[u8], data: &[u8]) -> [u8; 32] {
 
 /// HMAC-SHA-256 of `data` under `key`, lowercase hex:
 /// `hmac_sha256_digest`, hex-encoded — byte-identical to
-/// `hmac.new(key, data, hashlib.sha256).hexdigest()`.
+/// `hmac.new(key, data, hashlib.sha256).hexdigest()`. Key handling is
+/// `hmac_sha256_digest`'s contract verbatim (any length legal, empty
+/// included; held in memory for the call, not zeroized — stdlib posture).
 pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> String {
     const_hex::encode(hmac_sha256_digest(key, data))
 }

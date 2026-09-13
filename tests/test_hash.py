@@ -695,6 +695,13 @@ class TestArgumentContract:
             b"key", b"data"
         )
 
+    @pytest.mark.parametrize("tors_fn", list(_STDLIB_DIGEST), ids=lambda f: f.__name__)
+    def test_digest_bytearray_memoryview_migrate_via_bytes(self, tors_fn) -> None:
+        # The migration one-liner the TypeError points at: wrap the
+        # mutable buffer with bytes() first, then hash.
+        assert tors_fn(bytes(bytearray(b"abc"))) == _STDLIB_DIGEST[tors_fn](b"abc")
+        assert tors_fn(bytes(memoryview(b"abc"))) == _STDLIB_DIGEST[tors_fn](b"abc")
+
 
 class TestOutputInvariants:
     """Structural contracts that hold independent of the exact digest:
@@ -730,6 +737,11 @@ class TestOutputInvariants:
         # (hmac.new(b"", ...) works); the digest is pinned differentially.
         assert hmac_sha256_hex(b"", b"data") == _stdlib_hmac(b"", b"data")
         assert hmac_sha256_hex("", "data") == _stdlib_hmac(b"", b"data")
+        # RFC 2104 pads a short key with zeros, so the empty key IS the
+        # 64-zero-byte key: pinned in both spellings (the crate-side twin
+        # is hash_impl's empty_key_is_legal_and_is_the_zero_padded_key).
+        assert hmac_sha256_hex(b"", b"data") == hmac_sha256_hex(b"\x00" * 64, b"data")
+        assert hmac_sha256_digest(b"", b"data") == hmac_sha256_digest(b"\x00" * 64, b"data")
 
     def test_hmac_output_is_lowercase_hex_of_length_64(self) -> None:
         digest = hmac_sha256_hex(b"key", b"data")
@@ -776,6 +788,8 @@ class TestDigestOutputInvariants:
         # The empty-key parity the hex spelling pins, in the raw shape.
         assert hmac_sha256_digest(b"", b"data") == _stdlib_hmac_digest(b"", b"data")
         assert hmac_sha256_digest("", "data") == _stdlib_hmac_digest(b"", b"data")
+        # The 64-zero-byte equivalence, raw spelling (hex twin pinned above).
+        assert hmac_sha256_digest(b"", b"data") == hmac_sha256_digest(b"\x00" * 64, b"data")
 
 
 class TestConsumerShapes:

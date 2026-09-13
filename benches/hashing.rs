@@ -3,6 +3,10 @@
 //! `hmac_sha256_hex` and their raw-digest `_digest` twins), the
 //! request-signing / content-check primitives.
 //!
+//! `md5_*`/`sha1_*` (either spelling) are checksum/legacy-interop only,
+//! never security (see `hash_impl`'s scope section); their rows below are
+//! the Content-MD5/ETag/quick-compare jobs.
+//!
 //! The digest ladder (1 KiB / 1 MiB / 12 MiB) measures the engines at the
 //! sizes the Python-side wall cells and docs/performance.md quote
 //! (throughput sizes, where per-call overhead is amortized), and the hmac
@@ -91,11 +95,12 @@ fn bench_hmac(c: &mut Criterion) {
 
 fn bench_hmac_digest(c: &mut Criterion) {
     // The raw-digest twin of the request-signing shapes: the same keyed
-    // computation without the hex tail. The (32, 256) row is the request
-    // shape tests/test_performance.py's HMAC wall cell asserts
-    // (`test_hmac_sha256_hex_beats_the_fastest_stdlib_hmac_spelling`'s
-    // "request" case), so the digest spelling's overhead-dominated shape
-    // is benched, not just claimed via the hex rows above.
+    // computation without the hex tail. The (32, 256) row is recorded, not
+    // wall-gated: the wall cell (`test_hmac_sha256_hex_beats_the_fastest_
+    // stdlib_hmac_spelling`) asserts the `_hex` spelling of this shape, and
+    // the digest spelling is that same computation minus the hex tail, so
+    // the overhead-dominated shape is benched on both spellings while only
+    // the hex one carries a gate.
     let mut group = c.benchmark_group("hmac_sha256_digest");
     for (key_len, data_len) in [(32, 256)] {
         let key = vec![0x0bu8; key_len];

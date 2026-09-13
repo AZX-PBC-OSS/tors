@@ -22,7 +22,8 @@ use crate::hash_impl;
 /// the exactly-`bytes` doctrine of the bytes-in family
 /// (tests/test_b64.py::TestBytesOnlyArgumentContract): a `bytearray` or
 /// `memoryview` is a TypeError rather than a silent copy, because the
-/// GIL-released digest reads the buffer without the GIL held.
+/// GIL-released digest reads the buffer without the GIL held — callers
+/// holding one wrap it first, `tors.sha256_hex(bytes(buf))`, then hash.
 ///
 /// The str borrow is pyo3's `to_str` (the standard str-in class: a
 /// zero-copy alias for ASCII/cached inputs, the one-time O(input) UTF-8
@@ -121,7 +122,12 @@ pub fn sha512_hex(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<String> {
 /// bytes, the spelling a webhook secret arrives in); any key length is
 /// legal, empty included (parity with the stdlib spelling: HMAC pads
 /// short keys and hashes long ones). The key is borrowed and validated
-/// before the data.
+/// before the data. The key is held in memory for the call and is not
+/// zeroized on return — the same posture as the stdlib `hmac`/`hashlib`
+/// spelling. A non-ASCII str argument pays the one-time O(input) UTF-8
+/// materialization independently per argument (so two non-ASCII str
+/// inputs pay twice); the measured HMAC wall cells use bytes key+data,
+/// equivalently the ASCII zero-copy lane.
 ///
 /// GIL model: both borrows under the GIL; the whole keyed digest (key
 /// derivation included) plus hex formatting under one `py.detach`.
@@ -213,7 +219,11 @@ pub fn sha512_digest(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyBy
 /// `hmac.new(key, data, hashlib.sha256).digest()`. Each argument gets
 /// `md5_digest`'s str|bytes contract independently; any key length is
 /// legal, empty included; the key is borrowed and validated before the
-/// data.
+/// data. The key is held in memory for the call and is not zeroized on
+/// return — the same posture as the stdlib `hmac`/`hashlib` spelling. A
+/// non-ASCII str argument pays the one-time O(input) UTF-8 materialization
+/// independently per argument; the measured HMAC wall cells use bytes
+/// key+data, equivalently the ASCII zero-copy lane.
 ///
 /// GIL model: both borrows under the GIL; the whole keyed digest (key
 /// derivation included) under one `py.detach`; the fixed 32-byte
