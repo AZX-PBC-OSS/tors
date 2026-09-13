@@ -1009,8 +1009,9 @@ class TestEscapedObjectSpliceGrid:
     diverged before the splice learned to clear the memo; any future
     memo/splice interaction regression diverges on at least one of them.
     Intentionally blind to the full `\\X` escape set like the structural
-    sweep above (no escape-letter chars in the grid ingredients): the api.md "Lone surrogates" surrogate
-    class is pinned separately in TestLoneSurrogateEscapeDivergence.
+    sweep above (no escape-letter chars in the grid ingredients): the
+    api.md "Lone surrogates" surrogate class is pinned separately in
+    TestLoneSurrogateEscapeDivergence.
     """
 
     @pytest.mark.parametrize("raw", _splice_grid_raws())
