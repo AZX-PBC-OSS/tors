@@ -121,7 +121,7 @@ pub fn uuid7_timestamp_ms(py: Python<'_>, value: Bound<'_, PyAny>) -> PyResult<u
 }
 
 /// `tors.uuid_parse(value: str) -> bytes`: canonical UUID text to the 16
-/// raw bytes, strict: exactly 36 characters, hyphens at positions
+/// raw bytes, strict: exactly 36 ASCII characters (36 bytes), hyphens at positions
 /// 8/13/18/23 (the 8-4-4-4-12 groups), lowercase hexadecimal everywhere
 /// else, and `ValueError` naming the problem and the accepted form on
 /// anything else (positions in the messages are 0-based). The stdlib

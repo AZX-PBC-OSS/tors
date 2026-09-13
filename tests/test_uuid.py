@@ -329,11 +329,13 @@ class TestStrictCanonicalRejections:
             parse(bad_text)  # type: ignore[operator]
 
     def test_wrong_length_message_names_the_accepted_form_and_the_count(self) -> None:
-        with pytest.raises(ValueError, match=r"exactly 36 characters .* got 35"):
+        with pytest.raises(
+            ValueError, match=r"exactly 36 ASCII characters \(36 bytes\) .* got 35 bytes"
+        ):
             uuid_parse(DOC_V7_TEXT[:-1])
-        with pytest.raises(ValueError, match="got 45"):
+        with pytest.raises(ValueError, match="got 45 bytes"):
             uuid_parse("urn:uuid:" + DOC_V7_TEXT)
-        with pytest.raises(ValueError, match="got 32"):
+        with pytest.raises(ValueError, match="got 32 bytes"):
             uuid_parse(DOC_V7_TEXT.replace("-", ""))
 
     def test_missing_hyphen_message_names_the_position_and_the_found_character(self) -> None:
@@ -369,11 +371,11 @@ class TestStrictCanonicalRejections:
         # the byte offset the message reports is also the character index,
         # and `text[position]` in Python names the same character the
         # message does. A 36-CHARACTER text holding one (37 bytes) lands
-        # in the length gate instead, which counts BYTES while saying
-        # "characters" -- the pre-existing quirk (src/uuid_impl.rs's
-        # parse_canonical doc): such a text can never be canonical (the
-        # grammar is ASCII-only), the count it reports is the byte count,
-        # and the pin keeps that quirk's shape visible rather than silent.
+        # in the length gate instead, which counts bytes and says bytes --
+        # the fixed honesty (src/uuid_impl.rs's parse_canonical doc): such
+        # a text can never be canonical (the grammar is ASCII-only), the
+        # count it reports is the byte count, and the pin keeps that
+        # byte-count shape visible rather than silent.
         thirty_six_bytes = "01977420-dc00-7ébc-9def-9876543210f"
         assert len(thirty_six_bytes.encode()) == 36
         assert thirty_six_bytes[15] == "é"
@@ -383,7 +385,9 @@ class TestStrictCanonicalRejections:
         thirty_six_characters = DOC_V7_TEXT[:-1] + "é"
         assert len(thirty_six_characters) == 36
         assert len(thirty_six_characters.encode()) == 37
-        with pytest.raises(ValueError, match=r"exactly 36 characters .* got 37"):
+        with pytest.raises(
+            ValueError, match=r"exactly 36 ASCII characters \(36 bytes\) .* got 37 bytes"
+        ):
             uuid_parse(thirty_six_characters)
 
     @pytest.mark.parametrize(
@@ -404,12 +408,12 @@ class TestStrictCanonicalRejections:
         fullwidth = DOC_V7_TEXT[:5] + "ａ" + DOC_V7_TEXT[6:]
         assert len(fullwidth) == 36
         assert len(fullwidth.encode()) == 38
-        with pytest.raises(ValueError, match="got 38"):
+        with pytest.raises(ValueError, match="got 38 bytes"):
             uuid_parse(fullwidth)
         cyrillic = DOC_V7_TEXT[:5] + "а" + DOC_V7_TEXT[6:]
         assert len(cyrillic) == 36
         assert len(cyrillic.encode()) == 37
-        with pytest.raises(ValueError, match="got 37"):
+        with pytest.raises(ValueError, match="got 37 bytes"):
             uuid_parse(cyrillic)
 
     @pytest.mark.parametrize("position", [8, 13, 18, 23])
@@ -543,10 +547,10 @@ class TestStrictnessLayerRoutes:
     grammar to the Rust ``uuid`` crate and enforces strictness as a thin
     layer on top (canonical-encoding equality), so every rejection travels
     a named route -- the wrapper forms (braces, urn, hyphen-less) through
-    the length gate, structurally-broken 36-character text through the
+    the length gate, structurally-broken 36-byte text through the
     crate's parser plus tors's position classification (message-pinned in
     TestStrictCanonicalRejections), and uppercase through the encoding
-    comparison, the only loose form that is 36 characters and parses.
+    comparison, the only loose form that is 36 bytes and parses.
     These pins hold each loose form to its route and message so the
     layer's job -- rejecting exactly what the adopted crate accepts --
     stays tested at the boundary itself (the Rust-side twins, calling the
@@ -554,17 +558,17 @@ class TestStrictnessLayerRoutes:
 
     def test_the_wrapper_forms_reject_through_the_length_gate(self) -> None:
         # Braces +2, the urn prefix +9, hyphen-less -4: each names its own
-        # count. (38 is the gap this fills: 45 and 32 were pinned, 38 not.)
-        with pytest.raises(ValueError, match="got 38"):
+        # byte count. (38 is the gap this fills: 45 and 32 were pinned, 38 not.)
+        with pytest.raises(ValueError, match="got 38 bytes"):
             uuid_parse("{" + DOC_V7_TEXT + "}")
-        with pytest.raises(ValueError, match="got 45"):
+        with pytest.raises(ValueError, match="got 45 bytes"):
             uuid_parse("urn:uuid:" + DOC_V7_TEXT)
-        with pytest.raises(ValueError, match="got 32"):
+        with pytest.raises(ValueError, match="got 32 bytes"):
             uuid_parse(DOC_V7_TEXT.replace("-", ""))
 
     def test_uppercase_rejects_through_the_canonical_encoding_comparison(self) -> None:
         # The strictness layer's whole job in one pin: uppercase is the one
-        # loose form that is 36 characters, so it alone survives the length
+        # loose form that is 36 bytes, so it alone survives the length
         # gate AND the crate's parser (uuid's parse_str accepts any-case
         # hex, the same permissive union as the stdlib) -- only the
         # re-encode-and-compare step (parsed value re-encoded lowercase !=

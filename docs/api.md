@@ -2603,7 +2603,8 @@ which is precisely why the layer is tors's own.
 
 The int-out pair takes exactly `bytes` (16 bytes, `ValueError` naming the
 count otherwise; `bytearray`/`memoryview` are `TypeError`, the bytes-in
-surface's exactly-`bytes` zero-copy-borrow contract) or canonical `str`
+surface's borrows-the-argument-copies-the-16-bytes contract: the bytes
+spelling borrows the argument, copies the 16 bytes out) or canonical `str`
 (same strict grammar, same errors); `uuid_parse` takes exactly `str`. A
 `str` holding lone surrogates fails the borrow itself
 (`UnicodeEncodeError`) before any grammar check runs.

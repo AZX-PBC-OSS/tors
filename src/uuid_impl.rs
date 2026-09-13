@@ -23,8 +23,8 @@
 //! contract: parse_str accepts the loose forms tors exists to reject
 //! (braced text, the URN prefix, hyphen-less hex, any-case hex), so
 //! strictness remains tors's own thin layer on top -- canonical-encoding
-//! equality: a 36-character input is accepted only if it is byte-equal
-//! to its parsed value's re-encoded canonical form
+//! equality: a 36-ASCII-character (36-byte) input is accepted only if it
+//! is byte-equal to its parsed value's re-encoded canonical form
 //! (`hyphenated().encode_lower`). That one comparison is the whole
 //! layer, and the layer is the point: the strict contract is not the
 //! crate's default, it is tors's. The error taxonomy (tors's own
@@ -53,8 +53,8 @@
 //!
 //! # The strict canonical grammar
 //!
-//! `parse_canonical` accepts exactly one text shape: 36 characters,
-//! hyphens at positions 8, 13, 18, 23 (the 8-4-4-4-12 groups), lowercase
+//! `parse_canonical` accepts exactly one text shape: 36 ASCII characters
+//! (36 bytes), hyphens at positions 8, 13, 18, 23 (the 8-4-4-4-12 groups), lowercase
 //! hexadecimal everywhere else. The stdlib `uuid.UUID` also accepts
 //! braced text (`{...}`), the URN prefix (`urn:uuid:...`), hyphen-less
 //! hex, and uppercase; tors deliberately does not, the
@@ -63,7 +63,8 @@
 //! every RFC 9562 producer emits -- not the stdlib's permissive union
 //! (the same closed-set strictness as every other tors argument: the
 //! `errors=`/`boundary=` convention, `b64_decode`'s validate-by-default).
-//! The mechanics: tors's own length gate first (the exact-count message),
+//! The mechanics: tors's own byte-counting length gate first (the
+//! exact-count message names ASCII characters, bytes, and the got count),
 //! the crate's parse second (structure and transcode), the
 //! canonical-encoding comparison third (strictness), and
 //! `classify_divergence` last, naming the first divergence for the
@@ -85,9 +86,13 @@ use uuid::Uuid;
 /// rejected text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextError {
-    /// Not 36 characters (braces +2, the URN prefix +9, no hyphens -4 all
-    /// land here first): "UUID text must be exactly 36 characters (8-4-4-4-12
-    /// hyphenated lowercase hex), got N".
+    /// Not 36 ASCII characters (36 bytes) (braces +2, the URN prefix +9,
+    /// no hyphens -4 all land here first): "UUID text must be exactly 36
+    /// ASCII characters (36 bytes) (8-4-4-4-12 hyphenated lowercase hex),
+    /// got N bytes". The gate counts bytes (`str::len`): canonical text is
+    /// ASCII-only, so bytes and characters coincide on every accepted
+    /// input, and a multi-byte character can only ever appear in a
+    /// rejected one.
     Length(usize),
     /// A hyphen position (8, 13, 18, 23) holding anything but `-`:
     /// "expected '-' at position P, found C".
@@ -103,10 +108,10 @@ pub enum TextError {
     /// A hex position holding anything else (including whitespace and
     /// non-ASCII): "found C at position P".
     NotHex { position: usize, found: char },
-    /// The drift fallback: a 36-character input the crate's parser rejected
+    /// The drift fallback: a 36-byte input the crate's parser rejected
     /// whose divergence the scan could not name. Unreachable under every
     /// `uuid` 1.x grammar measured -- the scan's accepted set (hyphens at
-    /// 8/13/18/23, lowercase hex) is a subset of the crate's 36-character
+    /// 8/13/18/23, lowercase hex) is a subset of the crate's 36-byte
     /// grammar (any-case hex), so a crate rejection always contains a
     /// divergence the scan finds -- kept so a future grammar narrowing
     /// degrades to a ValueError naming the accepted form instead of a
@@ -125,8 +130,8 @@ impl TextError {
     pub fn message(&self) -> String {
         match self {
             TextError::Length(got) => format!(
-                "UUID text must be exactly 36 characters \
-                 (8-4-4-4-12 hyphenated lowercase hex), got {got}"
+                "UUID text must be exactly 36 ASCII characters (36 bytes) \
+                 (8-4-4-4-12 hyphenated lowercase hex), got {got} bytes"
             ),
             TextError::MissingHyphen { position, found } => format!(
                 "UUID text must be 8-4-4-4-12 hyphenated: \
@@ -154,22 +159,24 @@ impl TextError {
 /// The four hyphen positions of the canonical 8-4-4-4-12 form.
 const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
 
-/// Canonical UUID text to the 16 raw bytes, strict: exactly 36 characters,
-/// hyphens at 8/13/18/23, lowercase hex elsewhere, anything else
-/// `TextError` (first offending position wins, scanned left to right).
+/// Canonical UUID text to the 16 raw bytes, strict: exactly 36 ASCII
+/// characters (36 bytes), hyphens at 8/13/18/23, lowercase hex elsewhere,
+/// anything else `TextError` (first offending position wins, scanned left
+/// to right).
 ///
-/// The length check is over bytes; a 36-byte input holding any multi-byte
-/// UTF-8 character necessarily has fewer than 36 characters and the
-/// character itself is rejected at its position before that could matter
-/// (a multi-byte char is never `-` or a hex digit, and its start position
-/// is always scanned), so accepted input is pure ASCII by construction.
+/// The length check counts bytes (`str::len`); a 36-byte input holding any
+/// multi-byte UTF-8 character necessarily has fewer than 36 characters
+/// and the character itself is rejected at its position before that could
+/// matter (a multi-byte char is never `-` or a hex digit, and its start
+/// position is always scanned), so accepted input is pure ASCII by
+/// construction and the message names bytes honestly.
 ///
 /// The acceptance work is split: `Uuid::parse_str` owns the structural
 /// parse (hyphen placement, hex digits -- and the transcode: the accepted
 /// input's bytes are `*parsed.as_bytes()`, the crate's own decode), and
 /// canonical-encoding equality owns the strictness -- the parsed value is
 /// re-encoded through `hyphenated().encode_lower` and must be byte-equal
-/// to the input. Under the crate's 36-character grammar (hyphens exactly
+/// to the input. Under the crate's 36-byte grammar (hyphens exactly
 /// at 8/13/18/23, ASCII hex of either case elsewhere) that comparison
 /// rejects exactly one loose form: uppercase hex, which parses but
 /// re-encodes lowercase; every other loose form (braces, urn, hyphen-less)
@@ -192,7 +199,7 @@ pub fn parse_canonical(text: &str) -> Result<[u8; 16], TextError> {
         // mismatching byte is an uppercase hex digit (lowercase hex and
         // the hyphens re-encode identically), so this is the Uppercase
         // arm. The catch-all is drift insurance -- if a future uuid 1.x
-        // ever let some other byte survive parse_str at 36 characters,
+        // ever let some other byte survive parse_str at 36 bytes,
         // the input still gets a ValueError naming the position and
         // character, never a panic.
         let position = encoded
@@ -225,14 +232,14 @@ pub fn parse_canonical(text: &str) -> Result<[u8; 16], TextError> {
     Ok(*parsed.as_bytes())
 }
 
-/// The first divergence of a 36-character input the crate's parser itself
+/// The first divergence of a 36-byte input the crate's parser itself
 /// rejected, as the left-to-right single pass the message taxonomy pins:
 /// hyphen slots first (`MissingHyphen`), then hex slots (`StrayHyphen`,
 /// `Uppercase`, `NotHex`). This scan names a character and position for a
 /// message; it produces no bytes (the transcode lives in the crate, and
 /// this path only runs on rejection). Its accepted set -- hyphens at
 /// 8/13/18/23, lowercase hex elsewhere -- is a subset of the crate's
-/// 36-character grammar (the same shape with any-case hex), so a crate
+/// 36-byte grammar (the same shape with any-case hex), so a crate
 /// rejection always contains a divergence this scan finds; the
 /// fall-through arm is unreachable today and is the `NotCanonical` drift
 /// fallback, not a panic.
@@ -552,8 +559,8 @@ mod tests {
             parse_canonical("01977420-dc00-7abc-9def-98765432100")
                 .unwrap_err()
                 .message(),
-            "UUID text must be exactly 36 characters (8-4-4-4-12 hyphenated lowercase \
-             hex), got 35"
+            "UUID text must be exactly 36 ASCII characters (36 bytes) \
+             (8-4-4-4-12 hyphenated lowercase hex), got 35 bytes"
         );
         assert_eq!(
             parse_canonical("01977420-dc0007abc-9def-98765432100f")
