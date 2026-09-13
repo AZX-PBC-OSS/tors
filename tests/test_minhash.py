@@ -520,76 +520,53 @@ class TestBoundsContract:
         # tokenizer transient (~29MB dev-box self peak, vs ~29MB for the
         # same text at the default width).
         #
-        # Box-independence (CI #74: the previous revision read the parent's
-        # RUSAGE_CHILDREN ru_maxrss, which is the sticky MAX over every
-        # reaped child in the pytest process -- earlier document-engine
-        # subprocess probes set the watermark to ~818MB on the ubuntu
-        # runners, so the gate failed regardless of this probe. It also
-        # pinned an absolute 80MB ceiling, which is allocator/box
-        # dependent). Each probe now reports its OWN peak via
-        # RUSAGE_SELF printed to stdout, and the gate asserts:
+        # Ground truth (CI #74): each probe reports its OWN peak, read from
+        # the kernel, not the libc. The previous revision read the child's
+        # resource.getrusage(RUSAGE_SELF) -- on the ubuntu CI runners that
+        # call returns a workload-invariant fiction (~570-615MB, byte-
+        # identical for import-only, huge-window, and default-width probes
+        # within one leg) while /proc/self/status VmHWM, the smaps rollup
+        # ([heap] under 1MB, ~28MB total), and independent glibc repros
+        # (x86_64 + aarch64, glibc 2.35 + 2.39, Rust-level and full Python
+        # stack) all agree the true peaks are ~15-38MB. No code change
+        # could ever move that reading -- the deque, transient-churn, and
+        # zero-alloc counter spellings all measured the same fictional
+        # constant -- because no retaining allocation exists: the huge-
+        # window short-circuit answers the sentinel with only the
+        # interpreter + input string resident. The libc path is therefore
+        # unusable as a gate instrument in that environment; VmHWM is the
+        # kernel's own high-water mark. Darwin has no /proc and keeps
+        # getrusage, truthful there (~29MB dev-box). The gate asserts:
         #   (1) ratio huge-window / small-window < 2.0 -- the regression
-        #       pin (pre-fix ~116-145MB / ~29MB ~= 4-6x fails; fixed
-        #       ~29MB / ~29MB ~= 1.0 passes; interpreter baseline cancels,
-        #       so allocator/box scaling cancels too), and
-        #   (2) a generous absolute ceiling (300MB) as a backstop against
-        #       a joint blowup that preserves the ratio.
-        # TEMP-DIAG v2 (CI #74; reverted before merge): round 1 proved the
-        # child's TRUE peak is ~28MB (/proc VmHWM + smaps agree; containers
-        # agree) while resource.getrusage returns a CONSTANT 628672 KB in
-        # every child regardless of workload -- so the instrument, not the
-        # code, is broken in this environment. This round names the mocker
-        # (module origin, fn repr, const value, sys.path, startup env,
-        # ld.so.preload, double-getrusage liveness test) and validates the
-        # /proc-based reading as the gate value on Linux.
+        #       pin (retain-all path ~116-177MB / ~29MB ~= 4-6x fails;
+        #       fixed ~28MB / ~28MB ~= 1.0 passes; the interpreter
+        #       baseline cancels, so box scaling cancels too), and
+        #   (2) an absolute ceiling (100MB) as a backstop against a joint
+        #       blowup that preserves the ratio -- calibrated ~2.6x above
+        #       the worst measured fixed-code peak (38MB) and below every
+        #       measured retain-all peak (116MB+).
         import subprocess
         import sys
 
         def _child_self_peak_mb(prog: str) -> float:
-            diag = (
-                "import resource, os, sys; "
-                "p0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
-                + prog
-                + "; "
-                "p1 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
-                "print('DIAG p0_kb:', p0); "
-                "print('DIAG p1_kb:', p1); "
-                "print('DIAG resmod:', getattr(resource, '__file__', 'builtin')); "
-                "print('DIAG resfn:', resource.getrusage); "
-                "print('DIAG selfconst:', resource.RUSAGE_SELF); "
-                "print('DIAG exe:', sys.executable); "
-                "print('DIAG version:', sys.version.split()[0]); "
-                "print('DIAG path0:', sys.path[:6]); "
-                "keys = ('PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME'); "
-                "keys += ('LD_PRELOAD', 'VIRTUAL_ENV'); "
-                "print('DIAG env:', {k: os.environ.get(k) for k in keys})\n"
-                "try:\n"
-                "    print('DIAG preload:', open('/etc/ld.so.preload').read())\n"
-                "except Exception as e:\n"
-                "    print('DIAG preload missing:', e)\n"
-                "import tors._tors as _t; "
-                "print('DIAG torsfile:', _t.__file__); "
-                "print('DIAG sosize_mb:', round(os.path.getsize(_t.__file__) / 1048576, 1))\n"
-                "try:\n"
-                "    st = open('/proc/self/status').read()\n"
-                "    want = ('VmHWM', 'VmRSS', 'VmData')\n"
-                "    print('DIAG status:', [l for l in st.splitlines() if l.startswith(want)])\n"
-                "    hwm_lines = [l for l in st.splitlines() if l.startswith('VmHWM')]\n"
-                "    print('RESULT_MB', int(hwm_lines[0].split()[1]) / 1024)\n"
-                "except Exception as e:\n"
-                "    print('DIAG procfs skipped:', e)\n"
-                "    div = 1024 * 1024 if os.uname().sysname == 'Darwin' else 1024\n"
-                "    print('RESULT_MB', p1 / div)"
-            )
+            if sys.platform == "darwin":
+                reader = (
+                    "import resource; "
+                    "peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
+                    "print(peak / (1024 * 1024))"
+                )
+            else:
+                reader = (
+                    "lines = open('/proc/self/status').read().splitlines(); "
+                    "hwm = [line for line in lines if line.startswith('VmHWM')]; "
+                    "print(int(hwm[0].split()[1]) / 1024)"
+                )
+            wrapper = prog + "; " + reader
             done = subprocess.run(
-                [sys.executable, "-c", diag], capture_output=True, text=True
+                [sys.executable, "-c", wrapper], capture_output=True, text=True
             )
             assert done.returncode == 0, done.stderr[-2000:]
-            print("DIAG child dump:\n" + done.stdout)
-            for line in done.stdout.splitlines():
-                if line.startswith("RESULT_MB"):
-                    return float(line.split()[1])
-            raise AssertionError("no RESULT_MB in child output:\n" + done.stdout)
+            return float(done.stdout.strip().split()[-1])
 
         big_expr = "'the quick brown fox jumps over the lazy dog. ' * 300_000"
         huge_prog = (
@@ -605,11 +582,9 @@ class TestBoundsContract:
         started = time.perf_counter()
         huge_mb = _child_self_peak_mb(huge_prog)
         small_mb = _child_self_peak_mb(small_prog)
-        base_mb = _child_self_peak_mb("import tors")  # TEMP-DIAG: import baseline
         elapsed = time.perf_counter() - started
-        print(f"DIAG summary: base={base_mb:.1f}MB huge={huge_mb:.1f}MB small={small_mb:.1f}MB")
         assert elapsed < 60.0, f"huge window over large text took {elapsed:.2f}s"
-        assert huge_mb < 300.0, f"huge window peak too high: {huge_mb:.1f}MB"
+        assert huge_mb < 100.0, f"huge window peak too high: {huge_mb:.1f}MB"
         ratio = huge_mb / small_mb if small_mb > 0 else float("inf")
         assert ratio < 2.0, (
             f"huge window retained the stream: huge {huge_mb:.1f}MB vs "
