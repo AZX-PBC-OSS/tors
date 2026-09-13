@@ -123,8 +123,9 @@ fn into_pyerr(err: RandomError) -> PyErr {
 /// values, not grapheme clusters: a combining mark in the alphabet samples
 /// independently of its base character. The alphabet is materialized fresh
 /// on every call (no cross-call cache, by the fork-safe no-state
-/// discipline); bulk callers reusing one huge alphabet should prefer the
-/// stdlib. `length=0` returns `""`; negative raises `ValueError`; the only
+/// discipline); cost is O(alphabet) to materialize plus O(length) draws:
+/// bulk callers reusing one huge alphabet across many calls should prefer
+/// the stdlib. `length=0` returns `""`; negative raises `ValueError`; the only
 /// size ceiling is the argument itself (`Py_ssize_t`, 2^63 - 1 on 64-bit —
 /// anything wider raises `OverflowError` at extraction) and memory beyond
 /// it: the memory bound is a catchable `MemoryError` — `try_reserve`

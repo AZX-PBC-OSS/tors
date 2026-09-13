@@ -3949,7 +3949,10 @@ family.** Two spellings, never interchangeable:
   The output is a pure function of (seed, arguments), **fully predictable
   from the seed** — a reproducible-test/fixture tool, **NEVER safe for
   secrets, keys, or tokens**: any adversary who learns the seed can
-  reproduce the stream (and 64-bit seeds are brute-forceable). rand_core's
+  reproduce the stream (and 64-bit seeds are brute-forceable). A seeded
+  stream replays exactly across processes, threads, and forks by design —
+  same seed, same output — which is why it is never safe for secrets.
+  rand_core's
   own docs say the same about the derivation ("not suitable for
   cryptography ... the input size is only 64 bits"). Use the unseeded
   spelling for anything an adversary must not guess.
@@ -4021,7 +4024,8 @@ uniform-over-distinct-characters. Sampling is over Unicode scalar values,
 not grapheme clusters: a combining mark in the alphabet samples
 independently of its base character. The alphabet is materialized fresh on
 every call (no cross-call cache, by the fork-safe no-state discipline);
-bulk callers reusing one huge alphabet across many calls should prefer the
+cost is O(alphabet) to materialize plus O(length) draws. Bulk callers
+reusing one huge alphabet across many calls should prefer the
 stdlib. The only size ceiling is the argument itself (`Py_ssize_t`) and
 memory beyond it (`u64`-based sampling handles any alphabet a `str` can
 hold).

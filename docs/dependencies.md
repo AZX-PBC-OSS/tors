@@ -164,6 +164,18 @@ getrandom 0.3 was already in the base runtime graph via jsonschema's ahash),
 all of them `MIT OR Apache-2.0`/`Apache-2.0 OR MIT` and all already
 license-gated in their dev/engine positions.
 
+Pre-existing, flagged — not fixed by the random-generation branch (review
+notes, no action taken here): three getrandom majors coexist in the lock
+(0.2/0.3/0.4 via the ahash, rand_core, and uuid/dev paths — a future
+consolidation review, not this branch's scope); rand stays at 0.9 for the
+family's `os_rng` edge (0.10 is in the lock only as another tree's
+transitive); the dev-dependency `uuid v4` feature unifies only into
+test/bench builds, never the published crate's zero-feature graph
+(`cargo tree -e normal --no-default-features` shows uuid with no children);
+and VM snapshot/restore replay is out of scope — the fork-safety contract
+covers `fork()` (fresh OS draw per call, no userspace state), not a
+hypervisor restoring pre-draw state.
+
 The four `documents` engines are the same story one feature later:
 feature-gated (default OFF), so they are absent from the base wheel's build
 and present in the payload's.

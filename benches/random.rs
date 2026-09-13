@@ -41,6 +41,12 @@
 //! tests/test_performance.py (only the Python side can run the stdlib),
 //! and the GIL-release claims by tests/test_gil_release.py.
 //!
+//! The word buffer is 1024 bytes (128 words per OS fill): un-tuned — no
+//! block-size sweep has calibrated it, and none is claimed. A future
+//! criterion sweep over buffer sizes may move it; the word sequence (and
+//! hence every seeded pin) is buffer-size-independent by construction, so
+//! such a tuning changes cost, never output.
+//!
 //! Run locally with `cargo bench --no-default-features --bench random` —
 //! the `--no-default-features` is required because `extension-module`
 //! deliberately does not link libpython, which a bench binary needs. CI

@@ -640,6 +640,15 @@ class TestSeedDomain:
         # so it has always ridden along and still does.
         assert random_hex(8, seed=IntEnumLike.X) == random_hex(8, seed=8)
 
+    def test_real_numpy_scalar_seed_is_the_int_it_holds(self) -> None:
+        # L1: the runtime shape `_IndexLike` only models — a real numpy
+        # integer (the motivating `__index__`-only scalar) reduces through
+        # the same gate to the int it holds. Skipped where numpy is not
+        # installed (no new dependency); the fakes above always run.
+        np = pytest.importorskip("numpy")
+        assert random_hex(8, seed=np.int64(42)) == random_hex(8, seed=42)
+        assert uuid4(seed=np.int64(42)) == uuid4(seed=42)
+
     def test_a_raising_index_surfaces_its_own_error(self) -> None:
         # An `__index__` that RAISES surfaces its own error — the length
         # param's own behavior under pyo3 extraction — not a TypeError
@@ -705,16 +714,35 @@ class TestValueErrors:
         with pytest.raises(UnicodeEncodeError):
             random_string(8, "ab\ud800cd")
 
-    def test_the_length_ceiling_is_py_ssize_t_then_memory(self) -> None:
-        # MEDIUM-3's wording fix, pinned: "no size cap" never meant
-        # unbounded — the argument is Py_ssize_t (2^63 - 1 on 64-bit),
-        # and memory is the bound inside it. 2^63 itself never reaches
-        # the core (OverflowError at extraction); 2^63 - 1 reaches the
-        # reserve and comes back as the catchable MemoryError.
+    @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
+    def test_the_length_ceiling_overflow_at_py_ssize_t(self, name: str) -> None:
+        # MEDIUM-3's wording fix, pinned on every token spelling (4x2: the
+        # four length-first calls, OverflowError at the Py_ssize_t boundary
+        # plus MemoryError just inside it) — "no size cap" never meant
+        # unbounded: the argument is Py_ssize_t (2^63 - 1 on 64-bit), and
+        # memory is the bound inside it. 2^63 itself never reaches the core
+        # (OverflowError at extraction); 2^63 - 1 reaches the reserve and
+        # comes back as the catchable MemoryError.
+        call = dict(_TOKEN_CALLS)[name]
         with pytest.raises(OverflowError):
-            random_hex(2**63)
+            call(2**63)
+
+    @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
+    def test_the_length_ceiling_memory_just_inside_py_ssize_t(self, name: str) -> None:
+        call = dict(_TOKEN_CALLS)[name]
         with pytest.raises(MemoryError):
-            random_hex(2**63 - 1)
+            call(2**63 - 1)
+
+    def test_huge_alphabet_single_draw_cost_shape(self) -> None:
+        # M4's cost pin at small scale: O(alphabet) to materialize plus
+        # O(length) draws (documented in the core, the binding, and
+        # docs/api.md) — a 100k-char alphabet with length 1 builds exactly
+        # one output char, deterministically under seed=.
+        alphabet = "".join(chr(0xE000 + i) for i in range(100_000))
+        out = random_string(1, alphabet, seed=0)
+        assert len(out) == 1
+        assert out in alphabet
+        assert out == random_string(1, alphabet, seed=0)
 
     def test_huge_outputs_complete_no_cap_by_design(self) -> None:
         # 512 KiB of hex output from one call: no size cap exists (the bound
@@ -889,7 +917,9 @@ class TestUnseededOutputShape:
 
     def test_ten_thousand_uuid4s_are_distinct(self) -> None:
         # Birthday arithmetic at 122 random bits: a collision among 10k draws
-        # has probability ~1e-23; any repeat is a broken engine, not bad luck.
+        # has probability ~1e-29 (n^2 / 2^123); any repeat is a broken
+        # engine, not bad luck. (The same ~1e-29 the core docs state —
+        # one numeral, pinned once here and stated once there.)
         assert len({uuid4() for _ in range(10_000)}) == 10_000
 
     def test_uuid7_timestamp_is_the_callers_now_within_5s(self) -> None:
@@ -1087,21 +1117,58 @@ class TestNoRngStateGuard:
     def test_no_cached_rng_state_in_the_core(self) -> None:
         import pathlib
 
-        core = pathlib.Path(__file__).parent.parent / "src" / "random_impl.rs"
-        source = core.read_text(encoding="utf-8")
-        for forbidden in (
-            "thread_rng",
-            "ThreadRng",
-            "SmallRng",
-            "StdRng",
-            "fast-rng",
-            "fast_rng",
-            "lazy_static",
-            "LazyLock",
-            "thread_local",
-            "OnceLock",
-        ):
-            assert forbidden not in source, f"cached RNG state: {forbidden}"
+        # H1: the no-state discipline lives in two source files plus the
+        # manifest — a "perf: cache the rng" follow-up could land the cache
+        # in the binding or the feature list as easily as in the core, so
+        # the guard scans all three. Cargo.toml prose documents the declined
+        # shapes (thread-rng/fast-rng named as rejected), so its scan is
+        # declaration-scoped (tomllib, below) rather than textual.
+        for rel in ("src/random_impl.rs", "src/py/random.rs"):
+            source = (pathlib.Path(__file__).parent.parent / rel).read_text(encoding="utf-8")
+            for forbidden in (
+                "thread_rng",
+                "ThreadRng",
+                "SmallRng",
+                "StdRng",
+                "fast-rng",
+                "fast_rng",
+                "lazy_static",
+                "LazyLock",
+                "thread_local",
+                "OnceLock",
+            ):
+                assert forbidden not in source, f"cached RNG state in {rel}: {forbidden}"
+
+    def test_uuid_enables_no_rng_or_fast_rng_features(self) -> None:
+        # H1's manifest half: the published crate's uuid must stay the
+        # zero-feature builder set (no `rng`/`fast-rng` engine features —
+        # the builders are feature-free; the crate's own-rng constructors
+        # are what those features gate, and tors never calls them).
+        # Parsed as TOML, not grepped as text: Cargo.toml prose names the
+        # declined features in comments, so a substring scan would false-
+        # positive on its own documentation. The dev-dependency's `v4`
+        # (the bench's `new_v4()` comparator) unifies only into test/bench
+        # builds — `cargo tree -e normal --no-default-features` shows the
+        # published graph's uuid with no children; the lockfile's uuid ->
+        # getrandom edge is that dev unification, not the library path.
+        import pathlib
+        import tomllib
+
+        manifest = tomllib.loads(
+            (pathlib.Path(__file__).parent.parent / "Cargo.toml").read_text(encoding="utf-8")
+        )
+        uuid_dep = manifest["dependencies"]["uuid"]
+        assert uuid_dep.get("default-features") is False
+        for feat in uuid_dep.get("features", []):
+            assert feat not in ("rng", "fast-rng", "v4", "v7"), f"uuid feature: {feat}"
+        rand_dep = manifest["dependencies"]["rand"]
+        assert rand_dep.get("default-features") is False
+        assert "thread-rng" not in rand_dep.get("features", [])
+        assert "fast-rng" not in rand_dep.get("features", [])
+        assert "small_rng" not in rand_dep.get("features", [])
+        dev_uuid = manifest["dev-dependencies"]["uuid"]
+        for feat in dev_uuid.get("features", []):
+            assert feat not in ("fast-rng",), f"dev uuid feature: {feat}"
 
     def test_os_failures_map_to_runtime_error_in_the_binding(self) -> None:
         # The Os-error half of the mapping contract, pinned as text for
@@ -1239,8 +1306,16 @@ class TestUniformityAtScale:
         )
         # The modulo-mapped stream over the SAME words digests
         # differently — this is the assertion a `%` transcription
-        # fails (measured modulo digests: 7d805497… for n=62,
-        # 3594aec6… for n=3).
+        # fails. One negative control pinned as a literal (not just
+        # comment-recorded or inequality-asserted): the n=62 modulo digest
+        # below is what the naive `word % n` map over the same oracle words
+        # produces, so a regression to `%` fails BOTH the Lemire digest
+        # above and this pin (they cannot coincide — the maps diverge at
+        # draw 0).
+        assert (
+            hashlib.sha256(_modulo_string(300_000, BASE62_CHARS, 0).encode("ascii")).hexdigest()
+            == "7d80549778e25f58604a6858351a84404c7779c18e2c68d5afbbf8664019684b"
+        )
         assert _modulo_string(300_000, BASE62_CHARS, 0) != out62
         assert _modulo_string(300_000, "abc", 7) != out3
 

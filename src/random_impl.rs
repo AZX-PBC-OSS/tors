@@ -23,7 +23,9 @@
 //!   seed — a reproducible-test/fixture tool, NEVER safe for secrets, keys,
 //!   or tokens (rand_core's own docs say the same about `seed_from_u64`:
 //!   "not suitable for cryptography ... the input size is only 64 bits").
-//!   The derivation is rand_core's documented-stable default (its docs call
+//!   A seeded stream replays exactly across processes, threads, and forks
+//!   by design — same seed, same output — which is why it is never safe
+//!   for secrets. The derivation is rand_core's documented-stable default (its docs call
 //!   changing it a value-breaking change): a PCG32 (XSH-RR) generator keyed
 //!   by the seed emits the 32-byte ChaCha key as 8 little-endian u32s.
 //!   Note the spec-vs-source finding this records: the design brief called
@@ -252,7 +254,8 @@ impl Source {
 
 /// The u64 word source the alphabet sampler draws from: the stream as
 /// little-endian u64 words in order, block-buffered (one 1024-byte fill per
-/// 128 words) so the unseeded spelling pays one OS syscall per block rather
+/// 128 words, un-tuned — no block-size sweep has calibrated it) so the
+/// unseeded spelling pays one OS syscall per block rather
 /// than one per word. See the module docs' engine spec: the buffer changes
 /// consumption cost, never the word sequence, so seeded output is identical
 /// with or without it.
@@ -376,8 +379,9 @@ fn lemire_below(words: &mut Words, n: u64) -> Result<u64, RandomError> {
 /// The alphabet is materialized into a `Vec<char>` fresh on every call
 /// (one O(alphabet) pass under the binding's detach): there is no cross-
 /// call cache, by the same no-state discipline that keeps the unseeded
-/// spelling fork-safe. Bulk callers reusing one huge alphabet across
-/// many calls should prefer the stdlib (`random.choices`) or hold the
+/// spelling fork-safe. Cost is O(alphabet) to materialize plus O(length)
+/// draws. Bulk callers reusing one huge alphabet across many calls should
+/// prefer the stdlib (`random.choices`) or hold the
 /// materialization themselves; this spelling optimizes for the
 /// token/id case (short alphabets, one call per token).
 pub fn random_string(
@@ -480,6 +484,11 @@ pub fn uuid4(seed: Option<u64>) -> Result<String, RandomError> {
 /// as the raw 16 bytes, no canonical formatting — the bytes-out spelling
 /// for the same re-wrap consumers [`uuid4_bytes`] serves; `uuid7`
 /// formats this same buffer.
+///
+/// Uniqueness is probabilistic over the 74 random bits (122-bit uuid4
+/// needs ~2^61 draws for a 50% collision; 10k uuid4 draws collide with
+/// probability ~1e-29 — the same birthday arithmetic the Python suite
+/// pins; uuid7's per-millisecond bound is ~2^37 same-millisecond draws).
 pub fn uuid7_bytes() -> Result<[u8; 16], RandomError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -488,9 +497,19 @@ pub fn uuid7_bytes() -> Result<[u8; 16], RandomError> {
         })?;
     let millis = u64::try_from(duration.as_millis())
         .map_err(|_| RandomError::Clock("unix milliseconds do not fit in u64".to_string()))?;
+    uuid7_bytes_at(millis)
+}
+
+/// The timestamp-parameterized construction behind [`uuid7_bytes`]:
+/// the same builder over a caller-supplied millisecond timestamp.
+/// Production passes `SystemTime::now()`; the factorization exists so
+/// the 48-bit horizon refusal is unit-testable — no real system clock
+/// reads year 10,892, so only this spelling can exercise the
+/// `>= 1u64 << 48` arm (see the `uuid7_horizon_is_refused` test).
+fn uuid7_bytes_at(millis: u64) -> Result<[u8; 16], RandomError> {
     // The field is 48 bits: refuse at/above 2^48 explicitly (Clock, mapped
     // to RuntimeError) rather than let the builder truncate silently.
-    if millis >= 1 << 48 {
+    if millis >= 1u64 << 48 {
         return Err(RandomError::Clock(
             "unix milliseconds do not fit in the 48-bit uuid7 timestamp field".to_string(),
         ));
@@ -834,6 +853,45 @@ mod tests {
             random_hex(1 << 62, Some(0)),
             Err(RandomError::Memory(1 << 62))
         );
+    }
+
+    #[test]
+    fn uuid7_horizon_is_refused() {
+        // The 48-bit horizon arm, reachable only through the
+        // timestamp-parameterized spelling (no real clock reads year
+        // 10,892): below the horizon builds, at/above refuses with Clock.
+        assert!(uuid7_bytes_at((1u64 << 48) - 1).is_ok());
+        assert_eq!(
+            uuid7_bytes_at(1u64 << 48),
+            Err(RandomError::Clock(
+                "unix milliseconds do not fit in the 48-bit uuid7 timestamp field".to_string()
+            ))
+        );
+        assert_eq!(
+            uuid7_bytes_at(u64::MAX),
+            Err(RandomError::Clock(
+                "unix milliseconds do not fit in the 48-bit uuid7 timestamp field".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn huge_alphabet_single_draw_stays_linear() {
+        // The O(alphabet) + O(length) cost pin at small scale: a 100k-char
+        // alphabet with length 1 builds exactly one output char — the
+        // materialization pass runs once, one draw follows, and the seeded
+        // spelling is deterministic.
+        let alphabet: String = (0..100_000u32)
+            .map(|i| char::from_u32(0xE000 + i).expect("private-use range is valid"))
+            .collect();
+        assert_eq!(alphabet.chars().count(), 100_000);
+        let first = random_string(1, &alphabet, Some(0)).unwrap();
+        assert_eq!(first.chars().count(), 1);
+        assert!(alphabet.contains(&first[..]));
+        assert_eq!(first, random_string(1, &alphabet, Some(0)).unwrap());
+        let unseeded = random_string(1, &alphabet, None).unwrap();
+        assert_eq!(unseeded.chars().count(), 1);
+        assert!(alphabet.contains(&unseeded[..]));
     }
 
     #[test]
