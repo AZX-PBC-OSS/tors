@@ -117,6 +117,23 @@ class TestApiReferenceExamples:
         serialized_result = "k" * 64 * 1024
         assert tors.utf8_byte_len(serialized_result) <= 64 * 1024  # the gate passes
 
+    def test_utf16_byte_len_examples(self) -> None:
+        # docs/api.md's utf16_byte_len section, pinned directly: the
+        # example rows (BMP codepoints, the surrogate pair, the CJK row
+        # whose UTF-8 count diverges) and the NVARCHAR(140) column-cap
+        # gate the section is motivated by, spelled at its exact 280-byte
+        # boundary (140 UTF-16 units).
+        assert tors.utf16_byte_len("caf\u00e9") == 8
+        assert tors.utf16_byte_len("\U0001f600") == 4
+        assert tors.utf16_byte_len("\u6771\u4eac") == 4
+        assert tors.utf8_byte_len("\u6771\u4eac") == 6  # the contrast the doc draws
+        assert tors.utf16_byte_len("\u6771\u4eac") < tors.utf8_byte_len("\u6771\u4eac")
+        s = "k" * 140  # exactly 140 units: the gate passes
+        assert tors.utf16_byte_len(s) <= 280
+        s = "k" * 140 + "\U0001f600"  # 141 units (the astral codepoint is a
+        # PAIR): the gate trips
+        assert tors.utf16_byte_len(s) > 280
+
 
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:

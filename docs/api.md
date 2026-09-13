@@ -832,6 +832,90 @@ interval, so the heartbeat cells are ceiling-only; the linear envelope
 100 ms ceiling — the recorded scale guidance for this one heavy lane. No aio
 twin: an O(1)-to-borrow call needs no thread hop.
 
+## `tors.utf16_byte_len`
+
+```python
+def utf16_byte_len(s: str) -> int: ...
+```
+
+The UTF-16 byte length of a `str`: `len(s.encode("utf-16-le"))` with the
+2n copy taken out — 2 bytes per BMP codepoint, 4 per astral codepoint (a
+surrogate pair). This is the other half of the `len()` → bytes pair
+`utf8_byte_len` opens (the maintainer's ask: a util to convert a UTF8/UTF16
+python `len()` into bytes for the API, because backend devs need byte caps
+for storage and interop). UTF-16 is the code-unit world of JavaScript,
+Java, Windows, and .NET — `String.prototype.length` counts UTF-16 units,
+and an astral emoji is length 2 there — so column caps (`NVARCHAR`), wire
+caps, and interop size checks in that world are UTF-16 bytes, and the
+Python spelling of the count allocates and copies the entire 2n `bytes`
+object just to throw it away.
+
+The implementation is the utf8 twin's borrow plus derived arithmetic, no
+FFI: the standard str borrow hands the core a Rust `&str`, and the core
+derives the answer from its UTF-8 bytes — UTF-16 bytes =
+`2 * (#codepoints + #astral codepoints)`, where over valid UTF-8
+`#codepoints` is the lead-byte count and `#astral` is the count of 4-byte
+lead bytes (`>= 0xF0`) — one pass of byte-class arithmetic, no allocation,
+no per-codepoint decoding (the derivation, its proof against a
+`chars()`-based naive count, and the exhaustive boundary sweep are in
+`src/scan_impl.rs`). The corners the identity buys: no astral codepoints
+means exactly `2 * len(s)` for ALL BMP text — CJK and combining marks
+included, where the UTF-8 byte count diverges — pure ASCII means `2 *` the
+UTF-8 byte count, and every answer is even.
+
+The cost model, measured (the full lane table is in
+`tests/test_performance.py`):
+
+- **Warm lanes, both corpus kinds alike** — the scan is
+  representation-independent and the utf-16 expression pays its 2n
+  alloc + encode pass on every kind: measured ~2.2 µs at 64 KiB against
+  the expression's 8.8-10.4 µs, ~34 µs at 1 MiB against 142-147 µs, and
+  ~400 µs (~30 GB/s) at 12 MiB against 1.7-1.8 ms — ratios 0.21-0.26 on
+  every warm lane.
+- **Non-ASCII, first call on the object (a cold UTF-8 cache)**: the
+  borrow materializes and caches the UTF-8 view first (the utf8 twin's
+  cold class — encode-parity cost, GIL-held, and a prior `encode` does
+  not warm it), then the scan runs detached. Measured 376 µs at 1 MiB
+  against the utf-16 expression's own cold 146 µs — the one lane the
+  expression wins, because it never touches UTF-8 at all; the trade buys
+  every subsequent call at 4-5x and the absence of a 2n `bytes` object
+  per call.
+
+```python
+tors.utf16_byte_len("café")  # 8: four BMP codepoints, 2 bytes each
+tors.utf16_byte_len("\U0001f600")  # 4: one astral codepoint, a surrogate pair
+tors.utf16_byte_len("東京")  # 4: two BMP codepoints — the UTF-8 count is 6
+# a JS/Windows column cap, counted without the 2n copy:
+if tors.utf16_byte_len(s) > 280:  # over 140 UTF-16 units: NVARCHAR(140)'s budget
+    reject()
+```
+
+The surrogate lane is REFUSAL PARITY with the replaced expression, measured
+and pinned (a first-draft claim that the stdlib's utf-16-le encode accepts
+lone surrogates was wrong — the test battery caught it): the strict
+`encode("utf-16-le")` refuses lone surrogates exactly like the utf-8 codec
+does ("surrogates not allowed"), so the function refuses the same strings
+the expression itself refuses. Two honest differences: the tors error is
+the str-in borrow's own — `.encoding` is `"utf-8"` (the flavor of the step
+that fails, materializing the UTF-8 view; the expression's error says
+`"utf-16-le"`) — and the stdlib's `errors="surrogatepass"` mode WOULD
+encode them (one unit each), a mode tors deliberately does not offer (the
+crate-wide str-in contract: every str-argument tors function needs the
+UTF-8 view). Pinned attribute-for-attribute in tests/test_utf8_byte_len.py,
+the byte-len family file. The argument takes exactly `str` (`bytes` /
+`bytearray` / `memoryview` / `int` raise `TypeError`) — it counts a `str`,
+not decodes bytes; the decode side of UTF-16 is `decode_utf16`.
+
+GIL behavior: the borrow is the call's GIL-held residue (a non-ASCII
+object's first call materializes the UTF-8 view under the GIL — the utf8
+twin's class, ~5 ms at 12 MiB, under the 10 ms heartbeat interval), and the
+detach carries the real O(n) scan (~0.4 ms at 12 MiB, memchr-class) where
+the utf8 twin's detach is nominal around one field read. The heartbeat
+cells are ceiling-only; the linear envelope (~0.4-0.5 ms of GIL hold per
+MiB) puts a ~200 MiB non-ASCII string at the 100 ms ceiling, the twin's
+recorded scale guidance. No aio twin: the GIL-held residue is the borrow
+alone, and the scan detaches.
+
 ## `tors.CompiledPatterns`
 
 ```python

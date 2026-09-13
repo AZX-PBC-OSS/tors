@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-76 functions plus two small helper classes, grouped by what they do; the
+77 functions plus two small helper classes, grouped by what they do; the
 `documents` extra adds seven document-extraction functions and its own helper
 types. Full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).

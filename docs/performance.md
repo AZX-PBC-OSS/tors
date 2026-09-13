@@ -64,6 +64,21 @@ otherwise use:
   12 MiB, under the heartbeat interval); the full lane table is in
   `tests/test_performance.py`, the criterion core-vs-copy group in
   `benches/search.rs` (~0.5 ns flat against the copy's ~65 GiB/s).
+- `utf16_byte_len`: the interop twin — `len(s.encode("utf-16-le"))`
+  allocates and encodes the full 2n `bytes` object just to count it;
+  `tors` derives the count from the borrowed UTF-8 view (2 bytes per
+  codepoint plus 2 more per astral codepoint, both counts byte classes)
+  in one ~30 GB/s chunked pass with no allocation: ~2.2 µs at 64 KiB
+  against the expression's ~9-10 µs, ~34 µs at 1 MiB against ~145 µs,
+  ~400 µs at 12 MiB against ~1.7 ms — ratios 0.21-0.26 on every warm
+  lane, both corpus kinds (the scan is representation-independent).
+  The one lane the expression wins, recorded: a fresh non-ASCII
+  object's first call pays the borrow's UTF-8-cache materialization
+  (the utf8 twin's cold class) before the scan, while the utf-16
+  expression never touches UTF-8 — 376 µs against 146 µs at 1 MiB, the
+  trade buying every later call at 4-5x and no 2n allocation per call.
+  The lane table is in `tests/test_performance.py`, the criterion group
+  in `benches/search.rs` (the chunked scan against the encode baseline).
 - The diffing and fuzzy functions bound their superlinear worst cases with
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a
