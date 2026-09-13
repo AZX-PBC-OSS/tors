@@ -242,6 +242,34 @@ cores, ambient load ~6-17, 3 samples per cell, corpora from
   the loop at the floor at all, and the wall cells in
   tests/test_unescaped_scan.py carry the throughput side.
 
+utf8_byte_len cells (the byte-count companion, #52; measured on the
+calibration box, macOS, 16 cores, ambient load ~10-18, 3 samples per
+cell, corpora from ``reference``: plain prose for the ASCII lane,
+``decomposed`` with a FRESH object per sample for the non-ASCII
+first-call lane):
+
+- Both cells ceiling-only, for two different structural reasons. The
+  ASCII lane is O(1) end to end (compact ASCII is its own UTF-8, so the
+  str-in borrow is a zero-copy alias; everything past the borrow is a
+  field read and a single int out): measured worst gaps 10.2-11.3ms of
+  0.1-0.4ms walls — the ping floor plus to_thread dispatch, the call
+  itself ~0.1µs — the b64 12 MiB / utf8_is_valid sub-floor artifact.
+  Nothing O(n) exists to detach on this lane, so it pins that the call
+  leaves the loop at the floor at all; the O(1) band is pinned in wall
+  time by tests/test_performance.py.
+- The non-ASCII first-call lane is the function's one heavy lane, made
+  structural by the fresh-object-per-sample design: the borrow's
+  materialization of the UTF-8 view is GIL-held O(n) (there is no way
+  to fill an object's cache without the GIL), measured 4.6-5.6ms walls
+  inline at 12 MiB with worst gaps 10.6-10.8ms — the materialization
+  (~5ms) sits under the 10ms ping interval itself, so the loop never
+  misses a tick beyond the floor at this size; the 100ms ceiling holds
+  ~10x, and the linear envelope (~0.4-0.5ms of GIL hold per MiB) puts a
+  ~200 MiB non-ASCII string at the ceiling (the recorded scale
+  guidance). The gap/wall ratio is ~1.0 by construction (the wall IS
+  the GIL-held materialization), which is why this leg is ceiling-only
+  like the D-form fast-path cell, not because the wall is sub-floor.
+
 cells (``replace_many`` dense, ``sentence_bounds`` list,
 ``diff_opcodes_lines`` near-identical, all at 12 MiB; measured on the dev
 box, ambient load 2.0, 5 samples per cell, corpora from
@@ -1373,6 +1401,68 @@ def test_unescaped_scan_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
             ratio_budget=ratio_budget,
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("ascii", 12 * _MIB, None),
+        ("non-ascii-first-call", 12 * _MIB, None),
+    ],
+    ids=["ascii-12MiB-ceiling-only", "non-ascii-first-call-12MiB-ceiling-only"],
+)
+def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The byte-count claim, and its honest limit: the call's only O(n)
+    work is the str-in borrow itself — CPython materializes the UTF-8 view
+    under the GIL on a non-ASCII object's first contact (there is no way
+    to fill an object's cache without holding the GIL; the ``finalize``
+    cells' first-call class) — while everything past the borrow is O(1)
+    (the ``py.detach`` around the core is nominal, kept for the family
+    shape) and the return is a single int, so there is no marshalling
+    class and no error path past the borrow's own ``UnicodeEncodeError``
+    on lone surrogates.
+
+    Two legs, both ceiling-only:
+
+    - ``ascii`` (prose): the borrow is a zero-copy alias (compact ASCII
+      data is its own UTF-8), so the whole call is O(1) end to end and
+      the wall sits five orders of magnitude under the 10ms ping floor —
+      the sub-ping artifact, the b64 12 MiB / utf8_is_valid precedent.
+      The pin's limit, stated: nothing O(n) exists to detach, so this
+      leg cannot discriminate a detach regression; it pins that the call
+      leaves the loop at the floor at all, and the wall cells in
+      tests/test_performance.py carry the O(1) band.
+    - ``non-ascii-first-call`` (decomposed, a FRESH object per sample so
+      every sample carries the worst case): the materialization itself
+      is GIL-held O(n), measured ~4.7-5.7ms inline at 12 MiB on the
+      calibration box (the encoder pass plus a malloc plus the second
+      memcpy into the permanent cache, within ~10-20% of a cold
+      ``encode`` of the same object). The gap/wall ratio here is ~1.0 by
+      construction (the wall IS the GIL-held materialization — the
+      D-form fast-path cell's situation, not a detach regression), so
+      the 100ms ceiling alone is the assertion, holding ~20x margin at
+      this size; the linear envelope (~0.4-0.5ms of GIL hold per MiB)
+      puts a ~200 MiB non-ASCII string at the ceiling, the recorded
+      scale guidance for this function's one heavy lane.
+    """
+    if corpus_kind == "ascii":
+        corpus = _CORPORA["prose"](size_bytes)
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf8_byte_len, corpus),
+                ratio_budget=ratio_budget,
+            )
+        )
+    else:
+        copies = iter([_CORPORA["decomposed"](size_bytes) for _ in range(_SAMPLES)])
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf8_byte_len, next(copies)),
+                ratio_budget=ratio_budget,
+            )
+        )
 
 
 @pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])

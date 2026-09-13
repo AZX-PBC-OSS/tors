@@ -337,6 +337,155 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 
 
 # ---------------------------------------------------------------------------
+# The utf8_byte_len wall cells (#52): tors.utf8_byte_len(s) vs
+# len(s.encode("utf-8")), the expression it replaces. The full measured
+# lane table (ambient load ~10-18 on the calibration box, macOS, 16 cores,
+# min-of-7 after warmup unless noted):
+#
+#     ASCII (prose), the TaskQ serialized-JSON case (ensure_ascii=True
+#     output is pure ASCII): tors is FLAT ~0.1µs at every size (the
+#     zero-copy alias: compact ASCII data is its own UTF-8, nothing to
+#     build), while the expression pays alloc+memcpy every call:
+#
+#         size    tors        encode     ratio
+#         1 KiB   0.08-0.13µs 0.13µs     0.7-1.0  (a dead heat: both sides are
+#                                                   pure call overhead; recorded,
+#                                                   not asserted)
+#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.8µs
+#                                                 of pure alloc+memcpy per success)
+#         1 MiB   0.13µs      14.3µs     0.009
+#         12 MiB  0.13µs      184µs      0.0007
+#
+#     non-ASCII (decomposed), the three cache lanes (the borrow's UTF-8
+#     view is materialized once per OBJECT and cached by CPython; encode
+#     consults that cache but never fills it):
+#
+#         64 KiB:  cold-encode 21.8µs | first-call 26.7µs | warm-encode 1.8µs
+#                  | cached-tors 0.08µs
+#         1 MiB:   cold-encode 355.8µs | first-call 409.7µs | warm-encode 14.8µs
+#                  | cached-tors 0.13µs
+#         12 MiB:  cold-encode 4.9ms | first-call 4.7ms | warm-encode 196µs
+#                  | cached-tors 0.13µs
+#
+#     The honest reading: on a FRESH non-ASCII object the first call is
+#     encode-parity (the materialization IS an encode - ucs2lib encoder
+#     pass plus a malloc plus a second full memcpy into the permanent
+#     cache, measured within ~10-20% of a cold encode), so the win there
+#     is only the absence of a Python-visible bytes object; the win is on
+#     REPEAT calls on the same object (the warm-encode lane itself is 20-
+#     1600x the cached call), and unconditionally on ASCII. The cache is
+#     shared with encode itself: priming an object with utf8_byte_len
+#     dropped a subsequent len(s.encode()) from 4.9ms to 184µs at 12 MiB
+#     (measured, the mechanism verified in CPython 3.14's
+#     unicode_fill_utf8/unicode_encode_utf8).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes"),
+    [
+        ("ascii", 64 * 1024),
+        ("ascii", 1 * _MIB),
+        ("nonascii-cached", 64 * 1024),
+        ("nonascii-cached", 1 * _MIB),
+    ],
+    ids=["ascii-64KiB", "ascii-1MiB", "nonascii-cached-64KiB", "nonascii-cached-1MiB"],
+)
+def test_utf8_byte_len_beats_the_encode_expression_on_both_winnable_lanes(
+    corpus_kind: str, size_bytes: int
+) -> None:
+    """The race, asserted only where it is honestly winnable. Two lanes:
+    ``ascii`` (prose, the TaskQ serialized case — compact ASCII is its own
+    UTF-8, so the borrow is a zero-copy alias and the call is O(1) with no
+    allocation, while the expression pays alloc+memcpy every call) and
+    ``nonascii-cached`` (decomposed, the methodology's warmup having primed
+    the object's UTF-8 cache, so the race is the repeat-call semantics:
+    the cached O(1) borrow against the expression's warm one-memcpy copy
+    out of the same cache). Measured ratios 0.14/0.009 (ASCII 64 KiB/1 MiB)
+    and 0.05/0.008 (non-ASCII cached 64 KiB/1 MiB) against the shared 0.9
+    margin: the fresh-object non-ASCII lane, where the first call is
+    encode-parity by construction, is measured and recorded in the cell
+    below, never asserted."""
+    corpus = prose(size_bytes) if corpus_kind == "ascii" else decomposed(size_bytes)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.utf8_byte_len, corpus, samples=samples)
+    enc_ms = _min_wall_ms(lambda s: len(s.encode("utf-8")), corpus, samples=samples)
+    assert tors_ms < _MARGIN * enc_ms, (
+        f"utf8_byte_len {corpus_kind} {size_bytes // 1024}KiB: tors {tors_ms * 1000:.2f}µs vs "
+        f"encode {enc_ms * 1000:.2f}µs (ratio {tors_ms / enc_ms:.3f}): the count lost more "
+        "than the tolerance margin to the copy it exists to avoid"
+    )
+
+
+def test_utf8_byte_len_ascii_calls_stay_o1_at_12mib() -> None:
+    """The O(1) pin the ratio race cannot make by itself: at 12 MiB the
+    ASCII call must stay in the call-overhead band (measured ~0.13µs flat
+    from 1 KiB to 12 MiB), under a 5µs ceiling (~40x margin; µs-scale
+    samples draw the fast-cell sample count, min-of-7, since one preempted
+    run can set a min-of-3). A per-call O(n) regression - a validation
+    pass over the borrowed bytes, a lost zero-copy alias in a pyo3 upgrade
+    - lands at the encode class (~180µs at 12 MiB) and blows through by
+    ~36x. The same regression class on the non-ASCII path is caught by the
+    nonascii-cached race leg (the cached lane would regress to the
+    materialization class)."""
+    corpus = prose(12 * _MIB)
+    tors_us = _min_wall_ms(tors.utf8_byte_len, corpus, samples=_FAST_CELL_SAMPLES) * 1000
+    assert tors_us < 5.0, (
+        f"utf8_byte_len ASCII 12MiB took {tors_us:.2f}µs, outside the O(1) call band "
+        "(measured ~0.13µs flat across sizes, ceiling 5µs); the borrow stopped being "
+        "a zero-copy alias or gained a per-call scan"
+    )
+
+
+def test_utf8_byte_len_fresh_object_lanes_are_measured_not_asserted() -> None:
+    """The lanes where there is no win to assert, recorded instead (the
+    decode_utf8/b64_decode precedent): the 1 KiB ASCII race is a dead heat
+    (both sides ~0.1µs of pure call overhead - the 1 KiB memcpy is
+    invisible at that size), and a non-ASCII FRESH object's first call is
+    encode-parity by construction (the materialization is an encode: the
+    same ucs-to-UTF-8 pass plus a malloc plus a second memcpy into the
+    permanent cache; measured within ~10-20% of a cold encode at 1 MiB).
+    The parity is the honest cost of the route the implementation chose
+    (borrow, not hand-rolled arithmetic), and the reason the asserted
+    cells above carry only the lanes that are structurally winnable."""
+    one_kib = prose(1024)
+    tors_us = _min_wall_ms(tors.utf8_byte_len, one_kib, samples=_FAST_CELL_SAMPLES) * 1000
+    enc_us = (
+        _min_wall_ms(lambda s: len(s.encode("utf-8")), one_kib, samples=_FAST_CELL_SAMPLES) * 1000
+    )
+    print(f"utf8_byte_len ASCII 1KiB: tors {tors_us:.2f}µs encode {enc_us:.2f}µs (dead heat)")
+    # The cold lanes need a FRESH object per timed call, so the copies are
+    # built up front (a generator would build each corpus inside the timed
+    # lambda) and the helper runs with warmup=0 — every sample is a first
+    # contact with its own object.
+    size = 1 * _MIB
+    cold_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    cold_us = (
+        _min_wall_ms(
+            lambda _: len(next(cold_copies).encode("utf-8")),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    fresh_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    first_us = (
+        _min_wall_ms(
+            lambda _: tors.utf8_byte_len(next(fresh_copies)),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    print(
+        f"utf8_byte_len non-ASCII 1MiB fresh-object: cold-encode {cold_us:.1f}µs "
+        f"first-call {first_us:.1f}µs (parity, no assert)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The chunking family's document-scale cost shape (#22, then #30): the
 # per-call cost must be the segmentation walks the function is for, not
 # per-codepoint structures built unconditionally, and, since #30's lazy
