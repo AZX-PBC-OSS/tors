@@ -3285,6 +3285,61 @@ tests/test_gil_release.py. The core is a trivial one-pass membership walk
 arithmetic, no `unsafe`), which is why it ships no cargo-fuzz target: the
 hypothesis differentials over arbitrary Unicode cover its input space.
 
+### Common alphabets
+
+The scope question, answered up front: *is it worthwhile adding any other
+charset validators — b62, b64, hex, UUID?* No new validators. Named wrapper
+functions (`is_valid_b62`, `is_valid_b64url`, ...) would each delegate to
+the same core — N wrappers of zero performance gain, pure API surface and
+maintenance cost — so the generic `first_invalid_charset` stays the single
+engine. What *is* worth shipping is the data: the alphabets long enough
+that re-spelling them at every call site invites silent transcription
+errors (a wrong 62-character set still validates *something*). Those ship
+as pinned module constants — data, not code:
+
+| constant | alphabet | length | for |
+|---|---|---|---|
+| `tors.CHARSET_B62` | `0-9 A-Z a-z` | 62 | base62 ids |
+| `tors.CHARSET_B64URL` | `A-Z a-z 0-9 - _` — RFC 4648 §5, **unpadded** | 64 | JWT segments, url-safe tokens |
+| `tors.CHARSET_HEX_LOWER` | `0-9 a-f` | 16 | lowercase hex digests |
+| `tors.CHARSET_HEX_UPPER` | `0-9 A-F` | 16 | uppercase hex digests |
+| `tors.CHARSET_HEX_MIXED` | the 22-codepoint union of the two hex alphabets | 22 | case-insensitive hex digests |
+
+The `first=None` uniform spelling (one set at every position) makes each
+constant a single argument:
+
+```python
+ids = ["7xK9mQ2pZv", "0Zz8", "bad!"]
+tors.first_invalid_charset(ids, rest=tors.CHARSET_B62)
+# 2   ("bad!": "!" is outside the base62 alphabet)
+segments = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0="]
+tors.first_invalid_charset(segments, rest=tors.CHARSET_B64URL)
+# 1   (the second segment is padded — the OUT case below)
+```
+
+Three shapes are deliberately OUT, each for a structural reason:
+
+- **Standard/padded base64.** The `=` padding is positionally structured —
+  terminal only. A flat charset cannot express "positions `0..len-2` from
+  the alphabet, position `len-1` optionally `=`", and a charset that
+  admitted `=` would wrongly accept mid-string padding. `tors.b64_decode`
+  IS the strict base64 validator — decode-as-validation, which raises on
+  misplaced padding, wrong lengths, and non-alphabet codepoints alike, is
+  the right tool. That is why `CHARSET_B64URL` is the unpadded alphabet
+  and the padded segment above is an offender, not a pass.
+- **UUID.** The hyphens at fixed positions 8/13/18/23 are structure, not
+  charset; `first_invalid_charset` cannot express them. The strict UUID
+  validator is `tors.uuid_parse` (the uuid7-helpers branch), not a flat
+  alphabet.
+- **Digits.** `"0123456789"` is trivially spelled with zero typo risk; not
+  worth a name.
+
+The constants' contents are contract, pinned byte-exact with the
+length/uniqueness/subset algebra that makes the family coherent
+(tests/test_first_invalid_charset.py); the stub carries their type (`str`)
+and is held to `tors.__all__` by the same drift guard as every function
+(tests/test_pyi_drift.py).
+
 ## `tors.documents`
 
 Document-format extraction: PDF, the office and text formats (doc/docx, xls/xlsx,

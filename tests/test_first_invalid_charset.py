@@ -69,6 +69,16 @@ return) is pinned ceiling-only by tests/test_gil_release.py (the
 ``utf8_is_valid`` cell class: at realistic batch sizes the whole call sits
 far under the 10 ms ping floor); the criterion ladder for the Rust core
 alone is the ``first_invalid_charset`` group in benches/search.rs.
+
+The pinned common alphabets (``tors.CHARSET_B62``, ``CHARSET_B64URL``,
+``CHARSET_HEX_LOWER``/``_UPPER``/``_MIXED``) are module data for this
+engine, and this file pins them the way the engine itself is pinned: the
+scope question — should b62/b64/hex/UUID validators ship? — is answered in
+code by constants, not wrapper functions (N wrappers delegating to the
+single engine would be pure API surface and maintenance cost), so what
+ships is the data: the alphabets worth pinning, byte-exact, plus the
+length/uniqueness/subset algebra that makes the family coherent and the
+use shapes (base62 ids, JWT segments, hex digests) they exist for.
 """
 
 from __future__ import annotations
@@ -82,6 +92,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tors
 from reference import reference_first_invalid_charset
 from tors import first_invalid_charset
 
@@ -633,6 +644,144 @@ class TestBatchScale:
         assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == 42
 
 
+# --- The pinned common alphabets ------------------------------------------------
+#
+# The scope question — "is it worthwhile adding any other charset validators,
+# for b62, b64, hex, UUID?" — answered in code: no wrapper functions ship (N
+# wrappers delegating to the same core would add pure API surface and
+# maintenance cost for zero performance gain; the generic engine stays the
+# single engine), but the worthwhile part does: the alphabets genuinely
+# tedious to spell, published once as module constants. A base62 alphabet
+# transcribed wrong at a call site still validates *something*, silently —
+# the constants kill that failure mode, and the byte-exact pins below are
+# the net for a typo in either direction (module or pin).
+
+
+class TestPinnedAlphabetContents:
+    """The five constants, byte-exact: the single place a content typo can
+    hide. A constant's characters are contract — the standard spellings, in
+    their conventional orders (base62 digits-then-upper-then-lower, the
+    RFC 4648 §5 url-safe order, hex digits then letters) — not detail."""
+
+    def test_charset_b62(self) -> None:
+        assert (
+            tors.CHARSET_B62
+            == "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        )
+
+    def test_charset_b64url(self) -> None:
+        assert (
+            tors.CHARSET_B64URL
+            == "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        )
+
+    def test_charset_hex_lower(self) -> None:
+        assert tors.CHARSET_HEX_LOWER == "0123456789abcdef"
+
+    def test_charset_hex_upper(self) -> None:
+        assert tors.CHARSET_HEX_UPPER == "0123456789ABCDEF"
+
+    def test_charset_hex_mixed(self) -> None:
+        assert tors.CHARSET_HEX_MIXED == "0123456789abcdefABCDEF"
+
+
+class TestPinnedAlphabetProperties:
+    """The structural invariants a byte-exact pin alone does not state:
+    each alphabet is a set however spelled (no duplicate codepoints), each
+    has its nominal length, and the family is coherent as set algebra —
+    both hex spellings are subsets of HEX_MIXED (which is exactly their
+    union), and B64URL is exactly B62 plus the two url-safe punctuation
+    codepoints, so the base62 ids and the JWT segments share one lineage."""
+
+    @pytest.mark.parametrize(
+        ("name", "length"),
+        [
+            ("CHARSET_B62", 62),
+            ("CHARSET_B64URL", 64),
+            ("CHARSET_HEX_LOWER", 16),
+            ("CHARSET_HEX_UPPER", 16),
+            ("CHARSET_HEX_MIXED", 22),
+        ],
+    )
+    def test_each_alphabet_is_the_right_length_with_unique_codepoints(
+        self, name: str, length: int
+    ) -> None:
+        constant = getattr(tors, name)
+        assert len(constant) == length, f"{name}: expected {length} codepoints"
+        assert len(set(constant)) == len(constant), f"{name}: duplicate codepoints"
+
+    def test_b64url_is_exactly_b62_plus_the_urlsafe_punctuation(self) -> None:
+        assert set(tors.CHARSET_B62) <= set(tors.CHARSET_B64URL)
+        assert set(tors.CHARSET_B64URL) == set(tors.CHARSET_B62) | {"-", "_"}
+
+    def test_hex_mixed_is_exactly_the_union_of_both_hex_spellings(self) -> None:
+        assert set(tors.CHARSET_HEX_LOWER) <= set(tors.CHARSET_HEX_MIXED)
+        assert set(tors.CHARSET_HEX_UPPER) <= set(tors.CHARSET_HEX_MIXED)
+        assert set(tors.CHARSET_HEX_MIXED) == (
+            set(tors.CHARSET_HEX_LOWER) | set(tors.CHARSET_HEX_UPPER)
+        )
+
+
+class TestPinnedAlphabetUse:
+    """The constants in their intended seats. The uniform spelling
+    (``first=None``, one set at every position) makes each one a single
+    argument — ``first_invalid_charset(items, rest=tors.CHARSET_B62)`` —
+    over the three shapes they exist for: base62 ids, unpadded base64url
+    (JWT) segments, and hex digests in the fixed- and mixed-case
+    spellings."""
+
+    def test_base62_id_batch(self) -> None:
+        # "7xK9mQ2pZv" and "0Zz8" are pure base62; "bad!" offends on "!"
+        assert (
+            first_invalid_charset(["7xK9mQ2pZv", "0Zz8", "bad!"], rest=tors.CHARSET_B62)
+            == 2
+        )
+        assert first_invalid_charset(["7xK9mQ2pZv", "0Zz8"], rest=tors.CHARSET_B62) == -1
+
+    def test_jwt_segments(self) -> None:
+        # the three segments of a JWS — header, payload, signature — all
+        # unpadded base64url; the signature spelling carries "_", exactly
+        # the url-safe punctuation the alphabet exists to cover
+        segments = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        assert first_invalid_charset(segments, rest=tors.CHARSET_B64URL) == -1
+        # the padding mistake the unpadded alphabet is documented to catch:
+        # "=" is positional structure (terminal only), so a padded segment
+        # is an offender at its own index
+        padded = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0=",
+        ]
+        assert first_invalid_charset(padded, rest=tors.CHARSET_B64URL) == 1
+
+    def test_hex_digests_lower_and_mixed(self) -> None:
+        # sha256("abc"), the canonical 64-char lowercase digest
+        digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        assert first_invalid_charset([digest], rest=tors.CHARSET_HEX_LOWER) == -1
+        # the uppercase spelling of the same digest offends under the
+        # lower-only alphabet and passes under the case-insensitive one
+        assert first_invalid_charset([digest.upper()], rest=tors.CHARSET_HEX_LOWER) == 0
+        assert (
+            first_invalid_charset([digest, digest.upper()], rest=tors.CHARSET_HEX_LOWER)
+            == 1
+        )
+        assert (
+            first_invalid_charset([digest, digest.upper()], rest=tors.CHARSET_HEX_MIXED)
+            == -1
+        )
+
+    def test_empty_item_and_empty_batch_semantics_are_unchanged(self) -> None:
+        # the constants are set data only: the empty-item rule (an empty
+        # item is an offender wherever it sits, whatever the sets allow)
+        # and the empty-batch answer (-1, vacuously valid) are the
+        # engine's, identical under a published alphabet
+        assert first_invalid_charset(["", "0Zz8"], rest=tors.CHARSET_B62) == 0
+        assert first_invalid_charset([], rest=tors.CHARSET_B62) == -1
+
+
 # --- The docs' worked example, pinned -------------------------------------------
 
 
@@ -659,3 +808,16 @@ class TestDocsExamples:
     def test_uniform_rule_example(self) -> None:
         ident_rest = string.ascii_letters + "_" + string.digits
         assert first_invalid_charset(["worker:01", "tag name"], rest=ident_rest + "-:.") == 1
+
+    def test_common_alphabets_example(self) -> None:
+        """docs/api.md's Common alphabets subsection, pinned the same way:
+        the literals the doc shows (a base62 id batch, then a JWT-segment
+        pair whose second segment is mistakenly padded) are re-derived
+        here against the built extension."""
+        ids = ["7xK9mQ2pZv", "0Zz8", "bad!"]
+        assert first_invalid_charset(ids, rest=tors.CHARSET_B62) == 2
+        segments = [
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0=",
+        ]
+        assert first_invalid_charset(segments, rest=tors.CHARSET_B64URL) == 1

@@ -998,3 +998,16 @@ def refined_soundex(text: str) -> str: ...
 def first_invalid_charset(
     items: Sequence[str], *, first: str | None = None, rest: str
 ) -> int: ...
+
+# Pinned common alphabets for first_invalid_charset: module constants, not
+# functions (no signature to diff). The stub carries their type only —
+# never their content: the live module is the single spelling of a
+# 62-character alphabet, and the byte-exact contract pins live in
+# tests/test_first_invalid_charset.py. See docs/api.md's "Common
+# alphabets" for what ships, what deliberately does not (padded base64,
+# UUID, digits), and why.
+CHARSET_B62: str
+CHARSET_B64URL: str
+CHARSET_HEX_LOWER: str
+CHARSET_HEX_MIXED: str
+CHARSET_HEX_UPPER: str

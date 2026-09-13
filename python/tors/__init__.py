@@ -91,6 +91,11 @@ __all__ = [
     "b64_decode",
     "b64_encode_bytes",
     "bm25_rank",
+    "CHARSET_B62",
+    "CHARSET_B64URL",
+    "CHARSET_HEX_LOWER",
+    "CHARSET_HEX_MIXED",
+    "CHARSET_HEX_UPPER",
     "chunk_by_lines",
     "chunk_by_lines_iter",
     "chunk_by_paragraphs",
@@ -169,6 +174,25 @@ __all__ = [
     "word_bounds_iter",
     "word_count",
 ]
+
+# Pinned common alphabets for first_invalid_charset — published module data,
+# not validator functions: the generic engine stays the single engine (named
+# wrappers would delegate to the same core for zero performance gain, pure
+# API surface), and the constants kill the real friction, spelling a
+# 62-character alphabet correctly at every call site. See docs/api.md's
+# "Common alphabets" for the scope decision these encode, including what is
+# deliberately absent (padded base64, UUID, digits) and why.
+
+# The base62 id alphabet: digits, then upper, then lower.
+CHARSET_B62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+# The RFC 4648 §5 url-safe alphabet, unpadded: JWT segments, url-safe tokens.
+CHARSET_B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+# Lowercase hex digests.
+CHARSET_HEX_LOWER = "0123456789abcdef"
+# Uppercase hex digests.
+CHARSET_HEX_UPPER = "0123456789ABCDEF"
+# The 22-char union of the two hex spellings: case-insensitive hex digests.
+CHARSET_HEX_MIXED = "0123456789abcdefABCDEF"
 
 
 def __getattr__(name: str) -> ModuleType:

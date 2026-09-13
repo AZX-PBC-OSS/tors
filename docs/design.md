@@ -33,7 +33,12 @@ The cuts below are decisions, not oversights:
   same principle on the validation side — plain strings of permitted
   codepoints (data, not patterns: no ranges, escapes, or classes), and the
   Unicode-category classes (`\w`) that would need property tables stay out.
-  The same cut is why `scrub_log_text`'s rules
+  The pinned `CHARSET_*` constants carry that principle one step further:
+  the common alphabets (base62, unpadded base64url, hex lower/upper/mixed)
+  published once as module constants — lexical data, not N wrapper
+  functions around the single engine — and the bundled-lemma-data cut below
+  is about per-language datasets, not about naming a 16-codepoint hex
+  alphabet. The same cut is why `scrub_log_text`'s rules
   are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
   `uri_query_creds`), not patterns: each rule is a call-site regex the
   scrub exists to port (TaskQ's exception-text chain), hand-rolled in Rust
