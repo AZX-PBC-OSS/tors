@@ -42,18 +42,21 @@ from tors import minhash_signature
 # The mixed text alphabet: letters, numbers, punctuation, spaces, the
 # hard-break whitespace, the C0/C1 controls (U+001F separator included),
 # combining marks (Mn: the WB4 separator-attach), format controls (Cf:
-# ZWJ, SOFT HYPHEN), and line separators (Zl), out through the CJK block
-# (Lo scriptio continua) -- the differential oracle must agree with the
-# core on all of it, not just letters. Surrogates are excluded
-# explicitly (a lone surrogate is a UnicodeEncodeError at the boundary,
-# pinned separately below); the separator row stays an explicit fixture
-# too (the Cs surrogate category is absent from the list, so no draw can
-# be a surrogate).
+# ZWJ, SOFT HYPHEN), and line separators (Zl), out through the astral
+# planes (the max_codepoint covers emoji and other supplementary-plane
+# text; surrogates are excluded structurally -- the Cs category is absent
+# from the whitelist, so no draw can be a surrogate, which would raise
+# UnicodeEncodeError at the boundary instead) -- the differential oracle
+# must agree with the core on all of it, not just letters. Surrogates are
+# excluded explicitly (a lone surrogate is a UnicodeEncodeError at the
+# boundary, pinned separately below); the separator row stays an explicit
+# fixture too (the Cs surrogate category is absent from the list, so no
+# draw can be a surrogate).
 _TEXT = st.text(
     alphabet=st.characters(
         whitelist_categories=("L", "N", "Zs", "P", "Mn", "Cf", "Cc", "Zl"),
         whitelist_characters="\n\r\t",
-        max_codepoint=0x9FFF,
+        max_codepoint=0x10FFFF,
     ),
     max_size=200,
 )
@@ -124,8 +127,88 @@ class TestOracleDifferential:
         assert reference_minhash_tokens("Hello, WORLD!") == ["hello", ",", "world", "!"]
         assert reference_minhash_tokens("a\tb\nc\r\nd") == ["a", "b", "c", "d"]
         assert reference_minhash_tokens("") == []
+        assert reference_minhash_tokens("我爱北京 天安门") == [
+            "我",
+            "爱",
+            "北",
+            "京",
+            "天",
+            "安",
+            "门",
+        ]
+        assert reference_minhash_tokens("a b　c") == ["a", "b", "c"]
+        assert reference_minhash_tokens("\x1f\u0301 b") == ["\x1f\u0301", "b"]
+        # No NFC in this path (unlike normalize): a precomposed accent and
+        # its decomposed spelling stay byte-distinct tokens.
+        assert reference_minhash_tokens("é É") == ["é", "é"]
         assert minhash_signature("Hello, WORLD!") == minhash_signature("hello, world!")
         assert minhash_signature("a\tb\nc") == minhash_signature("a b\nc")
+
+    def test_whitespace_skip_matches_the_documented_25_codepoints(self) -> None:
+        # The _WHITESPACE transcription drift gate: the oracle's skip set
+        # is transcribed from Rust's char::is_whitespace (NOT Python's
+        # str.isspace, which also counts U+001C..U+001F). Every documented
+        # member must skip, and the U+001C..U+001F controls Python counts
+        # but Rust keeps must survive as real tokens -- a transcription
+        # edit in either direction fails here instead of silently
+        # re-fingerprinting every corpus through the oracle. The probe is
+        # solo-character: the skip fires on segments made ENTIRELY of
+        # whitespace, so each documented member alone must vanish -- while
+        # mid-word glue behavior (U+202F/U+00A0 keep "a b" one segment)
+        # is the segmenter's own break contract, not the skip's, and is
+        # pinned by the segmentation gate instead.
+        from reference import _WHITESPACE
+
+        assert sorted(map(ord, _WHITESPACE)) == [
+            0x0009,
+            0x000A,
+            0x000B,
+            0x000C,
+            0x000D,
+            0x0020,
+            0x0085,
+            0x00A0,
+            0x1680,
+            0x2000,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0x2006,
+            0x2007,
+            0x2008,
+            0x2009,
+            0x200A,
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+        ]
+        for ch in sorted(_WHITESPACE):
+            assert reference_minhash_tokens(ch) == [], f"U+{ord(ch):04X} not skipped"
+            assert reference_minhash_tokens(ch * 3) == [], f"U+{ord(ch):04X}x3 not skipped"
+        for cp in range(0x001C, 0x0020):
+            assert reference_minhash_tokens(chr(cp)) == [chr(cp)], f"U+{cp:04X} wrongly skipped"
+
+    def test_dedup_sweep_agrees_with_the_oracle_on_repeated_tokens(self) -> None:
+        # The dedup-first sweep's load-bearing equality: minima over
+        # occurrences equal minima over the distinct set, so the core
+        # (which updates each distinct shingle once) must agree with the
+        # per-occurrence oracle exactly where the sets differ most -- the
+        # repeated-token pathology ("ab ".repeat(200): 400 occurrences,
+        # ONE distinct shingle) and a 3-token-period text (150
+        # occurrences, 3 distinct shingles).
+        for text in ("ab " * 200, "ab cd ef " * 50):
+            for kwargs in (
+                {},
+                {"num_perm": 8, "seed": 42},
+                {"num_perm": 16, "shingle_size": 2, "seed": -1},
+            ):
+                assert minhash_signature(text, **kwargs) == reference_minhash_signature(
+                    text, **kwargs
+                ), f"{text[:12]!r}... {kwargs}"
 
 
 class TestGoldenPins:
@@ -426,6 +509,38 @@ class TestBoundsContract:
         assert sig == [_MINHASH_EMPTY] * 128
         assert elapsed < 5.0, f"huge shingle_size took {elapsed:.2f}s"
 
+    def test_huge_shingle_size_over_large_text_is_sentinel_without_retention(self) -> None:
+        # HIGH1: a shingle wider than the token stream must answer the
+        # sentinel WITHOUT retaining the stream. The pre-fix sweep grew the
+        # window deque to min(tokens, shingle_size), so ~13.5MB of prose at
+        # shingle_size=10**9 retained ~2.7M token Strings (~116MB child peak
+        # on the dev box, macOS/arm64) for an answer that is always the
+        # sentinel. The fix counts tokens retention-free when the width
+        # exceeds the stream, so the child peak stays near the tokenizer
+        # transient. Peak RSS is read from the reaped child (POSIX
+        # RUSAGE_CHILDREN; bytes on darwin, KiB on linux), with a ~2x
+        # margin under the measured pre-fix peak.
+        import os
+        import resource
+        import subprocess
+        import sys
+
+        prog = (
+            "import tors; big = 'the quick brown fox jumps over the lazy dog. ' * 300_000; "
+            "sig = tors.minhash_signature(big, shingle_size=10**9); "
+            "assert sig == [2**64 - 1] * 128, 'not sentinel'"
+        )
+        started = time.perf_counter()
+        completed = subprocess.run(
+            [sys.executable, "-c", prog], capture_output=True, text=True
+        )
+        elapsed = time.perf_counter() - started
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        peak_mb = peak / (1024 * 1024) if os.uname().sysname == "Darwin" else peak / 1024
+        assert elapsed < 60.0, f"huge window over large text took {elapsed:.2f}s"
+        assert peak_mb < 80.0, f"huge window retained the stream: {peak_mb:.1f}MB child peak"
+
     def test_values_are_in_the_affine_range_or_sentinel(self) -> None:
         # Every real minimum is an affine output in [0, 2^61 - 1); the only
         # value outside that range the API can ever return is the sentinel.
@@ -490,6 +605,52 @@ class TestSeedContract:
             minhash_signature(_FOX, seed=True)  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             minhash_signature(_FOX, seed=False)  # type: ignore[arg-type]
+
+    def test_index_returning_bool_is_rejected(self) -> None:
+        # The __index__ result is launder-checked the same way as the seed
+        # itself: an __index__ returning True/False is the same caller bug
+        # one dispatch removed (the pre-fix binding reduced it to 1/0).
+        class BoolIndex:
+            def __index__(self) -> int:
+                return True  # type: ignore[return-value]
+
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, seed=BoolIndex())  # type: ignore[arg-type]
+
+    def test_index_that_raises_propagates_its_own_error(self) -> None:
+        # __index__ is caller code: its own failure propagates unchanged,
+        # never masked as a seed TypeError (the pre-fix binding mapped
+        # every __index__ failure, including the caller's own raise, to
+        # "seed must be an int").
+        class Raising:
+            def __index__(self) -> int:
+                raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            minhash_signature(_FOX, seed=Raising())  # type: ignore[arg-type]
+
+    def test_index_without_and_is_accepted_exactly_once(self) -> None:
+        # The reduction dispatches the __index__ slot, never the
+        # instance's own __and__: an int-like with a hostile __and__
+        # reduces identically, and __index__ runs exactly once.
+        calls = 0
+
+        class IndexOnly:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def __index__(self) -> int:
+                nonlocal calls
+                calls += 1
+                return self._value
+
+            def __and__(self, other: object) -> int:
+                raise AssertionError("__and__ must never be dispatched")
+
+        assert minhash_signature(_FOX, seed=IndexOnly(5)) == minhash_signature(  # type: ignore[arg-type]
+            _FOX, seed=5
+        )
+        assert calls == 1, f"__index__ dispatched {calls}x"
 
 
 class TestJaccardProperty:
@@ -623,6 +784,41 @@ class TestArgumentContract:
         with pytest.raises(TypeError):
             minhash_signature(_FOX, num_perm=128.0)  # type: ignore[arg-type]
 
+    def test_bool_sizes_are_rejected(self) -> None:
+        # bool IS int, so True would launder to 1 through a plain i64
+        # extraction -- the same caller-bug class as a bool seed, and the
+        # binding rejects it the same way (the pre-fix binding accepted
+        # num_perm=True as 1 and shingle_size=True as 1).
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, num_perm=True)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, num_perm=False)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, shingle_size=True)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, shingle_size=False)  # type: ignore[arg-type]
+
+    def test_huge_int_sizes_raise_overflow_error(self) -> None:
+        # An int outside the i64 range the binding extracts raises pyo3's
+        # own OverflowError at extraction, never a ValueError -- the
+        # truncate_to_bounds-identical pattern api.md documents.
+        with pytest.raises(OverflowError):
+            minhash_signature(_FOX, num_perm=10**30)  # type: ignore[arg-type]
+        with pytest.raises(OverflowError):
+            minhash_signature(_FOX, shingle_size=10**30)  # type: ignore[arg-type]
+
+    def test_raising_index_sizes_propagate_their_own_error(self) -> None:
+        # Sizes ride the same __index__ protocol as the seed: a raising
+        # __index__ propagates unchanged.
+        class Raising:
+            def __index__(self) -> int:
+                raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            minhash_signature(_FOX, num_perm=Raising())  # type: ignore[arg-type]
+        with pytest.raises(RuntimeError, match="boom"):
+            minhash_signature(_FOX, shingle_size=Raising())  # type: ignore[arg-type]
+
     def test_non_int_shingle_size_raises_type_error(self) -> None:
         with pytest.raises(TypeError):
             minhash_signature(_FOX, shingle_size=3.5)  # type: ignore[arg-type]
@@ -634,6 +830,49 @@ class TestArgumentContract:
 
 
 class TestPerformanceSanity:
+    @staticmethod
+    def _distinct_rich(target_bytes: int) -> str:
+        # Deterministic distinct-rich corpus: zero-padded hex-counter
+        # words, every token unique, so (unlike the repeated-sentence
+        # prose) the distinct-shingle set is ~the token count and the
+        # O(distinct x num_perm) min-sweep actually runs. The worst-case
+        # shape the api.md caller-size bound is calibrated on.
+        unit = 9  # "w{:07x} " per word
+        n = max(1, target_bytes // unit)
+        return "".join(f"w{i:07x} " for i in range(n))
+
+    def test_wide_shingle_timing_row(self) -> None:
+        # HIGH2 honesty pin: each step re-hashes the whole window, so the
+        # hashing pass is O(tokens x shingle_size), not O(tokens). Wide
+        # windows on 100 KiB must still complete -- a tripwire with a wide
+        # ceiling, not a target -- and the row documents the scaling the
+        # cost formula discloses (dev-box numbers, macOS/arm64: shingle 3
+        # ~1.6 ms, 64 and 256 rising ~linearly in the width; see
+        # docs/performance.md).
+        from reference import prose
+
+        text = prose(100 * 1024)
+        for shingle_size in (3, 64, 256):
+            started = time.perf_counter()
+            sig = minhash_signature(text, shingle_size=shingle_size)
+            elapsed = time.perf_counter() - started
+            assert len(sig) == 128
+            assert elapsed < 30.0, f"shingle {shingle_size} took {elapsed:.2f}s"
+
+    def test_distinct_rich_worst_case_completes_within_budget(self) -> None:
+        # HIGH3 worst-case pin: 1 MiB of distinct-rich text at k=1024 is
+        # ~100M affine ops with no deadline_ms on this call, so the lever
+        # is the caller's own input size (api.md's bound). The ceiling is
+        # ~10x the dev-box nominal (macOS/arm64); the published numbers
+        # live in docs/performance.md.
+        for num_perm, ceiling in ((128, 15.0), (1024, 60.0)):
+            text = self._distinct_rich(1024 * 1024)
+            started = time.perf_counter()
+            sig = minhash_signature(text, num_perm=num_perm)
+            elapsed = time.perf_counter() - started
+            assert len(sig) == num_perm
+            assert all(0 <= v < 2**61 for v in sig)
+            assert elapsed < ceiling, f"k={num_perm} distinct-rich took {elapsed:.2f}s"
     def test_large_input_completes_quickly(self) -> None:
         # ~13.5 MB, the simhash sanity cell's corpus shape: the detached
         # tokenize+shingle+hash+sweep pass measures ~0.25 s at k=128 (the

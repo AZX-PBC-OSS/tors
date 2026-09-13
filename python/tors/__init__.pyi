@@ -963,8 +963,10 @@ def simhash128(text: str) -> int: ...
 # bounds); an int outside the i64 range the binding extracts raises
 # OverflowError instead (pyo3, the truncate_to_bounds-identical
 # pattern); seed is any int reduced mod
-# 2**64 (two's complement for negatives), accepted via __index__ (numpy
-# integers work; bool is rejected with TypeError). GIL: borrow + validation
+# 2**64 (two's complement for negatives), and all three ride __index__
+# (numpy integers work; bool is rejected with TypeError in every
+# position, including as an __index__ result; a raising __index__
+# propagates). GIL: borrow + validation
 # under the GIL, the whole pass under one detach, then the
 # num_perm-element int list. No aio twin: a fast one-shot call.
 def minhash_signature(

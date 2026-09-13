@@ -3304,27 +3304,47 @@ binding extracts (`num_perm=10**30`) raises pyo3's own `OverflowError`
 at extraction instead — the `truncate_to_bounds`-identical pattern for
 every i64-typed size argument.
 `seed` is any int, reduced mod `2**64` with two's-complement semantics
-for negatives (`seed=-1` is `seed=2**64 - 1`), accepted through the
-`__index__` protocol (numpy integers and other int-likes work); a
-non-int `seed` — including `bool`, which is rejected explicitly rather
-than laundered through `True == 1` — raises `TypeError`. A non-str
+for negatives (`seed=-1` is `seed=2**64 - 1`). All three int parameters
+are accepted through the `__index__` protocol (numpy integers and other
+int-likes work; the slot is dispatched, never the instance's own
+`__and__`, so masking cannot alter the value) — and `__index__` itself
+is caller code: it runs exactly once, with its own side effects, and
+its own failure propagates unchanged rather than masking as a parameter
+error. `bool` is rejected explicitly in every position (`num_perm=True`
+is a `TypeError`, not 1), including as an `__index__` result; anything
+without `__index__` (str, float, None, bytes) and an `__index__`
+returning a non-int are `TypeError`. A non-str
 `text` raises `TypeError`; text bearing lone surrogates raises
 `UnicodeEncodeError` (the crate-wide str-borrow contract). Cost is
-`O(tokens)` hashing plus `O(distinct × num_perm)` in the min-sweep, the
+`O(tokens × shingle_size)` hashing (every step re-hashes the whole live
+window under the length-prefixed framing — widths 64/256 on 100 KiB cost
+~9/~32 ms against ~2 ms at the default width on the dev box,
+macOS/arm64, release) plus `O(distinct × num_perm)` in the min-sweep, the
 dedup-first shape: each distinct shingle hash updates the minima once,
 so a repeated-token document rides its handful of distinct shingles
 rather than its thousands of occurrences. Resident memory is the live
-`shingle_size`-deep token window plus the distinct-hash set plus the
-`num_perm` coefficients — the token list is streamed, never retained
+`shingle_size`-deep token window — `O(min(tokens, shingle_size))` —
+plus the distinct-hash set plus the `num_perm` coefficients: the token
+list is streamed, never retained
 (the pre-fix shape held the whole `Vec<String>` across the sweep, a
 measured ~77 MB transient at 12 MB of prose: 133 MB peak vs 56 MB after,
-same interpreter and corpus baseline). There is no
+same interpreter and corpus baseline). Past 1024 tokens of width the
+short stream never materializes at all: a retention-free token count
+decides "fewer tokens than the width" first, so a huge `shingle_size`
+over a large text answers the sentinel at the tokenizer transient
+(~13.5 MB at width 10⁹ peaks ~30 MB, not the ~145 MB the retaining
+shape held, same dev box). There is no
 `deadline_ms` on this call (unlike `diff_opcodes`): the sweep has no
-superlinear shape, only the linear one above, so the lever is the
+superlinear shape, only the linear ones above, so the lever is the
 caller's own input size — bound it before calling (truncate, chunk, or
-`max_bytes`-gate the read) rather than after. Measured (macOS/arm64):
-~13.5 MB of repetitive prose at the default 128 permutations completes
-in ~0.25 s; the suite's 2.5 s regression ceiling is ~10x that nominal
+`max_bytes`-gate the read) rather than after. Measured (dev box,
+macOS/arm64, release): ~13.5 MB of repetitive prose at the default 128
+permutations completes in ~0.25 s, while 1 MiB of distinct-rich text
+(every token unique, the `minhash_signature_distinct` bench row and the
+Python worst-case cell) costs ~104 ms at k=128 and ~226 ms at k=1024
+(criterion medians, 10 samples) — the ~100M-affine-op worst case the
+caller bound is calibrated on; the suite's 2.5 s regression ceiling is
+~10x the repetitive nominal
 (see `tests/test_minhash.py`), a tripwire, not a target. No `aio`
 twin: a fast one-shot call.
 

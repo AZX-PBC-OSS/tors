@@ -40,10 +40,13 @@ const INVARIANT_FLOOR: usize = 256;
 enum Input {
     /// Arbitrary raw text and parameters: panic-freedom, determinism,
     /// the length/value shape, and the empty-set <-> sentinel
-    /// equivalence. `num_perm` spans the whole binding range 1..=1024
-    /// and `shingle_size` spans 0..=1029: 0 exercises the core's
-    /// malformed-width guard (the binding rejects it; the core must still
-    /// never panic) and the large end the short-of-a-window sentinel.
+    /// equivalence. `num_perm` spans 0..=1024: 0 exercises the core's
+    /// empty-signature guard (the binding rejects it; the core must still
+    /// never panic) and the top of the binding range rides the full
+    /// coefficient stream; `shingle_size` spans 0..=1029: 0 exercises the
+    /// core's malformed-width guard (the binding rejects it; the core
+    /// must still never panic) and the large end the short-of-a-window
+    /// sentinel (through the wide-window count-first path at the top).
     Raw {
         data: Vec<u8>,
         num_perm: u16,
@@ -153,7 +156,9 @@ fn check_signature_contract(text: &str, num_perm: usize, shingle_size: usize, se
 
 /// Arbitrary seed bytes to the u64 the core takes: the first 8 bytes
 /// little-endian (short inputs zero-pad, long inputs truncate — every
-/// bytestring maps, none panics).
+/// bytestring maps, none panics). A shape-only probe: it exercises the
+/// byte→u64 reduction plumbing, not the binding's `__index__`/bool
+/// contract (pinned separately in `tests/test_minhash.py`).
 fn seed_from_bytes(seed_bytes: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
     let n = seed_bytes.len().min(8);
@@ -173,7 +178,7 @@ fuzz_target!(|input: Input| {
                 return;
             }
             let text = String::from_utf8_lossy(&data);
-            let num_perm = 1 + num_perm as usize % 1024;
+            let num_perm = num_perm as usize % 1025;
             let shingle_size = shingle_size as usize % 1030;
             check_signature_contract(&text, num_perm, shingle_size, seed);
         }
@@ -187,7 +192,7 @@ fuzz_target!(|input: Input| {
                 return;
             }
             let text = String::from_utf8_lossy(&data);
-            let num_perm = 1 + num_perm as usize % 1024;
+            let num_perm = num_perm as usize % 1025;
             let shingle_size = shingle_size as usize % 1030;
             check_signature_contract(&text, num_perm, shingle_size, seed_from_bytes(&seed_bytes));
         }
@@ -198,7 +203,7 @@ fuzz_target!(|input: Input| {
             seed,
         } => {
             let text = EXACT_STRINGS[index as usize % EXACT_STRINGS.len()];
-            let num_perm = 1 + num_perm as usize % 1024;
+            let num_perm = num_perm as usize % 1025;
             let shingle_size = shingle_size as usize % 1030;
             check_signature_contract(text, num_perm, shingle_size, seed);
         }

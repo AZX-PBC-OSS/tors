@@ -27,10 +27,10 @@
 //! `sqrt(J(1 - J) / k)` — `O(1/sqrt(k))`, about 0.044 at `k = 128` and
 //! the worst case `J = 0.5`, halving with every 4x in `num_perm`. The
 //! `h_i` are affine maps over the Mersenne prime field (below), a
-//! 2-wise-independent family that approximates the min-wise
-//! independence the exact statement needs with negligible residual bias
-//! (measured below 0.003 over 2280 controlled pairs, the same battery
-//! that compared the candidate shingle hashes).
+//! 2-wise-independent family approximating the min-wise independence the
+//! exact statement needs, with residual bias negligible beside the
+//! `O(1/sqrt(k))` estimator noise (the fixture pairs pinned in
+//! `tests/test_minhash.py` sit inside the `k = 128` 2-sigma band).
 //!
 //! # Tokenization and shingling
 //!
@@ -210,7 +210,11 @@ fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>) -> u64 {
     let mut hasher = XxHash64::with_seed(0);
     hasher.write(&count.to_le_bytes());
     for token in tokens {
-        hasher.write(&(token.len() as u64).to_le_bytes());
+        hasher.write(
+            &u64::try_from(token.len())
+                .expect("token longer than u64::MAX bytes")
+                .to_le_bytes(),
+        );
         hasher.write(token.as_bytes());
     }
     hasher.finish()
@@ -220,13 +224,54 @@ fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>) -> u64 {
 /// the framing through.
 #[cfg(test)]
 fn hash_window(window: &[String]) -> u64 {
-    hash_tokens(window.len() as u64, window.iter().map(String::as_str))
+    hash_tokens(
+        u64::try_from(window.len()).expect("window longer than u64::MAX tokens"),
+        window.iter().map(String::as_str),
+    )
 }
 
 /// [`hash_tokens`] over the live streaming window: the spelling the sweep
 /// rides, so the window never materializes outside the deque.
 fn hash_live_window(window: &VecDeque<String>) -> u64 {
-    hash_tokens(window.len() as u64, window.iter().map(String::as_str))
+    hash_tokens(
+        u64::try_from(window.len()).expect("window longer than u64::MAX tokens"),
+        window.iter().map(String::as_str),
+    )
+}
+
+/// Widths above this take the count-first path: a window wider than 1024
+/// tokens is past every documented use (the default 3, the bench's
+/// widest timing row at 256), so the short-stream case -- the only case
+/// where the deque would grow to the token count instead of the width --
+/// is decided by a retention-free token count first (see
+/// `token_count_up_to`), and the deque never materializes the stream for
+/// an answer that is always the empty-set sentinel.
+const WIDE_WINDOW_COUNT_FIRST: usize = 1024;
+
+/// The token count up to `limit`, streamed without retaining anything:
+/// the retention-free probe wide windows ride before deciding the stream
+/// can ever fill one. Returns `min(tokens, limit)` -- callers comparing
+/// against `limit` learn exactly "fewer than `limit`" vs "at least
+/// `limit`" with at most `limit` tokens walked.
+fn token_count_up_to(text: &str, limit: usize) -> usize {
+    let mut n = 0usize;
+    for _ in normalized_word_tokens_stream(text) {
+        n += 1;
+        if n >= limit {
+            break;
+        }
+    }
+    n
+}
+
+/// Initial distinct-hash capacity guess from the byte length: ~6 bytes per
+/// token on prose bounds the window count from above, clamped so tiny
+/// inputs do not over-reserve and huge inputs do not pre-grab memory the
+/// set may never need (the repeated-token pathology needs exactly one
+/// slot). A heuristic only -- the set grows by rehash exactly as before,
+/// and the answer is bit-identical either way.
+fn distinct_capacity_guess(text: &str) -> usize {
+    (text.len() / 6).clamp(64, 8192)
 }
 
 /// The signature: `num_perm` min-hashes of the document's
@@ -237,21 +282,37 @@ fn hash_live_window(window: &VecDeque<String>) -> u64 {
 /// ride the crate's one tokenizer (`normalized_word_tokens_stream`, the
 /// `tf_idf`/`bm25_rank` stream with every knob off), streamed through a
 /// `shingle_size`-deep window: only the live window is ever resident, not
-/// the token list (the deque is grown, never pre-reserved, so a huge
-/// `shingle_size` reserves nothing and answers the sentinel once the
-/// stream ends short of a full window).
+/// the token list. The window holds at most `shingle_size` tokens --
+/// resident window memory is `O(min(tokens, shingle_size))` -- except
+/// through the wide-window short-circuit: widths above
+/// `WIDE_WINDOW_COUNT_FIRST` first count tokens retention-free, and a
+/// stream ending short of a full window answers the sentinel with `O(1)`
+/// window memory instead of materializing the whole stream in the deque.
 ///
 /// The sweep is dedup-first: each distinct shingle hash updates the minima
-/// once, so the pass is O(tokens) hashing plus O(distinct × num_perm) in
-/// the sweep (a repeated-token document rides its one distinct shingle,
-/// not its thousands of occurrences). Minima over occurrences equal minima
-/// over the distinct set, so the answer is byte-identical to the naive
-/// per-occurrence sweep. Note on the `HashSet`: it rides the std
-/// `RandomState` hasher, whose per-process seed would matter if iteration
-/// order escaped — it cannot here (only the per-position minima and the
-/// set cardinality escape, both order-independent), so the signature stays
+/// once, so the pass is `O(tokens × shingle_size)` hashing (every step
+/// re-hashes the whole live window under the length-prefixed framing) plus
+/// `O(distinct × num_perm)` in the sweep (a repeated-token document rides
+/// its one distinct shingle, not its thousands of occurrences). Minima over
+/// occurrences equal minima over the distinct set, so the answer is
+/// byte-identical to the naive per-occurrence sweep. The distinct set is
+/// pre-sized from `distinct_capacity_guess` (a heuristic; growth rehashes
+/// as before). Note on the `HashSet`: it rides the std `RandomState`
+/// hasher, whose per-process seed would matter if iteration order
+/// escaped — it cannot here (only the per-position minima and the set
+/// cardinality escape, both order-independent), so the signature stays
 /// fixture-grade deterministic; see also `distinct_shingle_count`.
+///
+/// `num_perm` carries a core-side sanity ceiling (1M elements, 8 MiB) so a
+/// direct Rust caller cannot spell `vec![u64::MAX; usize::MAX]` past the
+/// allocator: the pyo3 binding caps at 1024 long before this, and the fuzz
+/// target ranges `num_perm` over 0..=1024 to keep the `num_perm == 0`
+/// empty-signature guard exercised.
 pub fn signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) -> Vec<u64> {
+    assert!(
+        num_perm <= 1 << 20,
+        "num_perm {num_perm} exceeds the core sanity ceiling (2^20; the binding caps at 1024)"
+    );
     let mut sig = vec![u64::MAX; num_perm];
     // shingle_size == 0 is unreachable from the pyo3 surface (the binding
     // validates >= 1) and nonsensical as a window width; the sentinel
@@ -260,9 +321,19 @@ pub fn signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) ->
     if num_perm == 0 || shingle_size == 0 {
         return sig;
     }
+    // Wide-window short-circuit: fewer tokens than the width means the
+    // empty set, decided here by a retention-free count so the deque below
+    // never grows to the token count for an answer fixed in advance. When
+    // the count reaches the width the stream CAN fill a window and the
+    // sweep runs as usual.
+    if shingle_size > WIDE_WINDOW_COUNT_FIRST
+        && token_count_up_to(text, shingle_size) < shingle_size
+    {
+        return sig;
+    }
     let coefficients = coefficients(num_perm, seed);
     let mut window: VecDeque<String> = VecDeque::new();
-    let mut distinct: HashSet<u64> = HashSet::new();
+    let mut distinct: HashSet<u64> = HashSet::with_capacity(distinct_capacity_guess(text));
     for token in normalized_word_tokens_stream(text) {
         window.push_back(token);
         if window.len() > shingle_size {
@@ -302,8 +373,15 @@ pub fn distinct_shingle_count(text: &str, shingle_size: usize) -> usize {
     if shingle_size == 0 {
         return 0;
     }
+    // The same wide-window short-circuit as `signature`: a stream ending
+    // short of a full wide window is the empty set, decided retention-free.
+    if shingle_size > WIDE_WINDOW_COUNT_FIRST
+        && token_count_up_to(text, shingle_size) < shingle_size
+    {
+        return 0;
+    }
     let mut window: VecDeque<String> = VecDeque::new();
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut seen: HashSet<u64> = HashSet::with_capacity(distinct_capacity_guess(text));
     for token in normalized_word_tokens_stream(text) {
         window.push_back(token);
         if window.len() > shingle_size {
@@ -336,9 +414,17 @@ mod tests {
             .map(|i| {
                 let window = &tokens[i..i + shingle_size];
                 let mut frame = Vec::new();
-                frame.extend_from_slice(&(window.len() as u64).to_le_bytes());
+                frame.extend_from_slice(
+                    &u64::try_from(window.len())
+                        .expect("window longer than u64::MAX tokens")
+                        .to_le_bytes(),
+                );
                 for token in window {
-                    frame.extend_from_slice(&(token.len() as u64).to_le_bytes());
+                    frame.extend_from_slice(
+                        &u64::try_from(token.len())
+                            .expect("token longer than u64::MAX bytes")
+                            .to_le_bytes(),
+                    );
                     frame.extend_from_slice(token.as_bytes());
                 }
                 XxHash64::oneshot(0, &frame)
@@ -441,11 +527,18 @@ mod tests {
             frame.extend_from_slice(token.as_bytes());
         }
         assert_eq!(hash_window(&window), XxHash64::oneshot(0, &frame));
-        // A token boundary the join could never disambiguate stays
-        // distinct under the framing.
+        // Window boundaries the framing must disambiguate: a one-token
+        // window holding the separator-bearing token is a different frame
+        // from the two-token window spelling the same bytes apart, and
+        // ["ab", "c"] frames differently from ["a", "bc"] (the lengths
+        // travel with the bytes, so no boundary can hide).
         assert_ne!(
             hash_window(&["\x1f\u{301}".to_string()]),
-            hash_window(&["\x1f".to_string(), "\u{301}".to_string()][..1])
+            hash_window(&["\x1f".to_string(), "\u{301}".to_string()])
+        );
+        assert_ne!(
+            hash_window(&["ab".to_string(), "c".to_string()]),
+            hash_window(&["a".to_string(), "bc".to_string()])
         );
     }
 
@@ -510,6 +603,52 @@ mod tests {
             vec![u64::MAX; 4]
         );
         assert_eq!(distinct_shingle_count("one two three", usize::MAX), 0);
+    }
+
+    #[test]
+    fn dedup_sweep_agrees_with_naive_on_repeated_tokens() {
+        // The dedup-first sweep's load-bearing equality where the
+        // occurrence and distinct sets differ most: "ab ".repeat(200) is
+        // hundreds of occurrences of ONE distinct shingle, the period-3
+        // text hundreds of occurrences of three. Minima over occurrences
+        // equal minima over the distinct set, so the core must match the
+        // dedup-free naive spelling exactly here, not just on short
+        // strings.
+        for text in [("ab ".repeat(200)), ("ab cd ef ".repeat(50))] {
+            for (num_perm, shingle_size, seed) in
+                [(128usize, 3usize, 0u64), (8, 3, 42), (16, 2, u64::MAX)]
+            {
+                assert_eq!(
+                    signature(&text, num_perm, shingle_size, seed),
+                    naive_signature(&text, num_perm, shingle_size, seed),
+                    "dedup/naive disagreement on repeated tokens at k={num_perm} s={shingle_size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_window_over_large_text_answers_sentinel() {
+        // The count-first path's contract at scale: ~1 MB of prose at a
+        // wider-than-stream width is the empty set, decided without ever
+        // growing the deque to the token count.
+        let text = "the quick brown fox jumps over the lazy dog. ".repeat(24_000);
+        assert_eq!(signature(&text, 4, usize::MAX, 0), vec![u64::MAX; 4]);
+        assert_eq!(distinct_shingle_count(&text, usize::MAX), 0);
+        // The counter itself: 10 word tokens per sentence ("the quick
+        // brown fox jumps over the lazy dog" plus its period), all walked
+        // retention-free when the limit exceeds the stream.
+        assert_eq!(token_count_up_to(&text, usize::MAX), 240_000);
+        assert_eq!(token_count_up_to(&text, 10), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "core sanity ceiling")]
+    fn num_perm_past_the_sanity_ceiling_panics() {
+        // A direct Rust caller spelling vec![MAX; usize::MAX] must get a
+        // named panic, not an allocator abort: the ceiling sits far above
+        // the binding's 1024 cap.
+        let _ = signature("one two three", (1 << 20) + 1, 3, 0);
     }
 
     #[test]

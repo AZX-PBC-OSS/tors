@@ -45,7 +45,20 @@ otherwise use:
   corpus rides a handful of distinct shingles, so 1 MiB costs ~17 ms at
   `num_perm=512` exactly as at the default, and 1 KiB costs ~0.04 ms even
   at 512 (pre-dedup this row read 0.03/3.6/38.2 ms with ~100 ms at 1 MiB
-  under 512: the sweep, not the tokenize, dominated there).
+  under 512: the sweep, not the tokenize, dominated there). The hashing
+  pass itself is O(tokens × shingle_size) — every step re-hashes the
+  whole live window — so wide windows scale with the width: 100 KiB at
+  shingle 3/64/256 costs ~2/~9/~32 ms (dev box, macOS/arm64, release,
+  min-of-2). The worst case the caller-size bound is calibrated on is
+  the distinct-rich corpus (every token unique: the
+  `minhash_signature_distinct` bench row, k=128/1024, and the Python
+  worst-case cell): 1 MiB costs ~104 ms at k=128 and ~226 ms at k=1024
+  (criterion medians, 10 samples, same dev box) — ~100M affine ops with
+  no `deadline_ms` on the call, hence the bound-the-input-first lever
+  api.md documents. Resident window memory is O(min(tokens,
+  shingle_size)), and widths past 1024 tokens over a short stream never
+  materialize at all (retention-free count first: ~13.5 MB at width 10⁹
+  peaks ~30 MB, not the ~145 MB the retaining shape held).
 - `first_invalid_charset`: a 1000-item identifier batch validates in ~14 µs
   against ~97 µs for the per-item anchored-regex loop (~7x), and the
   batch-only shape is the point — a per-item tors call (~0.25 µs) loses to

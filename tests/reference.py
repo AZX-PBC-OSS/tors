@@ -882,7 +882,14 @@ def reference_minhash_tokens(text: str) -> list[str]:
     (Rust's ``char::is_whitespace`` set, the module comment's parity note),
     each lowercased with Python's full Unicode ``str.lower`` (the same full
     case mapping, SpecialCasing included, Rust's ``str::to_lowercase``
-    implements)."""
+    implements).
+
+    Known skew, named: the two lowercasings ride different Unicode tables
+    (the interpreter's own vs the ``unicode-segmentation``-era tables the
+    crate pins), so a future SpecialCasing revision could fold one exotic
+    token differently on the two sides. The oracle differential (astral
+    draws included) and the tricky-unicode rows are the tripwire; a
+    divergence fails there, not silently."""
     import tors
 
     tokens: list[str] = []
