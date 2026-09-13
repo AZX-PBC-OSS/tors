@@ -355,6 +355,38 @@ SEARCH_DENSE_PATTERNS: tuple[str, ...] = (
 # search-side choice). The few-matches shape the GIL cell measures.
 SEARCH_SPARSE_PATTERNS: tuple[str, ...] = ("monthly", "weekly", "annually")
 
+# The escape-parity scan's needle and corpora (the issue #50 surface):
+# ``tors.contains_unescaped`` / ``tors.find_unescaped`` answer, over raw bytes,
+# whether a six-byte escape text is "live" (preceded by an even run of
+# backslashes) or literal text. ``benches/search.rs`` mirrors both constants
+# (the needle and the false-positive injection unit), and
+# ``tests/test_bench_corpus_parity.py`` pins the mirrors, so the bench numbers
+# and the Python-side cell numbers cross-reference on the same bytes.
+UNESCAPED_NEEDLE: bytes = b"\\u0000"
+
+# orjson's rendering of the literal six-character TEXT "\u0000": the
+# backslash itself escaped, so the text spans SEVEN bytes (two backslashes
+# then ``u0000``) and the needle occurs once, at +1, behind a single
+# backslash — an odd run, a rejected hit. Every occurrence in the
+# false-positive corpus is therefore a false positive: the exact shape a
+# confirm-by-re-parse walk exists to clear, and the hit-dense workload the
+# bench and the GIL/wall cells drive (a corpus of real NUL escapes would
+# answer at the first hit and measure nothing).
+_ESCAPE_LITERAL_TEXT = "\\\\u0000"
+
+
+def unescaped_false_positive(target_bytes: int) -> bytes:
+    """Prose with one literal escape text (the seven-byte two-backslash
+    rendering) injected per sentence: pure ASCII, deterministic,
+    unit-quantized like every ``reference`` corpus, and every needle
+    occurrence sits behind an odd backslash run, so the scan rejects every
+    hit and runs to the end — the worst case for both wall time and GIL
+    release (no early exit), at a realistic orjson false-positive density
+    (one per ~140-byte sentence)."""
+    return _repeat_to(target_bytes, (_PROSE_SENTENCE + _ESCAPE_LITERAL_TEXT) * 4 + "\n\n").encode(
+        "utf-8"
+    )
+
 
 # --- shared differential oracles -------------------------------------------------------
 #
@@ -513,6 +545,39 @@ def reference_replace_many(text: str, replacements: dict[str, str]) -> str:
             out.append(text[pos])
             pos += 1
     return "".join(out)
+
+
+_BACKSLASH = 0x5C  # b"\\"[0], the parity byte the whole escape question turns on
+
+
+def reference_find_unescaped(haystack: bytes, needle: bytes) -> int:
+    """The escape-parity oracle (the ``reference_find_patterns`` shape): a
+    brute-force backward parity walk, pure-Python ``bytes`` operations only,
+    independent of every implementation detail on the tors side (memmem
+    engine, carried run state, resume arithmetic). An occurrence of ``needle``
+    at offset ``i`` counts only when the maximal run of backslashes
+    immediately before ``i`` has even length (0 is even: an occurrence at
+    offset 0 is live); a rejected hit advances the scan one byte past the
+    hit, not past the whole match, so self-overlapping needles stay correct;
+    no live occurrence answers ``-1`` (``bytes.find``'s sentinel).
+
+    This is also the manual parity loop the wall cells race: the hand-rolled
+    expression a consumer writes today (find the needle in the raw bytes,
+    count the backslash run before each hit), the exact algorithm TaskQ
+    verified against a re-parse walk before lifting it here."""
+    pos = 0
+    while True:
+        hit = haystack.find(needle, pos)
+        if hit == -1:
+            return -1
+        run = 0
+        j = hit - 1
+        while j >= 0 and haystack[j] == _BACKSLASH:
+            run += 1
+            j -= 1
+        if run % 2 == 0:
+            return hit
+        pos = hit + 1
 
 
 _OPCODE_TAGS = frozenset({"equal", "replace", "delete", "insert"})
