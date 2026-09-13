@@ -2552,16 +2552,19 @@ def uuid_version(value: bytes | str) -> int: ...
 def uuid_parse(value: str) -> bytes: ...
 ```
 
-The UUIDv7 field operations, hand-rolled bit work (no `uuid`-crate dependency:
-generating IDs is not this surface's job — every producer from `uuid.uuid7()`
-to `uuid_utils` already does that — reading the standard time-ordered ID's
-fields back out is). A store keyed by UUIDv7 IDs ends up reimplementing these
-three operations at every site that paginates by recency or buckets by time:
-the 48-bit unix-millisecond timestamp (keyset cursors and time-bucketed
-queries against an ID column), the version nibble that says whether that
-timestamp means anything, and a strict text-to-bytes parse at the
-ID-validation boundary. 16 bytes in, integer out — trivial, which is exactly
-why it keeps getting reimplemented slightly wrong.
+The UUIDv7 field operations: the hex-grammar work (the structural parse
+and the canonical encode) delegated to the Rust `uuid` crate — the uuid-rs
+org's, Apache-2.0 OR MIT, no default features, zero transitive
+dependencies — with tors's own thin strictness layer on top (generating
+IDs is not this surface's job — every producer from `uuid.uuid7()` to
+`uuid_utils` already does that — reading the standard time-ordered ID's
+fields back out is). A store keyed by UUIDv7 IDs ends up reimplementing
+these three operations at every site that paginates by recency or buckets
+by time: the 48-bit unix-millisecond timestamp (keyset cursors and
+time-bucketed queries against an ID column), the version nibble that says
+whether that timestamp means anything, and a strict text-to-bytes parse at
+the ID-validation boundary. 16 bytes in, integer out — trivial, which is
+exactly why it keeps getting reimplemented slightly wrong.
 
 `uuid7_timestamp_ms` returns the leading six bytes as a big-endian
 unix-millisecond timestamp (RFC 9562 section 5.7's `unix_ts_ms` field):
@@ -2589,7 +2592,13 @@ stdlib's permissive union; that closed-set strictness is the same contract
 `b64_decode`'s `validate=True` default and the `errors=`/`boundary=`
 parameters already establish. The divergences are pinned, not accidental:
 `tests/test_uuid.py` proves the stdlib accepts each loose form in the same
-test that pins tors rejecting it.
+test that pins tors rejecting it. The parse mechanics behind the contract:
+`Uuid::parse_str` (the crate's) owns structure and the text-to-bytes
+transcode, and tors's strictness layer is one comparison — accepted text
+must be byte-equal to its parsed value's re-encoded canonical form, which
+is what rejects the crate's (and the stdlib's) loose spellings at exactly
+the canonical grammar. The strict contract is not the crate's default,
+which is precisely why the layer is tors's own.
 
 The int-out pair takes exactly `bytes` (16 bytes, `ValueError` naming the
 count otherwise; `bytearray`/`memoryview` are `TypeError`, the bytes-in
@@ -2623,7 +2632,9 @@ call's own marshalling residue — a detached parse would be overhead for
 its own sake) with the extraction detached after it, keeping the crate's
 GIL-free-core contract uniform across the trio. `uuid_parse` is that
 contract's honest exception: its whole work *is* the 36-byte parse (there
-is no int-out tail to detach) and it runs GIL-held by design, ~0.3µs.
+is no int-out tail to detach) and it runs GIL-held by design, ~70ns a call
+(re-measured after the `uuid`-crate adoption; the crate's const-fn parser
+is faster than the hand-rolled scan it replaced).
 Every per-call GIL-held residue on this surface is sub-microsecond; the
 heartbeat cell in `tests/test_gil_release.py` pins the batch-loop band.
 

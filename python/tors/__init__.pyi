@@ -626,7 +626,8 @@ def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 # sake) with the extraction detached after it, so the int-out pair keeps
 # the crate's GIL-free-core contract uniform. uuid_parse is the trio's
 # zero-detach member: its whole work is that 36-byte parse (no int-out
-# tail exists to detach) and it runs GIL-held by design, ~0.3µs. Exactly
+# tail exists to detach) and it runs GIL-held by design, ~70ns a call
+# (re-measured after the uuid-crate adoption). Exactly
 # bytes or str for the int-out pair (bytearray/memoryview: TypeError, the
 # bytes-in surface's exactly-bytes contract); exactly str for uuid_parse.
 def uuid7_timestamp_ms(value: bytes | str) -> int: ...

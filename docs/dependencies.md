@@ -52,6 +52,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
 | regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package |
 | jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only, no TZDB backend: the accept-list shapes need none |
+| uuid | 1.26.0 | Apache-2.0 OR MIT | uuid_parse/uuid_version/uuid7_timestamp_ms's hex-grammar engine (`src/uuid_impl.rs`): the uuid-rs org crate adopted for the structural parse + canonical encode (the strict-canonical layer on top stays tors's — the crate's parse_str deliberately accepts the loose forms tors rejects, so tors enforces byte-equality with the re-encoded canonical form); default-features off: parse/from_bytes/encode need no features and the config pulls zero transitive dependencies (`cargo tree`-verified); already in the lock as cfb's and pdf_oxide's dependency (the documents engine tree), so the direct edge adds no new package (the aho-corasick/serde_json precedent) — the base wheel gains one zero-dependency crate, the documents wheel gains nothing |
 | pdf_oxide *(optional, `documents`)* | 0.3.78 | MIT OR Apache-2.0 | the documents payload's PDF engine (two-column reading order, link annotations, headings); default features only, and the caret bounds the 0.x line (see Cargo.toml's own comment for the measured rationale) |
 | anydoc *(optional, `documents`)* | 0.2.4 | MIT | the payload's office/text engine (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv) |
 | office_oxide *(optional, `documents`)* | 0.1.10 | MIT OR Apache-2.0 | the payload's caller-selectable `backend="oxide"` lane; already compiled in via pdf_oxide's tree, so the direct edge adds no new package |
@@ -77,14 +78,32 @@ The full transitive closure is machine-checked by the gate; the dev tree
   exact algorithm in the Rust ecosystem. It was already in the lock as a
   transitive dependency (criterion's regex) before find_patterns made it
   direct, so the dependency tree grew by zero packages.
+- `uuid` (the adoption decision): the UUIDv7 helper surface landed
+  hand-rolled first (zero new crates), and was reworked onto the crate per
+  the maintainer policy of preferring maintained, compliant additions over
+  hand-rolled parsing ("every line of code is a maintenance burden"). The
+  split that makes the adoption worth its weight: the hex-to-bytes
+  transcode and the grammar acceptance are the crate's battle-tested code
+  (and it was already compiled into the documents wheel via cfb and
+  pdf_oxide, so the direct edge grew the tree by zero packages), while
+  tors keeps exactly the two parts no crate provides — the
+  strict-canonical contract (byte-equality with the re-encoded canonical
+  form: parse_str deliberately accepts the loose forms tors rejects, so
+  the strictness layer is the point, not the crate's default) and the
+  error-message taxonomy with first-divergent positions (the crate's
+  error type exposes none). The boundary itself is pinned from both
+  sides: tests/test_uuid.py's route battery and src/uuid_impl.rs's
+  adoption-boundary tests call the crate directly, so a uuid 1.x grammar
+  change that moved the boundary fails as a boundary move, not a silent
+  acceptance or rejection shift.
 
 ## Transitive closure
 
-At the current lock state (325 `Cargo.lock` entries including tors-core
-itself, i.e. 324 dependency packages incl. dev and the documents engine
+At the current lock state (330 `Cargo.lock` entries including tors-core
+itself, i.e. 329 dependency packages incl. dev and the documents engine
 tree, re-derived with `cargo metadata --all-features` over the current lock):
-176 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, and anydoc among them), 18
-`Apache-2.0 OR MIT` (chardetng, autocfg), 12 `MIT/Apache-2.0` (version_check,
+179 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, and anydoc among them), 19
+`Apache-2.0 OR MIT` (chardetng, autocfg, uuid), 13 `MIT/Apache-2.0` (version_check,
 winapi, siphasher) plus 2 `Apache-2.0/MIT` (rs_merkle, bytecount) and 1
 `Apache-2.0 / MIT` (fnv), three more spellings of the same dual grant, 10
 `Unlicense OR MIT` (aho-corasick, memchr, jiff) and 4 `Unlicense/MIT` (csv,
@@ -129,7 +148,7 @@ and present in the payload's.
 `make deny` and CI's cargo-deny step run at the repo root and cover the full
 engine tree: `deny.toml`'s `[graph] all-features = true` resolves every cargo
 feature of the workspace into the checked graph, `documents` included. The
-root lock's 325 entries carry
+root lock's 330 entries carry
 pdf_oxide/anydoc/office_oxide/html-to-markdown-rs and their transitive trees,
 resolution is metadata-only (nothing links), and the check passes over all of
 them.
