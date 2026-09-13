@@ -44,18 +44,41 @@
 //! preserve exact character spans — a paragraph reflowed or a word
 //! swapped shifts character k-grams wholesale while word k-grams survive.
 //! A shingle is `shingle_size` consecutive tokens joined with U+001F (the
-//! ASCII unit separator); the join is injective because no UAX #29 token
-//! can contain U+001F (a C0 control is its own word segment), so two
-//! distinct token windows never hash the same bytes.
+//! ASCII unit separator), and the join is injective — on a narrower
+//! invariant than "no UAX #29 token can contain U+001F", which is false
+//! as stated: U+001F is not whitespace, so the segmenter keeps it as a
+//! token of its own (`tors.word_bounds("a\x1fb")` is the three tokens
+//! `["a", "\x1f", "b"]`). What holds is that U+001F never mixes into a
+//! longer segment (a C0 control is its own word segment): it reaches the
+//! token stream only as an entire single-character token. That forces
+//! the joined string to parse uniquely — a maximal U+001F run bounded by
+//! token characters is odd-length (one separator, then token/separator
+//! pairs), a run at either end of the join is even-length
+//! (token/separator pairs), and the all-separator string alternates
+//! token/separator ending on a token, so the phase of every run's
+//! separator/token alternation is fixed and exactly one token window
+//! produces a given joined string: two distinct windows never join to
+//! the same bytes, and a window's XXH64 is a function of the window
+//! alone (the no-mixing invariant and the join are pinned over a
+//! `\x1f`-bearing corpus and an exhaustive small-domain join in
+//! `tests/test_minhash.py`).
 //!
 //! # The pinned arithmetic (determinism contract)
 //!
 //! Every element is fixed, documented arithmetic, platform-independent
 //! (integer ops only, no floats, no per-process state), so the same text
 //! at the same parameters produces the identical signature across
-//! processes, versions, and machines — the same stability requirement
-//! `simhash_impl` states for its FNV-1a (a fingerprint that changes
-//! between runs breaks every cross-run dedupe built on it):
+//! processes, machines, and platforms within one tors version — the
+//! same stability requirement `simhash_impl` states for its FNV-1a (a
+//! fingerprint that changes between runs breaks every cross-run dedupe
+//! built on it). The boundary that claim stops at: the signature is a
+//! function of the crate's UAX #29 segmentation tables
+//! (`unicode-segmentation`, pinned in `Cargo.lock`) as well as of the
+//! frozen arithmetic, so a tors release bumping those tables can change
+//! signatures — re-fingerprinting every affected document; a caller
+//! persisting signatures or LSH tables across tors versions must
+//! re-baseline on upgrade (within a version the arithmetic and XXH64
+//! are frozen, nothing varying by process, machine, or platform):
 //!
 //! - the shingle hash `x` is XXH64 with seed 0 (the frozen-spec
 //!   algorithm via twox-hash; see the Cargo.toml dependency note for the

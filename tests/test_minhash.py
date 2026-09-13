@@ -289,8 +289,9 @@ class TestJaccardProperty:
     The three fixture pairs below are deterministic documents, so their
     agreement counts are exact integers, oracle-derived and pinned; the
     estimation rows assert |estimate - exact| stays inside the k=128
-    error band (~0.088 at the worst J=0.5, measured 0.028-0.043 on these
-    rows)."""
+    2-sigma band (0.088 = 1/sqrt(128), twice the max 1-sigma standard
+    error sqrt(0.25/128) ~ 0.044 at the worst J=0.5; measured 0.028-0.043
+    on these rows)."""
 
     _NEAR_A = (
         "The quarterly oil sample interval for field outages was adjusted after the bushing "
@@ -341,8 +342,10 @@ class TestJaccardProperty:
 
     def test_estimates_stay_within_the_k_128_error_band(self) -> None:
         # |estimate - exact| over the three fixtures plus a one-word edit of
-        # the prose corpus: all deterministic, all measured 0.028-0.043, the
-        # band is the theoretical sqrt(0.25/128) = 0.088 with margin.
+        # the prose corpus: all deterministic, all measured 0.028-0.043.
+        # The max 1-sigma standard error is sqrt(J(1-J)/k) <= sqrt(0.25/128)
+        # ~ 0.044 at the worst J=0.5; the asserted band, 0.088 = 1/sqrt(128),
+        # is the 2-sigma band at that worst case, with margin.
         from reference import prose
 
         rows: list[tuple[str, str, float]] = [

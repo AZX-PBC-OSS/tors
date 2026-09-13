@@ -55,7 +55,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
 | regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package |
 | jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only, no TZDB backend: the accept-list shapes need none |
-| twox-hash | 2.1.4 | MIT | minhash_signature's XXH64 shingle hash: the frozen-spec algorithm (the digest for a given seed and byte stream is part of the xxHash spec, not the crate's to change), which is exactly the stability a cross-version signature contract needs; default-features off with xxhash64+std only, a zero-dependency leaf that way (the crate's defaults pull `rand` for a random-builder API tors never touches); 240M downloads, releases into 2026-08 |
+| twox-hash | 2.1.4 | MIT | minhash_signature's XXH64 shingle hash: the frozen-spec algorithm (the digest for a given seed and byte stream is part of the xxHash spec, not the crate's to change), which is exactly the stability the hash half of the signature's determinism contract needs (the other, version-sensitive half is the UAX #29 segmentation via unicode-segmentation -- see api.md's determinism boundary note); default-features off with xxhash64+std only, a zero-dependency leaf that way (the crate's defaults pull `rand` for a random-builder API tors never touches); 240M downloads, releases into 2026-08 |
 | uuid | 1.26.0 | Apache-2.0 OR MIT | uuid_parse/uuid_version/uuid7_timestamp_ms's hex-grammar engine (`src/uuid_impl.rs`): the uuid-rs org crate adopted for the structural parse + canonical encode (the strict-canonical layer on top stays tors's — the crate's parse_str deliberately accepts the loose forms tors rejects, so tors enforces byte-equality with the re-encoded canonical form); with default-features=false: parse/from_bytes/encode need no features and the bare-tree config pulls zero transitive dependencies (`cargo tree`-verified; the bare tree resolves defaults only through the documents engine tree's cfb/pdf_oxide edges, which are feature-gated out of the base wheel); already in the lock as cfb's and pdf_oxide's dependency (the documents engine tree), so the direct edge adds no new package (the aho-corasick/serde_json precedent) — the base wheel gains one zero-dependency crate, the documents wheel gains nothing |
 | pdf_oxide *(optional, `documents`)* | 0.3.78 | MIT OR Apache-2.0 | the documents payload's PDF engine (two-column reading order, link annotations, headings); default features only, and the caret bounds the 0.x line (see Cargo.toml's own comment for the measured rationale) |
 | anydoc *(optional, `documents`)* | 0.2.4 | MIT | the payload's office/text engine (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv) |
@@ -111,21 +111,21 @@ the lock before the hashing surface re-derived it):
 181 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, anydoc, and twox-hash
 among them), 21
 `Apache-2.0 OR MIT` (chardetng, autocfg, uuid, and the hashing surface's
-ctutils/cmov arrivals), 13 `MIT/Apache-2.0` (version_check,
-winapi, siphasher) plus 2 `Apache-2.0/MIT` (rs_merkle, bytecount) and 1
-`Apache-2.0 / MIT` (fnv), three more spellings of the same dual grant, 10
-`Unlicense OR MIT` (aho-corasick, memchr, jiff) and 4 `Unlicense/MIT` (csv,
-same-file, walkdir), 8 Apache-2.0 (rphonetic, soundex/metaphone's crate,
-among them), 3 `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` (wasip2,
-wit-bindgen), 3 `Zlib OR Apache-2.0 OR MIT` (tinyvec, bytemuck), 3
-`MIT OR Apache-2.0 OR Zlib` (tinyvec_macros, the zune image crates) and 2
-`MIT OR Zlib OR Apache-2.0` (miniz_oxide, both versions), 3 Zlib (foldhash,
-slotmap, zlib-rs: engine-tree arrivals), 2 `BSD-2-Clause OR Apache-2.0 OR
-MIT` (zerocopy), 2 `BSD-3-Clause OR Apache-2.0` (moxcms, pxfm, the engines'
-color management), 2 BSD-3-Clause (the brotli alloc pair), 2
-`MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi, both major versions, the
-tri-license noted above), 2 `0BSD` (enum-iterator/enum-iterator-derive,
-rphonetic's own dependencies: the license-gate addition above), and 1 each of
+ctutils/cmov arrivals), 13 `MIT/Apache-2.0` (version_check, winapi, siphasher) plus 2 `Apache-2.0/MIT`
+(rs_merkle, bytecount) and 1 `Apache-2.0 / MIT` (fnv), three more spellings
+of the same dual grant, 10 `Unlicense OR MIT` (aho-corasick, memchr, jiff)
+and 4 `Unlicense/MIT` (csv, same-file, walkdir), 8 Apache-2.0 (rphonetic,
+soundex/metaphone's crate, among them), 3 `Apache-2.0 WITH LLVM-exception
+OR Apache-2.0 OR MIT` (wasip2, wit-bindgen), 3 `Zlib OR Apache-2.0 OR MIT`
+(tinyvec, bytemuck), 3 `MIT OR Apache-2.0 OR Zlib` (tinyvec_macros, the
+zune image crates) and 2 `MIT OR Zlib OR Apache-2.0` (miniz_oxide, both
+versions), 3 Zlib (foldhash, slotmap, zlib-rs: engine-tree arrivals), 2
+`BSD-2-Clause OR Apache-2.0 OR MIT` (zerocopy), 2 `BSD-3-Clause OR
+Apache-2.0` (moxcms, pxfm, the engines' color management), 2 BSD-3-Clause
+(the brotli alloc pair), 2 `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi,
+both major versions, the tri-license noted above), 2 `0BSD`
+(enum-iterator/enum-iterator-derive, rphonetic's own dependencies: the
+license-gate addition above), and 1 each of
 the singles: `0BSD OR MIT OR Apache-2.0` (adler2, a miniz_oxide dependency in
 the engine tree), `MIT-0` (borrow-or-share), `Apache-2.0 WITH
 LLVM-exception` (target-lexicon), `(MIT OR Apache-2.0) AND Unicode-3.0`

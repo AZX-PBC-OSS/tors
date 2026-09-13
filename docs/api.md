@@ -3226,8 +3226,22 @@ segmentation), segments made entirely of whitespace skipped, each
 lowercased with Unicode-correct case folding — so `"Hello, WORLD!"` and
 `"hello, world!"` signature identically, and whitespace shape (tabs,
 newlines, runs) is invisible. A shingle is `shingle_size` consecutive
-tokens joined with U+001F; the join is injective because no UAX #29 token
-can contain U+001F (a C0 control is its own word segment). Word shingles,
+tokens joined with U+001F, and the join is injective — on a narrower
+invariant than "no UAX #29 token can contain U+001F", which is false as
+stated: U+001F is not whitespace, so the segmenter keeps it as a token
+of its own (`tors.word_bounds("a\x1fb")` is the three tokens
+`["a", "\x1f", "b"]`). What holds — verified over a `\x1f`-bearing
+corpus and pinned in `tests/test_minhash.py` — is that U+001F never
+mixes into a longer segment (a C0 control is its own word segment): it
+reaches the token stream only as an entire single-character token. That
+forces the joined string to parse uniquely: a maximal U+001F run bounded
+by token characters is odd-length (one separator, then token/separator
+pairs), a run at either end of the join is even-length
+(token/separator pairs), and the all-separator string alternates
+token/separator ending on a token — so the phase of every run's
+separator/token alternation is fixed, exactly one token window produces
+a given joined string, and two distinct windows never join to the same
+bytes. Word shingles,
 not character shingles: natural-text near-duplicates preserve word
 sequence far more often than exact character spans — a reflowed paragraph
 or a swapped word shifts character k-grams wholesale while word k-grams
@@ -3236,8 +3250,17 @@ survive, which is what recall at corpus scale needs.
 **The pinned arithmetic (the determinism contract).** Every element is
 fixed, documented arithmetic, platform-independent (integer ops only), so
 the same text at the same parameters produces the identical signature
-across processes, versions, and machines — the same stability requirement
-the simhash family states for its FNV-1a:
+across processes, machines, and platforms within one tors version — the
+same stability requirement the simhash family states for its FNV-1a. The
+boundary that claim stops at: the signature is a function of the crate's
+UAX #29 segmentation tables (`unicode-segmentation`, pinned in
+`Cargo.lock`) as well as of the frozen arithmetic, so a tors release that
+bumps those tables can change signatures — re-fingerprinting every
+affected document. This surface's advertised use is persisted signatures
+and LSH tables at corpus scale, where a re-fingerprinting upgrade
+silently invalidates the table: a caller persisting either across tors
+versions must re-baseline on upgrade (within a version nothing varies —
+the arithmetic and XXH64 are frozen):
 
 - each shingle is hashed with XXH64, seed 0: the frozen-spec algorithm
   (final since xxHash 0.7.0 — the digest for a given seed and byte stream
@@ -3274,7 +3297,11 @@ into `r`-element bands and hash them for table keys) is a future
 companion question, not something hidden inside this core.
 
 **Bounds.** `num_perm` must be in `[1, 1024]` and `shingle_size` at least
-1; each raises `ValueError` naming the bounds before any work runs.
+1; an in-range value outside those bounds raises `ValueError` naming the
+bounds before any work runs, while an int outside the i64 range the
+binding extracts (`num_perm=10**30`) raises pyo3's own `OverflowError`
+at extraction instead — the `truncate_to_bounds`-identical pattern for
+every i64-typed size argument.
 `seed` is any int, reduced mod `2**64` with two's-complement semantics
 for negatives (`seed=-1` is `seed=2**64 - 1`). A non-str `text` or
 non-int `seed` raises `TypeError`; text bearing lone surrogates raises
