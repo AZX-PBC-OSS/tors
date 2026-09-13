@@ -19,9 +19,65 @@
 //!
 //! The walk is ITERATIVE (an explicit frame stack), not recursive: depth
 //! costs heap, never the call stack, so any tree the interpreter can hold
-//! walks clean (json.dumps itself `RecursionError`s on deep trees at a
-//! version-dependent depth -- a documented divergence lane: tors accepts
-//! deeper input than the stdlib spelling, deterministically).
+//! walks clean for EXACT containers (json.dumps itself `RecursionError`s
+//! on deep trees at a version-dependent depth -- a documented divergence
+//! lane: tors accepts deeper input than the stdlib spelling,
+//! deterministically). The subclass lane is capped instead, at json's
+//! own failure boundary for it (the runaway guard, below).
+//!
+//! # Subclass containers: json.dumps's own protocol iteration
+//!
+//! json.dumps does NOT walk a container subclass's concrete storage: a
+//! non-exact dict is iterated through `PyMapping_Items` -- the
+//! OVERRIDABLE `.items()`, its result materialized into a snapshot list
+//! and sorted with CPython's own timsort -- and a non-exact list/tuple
+//! through `PyObject_GetIter` (its `__iter__`), materialized
+//! `PySequence_Fast`-style before any child is encoded
+//! (Modules/_json.c's `encoder_listencode_dict` /
+//! `encoder_listencode_list`, stable 3.10 through 3.14). A subclass
+//! that hides, fakes, reorders, or empties its content through those
+//! hooks therefore changes json's hash, and the walk must follow or the
+//! two silently disagree. It does, by delegation -- the same
+//! exact-instance gate idiom the key sorts already use. EXACT instances
+//! keep the concrete-storage fast path (json's own exact-dict
+//! `sort_keys` branch materializes the same items, so the paths are
+//! byte-equivalent there, and the measured concrete walk stays).
+//!
+//! The dict lane spells json's own algorithm: `.items()` called through
+//! the interpreter, the result materialized (snapshot semantics: a
+//! mutation after it is invisible to the walk, one during it is
+//! captured), that list sorted with `list.sort()` over the pairs AS
+//! YIELDED -- before any pair is validated or any key spelled, so an
+//! unsortable mix raises the sort's own TypeError first -- and then, per
+//! pair, json's own checks in json's own order: each item must be a
+//! 2-sized tuple (subclass-tolerant, read from concrete storage, an
+//! overriding `__getitem__` ignored) or the shared
+//! `ValueError: items must return 2-tuples` fires; a subclass dict with
+//! EMPTY concrete storage emits `{}` without ever calling `.items()`
+//! (`PyDict_GET_SIZE == 0` short-circuits the C encoder first). The
+//! validation and the key coercion are LAZY, pair by pair in sorted
+//! order at frame-pull time, because that is json's encode order: a bad
+//! value at pair i raises before pair i+1 is validated.
+//!
+//! # The runaway guard (protocol frames vs. the recursion limit)
+//!
+//! json's encoder recurses in C at every container
+//! (`Py_EnterRecursiveCall`), so protocol-mediated nesting -- hooks that
+//! yield ever-fresh subclasses, which no circular marker can catch --
+//! dies by `RecursionError` when the interpreter's recursion budget
+//! runs out. tors's walk is iterative, so the same input would descend
+//! forever instead. The guard: PROTOCOL frames (subclass containers
+//! only) are counted against `sys.getrecursionlimit()`, read under the
+//! GIL once at walk start; at the cap the walk raises `RecursionError`
+//! -- json's own failure class. EXACT containers are uncapped,
+//! preserving the documented deep-nesting superset (tors green at
+//! 100k/150k exact levels where json.dumps raises). The rule: exact
+//! nesting is the superset lane; protocol nesting is json parity, its
+//! failure boundary included. On interpreters where json's budget IS
+//! the Python recursion limit (3.10/3.11) the boundary matches; on
+//! 3.12+ json's C-stack budget is looser than the recursion limit, so
+//! tors's cap is deliberately conservative there -- the same error
+//! class, a tighter boundary, never a silent loop.
 //!
 //! # Key handling: classify, sort, THEN coerce (json.dumps's own order)
 //!
@@ -93,7 +149,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRecursionError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
@@ -205,6 +261,40 @@ fn spell_float(obj: &Bound<'_, PyAny>, reprs: &Reprs<'_>) -> PyResult<String> {
         reprs.float_repr.call1((obj,))?.cast::<PyString>()?.clone()
     };
     Ok(spelled.to_str()?.to_owned())
+}
+
+/// One classified key's json.dumps string form: the coercion half of the
+/// sort-then-coerce order (the exact lane calls it post-sort at push;
+/// the protocol lane at frame-pull, pair by pair, json's own encode
+/// order). Str is borrowed here (the crate-wide lone-surrogate
+/// boundary), bools/ints/floats spell per the module docs, `None` is
+/// "null", and the non-coercible bucket raises the house-worded key
+/// TypeError.
+fn spell_key(kind: &KeyKind, handle: &Bound<'_, PyAny>, reprs: &Reprs<'_>) -> PyResult<String> {
+    Ok(match kind {
+        KeyKind::Str => handle
+            .cast::<PyString>()
+            .expect("classified Str")
+            .to_str()?
+            .to_owned(),
+        KeyKind::Bool(true) => "true".to_owned(),
+        KeyKind::Bool(false) => "false".to_owned(),
+        KeyKind::SmallInt(v) => v.to_string(),
+        KeyKind::BigInt => spell_long(handle, reprs)?,
+        KeyKind::Float(v) => {
+            if v.is_finite() {
+                spell_float(handle, reprs)?
+            } else if v.is_nan() {
+                "NaN".to_owned()
+            } else if *v > 0.0 {
+                "Infinity".to_owned()
+            } else {
+                "-Infinity".to_owned()
+            }
+        }
+        KeyKind::Null => "null".to_owned(),
+        KeyKind::Unknown => return Err(key_type_error(handle)),
+    })
 }
 
 /// A leaf's [`Canon`], or `None` for the containers the frame machine
@@ -362,34 +452,58 @@ fn dict_pairs<'py>(
     let mut pairs = Vec::with_capacity(n);
     for i in order {
         let entry = &entries[i];
-        let key = match &entry.kind {
-            KeyKind::Str => entry
-                .handle
-                .cast::<PyString>()
-                .expect("classified Str")
-                .to_str()?
-                .to_owned(),
-            KeyKind::Bool(true) => "true".to_owned(),
-            KeyKind::Bool(false) => "false".to_owned(),
-            KeyKind::SmallInt(v) => v.to_string(),
-            KeyKind::BigInt => spell_long(&entry.handle, reprs)?,
-            KeyKind::Float(v) => {
-                if v.is_finite() {
-                    spell_float(&entry.handle, reprs)?
-                } else if v.is_nan() {
-                    "NaN".to_owned()
-                } else if *v > 0.0 {
-                    "Infinity".to_owned()
-                } else {
-                    "-Infinity".to_owned()
-                }
-            }
-            KeyKind::Null => "null".to_owned(),
-            KeyKind::Unknown => return Err(key_type_error(&entry.handle)),
-        };
-        pairs.push((key, values[i].clone()));
+        pairs.push((
+            spell_key(&entry.kind, &entry.handle, reprs)?,
+            values[i].clone(),
+        ));
     }
     Ok(pairs)
+}
+
+/// The circular-marker entry (json's markers are enter/exit over object
+/// identity: a shared sibling is fine, only a true cycle raises). The
+/// call order is json's own per lane -- the protocol LIST lane enters
+/// after the iterator materialization (`encoder_listencode_list`
+/// materializes via `PySequence_Fast` first), both dict lanes before
+/// anything else runs -- and the exact lanes enter first too, where the
+/// order is unobservable (a concrete collect cannot raise).
+fn enter_marker(markers: &mut HashSet<usize>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    let ptr = obj.as_ptr() as usize;
+    if markers.contains(&ptr) {
+        return Err(PyValueError::new_err(
+            "circular reference detected in the content_hash() argument",
+        ));
+    }
+    markers.insert(ptr);
+    Ok(())
+}
+
+/// A non-exact dict's items, spelled exactly as json.dumps spells them
+/// (Modules/_json.c's `encoder_listencode_dict`, the
+/// `sort_keys || !PyDict_CheckExact` branch -- and content_hash is
+/// always sort_keys): the OVERRIDABLE `.items()` called through the
+/// interpreter, the result materialized into a snapshot
+/// (`PyMapping_Items`'s own semantics: every yielded element pulled,
+/// the first error propagating, later mutations invisible), and that
+/// list sorted with CPython's own timsort over the pairs AS YIELDED --
+/// before any pair is validated or any key spelled, so an unsortable
+/// mix raises the sort's own TypeError first. The 2-tuple validation
+/// and the key coercion happen lazily at frame-pull time, pair by pair
+/// in sorted order -- json's own encode order, where a bad value at
+/// pair i raises before pair i+1 is validated.
+fn sorted_items_protocol<'py>(
+    py: Python<'py>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let items = obj.call_method0("items")?;
+    let iter = items.try_iter()?;
+    let mut materialized: Vec<Bound<'py, PyAny>> = Vec::new();
+    for item in iter {
+        materialized.push(item?);
+    }
+    let list = PyList::new(py, materialized)?;
+    list.call_method0("sort")?;
+    Ok(list.iter().collect())
 }
 
 /// One open container on the walk's explicit stack. `container` is held
@@ -397,18 +511,44 @@ fn dict_pairs<'py>(
 /// stays referenced for the whole walk, which is also what makes the
 /// circular-marker set sound -- a marker's pointer is an alive object, so
 /// no freed-and-recycled address can ever false-positive as a cycle.
+/// `protocol` marks the subclass lane (json's own protocol iteration,
+/// and the only lane the runaway guard counts).
 enum Frame<'py> {
     Seq {
         container: Bound<'py, PyAny>,
         built: Vec<Canon>,
         pending: std::vec::IntoIter<Bound<'py, PyAny>>,
+        protocol: bool,
     },
     Map {
         container: Bound<'py, PyAny>,
         built: Vec<(String, Canon)>,
         open_key: Option<String>,
-        pending: std::vec::IntoIter<(String, Bound<'py, PyAny>)>,
+        pending: MapPending<'py>,
+        protocol: bool,
     },
+}
+
+/// A map frame's remaining work: the exact lane's pre-coerced (spelled
+/// key, value) pairs, or the protocol lane's sorted raw items -- each
+/// validated and key-coerced at pull time, json's own encode order, so
+/// pair i's value error fires before pair i+1 is validated.
+enum MapPending<'py> {
+    Coerced(std::vec::IntoIter<(String, Bound<'py, PyAny>)>),
+    Items(std::vec::IntoIter<Bound<'py, PyAny>>),
+}
+
+impl MapPending<'_> {
+    fn len(&self) -> usize {
+        match self {
+            MapPending::Coerced(pairs) => pairs.as_slice().len(),
+            MapPending::Items(items) => items.as_slice().len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Frame<'_> {
@@ -419,17 +559,37 @@ impl Frame<'_> {
             }
         }
     }
+
+    fn is_protocol(&self) -> bool {
+        matches!(
+            self,
+            Frame::Seq { protocol: true, .. } | Frame::Map { protocol: true, .. }
+        )
+    }
 }
 
 /// The whole GIL-held walk: `root` (and every object reachable from it)
 /// into one owned [`Canon`] tree, iteratively, with json.dumps's circular
 /// reference semantics (markers entered at container entry, exited at
-/// completion, so a shared sibling is fine and only a true cycle raises).
+/// completion, so a shared sibling is fine and only a true cycle raises)
+/// and json.dumps's own subclass iteration (the module docs' protocol
+/// lane, with its runaway guard).
 pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
     let reprs = Reprs {
         long_repr: py.get_type::<PyInt>().getattr("__repr__")?,
         float_repr: py.get_type::<PyFloat>().getattr("__repr__")?,
     };
+    // The protocol lane's runaway cap: json's C encoder enters a
+    // recursive call at every container, so protocol-mediated nesting
+    // dies by RecursionError at the interpreter's recursion budget; the
+    // iterative walk counts its PROTOCOL frames against the same limit
+    // (read here, under the GIL, once per call) and raises past it.
+    // EXACT containers are uncapped: the documented deep-nesting
+    // superset lives on the exact lane.
+    let recursion_cap: usize = PyModule::import(py, "sys")?
+        .call_method0("getrecursionlimit")?
+        .extract()?;
+    let mut protocol_depth: usize = 0;
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut markers: HashSet<usize> = HashSet::new();
     let mut finished: Option<Canon> = None;
@@ -457,7 +617,7 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                         .take()
                         .expect("a map value completed with no open key");
                     built.push((key, done));
-                    pending.as_slice().is_empty()
+                    pending.is_empty()
                 }
             };
             if !exhausted {
@@ -465,6 +625,9 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
             }
             let frame = stack.pop().expect("just checked non-empty");
             markers.remove(&frame.container_ptr());
+            if frame.is_protocol() {
+                protocol_depth -= 1;
+            }
             finished = Some(match frame {
                 Frame::Seq { built, .. } => Canon::Seq(built),
                 Frame::Map { built, .. } => Canon::Map(built),
@@ -474,30 +637,61 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
         // 2. Pick the next object to walk: the unwalked root (the first
         //    iteration), or the top frame's next child. A frame with no
         //    children left here is one that was pushed empty (exhausted
-        //    frames are popped in step 1): finalize it and loop.
-        let obj = match to_walk.take() {
-            Some(obj) => Some(obj),
+        //    frames are popped in step 1): finalize it and loop. The
+        //    protocol lane's map pull validates the pair and coerces its
+        //    key HERE -- lazily, in json's own encode order, so pair i's
+        //    value error fires before pair i+1 is validated.
+        let pulled: PyResult<Option<Bound<'_, PyAny>>> = match to_walk.take() {
+            Some(obj) => Ok(Some(obj)),
             None => match stack.last_mut() {
                 None => unreachable!("no work, no frames: step 1 returned"),
-                Some(Frame::Seq { pending, .. }) => pending.next(),
+                Some(Frame::Seq { pending, .. }) => Ok(pending.next()),
                 Some(Frame::Map {
                     pending, open_key, ..
-                }) => match pending.next() {
-                    Some((key, value)) => {
-                        *open_key = Some(key);
-                        Some(value)
-                    }
-                    None => None,
+                }) => match pending {
+                    MapPending::Coerced(pairs) => Ok(match pairs.next() {
+                        Some((key, value)) => {
+                            *open_key = Some(key);
+                            Some(value)
+                        }
+                        None => None,
+                    }),
+                    MapPending::Items(items) => match items.next() {
+                        None => Ok(None),
+                        Some(item) => {
+                            // json's own per-pair gate, at json's own
+                            // point in the order: the item must be a
+                            // 2-sized tuple read from concrete storage
+                            // (an overriding __getitem__ ignored), or
+                            // the shared ValueError fires.
+                            let pair = match item.cast::<PyTuple>() {
+                                Ok(pair) if pair.len() == 2 => pair,
+                                _ => {
+                                    return Err(PyValueError::new_err(
+                                        "items must return 2-tuples",
+                                    ));
+                                }
+                            };
+                            let key = pair.get_item(0)?;
+                            let value = pair.get_item(1)?;
+                            let kind = classify_key(&key);
+                            *open_key = Some(spell_key(&kind, &key, &reprs)?);
+                            Ok(Some(value))
+                        }
+                    },
                 },
             },
         };
-        let obj = match obj {
+        let obj = match pulled? {
             Some(obj) => obj,
             None => {
                 let frame = stack
                     .pop()
                     .expect("step 2 with an empty stack is unreachable");
                 markers.remove(&frame.container_ptr());
+                if frame.is_protocol() {
+                    protocol_depth -= 1;
+                }
                 finished = Some(match frame {
                     Frame::Seq { built, .. } => Canon::Seq(built),
                     Frame::Map { built, .. } => Canon::Map(built),
@@ -506,41 +700,84 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
             }
         };
 
-        // 3. Walk it: a leaf completes immediately; a container pushes a
-        //    frame (after the circular check), and its children become
-        //    the frame's pending work.
+        // 3. Walk it: a leaf completes immediately. An EXACT container
+        //    walks its concrete storage (the measured fast path; json's
+        //    own exact-dict sort_keys branch materializes the same
+        //    items, so the two are byte-equivalent there). A SUBCLASS
+        //    container delegates to the interpreter's own protocol --
+        //    json.dumps's subclass iteration, never the concrete storage
+        //    -- under the runaway guard.
         if let Some(leaf) = walk_leaf(&obj, &reprs)? {
             finished = Some(leaf);
             continue;
         }
-        let ptr = obj.as_ptr() as usize;
-        if markers.contains(&ptr) {
-            return Err(PyValueError::new_err(
-                "circular reference detected in the content_hash() argument",
+        let protocol = !(obj.is_exact_instance_of::<PyDict>()
+            || obj.is_exact_instance_of::<PyList>()
+            || obj.is_exact_instance_of::<PyTuple>());
+        if protocol && protocol_depth >= recursion_cap {
+            return Err(PyRecursionError::new_err(
+                "maximum recursion depth exceeded while walking a subclass container",
             ));
         }
-        markers.insert(ptr);
-        if let Ok(dict) = obj.cast::<PyDict>() {
-            let pairs = dict_pairs(py, dict, &reprs)?;
+        if obj.cast::<PyList>().is_ok() || obj.cast::<PyTuple>().is_ok() {
+            // The list/tuple lanes. json's `encoder_listencode_list`
+            // materializes FIRST (PySequence_Fast -> PyObject_GetIter on
+            // a subclass: its __iter__, every yield pulled) and checks
+            // the circular markers after; the exact lane checks first
+            // (its collect cannot raise, so the order is unobservable
+            // there).
+            let children = if protocol {
+                let children: Vec<Bound<'_, PyAny>> = obj.try_iter()?.collect::<PyResult<_>>()?;
+                enter_marker(&mut markers, &obj)?;
+                children
+            } else {
+                enter_marker(&mut markers, &obj)?;
+                if let Ok(list) = obj.cast::<PyList>() {
+                    list.iter().collect()
+                } else {
+                    obj.cast::<PyTuple>()
+                        .expect("walk_leaf guarded the tuple arm")
+                        .iter()
+                        .collect()
+                }
+            };
+            if protocol {
+                protocol_depth += 1;
+            }
+            stack.push(Frame::Seq {
+                container: obj,
+                built: Vec::with_capacity(children.len()),
+                pending: children.into_iter(),
+                protocol,
+            });
+        } else if let Ok(dict) = obj.cast::<PyDict>() {
+            // The dict lanes. json's `encoder_listencode_dict`: the {}
+            // gate reads the CONCRETE storage size first (a subclass
+            // dict with empty storage emits {} without ever calling
+            // .items()), the circular markers come next, and only then
+            // does the overridable .items() run (materialized, sorted,
+            // validated lazily at pull time).
+            let pending = if protocol {
+                if dict.len() == 0 {
+                    MapPending::Items(Vec::new().into_iter())
+                } else {
+                    enter_marker(&mut markers, &obj)?;
+                    MapPending::Items(sorted_items_protocol(py, &obj)?.into_iter())
+                }
+            } else {
+                enter_marker(&mut markers, &obj)?;
+                MapPending::Coerced(dict_pairs(py, dict, &reprs)?.into_iter())
+            };
+            if protocol {
+                protocol_depth += 1;
+            }
+            let capacity = pending.len();
             stack.push(Frame::Map {
                 container: obj,
-                built: Vec::with_capacity(pairs.len()),
+                built: Vec::with_capacity(capacity),
                 open_key: None,
-                pending: pairs.into_iter(),
-            });
-        } else if let Ok(list) = obj.cast::<PyList>() {
-            let children: Vec<Bound<'_, PyAny>> = list.iter().collect();
-            stack.push(Frame::Seq {
-                container: obj,
-                built: Vec::with_capacity(children.len()),
-                pending: children.into_iter(),
-            });
-        } else if let Ok(tuple) = obj.cast::<PyTuple>() {
-            let children: Vec<Bound<'_, PyAny>> = tuple.iter().collect();
-            stack.push(Frame::Seq {
-                container: obj,
-                built: Vec::with_capacity(children.len()),
-                pending: children.into_iter(),
+                pending,
+                protocol,
             });
         } else {
             // walk_leaf's guard makes this unreachable; spelled out so a
@@ -563,7 +800,15 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// `None`; containers: `list`, `tuple` (serializes as a list -- equal-value
 /// list/tuple hash identically), `dict` (keys sorted before
 /// stringification, `str`/`int`/`float`/`bool`/`None` keys coerced to
-/// their json string form). Anything else raises `TypeError` naming the
+/// their json string form). Container SUBCLASSES are iterated exactly as
+/// json.dumps iterates them -- a dict subclass through its (overridable)
+/// `.items()`, a list/tuple subclass through its `__iter__` -- never
+/// their concrete storage, so hiding/faking/reordering subclasses hash
+/// identically on both sides; non-pair `items()` yields raise json's own
+/// `ValueError: items must return 2-tuples`, and subclass chains nested
+/// past `sys.getrecursionlimit()` raise `RecursionError` on both sides
+/// (EXACT containers nest arbitrarily deep: the documented deep-nesting
+/// superset). Anything else raises `TypeError` naming the
 /// type; circular references raise `ValueError`; a str holding lone
 /// surrogates raises `UnicodeEncodeError` where json.dumps accepts it
 /// (the crate-wide str-borrow divergence, documented).

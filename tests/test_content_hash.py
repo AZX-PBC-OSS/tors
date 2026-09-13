@@ -51,6 +51,19 @@ The pinned contracts, each with its own class:
   raises on both sides identically).
 - **tuple == list** (``TestTupleListEquivalence``): tuples serialize as
   lists, recursively.
+- **Subclass containers** (``TestContainerSubclassIterationParity``):
+  json.dumps never walks a container subclass's concrete storage -- a
+  dict subclass goes through its OVERRIDABLE ``.items()`` (materialized
+  into a snapshot, sorted with CPython's own timsort, each pair required
+  to be a 2-tuple) and a list/tuple subclass through its ``__iter__``
+  (materialized) -- so tors delegates to the same interpreter calls:
+  hiding/faking/reordering/emptying subclasses hash identically on both
+  sides, a subclass dict with empty concrete storage emits ``{}``
+  without ever calling ``.items()``, and the runaway lane (hooks that
+  yield ever-fresh subclasses, which no circular marker can catch) dies
+  by ``RecursionError`` on both sides -- json by its C recursion guard,
+  tors by a protocol-frame cap at ``sys.getrecursionlimit()`` -- while
+  EXACT containers stay uncapped (the deep-nesting superset lane).
 - **The surrogate divergence** (``TestSurrogateDivergence``): a str holding
   lone surrogates (value or key) raises ``UnicodeEncodeError`` from the
   standard str borrow -- the crate-wide boundary every str-in surface
@@ -1031,18 +1044,293 @@ class TestSubclassComparisonParity:
         _assert_parity([Big.SMALL, Big.HUGE])
         _assert_parity({Big.SMALL: "x", Big.HUGE: "y"})
 
-    def test_container_subclasses_walk_native_storage(self) -> None:
-        from collections import OrderedDict
 
-        class ListSub(list):
+class TestContainerSubclassIterationParity:
+    """The red-team P1 lane, pinned: json.dumps does NOT walk a container
+    subclass's concrete storage. A non-exact dict is iterated through
+    ``PyMapping_Items`` -- the OVERRIDABLE ``.items()``, materialized into
+    a snapshot and sorted -- and a non-exact list/tuple through
+    ``PyObject_GetIter`` (its ``__iter__``), materialized
+    ``PySequence_Fast``-style (Modules/_json.c, stable 3.10 through
+    3.14). A subclass that hides, fakes, reorders, or empties its content
+    through those hooks therefore changes json's hash, and tors's walk
+    delegates to the same interpreter calls so the two agree on every
+    shape below. EXACT instances keep the concrete-storage fast path
+    (json's own exact-dict ``sort_keys`` branch materializes the same
+    items, byte-equivalent there), so the deep-nesting superset lane --
+    ``TestHypothesisDifferential``'s 100k-level pin -- is untouched.
+
+    The runaway lane: json's C encoder enters a recursive call at every
+    container, so hooks yielding ever-fresh subclasses (which no
+    circular marker can catch) die by ``RecursionError`` when the
+    interpreter's recursion budget runs out. tors's walk is iterative,
+    so the same input is capped instead: PROTOCOL frames -- subclass
+    containers only -- are counted against ``sys.getrecursionlimit()``
+    (read at walk start), and past the cap the walk raises
+    ``RecursionError`` itself. A finite chain well inside the limit
+    hashes with full parity on both sides.
+    """
+
+    class HidingDict(dict):
+        def items(self):
+            return [(k, v) for k, v in dict.items(self) if k != "secret"]
+
+    class FakingDict(dict):
+        def items(self):
+            return list(dict.items(self)) + [("a", 1)]
+
+    class EmptyFakingDict(dict):
+        calls = 0
+
+        def items(self):
+            type(self).calls += 1
+            return [("a", 1)]
+
+    class IterOnlyDict(dict):
+        def __iter__(self):
+            return iter(["lie"])
+
+    class SkippingList(list):
+        def __iter__(self):
+            return iter([x for x in list.__iter__(self) if x != 2])
+
+    class FakingList(list):
+        def __iter__(self):
+            return iter([1, 2, 99])
+
+    class EmptyIterTuple(tuple):
+        def __new__(cls, xs):
+            return tuple.__new__(cls, xs)
+
+        def __iter__(self):
+            return iter(())
+
+    class MutatingIter(list):
+        def __iter__(self):
+            self.append(99)  # during materialization: captured by the snapshot
+            return iter(list.__iter__(self))
+
+    class SelfYieldList(list):
+        def __iter__(self):
+            yield self
+
+    class SelfYieldDict(dict):
+        def __init__(self):
+            super().__init__(x=1)
+
+        def items(self):
+            return [("k", self)]
+
+    class FreshChainList(list):
+        def __iter__(self):
+            yield type(self)()
+
+    class FreshChainDict(dict):
+        def __init__(self):
+            super().__init__(x=1)
+
+        def items(self):
+            return [("k", type(self)())]
+
+    class ChainList(list):
+        def __init__(self, inner):
+            super().__init__()
+            self._inner = inner
+
+        def __iter__(self):
+            yield self._inner
+
+    def test_dict_subclass_items_is_called_through_the_interpreter(self) -> None:
+        cls = TestContainerSubclassIterationParity
+        _assert_parity(cls.HidingDict({"a": 1, "secret": 2}))
+        _assert_parity(cls.FakingDict({"x": 0}))
+        _assert_parity(cls.FakingDict({"z": 0, "m": 3}))
+
+    def test_empty_storage_dict_subclass_never_calls_items(self) -> None:
+        """json's ``{}`` gate reads the CONCRETE storage size before
+        anything else, so a subclass dict with empty storage emits ``{}``
+        without ever calling ``.items()``: a faking ``.items()`` on an
+        empty dict is a no-op on both sides, pinned with the call
+        counter."""
+        cls = TestContainerSubclassIterationParity
+        obj = cls.EmptyFakingDict()
+        assert _canonical(obj) == "{}"
+        assert cls.EmptyFakingDict.calls == 0
+        _assert_bytes(obj, b"{}")
+        assert cls.EmptyFakingDict.calls == 0
+
+    def test_iter_only_dict_subclass_ignores_the_iter_override(self) -> None:
+        """The dict lane is ``.items()``, never ``__iter__``: an
+        ``__iter__``-only override on a dict subclass changes nothing on
+        either side (json never calls it for dicts)."""
+        cls = TestContainerSubclassIterationParity
+        _assert_parity(cls.IterOnlyDict({"b": 2, "a": 1}))
+
+    def test_list_and_tuple_subclasses_iterate_via_the_protocol(self) -> None:
+        cls = TestContainerSubclassIterationParity
+        _assert_parity(cls.SkippingList([1, 2, 3]))
+        _assert_parity(cls.FakingList([1]))
+        _assert_parity(cls.EmptyIterTuple((1, 2)))
+        # Snapshot semantics: a mutation during materialization is
+        # captured identically on both sides. The mutation is per-CALL
+        # state (every __iter__ invocation appends again), so each
+        # engine gets its own fresh instance: json on one, tors on
+        # another, and both snapshots are [1,2,99].
+        assert _canonical(cls.MutatingIter([1, 2])) == "[1,2,99]"
+        assert content_hash(cls.MutatingIter([1, 2])) == _oracle([1, 2, 99])
+
+    def test_protocol_yielded_items_re_enter_the_type_dispatch(self) -> None:
+        """Whatever ``__iter__`` yields is walked by the same per-object
+        dispatch: exact containers, subclass containers (which delegate
+        again), and rejected leaves raise identically."""
+        cls = TestContainerSubclassIterationParity
+
+        class YieldsContainers(list):
+            def __iter__(self):
+                yield cls.HidingDict({"a": 1, "secret": 2})
+                yield cls.SkippingList([1, 2, 3])
+                yield {"plain": (1, cls.FakingList([1]))}
+
+        _assert_parity(YieldsContainers())
+
+        class YieldsBadLeaf(list):
+            def __iter__(self):
+                yield set()
+
+        with pytest.raises(TypeError, match="set"):
+            content_hash(YieldsBadLeaf())
+        with pytest.raises(TypeError):
+            _oracle(YieldsBadLeaf())
+
+    def test_self_referential_protocol_shapes_raise_circular_value_error(self) -> None:
+        """The literal self-yielders are TRUE cycles on both sides (the
+        circular markers are enter/exit around the materialized
+        children), so both engines raise the circular ValueError -- the
+        runaway lane is the fresh-yielder below, not these."""
+        cls = TestContainerSubclassIterationParity
+        for obj in (cls.SelfYieldList(), cls.SelfYieldDict()):
+            with pytest.raises(ValueError, match="[Cc]ircular reference detected"):
+                content_hash(obj)
+            with pytest.raises(ValueError):
+                _oracle(obj)
+
+    def test_the_runaway_protocol_chain_raises_recursion_error_on_both_sides(self) -> None:
+        """Hooks yielding ever-fresh subclasses defeat the circular
+        markers, so only a recursion budget can stop the descent: json
+        dies by its C recursion guard, tors by the protocol-frame cap.
+        Same exception class on both sides (the runaway guard's pin)."""
+        cls = TestContainerSubclassIterationParity
+        for obj in (cls.FreshChainList(), cls.FreshChainDict()):
+            with pytest.raises(RecursionError):
+                _oracle(obj)
+            with pytest.raises(RecursionError):
+                content_hash(obj)
+
+    def test_a_deep_but_finite_protocol_chain_hashes_with_parity(self) -> None:
+        """500 levels of list subclasses each overriding ``__iter__``,
+        ending in a ``None`` leaf: well inside ``sys.getrecursionlimit()``
+        (the default 1000) and inside json's budget on every supported
+        interpreter, so BOTH engines hash it -- or, on an interpreter
+        whose budget is tighter, both raise ``RecursionError``. Parity
+        either way, independent of where the boundary sits."""
+        obj: Any = None
+        for _ in range(500):
+            obj = TestContainerSubclassIterationParity.ChainList(obj)
+        try:
+            expected = _oracle(obj)
+        except RecursionError:
+            with pytest.raises(RecursionError):
+                content_hash(obj)
+        else:
+            assert content_hash(obj) == expected
+
+    def test_items_must_return_2_tuples_and_the_sort_runs_first(self) -> None:
+        """json's own ``items()`` contract, byte-identical: the sort runs
+        over the pairs AS YIELDED (an unsortable mix raises the sort's
+        own TypeError first, before any validation), then each pair must
+        be a 2-sized tuple -- subclass-tolerant, read from concrete
+        storage, an overriding ``__getitem__`` ignored -- or the shared
+        ``ValueError: items must return 2-tuples`` fires. And validation
+        is LAZY, in json's encode order: a bad VALUE at pair i raises
+        before pair i+1 is validated."""
+        from collections import namedtuple
+
+        class ItemsDict(dict):
+            def __init__(self, items):
+                super().__init__(x=1)  # non-empty storage: the {} gate is off
+                self._items = items
+
+            def items(self):
+                return self._items
+
+        for bad in (
+            [("z", 1, 1), ("a", 2, 2)],  # 3-tuples
+            [["a", 1]],  # list pairs: not tuples
+            ["not-a-pair"],  # not a sequence
+        ):
+            obj = ItemsDict(bad)
+            with pytest.raises(ValueError) as tors_exc:
+                content_hash(obj)
+            with pytest.raises(ValueError) as oracle_exc:
+                _oracle(obj)
+            assert str(tors_exc.value) == str(oracle_exc.value)
+
+        # the delegated sort fires before any pair is validated
+        obj = ItemsDict([("a", 1), 5])
+        with pytest.raises(TypeError) as tors_exc:
+            content_hash(obj)
+        with pytest.raises(TypeError) as oracle_exc:
+            _oracle(obj)
+        assert str(tors_exc.value) == str(oracle_exc.value)
+
+        # lazy order: the set value at sorted position 0 raises before
+        # the 3-tuple at position 1 is even validated
+        obj = ItemsDict([("a", set()), ("z", 1, 1)])
+        with pytest.raises(TypeError, match="set"):
+            content_hash(obj)
+        with pytest.raises(TypeError):
+            _oracle(obj)
+
+        # tuple-subclass pairs are accepted and read from concrete storage
+        Pair = namedtuple("Pair", "k v")
+
+        class GetItemLiar(tuple):
+            def __new__(cls, k, v):
+                return tuple.__new__(cls, (k, v))
+
+            def __getitem__(self, i):
+                return "LIE"
+
+        _assert_parity(ItemsDict([Pair("b", 1), ("a", 2)]))
+        _assert_parity(ItemsDict([GetItemLiar("b", 1), ("a", 2)]))
+
+    def test_plain_and_standard_container_subclasses_match_the_oracle(self) -> None:
+        """(Re-scoped from ``test_container_subclasses_walk_native_storage``,
+        whose name asserted the WRONG contract -- native storage -- for
+        containers json itself never walks natively.) The boring
+        subclasses, through the protocol lane: plain list/dict
+        subclasses, OrderedDict, namedtuple, and an ``__iter__``-faithful
+        list subclass."""
+        from collections import OrderedDict, namedtuple
+
+        class PlainListSub(list):
             pass
 
-        class DictSub(dict):
+        class PlainDictSub(dict):
             pass
+
+        class FaithfulIterList(list):
+            def __iter__(self):
+                return iter(list.__iter__(self))
+
+        Point = namedtuple("Point", "x y")
 
         _assert_parity(OrderedDict([("b", 1), ("a", 2)]))
-        _assert_parity({"sub": ListSub([1, 2])})
-        _assert_parity(DictSub({"z": 1, "a": 2}))
+        _assert_parity({"sub": PlainListSub([3, 1, 2])})
+        _assert_parity(PlainDictSub({"z": 1, "a": 2}))
+        _assert_parity(FaithfulIterList([1, {"k": PlainListSub([2])}]))
+        _assert_parity(Point(1, 2))
+        _assert_parity([Point(1, 2), OrderedDict(a=1)])
 
 
 class TestCanonicalByteLiterals:
