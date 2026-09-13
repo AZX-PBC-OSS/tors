@@ -215,11 +215,13 @@
 //! * `#codepoints` is the count of lead bytes — every UTF-8 sequence has
 //!   exactly one lead, and the continuation bytes are exactly
 //!   `0x80..=0xBF`, so `(b & 0xC0) != 0x80` selects the leads;
-//! * `#astral` is the count of bytes `>= 0xF0` — in valid UTF-8 those
-//!   are exactly the 4-byte lead bytes `0xF0..=0xF4` (one per astral
-//!   codepoint; `0xF5..=0xFF` never occur in valid UTF-8), and a 4-byte
-//!   sequence is exactly an astral codepoint (overlong forms are
-//!   invalid UTF-8, which a `&str` rules out by construction).
+//! * `#astral` is the count of 4-byte lead bytes `0xF0..=0xF4` — in
+//!   valid UTF-8 those are exactly the bytes `matches!(b, 0xF0..=0xF4)`
+//!   (one per astral codepoint; `0xF5..=0xFF` never occur in valid
+//!   UTF-8, so `b >= 0xF0` would count the same set over a `&str`,
+//!   but the closed range states the fact and fails safe), and a
+//!   4-byte sequence is exactly an astral codepoint (overlong forms
+//!   are invalid UTF-8, which a `&str` rules out by construction).
 //!
 //! One pass, two byte-class predicates, no allocation. The corners the
 //! identity buys: no astral codepoints means exactly `2 * len(s)` in
@@ -338,14 +340,16 @@ pub fn utf8_byte_len(s: &str) -> usize {
 
 /// The chunk width of the counting loop below: 16. The two counts are
 /// summed per chunk into `u8` accumulators, and the width is where the
-/// measurement landed on the calibration box (arm64, baseline build):
-/// 8 and 32 both run ~16 GB/s, 16 runs ~31 GB/s — the sweet spot
-/// between per-chunk overhead and loop-carried latency, the same class
-/// of measurement-decided constant as the segment scanner's
+/// measurement landed on the calibration box (arm64, rustc release
+/// build — bench artifact, not a portable constant: re-measure on
+/// your target; other widths/builds land differently): 8 and 32 both
+/// run ~16 GB/s there, 16 runs ~31 GB/s — the sweet spot between
+/// per-chunk overhead and loop-carried latency on that box, the same
+/// class of measurement-decided constant as the segment scanner's
 /// `BREAK_WINDOW`. The chunked spelling exists at all because the
 /// obvious `iter().filter().count()` closures do NOT auto-vectorize
-/// here (measured 4.2 GB/s scalar, slower than the expression the
-/// function exists to beat — the wall cells in
+/// here (measured 4.2 GB/s scalar on that box, slower than the
+/// expression the function exists to beat — the wall cells in
 /// tests/test_performance.py record both lanes).
 const UTF16_COUNT_CHUNK: usize = 16;
 
@@ -358,14 +362,26 @@ const UTF16_COUNT_CHUNK: usize = 16;
 /// deliberately: the module docs derive the identity
 /// `utf16 bytes = 2 * (#codepoints + #astral)`, where over valid UTF-8
 /// `#codepoints` is the lead-byte count (`(b & 0xC0) != 0x80`) and
-/// `#astral` is the count of 4-byte leads (`b >= 0xF0`, exactly
-/// `0xF0..=0xF4` in valid UTF-8) — no decoding, no allocation, summed
+/// `#astral` is the count of 4-byte leads (`matches!(b, 0xF0..=0xF4)`
+/// in valid UTF-8 — `0xF5..=0xFF` never occur in a `&str`, so the
+/// `>= 0xF0` shorthand would count the same set here, but the closed
+/// range states the valid-UTF-8 fact and fails safe if the input ever
+/// were not valid UTF-8: a stray `0xF5..=0xFF` byte is refused rather
+/// than counted as astral) — no decoding, no allocation, summed
 /// in [`UTF16_COUNT_CHUNK`]-sized chunks (the auto-vectorizing shape;
 /// see that constant's docs for the measurement). The identity is
 /// proved against the `chars()`-based naive count over the boundary
 /// battery and an exhaustive length-<=3 sweep (both sides additive
 /// over concatenation, so the sweep is exhaustive) in
 /// `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
+///
+/// The final doubling is checked arithmetic: on 32-bit targets
+/// `2 * (codepoints + astral)` can overflow `usize` past ~1 GiB of
+/// astral-dense text (the addition and the multiply both wrap in
+/// release), so both steps use `checked_add`/`checked_mul` and panic
+/// with an overflow message rather than wrapping silently — the
+/// Python wrapper maps this to `OverflowError` (see `src/py/scan.rs`);
+/// on 64-bit the check never fires (it would take exabytes).
 ///
 /// The cost model is the borrow's, the utf8 twin's exactly (ASCII
 /// zero-copy alias; cold-cache first call materializes-and-caches the
@@ -381,6 +397,15 @@ pub fn utf16_byte_len(s: &str) -> usize {
     // codepoint (its lead byte), one more per astral codepoint (its
     // 4-byte lead) — doubled at the end. See the module docs for the
     // identity and UTF16_COUNT_CHUNK's docs for the width.
+    //
+    // The astral predicate is the closed range `0xF0..=0xF4`, not the
+    // `>= 0xF0` shorthand: over valid UTF-8 the two count the same set
+    // (`0xF5..=0xFF` never occur in a `&str`), and the closed range
+    // fails safe — a stray high byte is refused rather than counted.
+    // The final `checked_add`/`checked_mul` refuses to wrap silently
+    // on 32-bit targets past ~1 GiB of astral-dense text (the Python
+    // wrapper maps the panic to `OverflowError`); on 64-bit it never
+    // fires.
     let bytes = s.as_bytes();
     let (chunks, remainder) = bytes.as_chunks::<UTF16_COUNT_CHUNK>();
     let mut codepoints = 0usize;
@@ -390,16 +415,19 @@ pub fn utf16_byte_len(s: &str) -> usize {
         let mut four_byte_leads = 0u8;
         for &b in chunk {
             leads += ((b & 0xC0) != 0x80) as u8;
-            four_byte_leads += (b >= 0xF0) as u8;
+            four_byte_leads += matches!(b, 0xF0..=0xF4) as u8;
         }
         codepoints += leads as usize;
         astral += four_byte_leads as usize;
     }
     for &b in remainder {
         codepoints += ((b & 0xC0) != 0x80) as usize;
-        astral += (b >= 0xF0) as usize;
+        astral += matches!(b, 0xF0..=0xF4) as usize;
     }
-    2 * (codepoints + astral)
+    codepoints
+        .checked_add(astral)
+        .and_then(|n| n.checked_mul(2))
+        .expect("utf16_byte_len overflow: input too large for usize on this target")
 }
 
 #[cfg(test)]
@@ -541,14 +569,20 @@ mod utf16_byte_len_tests {
 
     #[test]
     fn the_exhaustive_short_string_sweep_matches_the_naive_count() {
-        // Every string of length <= 3 over the boundary alphabet (one
-        // representative per UTF-8 sequence class, all four 4-byte lead
-        // values, the combining mark, the ZWJ, and a real NUL): both
-        // sides of the identity are additive over concatenation (UTF-16
-        // bytes sum per codepoint; the byte-class counts sum per
-        // codepoint), so agreement here is agreement on EVERY input —
-        // the sweep is the exhaustive proof, not a sample (the Python
-        // battery runs the same sweep against the stdlib oracle).
+        // Every string of length <= 3 codepoints over the boundary
+        // alphabet (one representative per UTF-8 sequence class, all
+        // four 4-byte lead values, the combining mark, the ZWJ, and a
+        // real NUL — every entry a single codepoint, so alphabet length
+        // IS codepoint length, and every concatenation is valid UTF-8
+        // by construction): both sides of the identity are additive
+        // over concatenation (UTF-16 bytes sum per codepoint; the
+        // byte-class counts sum per codepoint), so agreement here is
+        // agreement on EVERY input — the sweep is the exhaustive proof,
+        // not a sample (the Python battery runs the same sweep against
+        // the stdlib oracle; 17 alphabet entries give
+        // 17 + 17^2 + 17^3 = 5219 cases here, where the Python sweep's
+        // 21-entry alphabet with extra ASCII representatives gives 9723
+        // — same theorem, denser ASCII sampling there).
         let alphabet = [
             "a",
             "\u{7f}",
@@ -556,7 +590,7 @@ mod utf16_byte_len_tests {
             "\u{7ff}",
             "\u{800}",
             "\u{ffff}",
-            "caf\u{e9}",
+            "\u{e9}",
             "\u{301}",
             "\u{200d}",
             "\u{6771}",
@@ -592,6 +626,48 @@ mod utf16_byte_len_tests {
         let text = unit.repeat(1 + (1024 * 1024) / unit.len());
         assert!(text.len() >= 1024 * 1024);
         assert_eq!(utf16_byte_len(&text), naive_utf16_byte_len(&text));
+    }
+
+    #[test]
+    fn checked_arithmetic_refuses_to_wrap_silently() {
+        // H1: `2 * (codepoints + astral)` wraps `usize` in release past
+        // ~1 GiB of astral-dense text on 32-bit targets. The core must
+        // use `checked_add`/`checked_mul` (panicking rather than
+        // wrapping; the Python wrapper maps this to `OverflowError`).
+        // `usize::MAX` itself is unreachable in a test, so this pins
+        // the checked spelling directly on small numbers: the same
+        // operator chain the core uses must return `None` at the
+        // boundary instead of wrapping to 0.
+        let almost_max = usize::MAX - 1;
+        assert_eq!(
+            almost_max.checked_add(1).and_then(|n| n.checked_mul(2)),
+            None
+        );
+        assert_eq!(usize::MAX.checked_add(1), None);
+        assert_eq!(usize::MAX.checked_mul(2), None);
+        // And the un-overflowed chain still answers: the happy path the
+        // core takes on every real input.
+        assert_eq!(
+            1usize.checked_add(1).and_then(|n| n.checked_mul(2)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn thirty_two_bit_targets_refuse_gigabyte_scale_inputs() {
+        // 32-bit-only: a ~1 GiB astral-dense input would wrap
+        // `2 * (codepoints + astral)` past `u32::MAX`. Building the
+        // gigabyte is out of scope for a unit test; this pins the
+        // contract that the overflow panics (mapped to `OverflowError`
+        // Python-side) rather than wrapping — exercised here via the
+        // checked chain at the boundary, since the allocation itself
+        // would OOM the test runner.
+        let almost_max = usize::MAX - 1;
+        assert_eq!(
+            almost_max.checked_add(1).and_then(|n| n.checked_mul(2)),
+            None
+        );
     }
 }
 

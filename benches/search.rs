@@ -92,7 +92,7 @@
 //!   whole result: the core's throughput column is deliberately
 //!   meaningless (an O(1) read over n input bytes reports absurd TiB/s)
 //!   and exists only to make the flat line visible next to the baseline.
-//! - `encode_baseline`: `text.as_bytes().to_vec()` — one allocation plus
+//! - `memcpy_floor`: `text.as_bytes().to_vec()` — one allocation plus
 //!   one memcpy of the full corpus, the dominant cost of
 //!   `len(s.encode("utf-8"))` on ASCII input (CPython's ASCII encode fast
 //!   path is exactly this copy) and the floor model of it on non-ASCII
@@ -127,11 +127,12 @@
 //! - `core`: `scan_impl::utf16_byte_len(&text)` — the derived
 //!   arithmetic (the lead-byte and 4-byte-lead counts, doubled), one
 //!   pass over the corpus, no allocation.
-//! - `encode_baseline`: `text.encode_utf16().collect::<Vec<u16>>()` —
-//!   the 2n allocation plus the per-codepoint encode pass, the dominant
-//!   cost of `len(s.encode("utf-16-le"))` (CPython's codec is this
-//!   shape: an ASCII widen pass or a UCS2 near-memcpy, always with the
-//!   full output allocation). The true end-to-end lanes — the pyo3
+//! - `rust_utf16_shape`: `text.encode_utf16().collect::<Vec<u16>>()` —
+//!   the 2n allocation plus the per-codepoint encode pass, the
+//!   Rust-side shape model of `len(s.encode("utf-16-le"))`'s cost
+//!   (CPython's codec is this shape: an ASCII widen pass or a UCS2
+//!   near-memcpy, always with the full output allocation — not a
+//!   CPython timing claim). The true end-to-end lanes — the pyo3
 //!   borrow's cache classes — are measured Python-side by the
 //!   `utf16_byte_len` cells in tests/test_performance.py, same split
 //!   as the utf8 group.
@@ -372,12 +373,12 @@ fn bench_utf8_byte_len(c: &mut Criterion) {
                 bench.iter(|| scan_impl::utf8_byte_len(black_box(text)));
             },
         );
-        // The encode baseline: the alloc+memcpy the replaced expression
+        // The memcpy floor: the alloc+memcpy the replaced expression
         // pays — CPython's ASCII encode fast path is exactly this copy
         // (the Python-side cells measure the live expression and the
         // non-ASCII cold/warm lanes this cannot see).
         group.bench_with_input(
-            BenchmarkId::new("encode_baseline", format!("{}B", text.len())),
+            BenchmarkId::new("memcpy_floor", format!("{}B", text.len())),
             &text,
             |bench, text| {
                 bench.iter(|| black_box(text.as_bytes().to_vec()));
@@ -402,12 +403,13 @@ fn bench_utf16_byte_len(c: &mut Criterion) {
                 bench.iter(|| scan_impl::utf16_byte_len(black_box(text)));
             },
         );
-        // The encode baseline: the 2n allocation plus the per-codepoint
-        // encode pass the replaced expression pays (CPython's utf-16-le
-        // codec is this shape; the Python-side cells measure the live
-        // expression and the borrow's cache lanes this cannot see).
+        // The Rust-side shape model: the 2n allocation plus the
+        // per-codepoint encode pass the replaced expression pays
+        // (CPython's utf-16-le codec is this shape; the Python-side
+        // cells measure the live expression and the borrow's cache
+        // lanes this cannot see).
         group.bench_with_input(
-            BenchmarkId::new("encode_baseline", format!("{}B", text.len())),
+            BenchmarkId::new("rust_utf16_shape", format!("{}B", text.len())),
             &text,
             |bench, text| {
                 bench.iter(|| black_box(text.encode_utf16().collect::<Vec<u16>>()));

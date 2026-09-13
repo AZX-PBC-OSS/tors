@@ -764,6 +764,17 @@ and `backend/_terminal.py` re-encodes a serialized result of up to
 genuine double pass, the byte count having existed inside the serializer's
 output and been discarded by the `.decode()` that produced the `str`.
 
+Fresh vs repeat, stated up front (the cold-lane economics the lane table
+pins: cold-encode 4.9 ms | first-call 4.7 ms | warm-encode 196 µs |
+cached-tors 0.13 µs at 12 MiB): a terminal fresh `str` per success never
+repeats on the same object, so the one-shot lane is encode-parity by
+construction — the win there is only the absence of a Python-visible
+`bytes` object, not wall time. The wall-time win is repeat counts on the
+same object (O(1) cached borrow vs a fresh alloc+memcpy per `encode`)
+and every ASCII count (zero-copy alias, flat ~0.1 µs). Memory on every
+lane is zero-alloc: one field read off the borrowed `&str` (the chunked
+count is the utf16 twin's shape; this twin allocates nothing).
+
 A companion, not a standalone motivation: this ships in the scan family's
 binding module as the pinned companion of `contains_unescaped`/
 `find_unescaped`, same module and same harness patterns — and honest sizing
@@ -799,9 +810,12 @@ The cost model that buys, measured (the full lane table is in
   ~184 µs, measured — while a prior `len(s.encode())` does not warm this
   lane at all: the first `utf8_byte_len` after an encode still pays the full
   materialization (measured ~3.8-4.8 ms at 12 MiB on fresh objects, the cold
-  class exactly; in every CPython from 3.10 through 3.14 the encode path
-  reads the cache and only the `PyUnicode_AsUTF8AndSize` borrow — the str-in
-  borrow — writes it).
+  class exactly; observed on CPython 3.12 here, expected from the sources
+  on 3.10–3.14 — see `docs/cache-proof.md` for the per-version
+  `Objects/unicodeobject.c` links — where the encode path reads the cache
+  and only the `PyUnicode_AsUTF8AndSize` borrow writes it). Semantic pins
+  (same object, same answer) are the contract; timing is not — the cache
+  is CPython-internal and the wall cells record it, never assert it.
 - **Non-ASCII, repeat calls on the same object**: O(1) — strictly better than
   the expression, which re-copies on every call (measured ~0.1 µs against the
   warm expression's 1.8 µs at 64 KiB and 196 µs at 12 MiB).
@@ -855,13 +869,16 @@ FFI: the standard str borrow hands the core a Rust `&str`, and the core
 derives the answer from its UTF-8 bytes — UTF-16 bytes =
 `2 * (#codepoints + #astral codepoints)`, where over valid UTF-8
 `#codepoints` is the lead-byte count and `#astral` is the count of 4-byte
-lead bytes (`>= 0xF0`) — one pass of byte-class arithmetic, no allocation,
-no per-codepoint decoding (the derivation, its proof against a
-`chars()`-based naive count, and the exhaustive boundary sweep are in
-`src/scan_impl.rs`). The corners the identity buys: no astral codepoints
-means exactly `2 * len(s)` for ALL BMP text — CJK and combining marks
-included, where the UTF-8 byte count diverges — pure ASCII means `2 *` the
-UTF-8 byte count, and every answer is even.
+lead bytes (`matches!(b, 0xF0..=0xF4)` — `0xF5..=0xFF` never occur in a
+`&str`, so the closed range fails safe) — one pass of byte-class
+arithmetic, no allocation, no per-codepoint decoding (the derivation, its
+proof against a `chars()`-based naive count, and the exhaustive boundary
+sweep are in `src/scan_impl.rs`). The corners the identity buys: no astral
+codepoints means exactly `2 * len(s)` for ALL BMP text — CJK and combining
+marks included, where the UTF-8 byte count diverges — pure ASCII means `2 *`
+the UTF-8 byte count, and every answer is even. The final doubling is
+checked arithmetic: past ~1 GiB of astral-dense text on 32-bit targets it
+raises `OverflowError` instead of wrapping (never fires on 64-bit).
 
 The cost model, measured (the full lane table is in
 `tests/test_performance.py`):
@@ -870,16 +887,22 @@ The cost model, measured (the full lane table is in
   representation-independent and the utf-16 expression pays its 2n
   alloc + encode pass on every kind: measured ~2.2 µs at 64 KiB against
   the expression's 8.8-10.4 µs, ~34 µs at 1 MiB against 142-147 µs, and
-  ~400 µs (~30 GB/s) at 12 MiB against 1.7-1.8 ms — ratios 0.21-0.26 on
-  every warm lane.
+  ~400 µs at 12 MiB against 1.7-1.8 ms — ratios 0.21-0.26 on every warm
+  lane. Repeat counts on the same object stay O(1)-borrow plus the
+  detached scan; memory is zero-alloc on every lane (field read plus the
+  chunked count, no `bytes` object on any lane).
 - **Non-ASCII, first call on the object (a cold UTF-8 cache)**: the
   borrow materializes and caches the UTF-8 view first (the utf8 twin's
   cold class — encode-parity cost, GIL-held, and a prior `encode` does
-  not warm it), then the scan runs detached. Measured 376 µs at 1 MiB
-  against the utf-16 expression's own cold 146 µs — the one lane the
-  expression wins, because it never touches UTF-8 at all; the trade buys
-  every subsequent call at 4-5x and the absence of a 2n `bytes` object
-  per call.
+  not warm it; observed on CPython 3.12 here, expected from the sources
+  on 3.10–3.14 — see `docs/cache-proof.md`), then the scan runs
+  detached. Measured 376 µs at 1 MiB against the utf-16 expression's own
+  cold 146 µs — the one lane the expression wins, because it never
+  touches UTF-8 at all; `utf16_byte_len` is NOT recommended for one-shot
+  counts of fresh non-ASCII strings. The trade buys every subsequent
+  call at 4-5x and the absence of a 2n `bytes` object per call. The
+  fresh-object end-to-end bench is the `measured_not_asserted` cell in
+  `tests/test_performance.py`.
 
 ```python
 tors.utf16_byte_len("café")  # 8: four BMP codepoints, 2 bytes each
@@ -895,14 +918,24 @@ and pinned (a first-draft claim that the stdlib's utf-16-le encode accepts
 lone surrogates was wrong — the test battery caught it): the strict
 `encode("utf-16-le")` refuses lone surrogates exactly like the utf-8 codec
 does ("surrogates not allowed"), so the function refuses the same strings
-the expression itself refuses. Two honest differences: the tors error is
-the str-in borrow's own — `.encoding` is `"utf-8"` (the flavor of the step
-that fails, materializing the UTF-8 view; the expression's error says
-`"utf-16-le"`) — and the stdlib's `errors="surrogatepass"` mode WOULD
-encode them (one unit each), a mode tors deliberately does not offer (the
-crate-wide str-in contract: every str-argument tors function needs the
-UTF-8 view). Pinned attribute-for-attribute in tests/test_utf8_byte_len.py,
-the byte-len family file. The argument takes exactly `str` (`bytes` /
+the expression itself refuses.
+
+> **⚠ Breaking differences from the replaced expression.** The refusal
+> decision is parity; the error SHAPE is not:
+> (1) `.encoding` is `"utf-8"` (the str-in borrow materializing the UTF-8
+> view is the step that fails) where the expression's error says
+> `"utf-16-le"` — an encoding-label switch a caller matching on
+> `.encoding` will observe;
+> (2) on a multi-surrogate run the borrow's `(start, end)` names the
+> whole run where the utf-16-le error reports only the first unit —
+> a whole-run span vs a first-unit span;
+> (3) `errors="surrogatepass"` (one 2-byte unit per lone surrogate, the
+> 3-byte WTF-8 spelling in utf-8) is unsupported — no str-argument tors
+> function offers a surrogate mode, since every one needs the UTF-8 view
+> first.
+> Pinned attribute-for-attribute in tests/test_utf8_byte_len.py, the
+> byte-len family file (including the `encode("utf-16")` BOM form, which
+> answers the le length plus the 2-byte BOM). The argument takes exactly `str` (`bytes` /
 `bytearray` / `memoryview` / `int` raise `TypeError`) — it counts a `str`,
 not decodes bytes; the decode side of UTF-16 is `decode_utf16`.
 

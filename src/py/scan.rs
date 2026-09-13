@@ -1,4 +1,4 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyOverflowError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::scan_impl;
@@ -95,6 +95,18 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 /// byte count having existed inside the serializer's output and been
 /// discarded by the `.decode()` that produced the `str`.
 ///
+/// Fresh vs repeat, stated up front (the cold-lane economics the lane
+/// table pins: cold-encode 4.9 ms | first-call 4.7 ms | warm-encode
+/// 196 µs | cached-tors 0.13 µs at 12 MiB): the terminal's fresh `str`
+/// per success never repeats on the same object, so its one-shot lane
+/// is encode-parity by construction — the win there is only the absence
+/// of a Python-visible `bytes` object, not wall time. The wall-time win
+/// is repeat counts on the same object (O(1) cached borrow vs a fresh
+/// alloc+memcpy per `encode`) and every ASCII count (zero-copy alias,
+/// flat ~0.1 µs). Memory: zero-alloc — one field read off the borrowed
+/// `&str` (the chunked count is the utf16 twin's; this twin allocates
+/// nothing on any lane).
+///
 /// **Companion, not standalone**: this ships in the scan family's binding
 /// module as the pinned companion of `contains_unescaped`/
 /// `find_unescaped` (#50) — same module, same harness patterns — and
@@ -163,13 +175,40 @@ pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
 /// interop size checks in that world are UTF-16 bytes, and the Python
 /// spelling of the count allocates the entire copy to take it.
 ///
+/// Fresh vs repeat, stated up front (the cold-lane economics): on a
+/// FRESH non-ASCII object the first call pays the borrow's UTF-8-cache
+/// materialization (encode-parity, GIL-held) BEFORE the scan, while the
+/// utf-16 expression never touches UTF-8 — so a one-shot count of a
+/// fresh non-ASCII string is the one lane the expression wins, and
+/// `utf16_byte_len` is NOT recommended there; the win is repeat counts
+/// on the same object (4-5x, no 2n allocation per call) and every ASCII
+/// count (no cold case at all). The wall cells in
+/// tests/test_performance.py pin both lanes; the fresh-object cell is
+/// the end-to-end one-shot bench.
+///
+/// > **Breaking differences from `len(s.encode("utf-16-le"))`** (the
+/// > replaced expression): (1) the error's `.encoding` is `"utf-8"`
+/// > (the str-in borrow materializing the UTF-8 view is the step that
+/// > fails) where the expression's says `"utf-16-le"`; (2) on a
+/// > multi-surrogate run the borrow's `(start, end)` names the whole
+/// > run where the utf-16-le error reports only the first unit;
+/// > (3) `errors="surrogatepass"` (one 2-byte unit per lone surrogate)
+/// > is unsupported — no str-argument tors function offers a surrogate
+/// > mode, since every one needs the UTF-8 view first. Refusal parity
+/// > otherwise: the strict codec refuses the same strings tors refuses.
+///
+/// Overflow: `2 * (codepoints + astral)` is checked arithmetic — past
+/// ~1 GiB of astral-dense text on 32-bit targets it raises
+/// `OverflowError` instead of wrapping; on 64-bit it never fires.
+///
 /// The implementation is the utf8 twin's borrow plus derived
 /// arithmetic, no FFI: the standard str-in borrow hands the core a
 /// Rust `&str`, and the core derives the answer from its UTF-8 bytes —
 /// `2 * (#codepoints + #astral)`, `#codepoints` the lead-byte count,
-/// `#astral` the count of 4-byte leads (bytes `>= 0xF0`) — one pass,
-/// no allocation, no per-codepoint decoding. The derivation, its
-/// proof against a `chars()`-based naive count, and the exhaustive
+/// `#astral` the count of 4-byte leads (`matches!(b, 0xF0..=0xF4)` —
+/// `0xF5..=0xFF` never occur in a `&str`, so the range fails safe) —
+/// one pass, no allocation, no per-codepoint decoding. The derivation,
+/// its proof against a `chars()`-based naive count, and the exhaustive
 /// boundary sweep are `src/scan_impl.rs`'s; the stdlib-oracle parity
 /// (`len(s.encode("utf-16-le"))` over generated text, every reference
 /// corpus, and the same sweep) is tests/test_utf8_byte_len.py's, the
@@ -223,6 +262,19 @@ pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
 /// twin: the GIL-held residue is the borrow alone, and the scan
 /// detaches.
 #[pyfunction]
-pub fn utf16_byte_len(py: Python<'_>, s: &str) -> usize {
-    py.detach(|| scan_impl::utf16_byte_len(s))
+pub fn utf16_byte_len(py: Python<'_>, s: &str) -> PyResult<usize> {
+    // H1: the core's checked arithmetic panics on 32-bit overflow
+    // rather than wrapping; catch the panic at the boundary and raise
+    // the Python-side contract instead. `catch_unwind` needs an
+    // `AssertUnwindSafe` wrapper around the closure's borrowed capture.
+    use std::panic::AssertUnwindSafe;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        py.detach(|| scan_impl::utf16_byte_len(s))
+    }));
+    match result {
+        Ok(n) => Ok(n),
+        Err(_) => Err(PyOverflowError::new_err(
+            "utf16_byte_len overflow: input too large for usize on this target (32-bit)",
+        )),
+    }
 }

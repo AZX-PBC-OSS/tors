@@ -210,9 +210,7 @@ _CONTENT_ROWS: list[tuple[str, int]] = [
 ]
 
 _GOLDEN_CASES = _BOUNDARY_LADDER + _CONTENT_ROWS
-_GOLDEN_IDS = [
-    f"boundary-{text!r}-{expected}b" for text, expected in _BOUNDARY_LADDER
-] + [
+_GOLDEN_IDS = [f"boundary-{text!r}-{expected}b" for text, expected in _BOUNDARY_LADDER] + [
     "latin-1-accent",
     "cjk",
     "astral-emoji",
@@ -242,9 +240,7 @@ def test_one_mib_of_mixed_script_text_matches_the_oracle() -> None:
     oracle comparison is the whole pin at this scale (hand-computing a
     megabyte is silliness); the point is that the answer holds at a size
     where the encode being replaced allocates a full megabyte."""
-    unit = (
-        "Torque specifications, caf\u00e9 \u6771\u4eac \U0001f600 e\u0301\x00\n\n"
-    )
+    unit = "Torque specifications, caf\u00e9 \u6771\u4eac \U0001f600 e\u0301\x00\n\n"
     text = unit * (1 * _MIB // len(unit.encode("utf-8")))
     assert len(text.encode("utf-8")) >= 1 * _MIB - len(unit.encode("utf-8"))
     assert utf8_byte_len(text) == len(text.encode("utf-8"))
@@ -278,9 +274,7 @@ _CLASS_CHARS = [
     "\U0010ffff",
 ]
 
-_class_text = st.lists(st.sampled_from(_CLASS_CHARS), min_size=0, max_size=80).map(
-    "".join
-)
+_class_text = st.lists(st.sampled_from(_CLASS_CHARS), min_size=0, max_size=80).map("".join)
 
 _astral_text = st.text(
     alphabet=st.characters(min_codepoint=0x10000, max_codepoint=0x10FFFF),
@@ -412,6 +406,7 @@ class TestArgumentContract:
         subclass (CPython's own coercion behavior for str APIs —
         ``"x".join`` and ``str.encode`` accept subclasses too), so the
         function measures the subclass instance's own value."""
+
         class Shout(str):
             pass
 
@@ -599,10 +594,7 @@ def test_utf16_one_mib_of_astral_bearing_text_matches_the_oracle() -> None:
     scale (hand-computing a megabyte is silliness); the point is that the
     answer holds at a size where the encode being replaced allocates the
     whole UTF-16 copy of it, two bytes per codepoint."""
-    unit = (
-        "Torque specifications, caf\u00e9 \u6771\u4eac \U0001f600 "
-        "\U00040000 e\u0301\x00\n\n"
-    )
+    unit = "Torque specifications, caf\u00e9 \u6771\u4eac \U0001f600 \U00040000 e\u0301\x00\n\n"
     text = unit * (1 * _MIB // len(unit.encode("utf-8")))
     assert len(text.encode("utf-8")) >= 1 * _MIB - len(unit.encode("utf-8"))
     assert utf16_byte_len(text) == len(text.encode("utf-16-le"))
@@ -890,6 +882,7 @@ class TestUtf16ArgumentContract:
         """The isinstance contract, the utf8 twin's: the extraction accepts
         a ``str`` subclass and measures the subclass instance's own
         value."""
+
         class Shout(str):
             pass
 
@@ -1004,3 +997,164 @@ def test_the_utf16_cap_gate_trips_where_the_encode_gate_trips(units_over_cap: in
         assert utf16_byte_len(payload) <= _UTF16_CAP_BYTES  # the gate accepts
     else:
         assert utf16_byte_len(payload) > _UTF16_CAP_BYTES  # the gate rejects
+
+
+# --- utf16: BOM exclusion, byte-order parity, and the JS-unit corner -----
+#
+# The BOM exclusion sentence, asserted: `utf16_byte_len` counts UTF-16
+# units only — no byte-order mark. `s.encode("utf-16")` (the BOM form)
+# answers the le length plus the 2-byte BOM; `s.encode("utf-16-be")`
+# answers the same bytes as le in the other order.
+
+
+def test_utf16_excludes_the_bom_that_encode_utf16_adds() -> None:
+    """BOM exclusion, pinned: `encode("utf-16")` writes a 2-byte BOM the
+    le/be forms never do, and `utf16_byte_len` counts units only — so it
+    equals the le length and trails the BOM form by exactly 2."""
+    for text in ("", "a", "café", "東京", "😀", "a😀b"):
+        assert utf16_byte_len(text) == len(text.encode("utf-16-le"))
+        assert len(text.encode("utf-16")) == len(text.encode("utf-16-le")) + 2
+        assert utf16_byte_len(text) == len(text.encode("utf-16")) - 2
+
+
+def test_utf16_be_parity_matches_the_le_oracle() -> None:
+    """Byte-order parity: le and be differ only in byte order, never in
+    length — so the le oracle this function pins also equals the be
+    oracle on every input, surrogate-free or otherwise countable."""
+    for text in ("", "a", "café", "東京", "é", "😀", "a😀b東京"):
+        assert len(text.encode("utf-16-be")) == len(text.encode("utf-16-le"))
+        assert utf16_byte_len(text) == len(text.encode("utf-16-be"))
+
+
+def test_js_string_length_is_half_the_utf16_byte_length() -> None:
+    """The JS-unit corner: `String.prototype.length` counts UTF-16 units,
+    so `"😀".length === 2` in JS is `utf16_byte_len("😀") == 4` here —
+    two units, one per surrogate. BMP text is one unit per codepoint
+    (`len(s)` units); astral text is two per codepoint."""
+    assert utf16_byte_len("😀") == 4
+    assert len("😀") == 1  # one codepoint, two UTF-16 units
+    assert utf16_byte_len("😀") == 2 * 2
+    assert utf16_byte_len("abc") == 2 * len("abc")
+    assert utf16_byte_len("東京") == 2 * len("東京")
+
+
+def test_surrogatepass_decoded_input_is_refused() -> None:
+    """The surrogatepass-decode input lane: WTF-8 bytes decoded with
+    `errors="surrogatepass"` produce a `str` holding lone surrogates —
+    exactly the input the crate-wide str-in contract refuses. Both twins
+    raise the borrow's `UnicodeEncodeError` there (refusal parity), and
+    the stdlib's surrogatepass ENCODE would accept it (the mode tors
+    does not offer)."""
+    text = b"\xed\xa0\x80".decode("utf-8", "surrogatepass")
+    assert len(text) == 1 and 0xD800 <= ord(text) <= 0xDFFF
+    with pytest.raises(UnicodeEncodeError):
+        utf8_byte_len(text)
+    with pytest.raises(UnicodeEncodeError) as exc_info:
+        utf16_byte_len(text)
+    assert exc_info.value.encoding == "utf-8"
+    # The escape hatch tors does not offer, pinned on this input too:
+    assert len(text.encode("utf-16-le", "surrogatepass")) == 2 * len(text)
+
+
+def test_utf16_exhaustive_sweep_count_and_alphabet_contract() -> None:
+    """Sweep-count unification pin: the Python sweep runs 21 alphabet
+    entries (extra ASCII representatives `Z`, `0`, ` ` plus the Rust
+    sweep's 17) over lengths 1–3 in codepoints — 21 + 21² + 21³ = 9723
+    cases — where the Rust sweep's 17-entry single-codepoint alphabet
+    gives 17 + 17² + 17³ = 5219. Same theorem (additivity over
+    concatenation of valid-UTF-8 single-codepoint entries), denser ASCII
+    sampling here; both alphabets are length-in-codepoints and
+    valid-UTF-8-only by construction."""
+    assert len(_UTF16_CLASS_CHARS) == 21
+    assert all(len(ch) == 1 for ch in _UTF16_CLASS_CHARS)
+    total = sum(len(_UTF16_CLASS_CHARS) ** n for n in (1, 2, 3))
+    assert total == 9723
+    # Every entry encodes cleanly (valid UTF-8/UTF-16, no surrogates):
+    for ch in _UTF16_CLASS_CHARS:
+        ch.encode("utf-8")
+        ch.encode("utf-16-le")
+
+
+def test_overflow_contract_documents_the_32bit_boundary() -> None:
+    """The 32-bit overflow contract, stated without a gigabyte: on 64-bit
+    (this runner) `2 * (codepoints + astral)` cannot overflow `usize`,
+    so large-but-reasonable inputs — including 12 MiB of astral text —
+    answer exactly. Past ~1 GiB of astral-dense text on a 32-bit target
+    the checked arithmetic raises `OverflowError` instead of wrapping
+    (crate-side `checked_add`/`checked_mul` pin plus the
+    `#[cfg(target_pointer_width = "32")]` test in `src/scan_impl.rs`;
+    the Python wrapper maps the failure to `OverflowError`)."""
+    import struct
+
+    assert struct.calcsize("P") == 8  # documents this leg ran 64-bit
+    astral = "😀" * (3 * 1024 * 1024)  # 12 MiB of UTF-8, astral-dense
+    assert utf16_byte_len(astral) == 4 * len(astral) == len(astral.encode("utf-16-le"))
+
+
+def test_interpreter_matrix_note_gil_and_pypy() -> None:
+    """Interpreter-matrix note, pinned as behavior: the detach is a
+    static property of the wrapper (`py.detach` around the core — see
+    the static presence pin below), not a timing claim. On free-threaded
+    CPython the GIL-held residue (the borrow's first-call
+    materialization) still serializes on the object's cache state, and
+    on PyPy the UTF-8-view cache internals differ — so only the semantic
+    pins (same object, same answer) are portable; wall cells are
+    CPython-3.12-calibration-box numbers, re-measure per leg."""
+    import sys
+
+    _ = sys.version_info  # the note travels with the suite, not a branch
+    text = "café 東京 😀" * 100
+    assert utf16_byte_len(text) == len(text.encode("utf-16-le"))
+    assert utf8_byte_len(text) == len(text.encode("utf-8"))
+
+
+def test_detach_is_statically_present_in_both_wrappers() -> None:
+    """Static detach-presence pin: the heartbeat cells admit they cannot
+    catch a detach removal (a removed detach still passes the 100 ms
+    ceiling at these sizes — the wall just moves under the GIL), so this
+    cell pins the mechanism statically instead: both `utf8_byte_len`
+    and `utf16_byte_len` bodies in `src/py/scan.rs` must route the core
+    through `py.detach`. The 1.0 ms scan-band ceiling in
+    `tests/test_performance.py` stays as the dynamic backstop (a
+    scalar-loop regression blows it by 3x); this is the static one."""
+    import pathlib
+
+    src = pathlib.Path(__file__).parent.parent.joinpath("src", "py", "scan.rs").read_text()
+    for name in ("utf8_byte_len", "utf16_byte_len"):
+        start = src.index(f"pub fn {name}")
+        body = src[start : start + 2000]
+        assert "py.detach" in body, f"{name} lost its py.detach"
+
+
+def test_cheap_utf16_differential_against_encode_utf16_count() -> None:
+    """Cheap utf16 differential fuzz (no hypothesis profile needed): the
+    `str.encode_utf16()` iterator count doubled must equal the byte
+    length on a fixed pseudo-random corpus — an independent Rust-side
+    spelling (`encode_utf16().count()`, per-codepoint UTF-16 units)
+    cross-checked against the byte-class arithmetic without building
+    the 2n copy. Deterministic (LCG over the boundary codepoints), 2000
+    cases, mean length ~20."""
+    boundary = [
+        0x61,
+        0x7F,
+        0x80,
+        0x7FF,
+        0x800,
+        0xFFFF,
+        0x10000,
+        0x40000,
+        0x80000,
+        0xC0000,
+        0x10FFFF,
+    ]
+    state = 0x12345678
+    for _ in range(2000):
+        n = state % 41
+        state = (1103515245 * state + 12345) & 0x7FFFFFFF
+        chars = []
+        for _ in range(n):
+            state = (1103515245 * state + 12345) & 0x7FFFFFFF
+            chars.append(chr(boundary[state % len(boundary)]))
+        text = "".join(chars)
+        assert utf16_byte_len(text) == len(text.encode("utf-16-le"))
+        assert utf16_byte_len(text) % 2 == 0

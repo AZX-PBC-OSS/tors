@@ -269,6 +269,17 @@ def utf8_byte_len(s: str) -> int: ...
 # errors="surrogatepass" mode WOULD encode them (one unit each) — a
 # mode tors deliberately does not offer.
 #
+# ⚠ Breaking differences from len(s.encode("utf-16-le")): (1) the
+# error's .encoding is "utf-8", not "utf-16-le" (encoding-label switch
+# for callers matching on it); (2) on a multi-surrogate run the
+# borrow's (start, end) names the whole run (utf-8 whole-run span) where
+# the utf-16-le error reports only the first unit (first-unit span);
+# (3) errors="surrogatepass" is unsupported. See docs/api.md.
+#
+# Overflow: 2 * (codepoints + astral) is checked — past ~1 GiB of
+# astral-dense text on 32-bit targets this raises OverflowError instead
+# of wrapping (never fires on 64-bit).
+#
 # GIL note: a single int return (no marshalling class); the GIL-held
 # residue is the borrow (the cold-cache first call's materialization,
 # under the 10ms ping floor at 12 MiB), and the detach carries the

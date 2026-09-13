@@ -58,17 +58,23 @@ otherwise use:
   str-in borrow fills the cache — `encode` then reads it, a ~184 µs copy at
   12 MiB instead of ~4.9 ms — but a prior `encode` fills nothing, so the
   first `utf8_byte_len` after an encode still pays the full materialization
-  (measured ~3.8-4.8 ms at 12 MiB; `unicode_encode_utf8` reads the cache and
-  never writes it, in every CPython 3.10-3.14). That first-call
+  (measured ~3.8-4.8 ms at 12 MiB; observed on CPython 3.12 here, expected
+  from the sources on 3.10–3.14 — see `docs/cache-proof.md` for the
+  per-version `Objects/unicodeobject.c` links. Semantic pins are the
+  contract; timing is not). That first-call
   materialization is the function's one GIL-held O(n) pass (~5 ms at
   12 MiB, under the heartbeat interval); the full lane table is in
-  `tests/test_performance.py`, the criterion core-vs-copy group in
-  `benches/search.rs` (~0.5 ns flat against the copy's ~65 GiB/s).
+  `tests/test_performance.py` (both sharing directions re-measured
+  in-process), the criterion core-vs-copy group in
+  `benches/search.rs` (`core` ~0.5 ns flat against the `memcpy_floor`'s
+  ~65 GiB/s bench artifact on the calibration box).
 - `utf16_byte_len`: the interop twin — `len(s.encode("utf-16-le"))`
   allocates and encodes the full 2n `bytes` object just to count it;
   `tors` derives the count from the borrowed UTF-8 view (2 bytes per
   codepoint plus 2 more per astral codepoint, both counts byte classes)
-  in one ~30 GB/s chunked pass with no allocation: ~2.2 µs at 64 KiB
+  in one chunked pass with no allocation (bench artifact on the
+  calibration box, arm64 rustc release: ~30 GB/s; re-measure on your
+  target): ~2.2 µs at 64 KiB
   against the expression's ~9-10 µs, ~34 µs at 1 MiB against ~145 µs,
   ~400 µs at 12 MiB against ~1.7 ms — ratios 0.21-0.26 on every warm
   lane, both corpus kinds (the scan is representation-independent).
@@ -76,9 +82,12 @@ otherwise use:
   object's first call pays the borrow's UTF-8-cache materialization
   (the utf8 twin's cold class) before the scan, while the utf-16
   expression never touches UTF-8 — 376 µs against 146 µs at 1 MiB, the
-  trade buying every later call at 4-5x and no 2n allocation per call.
-  The lane table is in `tests/test_performance.py`, the criterion group
-  in `benches/search.rs` (the chunked scan against the encode baseline).
+  trade buying every later call at 4-5x and no 2n allocation per call;
+  one-shot counts of fresh non-ASCII strings are not the recommended
+  lane. The lane table is in `tests/test_performance.py` (including the
+  fresh-object end-to-end bench), the criterion group in
+  `benches/search.rs` (the chunked scan against the `rust_utf16_shape`
+  baseline; the utf8 group races `core` against the `memcpy_floor`).
 - The diffing and fuzzy functions bound their superlinear worst cases with
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a

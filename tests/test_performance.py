@@ -362,11 +362,13 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #     non-ASCII (decomposed), the cache lanes (the borrow's UTF-8 view is
 #     materialized once per OBJECT and cached by CPython; the sharing with
 #     encode is one-directional — the str-in borrow fills the cache and
-#     encode reads it but never fills it, verified in the CPython sources
-#     3.10-3.14: unicode_fill_utf8, the only writer, is reachable solely
-#     from PyUnicode_AsUTF8AndSize, the str-in borrow, while
-#     unicode_encode_utf8 returns a copy of a filled cache and writes
-#     nothing on a miss):
+#     encode reads it but never fills it, observed on CPython 3.12 here
+#     and expected from the sources on 3.10-3.14 — see docs/cache-proof.md
+#     for the per-version Objects/unicodeobject.c links and the
+#     ripgrep recipe (`unicode_fill_utf8`, the only writer, reachable
+#     solely from PyUnicode_AsUTF8AndSize, while unicode_encode_utf8
+#     returns a copy of a filled cache and writes nothing on a miss).
+#     Semantic pins are the contract; timing is not):
 #
 #         64 KiB:  cold-encode 21.8µs | first-call 26.7µs | warm-encode 1.8µs
 #                  | cached-tors 0.08µs
@@ -526,6 +528,10 @@ def test_utf8_byte_len_fresh_object_lanes_are_measured_not_asserted() -> None:
 #         64 KiB  2.2µs        8.8-10.4µs     0.21-0.25
 #         1 MiB   33-34µs      142-147µs      0.22-0.24
 #         12 MiB  399-412µs    1656-1786µs    0.23-0.24 (a ~30 GB/s scan
+#                                                    bench artifact on the
+#                                                    calibration box, arm64
+#                                                    rustc release —
+#                                                    re-measure per target —
 #                                                    against the expression's
 #                                                    2n alloc + widen pass)
 #
