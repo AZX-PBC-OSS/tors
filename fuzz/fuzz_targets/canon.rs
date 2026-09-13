@@ -14,6 +14,13 @@
 //! `json.dumps` itself) is the real parity net; this target is the other
 //! bug class, per the fuzz crate's own doctrine: raw adversarial shapes
 //! a hypothesis strategy never draws, straight into the pure-Rust core.
+//!
+//! SURROGATE LANE NOTE: this target builds `Canon::Str` from valid UTF-8
+//! only (`from_utf8_lossy` / valid scalar `char`s), so lone surrogates --
+//! the documented Python-boundary divergence where `content_hash` raises
+//! `UnicodeEncodeError` and `json.dumps` emits `\udXXX` -- never reach the
+//! emitter here by construction. That lane is pinned Python-side
+//! (`TestSurrogateDivergence`), not here.
 
 #![no_main]
 

@@ -2572,10 +2572,36 @@ the interpreter budget), pinned as a documented divergence, not parity.
 **Subclass hooks run to completion under the GIL.** A dict subclass's
 `.items()` and a list/tuple subclass's `__iter__` are pulled to completion
 before the child walk begins; a hook yielding an unbounded stream aborts
-at `MAX_PROTOCOL_ITEMS` (1M pulled items per container) with `ValueError`,
-bounded never infinite. Treat `content_hash` as trusted-input-only for
-subclass instances with attacker-controlled hooks — the same posture
-`json.dumps` itself has.
+with a generic `ValueError` (the per-container bound is a DoS backstop, its
+value deliberately not leaked), bounded never infinite. Treat
+`content_hash` as trusted-input-only for subclass instances with
+attacker-controlled hooks — the same posture `json.dumps` itself has
+(it materializes unboundedly and would spin forever). The same
+trusted-input-only posture covers depth/breadth beyond a modest envelope
+(depth on the order of 10-20k frames, visited objects on the order of
+200-500k nodes): the untrusted-input ceiling (`MAX_TOTAL_DEPTH` 150k total
+frames exact+protocol, `MAX_WALK_NODES` 2M visited objects; 100k exact
+levels hash, 200k raises `RecursionError`) is test-fitted to the pinned
+superset lane, not to an adversarial wall/RSS budget — a 149k-deep exact
+tree still holds tens of MiB GIL-held before the ceiling fires.
+
+**Protocol nesting past ~1000 is unsupported.** Subclass containers are
+counted against `sys.getrecursionlimit()` and raise `RecursionError` at the
+cap. On 3.10/3.11 that matches `json.dumps`'s own boundary; on 3.12+ the
+stdlib C-stack budget is looser (a legit 2k-deep subclass chain hashes under
+`json.dumps` at ~100k frames on 3.14 while tors raises at ~1000) — a
+deliberate conservative divergence, same error class, tighter boundary,
+never a silent hash. Exact nesting is the deep lane (100k levels hash);
+protocol nesting is the parity lane up to the interpreter limit.
+
+**Delegated sorts are bounded.** Exotic-key dicts (any float/big-int/
+mixed/NaN/subclass key) sort by delegating to CPython's own `list.sort`
+over live `(key, value)` tuples — O(n log n) Python comparisons plus one
+hash entry and one tuple per key, all GIL-held (≈100 MiB for 1M exotic
+keys). Past `MAX_DELEGATED_SORT_KEYS` (100k) keys in one dict, or
+`MAX_TOTAL_DELEGATED_PAIRS` (500k) delegated pairs walked in one call, the
+walk refuses with a generic `ValueError`. The str and int/bool fast paths
+take no interpreter sort and cost nothing against these bounds.
 
 **GIL model.** The object walk and the leaf spellings run under the GIL
 (the standard arg-walk class scaled to an object, O(tree): one borrow

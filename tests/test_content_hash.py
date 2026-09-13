@@ -768,10 +768,12 @@ class TestHypothesisDifferential:
             for _ in range(depth):
                 obj = [obj]
             _assert_parity(obj)
+            _assert_bytes(obj, b"[" * depth + b"null" + b"]" * depth)
             obj = None
             for _ in range(depth):
                 obj = {"k": obj}
             _assert_parity(obj)
+            _assert_bytes(obj, b'{"k":' * depth + b"null" + b"}" * depth)
             obj = None
             for _ in range(depth):
                 obj = ({"k": [obj]},)
@@ -1426,8 +1428,10 @@ class TestUntrustedInputCeiling:
 class TestBoundedHooks:
     """C2: subclass hooks run to completion under the GIL, bounded by the
     per-container materialization cap. An infinite ``__iter__``/``.items()``
-    aborts with ``ValueError`` instead of spinning forever (the must-timeout
-    pin: the call returns promptly, it never hangs the interpreter)."""
+    aborts with a generic ``ValueError`` instead of spinning forever (the
+    must-timeout pin: the call returns promptly, it never hangs the
+    interpreter; the bound value is deliberately not leaked in the
+    message)."""
 
     def test_infinite_iter_aborts_promptly_with_value_error(self) -> None:
         import itertools
@@ -1438,9 +1442,10 @@ class TestBoundedHooks:
                 return iter(itertools.repeat(1))
 
         started = time.monotonic()
-        with pytest.raises(ValueError, match="unbounded hook"):
+        with pytest.raises(ValueError, match="unbounded hook") as exc_info:
             content_hash(Inf())
-        assert time.monotonic() - started < 30, "unbounded hook was not bounded"
+        assert time.monotonic() - started < 2, "unbounded hook was not bounded"
+        assert "1000000" not in str(exc_info.value), "cap value leaked"
 
     def test_infinite_items_aborts_promptly_with_value_error(self) -> None:
         import itertools
@@ -1454,9 +1459,10 @@ class TestBoundedHooks:
                 return itertools.repeat(("k", 1))
 
         started = time.monotonic()
-        with pytest.raises(ValueError, match="unbounded hook"):
+        with pytest.raises(ValueError, match="unbounded hook") as exc_info:
             content_hash(InfDict())
-        assert time.monotonic() - started < 30, "unbounded hook was not bounded"
+        assert time.monotonic() - started < 2, "unbounded hook was not bounded"
+        assert "1000000" not in str(exc_info.value), "cap value leaked"
 
     def test_generator_items_still_hash_with_parity(self) -> None:
         """``.items()`` returning a generator (not a list) is the normal
@@ -1476,23 +1482,20 @@ class TestBoundedHooks:
 class TestMixedNestingDivergence:
     """H1: mixed exact+protocol nesting diverges by construction (json
     counts every container against one C budget; tors counts only protocol
-    frames against the interpreter budget). 250 exact + 800 protocol levels
-    interleaved: never a silent hash mismatch -- either both engines hash
-    identically, or json raises while tors succeeds (the documented
-    divergence)."""
+    frames against the interpreter budget). Never a silent hash mismatch --
+    either both engines hash identically, or json raises while tors succeeds
+    (the documented divergence). Pinned in four interleavings (one-block,
+    alternating, reverse, scattered) so a single-shape pin cannot mislabel
+    the lane."""
 
-    def test_250_exact_800_protocol_interleaved_never_mismatches(self) -> None:
+    def _chain(self, inner: Any) -> Any:
         cls = TestContainerSubclassIterationParity
-        obj: Any = None
-        for i in range(1050):
-            if i % 1050 < 250:
-                obj = [obj]
-            else:
-                inner = obj
-                chain = cls.ChainList.__new__(cls.ChainList)
-                list.__init__(chain)
-                chain._inner = inner
-                obj = chain
+        chain = cls.ChainList.__new__(cls.ChainList)
+        list.__init__(chain)
+        chain._inner = inner
+        return chain
+
+    def _check_never_mismatches(self, obj: Any) -> None:
         try:
             expected = _oracle(obj)
         except RecursionError:
@@ -1506,24 +1509,64 @@ class TestMixedNestingDivergence:
         else:
             assert content_hash(obj) == expected
 
+    def test_250_exact_800_protocol_interleaved_never_mismatches(self) -> None:
+        obj: Any = None
+        for _ in range(250):
+            obj = [obj]
+        for _ in range(800):
+            obj = self._chain(obj)
+        self._check_never_mismatches(obj)
+
+    def test_alternating_exact_protocol_never_mismatches(self) -> None:
+        obj: Any = None
+        for _ in range(400):
+            obj = [obj]
+            obj = self._chain(obj)
+        self._check_never_mismatches(obj)
+
+    def test_reverse_800_protocol_250_exact_never_mismatches(self) -> None:
+        obj: Any = None
+        for _ in range(800):
+            obj = self._chain(obj)
+        for _ in range(250):
+            obj = [obj]
+        self._check_never_mismatches(obj)
+
+    def test_scattered_exact_inside_protocol_never_mismatches(self) -> None:
+        obj: Any = self._chain(self._chain([self._chain(None)]))
+        obj = [obj, self._chain([obj])]
+        self._check_never_mismatches(obj)
+
 
 class TestProtocolBoundary:
     """M1: the protocol-frame cap sits at ``sys.getrecursionlimit()``
-    (``>=`` vs C's ``>``: deliberately conservative by one frame, same
-    error class). The tors-side boundary is exact; json's own boundary is
-    version-dependent (C-stack budget on 3.12+), so only tors's side is
-    pinned exactly here."""
+    (depth <= limit hashes, depth == limit+1 raises -- the same ``>``
+    boundary C enforces, same error class). The tors-side boundary is exact
+    (limit-1/limit/limit+1 pinned); json's own boundary is
+    version-dependent (C-stack budget on 3.12+, ~100k on 3.14), so only
+    tors's side is pinned exactly here. Protocol nesting past ~1000 is
+    UNSUPPORTED by contract even where the stdlib succeeds."""
 
-    def test_deep_protocol_chain_past_the_limit_raises_recursion_error(self) -> None:
+    def _chain_depth(self, depth: int) -> Any:
         cls = TestContainerSubclassIterationParity
         obj: Any = None
-        for _ in range(sys.getrecursionlimit() + 50):
+        for _ in range(depth):
             chain = cls.ChainList.__new__(cls.ChainList)
             list.__init__(chain)
             chain._inner = obj
             obj = chain
+        return obj
+
+    def test_protocol_boundary_limit_minus1_limit_limit_plus1(self) -> None:
+        lim = sys.getrecursionlimit()
+        _assert_parity(self._chain_depth(lim - 1))
+        _assert_parity(self._chain_depth(lim))
         with pytest.raises(RecursionError):
-            content_hash(obj)
+            content_hash(self._chain_depth(lim + 1))
+
+    def test_deep_protocol_chain_past_the_limit_raises_recursion_error(self) -> None:
+        with pytest.raises(RecursionError):
+            content_hash(self._chain_depth(sys.getrecursionlimit() + 50))
 
     def test_shallow_protocol_chain_matches_the_oracle(self) -> None:
         cls = TestContainerSubclassIterationParity
@@ -1538,9 +1581,10 @@ class TestProtocolBoundary:
 
 class TestWallCeiling:
     """M2: the wall gate -- the measured race, asserted. At 1 MiB of
-    canonical form tors stays within 1.5x the full stdlib expression
-    (plus a flat 0.5s scheduling slack so the gate never flakes on a
-    loaded box)."""
+    canonical form tors stays within 1.5x the full stdlib expression. The
+    slack is scaled (0.05s, not the old vacuous 0.5s that dwarfed the ~3ms
+    1 MiB walls): tight enough to mean something, loose enough not to flake
+    on a loaded box."""
 
     def test_1mib_wall_within_1_5x_stdlib(self) -> None:
         import time
@@ -1557,7 +1601,7 @@ class TestWallCeiling:
 
         stdlib_wall = wall(lambda: _oracle(obj))
         tors_wall = wall(lambda: content_hash(obj))
-        assert tors_wall <= 1.5 * stdlib_wall + 0.5, (
+        assert tors_wall <= 1.5 * stdlib_wall + 0.05, (
             f"tors wall {tors_wall:.3f}s exceeds 1.5x stdlib {stdlib_wall:.3f}s"
         )
 
@@ -1660,7 +1704,8 @@ class TestDeepTreeGilRelease:
     """H3: the digest half (emission + SHA-256 + owned-tree teardown) runs
     detached. A heartbeat thread advances while a multi-MiB
     ``content_hash`` runs -- a lost detach (or a GIL-held drop tail) would
-    pin the counter."""
+    pin the counter. The deep-drop lane pins the same detach at 100k depth
+    (shallow-heartbeat-only would miss a GIL-held Drop tail)."""
 
     def test_heartbeat_advances_during_a_large_hash(self) -> None:
         import threading
@@ -1683,3 +1728,86 @@ class TestDeepTreeGilRelease:
             stop.set()
             thread.join(timeout=10)
         assert beats[0] >= 1, "heartbeat never advanced: the digest half held the GIL"
+
+    def test_heartbeat_advances_during_a_100k_deep_hash(self) -> None:
+        """The deep teardown is detached too: a 100k-deep tree's emission +
+        iterative Drop must not pin the heartbeat."""
+        import threading
+        import time
+
+        obj: Any = None
+        for _ in range(100_000):
+            obj = [obj]
+        stop = threading.Event()
+        beats: list[int] = [0]
+
+        def heartbeat() -> None:
+            while not stop.is_set():
+                beats[0] += 1
+                time.sleep(0.001)
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            content_hash(obj)
+        finally:
+            stop.set()
+            thread.join(timeout=30)
+        assert beats[0] >= 1, "heartbeat never advanced during deep hash"
+
+
+class TestDelegatedSortBounds:
+    """HIGH-2/HIGH-3: the delegated-sort lanes are bounded. One huge
+    exotic-key dict (>100k keys) refuses instead of materializing ~100 MiB
+    GIL-held; breadth-of-exotics (hundreds of thousands of tiny delegated
+    dicts, 500k 2-key sorts + HashMaps under the node caps) refuses via the
+    total-delegated-pairs bound. Fast-path dicts (str/int) cost nothing."""
+
+    def test_single_huge_exotic_dict_refuses(self) -> None:
+        obj = {float(i) + 0.5: i for i in range(100_001)}
+        with pytest.raises(ValueError, match="delegated"):
+            content_hash(obj)
+
+    def test_100k_exotic_bench_pin(self) -> None:
+        """The 100k bench pin: 50k float keys hash (below the per-dict
+        bound), proving the bound sits above legitimate wide dicts."""
+        obj = {float(i) + 0.5: i for i in range(50_000)}
+        _assert_parity(obj)
+
+    def test_breadth_of_exotics_refuses_via_total_bound(self) -> None:
+        objs = [{float(i) + 0.5: 1, float(i + 10_000_000) + 0.5: 2} for i in range(300_000)]
+        with pytest.raises(ValueError, match="delegated"):
+            content_hash(objs)
+
+    def test_str_and_int_wide_dicts_ignore_the_delegated_bounds(self) -> None:
+        _assert_parity({f"k{i:06d}": i for i in range(10_000)})
+        _assert_parity({i: str(i) for i in range(10_000)})
+
+
+class TestHostileReprAndNanSharing:
+    """P2-P4 leftovers: a hostile ``__repr__`` on values/keys must not
+    escape (int/float subclasses spell via the BASE repr; str content, not
+    repr), and NaN keys sharing one VALUE object debug-pin the identity
+    index."""
+
+    def test_hostile_repr_never_escapes(self) -> None:
+        class EvilInt(int):
+            def __repr__(self) -> str:
+                return "EVIL"
+
+        class EvilFloat(float):
+            def __repr__(self) -> str:
+                return "EVIL"
+
+        class EvilStr(str):
+            def __repr__(self) -> str:
+                return "EVIL"
+
+        _assert_parity([EvilInt(5), EvilFloat(0.5), EvilStr("actual")])
+        _assert_parity({EvilInt(5): 1, EvilFloat(2.5): 2, EvilStr("k"): 3})
+        _assert_bytes({"v": EvilStr("actual")}, b'{"v":"actual"}')
+
+    def test_nan_keys_sharing_one_value_object(self) -> None:
+        nan_a, nan_b = float("nan"), float("nan")
+        shared: list[Any] = [1]
+        _assert_parity({nan_a: shared, nan_b: shared})

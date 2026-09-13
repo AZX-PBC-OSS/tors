@@ -97,8 +97,9 @@
 //! tors's own `RecursionError`). The rule: exact nesting is the superset
 //! lane up to the ceiling; protocol nesting is json parity, its failure
 //! boundary included. On interpreters where json's budget IS the Python
-//! recursion limit (3.10/3.11) the boundary matches within one frame
-//! (`>=` vs C's `>`: deliberately conservative, same error class); on
+//! recursion limit (3.10/3.11) the boundary matches (depth <= limit hashes,
+//! depth == limit+1 raises on both sides -- pinned limit-1/limit/limit+1);
+//! on
 //! 3.12+ json's C-stack budget is looser than the recursion limit, so
 //! tors's cap is deliberately conservative there -- the same error
 //! class, a tighter boundary, never a silent loop.
@@ -111,6 +112,17 @@
 //! ceiling). Pinned as a documented divergence, not parity:
 //! `tests/test_content_hash.py`'s interleaved exact+protocol differential
 //! pins the shape.
+//!
+//! PROTOCOL BUDGET HONESTY (>1000 UNSUPPORTED): the protocol-frame cap is
+//! `sys.getrecursionlimit()` (~1000), matching json's failure boundary on
+//! 3.10/3.11 where the C budget IS the recursion limit. On 3.12+ json's
+//! C-stack budget is looser (a legit 2k-deep subclass chain hashes under
+//! `json.dumps` at ~100k frames on 3.14 while tors raises `RecursionError`
+//! at ~1000) -- a deliberate conservative divergence, same error class,
+//! tighter boundary, never a silent hash. Protocol nesting past ~1000 is
+//! therefore UNSUPPORTED by contract (documented in `docs/api.md` and the
+//! `.pyi` stub): exact nesting is the deep lane, protocol nesting is the
+//! parity lane up to the interpreter limit.
 //!
 //! # Key handling: classify, sort, THEN coerce (json.dumps's own order)
 //!
@@ -193,19 +205,48 @@ use crate::canon_impl::Canon;
 /// lane) pass with headroom; 200k-deep adversarial nesting raises
 /// `RecursionError` instead of materializing 200k `Canon` nodes plus the
 /// marker/work stacks GIL-held. Tune down for stricter postures.
+///
+/// THREAT-FITTED ENVELOPE: the caps above are test-fitted to the pinned
+/// superset lane, not to an adversarial wall/RSS budget -- a 149k-deep
+/// exact tree still materializes tens of MiB of `Canon` nodes plus the
+/// frame/marker stacks GIL-held before the ceiling fires. Treat
+/// `content_hash` as trusted-input-only for depth/breadth beyond a modest
+/// envelope (depth on the order of 10-20k frames, visited objects on the
+/// order of 200-500k nodes); size the caps for the caller's threat model
+/// before hashing adversarial input.
 pub(crate) const MAX_TOTAL_DEPTH: usize = 150_000;
 /// Untrusted-input ceiling: total visited objects (leaves + containers).
 /// The 12 MiB records corpus walks ~1M nodes; the cap sits at 2x that, so
 /// legitimate corpora pass while breadth-DoS (a multi-million-element
 /// list) raises `ValueError` instead of growing the owned tree unbounded.
+/// Same envelope caveat as `MAX_TOTAL_DEPTH`: untrusted input belongs
+/// under ~200-500k nodes; beyond that the GIL-held owned tree is tens of
+/// MiB and the caller must treat the input as trusted.
 pub(crate) const MAX_WALK_NODES: usize = 2_000_000;
 /// Per-container protocol materialization cap: a subclass `__iter__` /
 /// `.items()` result is pulled to completion under the GIL, so an
 /// unbounded hook (an infinite iterator) would spin forever. Past this
 /// many pulled items the walk aborts with `ValueError`. Legitimate
 /// containers (10k-key dicts, 1 MiB corpora) sit orders of magnitude
-/// below it.
+/// below it. The message is deliberately generic (no cap value): the
+/// bound is a DoS backstop, not a contract to advertise to hook authors.
 pub(crate) const MAX_PROTOCOL_ITEMS: usize = 1_000_000;
+/// Per-dict delegated-sort bound (HIGH-3): the exotic-key lane delegates
+/// to CPython's `list.sort()` over live `(key, value)` tuples -- O(n log n)
+/// Python comparisons plus one `HashMap` entry and one Python tuple per
+/// key, all GIL-held. A 1M-exotic-key dict is ~100 MiB GIL-held before a
+/// single byte is emitted. Past this many keys the walk refuses with
+/// `ValueError` instead of paying that residue. The str and int/bool fast
+/// paths are unaffected (no interpreter sort); 10k-key dicts sit an order
+/// of magnitude below the bound.
+pub(crate) const MAX_DELEGATED_SORT_KEYS: usize = 100_000;
+/// Total delegated-sort work bound (HIGH-2): breadth-of-exotics -- e.g.
+/// 500k 2-key exotic dicts, each taking the delegated lane -- is 500k
+/// interpreter sorts plus 500k identity `HashMap`s, all under the node
+/// caps. Past this many total delegated pairs walked the call aborts with
+/// `ValueError`. Counts exact-lane delegated dicts AND protocol-lane
+/// `.items()` sorts; fast-path dicts cost nothing against it.
+pub(crate) const MAX_TOTAL_DELEGATED_PAIRS: usize = 500_000;
 
 /// A dict key's classification: which coercion bucket it falls into.
 /// Infallible to compute (a storage read or a type check, nothing that
@@ -405,6 +446,7 @@ fn dict_pairs<'py>(
     py: Python<'py>,
     dict: &Bound<'py, PyDict>,
     reprs: &Reprs<'py>,
+    delegated_total: &mut usize,
 ) -> PyResult<Vec<(String, Bound<'py, PyAny>)>> {
     let mut entries: Vec<KeyEntry<'_>> = Vec::with_capacity(dict.len());
     let mut values: Vec<Bound<'_, PyAny>> = Vec::with_capacity(dict.len());
@@ -486,12 +528,33 @@ fn dict_pairs<'py>(
         keyed.sort_by_key(|&(v, _)| v);
         keyed.into_iter().map(|(_, i)| i).collect()
     } else {
+        // The delegated lane: bounded BEFORE any materialization, so a
+        // 1M-exotic-key dict refuses instead of building ~100 MiB of
+        // tuples + HashMap GIL-held. Per-dict cap first (the single-sort
+        // DoS), then the running total (the breadth-of-exotics DoS:
+        // hundreds of thousands of tiny delegated dicts). Both bounds
+        // are generic `ValueError`s (no cap values leaked). The list is
+        // pre-sized by construction: exactly `n` appends into one Python
+        // list CPython sorts in place (no intermediate Rust Vec<PyTuple>
+        // -> PyList copy); the delegated path already pays one
+        // interpreter sort, it must not also pay a double collect.
         // Identity index: (key ptr, value ptr) -> entry index. A dict
         // cannot hold two entries with the same key AND value object
         // (inserting an equal key updates; two coexisting keys are
         // pairwise !=, and NaN's k != k lets the same KEY object coexist
         // only under different values), so each identity pair maps to
         // exactly one entry.
+        if n > MAX_DELEGATED_SORT_KEYS {
+            return Err(PyValueError::new_err(
+                "content_hash() dict has too many keys requiring interpreter sort: refusing an unbounded delegated sort",
+            ));
+        }
+        *delegated_total = delegated_total.saturating_add(n);
+        if *delegated_total > MAX_TOTAL_DELEGATED_PAIRS {
+            return Err(PyValueError::new_err(
+                "content_hash() walked too many interpreter-sorted pairs: refusing unbounded delegated-sort work",
+            ));
+        }
         let mut index_of: HashMap<(usize, usize), usize> = HashMap::with_capacity(n);
         for (i, (entry, value)) in entries.iter().zip(&values).enumerate() {
             let id = (entry.handle.as_ptr() as usize, value.as_ptr() as usize);
@@ -501,11 +564,7 @@ fn dict_pairs<'py>(
             );
             index_of.insert(id, i);
         }
-        // Single materialization: the pairs are appended straight into
-        // the Python list CPython sorts in place (no intermediate Rust
-        // `Vec<PyTuple>` -> `PyList::new` copy; the delegated path already
-        // pays one interpreter sort, it must not also pay a double
-        // collect). The delegated sort is the known slow lane vs. the
+        // The delegated sort is the known slow lane vs. the
         // byte/numeric fast paths above: one `list.sort()` over live
         // objects, documented here so a caller sorting exotic key zoos at
         // scale can read the cost.
@@ -575,6 +634,7 @@ fn enter_marker(markers: &mut HashSet<usize>, obj: &Bound<'_, PyAny>) -> PyResul
 fn sorted_items_protocol<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
+    delegated_total: &mut usize,
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let items = obj.call_method0("items")?;
     let iter = items.try_iter()?;
@@ -582,18 +642,33 @@ fn sorted_items_protocol<'py>(
     // straight into the Python list CPython sorts in place (no Rust Vec
     // -> PyList copy). The pull runs to completion under the GIL, so the
     // cap is what bounds a malicious unbounded `.items()` -- past it the
-    // walk aborts with ValueError instead of spinning forever.
+    // walk aborts with a generic ValueError (no cap value leaked) instead
+    // of spinning forever.
     let list = PyList::empty(py);
     let mut pulled: usize = 0;
     for item in iter {
         let item = item?;
         pulled += 1;
         if pulled > MAX_PROTOCOL_ITEMS {
-            return Err(PyValueError::new_err(format!(
-                "content_hash() subclass .items() yielded more than {MAX_PROTOCOL_ITEMS} items: refusing an unbounded hook result"
-            )));
+            return Err(PyValueError::new_err(
+                "content_hash() subclass hook yielded too many items: refusing an unbounded hook result",
+            ));
         }
         list.append(item)?;
+    }
+    // The protocol sort is delegated work too: count it against the same
+    // total-delegated bound as the exact exotic lane (HIGH-2), and refuse
+    // a single huge `.items()` result before paying the interpreter sort.
+    if pulled > MAX_DELEGATED_SORT_KEYS {
+        return Err(PyValueError::new_err(
+            "content_hash() subclass hook yielded too many items to sort: refusing an unbounded delegated sort",
+        ));
+    }
+    *delegated_total = delegated_total.saturating_add(pulled);
+    if *delegated_total > MAX_TOTAL_DELEGATED_PAIRS {
+        return Err(PyValueError::new_err(
+            "content_hash() walked too many interpreter-sorted pairs: refusing unbounded delegated-sort work",
+        ));
     }
     list.call_method0("sort")?;
     Ok(list.iter().collect())
@@ -676,9 +751,9 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
     // recursive call at every container, so protocol-mediated nesting
     // dies by RecursionError at the interpreter's recursion budget; the
     // iterative walk counts its PROTOCOL frames against the same limit
-    // (read here, under the GIL, once per call) and raises at-or-past it.
-    // The `>=` (vs C's `>`) is deliberately conservative by one frame:
-    // same error class, boundary within one, never a silent loop.
+    // (read here, under the GIL, once per call): depth <= limit hashes,
+    // depth == limit+1 raises -- the same `>` boundary C enforces, same
+    // error class, never a silent loop.
     // EXACT containers bypass the interpreter budget but count against
     // MAX_TOTAL_DEPTH below: the deep-nesting superset lives inside the
     // untrusted-input ceiling, not outside all bounds.
@@ -687,6 +762,7 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
         .extract()?;
     let mut protocol_depth: usize = 0;
     let mut nodes: usize = 0;
+    let mut delegated_total: usize = 0;
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut markers: HashSet<usize> = HashSet::new();
     let mut finished: Option<Canon> = None;
@@ -771,7 +847,12 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                             };
                             // `Bound<PyTuple>::get_item` reads the tuple's
                             // concrete storage slot (`PyTuple_GET_ITEM`
-                            // semantics): a tuple-subclass override of
+                            // semantics, pyo3 0.29 -- a tuple-subclass
+                            // override of `__getitem__` is NOT consulted,
+                            // matching the C encoder's direct slot read.
+                            // If pyo3 changes this accessor's semantics,
+                            // this lane must move to explicit FFI):
+                            // a tuple-subclass override of
                             // `__getitem__` is NOT consulted, matching the
                             // C encoder's direct slot read. Pinned by the
                             // `GetItemLiar` differential below.
@@ -813,9 +894,9 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
         //    -- under the runaway guard and the untrusted-input ceiling.
         nodes += 1;
         if nodes > MAX_WALK_NODES {
-            return Err(PyValueError::new_err(format!(
-                "content_hash() argument visits more than {MAX_WALK_NODES} objects: refusing an unbounded tree"
-            )));
+            return Err(PyValueError::new_err(
+                "content_hash() argument visits too many objects: refusing an unbounded tree",
+            ));
         }
         if let Some(leaf) = walk_leaf(&obj, &reprs)? {
             finished = Some(leaf);
@@ -834,9 +915,9 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
         // pushing past the ceiling raises RecursionError instead of
         // materializing an unbounded owned tree GIL-held.
         if stack.len() >= MAX_TOTAL_DEPTH {
-            return Err(PyRecursionError::new_err(format!(
-                "content_hash() nesting exceeds the {MAX_TOTAL_DEPTH}-frame untrusted-input ceiling"
-            )));
+            return Err(PyRecursionError::new_err(
+                "content_hash() nesting exceeds the untrusted-input ceiling",
+            ));
         }
         if obj.cast::<PyList>().is_ok() || obj.cast::<PyTuple>().is_ok() {
             // The list/tuple lanes. json's `encoder_listencode_list`
@@ -846,15 +927,16 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
             // (its collect cannot raise, so the order is unobservable
             // there).
             let children = if protocol {
-                // Bounded pull: an infinite `__iter__` aborts here with
-                // ValueError instead of spinning GIL-held forever.
+                // Bounded pull: an infinite `__iter__` aborts here with a
+                // generic ValueError (no cap value leaked) instead of
+                // spinning GIL-held forever.
                 let mut children: Vec<Bound<'_, PyAny>> = Vec::new();
                 for child in obj.try_iter()? {
                     children.push(child?);
                     if children.len() > MAX_PROTOCOL_ITEMS {
-                        return Err(PyValueError::new_err(format!(
-                            "content_hash() subclass __iter__ yielded more than {MAX_PROTOCOL_ITEMS} items: refusing an unbounded hook result"
-                        )));
+                        return Err(PyValueError::new_err(
+                            "content_hash() subclass hook yielded too many items: refusing an unbounded hook result",
+                        ));
                     }
                 }
                 enter_marker(&mut markers, &obj)?;
@@ -891,11 +973,15 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                     MapPending::Items(Vec::new().into_iter())
                 } else {
                     enter_marker(&mut markers, &obj)?;
-                    MapPending::Items(sorted_items_protocol(py, &obj)?.into_iter())
+                    MapPending::Items(
+                        sorted_items_protocol(py, &obj, &mut delegated_total)?.into_iter(),
+                    )
                 }
             } else {
                 enter_marker(&mut markers, &obj)?;
-                MapPending::Coerced(dict_pairs(py, dict, &reprs)?.into_iter())
+                MapPending::Coerced(
+                    dict_pairs(py, dict, &reprs, &mut delegated_total)?.into_iter(),
+                )
             };
             if protocol {
                 protocol_depth += 1;
@@ -935,13 +1021,23 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// their json string form). Container SUBCLASSES are iterated exactly as
 /// json.dumps iterates them -- a dict subclass through its (overridable)
 /// `.items()`, a list/tuple subclass through its `__iter__`, each hook run
-/// to completion under the GIL and bounded by `MAX_PROTOCOL_ITEMS` -- never
+/// to completion under the GIL and bounded by `MAX_PROTOCOL_ITEMS` (generic
+/// `ValueError`, no bound leaked) -- never
 /// their concrete storage, so hiding/faking/reordering subclasses hash
 /// identically on both sides; non-pair `items()` yields raise json's own
 /// `ValueError: items must return 2-tuples`, and subclass chains nested
 /// past `sys.getrecursionlimit()` raise `RecursionError` on both sides
 /// (EXACT containers nest deeper than json up to the `MAX_TOTAL_DEPTH`
 /// untrusted-input ceiling: the documented deep-nesting superset, bounded).
+/// Protocol nesting past ~1000 is UNSUPPORTED by contract even where the
+/// stdlib 3.12+ succeeds (tighter boundary, same error class). Exotic-key
+/// dicts (any float/big-int/mixed/NaN/subclass key) delegate their sort to
+/// CPython and are bounded by `MAX_DELEGATED_SORT_KEYS` per dict and
+/// `MAX_TOTAL_DELEGATED_PAIRS` total (generic `ValueError`). Treat
+/// `content_hash` as trusted-input-only for subclass hooks, for depth
+/// beyond ~10-20k frames, and for breadth beyond ~200-500k visited objects
+/// -- the same posture `json.dumps` itself has, which materializes
+/// unboundedly.
 /// Anything else raises `TypeError` naming the
 /// type; circular references raise `ValueError`; a str holding lone
 /// surrogates raises `UnicodeEncodeError` where json.dumps accepts it

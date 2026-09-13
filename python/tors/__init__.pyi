@@ -615,6 +615,17 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 # read per int, one repr call per float); the canonical-form emission and
 # the SHA-256 run under one py.detach. No tors.aio twin: a fast one-shot
 # call (see docs/async.md's family list).
+#
+# Bounds (generic ValueError, no bound values leaked): subclass hooks run to
+# completion under the GIL and abort past the per-container bound; exotic-key
+# dicts (any float/big-int/mixed/NaN/subclass key) delegate to CPython's own
+# list.sort and abort past 100k keys in one dict or 500k delegated pairs per
+# call; exact+protocol nesting aborts past the untrusted-input ceiling
+# (100k exact levels hash, 200k raises RecursionError). Protocol nesting past
+# ~1000 (sys.getrecursionlimit()) raises RecursionError even where stdlib
+# 3.12+ succeeds (documented conservative divergence). Treat content_hash as
+# trusted-input-only for subclass hooks, for depth beyond ~10-20k frames,
+# and for breadth beyond ~200-500k visited objects.
 def content_hash(
     obj: str | int | float | bool | None | list | tuple | dict,
 ) -> str: ...
