@@ -466,7 +466,8 @@ class TestValueErrors:
     error): negative counts are ValueError naming the parameter and the
     accepted form (the chunkers' style), zero is legal and returns the
     empty string (secrets.token_hex(0)'s own shape), and there is no size
-    cap by design."""
+    cap by design — the memory bound is a catchable MemoryError
+    (TestMemoryBound below), never a cap and never an abort."""
 
     @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
     @pytest.mark.parametrize("length", [-1, -1000], ids=["-1", "-1000"])
@@ -512,9 +513,10 @@ class TestValueErrors:
             random_string(8, "ab\ud800cd")
 
     def test_huge_outputs_complete_no_cap_by_design(self) -> None:
-        # 512 KiB of hex output from one call: no size cap exists (memory is
-        # the only bound), and the seeded spelling is digest-stable AND
-        # digest-pinned (the large-vector idiom).
+        # 512 KiB of hex output from one call: no size cap exists (the bound
+        # is a catchable MemoryError, pinned in TestMemoryBound), and the
+        # seeded spelling is digest-stable AND digest-pinned (the
+        # large-vector idiom).
         out = random_hex(512 * 1024)
         assert len(out) == 512 * 1024
         assert set(out) <= set(HEX_CHARS)
@@ -524,6 +526,46 @@ class TestValueErrors:
 
         assert seeded_digest() == seeded_digest()
         assert seeded_digest() == "516ff0a3860664d6bfc6dc5201012acef43da36cf7171203f888ed91e912f664"
+
+
+class TestMemoryBound:
+    """The oversized-length contract: no size cap exists, and the memory
+    bound is a CATCHABLE ``MemoryError`` — the Python convention (``'x' * n``
+    and ``secrets.token_hex(n)`` raise it too; the anchors are pinned below)
+    — never a process abort. The abort is the bug this class pins dead: the
+    core's old ``String::with_capacity`` raised SIGABRT on allocation
+    failure (Rust's default handler, uncatchable, takes the interpreter
+    with it); the reserve now runs through ``try_reserve``, which refuses
+    oversized requests as a plain error the binding maps to ``MemoryError``
+    — before any allocation is attempted, so these pins run in-process in
+    the suite safely. The uuid paths are fixed-size (16-byte buffers) and
+    stand outside this class entirely."""
+
+    @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
+    def test_an_impossible_length_raises_memory_error_not_an_abort(self, name: str) -> None:
+        # 2**62 output characters is past any 64-bit allocator's reach (the
+        # userspace address space alone), so the reserve refuses and the
+        # call raises, in-process, catchable. If this fix ever regresses the
+        # process dies at the first parametrized case — loud, not subtle.
+        call = dict(_TOKEN_CALLS)[name]
+        with pytest.raises(MemoryError):
+            call(2**62)
+
+    def test_a_saturating_worst_case_is_the_same_catchable_shape(self) -> None:
+        # A 4-byte-per-char alphabet at 2**61 saturates the worst-case byte
+        # computation to usize::MAX; the reserve's own capacity check
+        # refuses it without attempting any allocation — same MemoryError,
+        # and the arithmetic never panics on the way there.
+        with pytest.raises(MemoryError):
+            random_string(2**61, "😀")
+
+    def test_the_python_convention_anchors_raise_it_too(self) -> None:
+        # The convention being matched, pinned: the stdlib spellings raise
+        # the same catchable error for the same request, never abort.
+        with pytest.raises(MemoryError):
+            _ = "x" * (2**62)
+        with pytest.raises(MemoryError):
+            secrets.token_hex(2**62)
 
 
 class TestUnseededOutputShape:

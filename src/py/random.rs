@@ -17,7 +17,7 @@
 //! detached-transform input class `tors.aio` exists for (a thread hop costs
 //! more than the call at every realistic token/key size); see docs/async.md.
 
-use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyInt};
 
@@ -60,11 +60,16 @@ fn seed_to_u64(seed: Option<Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
 
 /// Map the core's error shapes onto the Python exception taxonomy: the OS
 /// entropy failure and the uuid7 clock failure become `RuntimeError`
-/// carrying the reason (raise-time only, after the GIL is reacquired), and
-/// the empty alphabet becomes the family's ValueError naming the parameter.
+/// carrying the reason (raise-time only, after the GIL is reacquired), the
+/// empty alphabet becomes the family's ValueError naming the parameter, and
+/// an impossible length's failed reservation becomes `MemoryError` —
+/// catchable, the `'x' * n` / `secrets.token_hex(n)` convention, where the
+/// `with_capacity` reserve it replaced aborted the whole process on the
+/// same request.
 fn into_pyerr(err: RandomError) -> PyErr {
     match err {
         RandomError::EmptyAlphabet => PyValueError::new_err(err.message()),
+        RandomError::Memory(_) => PyMemoryError::new_err(err.message()),
         RandomError::Os(_) | RandomError::Clock(_) => PyRuntimeError::new_err(err.message()),
     }
 }
@@ -87,7 +92,9 @@ fn into_pyerr(err: RandomError) -> PyErr {
 /// raises `TypeError`): multibyte characters are sampled as characters, so
 /// the output is always exactly `length` characters over the alphabet's own
 /// characters. `length=0` returns `""`; negative raises `ValueError`; there
-/// is no size cap (memory is the only bound).
+/// is no size cap: memory is the only bound, and the bound is a catchable
+/// `MemoryError` — `try_reserve` refuses an impossible length before any
+/// allocation is attempted, `'x' * n`'s own shape — never a process abort.
 ///
 /// GIL model: argument validation under the GIL, the whole fill + sampling +
 /// string build under one `py.detach`, then the O(output) marshalling.
@@ -127,7 +134,8 @@ pub fn random_string(
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
 /// `length=0` returns `""` (`secrets.token_hex(0)`'s own shape); negative
-/// raises `ValueError`; no size cap (memory is the only bound).
+/// raises `ValueError`; no size cap: the memory bound is a catchable
+/// `MemoryError` (see `random_string`), never a process abort.
 ///
 /// GIL model: validation under the GIL, the sampling + string build under
 /// one `py.detach`, then the O(output) marshalling.
@@ -156,7 +164,8 @@ pub fn random_hex(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `length=0` returns `""`; negative raises `ValueError`; no size cap.
+/// `length=0` returns `""`; negative raises `ValueError`; no size cap
+/// (the memory bound is a catchable `MemoryError`, never an abort).
 ///
 /// GIL model: `random_string`'s exactly.
 #[pyfunction(signature = (length, *, seed = None))]
@@ -196,7 +205,8 @@ pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `length=0` returns `""`; negative raises `ValueError`; no size cap.
+/// `length=0` returns `""`; negative raises `ValueError`; no size cap
+/// (the memory bound is a catchable `MemoryError`, never an abort).
 ///
 /// GIL model: `random_string`'s exactly.
 #[pyfunction(signature = (length, *, seed = None))]

@@ -3975,7 +3975,10 @@ form; an empty alphabet raises `ValueError`; non-`str` alphabet, non-`int`
 length, and non-`int` non-`None` seed raise `TypeError`; an alphabet holding
 lone surrogates raises `UnicodeEncodeError` (the repo-wide str contract).
 `0` is legal everywhere and returns `""` (`secrets.token_hex(0)`'s own
-shape). There is no size cap: memory is the only bound.
+shape). There is no size cap: memory is the only bound, and the bound is a
+catchable `MemoryError` — an impossible length is refused before any
+allocation is attempted (`try_reserve`), the exact shape `'x' * n` and
+`secrets.token_hex(n)` give for the same request — never a process abort.
 
 No `tors.aio` twins: these are fast CPU/syscall calls, not the
 detached-transform input class the async surface exists for

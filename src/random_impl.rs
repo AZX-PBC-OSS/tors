@@ -168,6 +168,21 @@ pub enum RandomError {
     /// Unix epoch (clock skew backwards past 1970), or (theoretically) past
     /// the u64 millisecond horizon (year ~584 million).
     Clock(String),
+    /// The output string's reservation failed: the requested length's
+    /// worst-case byte size does not fit in memory. The usize is that
+    /// worst-case (length × the alphabet's widest UTF-8 width, saturating).
+    /// The binding maps this to Python's `MemoryError` — catchable, the
+    /// `'x' * n` / `secrets.token_hex(n)` convention — where the reserve it
+    /// replaces (`String::with_capacity`) ABORTED the process on the same
+    /// request (Rust's default allocation-failure handler: SIGABRT,
+    /// uncatchable, takes the interpreter with it). `try_reserve` refuses
+    /// oversized requests as this error BEFORE any allocation is attempted
+    /// (its own capacity check rejects anything past `isize::MAX` without
+    /// calling the allocator; larger-but-in-range requests fail inside the
+    /// allocator, which returns null rather than aborting under this
+    /// spelling), so the pinned in-suite behavior is deterministic on every
+    /// 64-bit wheel.
+    Memory(usize),
 }
 
 impl RandomError {
@@ -177,6 +192,9 @@ impl RandomError {
             RandomError::EmptyAlphabet => "alphabet must be a non-empty str".to_string(),
             RandomError::Os(err) => format!("operating system entropy source failed: {err}"),
             RandomError::Clock(err) => format!("uuid7 timestamp source failed: {err}"),
+            RandomError::Memory(requested) => {
+                format!("cannot allocate {requested} bytes for the output string")
+            }
         }
     }
 }
@@ -305,9 +323,18 @@ pub fn random_string(
     }
     let n = chars.len() as u64;
     // Reserve for the worst case (every output char the alphabet's widest);
-    // saturating so an absurd length fails at allocation, not arithmetic.
+    // saturating so an absurd length fails at the reservation, not
+    // arithmetic. The reserve is `try_reserve`, NOT `with_capacity`: an
+    // impossible length must come back as `RandomError::Memory` (the
+    // binding's catchable MemoryError, Python's own `'x' * n` convention),
+    // where `with_capacity`'s allocation failure aborts the process —
+    // uncatchable SIGABRT, the whole interpreter down. `try_reserve`
+    // refuses before any allocation is attempted, so the refusal is a
+    // plain error value, raised after the detach in the binding.
     let widest = chars.iter().map(|c| c.len_utf8()).max().unwrap_or(1);
-    let mut out = String::with_capacity(length.saturating_mul(widest));
+    let mut out = String::new();
+    out.try_reserve(length.saturating_mul(widest))
+        .map_err(|_| RandomError::Memory(length.saturating_mul(widest)))?;
     let mut words = Words::new(Source::new(seed));
     for _ in 0..length {
         let index = lemire_below(&mut words, n)? as usize;
@@ -557,6 +584,44 @@ mod tests {
         assert_eq!(
             RandomError::Os("getrandom: not supported".into()).message(),
             "operating system entropy source failed: getrandom: not supported"
+        );
+        assert_eq!(
+            RandomError::Memory(4611686018427387904).message(),
+            "cannot allocate 4611686018427387904 bytes for the output string"
+        );
+    }
+
+    #[test]
+    fn an_impossible_length_is_a_memory_error_not_an_abort() {
+        // Three refusal routes, all the plain `Memory` error value — where
+        // the `with_capacity` spelling this replaces aborted the process
+        // (SIGABRT through Rust's default allocation-failure handler).
+        // 2^62 one-byte chars: inside the reserve's own capacity limit, so
+        // the ALLOCATOR refuses it (past the userspace address space on any
+        // 64-bit target, deterministically).
+        assert_eq!(
+            random_string(1 << 62, "ab", None),
+            Err(RandomError::Memory(1 << 62))
+        );
+        // 2^61 four-byte chars: the worst case 2^63 is past `isize::MAX`,
+        // so the reserve's capacity check refuses WITHOUT consulting the
+        // allocator.
+        assert_eq!(
+            random_string(1 << 61, "\u{1F600}", None),
+            Err(RandomError::Memory(1 << 63))
+        );
+        // 2^62 four-byte chars: the worst-case product saturates to
+        // `usize::MAX` — the arithmetic itself never panics on the way to
+        // the refusal.
+        assert_eq!(
+            random_string(1 << 62, "\u{1F600}", None),
+            Err(RandomError::Memory(usize::MAX))
+        );
+        // And the refusal precedes any entropy draw: a seeded stream is
+        // not consumed by a call that cannot build its output.
+        assert_eq!(
+            random_hex(1 << 62, Some(0)),
+            Err(RandomError::Memory(1 << 62))
         );
     }
 
