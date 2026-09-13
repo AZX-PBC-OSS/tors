@@ -676,7 +676,7 @@ fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
 /// Linear in the input — the contract this pass owes the scrub API. The
 /// cursor advances only on match, so K failed anchors sharing one tail
 /// would each re-walk it: the password class `[^\s@]+` permits `:`/`/`/`?`
-//// `=`, so `"a://u:"*K + "p"*M` (no `@` anywhere) pays O(K*M) — ~486ms
+/// `=`, so `"a://u:"*K + "p"*M` (no `@` anywhere) pays O(K*M) — ~486ms
 /// pre-fix at K=2000/M=200k where the chain's own `re` pays ~4s (also
 /// quadratic; availability wins over matching its complexity class). The
 /// fix is failure memoization: `fail_end` is the farthest tail position a
@@ -773,7 +773,7 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
             // `://` can start inside the username before its colon.
             // debug_assert below documents the bound the skip relies on:
             // the failed tail end never precedes its colon.
-            debug_assert!(end >= colon + 1);
+            debug_assert!(end > colon);
             fail_end = fail_end.max(end);
             continue;
         }

@@ -338,8 +338,9 @@ def test_scrub_log_text_beats_the_regex_chain_on_exception_text(size_bytes: int)
 
     A ~30-40x win, asserted with the shared 0.9 margin: the chain is four
     whole-text ``re.sub`` passes while tors is four linear memchr/memmem
-    scans + splice under one ``py.detach``. The 1 KiB cell is fast-cell territory (µs-scale samples) and
-    draws ``_FAST_CELL_SAMPLES`` accordingly; even at that scale the margin
+    scans + splice under one ``py.detach``. The 1 KiB cell is fast-cell
+    territory (µs-scale samples) and draws ``_FAST_CELL_SAMPLES``
+    accordingly; even at that scale the margin
     absorbs a loaded runner many times over. The GIL-release side of the
     same surface is pinned in tests/test_gil_release.py (the 96 MiB
     heartbeat cell; the chain holds the loop for ~2.5s of a ~2.76s wall at
