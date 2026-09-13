@@ -39,6 +39,7 @@ pub mod simhash;
 pub mod tfidf;
 pub mod truncate;
 pub mod url;
+pub mod uuid;
 
 /// Emits one eager-iterator `#[pyclass]`: the Python-visible class name,
 /// its per-class doc comment (the payload's `#[doc]` attribute lands on

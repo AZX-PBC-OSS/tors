@@ -329,6 +329,7 @@ pub mod truncate_impl;
 pub mod url_impl;
 pub mod utf16_impl;
 pub mod utf8_impl;
+pub mod uuid_impl;
 
 use std::borrow::Cow;
 
@@ -392,6 +393,7 @@ use py::simhash::*;
 use py::tfidf::*;
 use py::truncate::*;
 use py::url::*;
+use py::uuid::*;
 
 /// The shared core of every `*_iter` streaming iterator (the
 /// segmentation, find_patterns, and chunking families'): the input kept
@@ -545,6 +547,9 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
     m.add_function(wrap_pyfunction!(first_invalid_charset, m)?)?;
     m.add_function(wrap_pyfunction!(first_invalid_offender, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7_timestamp_ms, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid_version, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid_parse, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
     m.add_class::<CompiledPatterns>()?;
     Ok(())

@@ -603,6 +603,36 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 
+# The UUIDv7 helper trio (RFC 9562 layout): the keyset-pagination /
+# time-bucketed-query primitives over time-ordered IDs. uuid7_timestamp_ms
+# returns the 48-bit big-endian unix-millisecond field (the leading six
+# bytes; datetime.fromtimestamp(ms / 1000, UTC) is the ID's creation
+# instant), ValueError naming the found version when the version nibble is
+# not 7. uuid_version returns the version nibble (byte 6's high half,
+# 0-15) for any UUID of any variant: the field itself, no variant check
+# (the variant is byte 8's top two bits, a different field, out of scope).
+# uuid_parse is canonical text -> the 16 raw bytes, strict: exactly 36
+# characters, hyphens at 8/13/18/23, lowercase hex elsewhere, ValueError
+# naming the problem and the accepted form otherwise (positions 0-based).
+# The stdlib uuid.UUID also accepts braces, urn:uuid:, hyphen-less hex,
+# and uppercase; tors deliberately does not (the validation-primitive
+# contract, the same closed-set strictness as errors=/boundary=), pinned
+# as deliberate divergences in tests/test_uuid.py.
+#
+# GIL note: the bytes spelling borrows the argument zero-copy and the bit
+# extraction runs under py.detach; the str spelling validates and
+# transcodes under the GIL (36 bytes, smaller than the call's own
+# marshalling residue -- a detached parse would be overhead for its own
+# sake) with the extraction detached after it, so the int-out pair keeps
+# the crate's GIL-free-core contract uniform. uuid_parse is the trio's
+# zero-detach member: its whole work is that 36-byte parse (no int-out
+# tail exists to detach) and it runs GIL-held by design, ~0.3µs. Exactly
+# bytes or str for the int-out pair (bytearray/memoryview: TypeError, the
+# bytes-in surface's exactly-bytes contract); exactly str for uuid_parse.
+def uuid7_timestamp_ms(value: bytes | str) -> int: ...
+def uuid_version(value: bytes | str) -> int: ...
+def uuid_parse(value: str) -> bytes: ...
+
 # FastCDC 2020 content-defined chunking: (start, end) byte spans (not
 # codepoints: a byte-level primitive, unlike word_bounds/sentence_bounds),
 # partitioning data exactly. Empty input -> []; input shorter than min_size

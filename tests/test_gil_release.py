@@ -2526,21 +2526,27 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
 _UUID7_BATCH_BYTES = bytes.fromhex("01977420dc007abc9def98765432100f")
 _UUID7_BATCH_TEXT = "01977420-dc00-7abc-9def-98765432100f"
 
-# The trio's batch size: one call is ~0.2-0.4µs (16 bytes in, one int or one
-# 16-byte value out), so a single call sits four orders of magnitude under
-# the 10ms ping floor and no single-call cell can mean anything. The batch
-# loop is sized to a wall comfortably above the floor (~100-200ms measured,
-# calibrated below) where both shared budgets still discriminate the
-# regression class this cell CAN catch: a per-call GIL-held residue that
-# grows into the tens of milliseconds (an accidental lock, an error-path
-# import on the happy path, a marshalling blowout). The one regression it
-# honestly CANNOT catch is a lost py.detach on the int-out pair: the
-# extraction itself is a handful of nanoseconds, so holding it changes the
-# per-call GIL-held time by less than the call machinery's own jitter --
-# the detach on this surface is contract uniformity with the rest of the
-# crate, not a measurable GIL-release payoff (src/py/uuid.rs's doc comment
-# records the same reasoning from the implementation side).
-_UUID_BATCH_CALLS = 500_000
+# The trio's batch size: one call is ~60-90ns (16 bytes in, one int or one
+# 16-byte value out; measured 59-76ns inline, 63-85ns per loop iteration
+# with the generator bookkeeping), so a single call sits four orders of
+# magnitude under the 10ms ping floor and no single-call cell can mean
+# anything. The batch is sized by the diff_opcodes_near_identical
+# enlargement precedent: at 4M calls the walls (~440-610ms measured) sit
+# ~50x above the ping floor, which keeps the shared ratio budget
+# discriminating (the many-tiny-calls shape's structural gap band -- GIL
+# handoff contention between the heartbeat and a worker thread reacquiring
+# the GIL every ~70ns, tens of ms under load -- is wall-independent, so a
+# bigger wall shrinks its ratio: measured worst 0.13 at ambient load
+# 8.6-12.3, >=2x under the 0.30 budget). The catchable regression classes:
+# a wholesale hold of the loop (gap ~= wall ~= 1.0: both budgets, by far)
+# and a per-call GIL-held residue grown to ~100ms+. The one regression
+# this cell honestly CANNOT catch is a lost py.detach on the int-out pair:
+# the extraction itself is a handful of nanoseconds, so holding it changes
+# the per-call GIL-held time by less than the call machinery's own jitter
+# -- the detach on this surface is contract uniformity with the rest of
+# the crate, not a measurable GIL-release payoff (src/py/uuid.rs's doc
+# comment records the same reasoning from the implementation side).
+_UUID_BATCH_CALLS = 4_000_000
 
 
 @pytest.mark.parametrize(
@@ -2556,15 +2562,20 @@ def test_uuid_helpers_batch_loop_keeps_the_event_loop_at_heartbeat_granularity(
     parse, which runs GIL-held by design -- there is no int-out tail to
     detach and a detach around a 36-byte scan would be overhead for its own
     sake), so a batch loop of the calls in a worker thread leaves the loop
-    ticking at heartbeat granularity over a ~100-200ms wall.
+    ticking at heartbeat granularity over a ~440-610ms wall.
 
-    Both shared budgets are asserted: the walls clear the 10ms ping floor by
-    ~10x, so the ratio is not the sub-ping artifact, and a per-call residue
-    regression of the tens-of-ms class (a tenth of the batch's wall held per
-    call in one burst) blows the 0.30 ratio and approaches the 100ms
-    ceiling. Measured on the dev box, 3 samples per helper: worst gaps at
-    the ping floor (the 10-11ms band every detached cell shows) of
-    ~100-200ms walls, ratio ~0.06-0.11."""
+    Both shared budgets are asserted. The gap band to expect is NOT the
+    quiet-box 10-11ms ping floor: a worker thread reacquiring the GIL
+    every ~70ns contends with the heartbeat for it, and under load that
+    handoff contention yields tens-of-ms worst gaps -- measured 27-75ms of
+    441-611ms walls (ratio 0.06-0.13) at ambient load 8.6-12.3, a
+    deliberately hostile calibration case; on a quiet box the band
+    collapses back toward the floor. The budgets' discriminators, sized
+    against that band: a wholesale hold of the loop shows gap ~= wall ~=
+    1.0 (fails the 0.30 ratio by >3x and the 100ms ceiling by >4x), and a
+    per-call residue grown to ~100ms+ trips the ceiling; a lost detach on
+    the extraction is invisible either way (nanoseconds of work), the
+    honest limitation recorded beside the constant above."""
     calls: dict[str, Callable[[], object]] = {
         "uuid7_timestamp_ms": lambda: tors.uuid7_timestamp_ms(_UUID7_BATCH_BYTES),
         "uuid_version": lambda: tors.uuid_version(_UUID7_BATCH_BYTES),

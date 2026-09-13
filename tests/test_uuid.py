@@ -54,7 +54,7 @@ from hypothesis import strategies as st
 from tors import uuid7_timestamp_ms, uuid_parse, uuid_version
 
 # The fixed UUIDv7 of the docs/api.md example (pinned in TestDocExamples):
-# timestamp field 1_750_000_000_000 ms (2025-06-15T17:06:40Z), version 7,
+# timestamp field 1_750_000_000_000 ms (2025-06-15T15:06:40Z), version 7,
 # RFC 4122 variant, fixed rand fields -- deterministic, so the doc's outputs
 # are literals, not elided. Built by the same RFC 9562 layout the oracle
 # builders below use.
@@ -141,7 +141,7 @@ class TestUuid7TimestampExtraction:
         # field is unix milliseconds, so fromtimestamp(ms / 1000) is the
         # ID's creation instant (docs/api.md's example, pinned).
         moment = datetime.datetime.fromtimestamp(DOC_V7_TS_MS / 1000, datetime.UTC)
-        assert moment == datetime.datetime(2025, 6, 15, 17, 6, 40, tzinfo=datetime.UTC)
+        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
 
 
 class TestUuid7TimestampVersionGuard:
@@ -471,4 +471,4 @@ class TestDocExamples:
         with pytest.raises(ValueError, match="uppercase"):
             uuid_parse(str(u).upper())
         moment = datetime.datetime.fromtimestamp(uuid7_timestamp_ms(u.bytes) / 1000, datetime.UTC)
-        assert moment == datetime.datetime(2025, 6, 15, 17, 6, 40, tzinfo=datetime.UTC)
+        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
