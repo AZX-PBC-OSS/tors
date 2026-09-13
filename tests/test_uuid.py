@@ -357,6 +357,35 @@ class TestStrictCanonicalRejections:
         with pytest.raises(ValueError, match=r"found 'g' at position 5"):
             uuid_parse(DOC_V7_TEXT[:5] + "g" + DOC_V7_TEXT[6:])
 
+    def test_multibyte_shapes_are_rejected_by_position_or_by_byte_count(self) -> None:
+        # The two reachable multibyte shapes, pinned Python-side (the
+        # Rust-side twin pins the 36-BYTE case structurally:
+        # src/uuid_impl.rs's
+        # multibyte_characters_are_rejected_at_their_start_position). A
+        # 36-BYTE text holding one two-byte character (35 characters)
+        # passes the length gate and is rejected AT ITS START POSITION --
+        # every byte before the first multibyte character is ASCII (the
+        # left-to-right scan would have named any earlier divergence), so
+        # the byte offset the message reports is also the character index,
+        # and `text[position]` in Python names the same character the
+        # message does. A 36-CHARACTER text holding one (37 bytes) lands
+        # in the length gate instead, which counts BYTES while saying
+        # "characters" -- the pre-existing quirk (src/uuid_impl.rs's
+        # parse_canonical doc): such a text can never be canonical (the
+        # grammar is ASCII-only), the count it reports is the byte count,
+        # and the pin keeps that quirk's shape visible rather than silent.
+        thirty_six_bytes = "01977420-dc00-7ébc-9def-9876543210f"
+        assert len(thirty_six_bytes.encode()) == 36
+        assert thirty_six_bytes[15] == "é"
+        with pytest.raises(ValueError, match=r"found 'é' at position 15"):
+            uuid_parse(thirty_six_bytes)
+
+        thirty_six_characters = DOC_V7_TEXT[:-1] + "é"
+        assert len(thirty_six_characters) == 36
+        assert len(thirty_six_characters.encode()) == 37
+        with pytest.raises(ValueError, match=r"exactly 36 characters .* got 37"):
+            uuid_parse(thirty_six_characters)
+
     @pytest.mark.parametrize("length", [0, 1, 15, 17, 32, 35, 37, 64])
     def test_wrong_bytes_length_message_names_the_count(self, length: int) -> None:
         with pytest.raises(ValueError, match=f"exactly 16 bytes for a UUID, got {length}"):
