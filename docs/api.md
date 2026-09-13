@@ -2616,8 +2616,8 @@ u = uuid.UUID("01977420-dc00-7abc-9def-98765432100f")
 tors.uuid_version(u.bytes)  # 7
 tors.uuid7_timestamp_ms(u.bytes)  # 1750000000000
 tors.uuid7_timestamp_ms(str(u))  # 1750000000000: canonical text accepted too
-datetime.datetime.fromtimestamp(1750000000000 / 1000, datetime.UTC)
-# datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
+datetime.datetime.fromtimestamp(1750000000000 / 1000, datetime.timezone.utc)
+# datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.timezone.utc)
 tors.uuid_parse(str(u)) == u.bytes  # True
 tors.uuid_parse(str(u).upper())
 # ValueError: UUID text must be lowercase hex: found uppercase 'D' at

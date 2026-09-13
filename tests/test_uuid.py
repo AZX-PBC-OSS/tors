@@ -140,8 +140,8 @@ class TestUuid7TimestampExtraction:
         # The time-bucket query the primitive exists for, spelled out: the
         # field is unix milliseconds, so fromtimestamp(ms / 1000) is the
         # ID's creation instant (docs/api.md's example, pinned).
-        moment = datetime.datetime.fromtimestamp(DOC_V7_TS_MS / 1000, datetime.UTC)
-        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
+        moment = datetime.datetime.fromtimestamp(DOC_V7_TS_MS / 1000, datetime.timezone.utc)
+        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.timezone.utc)
 
 
 class TestUuid7TimestampVersionGuard:
@@ -550,5 +550,5 @@ class TestDocExamples:
         assert uuid_parse(str(u)) == u.bytes
         with pytest.raises(ValueError, match="uppercase"):
             uuid_parse(str(u).upper())
-        moment = datetime.datetime.fromtimestamp(uuid7_timestamp_ms(u.bytes) / 1000, datetime.UTC)
-        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
+        moment = datetime.datetime.fromtimestamp(uuid7_timestamp_ms(u.bytes) / 1000, datetime.timezone.utc)
+        assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.timezone.utc)
