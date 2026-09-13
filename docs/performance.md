@@ -34,6 +34,10 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
+- `first_invalid_charset`: a 1000-item identifier batch validates in ~14 µs
+  against ~97 µs for the per-item anchored-regex loop (~7x), and the
+  batch-only shape is the point — a per-item tors call (~0.25 µs) loses to
+  one compiled regex match (~0.08 µs), so only the one-detach batch wins.
 - `find_unescaped`/`contains_unescaped`: the escape-parity scan answers "is
   this `\u0000` a real NUL or the literal text?" straight from raw serialized
   JSON in one detached pass — ≈0.26 ms at 12 MiB with no occurrence

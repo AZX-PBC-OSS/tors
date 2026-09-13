@@ -3207,6 +3207,84 @@ tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 # ('R901096', 'R901096')
 ```
 
+## `tors.first_invalid_charset`
+
+```python
+def first_invalid_charset(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> int: ...
+```
+
+Batch codepoint-set validation for identifier-style rules, one GIL-released
+pass per batch: the index into `items` of the first item not built entirely
+from the caller's two sets — `first` the set of codepoints allowed at
+position 0, `rest` the set allowed at every position after it (and at
+position 0 too when `first` is `None`, the uniform spelling: one set
+everywhere) — or `-1` when every item passes. An empty item is an offender,
+wherever it sits. `first=""` allows nothing at position 0 (every item
+offends); `rest=""` allows nothing after position 0 (under the uniform
+spelling every item offends; with a non-empty `first`, only single-codepoint
+items drawn from `first` can pass). The scan short-circuits at the first
+offender — no promise about work done past it, though the argument walk does
+validate the whole sequence up front (a bad entry anywhere raises at the
+boundary, past a first offender or not). The answer is always an item index,
+never a position within an item.
+
+The sets are **data, not patterns**: plain strings of permitted codepoints,
+membership per codepoint (never per byte; duplicate codepoints in a spelling
+are harmless and their order is irrelevant). No ranges, no escapes, no
+classes — an `^[a-z_][a-z0-9_]*$`-style rule is spelled by listing the
+codepoints — and no Unicode-category classes (`\w`), which would need
+property tables: the charter boundary already drawn for lexical data
+([design and scope](design.md)). A rule that needs `\w` is not expressible;
+a rule that needs specific codepoints is, whatever their script.
+
+**Batch-only by design, and honestly so.** The motivating consumer (an
+enqueue path) validates identifier-shaped strings with anchored regexes at
+84–950 ns per call, each under a single `py.detach` round trip — so a
+per-item tors call (~0.25 µs measured, against ~0.08 µs for one compiled
+regex match) is *slower* than the regex it would replace. The win exists
+only when one call covers the batch: one detach, one pass over all items.
+Measured on the dev box (min-of-7): the crossover is at single-digit item
+counts (~2x at a 10-item batch), ~5x at 100 items (2.0 µs vs the per-item
+regex loop's 9.7 µs), ~7x at 1000 (14.0 µs vs 96.7 µs). The Rust core alone
+measures ~64 ns fixed (the two set builds) plus ~5.4 ns per item
+(`first_invalid_charset` group, `benches/search.rs`). Do not call this once
+per string; call it on the batch.
+
+```python
+import string
+
+ident_first = string.ascii_letters + "_"
+ident_rest = ident_first + string.digits
+tors.first_invalid_charset(["job_42", "queue_eu", "9bad"], first=ident_first, rest=ident_rest)
+# 2   ("9bad": a digit is not allowed at position 0)
+tors.first_invalid_charset(["job_42", "queue_eu"], first=ident_first, rest=ident_rest)
+# -1  (every item passes)
+tors.first_invalid_charset(["worker:01", "tag name"], rest=ident_rest + "-:.")
+# 1   (first=None: one set everywhere; "tag name" carries a space)
+```
+
+Argument contract: `items` is a sequence of `str` — a `list`, a `tuple`, or
+any `Sequence` (a bare `str` raises `TypeError`, as do non-sequences: dict,
+set, generators, scalars; a non-`str` entry raises `TypeError`); `first` and
+`rest` must be exactly `str`, both keyword-only, `rest` required, `first`
+defaulting to `None`; lone surrogates raise `UnicodeEncodeError` at the
+argument boundary (the standard str-in boundary, paid by every item and both
+set arguments). The contract is proven against a pure-Python membership-loop
+oracle plus the equivalent anchored regexes rebuilt from the same set halves
+over hypothesis-generated inputs (tests/test_first_invalid_charset.py).
+
+GIL model: one GIL-held walk of the items sequence (the standard str-in
+borrow class, O(items) handles), then the set builds and the whole batch
+scan under one `py.detach`, then a single int return — no marshalling class
+at all. At realistic batch sizes the whole call sits far under the 10 ms ping
+floor, so the GIL cell is ceiling-only (the `utf8_is_valid` class), pinned in
+tests/test_gil_release.py. The core is a trivial one-pass membership walk
+(one-bit-per-codepoint ASCII mask plus a sorted non-ASCII tail; no index
+arithmetic, no `unsafe`), which is why it ships no cargo-fuzz target: the
+hypothesis differentials over arbitrary Unicode cover its input space.
+
 ## `tors.documents`
 
 Document-format extraction: PDF, the office and text formats (doc/docx, xls/xlsx,

@@ -29,7 +29,11 @@ The cuts below are decisions, not oversights:
 - **General regex.** `find_patterns`/`replace_many` are leftmost-longest
   multi-pattern literal search, not a regex engine; `chunk_hierarchical`'s
   `separators` are literal strings (or `None`, splicing in the default
-  hierarchy), not patterns. The same cut is why `scrub_log_text`'s rules
+  hierarchy), not patterns; `first_invalid_charset`'s `first`/`rest` are the
+  same principle on the validation side — plain strings of permitted
+  codepoints (data, not patterns: no ranges, escapes, or classes), and the
+  Unicode-category classes (`\w`) that would need property tables stay out.
+  The same cut is why `scrub_log_text`'s rules
   are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
   `uri_query_creds`), not patterns: each rule is a call-site regex the
   scrub exists to port (TaskQ's exception-text chain), hand-rolled in Rust
