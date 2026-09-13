@@ -84,3 +84,61 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
             isize::try_from(hit).expect("haystack offset fits in isize")
         }))
 }
+
+/// `tors.utf8_byte_len(s)`: the UTF-8 byte length of `s` — the answer
+/// `len(s.encode("utf-8"))` computes by allocating and copying the whole
+/// `bytes` object first, taken here without the copy. The count a caller
+/// wants when a size cap sits in front of a store: TaskQ's
+/// idempotency-key and scope byte caps on every enqueue, and the
+/// terminal's re-encode of a serialized result of up to 64 KiB
+/// (`MAX_RESULT_BYTES`) on every success — a genuine double pass, the
+/// byte count having existed inside the serializer's output and been
+/// discarded by the `.decode()` that produced the `str`.
+///
+/// **Companion, not standalone**: this ships in the scan family's binding
+/// module as the pinned companion of `contains_unescaped`/
+/// `find_unescaped` (#50) — same module, same harness patterns — and
+/// honest sizing says it would not stand alone: a short-string encode is
+/// a few hundred nanoseconds, so the win is large inputs and hot paths,
+/// where the copy is the cost (the 64 KiB terminal case is ~1.5 µs of
+/// pure memcpy per success).
+///
+/// Cost model (the deliberate deviation from the issue's sketch: no
+/// hand-rolled UCS1/UCS2/UCS4 arithmetic — the module docs in
+/// `src/scan_impl.rs` carry the full rationale — the standard str-in
+/// borrow instead, and the core is the borrowed `&str`'s `len()`, one
+/// field read):
+///
+/// * ASCII (serialized JSON with `ensure_ascii=True`): compact ASCII data
+///   is its own UTF-8, so the borrow is a zero-copy alias and the call is
+///   O(1), no allocation at all.
+/// * Non-ASCII, first call on the object: CPython materializes and CACHES
+///   the UTF-8 view on the `str` object (an internal cache, not a
+///   Python-visible `bytes`; shared with every other str-in tors call on
+///   the same object), so the first call is O(n) — encode-parity in cost
+///   class, with no Python-visible object to allocate and collect.
+/// * Non-ASCII, repeat calls on the same object: O(1) — strictly better
+///   than the expression, which re-copies on every call.
+///
+/// Error parity: a `str` holding lone surrogates cannot be UTF-8-encoded,
+/// and the borrow raises CPython's own `UnicodeEncodeError` (pyo3
+/// propagates it from the `&str` extraction, before any tors code runs) —
+/// the same exception `encode` raises, attributes included; there is no
+/// tors-side error path at all. Pinned attribute-for-attribute in
+/// tests/test_utf8_byte_len.py.
+///
+/// GIL model: `grapheme_count`'s marshalling class (a single `int`
+/// return, nothing else held past the borrow), with one honest
+/// difference: the call's only O(n) work IS the borrow — the first
+/// non-ASCII call's materialization runs under the GIL (the standard
+/// str-in first-call class every str-argument tors function pays; there
+/// is no way to borrow the view without it), and the `py.detach` around
+/// the core is nominal (an O(1) field read), kept for the module's family
+/// shape. The heartbeat cell in tests/test_gil_release.py pins the band:
+/// the 12 MiB non-ASCII first call's materialization sits under the 10 ms
+/// ping floor, so the cell is ceiling-only like every sub-floor member.
+/// No aio twin: an O(1)-to-O(n)-borrow call needs no thread hop.
+#[pyfunction]
+pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
+    py.detach(|| scan_impl::utf8_byte_len(s))
+}

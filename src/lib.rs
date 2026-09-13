@@ -222,7 +222,17 @@
 //! (raised under the GIL, before the detach). The whole pass at 12 MiB
 //! sits well under the 10 ms heartbeat floor (memchr-class throughput),
 //! so both corpus shapes' heartbeat cells are ceiling-only, the
-//! b64/utf8_is_valid budget class.
+//! b64/utf8_is_valid budget class. Its pinned companion
+//! (`utf8_byte_len`, #52, same binding module) is the one surface whose
+//! GIL-held residue IS its work on a first non-ASCII call: the standard
+//! str-in borrow materializes and caches the UTF-8 view under the GIL
+//! (O(n), the `finalize` first-call class; ASCII is a zero-copy alias and
+//! repeat calls O(1), strictly better than `len(s.encode())`'s
+//! re-copy-every-call), while the detach around the core is nominal —
+//! the core is the borrowed `&str`'s `len()`, one field read. A single
+//! `int` return, no marshalling class, no error path past the borrow's
+//! own `UnicodeEncodeError` on lone surrogates (CPython's error,
+//! `encode`'s exact parity).
 
 pub mod b64_impl;
 pub mod bm25_impl;
@@ -423,6 +433,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utf16_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
+    m.add_function(wrap_pyfunction!(utf8_byte_len, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes_lines, m)?)?;

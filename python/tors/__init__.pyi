@@ -201,6 +201,37 @@ def count_matches(patterns: list[str], text: str) -> int: ...
 def contains_unescaped(haystack: bytes, needle: bytes) -> bool: ...
 def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
 
+# The scan surface's pinned companion (#52): the UTF-8 byte length of a
+# str — len(s.encode("utf-8")) with the copy taken out. The count a
+# caller wants when a size cap sits in front of a store (TaskQ's
+# idempotency-key/scope byte caps per enqueue, the terminal's re-encode
+# of a serialized result of up to 64 KiB per success — a double pass:
+# the byte count existed inside the serializer's output and was
+# discarded by the .decode()). Companion, not standalone: it ships in
+# the scan family's binding module with the same harness patterns, and
+# honest sizing says the win is large inputs and hot paths only.
+#
+# Cache semantics (the deliberate implementation: the standard str-in
+# borrow, not hand-rolled UCS arithmetic — a Rust &str IS its UTF-8
+# bytes, so the core is one field read): ASCII is a zero-copy alias, so
+# the call is O(1) with no allocation; a non-ASCII input's FIRST call
+# materializes and caches the UTF-8 view on the str object (a
+# CPython-internal cache, not a Python-visible bytes, shared with every
+# other str-in tors call on the same object) — encode-parity cost, no
+# Python-visible object; repeat calls on the same object are O(1),
+# strictly better than len(s.encode()), which re-copies every call.
+#
+# Error parity: a str holding lone surrogates raises UnicodeEncodeError —
+# CPython's own error from the borrow (the same exception encode raises,
+# attributes included); no tors-side error path exists.
+#
+# GIL note: a single int return (no marshalling class); the call's only
+# O(n) work is the borrow itself — the first non-ASCII call's
+# materialization is GIL-held (the standard str-in first-call class),
+# under the 10ms ping floor at 12 MiB; the detach around the O(1) core
+# is nominal. No aio twin (an O(1)-to-borrow call needs no thread hop).
+def utf8_byte_len(s: str) -> int: ...
+
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
 # pattern list compiled once (one detached build at construction), then
 # every call is the free function's scan classes minus the per-call

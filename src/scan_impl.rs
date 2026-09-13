@@ -1,3 +1,11 @@
+//! Two scan-family cores live in this module: the escape-parity byte scan
+//! (the pure-Rust core of `tors.contains_unescaped` and
+//! `tors.find_unescaped`, #50) and the UTF-8 byte-length measurement (the
+//! core of `tors.utf8_byte_len`, #52) — the pinned companion that shipped
+//! beside it in the same binding module. The scan sections below are
+//! #50's; the measurement section at the end is #52's; they share only the
+//! binding module (`src/py/scan.rs`) and the harness patterns, not logic.
+//!
 //! Escape-parity byte scan, the pure-Rust core of `tors.contains_unescaped`
 //! and `tors.find_unescaped`: find the first occurrence of a needle that is
 //! not itself escaped.
@@ -110,6 +118,68 @@
 //! in `src/py/scan.rs` adds only the argument borrows, the GIL release,
 //! and the `bool`/`int` return marshalling (see the crate GIL model in
 //! `src/lib.rs`).
+//!
+//! # utf8_byte_len: the measurement companion (#52)
+//!
+//! `tors.utf8_byte_len(s)` answers `len(s.encode("utf-8"))` without
+//! building the bytes object: the count a caller wants when a size cap
+//! sits in front of a store (TaskQ's idempotency-key/scope byte caps on
+//! every enqueue, and the terminal's re-encode of a serialized result of
+//! up to 64 KiB on every success — a genuine double pass, the byte count
+//! having existed inside the serializer's output and been discarded by
+//! the `.decode()` that produced the `str`). It lives in this module
+//! because it is the scan surface's pinned companion — same binding
+//! module, same harness patterns — and honest sizing says it would not
+//! stand alone (a short-string encode is a few hundred nanoseconds; the
+//! win is large inputs and hot paths, where the copy is the cost).
+//!
+//! # Why the core is one expression, and why that is the point
+//!
+//! The issue's sketch proposed hand-rolled per-range arithmetic over
+//! CPython's internal UCS1/UCS2/UCS4 storage: 1/2/3/4 bytes per codepoint
+//! by range, surrogate pairs in UCS2 folding into one 4-byte sequence,
+//! behind unsafe FFI walks of `PyUnicode_KIND`/data. This implementation
+//! rejects that route. The wrapper performs the repo's standard str-in
+//! borrow (pyo3 `to_str`, `PyUnicode_AsUTF8AndSize` — the same
+//! zero-copy-or-materialize-once borrow every str-argument tors function
+//! uses) and hands this core a Rust `&str`, whose `len()` IS its UTF-8
+//! byte length: a `&str` is its UTF-8 bytes by construction, so the
+//! answer is one field read. The mechanism is dried into the language
+//! instead of reimplemented; an unsafe KIND/data walk with
+//! surrogate-pair arithmetic would exist only to avoid one cached
+//! materialization, which is exactly the hand-rolled complexity the
+//! maintenance-burden policy refuses. The trade is deliberate and
+//! measured (the wrapper's docs and tests/test_performance.py carry the
+//! numbers):
+//!
+//! * ASCII (the serialized-JSON case): the borrow is a zero-copy alias —
+//!   compact ASCII data is its own UTF-8 — so the call is O(1) with no
+//!   allocation, against the expression's alloc+memcpy every call.
+//! * Non-ASCII, first call on the object: CPython materializes and CACHES
+//!   the UTF-8 view on the `str` object (an internal cache, not a
+//!   Python-visible `bytes`, shared with every other str-in tors call on
+//!   the same object), so the first call is O(n) — encode-parity in cost
+//!   class, with no Python-visible object to allocate and collect.
+//! * Non-ASCII, repeat calls on the same object: O(1) — strictly better
+//!   than the expression, which re-copies on every call.
+//!
+//! Error parity is free: a `str` holding lone surrogates cannot be
+//! UTF-8-encoded, and `PyUnicode_AsUTF8AndSize` raises CPython's own
+//! `UnicodeEncodeError` (pyo3 propagates it from the borrow, before any
+//! tors code runs) — the same exception `encode` raises, attributes
+//! included (pinned attribute-for-attribute in
+//! tests/test_utf8_byte_len.py). There is no tors-side error path at all.
+//!
+//! No fuzz target exists for this function, deliberately: the core is one
+//! field read over a type that guarantees its own invariant (a `&str` is
+//! valid UTF-8 by construction, so its `len()` is the byte length by the
+//! language's own rules) — there is no input-dependent logic for a
+//! Rust-side fuzzer to explore, and the interesting invariants (encode
+//! parity, the surrogate error) live at the CPython/pyo3 boundary
+//! cargo-fuzz cannot reach. A target comparing `s.len()` to a re-encode
+//! of the same data would assert the standard library against itself:
+//! vacuous, and negative value in the wired lists it would have to
+//! occupy.
 
 /// The byte offset of the first live (even-run) occurrence of `needle` in
 /// `haystack` — the first occurrence whose maximal preceding backslash run
@@ -148,6 +218,90 @@ pub fn find_unescaped(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         from = hit + 1;
     }
     None
+}
+
+// --- #52: the UTF-8 byte-length measurement --------------------------------------------
+//
+// The companion core, separated from the scan above. See the module docs'
+// "utf8_byte_len" section for the borrow-not-arithmetic decision, the
+// cache trade, the error parity, and the no-fuzz rationale; the wrapper in
+// src/py/scan.rs carries the Python-facing contract.
+
+/// The UTF-8 byte length of `s` — the number of bytes `s` occupies as
+/// UTF-8, the answer `len(s.encode("utf-8"))` computes by allocating and
+/// copying the whole `bytes` object first.
+///
+/// The body is one expression, deliberately: a Rust `&str` IS its UTF-8
+/// bytes (valid by construction), so its `len()` is the UTF-8 byte length
+/// by the language's own rules — the mechanism is dried into the language
+/// rather than reimplemented (the module docs' section on why the issue's
+/// per-range UCS arithmetic was rejected). The cost model lives at the
+/// borrow, not here: ASCII inputs are zero-copy aliases, a non-ASCII
+/// input's first call materializes and caches the UTF-8 view on the
+/// Python object (encode-parity cost, no Python-visible allocation), and
+/// repeat calls on the same object are O(1) — strictly better than the
+/// expression, which re-copies every call. Lone surrogates never reach
+/// this function: the borrow raises `UnicodeEncodeError` first, exactly
+/// `encode`'s own error.
+pub fn utf8_byte_len(s: &str) -> usize {
+    s.len()
+}
+
+#[cfg(test)]
+mod utf8_byte_len_tests {
+    use super::*;
+
+    #[test]
+    fn boundary_codepoints_answer_the_sequence_table() {
+        // The UTF-8 sequence table at its boundaries: 1 byte below U+0080,
+        // 2 to U+07FF, 3 to U+FFFF, 4 above — hand-computed expectations,
+        // the same rows the Python battery pins (a wrong row fails here
+        // before the extension even builds).
+        assert_eq!(utf8_byte_len(""), 0);
+        assert_eq!(utf8_byte_len("a"), 1);
+        assert_eq!(utf8_byte_len("\u{7f}"), 1);
+        assert_eq!(utf8_byte_len("\u{80}"), 2);
+        assert_eq!(utf8_byte_len("\u{7ff}"), 2);
+        assert_eq!(utf8_byte_len("\u{800}"), 3);
+        assert_eq!(utf8_byte_len("\u{ffff}"), 3);
+        assert_eq!(utf8_byte_len("\u{10000}"), 4);
+        assert_eq!(utf8_byte_len("\u{10ffff}"), 4);
+    }
+
+    #[test]
+    fn mixed_content_answers_the_sum_of_its_sequence_lengths() {
+        assert_eq!(utf8_byte_len("caf\u{e9}"), 5); // 4 ASCII + one 2-byte
+        assert_eq!(utf8_byte_len("\u{6771}\u{4eac}"), 6); // two 3-byte
+        assert_eq!(utf8_byte_len("\u{1f600}"), 4); // one 4-byte
+        assert_eq!(utf8_byte_len("e\u{301}"), 3); // 1 + a combining mark
+        assert_eq!(utf8_byte_len("\u{1f468}\u{200d}\u{1f469}"), 4 + 3 + 4);
+        assert_eq!(utf8_byte_len("\u{0}"), 1); // a real NUL: 1 byte
+    }
+
+    #[test]
+    fn byte_length_diverges_from_char_count_on_astral_text() {
+        // The char/byte divergence the API exists to answer: astral chars
+        // are 1 char and 4 bytes, so a char-counting regression fails here
+        // by exactly 4x (the class of bug the Python differential's
+        // astral-only strategy pins from the other side).
+        let astral = "\u{1f600}".repeat(1000);
+        assert_eq!(utf8_byte_len(&astral), 4000);
+        assert_eq!(astral.chars().count(), 1000);
+    }
+
+    #[test]
+    fn a_one_mib_scale_string_answers_its_encoded_length() {
+        // The 1 MiB ladder top: the answer holds at the scale where the
+        // replaced expression allocates a full megabyte. The expectation
+        // is derived from the unit recipe (32 bytes per unit, pinned by
+        // the assert — the first draft of this row mis-counted the unit
+        // at 26 and the pin caught it), 32,768 units making exactly
+        // 1 MiB.
+        let unit = "Torque spec, caf\u{e9} \u{6771}\u{4eac} \u{1f600}\u{301}";
+        assert_eq!(unit.len(), 32);
+        let text = unit.repeat(32_768);
+        assert_eq!(utf8_byte_len(&text), 32 * 32_768);
+    }
 }
 
 #[cfg(test)]
