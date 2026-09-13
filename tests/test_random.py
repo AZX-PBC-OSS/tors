@@ -1152,6 +1152,7 @@ class TestNoRngStateGuard:
         # published graph's uuid with no children; the lockfile's uuid ->
         # getrandom edge is that dev unification, not the library path.
         import pathlib
+
         import tomllib
 
         manifest = tomllib.loads(
