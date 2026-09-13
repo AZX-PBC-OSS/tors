@@ -82,6 +82,40 @@
 //! for a six-byte needle). Iterations stay sub-10ms at every ladder size
 //! (memchr-class throughput), so every cell keeps default sampling.
 //!
+//! The `utf8_byte_len` group (the issue #52 companion core,
+//! `scan_impl::utf8_byte_len`): the answer to "how many UTF-8 bytes is
+//! this str?" versus the cost of the stdlib expression it replaces. Two
+//! cells per size:
+//!
+//! - `core`: `scan_impl::utf8_byte_len(&text)` — the borrowed `&str`'s
+//!   `len()`, ONE FIELD READ, flat ns at every size. That flatness is the
+//!   whole result: the core's throughput column is deliberately
+//!   meaningless (an O(1) read over n input bytes reports absurd TiB/s)
+//!   and exists only to make the flat line visible next to the baseline.
+//! - `encode_baseline`: `text.as_bytes().to_vec()` — one allocation plus
+//!   one memcpy of the full corpus, the dominant cost of
+//!   `len(s.encode("utf-8"))` on ASCII input (CPython's ASCII encode fast
+//!   path is exactly this copy) and the floor model of it on non-ASCII
+//!   input (where a cold encode additionally runs the ucs-to-UTF-8
+//!   encoder pass, several× the copy). The true end-to-end lanes — ASCII
+//!   zero-copy alias, non-ASCII materialize-once-then-cached, all raced
+//!   against the live expression — are measured Python-side by the
+//!   `utf8_byte_len` cells in tests/test_performance.py; a Rust bench
+//!   cannot see the pyo3 borrow where those lanes live.
+//!
+//! Ladder: 64 KiB / 1 MiB / 12 MiB — the TaskQ result cap
+//! (`MAX_RESULT_BYTES`, the size the function's motivating double pass
+//! pays), the wall cells' mid leg, and the suite's canonical size. No
+//! 100 MiB leg (the sibling groups' 100 MiB exists to show a linear
+//! scan's throughput stability; a flat O(1) read and a trivial memcpy
+//! have nothing new to show there). Corpus: the shared prose recipe
+//! only — the core is representation-independent (the ASCII-alias vs
+//! materialize-once distinction lives at the pyo3 borrow, not here), and
+//! prose is already corpus-pinned by tests/test_bench_corpus_parity.py
+//! through the common module, so this group adds no bench-local
+//! constants for that file to pin. Iterations are ns-scale (core) and
+//! µs-scale (baseline), so every cell keeps default sampling.
+//!
 //! Run locally with `cargo bench --no-default-features --bench search` — the
 //! `--no-default-features` is required because `extension-module`
 //! deliberately does not link libpython, which a bench binary needs. CI only
@@ -300,11 +334,41 @@ fn bench_unescaped_scan(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_utf8_byte_len(c: &mut Criterion) {
+    let mut group = c.benchmark_group("utf8_byte_len");
+    for target_bytes in [64 * 1024, 1024 * 1024, 12 * 1024 * 1024] {
+        let text = prose(target_bytes);
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        // The core: the borrowed &str's len() — one field read, flat ns at
+        // every size (the throughput column's absurd TiB/s is the point).
+        group.bench_with_input(
+            BenchmarkId::new("core", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| scan_impl::utf8_byte_len(black_box(text)));
+            },
+        );
+        // The encode baseline: the alloc+memcpy the replaced expression
+        // pays — CPython's ASCII encode fast path is exactly this copy
+        // (the Python-side cells measure the live expression and the
+        // non-ASCII cold/warm lanes this cannot see).
+        group.bench_with_input(
+            BenchmarkId::new("encode_baseline", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| black_box(text.as_bytes().to_vec()));
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_search,
     bench_replace_many,
     bench_replace_many_masked,
-    bench_unescaped_scan
+    bench_unescaped_scan,
+    bench_utf8_byte_len
 );
 criterion_main!(benches);
