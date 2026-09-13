@@ -40,11 +40,33 @@ const INVARIANT_FLOOR: usize = 256;
 enum Input {
     /// Arbitrary raw text and parameters: panic-freedom, determinism,
     /// the length/value shape, and the empty-set <-> sentinel
-    /// equivalence.
+    /// equivalence. `num_perm` spans the whole binding range 1..=1024
+    /// and `shingle_size` spans 0..=1029: 0 exercises the core's
+    /// malformed-width guard (the binding rejects it; the core must still
+    /// never panic) and the large end the short-of-a-window sentinel.
     Raw {
         data: Vec<u8>,
-        num_perm: u8,
-        shingle_size: u8,
+        num_perm: u16,
+        shingle_size: u16,
+        seed: u64,
+    },
+    /// The seed as arbitrary bytes (any length, including empty and
+    /// over-long): the byte->u64 reduction plus the same contract the Raw
+    /// lane asserts, so seed handling is fuzzed as bytes, not just as a
+    /// ready-made u64.
+    SeedBytes {
+        data: Vec<u8>,
+        num_perm: u16,
+        shingle_size: u16,
+        seed_bytes: Vec<u8>,
+    },
+    /// Exact adversarial strings (the WB4 separator-attach corpus, ZWJ
+    /// emoji, CJK, regional indicators) at fuzzed parameters: the inputs
+    /// a byte soup almost never assembles, pinned exactly.
+    Exact {
+        index: u8,
+        num_perm: u16,
+        shingle_size: u16,
         seed: u64,
     },
     /// The input vs a one-byte flip of itself vs an independent
@@ -56,6 +78,27 @@ enum Input {
         shingle_size: u8,
     },
 }
+
+/// The exact-string lane's corpus: every row a segmentation or framing
+/// edge (see `src/minhash_impl.rs`'s WB4 note and
+/// `tests/test_minhash.py`'s adjacency corpus).
+const EXACT_STRINGS: &[&str] = &[
+    "\u{1f}\u{301}",
+    "\u{1f}\u{200d}",
+    "\u{1f}\u{ad}",
+    "a \u{1f}\u{301} b c",
+    "A\u{1f}\u{301}b",
+    "\u{1f}",
+    "\u{1f}\u{1f}\u{1f}",
+    "a\u{1f}b c",
+    "\u{1f469}\u{200d}\u{1f52c} \u{30c6}\u{30b9}\u{30c8}",
+    "\u{1f1fa}\u{1f1f8}\u{1f1fa}",
+    "\u{1100}\u{1161}\u{11a8} \u{e0}\u{30d}",
+    "caf\u{e9} soci\u{e9}t\u{e9} na\u{ef}ve \u{6771}\u{4eac}\u{306f}\u{65e5}\u{672c}",
+    "Hello, world! One. Two.",
+    "   \t  ",
+    "",
+];
 
 fn agreement_fraction(a: &[u64], b: &[u64]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
@@ -78,6 +121,46 @@ fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
+/// The shared panic-freedom/determinism/length/value-shape contract
+/// every non-mutated lane asserts.
+fn check_signature_contract(text: &str, num_perm: usize, shingle_size: usize, seed: u64) {
+    // Determinism: the pinned arithmetic is platform-independent,
+    // so the same call twice must agree element for element.
+    let sig = tors::minhash_impl::signature(text, num_perm, shingle_size, seed);
+    assert_eq!(
+        sig,
+        tors::minhash_impl::signature(text, num_perm, shingle_size, seed),
+        "signature not deterministic"
+    );
+    // The length contract.
+    assert_eq!(sig.len(), num_perm, "signature length != num_perm");
+    // The value contract: every element is either an affine output
+    // (below the Mersenne prime) or the empty-set sentinel, and
+    // the sentinel appears exactly when the shingle set is empty.
+    let distinct = tors::minhash_impl::distinct_shingle_count(text, shingle_size);
+    if distinct == 0 {
+        assert!(
+            sig.iter().all(|&v| v == u64::MAX),
+            "empty shingle set but not the all-sentinel signature"
+        );
+    } else {
+        assert!(
+            sig.iter().all(|&v| v < (1 << 61) - 1),
+            "signature element outside the affine range"
+        );
+    }
+}
+
+/// Arbitrary seed bytes to the u64 the core takes: the first 8 bytes
+/// little-endian (short inputs zero-pad, long inputs truncate — every
+/// bytestring maps, none panics).
+fn seed_from_bytes(seed_bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    let n = seed_bytes.len().min(8);
+    buf[..n].copy_from_slice(&seed_bytes[..n]);
+    u64::from_le_bytes(buf)
+}
+
 fuzz_target!(|input: Input| {
     match input {
         Input::Raw {
@@ -90,33 +173,34 @@ fuzz_target!(|input: Input| {
                 return;
             }
             let text = String::from_utf8_lossy(&data);
-            let num_perm = 1 + num_perm as usize % 256;
-            let shingle_size = 1 + shingle_size as usize % 8;
-            // Determinism: the pinned arithmetic is platform-independent,
-            // so the same call twice must agree element for element.
-            let sig = tors::minhash_impl::signature(&text, num_perm, shingle_size, seed);
-            assert_eq!(
-                sig,
-                tors::minhash_impl::signature(&text, num_perm, shingle_size, seed),
-                "signature not deterministic"
-            );
-            // The length contract.
-            assert_eq!(sig.len(), num_perm, "signature length != num_perm");
-            // The value contract: every element is either an affine output
-            // (below the Mersenne prime) or the empty-set sentinel, and
-            // the sentinel appears exactly when the shingle set is empty.
-            let distinct = tors::minhash_impl::distinct_shingle_count(&text, shingle_size);
-            if distinct == 0 {
-                assert!(
-                    sig.iter().all(|&v| v == u64::MAX),
-                    "empty shingle set but not the all-sentinel signature"
-                );
-            } else {
-                assert!(
-                    sig.iter().all(|&v| v < (1 << 61) - 1),
-                    "signature element outside the affine range"
-                );
+            let num_perm = 1 + num_perm as usize % 1024;
+            let shingle_size = shingle_size as usize % 1030;
+            check_signature_contract(&text, num_perm, shingle_size, seed);
+        }
+        Input::SeedBytes {
+            data,
+            num_perm,
+            shingle_size,
+            seed_bytes,
+        } => {
+            if data.len() > 16 * 1024 || seed_bytes.len() > 16 {
+                return;
             }
+            let text = String::from_utf8_lossy(&data);
+            let num_perm = 1 + num_perm as usize % 1024;
+            let shingle_size = shingle_size as usize % 1030;
+            check_signature_contract(&text, num_perm, shingle_size, seed_from_bytes(&seed_bytes));
+        }
+        Input::Exact {
+            index,
+            num_perm,
+            shingle_size,
+            seed,
+        } => {
+            let text = EXACT_STRINGS[index as usize % EXACT_STRINGS.len()];
+            let num_perm = 1 + num_perm as usize % 1024;
+            let shingle_size = shingle_size as usize % 1030;
+            check_signature_contract(text, num_perm, shingle_size, seed);
         }
         Input::Mutated {
             data,

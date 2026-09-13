@@ -39,10 +39,13 @@ otherwise use:
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
 - `minhash_signature`, `num_perm=128`, vs the pure-Python MinHash loop it
   replaces (the same tokens, shingles, XXH64, and permutation arithmetic
-  in Python): 0.03 ms vs 3.2 ms at 1 KiB (~104x), 3.6 ms vs 274 ms at
-  100 KiB (~77x), 38.2 ms vs 2.83 s at 1 MiB (~74x). The sweep is
-  O(shingles × num_perm): ~100 ms at 1 MiB with `num_perm=512`, ~0.3 ms at
-  1 KiB with the default.
+  in Python): 0.02 ms vs 3.4 ms at 1 KiB (~170x), 1.6 ms vs 281 ms at
+  100 KiB (~175x), 17.7 ms vs 2.89 s at 1 MiB (~163x). The sweep is
+  O(distinct shingles × num_perm) after the dedup-first pass: the prose
+  corpus rides a handful of distinct shingles, so 1 MiB costs ~17 ms at
+  `num_perm=512` exactly as at the default, and 1 KiB costs ~0.04 ms even
+  at 512 (pre-dedup this row read 0.03/3.6/38.2 ms with ~100 ms at 1 MiB
+  under 512: the sweep, not the tokenize, dominated there).
 - `first_invalid_charset`: a 1000-item identifier batch validates in ~14 µs
   against ~97 µs for the per-item anchored-regex loop (~7x), and the
   batch-only shape is the point — a per-item tors call (~0.25 µs) loses to

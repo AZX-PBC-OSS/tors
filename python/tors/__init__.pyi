@@ -945,8 +945,8 @@ def simhash128(text: str) -> int: ...
 # the precision side; minhash recalls similar shingle sets at corpus
 # scale, the quantity an LSH-banding table -- caller state, tors stays
 # stateless -- buckets on). num_perm min-hashes over shingle_size-token
-# word shingles (the tf_idf/bm25 UAX #29 token stream, lowercased, tokens
-# joined with U+001F); each element is min over shingles of
+# word shingles (the tf_idf/bm25 UAX #29 token stream, lowercased, each
+# window hashed under the injective length-prefixed framing); each element is min over shingles of
 # (a_i * x + b_i) mod (2^61 - 1), x the shingle's XXH64 (frozen-spec,
 # deterministic across processes/machines/versions), (a_i, b_i) derived
 # from seed by a pinned SplitMix64 stream. The signature is
@@ -963,7 +963,8 @@ def simhash128(text: str) -> int: ...
 # bounds); an int outside the i64 range the binding extracts raises
 # OverflowError instead (pyo3, the truncate_to_bounds-identical
 # pattern); seed is any int reduced mod
-# 2**64 (two's complement for negatives). GIL: borrow + validation
+# 2**64 (two's complement for negatives), accepted via __index__ (numpy
+# integers work; bool is rejected with TypeError). GIL: borrow + validation
 # under the GIL, the whole pass under one detach, then the
 # num_perm-element int list. No aio twin: a fast one-shot call.
 def minhash_signature(

@@ -43,24 +43,24 @@
 //! near-duplicates preserve word sequence far more often than they
 //! preserve exact character spans — a paragraph reflowed or a word
 //! swapped shifts character k-grams wholesale while word k-grams survive.
-//! A shingle is `shingle_size` consecutive tokens joined with U+001F (the
-//! ASCII unit separator), and the join is injective — on a narrower
-//! invariant than "no UAX #29 token can contain U+001F", which is false
-//! as stated: U+001F is not whitespace, so the segmenter keeps it as a
-//! token of its own (`tors.word_bounds("a\x1fb")` is the three tokens
-//! `["a", "\x1f", "b"]`). What holds is that U+001F never mixes into a
-//! longer segment (a C0 control is its own word segment): it reaches the
-//! token stream only as an entire single-character token. That forces
-//! the joined string to parse uniquely — a maximal U+001F run bounded by
-//! token characters is odd-length (one separator, then token/separator
-//! pairs), a run at either end of the join is even-length
-//! (token/separator pairs), and the all-separator string alternates
-//! token/separator ending on a token, so the phase of every run's
-//! separator/token alternation is fixed and exactly one token window
-//! produces a given joined string: two distinct windows never join to
-//! the same bytes, and a window's XXH64 is a function of the window
-//! alone (the no-mixing invariant and the join are pinned over a
-//! `\x1f`-bearing corpus and an exhaustive small-domain join in
+//! A shingle is `shingle_size` consecutive tokens hashed under an
+//! injective length-prefixed framing: the window's token count as one
+//! little-endian u64, then per token its UTF-8 byte length as one
+//! little-endian u64 followed by the bytes themselves, the whole frame fed
+//! to XXH64 (seed 0). The framing is injective by construction
+//! (length-prefix codes are uniquely decodable), so a window's XXH64 is a
+//! function of the window alone with no separator-injectivity premise at
+//! all — deliberately, because "no UAX #29 token can contain U+001F" is
+//! FALSE as stated: U+001F is not whitespace, so the segmenter keeps it,
+//! and UAX #29 WB4 (ignore Extend/Format/ZWJ) then glues a following
+//! combining mark, ZWJ, or SOFT HYPHEN onto it (`tors.word_bounds("a\x1fb")`
+//! is the three tokens `["a", "\x1f", "b"]`, but
+//! `tors.word_bounds("\x1f\u{301}")` is the single token `["\x1f\u{301}"]`).
+//! The old `token + U+001F + token` join therefore rested on the narrower
+//! (and segmentation-table-sensitive) claim that U+001F never mixes into a
+//! longer segment; the framing rests on nothing the segmenter can take
+//! away (the WB4 attach is pinned over a `\x1f`-adjacent mark corpus and
+//! the framing's injectivity over a separator-bearing window domain in
 //! `tests/test_minhash.py`).
 //!
 //! # The pinned arithmetic (determinism contract)
@@ -97,10 +97,10 @@
 //!   `tests/test_minhash.py`);
 //! - `h_i(x) = (a_i * x + b_i) mod p`, the 128-bit product reduced by
 //!   the shift-add Mersenne reduction (three fold rounds plus one
-//!   conditional subtract, exact for every input below 2^126; the
-//!   `v == p` fixed point of the naive fold loop is why the reduction is
-//!   spelled in closed rounds — pinned against a direct `%` oracle in
-//!   the tests);
+//!   conditional subtract, exact for every u128 input — the `v == p` fixed
+//!   point of the naive fold loop is why the reduction is spelled in closed
+//!   rounds — pinned against a direct `%` oracle over the full u128 range
+//!   in the tests);
 //! - `signature[i] = min` over the document's shingle hashes.
 //!
 //! This is fixture-grade determinism, not cryptography: nothing here
@@ -130,20 +130,19 @@
 //! whole-file sizes, single-digit at document scale) gains nothing from
 //! a thread dispatch.
 
+use std::collections::{HashSet, VecDeque};
 use std::hash::Hasher as _;
 
 use twox_hash::XxHash64;
 
+#[cfg(test)]
 use crate::tokenize_impl::normalized_word_tokens;
+use crate::tokenize_impl::normalized_word_tokens_stream;
 
 /// The Mersenne prime the affine permutations live over: p = 2^61 - 1.
 const MERSENNE_P: u64 = (1 << 61) - 1;
 
-/// The shingle join separator: U+001F, the ASCII unit separator (the
-/// module doc's injectivity note).
-const SHINGLE_SEP: &[u8] = b"\x1f";
-
-/// `x mod (2^61 - 1)` for `x < 2^126`, the shift-add Mersenne reduction:
+/// `x mod (2^61 - 1)` for every u128 `x`, the shift-add Mersenne reduction:
 /// three fold rounds `(x & p) + (x >> 61)` (each folds the top bits into
 /// the bottom 61 without changing the residue mod `2^61 - 1`, since
 /// `2^61 ≡ 1`), then one conditional subtract. The closed-round spelling
@@ -153,7 +152,11 @@ const SHINGLE_SEP: &[u8] = b"\x1f";
 /// battery, including that exact value.
 fn mersenne_mod(x: u128) -> u64 {
     let m: u128 = u128::from(MERSENNE_P);
-    // x < 2^126 -> r1 < 2^65 + 2^61 -> r2 < 2^61 + 18 -> r3 <= p + 1.
+    // Full-u128 bound: x < 2^128 -> r1 < 2^67 + 2^61 -> r2 < 2^61 + 2^7
+    // (r1 >> 61 <= 65) -> r3 <= 2^61 = m + 1 (r2 >> 61 <= 1), so the one
+    // conditional subtract always lands below m. The sweep itself never
+    // exceeds (p-1) * u64::MAX + (p-1) < 2^125; the reduction is exact
+    // above that anyway, and the test battery pins the whole u128 range.
     let mut r = (x & m) + (x >> 61);
     r = (r & m) + (r >> 61);
     r = (r & m) + (r >> 61);
@@ -193,49 +196,87 @@ fn coefficients(num_perm: usize, seed: u64) -> Vec<(u64, u64)> {
     pairs
 }
 
-/// The XXH64 (seed 0) of one shingle window: each token's UTF-8 bytes
-/// fed to the streaming hasher with the U+001F separator between them —
-/// byte-identical to hashing the joined `String` (XXH64 is a streaming
-/// algorithm: the digest depends only on seed and byte sequence),
-/// without materializing a per-shingle allocation. The one spelling both
-/// the signature sweep and the distinct-shingle counter ride, so the
-/// shingle-hash contract cannot drift between them.
-fn hash_window(window: &[String]) -> u64 {
-    let mut hasher = XxHash64::default();
-    for (i, token) in window.iter().enumerate() {
-        if i > 0 {
-            hasher.write(SHINGLE_SEP);
-        }
+/// The XXH64 (seed 0, spelled explicitly: `Default` would also be seed 0
+/// today, but the seed is load-bearing contract, not a default worth
+/// inheriting silently) of one shingle window under the injective
+/// length-prefixed framing: LE64(window length), then per token
+/// LE64(byte length) + the UTF-8 bytes. Length-prefix codes are uniquely
+/// decodable, so distinct windows frame distinctly however many U+001F
+/// bytes the tokens themselves carry (the module doc's WB4 note) — and
+/// the digest is fed streaming, with no per-shingle allocation. The one
+/// spelling both the signature sweep and the distinct-shingle counter
+/// ride, so the shingle-hash contract cannot drift between them.
+fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>) -> u64 {
+    let mut hasher = XxHash64::with_seed(0);
+    hasher.write(&count.to_le_bytes());
+    for token in tokens {
+        hasher.write(&(token.len() as u64).to_le_bytes());
         hasher.write(token.as_bytes());
     }
     hasher.finish()
 }
 
+/// [`hash_tokens`] over a materialized window: the spelling the tests pin
+/// the framing through.
+#[cfg(test)]
+fn hash_window(window: &[String]) -> u64 {
+    hash_tokens(window.len() as u64, window.iter().map(String::as_str))
+}
+
+/// [`hash_tokens`] over the live streaming window: the spelling the sweep
+/// rides, so the window never materializes outside the deque.
+fn hash_live_window(window: &VecDeque<String>) -> u64 {
+    hash_tokens(window.len() as u64, window.iter().map(String::as_str))
+}
+
 /// The signature: `num_perm` min-hashes of the document's
 /// `shingle_size`-token word shingles. Every element starts at the u64
 /// MAX sentinel, which is simultaneously the min-identity (so the sweep
-/// overwrites it on the first shingle) and the empty-set convention's
-/// answer (no shingles means it survives untouched). Tokens ride the
-/// crate's one tokenizer (`normalized_word_tokens` with every knob off,
-/// the `tf_idf`/`bm25_rank` stream).
+/// overwrites it on the first distinct shingle) and the empty-set
+/// convention's answer (no shingles means it survives untouched). Tokens
+/// ride the crate's one tokenizer (`normalized_word_tokens_stream`, the
+/// `tf_idf`/`bm25_rank` stream with every knob off), streamed through a
+/// `shingle_size`-deep window: only the live window is ever resident, not
+/// the token list (the deque is grown, never pre-reserved, so a huge
+/// `shingle_size` reserves nothing and answers the sentinel once the
+/// stream ends short of a full window).
+///
+/// The sweep is dedup-first: each distinct shingle hash updates the minima
+/// once, so the pass is O(tokens) hashing plus O(distinct × num_perm) in
+/// the sweep (a repeated-token document rides its one distinct shingle,
+/// not its thousands of occurrences). Minima over occurrences equal minima
+/// over the distinct set, so the answer is byte-identical to the naive
+/// per-occurrence sweep. Note on the `HashSet`: it rides the std
+/// `RandomState` hasher, whose per-process seed would matter if iteration
+/// order escaped — it cannot here (only the per-position minima and the
+/// set cardinality escape, both order-independent), so the signature stays
+/// fixture-grade deterministic; see also `distinct_shingle_count`.
 pub fn signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) -> Vec<u64> {
     let mut sig = vec![u64::MAX; num_perm];
     // shingle_size == 0 is unreachable from the pyo3 surface (the binding
-    // validates >= 1) and nonsensical as a window width (std's windows(0)
-    // panics); the sentinel answer keeps the core total for direct Rust
-    // callers rather than panicking on a malformed width.
+    // validates >= 1) and nonsensical as a window width; the sentinel
+    // answer keeps the core total for direct Rust callers rather than
+    // panicking on a malformed width.
     if num_perm == 0 || shingle_size == 0 {
         return sig;
     }
-    let tokens = normalized_word_tokens(text, false, None, None);
-    if tokens.len() < shingle_size {
-        return sig;
-    }
     let coefficients = coefficients(num_perm, seed);
-    for window in tokens.windows(shingle_size) {
-        let x = hash_window(window);
+    let mut window: VecDeque<String> = VecDeque::new();
+    let mut distinct: HashSet<u64> = HashSet::new();
+    for token in normalized_word_tokens_stream(text) {
+        window.push_back(token);
+        if window.len() > shingle_size {
+            window.pop_front();
+        }
+        if window.len() == shingle_size {
+            distinct.insert(hash_live_window(&window));
+        }
+    }
+    // No full window ever formed: fewer tokens than shingle_size, the
+    // empty-shingle-set convention (the sentinel survives untouched).
+    for x in &distinct {
         for (element, &(a, b)) in sig.iter_mut().zip(&coefficients) {
-            let h = mersenne_mod(u128::from(a) * u128::from(x) + u128::from(b));
+            let h = mersenne_mod(u128::from(a) * u128::from(*x) + u128::from(b));
             if h < *element {
                 *element = h;
             }
@@ -246,25 +287,31 @@ pub fn signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) ->
 
 /// The number of distinct shingle hashes in `text` at `shingle_size`: the
 /// document's shingle-set cardinality, the quantity the Jaccard estimator
-/// is actually about (the min-sweep visits every shingle occurrence, but
-/// duplicates cannot change a minimum, so the signature depends on this
-/// set, not the occurrence count). Exposed for the Rust surface because
-/// it is the natural diversity check an LSH-table builder runs before
-/// trusting a document's signature (a repeated-token document has
+/// is actually about (duplicates cannot change a minimum, so the signature
+/// depends on this set, not the occurrence count — the sweep rides the
+/// same set). Streamed like the signature: only the live window plus the
+/// hash set is resident, never the token list. Exposed for the Rust surface
+/// because it is the natural diversity check an LSH-table builder runs
+/// before trusting a document's signature (a repeated-token document has
 /// thousands of tokens but one distinct shingle, and its estimates are
 /// correspondingly coarse), and because `fuzz_targets/minhash.rs`'s
-/// semantic-invariant floor is exactly this count.
+/// semantic-invariant floor is exactly this count. The `HashSet` rides
+/// `RandomState` like the signature's; only the cardinality escapes, so
+/// the count is deterministic across processes.
 pub fn distinct_shingle_count(text: &str, shingle_size: usize) -> usize {
     if shingle_size == 0 {
         return 0;
     }
-    let tokens = normalized_word_tokens(text, false, None, None);
-    if tokens.len() < shingle_size {
-        return 0;
-    }
-    let mut seen = std::collections::HashSet::with_capacity(tokens.len());
-    for window in tokens.windows(shingle_size) {
-        seen.insert(hash_window(window));
+    let mut window: VecDeque<String> = VecDeque::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    for token in normalized_word_tokens_stream(text) {
+        window.push_back(token);
+        if window.len() > shingle_size {
+            window.pop_front();
+        }
+        if window.len() == shingle_size {
+            seen.insert(hash_live_window(&window));
+        }
     }
     seen.len()
 }
@@ -274,22 +321,28 @@ mod tests {
     use super::*;
 
     /// The naive spec spelling the streaming core is differentially pinned
-    /// against: materialize the joined shingle `String`s, hash each with
-    /// the one-shot XXH64, then take each permutation's minimum from the
-    /// collected hash list (permutation-major, opposite loop nesting).
-    /// Same spec, opposite structure; agreement is evidence about the
-    /// contract, not a shared bug.
+    /// against: materialize the length-prefixed shingle frames, hash each
+    /// with the one-shot XXH64, then take each permutation's minimum from
+    /// the collected hash list (permutation-major, opposite loop nesting;
+    /// dedup-free, unlike the core's distinct-set sweep — minima agree
+    /// either way). Same spec, opposite structure; agreement is evidence
+    /// about the contract, not a shared bug.
     fn naive_signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) -> Vec<u64> {
         let tokens = normalized_word_tokens(text, false, None, None);
         if tokens.len() < shingle_size {
             return vec![u64::MAX; num_perm];
         }
-        let shingles: Vec<String> = (0..=tokens.len() - shingle_size)
-            .map(|i| tokens[i..i + shingle_size].join("\u{1f}"))
-            .collect();
-        let hashes: Vec<u64> = shingles
-            .iter()
-            .map(|s| XxHash64::oneshot(0, s.as_bytes()))
+        let hashes: Vec<u64> = (0..=tokens.len() - shingle_size)
+            .map(|i| {
+                let window = &tokens[i..i + shingle_size];
+                let mut frame = Vec::new();
+                frame.extend_from_slice(&(window.len() as u64).to_le_bytes());
+                for token in window {
+                    frame.extend_from_slice(&(token.len() as u64).to_le_bytes());
+                    frame.extend_from_slice(token.as_bytes());
+                }
+                XxHash64::oneshot(0, &frame)
+            })
             .collect();
         coefficients(num_perm, seed)
             .into_iter()
@@ -356,15 +409,44 @@ mod tests {
         assert_eq!(XxHash64::oneshot(0, b""), 0xEF46_DB37_51D8_E999);
         assert_eq!(XxHash64::oneshot(0, b"a"), 0xD24E_C4F1_A98C_6E5B);
         // The streaming spelling the core uses must agree with oneshot on
-        // a multi-part feed: tokens + separators == the joined string.
-        let joined = "the\u{1f}quick\u{1f}brown";
-        let mut hasher = XxHash64::default();
-        hasher.write(b"the");
-        hasher.write(SHINGLE_SEP);
-        hasher.write(b"quick");
-        hasher.write(SHINGLE_SEP);
-        hasher.write(b"brown");
-        assert_eq!(hasher.finish(), XxHash64::oneshot(0, joined.as_bytes()));
+        // a multi-part feed: the length-prefixed frame written part by
+        // part == the same frame hashed whole.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&3u64.to_le_bytes());
+        for token in ["the", "quick", "brown"] {
+            frame.extend_from_slice(&(token.len() as u64).to_le_bytes());
+            frame.extend_from_slice(token.as_bytes());
+        }
+        let mut hasher = XxHash64::with_seed(0);
+        hasher.write(&3u64.to_le_bytes());
+        for token in ["the", "quick", "brown"] {
+            hasher.write(&(token.len() as u64).to_le_bytes());
+            hasher.write(token.as_bytes());
+        }
+        assert_eq!(hasher.finish(), XxHash64::oneshot(0, &frame));
+    }
+
+    #[test]
+    fn shingle_framing_is_length_prefixed() {
+        // UAX #29 WB4 attaches Extend/Format/ZWJ to U+001F, so tokens like
+        // "\x1f\u{301}" exist and the old token+U+001F+token join is no
+        // injective basis. The frame is LE64(window_len) followed by
+        // LE64(byte_len)+bytes per token (explicit little-endian: the
+        // determinism contract is cross-platform), hashed with XXH64 seed 0.
+        let window = vec!["a".to_string(), "\x1f\u{301}".to_string()];
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(window.len() as u64).to_le_bytes());
+        for token in &window {
+            frame.extend_from_slice(&(token.len() as u64).to_le_bytes());
+            frame.extend_from_slice(token.as_bytes());
+        }
+        assert_eq!(hash_window(&window), XxHash64::oneshot(0, &frame));
+        // A token boundary the join could never disambiguate stays
+        // distinct under the framing.
+        assert_ne!(
+            hash_window(&["\x1f\u{301}".to_string()]),
+            hash_window(&["\x1f".to_string(), "\u{301}".to_string()][..1])
+        );
     }
 
     #[test]
@@ -420,6 +502,14 @@ mod tests {
         // pyo3 surface rejects both before the core ever sees them).
         assert!(signature("one two three", 0, 3, 0).is_empty());
         assert_eq!(signature("one two three", 4, 0, 0), vec![u64::MAX; 4]);
+        // A shingle wider than the token stream is the empty set, however
+        // huge the width: the sentinel with no window blowup (the window
+        // deque is grown, never pre-reserved, so this reserves nothing).
+        assert_eq!(
+            signature("one two three", 4, usize::MAX, 0),
+            vec![u64::MAX; 4]
+        );
+        assert_eq!(distinct_shingle_count("one two three", usize::MAX), 0);
     }
 
     #[test]
@@ -500,8 +590,9 @@ mod tests {
     /// side (tests/test_minhash.py), held here as the crate-side anchors
     /// (the simhash precedent: the impl module's tests hold the measured
     /// anchors, the Python battery mirrors them): near-identical
-    /// (agreement 82 of 128, exact J 0.6129), moderately similar (30 of
+    /// (agreement 74 of 128, exact J 0.6129), moderately similar (22 of
     /// 128, exact J 0.2000), vocabulary-disjoint (0 of 128, exact J 0).
+    /// All three estimates sit inside the k=128 2-sigma band (0.088).
     #[test]
     fn distinct_shingle_count_pins_the_set_cardinality() {
         // Empty/short/whitespace: the empty set.
@@ -545,8 +636,8 @@ mod tests {
             let sig_b = signature(b, 128, 3, 0);
             sig_a.iter().zip(&sig_b).filter(|(x, y)| x == y).count()
         };
-        assert_eq!(agreement(&near_a, &near_b), 82);
-        assert_eq!(agreement(&moderate_a, &moderate_b), 30);
+        assert_eq!(agreement(&near_a, &near_b), 74);
+        assert_eq!(agreement(&moderate_a, &moderate_b), 22);
         assert_eq!(agreement(&disjoint_a, &disjoint_b), 0);
     }
 }

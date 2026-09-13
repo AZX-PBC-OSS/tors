@@ -9,7 +9,8 @@ index (caller state; tors stays stateless) buckets candidates on.
 The pinned arithmetic (``src/minhash_impl.rs``'s module doc is the full
 writeup): tokens are the tokenizer's UAX #29 word segments (whitespace-only
 segments skipped, lowercased); shingles are consecutive ``shingle_size``-
-token windows joined with U+001F; each shingle is hashed with XXH64 (seed 0,
+token windows hashed under the injective length-prefixed framing
+(LE64(n) || (LE64(len) || bytes)*); each shingle is hashed with XXH64 (seed 0,
 the frozen-spec algorithm via twox-hash; the differential oracle hashes the
 same shingles through the pinned ``xxhash`` package wrapping the C reference
 implementation, so agreement is evidence about two independent
@@ -38,15 +39,21 @@ from reference import (
 )
 from tors import minhash_signature
 
-# The mixed text alphabet: letters, numbers, punctuation, spaces, plus the
-# hard-break whitespace (excludes surrogates by construction and controls
-# below 0x2000 other than the explicitly whitelisted \n\r\t; the U+001F
-# separator row and the surrogate row are pinned as explicit fixtures).
+# The mixed text alphabet: letters, numbers, punctuation, spaces, the
+# hard-break whitespace, the C0/C1 controls (U+001F separator included),
+# combining marks (Mn: the WB4 separator-attach), format controls (Cf:
+# ZWJ, SOFT HYPHEN), and line separators (Zl), out through the CJK block
+# (Lo scriptio continua) -- the differential oracle must agree with the
+# core on all of it, not just letters. Surrogates are excluded
+# explicitly (a lone surrogate is a UnicodeEncodeError at the boundary,
+# pinned separately below); the separator row stays an explicit fixture
+# too (the Cs surrogate category is absent from the list, so no draw can
+# be a surrogate).
 _TEXT = st.text(
     alphabet=st.characters(
-        whitelist_categories=("L", "N", "Zs", "P"),
+        whitelist_categories=("L", "N", "Zs", "P", "Mn", "Cf", "Cc", "Zl"),
         whitelist_characters="\n\r\t",
-        max_codepoint=0x2FFF,
+        max_codepoint=0x9FFF,
     ),
     max_size=200,
 )
@@ -129,14 +136,14 @@ class TestGoldenPins:
 
     def test_full_signature_at_num_perm_8(self) -> None:
         assert minhash_signature(_FOX, num_perm=8) == [
-            207829741228551648,
-            886224216710130644,
-            5239036883153575,
-            410872505281952979,
-            206408683582913069,
-            264955052027332870,
-            596676407842964365,
-            70385239711227410,
+            169259083321921084,
+            172457087984037558,
+            128202111860233391,
+            493909799184687459,
+            178272364556672123,
+            724714824782277816,
+            541813272509765753,
+            270160054342519274,
         ]
 
     def test_first_elements_across_params(self) -> None:
@@ -146,38 +153,38 @@ class TestGoldenPins:
             (
                 _FOX,
                 {},
-                [207829741228551648, 886224216710130644, 5239036883153575, 410872505281952979],
-                221145959159655086,
+                [169259083321921084, 172457087984037558, 128202111860233391, 493909799184687459],
+                233113311292222340,
             ),
             (
                 _FOX,
                 {"seed": 42},
-                [270372989529981796, 105077448321344730, 235377393589391342, 121953126375922264],
-                551058709496425660,
+                [131105769293970662, 48546077666774954, 385205238630604648, 418317608302171271],
+                224966429528101112,
             ),
             (
                 _FOX,
                 {"seed": -1},
-                [254597756377403703, 48405316552563713, 178401967871503489, 313500567055445292],
-                383375621771831909,
+                [47248574907900023, 265721080939863404, 453343482114475226, 165744942491687530],
+                81491349990655831,
             ),
             (
                 _FOX,
                 {"shingle_size": 1},
-                [43535712731860995, 400583443249740695, 1101800490404374691, 298222042623614620],
-                94148238014863239,
+                [191606523678226712, 202562416858770285, 182802331010015698, 794464171970867],
+                39137848709602292,
             ),
             (
                 _FOX,
                 {"shingle_size": 2, "seed": 9},
-                [31169703906224804, 227597385112405833, 163487546933959719, 361898046382711100],
-                26421055431877821,
+                [827085101323958520, 193580844359367194, 988130364243929771, 811785053874202799],
+                412014949155909011,
             ),
             (
                 "café société naïve 東京は日本の首都です",
                 {"seed": 7, "num_perm": 16, "shingle_size": 2},
-                [118418957341389701, 425684181524778837, 123408742880440953, 147121324028316642],
-                64230409300765984,
+                [561701975191372594, 60786007352341992, 308166649822990343, 104059567270939064],
+                90746508296396512,
             ),
         ]
         for text, kwargs, first4, last in pins:
@@ -204,22 +211,22 @@ class TestGoldenPins:
 
 
 class TestShingleSeparatorInjectivity:
-    """The separator-invariant pin behind the join's documented
-    injectivity: U+001F never MIXES INTO a longer UAX #29 segment -- it
-    reaches the token stream only as an entire single-character token
-    (``word_bounds("a\\x1fb")`` is the three tokens ``["a", "\\x1f",
-    "b"]``: a C0 control is its own word segment, and U+001F is not
-    whitespace, so the segmenter keeps it, alone). Both rows pass today
-    by construction -- the pin's job is guarding the future, not proving
-    the present: a segmentation change that lets U+001F ride inside a
-    longer token, or a separator swap made on the old (false) "no token
-    contains U+001F" premise, would silently break the window-to-shingle
-    correspondence every signature and distinct-shingle count rides;
-    these rows make that a gate failure instead. The structural
-    argument the docs carry, in compressed form: a maximal U+001F run
-    inside a join is odd-length (one separator, then token/separator
-    pairs), a run at either end is even-length (token/separator pairs),
-    so the separator/token phase is forced and the parse is unique."""
+    """The separator-behavior pins behind the framing's documented
+    injectivity. The first row pins what still holds: over plain
+    letter/separator/whitespace text U+001F never MIXES INTO a longer UAX
+    #29 segment -- it reaches the token stream only as an entire
+    single-character token (``word_bounds("a\\x1fb")`` is the three tokens
+    ``["a", "\\x1f", "b"]``: a C0 control is its own word segment, and
+    U+001F is not whitespace, so the segmenter keeps it, alone). The
+    second row pins where that stops: UAX #29 WB4 glues a following
+    combining mark, ZWJ, or SOFT HYPHEN onto the separator, so the stream
+    holds tokens like ``"\\x1f\\u0301"`` -- the old "no token contains
+    U+001F" premise is false, and the shingle hash (the length-prefixed
+    framing pinned in ``TestShingleFraming``) deliberately rests on
+    nothing the segmenter can take away. Together the rows guard both
+    directions: a segmentation change in either direction -- U+001F
+    starting to mix into plain-letter runs, or the WB4 attach going
+    away -- is a gate failure instead of a silent fingerprint change."""
 
     def test_no_token_mixes_the_separator_in_over_a_x1f_bearing_corpus(self) -> None:
         # Every string over the alphabet {a, b, \x1f, space} up to length
@@ -249,25 +256,111 @@ class TestShingleSeparatorInjectivity:
                     f"{text!r}: token {token!r} mixes the separator into a longer segment"
                 )
 
-    def test_the_join_is_injective_over_the_exhaustive_small_domain(self) -> None:
+    def test_separator_adjacent_marks_attach_to_the_separator(self) -> None:
+        # UAX #29 WB4 (ignore Extend/Format/ZWJ): U+001F followed by a
+        # combining mark (Mn), ZWJ (Cf), or SOFT HYPHEN (Cf, Format) stays
+        # ONE word segment -- so the token stream DOES hold tokens that
+        # contain U+001F mixed with more characters. This is the root-cause
+        # pin behind the framing fix: the old "U+001F never mixes into a
+        # longer segment" premise is false, and the shingle hash no longer
+        # relies on it (see TestShingleFraming below).
+        assert reference_minhash_tokens("\x1f\u0301") == ["\x1f\u0301"]
+        assert reference_minhash_tokens("\x1f\u200d") == ["\x1f\u200d"]
+        assert reference_minhash_tokens("\x1f\u00ad") == ["\x1f\u00ad"]
+        assert reference_minhash_tokens("a \x1f\u0301") == ["a", "\x1f\u0301"]
+        # Every combining mark in U+0300-U+036F attaches the same way.
+        for cp in range(0x0300, 0x0370):
+            mark = chr(cp)
+            assert reference_minhash_tokens("\x1f" + mark) == ["\x1f" + mark.lower()], (
+                f"U+{cp:04X} did not attach to the separator"
+            )
+
+    def test_signatures_over_separator_bearing_text_match_the_oracle(self) -> None:
+        # The framing fix must hold exactly where the old invariant broke:
+        # texts whose token stream carries U+001F-bearing tokens.
+        rows = [
+            "\x1f\u0301 a b c",
+            "a \x1f\u200d b \x1f\u00ad c",
+            "A\x1f\u0301b c d",
+            "\x1f\u0300 \x1f\u036f x y",
+        ]
+        for text in rows:
+            assert minhash_signature(text, num_perm=8) == reference_minhash_signature(
+                text, num_perm=8
+            ), f"oracle disagreement for {text!r}"
+
+    def test_the_framing_is_injective_over_the_exhaustive_small_domain(self) -> None:
         # Every window (ordered, with repetition) over the token domain
-        # {a, b, ab, "\x1f"} at shingle_size 1..5: 4 + 16 + 64 + 256 +
-        # 1024 = 1364 windows, the domain chosen so the join must
-        # disambiguate a token that is another token's concatenation
-        # ("ab" vs the window [a, b]) and the separator's own single
-        # token ([\x1f] vs the separator between two tokens). All 1364
-        # joined strings are distinct: zero collisions, the exhaustive
-        # form of "two distinct token windows never join to the same
-        # bytes".
-        domain = ["a", "b", "ab", "\x1f"]
-        joined: set[str] = set()
+        # {a, b, ab, "\x1f", "\x1f\u0301"} at shingle_size 1..4 frames
+        # distinctly under the length-prefixed framing (the domain chosen
+        # so the framing must disambiguate a token that is another token's
+        # concatenation ("ab" vs [a, b]), the separator's own single token,
+        # AND a token carrying the separator itself). The exhaustive form
+        # of "two distinct token windows never frame to the same bytes" --
+        # the property the old U+001F join could not prove once WB4 lets
+        # "\x1f\u0301" into the stream.
+        domain = ["a", "b", "ab", "\x1f", "\x1f\u0301"]
+        framed: set[bytes] = set()
         windows = 0
-        for shingle_size in range(1, 6):
+        for shingle_size in range(1, 5):
             for window in product(domain, repeat=shingle_size):
-                joined.add("\x1f".join(window))
+                framed.add(TestShingleFraming._frame(list(window)))
                 windows += 1
-        assert windows == 1364
-        assert len(joined) == windows, "the shingle join is not injective over the small domain"
+        assert windows == 5 + 25 + 125 + 625
+        assert len(framed) == windows, "the shingle framing is not injective"
+
+
+class TestShingleFraming:
+    """The shingle-hash framing pin: each window hashes the length-prefixed
+    frame ``LE64(n) || (LE64(len) || bytes)*`` with XXH64 seed 0 -- never
+    the ``token + U+001F + token`` join, which is ambiguous once tokens
+    themselves can carry U+001F (the WB4 attach pinned above)."""
+
+    @staticmethod
+    def _frame(window: list[str]) -> bytes:
+        import struct
+
+        out = struct.pack("<Q", len(window))
+        for token in window:
+            raw = token.encode("utf-8")
+            out += struct.pack("<Q", len(raw)) + raw
+        return out
+
+    def test_single_shingle_signature_matches_the_framing(self) -> None:
+        # "a \\x1f\\u0301" tokenizes to exactly ["a", "\\x1f\\u0301"], so at
+        # shingle_size=2 the signature is one shingle's affine image --
+        # computed here through the INDEPENDENT xxhash package over the
+        # length-prefixed frame, never through the oracle's join.
+        import xxhash
+
+        from reference import reference_minhash_coefficients
+
+        text = "a \x1f\u0301"
+        assert reference_minhash_tokens(text) == ["a", "\x1f\u0301"]
+        x = xxhash.xxh64_intdigest(self._frame(["a", "\x1f\u0301"]))
+        expected = [
+            (a * x + b) % (2**61 - 1)
+            for (a, b) in reference_minhash_coefficients(8, 0)
+        ]
+        assert minhash_signature(text, num_perm=8, shingle_size=2, seed=0) == expected
+
+    def test_frames_are_distinct_over_a_separator_bearing_domain(self) -> None:
+        # The framing construction itself is injective: every window over a
+        # domain holding U+001F-bearing tokens frames distinctly (the
+        # property the old join lacked a proof of). Pure-Python pin on the
+        # construction; the tors half is pinned by the golden above plus
+        # the oracle differential.
+        from itertools import product
+
+        domain = ["a", "b", "ab", "\x1f", "\x1f\u0301", "\u0301"]
+        framed: set[bytes] = set()
+        windows = 0
+        for shingle_size in range(1, 4):
+            for window in product(domain, repeat=shingle_size):
+                framed.add(self._frame(list(window)))
+                windows += 1
+        assert windows == 6 + 36 + 216
+        assert len(framed) == windows, "the shingle framing is not injective"
 
 
 class TestEmptyConvention:
@@ -317,6 +410,22 @@ class TestBoundsContract:
         for num_perm in (1, 7, 128, 1024):
             assert len(minhash_signature(_FOX, num_perm=num_perm)) == num_perm
 
+    def test_num_perm_1024_matches_the_oracle(self) -> None:
+        # The top of the range rides the full coefficient stream: pin it
+        # against the oracle, not just for length.
+        assert minhash_signature(_FOX, num_perm=1024, seed=7) == reference_minhash_signature(
+            _FOX, num_perm=1024, seed=7
+        )
+
+    def test_huge_shingle_size_is_sentinel_without_work(self) -> None:
+        # A shingle wider than the token stream is the empty set, however
+        # huge the width: the sentinel answer with no window blowup.
+        started = time.perf_counter()
+        sig = minhash_signature(_FOX, shingle_size=10**9)
+        elapsed = time.perf_counter() - started
+        assert sig == [_MINHASH_EMPTY] * 128
+        assert elapsed < 5.0, f"huge shingle_size took {elapsed:.2f}s"
+
     def test_values_are_in_the_affine_range_or_sentinel(self) -> None:
         # Every real minimum is an affine output in [0, 2^61 - 1); the only
         # value outside that range the API can ever return is the sentinel.
@@ -348,6 +457,39 @@ class TestSeedContract:
     def test_non_int_seed_raises_type_error(self, seed: object) -> None:
         with pytest.raises(TypeError):
             minhash_signature(_FOX, seed=seed)  # type: ignore[arg-type]
+
+    def test_index_protocol_seed_is_accepted(self) -> None:
+        # Any __index__-only int-like (numpy integers, enums.IntEnum)
+        # reduces mod 2**64 like a plain int: the binding must go through
+        # the __index__ protocol, never the instance's own __and__.
+        class IndexOnly:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def __index__(self) -> int:
+                return self._value
+
+        assert minhash_signature(_FOX, seed=IndexOnly(5)) == minhash_signature(  # type: ignore[arg-type]
+            _FOX, seed=5
+        )
+        assert minhash_signature(_FOX, seed=IndexOnly(-1)) == minhash_signature(  # type: ignore[arg-type]
+            _FOX, seed=2**64 - 1
+        )
+        assert minhash_signature(_FOX, seed=IndexOnly(2**100)) == minhash_signature(  # type: ignore[arg-type]
+            _FOX, seed=0
+        )
+
+    def test_numpy_int64_seed_is_accepted(self) -> None:
+        np = pytest.importorskip("numpy")
+        assert minhash_signature(_FOX, seed=np.int64(5)) == minhash_signature(_FOX, seed=5)
+
+    def test_bool_seed_is_rejected(self) -> None:
+        # bool IS int, but a seed of True/False is a caller bug magnet, not
+        # a seed: rejected explicitly with TypeError.
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, seed=True)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            minhash_signature(_FOX, seed=False)  # type: ignore[arg-type]
 
 
 class TestJaccardProperty:
@@ -382,12 +524,12 @@ class TestJaccardProperty:
     def test_near_identical_pair_agreement_is_pinned(self) -> None:
         a = minhash_signature(self._NEAR_A)
         b = minhash_signature(self._NEAR_B)
-        assert _agreement(a, b) == 82  # exact J 0.6129, estimate 82/128 = 0.6406
+        assert _agreement(a, b) == 74  # exact J 0.6129, estimate 74/128 = 0.5781
 
     def test_moderately_similar_pair_agreement_is_pinned(self) -> None:
         a = minhash_signature(self._MODERATE_A)
         b = minhash_signature(self._MODERATE_B)
-        assert _agreement(a, b) == 30  # exact J 0.2000, estimate 30/128 = 0.2344
+        assert _agreement(a, b) == 22  # exact J 0.2000, estimate 22/128 = 0.1719
 
     def test_disjoint_pair_agreement_is_pinned(self) -> None:
         a = minhash_signature(self._DISJOINT_A)
@@ -406,7 +548,7 @@ class TestJaccardProperty:
             minhash_signature(self._DISJOINT_A), minhash_signature(self._DISJOINT_B)
         )
         assert near > moderate > disjoint
-        assert near - moderate >= 40  # 82 vs 30 measured: the margins are structural
+        assert near - moderate >= 40  # 74 vs 22 measured: the margins are structural
 
     def test_estimates_stay_within_the_k_128_error_band(self) -> None:
         # |estimate - exact| over the three fixtures plus a one-word edit of
@@ -425,7 +567,7 @@ class TestJaccardProperty:
             est = _agreement(minhash_signature(a_text), minhash_signature(b_text)) / 128
             assert abs(est - exact) < 0.088, f"{est:.4f} vs exact {exact:.4f}"
         # The prose corpus, one word swapped once: exact J 0.9259, estimate
-        # 124/128 = 0.9688 (the repeated-sentence corpus has only 25
+        # 118/128 = 0.921875 (the repeated-sentence corpus has only 25
         # distinct shingles at 64 KiB -- the estimate is coarse there by
         # construction, still inside the band).
         a_text = prose(64 * 1024)
@@ -494,15 +636,16 @@ class TestArgumentContract:
 class TestPerformanceSanity:
     def test_large_input_completes_quickly(self) -> None:
         # ~13.5 MB, the simhash sanity cell's corpus shape: the detached
-        # tokenize+shingle+hash+sweep pass is measured in the hundreds of
-        # milliseconds at k=128 (see docs/performance.md); 5s is the
-        # crash/regression ceiling, not the target.
+        # tokenize+shingle+hash+sweep pass measures ~0.25 s at k=128 (the
+        # dedup-first sweep rides the corpus's handful of distinct
+        # shingles; see docs/performance.md), so the 2.5 s ceiling is ~10x
+        # nominal: a crash/regression tripwire, not the target.
         big = "the quick brown fox jumps over the lazy dog. " * 300_000
         started = time.perf_counter()
         sig = minhash_signature(big)
         elapsed = time.perf_counter() - started
         assert len(sig) == 128
-        assert elapsed < 5.0, f"minhash_signature on ~13.5MB took {elapsed:.2f}s"
+        assert elapsed < 2.5, f"minhash_signature on ~13.5MB took {elapsed:.2f}s"
 
     def test_large_input_is_deterministic(self) -> None:
         big = "lorem ipsum dolor sit amet " * 100_000

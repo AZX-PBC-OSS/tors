@@ -840,10 +840,20 @@ _MINHASH_MERSENNE = (1 << 61) - 1
 # The u64 MAX sentinel: every element of the empty-shingle-set signature
 # (empty text, or fewer tokens than shingle_size).
 _MINHASH_EMPTY = (1 << 64) - 1
-# The shingle join separator: U+001F ASCII unit separator. The UAX #29 walk
-# never yields a token containing it (a C0 control is its own word segment),
-# so the join is injective over token sequences.
-_MINHASH_SEP = "\u001f"
+# The shingle framing: NOT a U+001F join. UAX #29 WB4 (ignore
+# Extend/Format/ZWJ) glues a following combining mark, ZWJ, or SOFT HYPHEN
+# onto U+001F, so the token stream holds tokens like "\x1f\u0301" and no
+# separator join over it is injective. The frame is the injective
+# length-prefixed spelling ``LE64(n) || (LE64(len) || bytes)*`` the Rust
+# core hashes (``src/minhash_impl.rs``), transcribed here byte for byte.
+def _minhash_frame(window: list[str]) -> bytes:
+    import struct
+
+    out = struct.pack("<Q", len(window))
+    for token in window:
+        raw = token.encode("utf-8")
+        out += struct.pack("<Q", len(raw)) + raw
+    return out
 
 # SplitMix64 (Steele/Marsaglia's fixed arithmetic, the standard
 # fixture-grade 64-bit generator): the state advance and mixer constants.
@@ -918,11 +928,12 @@ def reference_minhash_signature(
     text: str, *, num_perm: int = 128, shingle_size: int = 3, seed: int = 0
 ) -> list[int]:
     """The MinHash oracle: ``reference_minhash_tokens``' stream cut into
-    consecutive ``shingle_size``-token shingles joined with U+001F, each
-    shingle hashed with XXH64 (seed 0; the pinned ``xxhash`` package
-    wrapping the C reference implementation of the same frozen spec
-    twox-hash implements on the Rust side), then ``signature[i] =
-    min over shingles of (a_i * x + b_i) mod (2^61 - 1)`` over the
+    consecutive ``shingle_size``-token shingles framed with the injective
+    length-prefixed spelling (``_minhash_frame``), each frame hashed with
+    XXH64 (seed 0; the pinned ``xxhash`` package wrapping the C reference
+    implementation of the same frozen spec twox-hash implements on the
+    Rust side), then ``signature[i] = min over shingles of
+    (a_i * x + b_i) mod (2^61 - 1)`` over the
     ``reference_minhash_coefficients`` pairs. Fewer tokens than
     ``shingle_size`` (empty text included) is the empty-shingle-set
     convention: every element the u64 MAX sentinel."""
@@ -934,8 +945,7 @@ def reference_minhash_signature(
     coefficients = reference_minhash_coefficients(num_perm, seed)
     signature = [_MINHASH_EMPTY] * num_perm
     for i in range(len(tokens) - shingle_size + 1):
-        shingle = _MINHASH_SEP.join(tokens[i : i + shingle_size])
-        x = xxhash.xxh64_intdigest(shingle.encode("utf-8"))
+        x = xxhash.xxh64_intdigest(_minhash_frame(tokens[i : i + shingle_size]))
         for j, (a, b) in enumerate(coefficients):
             h = (a * x + b) % _MINHASH_MERSENNE
             if h < signature[j]:

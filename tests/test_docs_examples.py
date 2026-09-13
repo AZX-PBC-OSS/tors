@@ -141,8 +141,8 @@ class TestApiReferenceExamples:
         a = tors.minhash_signature(original)
         b = tors.minhash_signature(edited)
         u = tors.minhash_signature(unrelated)
-        assert a[:3] == [51021051529452558, 135255836154009735, 9126342164787069]
-        assert sum(x == y for x, y in zip(a, b, strict=True)) / len(a) == 0.671875
+        assert a[:3] == [151086443443351341, 59387643775660493, 132191052063639682]
+        assert sum(x == y for x, y in zip(a, b, strict=True)) / len(a) == 0.6015625
         assert sum(x == y for x, y in zip(a, u, strict=True)) / len(a) == 0.0
         assert tors.minhash_signature("")[:3] == [
             18446744073709551615,

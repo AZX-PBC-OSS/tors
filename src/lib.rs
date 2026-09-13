@@ -218,13 +218,20 @@
 //!
 //! The MinHash surface (`minhash_signature`) adds one list-returning shape
 //! with a structurally bounded marshalling class: the argument borrow plus
-//! the bounds validation and the seed mask (one `int.__and__` call) under
-//! the GIL, the whole tokenize + shingle + XXH64 + min-sweep under one
-//! `py.detach` (the sweep is the dominant cost, O(shingles * num_perm)),
-//! then the `num_perm`-element int-list marshalling after — at most 1024
-//! fresh `PyLong`s, two orders of magnitude under the word_bounds
-//! 3.67M-tuple band at the same corpus size, so no streaming twin is
-//! warranted (the list is the answer, and it is small by contract).
+//! the bounds validation and the seed reduction (one `__index__` call and
+//! the mask, no instance-dunder dispatch) under the GIL, the whole
+//! tokenize + shingle + XXH64 + min-sweep under one `py.detach` (the sweep
+//! is the dominant cost, O(distinct shingles * num_perm) after the
+//! dedup-first pass), then the `num_perm`-element int-list marshalling
+//! after — at most 1024 fresh `PyLong`s, two orders of magnitude under the
+//! word_bounds 3.67M-tuple band at the same corpus size, so no streaming
+//! twin is warranted (the list is the answer, and it is small by
+//! contract). Resident memory past the answer is the live
+//! `shingle_size`-deep token window plus the distinct-hash set plus the
+//! coefficients — O(tokens) hashing with O(distinct + num_perm) retained,
+//! the token list streamed, never materialized (docs/api.md carries the
+//! measured bands and the caller-side input-size guidance; there is no
+//! `deadline_ms` here, the cost shape is linear, not superlinear).
 //!
 //! The object content-addressing surface (`content_hash`) adds a residue
 //! class of its own, the arg-walk class scaled to a whole object tree:

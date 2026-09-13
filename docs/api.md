@@ -3226,22 +3226,23 @@ segmentation), segments made entirely of whitespace skipped, each
 lowercased with Unicode-correct case folding — so `"Hello, WORLD!"` and
 `"hello, world!"` signature identically, and whitespace shape (tabs,
 newlines, runs) is invisible. A shingle is `shingle_size` consecutive
-tokens joined with U+001F, and the join is injective — on a narrower
-invariant than "no UAX #29 token can contain U+001F", which is false as
-stated: U+001F is not whitespace, so the segmenter keeps it as a token
-of its own (`tors.word_bounds("a\x1fb")` is the three tokens
-`["a", "\x1f", "b"]`). What holds — verified over a `\x1f`-bearing
-corpus and pinned in `tests/test_minhash.py` — is that U+001F never
-mixes into a longer segment (a C0 control is its own word segment): it
-reaches the token stream only as an entire single-character token. That
-forces the joined string to parse uniquely: a maximal U+001F run bounded
-by token characters is odd-length (one separator, then token/separator
-pairs), a run at either end of the join is even-length
-(token/separator pairs), and the all-separator string alternates
-token/separator ending on a token — so the phase of every run's
-separator/token alternation is fixed, exactly one token window produces
-a given joined string, and two distinct windows never join to the same
-bytes. Word shingles,
+tokens hashed under an injective length-prefixed framing: the window's
+token count as one little-endian u64, then per token its UTF-8 byte
+length as one little-endian u64 followed by the bytes themselves, the
+whole frame fed to XXH64 (seed 0). Length-prefix codes are uniquely
+decodable, so the framing is injective by construction — deliberately,
+because "no UAX #29 token can contain U+001F" is false: U+001F is not
+whitespace, so the segmenter keeps it (`tors.word_bounds("a\x1fb")` is
+the three tokens `["a", "\x1f", "b"]`), and UAX #29 WB4 (ignore
+Extend/Format/ZWJ) then glues a following combining mark, ZWJ, or SOFT
+HYPHEN onto it (`tors.word_bounds("\x1f\u0301")` is the single token
+`["\x1f\u0301"]`). A `token + U+001F + token` join would rest on the
+narrower (and segmentation-table-sensitive) claim that U+001F never
+mixes into a longer segment; the framing rests on nothing the segmenter
+can take away. Both directions are pinned in `tests/test_minhash.py`:
+the `\x1f`-adjacent mark corpus (every combining mark in U+0300–U+036F,
+plus ZWJ and SOFT HYPHEN, attaches) and the framing's injectivity over a
+separator-bearing window domain. Word shingles,
 not character shingles: natural-text near-duplicates preserve word
 sequence far more often than exact character spans — a reflowed paragraph
 or a swapped word shifts character k-grams wholesale while word k-grams
@@ -3303,12 +3304,29 @@ binding extracts (`num_perm=10**30`) raises pyo3's own `OverflowError`
 at extraction instead — the `truncate_to_bounds`-identical pattern for
 every i64-typed size argument.
 `seed` is any int, reduced mod `2**64` with two's-complement semantics
-for negatives (`seed=-1` is `seed=2**64 - 1`). A non-str `text` or
-non-int `seed` raises `TypeError`; text bearing lone surrogates raises
-`UnicodeEncodeError` (the crate-wide str-borrow contract). `O(shingles ×
-num_perm)` in the sweep with `O(num_perm)` extra memory — no token or
-shingle list is retained after hashing. No `aio` twin: a fast one-shot
-call.
+for negatives (`seed=-1` is `seed=2**64 - 1`), accepted through the
+`__index__` protocol (numpy integers and other int-likes work); a
+non-int `seed` — including `bool`, which is rejected explicitly rather
+than laundered through `True == 1` — raises `TypeError`. A non-str
+`text` raises `TypeError`; text bearing lone surrogates raises
+`UnicodeEncodeError` (the crate-wide str-borrow contract). Cost is
+`O(tokens)` hashing plus `O(distinct × num_perm)` in the min-sweep, the
+dedup-first shape: each distinct shingle hash updates the minima once,
+so a repeated-token document rides its handful of distinct shingles
+rather than its thousands of occurrences. Resident memory is the live
+`shingle_size`-deep token window plus the distinct-hash set plus the
+`num_perm` coefficients — the token list is streamed, never retained
+(the pre-fix shape held the whole `Vec<String>` across the sweep, a
+measured ~77 MB transient at 12 MB of prose: 133 MB peak vs 56 MB after,
+same interpreter and corpus baseline). There is no
+`deadline_ms` on this call (unlike `diff_opcodes`): the sweep has no
+superlinear shape, only the linear one above, so the lever is the
+caller's own input size — bound it before calling (truncate, chunk, or
+`max_bytes`-gate the read) rather than after. Measured (macOS/arm64):
+~13.5 MB of repetitive prose at the default 128 permutations completes
+in ~0.25 s; the suite's 2.5 s regression ceiling is ~10x that nominal
+(see `tests/test_minhash.py`), a tripwire, not a target. No `aio`
+twin: a fast one-shot call.
 
 ```python
 original = (
@@ -3325,9 +3343,9 @@ a = tors.minhash_signature(original)
 b = tors.minhash_signature(edited)
 u = tors.minhash_signature(unrelated)
 a[:3]
-# [51021051529452558, 135255836154009735, 9126342164787069]
+# [151086443443351341, 59387643775660493, 132191052063639682]
 sum(x == y for x, y in zip(a, b)) / len(a)
-# 0.671875: near-duplicates — the two-word swap leaves most 3-word
+# 0.6015625: near-duplicates — the two-word swap leaves most 3-word
 # shingles intact, so the estimated shingle-set Jaccard stays high
 # (exact J here: 0.6429)
 sum(x == y for x, y in zip(a, u)) / len(a)

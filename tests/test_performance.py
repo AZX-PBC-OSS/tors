@@ -83,14 +83,14 @@ deterministic work, so one sample is the conservative denominator; the
 difflib-race precedent):
 
     size    tors        oracle      tors/oracle
-    1 KiB   0.03ms      3.2ms       0.010  (~104x)
-    100KiB  3.6ms       274.0ms     0.013  (~77x)
-    1 MiB   38.2ms      2834.6ms    0.013  (~74x)
+    1 KiB   0.02ms      3.4ms       0.006  (~170x)
+    100KiB  1.6ms       280.9ms     0.006  (~175x)
+    1 MiB   17.7ms      2886.5ms    0.006  (~163x)
 
 The margin is 0.5, not the near-parity 0.9 elsewhere in this file: the oracle is
 slow Python (an O(shingles x num_perm) bigint inner loop), so the criterion the
 cell pins is ``the native pass keeps its advantage`` (a regression to within 2x
-of pure Python fails it), not a close race; the measured ratios leave ~37x
+of pure Python fails it), not a close race; the measured ratios leave ~80x
 headroom, so load asymmetry cannot flake it.
 """
 
@@ -1283,8 +1283,8 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
 
 
 # The minhash race's tolerance margin: measured tors/oracle ratios
-# 0.010-0.013 across the ladder (the module docstring's table), so 0.5
-# leaves ~37x headroom while still failing a lost-native-advantage
+# 0.005-0.007 across the ladder (the module docstring's table), so 0.5
+# leaves ~80x headroom while still failing a lost-native-advantage
 # regression (the native pass within 2x of the pure-Python bigint loop).
 # The _GCM_WALL_MARGIN precedent: the assertion pins the relationship,
 # not a close race.
@@ -1302,7 +1302,7 @@ def test_minhash_signature_beats_the_pure_python_oracle_on_the_doc_ladder(
     The oracle is slow by construction -- one Python-level bigint affine
     per (shingle, permutation) pair, O(shingles x 128) interpreted
     iterations -- which is the point: it is the expression a caller
-    without tors would run, and the measured 74-104x gap is the native
+    without tors would run, and the measured ~160-175x gap is the native
     pass's wall-time case. The oracle draws a single sample (its wall is
     deterministic work at 3ms-2.8s across the ladder, and noise only
     ever adds time, making the single sample conservative for the
