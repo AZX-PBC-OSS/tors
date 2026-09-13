@@ -161,6 +161,28 @@ class TestApiReferenceExamples:
         assert tors.utf16_byte_len(s) > 280
 
 
+class TestHashingExamples:
+    """docs/api.md's hashing-section examples, pinned the same way: the
+    webhook-signature and ETag-check literals the doc shows are re-derived
+    here against the built extension."""
+
+    def test_webhook_signature_example(self) -> None:
+        import hmac as hmac_module
+
+        secret = "whsec_3f9d2a8c"
+        payload = '{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+        expected = tors.hmac_sha256_hex(secret, payload)
+        assert expected == "43ec3b86ee42fdcf9640ded30e94104b4a11b9fd43f1624b30471f7b13e76a12"
+        assert hmac_module.compare_digest(expected, tors.hmac_sha256_hex(secret, payload))
+
+    def test_etag_check_example(self) -> None:
+        body = tors.normalize("line one  \n\n\n\nline two\r\n")
+        assert body == "line one\n\nline two"
+        assert tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"
+        # the declared-ETag comparison the doc shows
+        assert tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"
+
+
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:
         thread = (

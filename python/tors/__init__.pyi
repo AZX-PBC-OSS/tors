@@ -603,6 +603,39 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 
+# One-shot hashing, the request-signing/content-check primitives: lowercase
+# hex out, the whole digest (hex formatting included) under one
+# py.detach. str input is its UTF-8 bytes (tors.sha256_hex(s) ==
+# hashlib.sha256(s.encode("utf-8")).hexdigest(); hashlib itself refuses
+# str — the convenience is deliberate). bytes input is exactly bytes
+# (bytearray/memoryview raise TypeError, the bytes-in family's
+# immutable-buffer doctrine); a lone surrogate raises UnicodeEncodeError
+# at the argument boundary (the crate-wide str-in contract). Stateless
+# one-shot only: no hash object, no streaming surface (tors is stateless
+# by charter; for incremental feeding, hashlib's object API is the right
+# tool and is not duplicated).
+#
+# SECURITY: md5 and sha1 are checksum/legacy-interop only (Content-MD5,
+# S3 ETags, cache-busting, quick compares) — broken for security since
+# the 2000s (md5 collisions since 2004, sha1's first practical collision
+# 2017). Never use either for signatures, certificates, or passwords;
+# sha256_hex/sha512_hex/hmac_sha256_hex are the security side.
+def md5_hex(data: str | bytes) -> str: ...
+def sha1_hex(data: str | bytes) -> str: ...
+def sha256_hex(data: str | bytes) -> str: ...
+def sha512_hex(data: str | bytes) -> str: ...
+
+# HMAC-SHA-256, the request-signing primitive (webhook signatures, AWS
+# SigV4-style HMAC chains, API auth): byte-identical to
+# hmac.new(key, data, hashlib.sha256).hexdigest(). Each argument carries
+# the hashing family's str|bytes contract independently (a str key is
+# its UTF-8 bytes, the spelling a webhook secret arrives in); any key
+# length is legal, empty included (parity with stdlib hmac). GIL model:
+# both borrows under the GIL, the whole keyed digest (key derivation
+# included) plus hex formatting under one detach.
+def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...
+
+
 # The UUIDv7 helper trio (RFC 9562 layout): the keyset-pagination /
 # time-bucketed-query primitives over time-ordered IDs. uuid7_timestamp_ms
 # returns the 48-bit big-endian unix-millisecond field (the leading six

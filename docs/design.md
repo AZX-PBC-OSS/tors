@@ -73,9 +73,33 @@ The cuts below are decisions, not oversights:
   re-applies its steps on every call rather than compiling a reusable
   pipeline handle; see `CompiledLemmaDict` above for that measured
   exception.
+- **Streaming hash objects / an open-ended digest registry.** The hashing
+  surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
+  `hmac_sha256_hex`) is a closed set of named one-shot functions, not a
+  `hashlib`-style object API: tors is stateless by charter, and a
+  constructor-plus-`update()` object is exactly the persistent-handle
+  shape that charter cuts (`hashlib.sha256()` construction is O(1), so
+  unlike `CompiledPatterns`/`CompiledLemmaDict` there is no measured
+  re-materialization cost to justify one). Callers feeding a stream hash
+  chunk digests and combine them (`merkle_root`, or a running HMAC chain);
+  for incremental feeding `hashlib`'s object API already exists and is not
+  duplicated. The algorithm set is closed for the same reason every
+  surface here is: each addition is a permanent compatibility and
+  maintenance commitment, and the five cover the request-signing and
+  content-check jobs a text pipeline actually has (anything keyed to a
+  newer digest is a security-primitive decision, not a text-ops one). The
+  engines are the maintained RustCrypto crates (`md-5`, `sha1`, `sha2`,
+  `hmac`), nothing hand-rolled — a digest implementation is the worst
+  kind of code to hand-roll, every line a maintenance burden and a
+  silent-corruption risk the maintained crates already carry
+  primary-source test vectors against.
 
 ## Limitations
 
+- **`md5_hex` and `sha1_hex` are not security primitives.** Checksum /
+  ETag / legacy-interop only: md5 has had practical collisions since 2004
+  and sha1 since 2017. The security side of the hashing surface is
+  `sha256_hex`/`sha512_hex`/`hmac_sha256_hex`.
 - **SimHash is not cryptographic.** It is a fast, uniformly-spreading voting
   hash, not a security primitive: two unrelated documents can coincidentally
   land close together, especially on short text, and there is no universal

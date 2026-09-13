@@ -424,6 +424,44 @@ end-of-call marshalling alignment):
   on every member; the light members' can't-discriminate-a-held-
   sub-ceiling-wall limitation and the mid-weight members' fast-box
   caveat are stated in the cell's docstring.
+
+hashing cells (``sha256_hex``/``sha512_hex`` at 12 MiB, measured on the
+dev box this section was calibrated on, Apple Silicon, ambient load
+7.8-9.7, 3 samples per cell, the prose corpus's UTF-8 bytes):
+
+- The walls are the story: 4-5ms (sha256) and 7-8ms (sha512) for one
+  12 MiB digest, at or under the 10ms ping floor itself, so every
+  worst-gap/wall ratio is the suite's documented sub-ping artifact and
+  both cells are ceiling-only (``ratio_budget=None``, the b64 12 MiB /
+  find_patterns sparse / chunking light-member precedent): measured
+  worst gaps 10.1-10.7ms — the ping floor plus the zero-copy argument
+  borrow and the O(64..128) hex-string marshalling, nothing else, the
+  no-residue-class claim of src/lib.rs's hashing paragraph measured
+  directly.
+- The honest hashlib red side, measured and NOT asserted: CPython's
+  ``hashlib`` releases the GIL for digest updates of 2048+ bytes (the
+  ``_hashopenssl`` threshold), so at digest-scale sizes the stdlib is
+  loop-friendly too — measured at 12 MiB (worst gaps 10.4-10.8ms of
+  4-8ms walls, the ping floor) and at 96 MiB (10.9-11.1ms of 33-38ms
+  walls for sha256, 11.1ms of 117-121ms for md5: the floor against
+  walls 3-12x over it). There is therefore no GIL-blocked stdlib red
+  row to assert against at any size where the work is visible: below
+  the 2048-byte threshold hashlib holds the GIL, but a sub-threshold
+  digest is ~11µs (measured), invisible under the floor either way.
+  The urllib red-side precedent applies: the red side is measured live
+  and recorded in the cell below, and what is asserted is the value
+  parity (the 12 MiB differential anchor).
+- The discriminating-power limitation, stated (the chunking family's
+  light-member note, verbatim precedent): on this hardware a lost
+  detach at 12 MiB shows a sub-floor wall (inline tors measured
+  10.7ms worst gaps of 5ms walls — the floor, indistinguishable from
+  the green band), so no budget the green cells use could discriminate
+  it here. What a detach regression would look like on slower
+  hardware, measured at 96 MiB (where the sha256 wall clears the floor
+  ~4x): to_thread worst gaps 11.1ms of 39-40ms (ratio 0.28) vs inline
+  39.0-39.7ms of 39-40ms (ratio 1.00, the whole wall held) — the
+  one-call lost-detach shape, recorded so the next reader knows the
+  ceiling-only design is a hardware-speed statement, not a no-op.
 """
 
 from __future__ import annotations
@@ -2516,6 +2554,95 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
         f"{difflib_wall * 1000:.0f}ms (ratio {tors_wall / difflib_wall:.4f}): the native "
         "sweep lost more than the tolerance margin to the quadratic stdlib matcher"
     )
+
+
+# --- The one-shot hashing surface -------------------------------------------------
+#
+# sha256_hex/sha512_hex at 12 MiB: ceiling-only cells (walls at or under the
+# ping floor on the calibration hardware), plus the measured-not-asserted
+# hashlib red-side recording cell (the urllib red-side precedent: the
+# stdlib releases the GIL for 2048+-byte digest updates, so there is no
+# GIL-blocked red row to assert; see the module docstring's hashing
+# paragraph for the full measured story, including the 96 MiB inline
+# lost-detach discrimination measurements).
+
+
+@pytest.mark.parametrize("fn_name", ["sha256_hex", "sha512_hex"], ids=["sha256", "sha512"])
+def test_hash_digest_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    fn_name: str,
+) -> None:
+    """The hashing surface's GIL claim, at the size the wall-vs-hashlib
+    comparison is told (tests/test_performance.py): one 12 MiB digest in a
+    worker thread, the whole computation (hex formatting included) under
+    one ``py.detach``, and the loop ticks at the ping floor through it —
+    measured 10.1-10.7ms worst gaps (the floor plus the argument borrow
+    and the O(64..128) hex marshalling; the crate GIL model's
+    no-residue-class claim for this surface, measured directly).
+
+    Ceiling-only (``ratio_budget=None``, the b64 12 MiB / find_patterns
+    sparse precedent): the 12 MiB digest walls on the calibration hardware
+    are 4-5ms (sha256) and 7-8ms (sha512), at or under the 10ms ping
+    floor, so any gap/wall ratio is the documented sub-ping artifact. The
+    limitation, stated rather than thresholded away (the chunking
+    family's light-member note): a lost detach at this size holds a
+    sub-floor wall on this hardware and no budget here discriminates it;
+    the 96 MiB measurements in the module docstring (to_thread 0.28 vs
+    inline 1.00) are what the regression looks like where the wall clears
+    the floor, and the 100ms ceiling is the pin that catches it on
+    hardware slow enough for a held 12 MiB digest to reach it."""
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    fn = getattr(tors, fn_name)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(fn, corpus),
+            ratio_budget=None,
+        )
+    )
+
+
+def test_hashlib_red_side_is_measured_and_value_parity_is_asserted() -> None:
+    """The stdlib red side for the hashing surface, measured live in the
+    same to_thread cell style and recorded, not budget-asserted (the
+    urllib red-side precedent): CPython's ``hashlib`` releases the GIL for
+    digest updates of 2048+ bytes (the ``_hashopenssl`` threshold), so at
+    digest-scale sizes the stdlib keeps the loop at the ping floor too and
+    asserting a blocked red row would be manufacturing a win the
+    measurement does not show. Below the threshold hashlib does hold the
+    GIL, but a sub-threshold digest is ~11µs of held GIL (measured),
+    invisible under the 10ms floor either way — the honest statement is
+    that tors's GIL release is uniform at every size while hashlib's
+    starts at 2048 bytes, and that this surface's GIL value over the
+    stdlib is the µs-scale uniformity plus the never-held hex tail, not a
+    latency win at digest sizes. What IS asserted is the value parity
+    (the 12 MiB differential anchor, the same equality the hypothesis
+    gates in tests/test_hash.py prove at generated sizes, here at corpus
+    scale); the bands are printed so every run's log carries the recorded
+    shape."""
+    import hashlib
+
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    # The 12 MiB parity anchors (one inline call each side).
+    assert tors.md5_hex(corpus) == hashlib.md5(corpus).hexdigest()
+    assert tors.sha1_hex(corpus) == hashlib.sha1(corpus).hexdigest()
+    assert tors.sha256_hex(corpus) == hashlib.sha256(corpus).hexdigest()
+    assert tors.sha512_hex(corpus) == hashlib.sha512(corpus).hexdigest()
+
+    note = "hashlib red side (recorded, not asserted; GIL released for 2048+-byte updates): "
+    for name, red in (
+        ("hashlib.sha256", lambda raw: hashlib.sha256(raw).hexdigest()),
+        ("hashlib.sha512", lambda raw: hashlib.sha512(raw).hexdigest()),
+    ):
+        observed = [
+            asyncio.run(
+                _gap_and_wall_during(lambda red=red: asyncio.to_thread(red, corpus))
+            )
+            for _ in range(_SAMPLES)
+        ]
+        for gap, wall in observed:
+            print(
+                f"{note}{name} blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms "
+                f"operation ({gap / wall:.0%})"
+            )
 
 
 # The UUIDv7 helper trio's fixed v7 (timestamp field 1_750_000_000_000 ms,

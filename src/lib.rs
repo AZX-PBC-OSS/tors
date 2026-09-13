@@ -13,8 +13,9 @@
 //! [`truncate_impl`] (boundary-safe and
 //! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
 //! scrub), [`charset_impl`] (batch codepoint-set validation for
-//! identifier-style rules), and [`scrub_impl`] (named-rule log scrubbing:
-//! the TaskQ exception-text chain); they are
+//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
+//! the TaskQ exception-text chain), and [`hash_impl`] (the one-shot
+//! md5/sha1/sha256/sha512/hmac hashing surface); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -215,6 +216,31 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The one-shot hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/
+//! `sha512_hex`/`hmac_sha256_hex`) adds no residue class at all: each
+//! argument pays the standard str-in borrow class (zero-copy for
+//! ASCII/cached str inputs, the one-time O(input) UTF-8 materialization on
+//! the first non-ASCII call) or the zero-copy immutable `PyBytes` borrow
+//! (the bytes-in family: no materialization class exists for bytes, and
+//! exactly-`bytes` is the doctrine — a `bytearray`/`memoryview` is a
+//! TypeError rather than a copy the detached read would race), then the
+//! whole digest computation AND the hex formatting run under one
+//! `py.detach`, and the residue reduces to marshalling one short `String`
+//! (O(32..128), fixed by algorithm, three orders of magnitude under the
+//! 10ms ping floor at every input size). `hmac_sha256_hex` borrows two
+//! arguments under the GIL and runs the keyed digest (key derivation
+//! included) under the same single detach. The honest hashlib
+//! comparison, measured: CPython's own `hashlib` releases the GIL for
+//! updates of 2048+ bytes (the `_hashlib` threshold), so at multi-MiB
+//! sizes the stdlib is also loop-friendly and tors's GIL release is not a
+//! latency win there; below that threshold (the webhook/request-signing
+//! sizes this surface exists for) `hashlib` holds the GIL, but a
+//! sub-2048-byte digest is microseconds, immaterial to loop latency
+//! either way. The GIL cells in `tests/test_gil_release.py` pin the
+//! ceiling-only band (12 MiB digest walls sit at the tens-of-ms scale,
+//! the b64 12 MiB precedent) and record the measured hashlib red side
+//! rather than asserting one it does not have.
+//!
 //! The charset-validation surface (`first_invalid_charset` and its
 //! offender-detail spelling `first_invalid_offender`, two projections of
 //! the one core scan) is `count_matches`' extreme point over a batch
@@ -296,6 +322,7 @@ pub mod finalize_impl;
 pub mod forms_impl;
 pub mod fuzzy_impl;
 pub mod grounded_impl;
+pub mod hash_impl;
 pub mod html_impl;
 pub mod html_table;
 pub mod json_repair;
@@ -378,6 +405,7 @@ use py::fence::*;
 use py::forms::*;
 use py::fuzzy::*;
 use py::grounded::*;
+use py::hash::*;
 use py::html::*;
 use py::json_repair::*;
 use py::lemma_dict::CompiledLemmaDict;
@@ -512,6 +540,11 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
+    m.add_function(wrap_pyfunction!(md5_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha1_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha512_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(hmac_sha256_hex, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_cdc, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text_iter, m)?)?;

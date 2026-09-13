@@ -2544,6 +2544,117 @@ tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
 # [2, 3]: every trailing index beyond the shorter list's length
 ```
 
+## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex`
+
+```python
+def md5_hex(data: str | bytes) -> str: ...        # 32 lowercase hex chars
+def sha1_hex(data: str | bytes) -> str: ...       # 40
+def sha256_hex(data: str | bytes) -> str: ...     # 64
+def sha512_hex(data: str | bytes) -> str: ...     # 128
+def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...  # 64
+```
+
+The one-shot hashing primitives a text pipeline keeps reaching for:
+webhook signature verification and API auth (`hmac_sha256_hex` — the
+GitHub/Stripe/Slack HMAC-SHA-256 convention), ETag and Content-MD5 checks
+against object stores (`md5_hex`), quick content compares and
+legacy-interop digests (`sha1_hex`), and dedup-cache keys / content
+addressing (`sha256_hex`/`sha512_hex` — the same engine `finalize`'s hash
+tail and `merkle_root`'s leaves use, without the normalize stage). Every
+algorithm is the maintained RustCrypto implementation (`md-5`, `sha1`,
+`sha2`, `hmac`); nothing is hand-rolled, the same dependency policy as the
+rest of the crate. Byte-identical to the stdlib spellings —
+`tors.sha256_hex(data) == hashlib.sha256(data).hexdigest()`,
+`tors.hmac_sha256_hex(key, data) == hmac.new(key, data,
+hashlib.sha256).hexdigest()` — pinned by exact differentials over
+hypothesis corpora plus the primary-source known-answer vectors (RFC 1321,
+FIPS 180-4, RFC 4231's every HMAC-SHA-256 case) in `tests/test_hash.py`.
+
+**`md5_hex` and `sha1_hex` are checksum/legacy-interop primitives, never
+security primitives.** Both are broken and have been since the 2000s:
+practical md5 collisions date to 2004, sha1's first public collision to
+2017 (Google's SHAttered). Use them for Content-MD5, S3 ETags,
+cache-busting, rsync-style quick compares — never for signatures,
+certificates, or password handling. The security side of this surface is
+`sha256_hex`/`sha512_hex`/`hmac_sha256_hex`.
+
+**str input is its UTF-8 bytes, on purpose.** `hashlib` raises TypeError on
+str and makes every caller spell `s.encode("utf-8")` first; tors takes the
+str directly — `tors.sha256_hex(s) == hashlib.sha256(s.encode("utf-8"))
+.hexdigest()` — because the str-in convention is crate-wide (`normalize`,
+`finalize`, the segmentation family). A str holding lone surrogates
+therefore raises `UnicodeEncodeError` at the argument boundary, the same
+crate-wide contract. bytes input is exactly `bytes`: `bytearray` and
+`memoryview` raise TypeError rather than being copied, the bytes-in
+family's immutable-buffer doctrine (`b64_encode_bytes`,
+tests/test_b64.py). Any input length is legal, empty included (the
+empty-input digests are pinned known-answer vectors); there are no
+ValueError paths on this surface.
+
+**Stateless one-shot only.** No hash object, no streaming update surface:
+tors is stateless by charter ([Design and scope](design.md)), and a
+`hashlib`-style constructor object is exactly the persistent-handle shape
+that charter cuts (the two measured exceptions, `CompiledPatterns` and
+`CompiledLemmaDict`, exist for per-call re-materialization costs a digest
+object doesn't have: `hashlib.sha256()` construction is O(1)). A caller
+hashing a stream hashes chunk digests and combines them (the
+`merkle_root` shape, or a running HMAC chain over chunks); for incremental
+feeding, `hashlib`'s object API is the right tool and is not duplicated.
+
+**GIL model.** The argument borrow (zero-copy for ASCII/cached str, for
+bytes always) runs under the GIL; the whole digest computation — update,
+finalize, and the O(digest-size) hex formatting — runs under one
+`py.detach`; one short hex string is marshalled back. The honest
+comparison with `hashlib`, measured (Apple Silicon, min-of-3):
+CPython's `hashlib` releases the GIL for digest updates of 2048+ bytes
+(the `_hashopenssl` threshold), so at multi-MiB sizes the stdlib is
+loop-friendly too and tors's GIL release is uniformity, not a latency
+win; below the threshold `hashlib` holds the GIL but a sub-2048-byte
+digest is microseconds, immaterial either way. On raw throughput the
+OpenSSL engines (hardware SHA extensions) win or tie at engine-dominated
+sizes — sha256 12 MiB measured 4.3ms (tors) vs 3.8ms (hashlib), sha1
+4.2 vs 3.7, md5 and sha512 dead heats — recorded, not hidden. The wall
+wins tors can assert are the sizes this surface exists for, where
+per-call overhead dominates the engine: hashing a short str at 0.40-0.54
+of `hashlib.sha256(s.encode("utf-8")).hexdigest()` (the encode is a real
+cost the stdlib makes you pay), and HMAC at request-signature sizes at
+~0.31 of even the stdlib's fastest one-shot spelling
+(`hmac.digest(key, data, "sha256").hex()`). Full tables:
+[Performance](performance.md).
+
+A webhook-verification shape (the `str` key and payload spell exactly how
+they arrive off the wire; `hmac.compare_digest` stays the right compare):
+
+```python
+import hmac as hmac_module
+import tors
+
+secret = "whsec_3f9d2a8c"
+payload = '{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+
+expected = tors.hmac_sha256_hex(secret, payload)
+# "43ec3b86ee42fdcf9640ded30e94104b4a11b9fd43f1624b30471f7b13e76a12"
+
+hmac_module.compare_digest(expected, tors.hmac_sha256_hex(secret, payload))
+# True
+```
+
+An S3/HTTP ETag check (the md5 checksum use; the value is the normalized
+body's digest, matching what the store computed):
+
+```python
+import tors
+
+body = tors.normalize("line one  \n\n\n\nline two\r\n")
+# "line one\n\nline two"
+
+tors.md5_hex(body)
+# "487f5cc2c45cc57e638d9fce8c33d95c"
+
+tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"  # the declared ETag
+# True
+```
+
 ## `tors.uuid7_timestamp_ms` / `tors.uuid_version` / `tors.uuid_parse`
 
 ```python

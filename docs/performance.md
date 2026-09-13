@@ -100,6 +100,39 @@ otherwise use:
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a
   `TimeoutError`.
 
+## One-shot hashing vs hashlib, honestly measured
+
+The hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
+`hmac_sha256_hex`) is the one tors family where the stdlib alternative is
+C-native and fast, so the honest tables, measured (Apple Silicon, ambient
+load ~8-10, min-of-3 after warmup, prose corpus bytes; the ledger cells are
+`tests/test_performance.py`'s):
+
+- Raw digest throughput, tors vs `hashlib` (OpenSSL, hardware SHA
+  extensions): **hashlib wins or ties every engine-dominated cell** —
+  sha256 12 MiB 4.3 ms vs 3.8 ms (ratio 1.16), sha1 4.2 vs 3.7 (1.06),
+  md5 14.5 vs 13.9 (1.03), sha512 7.0 vs 7.7 (0.98). Recorded, asserted
+  nowhere: at these sizes the surface's value is the parity digest, the
+  str convenience, and the GIL uniformity, not throughput.
+- Short-str hashing (the cache-key/ETag/request-ID spelling, where
+  `hashlib` makes you encode first): **tors wins ~2x** —
+  `sha256_hex(s)` at 0.40-0.54 of `hashlib.sha256(s.encode("utf-8"))
+  .hexdigest()` (0.17 µs vs 0.33 µs at 128 B; 0.28 vs 0.52 at 512 B),
+  asserted in the wall cells.
+- HMAC at request-signature sizes: **tors wins ~3x against even the
+  stdlib's fastest spelling** — 0.29 µs vs `hmac.digest(key, data,
+  "sha256").hex()`'s 0.92 µs (ratio ~0.31; the idiomatic `hmac.new(...)
+  .hexdigest()` costs 1.12 µs), asserted.
+- GIL: tors releases the GIL for the whole digest (hex formatting
+  included) at every size; `hashlib` releases it for updates of 2048+
+  bytes (the `_hashopenssl` threshold), so at multi-MiB sizes the stdlib
+  is loop-friendly too — worst heartbeat gaps at the ~10 ms ping floor
+  for both at 12 MiB and 96 MiB (measured in `tests/test_gil_release.py`,
+  recorded, not asserted as a stdlib failure). The tors difference is
+  uniformity (no 2048-byte threshold, no held hex tail) plus the
+  µs-scale short-call wins above; a 12 MiB digest walls at 4-8 ms on the
+  calibration hardware, under the ping floor itself.
+
 ## Chunking
 
 Chunking costs the segmentation walks it actually consults, not per-codepoint

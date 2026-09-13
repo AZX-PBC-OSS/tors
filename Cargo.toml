@@ -29,6 +29,23 @@ unicode-normalization = "0.1"
 # byte-identical to hashlib.sha256(...).hexdigest(), the expression a normalize-then-hash
 # dedupe gate computes.
 sha2 = "0.11"
+# The one-shot hashing surface (`src/hash_impl.rs`): the same RustCrypto
+# family sha2 already comes from, so one dependency line per algorithm and
+# nothing hand-rolled (a digest implementation is the worst kind of
+# hand-rolling: every line is a maintenance burden and a correctness risk
+# the maintained crates already carry test vectors against). md-5/sha1:
+# checksum/ETag/legacy-interop only, never security (broken since the
+# 2000s; the docs carry the note everywhere they are named). default-
+# features = false: the digest computation needs none of the crates' std
+# conveniences (the sha2 line above predates this surface and keeps its
+# own default for finalize's in-scan hasher; feature unification is
+# per-crate, so these lines only govern their own crates).
+md-5 = { version = "0.11", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+# hmac_sha256_hex's HMAC construction (RFC 2104) over the sha2 engine: the
+# request-signing primitive (webhook signatures, AWS SigV4-style chains).
+# default-features = false: same reasoning as md-5/sha1 above.
+hmac = { version = "0.13", default-features = false }
 # hex-encoding of that digest: const-hex is the maintained drop-in for the `hex` crate
 # (no release since 2020, open "Unmaintained?" issue), same `encode(bytes) -> String`
 # call shape.
@@ -259,6 +276,10 @@ harness = false
 
 [[bench]]
 name = "integrity"
+harness = false
+
+[[bench]]
+name = "hashing"
 harness = false
 
 [[bench]]

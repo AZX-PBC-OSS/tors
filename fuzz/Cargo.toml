@@ -198,3 +198,10 @@ path = "fuzz_targets/unescaped.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hash"
+path = "fuzz_targets/hash.rs"
+test = false
+doc = false
+bench = false

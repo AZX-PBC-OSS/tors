@@ -35,8 +35,11 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | pyo3 | 0.29.2 | MIT OR Apache-2.0 | the CPython extension layer (abi3-py310) |
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0) |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | UAX #29 grapheme/word tables (Unicode 17.0.0) |
-| sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's SHA-256 |
+| sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
 | const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding |
+| md-5 | 0.11.0 | MIT OR Apache-2.0 | `md5_hex`'s engine (checksum/ETag/legacy-interop only, never security); already resolved in the lock as the documents tree's (pdf_oxide/lopdf) dependency before the hashing surface made it direct, so the direct edge added no new package — the aho-corasick/encoding_rs precedent |
+| sha1 | 0.11.0 | MIT OR Apache-2.0 | `sha1_hex`'s engine (checksum/legacy-interop only, never security); default-features off (the digest computation needs none of the crate's std conveniences) |
+| hmac | 0.13.0 | MIT OR Apache-2.0 | `hmac_sha256_hex`'s RFC 2104 HMAC construction over the sha2 engine (the request-signing primitive); default-features off; accepts keys of any length (its `KeyInit::new` cannot fail for HMAC, verified against the vendored source), pulling ctutils/cmov (digest 0.11's constant-time utilities, Apache-2.0 OR MIT) — the lock's only additions from the hashing surface, 4 packages total incl. sha1 and hmac themselves |
 | base64 | 0.23.1 | MIT OR Apache-2.0 | RFC 4648 encode/decode core, `simd-unsafe` feature enabled (the crate's own AVX2/NEON kernels, runtime-detected with a scalar fallback: already-shipped, widely-exercised unsafe code upstream, not written in tors) |
 | memchr | 2.8.3 | Unlicense OR MIT | SIMD sentinel scans |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 | SIMD UTF-8 validity scan |
@@ -99,11 +102,14 @@ The full transitive closure is machine-checked by the gate; the dev tree
 
 ## Transitive closure
 
-At the current lock state (330 `Cargo.lock` entries including tors-core
-itself, i.e. 329 dependency packages incl. dev and the documents engine
-tree, re-derived with `cargo metadata --all-features` over the current lock):
-179 `MIT OR Apache-2.0`, 60 MIT (fastcdc, strsim, and anydoc among them), 19
-`Apache-2.0 OR MIT` (chardetng, autocfg, uuid), 13 `MIT/Apache-2.0` (version_check,
+At the current lock state (334 `Cargo.lock` entries including tors-core
+itself, i.e. 333 dependency packages incl. dev and the documents engine
+tree, re-derived with `cargo metadata --all-features` over the current
+lock; the previous figure recorded here had drifted five entries behind
+the lock before the hashing surface re-derived it):
+181 `MIT OR Apache-2.0`, 59 MIT (fastcdc, strsim, and anydoc among them), 21
+`Apache-2.0 OR MIT` (chardetng, autocfg, uuid, and the hashing surface's
+ctutils/cmov arrivals), 13 `MIT/Apache-2.0` (version_check,
 winapi, siphasher) plus 2 `Apache-2.0/MIT` (rs_merkle, bytecount) and 1
 `Apache-2.0 / MIT` (fnv), three more spellings of the same dual grant, 10
 `Unlicense OR MIT` (aho-corasick, memchr, jiff) and 4 `Unlicense/MIT` (csv,
@@ -135,7 +141,11 @@ runtime package closure from 55 to 102 (jsonschema's draft-4-2020-12
 validation tree is the addition; serde_json and regex were already in the
 lock as transitives, and jiff brings one small crate, so the real addition is
 jsonschema's tree). The engine tree is the next delta on top, inside the
-count through the all-features gate resolution below. The gate re-checks
+count through the all-features gate resolution below. The hashing surface is
+the smallest delta of the three: four new lock entries (sha1, hmac, and
+digest 0.11's constant-time utilities ctutils/cmov), with md-5 already
+resolved in the lock as the documents tree's dependency, so the direct edge
+added no new package. The gate re-checks
 every new entry against the allowlist on every run: the MIT-0 license it
 flagged on the way in (borrow-or-share) is recorded above and in `deny.toml`.
 
@@ -148,7 +158,7 @@ and present in the payload's.
 `make deny` and CI's cargo-deny step run at the repo root and cover the full
 engine tree: `deny.toml`'s `[graph] all-features = true` resolves every cargo
 feature of the workspace into the checked graph, `documents` included. The
-root lock's 330 entries carry
+root lock's 334 entries carry
 pdf_oxide/anydoc/office_oxide/html-to-markdown-rs and their transitive trees,
 resolution is metadata-only (nothing links), and the check passes over all of
 them.

@@ -77,6 +77,8 @@ min-of-5 after warmup):
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import html
 import re
 import string
@@ -316,6 +318,127 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
     print(
         f"html_unescape no-& prose 12MiB: tors {tors_ms:.2f}ms "
         f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+# --- The one-shot hashing surface -------------------------------------------------
+#
+# The honest hashlib comparison, measured on the dev box (Apple Silicon,
+# ambient load 7.8-9.7): hashlib's digest engines are OpenSSL-backed with
+# hardware SHA extensions, and at throughput sizes they win or tie —
+# sha256 1.16-1.19 (a real stdlib win, recorded below and asserted
+# nowhere), sha1 1.06-1.11, md5 0.88-1.03 and sha512 ~0.98 (dead heats).
+# tors's genuine wall wins are the sizes this surface exists for, where
+# per-call overhead dominates the engine: hashing a SHORT STR (the
+# cache-key/ETag spelling, where hashlib makes the caller encode first)
+# at 0.40-0.54 of the stdlib expression, and HMAC at request-signature
+# sizes at ~0.31-0.36 of even the stdlib's fastest one-shot spelling
+# (``hmac.digest(...).hex()``, measured against explicitly so the
+# asserted cell does not race a slow opponent).
+# Micro-scale cells draw more samples: a sub-µs sample is one scheduler
+# hit away from its minimum, so min-of-15 gives the short side enough
+# draws to find an uncontended window (the _FAST_CELL_SAMPLES
+# derivation, sized for this surface's µs-scale cells).
+_HASH_MICRO_SAMPLES = 15
+
+
+@pytest.mark.parametrize(
+    "tors_fn_name", ["md5_hex", "sha1_hex", "sha256_hex", "sha512_hex"]
+)
+@pytest.mark.parametrize("size_bytes", [1024, 12 * _MIB], ids=["1KiB", "12MiB"])
+def test_digest_wall_time_vs_hashlib_is_measured_not_asserted(
+    tors_fn_name: str, size_bytes: int
+) -> None:
+    """The digest engines head-to-head at bytes-throughput sizes, measured
+    and not asserted, the decode_utf8/b64_decode precedent: hashlib's
+    OpenSSL engines (hardware SHA extensions) win or tie at every size
+    where the engine dominates the call. Measured (min-of-3 after warmup,
+    prose corpus bytes):
+
+        algorithm   size    tors        hashlib     tors/hashlib
+        md5         1 KiB   ~0.001ms    ~0.001ms    0.88
+        sha1        1 KiB   ~0.001ms    ~0.001ms    0.69
+        sha256      1 KiB   ~0.001ms    ~0.001ms    0.83
+        sha512      1 KiB   ~0.001ms    ~0.001ms    0.74
+        md5         12 MiB  15.0ms      14.5ms      1.03
+        sha1        12 MiB  4.4ms       4.2ms       1.06
+        sha256      12 MiB  4.9ms       4.1ms       1.19
+        sha512      12 MiB  7.2ms       7.4ms       0.98
+
+    The sha256/sha1 losses are real and recorded, not thresholded away:
+    the surface's value at these sizes is the parity digest (pinned
+    differentially in tests/test_hash.py), the str convenience, and the
+    GIL story told in tests/test_gil_release.py (hashlib releases the GIL
+    for 2048+-byte updates, so the honest claim there is uniformity, not a
+    latency win). The wall wins this surface can assert are the
+    short-str and hmac cells below, the request-signing sizes where the
+    per-call overhead is the cost."""
+    raw = corpus_utf8("prose", size_bytes)
+    tors_fn = getattr(tors, tors_fn_name)
+    stdlib_fn = getattr(hashlib, tors_fn_name.removesuffix("_hex"))
+    tors_ms = _min_wall_ms(tors_fn, raw)
+    std_ms = _min_wall_ms(lambda r: stdlib_fn(r).hexdigest(), raw)
+    print(
+        f"{tors_fn_name} {size_bytes // 1024}KiB: tors {tors_ms:.3f}ms "
+        f"hashlib {std_ms:.3f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [128, 512], ids=["128B", "512B"])
+def test_sha256_hex_beats_encode_plus_hashlib_on_short_strings(size_bytes: int) -> None:
+    """The short-str wall win, asserted: hashing a str directly vs the
+    expression a hashlib caller must write
+    (``hashlib.sha256(s.encode("utf-8")).hexdigest()``), the cache-key /
+    ETag / request-ID spelling. tors pays one pyo3 call and the borrowed
+    UTF-8; the stdlib expression pays ``str.encode`` (a fresh bytes
+    object), the hash-object constructor, and the ``hexdigest`` call.
+    Measured 0.17µs vs 0.33µs at 128B and 0.28µs vs 0.52µs at 512B
+    (ratios 0.40-0.54, min-of-many at load ~10); asserted with the 0.9
+    margin, ~1.7-2.2x of headroom."""
+    text = prose(4096)[:size_bytes]
+    tors_ms = _min_wall_ms(tors.sha256_hex, text, samples=_HASH_MICRO_SAMPLES)
+    std_ms = _min_wall_ms(
+        lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest(),
+        text,
+        samples=_HASH_MICRO_SAMPLES,
+    )
+    assert tors_ms < _MARGIN * std_ms, (
+        f"sha256_hex str {size_bytes}B: tors {tors_ms:.4f}ms vs "
+        f"encode+hashlib {std_ms:.4f}ms (ratio {tors_ms / std_ms:.2f}): the "
+        "one-call str spelling lost more than the tolerance margin to the "
+        "encode-then-hash expression"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key_len", "data_len"), [(32, 256), (131, 200)], ids=["request", "long-key"]
+)
+def test_hmac_sha256_hex_beats_the_fastest_stdlib_hmac_spelling(
+    key_len: int, data_len: int
+) -> None:
+    """The request-signing wall win, asserted against the stdlib's
+    FASTEST spelling, not the common slow one: ``hmac.digest(key, data,
+    "sha256").hex()`` is CPython's optimized one-shot C path (the one the
+    docs point performance-sensitive callers at), measured 0.92µs where
+    the idiomatic ``hmac.new(...).hexdigest()`` costs 1.12µs. tors's one
+    call (0.29µs) beats even the fast spelling by ~3x (ratio ~0.31; the
+    long-key/short-data RFC 4231 case-6 shape ~0.36), because the stdlib
+    spelling still pays two CPython calls (``hmac.digest`` plus ``.hex()``)
+    against tors's single pyo3 call. The webhook-verification loop is
+    exactly this shape: one HMAC per request, overhead-dominated."""
+    key = b"k" * key_len
+    data = b"d" * data_len
+    tors_ms = _min_wall_ms(
+        lambda _: tors.hmac_sha256_hex(key, data), None, samples=_HASH_MICRO_SAMPLES
+    )
+    std_ms = _min_wall_ms(
+        lambda _: hmac.digest(key, data, "sha256").hex(), None, samples=_HASH_MICRO_SAMPLES
+    )
+    assert tors_ms < _MARGIN * std_ms, (
+        f"hmac_sha256_hex k={key_len} d={data_len}: tors {tors_ms:.4f}ms vs "
+        f"hmac.digest+hex {std_ms:.4f}ms (ratio {tors_ms / std_ms:.2f}): the "
+        "one-call native HMAC lost more than the tolerance margin to the "
+        "stdlib's fastest one-shot spelling"
     )
 
 
