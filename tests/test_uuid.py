@@ -608,5 +608,7 @@ class TestDocExamples:
         assert uuid_parse(str(u)) == u.bytes
         with pytest.raises(ValueError, match="uppercase"):
             uuid_parse(str(u).upper())
-        moment = datetime.datetime.fromtimestamp(uuid7_timestamp_ms(u.bytes) / 1000, datetime.timezone.utc)
+        moment = datetime.datetime.fromtimestamp(
+            uuid7_timestamp_ms(u.bytes) / 1000, datetime.timezone.utc
+        )
         assert moment == datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.timezone.utc)
