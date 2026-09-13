@@ -220,6 +220,28 @@ the dev box, ambient load 6.9-7.3, 3 samples per cell):
   millions of matches are the streaming-API question the word_bounds
   finding already raised, recorded again in docs/async.md.
 
+unescaped-scan cells (``contains_unescaped``/``find_unescaped``, the
+escape-parity byte scan; measured on the calibration box, macOS, 16
+cores, ambient load ~6-17, 3 samples per cell, corpora from
+``reference``: the plain prose bytes for the sparse shape and
+``unescaped_false_positive`` for the hit-dense all-rejected shape):
+
+- Both cells ceiling-only (the b64 12 MiB / utf8_is_valid precedent):
+  the scan is memchr-class — measured 0.25ms (sparse, no occurrence) and
+  0.79ms (dense, 72,520 rejected hits) inline at 12 MiB — so the walls
+  sit an order of magnitude under the 10ms ping floor and any gap/wall
+  ratio is the suite's documented sub-ping artifact. Measured worst gaps
+  10.3-11.1ms (the floor plus ~0.3-1.1ms of to_thread dispatch and the
+  two argument borrows) of 0.4-1.3ms walls, both shapes, both spellings
+  (``contains`` measured the same band: it is the same scan by
+  construction, pinned by the invariant test in
+  tests/test_unescaped_scan.py). The 100ms ceiling alone is the
+  assertion (~9x margin); the same limitation as every sub-floor cell
+  applies: a held ~1ms scan is invisible under the floor either way, so
+  these cells pin that the whole memmem loop plus the parity walk leaves
+  the loop at the floor at all, and the wall cells in
+  tests/test_unescaped_scan.py carry the throughput side.
+
 cells (``replace_many`` dense, ``sentence_bounds`` list,
 ``diff_opcodes_lines`` near-identical, all at 12 MiB; measured on the dev
 box, ambient load 2.0, 5 samples per cell, corpora from
@@ -380,6 +402,7 @@ import tors
 from reference import (
     SEARCH_DENSE_PATTERNS,
     SEARCH_SPARSE_PATTERNS,
+    UNESCAPED_NEEDLE,
     compat,
     corpus_b64,
     corpus_utf8,
@@ -390,6 +413,7 @@ from reference import (
     prose,
     reference_finalize,
     reference_normalize,
+    unescaped_false_positive,
 )
 
 # The timing lane: every test in this module is a measurement cell (worst
@@ -1297,6 +1321,55 @@ def test_utf8_is_valid_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.utf8_is_valid, corpus),
+            ratio_budget=ratio_budget,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("sparse", 12 * _MIB, None),
+        ("false-positive", 12 * _MIB, None),
+    ],
+    ids=["sparse-12MiB-ceiling-only", "false-positive-12MiB-ceiling-only"],
+)
+def test_unescaped_scan_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The escape-parity scan claim: the whole pass — the memmem occurrence
+    loop, the per-hit backward run walk, the carried run state — runs under
+    ``py.detach``, and the call's GIL-held residue is the two zero-copy
+    ``PyBytes`` borrows alone (a ``bool``/``int`` return, so no marshalling
+    class at all; the empty-needle ``ValueError`` is the only error path and
+    it fires before the detach), the ``utf8_is_valid`` extreme point applied
+    to search. Two corpus shapes: ``sparse`` (plain prose bytes, no
+    occurrence: the pure scan) and ``false-positive`` (one literal
+    ``\\\\u0000`` per sentence, every one of its ~72,520 occurrences behind
+    an odd run and rejected: the full scan plus the per-hit parity work,
+    no early exit — the worst case for both wall time and GIL release).
+
+    Both cells ceiling-only by the b64 12 MiB / utf8_is_valid precedent:
+    the scan is memchr-class (measured inline 0.25ms sparse / 0.79ms dense
+    at 12 MiB on the calibration box), so the wall sits an order of
+    magnitude under the 10ms ping floor and any gap/wall ratio is the
+    suite's documented sub-ping artifact. Measured on the calibration box
+    (macOS, 16 cores, ambient load ~6-17, 3 samples per cell): worst gaps
+    10.3-11.1ms of 0.4-1.3ms walls, both shapes and both spellings (the
+    module docstring's ledger). The 100ms ceiling alone is the assertion
+    (~9x margin); the sub-floor limitation is the same as every
+    ceiling-only cell's: a held ~1ms scan is invisible under the floor
+    either way, so this cell pins that the scan leaves the loop at the
+    floor at all, and the wall cells in tests/test_unescaped_scan.py carry
+    the throughput side."""
+    corpus = (
+        corpus_utf8("prose", size_bytes)
+        if corpus_kind == "sparse"
+        else unescaped_false_positive(size_bytes)
+    )
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.find_unescaped, corpus, UNESCAPED_NEEDLE),
             ratio_budget=ratio_budget,
         )
     )

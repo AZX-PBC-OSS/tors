@@ -523,21 +523,18 @@ def _min_wall_ms(op: Callable[[], object], samples: int = 3, warmup: int = 1) ->
     return best * 1000.0
 
 
-# The no-match cell's ceiling vs the bare prefilter: both sides are the same
-# scan class over the same bytes (CPython's ``in`` and memchr's memmem are
-# both vectorized substring searches), so the measured ratio sits near 1 and
-# the ceiling's job is the regression classes: a lost SIMD prefilter
-# (the naive byte loop is ~an order slower), a per-byte run-state walk that
-# scans the whole haystack instead of only the hit-adjacent bytes, or an
-# accidental quadratic. 8x is the chunk_hierarchical no-match precedent's
-# margin over the same ``in`` racer.
+# The no-match cell's ceiling vs the bare prefilter: the measured direction
+# on the calibration box is tors FASTER than CPython's `in` by ~20x (memchr's
+# memmem is SIMD-class where CPython's substring search is not: 0.25ms vs
+# 5.4ms at 12 MiB), so the 8x ceiling is not a "may pay a little more"
+# bound but the class pin with room for a box where the two engines' relative
+# speed sits differently — the chunk_hierarchical no-match precedent's margin
+# over the same `in` racer. The absolute companion (40ms, ~50x above the
+# measured wall) catches the quadratic and per-structure classes on every
+# box; a memchr scalar-fallback swap (~6-12ms here) is a memchr-version
+# event, not a tors code regression, and is recorded as out of this cell's
+# teeth rather than pretended caught.
 _SCAN_VS_PREFILTER_CEILING = 8.0
-
-# The absolute companion ceiling: the prefilter race is blind to a
-# same-speed-scan-but-more-work regression class (both sides slowing
-# together under it), so the cell also pins the scan's own wall at the size
-# the GIL cell drives. Calibrated from the measured band with the
-# find_patterns 1 MiB cell's ~5x margin derivation.
 _SCAN_12MIB_CEILING_MS = 40.0
 
 
@@ -545,8 +542,11 @@ def test_no_match_scan_stays_within_the_bare_prefilter_band_at_12mib() -> None:
     """The pure-scan shape (the sparse corpus: prose bytes, no backslash, no
     occurrence — the prefilter's own best case, no confirm walk would ever
     fire): one ``find_unescaped`` call vs one ``needle in data`` check over
-    the same 12 MiB. tors may only pay the prefilter's scan class plus
-    marginal machinery (the Finder build, the never-taken run-state walk)."""
+    the same 12 MiB. Measured on the calibration box (macOS, 16 cores,
+    ambient load ~17, min-of-5 after warm-up): tors 0.25ms against the
+    prefilter's 5.4ms — the native scan is ~20x FASTER than CPython's own
+    substring search, recorded, not thresholded away; the assertions pin
+    the class relationship (8x) and the absolute band (40ms)."""
     data = corpus_utf8("prose", 12 * _MIB)
     needle = UNESCAPED_NEEDLE
     tors_ms = _min_wall_ms(lambda: find_unescaped(data, needle))
@@ -565,21 +565,25 @@ def test_no_match_scan_stays_within_the_bare_prefilter_band_at_12mib() -> None:
 
 # The dense cell's margin: the stdlib-expression race idiom (tors < 0.9 x
 # the expression it replaces), the same _MARGIN as every test_performance.py
-# cell.
+# cell; the absolute companion catches the classes the load-fair race is
+# blind to (both sides slowing together).
 _LOOP_WIN_MARGIN = 0.9
+_DENSE_12MIB_CEILING_MS = 40.0
 
 
 def test_false_positive_scan_beats_the_manual_parity_loop_at_12mib() -> None:
     """The hit-dense shape (the false-positive corpus: one literal
-    ``\\u0000`` per sentence, every occurrence behind an odd run, so the
+    ``\\\\u0000`` per sentence, every occurrence behind an odd run, so the
     scan rejects every hit and runs to the end — the workload the
     confirm-by-reparse walk existed for, and the worst case for both wall
     time and GIL release): one ``find_unescaped`` call vs the manual parity
-    loop over the same bytes. The loop is the exact expression this surface
-    replaces (find + count-backslashes-per-hit in pure Python); the native
-    scan must beat it by more than the load margin at document scale.
-    ``contains_unescaped`` is the same scan by construction (the invariant
-    pin), so the race answers for both spellings."""
+    loop over the same bytes. Measured on the calibration box (macOS, 16
+    cores, ambient load ~17, min-of-5 after warm-up): tors 0.79ms (72,520
+    rejected hits) against the loop's 13.0ms, ratio 0.061 — the native scan
+    wins by ~16x, and the 0.9 margin absorbs any load that moves both sides
+    together. ``contains_unescaped`` measured 0.71ms on the same corpus
+    (the same scan by construction, pinned by the invariant test), so the
+    race answers for both spellings."""
     data = unescaped_false_positive(12 * _MIB)
     needle = UNESCAPED_NEEDLE
     tors_ms = _min_wall_ms(lambda: find_unescaped(data, needle))
@@ -589,4 +593,9 @@ def test_false_positive_scan_beats_the_manual_parity_loop_at_12mib() -> None:
         f"parity loop's {loop_ms:.1f}ms (ratio {tors_ms / loop_ms:.2f}): the "
         "native scan lost more than the tolerance margin to the hand-rolled "
         "expression it exists to replace"
+    )
+    assert tors_ms < _DENSE_12MIB_CEILING_MS, (
+        f"12 MiB false-positive scan: tors took {tors_ms:.1f}ms, over the "
+        f"absolute band (ceiling {_DENSE_12MIB_CEILING_MS:.0f}ms, ~50x above "
+        "the measured wall); the scan regressed out of its measured class"
     )
