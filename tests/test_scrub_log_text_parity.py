@@ -57,6 +57,7 @@ import itertools
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -298,11 +299,46 @@ def _param_grid() -> list[str]:
     return out
 
 
+# --- the needle-chain lane: K escaped DETAIL needles sharing one line ------------------
+#
+# The escaped pass's line state (line end, line start, trailing-ws start) is
+# per-line, but its needles are not: a repr-flattened line can carry thousands
+# of ``\\nDETAIL:`` needles, every one of which used to recompute that state
+# from scratch — the superlinear scan the pass's line-state memo exists to
+# prevent (the timing cell below pins the time side; these cells pin that the
+# memo never moves a byte). The shapes, each hunting its own seam:
+#
+# * the K-chain: K needles on ONE line at growing K (every needle after the
+#   first is a memo REUSE; the last needle is left alone as the pinned
+#   no-terminator non-match, so the oracle's own lazy scan and the memoized
+#   scan must agree on exactly which K-1 runs die);
+# * the ws-run shape: the K-chain plus a 200k trailing-whitespace run, the
+#   quote-candidate/trailing-ws interplay at scale (the run's start is the
+#   one value the ws memo exists for — recomputed per needle before the fix,
+#   carried once per line after);
+# * the mixed chain: real-newline lines each carrying 16 escaped needles and
+#   a ``')`` quote terminator, so the memo is reused within a line and
+#   rebuilt across lines in the same scan;
+# * the failed-needle interleave: needles that fail the DETAIL check (their
+#   space run ends at the next needle's backslash) between successful ones,
+#   all on one line — a failed needle must not touch the memo it sits inside.
+_NEEDLE_CHAIN_UNIT = "\\nDETAIL:'x"
+
+
+def _needle_chain_cases() -> list[str]:
+    out = [_NEEDLE_CHAIN_UNIT * k for k in (1, 2, 17, 257, 4096)]
+    out.append(_NEEDLE_CHAIN_UNIT * 3_200 + " " * 200_000)
+    out.append(("E('a" + _NEEDLE_CHAIN_UNIT * 16 + "')\n") * 64)
+    out.append("\\n  \\nDETAIL:x" * 512)
+    return out
+
+
 _CORPUS_CASES: list[str] = (
     _CORPUS
     + _userinfo_grid()
     + _escaped_grid()
     + _param_grid()
+    + _needle_chain_cases()
     + [scrub_corpus(1024), scrub_corpus(100 * 1024), scrub_corpus(1024 * 1024)]
 )
 
@@ -436,6 +472,39 @@ class TestExhaustiveSweep:
         assert got == want
 
 
+# --- the timing-lane wall cell: the needle-chain linearity contract ---------------------
+
+
+def _min_wall_ms(op, samples: int = 3, warmup: int = 1) -> float:
+    for _ in range(warmup):
+        op()
+    best = float("inf")
+    for _ in range(samples):
+        started = time.perf_counter()
+        op()
+        best = min(best, time.perf_counter() - started)
+    return best * 1000.0
+
+
+@pytest.mark.timing
+def test_scrub_escaped_needle_chain_wall_stays_linear_on_the_ws_run_shape() -> None:
+    """The escaped pass's linearity contract as a wall band: the 235KB
+    worst shape of the needle-chain lane above (3,200 ``\\nDETAIL:`` needles
+    sharing one line, then a 200k trailing-whitespace run) scrubs inside
+    60ms. Derivation: the memoized pass is linear and measures ~0.4ms on
+    this box (min-of-3), so 60ms is a ~140x sanity margin that only a
+    complexity regression can reach — the shape is the red-team P1 repro
+    whose PRE-fix cost was ~350ms here (per-needle line-state
+    recomputation, O(K*M) on exactly this input), so a return to the
+    superlinear scan overshoots the ceiling ~6x while any linear
+    implementation — even one two orders of magnitude slower per byte —
+    stays under. A timing-lane cell: the load-sensitive wall measurement
+    CI's matrix legs deselect (``-m "not timing and not sweep"``), one 3.12
+    leg running it: the marker-split contract every lane cell carries."""
+    text = _NEEDLE_CHAIN_UNIT * 3_200 + " " * 200_000
+    assert _min_wall_ms(lambda: tors.scrub_log_text(text)) < 60.0
+
+
 # --- the live-oracle re-sync lane (TaskQ checkout gated) ------------------------------
 
 
@@ -506,7 +575,10 @@ class TestLiveOracleResync:
         flag_before = module._redaction_enabled  # noqa: SLF001
         try:
             module._redaction_enabled = True  # noqa: SLF001
-            for text in _CORPUS + [scrub_corpus(1024), scrub_corpus(100 * 1024)]:
+            for text in _CORPUS + _needle_chain_cases() + [
+                scrub_corpus(1024),
+                scrub_corpus(100 * 1024),
+            ]:
                 assert module._scrub_text(text) == reference_scrub_log_text(text)  # noqa: SLF001
         finally:
             module._redaction_enabled = flag_before  # noqa: SLF001
@@ -517,7 +589,10 @@ class TestLiveOracleResync:
         flag_before = module._redaction_enabled  # noqa: SLF001
         try:
             module._redaction_enabled = True  # noqa: SLF001
-            for text in _CORPUS + [scrub_corpus(1024), scrub_corpus(100 * 1024)]:
+            for text in _CORPUS + _needle_chain_cases() + [
+                scrub_corpus(1024),
+                scrub_corpus(100 * 1024),
+            ]:
                 assert tors.scrub_log_text(text) == module._scrub_text(text)  # noqa: SLF001
         finally:
             module._redaction_enabled = flag_before  # noqa: SLF001
