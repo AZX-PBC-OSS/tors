@@ -2503,16 +2503,17 @@ coerced exactly as `json.dumps` coerces them: `1` -> `"1"`, `True` ->
 `"Infinity"`. Keys are sorted BEFORE stringification — all-int keys come
 out in numeric order (`2` before `10`), where the same digits as str keys
 sort lexicographically (`"10"` before `"2"`). The exotic key shapes — any
-float key, big-int keys, mixed int/float, NaN keys — are sorted by
-CPython's own `list.sort` (the same comparisons `json.dumps`'s items sort
-makes, the same timsort consuming them), so the output order matches the
-running interpreter byte-for-byte, including the corners no
-reimplementation would dare: two distinct NaN objects legally coexist as
-dict keys, and their output order is timsort's behavior, not a
-mathematical property. Mixed unsortable key types (`{1: ..., "a": ...}`)
-raise the sort's own `TypeError`, byte-identical with `json.dumps`'s;
-non-coercible key types (`tuple`, `bytes`, ...) raise `TypeError` naming
-the key type.
+float key, big-int keys, mixed int/float, NaN keys, and any
+str/int-SUBCLASS key (whose overridden rich comparison `json.dumps`'s
+sort honors) — are sorted by delegating to CPython's own `list.sort` over
+the dict's own `(key, value)` items: the very tuples `json.dumps` sorts,
+the same timsort, so the output order matches the running interpreter
+byte-for-byte, including the corners no reimplementation would dare: two
+distinct NaN objects legally coexist as dict keys, and their output order
+is timsort's behavior, not a mathematical property. Mixed unsortable key
+types (`{1: ..., "a": ...}`) raise the sort's own `TypeError`,
+byte-identical with `json.dumps`'s; non-coercible key types (`tuple`,
+`bytes`, ...) raise `TypeError` naming the key type.
 
 **Strings: the `ensure_ascii` escape table.** Inside a string the raw
 bytes are exactly printable ASCII (U+0020-U+007E) minus `"` and `\` — the

@@ -36,28 +36,32 @@
 //!
 //! Three sort paths:
 //!
-//! - **All-str keys** (the overwhelmingly common shape): each key's UTF-8
-//!   is borrowed and the pairs sorted by bytes -- identical to Python's
-//!   codepoint-order `str` comparison, because UTF-8 byte order IS
-//!   codepoint order for the valid UTF-8 a `to_str` borrow can produce.
-//! - **All int/bool keys inside i64**: a numeric i64 sort (bool as its
-//!   0/1 int value; a `True`/`1` pair cannot coexist as dict keys, so no
-//!   tie is possible).
+//! - **All-exact-str keys** (the overwhelmingly common shape): each key's
+//!   UTF-8 is borrowed and the pairs sorted by bytes -- identical to
+//!   Python's codepoint-order `str` comparison, because UTF-8 byte order
+//!   IS codepoint order for the valid UTF-8 a `to_str` borrow can produce.
+//! - **All exact int/bool keys inside i64**: a numeric i64 sort (bool as
+//!   its 0/1 int value; a `True`/`1` pair cannot coexist as dict keys, so
+//!   no tie is possible).
 //! - **Everything else** (any float key, any big-int key, mixed
-//!   int/float, `None` alongside others): the sort is DELEGATED to
-//!   CPython -- a `list` of `(key, index)` tuples, sorted with
-//!   `list.sort()`. Dict keys are pairwise `!=` (dict semantics), so
-//!   tuple comparison always decides on the key and the index never
-//!   participates: the comparison results are IDENTICAL to json.dumps's
-//!   own `(key, value)` items sort, and the same timsort consumes them,
-//!   so the permutation matches byte-for-byte -- including the corners
-//!   no reimplementation would dare: NaN keys (an inconsistent
-//!   comparator, where the output order is timsort's behavior, not a
-//!   mathematical property; two distinct NaN objects legally coexist as
-//!   dict keys), exact int/float cross-type comparison at 2**63-scale
-//!   magnitudes, and arbitrary-precision int keys. The mixed-type
-//!   comparison `TypeError` that delegation surfaces is json.dumps's own
-//!   message, byte-identical, for free.
+//!   int/float, `None` alongside others, and ANY str/int-SUBCLASS key):
+//!   the sort is DELEGATED to CPython -- a `list` of the dict's own
+//!   `(key, value)` pairs, sorted with `list.sort()`, the very items
+//!   `json.dumps` itself sorts the same way. The permutation is read back
+//!   by object identity, which is unambiguous (a dict cannot hold two
+//!   entries with the same key AND value object). This is byte-exact
+//!   parity by construction -- the same tuples, the same timsort -- which
+//!   is what carries the corners no reimplementation would dare: NaN
+//!   keys (an inconsistent comparator, where the output order is
+//!   timsort's behavior, not a mathematical property; two distinct NaN
+//!   objects legally coexist as dict keys), exact int/float cross-type
+//!   comparison at 2**63-scale magnitudes, arbitrary-precision int keys,
+//!   and subclass keys whose overridden rich comparison (`__lt__`,
+//!   `__eq__`-lying equals that fall the tiebreak to the values)
+//!   `json.dumps` honors and a numeric/byte sort would silently ignore --
+//!   which is exactly why the fast paths above are gated on EXACT
+//!   instances. The mixed-type comparison `TypeError` that delegation
+//!   surfaces is json.dumps's own message, byte-identical, for free.
 //!
 //! # The spellings (Python's own, never reimplemented)
 //!
@@ -87,7 +91,7 @@
 //! pinned divergence (`tests/test_content_hash.py`::
 //! `TestSurrogateDivergence`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -263,14 +267,20 @@ fn dict_pairs<'py>(
     }
     let n = entries.len();
 
-    // The all-str fast path: borrow and copy each key ONCE (the only
+    // The all-exact-str fast path: borrow and copy each key ONCE (the only
     // place a surrogate key can raise, after the sort-shape decision),
     // sort the pairs by UTF-8 bytes (== Python's codepoint-order str
     // comparison), done. A lone-surrogate key raises here for an all-str
     // dict -- the documented divergence -- while a MIXED-type dict never
     // reaches this path and raises the sort's comparison error first,
-    // matching json.dumps's error order.
-    if entries.iter().all(|e| matches!(e.kind, KeyKind::Str)) {
+    // matching json.dumps's error order. EXACT str instances only: a str
+    // SUBCLASS key may override rich comparison, which json.dumps's own
+    // sort honors -- such keys take the delegated path below.
+    if entries.iter().all(|e| matches!(e.kind, KeyKind::Str))
+        && entries
+            .iter()
+            .all(|e| e.handle.is_exact_instance_of::<PyString>())
+    {
         let mut pairs: Vec<(String, Bound<'_, PyAny>)> = Vec::with_capacity(n);
         for (entry, value) in entries.into_iter().zip(values) {
             let key = entry
@@ -285,16 +295,21 @@ fn dict_pairs<'py>(
     }
 
     // The order the pairs will be coerced in. n <= 1 needs no comparison
-    // (any single key is trivially sorted); the all-int/bool fast path is
-    // a numeric i64 sort; everything else delegates to CPython's timsort
-    // over (key, index) tuples -- the module docs' byte-exact parity
-    // argument -- which also raises json.dumps's own comparison
-    // TypeError for mixed unsortable key types.
+    // (any single key is trivially sorted); the all-exact-int/bool fast
+    // path is a numeric i64 sort (same exact-instance gate as the str
+    // path, for the same overridden-comparison reason); everything else
+    // delegates to CPython's timsort over the dict's own (key, value)
+    // pairs -- json.dumps's own items sort, byte-exact by construction,
+    // which also raises json.dumps's own comparison TypeError for mixed
+    // unsortable key types.
     let order: Vec<usize> = if n <= 1 {
         (0..n).collect()
     } else if entries
         .iter()
         .all(|e| matches!(e.kind, KeyKind::Bool(_) | KeyKind::SmallInt(_)))
+        && entries
+            .iter()
+            .all(|e| e.handle.is_exact_instance_of::<PyInt>())
     {
         let mut keyed: Vec<(i64, usize)> = entries
             .iter()
@@ -311,20 +326,33 @@ fn dict_pairs<'py>(
         keyed.sort_by_key(|&(v, _)| v);
         keyed.into_iter().map(|(_, i)| i).collect()
     } else {
+        // Identity index: (key ptr, value ptr) -> entry index. A dict
+        // cannot hold two entries with the same key AND value object
+        // (inserting an equal key updates; two coexisting keys are
+        // pairwise !=, and NaN's k != k lets the same KEY object coexist
+        // only under different values), so each identity pair maps to
+        // exactly one entry.
+        let mut index_of: HashMap<(usize, usize), usize> = HashMap::with_capacity(n);
+        for (i, (entry, value)) in entries.iter().zip(&values).enumerate() {
+            index_of.insert((entry.handle.as_ptr() as usize, value.as_ptr() as usize), i);
+        }
         let tuples: Vec<Bound<'py, PyTuple>> = entries
             .iter()
-            .enumerate()
-            .map(|(i, e)| (e.handle.clone(), i).into_pyobject(py))
+            .zip(&values)
+            .map(|(entry, value)| (entry.handle.clone(), value.clone()).into_pyobject(py))
             .collect::<PyResult<_>>()?;
         let list = PyList::new(py, tuples)?;
         list.call_method0("sort")?;
         let mut order = Vec::with_capacity(n);
         for item in list.iter() {
-            let idx: usize = item
+            let pair = item
                 .cast::<PyTuple>()
-                .expect("the list holds (key, index) tuples")
-                .get_item(1)?
-                .extract()?;
+                .expect("the list holds (key, value) tuples");
+            let key_ptr = pair.get_item(0)?.as_ptr() as usize;
+            let value_ptr = pair.get_item(1)?.as_ptr() as usize;
+            let idx = index_of
+                .remove(&(key_ptr, value_ptr))
+                .expect("the sort returned a pair we did not build");
             order.push(idx);
         }
         order

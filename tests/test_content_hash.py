@@ -914,6 +914,110 @@ class TestSurrogateDivergence:
         _assert_parity({"😀": ["🎉", chr(0x10FFFF)]})
 
 
+class TestSubclassComparisonParity:
+    """The red-team corners around subclass keys, pinned: json.dumps's sort
+    honors OVERRIDDEN rich comparison on str/int-subclass dict keys (a
+    flipped ``__lt__`` reorders the output; an ``__eq__``-lying subclass
+    falls the tuple tiebreak to the VALUES), so tors's fast sorts are
+    gated on EXACT instances and every subclass-keyed dict delegates to
+    CPython's own timsort over the dict's own (key, value) items. The
+    flipped-``__lt__`` int-subclass case was a real red-team find: a
+    numeric fast path silently sorted ``I(1)`` before ``I(3)`` where
+    json.dumps honored the override (I(3) first); the gate and the
+    (key, value) delegation close the whole class."""
+
+    class FlippedInt(int):
+        def __repr__(self) -> str:
+            return "OVERRIDDEN"
+
+        def __lt__(self, other: object) -> bool:
+            return int(self) > int(other)
+
+        def __le__(self, other: object) -> bool:
+            return int(self) >= int(other)
+
+    class FlippedStr(str):
+        def __lt__(self, other: str) -> bool:
+            return str(self) > str(other)
+
+    class LyingEqStr(str):
+        # Always-equal with a per-object hash: two of these legally
+        # coexist as dict keys, and the items-sort tiebreak lands on the
+        # VALUES, exactly json.dumps's behavior.
+
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            return False
+
+        def __hash__(self) -> int:
+            return hash(str(self)) ^ id(self)
+
+    class ReprStr(str):
+        def __repr__(self) -> str:
+            return "OVERRIDDEN"
+
+    class ReprFloat(float):
+        def __repr__(self) -> str:
+            return "OVERRIDDEN"
+
+    def test_flipped_lt_int_subclass_keys_match_the_oracle(self) -> None:
+        cls = TestSubclassComparisonParity
+        i1, i2, i3 = cls.FlippedInt(1), cls.FlippedInt(2), cls.FlippedInt(3)
+        _assert_parity({i3: "a", i1: "b"})
+        _assert_parity({i3: "a", i1: "b", i2: "c"})
+        _assert_parity({i1: "a", i3: "b"})
+
+    def test_flipped_lt_str_subclass_keys_match_the_oracle(self) -> None:
+        cls = TestSubclassComparisonParity
+        a, b = cls.FlippedStr("a"), cls.FlippedStr("b")
+        _assert_parity({b: 1, a: 2})
+        _assert_parity({a: 1, b: 2})
+
+    def test_eq_lying_keys_fall_the_tiebreak_to_the_values(self) -> None:
+        cls = TestSubclassComparisonParity
+        obj = {cls.LyingEqStr("a"): 5, cls.LyingEqStr("b"): 3}
+        _assert_parity(obj)
+
+    def test_mixed_exact_and_subclass_keys_delegate(self) -> None:
+        cls = TestSubclassComparisonParity
+        _assert_parity({1: "plain", cls.FlippedInt(9): "sub"})
+        _assert_parity({"a": 1, cls.ReprStr("b"): 2})
+        _assert_parity({"b": 1, cls.FlippedStr("a"): 2})
+
+    def test_subclass_values_and_keys_use_base_spellings(self) -> None:
+        """json.dumps spells int/float subclass VALUES and KEYS via the
+        BASE type's repr (an IntEnum dumps as its number; a
+        repr-overriding float subclass dumps as 0.5) and str subclasses by
+        their CONTENT; tors matches all three."""
+        from enum import IntEnum
+
+        class Big(IntEnum):
+            SMALL = 5
+            HUGE = 2**70
+
+        _assert_parity({"v": TestSubclassComparisonParity.ReprStr("actual")})
+        _assert_parity({TestSubclassComparisonParity.ReprStr("k"): 1})
+        _assert_parity({"v": 7.5, "w": TestSubclassComparisonParity.ReprFloat(0.5)})
+        _assert_parity({TestSubclassComparisonParity.ReprFloat(2.5): 1})
+        _assert_parity([Big.SMALL, Big.HUGE])
+        _assert_parity({Big.SMALL: "x", Big.HUGE: "y"})
+
+    def test_container_subclasses_walk_native_storage(self) -> None:
+        from collections import OrderedDict
+
+        class ListSub(list):
+            pass
+
+        class DictSub(dict):
+            pass
+
+        _assert_parity(OrderedDict([("b", 1), ("a", 2)]))
+        _assert_parity({"sub": ListSub([1, 2])})
+        _assert_parity(DictSub({"z": 1, "a": 2}))
+
+
 class TestCanonicalByteLiterals:
     """Whole-tree canonical forms pinned as literal bytes (sha256'd here),
     independent of the oracle: the emitter's structural spellings -- compact
