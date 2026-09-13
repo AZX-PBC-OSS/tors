@@ -2544,6 +2544,89 @@ tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
 # [2, 3]: every trailing index beyond the shorter list's length
 ```
 
+## `tors.uuid7_timestamp_ms` / `tors.uuid_version` / `tors.uuid_parse`
+
+```python
+def uuid7_timestamp_ms(value: bytes | str) -> int: ...
+def uuid_version(value: bytes | str) -> int: ...
+def uuid_parse(value: str) -> bytes: ...
+```
+
+The UUIDv7 field operations, hand-rolled bit work (no `uuid`-crate dependency:
+generating IDs is not this surface's job — every producer from `uuid.uuid7()`
+to `uuid_utils` already does that — reading the standard time-ordered ID's
+fields back out is). A store keyed by UUIDv7 IDs ends up reimplementing these
+three operations at every site that paginates by recency or buckets by time:
+the 48-bit unix-millisecond timestamp (keyset cursors and time-bucketed
+queries against an ID column), the version nibble that says whether that
+timestamp means anything, and a strict text-to-bytes parse at the
+ID-validation boundary. 16 bytes in, integer out — trivial, which is exactly
+why it keeps getting reimplemented slightly wrong.
+
+`uuid7_timestamp_ms` returns the leading six bytes as a big-endian
+unix-millisecond timestamp (RFC 9562 section 5.7's `unix_ts_ms` field):
+`datetime.datetime.fromtimestamp(ms / 1000, UTC)` is the ID's creation
+instant. It raises `ValueError` naming the version actually found when the
+version nibble is not 7 — the field is only defined for v7, and the nil
+UUID's all-zero field must not silently answer `0`.
+
+`uuid_version` returns the version nibble (byte 6's high half), `0`-`15`, for
+any UUID of any variant: the field itself, not an RFC-4122-ness check. The
+variant is a different field (byte 8's top two bits) and out of scope; the
+stdlib `uuid.UUID.version` property refuses to answer off the RFC 4122
+variant, where this answers the nibble question unconditionally.
+
+`uuid_parse` is canonical text to the 16 raw bytes, strict, the
+validation-primitive direction. **The stdlib `uuid.UUID` accepts strictly
+more than this, deliberately not matched here**: it parses braced text
+(`{...}`), the URN prefix (`urn:uuid:...`), hyphen-less hex, and uppercase,
+while `uuid_parse` accepts exactly one grammar — 36 characters, hyphens at
+positions 8/13/18/23 (the 8-4-4-4-12 groups), lowercase hexadecimal
+elsewhere — raising `ValueError` naming the problem, the position
+(0-based), and the accepted form otherwise. A caller using this as a gate
+wants one grammar, the canonical one every producer emits, not the
+stdlib's permissive union; that closed-set strictness is the same contract
+`b64_decode`'s `validate=True` default and the `errors=`/`boundary=`
+parameters already establish. The divergences are pinned, not accidental:
+`tests/test_uuid.py` proves the stdlib accepts each loose form in the same
+test that pins tors rejecting it.
+
+The int-out pair takes exactly `bytes` (16 bytes, `ValueError` naming the
+count otherwise; `bytearray`/`memoryview` are `TypeError`, the bytes-in
+surface's exactly-`bytes` zero-copy-borrow contract) or canonical `str`
+(same strict grammar, same errors); `uuid_parse` takes exactly `str`. A
+`str` holding lone surrogates fails the borrow itself
+(`UnicodeEncodeError`) before any grammar check runs.
+
+```python
+import datetime
+import uuid
+
+# any v7 works; this one is fixed so the outputs below are literals
+u = uuid.UUID("01977420-dc00-7abc-9def-98765432100f")
+tors.uuid_version(u.bytes)  # 7
+tors.uuid7_timestamp_ms(u.bytes)  # 1750000000000
+tors.uuid7_timestamp_ms(str(u))  # 1750000000000: canonical text accepted too
+datetime.datetime.fromtimestamp(1750000000000 / 1000, datetime.UTC)
+# datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.UTC)
+tors.uuid_parse(str(u)) == u.bytes  # True
+tors.uuid_parse(str(u).upper())
+# ValueError: UUID text must be lowercase hex: found uppercase 'D' at
+# position 9 (the stdlib uuid module accepts uppercase; tors's canonical
+# form deliberately does not)
+```
+
+GIL model: the bytes spelling borrows the argument zero-copy and the bit
+extraction runs under `py.detach`; the str spelling validates and
+transcodes under the GIL (the whole input is 36 bytes, smaller than the
+call's own marshalling residue — a detached parse would be overhead for
+its own sake) with the extraction detached after it, keeping the crate's
+GIL-free-core contract uniform across the trio. `uuid_parse` is that
+contract's honest exception: its whole work *is* the 36-byte parse (there
+is no int-out tail to detach) and it runs GIL-held by design, ~0.3µs.
+Every per-call GIL-held residue on this surface is sub-microsecond; the
+heartbeat cell in `tests/test_gil_release.py` pins the batch-loop band.
+
 ## `tors.simhash64`
 
 ```python

@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-80 functions plus two small helper classes and five pinned charset constants,
+83 functions plus two small helper classes and five pinned charset constants,
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
 edge cases are in the [API reference](docs/api.md).
@@ -149,6 +149,7 @@ edge cases are in the [API reference](docs/api.md).
 | URL encoding | `quote`, `quote_plus`, `unquote`, `unquote_plus` |
 | Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical` |
 | Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `merkle_root`, `merkle_diff` |
+| UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |
 | Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris` |
 
