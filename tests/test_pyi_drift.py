@@ -1,9 +1,10 @@
 """The ``__init__.pyi`` drift guard: every name ``tors.__all__`` exports (and
 no others) must appear in ``python/tors/__init__.pyi`` — functions and
 classes as a ``def``, published constants as an annotated constant entry
-(``CHARSET_B62: str`` and kin) — and each stub ``def``'s full signature
-(argument names in order, keyword-only markers, defaults, and
-per-parameter/return annotations) must match the live function.
+(``CHARSET_B62: str`` and kin), never both under one name — and each stub
+``def``'s full signature (argument names in order, keyword-only markers,
+defaults, and per-parameter/return annotations) must match the live
+function.
 
 The stub is the typed surface: a function added to the extension and
 re-exported by ``python/tors/__init__.py`` without a stub entry silently ships
@@ -185,6 +186,26 @@ def test_every_dunder_all_name_and_no_others_has_a_pyi_entry() -> None:
     )
 
 
+def test_no_stub_name_is_both_a_def_and_a_constant() -> None:
+    """The partition pin: a stub name is a ``def`` (function or class) or
+    an annotated constant, never both. A name spelled both ways is the
+    shadowing defect, and it slips past both other pins: the name-set
+    test unions defs ∪ constants (the name appears either way, so the
+    duplicate is invisible), and the signature test's constants
+    continue-path exempts the same-named ``def`` from signature checking
+    — a drifted shadowed ``def`` would ship untyped-pinned and
+    undetected. The stub's grammar has no dual form; neither may the
+    guard tolerate one."""
+    shadowed = set(_stub_defs()) & set(_stub_constants())
+    assert not shadowed, (
+        "python/tors/__init__.pyi name shadowing: "
+        f"{sorted(shadowed)} is spelled as both a def and an annotated "
+        "constant; the def would escape the signature pin via the "
+        "constants path — a published name is one or the other, never "
+        "both: delete one of the two entries"
+    )
+
+
 def test_every_stub_signature_matches_the_live_function() -> None:
     """The full-signature pin: for every exported function, the stub's
     parameter names in order, keyword-only markers, and literal defaults must
@@ -255,10 +276,10 @@ def test_every_stub_signature_matches_the_live_function() -> None:
 def test_the_guard_itself_catches_each_drift_axis() -> None:
     """The guard's teeth, proven: mutating a copy of the pyi text on each
     axis (a missing keyword argument, a changed default, a lost keyword-only
-    marker, a dropped annotation, a vanished constant entry) must make the
-    relevant comparison disagree; a drift guard that cannot fail is
-    decoration. Runs against an in-memory mutated parse; the shipped pyi is
-    untouched."""
+    marker, a dropped annotation, a vanished constant entry, a def shadowing
+    a constant entry) must make the relevant comparison disagree; a drift
+    guard that cannot fail is decoration. Runs against an in-memory mutated
+    parse; the shipped pyi is untouched."""
 
     def signature_of(source: str, name: str) -> list[tuple[str, str, Any]]:
         tree = ast.parse(source)
@@ -276,6 +297,13 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
             node.target.id
             for node in ast.parse(source).body
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+
+    def def_names(source: str) -> set[str]:
+        return {
+            node.name
+            for node in ast.parse(source).body
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
         }
 
     base = _PYI.read_text(encoding="utf-8")
@@ -314,3 +342,11 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
     assert missing_constant != base, "the mutation did not apply: fix the guard test"
     assert "CHARSET_B62" not in constant_names(missing_constant)
     assert "CHARSET_B62" in constant_names(base)
+    # Axis 6: a def shadows a published constant's entry (the partition
+    # pin): the name-set union is blind to the duplicate, and the
+    # signature test's constants continue-path would exempt the def from
+    # signature checking.
+    shadowed_constant = base + "\ndef CHARSET_B62(x: int) -> int: ...\n"
+    assert shadowed_constant != base, "the mutation did not apply: fix the guard test"
+    assert def_names(shadowed_constant) & constant_names(shadowed_constant) == {"CHARSET_B62"}
+    assert not (def_names(base) & constant_names(base))
