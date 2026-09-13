@@ -44,3 +44,10 @@ part anyway, so `await asyncio.to_thread(lambda: list(tors.word_bounds_iter(text
 covers the streaming shape when it is needed. Signatures are identical to the
 sync spellings, pinned by `tests/test_aio.py`; the stub `aio.pyi` is generated
 by `tools/gen_aio_stub.py`.
+
+The random-generation family (`random_string`, `random_hex`, `random_b62`,
+`random_b64url`, `uuid4`, `uuid7`) has no async twin either: every generator
+is a fast CPU/syscall call — one getrandom draw plus formatting, microseconds
+at real token/key sizes — not the detached-transform input class this module
+exists for. A thread hop would cost more than the call at every realistic
+size; call them directly from a coroutine.

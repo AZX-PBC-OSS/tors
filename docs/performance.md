@@ -228,6 +228,44 @@ document to the per-codepoint decoder):
 Outputs are differential-pinned identical across every one of these shapes;
 the wall contracts gate in `tests/test_performance.py`.
 
+## Random generation
+
+Measured on the dev box (Apple Silicon, quiet; min-of-25 after warm-up,
+`tests/test_performance.py`'s microsecond cells; criterion's
+`benches/random.rs` for the bench-side rows):
+
+- Against the stdlib expressions they replace — `secrets.token_hex`,
+  `secrets.token_urlsafe`, `uuid.uuid4` — the tors spellings win modestly at
+  every asserted size and sit at parity at the 64 B call-overhead floor:
+  hex 0.90-1.00x, urlsafe 0.78-0.92x, uuid4 0.85x (1.1µs vs 1.3µs). The
+  honest statement: both sides are one OS syscall plus SIMD-ish C
+  formatting, so the wall wins are small; the measured value of the tors
+  spelling is the GIL release (the generation cell in
+  `tests/test_gil_release.py`: a 1 MiB draw holds the loop's worst
+  heartbeat gap to ~11ms, the ping floor plus ~1ms of string marshalling)
+  and the seeded determinism, not a wall blowout.
+- The size ladder (criterion): `random_hex` ~1.0µs at 16-256 bytes (the
+  syscall floor), 4.1µs at 1 KiB, 260µs at 64 KiB; `random_b64url` within a
+  few percent of hex at every rung; `random_b62` (the char-sampling engine)
+  4.3µs for a 22-char id (one 1024-byte block fill for the whole id), 33µs
+  at 1 KiB, 2.1ms at 64 KiB chars.
+- `uuid4` full path (fresh `OsRng` fill + builder + format) vs the uuid
+  crate's own `Uuid::new_v4()`: ~parity, 1.06µs vs 1.05µs — and that
+  comparator is itself getrandom-per-call in uuid 1.26 (verified in its
+  source; the thread-cached engine is the separate opt-in `fast-rng`
+  feature), so the pair measures tors's wrapper tax over the crate's
+  equivalent: zero.
+- `uuid7`: 0.79-0.9µs. Against `uuid_utils` (the Rust-extension
+  incumbent, measured in a throwaway venv on the same box and interpreter,
+  3.14.7): `uuid_utils.uuid7` (native object return, process-local
+  counter engine) 0.04µs and `uuid_utils.compat.uuid7` (str return) 0.21µs
+  — 4-20x faster than tors, bought with exactly the statefulness tors
+  declines: a process-local monotonic counter (no syscall per call) where
+  tors draws fresh OS entropy per call for the family's fork-safety
+  contract. A strictly-monotonic counter is also a different uniqueness
+  promise (see docs/api.md's uuid7 boundary note); pick the product
+  promise, not just the number.
+
 ## Object content hashing
 
 `content_hash` vs the full stdlib spelling

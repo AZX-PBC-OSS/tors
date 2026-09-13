@@ -22,6 +22,17 @@ and does not reopen the case for a general pipeline object; beyond its
 sibling `CompiledPatterns`, nothing else in this library gets a persistent
 handle.
 
+The random-generation family is the doctrine's strongest case, not an
+exception: even its entropy source is stateless. The unseeded spelling draws
+fresh bytes from the operating system's CSPRNG on every call (no cached
+userspace engine, no thread-local stream), which is exactly why it is
+fork-safe — a `fork()` child cannot inherit a parent's stream because there
+is no stream state to inherit, `secrets`' own semantics. The seeded spelling
+is a pure function of (seed, arguments): nothing carries across calls there
+either. A faster thread-cached engine (what `uuid_utils`' counter and the
+uuid crate's `fast-rng` feature ship) is a stateful design tors deliberately
+declines for this family; see the API reference's security contract.
+
 ## Scope cuts
 
 The cuts below are decisions, not oversights:
@@ -46,6 +57,17 @@ The cuts below are decisions, not oversights:
   would reopen the regex-semantics question this cut closes. New scrubs
   arrive as new named rules with their own pinned contracts
   (`strip_controls` is the family's first member), never as parameters.
+- **A general RNG engine surface.** The random-generation family is a
+  closed set of named generators — `random_string`, `random_hex`,
+  `random_b62`, `random_b64url`, `uuid4`, `uuid7` — over exactly two
+  entropy spellings: fresh OS CSPRNG bytes per call (the default, the
+  secrets-safe one), or a seed-keyed ChaCha20 stream for reproducible
+  tests and fixtures. tors does not expose a PRNG handle, a stream/next
+  API, or distribution samplers; `seed=` is a fixture tool, never an
+  entropy source. The hard parts are maintained crates under the
+  dependency policy (rand's `OsRng`, rand_chacha's stream, uuid's field
+  builders, const-hex, base64); what tors owns is the glue — the
+  block-buffered word sampler and Lemire's unbiased index draw.
 - **Schema-aware JSON/YAML coercion.** The JSON side moved IN with the
   `repair_json` family: syntax repair of malformed JSON and schema-guided
   alignment/coercion against a JSON Schema are algorithms (a repair parser's
@@ -136,3 +158,15 @@ The cuts below are decisions, not oversights:
 - **`tf_idf`/`bm25_rank` make no relevance claim.** Both are correctly
   implemented, well-specified ranking formulas; neither promises retrieval
   quality for any particular corpus or query.
+- **Seeded random output is predictable.** `seed=` on the random-generation
+  family is a reproducible-fixture tool: the output is a pure function of
+  the seed, fully predictable from it, and never safe for secrets, keys, or
+  tokens. The unseeded spelling (fresh OS entropy per call, fork-safe) is
+  the secrets-safe one; the distinction is the family's whole security
+  contract, stated on every surface.
+- **`uuid7` is probabilistically unique, not monotonic.** 48 Unix
+  milliseconds + 74 random bits per call: same-millisecond calls order by
+  their random bits, and a backwards clock step flows straight into the
+  timestamp. `uuid_utils`' strictly-monotonic counter (process-local
+  state, no syscall per call) is a different product promise, not a
+  missing feature.

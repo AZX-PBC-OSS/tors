@@ -16,6 +16,8 @@ commit.
 
 from __future__ import annotations
 
+import time
+
 import tors
 
 
@@ -339,3 +341,45 @@ class TestTranscriptRecipeExamples:
             "they asked for a follow-up meeting. The budget holds."
         )
         assert tors.sentence_bounds(cue) == [(0, 8), (8, 99), (99, 116)]
+
+
+class TestRandomGenerationExamples:
+    """docs/api.md's random-generation section, pinned: the seeded examples
+    are deterministic, so their literals are exact pins; the unseeded
+    example (a fresh OS draw every call) and the uuid7 timestamp
+    round-trip are pinned by shape, exactly the split the doc's own
+    comments state. If one of these fails after an intentional change, the
+    doc and this pin move together, in the same commit."""
+
+    def test_family_intro_examples(self) -> None:
+        # "len(tors.random_hex(32)) / # 64": the unseeded spelling's shape.
+        assert len(tors.random_hex(32)) == 64
+        # The deterministic spelling's literal.
+        assert tors.random_hex(16, seed=42) == "7848b5d711bc9883996317a3f9c90269"
+
+    def test_random_string_example(self) -> None:
+        assert tors.random_string(12, "abcdef", seed=42) == "dcabacecacae"
+
+    def test_random_b62_example(self) -> None:
+        assert tors.random_b62(22, seed=0) == "1yrBtE6FUlG59Zjj3K2vVn"
+
+    def test_random_b64url_example(self) -> None:
+        # 9 ≡ 0 mod 3: no padding either way, the doc's own parenthetical.
+        assert tors.random_b64url(9, seed=7) == "GUVKJ7dS-QWQ"
+        assert tors.random_b64url(9, padded=True, seed=7) == "GUVKJ7dS-QWQ"
+
+    def test_uuid4_example(self) -> None:
+        assert tors.uuid4(seed=42) == "7848b5d7-11bc-4883-9963-17a3f9c90269"
+
+    def test_uuid7_timestamp_round_trip_example(self) -> None:
+        # The doc's caller-visible contract: the canonical string's first
+        # two dash-free groups decode to the call's Unix epoch
+        # milliseconds. Shape-pinned (the draw and the clock are both
+        # live), the same ±60s window tests/test_random.py asserts.
+        before = time.time() * 1000
+        value = tors.uuid7()
+        after = time.time() * 1000
+        assert len(value) == 36
+        assert value[14] == "7"
+        ts = int(value[:8] + value[9:13], 16)
+        assert before - 60_000 <= ts <= after + 60_000

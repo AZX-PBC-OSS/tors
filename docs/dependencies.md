@@ -36,11 +36,11 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0) |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | UAX #29 grapheme/word tables (Unicode 17.0.0) |
 | sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's and content_hash's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
-| const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding |
+| const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding (finalize) and `random_hex`'s 2n-lowercase-hex formatting |
 | md-5 | 0.11.0 | MIT OR Apache-2.0 | `md5_hex`'s engine (checksum/ETag/legacy-interop only, never security); already resolved in the lock as the documents tree's (pdf_oxide/lopdf) dependency before the hashing surface made it direct, so the direct edge added no new package — the aho-corasick/encoding_rs precedent |
 | sha1 | 0.11.0 | MIT OR Apache-2.0 | `sha1_hex`'s engine (checksum/legacy-interop only, never security); default-features off (the digest computation needs none of the crate's std conveniences) |
 | hmac | 0.13.0 | MIT OR Apache-2.0 | `hmac_sha256_hex`'s RFC 2104 HMAC construction over the sha2 engine (the request-signing primitive); default-features off; accepts keys of any length (its `KeyInit::new` cannot fail for HMAC, verified against the vendored source), pulling ctutils/cmov (digest 0.11's constant-time utilities, Apache-2.0 OR MIT) — the lock's only additions from the hashing surface, 4 packages total incl. sha1 and hmac themselves |
-| base64 | 0.23.1 | MIT OR Apache-2.0 | RFC 4648 encode/decode core, `simd-unsafe` feature enabled (the crate's own AVX2/NEON kernels, runtime-detected with a scalar fallback: already-shipped, widely-exercised unsafe code upstream, not written in tors) |
+| base64 | 0.23.1 | MIT OR Apache-2.0 | RFC 4648 encode/decode core (`b64_encode_bytes`/`b64_decode`'s `STANDARD` engine, `random_b64url`'s `URL_SAFE`/`URL_SAFE_NO_PAD` engines), `simd-unsafe` feature enabled (the crate's own AVX2/NEON kernels, runtime-detected with a scalar fallback: already-shipped, widely-exercised unsafe code upstream, not written in tors) |
 | memchr | 2.8.3 | Unlicense OR MIT | SIMD sentinel scans |
 | simdutf8 | 0.1.5 | MIT OR Apache-2.0 | SIMD UTF-8 validity scan |
 | similar | 3.2.0 | Apache-2.0 | Myers diff engine for diff_opcodes |
@@ -55,14 +55,18 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | serde_json | 1 | MIT OR Apache-2.0 | the JSON interchange type the validator works over; already in the tree as criterion's transitive, so the direct edge adds no new package (the aho-corasick/encoding_rs precedent) |
 | regex | 1 | MIT OR Apache-2.0 | json_repair's single-number extraction grammars (tier-3 prose/currency/percent tokens and the tier-4 separator readings); already in the tree transitively (aho-corasick/memchr elect it via other consumers), so the direct edge adds no new package |
 | jiff | 0.2 | MIT OR Unlicense | json_repair's date/time normalization engine (`format: date`/`date-time`/`time`): calendar + timezone-instant math from the datetime crate the Rust ecosystem's own docs point at (the memchr Unlicense-election precedent); default-features off, std only, no TZDB backend: the accept-list shapes need none |
+| rand | 0.9.5 | MIT OR Apache-2.0 | the random-generation family's unseeded OS entropy source (`rand::rngs::OsRng`, a re-export of rand_core's zero-sized handle over the getrandom crate's syscall): default-features off, `os_rng` only — none of rand's samplers, distributions, or thread-rng machinery is used (tors owns the u64 stream consumption, Lemire's method, documented in random_impl.rs); already in the lock as the dev tree's transitive, so the direct edge adds no new package (the serde_json precedent) |
+| rand_chacha | 0.9.0 | MIT OR Apache-2.0 | the seeded spelling's deterministic ChaCha20 stream (`ChaCha20Rng::seed_from_u64`, rand_core's PCG32 derivation, re-implemented by the tests' oracle); default-features off (std unneeded); already in the lock as the dev tree's transitive, so no new package; pulls ppv-lite86 (MIT OR Apache-2.0, the SSE2 backend) alongside rand_core |
+| rand_core | 0.9.5 | MIT OR Apache-2.0 | the traits the engine speaks directly (`SeedableRng::seed_from_u64`, `RngCore`/`TryRngCore` for the two fill spellings) and the documented-stable PCG32 seed derivation the seeded pins freeze; no features (the trait surface is core); no new package (already in the tree via rand and rand_chacha) |
 | twox-hash | 2.1.4 | MIT | minhash_signature's XXH64 shingle hash: the frozen-spec algorithm (the digest for a given seed and byte stream is part of the xxHash spec, not the crate's to change), which is exactly the stability the hash half of the signature's determinism contract needs (the other, version-sensitive half is the UAX #29 segmentation via unicode-segmentation -- see api.md's determinism boundary note); default-features off with xxhash64+std only, a zero-dependency leaf that way (the crate's defaults pull `rand` for a random-builder API tors never touches); 240M downloads, releases into 2026-08 |
-| uuid | 1.26.0 | Apache-2.0 OR MIT | uuid_parse/uuid_version/uuid7_timestamp_ms's hex-grammar engine (`src/uuid_impl.rs`): the uuid-rs org crate adopted for the structural parse + canonical encode (the strict-canonical layer on top stays tors's — the crate's parse_str deliberately accepts the loose forms tors rejects, so tors enforces byte-equality with the re-encoded canonical form); with default-features=false: parse/from_bytes/encode need no features and the bare-tree config pulls zero transitive dependencies (`cargo tree`-verified; the bare tree resolves defaults only through the documents engine tree's cfb/pdf_oxide edges, which are feature-gated out of the base wheel); already in the lock as cfb's and pdf_oxide's dependency (the documents engine tree), so the direct edge adds no new package (the aho-corasick/serde_json precedent) — the base wheel gains one zero-dependency crate, the documents wheel gains nothing |
+| uuid | 1.26.0 | Apache-2.0 OR MIT | one crate, two consumers: the field-reading trio's hex-grammar engine (uuid_parse/uuid_version/uuid7_timestamp_ms, `src/uuid_impl.rs`: parse + canonical encode, the strict-canonical layer staying tors's — the crate's parse_str deliberately accepts the loose forms tors rejects, so tors enforces byte-equality with the re-encoded canonical form) and the random-generation family's field layout and canonical formatting (tors draws its own bytes and hands them to zero-feature builders — `Builder::from_random_bytes`, `Builder::from_unix_timestamp_millis`, both feature-free, verified in the resolved source; the crate's `v4`/`v7`/`rng` features gate only its own-rng constructors, which tors never calls, and `rng` itself is getrandom-per-call in 1.26, not a thread cache); already in the lock as the documents engine tree's transitive (cfb's and pdf_oxide's dependency), so the direct edge adds no new package (the aho-corasick/serde_json precedent) — and the dev-side `v4` feature (the bench's `new_v4()` comparator) unifies only into test/bench builds |
 | pdf_oxide *(optional, `documents`)* | 0.3.78 | MIT OR Apache-2.0 | the documents payload's PDF engine (two-column reading order, link annotations, headings); default features only, and the caret bounds the 0.x line (see Cargo.toml's own comment for the measured rationale) |
 | anydoc *(optional, `documents`)* | 0.2.4 | MIT | the payload's office/text engine (doc/docx, xls/xlsx, ppt/pptx, rtf, odt/ods/odp, epub, csv) |
 | office_oxide *(optional, `documents`)* | 0.1.10 | MIT OR Apache-2.0 | the payload's caller-selectable `backend="oxide"` lane; already compiled in via pdf_oxide's tree, so the direct edge adds no new package |
 | html-to-markdown-rs *(optional, `documents`)* | 3.12 | MIT | the payload's HTML engine; default-features off (its optional HTTP/MCP stack stays out) |
 | criterion *(dev)* | 0.8.2 | Apache-2.0 OR MIT | the benchmark harness |
 | strsim *(dev)* | 0.11.1 | MIT | differential oracle for levenshtein/jaro/jaro_winkler tests |
+| uuid *(dev, `v4` feature)* | 1.26.0 | Apache-2.0 OR MIT | the random bench's `Uuid::new_v4()` comparator (the crate's own getrandom-per-call constructor — verified in its source; the thread-cached engine is the separate opt-in `fast-rng` feature): as a dev-dependency its features unify only into test/bench builds, never the published crate's |
 
 ## Maintenance notes
 
@@ -150,6 +154,15 @@ resolved in the lock as the documents tree's dependency, so the direct edge
 added no new package. The gate re-checks
 every new entry against the allowlist on every run: the MIT-0 license it
 flagged on the way in (borrow-or-share) is recorded above and in `deny.toml`.
+
+The random-generation family's direct edges (rand, rand_chacha, rand_core,
+uuid) grew the lock by ZERO packages — every one was already resolved as a
+dev-tree (criterion) or engine-tree transitive, the serde_json precedent
+applied four times over. What grew is the base wheel's runtime closure, by
+exactly five crates (rand, rand_core, rand_chacha, ppv-lite86, uuid;
+getrandom 0.3 was already in the base runtime graph via jsonschema's ahash),
+all of them `MIT OR Apache-2.0`/`Apache-2.0 OR MIT` and all already
+license-gated in their dev/engine positions.
 
 The four `documents` engines are the same story one feature later:
 feature-gated (default OFF), so they are absent from the base wheel's build

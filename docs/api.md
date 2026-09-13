@@ -3915,6 +3915,181 @@ tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 # ('R901096', 'R901096')
 ```
 
+## Random generation (`random_string` / `random_hex` / `random_b62` / `random_b64url` / `uuid4` / `uuid7`)
+
+The universally hand-rolled helpers — token hex, urlsafe tokens, base62 ids,
+UUIDv4/v7 — as fast GIL-free tors primitives. The Python incumbents (`secrets`,
+`uuid`, `uuid_utils`) hold the GIL through their formatting passes; tors runs
+the whole draw-plus-format pass under one `py.detach`.
+
+**The security contract, stated first because it is the one way to misuse this
+family.** Two spellings, never interchangeable:
+
+- **Unseeded (the default)**: fresh bytes from the operating system's CSPRNG
+  on every call — `getrandom`/`getentropy` through `rand`'s `OsRng`, drawn
+  per call. There is no process or thread RNG state anywhere in tors, so a
+  `fork()` child cannot inherit and replay a parent's stream — fork-safe,
+  matching stdlib `secrets`' own per-call semantics exactly. This is the
+  spelling safe for keys, tokens, and secrets.
+- **Seeded (`seed=`)**: a deterministic ChaCha20 stream keyed by the seed.
+  The output is a pure function of (seed, arguments), **fully predictable
+  from the seed** — a reproducible-test/fixture tool, **NEVER safe for
+  secrets, keys, or tokens**: any adversary who learns the seed can
+  reproduce the stream (and 64-bit seeds are brute-forceable). rand_core's
+  own docs say the same about the derivation ("not suitable for
+  cryptography ... the input size is only 64 bits"). Use the unseeded
+  spelling for anything an adversary must not guess.
+
+The seeded mode is deterministic cross-platform (ChaCha20 plus Lemire
+sampling plus the crate formatters are platform-independent arithmetic), so
+seeded outputs are safe to pin as test fixtures; `tests/test_random.py`
+pins them two ways — against committed literals, and against an
+independent Python re-implementation of the documented construction
+(rand_core's PCG32 seed derivation, the RFC 8439 ChaCha block, Lemire's
+nearly-divisionless draw).
+
+Sampling has **no modulo bias**: `random_string`/`random_b62` draw alphabet
+indices with Lemire's nearly-divisionless method (reject exactly the draws
+whose product low-half falls below `2^64 mod n`, leaving every output the
+same number of preimages — uniform by construction; a plain `x % n` does not
+have this property). The byte-fill spellings (`random_hex`, `random_b64url`,
+`uuid4`) sample raw bytes, uniform by construction. One engine subtlety the
+tests pin honestly: `random_hex(n, seed=s)` and
+`random_string(2n, "0123456789abcdef", seed=s)` agree in distribution but
+not in value — byte-fill consumes n stream bytes while char sampling
+consumes at least 2n u64 draws, so the same seed gives different outputs.
+
+Errors follow the repo taxonomy: a negative `length`/`n_bytes` raises
+`ValueError` naming the parameter and the accepted form; an empty alphabet
+raises `ValueError`; non-`str` alphabet, non-`int` length, and non-`int`
+non-`None` seed raise `TypeError`; an alphabet holding lone surrogates
+raises `UnicodeEncodeError` (the repo-wide str contract). `0` is legal
+everywhere and returns `""` (`secrets.token_hex(0)`'s own shape). There is
+no size cap: memory is the only bound.
+
+No `tors.aio` twins: these are fast CPU/syscall calls, not the
+detached-transform input class the async surface exists for
+([Async use](async.md)).
+
+```python
+len(tors.random_hex(32))          # the unseeded spelling: fresh OS draw
+# 64                                # every call — never a pinned literal
+
+tors.random_hex(16, seed=42)      # the deterministic spelling: pin it in tests
+# '7848b5d711bc9883996317a3f9c90269'
+```
+
+### `tors.random_string`
+
+```python
+def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str: ...
+```
+
+`length` characters sampled uniformly (Lemire, no modulo bias at any
+alphabet size) from any non-empty `alphabet` str, in one GIL-released pass.
+Multibyte characters are sampled as characters: the output is always exactly
+`length` characters over the alphabet's own characters. No size cap
+(`u64`-based sampling handles any alphabet a `str` can hold).
+
+```python
+tors.random_string(12, "abcdef", seed=42)
+# 'dcabacecacae'
+```
+
+### `tors.random_hex`
+
+```python
+def random_hex(n_bytes: int, *, seed: int | None = None) -> str: ...
+```
+
+`secrets.token_hex(n_bytes)` parity: `2 * n_bytes` lowercase hex characters
+from one `n_bytes` entropy fill. The hex-key spelling.
+
+```python
+tors.random_hex(16, seed=42)
+# '7848b5d711bc9883996317a3f9c90269'
+```
+
+### `tors.random_b62`
+
+```python
+def random_b62(length: int, *, seed: int | None = None) -> str: ...
+```
+
+Exactly `random_string(length, BASE62_CHARS)` — one engine, delegated — over
+`[0-9A-Za-z]`: the URL-safe, case-sensitive, human-transcribable id
+spelling.
+
+```python
+tors.random_b62(22, seed=0)
+# '1yrBtE6FUlG59Zjj3K2vVn'
+```
+
+### `tors.random_b64url`
+
+```python
+def random_b64url(n_bytes: int, *, padded: bool = False, seed: int | None = None) -> str: ...
+```
+
+RFC 4648 §5 urlsafe base64 (`A-Za-z0-9-_`; `+` and `/` never) of one
+`n_bytes` entropy fill. `secrets.token_urlsafe(n_bytes)` parity at the
+default `padded=False` (length `ceil(4n/3)`, no `=` tail); `padded=True`
+adds the `=` tail per the RFC (`(3 - n mod 3) mod 3` of them, total
+`4 * ceil(n/3)`).
+
+```python
+tors.random_b64url(9, seed=7), tors.random_b64url(9, padded=True, seed=7)
+# ('GUVKJ7dS-QWQ', 'GUVKJ7dS-QWQ')   # 9 ≡ 0 mod 3: no padding either way
+```
+
+### `tors.uuid4`
+
+```python
+def uuid4(*, seed: int | None = None) -> str: ...
+```
+
+An RFC 4122 version-4 UUID string (36 chars, lowercase, hyphens at
+8/13/18/23) from one 16-byte entropy fill — the stdlib `uuid.uuid4()`
+spelling, GIL-released, with the family's optional deterministic mode.
+Uniqueness is probabilistic (122 random bits), the same guarantee
+`uuid.uuid4()` carries.
+
+```python
+tors.uuid4(seed=42)
+# '7848b5d7-11bc-4883-9963-17a3f9c90269'
+```
+
+### `tors.uuid7`
+
+```python
+def uuid7() -> str: ...
+```
+
+An RFC 9562 version-7 UUID string: 48-bit Unix-epoch milliseconds + version
+7 + variant + 74 random bits (12-bit `rand_a` + 62-bit `rand_b`) from one
+OS draw — the sortable-id spelling. **No `seed=` parameter, by design**: the
+timestamp is external state, so a seeded uuid7 would still vary with the
+clock — the deterministic tool is `uuid4(seed=...)`.
+
+**The uniqueness boundary, stated honestly**: probabilistically unique
+(birthday bound over 74 random bits within a millisecond, distinct
+timestamps across milliseconds), **NOT counter-monotonic**. Two calls within
+one millisecond are ordered by their random bits, not by call order; a
+backwards clock step flows straight into the timestamp. `uuid_utils`'
+strict-monotonic counter is a different product promise — its engine keeps
+process-local counter state (and pays no syscall per call, which is why it
+benchmarks faster; see [Performance](performance.md)), where tors draws
+fresh OS entropy per call for the same fork-safety the rest of this family
+carries. The caller-visible contract is the timestamp itself:
+
+```python
+u = tors.uuid7()
+u
+# '01a09927-e261-7153-8d74-283f6d488162'
+int(u[:8] + u[9:13], 16)  # the call's Unix epoch milliseconds
+# 1789275923041
+```
+
 ## `tors.first_invalid_charset`
 
 ```python
