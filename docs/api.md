@@ -679,6 +679,73 @@ tors.count_matches(["cat", "catalogue"], "the cat sat in the catalogue")
 # 2
 ```
 
+## `tors.contains_unescaped` / `tors.find_unescaped`
+
+```python
+def contains_unescaped(haystack: bytes, needle: bytes) -> bool: ...
+def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
+```
+
+Escape-parity-aware byte search in one GIL-released native pass: an occurrence of
+`needle` at byte offset `i` counts only when the maximal run of `\` immediately
+before `i` has **even** length (an empty run is even, so an occurrence at offset
+0 counts). An odd run means the run's backslash pairs escape each other and the
+leftover one escapes the occurrence's first byte — the occurrence is literal
+text, not the sequence. `find_unescaped` returns the offset of the first
+unescaped occurrence, `-1` when none exists (`bytes.find`'s own sentinel, kept
+over `Optional[int]` deliberately: it is the spelling stdlib callers already
+branch on); `contains_unescaped` is the boolean spelling of the same question.
+
+The motivating case is JSON, and it is byte-ambiguous by construction: a
+serializer (orjson is the measured consumer) renders a real NUL codepoint
+(U+0000) as the six-byte escape text `\u0000` and the literal six-character
+text of the same spelling as seven bytes (the backslash itself escaped), and
+the second contains the first at offset +1 — so a plain substring test answers
+"yes" for both. PostgreSQL settles it downstream: a real NUL is fatal in a
+`jsonb` column (SQLSTATE 22P05), the literal text is fine, so a pipeline that
+binds serialized JSON must know which one it holds before the INSERT — reject
+the wrong one and you either refuse legal text or ship a value that fails the
+bind. The stdlib's only spelling is find-then-re-parse-the-whole-value-and-
+recursively-walk-it; the parity rule answers from the raw bytes directly:
+
+```python
+tors.find_unescaped(b'"a\\u0000b"', b"\\u0000")  # 2: the real NUL escape
+tors.find_unescaped(b'"a\\\\u0000b"', b"\\u0000")  # -1: the literal text
+tors.contains_unescaped(b'"a\\\\u0000b"', b"\\u0000")  # False
+```
+
+Contract details, each pinned in tests/test_unescaped_scan.py:
+
+- **The offsets are byte offsets, not `str` indices**: the return indexes the
+  `bytes` it was handed — `haystack[i:i + len(needle)] == needle` for every
+  answer that is not `-1`. Over multibyte UTF-8 content the byte offset and the
+  decoded text's character offset are different numbers (`find_patterns` needed
+  a byte→char mapping for exactly this confusion; this API has none, because
+  the input is bytes and the contract is byte-space end to end).
+- **Rejected hits advance the scan one byte past the hit, not past the whole
+  match**, so self-overlapping needles stay correct: the two-byte needle
+  `b"00"` in a haystack of one backslash then `000` rejects the hit at 1 and
+  finds the overlapping live hit at 2, which a resume-at-match-end scan would
+  skip entirely.
+- An empty needle raises `ValueError("empty needle")` (it would match at every
+  position and has no parity meaning, the `find_patterns` empty-pattern
+  rationale); both arguments take exactly `bytes` (`bytearray` / `memoryview` /
+  `str` raise `TypeError`, the bytes-in surface's zero-copy immutable-borrow
+  contract).
+- **No JSON knowledge lives in the functions**: parity is the mechanism;
+  "the needle is an escape sequence, so even means live and odd means literal"
+  is the caller's reading of it. Any backslash-escaped grammar (printf format
+  strings, shell quotes, regex sources) can drive the same scan.
+
+GIL behavior: `utf8_is_valid`'s class exactly — two zero-copy `PyBytes` borrows,
+the whole memmem scan plus the per-hit parity walk under one `py.detach`, and
+`bool`/`int` returns, so there is no marshalling class at all and no error path
+past the empty-needle `ValueError` (raised under the GIL, before the detach).
+The 12 MiB pass sits well under the 10 ms heartbeat floor (memchr-class;
+measured 0.25 ms no-match and 0.79 ms over a 72,520-rejected-hit false-positive
+corpus), so the heartbeat cells are ceiling-only. No aio twin: a sub-millisecond
+call needs no thread hop.
+
 ## `tors.CompiledPatterns`
 
 ```python

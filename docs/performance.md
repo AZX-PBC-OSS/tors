@@ -34,6 +34,13 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
+- `find_unescaped`/`contains_unescaped`: the escape-parity scan answers "is
+  this `\u0000` a real NUL or the literal text?" straight from raw serialized
+  JSON in one detached pass — measured 0.25 ms at 12 MiB with no occurrence
+  and 0.79 ms over a 72,520-rejected-hit false-positive corpus, where the
+  hand-rolled find-and-count-backslashes loop it replaces takes 13 ms (and
+  the confirm-by-re-parse guard the algorithm was lifted from pays a full
+  parse plus a recursive walk per prefilter hit).
 - The diffing and fuzzy functions bound their superlinear worst cases with
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a

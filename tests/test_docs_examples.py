@@ -95,6 +95,16 @@ class TestApiReferenceExamples:
             (132, 145),
         ]
 
+    def test_unescaped_scan_json_renderings(self) -> None:
+        # docs/api.md's contains_unescaped/find_unescaped section, pinned
+        # directly (the literals the doc shows, both spellings): the real
+        # NUL escape and the literal text differ only in the backslash run
+        # before the shared six bytes — offset 2 vs -1, True vs False.
+        assert tors.find_unescaped(b'"a\\u0000b"', b"\\u0000") == 2
+        assert tors.find_unescaped(b'"a\\\\u0000b"', b"\\u0000") == -1
+        assert tors.contains_unescaped(b'"a\\\\u0000b"', b"\\u0000") is False
+        assert tors.contains_unescaped(b'"a\\u0000b"', b"\\u0000") is True
+
 
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:
