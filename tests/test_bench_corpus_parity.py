@@ -187,7 +187,15 @@ def test_every_bench_builds_its_corpora_from_the_common_module() -> None:
     triplicated corpus recipes cannot quietly re-grow inside a bench file;
     the corpus identity above is only meaningful while the benches actually
     build from ``benches/common/mod.rs``."""
-    for name in ("normalize.rs", "bytes.rs", "text.rs", "utf8.rs", "diff.rs", "search.rs"):
+    for name in (
+        "normalize.rs",
+        "bytes.rs",
+        "text.rs",
+        "utf8.rs",
+        "diff.rs",
+        "search.rs",
+        "canon.rs",
+    ):
         source = (_BENCHES_DIR / name).read_text(encoding="utf-8")
         assert _USES_COMMON.search(source), (
             f"benches/{name} no longer declares `mod common;`: its corpora are "

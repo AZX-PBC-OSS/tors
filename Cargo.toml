@@ -247,6 +247,10 @@ name = "normalize"
 harness = false
 
 [[bench]]
+name = "canon"
+harness = false
+
+[[bench]]
 name = "bytes"
 harness = false
 
