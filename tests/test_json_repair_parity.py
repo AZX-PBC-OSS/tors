@@ -353,6 +353,145 @@ class TestDifferentialParity:
             json_repair_lib.loads(raw, strict=True, skip_json_loads=True)
 
 
+class TestLoneSurrogateEscapeDivergence:
+    r"""The §9.2 lone-surrogate-escape class, pinned on both engines.
+
+    A `\uXXXX` escape decoding to an unpaired surrogate (a high half not
+    directly followed by a `\udCXX` low-half escape, or a bare low half) is
+    the one string-value class where byte-parity with the oracle is
+    architecturally out of reach, so it is classified (§9.2; api.md's "Lone
+    surrogates" divergence entry; the pinned unit tests in
+    src/json_repair/string.rs and src/json_repair/strict.rs) instead of
+    oracle-compared for equality. Mechanism: upstream decodes every `\u`
+    escape with chr(int(hex, 16)) and a Python str carries the raw lone
+    surrogate onward — json.dumps re-emits it as the identical escape text
+    on the str lane, and the raw surrogate itself comes back on the loads
+    lane (and with ensure_ascii=False). A Rust String cannot hold
+    U+D800..U+DFFF (char::from_u32 rejects the block), so the port's escape
+    decoder maps a lone half to U+FFFD. Preserving the escape TEXT in the
+    value instead would match the str lane but corrupt the value (six
+    characters of escape text where the oracle holds one surrogate), still
+    diverge on the loads lane (pyo3 marshals strings through Rust str), and
+    break the str/loads internal consistency pinned below — a full fix
+    needs a raw-slice value representation, a maintainer decision, not a
+    parser patch.
+
+    This pin holds the classified line on the exact minimal shapes so a
+    change on EITHER side — a json-repair re-sync that alters the class, or
+    a tors policy change — fails here and forces re-classification, the
+    same tripwire role the §9.4/§9.5/§9.6 pins above play for their
+    classes. The hypothesis lanes stay honest by construction instead: the
+    mutation alphabets exclude the surrogate block and backslash (see
+    _base_text), so this class is unreachable there by design.
+    """
+
+    def test_oracle_preserves_the_lone_surrogate(self) -> None:
+        # The str lane: json.dumps re-emits the raw lone surrogate as the
+        # identical escape text, on the repair lane (skip_json_loads) and
+        # the json.loads fast lane alike.
+        for raw, want in [
+            ('["\\ud800"]', '["\\ud800"]'),
+            ('["\\udc00"]', '["\\udc00"]'),
+            ('{"k":"\\ud800"}', '{"k": "\\ud800"}'),
+            ('{"\\ud800": 1}', '{"\\ud800": 1}'),
+            ('["\\ud83d x"]', '["\\ud83d x"]'),
+            ('["a\\ud800b"]', '["a\\ud800b"]'),
+        ]:
+            assert json_repair_lib.repair_json(raw, skip_json_loads=True) == want
+            assert json_repair_lib.repair_json(raw) == want
+        # ensure_ascii=False: the raw surrogate itself, unescaped.
+        assert json_repair_lib.repair_json(
+            '["\\ud800"]', skip_json_loads=True, ensure_ascii=False
+        ) == '["\ud800"]'
+        # The loads lane: the raw lone surrogate inside the Python str,
+        # both lanes (the fast lane is stdlib json.loads semantics).
+        assert json_repair_lib.loads('["\\ud800"]', skip_json_loads=True) == ["\ud800"]
+        assert json_repair_lib.loads('["a\\ud800b"]', skip_json_loads=True) == ["a\ud800b"]
+        assert json_repair_lib.loads('["\\ud800"]') == ["\ud800"]
+
+    def test_tors_maps_lone_halves_to_the_replacement_char(self) -> None:
+        # §9.2: the escape decoder's lone-surrogate arm (string.rs) and the
+        # strict fast path's (strict.rs) agree — U+FFFD on every spelling.
+        for raw, want in [
+            ('["\\ud800"]', '["\\ufffd"]'),
+            ('["\\udc00"]', '["\\ufffd"]'),
+            ('{"k":"\\ud800"}', '{"k": "\\ufffd"}'),
+            ('{"\\ud800": 1}', '{"\\ufffd": 1}'),
+            ('["\\ud83d x"]', '["\\ufffd x"]'),
+            ('["a\\ud800b"]', '["a\\ufffdb"]'),
+        ]:
+            assert tors.repair_json(raw, skip_json_loads=True) == want
+            assert tors.repair_json(raw) == want
+        # ensure_ascii=False: the replacement char itself, unescaped.
+        assert tors.repair_json(
+            '["\\ud800"]', skip_json_loads=True, ensure_ascii=False
+        ) == '["\ufffd"]'
+        # The loads and diagnostics spellings agree with the str spelling.
+        assert tors.repair_json_loads('["\\ud800"]', skip_json_loads=True) == ["\ufffd"]
+        assert tors.repair_json_loads('["a\\ud800b"]', skip_json_loads=True) == ["a\ufffdb"]
+        assert tors.repair_json_loads('["\\ud800"]') == ["\ufffd"]
+        value, _diags = tors.repair_json_diagnostics('["\\ud800"]', skip_json_loads=True)
+        assert value == ["\ufffd"]
+
+    def test_well_formed_pairs_stay_byte_identical_on_the_str_lane(self) -> None:
+        # A well-formed pair is NOT the divergence: the port combines the
+        # halves into the astral scalar and re-emits the identical pair
+        # bytes, and the oracle's raw halves serialize to the same text —
+        # byte-identical on both lanes, the repair lane included (the
+        # trailing comma forces it). A regression in the pair-vs-lone
+        # boundary (decode_surrogate_pair) diverges here.
+        for raw in ('["\\ud83d\\ude00"]', '["\\ud83d\\ude00",]'):
+            assert tors.repair_json(raw, skip_json_loads=True) == '["\\ud83d\\ude00"]'
+            assert tors.repair_json(raw, skip_json_loads=True) == (
+                json_repair_lib.repair_json(raw, skip_json_loads=True)
+            )
+        # The loads lane is the pair face of the same architecture line:
+        # tors combines (stdlib json.loads semantics, pinned natively in
+        # test_json_repair_native.py) while the oracle's repair parser
+        # leaves the two raw halves in the value.
+        assert tors.repair_json_loads('["\\ud83d\\ude00",]', skip_json_loads=True) == [
+            "\U0001F600"
+        ]
+        assert json_repair_lib.loads('["\\ud83d\\ude00",]', skip_json_loads=True) == [
+            "\ud83d\ude00"
+        ]
+
+    def test_tors_spellings_stay_internally_consistent(self) -> None:
+        # The invariant a naive "preserve the escape text in the value"
+        # fix would break: the loads spelling is exactly json.loads of the
+        # str spelling, on every shape and lane.
+        raws = [
+            '["\\ud800"]',
+            '["\\udc00"]',
+            '{"k":"\\ud800"}',
+            '{"\\ud800": 1}',
+            '["\\ud83d x"]',
+            '["a\\ud800b"]',
+            '["\\ud83d\\ude00",]',
+            '"\\ud800"',
+        ]
+        for raw in raws:
+            for kwargs in ({}, {"skip_json_loads": True}):
+                s = tors.repair_json(raw, **kwargs)
+                if s == "":
+                    continue
+                assert tors.repair_json_loads(raw, **kwargs) == json.loads(s)
+
+    def test_top_level_bare_string_sentinel_faces(self) -> None:
+        # The repair lane collapses a top-level lone-surrogate string to
+        # the '' sentinel on BOTH engines (the same collapse as '""'), so
+        # the top-level spelling is the one agreeing face of the class.
+        assert json_repair_lib.repair_json('"\\ud800"', skip_json_loads=True) == ""
+        assert tors.repair_json('"\\ud800"', skip_json_loads=True) == ""
+        assert json_repair_lib.loads('"\\ud800"', skip_json_loads=True) == ""
+        assert tors.repair_json_loads('"\\ud800"', skip_json_loads=True) == ""
+        # The default lane takes the json.loads fast path instead, where
+        # the §9.2 arm of the strict decoder shows the same classified
+        # split as the repair parser.
+        assert json_repair_lib.repair_json('"\\ud800"') == '"\\ud800"'
+        assert tors.repair_json('"\\ud800"') == '"\\ufffd"'
+
+
 _base_text = st.text(
     # bmp-only, no backslash: astral chars dump as surrogate-pair escapes
     # and a mutation landing inside one leaves a lone surrogate escape:
