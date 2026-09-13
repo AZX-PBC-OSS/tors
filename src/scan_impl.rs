@@ -353,6 +353,23 @@ pub fn utf8_byte_len(s: &str) -> usize {
 /// tests/test_performance.py record both lanes).
 const UTF16_COUNT_CHUNK: usize = 16;
 
+/// The single narrowing step shared by the core below: `2 * (codepoints
+/// + astral)` as checked arithmetic, `None` on overflow instead of
+/// wrapping. `u64` inputs make the step injectable at small scale —
+/// synthetic counts exercise the boundary without a gigabyte
+/// allocation — and portable: the `try_from` narrow is the only
+/// target-width-dependent point, so the 32-bit overflow path is covered
+/// by unit (see the combine test) rather than by a gigabyte fixture.
+///
+/// Tier note: 32-bit targets are tier-3 for this function — the
+/// overflow leg past ~1 GiB of astral-dense text is contract-pinned by
+/// the combine unit, not exercised in CI (wheels are 64-bit-only; no
+/// 32-bit leg builds this target).
+pub(crate) fn utf16_combine_counts(codepoints: u64, astral: u64) -> Option<usize> {
+    let doubled = codepoints.checked_add(astral)?.checked_mul(2)?;
+    usize::try_from(doubled).ok()
+}
+
 /// The UTF-16 byte length of `s` — 2 bytes per BMP codepoint, 4 per
 /// astral codepoint (the surrogate pair) — the answer
 /// `len(s.encode("utf-16-le"))` computes by allocating and copying the
@@ -375,13 +392,18 @@ const UTF16_COUNT_CHUNK: usize = 16;
 /// over concatenation, so the sweep is exhaustive) in
 /// `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
 ///
-/// The final doubling is checked arithmetic: on 32-bit targets
-/// `2 * (codepoints + astral)` can overflow `usize` past ~1 GiB of
-/// astral-dense text (the addition and the multiply both wrap in
-/// release), so both steps use `checked_add`/`checked_mul` and panic
-/// with an overflow message rather than wrapping silently — the
-/// Python wrapper maps this to `OverflowError` (see `src/py/scan.rs`);
-/// on 64-bit the check never fires (it would take exabytes).
+/// Fallible, no panic: the return is `Option<usize>` — `None` past
+/// ~1 GiB of astral-dense text on 32-bit targets (the only width on
+/// which the doubling can overflow `usize`). The accumulators are
+/// `u64`, so no per-chunk add can wrap before the single narrowing
+/// step: any `&str` is shorter than `isize::MAX` bytes, hence holds
+/// fewer than `isize::MAX` codepoints — far below `u64::MAX` — and the
+/// only checked point is the final [`utf16_combine_counts`] narrow,
+/// which the Python wrapper maps to `OverflowError` (see
+/// `src/py/scan.rs`). There is no `expect` on this path, in this
+/// module or the wrapper: overflow travels as a value, never as a
+/// panic (no unwinding, no `catch_unwind`). On 64-bit the `None` leg
+/// never fires (it would take exabytes).
 ///
 /// The cost model is the borrow's, the utf8 twin's exactly (ASCII
 /// zero-copy alias; cold-cache first call materializes-and-caches the
@@ -392,24 +414,29 @@ const UTF16_COUNT_CHUNK: usize = 16;
 /// surrogates too; the borrow's utf-8-flavored error and the stdlib's
 /// surrogatepass acceptance mode are the two honest differences — the
 /// wrapper's docs and the Python battery pin both).
-pub fn utf16_byte_len(s: &str) -> usize {
+pub fn utf16_byte_len(s: &str) -> Option<usize> {
     // The derivation's two counts, one chunked pass: one unit per
     // codepoint (its lead byte), one more per astral codepoint (its
-    // 4-byte lead) — doubled at the end. See the module docs for the
-    // identity and UTF16_COUNT_CHUNK's docs for the width.
+    // 4-byte lead) — doubled once at the end via utf16_combine_counts.
+    // See the module docs for the identity and UTF16_COUNT_CHUNK's
+    // docs for the width.
     //
     // The astral predicate is the closed range `0xF0..=0xF4`, not the
     // `>= 0xF0` shorthand: over valid UTF-8 the two count the same set
     // (`0xF5..=0xFF` never occur in a `&str`), and the closed range
     // fails safe — a stray high byte is refused rather than counted.
-    // The final `checked_add`/`checked_mul` refuses to wrap silently
-    // on 32-bit targets past ~1 GiB of astral-dense text (the Python
-    // wrapper maps the panic to `OverflowError`); on 64-bit it never
-    // fires.
+    //
+    // Accumulator widths (MEDIUM-4, stated once): `u64`, not `usize`.
+    // Per-chunk `+=` on `usize` would wrap in release before the final
+    // checked step on 32-bit past ~4 GiB of counted units; `u64`
+    // cannot wrap for any real `&str` (byte length < isize::MAX, so
+    // both counts are < 2^31 on 32-bit, < 2^63 on 64-bit — orders of
+    // magnitude below u64::MAX), leaving exactly one fallible point:
+    // the final narrow to `usize`.
     let bytes = s.as_bytes();
     let (chunks, remainder) = bytes.as_chunks::<UTF16_COUNT_CHUNK>();
-    let mut codepoints = 0usize;
-    let mut astral = 0usize;
+    let mut codepoints = 0u64;
+    let mut astral = 0u64;
     for chunk in chunks {
         let mut leads = 0u8;
         let mut four_byte_leads = 0u8;
@@ -417,17 +444,14 @@ pub fn utf16_byte_len(s: &str) -> usize {
             leads += ((b & 0xC0) != 0x80) as u8;
             four_byte_leads += matches!(b, 0xF0..=0xF4) as u8;
         }
-        codepoints += leads as usize;
-        astral += four_byte_leads as usize;
+        codepoints += leads as u64;
+        astral += four_byte_leads as u64;
     }
     for &b in remainder {
-        codepoints += ((b & 0xC0) != 0x80) as usize;
-        astral += matches!(b, 0xF0..=0xF4) as usize;
+        codepoints += ((b & 0xC0) != 0x80) as u64;
+        astral += matches!(b, 0xF0..=0xF4) as u64;
     }
-    codepoints
-        .checked_add(astral)
-        .and_then(|n| n.checked_mul(2))
-        .expect("utf16_byte_len overflow: input too large for usize on this target")
+    utf16_combine_counts(codepoints, astral)
 }
 
 #[cfg(test)]
@@ -509,28 +533,28 @@ mod utf16_byte_len_tests {
         // above it — including all four 4-byte lead values 0xF0-0xF4,
         // the rows an astral predicate that caught only 0xF0 would
         // answer 2 for and fail here.
-        assert_eq!(utf16_byte_len(""), 0);
-        assert_eq!(utf16_byte_len("a"), 2);
-        assert_eq!(utf16_byte_len("\u{7f}"), 2);
-        assert_eq!(utf16_byte_len("\u{80}"), 2);
-        assert_eq!(utf16_byte_len("\u{7ff}"), 2);
-        assert_eq!(utf16_byte_len("\u{800}"), 2);
-        assert_eq!(utf16_byte_len("\u{ffff}"), 2);
-        assert_eq!(utf16_byte_len("\u{10000}"), 4);
-        assert_eq!(utf16_byte_len("\u{40000}"), 4); // 0xF1 lead
-        assert_eq!(utf16_byte_len("\u{80000}"), 4); // 0xF2 lead
-        assert_eq!(utf16_byte_len("\u{c0000}"), 4); // 0xF3 lead
-        assert_eq!(utf16_byte_len("\u{10ffff}"), 4); // 0xF4 lead
+        assert_eq!(utf16_byte_len(""), Some(0));
+        assert_eq!(utf16_byte_len("a"), Some(2));
+        assert_eq!(utf16_byte_len("\u{7f}"), Some(2));
+        assert_eq!(utf16_byte_len("\u{80}"), Some(2));
+        assert_eq!(utf16_byte_len("\u{7ff}"), Some(2));
+        assert_eq!(utf16_byte_len("\u{800}"), Some(2));
+        assert_eq!(utf16_byte_len("\u{ffff}"), Some(2));
+        assert_eq!(utf16_byte_len("\u{10000}"), Some(4));
+        assert_eq!(utf16_byte_len("\u{40000}"), Some(4)); // 0xF1 lead
+        assert_eq!(utf16_byte_len("\u{80000}"), Some(4)); // 0xF2 lead
+        assert_eq!(utf16_byte_len("\u{c0000}"), Some(4)); // 0xF3 lead
+        assert_eq!(utf16_byte_len("\u{10ffff}"), Some(4)); // 0xF4 lead
     }
 
     #[test]
     fn mixed_content_answers_the_sum_of_its_unit_costs() {
-        assert_eq!(utf16_byte_len("caf\u{e9}"), 8);
-        assert_eq!(utf16_byte_len("\u{6771}\u{4eac}"), 4); // UTF-8 answers 6
-        assert_eq!(utf16_byte_len("\u{1f600}"), 4);
-        assert_eq!(utf16_byte_len("e\u{301}"), 4);
-        assert_eq!(utf16_byte_len("\u{1f468}\u{200d}\u{1f469}"), 4 + 2 + 4);
-        assert_eq!(utf16_byte_len("\u{0}"), 2); // a real NUL: one unit
+        assert_eq!(utf16_byte_len("caf\u{e9}"), Some(8));
+        assert_eq!(utf16_byte_len("\u{6771}\u{4eac}"), Some(4)); // UTF-8 answers 6
+        assert_eq!(utf16_byte_len("\u{1f600}"), Some(4));
+        assert_eq!(utf16_byte_len("e\u{301}"), Some(4));
+        assert_eq!(utf16_byte_len("\u{1f468}\u{200d}\u{1f469}"), Some(4 + 2 + 4));
+        assert_eq!(utf16_byte_len("\u{0}"), Some(2)); // a real NUL: one unit
     }
 
     #[test]
@@ -550,21 +574,21 @@ mod utf16_byte_len_tests {
             "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
         ];
         for row in rows {
-            assert_eq!(utf16_byte_len(row), naive_utf16_byte_len(row), "{row:?}");
+            assert_eq!(utf16_byte_len(row), Some(naive_utf16_byte_len(row)), "{row:?}");
         }
         let ascii = "k".repeat(1000);
-        assert_eq!(utf16_byte_len(&ascii), naive_utf16_byte_len(&ascii));
+        assert_eq!(utf16_byte_len(&ascii), Some(naive_utf16_byte_len(&ascii)));
         let cjk = "\u{6771}\u{4eac}".repeat(1000);
-        assert_eq!(utf16_byte_len(&cjk), naive_utf16_byte_len(&cjk));
+        assert_eq!(utf16_byte_len(&cjk), Some(naive_utf16_byte_len(&cjk)));
         let astral = "\u{1f600}".repeat(1000);
-        assert_eq!(utf16_byte_len(&astral), naive_utf16_byte_len(&astral));
+        assert_eq!(utf16_byte_len(&astral), Some(naive_utf16_byte_len(&astral)));
         // the corners, stated as identities the naive count also gives:
         // no astral -> 2 per codepoint for ALL BMP text ...
-        assert_eq!(utf16_byte_len(&cjk), 2 * cjk.chars().count());
+        assert_eq!(utf16_byte_len(&cjk), Some(2 * cjk.chars().count()));
         // ... pure ASCII -> additionally 2 per UTF-8 byte ...
-        assert_eq!(utf16_byte_len(&ascii), 2 * ascii.len());
+        assert_eq!(utf16_byte_len(&ascii), Some(2 * ascii.len()));
         // ... and every astral codepoint is the 4-byte pair.
-        assert_eq!(utf16_byte_len(&astral), 4000);
+        assert_eq!(utf16_byte_len(&astral), Some(4000));
     }
 
     #[test]
@@ -603,15 +627,15 @@ mod utf16_byte_len_tests {
             "\u{0}",
         ];
         for &a in &alphabet {
-            assert_eq!(utf16_byte_len(a), naive_utf16_byte_len(a));
+            assert_eq!(utf16_byte_len(a), Some(naive_utf16_byte_len(a)));
             for &b in &alphabet {
                 let mut two = String::from(a);
                 two.push_str(b);
-                assert_eq!(utf16_byte_len(&two), naive_utf16_byte_len(&two));
+                assert_eq!(utf16_byte_len(&two), Some(naive_utf16_byte_len(&two)));
                 for &c in &alphabet {
                     let mut three = two.clone();
                     three.push_str(c);
-                    assert_eq!(utf16_byte_len(&three), naive_utf16_byte_len(&three));
+                    assert_eq!(utf16_byte_len(&three), Some(naive_utf16_byte_len(&three)));
                 }
             }
         }
@@ -625,49 +649,72 @@ mod utf16_byte_len_tests {
         let unit = "Torque spec, caf\u{e9} \u{6771}\u{4eac} \u{1f600} \u{40000} e\u{301}\u{0}\n\n";
         let text = unit.repeat(1 + (1024 * 1024) / unit.len());
         assert!(text.len() >= 1024 * 1024);
-        assert_eq!(utf16_byte_len(&text), naive_utf16_byte_len(&text));
+        assert_eq!(utf16_byte_len(&text), Some(naive_utf16_byte_len(&text)));
     }
 
     #[test]
-    fn checked_arithmetic_refuses_to_wrap_silently() {
-        // H1: `2 * (codepoints + astral)` wraps `usize` in release past
-        // ~1 GiB of astral-dense text on 32-bit targets. The core must
-        // use `checked_add`/`checked_mul` (panicking rather than
-        // wrapping; the Python wrapper maps this to `OverflowError`).
-        // `usize::MAX` itself is unreachable in a test, so this pins
-        // the checked spelling directly on small numbers: the same
-        // operator chain the core uses must return `None` at the
-        // boundary instead of wrapping to 0.
-        let almost_max = usize::MAX - 1;
-        assert_eq!(
-            almost_max.checked_add(1).and_then(|n| n.checked_mul(2)),
+    fn combine_counts_answers_the_doubled_sum_and_refuses_overflow() {
+        // HIGH-2 injectable unit (runs on 64-bit CI, no gigabyte
+        // allocation): synthetic counts through the same combine step
+        // the core uses. Happy path answers; boundary counts return
+        // None instead of wrapping.
+        assert_eq!(utf16_combine_counts(0, 0), Some(0));
+        assert_eq!(utf16_combine_counts(1, 0), Some(2));
+        assert_eq!(utf16_combine_counts(1, 1), Some(4));
+        assert_eq!(utf16_combine_counts(1000, 1000), Some(4000));
+        // Doubling overflow at the usize boundary refuses:
+        assert_eq!(utf16_combine_counts(usize::MAX as u64 / 2 + 1, 0), None);
+        assert_eq!(utf16_combine_counts(usize::MAX as u64, 0), None);
+        assert_eq!(utf16_combine_counts(usize::MAX as u64, 1), None);
+        // The 32-bit boundary shape, stated portably: counts whose
+        // doubled sum exceeds u32::MAX refuse on 32-bit targets and
+        // answer on 64-bit ones — the tier-3 path (see the module
+        // docs) pinned without allocating a gigabyte.
+        let over_32 = utf16_combine_counts(u32::MAX as u64 / 2 + 1, 0);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(over_32, None);
+        #[cfg(not(target_pointer_width = "32"))]
+        assert_eq!(over_32, Some((u32::MAX as usize / 2 + 1) * 2));
+    }
+
+    #[test]
+    fn fallible_core_answers_some_on_real_inputs() {
+        // HIGH-1: the core is fallible (Option), not panicking — real
+        // inputs answer Some, the None leg is the combine test above.
+        assert_eq!(utf16_byte_len(""), Some(0));
+        assert_eq!(utf16_byte_len("a"), Some(2));
+        assert_eq!(utf16_byte_len("\u{1f600}"), Some(4));
+    }
+
+    #[test]
+    fn checked_combine_refuses_to_wrap_silently() {
+        // The core's fallible narrow, pinned directly: the same
+        // combine step utf16_byte_len uses must return None at the
+        // boundary instead of wrapping to 0 — no gigabyte fixture,
+        // no panic, the Option the wrapper maps to OverflowError.
+        // (Replaces an earlier spelling that tested the std
+        // checked-chain in isolation rather than the core's step.)
+        assert_eq!(utf16_combine_counts(usize::MAX as u64, 0), {
+            // On 64-bit usize::MAX fits u64 exactly and refuses at
+            // the narrow/doubling; on 32-bit the u64 value cannot
+            // narrow and refuses too — either way None.
             None
-        );
-        assert_eq!(usize::MAX.checked_add(1), None);
-        assert_eq!(usize::MAX.checked_mul(2), None);
-        // And the un-overflowed chain still answers: the happy path the
-        // core takes on every real input.
-        assert_eq!(
-            1usize.checked_add(1).and_then(|n| n.checked_mul(2)),
-            Some(4)
-        );
+        });
+        assert_eq!(utf16_combine_counts(1, 1), Some(4));
     }
 
     #[test]
     #[cfg(target_pointer_width = "32")]
-    fn thirty_two_bit_targets_refuse_gigabyte_scale_inputs() {
-        // 32-bit-only: a ~1 GiB astral-dense input would wrap
-        // `2 * (codepoints + astral)` past `u32::MAX`. Building the
-        // gigabyte is out of scope for a unit test; this pins the
-        // contract that the overflow panics (mapped to `OverflowError`
-        // Python-side) rather than wrapping — exercised here via the
-        // checked chain at the boundary, since the allocation itself
-        // would OOM the test runner.
-        let almost_max = usize::MAX - 1;
-        assert_eq!(
-            almost_max.checked_add(1).and_then(|n| n.checked_mul(2)),
-            None
-        );
+    fn thirty_two_bit_targets_refuse_gigabyte_scale_counts() {
+        // 32-bit-only tier-3 leg: counts past ~1 GiB of astral-dense
+        // text refuse via the combine narrow (mapped to
+        // `OverflowError` Python-side) rather than wrapping.
+        // Synthetic counts — the allocation itself would OOM the
+        // runner, so the helper carries the contract; the 64-bit
+        // shape of the same boundary is pinned portably in
+        // combine_counts_answers_the_doubled_sum_and_refuses_overflow.
+        assert_eq!(utf16_combine_counts(u32::MAX as u64, 1), None);
+        assert_eq!(utf16_combine_counts(u32::MAX as u64 / 2 + 1, 0), None);
     }
 }
 

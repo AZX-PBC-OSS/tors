@@ -788,8 +788,10 @@ internal UCS storage: pyo3's `to_str` hands the core a Rust `&str`, whose
 `len()` IS its UTF-8 byte length — one field read, the mechanism dried into
 the language instead of hand-rolled (an unsafe `PyUnicode_KIND`/data walk with
 surrogate-pair arithmetic would exist only to avoid one cached materialization).
-The cost model that buys, measured (the full lane table is in
-`tests/test_performance.py`):
+The cost model that buys, measured — all wall numbers below are
+CPython-3.12 calibration-box figures (arm64, release build; re-measure
+per target — semantic pins are the contract, timing is not; the full
+lane table is in `tests/test_performance.py`):
 
 - **ASCII** (serialized JSON with `ensure_ascii=True` is pure ASCII): compact
   ASCII data is its own UTF-8, so the borrow is a zero-copy alias and the call
@@ -880,8 +882,10 @@ the UTF-8 byte count, and every answer is even. The final doubling is
 checked arithmetic: past ~1 GiB of astral-dense text on 32-bit targets it
 raises `OverflowError` instead of wrapping (never fires on 64-bit).
 
-The cost model, measured (the full lane table is in
-`tests/test_performance.py`):
+The cost model, measured — all wall numbers below are
+CPython-3.12 calibration-box figures (arm64, release build; re-measure
+per target — semantic pins are the contract, timing is not; the full
+lane table is in `tests/test_performance.py`):
 
 - **Warm lanes, both corpus kinds alike** — the scan is
   representation-independent and the utf-16 expression pays its 2n

@@ -1081,8 +1081,8 @@ def test_overflow_contract_documents_the_32bit_boundary() -> None:
     so large-but-reasonable inputs — including 12 MiB of astral text —
     answer exactly. Past ~1 GiB of astral-dense text on a 32-bit target
     the checked arithmetic raises `OverflowError` instead of wrapping
-    (crate-side `checked_add`/`checked_mul` pin plus the
-    `#[cfg(target_pointer_width = "32")]` test in `src/scan_impl.rs`;
+    (crate-side `utf16_combine_counts` injectable unit plus the
+    32-bit-only tier-3 leg in `src/scan_impl.rs`;
     the Python wrapper maps the failure to `OverflowError`)."""
     import struct
 
@@ -1116,14 +1116,26 @@ def test_detach_is_statically_present_in_both_wrappers() -> None:
     and `utf16_byte_len` bodies in `src/py/scan.rs` must route the core
     through `py.detach`. The 1.0 ms scan-band ceiling in
     `tests/test_performance.py` stays as the dynamic backstop (a
-    scalar-loop regression blows it by 3x); this is the static one."""
+    scalar-loop regression blows it by 3x); this is the static one.
+
+    Airtight spelling (MEDIUM-3): each function body is parsed from its
+    `pub fn {name}` to the next `pub fn` (or EOF — the function's full
+    extent, not a fixed window), and must contain the exact call string
+    `py.detach(|| scan_impl::{name}` — detach presence AND core routing
+    together, so neither a removed detach nor a detach around other
+    work passes."""
     import pathlib
 
     src = pathlib.Path(__file__).parent.parent.joinpath("src", "py", "scan.rs").read_text()
     for name in ("utf8_byte_len", "utf16_byte_len"):
         start = src.index(f"pub fn {name}")
-        body = src[start : start + 2000]
-        assert "py.detach" in body, f"{name} lost its py.detach"
+        next_fn = src.find("\npub fn ", start + 1)
+        body = src[start:] if next_fn == -1 else src[start:next_fn]
+        # The function extent must close: a top-level `}` ends the body
+        # (guards against the slice running past the function when the
+        # next-pub-fn search misses).
+        assert "\n}" in body, f"{name} body has no closing brace"
+        assert f"py.detach(|| scan_impl::{name}" in body, f"{name} lost its py.detach-routed core call"
 
 
 def test_cheap_utf16_differential_against_encode_utf16_count() -> None:

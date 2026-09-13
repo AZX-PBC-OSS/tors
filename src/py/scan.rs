@@ -263,18 +263,14 @@ pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
 /// detaches.
 #[pyfunction]
 pub fn utf16_byte_len(py: Python<'_>, s: &str) -> PyResult<usize> {
-    // H1: the core's checked arithmetic panics on 32-bit overflow
-    // rather than wrapping; catch the panic at the boundary and raise
-    // the Python-side contract instead. `catch_unwind` needs an
-    // `AssertUnwindSafe` wrapper around the closure's borrowed capture.
-    use std::panic::AssertUnwindSafe;
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        py.detach(|| scan_impl::utf16_byte_len(s))
-    }));
-    match result {
-        Ok(n) => Ok(n),
-        Err(_) => Err(PyOverflowError::new_err(
+    // Fallible core, no unwinding: the core returns Option (None past
+    // ~1 GiB of astral-dense text on 32-bit targets), mapped here to
+    // the Python-side OverflowError contract. No catch_unwind, no
+    // expect on this path — overflow travels as a value, so there is
+    // no panic to mask and no unwind/GIL-restore assumption to make.
+    py.detach(|| scan_impl::utf16_byte_len(s)).ok_or_else(|| {
+        PyOverflowError::new_err(
             "utf16_byte_len overflow: input too large for usize on this target (32-bit)",
-        )),
-    }
+        )
+    })
 }
