@@ -83,7 +83,7 @@ fn bench_uuid_paths(c: &mut Criterion) {
 fn bench_token_ladders(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_hex");
     for &length in &HEX_LADDER {
-        group.throughput(Throughput::Bytes(length as u64));
+        group.throughput(Throughput::Elements(length as u64));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             b.iter(|| black_box(random_impl::random_hex(len, None).expect("os entropy")))
         });
@@ -92,7 +92,7 @@ fn bench_token_ladders(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("random_b64url");
     for &length in &B64URL_LADDER {
-        group.throughput(Throughput::Bytes(length as u64));
+        group.throughput(Throughput::Elements(length as u64));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             b.iter(|| black_box(random_impl::random_b64url(len, None).expect("os entropy")))
         });
@@ -101,7 +101,7 @@ fn bench_token_ladders(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("random_b62");
     for &length in &B62_LADDER {
-        group.throughput(Throughput::Bytes(length as u64));
+        group.throughput(Throughput::Elements(length as u64));
         group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
             b.iter(|| black_box(random_impl::random_b62(len, None).expect("os entropy")))
         });

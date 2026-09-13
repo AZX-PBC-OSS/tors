@@ -170,15 +170,14 @@ pub enum RandomError {
     /// string carries the OS error's own message.
     Os(String),
     /// `uuid7`'s timestamp source failed: the system clock reads before the
-    /// Unix epoch (clock skew backwards past 1970). The forward horizon is
-    /// NOT the u64 millisecond check in this core (year ~584 million): the
-    /// uuid 1.26 builder silently TRUNCATES the timestamp above 2^48
-    /// milliseconds (year ~10,892; verified in its source — `timestamp.rs`
-    /// masks `millis_high` to the 48 bits the field holds), long before any
-    /// u64 overflow. That truncation is unreachable in practice — no real
-    /// system clock reads year 10,892 — so it is recorded from the
-    /// source-read, not from a reachable failure shape; only a mocked clock
-    /// past the horizon can hit it.
+    /// Unix epoch (clock skew backwards past 1970), or at/above 2^48
+    /// milliseconds (year ~10,892 — the uuid 1.26 builder silently
+    /// TRUNCATES the timestamp above the 48 bits the field holds, verified
+    /// in its source: `timestamp.rs` masks `millis_high` to the field
+    /// width; this core refuses explicitly with `Clock` instead, so the
+    /// truncation is unreachable by code, not just by calendar — no real
+    /// system clock reads year 10,892, and only a mocked clock past the
+    /// horizon can hit it).
     Clock(String),
     /// The output string's reservation failed: the requested length's
     /// worst-case byte size does not fit in memory. The usize is that
@@ -274,6 +273,28 @@ impl Words {
         }
     }
 
+    /// Test-only constructor: the exact u64 sequence `words`, in draw
+    /// order, with no entropy source behind it — so a test can place a
+    /// rejecting word first and assert the redraw consumes the next one.
+    #[cfg(test)]
+    fn for_test(words: &[u64]) -> Self {
+        let mut buf = [0u8; 1024];
+        assert!(
+            words.len() * 8 <= buf.len(),
+            "test words exceed the block buffer"
+        );
+        for (i, w) in words.iter().enumerate() {
+            buf[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
+        }
+        Words {
+            // Never touched: `pos + 8 <= len` holds until the words run
+            // out, and the tests never draw past their own sequence.
+            source: Source::new(Some(0)),
+            buf,
+            pos: 0,
+        }
+    }
+
     fn next_u64(&mut self) -> Result<u64, RandomError> {
         if self.pos + 8 > self.buf.len() {
             self.source.fill(&mut self.buf)?;
@@ -296,22 +317,37 @@ impl Words {
 ///
 /// `n` must be >= 1 (the caller checks the non-empty alphabet before
 /// sampling; an empty alphabet has no index to draw).
+///
+/// The single-draw step as a pure function, factored out so the rejection
+/// path is unit-testable without a stream: `None` is "rejected, consume
+/// the next word and redraw", `Some(h)` is the accepted index. `x = 0`
+/// always rejects for `n >= 2` (its product is 0, below every threshold),
+/// which is what the reject-path test feeds.
+fn lemire_accept(x: u64, n: u64) -> Option<u64> {
+    let product = (x as u128) * (n as u128);
+    let low = product as u64;
+    // Fast path (probability 1 - n/2^64): the low half alone certifies
+    // the draw, no division needed — the "nearly divisionless" property.
+    if low >= n {
+        return Some((product >> 64) as u64);
+    }
+    // Rare: compare against the rejection threshold t = 2^64 mod n.
+    // (-n) mod n == (2^64 - n) mod n == 2^64 mod n, and for powers of
+    // two it is 0 (exact division, no rejection region at all).
+    let threshold = n.wrapping_neg() % n;
+    if low >= threshold {
+        return Some((product >> 64) as u64);
+    }
+    // Rejected (probability < n/2^64): the caller redraws, consuming
+    // the next word.
+    None
+}
+
 fn lemire_below(words: &mut Words, n: u64) -> Result<u64, RandomError> {
     loop {
         let x = words.next_u64()?;
-        let product = (x as u128) * (n as u128);
-        let low = product as u64;
-        // Fast path (probability 1 - n/2^64): the low half alone certifies
-        // the draw, no division needed — the "nearly divisionless" property.
-        if low >= n {
-            return Ok((product >> 64) as u64);
-        }
-        // Rare: compare against the rejection threshold t = 2^64 mod n.
-        // (-n) mod n == (2^64 - n) mod n == 2^64 mod n, and for powers of
-        // two it is 0 (exact division, no rejection region at all).
-        let threshold = n.wrapping_neg() % n;
-        if low >= threshold {
-            return Ok((product >> 64) as u64);
+        if let Some(h) = lemire_accept(x, n) {
+            return Ok(h);
         }
         // Rejected (probability < n/2^64): redraw. Consumes the next word.
     }
@@ -324,6 +360,26 @@ fn lemire_below(words: &mut Words, n: u64) -> Result<u64, RandomError> {
 /// caller (binding) has already rejected the empty alphabet with
 /// `RandomError::EmptyAlphabet` checked here — the cores validate their own
 /// contracts too, so the fuzz target exercises the same refusal.
+///
+/// Duplicate characters are WEIGHTED, not deduplicated: each of the
+/// `length` positions is an independent uniform draw over the alphabet's
+/// character POSITIONS, so `"aaab"` yields `a` with probability 3/4 and
+/// `b` with 1/4. Callers wanting uniform-over-distinct-characters must
+/// dedupe the alphabet first.
+///
+/// Sampling is over Unicode scalar values (`char`), not grapheme
+/// clusters: an alphabet holding a base character plus combining marks
+/// samples each codepoint independently, so a combining mark can land
+/// without its base. Callers needing cluster-atomic output should pass
+/// precomposed characters.
+///
+/// The alphabet is materialized into a `Vec<char>` fresh on every call
+/// (one O(alphabet) pass under the binding's detach): there is no cross-
+/// call cache, by the same no-state discipline that keeps the unseeded
+/// spelling fork-safe. Bulk callers reusing one huge alphabet across
+/// many calls should prefer the stdlib (`random.choices`) or hold the
+/// materialization themselves; this spelling optimizes for the
+/// token/id case (short alphabets, one call per token).
 pub fn random_string(
     length: usize,
     alphabet: &str,
@@ -432,6 +488,13 @@ pub fn uuid7_bytes() -> Result<[u8; 16], RandomError> {
         })?;
     let millis = u64::try_from(duration.as_millis())
         .map_err(|_| RandomError::Clock("unix milliseconds do not fit in u64".to_string()))?;
+    // The field is 48 bits: refuse at/above 2^48 explicitly (Clock, mapped
+    // to RuntimeError) rather than let the builder truncate silently.
+    if millis >= 1 << 48 {
+        return Err(RandomError::Clock(
+            "unix milliseconds do not fit in the 48-bit uuid7 timestamp field".to_string(),
+        ));
+    }
     let mut counter_random = [0u8; 10];
     Source::new(None).fill(&mut counter_random)?;
     Ok(
@@ -500,6 +563,89 @@ mod tests {
         for _ in 0..256 {
             assert_eq!(lemire_below(&mut words, 1).unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn lemire_rejection_consumes_the_next_word() {
+        // n = 3: the threshold t = 2^64 mod 3 is 1, and x = 0 gives the
+        // product 0 whose low half 0 falls below it: rejected. (For
+        // powers of two t is 0 and even x = 0 accepts — no rejection
+        // region at all.)
+        assert_eq!(lemire_accept(0, 3), None);
+        assert_eq!(lemire_accept(0, 64), Some(0));
+        // A rejecting head word followed by a known word: the accepted
+        // index is the SECOND word's mapping, proving the redraw
+        // consumed the next word rather than returning or stalling.
+        // (u64::MAX * 3) >> 64 is 2, accepted on the fast path
+        // (low half 2^64 - 3 >= 3).
+        let mut words = Words::for_test(&[0, u64::MAX]);
+        assert_eq!(lemire_below(&mut words, 3).unwrap(), 2);
+        assert_eq!(words.pos, 16, "both words must be consumed");
+    }
+
+    #[test]
+    fn chacha20_seed_zero_first_block_is_pinned() {
+        // The derivation + block 0 through rand_chacha itself (not the
+        // Python oracle): seed 0's PCG32 key streams this block first.
+        // Cross-check: these are the 16 pre-mask bytes behind the
+        // uuid4(seed=0) golden (byte 6 pre-mask 0x3c, masked to 0x4c by
+        // the version-4 field layout; byte 8 already variant-conformant).
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let mut block = [0u8; 64];
+        rng.fill_bytes(&mut block);
+        assert_eq!(
+            &block[..16],
+            &[
+                0xb2, 0xf7, 0xf5, 0x81, 0xd6, 0xde, 0x3c, 0x06, 0xa8, 0x22, 0xfd, 0x6e, 0x7e, 0x82,
+                0x65, 0xfb
+            ]
+        );
+    }
+
+    #[test]
+    fn lemire_stays_uniform_at_scale_and_is_not_modulo() {
+        // HIGH-2's two halves in one test. 300k seeded draws over the
+        // 62-symbol alphabet (seed 0): the chi-square over 61 degrees of
+        // freedom must stay far under the 99.9% critical value (~109 —
+        // measured ~52), and every bucket within ±500 of the 4838.7
+        // mean (measured extremes 4706/4940). The bounds prove
+        // uniformity; they alone cannot tell Lemire from `%` (a modulo
+        // map is uniform too) — so the test ALSO asserts the engine is
+        // not `%` on the same stream: the first 64 draws' Lemire
+        // high-bits indices must differ from the naive low-bits
+        // `x % 62` indices (a `%` transcription fails here on draw 0).
+        // The exact-value identity at scale lives in the Python suite
+        // (a 300k-draw digest pin, whose modulo-mapped digest differs
+        // in full); the committed goldens above pin determinism, never
+        // unbiasedness — this test owns the unbiasedness claim.
+        let out = random_string(300_000, BASE62_CHARS, Some(0)).unwrap();
+        let mut counts = [0u64; 62];
+        for b in out.bytes() {
+            let idx = BASE62_CHARS.bytes().position(|b2| b2 == b).unwrap();
+            counts[idx] += 1;
+        }
+        let mean = 300_000f64 / 62.0;
+        let chi2: f64 = counts
+            .iter()
+            .map(|&c| (c as f64 - mean).powi(2) / mean)
+            .sum();
+        assert!(chi2 < 110.0, "chi-square {chi2} over 61 df is not uniform");
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(
+                (c as f64 - mean).abs() < 500.0,
+                "bucket {i} count {c} too far from {mean}"
+            );
+        }
+        let mut words = Words::new(Source::new(Some(0)));
+        let lemire_seq: Vec<u64> = (0..64)
+            .map(|_| lemire_below(&mut words, 62).unwrap())
+            .collect();
+        let mut words = Words::new(Source::new(Some(0)));
+        let modulo_seq: Vec<u64> = (0..64).map(|_| words.next_u64().unwrap() % 62).collect();
+        assert_ne!(
+            lemire_seq, modulo_seq,
+            "Lemire must not degenerate to x % n on the same stream"
+        );
     }
 
     #[test]

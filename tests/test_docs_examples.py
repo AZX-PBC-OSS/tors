@@ -377,14 +377,14 @@ class TestRandomGenerationExamples:
         # The doc's caller-visible contract: the canonical string's first
         # two dash-free groups decode to the call's Unix epoch
         # milliseconds. Shape-pinned (the draw and the clock are both
-        # live), the same ±60s window tests/test_random.py asserts.
+        # live), the same ±5s window tests/test_random.py asserts.
         before = time.time() * 1000
         value = tors.uuid7()
         after = time.time() * 1000
         assert len(value) == 36
         assert value[14] == "7"
         ts = int(value[:8] + value[9:13], 16)
-        assert before - 60_000 <= ts <= after + 60_000
+        assert before - 5_000 <= ts <= after + 5_000
 
     def test_uuid4_bytes_bytes_uuid4_bytes_example(self) -> None:
         # The bytes spellings' contract line, pinned: uuid4_bytes(seed=s)
@@ -399,11 +399,11 @@ class TestRandomGenerationExamples:
         # The doc's two consumer shapes, pinned: the stdlib constructor
         # over the raw bytes carries version and variant through, and the
         # .hex()[:12] slice is the timestamp prefix (the u[:8] + u[9:13]
-        # field's own bytes), both within the ±60s clock window.
+        # field's own bytes), both within the ±5s clock window.
         u = stdlib_uuid.UUID(bytes=tors.uuid7_bytes())
         assert (u.version, u.variant) == (7, stdlib_uuid.RFC_4122)
         before = time.time() * 1000
         prefix = tors.uuid7_bytes().hex()[:12]
         after = time.time() * 1000
         assert len(prefix) == 12
-        assert before - 60_000 <= int(prefix, 16) <= after + 60_000
+        assert before - 5_000 <= int(prefix, 16) <= after + 5_000

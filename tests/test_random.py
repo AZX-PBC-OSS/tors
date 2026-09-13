@@ -352,6 +352,15 @@ class TestSeededGoldenLiterals:
     implementation; a ChaCha/rand_core semantic change breaks these loudly,
     which is the point: it is a finding, not a flake).
 
+    What these pins do NOT prove, stated so nobody over-reads them: they
+    pin DETERMINISM (same seed, same output, cross-version) — never
+    unbiasedness. A modulo-biased transcription (`x % n` on the same
+    words) reproduces most of these literals' prefixes without ever
+    rejecting, because the rejection region is < 2^-58 per draw; the
+    unbiasedness claim is owned by ``TestUniformityAtScale`` (chi-square
+    bounds plus exact-count digests that a ``%`` transcription fails in
+    full) and the crate-side reject-path unit, not by any golden here.
+
     The internal cross-references the byte-fill engines used to carry are
     gone with them: "uuid4(seed=0)'s hex digits are hex(8, seed=0)'s" and
     "b64url(3, seed=0) decodes to hex(8, seed=0)'s first bytes" were
@@ -509,7 +518,7 @@ class TestUuidBytesSpellings:
             b = uuid7_bytes()
             after = time.time() * 1000
             ts = int.from_bytes(b[:6], "big")
-            assert before - 60_000 <= ts <= after + 60_000
+            assert before - 5_000 <= ts <= after + 5_000
 
     def test_the_uuid_constructor_consumer_shape(self) -> None:
         # The surveyed re-wrap shape, pinned as a docs example too: the
@@ -530,7 +539,7 @@ class TestUuidBytesSpellings:
         prefix = uuid7_bytes().hex()[:12]
         after = time.time() * 1000
         ts = int(prefix, 16)
-        assert before - 60_000 <= ts <= after + 60_000
+        assert before - 5_000 <= ts <= after + 5_000
 
     def test_unseeded_bytes_are_distinct(self) -> None:
         # Birthday arithmetic unchanged from the string spellings (122
@@ -542,7 +551,7 @@ class TestUuidBytesSpellings:
     def test_uuid4_bytes_seed_contract_matches_uuid4(self) -> None:
         # TypeError parity with uuid4: a non-int-like seed names the
         # parameter; the parameter is keyword-only (uuid4's own shape).
-        with pytest.raises(TypeError, match="seed must be an int or None"):
+        with pytest.raises(TypeError, match=r"seed must be int-like \(__index__\) or None"):
             uuid4_bytes(seed="42")  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             uuid4_bytes(1)  # type: ignore[misc,call-arg]
@@ -601,7 +610,7 @@ class TestSeedDomain:
         ids=["str", "float", "bytes", "list", "object"],
     )
     def test_non_int_seed_raises_type_error(self, not_an_int: object) -> None:
-        with pytest.raises(TypeError, match="seed must be an int or None"):
+        with pytest.raises(TypeError, match=r"seed must be int-like \(__index__\) or None"):
             random_hex(8, seed=not_an_int)  # type: ignore[arg-type]
 
     def test_index_like_seed_is_the_int_it_indexes_to(self) -> None:
@@ -695,6 +704,17 @@ class TestValueErrors:
         # surrogates with UnicodeEncodeError before any work runs.
         with pytest.raises(UnicodeEncodeError):
             random_string(8, "ab\ud800cd")
+
+    def test_the_length_ceiling_is_py_ssize_t_then_memory(self) -> None:
+        # MEDIUM-3's wording fix, pinned: "no size cap" never meant
+        # unbounded — the argument is Py_ssize_t (2^63 - 1 on 64-bit),
+        # and memory is the bound inside it. 2^63 itself never reaches
+        # the core (OverflowError at extraction); 2^63 - 1 reaches the
+        # reserve and comes back as the catchable MemoryError.
+        with pytest.raises(OverflowError):
+            random_hex(2**63)
+        with pytest.raises(MemoryError):
+            random_hex(2**63 - 1)
 
     def test_huge_outputs_complete_no_cap_by_design(self) -> None:
         # 512 KiB of hex output from one call: no size cap exists (the bound
@@ -872,7 +892,7 @@ class TestUnseededOutputShape:
         # has probability ~1e-23; any repeat is a broken engine, not bad luck.
         assert len({uuid4() for _ in range(10_000)}) == 10_000
 
-    def test_uuid7_timestamp_is_the_callers_now_within_60s(self) -> None:
+    def test_uuid7_timestamp_is_the_callers_now_within_5s(self) -> None:
         # The caller-visible uuid7 contract: the 48-bit timestamp field (the
         # first 12 hex digits, which in the canonical string are the two
         # dash-free groups u[:8] + u[9:13]) decodes to the Unix-epoch
@@ -880,12 +900,15 @@ class TestUnseededOutputShape:
         # same-millisecond calls differ only in the random tail, and clock
         # skew backwards flows straight through (uuid_utils' strict
         # monotonicity is a different product promise; see docs/api.md).
+        # The window is ±5s: the timestamp is read inside the call between
+        # the two host reads, so anything wider is a broken clock or a
+        # broken builder, not tolerance.
         for _ in range(8):
             before = time.time() * 1000
             value = uuid7()
             after = time.time() * 1000
             ts = int(value[:8] + value[9:13], 16)
-            assert before - 60_000 <= ts <= after + 60_000
+            assert before - 5_000 <= ts <= after + 5_000
 
     def test_uuid7_takes_no_seed_and_rejects_one(self) -> None:
         # The timestamp is external state: a seeded uuid7 would still vary
@@ -1004,3 +1027,230 @@ class TestDocstringSecurityContract:
         doc = " ".join((uuid7_bytes.__doc__ or "").lower().split())
         assert "external state" in doc
         assert "probabilistically unique" in doc
+
+
+class TestForkSafety:
+    """HIGH-1's positive control: the unseeded spelling must not replay
+    across ``os.fork()`` — the failure a cached userspace RNG would show.
+
+    Negative control, recorded here rather than run (it would poison the
+    suite's own process with a cache): a ``ThreadRng``/``SmallRng``/``StdRng``
+    parked in a thread-local or ``lazy_static``/``OnceLock`` replays the
+    parent's stream in the child — the first N post-fork child draws
+    equal the parent's next N draws. This test asserts the opposite for
+    tors (disjoint parent/child token sets), and
+    ``TestNoRngStateGuard`` pins the absence of the cache that would
+    make the negative control pass.
+    """
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="no os.fork on this platform")
+    def test_fork_child_does_not_replay_the_parent_stream(self) -> None:
+        n = 64
+        parent_tokens = {random_hex(32) for _ in range(n)}
+        assert len(parent_tokens) == n
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child: draw, report over the pipe, exit cleanly.
+            try:
+                os.close(read_fd)
+                child_tokens = [random_hex(32) for _ in range(n)]
+                os.write(write_fd, "\n".join(child_tokens).encode("ascii"))
+            finally:
+                # os._exit, never sys.exit: no pytest teardown, no
+                # stdio flush, no exception delivery in the child.
+                os._exit(0)
+        os.close(write_fd)
+        chunks = []
+        while True:
+            chunk = os.read(read_fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        child_tokens = b"".join(chunks).decode("ascii").split("\n")
+        assert len(child_tokens) == n
+        assert len(set(child_tokens)) == n
+        assert set(child_tokens).isdisjoint(parent_tokens)
+
+
+class TestNoRngStateGuard:
+    """The grep guard behind the fork test: ``src/random_impl.rs`` must
+    contain no thread- or process-level RNG cache — the state whose
+    absence IS the fork-safety argument (inspection-only: no test can
+    observe a cache it must not have, so the suite pins the source
+    text instead). The ``fast-rng``/``lazy`` spellings are checked in
+    prose form too, because a comment-only reference is how such a
+    cache usually arrives (a "perf: cache the rng" follow-up)."""
+
+    def test_no_cached_rng_state_in_the_core(self) -> None:
+        import pathlib
+
+        core = pathlib.Path(__file__).parent.parent / "src" / "random_impl.rs"
+        source = core.read_text(encoding="utf-8")
+        for forbidden in (
+            "thread_rng",
+            "ThreadRng",
+            "SmallRng",
+            "StdRng",
+            "fast-rng",
+            "fast_rng",
+            "lazy_static",
+            "LazyLock",
+            "thread_local",
+            "OnceLock",
+        ):
+            assert forbidden not in source, f"cached RNG state: {forbidden}"
+
+    def test_os_failures_map_to_runtime_error_in_the_binding(self) -> None:
+        # The Os-error half of the mapping contract, pinned as text for
+        # the same un-triggerability reason: a real getrandom failure
+        # is effectively impossible post-boot, so no test can raise it
+        # on demand — but the mapping arm must survive refactors.
+        import pathlib
+
+        binding = pathlib.Path(__file__).parent.parent / "src" / "py" / "random.rs"
+        source = binding.read_text(encoding="utf-8")
+        assert "RandomError::Os(_) | RandomError::Clock(_) => PyRuntimeError" in source
+
+
+class TestRfc8439Anchors:
+    """MEDIUM-1: the oracle's ChaCha transcription anchored to RFC 8439
+    itself, not just to rand_chacha's output (which the seeded goldens
+    already pin — a transcription bug shared by oracle and extension
+    would sail through those).
+
+    What is pinned at which level, honestly: the quarter-round (§2.1.1)
+    and quarter-round-on-state (§2.2.1) vectors run THROUGH the oracle's
+    ``_quarter_round`` — the exact primitive the stream is built from.
+    The full §2.3.2 block vector canNOT run through ``_chacha20_block``:
+    RFC 8439 uses the IETF layout (32-bit counter word 12, 96-bit nonce
+    words 13-15 — its test nonce sets word 14 to 0x4a000000), while
+    rand_chacha 0.9, and therefore this family's stream, uses the
+    original layout (64-bit counter words 12-13, 64-bit stream id words
+    14-15, always zero under ``seed_from_u64``) — no (key, counter)
+    argument to ``_chacha20_block`` can express word 14 != 0. Pinning
+    §2.3.2's bytes here would fail, correctly. What anchors the block
+    composition instead: ``seed_from_u64(0)``'s first 16 stream bytes
+    as a committed literal (the same bytes the crate-side
+    ``chacha20_seed_zero_first_block_is_pinned`` asserts through
+    rand_chacha itself, and the pre-mask prefix of the uuid4(seed=0)
+    golden) — the derivation-to-stream joint, pinned twice.
+    """
+
+    def test_quarter_round_matches_rfc_2_1_1(self) -> None:
+        state = [0x11111111, 0x01020304, 0x9B8D6F43, 0x01234567]
+        _quarter_round(state, 0, 1, 2, 3)
+        assert state == [0xEA2A92F4, 0xCB1CF8CE, 0x4581472E, 0x5881C4BB]
+
+    def test_state_quarter_round_matches_rfc_2_2_1(self) -> None:
+        state = [
+            0x879531E0,
+            0xC5ECF37D,
+            0x516461B1,
+            0xC9A62F8A,
+            0x44C20EF3,
+            0x3390AF7F,
+            0xD9FC690B,
+            0x2A5F714C,
+            0x53372767,
+            0xB00A5631,
+            0x974C541A,
+            0x359E9963,
+            0x5C971061,
+            0x3D631689,
+            0x2098D9D6,
+            0x91DBD320,
+        ]
+        _quarter_round(state, 2, 7, 8, 13)
+        assert state[2] == 0xBDB886DC
+        assert state[7] == 0xCFACAFD2
+        assert state[8] == 0xE46BEA80
+        assert state[13] == 0xCCC07C79
+
+    def test_seed_zero_first_stream_bytes_are_pinned(self) -> None:
+        # seed_from_u64(0) -> block 0 -> first 16 bytes, committed: the
+        # derivation-to-stream joint both implementations share.
+        assert _oracle_bytes(16, 0).hex() == "b2f7f581d6de3c06a822fd6e7e8265fb"
+
+
+class TestDuplicateAlphabetsAreWeighted:
+    """MEDIUM-2: duplicate characters in the alphabet are weighted, not
+    deduplicated — each position is an independent uniform draw over the
+    alphabet's character POSITIONS, so ``"aaab"`` yields ``a`` with
+    probability 3/4. Callers wanting uniform-over-distinct-characters
+    must dedupe first (documented in the core, the binding, and
+    docs/api.md)."""
+
+    def test_aaab_is_three_to_one_seeded(self) -> None:
+        # 256 draws, seed 0: exact pin (187 a's, 69 b's) — a dedupe
+        # transcription would print ~128/128 and fail here.
+        out = random_string(256, "aaab", seed=0)
+        assert len(out) == 256
+        assert out.count("a") == 187
+        assert out.count("b") == 69
+        assert set(out) == {"a", "b"}
+
+    def test_the_ratio_holds_across_seeds(self) -> None:
+        # The 3:1 shape, statistically: 4096 draws stay within ±10% of
+        # the 3072/1024 expectation at every probed seed (stddev ~28,
+        # so the band is ~±11 sigma — a uniform-over-distinct
+        # regression lands at ~2048/2048 and fails by ~1000).
+        for seed in (0, 1, 42):
+            out = random_string(4096, "aaab", seed=seed)
+            assert 2764 <= out.count("a") <= 3380
+            assert len(out) - out.count("a") == out.count("b")
+
+
+class TestUniformityAtScale:
+    """HIGH-2's Python half: the seeded stream is uniform at a scale
+    where eyeballing goldens proves nothing — and the pins fail under
+    a ``x % n`` transcription (whose digests differ in full: the
+    high-bits Lemire map and the low-bits modulo map are different
+    functions of the same words, diverging from draw 0).
+
+    Calibration, measured: n=62, 300k draws, seed 0 — chi-square ~51.9
+    over 61 df (99.9% critical value ~109; bound set at 110), bucket
+    extremes 4706/4940 around the 4838.7 mean (window set at ±500);
+    n=3, 300k draws, seed 7 — chi-square ~3.6 over 2 df (bound 15),
+    counts (100266, 100221, 99513). The bounds prove uniformity; the
+    EXACT digests prove the mapping (a ``%`` transcription is uniform
+    too, so bounds alone cannot catch it — the digests can)."""
+
+    def test_chi_square_bounds_at_300k_draws(self) -> None:
+        out = random_string(300_000, BASE62_CHARS, seed=0)
+        mean = 300_000 / 62
+        counts = [out.count(ch) for ch in BASE62_CHARS]
+        chi2 = sum((c - mean) ** 2 / mean for c in counts)
+        assert chi2 < 110.0
+        assert all(abs(c - mean) < 500 for c in counts)
+
+    def test_exact_digests_fail_under_modulo(self) -> None:
+        out62 = random_string(300_000, BASE62_CHARS, seed=0)
+        assert (
+            hashlib.sha256(out62.encode("ascii")).hexdigest()
+            == "65c258660e5ac3b11e3b873075436e7c3a4ac6b70af8ee49742dd56f321a17ed"
+        )
+        out3 = random_string(300_000, "abc", seed=7)
+        assert (
+            hashlib.sha256(out3.encode("ascii")).hexdigest()
+            == "0155a34eebe428eed943620ded5bb16cb841a9b50b2ab909fae03d86ae4a0687"
+        )
+        # The modulo-mapped stream over the SAME words digests
+        # differently — this is the assertion a `%` transcription
+        # fails (measured modulo digests: 7d805497… for n=62,
+        # 3594aec6… for n=3).
+        assert _modulo_string(300_000, BASE62_CHARS, 0) != out62
+        assert _modulo_string(300_000, "abc", 7) != out3
+
+
+def _modulo_string(length: int, alphabet: str, seed: int) -> str:
+    """The naive transcription under test: low-bits ``word % n`` over
+    the oracle's own word stream — uniform in distribution, a different
+    function of the words, and therefore a different (wrong) pinned
+    output. Exists only for ``TestUniformityAtScale``'s divergence
+    pins."""
+    chars = list(alphabet)
+    words = _oracle_words(seed)
+    return "".join(chars[next(words) % len(chars)] for _ in range(length))

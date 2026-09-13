@@ -34,7 +34,7 @@ use tors::random_impl::{self, RandomError};
 #[derive(Arbitrary, Debug)]
 struct Input {
     seed: u64,
-    length: u8,
+    length: u16,
     alphabet: String,
 }
 
@@ -202,11 +202,12 @@ fuzz_target!(|input: Input| {
     );
 
     // uuid7: unseeded and timestamp-carried, so only the shape and a
-    // generous clock sanity (the 48-bit field — the first 12 hex digits,
-    // which in the canonical string are u[:8] (the high 32 bits) and
-    // u[9..13] (the low 16) — within a day of now; a badly skewed host
-    // clock is an environment finding, not a crash, and the day window
-    // tolerates any sane CI runner).
+    // clock sanity (the 48-bit field — the first 12 hex digits, which in
+    // the canonical string are u[:8] (the high 32 bits) and u[9..13]
+    // (the low 16) — within 5 seconds of now; the timestamp is read
+    // inside the call between two host reads, so anything wider is a
+    // broken clock or a broken builder, and the suite pins the same ±5s
+    // window on the Python side).
     let v7 = random_impl::uuid7().unwrap();
     assert_uuid_shape(&v7, b'7');
     let ts = (u64::from_str_radix(&v7[..8], 16).unwrap() << 16)
@@ -216,7 +217,27 @@ fuzz_target!(|input: Input| {
         .expect("fuzz host clock before the Unix epoch")
         .as_millis() as u64;
     assert!(
-        ts.abs_diff(now) < 24 * 60 * 60 * 1000,
-        "uuid7 timestamp {ts} is not within a day of now {now}"
+        ts.abs_diff(now) < 5_000,
+        "uuid7 timestamp {ts} is not within 5s of now {now}"
+    );
+
+    // An impossible length is the catchable Memory error, never an
+    // allocation attempt: 2^62 output characters is past any 64-bit
+    // allocator's reach, so try_reserve refuses without touching the
+    // allocator — safe to assert on every fuzz input, and it pins the
+    // MemoryError corpus shape the Python suite asserts as MemoryError.
+    assert!(matches!(
+        random_impl::random_string(1 << 62, "ab", seed),
+        Err(RandomError::Memory(_))
+    ));
+
+    // The OS-error mapping the binding owns (Os -> RuntimeError): the
+    // core shapes the message the binding raises with, so the prefix
+    // the Python contract documents is pinned here, at the value the
+    // fuzz target can construct without failing the real entropy source.
+    assert!(
+        RandomError::Os("getrandom: test".into())
+            .message()
+            .starts_with("operating system entropy source failed: ")
     );
 });

@@ -49,7 +49,7 @@ fn seed_to_u64(seed: Option<Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
     };
     let not_int_like = || {
         PyTypeError::new_err(format!(
-            "seed must be an int or None, not {}",
+            "seed must be int-like (__index__) or None, not {}",
             seed.get_type()
                 .name()
                 .map(|name| name.to_string())
@@ -116,17 +116,27 @@ fn into_pyerr(err: RandomError) -> PyErr {
 /// The alphabet is any non-empty `str` (empty raises `ValueError`; non-`str`
 /// raises `TypeError`): multibyte characters are sampled as characters, so
 /// the output is always exactly `length` characters over the alphabet's own
-/// characters. `length=0` returns `""`; negative raises `ValueError`; there
-/// is no size cap: memory is the only bound, and the bound is a catchable
-/// `MemoryError` — `try_reserve` refuses an impossible length before any
-/// allocation is attempted, `'x' * n`'s own shape — never a process abort.
+/// characters. Duplicate characters are weighted, not deduplicated — each
+/// position is an independent draw over the alphabet's character positions,
+/// so `"aaab"` yields `a` with probability 3/4: dedupe the alphabet first
+/// for uniform-over-distinct-characters. Sampling is over Unicode scalar
+/// values, not grapheme clusters: a combining mark in the alphabet samples
+/// independently of its base character. The alphabet is materialized fresh
+/// on every call (no cross-call cache, by the fork-safe no-state
+/// discipline); bulk callers reusing one huge alphabet should prefer the
+/// stdlib. `length=0` returns `""`; negative raises `ValueError`; the only
+/// size ceiling is the argument itself (`Py_ssize_t`, 2^63 - 1 on 64-bit —
+/// anything wider raises `OverflowError` at extraction) and memory beyond
+/// it: the memory bound is a catchable `MemoryError` — `try_reserve`
+/// refuses an impossible length before any allocation is attempted,
+/// `'x' * n`'s own shape — never a process abort.
 ///
 /// GIL model: argument validation under the GIL, the whole fill + sampling +
 /// string build under one `py.detach`, then the O(output) marshalling.
 #[pyfunction(signature = (length, alphabet, *, seed = None))]
 pub fn random_string(
     py: Python<'_>,
-    length: i64,
+    length: isize,
     alphabet: &str,
     seed: Option<Bound<'_, PyAny>>,
 ) -> PyResult<String> {
@@ -159,13 +169,19 @@ pub fn random_string(
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
 /// `length=0` returns `""` (`secrets.token_hex(0)`'s own shape); negative
-/// raises `ValueError`; no size cap: the memory bound is a catchable
-/// `MemoryError` (see `random_string`), never a process abort.
+/// raises `ValueError`; the only size ceiling is the argument itself
+/// (`Py_ssize_t`, 2^63 - 1 on 64-bit) and memory beyond it: the memory
+/// bound is a catchable `MemoryError` (see `random_string`), never a
+/// process abort.
 ///
 /// GIL model: validation under the GIL, the sampling + string build under
 /// one `py.detach`, then the O(output) marshalling.
 #[pyfunction(signature = (length, *, seed = None))]
-pub fn random_hex(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -> PyResult<String> {
+pub fn random_hex(
+    py: Python<'_>,
+    length: isize,
+    seed: Option<Bound<'_, PyAny>>,
+) -> PyResult<String> {
     if length < 0 {
         return Err(PyValueError::new_err(format!(
             "length must be >= 0, got {length}"
@@ -189,12 +205,18 @@ pub fn random_hex(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `length=0` returns `""`; negative raises `ValueError`; no size cap
-/// (the memory bound is a catchable `MemoryError`, never an abort).
+/// `length=0` returns `""`; negative raises `ValueError`; the only size
+/// ceiling is the argument itself (`Py_ssize_t`, 2^63 - 1 on 64-bit) and
+/// memory beyond it (the memory bound is a catchable `MemoryError`,
+/// never an abort).
 ///
 /// GIL model: `random_string`'s exactly.
 #[pyfunction(signature = (length, *, seed = None))]
-pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -> PyResult<String> {
+pub fn random_b62(
+    py: Python<'_>,
+    length: isize,
+    seed: Option<Bound<'_, PyAny>>,
+) -> PyResult<String> {
     if length < 0 {
         return Err(PyValueError::new_err(format!(
             "length must be >= 0, got {length}"
@@ -233,14 +255,16 @@ pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `length=0` returns `""`; negative raises `ValueError`; no size cap
-/// (the memory bound is a catchable `MemoryError`, never an abort).
+/// `length=0` returns `""`; negative raises `ValueError`; the only size
+/// ceiling is the argument itself (`Py_ssize_t`, 2^63 - 1 on 64-bit) and
+/// memory beyond it (the memory bound is a catchable `MemoryError`,
+/// never an abort).
 ///
 /// GIL model: `random_string`'s exactly.
 #[pyfunction(signature = (length, *, seed = None))]
 pub fn random_b64url(
     py: Python<'_>,
-    length: i64,
+    length: isize,
     seed: Option<Bound<'_, PyAny>>,
 ) -> PyResult<String> {
     if length < 0 {
@@ -328,12 +352,12 @@ pub fn uuid7(py: Python<'_>) -> PyResult<String> {
 /// GIL model: `uuid4`'s exactly (the 16-byte `bytes` marshalling after the
 /// GIL is reacquired).
 #[pyfunction(signature = (*, seed = None))]
-pub fn uuid4_bytes(py: Python<'_>, seed: Option<Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+pub fn uuid4_bytes(py: Python<'_>, seed: Option<Bound<'_, PyAny>>) -> PyResult<Py<PyBytes>> {
     let seed = seed_to_u64(seed)?;
     let bytes = py
         .detach(|| random_impl::uuid4_bytes(seed))
         .map_err(into_pyerr)?;
-    Ok(PyBytes::new(py, &bytes).into_any().unbind())
+    Ok(PyBytes::new(py, &bytes).unbind())
 }
 
 /// `tors.uuid7_bytes()`: the RFC 9562 version-7 UUID's 16 raw bytes —
@@ -358,7 +382,7 @@ pub fn uuid4_bytes(py: Python<'_>, seed: Option<Bound<'_, PyAny>>) -> PyResult<P
 /// GIL model: `uuid7`'s exactly (the 16-byte `bytes` marshalling after the
 /// GIL is reacquired).
 #[pyfunction]
-pub fn uuid7_bytes(py: Python<'_>) -> PyResult<Py<PyAny>> {
+pub fn uuid7_bytes(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let bytes = py.detach(random_impl::uuid7_bytes).map_err(into_pyerr)?;
-    Ok(PyBytes::new(py, &bytes).into_any().unbind())
+    Ok(PyBytes::new(py, &bytes).unbind())
 }

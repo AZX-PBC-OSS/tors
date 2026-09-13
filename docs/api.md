@@ -3968,6 +3968,12 @@ indices with Lemire's nearly-divisionless method (reject exactly the draws
 whose product low-half falls below `2^64 mod n`, leaving every output the
 same number of preimages — uniform by construction; a plain `x % n` does not
 have this property). The uuids sample raw bytes, uniform by construction.
+The committed goldens pin determinism (same seed, same output), never
+unbiasedness on their own — a modulo transcription reproduces short
+goldens without ever hitting its < 2^-58-per-draw rejection region; the
+unbiasedness claim is owned by the 300k-draw chi-square/exact-count pins
+in `tests/test_random.py` (whose digests a `%` transcription fails in
+full) and the crate-side reject-path unit.
 
 Errors follow the repo taxonomy, uniformly across the four token spellings:
 a negative `length` raises `ValueError` naming the parameter and the accepted
@@ -3979,10 +3985,12 @@ crate accept; an `__index__` that itself raises surfaces its own error); an
 alphabet holding
 lone surrogates raises `UnicodeEncodeError` (the repo-wide str contract).
 `0` is legal everywhere and returns `""` (`secrets.token_hex(0)`'s own
-shape). There is no size cap: memory is the only bound, and the bound is a
-catchable `MemoryError` — an impossible length is refused before any
-allocation is attempted (`try_reserve`), the exact shape `'x' * n` and
-`secrets.token_hex(n)` give for the same request — never a process abort.
+shape). There is no size cap inside the argument: `length` is `Py_ssize_t`
+(2^63 - 1 on 64-bit — anything wider raises `OverflowError` at extraction),
+and memory is the only bound inside that — a catchable `MemoryError`: an
+impossible length is refused before any allocation is attempted
+(`try_reserve`), the exact shape `'x' * n` and `secrets.token_hex(n)` give
+for the same request — never a process abort.
 
 No `tors.aio` twins: these are fast CPU/syscall calls, not the
 detached-transform input class the async surface exists for
@@ -3999,14 +4007,24 @@ tors.random_hex(32, seed=42)      # the deterministic spelling: pin it in tests
 ### `tors.random_string`
 
 ```python
-def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str: ...
+def random_string(length: int, alphabet: str, *, seed: int | SupportsIndex | None = None) -> str: ...
 ```
 
 `length` characters sampled uniformly (Lemire, no modulo bias at any
 alphabet size) from any non-empty `alphabet` str, in one GIL-released pass.
 Multibyte characters are sampled as characters: the output is always exactly
-`length` characters over the alphabet's own characters. No size cap
-(`u64`-based sampling handles any alphabet a `str` can hold).
+`length` characters over the alphabet's own characters.
+Duplicate characters are weighted, not deduplicated — each position is an
+independent draw over the alphabet's character positions, so `"aaab"`
+yields `a` with probability 3/4: dedupe the alphabet first for
+uniform-over-distinct-characters. Sampling is over Unicode scalar values,
+not grapheme clusters: a combining mark in the alphabet samples
+independently of its base character. The alphabet is materialized fresh on
+every call (no cross-call cache, by the fork-safe no-state discipline);
+bulk callers reusing one huge alphabet across many calls should prefer the
+stdlib. The only size ceiling is the argument itself (`Py_ssize_t`) and
+memory beyond it (`u64`-based sampling handles any alphabet a `str` can
+hold).
 
 ```python
 tors.random_string(12, "abcdef", seed=42)
@@ -4016,7 +4034,7 @@ tors.random_string(12, "abcdef", seed=42)
 ### `tors.random_hex`
 
 ```python
-def random_hex(length: int, *, seed: int | None = None) -> str: ...
+def random_hex(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
 ```
 
 `length` lowercase hex characters — exactly
@@ -4040,7 +4058,7 @@ tors.random_hex(32, seed=42)
 ### `tors.random_b62`
 
 ```python
-def random_b62(length: int, *, seed: int | None = None) -> str: ...
+def random_b62(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
 ```
 
 Exactly `random_string(length, BASE62_CHARS)` — one engine, delegated — over
@@ -4055,7 +4073,7 @@ tors.random_b62(22, seed=0)
 ### `tors.random_b64url`
 
 ```python
-def random_b64url(length: int, *, seed: int | None = None) -> str: ...
+def random_b64url(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
 ```
 
 `length` characters uniform over the 64-character RFC 4648 §5 urlsafe
@@ -4085,7 +4103,7 @@ tors.random_b64url(43, seed=7)
 ### `tors.uuid4`
 
 ```python
-def uuid4(*, seed: int | None = None) -> str: ...
+def uuid4(*, seed: int | SupportsIndex | None = None) -> str: ...
 ```
 
 An RFC 4122 version-4 UUID string (36 chars, lowercase, hyphens at
@@ -4133,7 +4151,7 @@ int(u[:8] + u[9:13], 16)  # the call's Unix epoch milliseconds
 ### `tors.uuid4_bytes` / `tors.uuid7_bytes`
 
 ```python
-def uuid4_bytes(*, seed: int | None = None) -> bytes: ...
+def uuid4_bytes(*, seed: int | SupportsIndex | None = None) -> bytes: ...
 def uuid7_bytes() -> bytes: ...
 ```
 
@@ -4161,7 +4179,7 @@ spellings, pinned as literal equality in `tests/test_random.py` (the seeded
 bytes are pure functions of the seed, pinned against the same independent
 oracle). `uuid7_bytes()[:6]` big-endian is the call's Unix-epoch
 milliseconds (`int.from_bytes(b[:6], "big")` — the `u[:8] + u[9:13]`
-field's own bytes), the same 60-second clock tolerance `uuid7`'s timestamp
+field's own bytes), the same 5-second clock tolerance `uuid7`'s timestamp
 contract carries. The seed contract and security warning are `uuid4`'s own
 (any int-like, reduced mod 2^64; a seeded stream is fully predictable —
 never for secrets), and `uuid7_bytes` takes no `seed=` for `uuid7`'s own

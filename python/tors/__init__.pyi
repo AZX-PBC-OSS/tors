@@ -1,5 +1,5 @@
 from collections.abc import Iterator, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, SupportsIndex
 
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
 # STEMMER_LANGUAGES (this is that same list, spelled as a type). Shared by
@@ -1155,7 +1155,14 @@ def refined_soundex(text: str) -> str: ...
 # exactly random_string over their fixed alphabets (Lemire, no modulo
 # bias). All six are one GIL-released pass (draw + sampling/formatting
 # under py.detach).
-def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str: ...
+# The seed contract shared by every seeded spelling below: any int-like —
+# an int instance (bools, IntEnums) or any __index__ object — reduced mod
+# 2**64, or None for the unseeded OS-entropy spelling. A non-int-like seed
+# raises TypeError naming the int-like (__index__) convention.
+_SeedLike = int | SupportsIndex
+def random_string(
+    length: int, alphabet: str, *, seed: _SeedLike | None = None
+) -> str: ...
 
 # length lowercase hex characters ("0123456789abcdef"), uniform per
 # character: exactly random_string(length, HEX_CHARS). Odd lengths are
@@ -1163,10 +1170,10 @@ def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str
 # digest-shaped keys want (every 2 chars exactly one byte).
 # secrets.token_hex(n) is the same uniform distribution as random_hex(2*n)
 # — different draws.
-def random_hex(length: int, *, seed: int | None = None) -> str: ...
+def random_hex(length: int, *, seed: _SeedLike | None = None) -> str: ...
 
 # Exactly random_string(length, BASE62_CHARS): the [0-9A-Za-z] id spelling.
-def random_b62(length: int, *, seed: int | None = None) -> str: ...
+def random_b62(length: int, *, seed: _SeedLike | None = None) -> str: ...
 
 # length characters uniform over the 64-char RFC 4648 §5 urlsafe alphabet
 # (A-Za-z0-9-_, never + or /), every position unconstrained: the
@@ -1175,12 +1182,12 @@ def random_b62(length: int, *, seed: int | None = None) -> str: ...
 # padded= parameter — padding is an encoding concept, not a token
 # concept). Callers wanting encodable random material: random_hex of even
 # length (byte-exact via hex).
-def random_b64url(length: int, *, seed: int | None = None) -> str: ...
+def random_b64url(length: int, *, seed: _SeedLike | None = None) -> str: ...
 
 # An RFC 4122 v4 UUID string (36 chars, lowercase, hyphens at 8/13/18/23):
 # 122 random bits, the uuid.uuid4() spelling. Deterministic under seed=
 # (predictable — the security contract above).
-def uuid4(*, seed: int | None = None) -> str: ...
+def uuid4(*, seed: _SeedLike | None = None) -> str: ...
 
 # An RFC 9562 v7 UUID string: 48-bit Unix-millisecond timestamp + 74 random
 # bits. No seed parameter: the timestamp is external state (a seeded uuid7
@@ -1201,7 +1208,7 @@ def uuid7() -> str: ...
 # same security paragraph above (seed= is predictable, never for secrets).
 # Fixed 16 bytes: no length argument, so the token spellings' memory-bound
 # class does not exist here.
-def uuid4_bytes(*, seed: int | None = None) -> bytes: ...
+def uuid4_bytes(*, seed: _SeedLike | None = None) -> bytes: ...
 
 # The uuid7 buffer spelling: the same 16 raw bytes uuid7 formats —
 # 48-bit Unix-millisecond timestamp + 74 random bits, NO canonical
