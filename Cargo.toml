@@ -318,3 +318,7 @@ harness = false
 [[bench]]
 name = "json_repair"
 harness = false
+
+[[bench]]
+name = "minhash"
+harness = false

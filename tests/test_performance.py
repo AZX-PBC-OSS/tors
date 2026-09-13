@@ -72,6 +72,26 @@ min-of-5 after warmup):
     Its value is the GIL release (pinned in tests/test_gil_release.py), CPython-parity
     guarantees (tests/test_decode_utf8.py), and its role inside ``finalize_utf8``.
     Deliberately recorded, not thresholded away.
+
+``tors.minhash_signature`` vs the pure-Python oracle
+(``reference.reference_minhash_signature``, the transcribed MinHash: same tokens
+via ``word_bounds``, same shingles, XXH64 via the pinned ``xxhash`` package, the
+same SplitMix64-to-affine arithmetic in Python bigints), at the default
+``num_perm=128``, prose corpus, measured on the dev box (macOS/arm64, tors
+min-of-7 after warmup, oracle single sample -- its wall is seconds-scale and
+deterministic work, so one sample is the conservative denominator; the
+difflib-race precedent):
+
+    size    tors        oracle      tors/oracle
+    1 KiB   0.03ms      3.2ms       0.010  (~104x)
+    100KiB  3.6ms       274.0ms     0.013  (~77x)
+    1 MiB   38.2ms      2834.6ms    0.013  (~74x)
+
+The margin is 0.5, not the near-parity 0.9 elsewhere in this file: the oracle is
+slow Python (an O(shingles x num_perm) bigint inner loop), so the criterion the
+cell pins is ``the native pass keeps its advantage`` (a regression to within 2x
+of pure Python fails it), not a close race; the measured ratios leave ~37x
+headroom, so load asymmetry cannot flake it.
 """
 
 from __future__ import annotations
@@ -98,6 +118,7 @@ from reference import (
     entities,
     prose,
     reference_finalize,
+    reference_minhash_signature,
     reference_scrub_log_text,
     scrub_corpus,
 )
@@ -1258,6 +1279,47 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
         "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
         "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
+    )
+
+
+# The minhash race's tolerance margin: measured tors/oracle ratios
+# 0.010-0.013 across the ladder (the module docstring's table), so 0.5
+# leaves ~37x headroom while still failing a lost-native-advantage
+# regression (the native pass within 2x of the pure-Python bigint loop).
+# The _GCM_WALL_MARGIN precedent: the assertion pins the relationship,
+# not a close race.
+_MINHASH_WALL_MARGIN = 0.5
+
+
+@pytest.mark.parametrize(
+    "size_bytes", [1 * 1024, 100 * 1024, 1 * _MIB], ids=["1KiB", "100KiB", "1MiB"]
+)
+def test_minhash_signature_beats_the_pure_python_oracle_on_the_doc_ladder(
+    size_bytes: int,
+) -> None:
+    """``minhash_signature`` vs its transcribed pure-Python oracle over a
+    document-size ladder at the default ``num_perm=128`` (prose corpus).
+    The oracle is slow by construction -- one Python-level bigint affine
+    per (shingle, permutation) pair, O(shingles x 128) interpreted
+    iterations -- which is the point: it is the expression a caller
+    without tors would run, and the measured 74-104x gap is the native
+    pass's wall-time case. The oracle draws a single sample (its wall is
+    deterministic work at 3ms-2.8s across the ladder, and noise only
+    ever adds time, making the single sample conservative for the
+    denominator); tors draws the size-appropriate min-of-N (7 under
+    4 MiB). The 0.5 margin is the criterion, not a calibration: it fails
+    a regression that brings the native pass within 2x of pure Python
+    while no realistic load asymmetry can flake it at ~37x headroom."""
+    corpus = prose(size_bytes)
+    tors_ms = _min_wall_ms(tors.minhash_signature, corpus, samples=_samples_for(size_bytes))
+    started = time.perf_counter()
+    reference_minhash_signature(corpus)
+    oracle_ms = (time.perf_counter() - started) * 1000.0
+    assert tors_ms < _MINHASH_WALL_MARGIN * oracle_ms, (
+        f"prose {size_bytes // 1024}KiB: tors {tors_ms:.2f}ms vs oracle "
+        f"{oracle_ms:.1f}ms (ratio {tors_ms / oracle_ms:.4f}): the native "
+        "tokenize+shingle+hash+sweep pass lost more than the margin to the "
+        "pure-Python MinHash loop"
     )
 
 

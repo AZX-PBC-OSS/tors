@@ -2622,6 +2622,36 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
     )
 
 
+@pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_minhash_signature_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int
+) -> None:
+    """The MinHash claim: the whole tokenize + shingle + XXH64 + min-sweep
+    (the sweep is the dominant cost, O(shingles x num_perm)) runs under one
+    ``py.detach``, and the return marshalling is bounded by contract at
+    ``num_perm`` ints (<= 1024), so the GIL-held residue is the argument
+    borrow plus at most a thousand fresh ints -- two orders of magnitude
+    under the word_bounds 3.67M-tuple band at the same corpus size, the
+    structural reason no streaming twin exists for this shape.
+
+    Measured on the dev box (macOS/arm64, ambient load ~2, 3 samples per
+    cell, ``num_perm`` 128):
+
+    - prose 12 MiB: worst gap 11.1ms of 456-466ms walls (ratio 0.024):
+      the ping floor plus the borrow and the 128-int marshalling.
+    - decomposed 12 MiB: the same band plus the str-in one-time O(input)
+      UTF-8 materialization on the first sample (the class every str-in
+      function pays), still at the floor scale.
+
+    Every sample sits deep inside both shared budgets (~12x on the ratio,
+    ~9x on the ceiling)."""
+    corpus = _CORPORA[corpus_kind](size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.minhash_signature, corpus))
+    )
+
+
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
