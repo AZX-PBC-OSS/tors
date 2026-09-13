@@ -100,8 +100,9 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 /// `find_unescaped` (#50) — same module, same harness patterns — and
 /// honest sizing says it would not stand alone: a short-string encode is
 /// a few hundred nanoseconds, so the win is large inputs and hot paths,
-/// where the copy is the cost (the 64 KiB terminal case is ~1.5 µs of
-/// pure memcpy per success).
+/// where the copy is the cost — the 64 KiB terminal case is ~0.9 µs of
+/// pure alloc+memcpy per success, the lane table's ASCII 64 KiB
+/// expression cell).
 ///
 /// Cost model (the deliberate deviation from the issue's sketch: no
 /// hand-rolled UCS1/UCS2/UCS4 arithmetic — the module docs in
@@ -112,11 +113,18 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 /// * ASCII (serialized JSON with `ensure_ascii=True`): compact ASCII data
 ///   is its own UTF-8, so the borrow is a zero-copy alias and the call is
 ///   O(1), no allocation at all.
-/// * Non-ASCII, first call on the object: CPython materializes and CACHES
-///   the UTF-8 view on the `str` object (an internal cache, not a
-///   Python-visible `bytes`; shared with every other str-in tors call on
-///   the same object), so the first call is O(n) — encode-parity in cost
-///   class, with no Python-visible object to allocate and collect.
+/// * Non-ASCII, first call on the object (a cold UTF-8 cache): CPython
+///   materializes and CACHES the UTF-8 view on the `str` object (an
+///   internal cache, not a Python-visible `bytes`; filled by this borrow
+///   and by any earlier str-in tors call on the same object, read by
+///   `encode` — which never fills it), so the first call is O(n) —
+///   encode-parity in cost class, with no Python-visible object to
+///   allocate and collect. The sharing with `encode` is one-directional:
+///   a prior `len(s.encode())` does not warm this lane (measured
+///   ~3.8-4.8 ms for the first call after an encode at 12 MiB on fresh
+///   objects, the cold class exactly — in every CPython 3.10-3.14
+///   `unicode_encode_utf8` reads the cache and only
+///   `PyUnicode_AsUTF8AndSize`, the str-in borrow, writes it).
 /// * Non-ASCII, repeat calls on the same object: O(1) — strictly better
 ///   than the expression, which re-copies on every call.
 ///

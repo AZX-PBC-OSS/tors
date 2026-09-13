@@ -351,14 +351,22 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #         1 KiB   0.08-0.13µs 0.13µs     0.7-1.0  (a dead heat: both sides are
 #                                                   pure call overhead; recorded,
 #                                                   not asserted)
-#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.8µs
-#                                                 of pure alloc+memcpy per success)
+#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.9µs
+#                                                 of pure alloc+memcpy per
+#                                                 success — the figure every
+#                                                 doc site cites for the
+#                                                 terminal case)
 #         1 MiB   0.13µs      14.3µs     0.009
 #         12 MiB  0.13µs      184µs      0.0007
 #
-#     non-ASCII (decomposed), the three cache lanes (the borrow's UTF-8
-#     view is materialized once per OBJECT and cached by CPython; encode
-#     consults that cache but never fills it):
+#     non-ASCII (decomposed), the cache lanes (the borrow's UTF-8 view is
+#     materialized once per OBJECT and cached by CPython; the sharing with
+#     encode is one-directional — the str-in borrow fills the cache and
+#     encode reads it but never fills it, verified in the CPython sources
+#     3.10-3.14: unicode_fill_utf8, the only writer, is reachable solely
+#     from PyUnicode_AsUTF8AndSize, the str-in borrow, while
+#     unicode_encode_utf8 returns a copy of a filled cache and writes
+#     nothing on a miss):
 #
 #         64 KiB:  cold-encode 21.8µs | first-call 26.7µs | warm-encode 1.8µs
 #                  | cached-tors 0.08µs
@@ -373,11 +381,26 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #     cache, measured within ~10-20% of a cold encode), so the win there
 #     is only the absence of a Python-visible bytes object; the win is on
 #     REPEAT calls on the same object (the warm-encode lane itself is 20-
-#     1600x the cached call), and unconditionally on ASCII. The cache is
-#     shared with encode itself: priming an object with utf8_byte_len
-#     dropped a subsequent len(s.encode()) from 4.9ms to 184µs at 12 MiB
-#     (measured, the mechanism verified in CPython 3.14's
-#     unicode_fill_utf8/unicode_encode_utf8).
+#     1600x the cached call), and unconditionally on ASCII.
+#
+#     Both sharing directions, measured (a red-team pass reported the
+#     reverse of the recorded one; re-measured to adjudicate, min-of-7
+#     FRESH 12 MiB objects per lane, this box at ambient load ~6-7):
+#     tors-primed encode 177µs (the consult: one memcpy out of the filled
+#     cache - the recorded 184µs lane, reproduced); encode-primed FIRST
+#     utf8_byte_len 3.85-4.79ms, indistinguishable from the cold
+#     first-call lane (3.91-4.22ms) - a prior encode does NOT warm the
+#     tors lane. The reported 0.12-0.21µs "first call after encode" is
+#     this table's own cached-tors band (0.13µs), i.e. a warm object: the
+#     measurement to make that number is a cached call, not a first call.
+#     The same re-measurement pass re-checked the disputed 64 KiB figure
+#     (P2-2): the ASCII expression cell landed 0.75µs here (min-of-7,
+#     same load) against the recorded 0.9µs - the same class, and the
+#     lane table's 0.9µs stands as the ONE figure cited everywhere; the
+#     ~1.5µs the binding/test docstrings had carried matches no recorded
+#     lane (the nearest class is the non-ASCII warm encode's single
+#     1.8µs memcpy, which is not the terminal case - the terminal's
+#     serialized result is ASCII).
 # ---------------------------------------------------------------------------
 
 

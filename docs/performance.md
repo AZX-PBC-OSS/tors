@@ -50,10 +50,16 @@ otherwise use:
   TaskQ result-cap size, and ~180 µs at 12 MiB) and ~0.1 µs on repeat calls
   over a cached non-ASCII object, where even the warm expression pays a full
   copy out of the same cache (~196 µs at 12 MiB). The honest lanes,
-  recorded: a fresh non-ASCII object's first call is encode-parity (the
-  cache materialization IS an encode — the encoder pass plus a malloc plus
-  a second memcpy, ~4.7 ms at 12 MiB against a cold encode's ~4.9 ms), and
-  1 KiB is a dead heat (pure call overhead on both sides). That first-call
+  recorded: a fresh non-ASCII object's first call — the cold-cache case — is
+  encode-parity (the cache materialization IS an encode — the encoder pass
+  plus a malloc plus a second memcpy, ~4.7 ms at 12 MiB against a cold
+  encode's ~4.9 ms), 1 KiB is a dead heat (pure call overhead on both
+  sides), and the cache sharing with `encode` is one-directional: the
+  str-in borrow fills the cache — `encode` then reads it, a ~184 µs copy at
+  12 MiB instead of ~4.9 ms — but a prior `encode` fills nothing, so the
+  first `utf8_byte_len` after an encode still pays the full materialization
+  (measured ~3.8-4.8 ms at 12 MiB; `unicode_encode_utf8` reads the cache and
+  never writes it, in every CPython 3.10-3.14). That first-call
   materialization is the function's one GIL-held O(n) pass (~5 ms at
   12 MiB, under the heartbeat interval); the full lane table is in
   `tests/test_performance.py`, the criterion core-vs-copy group in

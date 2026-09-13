@@ -769,7 +769,8 @@ binding module as the pinned companion of `contains_unescaped`/
 `find_unescaped`, same module and same harness patterns — and honest sizing
 says it would not stand alone (a short-string encode is a few hundred
 nanoseconds; the win is large inputs and hot paths, where the copy is the
-cost — the 64 KiB terminal case is ~0.8 µs of pure alloc+memcpy per success).
+cost — the 64 KiB terminal case is ~0.9 µs of pure alloc+memcpy per success,
+the lane table's ASCII 64 KiB expression cell).
 
 The implementation is the standard str borrow, not arithmetic over CPython's
 internal UCS storage: pyo3's `to_str` hands the core a Rust `&str`, whose
@@ -784,15 +785,23 @@ The cost model that buys, measured (the full lane table is in
   is O(1) with no allocation at all — measured flat ~0.1 µs from 1 KiB to
   12 MiB, against the expression's alloc+memcpy every call (~0.9 µs at 64 KiB,
   ~14 µs at 1 MiB, ~180 µs at 12 MiB).
-- **Non-ASCII, first call on the object**: CPython materializes and caches the
-  UTF-8 view on the `str` object (an internal cache, not a Python-visible
-  `bytes`), so the first call is O(n) — encode-parity in cost class (measured
-  within ~10-20% of a cold encode: the same encoder pass plus a malloc plus a
-  second memcpy into the permanent cache), with no Python-visible object to
-  allocate and collect. The cache is shared with every other str-in tors call
-  on the same object — and with `encode` itself, which consults it but never
-  fills it: after one `utf8_byte_len`, a subsequent `len(s.encode())` on the
-  same 12 MiB object dropped from ~4.9 ms to ~184 µs, measured.
+- **Non-ASCII, first call on the object (a cold UTF-8 cache)**: CPython
+  materializes and caches the UTF-8 view on the `str` object (an internal
+  cache, not a Python-visible `bytes`), so the first call is O(n) —
+  encode-parity in cost class (measured within ~10-20% of a cold encode: the
+  same encoder pass plus a malloc plus a second memcpy into the permanent
+  cache), with no Python-visible object to allocate and collect. What "cold"
+  means, exactly: the cache is filled by the str-in borrow itself — this
+  call, or any earlier str-in tors call on the same object — and nothing
+  else fills it. `encode` shares the cache but only reads it, so the sharing
+  is one-directional: after one `utf8_byte_len`, a subsequent
+  `len(s.encode())` on the same 12 MiB object dropped from ~4.9 ms to
+  ~184 µs, measured — while a prior `len(s.encode())` does not warm this
+  lane at all: the first `utf8_byte_len` after an encode still pays the full
+  materialization (measured ~3.8-4.8 ms at 12 MiB on fresh objects, the cold
+  class exactly; in every CPython from 3.10 through 3.14 the encode path
+  reads the cache and only the `PyUnicode_AsUTF8AndSize` borrow — the str-in
+  borrow — writes it).
 - **Non-ASCII, repeat calls on the same object**: O(1) — strictly better than
   the expression, which re-copies on every call (measured ~0.1 µs against the
   warm expression's 1.8 µs at 64 KiB and 196 µs at 12 MiB).

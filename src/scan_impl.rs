@@ -155,11 +155,17 @@
 //! * ASCII (the serialized-JSON case): the borrow is a zero-copy alias —
 //!   compact ASCII data is its own UTF-8 — so the call is O(1) with no
 //!   allocation, against the expression's alloc+memcpy every call.
-//! * Non-ASCII, first call on the object: CPython materializes and CACHES
-//!   the UTF-8 view on the `str` object (an internal cache, not a
-//!   Python-visible `bytes`, shared with every other str-in tors call on
-//!   the same object), so the first call is O(n) — encode-parity in cost
-//!   class, with no Python-visible object to allocate and collect.
+//! * Non-ASCII, first call on the object (a cold UTF-8 cache): CPython
+//!   materializes and CACHES the UTF-8 view on the `str` object (an
+//!   internal cache, not a Python-visible `bytes`, filled by this borrow
+//!   and by any earlier str-in tors call on the same object — `encode`
+//!   reads it and never fills it), so the first call is O(n) —
+//!   encode-parity in cost class, with no Python-visible object to
+//!   allocate and collect, and a prior `len(s.encode())` does not warm
+//!   it: the first call after an encode still pays the full
+//!   materialization (the cold class, measured — in every CPython
+//!   3.10-3.14 `unicode_encode_utf8` reads the cache and only
+//!   `PyUnicode_AsUTF8AndSize`, the str-in borrow, writes it).
 //! * Non-ASCII, repeat calls on the same object: O(1) — strictly better
 //!   than the expression, which re-copies on every call.
 //!

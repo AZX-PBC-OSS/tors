@@ -20,8 +20,9 @@ binding module (``src/py/scan.rs``, the ``contains_unescaped`` /
 escape-parity scan (#50) — same module, same test/bench harness patterns
 — and honest sizing says it would not stand alone: a short-string encode
 is a few hundred nanoseconds, so the win only exists at large inputs or
-hot paths where the copy is the cost (the 64 KiB terminal case is about
-a microsecond and a half of pure memcpy per success).
+hot paths where the copy is the cost (the 64 KiB terminal case is ~0.9 µs
+of pure alloc+memcpy per success — the lane table's ASCII 64 KiB
+expression cell in tests/test_performance.py).
 
 Implementation, and the deliberate deviation from the issue's sketch: the
 issue proposed hand-rolled per-range arithmetic over CPython's internal
@@ -44,12 +45,14 @@ tests/test_gil_release.py):
   ASCII data is its own UTF-8, so the borrow is a zero-copy alias and the
   call is O(1) with no allocation at all — versus the expression's
   alloc+memcpy every call.
-- **Non-ASCII, first call on the object**: CPython materializes and
-  CACHES the UTF-8 view on the ``str`` object (an internal cache, not a
-  Python-visible ``bytes``; shared with every other str-in tors call on
-  the same object), so the first call is O(n) — encode-parity in cost
-  class, GIL-held like every str-in borrow (the ``finalize`` first-call
-  class), with no Python-visible object to collect.
+- **Non-ASCII, first call on the object (a cold UTF-8 cache)**: CPython
+  materializes and CACHES the UTF-8 view on the ``str`` object (an
+  internal cache, not a Python-visible ``bytes``; filled by this borrow
+  and by any earlier str-in tors call on the same object, read but never
+  filled by ``encode`` — a prior ``len(s.encode())`` does not warm it),
+  so the first call is O(n) — encode-parity in cost class, GIL-held like
+  every str-in borrow (the ``finalize`` first-call class), with no
+  Python-visible object to collect.
 - **Non-ASCII, repeat calls on the same object**: O(1) — the cached view
   is borrowed zero-copy — strictly better than ``len(s.encode())``,
   which re-copies on every call.

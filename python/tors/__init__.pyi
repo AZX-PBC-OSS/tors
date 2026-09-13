@@ -214,10 +214,12 @@ def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
 # Cache semantics (the deliberate implementation: the standard str-in
 # borrow, not hand-rolled UCS arithmetic — a Rust &str IS its UTF-8
 # bytes, so the core is one field read): ASCII is a zero-copy alias, so
-# the call is O(1) with no allocation; a non-ASCII input's FIRST call
-# materializes and caches the UTF-8 view on the str object (a
-# CPython-internal cache, not a Python-visible bytes, shared with every
-# other str-in tors call on the same object) — encode-parity cost, no
+# the call is O(1) with no allocation; a non-ASCII input's FIRST call —
+# exactly the cold-cache case — materializes and caches the UTF-8 view
+# on the str object (a CPython-internal cache, not a Python-visible
+# bytes, filled by this borrow and by any earlier str-in tors call on
+# the same object, read but never filled by encode: a prior
+# len(s.encode()) does not warm it) — encode-parity cost, no
 # Python-visible object; repeat calls on the same object are O(1),
 # strictly better than len(s.encode()), which re-copies every call.
 #

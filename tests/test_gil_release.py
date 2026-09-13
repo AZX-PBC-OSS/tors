@@ -259,8 +259,10 @@ first-call lane):
   time by tests/test_performance.py.
 - The non-ASCII first-call lane is the function's one heavy lane, made
   structural by the fresh-object-per-sample design: the borrow's
-  materialization of the UTF-8 view is GIL-held O(n) (there is no way
-  to fill an object's cache without the GIL), measured 4.6-5.6ms walls
+  materialization of the UTF-8 view is GIL-held O(n) (the cold-cache case:
+  the borrow fills the cache, ``encode`` only reads it, so only a str-in
+  call — not a prior encode — ends the cold lane; there is no way to fill
+  an object's cache without the GIL), measured 4.6-5.6ms walls
   inline at 12 MiB with worst gaps 10.6-10.8ms — the materialization
   (~5ms) sits under the 10ms ping interval itself, so the loop never
   misses a tick beyond the floor at this size; the 100ms ceiling holds
@@ -1416,9 +1418,12 @@ def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
 ) -> None:
     """The byte-count claim, and its honest limit: the call's only O(n)
     work is the str-in borrow itself — CPython materializes the UTF-8 view
-    under the GIL on a non-ASCII object's first contact (there is no way
-    to fill an object's cache without holding the GIL; the ``finalize``
-    cells' first-call class) — while everything past the borrow is O(1)
+    under the GIL on a non-ASCII object's first contact, the cold-cache
+    case exactly (a prior ``encode`` does not warm it: ``encode`` reads
+    this cache and never fills it, so only a str-in call ends the cold
+    lane; there is no way to fill an object's cache without holding the
+    GIL; the ``finalize`` cells' first-call class) — while everything past
+    the borrow is O(1)
     (the ``py.detach`` around the core is nominal, kept for the family
     shape) and the return is a single int, so there is no marshalling
     class and no error path past the borrow's own ``UnicodeEncodeError``
