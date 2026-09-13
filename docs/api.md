@@ -3239,6 +3239,18 @@ property tables: the charter boundary already drawn for lexical data
 ([design and scope](design.md)). A rule that needs `\w` is not expressible;
 a rule that needs specific codepoints is, whatever their script.
 
+Membership is per scalar value, with no normalization: precomposed `é`
+(U+00E9, one codepoint) and decomposed `e` + U+0301 (two codepoints) are
+different inputs and get different verdicts — `first_invalid_charset(["é"],
+rest="é")` is `-1` while `first_invalid_charset(["é"], rest="é")`
+is `0`, correctly per the per-codepoint engine. When NFC and NFD forms
+must agree, normalize (`tors.normalize` / `tors.nfc`) before validating.
+
+Membership is per codepoint, not per grapheme cluster: a ZWJ family emoji
+(5 codepoints), a flag pair (2 regional indicators), or a base letter plus
+a combining mark (2 codepoints) each pass only when every constituent
+codepoint is in the set — one grapheme can still offend.
+
 **Batch-only by design, and honestly so.** The motivating consumer (an
 enqueue path) validates identifier-shaped strings with anchored regexes at
 84–950 ns per call, each under a single `py.detach` round trip — so a
@@ -3249,7 +3261,8 @@ Measured on the dev box (min-of-7): the crossover is at single-digit item
 counts (~2x at a 10-item batch), ~5x at 100 items (2.0 µs vs the per-item
 regex loop's 9.7 µs), ~7x at 1000 (14.0 µs vs 96.7 µs). The Rust core alone
 measures ~64 ns fixed (the two set builds) plus ~5.4 ns per item
-(`first_invalid_charset` group, `benches/search.rs`). Do not call this once
+(post-`#[inline]` band, `first_invalid_charset` group, `benches/search.rs`).
+Do not call this once
 per string; call it on the batch.
 
 ```python
@@ -3276,16 +3289,24 @@ oracle plus the equivalent anchored regexes rebuilt from the same set halves
 over hypothesis-generated inputs (tests/test_first_invalid_charset.py).
 
 GIL model: one GIL-held walk of the items sequence (the standard str-in
-borrow class, O(items) handles), then the set builds and the whole batch
-scan under one `py.detach`, then a single int return — no marshalling class
-at all. At realistic batch sizes the whole call sits far under the 10 ms ping
-floor, so the GIL cell is ceiling-only (the `utf8_is_valid` class), pinned in
-tests/test_gil_release.py. The core is a trivial one-pass membership walk
-(one-bit-per-codepoint ASCII mask plus a sorted non-ASCII tail; no index
-arithmetic, no `unsafe`), which is why it ships no cargo-fuzz target: the
-hypothesis differentials over arbitrary Unicode cover its input space. The
-Rust core alone measures ~63 ns fixed (the two set builds) plus ~4.6 ns per
-item (`first_invalid_charset` group, `benches/search.rs`).
+borrow class, O(items) handles; the one-time O(input) UTF-8 materialization
+applies per non-ASCII item object on first extraction, so a batch of
+never-before-touched non-ASCII items holds the GIL for that
+materialization — the non-ASCII worst-hold cell), then the set builds and
+the whole batch scan under one `py.detach`, then a single int return — no
+marshalling class at all. The set builds are O(set) over the ASCII spelling
+plus O(set log set) over the non-ASCII tail (sort + dedup, inside the
+detach): negligible for the few-dozen-codepoint ASCII rules this validator
+exists for (the ~64 ns fixed band above), a real sort for a 10k-codepoint
+non-ASCII spelling. At realistic batch sizes the whole call sits far under
+the 10 ms ping floor, so the GIL cell is ceiling-only (the `utf8_is_valid`
+class), pinned in tests/test_gil_release.py. The core is a trivial one-pass
+membership walk (one-bit-per-codepoint ASCII mask plus a sorted non-ASCII
+tail; no index arithmetic, no `unsafe`), which is why it ships no
+cargo-fuzz target: the hypothesis differentials over arbitrary Unicode
+cover its input space. The Rust core band is the one above — ~64 ns fixed
+(the two set builds) plus ~5.4 ns per item, post-`#[inline]`
+(`first_invalid_charset` group, `benches/search.rs`).
 
 ### Building rejection messages: `tors.first_invalid_offender`
 
@@ -3320,7 +3341,8 @@ item's FIRST offending position, `None` when every item passes.
 - A `== -1` / `!= -1` test ported from the int spelling does not
   transfer: a tuple never equals `-1`, so an `!= -1` invalidity guard
   fires on every batch and an `== -1` validity guard never does, both
-  silently. The clean spelling is `is None` / `is not None`.
+  silently. The clean spelling is `is None` / `is not None`, pinned on
+  both branches (clean AND offending) in tests/test_first_invalid_charset.py.
 
 ```python
 import string
@@ -3410,9 +3432,9 @@ Three shapes are deliberately OUT, each for a structural reason:
   the right tool. That is why `CHARSET_B64URL` is the unpadded alphabet
   and the padded segment above is an offender, not a pass.
 - **UUID.** The hyphens at fixed positions 8/13/18/23 are structure, not
-  charset; `first_invalid_charset` cannot express them. The strict UUID
-  validator is `tors.uuid_parse` (the uuid7-helpers branch), not a flat
-  alphabet.
+  charset; `first_invalid_charset` cannot express them. There is no
+  strict UUID validator in this release — hyphens are structure,
+  tracked on the uuid7-helpers branch — not a flat alphabet.
 - **Digits.** `"0123456789"` is trivially spelled with zero typo risk; not
   worth a name.
 

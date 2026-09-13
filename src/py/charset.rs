@@ -63,7 +63,10 @@ fn borrow_str_sequence<R>(
 /// caller-supplied data and checked for a whole batch in one pass. The
 /// sets are data, not patterns: plain strings of permitted codepoints,
 /// membership per codepoint (duplicates in a spelling harmless, order
-/// irrelevant); ranges, escapes, and Unicode-category classes (`\w`,
+/// irrelevant; per scalar value with no normalization — precomposed é and
+/// decomposed e + U+0301 get different verdicts, so callers who need
+/// NFC/NFD to agree normalize with tors.normalize/nfc first); ranges,
+/// escapes, and Unicode-category classes (`\w`,
 /// which would need property tables) are out of scope by charter
 /// (docs/design.md). An empty item is an offender, wherever it sits.
 ///
@@ -90,8 +93,13 @@ fn borrow_str_sequence<R>(
 /// GIL model: one GIL-held sequence walk borrowing each entry's UTF-8
 /// (the standard str-in class, O(items) handles; the one-time O(input)
 /// materialization applies per non-ASCII item object on first call, and
-/// to `first`/`rest` as usual), then set build + the whole batch scan
-/// under one `py.detach`, then a single int return (the
+/// to `first`/`rest` as usual — a batch of never-before-touched
+/// non-ASCII items holds the GIL for that materialization, the non-ASCII
+/// worst-hold cell), then set build + the whole batch scan
+/// under one `py.detach` (the set builds are O(set) ASCII plus O(set log
+/// set) non-ASCII tail sort + dedup, inside the detach: negligible for the
+/// few-dozen-codepoint rules, a real sort for a 10k spelling), then a
+/// single int return (the
 /// `grapheme_count`/`count_matches` no-marshalling shape). At realistic
 /// batch sizes the whole call sits far under the 10 ms ping floor, so the
 /// GIL cell is ceiling-only (the `utf8_is_valid` class), pinned in

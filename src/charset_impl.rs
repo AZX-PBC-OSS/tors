@@ -17,7 +17,10 @@
 //! codepoints, and the Unicode-category classes (`\w`) that would need
 //! property tables stay out (the lexical-data charter boundary,
 //! docs/design.md). Duplicates in a spelling are idempotent and order is
-//! irrelevant: a set, however spelled.
+//! irrelevant: a set, however spelled. Membership is per scalar value with
+//! no normalization: precomposed é (U+00E9) and decomposed e + U+0301 are
+//! different inputs with different verdicts — callers who need NFC/NFD to
+//! agree normalize before validating.
 //!
 //! One scan answers both published spellings. The walk stops at the first
 //! offending codepoint of the first offending item, and at that stop point
@@ -65,6 +68,11 @@ struct CharSet {
 }
 
 impl CharSet {
+    /// Build a set from its spelling: O(set) over the ASCII codepoints
+    /// plus O(set log set) over the non-ASCII tail (sort + dedup, inside
+    /// the caller's detach) — negligible for the few-dozen-codepoint
+    /// ASCII rules this validator exists for, a real sort for a
+    /// 10k-codepoint non-ASCII spelling.
     fn build(set: &str) -> CharSet {
         let mut ascii = 0u128;
         let mut non_ascii = Vec::new();

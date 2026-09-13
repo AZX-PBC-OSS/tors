@@ -263,6 +263,55 @@ class TestTaskQRuleShapes:
         assert first_invalid_charset(["café"], rest=ascii_tag_rest) == 0
         assert first_invalid_charset(["café"], rest=ascii_tag_rest + "é") == -1
 
+    def test_nfc_and_nfd_forms_get_different_verdicts_normalize_first(self) -> None:
+        """The normalization bypass, pinned: the engine is per-scalar (one
+        codepoint at a time, no NFC/NFD folding), so precomposed é (U+00E9,
+        one codepoint) and decomposed e+U+0301 (two codepoints) get
+        different verdicts under ``rest="é"`` — correct per the data
+        model, surprising when NFC/NFD must agree. A caller who needs
+        the two forms to agree normalizes first (``tors.normalize`` /
+        ``tors.nfc``) before validating."""
+        assert first_invalid_charset(["é"], rest="é") == -1
+        assert first_invalid_charset(["é"], rest="é") == 0
+        assert reference_first_invalid_charset(["é"], None, "é") == -1
+        assert reference_first_invalid_charset(["é"], None, "é") == 0
+        # After NFC both forms are the one-codepoint é, so both pass.
+        assert first_invalid_charset([tors.normalize("é")], rest="é") == -1
+        assert first_invalid_charset([tors.normalize("é")], rest="é") == -1
+
+    def test_membership_is_per_codepoint_not_per_grapheme_cluster(self) -> None:
+        """Codepoints, not grapheme clusters: a ZWJ family emoji (5
+        codepoints), a flag pair (2 regional indicators), and a base +
+        combining mark (2 codepoints) each pass only when every
+        constituent codepoint is in the set — one missing joiner, one
+        missing indicator, one missing combining mark offends, even
+        though the item is a single grapheme either way."""
+        zwj = "👨\u200d👩\u200d👧"  # 5 codepoints, 1 grapheme
+        flag = "🇫🇷"  # 2 regional indicators, 1 grapheme
+        assert first_invalid_charset([zwj], rest=zwj) == -1
+        assert first_invalid_charset([zwj], rest=zwj.replace("\u200d", "")) == 0
+        assert first_invalid_charset([flag], rest=flag) == -1
+        assert first_invalid_charset([flag], rest="🇫") == 0
+        assert first_invalid_charset(["é"], rest="é") == -1
+        assert first_invalid_charset(["é"], rest="é") == 0
+        assert first_invalid_charset(["é"], rest="é") == -1
+        assert reference_first_invalid_charset([zwj], None, zwj) == -1
+        assert reference_first_invalid_charset([flag], None, flag) == -1
+
+    def test_a_10k_non_ascii_set_spelling_validates_correctly(self) -> None:
+        """The huge-set build: 10_000 distinct non-ASCII codepoints spell
+        a set whose tail sorts/dedups (O(set log set), inside the
+        detach) and still validates per codepoint — members pass,
+        one missing codepoint offends. The build cost is the set
+        builds, not the batch scan (the ~64 ns fixed band covers the
+        few-dozen-codepoint ASCII rule; a 10k tail pays its sort)."""
+        huge = "".join(chr(cp) for cp in range(0x1000, 0x1000 + 10_000))
+        member = chr(0x1000) + chr(0x1000 + 9_999)
+        assert first_invalid_charset([member], rest=huge) == -1
+        assert first_invalid_charset([member + "e"], rest=huge) == 0
+        assert first_invalid_charset(["e"], rest=huge) == 0
+        assert reference_first_invalid_charset([member], None, huge) == -1
+
 
 # --- The golden semantics battery ---------------------------------------------
 #
@@ -788,6 +837,24 @@ def test_char_position_is_a_codepoint_index_not_a_byte_offset() -> None:
     got = first_invalid_offender(["ok_" + _CRAB], rest="ok_")
     assert got == (0, 3, _CRAB)
     assert len(got[2]) == 1
+
+
+def test_offender_never_equals_minus_one_spell_the_check_is_none() -> None:
+    """The -1 trap, pinned on both branches: a tuple never equals -1, so
+    an ``!= -1`` invalidity guard ported from the int spelling fires on
+    EVERY batch (clean included) and an ``== -1`` validity guard never
+    does, both silently. The clean spelling is ``is None`` /
+    ``is not None``."""
+    clean = first_invalid_offender(["job_42"], first=IDENT_FIRST, rest=IDENT_REST)
+    assert clean is None
+    assert (clean != -1) is True  # the trap: True even though the batch is clean
+    assert (clean == -1) is False  # ... and never True, even here
+    offending = first_invalid_offender(["job_42", "9bad"], first=IDENT_FIRST, rest=IDENT_REST)
+    assert offending == (1, 0, "9")
+    assert (offending != -1) is True  # True here too: the guard cannot discriminate
+    assert (offending == -1) is False
+    assert (offending is None) is False
+    assert (clean is None) is True
 
 
 @given(_items_first_rest())
