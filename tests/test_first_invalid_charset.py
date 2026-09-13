@@ -389,6 +389,28 @@ def test_set_spelling_order_is_irrelevant() -> None:
         assert reference_first_invalid_charset(items, fs, rs) == 1
 
 
+def test_regex_special_codepoints_are_plain_data_not_patterns() -> None:
+    """The data-not-patterns rule at its sharpest edge, pinned
+    deterministically: every regex metacharacter is an ordinary member
+    codepoint, spelled and matched literally — a set spelled with the
+    whole specials string admits items built from it (no escaping
+    semantics anywhere), dropping one metacharacter from the spelling
+    makes items carrying it offend, and a metacharacter is a legal
+    position-0 codepoint under a ``first`` spelling. The membership
+    oracle cross-checks every row, so the pin cannot launder a
+    regex-flavored misreading of the set (the hypothesis differentials
+    cover this statistically; this row makes it deterministic)."""
+    specials = ".*+[](){}|^$-\\"
+    items = [".*+", "|^$-\\", "[a]", "x.*"]
+    assert first_invalid_charset(items, rest=specials) == 2
+    assert reference_first_invalid_charset(items, None, specials) == 2
+    without_backslash = specials.replace("\\", "")
+    assert first_invalid_charset(["\\"], rest=without_backslash) == 0
+    assert reference_first_invalid_charset(["\\"], None, without_backslash) == 0
+    assert first_invalid_charset([".*x"], first=".", rest="*x") == -1
+    assert reference_first_invalid_charset([".*x"], ".", "*x") == -1
+
+
 # --- The argument-boundary contract -------------------------------------------
 
 
@@ -399,6 +421,34 @@ class TestArgumentContract:
         pinned on the same hand-derived index."""
         assert first_invalid_charset(("job_42", "9bad"), first=IDENT_FIRST, rest=IDENT_REST) == 1
         assert first_invalid_charset(["job_42", "9bad"], first=IDENT_FIRST, rest=IDENT_REST) == 1
+
+    def test_any_sequence_abc_instance_is_accepted_like_a_list(self) -> None:
+        """The annotation is ``Sequence[str]`` and the walk casts to the
+        sequence protocol, so any ``collections.abc.Sequence`` instance —
+        not just ``list``/``tuple`` — answers exactly the list spelling's
+        answer. The bare-``str`` refusal is an ``isinstance`` refusal, so a
+        ``str`` subclass as ``items`` is refused with it: it would silently
+        validate its own characters exactly as a bare ``str`` would."""
+        class Boxed(Sequence):
+            def __init__(self, xs: list[str]) -> None:
+                self._xs = xs
+
+            def __getitem__(self, i: int) -> str:
+                return self._xs[i]
+
+            def __len__(self) -> int:
+                return len(self._xs)
+
+        assert (
+            first_invalid_charset(Boxed(["job_42", "9bad"]), first=IDENT_FIRST, rest=IDENT_REST)
+            == 1
+        )
+
+        class StrSub(str):
+            pass
+
+        with pytest.raises(TypeError):
+            first_invalid_charset(StrSub("job_42"), rest=IDENT_REST)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
         "not_items",
@@ -642,6 +692,18 @@ class TestBatchScale:
         items = _ident_batch(100, poison_at=42)
         items[43] = "also bad"
         assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == 42
+
+    def test_a_100_000_item_batch_answers_correctly(self) -> None:
+        """The GIL cells drive 100k/1M-item batches but assert only loop
+        responsiveness, and the scale battery otherwise stops at 1000: this
+        cell pins the ANSWER at the 100k size (all-valid and
+        offender-at-the-end, both hand-derived), so a size-dependent
+        regression — an index overflow, a walk/scan mismatch at scale —
+        fails here instead of passing under a heartbeat-only check."""
+        items = _ident_batch(100_000)
+        assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == -1
+        items[-1] = "bad name"
+        assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == 99_999
 
 
 # --- The pinned common alphabets ------------------------------------------------
