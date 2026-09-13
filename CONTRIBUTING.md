@@ -56,7 +56,7 @@ stale doc is treated as a defect, the same severity as a stale test.
 
 `fuzz/` holds `cargo-fuzz` (libFuzzer) targets for the parsing/decoding/scoring
 cores most exposed to raw adversarial input: `decode_utf8`, `decode_utf16`,
-`b64_decode`, `html_unescape`, `fence`, `chunk_hierarchical`, `normalize`,
+`b64_decode`, `canon`, `html_unescape`, `fence`, `chunk_hierarchical`, `normalize`,
 `search`, `segmentation`, `diff`, `grounded`, `phonetic`, `bm25`, `tfidf`,
 `truncate_ellipsis`, `controls`, `json_repair`, `gfm_strip`, and `hash`
 (the current

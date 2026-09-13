@@ -60,7 +60,7 @@ jobs:
         working-directory: fuzz
         run: |
           set -e
-          for t in decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash; do
+          for t in decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash; do
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=30 -close_fd_mask=3
           done

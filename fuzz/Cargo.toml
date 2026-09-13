@@ -74,6 +74,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "canon"
+path = "fuzz_targets/canon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "html_unescape"
 path = "fuzz_targets/html_unescape.rs"
 test = false
