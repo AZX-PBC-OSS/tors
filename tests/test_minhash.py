@@ -534,21 +534,39 @@ class TestBoundsContract:
         #       so allocator/box scaling cancels too), and
         #   (2) a generous absolute ceiling (300MB) as a backstop against
         #       a joint blowup that preserves the ratio.
-        # TEMP-DIAG (CI #74 root-cause round; reverted before merge): the
-        # gate fails on CI at ~570-615MB while every code version measures
-        # 15-180MB under glibc locally, so the child dumps its own artifact
-        # identity (which .so, how big), interpreter, numbers, and an
-        # smaps rollup naming the mapping that actually holds the RSS.
+        # TEMP-DIAG v2 (CI #74; reverted before merge): round 1 proved the
+        # child's TRUE peak is ~28MB (/proc VmHWM + smaps agree; containers
+        # agree) while resource.getrusage returns a CONSTANT 628672 KB in
+        # every child regardless of workload -- so the instrument, not the
+        # code, is broken in this environment. This round names the mocker
+        # (module origin, fn repr, const value, sys.path, startup env,
+        # ld.so.preload, double-getrusage liveness test) and validates the
+        # /proc-based reading as the gate value on Linux.
         import subprocess
         import sys
 
         def _child_self_peak_mb(prog: str) -> float:
             diag = (
-                "import resource, os, sys; " + prog + "; "
-                "peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
-                "print('DIAG peak_kb:', peak); "
+                "import resource, os, sys; "
+                "p0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
+                + prog
+                + "; "
+                "p1 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
+                "print('DIAG p0_kb:', p0); "
+                "print('DIAG p1_kb:', p1); "
+                "print('DIAG resmod:', getattr(resource, '__file__', 'builtin')); "
+                "print('DIAG resfn:', resource.getrusage); "
+                "print('DIAG selfconst:', resource.RUSAGE_SELF); "
                 "print('DIAG exe:', sys.executable); "
                 "print('DIAG version:', sys.version.split()[0]); "
+                "print('DIAG path0:', sys.path[:6]); "
+                "keys = ('PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME'); "
+                "keys += ('LD_PRELOAD', 'VIRTUAL_ENV'); "
+                "print('DIAG env:', {k: os.environ.get(k) for k in keys})\n"
+                "try:\n"
+                "    print('DIAG preload:', open('/etc/ld.so.preload').read())\n"
+                "except Exception as e:\n"
+                "    print('DIAG preload missing:', e)\n"
                 "import tors._tors as _t; "
                 "print('DIAG torsfile:', _t.__file__); "
                 "print('DIAG sosize_mb:', round(os.path.getsize(_t.__file__) / 1048576, 1))\n"
@@ -556,29 +574,22 @@ class TestBoundsContract:
                 "    st = open('/proc/self/status').read()\n"
                 "    want = ('VmHWM', 'VmRSS', 'VmData')\n"
                 "    print('DIAG status:', [l for l in st.splitlines() if l.startswith(want)])\n"
-                "    roll = {}\n"
-                "    cur = 'anon'\n"
-                "    for ln in open('/proc/self/smaps').read().splitlines():\n"
-                "        parts = ln.split()\n"
-                "        if not parts:\n"
-                "            continue\n"
-                "        t0 = parts[0]\n"
-                "        if '-' in t0 and all(c in '0123456789abcdef-' for c in t0):\n"
-                "            cur = parts[5] if len(parts) > 5 else 'anon'\n"
-                "        elif t0 == 'Rss:':\n"
-                "            roll[cur] = roll.get(cur, 0) + int(parts[1])\n"
-                "    top = sorted(roll.items(), key=lambda kv: -kv[1])[:8]\n"
-                "    print('DIAG topmaps_kb:', [(k, v) for k, v in top])\n"
+                "    hwm_lines = [l for l in st.splitlines() if l.startswith('VmHWM')]\n"
+                "    print('RESULT_MB', int(hwm_lines[0].split()[1]) / 1024)\n"
                 "except Exception as e:\n"
                 "    print('DIAG procfs skipped:', e)\n"
-                "print(peak / (1024 * 1024) if os.uname().sysname == 'Darwin' else peak / 1024)"
+                "    div = 1024 * 1024 if os.uname().sysname == 'Darwin' else 1024\n"
+                "    print('RESULT_MB', p1 / div)"
             )
             done = subprocess.run(
                 [sys.executable, "-c", diag], capture_output=True, text=True
             )
             assert done.returncode == 0, done.stderr[-2000:]
             print("DIAG child dump:\n" + done.stdout)
-            return float(done.stdout.strip().split()[-1])
+            for line in done.stdout.splitlines():
+                if line.startswith("RESULT_MB"):
+                    return float(line.split()[1])
+            raise AssertionError("no RESULT_MB in child output:\n" + done.stdout)
 
         big_expr = "'the quick brown fox jumps over the lazy dog. ' * 300_000"
         huge_prog = (
