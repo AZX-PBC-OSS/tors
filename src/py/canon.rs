@@ -979,9 +979,7 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                 }
             } else {
                 enter_marker(&mut markers, &obj)?;
-                MapPending::Coerced(
-                    dict_pairs(py, dict, &reprs, &mut delegated_total)?.into_iter(),
-                )
+                MapPending::Coerced(dict_pairs(py, dict, &reprs, &mut delegated_total)?.into_iter())
             };
             if protocol {
                 protocol_depth += 1;
