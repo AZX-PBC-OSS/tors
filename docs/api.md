@@ -3283,7 +3283,85 @@ floor, so the GIL cell is ceiling-only (the `utf8_is_valid` class), pinned in
 tests/test_gil_release.py. The core is a trivial one-pass membership walk
 (one-bit-per-codepoint ASCII mask plus a sorted non-ASCII tail; no index
 arithmetic, no `unsafe`), which is why it ships no cargo-fuzz target: the
-hypothesis differentials over arbitrary Unicode cover its input space.
+hypothesis differentials over arbitrary Unicode cover its input space. The
+Rust core alone measures ~63 ns fixed (the two set builds) plus ~4.6 ns per
+item (`first_invalid_charset` group, `benches/search.rs`).
+
+### Building rejection messages: `tors.first_invalid_offender`
+
+```python
+def first_invalid_offender(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> tuple[int, int, str] | None: ...
+```
+
+The integration survey's finding made the detail a function: the
+consumer's rejection UX names the losing CHARACTER and POSITION (its
+per-character messages), and an item index alone cannot. The offender
+spelling is the same scan answering that question: it returns
+`(item_index, char_position, offending_char)` for the first offending
+item's FIRST offending position, `None` when every item passes.
+
+- `char_position` is a **codepoint index** within the item — the family's
+  data model is codepoints (membership is per codepoint), so positions
+  count codepoints, never UTF-8 byte offsets: in `"🦀x"` the `x` sits at
+  position 1 (its byte offset would be 4). `offending_char` is that
+  codepoint as a 1-char `str`, a 4-byte astral codepoint included.
+- **The empty item reports `(i, 0, "")`**: an empty item is an offender
+  with no codepoint at position 0 to name, so the char field is empty
+  exactly when the item is — a message builder branches on it.
+- The consistency invariant with the int spelling is structural — the
+  Rust core's ONE scan returns the stop detail and each spelling projects
+  it — so `first_invalid_offender(...)` is `None` exactly when
+  `first_invalid_charset(...)` answers `-1`, and when not `None` the
+  tuple's first field IS the int spelling's answer. The differential
+  battery pins it against the reference oracle extended to return the
+  detail (tests/test_first_invalid_charset.py).
+
+```python
+import string
+
+queue_first = string.ascii_letters + string.digits + "_"
+queue_rest = queue_first + ".-"
+names = ["jobs_eu", "foo:eu", "queue_us"]
+
+offender = tors.first_invalid_offender(names, first=queue_first, rest=queue_rest)
+# (1, 3, ":")   ("foo:eu": ":" is not allowed at position 3)
+
+def rejection(names, offender):
+    if offender is None:
+        return None
+    item, position, char = offender
+    if not char:  # the empty item: no offending character to name
+        return f"queue name {names[item]!r} is invalid: it is empty"
+    return f"queue name {names[item]!r} is invalid: {char!r} at position {position} is not allowed"
+
+rejection(names, offender)
+# "queue name 'foo:eu' is invalid: ':' at position 3 is not allowed"
+```
+
+The argument contract is the int spelling's exactly — the same shared
+walk, so every boundary refusal (a bare `str`, non-sequences, non-`str`
+entries, non-`str` `first`/`rest`, lone surrogates; the
+walk-validates-the-whole-list-first precedence) raises the same exception
+with the byte-identical message, pinned by raising both spellings on the
+same bad input and comparing them. No new error classes.
+
+One engine, one scan, and the int path pays nothing for the detail: the
+walk stops at the first offending codepoint, and at that stop point it
+already holds the position and the codepoint — the detail is free by
+construction, the only addition to the shared walk being the position
+counter (one integer add per codepoint, a dead field in the int
+projection). The scan is `#[inline]`, so each projection compiles away
+the fields it drops: without the inline the multi-word stop state
+crosses a call boundary and the int spelling paid ~10% on the criterion
+group's small cells for detail it discarded (measured); with it the band
+is back — the cells above are the post-extension numbers. The int
+spelling's performance cells (the wall race, the criterion group, the
+GIL ceiling cell) carry the family's contract unchanged, and this
+spelling adds no cells of its own: same engine, same walk, same
+one-detach batch pass, the only delta being the return — one small
+tuple, built only when an offender is found.
 
 ### Common alphabets
 

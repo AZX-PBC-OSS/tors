@@ -1,5 +1,7 @@
-//! `tors.first_invalid_charset`: the batch codepoint-set validator binding,
-//! the argument-walk + one-detach shape over a str sequence.
+//! `tors.first_invalid_charset`/`tors.first_invalid_offender`: the batch
+//! codepoint-set validator's two spellings of one scan (the int index;
+//! the offender detail a rejection message needs), each the
+//! argument-walk + one-detach shape over a str sequence.
 
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -106,5 +108,75 @@ pub fn first_invalid_charset(
     // `borrow_str_sequence`), then one detached pass over the whole batch.
     borrow_str_sequence(items, |_handles, borrowed| {
         Ok(py.detach(|| charset_impl::first_invalid_charset(borrowed, first, rest)))
+    })
+}
+
+/// `tors.first_invalid_offender(items, *, first=None, rest)`: the offender
+/// detail of the same scan `first_invalid_charset` runs —
+/// `(item_index, char_position, offending_char)` for the FIRST offending
+/// item's first offending position, `None` when every item passes. The
+/// integration survey's finding made this a function: the consumer's
+/// rejection UX names the losing CHARACTER and POSITION (its
+/// per-character messages), and an item index alone cannot — the tuple is
+/// what a rejection message is built from (docs/api.md's "Building
+/// rejection messages" example).
+///
+/// Semantics, each pinned in tests/test_first_invalid_charset.py:
+/// `char_position` is a CODEPOINT index within the item (the family's
+/// data model, membership per codepoint — never a UTF-8 byte offset),
+/// and `offending_char` is that codepoint as a 1-char str. The empty
+/// item reports `(i, 0, "")`: an empty item has no offending character,
+/// so the char field is empty exactly when the item is. The consistency
+/// invariant against the int spelling is structural — the Rust core's
+/// one scan returns the detail and each spelling projects it (the int
+/// answer is the tuple's item index, `-1` exactly when the tuple is
+/// `None`) — so the two spellings cannot disagree; the differential
+/// battery pins it against the reference oracle anyway.
+///
+/// The argument contract is the sibling's exactly — the same
+/// [`borrow_str_sequence`] walk, so every boundary refusal (bare `str`,
+/// non-sequences, non-`str` entries, non-`str` `first`/`rest`, lone
+/// surrogates) raises the same exception with the byte-identical
+/// message; the walk still validates the whole sequence up front (a bad
+/// entry anywhere raises at the boundary, past a first offender or
+/// not). No new error classes, no negative-index handling anywhere in
+/// the family.
+///
+/// GIL model: the sibling's exactly — one GIL-held sequence walk, then
+/// the set builds and the whole batch scan under one `py.detach` — with
+/// the one delta the spelling implies: the return is a single small
+/// tuple (or `None`), built only when an offender is found, so the
+/// no-marshalling story of the int spelling gains exactly one
+/// already-allocated-size return. The int spelling's performance cells
+/// (the wall race, the criterion group, the GIL ceiling cell) carry the
+/// family's contract; this spelling adds no cells of its own (same
+/// engine, same walk, same detach), the reasoning recorded in the test
+/// file's offender section.
+#[pyfunction(signature = (items, *, first = None, rest))]
+pub fn first_invalid_offender(
+    py: Python<'_>,
+    items: &Bound<'_, PyAny>,
+    first: Option<&str>,
+    rest: &str,
+) -> PyResult<Option<(usize, usize, String)>> {
+    // The same shared-sequence walk and the same one detached scan; the
+    // only spelling-specific work is the projection of the scan's stop
+    // state into the tuple (the empty item's absent codepoint spelled as
+    // the empty string).
+    borrow_str_sequence(items, |_handles, borrowed| {
+        Ok(py.detach(
+            || match charset_impl::scan_first_invalid(borrowed, first, rest) {
+                charset_impl::FirstInvalid::Clean => None,
+                charset_impl::FirstInvalid::Offender {
+                    item,
+                    position,
+                    codepoint,
+                } => Some((
+                    item,
+                    position,
+                    codepoint.map_or(String::new(), String::from),
+                )),
+            },
+        ))
     })
 }

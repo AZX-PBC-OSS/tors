@@ -41,6 +41,22 @@ Semantics, pinned precisely:
 6. An empty ``items`` sequence answers ``-1`` (vacuously valid), including
    under spellings where every item would offend.
 
+The offender-detail spelling — ``tors.first_invalid_offender(items, *,
+first=None, rest) -> tuple[int, int, str] | None`` — is the SAME scan
+answering the question a rejection UX asks (the integration survey's
+finding: TaskQ's per-character rejection messages name the losing
+character and its position, which an item index alone cannot): it returns
+``(item_index, char_position, offending_char)`` for the first offending
+item's FIRST offending position, ``None`` when every item passes.
+``char_position`` counts CODEPOINTS within the item (the family's data
+model, membership per codepoint), never UTF-8 byte offsets, and the
+offending char is that codepoint as a 1-char ``str``. The empty item
+reports ``(i, 0, "")`` — an empty item has no offending character; the
+char field is empty exactly when the item is. The consistency invariant
+against the int spelling (``None`` iff ``-1``; the item index equal) and
+the byte-identical argument boundary (the same shared walk) are pinned
+below, in the offender section.
+
 Contract decisions at the argument boundary (each pinned below):
 
 - ``items`` is a sequence of ``str``: a ``list`` or ``tuple`` (any
@@ -93,8 +109,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tors
-from reference import reference_first_invalid_charset
-from tors import first_invalid_charset
+from reference import reference_first_invalid_charset, reference_first_invalid_offender
+from tors import first_invalid_charset, first_invalid_offender
 
 # --- The three real TaskQ rule shapes ----------------------------------------
 #
@@ -657,6 +673,333 @@ def test_every_small_items_list_and_set_spelling_matches_the_reference() -> None
                 ), (items, first, rest)
 
 
+# --- The offender detail spelling: tors.first_invalid_offender -------------------
+#
+# The integration survey's finding, and the reason this spelling exists:
+# TaskQ's rejection UX names the losing CHARACTER and POSITION
+# (backend/_protocol.py's _queue_name_offender builds per-character
+# messages), and the index-only return blocks that migration — an item
+# index says WHICH item lost, never where inside it or on what codepoint.
+# The offender spelling is the same engine answering that question:
+# ``(item_index, char_position, offending_char)`` for the first offending
+# item's FIRST offending position, ``None`` when every item passes. The
+# Rust core's one scan produces the detail; the int spelling is the index
+# projection of the same scan (the consistency invariant below).
+#
+# No separate bench, wall, or GIL cells for this spelling, and the
+# reasoning is recorded here as the docs record it: the engine, the
+# GIL-held argument walk, and the one-detach batch pass are the int
+# spelling's exactly, and the only delta is the return — one small tuple,
+# built only when an offender is found — so the int spelling's cells
+# (tests/test_performance.py's race, the ``first_invalid_charset``
+# criterion group, tests/test_gil_release.py's ceiling cell) carry the
+# family's performance contract unchanged.
+
+_OFFENDER_CASES: list[tuple[list[str], str | None, str, tuple[int, int, str] | None]] = [
+    ([], None, "a", None),
+    ([], "", "a", None),
+    (["a"], None, "a", None),
+    (["b"], None, "a", (0, 0, "b")),
+    (["a", "b", "a"], None, "a", (1, 0, "b")),
+    (["a", "a", "b"], None, "a", (2, 0, "b")),
+    ([""], None, "a", (0, 0, "")),
+    (["a", "", "a"], None, "a", (1, 0, "")),
+    ([""], "", "a", (0, 0, "")),
+    (["a"], "", "a", (0, 0, "a")),
+    (["a", "b"], "", "a", (0, 0, "a")),
+    (["a"], None, "", (0, 0, "a")),
+    (["a", "aa"], "a", "", (1, 1, "a")),
+    (["a"], "a", "", None),
+    (["Aaa"], "AB", "ab", None),
+    (["aAa"], "aAB", "ab", (0, 1, "A")),
+    (["A"], "AB", "ab", None),
+    (["aa"], "a", "ab", None),
+    (["ba"], "a", "ab", (0, 0, "b")),
+    (["ab"], "a", "a", (0, 1, "b")),
+    (["axc"], None, "abc", (0, 1, "x")),
+    ([_E_ACUTE], None, _E_ACUTE, None),
+    (["e" + _E_ACUTE], None, _E_ACUTE, (0, 0, "e")),
+    ([_CRAB + "x"], None, _CRAB, (0, 1, "x")),
+    ([_E_ACUTE + "東" + _CRAB], None, _E_ACUTE + "東" + _MATH_X, (0, 2, _CRAB)),
+]
+
+_OFFENDER_IDS = [
+    "empty-batch-is-vacuously-valid",
+    "empty-batch-stays-valid-under-first-empty",
+    "single-valid-item",
+    "single-item-head-offender-names-position-zero",
+    "first-offender-mid-list",
+    "offender-at-the-end",
+    "empty-item-offender-is-index-position-zero-empty-char",
+    "empty-item-mid-list",
+    "empty-item-offends-regardless-of-first",
+    "first-empty-head-offender-names-position-zero",
+    "first-empty-makes-every-item-the-first-offender",
+    "rest-empty-uniform-head-offender",
+    "rest-empty-offender-at-position-one",
+    "rest-empty-single-codepoint-item-from-first-passes",
+    "first-only-codepoint-at-position-0-passes",
+    "first-only-codepoint-at-position-1-is-the-offender",
+    "single-first-only-codepoint-item",
+    "first-and-rest-are-independent-sets",
+    "rest-only-codepoint-not-allowed-at-position-zero",
+    "the-detail-names-the-char-position-not-just-the-item",
+    "uniform-offender-past-the-head",
+    "two-byte-codepoint-member-passes",
+    "ascii-head-outside-a-non-ascii-set",
+    "astral-member-then-ascii-offender-at-codepoint-position-one",
+    "mixed-widths-offender-past-multibyte-codepoints",
+]
+
+
+@pytest.mark.parametrize(
+    ("items", "first", "rest", "expected"), _OFFENDER_CASES, ids=_OFFENDER_IDS
+)
+def test_offender_golden_battery(
+    items: list[str], first: str | None, rest: str, expected: tuple[int, int, str] | None
+) -> None:
+    """The fixed anchor of the offender contract: every tuple hand-derived
+    (the item index, the codepoint position the rule broke at, the
+    codepoint there) and cross-checked against the offender oracle, so a
+    wrong pin fails loudly instead of laundering through. The empty-item
+    rows pin the spelling decision: ``(i, 0, "")`` — an empty item has no
+    offending character; the char field is empty exactly when the item
+    is."""
+    assert first_invalid_offender(items, first=first, rest=rest) == expected
+    assert expected == reference_first_invalid_offender(items, first, rest)
+
+
+def test_char_position_is_a_codepoint_index_not_a_byte_offset() -> None:
+    """The position the tuple reports indexes CODEPOINTS within the item —
+    the family's data model, membership per codepoint — never UTF-8 byte
+    offsets: over items whose offenders sit past multibyte codepoints the
+    codepoint position and the byte offset disagree on every row, and the
+    pinned answers are the codepoint ones (a byte-counted-position
+    regression fails here). The offending char is that codepoint as a
+    1-char str, a 4-byte astral codepoint included."""
+    # "x" sits at codepoint position 1 of an item whose head is a 4-byte
+    # codepoint: its byte offset would be 4.
+    assert first_invalid_offender([_CRAB + "x"], rest=_CRAB) == (0, 1, "x")
+    # the crab at codepoint position 2, past a 2-byte and a 3-byte
+    # codepoint: its byte offset would be 5.
+    item = _E_ACUTE + "東" + _CRAB
+    assert first_invalid_offender([item], rest=_E_ACUTE + "東" + _MATH_X) == (0, 2, _CRAB)
+    # the offending char field is a 1-char str even for an astral codepoint
+    got = first_invalid_offender(["ok_" + _CRAB], rest="ok_")
+    assert got == (0, 3, _CRAB)
+    assert len(got[2]) == 1
+
+
+@given(_items_first_rest())
+@settings(max_examples=500)
+def test_offender_is_none_iff_the_int_spelling_answers_minus_one(
+    items_first_rest: tuple[list[str], str | None, str],
+) -> None:
+    """The consistency invariant between the siblings, stated on its own:
+    the tuple spelling is ``None`` exactly when the int spelling answers
+    ``-1``; when not ``None`` its first field IS the int spelling's answer
+    (the same scan, two projections); and the whole tuple equals the
+    offender oracle's — the (position, char) detail verified against the
+    reference over the same generated space the int differential covers
+    (astral offenders, first-only codepoints at 0 vs 1, the ``first=""``/
+    ``rest=""`` corners, empty items, empty lists, single items)."""
+    items, first, rest = items_first_rest
+    detail = first_invalid_offender(items, first=first, rest=rest)
+    index = first_invalid_charset(items, first=first, rest=rest)
+    assert (detail is None) == (index == -1)
+    if detail is not None:
+        assert detail[0] == index
+    assert detail == reference_first_invalid_offender(items, first, rest)
+
+
+@given(_arbitrary_items_first_rest())
+@settings(max_examples=300)
+def test_offender_matches_the_reference_over_arbitrary_unicode(
+    items_first_rest: tuple[list[str], str | None, str],
+) -> None:
+    """The arbitrary-Unicode differential for the offender spelling: exact
+    tuple equality with the oracle over any codepoint class (combining
+    marks, scripts, widths the fixed alphabet cannot generate), plus the
+    None-iff-minus-one invariant against the int spelling on the same
+    draws."""
+    items, first, rest = items_first_rest
+    assert first_invalid_offender(items, first=first, rest=rest) == (
+        reference_first_invalid_offender(items, first, rest)
+    )
+    assert (first_invalid_offender(items, first=first, rest=rest) is None) == (
+        first_invalid_charset(items, first=first, rest=rest) == -1
+    )
+
+
+def test_every_small_items_list_and_set_spelling_matches_the_offender_reference() -> None:
+    """The deterministic sweep for the offender spelling, the int
+    spelling's own sweep exactly (85 x 16 pairs: every items list of size
+    0-3 over the same pool crossed with the same ``first``/``rest``
+    spellings), asserting full tuple equality with the oracle — no
+    sampling at all."""
+    pool = ["", "a", "b", "ab"]
+    items_lists: list[list[str]] = [[]]
+    for size in (1, 2, 3):
+        items_lists.extend(list(combo) for combo in itertools.product(pool, repeat=size))
+    for items in items_lists:
+        for first in (None, "", "a", "ab"):
+            for rest in ("", "a", "ab", "b"):
+                assert first_invalid_offender(items, first=first, rest=rest) == (
+                    reference_first_invalid_offender(items, first, rest)
+                ), (items, first, rest)
+
+
+class TestOffenderArgumentContract:
+    """The offender spelling's argument boundary is the int spelling's
+    exactly — the same shared walk — so every refusal is byte-identical,
+    pinned here by raising both siblings on the same bad input and
+    comparing the messages: the migration promise is that swapping the
+    int call for the tuple call changes nothing about what raises or what
+    it says. No new error classes exist to test; the taxonomy is the
+    sibling's (TypeError / UnicodeEncodeError at the same boundaries, no
+    negative-index handling anywhere in the family)."""
+
+    @pytest.mark.parametrize(
+        "not_items",
+        ["abc", b"abc", bytearray(b"abc"), 123, None, {"a": 1}, {"a"}, range(3), (c for c in ())],
+        ids=[
+            "bare-str",
+            "bytes",
+            "bytearray",
+            "int",
+            "none",
+            "dict",
+            "set",
+            "range",
+            "generator",
+        ],
+    )
+    def test_items_refusals_are_byte_identical_to_the_int_spelling(
+        self, not_items: object
+    ) -> None:
+        with pytest.raises(TypeError) as int_raises:
+            first_invalid_charset(not_items, rest="a")  # type: ignore[arg-type]
+        with pytest.raises(TypeError) as offender_raises:
+            first_invalid_offender(not_items, rest="a")  # type: ignore[arg-type]
+        assert str(offender_raises.value) == str(int_raises.value)
+
+    @pytest.mark.parametrize(
+        "bad_entry",
+        [b"x", bytearray(b"x"), 123, None],
+        ids=["bytes-entry", "bytearray-entry", "int-entry", "none-entry"],
+    )
+    def test_non_str_entry_refusals_are_byte_identical(self, bad_entry: object) -> None:
+        with pytest.raises(TypeError) as int_raises:
+            first_invalid_charset(["ok", bad_entry], rest="ok")  # type: ignore[list-item]
+        with pytest.raises(TypeError) as offender_raises:
+            first_invalid_offender(["ok", bad_entry], rest="ok")  # type: ignore[list-item]
+        assert str(offender_raises.value) == str(int_raises.value)
+
+    def test_non_str_first_and_rest_refusals_are_byte_identical(self) -> None:
+        for kwargs in (
+            {"first": 1, "rest": "a"},
+            {"first": b"x", "rest": "a"},
+            {"rest": 1},
+            {"rest": b"x"},
+        ):
+            with pytest.raises(TypeError) as int_raises:
+                first_invalid_charset(["a"], **kwargs)  # type: ignore[arg-type]
+            with pytest.raises(TypeError) as offender_raises:
+                first_invalid_offender(["a"], **kwargs)  # type: ignore[arg-type]
+            assert str(offender_raises.value) == str(int_raises.value)
+
+    def test_lone_surrogate_refusals_are_byte_identical(self) -> None:
+        """The standard str-in boundary, paid identically: the same
+        ``UnicodeEncodeError`` message from both siblings for a lone
+        surrogate in an item, in ``first``, or in ``rest``."""
+        for items, kwargs in (
+            (["abc\ud800"], {"rest": "abc"}),
+            (["ok"], {"first": "a\ud800", "rest": "a"}),
+            (["ok"], {"rest": "a\ud800"}),
+        ):
+            with pytest.raises(UnicodeEncodeError) as int_raises:
+                first_invalid_charset(items, **kwargs)
+            with pytest.raises(UnicodeEncodeError) as offender_raises:
+                first_invalid_offender(items, **kwargs)
+            assert str(offender_raises.value) == str(int_raises.value)
+
+    def test_the_items_walk_validates_the_whole_list_before_the_scan(self) -> None:
+        """The walk-first precedence is the sibling's: a bad entry anywhere
+        raises at the boundary even when an earlier item already offends —
+        the short-circuit is a scan property, never an argument-validation
+        one, in the offender spelling too."""
+        with pytest.raises(TypeError):
+            first_invalid_offender(["bad item", 123], rest="abc")  # type: ignore[list-item]
+        with pytest.raises(UnicodeEncodeError):
+            first_invalid_offender(["bad item", "x\ud800"], rest="abc")
+
+    def test_first_is_keyword_only_rest_is_required_items_may_be_keyword(self) -> None:
+        """The signature shape is the sibling's: both set arguments
+        keyword-only, ``rest`` required, ``first`` defaulting to ``None``
+        (the uniform spelling), ``items`` passable by name; the default
+        and an explicit ``None`` are the same call."""
+        with pytest.raises(TypeError):
+            first_invalid_offender(["a"], "a", "a")  # type: ignore[misc]
+        with pytest.raises(TypeError):
+            first_invalid_offender(["a"], first="a")  # type: ignore[call-arg]
+        assert first_invalid_offender(items=["a"], rest="a") is None
+        assert first_invalid_offender(["a"], rest="a") == first_invalid_offender(
+            ["a"], first=None, rest="a"
+        )
+
+    def test_any_sequence_is_accepted_like_a_list(self) -> None:
+        """``items`` is a sequence: the tuple spelling answers exactly what
+        the list spelling answers (and what the int spelling answers for
+        the same batch, the consistency invariant at the boundary)."""
+        expected = (1, 0, "9")
+        assert (
+            first_invalid_offender(("job_42", "9bad"), first=IDENT_FIRST, rest=IDENT_REST)
+            == expected
+        )
+        assert (
+            first_invalid_offender(["job_42", "9bad"], first=IDENT_FIRST, rest=IDENT_REST)
+            == expected
+        )
+
+
+def test_building_a_taskq_style_rejection_message_from_the_tuple() -> None:
+    """The use-case pin: the tuple carries exactly what TaskQ's
+    per-character rejection messages are built from (the losing character
+    and its position, plus the item index to name the item), so the
+    message is one f-string off the tuple — the shape the docs' "Building
+    rejection messages" example shows, pinned here with all three
+    branches: a character offender, the empty item (whose ``(i, 0, "")``
+    tuple has no character to name, so the message says the item is
+    empty), and the all-valid batch (``None``, no message at all)."""
+    queue_first = string.ascii_letters + string.digits + "_"
+    queue_rest = queue_first + ".-"
+
+    def rejection(
+        names: list[str], offender: tuple[int, int, str] | None
+    ) -> str | None:
+        if offender is None:
+            return None
+        item, position, char = offender
+        if not char:  # the empty item: no offending character to name
+            return f"queue name {names[item]!r} is invalid: it is empty"
+        return (
+            f"queue name {names[item]!r} is invalid: {char!r} at position {position} is not allowed"
+        )
+
+    names = ["jobs_eu", "foo:eu", "queue_us"]
+    offender = first_invalid_offender(names, first=queue_first, rest=queue_rest)
+    assert offender == (1, 3, ":")
+    assert rejection(names, offender) == (
+        "queue name 'foo:eu' is invalid: ':' at position 3 is not allowed"
+    )
+    empty_at = ["jobs_eu", "", "queue_us"]
+    assert first_invalid_offender(empty_at, first=queue_first, rest=queue_rest) == (1, 0, "")
+    assert rejection(empty_at, (1, 0, "")) == "queue name '' is invalid: it is empty"
+    valid = ["jobs_eu", "queue_us"]
+    assert first_invalid_offender(valid, first=queue_first, rest=queue_rest) is None
+    assert rejection(valid, None) is None
+
+
 # --- Batch-scale batteries ------------------------------------------------------
 
 
@@ -704,6 +1047,19 @@ class TestBatchScale:
         assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == -1
         items[-1] = "bad name"
         assert first_invalid_charset(items, first=IDENT_FIRST, rest=IDENT_REST) == 99_999
+
+    def test_a_100_000_item_batch_reports_the_offender_detail_at_scale(self) -> None:
+        """The offender spelling's twin of the cell above: the tuple pinned
+        at the 100k size (offender spliced at the very end), hand-derived —
+        index 99_999, the space in "bad name" at codepoint position 3 — so
+        a size-dependent detail regression fails here, not only under the
+        int spelling's cell."""
+        items = _ident_batch(100_000, poison_at=99_999)
+        assert first_invalid_offender(items, first=IDENT_FIRST, rest=IDENT_REST) == (
+            99_999,
+            3,
+            " ",
+        )
 
 
 # --- The pinned common alphabets ------------------------------------------------
@@ -883,3 +1239,21 @@ class TestDocsExamples:
             "eyJzdWIiOiIxMjM0NTY3ODkwIn0=",
         ]
         assert first_invalid_charset(segments, rest=tors.CHARSET_B64URL) == 1
+
+    def test_rejection_message_example(self) -> None:
+        """docs/api.md's "Building rejection messages" subsection, pinned
+        the same way: the literals the doc shows (the queue-name batch,
+        the ``(1, 3, ":")`` tuple, the message the example builds from it)
+        are re-derived here against the built extension."""
+        queue_first = string.ascii_letters + string.digits + "_"
+        queue_rest = queue_first + ".-"
+        names = ["jobs_eu", "foo:eu", "queue_us"]
+        assert (
+            first_invalid_offender(names, first=queue_first, rest=queue_rest)
+            == (1, 3, ":")
+        )
+        item, position, char = 1, 3, ":"
+        assert (
+            f"queue name {names[item]!r} is invalid: {char!r} at position {position} is not allowed"
+            == "queue name 'foo:eu' is invalid: ':' at position 3 is not allowed"
+        )

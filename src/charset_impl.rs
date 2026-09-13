@@ -19,6 +19,20 @@
 //! docs/design.md). Duplicates in a spelling are idempotent and order is
 //! irrelevant: a set, however spelled.
 //!
+//! One scan answers both published spellings. The walk stops at the first
+//! offending codepoint of the first offending item, and at that stop point
+//! it already holds the whole offender detail — which item, which CODEPOINT
+//! position within it (never a byte offset: the family's data model is
+//! codepoints), which codepoint — so the core returns that detail
+//! (`FirstInvalid`) and each spelling projects it: `first_invalid_charset`
+//! the item index (`-1` when clean), `first_invalid_offender` the
+//! `(item, position, codepoint)` tuple the rejection-UX callers need (the
+//! consumer's own messages name the losing character and position). The
+//! detail is free at the stop point by construction; the one thing the
+//! shared walk gains over the index-only spelling is the position counter
+//! on the rest walk (one integer add per codepoint, dead in the int
+//! projection — the criterion group's band is the honest check).
+//!
 //! Representation, sized for the expected case (a few dozen ASCII
 //! codepoints, the shape every real identifier/queue/tag rule has): a
 //! one-bit-per-codepoint `u128` over the ASCII range plus a sorted,
@@ -80,9 +94,37 @@ impl CharSet {
     }
 }
 
-/// The index into `items` of the first item not built entirely from the
-/// caller's two sets, `-1` when all pass, short-circuiting at the first
-/// offender.
+/// The one scan's full answer: where the first offending item sits and,
+/// within it, where the rule broke — the detail a rejection message needs
+/// (the consumer's per-character messages name the losing character and
+/// its position), of which `first_invalid_charset`'s `-1`/index answer is
+/// the projection.
+pub enum FirstInvalid {
+    /// Every item passed.
+    Clean,
+    /// The first offending item: its index into `items`, the CODEPOINT
+    /// position within it where the rule broke (0, the head position, when
+    /// the first codepoint itself is outside the position-0 set — and for
+    /// the empty item, which has no codepoint there to check), and the
+    /// codepoint at that position — `None` exactly for the empty item, an
+    /// offender with no codepoint at position 0 to name (the tuple
+    /// spelling's char field is empty exactly when the item is).
+    Offender {
+        /// The offending item's index into `items`.
+        item: usize,
+        /// The first offending position, a codepoint index within the
+        /// item (never a byte offset).
+        position: usize,
+        /// The codepoint at `position`, a 1-char string on the Python
+        /// side; `None` for the empty item.
+        codepoint: Option<char>,
+    },
+}
+
+/// The one core scan both published spellings project: the positional rule
+/// over every item, stopping at the first offending codepoint of the first
+/// offending item and returning the full detail of that stop
+/// ([`FirstInvalid`]).
 ///
 /// The positional rule: `first` (when `Some`) is the set of codepoints
 /// allowed at position 0, `rest` the set allowed at every position after
@@ -92,17 +134,35 @@ impl CharSet {
 /// position 0, so every item offends; `rest == ""` allows nothing after
 /// position 0, so under the uniform spelling every item offends and with
 /// a non-empty `first` only single-codepoint items drawn from `first`
-/// pass. Membership is per codepoint over the whole item, and the answer
-/// is an item index, never a position within an item.
-pub fn first_invalid_charset(items: &[&str], first: Option<&str>, rest: &str) -> isize {
+/// pass. Membership is per codepoint over the whole item.
+///
+/// The detail is what the walk holds at its stop point — the codepoint
+/// the membership test just rejected, and its position, counted in
+/// codepoints by the rest walk's counter (the one integer add per
+/// codepoint the shared walk carries; the int projection's dead field).
+///
+/// `#[inline]` so the enum never crosses a call boundary: each projection
+/// (`first_invalid_charset`'s isize, the binding's tuple) collapses the
+/// scan into itself and the fields it does not keep die at compile time —
+/// without it the multi-word stop state is returned through memory and
+/// the int spelling pays a fixed marshalling cost for detail it drops
+/// (measured: ~+10% on the criterion group's 1/10-item cells until the
+/// inline, the band back at baseline after).
+#[inline]
+pub fn scan_first_invalid(items: &[&str], first: Option<&str>, rest: &str) -> FirstInvalid {
     let first_set = first.map(CharSet::build);
     let rest_set = CharSet::build(rest);
     for (idx, item) in items.iter().enumerate() {
         let mut chars = item.chars();
         // The empty item: an offender wherever it sits, whatever the sets
-        // allow — there is no codepoint at position 0 to check.
+        // allow — there is no codepoint at position 0 to check, so there
+        // is none to name either.
         let Some(head) = chars.next() else {
-            return idx as isize;
+            return FirstInvalid::Offender {
+                item: idx,
+                position: 0,
+                codepoint: None,
+            };
         };
         // Position 0 is governed by `first` when given, by `rest`
         // otherwise (the uniform spelling).
@@ -110,11 +170,38 @@ pub fn first_invalid_charset(items: &[&str], first: Option<&str>, rest: &str) ->
             Some(set) => set.contains(head),
             None => rest_set.contains(head),
         };
-        if !head_ok || !chars.all(|c| rest_set.contains(c)) {
-            return idx as isize;
+        if !head_ok {
+            return FirstInvalid::Offender {
+                item: idx,
+                position: 0,
+                codepoint: Some(head),
+            };
+        }
+        // The rest walk stops at the first codepoint outside `rest`, and
+        // the stop point IS the offender detail: `enumerate` counts
+        // codepoints (offset 0 within the rest, so the item position is
+        // offset + 1), `find` hands back the rejecting codepoint itself.
+        if let Some((offset, c)) = chars.enumerate().find(|(_, c)| !rest_set.contains(*c)) {
+            return FirstInvalid::Offender {
+                item: idx,
+                position: offset + 1,
+                codepoint: Some(c),
+            };
         }
     }
-    -1
+    FirstInvalid::Clean
+}
+
+/// The index into `items` of the first item not built entirely from the
+/// caller's two sets, `-1` when all pass, short-circuiting at the first
+/// offender: the int projection of [`scan_first_invalid`], the same scan
+/// the offender-detail spelling projects (so the two spellings cannot
+/// disagree — the Python-side consistency invariant pins it).
+pub fn first_invalid_charset(items: &[&str], first: Option<&str>, rest: &str) -> isize {
+    match scan_first_invalid(items, first, rest) {
+        FirstInvalid::Clean => -1,
+        FirstInvalid::Offender { item, .. } => item as isize,
+    }
 }
 
 #[cfg(test)]
@@ -125,10 +212,15 @@ mod tests {
         first_invalid_charset(items, first, rest)
     }
 
+    fn detail(items: &[&str], first: Option<&str>, rest: &str) -> FirstInvalid {
+        scan_first_invalid(items, first, rest)
+    }
+
     #[test]
     fn an_empty_batch_is_vacuously_valid() {
         assert_eq!(check(&[], None, "a"), -1);
         assert_eq!(check(&[], Some(""), ""), -1);
+        assert!(matches!(detail(&[], None, "a"), FirstInvalid::Clean));
     }
 
     #[test]
@@ -139,6 +231,10 @@ mod tests {
             check(&["taskq", "worker_id", "job_42"], Some(first), rest),
             -1
         );
+        assert!(matches!(
+            detail(&["taskq", "worker_id", "job_42"], Some(first), rest),
+            FirstInvalid::Clean
+        ));
     }
 
     #[test]
@@ -230,5 +326,104 @@ mod tests {
         assert!(set.contains('_'));
         assert!(!set.contains(' '));
         assert!(!set.contains('é'));
+    }
+
+    // --- The offender detail (the scan's full answer) ---------------------
+
+    fn offender_of(
+        items: &[&str],
+        first: Option<&str>,
+        rest: &str,
+    ) -> Option<(usize, usize, Option<char>)> {
+        match detail(items, first, rest) {
+            FirstInvalid::Clean => None,
+            FirstInvalid::Offender {
+                item,
+                position,
+                codepoint,
+            } => Some((item, position, codepoint)),
+        }
+    }
+
+    #[test]
+    fn the_detail_names_the_head_offenders_position_zero_and_codepoint() {
+        // The uniform spelling: "b" at position 0 is outside "a".
+        assert_eq!(offender_of(&["b"], None, "a"), Some((0, 0, Some('b'))));
+        // ... and under a first spelling the same position, the first set
+        // doing the rejecting.
+        assert_eq!(
+            offender_of(&["b"], Some("a"), "ab"),
+            Some((0, 0, Some('b')))
+        );
+        // An offender past the first item keeps its own index.
+        assert_eq!(
+            offender_of(&["a", "b", "a"], None, "a"),
+            Some((1, 0, Some('b')))
+        );
+    }
+
+    #[test]
+    fn the_detail_names_the_rest_offenders_codepoint_position() {
+        // "ab" under first="a"/rest="a": the rule breaks at position 1.
+        assert_eq!(
+            offender_of(&["ab"], Some("a"), "a"),
+            Some((0, 1, Some('b')))
+        );
+        // rest="" with a first set: only the head passes, position 1 next.
+        assert_eq!(offender_of(&["aa"], Some("a"), ""), Some((0, 1, Some('a'))));
+        // A first-only codepoint at position 1 is the offender there (the
+        // head must pass first: "a" is in the first set).
+        assert_eq!(
+            offender_of(&["aAa"], Some("aAB"), "ab"),
+            Some((0, 1, Some('A')))
+        );
+    }
+
+    #[test]
+    fn the_empty_items_offender_carries_no_codepoint() {
+        // The spelling decision: an empty item has no offending character;
+        // the tuple's char field is empty exactly when the item is.
+        assert_eq!(offender_of(&[""], None, "a"), Some((0, 0, None)));
+        assert_eq!(offender_of(&["a", "", "a"], None, "a"), Some((1, 0, None)));
+        assert_eq!(offender_of(&[""], Some(""), "a"), Some((0, 0, None)));
+    }
+
+    #[test]
+    fn the_detail_position_is_a_codepoint_index_not_a_byte_offset() {
+        // 4-byte head, ASCII offender at codepoint 1 (byte offset 4).
+        assert_eq!(
+            offender_of(&["\u{1f980}x"], None, "\u{1f980}"),
+            Some((0, 1, Some('x')))
+        );
+        // 2-byte + 3-byte members, astral offender at codepoint 2 (byte
+        // offset 5), named as its own 1-char codepoint.
+        assert_eq!(
+            offender_of(&["é東\u{1f980}"], None, "é東\u{1d54f}"),
+            Some((0, 2, Some('\u{1f980}')))
+        );
+    }
+
+    #[test]
+    fn the_int_projection_is_the_details_item_index() {
+        // The two spellings are projections of one scan: the int answer is
+        // the detail's item field, -1 exactly when the detail is Clean.
+        for (items, first, rest) in [
+            (
+                &["taskq", "job_42"][..],
+                Some("abcdefghijklmnopqrstuvwxyz_"),
+                "abcdefghijklmnopqrstuvwxyz0123456789_",
+            ),
+            (&["ok", "9bad", "worse"][..], None, "okwrste"),
+            (&["ab"][..], Some("a"), "a"),
+            (&["a", "", "a"][..], None, "a"),
+            (&["\u{1f980}x"][..], None, "\u{1f980}"),
+        ] {
+            let scanned = offender_of(items, first, rest);
+            let projected = check(items, first, rest);
+            match scanned {
+                None => assert_eq!(projected, -1),
+                Some((item, _, _)) => assert_eq!(projected, item as isize),
+            }
+        }
     }
 }

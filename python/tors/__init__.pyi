@@ -999,6 +999,23 @@ def first_invalid_charset(
     items: Sequence[str], *, first: str | None = None, rest: str
 ) -> int: ...
 
+# The offender-detail spelling of the same scan: (item_index,
+# char_position, offending_char) for the first offending item's FIRST
+# offending position — the detail a rejection message needs (the
+# consumer's per-character messages name the losing character and
+# position) — None when every item passes. char_position is a CODEPOINT
+# index within the item (the family's data model), never a UTF-8 byte
+# offset; offending_char is that codepoint as a 1-char str. The empty
+# item reports (i, 0, ""): no offending character to name, the char
+# field empty exactly when the item is. Same engine, same walk, same
+# one-detach batch pass and the same argument contract (byte-identical
+# refusals) as the int spelling; the int answer is the tuple's item
+# index, -1 exactly when the tuple is None. See docs/api.md's
+# "Building rejection messages".
+def first_invalid_offender(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> tuple[int, int, str] | None: ...
+
 # Pinned common alphabets for first_invalid_charset: module constants, not
 # functions (no signature to diff). The stub carries their type only —
 # never their content: the live module is the single spelling of a

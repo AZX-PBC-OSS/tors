@@ -604,6 +604,31 @@ def reference_first_invalid_charset(items: Sequence[str], first: str | None, res
     return -1
 
 
+def reference_first_invalid_offender(
+    items: Sequence[str], first: str | None, rest: str
+) -> tuple[int, int, str] | None:
+    """The offender-detail oracle for ``tors.first_invalid_offender``: the
+    membership loop above re-spelled to return the detail a rejection
+    message needs — ``(item_index, char_position, offending_char)`` for the
+    first offending item's first offending position, ``None`` when every
+    item passes. ``char_position`` counts CODEPOINTS within the item (the
+    family's data model: ``item[position]`` is the offending codepoint, a
+    1-char ``str``, never a byte offset), and the empty item — an offender
+    with no codepoint at position 0 to name — reports ``(idx, 0, "")``: the
+    char field is empty exactly when the item is. Shares no machinery with
+    the tors side, so agreement is evidence about the contract."""
+    for idx, item in enumerate(items):
+        if not item:
+            return (idx, 0, "")
+        allowed_first = rest if first is None else first
+        if item[0] not in allowed_first:
+            return (idx, 0, item[0])
+        for position, ch in enumerate(item[1:], start=1):
+            if ch not in rest:
+                return (idx, position, ch)
+    return None
+
+
 # --- the scrub_log_text oracle (the TaskQ exception-text chain) --------------------
 #
 # ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
