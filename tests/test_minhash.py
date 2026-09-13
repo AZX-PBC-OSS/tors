@@ -534,20 +534,50 @@ class TestBoundsContract:
         #       so allocator/box scaling cancels too), and
         #   (2) a generous absolute ceiling (300MB) as a backstop against
         #       a joint blowup that preserves the ratio.
+        # TEMP-DIAG (CI #74 root-cause round; reverted before merge): the
+        # gate fails on CI at ~570-615MB while every code version measures
+        # 15-180MB under glibc locally, so the child dumps its own artifact
+        # identity (which .so, how big), interpreter, numbers, and an
+        # smaps rollup naming the mapping that actually holds the RSS.
         import subprocess
         import sys
 
         def _child_self_peak_mb(prog: str) -> float:
-            wrapper = (
-                "import resource; " + prog + "; "
+            diag = (
+                "import resource, os, sys; " + prog + "; "
                 "peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss; "
-                "import os; "
+                "print('DIAG peak_kb:', peak); "
+                "print('DIAG exe:', sys.executable); "
+                "print('DIAG version:', sys.version.split()[0]); "
+                "import tors._tors as _t; "
+                "print('DIAG torsfile:', _t.__file__); "
+                "print('DIAG sosize_mb:', round(os.path.getsize(_t.__file__) / 1048576, 1))\n"
+                "try:\n"
+                "    st = open('/proc/self/status').read()\n"
+                "    want = ('VmHWM', 'VmRSS', 'VmData')\n"
+                "    print('DIAG status:', [l for l in st.splitlines() if l.startswith(want)])\n"
+                "    roll = {}\n"
+                "    cur = 'anon'\n"
+                "    for ln in open('/proc/self/smaps').read().splitlines():\n"
+                "        parts = ln.split()\n"
+                "        if not parts:\n"
+                "            continue\n"
+                "        t0 = parts[0]\n"
+                "        if '-' in t0 and all(c in '0123456789abcdef-' for c in t0):\n"
+                "            cur = parts[5] if len(parts) > 5 else 'anon'\n"
+                "        elif t0 == 'Rss:':\n"
+                "            roll[cur] = roll.get(cur, 0) + int(parts[1])\n"
+                "    top = sorted(roll.items(), key=lambda kv: -kv[1])[:8]\n"
+                "    print('DIAG topmaps_kb:', [(k, v) for k, v in top])\n"
+                "except Exception as e:\n"
+                "    print('DIAG procfs skipped:', e)\n"
                 "print(peak / (1024 * 1024) if os.uname().sysname == 'Darwin' else peak / 1024)"
             )
             done = subprocess.run(
-                [sys.executable, "-c", wrapper], capture_output=True, text=True
+                [sys.executable, "-c", diag], capture_output=True, text=True
             )
             assert done.returncode == 0, done.stderr[-2000:]
+            print("DIAG child dump:\n" + done.stdout)
             return float(done.stdout.strip().split()[-1])
 
         big_expr = "'the quick brown fox jumps over the lazy dog. ' * 300_000"
@@ -564,7 +594,9 @@ class TestBoundsContract:
         started = time.perf_counter()
         huge_mb = _child_self_peak_mb(huge_prog)
         small_mb = _child_self_peak_mb(small_prog)
+        base_mb = _child_self_peak_mb("import tors")  # TEMP-DIAG: import baseline
         elapsed = time.perf_counter() - started
+        print(f"DIAG summary: base={base_mb:.1f}MB huge={huge_mb:.1f}MB small={small_mb:.1f}MB")
         assert elapsed < 60.0, f"huge window over large text took {elapsed:.2f}s"
         assert huge_mb < 300.0, f"huge window peak too high: {huge_mb:.1f}MB"
         ratio = huge_mb / small_mb if small_mb > 0 else float("inf")
