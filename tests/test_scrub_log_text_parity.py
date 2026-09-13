@@ -409,7 +409,7 @@ class TestHypothesisDifferential:
 #
 # Every string up to length 6 over [? & p w d = @] that contains a delimiter
 # and a `p` (the shortest firing shape, `?pwd=x` aside, is 6 chars; without
-# a `p` no name can match): 68,200 cells, the json_repair sweep's scale. The
+# a `p` no name can match): 67,200 cells, the json_repair sweep's scale. The
 # alphabet drops the value filler `x` on purpose — `=` and `@` as value
 # chars exercise the value-class boundaries (a `?`/`=` inside a value, the
 # empty-value non-match) more densely than another letter would.
@@ -493,7 +493,7 @@ class TestLiveOracleResync:
     def test_the_live_patterns_are_the_quoted_pin(self) -> None:
         for name, quoted in QUOTED_PATTERNS.items():
             live = getattr(_TASKQ, name)
-            assert isinstance(live, re.Pattern[str])
+            assert isinstance(live, re.Pattern)
             assert live.pattern == quoted, (
                 f"TaskQ's {name} changed (or this pin is stale): {live.pattern!r} "
                 f"vs the quoted {quoted!r} — re-sync the pin in tests/reference.py "

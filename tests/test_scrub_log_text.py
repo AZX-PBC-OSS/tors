@@ -316,7 +316,7 @@ class TestRulesParameter:
             scrub_log_text("x", ["pg_detail_lines", "uri_creds"])
         assert str(excinfo.value) == (
             "rules must be one of ('pg_detail_lines', 'uri_userinfo', "
-            "'uri_query_creds'), not 'uri_creds'"
+            "'uri_query_creds'), not \"uri_creds\""
         )
 
     @pytest.mark.parametrize(
@@ -421,19 +421,33 @@ class TestHypothesisInvariants:
 
     @given(_ANY_TEXT)
     @settings(max_examples=300)
-    def test_a_userinfo_password_never_survives(self, text: str) -> None:
+    def test_the_userinfo_mask_always_claims_the_whole_password(self, text: str) -> None:
+        # The exact masked shape, not a substring check: the template's
+        # outer match always fires (fixed scheme/username/separator, the
+        # `@` right after the payload), and no earlier pass can break it —
+        # an escaped-DETAIL deletion inside the payload only shrinks what
+        # gets masked — so the output is exactly the masked template
+        # whatever the payload (a short payload like `a` or `*` would
+        # trivially "survive" a substring check inside the scaffold or the
+        # `***` itself).
         payload = _legal_credential_payload(text)
-        if not payload or payload == "***":
-            return  # empty is no password; "***" is the mask's own fixed point
-        assert payload not in scrub_log_text(f"a://u:{payload}@h")
+        if payload:
+            assert scrub_log_text(f"a://u:{payload}@h") == "a://u:***@h"
+        else:
+            assert scrub_log_text("a://u:@h") == "a://u:@h"  # empty password: no mask
 
     @given(_ANY_TEXT)
     @settings(max_examples=300)
-    def test_a_query_param_password_never_survives(self, text: str) -> None:
+    def test_the_param_mask_always_claims_the_whole_value(self, text: str) -> None:
+        # Same reasoning: the template carries no `@` at all, so the
+        # userinfo pass can never fire inside it, and the param value —
+        # whatever an escaped-DETAIL deletion leaves of it — is always
+        # masked whole.
         payload = _legal_credential_payload(text)
-        if not payload or payload == "***":
-            return
-        assert payload not in scrub_log_text(f"?password={payload}&x=1")
+        if payload:
+            assert scrub_log_text(f"?password={payload}&x=1") == "?password=***&x=1"
+        else:
+            assert scrub_log_text("?password=&x=1") == "?password=&x=1"  # empty: no mask
 
     @given(_ANY_TEXT)
     @settings(max_examples=300)
