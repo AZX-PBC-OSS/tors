@@ -137,6 +137,23 @@ regex = "1"
 # UNLICENSE (the memchr election precedent). default-features off with
 # std only — no timezone database needed (fixed offsets + civil types).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# minhash_signature's shingle hash: XXH64 (twox-hash 2.1). The dep survey
+# (issue #62, 2026-09) measured the three candidates over the prose corpus
+# at ~30-byte shingles: XXH64 2.1 ns/shingle vs inline FNV-1a 5.9 vs
+# sha256-truncate 20.6, and found the end-to-end Jaccard-estimation quality
+# statistically indistinguishable between them over 2280 controlled pairs
+# (the affine stage over the Mersenne prime dominates the randomness; the
+# input hash's job is injectivity, which all three provide) — so the
+# fastest well-maintained one wins. XXH64 is the frozen-spec algorithm
+# (final since xxHash 0.7.0, 2016: the digest for a given seed and byte
+# stream is part of the spec, not an implementation detail), which is
+# exactly the stability a cross-version signature contract needs; MIT
+# (deny.toml's allowlist verbatim, no new entries); 240M downloads /
+# 52M recent, releases into 2026-08. default-features = false with
+# xxhash64+std: the crate is a ZERO-dependency leaf this way — its
+# defaults pull rand (+chacha20/getrandom) for the random-builder API
+# this crate never touches.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64", "std"] }
 # The UUIDv7 helper trio's parse/encode engine (src/uuid_impl.rs,
 # `uuid_parse`/`uuid_version`/`uuid7_timestamp_ms`): the uuid-rs org's crate,
 # adopted for the hex grammar work (parse + canonical encode) per the

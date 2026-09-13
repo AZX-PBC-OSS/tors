@@ -941,6 +941,31 @@ def simhash64(text: str) -> int: ...
 # for the distance; thresholds corpus-dependent).
 def simhash128(text: str) -> int: ...
 
+# The recall-side near-dup complement to the simhash family (simhash is
+# the precision side; minhash recalls similar shingle sets at corpus
+# scale, the quantity an LSH-banding table -- caller state, tors stays
+# stateless -- buckets on). num_perm min-hashes over shingle_size-token
+# word shingles (the tf_idf/bm25 UAX #29 token stream, lowercased, tokens
+# joined with U+001F); each element is min over shingles of
+# (a_i * x + b_i) mod (2^61 - 1), x the shingle's XXH64 (frozen-spec,
+# deterministic across processes/machines/versions), (a_i, b_i) derived
+# from seed by a pinned SplitMix64 stream. The agreement fraction of two
+# signatures estimates their shingle-set Jaccard similarity with standard
+# error sqrt(J(1-J)/num_perm) (~0.044 at 128). Empty text / whitespace
+# only / fewer tokens than shingle_size: every element 2**64 - 1 (the
+# empty-set sentinel, outside the affine range). num_perm in [1, 1024]
+# and shingle_size >= 1, else ValueError; seed is any int reduced mod
+# 2**64 (two's complement for negatives). GIL: borrow + validation
+# under the GIL, the whole pass under one detach, then the
+# num_perm-element int list. No aio twin: a fast one-shot call.
+def minhash_signature(
+    text: str,
+    *,
+    num_perm: int = 128,
+    shingle_size: int = 3,
+    seed: int = 0,
+) -> list[int]: ...
+
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased
 # (Unicode-correct str.lower, not ASCII-only). TF is the raw term count

@@ -814,3 +814,130 @@ def _joined(parts: list[str], whole: str | list[str]) -> bool:
         return "".join(parts) == whole
     flattened = [token for part in parts for token in (part if isinstance(part, list) else [part])]
     return flattened == list(whole)
+
+
+# --- MinHash oracle --------------------------------------------------------------------
+#
+# The pure-Python MinHash oracle for tests/test_minhash.py: the same token
+# stream, the same shingle construction, the same shingle hash, and the same
+# permutation arithmetic as ``tors.minhash_signature``, each transcribed from
+# the pinned contract in ``src/minhash_impl.rs``'s module docs, so agreement
+# between the two is evidence about that contract, not a shared bug.
+#
+# One deliberate non-self-containment, named here: the token stream comes
+# from ``tors.word_bounds`` (the UAX #29 segmentation) rather than a pure
+# Python reimplementation. UAX #29 word segmentation has no stdlib spelling
+# and hand-deriving it would duplicate the unicode-segmentation tables; the
+# segmentation surface carries its own independent contract gate
+# (tests/test_segmentation.py), so the oracle stands on it and pins
+# everything DOWNSTREAM: the whitespace-segment skip, the lowercase fold,
+# the shingle join, the XXH64 shingle hash, and the whole
+# SplitMix64-to-affine permutation pipeline.
+
+# The Mersenne prime the affine permutations live over: h_i(x) = (a_i * x +
+# b_i) mod p, p = 2^61 - 1, the standard MinHash field.
+_MINHASH_MERSENNE = (1 << 61) - 1
+# The u64 MAX sentinel: every element of the empty-shingle-set signature
+# (empty text, or fewer tokens than shingle_size).
+_MINHASH_EMPTY = (1 << 64) - 1
+# The shingle join separator: U+001F ASCII unit separator. The UAX #29 walk
+# never yields a token containing it (a C0 control is its own word segment),
+# so the join is injective over token sequences.
+_MINHASH_SEP = "\u001f"
+
+# SplitMix64 (Steele/Marsaglia's fixed arithmetic, the standard
+# fixture-grade 64-bit generator): the state advance and mixer constants.
+_SPLITMIX64_GAMMA = 0x9E3779B97F4A7C15
+_SPLITMIX64_M1 = 0xBF58476D1CE4E5B9
+_SPLITMIX64_M2 = 0x94D049BB133111EB
+
+# The Unicode White_Space property's exact 25 codepoints: Rust's
+# ``char::is_whitespace`` (the skip the Rust tokenizer applies), NOT
+# ``str.isspace``/``str.strip`` -- Python's own space predicate also counts
+# U+001C..U+001F, which Rust keeps as real word tokens.
+_WHITESPACE = frozenset(
+    chr(cp)
+    for cp in (
+        list(range(0x0009, 0x000E))  # TAB LF VT FF CR
+        + [0x0020, 0x0085, 0x00A0, 0x1680]
+        + list(range(0x2000, 0x200B))
+        + [0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+    )
+)
+
+
+def reference_minhash_tokens(text: str) -> list[str]:
+    """The token stream ``minhash_signature`` shingles: ``tors.word_bounds``
+    segments, segments made entirely of White_Space codepoints skipped
+    (Rust's ``char::is_whitespace`` set, the module comment's parity note),
+    each lowercased with Python's full Unicode ``str.lower`` (the same full
+    case mapping, SpecialCasing included, Rust's ``str::to_lowercase``
+    implements)."""
+    import tors
+
+    tokens: list[str] = []
+    for start, end in tors.word_bounds(text):
+        segment = text[start:end]
+        if not all(ch in _WHITESPACE for ch in segment):
+            tokens.append(segment.lower())
+    return tokens
+
+
+def _splitmix64(state: int) -> tuple[int, int]:
+    """One SplitMix64 step: ``(state', output)`` -- advance the state by the
+    golden-ratio gamma mod 2^64, then mix a copy of the new state (xorshift
+    twice through the two mixer constants, final xorshift-right)."""
+    state = (state + _SPLITMIX64_GAMMA) & _U64_MASK
+    z = state
+    z = ((z ^ (z >> 30)) * _SPLITMIX64_M1) & _U64_MASK
+    z = ((z ^ (z >> 27)) * _SPLITMIX64_M2) & _U64_MASK
+    z = z ^ (z >> 31)
+    return state, z
+
+
+def reference_minhash_coefficients(num_perm: int, seed: int) -> list[tuple[int, int]]:
+    """The ``(a_i, b_i)`` pairs, the pinned derivation: a SplitMix64 stream
+    seeded with ``seed`` reduced mod 2^64 (two's complement for negatives),
+    two draws per permutation -- ``a_i`` first, in ``[1, 2^61 - 2]`` (a zero
+    multiplier would collapse the permutation to a constant, so it is
+    excluded), then ``b_i`` in ``[0, 2^61 - 2]``. Fixture-grade
+    determinism, not crypto: the same arithmetic is pinned in
+    ``src/minhash_impl.rs`` and golden-pinned by the test battery."""
+    state = seed & _U64_MASK
+    pairs: list[tuple[int, int]] = []
+    for _ in range(num_perm):
+        state, za = _splitmix64(state)
+        state, zb = _splitmix64(state)
+        a = za % (_MINHASH_MERSENNE - 1) + 1
+        b = zb % _MINHASH_MERSENNE
+        pairs.append((a, b))
+    return pairs
+
+
+def reference_minhash_signature(
+    text: str, *, num_perm: int = 128, shingle_size: int = 3, seed: int = 0
+) -> list[int]:
+    """The MinHash oracle: ``reference_minhash_tokens``' stream cut into
+    consecutive ``shingle_size``-token shingles joined with U+001F, each
+    shingle hashed with XXH64 (seed 0; the pinned ``xxhash`` package
+    wrapping the C reference implementation of the same frozen spec
+    twox-hash implements on the Rust side), then ``signature[i] =
+    min over shingles of (a_i * x + b_i) mod (2^61 - 1)`` over the
+    ``reference_minhash_coefficients`` pairs. Fewer tokens than
+    ``shingle_size`` (empty text included) is the empty-shingle-set
+    convention: every element the u64 MAX sentinel."""
+    import xxhash
+
+    tokens = reference_minhash_tokens(text)
+    if len(tokens) < shingle_size:
+        return [_MINHASH_EMPTY] * num_perm
+    coefficients = reference_minhash_coefficients(num_perm, seed)
+    signature = [_MINHASH_EMPTY] * num_perm
+    for i in range(len(tokens) - shingle_size + 1):
+        shingle = _MINHASH_SEP.join(tokens[i : i + shingle_size])
+        x = xxhash.xxh64_intdigest(shingle.encode("utf-8"))
+        for j, (a, b) in enumerate(coefficients):
+            h = (a * x + b) % _MINHASH_MERSENNE
+            if h < signature[j]:
+                signature[j] = h
+    return signature

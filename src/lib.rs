@@ -216,6 +216,16 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The MinHash surface (`minhash_signature`) adds one list-returning shape
+//! with a structurally bounded marshalling class: the argument borrow plus
+//! the bounds validation and the seed mask (one `int.__and__` call) under
+//! the GIL, the whole tokenize + shingle + XXH64 + min-sweep under one
+//! `py.detach` (the sweep is the dominant cost, O(shingles * num_perm)),
+//! then the `num_perm`-element int-list marshalling after — at most 1024
+//! fresh `PyLong`s, two orders of magnitude under the word_bounds
+//! 3.67M-tuple band at the same corpus size, so no streaming twin is
+//! warranted (the list is the answer, and it is small by contract).
+//!
 //! The object content-addressing surface (`content_hash`) adds a residue
 //! class of its own, the arg-walk class scaled to a whole object tree:
 //! the walk that materializes the canonical form's owned value tree runs
@@ -362,6 +372,7 @@ pub mod html_table;
 pub mod json_repair;
 pub mod json_schema_impl;
 pub mod merkle_impl;
+pub mod minhash_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
 // The documents surface is feature-gated (`documents`): its engines
@@ -445,6 +456,7 @@ use py::html::*;
 use py::json_repair::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
+use py::minhash::*;
 use py::normalize::*;
 use py::phonetic::*;
 use py::pipeline::*;
@@ -600,6 +612,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
+    m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;
     m.add_function(wrap_pyfunction!(quote, m)?)?;
     m.add_function(wrap_pyfunction!(quote_plus, m)?)?;
     m.add_function(wrap_pyfunction!(unquote, m)?)?;
