@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import unicodedata
 from collections.abc import Callable, Sequence
@@ -421,6 +422,50 @@ def unescaped_false_positive(target_bytes: int) -> bytes:
     return _repeat_to(target_bytes, (_PROSE_SENTENCE + _ESCAPE_LITERAL_TEXT) * 4 + "\n\n").encode(
         "utf-8"
     )
+
+
+# --- content_hash object corpus -------------------------------------------------------
+#
+# The JSON-shaped object tree for ``tors.content_hash``'s cells: the 1 MiB
+# parity case in ``tests/test_content_hash.py``, the 12 MiB GIL cell in
+# ``tests/test_gil_release.py``, and the wall cells in
+# ``tests/test_performance.py``. A document dict of records, each a pure
+# function of its index (the no-rng determinism every corpus here follows):
+# ``{"id": int, "name": str, "note": str, "score": float, "tags": list[str],
+# "active": bool}``, the str-heavy shape a serialized API response or a model
+# batch row actually has. The ``note`` carries the shared prose sentence twice
+# so the payload bytes cross-reference the same recipe every other corpus
+# family measures.
+#
+# Sizing: ``target_bytes`` counts the CANONICAL form's bytes
+# (``json.dumps(record, sort_keys=True, separators=(",", ":"))``), quantized
+# to whole records via the canonical size of record 0, computed at call time
+# from the builder itself (the same dynamic-unit idiom ``_repeat_to`` uses;
+# the ``id`` and ``name`` fields stay fixed-width, and the ``score`` repr is
+# fixed-width per residue class, so record 0's size is representative to
+# within a few bytes across any build).
+
+
+def _content_record(i: int) -> dict[str, object]:
+    """Record ``i``: every field a pure function of ``i``, no rng."""
+    return {
+        "id": i,
+        "name": f"record-{i:06d}",
+        "note": _PROSE_SENTENCE * 2,
+        "score": (i % 40) * 0.125,
+        "tags": ["alpha", "beta"] if i % 2 else [],
+        "active": i % 3 == 0,
+    }
+
+
+def content_object(target_bytes: int) -> dict[str, object]:
+    """The ``tors.content_hash`` corpus at ``target_bytes`` of canonical form:
+    ``{"schema": 2, "count": n, "records": [...]}`` with ``n`` whole records
+    (``max(1, target // per-record canonical bytes)``, so a 12 MiB target
+    lands within one record of 12 MiB of canonical output)."""
+    unit = len(json.dumps(_content_record(0), sort_keys=True, separators=(",", ":"))) + 1
+    n = max(1, target_bytes // unit)
+    return {"schema": 2, "count": n, "records": [_content_record(i) for i in range(n)]}
 
 
 # --- shared differential oracles -------------------------------------------------------

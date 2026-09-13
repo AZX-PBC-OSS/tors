@@ -222,6 +222,29 @@ class TestHashingExamples:
         )
 
 
+class TestContentHashExamples:
+    """docs/api.md's ``tors.content_hash`` section: the dedup-key example
+    (equal content, any key order, one hash) and the cache-key example,
+    their literal hex digests pinned the same way every other docs example
+    here is (the README's "the output above is what they actually return"
+    discipline)."""
+
+    def test_dedup_key_example(self) -> None:
+        a = {"title": "Q3 outage report", "severity": "high", "tags": ["grid", "north"]}
+        b = {"tags": ["grid", "north"], "severity": "high", "title": "Q3 outage report"}
+        assert tors.content_hash(a) == tors.content_hash(b)
+        expected = "558be2127fa557b06ffd3dd0735697e14022546c969c6c37b01cf6278a178cf2"
+        assert tors.content_hash(a) == expected
+
+    def test_cache_key_example(self) -> None:
+        request = {
+            "model": "guss-9",
+            "messages": [{"role": "user", "text": "Summarize the Q3 report."}],
+        }
+        expected = "b0df18f8e089f15fb56fa51c241151213e67b82e7b656de29b1bafedb3785464"
+        assert tors.content_hash(request) == expected
+
+
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:
         thread = (

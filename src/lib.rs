@@ -216,6 +216,26 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The object content-addressing surface (`content_hash`) adds a residue
+//! class of its own, the arg-walk class scaled to a whole object tree:
+//! the walk that materializes the canonical form's owned value tree runs
+//! under the GIL (one `to_str` borrow plus copy per str — the standard
+//! str-in class per string object, first-call UTF-8 materialization
+//! included; one i64 storage read per fast-path int; one Python `repr`
+//! call per float or big int; one CPython `list.sort` per dict whose keys
+//! are not all-str or all-int — the exotic-key shapes, where delegation
+//! to the interpreter's own timsort is what buys byte-exact json.dumps
+//! parity, NaN keys and exact int/float cross-comparisons included), and
+//! then the canonical-form emission plus the SHA-256 run under one
+//! `py.detach`, streaming into the hasher with no intermediate buffer.
+//! The walk is iterative (an explicit frame stack), so tree depth costs
+//! heap, never the call stack: any nesting the interpreter can build
+//! hashes clean, where `json.dumps` itself `RecursionError`s at a
+//! version-dependent depth — a documented divergence lane, the accepted
+//! superset. `tests/test_gil_release.py`'s content_hash cell pins the
+//! walk's band at 12 MiB of the records corpus; the return is a single
+//! 64-char hex string, so there is no marshalling class to speak of.
+//!
 //! The one-shot hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/
 //! `sha512_hex`/`hmac_sha256_hex` and their raw-digest twins
 //! `md5_digest`/`sha1_digest`/`sha256_digest`/`sha512_digest`/
@@ -322,6 +342,7 @@
 
 pub mod b64_impl;
 pub mod bm25_impl;
+pub mod canon_impl;
 pub mod charset_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
@@ -408,6 +429,7 @@ pub(crate) fn detached_transform(
 pub mod py;
 
 use py::bm25::*;
+use py::canon::*;
 use py::charset::*;
 use py::chunk::*;
 use py::codec::*;
@@ -553,6 +575,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
+    m.add_function(wrap_pyfunction!(content_hash, m)?)?;
     m.add_function(wrap_pyfunction!(md5_hex, m)?)?;
     m.add_function(wrap_pyfunction!(sha1_hex, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;

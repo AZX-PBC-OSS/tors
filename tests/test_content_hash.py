@@ -1,0 +1,954 @@
+"""Contract gate for ``tors.content_hash``: the content-addressing hash over
+Python objects, byte-identical with the stdlib expression it replaces.
+
+``content_hash(obj: str | int | float | bool | None | list | tuple | dict) ->
+str`` is the lowercase-hex SHA-256 of the object's canonical form, where the
+canonical form is EXACTLY ``json.dumps(obj, sort_keys=True, separators=(",",":"))``
+with the defaults ``ensure_ascii=True`` and ``allow_nan``. The oracle is
+therefore total and always available, the same shape every other
+differential in this suite pins against:
+
+    hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+Every contract below is a differential pin against that oracle, plus
+byte-level literal pins (the canonical bytes themselves, sha256'd here) so
+the emitter's output shape is pinned independently of agreeing-with-itself
+differential evidence.
+
+The pinned contracts, each with its own class:
+
+- **Escape table** (``TestEscapeBattery``): inside a string, exactly ``"``,
+  ``\\``, and every codepoint outside printable ASCII (U+0020-U+007E) are
+  escaped -- the five short escapes ``\\b`` ``\\t`` ``\\n`` ``\\f`` ``\\r``
+  for U+0008/9/A/C/D, ``\\"``/``\\\\`` for quote/backslash, and ``\\u00XX``
+  LOWERCASE-hex for the other 27 controls below U+0020 plus DEL (U+007F,
+  which is outside printable ASCII); every non-ASCII codepoint becomes
+  ``\\uXXXX`` lowercase, astral codepoints as surrogate-pair escapes
+  (``chr(0x1F600)`` -> ``"\\ud83d\\ude00"``). The forward slash is never
+  escaped. Every codepoint U+0000-U+007F and the BMP/astral boundary
+  codepoints are pinned as literals and differentially, as values and as
+  dict keys.
+- **Dict keys** (``TestDictKeys``): json.dumps's coercion (``1`` -> ``"1"``,
+  ``True`` -> ``"true"``, ``None`` -> ``"null"``, ``1.0`` -> ``"1.0"``,
+  ``nan``/``inf`` -> ``"NaN"``/``"Infinity"``), sorting BEFORE
+  stringification (all-int keys sort numerically then stringify: 2 < 10;
+  the same digits as str keys sort lexicographically: "10" < "2"), and
+  error parity for the shapes json.dumps rejects (mixed unsortable key
+  types raise the sort's own TypeError, byte-identical, because tors
+  delegates that sort to CPython's; non-coercible key types raise TypeError
+  naming the type).
+- **Floats** (``TestFloatZoo``): repr'd via Python's own float repr, exact
+  by construction (tors never reimplements float formatting); non-finite
+  values use json's ``allow_nan`` literals ``NaN``/``Infinity``/
+  ``-Infinity``. The zoo: ``-0.0``, ``0.1``, ``1e16``, ``1e-5``, ``1e100``,
+  ``5e-324``, ``sys.float_info.max``, ``nan``, ``inf``, ``-inf``, and the
+  repr-boundary spellings around them, as values and as keys.
+- **Ints** (``TestInts``): arbitrary precision -- the i64 fast path covers
+  ``-(2**63)`` .. ``2**63-1`` and everything beyond falls back to Python's
+  own int->str (so the interpreter's ``sys.set_int_max_str_digits`` limit
+  raises on both sides identically).
+- **tuple == list** (``TestTupleListEquivalence``): tuples serialize as
+  lists, recursively.
+- **The surrogate divergence** (``TestSurrogateDivergence``): a str holding
+  lone surrogates (value or key) raises ``UnicodeEncodeError`` from the
+  standard str borrow -- the crate-wide boundary every str-in surface
+  documents -- where json.dumps SUCCEEDS (it emits ``\\udXXX`` escapes).
+  A documented, pinned divergence, not a bug.
+- **Errors** (``TestErrorParity``): non-serializable values raise TypeError
+  naming the type; circular references raise ValueError on both sides;
+  huge ints hit the interpreter's digit limit on both sides.
+- **Determinism** (``TestDeterminism``): any dict key order -> the same
+  hash; equal-value list/tuple -> the same hash; repeated calls -> the
+  same hash; 64 lowercase hex chars.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+from enum import Enum
+from typing import Any
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from reference import content_object
+from tors import content_hash
+
+_MIB = 1024 * 1024
+
+
+def _canonical(obj: Any) -> str:
+    """The canonical form, spelled exactly as the contract defines it."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+def _oracle(obj: Any) -> str:
+    """The full stdlib expression ``tors.content_hash`` replaces."""
+    return hashlib.sha256(_canonical(obj).encode("utf-8")).hexdigest()
+
+
+def _assert_parity(obj: Any) -> None:
+    """Differential parity, raising shapes included: an object the oracle
+    refuses (mixed unsortable key types; an int over the interpreter's
+    digit limit) must be refused by tors with the SAME exception type --
+    the differential covers the error domain, not just the success
+    domain."""
+    try:
+        expected = _oracle(obj)
+    except (TypeError, ValueError) as oracle_exc:
+        with pytest.raises(type(oracle_exc)):
+            content_hash(obj)
+        return
+    assert content_hash(obj) == expected
+
+
+def _assert_bytes(obj: Any, canonical: bytes) -> None:
+    """The literal pin: the canonical bytes themselves, sha256'd here."""
+    assert content_hash(obj) == hashlib.sha256(canonical).hexdigest()
+
+
+# The deterministic u64 LCG (the reference.py diff-corpus idiom) for the
+# key-order shuffles: reproducible permutation sequences, no rng module.
+_LCG_SEED = 0x9E3779B97F4A7C15
+_LCG_MUL = 6364136223846793005
+_LCG_INC = 1442695040888963407
+_U64_MASK = (1 << 64) - 1
+
+
+def _shuffled_order(n: int, salt: int) -> list[int]:
+    """A deterministic permutation of ``range(n)``: Fisher-Yates driven by
+    the LCG seeded per ``salt``, so each test's shuffles are reproducible."""
+    order = list(range(n))
+    state = (_LCG_SEED ^ (salt * 0x2545F4914F6CDD1D)) & _U64_MASK
+    for i in range(n - 1, 0, -1):
+        state = (state * _LCG_MUL + _LCG_INC) & _U64_MASK
+        j = state % (i + 1)
+        order[i], order[j] = order[j], order[i]
+    return order
+
+
+# The differential strategies (module level: the recursive strategy's
+# extend lambda cannot see class scope). Keys: every coercible type, floats
+# unbounded (nan/inf keys exercise the delegated sort; distinct NaN
+# objects coexist as dict keys). Values: full recursion over lists,
+# tuples (via .map(tuple), so nesting mixes both spellings), and dicts.
+_KEYS = st.one_of(
+    st.text(),
+    st.integers(),
+    st.floats(allow_nan=True, allow_infinity=True),
+    st.booleans(),
+    st.none(),
+)
+_SCALARS = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(),
+    st.floats(allow_nan=True, allow_infinity=True),
+    st.text(),
+)
+_VALUES = st.recursive(
+    _SCALARS,
+    lambda children: st.one_of(
+        st.lists(children, max_size=6),
+        st.lists(children, max_size=4).map(tuple),
+        st.dictionaries(_KEYS, children, max_size=6),
+    ),
+    max_leaves=25,
+)
+
+
+class TestScalarParity:
+    """The leaf types over a literal battery: parity plus literal canonical
+    bytes for each, so the emitter's scalar spellings are pinned without
+    relying on the oracle alone."""
+
+    @pytest.mark.parametrize(
+        ("obj", "canonical"),
+        [
+            (None, b"null"),
+            (True, b"true"),
+            (False, b"false"),
+            (0, b"0"),
+            (-1, b"-1"),
+            (1, b"1"),
+            (9223372036854775807, b"9223372036854775807"),
+            (-9223372036854775808, b"-9223372036854775808"),
+            (0.5, b"0.5"),
+            (-0.0, b"-0.0"),
+            (1e16, b"1e+16"),
+            ("", b'""'),
+            ("a", b'"a"'),
+            (" a ", b'" a "'),
+            ("~", b'"~"'),
+            ([], b"[]"),
+            ((), b"[]"),
+            ({}, b"{}"),
+            ([None], b"[null]"),
+            ([1, "a"], b'[1,"a"]'),
+            ([1.5, 2], b"[1.5,2]"),
+            ({"a": 1}, b'{"a":1}'),
+            ({"b": 2, "a": 1}, b'{"a":1,"b":2}'),
+            ([[], [[]]], b"[[],[[]]]"),
+            (({"k": (1, [2])},), b'[{"k":[1,[2]]}]'),
+            ({True: "x"}, b'{"true":"x"}'),
+            ({None: 1}, b'{"null":1}'),
+            ({1: "x"}, b'{"1":"x"}'),
+            ({1.0: "x"}, b'{"1.0":"x"}'),
+            ({float("nan"): 1}, b'{"NaN":1}'),
+            ({float("inf"): 1}, b'{"Infinity":1}'),
+        ],
+        ids=[
+            "none",
+            "true",
+            "false",
+            "zero",
+            "neg-one",
+            "one",
+            "i64-max",
+            "i64-min",
+            "half",
+            "neg-zero",
+            "1e16",
+            "empty-str",
+            "a",
+            "padded-str",
+            "tilde",
+            "empty-list",
+            "empty-tuple",
+            "empty-dict",
+            "null-list",
+            "int-str-list",
+            "float-int-list",
+            "single-pair",
+            "sorted-pair",
+            "nested-empties",
+            "tuple-in-dict-in-list",
+            "bool-key",
+            "none-key",
+            "int-key",
+            "float-key",
+            "nan-key",
+            "inf-key",
+        ],
+    )
+    def test_scalar_battery(self, obj: Any, canonical: bytes) -> None:
+        _assert_parity(obj)
+        _assert_bytes(obj, canonical)
+
+    def test_the_five_short_escapes_and_no_others(self) -> None:
+        """Exactly U+0008/0009/000A/000C/000D take the short escapes among
+        the controls; the other 27 codepoints below U+0020 take ``\\u00XX``
+        lowercase, DEL (U+007F) is escaped as ``\\u007f`` (it is outside
+        printable ASCII: the raw range is exactly U+0020-U+007E), and the
+        raw set is every printable ASCII codepoint except ``"`` and ``\\``."""
+        _assert_bytes("\b", b'"\\b"')
+        _assert_bytes("\t", b'"\\t"')
+        _assert_bytes("\n", b'"\\n"')
+        _assert_bytes("\f", b'"\\f"')
+        _assert_bytes("\r", b'"\\r"')
+        _assert_bytes("\x00", b'"\\u0000"')
+        _assert_bytes("\x0b", b'"\\u000b"')
+        _assert_bytes("\x1f", b'"\\u001f"')
+        _assert_bytes("\x7f", b'"\\u007f"')
+        _assert_bytes('"', b'"\\""')
+        _assert_bytes("\\", b'"\\\\"')
+        short = {0x08: "b", 0x09: "t", 0x0A: "n", 0x0C: "f", 0x0D: "r"}
+        for cp in range(0x20):
+            expected = f'"\\{short[cp]}"' if cp in short else f'"\\u{cp:04x}"'
+            assert _canonical(chr(cp)) == expected
+        raw = [cp for cp in range(0x20, 0x7F) if cp not in (0x22, 0x5C)]
+        assert len(raw) == 93
+        for cp in raw:
+            _assert_bytes(chr(cp), b'"' + bytes([cp]) + b'"')
+
+    def test_forward_slash_is_never_escaped(self) -> None:
+        _assert_bytes("a/b", b'"a/b"')
+        _assert_parity("\\/\\")
+
+
+class TestEscapeBattery:
+    """Every codepoint U+0000-U+007F plus the non-ASCII boundary codepoints,
+    as values and as dict keys: parity against the oracle (which pins the
+    exact escape spelling) plus structural assertions on the canonical form
+    itself (ASCII-only output, lowercase hex, astral as surrogate pairs)."""
+
+    # Every BMP range boundary, the astral boundary, the extremes, and
+    # samples from each plane (Hangul right after the surrogate block's end,
+    # private use, variation selectors, the last codepoints).
+    _BOUNDARY_CPS = [
+        0x00,
+        0x07,
+        0x08,
+        0x0B,
+        0x1F,
+        0x20,
+        0x21,
+        0x22,
+        0x23,
+        0x5B,
+        0x5C,
+        0x5D,
+        0x7E,
+        0x7F,
+        0x80,
+        0x7FF,
+        0x800,
+        0x9FF,
+        0xAC00,
+        0xD7FF,  # last codepoint before the surrogate block
+        0xE000,  # first private-use codepoint after it
+        0xF900,
+        0xFFFE,
+        0xFFFF,
+        0x10000,  # first astral
+        0x10001,
+        0x1F600,
+        0x20000,
+        0x2FA1D,
+        0x30000,
+        0xE0001,
+        0xE0100,
+        0xF0000,
+        0xFFFFE,
+        0x100000,
+        0x10FFFE,
+        0x10FFFF,  # the last codepoint
+    ]
+
+    @pytest.mark.parametrize("cp", range(0x80), ids=[f"U+{cp:04X}" for cp in range(0x80)])
+    def test_ascii_codepoint_as_value(self, cp: int) -> None:
+        _assert_parity(chr(cp))
+
+    @pytest.mark.parametrize("cp", _BOUNDARY_CPS, ids=[f"U+{cp:05X}" for cp in _BOUNDARY_CPS])
+    def test_boundary_codepoint_as_value(self, cp: int) -> None:
+        _assert_parity(chr(cp))
+
+    @pytest.mark.parametrize("cp", _BOUNDARY_CPS, ids=[f"U+{cp:05X}" for cp in _BOUNDARY_CPS])
+    def test_boundary_codepoint_as_key(self, cp: int) -> None:
+        _assert_parity({chr(cp): 1})
+
+    def test_astral_codepoints_emit_lowercase_surrogate_pair_escapes(self) -> None:
+        _assert_bytes(chr(0x1F600), b'"\\ud83d\\ude00"')
+        _assert_bytes(chr(0x10FFFF), b'"\\udbff\\udfff"')
+        _assert_bytes(chr(0x10000), b'"\\ud800\\udc00"')
+
+    def test_non_ascii_escapes_are_lowercase_hex(self) -> None:
+        for cp in (0xE9, 0x80, 0x7FF, 0x800, 0xFFFD, 0xFEFF, 0x2028, 0x2029, 0x85, 0xA0, 0xAD):
+            assert _canonical(chr(cp)) == f'"\\u{cp:04x}"'
+
+    def test_backslash_and_quote_runs(self) -> None:
+        for s in [
+            "\\\\",
+            '""""',
+            "\\n\\t\\r",
+            'say "hi" \\ ok',
+            "\\",
+            '"',
+            '"\\"',
+            "\\u0041",
+            "a\\/b",
+        ]:
+            _assert_parity(s)
+        _assert_bytes('"\\"', b'"\\"\\\\\\""')
+        _assert_bytes("\\\\", b'"\\\\\\\\"')
+
+    def test_control_run_mixed_with_astral_and_bmp(self) -> None:
+        s = "a\x00\b\x1f\x7fé😀\t"
+        _assert_parity(s)
+        _assert_parity({s: s})
+        assert _canonical(s) == '"a\\u0000\\b\\u001f\\u007f\\u00e9\\ud83d\\ude00\\t"'
+
+    def test_escaped_output_is_always_ascii(self) -> None:
+        """The whole canonical form is pure ASCII for any input (the
+        ensure_ascii contract): the emitted bytes can never exceed 0x7F."""
+        obj = {"clé": ["héllo", "wörld", chr(0x10FFFF)], "😀": chr(0xE01F0)}
+        assert _canonical(obj).isascii()
+        _assert_parity(obj)
+
+
+class TestFloatZoo:
+    """Finite floats use Python's own repr spelling (tors calls it; it never
+    reimplements float formatting); non-finites use json's allow_nan
+    literals. Every spelling below is what repr() actually returns, pinned
+    as literal canonical bytes."""
+
+    @pytest.mark.parametrize(
+        ("f", "canonical"),
+        [
+            (-0.0, b"-0.0"),
+            (0.0, b"0.0"),
+            (0.1, b"0.1"),
+            (0.5, b"0.5"),
+            (1.5, b"1.5"),
+            (2.0, b"2.0"),
+            (100.0, b"100.0"),
+            (1e15, b"1000000000000000.0"),
+            (1e16, b"1e+16"),
+            (1e-4, b"0.0001"),
+            (1e-5, b"1e-05"),
+            (1e100, b"1e+100"),
+            (5e-324, b"5e-324"),  # the smallest subnormal
+            (sys.float_info.max, b"1.7976931348623157e+308"),
+            (-sys.float_info.max, b"-1.7976931348623157e+308"),
+            (123456789012345678.0, b"1.2345678901234568e+17"),
+            (float("nan"), b"NaN"),
+            (float("inf"), b"Infinity"),
+            (float("-inf"), b"-Infinity"),
+        ],
+        ids=[
+            "neg-zero",
+            "zero",
+            "tenth",
+            "half",
+            "one-five",
+            "two",
+            "hundred",
+            "1e15",
+            "1e16",
+            "1e-4",
+            "1e-5",
+            "1e100",
+            "min-subnormal",
+            "float-max",
+            "float-neg-max",
+            "rounding-17",
+            "nan",
+            "inf",
+            "neg-inf",
+        ],
+    )
+    def test_float_spelling_as_value(self, f: float, canonical: bytes) -> None:
+        _assert_parity(f)
+        _assert_bytes(f, canonical)
+
+    @pytest.mark.parametrize(
+        "f",
+        [
+            -0.0,
+            0.1,
+            1e16,
+            1e-5,
+            1e100,
+            5e-324,
+            sys.float_info.max,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+        ],
+        ids=[
+            "neg-zero",
+            "tenth",
+            "1e16",
+            "1e-5",
+            "1e100",
+            "min-subnormal",
+            "float-max",
+            "nan",
+            "inf",
+            "neg-inf",
+        ],
+    )
+    def test_float_spelling_as_key(self, f: float) -> None:
+        _assert_parity({f: "v"})
+
+    def test_float_key_sort_is_numeric_across_the_zoo(self) -> None:
+        zoo = [5e-324, -0.0, 1e-5, 0.1, 1.5, 1e16, 1e100, sys.float_info.max, float("inf")]
+        _assert_parity({f: i for i, f in enumerate(zoo)})
+
+    def test_the_whole_zoo_in_a_list_keeps_order(self) -> None:
+        zoo = [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -0.0,
+            0.1,
+            1e16,
+            1e-5,
+            5e-324,
+            sys.float_info.max,
+        ]
+        _assert_parity(zoo)
+        _assert_parity([zoo, zoo])  # shared sibling lists, no false circular
+
+
+class TestInts:
+    """Arbitrary precision: the i64 fast path at its exact boundaries, the
+    repr fallback beyond them (both directions), and the interpreter's
+    int->str digit limit raising identically on both sides."""
+
+    @pytest.mark.parametrize(
+        "i",
+        [
+            0,
+            1,
+            -1,
+            2**31 - 1,
+            -(2**31),
+            2**53,
+            2**62,
+            2**63 - 1,
+            -(2**63),
+            2**63,
+            -(2**63) - 1,
+            2**64,
+            2**100,
+            -(2**100),
+            10**40,
+            -(10**40),
+        ],
+        ids=[
+            "zero",
+            "one",
+            "neg-one",
+            "i32-max",
+            "i32-min",
+            "2^53",
+            "2^62",
+            "i64-max",
+            "i64-min",
+            "i64-max-plus",
+            "i64-min-minus",
+            "2^64",
+            "2^100",
+            "neg-2^100",
+            "10^40",
+            "neg-10^40",
+        ],
+    )
+    def test_int_boundaries_as_values(self, i: int) -> None:
+        _assert_parity(i)
+        _assert_bytes(i, str(i).encode("ascii"))
+
+    def test_magnitude_ladder(self) -> None:
+        ladder = [2**k for k in (0, 31, 32, 62, 63, 64, 65, 100, 431)]
+        _assert_parity(ladder)
+        _assert_parity([-x for x in ladder])
+
+    def test_big_ints_as_keys_sort_numerically(self) -> None:
+        keys = [2**100, -(2**100), 0, 2**63, -(2**63), 17, 2**40]
+        _assert_parity({k: i for i, k in enumerate(keys)})
+
+    def test_big_int_mixed_with_float_keys_sorts_exactly(self) -> None:
+        """2**63 vs 9.3e18 vs 2**63+1: int/float key comparison is exact in
+        Python (neither side rounds), pinned here at the magnitudes where a
+        naive as-f64 comparison would misorder."""
+        keys = {2**63: "a", 9.3e18: "b", 2**63 + 1: "c", 1e19: "d", -(2**63): "e"}
+        _assert_parity(keys)
+
+    def test_huge_int_hits_the_interpreter_digit_limit_identically(self) -> None:
+        """10**5001 exceeds the default 4300-digit int->str limit on 3.11+,
+        so BOTH sides raise ValueError; on 3.10 (no limit) both sides hash.
+        Whichever interpreter runs this gate, the two sides agree."""
+        huge = 10**5001
+        try:
+            expected = _oracle(huge)
+        except ValueError:
+            with pytest.raises(ValueError):
+                content_hash(huge)
+        else:
+            assert content_hash(huge) == expected
+
+
+class TestDictKeys:
+    """json.dumps's key coercion, sort-before-stringification, and the
+    rejected shapes (mixed unsortable types; non-coercible key types)."""
+
+    def test_key_coercion_pins(self) -> None:
+        _assert_bytes({1: "x"}, b'{"1":"x"}')
+        _assert_bytes({True: "x"}, b'{"true":"x"}')
+        _assert_bytes({False: "x"}, b'{"false":"x"}')
+        _assert_bytes({None: "x"}, b'{"null":"x"}')
+        _assert_bytes({1.0: "x"}, b'{"1.0":"x"}')
+        _assert_bytes({2.5: "x"}, b'{"2.5":"x"}')
+        _assert_bytes({-1: "x"}, b'{"-1":"x"}')
+        _assert_bytes({"": "x"}, b'{"":"x"}')
+
+    def test_sort_before_stringification_int_keys_sort_numerically(self) -> None:
+        """{10, 2, 33} -> "2", "10", "33": numeric order THEN stringify. If
+        the keys were stringified first, "10" would sort before "2"."""
+        _assert_bytes({10: "a", 2: "b", 33: "c", -5: "d"}, b'{"-5":"d","2":"b","10":"a","33":"c"}')
+
+    def test_str_keys_with_digit_spelling_sort_lexicographically(self) -> None:
+        """The contrast that proves sorting happens on the original keys:
+        the same digits as str keys sort as strings ("10" < "2")."""
+        _assert_bytes({"10": "a", "2": "b"}, b'{"10":"a","2":"b"}')
+
+    def test_bool_and_int_keys_sort_together_numerically(self) -> None:
+        _assert_bytes({True: "t", 10: "a", 2: "b"}, b'{"true":"t","2":"b","10":"a"}')
+        _assert_bytes({False: "f", True: "t"}, b'{"false":"f","true":"t"}')
+
+    def test_int_and_float_keys_sort_together_numerically(self) -> None:
+        _assert_bytes({1: "a", 1.5: "b", 0.5: "c"}, b'{"0.5":"c","1":"a","1.5":"b"}')
+
+    def test_str_keys_sort_by_codepoint(self) -> None:
+        obj = {"b": 1, "a": 2, "é": 3, "Z": 4, "~": 5, "😀": 6, "0": 7}
+        _assert_parity(obj)
+        # ASCII first (by codepoint), then U+00E9, then the astral emoji.
+        assert list(json.loads(_canonical(obj))) == ["0", "Z", "a", "b", "~", "é", "😀"]
+
+    def test_non_finite_key_coercion(self) -> None:
+        _assert_bytes({float("nan"): 1}, b'{"NaN":1}')
+        _assert_bytes({float("inf"): 1, float("-inf"): 0}, b'{"-Infinity":0,"Infinity":1}')
+
+    def test_nan_key_dict_corners_match_the_oracle_exactly(self) -> None:
+        """NaN keys make the sort comparator inconsistent (nan < x is False
+        both ways), so the output order is CPython's timsort behavior, not a
+        mathematical property. tors pins parity by delegating that sort to
+        CPython's own ``list.sort`` (the same comparisons, the same
+        algorithm), so it matches whatever the running interpreter does --
+        including the two-distinct-NaN-keys dict (nan != nan lets both
+        coexist as keys) and NaN mixed with sortable keys."""
+        nan_a, nan_b = float("nan"), float("nan")
+        _assert_parity({nan_a: "a"})
+        _assert_parity({nan_a: "a", nan_b: "b"})
+        _assert_parity({nan_b: "b", nan_a: "a"})
+        _assert_parity({nan_a: "a", 1: "b"})
+        _assert_parity({1: "b", nan_a: "a"})
+        _assert_parity({nan_a: "a", 1: "b", 2.5: "c"})
+        _assert_parity({2.5: "c", nan_a: "a", 1: "b"})
+
+    def test_key_order_invariance(self) -> None:
+        """The same pairs in any insertion order hash identically (the
+        canonical form is sorted, so the hash cannot see insertion order)."""
+        base = {f"k{i:03d}": i for i in range(50)}
+        reference_hash = content_hash(base)
+        for salt in range(1, 6):
+            order = _shuffled_order(50, salt)
+            shuffled = {f"k{i:03d}": i for i in order}
+            assert content_hash(shuffled) == reference_hash
+
+    def test_wide_str_key_dict(self) -> None:
+        obj = {f"key-{i:05d}": i for i in _shuffled_order(10_000, salt=7)}
+        _assert_parity(obj)
+
+    def test_wide_int_key_dict_sorts_numerically(self) -> None:
+        obj = {i: str(i) for i in _shuffled_order(10_000, salt=8)}
+        _assert_parity(obj)
+        assert list(json.loads(_canonical(obj))) == [str(i) for i in range(10_000)]
+
+    def test_wide_bool_int_float_key_dict(self) -> None:
+        keys: list[Any] = [False, True, 2, 10, 10.5, -3.25, 7]
+        obj = {k: str(k) for k in keys}
+        _assert_parity(obj)
+
+    def test_single_key_of_every_coercible_type_needs_no_sort(self) -> None:
+        for key in [
+            "s",
+            "",
+            1,
+            -1,
+            2**100,
+            True,
+            False,
+            None,
+            1.0,
+            2.5,
+            float("nan"),
+            float("inf"),
+        ]:
+            _assert_parity({key: "v"})
+
+
+class TestTupleListEquivalence:
+    """Tuples serialize as lists: an equal-value list and tuple hash the
+    same, recursively, at every nesting depth."""
+
+    @pytest.mark.parametrize(
+        ("seq", "tup"),
+        [
+            ([1, 2], (1, 2)),
+            ([], ()),
+            ([1, "a", None, 2.5], (1, "a", None, 2.5)),
+            ([[1], [2, 3]], ((1,), (2, 3))),
+            ([{"a": (1,)}], ({"a": [1]},)),
+            ([[[[1]]]], ((((1,),),),)),
+        ],
+        ids=["flat", "empty", "mixed", "nested", "dict-wrapped", "deep"],
+    )
+    def test_equal_value_list_and_tuple_hash_identically(self, seq: list, tup: tuple) -> None:
+        assert content_hash(seq) == content_hash(tup)
+        _assert_parity(seq)
+        _assert_parity(tup)
+
+    def test_tuple_mixed_into_lists_and_dicts(self) -> None:
+        _assert_parity([1, (2, [3, (4,)])])
+        _assert_parity({"t": (1, (2,)), "l": [1, [2]]})
+
+
+class TestDeterminism:
+    def test_repeated_calls_are_identical(self) -> None:
+        obj = {"a": [1, 2.5, "x", None, True], "b": (1,)}
+        assert content_hash(obj) == content_hash(obj) == content_hash(obj)
+
+    def test_output_is_64_lowercase_hex_chars(self) -> None:
+        h = content_hash({"any": ["object"]})
+        assert len(h) == 64
+        assert h == h.lower()
+        int(h, 16)  # valid hex
+
+    def test_distinct_objects_hash_distinctly(self) -> None:
+        assert content_hash({"a": 1}) != content_hash({"a": 2})
+        assert content_hash([1, 2]) != content_hash([2, 1])  # order-sensitive
+        assert content_hash({"a": 1, "b": 2}) != content_hash({"a": 2, "b": 1})
+
+
+class TestHypothesisDifferential:
+    """The total differential: hypothesis-generated objects over every
+    accepted type, nesting, and key-type zoo, each checked against the
+    oracle. The strategy never generates lone surrogates (``st.text`` cannot
+    by construction), so every generated object is inside the shared domain
+    of both implementations."""
+
+    @given(_VALUES)
+    @settings(max_examples=300)
+    def test_arbitrary_objects_match_the_oracle(self, obj: Any) -> None:
+        _assert_parity(obj)
+
+    @given(st.dictionaries(_KEYS, _SCALARS, max_size=10))
+    @settings(max_examples=300)
+    def test_arbitrary_key_zoos_match_the_oracle(self, obj: dict) -> None:
+        _assert_parity(obj)
+
+    @given(st.lists(_SCALARS, min_size=1, max_size=6))
+    @settings(max_examples=150)
+    def test_equal_value_list_and_tuple_always_hash_identically(self, items: list) -> None:
+        assert content_hash(items) == content_hash(tuple(items))
+
+    def test_deep_nesting_ladder(self) -> None:
+        for depth in (10, 100, 300):
+            obj: Any = None
+            for _ in range(depth):
+                obj = [obj]
+            _assert_parity(obj)
+            obj = None
+            for _ in range(depth):
+                obj = {"k": obj}
+            _assert_parity(obj)
+            obj = None
+            for _ in range(depth):
+                obj = ({"k": [obj]},)
+            _assert_parity(obj)
+
+    def test_1mib_object_parity(self) -> None:
+        """The ``reference.content_object`` corpus (the same tree the GIL
+        and wall cells measure) at 1 MiB of canonical form."""
+        _assert_parity(content_object(1 * _MIB))
+
+
+class TestErrorParity:
+    """Both sides raise for exactly the same objects, with the same
+    exception types; tors's own TypeError wording names the offending type
+    (values and non-coercible keys), the mixed-key sort error is
+    byte-identical with json.dumps's (delegated to CPython's own sort), and
+    circular references raise ValueError on both sides."""
+
+    class Widget:
+        pass
+
+    class Color(Enum):
+        RED = 1
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            set(),
+            frozenset(),
+            b"bytes",
+            bytearray(),
+            Widget(),
+            object(),
+            type,
+            complex(1, 2),
+            range(3),
+            memoryview(b"x"),
+            Color.RED,
+            {1: [1]}.keys(),
+            iter([]),
+        ],
+        ids=[
+            "set",
+            "frozenset",
+            "bytes",
+            "bytearray",
+            "custom-class",
+            "object",
+            "type-object",
+            "complex",
+            "range",
+            "memoryview",
+            "plain-enum",
+            "dict-keys-view",
+            "list-iterator",
+        ],
+    )
+    def test_non_serializable_values_raise_type_error_on_both_sides(self, value: Any) -> None:
+        with pytest.raises(TypeError, match=re.escape(type(value).__name__)):
+            content_hash({"v": value})
+        with pytest.raises(TypeError):
+            _oracle({"v": value})
+
+    def test_type_error_names_the_offending_type_top_level_and_nested(self) -> None:
+        with pytest.raises(TypeError, match="set"):
+            content_hash(set())
+        with pytest.raises(TypeError, match="Widget"):
+            content_hash([1, [2, {"deep": TestErrorParity.Widget()}]])
+        with pytest.raises(TypeError, match="bytes"):
+            content_hash({"k": b"x"})
+
+    @pytest.mark.parametrize(
+        "key",
+        [(1, 2), b"b", 1.5j, Widget()],
+        ids=["tuple", "bytes", "complex", "custom-class"],
+    )
+    def test_non_coercible_keys_raise_type_error_on_both_sides(self, key: Any) -> None:
+        # (bytearray and other unhashables never reach either
+        # implementation: the dict itself refuses them at construction.)
+        with pytest.raises(TypeError, match="keys must be str, int, float, bool, or None"):
+            content_hash({key: 1})
+        with pytest.raises(TypeError):
+            _oracle({key: 1})
+
+    def test_decimal_key_is_rejected_like_json_rejects_it(self) -> None:
+        from decimal import Decimal
+
+        with pytest.raises(TypeError, match="Decimal"):
+            content_hash({Decimal("1.5"): 1})
+        with pytest.raises(TypeError):
+            _oracle({Decimal("1.5"): 1})
+
+    @pytest.mark.parametrize(
+        "obj",
+        [
+            {1: "a", "b": 2},
+            {"b": 2, 1: "a"},
+            {None: 1, 2: 3},
+            {"a": 1, (1, 2): 2},
+            {"a": set(), (1, 2): 1},  # sort error fires before the value's
+        ],
+        ids=["int-str", "str-int", "none-int", "str-tuple", "doubly-bad"],
+    )
+    def test_mixed_unsortable_keys_raise_the_sorts_own_type_error(self, obj: dict) -> None:
+        """The delegated sort reproduces json.dumps's comparison error
+        byte-for-byte (same timsort, same operands), and it fires BEFORE
+        any value is walked, exactly as in json.dumps's own encode order."""
+        with pytest.raises(TypeError) as tors_exc:
+            content_hash(obj)
+        with pytest.raises(TypeError) as oracle_exc:
+            _oracle(obj)
+        assert str(tors_exc.value) == str(oracle_exc.value)
+
+    def test_key_type_error_fires_before_value_errors_for_single_key_dicts(self) -> None:
+        with pytest.raises(TypeError, match="keys must be"):
+            content_hash({(1, 2): set()})
+        with pytest.raises(TypeError):
+            _oracle({(1, 2): set()})
+
+    def test_first_bad_value_in_emission_order_wins(self) -> None:
+        with pytest.raises(TypeError, match="not set"):
+            content_hash({"a": set(), "b": frozenset()})
+        with pytest.raises(TypeError, match="not frozenset"):
+            content_hash({"a": 1, "b": frozenset(), "c": set()})
+
+    def test_circular_references_raise_value_error_on_both_sides(self) -> None:
+        a: list[Any] = []
+        a.append(a)
+        with pytest.raises(ValueError, match="[Cc]ircular reference detected"):
+            content_hash(a)
+        with pytest.raises(ValueError):
+            _oracle(a)
+
+        d: dict[str, Any] = {}
+        d["self"] = d
+        with pytest.raises(ValueError, match="[Cc]ircular reference detected"):
+            content_hash(d)
+        with pytest.raises(ValueError):
+            _oracle(d)
+
+    def test_shared_non_circular_siblings_hash_fine(self) -> None:
+        """The same object appearing twice as a sibling is NOT circular
+        (json's markers are enter/exit, and so is tors's walk)."""
+        shared = [1, {"k": "v"}]
+        _assert_parity([shared, shared, shared])
+        _assert_parity({"a": shared, "b": shared})
+
+
+class TestSurrogateDivergence:
+    """The documented divergence lane: json.dumps accepts lone surrogates
+    (it emits ``\\udXXX`` escapes for them), while every str-in surface in
+    this crate refuses them at the borrow (``UnicodeEncodeError``,
+    "surrogates not allowed"). Pinned loudly so nobody mistakes it for a
+    bug: if these ever pass, the crate-wide str-borrow contract has
+    regressed, not content_hash."""
+
+    @pytest.mark.parametrize(
+        "s",
+        ["\ud800", "\udfff", "a\ud800b", "\ud800abc\udfff", "\ud83d\ude00"],
+        ids=["d800", "dfff", "mid", "both-ends", "surrogate-pair-spelling"],
+    )
+    def test_lone_surrogate_values_raise_where_json_succeeds(self, s: str) -> None:
+        assert _canonical(s)  # json.dumps SUCCEEDS: the divergence is real
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash(s)
+
+    def test_lone_surrogate_keys_raise_where_json_succeeds(self) -> None:
+        assert _canonical({"\ud800": 1})
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash({"\ud800": 1})
+
+    def test_lone_surrogates_nested_deep_raise(self) -> None:
+        obj = {"ok": [1, "fine"], "bad": ["\ud800"]}
+        assert _canonical(obj)
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash(obj)
+
+    def test_clean_astral_text_is_fine_on_both_sides(self) -> None:
+        """The neighboring non-divergent lane: real astral text (valid
+        surrogate pairs in UTF-16 terms) hashes with full parity."""
+        _assert_parity("emoji \U0001F600 and \U0001D538 math")
+        _assert_parity({"😀": ["🎉", chr(0x10FFFF)]})
+
+
+class TestCanonicalByteLiterals:
+    """Whole-tree canonical forms pinned as literal bytes (sha256'd here),
+    independent of the oracle: the emitter's structural spellings -- compact
+    separators, sorted keys, nested containers -- in one place."""
+
+    @pytest.mark.parametrize(
+        ("obj", "canonical"),
+        [
+            ({}, b"{}"),
+            ([], b"[]"),
+            ([1, 2, 3], b"[1,2,3]"),
+            ((1, 2, 3), b"[1,2,3]"),
+            ({"a": []}, b'{"a":[]}'),
+            ({"b": 1, "a": 2}, b'{"a":2,"b":1}'),
+            ([{"x": 1}, {"y": [2, 3]}], b'[{"x":1},{"y":[2,3]}]'),
+            (
+                {"nested": {"deep": {"deeper": [True, False, None]}}},
+                b'{"nested":{"deep":{"deeper":[true,false,null]}}}',
+            ),
+            ({"s": "with spaces and:colons,commas"}, b'{"s":"with spaces and:colons,commas"}'),
+            ({"a": [1.5, "x", {"b": ()}]}, b'{"a":[1.5,"x",{"b":[]}]}'),
+        ],
+        ids=[
+            "empty-dict",
+            "empty-list",
+            "int-list",
+            "int-tuple",
+            "empty-nested",
+            "two-sorted",
+            "list-of-dicts",
+            "deep-dict",
+            "separator-chars-in-strings",
+            "kitchen-sink",
+        ],
+    )
+    def test_tree_literals(self, obj: Any, canonical: bytes) -> None:
+        _assert_bytes(obj, canonical)
+        _assert_parity(obj)

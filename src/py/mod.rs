@@ -14,6 +14,7 @@
 mod _borrow;
 
 pub mod bm25;
+pub mod canon;
 pub mod charset;
 pub mod chunk;
 pub mod codec;

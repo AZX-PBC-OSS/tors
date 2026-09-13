@@ -597,6 +597,28 @@ def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: 
 # ValueError otherwise). Identity contract: is s exactly when == s.
 def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*") -> str: ...
 
+# The object content hash: lowercase-hex SHA-256 of the canonical form,
+# EXACTLY json.dumps(obj, sort_keys=True, separators=(",", ":")) with
+# default ensure_ascii and allow_nan -- byte-identical with the stdlib
+# expression, pinned differentially against it. Leaves: str, int
+# (arbitrary precision), float (Python's own repr spelling; NaN/Infinity/
+# -Infinity literals), bool, None; containers: list, tuple (serializes as
+# a list), dict (keys sorted BEFORE stringification; str/int/float/bool/
+# None keys coerced to their json string form). Anything else raises
+# TypeError naming the type; circular references raise ValueError; a str
+# holding lone surrogates raises UnicodeEncodeError where json.dumps
+# accepts it (the crate-wide str-borrow divergence, documented in
+# docs/api.md). Deterministic: any dict key order yields the same hash.
+#
+# GIL note: the object walk and leaf spellings run under the GIL (the
+# standard arg-walk class, O(tree): one borrow+copy per str, one storage
+# read per int, one repr call per float); the canonical-form emission and
+# the SHA-256 run under one py.detach. No tors.aio twin: a fast one-shot
+# call (see docs/async.md's family list).
+def content_hash(
+    obj: str | int | float | bool | None | list | tuple | dict,
+) -> str: ...
+
 # Domain-separated SHA-256 (RFC 6962-style: leaves hash 0x00‖chunk, internal
 # nodes hash 0x01‖left‖right): not the crate's undifferentiated default,
 # which is forgeable (CVE-2012-2459-class leaf/internal-node confusion).
