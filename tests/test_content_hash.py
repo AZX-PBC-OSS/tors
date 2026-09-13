@@ -650,6 +650,35 @@ class TestDictKeys:
         obj = {k: str(k) for k in keys}
         _assert_parity(obj)
 
+    def test_wide_bool_int_key_set_sorts_numerically_through_the_fast_path(self) -> None:
+        """The all-exact int/bool fast path's BOOL lane, widened to life:
+        the original whole-set gate (``is_exact_instance_of::<PyInt>``)
+        is FALSE for ``True``/``False`` -- bool's type is ``bool``, not
+        ``int`` -- so every bool-bearing key set silently took the
+        delegated timsort and the fast path the docstring described
+        never ran. Bool IS its 0/1 int value (and bool cannot be
+        subclassed; ``True``/``1`` and ``False``/``0`` cannot coexist as
+        dict keys, so no tie is possible), so the numeric i64 sort is
+        exact for the mixed set. This pin hashed identically through the
+        delegated path before the widening and through the fast path
+        after -- which is exactly why it needs pinning both sides of the
+        gate."""
+        obj = {
+            False: "f",
+            True: "t",
+            -5: "d",
+            2: "b",
+            10: "a",
+            9223372036854775807: "m",
+            -9223372036854775808: "n",
+        }
+        _assert_parity(obj)
+        _assert_bytes(
+            obj,
+            b'{"-9223372036854775808":"n","-5":"d","false":"f",'
+            b'"true":"t","2":"b","10":"a","9223372036854775807":"m"}',
+        )
+
     def test_single_key_of_every_coercible_type_needs_no_sort(self) -> None:
         for key in [
             "s",

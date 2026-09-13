@@ -394,13 +394,25 @@ fn dict_pairs<'py>(
     // unsortable key types.
     let order: Vec<usize> = if n <= 1 {
         (0..n).collect()
-    } else if entries
-        .iter()
-        .all(|e| matches!(e.kind, KeyKind::Bool(_) | KeyKind::SmallInt(_)))
-        && entries
-            .iter()
-            .all(|e| e.handle.is_exact_instance_of::<PyInt>())
-    {
+    } else if entries.iter().all(|e| match &e.kind {
+        // The exact gate is per bucket: bool IS its 0/1 int value (and
+        // bool cannot be subclassed, so a Bool-classified key is exact
+        // by construction -- the explicit gate mirrors the str/int
+        // lanes' idiom), while a SmallInt-classified key may be an int
+        // SUBCLASS with overridden rich comparison, which the numeric
+        // sort would silently ignore, so it must stay exact to take
+        // this path. True/1 and False/0 cannot coexist as dict keys,
+        // so no numeric tie is possible and the i64 sort is the tuples'
+        // own total order. The original whole-set gate
+        // (is_exact_instance_of::<PyInt> over every entry) is FALSE for
+        // True/False -- bool's type is bool, not int -- so every
+        // bool-bearing key set silently took the delegated path and
+        // this fast path never ran: the docstring described it, the
+        // code did not deliver it.
+        KeyKind::Bool(_) => e.handle.is_exact_instance_of::<PyBool>(),
+        KeyKind::SmallInt(_) => e.handle.is_exact_instance_of::<PyInt>(),
+        _ => false,
+    }) {
         let mut keyed: Vec<(i64, usize)> = entries
             .iter()
             .enumerate()
