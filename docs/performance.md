@@ -203,6 +203,31 @@ document to the per-codepoint decoder):
 Outputs are differential-pinned identical across every one of these shapes;
 the wall contracts gate in `tests/test_performance.py`.
 
+## Object content hashing
+
+`content_hash` vs the full stdlib spelling
+(`sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()`)
+is a measured dead heat at every scale over the records corpus
+(`tests/test_performance.py`, min-of-N):
+
+| size | tors | stdlib | ratio |
+|---|---|---|---|
+| 64 KiB | 0.20ms | 0.21ms | 0.97 |
+| 1 MiB | 3.38ms | 3.37ms | 1.00 |
+| 12 MiB | 41.87ms | 41.79ms | 1.00 |
+
+Both sides do equivalent work (CPython's C encoder builds the canonical
+string in one GIL-held pass, then pays `str.encode` and a released-GIL
+`sha256`; tors pays a GIL-held walk into an owned tree plus a detached
+emit-and-hash), so no wall win is asserted anywhere on this surface. The
+value is the GIL release — the stdlib holds the loop for `json.dumps` +
+`str.encode`, inline ratio 1.00-1.02 in every sample against tors's
+0.45-0.60 at 12 MiB (`tests/test_gil_release.py`) — and the byte-exact
+parity contract. The detached half (emission + SHA-256) benches at
+~870 MiB/s on the records corpus and ~786 MiB/s on an escape-heavy
+every-codepoint corpus (`benches/canon.rs`): the full `ensure_ascii`
+escape table costs ~10% over raw-run copying.
+
 ## List returns have a cost at scale
 
 The list-returning functions marshal one tuple per segment under the GIL:

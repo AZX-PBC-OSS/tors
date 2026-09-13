@@ -35,7 +35,7 @@ The full transitive closure is machine-checked by the gate; the dev tree
 | pyo3 | 0.29.2 | MIT OR Apache-2.0 | the CPython extension layer (abi3-py310) |
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | NFC/NFD/NFKC/NFKD tables (Unicode 16.0.0) |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | UAX #29 grapheme/word tables (Unicode 17.0.0) |
-| sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
+| sha2 | 0.11.0 | MIT OR Apache-2.0 | finalize's and content_hash's SHA-256, and (with the rest of the RustCrypto family below) the one-shot hashing surface's sha256/sha512 engines and hmac's inner hash |
 | const-hex | 1.19.1 | MIT OR Apache-2.0 | digest hex encoding |
 | md-5 | 0.11.0 | MIT OR Apache-2.0 | `md5_hex`'s engine (checksum/ETag/legacy-interop only, never security); already resolved in the lock as the documents tree's (pdf_oxide/lopdf) dependency before the hashing surface made it direct, so the direct edge added no new package — the aho-corasick/encoding_rs precedent |
 | sha1 | 0.11.0 | MIT OR Apache-2.0 | `sha1_hex`'s engine (checksum/legacy-interop only, never security); default-features off (the digest computation needs none of the crate's std conveniences) |

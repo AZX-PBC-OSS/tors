@@ -73,6 +73,13 @@ The cuts below are decisions, not oversights:
   re-applies its steps on every call rather than compiling a reusable
   pipeline handle; see `CompiledLemmaDict` above for that measured
   exception.
+- **A second canonical-serialization dialect.** `content_hash` emits
+  exactly one canonical form: the `json.dumps`-compatible one (`sort_keys`,
+  `ensure_ascii`, compact separators), pinned differentially against the
+  stdlib itself — not `serde_json`'s or `orjson`'s raw-UTF-8 dialects, and
+  deliberately not configurable: a hash surface must be one fixed byte
+  format forever, or every previously-computed digest silently changes
+  meaning.
 - **Streaming hash objects / an open-ended digest registry.** The hashing
   surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
   `hmac_sha256_hex`, each with a raw-digest `_digest` twin) is a closed

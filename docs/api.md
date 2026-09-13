@@ -2461,6 +2461,130 @@ tors.chunk_cdc(b"hello world " * 10_000)
 # [(0, 65534), (65534, 120000)]
 ```
 
+## `tors.content_hash`
+
+```python
+def content_hash(obj: str | int | float | bool | None | list | tuple | dict) -> str: ...
+```
+
+The object content hash: the lowercase-hex SHA-256 of the object's
+**canonical form**, where the canonical form is EXACTLY
+
+```python
+json.dumps(obj, sort_keys=True, separators=(",", ":"))
+```
+
+with `json.dumps`'s defaults `ensure_ascii=True` and `allow_nan` — so the
+oracle is the stdlib itself, total and always available:
+
+```python
+hashlib.sha256(
+    json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+```
+
+`tors.content_hash(obj)` returns that string, byte-identical, pinned
+differentially against the oracle over every contract below
+(`tests/test_content_hash.py`) and literal-pinned at the byte level
+crate-side (`src/canon_impl.rs`). Deterministic by construction: any dict
+key order yields the same hash, and an equal-value `list` and `tuple`
+hash identically (tuples serialize as lists, recursively).
+
+**The type contract.** Leaves: `str`, `int` (arbitrary precision), `float`,
+`bool`, `None`. Containers: `list`, `tuple`, `dict`. Anything else raises
+`TypeError` naming the type (`set`, `frozenset`, `bytes`, `bytearray`,
+custom classes, plain `Enum`, views, iterators alike). Circular references
+raise `ValueError` on both sides (`json.dumps`'s own marker semantics: a
+shared sibling is fine, only a true cycle raises).
+
+**Dict keys: coercion, then json's own sort order.** Non-str keys are
+coerced exactly as `json.dumps` coerces them: `1` -> `"1"`, `True` ->
+`"true"`, `None` -> `"null"`, `1.0` -> `"1.0"`, `nan`/`inf` -> `"NaN"`/
+`"Infinity"`. Keys are sorted BEFORE stringification — all-int keys come
+out in numeric order (`2` before `10`), where the same digits as str keys
+sort lexicographically (`"10"` before `"2"`). The exotic key shapes — any
+float key, big-int keys, mixed int/float, NaN keys — are sorted by
+CPython's own `list.sort` (the same comparisons `json.dumps`'s items sort
+makes, the same timsort consuming them), so the output order matches the
+running interpreter byte-for-byte, including the corners no
+reimplementation would dare: two distinct NaN objects legally coexist as
+dict keys, and their output order is timsort's behavior, not a
+mathematical property. Mixed unsortable key types (`{1: ..., "a": ...}`)
+raise the sort's own `TypeError`, byte-identical with `json.dumps`'s;
+non-coercible key types (`tuple`, `bytes`, ...) raise `TypeError` naming
+the key type.
+
+**Strings: the `ensure_ascii` escape table.** Inside a string the raw
+bytes are exactly printable ASCII (U+0020-U+007E) minus `"` and `\` — the
+forward slash is never escaped. Everything else is escaped: `\"`, `\\`,
+the five short escapes `\b` `\t` `\n` `\f` `\r` (U+0008/9/A/C/D), `\u00XX`
+lowercase for the other controls and for DEL (U+007F is outside printable
+ASCII), `\uXXXX` lowercase for all non-ASCII, and astral codepoints as
+surrogate-pair escapes: `chr(0x1F600)` -> `"\ud83d\ude00"`. Every
+codepoint U+0000-U+007F and the BMP/astral boundary codepoints are pinned
+as values and as dict keys.
+
+**Floats: Python's own repr, never reimplemented.** Finite floats are
+materialized via Python's float `repr` during the walk (tors does not
+reimplement float formatting — exact by construction, `0.1` is `"0.1"`,
+`1e16` is `"1e+16"`, `5e-324` is `"5e-324"`, `sys.float_info.max` is its
+full 17-digit spelling). Non-finite values use json's `allow_nan`
+literals: `NaN`, `Infinity`, `-Infinity`.
+
+**Ints: arbitrary precision.** The i64 fast path covers
+`-(2**63)`..`2**63-1` (a storage read plus fixed-buffer decimal digits;
+measured 4.8ns per int against 29.3ns for the repr call, ~6x), and
+everything beyond falls back to Python's own `int`->`str`, so the
+interpreter's `sys.set_int_max_str_digits` limit raises identically on
+both sides (`ValueError` on 3.11+; on 3.10, no limit, both sides hash).
+
+**Why the emitter is hand-written.** No maintained crate emits this byte
+format: `serde_json` and `orjson` both output raw UTF-8 for non-ASCII
+strings with their own escape rules and no `ensure_ascii` mode at all.
+The contract here is the stdlib's exact wire format, so the emission is
+tors's own ~150 lines (`src/canon_impl.rs`) rather than a dependency that
+approximates it. Nothing else is hand-rolled where a crate exists: the
+hash is `sha2`, the hex is `const_hex`, and every float/int spelling is
+Python's own.
+
+**The surrogate divergence (documented, pinned).** A `str` holding lone
+surrogates — value or key — raises `UnicodeEncodeError` ("surrogates not
+allowed") from the standard str borrow, the crate-wide boundary every
+str-in surface here documents, where `json.dumps` ACCEPTS lone surrogates
+(it emits `\udXXX` escapes for them). Real astral text (valid surrogate
+pairs) hashes with full parity. The other divergence lane: the walk is
+iterative, so tors accepts nesting deeper than `json.dumps`, which
+`RecursionError`s at an interpreter-version-dependent depth.
+
+**GIL model.** The object walk and the leaf spellings run under the GIL
+(the standard arg-walk class scaled to an object, O(tree): one borrow
+plus copy per str, one i64 read per int, one `repr` call per float); the
+canonical-form emission and the SHA-256 run under one `py.detach`,
+streaming into the hasher. At 12 MiB of the records corpus the walk's
+worst heartbeat gap measured 23-32ms of 42-60ms walls (the stdlib
+spelling holds ~the whole wall: ratio 1.00 inline vs tors's 0.45-0.60;
+`tests/test_gil_release.py`), and the wall race with the full stdlib
+expression is a measured dead heat at 64 KiB-12 MiB
+(`tests/test_performance.py`): the value is the GIL release and the
+parity guarantees, not raw speed over the C encoder.
+
+```python
+a = {"title": "Q3 outage report", "severity": "high", "tags": ["grid", "north"]}
+b = {"tags": ["grid", "north"], "severity": "high", "title": "Q3 outage report"}
+tors.content_hash(a) == tors.content_hash(b)
+# True: equal content, any key order, one dedup key
+tors.content_hash(a)
+# '558be2127fa557b06ffd3dd0735697e14022546c969c6c37b01cf6278a178cf2'
+
+request = {"model": "guss-9", "messages": [{"role": "user", "text": "Summarize the Q3 report."}]}
+tors.content_hash(request)
+# 'b0df18f8e089f15fb56fa51c241151213e67b82e7b656de29b1bafedb3785464'
+```
+
+**Async**: no `tors.aio.content_hash` twin: a fast one-shot call over an
+in-memory object, not a large-input pass worth a thread dispatch (see
+[Async use](async.md)).
+
 ## `tors.merkle_root`
 
 ```python
