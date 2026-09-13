@@ -758,7 +758,12 @@ class TestOracleFreshness:
     is at most _ORACLE_FRESH_DAYS old (a re-sync clock, not a grammar
     check), and (b) the running interpreter's UCD still equals the UCD
     the Rust Nd tables pin (a Unicode/dependency bump that could move
-    the `re` digit class re-opens the re-sync)."""
+    the `re` digit class re-opens the re-sync). The UCD pin is strict
+    only where it can fire: interpreters at or past the pinned UCD must
+    match it exactly (a newer UCD is a re-sync request), while older legs
+    skip explicitly (their UCD predates the tables by construction, and
+    the behavioral lanes — the Nd-exhaustive and parity suites — run
+    unskipped everywhere)."""
 
     def test_provenance_constants_exist(self) -> None:
         import reference
@@ -784,9 +789,19 @@ class TestOracleFreshness:
     def test_interpreter_ucd_matches_pinned_tables(self) -> None:
         import reference
 
-        assert unicodedata.unidata_version == reference.SCRUB_PII_ORACLE_UCD, (
-            f"interpreter UCD {unicodedata.unidata_version} != pinned "
-            f"{reference.SCRUB_PII_ORACLE_UCD}: re-sync the scrub_pii oracle "
+        pinned = reference.SCRUB_PII_ORACLE_UCD
+        running = unicodedata.unidata_version
+        running_t = tuple(int(p) for p in running.split("."))
+        pinned_t = tuple(int(p) for p in pinned.split("."))
+        if running_t < pinned_t:
+            pytest.skip(
+                f"interpreter UCD {running} < pinned {pinned}: older leg "
+                "predates the tables by construction; the behavioral lanes "
+                "(Nd-exhaustive, parity) run unskipped everywhere"
+            )
+        assert running == pinned, (
+            f"interpreter UCD {running} != pinned "
+            f"{pinned}: re-sync the scrub_pii oracle "
             "(the Nd table the `re` digit class matches on may have moved)"
         )
 

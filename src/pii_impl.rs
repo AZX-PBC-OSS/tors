@@ -1271,6 +1271,36 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
     }
 
     #[test]
+    fn fuzz_crash_adjacent_embedded_email_match_converges() {
+        // fuzz-smoke crash-effd9780 (`A@a.Az.A@a.Az`, raw bytes with a
+        // trailing invalid-UTF-8 `\xccA`): adjacent email matches where
+        // the second span's string (`.A@a.Az`) embeds the first's
+        // (`A@a.Az`). The transform was correct — the abort came from
+        // the harness's per-string survivor accounting, which ignored
+        // cross-string coverage — pinned here so the shape never
+        // regresses: exact tokens, convergence, and phone-only identity
+        // (no digits, so the phone pass must stay borrowed).
+        let once = scrub("A@a.Az.A@a.Az", PiiRules::BOTH, "");
+        assert_eq!(
+            once,
+            format!(
+                "@a.Az~{}@a.Az~{}",
+                digest("", "A@a.Az"),
+                digest("", ".A@a.Az")
+            )
+        );
+        let twice = scrub(&once, PiiRules::BOTH, "");
+        assert!(
+            matches!(scrub_pii(&twice, PiiRules::BOTH, ""), Cow::Borrowed(_)),
+            "no convergence in {twice:?}"
+        );
+        assert!(matches!(
+            scrub_pii("A@a.Az.A@a.Az", phone_only(), ""),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
     fn tokens_are_fixed_points() {
         for token in [
             format!("@b.co~{}", digest("", "a@b.co")),

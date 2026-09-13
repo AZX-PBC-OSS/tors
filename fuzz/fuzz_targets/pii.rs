@@ -317,29 +317,57 @@ fn matches_of(s: &str, match_at: fn(&[char], usize) -> Option<usize>) -> Vec<(us
     found
 }
 
-/// Positional survivor check: every match span of the input consumes
-/// exactly one verbatim occurrence of its string, and a replacement never
-/// reintroduces one (every token carries a `~` no grammar can span, and
-/// neither token half alone holds a match — the digest hex has no
-/// separator/`+`/`@`, the prefix at most three codepoints), so the output
-/// must hold exactly `input_occurrences - spans` copies per distinct
-/// string. A bare `contains` check false-positives on benign dual-copy
-/// inputs (`call (415) 555-2671 ref 999(415) 555-2671`: the standalone
-/// match scrubs while the id-embedded copy survives whole, and the
-/// substring still `contains`-matches); the accounting here separates the
-/// two. (`str::matches` counts leftmost-non-overlapping occurrences — a
-/// maximum-cardinality set — so the input count always covers the spans.)
+/// Leftmost-non-overlapping occurrences of `needle` in `chars`, the
+/// `str::matches` order spelled in char space (the spans above are char
+/// indices, so the survivor accounting must agree on units with them,
+/// never with byte offsets).
+fn occurrences_in(chars: &[char], needle: &[char]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    if needle.is_empty() {
+        return out;
+    }
+    let mut i = 0;
+    while i + needle.len() <= chars.len() {
+        if chars[i..i + needle.len()] == *needle {
+            out.push((i, i + needle.len()));
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Positional survivor check: an input occurrence survives iff NO span
+/// covers it, and a replacement never reintroduces one (every token
+/// carries a `~` no grammar can span, and neither token half alone holds
+/// a match — the digest hex has no separator/`+`/`@`, the prefix at most
+/// three codepoints), so the output must hold exactly the uncovered
+/// count per distinct string. A bare `contains` check false-positives on
+/// benign dual-copy inputs (`call (415) 555-2671 ref 999(415) 555-2671`:
+/// the standalone match scrubs while the id-embedded copy survives whole,
+/// and the substring still `contains`-matches); the accounting here
+/// separates the two. Coverage is tested against EVERY span, not just
+/// spans of the same string: adjacent email matches can embed one
+/// another's text (`A@a.Az.A@a.Az` spans `A@a.Az` and `.A@a.Az`, the
+/// second covering the input's other occurrence of the first), and a
+/// per-string subtraction miscounts that as a survivor (crash-effd9780).
 fn assert_no_survivors(s: &str, out: &str, spans: &[(usize, usize)], label: &str) {
     use std::collections::HashMap;
     let chars: Vec<char> = s.chars().collect();
-    let mut per_string: HashMap<String, usize> = HashMap::new();
+    let out_chars: Vec<char> = out.chars().collect();
+    let mut per_string: HashMap<String, ()> = HashMap::new();
     for (start, end) in spans {
         let matched: String = chars.iter().skip(*start).take(end - start).collect();
-        *per_string.entry(matched).or_insert(0) += 1;
+        per_string.entry(matched).or_insert(());
     }
-    for (matched, n_spans) in &per_string {
-        let want = s.matches(matched.as_str()).count() - n_spans;
-        let got = out.matches(matched.as_str()).count();
+    for matched in per_string.keys() {
+        let needle: Vec<char> = matched.chars().collect();
+        let want = occurrences_in(&chars, &needle)
+            .iter()
+            .filter(|&&(a, b)| !spans.iter().any(|&(c, d)| a < d && c < b))
+            .count();
+        let got = occurrences_in(&out_chars, &needle).len();
         assert!(
             got == want,
             "{label} on {s:?}: {matched:?} occurs {got}x in the output, want {want}x"
