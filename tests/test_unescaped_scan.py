@@ -214,6 +214,19 @@ _SELF_OVERLAP_CASES: list[tuple[bytes, bytes, int]] = [
     (b"\\" * 8, b"\\\\", 0),
     (b"x" + b"\\" * 3 + b"y", b"\\\\", 1),
     (b"\\a\\aa", b"a", 4),
+    # The border needles beyond the uniform-alphabet rows: ``abab`` (a proper
+    # border of period 2 over a MIXED alphabet — the resume rule's shape when
+    # the overlap stride and the alphabet both vary) rejects the hit at 1 and
+    # finds the overlapping live hit at 3, inside the rejected match; ``aaa``
+    # (period 1) does the same at 2. Both verified against the oracle.
+    (b"\\abababab", b"abab", 3),
+    (b"\\aaaaa", b"aaa", 2),
+    # A chain of four ALL-REJECTED hits (every occurrence of ``\\u`` behind
+    # exactly one backslash: runs 3, 1, 1, 1), the carried-run-state boundary
+    # shape — then the same chain with a live occurrence appended behind a
+    # non-backslash, so the scan walks past every rejection to the live hit.
+    (b"\\" * 4 + b"u\\\\" * 3 + b"u", b"\\u", -1),
+    (b"\\" * 4 + b"u\\\\" * 3 + b"u" + b"x\\u", b"\\u", 15),
 ]
 
 _SELF_OVERLAP_IDS = [
@@ -223,6 +236,10 @@ _SELF_OVERLAP_IDS = [
     "all-backslash-needle-over-a-long-run",
     "backslash-pair-needle-after-a-non-backslash",
     "single-char-needle-walks-the-overlap-chain",
+    "period-two-border-needle-mixed-alphabet",
+    "period-one-border-needle-chain",
+    "four-rejected-hits-each-behind-one-backslash",
+    "rejected-chain-then-live-behind-a-non-backslash",
 ]
 
 
