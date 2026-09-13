@@ -25,6 +25,7 @@ real minimum) -- a stable digest for empty documents.
 from __future__ import annotations
 
 import time
+from itertools import product
 
 import pytest
 from hypothesis import given, settings
@@ -200,6 +201,73 @@ class TestGoldenPins:
         assert text is not fresh
         assert minhash_signature(text) == minhash_signature(text)
         assert minhash_signature(text) == minhash_signature(fresh)
+
+
+class TestShingleSeparatorInjectivity:
+    """The separator-invariant pin behind the join's documented
+    injectivity: U+001F never MIXES INTO a longer UAX #29 segment -- it
+    reaches the token stream only as an entire single-character token
+    (``word_bounds("a\\x1fb")`` is the three tokens ``["a", "\\x1f",
+    "b"]``: a C0 control is its own word segment, and U+001F is not
+    whitespace, so the segmenter keeps it, alone). Both rows pass today
+    by construction -- the pin's job is guarding the future, not proving
+    the present: a segmentation change that lets U+001F ride inside a
+    longer token, or a separator swap made on the old (false) "no token
+    contains U+001F" premise, would silently break the window-to-shingle
+    correspondence every signature and distinct-shingle count rides;
+    these rows make that a gate failure instead. The structural
+    argument the docs carry, in compressed form: a maximal U+001F run
+    inside a join is odd-length (one separator, then token/separator
+    pairs), a run at either end is even-length (token/separator pairs),
+    so the separator/token phase is forced and the parse is unique."""
+
+    def test_no_token_mixes_the_separator_in_over_a_x1f_bearing_corpus(self) -> None:
+        # Every string over the alphabet {a, b, \x1f, space} up to length
+        # 6 (5460 strings: every placement of separator runs among
+        # letters and whitespace, every edge shape included), plus the
+        # explicit edge rows (multi-separator runs, tab-flanked, the
+        # uppercase fold, a separator run at each end): any token
+        # containing \x1f is exactly the one-character "\x1f" -- never a
+        # longer segment.
+        alphabet = ["a", "b", "\x1f", " "]
+        corpus = {
+            "a\x1fb",
+            "a\x1f\x1f\x1fb",
+            "\x1f",
+            "\x1f" * 7,
+            " \x1f ",
+            "a\t\x1f\tb",
+            "A\x1fB",
+            "ab\x1fcd",
+            "\x1fa b\x1f",
+        }
+        for length in range(1, 7):
+            corpus.update("".join(chars) for chars in product(alphabet, repeat=length))
+        for text in sorted(corpus):
+            for token in reference_minhash_tokens(text):
+                assert token == "\x1f" or "\x1f" not in token, (
+                    f"{text!r}: token {token!r} mixes the separator into a longer segment"
+                )
+
+    def test_the_join_is_injective_over_the_exhaustive_small_domain(self) -> None:
+        # Every window (ordered, with repetition) over the token domain
+        # {a, b, ab, "\x1f"} at shingle_size 1..5: 4 + 16 + 64 + 256 +
+        # 1024 = 1364 windows, the domain chosen so the join must
+        # disambiguate a token that is another token's concatenation
+        # ("ab" vs the window [a, b]) and the separator's own single
+        # token ([\x1f] vs the separator between two tokens). All 1364
+        # joined strings are distinct: zero collisions, the exhaustive
+        # form of "two distinct token windows never join to the same
+        # bytes".
+        domain = ["a", "b", "ab", "\x1f"]
+        joined: set[str] = set()
+        windows = 0
+        for shingle_size in range(1, 6):
+            for window in product(domain, repeat=shingle_size):
+                joined.add("\x1f".join(window))
+                windows += 1
+        assert windows == 1364
+        assert len(joined) == windows, "the shingle join is not injective over the small domain"
 
 
 class TestEmptyConvention:
