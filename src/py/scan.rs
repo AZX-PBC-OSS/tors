@@ -24,7 +24,7 @@ fn refuse_empty_needle(needle: &[u8]) -> PyResult<()> {
 /// See `src/scan_impl.rs` for the full contract, the JSON `\u0000`-vs-
 /// `\\u0000` motivation (a real NUL is fatal in a PostgreSQL jsonb column,
 /// the literal text is fine, and the two are byte-ambiguous), and the
-/// amortized run-state machinery; the differential oracle and the golden
+/// parity walk's cost story; the differential oracle and the golden
 /// battery are tests/test_unescaped_scan.py.
 ///
 /// No JSON knowledge lives in the function: parity is the mechanism, and

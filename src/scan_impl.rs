@@ -52,29 +52,50 @@
 //! arbitrary (haystack, needle) pairs is smaller than an abstraction that
 //! would span those two, and it serves the general case.
 //!
-//! # The engine and the amortized run state
+//! # The engine and the parity walk
 //!
 //! The occurrence scan is `memchr::memmem::Finder` (memchr is already a
 //! direct dependency; the Finder holds the needle's search strategy, so
 //! the per-hit loop reuses one build), and the parity work is a backward
-//! walk over the backslash run immediately before each hit, with the run
-//! state carried forward across hits so no run is re-walked:
+//! walk over the backslash run immediately before each hit:
 //!
-//! * Invariant: `run_start` is the start of the maximal backslash run
-//!   ending at `scanned` (empty at 0), maintained exactly by induction —
-//!   the walk below either stops at a non-backslash (a fresh maximal run)
-//!   or reaches `scanned`, in which case the run genuinely continues into
-//!   the carried `[run_start, scanned)` and its start is already known.
 //! * Cost: the walk for a hit covers only bytes of the gap since the
-//!   previous hit, and gaps tile (each byte belongs to exactly one
-//!   inter-hit gap), so every byte is walked backward at most once across
-//!   the whole scan — the same bounding argument `skip_to_character`
-//!   writes down for its bulk-skipped runs: the walk-back's total cost is
-//!   bounded by the runs the forward scan skipped past. A naive per-hit
-//!   walk, by contrast, re-walks a shared run's bytes for every hit at its
-//!   tail (up to needle-backslash-prefix-length hits per run, each walking
-//!   the full run: a long run followed by `u0000`-style tails pays the run
-//!   once per hit).
+//!   previous hit (it is bounded at that hit even mid-run), and gaps
+//!   tile (each byte belongs to exactly one inter-hit gap), so every
+//!   byte is walked backward at most once across the whole scan.
+//! * That bound is defensive, not load-bearing: a naive per-hit walk to
+//!   the run's true start, previous hit ignored, never re-walks either.
+//!   A hit with a nonzero walk sits at a maximal run's end or strictly
+//!   inside it, and the two placements are mutually exclusive per
+//!   needle: a hit at a run's end needs the needle's first byte to be a
+//!   non-backslash (the byte there is what ends the run), while a hit
+//!   strictly inside needs it to be a backslash, which forces the
+//!   needle's backslash prefix to end exactly at the run's end — one
+//!   position per run either way, so at most one hit per maximal run
+//!   ever walks, and every walk stays inside its own run (runs are
+//!   disjoint). An all-backslash needle never walks at all: its first
+//!   hit sits at a maximal run's start — an even, empty run before it —
+//!   and answers the scan there. The naive walk is linear on its own;
+//!   the gap bound above is belt and braces, not the device that saves
+//!   the scan from re-walking.
+//! * The carried run start (`run_start`, the start of the maximal run
+//!   ending at `scanned`, maintained by induction) exists for the one
+//!   case the gap bound cannot settle alone: a hit whose run reaches
+//!   all the way back through the gap to the previous hit. That case is
+//!   provably unreachable past the first hit. A gap of all backslashes
+//!   between two hits forces the needle to be all backslashes — if the
+//!   gap is at least needle-length the needle lies inside it, and
+//!   otherwise the gap length `d` is a period of the needle (both hits
+//!   spell the needle over the same gap bytes) whose first `d` bytes
+//!   are backslashes, so `needle[j] == needle[j mod d]` carries them
+//!   through the whole needle — and an all-backslash needle's first hit
+//!   is always live at a run start (the second bullet), so the scan
+//!   returns at that hit and no second hit exists to reach the branch.
+//!   The join branch that consumes `run_start` therefore fires only at
+//!   the first hit, where `scanned == 0` and it answers `0` — exactly
+//!   what the walk's own `run_back` already holds there. The carried
+//!   start is the spec's defensive bound-marker; it never changes an
+//!   answer.
 //!
 //! # Preconditions (enforced by the wrapper before this runs)
 //!
@@ -101,29 +122,32 @@
 /// are never assumed to be anything but bytes.
 ///
 /// Rejected (odd-run) hits advance the search one byte past the hit, not
-/// past the whole match, so self-overlapping needles stay correct; the
-/// run state carried between hits keeps every byte of the haystack walked
-/// backward at most once across the whole scan (the module docs'
-/// amortization argument).
+/// past the whole match, so self-overlapping needles stay correct; each
+/// hit's walk is bounded at the previous hit, so every byte of the
+/// haystack is walked backward at most once across the whole scan (the
+/// module docs' cost argument — and the proof that the naive walk is
+/// linear too).
 pub fn find_unescaped(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let finder = memchr::memmem::Finder::new(needle);
-    // The carried run state (the module docs' invariant): `run_start` is
-    // the start of the maximal backslash run ending at `scanned`, and
-    // `scanned` is the previous hit's offset (0 before the first). `from`
-    // is the next occurrence search's origin: 0, then one byte past each
-    // rejected hit — the resume rule that keeps self-overlapping needles
-    // correct.
+    // `from` is the next occurrence search's origin: 0, then one byte
+    // past each rejected hit — the resume rule that keeps self-overlapping
+    // needles correct. `scanned` (the previous hit's offset, 0 before the
+    // first) bounds the walk below; `run_start` carries the classified
+    // run start forward — the spec's defensive bound-marker, whose join
+    // branch is provably dead past the first hit (the module docs'
+    // third bullet).
     let mut scanned = 0;
     let mut run_start = 0;
     let mut from = 0;
     while let Some(rel) = finder.find(&haystack[from..]) {
         let hit = from + rel;
         // The backward run count, bounded by `scanned`: walk the gap's
-        // trailing backslash run. Stopping at a non-backslash settles a
-        // fresh maximal run; reaching `scanned` means the run continues
-        // into the carried `[run_start, scanned)`, whose start is already
-        // known — the jump that keeps the walk regions inside disjoint
-        // inter-hit gaps, so no run is ever re-walked.
+        // trailing backslash run to its start. Stopping at a
+        // non-backslash settles a fresh maximal run inside the gap;
+        // reaching `scanned` (the whole gap backslashes) is the join
+        // case, reachable only at the first hit — the bound itself is
+        // what keeps every walk inside its own inter-hit gap, and gaps
+        // tile, so no byte is ever walked twice.
         let mut run_back = hit;
         while run_back > scanned && haystack[run_back - 1] == b'\\' {
             run_back -= 1;
@@ -133,8 +157,6 @@ pub fn find_unescaped(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         } else {
             run_back
         };
-        // Carry the classified prefix forward: the maximal run ending at
-        // `hit` is now the invariant's subject for the next hit.
         scanned = hit;
         run_start = hit_run_start;
         if (hit - hit_run_start).is_multiple_of(2) {
