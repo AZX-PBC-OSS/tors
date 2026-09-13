@@ -735,6 +735,33 @@ class TestHypothesisDifferential:
                 obj = ({"k": [obj]},)
             _assert_parity(obj)
 
+    def test_beyond_jsons_recursion_boundary_the_walk_stays_iterative(self) -> None:
+        """The deep-nesting divergence lane, pinned Python-side: the walk is
+        ITERATIVE (an explicit frame stack, ``src/py/canon.rs``), so tree depth
+        costs heap, never the call stack, and ``content_hash`` accepts nesting
+        far deeper than ``json.dumps``, which ``RecursionError``s at an
+        interpreter-version- and stack-size-dependent depth (measured on the
+        dev box's 3.14: between 104590 and 104591 list levels -- the C
+        recursion budget is stack-proportional there, NOT the ~1000 of the
+        Python recursion limit; older interpreters fail far shallower). This
+        pin does not touch the oracle at all (the boundary moves per
+        interpreter and per box): it pins tors's own side of the documented
+        lane -- the same 100k/50k depths the crate-side emitter and iterative
+        ``Drop`` pins hold in ``src/canon_impl.rs`` -- through the REAL pyo3
+        walk, which no other test covers past depth 300. A regression to a
+        recursive walk would pass the 300-step ladder and only fail here.
+        The literal bytes follow the crate-side formula: a ``d``-deep list of
+        ``None`` is exactly ``b"[" * d + b"null" + b"]" * d``."""
+        for depth in (100_000, 50_000):
+            obj: Any = None
+            for _ in range(depth):
+                obj = [obj]
+            _assert_bytes(obj, b"[" * depth + b"null" + b"]" * depth)
+            obj = None
+            for _ in range(depth):
+                obj = {"k": obj}
+            _assert_bytes(obj, b'{"k":' * depth + b"null" + b"}" * depth)
+
     def test_1mib_object_parity(self) -> None:
         """The ``reference.content_object`` corpus (the same tree the GIL
         and wall cells measure) at 1 MiB of canonical form."""
