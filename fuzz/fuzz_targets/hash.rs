@@ -89,14 +89,16 @@ fuzz_target!(|input: Input| {
             tors::hash_impl::sha1_digest(b"")
         );
         assert_eq!(
-            const_hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855").unwrap(),
+            const_hex::decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap(),
             tors::hash_impl::sha256_digest(b"")
         );
         assert_eq!(
             const_hex::decode(
                 "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
                  47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
-            ).unwrap(),
+            )
+            .unwrap(),
             tors::hash_impl::sha512_digest(b"")
         );
     }
@@ -122,7 +124,8 @@ fuzz_target!(|input: Input| {
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
         assert_eq!(
-            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843").unwrap(),
+            const_hex::decode("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+                .unwrap(),
             mac_raw
         );
     }

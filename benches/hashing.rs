@@ -102,7 +102,8 @@ fn bench_hmac_digest(c: &mut Criterion) {
     // the overhead-dominated shape is benched on both spellings while only
     // the hex one carries a gate.
     let mut group = c.benchmark_group("hmac_sha256_digest");
-    for (key_len, data_len) in [(32, 256)] {
+    {
+        let (key_len, data_len) = (32, 256);
         let key = vec![0x0bu8; key_len];
         let data = prose(data_len + 1024).as_bytes()[..data_len].to_vec();
         group.throughput(Throughput::Bytes(data_len as u64));

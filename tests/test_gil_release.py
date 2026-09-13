@@ -2575,7 +2575,9 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
 
 
 @pytest.mark.parametrize(
-    "fn_name", ["sha256_hex", "sha512_hex", "sha256_digest"], ids=["sha256", "sha512", "sha256-digest"]
+    "fn_name",
+    ["sha256_hex", "sha512_hex", "sha256_digest"],
+    ids=["sha256", "sha512", "sha256-digest"],
 )
 def test_hash_digest_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     fn_name: str,
