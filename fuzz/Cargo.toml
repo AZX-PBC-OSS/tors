@@ -165,6 +165,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "scrub_log_text"
+path = "fuzz_targets/scrub_log_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "json_repair"
 path = "fuzz_targets/json_repair.rs"
 test = false
