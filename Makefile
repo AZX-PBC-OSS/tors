@@ -134,6 +134,10 @@ gen-html-table:
 # (unit-pinned + both crash artifacts re-run clean + a 120s/1.37M-run
 # smoke clean).
 #
+# unescaped joined with the escape-parity scan surface (issue #50): the
+# contains_unescaped/find_unescaped core over backslash-dense folded
+# bytes, differential-pinned against a naive parity walk in the target.
+#
 # documents_markdown stays deliberately ABSENT from the run lists: built
 # and committed (fuzz/Cargo.toml [[bin]], the `documents` feature is on
 # in the fuzz crate's tors dep so the surface compiles), but it
@@ -146,7 +150,7 @@ gen-html-table:
 # 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
 # alternation). It stays committed as the repro harness, joining the run
 # lists when pdf_oxide ships a cap.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls json_repair gfm_strip unescaped
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \

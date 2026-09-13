@@ -179,3 +179,10 @@ path = "fuzz_targets/gfm_strip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "unescaped"
+path = "fuzz_targets/unescaped.rs"
+test = false
+doc = false
+bench = false
