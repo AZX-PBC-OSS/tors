@@ -1435,28 +1435,42 @@ def test_the_no_stdlib_comparator_generators_absolute_bands_hold() -> None:
     base62/alphabetic sampling) and ``uuid7`` (no CI-safe comparator: the
     stdlib has no v7, and uuid_utils is not a dependency this suite may
     assume) take absolute ceilings over measured floors, the
-    ``chunk_by_paragraphs`` no-comparator shape at microsecond scale:
+    ``chunk_by_paragraphs`` no-comparator shape at microsecond scale.
 
-    - ``random_b62(22)`` measured ~4.2us (one 1024-byte block fill for the
-      whole id, 22 Lemire draws). Ceiling 25us (~6x): the positioned
-      regression is a lost block buffer -- a per-draw syscall spelling
-      costs ~22 x 1.2us = ~26us of syscalls alone and trips it.
-    - ``random_string(22, "ab")`` measured ~4.1us, same engine, same
-      ceiling class (30us, a hair wider: the multibyte-capable push path).
+    The 22-char rungs' derivation, honest numbers on both instruments
+    (the red-team cell-teeth finding closed here): the floors are ~4.2us
+    (b62) / ~4.1us (string) — one 1024-byte block fill for the whole id,
+    22 Lemire draws — and the positioned regression (a lost block buffer,
+    one syscall per draw) costs 0.83us per syscall as measured on this
+    box (``os.urandom(8)``, min-of-200), so 22 draws are ~19-20us of
+    syscalls locally, ~22 x 1.2us = ~26us on the lane's per-char number.
+    The old ceilings had no teeth against that: 30us sat ABOVE both
+    projections (the regression passed the string rung outright), and
+    25us tripped the lane number by ~6% and the local projection not at
+    all (19 < 25). 15us trips the regression on BOTH instruments by ~25%
+    (local) / ~75% (lane) while keeping ~3.6x headroom over the floor for
+    load — the min-of-25 sampler's protection.
+
+    - ``random_b62(22)`` and ``random_string(22, "ab")``: same engine,
+      same 15us ceiling (the multibyte-capable push path measures the
+      same floor at this size).
     - ``uuid7()`` measured ~0.9us. Ceiling 25us (~28x): catches a per-call
       engine-class regression (a rebuilt ChaCha, a second syscall), not
       tunings."""
     b62_us = _min_wall_us_fn(lambda: tors.random_b62(22))
-    assert b62_us < 25.0, (
+    assert b62_us < 15.0, (
         f"random_b62(22) took {b62_us:.1f}us, outside the absolute band "
-        "(measured ~4.2us, ceiling 25us; a per-draw-syscall spelling measures "
-        "~26us+ and must fail this cell); the block-buffered sampler regressed"
+        "(floor ~4.2us, ceiling 15us; a lost block buffer — one syscall "
+        "per draw — measures ~19-20us locally / ~26us on the lane's "
+        "per-char number and must fail this cell); the block-buffered "
+        "sampler regressed"
     )
     string_us = _min_wall_us_fn(lambda: tors.random_string(22, "ab"))
-    assert string_us < 30.0, (
-        f"random_string(22, 'ab') took {string_us:.1f}us, outside the absolute "
-        "band (measured ~4.1us, ceiling 30us); the block-buffered sampler "
-        "regressed"
+    assert string_us < 15.0, (
+        f"random_string(22, 'ab') took {string_us:.1f}us, outside the "
+        "absolute band (floor ~4.1us, ceiling 15us; a lost block buffer "
+        "measures ~19-26us and must fail this cell); the block-buffered "
+        "sampler regressed"
     )
     uuid7_us = _min_wall_us_fn(tors.uuid7)
     assert uuid7_us < 25.0, (
