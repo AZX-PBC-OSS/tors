@@ -57,6 +57,17 @@ The cuts below are decisions, not oversights:
   would reopen the regex-semantics question this cut closes. New scrubs
   arrive as new named rules with their own pinned contracts
   (`strip_controls` is the family's first member), never as parameters.
+  The scrub family (`strip_controls`,
+  `scrub_pii`) follows the same charter from the other direction: each is
+  a hand-rolled scanner for one pinned grammar (a ported call-site
+  contract), never a general pattern surface. `scrub_pii`'s rule set is
+  the closed two-name contact set — email addresses and `+`-led phone
+  numbers — because that is the contract the adopted telemetry-safety
+  module states; other redaction grammars (credential-shaped material,
+  national identifiers) are separate follow-up contracts with their own
+  pinned sources, not silent extensions of this one, the same way C1
+  controls are a follow-up to `strip_controls` rather than a widening of
+  it.
 - **A general RNG engine surface.** The random-generation family is a
   closed set of named generators — `random_string`, `random_hex`,
   `random_b62`, `random_b64url`, `uuid4`, `uuid7` — over exactly two

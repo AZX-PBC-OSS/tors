@@ -129,7 +129,7 @@ actually return.
 
 ## What's inside
 
-103 functions plus two small helper classes and five pinned charset constants,
+104 functions plus two small helper classes and five pinned charset constants,
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
 edge cases are in the [API reference](docs/api.md).
@@ -137,6 +137,7 @@ edge cases are in the [API reference](docs/api.md).
 | family | functions |
 |---|---|
 | Unicode normalization & forms | `normalize`, `finalize`, `nfc`/`nfd`/`nfkc`/`nfkd`, `html_unescape`, `strip_controls` |
+| Contact scrub | `scrub_pii` |
 | UTF-8 / UTF-16 / base64 codecs | `decode_utf8`, `finalize_utf8`, `utf8_is_valid`, `decode_utf16`, `utf16_is_valid`, `b64_encode_bytes`, `b64_decode`, `detect_encoding` |
 | Hashing & request signing | `md5_hex`, `sha1_hex`, `sha256_hex`, `sha512_hex`, `hmac_sha256_hex` + raw-digest `_digest` twins (md5/sha1: checksum/legacy-interop only, broken for security since the 2000s — never signatures, certificates, or passwords) |
 | Random generation (keys, tokens, ids) | `random_string`, `random_hex`, `random_b62`, `random_b64url`, `uuid4`(+`_bytes`), `uuid7`(+`_bytes`) |

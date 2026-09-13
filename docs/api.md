@@ -114,6 +114,100 @@ tors.strip_controls("score: 4\x00\x01great\x7f")
 
 **Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
+## `tors.scrub_pii`
+
+```python
+def scrub_pii(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone"]] | None = None,
+    *,
+    salt: str | None = None,
+) -> str: ...
+```
+
+Replace contact material — email addresses and `+`-led phone numbers — inside
+free text with correlation tokens, in one GIL-released pass. The call-site
+driver: telemetry is the one store a data purge cannot reach, so an error
+excerpt, rejection message, or response-body excerpt that echoes a person's
+address or number must be scrubbed before it reaches the log — the shape
+upstream APIs produce when they echo request content back in an error string.
+A port of a private consumer's telemetry-safety module, pinned byte-identical
+to it at `salt=""`.
+
+What the tokens are: `@domain~<digest>` for an email (the domain is the
+non-identifying half an operator actually reasons about — "the ambiguity is on
+the corporate domain"), `prefix~<digest>` for a phone number, where `prefix`
+is the match's first three code points (a canonical E.164's country code:
+`"+47"` compact, `"+1 "` for a domestic spelling where the third code point is
+the space) and `<digest>` is the first 12 hex chars of `sha256(salt + match)`.
+A token is a correlation handle, not a secret: it lets an operator tie two log
+lines to the same address without the record holding the address.
+
+```python
+tors.scrub_pii("unknown candidate fungai.chetima@example.com called from +14155552671 twice")
+# "unknown candidate @example.com~3aa8d1d0bb1a called from +14~115f5ee5ea90 twice"
+
+tors.scrub_pii("ring +1 (415) 555-2671 about ticket 4096")
+# "ring +1 ~dc750721a848 about ticket 4096"
+```
+
+The two rules, a closed set (anything else is a `ValueError` naming it):
+
+- `contact_email` — the deliberately permissive local part
+  `[A-Za-z0-9._%+\-]+`, a domain of ASCII letters/digits/dots/hyphens, and a
+  two-plus-letter ASCII tail after the largest dot the greedy backtracking
+  can reach (`a@b.co9` scrubs `a@b.co` and leaves the `9`; `a@b.c.d` never
+  matches; `a@.b.co` matches with the domain kept verbatim). URLs, `mailto:`
+  links, and code spans get no special treatment: whatever email sits inside
+  them matches — over-matching costs a token where a literal string would
+  have read fine, while under-matching leaks.
+- `contact_phone` — anchored on a literal `+` because a bare digit run is an
+  order number, byte count, or timestamp, and redacting that would destroy
+  the diagnostic the scrubber exists to preserve; at least eight digits with
+  the separators humans and upstream APIs use (`( ) - . ` and space — two
+  numbers split by one space are ONE match); the digit class is Unicode Nd
+  (every decimal-digit script), and a `~` or a second `+` breaks a run.
+  `ticket 4096` above survives untouched.
+
+`rules=None` applies both rules in the canonical order — the email
+substitution over the whole string first, then the phone substitution over
+its result, each exactly once — because an email's local part may itself
+carry a `+`-led digit run (`user+14155552671@example.com` is one email, and
+the phone rule must see its token, never the address). `[]` is the identity
+(the original object); duplicates dedupe and listing order is irrelevant;
+each name restricts the scrub to that rule.
+
+**The salt trade-off, stated plainly.** `salt=None` uses tors's documented
+default `"tors/scrub_pii/v1"` — a fixed, non-secret, versioned
+domain-separation tag (frozen: changing it would silently change every
+deployment's token values). A KNOWN salt, the public default included, does
+not make the digest secret: the E.164 space is small enough to enumerate, so
+an attacker with a candidate list can still confirm whether a specific
+address appeared. The tokens are redaction, not pseudonymization crypto;
+deployments that care pass their own secret salt, and a consumer migrating
+from an unsalted upstream scrubber passes `salt=""` to keep its token values
+byte-identical — any other salt changes them.
+
+**Idempotence, as it true is.** Tokens are individually fixed points, and the
+output is a fixed point unless an email token is immediately followed by
+`@`-shaped text — reachable when two email matches were adjacent
+(`a@b.co9@x.yz`) or when a match is followed by an unmatched `@`-run whose
+own local part the match consumed (`x@b.co@w.vu`). A token's digest hex is
+local-part material, so a second pass fires once more on that boundary and
+then holds: **scrubbing twice always converges**. If your excerpts can chain
+emails like that and you need a guaranteed fixed point, scrub twice;
+everything else is one pass. Phone-only is strictly idempotent.
+
+`tors.scrub_pii(s, ...) is s` exactly when no active rule matches. A `str`
+holding lone surrogates is refused at the argument boundary with
+`UnicodeEncodeError` ("surrogates not allowed"), the same boundary every
+str-in function here documents — the ported chain diverges there by design
+(its classes never match a surrogate, so it returns such text with the
+matches around it still scrubbed), and the divergence is pinned in both
+directions by the parity gates.
+
+**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 ## `tors.scrub_log_text`
 
 ```python

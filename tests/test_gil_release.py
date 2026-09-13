@@ -487,6 +487,7 @@ from reference import (
     SEARCH_SPARSE_PATTERNS,
     UNESCAPED_NEEDLE,
     compat,
+    contacts,
     content_object,
     corpus_b64,
     corpus_utf8,
@@ -551,6 +552,16 @@ _WORD_BOUNDS_RATIO_BUDGET = 0.85
 # shows (the whole transform held); the 100ms ceiling independently holds
 # ~2.3x margin. Same derivation shape as _B64_RATIO_BUDGET below.
 _QC_YES_12MIB_RATIO_BUDGET = 0.60
+
+# The 12 MiB scrub_pii cell's ratio budget, same derivation: the scrub's
+# double scan is fast enough that the 12 MiB contacts corpus completes in
+# ~36-40ms while the O(output) marshalling of its ~11.8 MiB result string
+# costs ~12ms, so the residue is structurally ~33-34% of the wall (measured,
+# every sample) where the shared 0.30 cannot hold. 0.60 sits ~1.8x above
+# the worst measured ratio and ~40% below the ~1.0 a detach regression
+# shows (a held double scan pins the whole ~36ms wall as one gap); the
+# 100ms ceiling independently holds ~8x over the worst gap.
+_SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
 
 # content_hash's own ratio budget (the object-walk residue class, a new
 # class: the GIL-held walk materializes the whole value tree -- one borrow
@@ -1916,6 +1927,38 @@ def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     text = scrub_corpus(size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.scrub_log_text, text))
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_scrub_pii_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The scrub claim on the contact-dense shape the function exists
+    for: one email and one human-spelled E.164 number per sentence of
+    the 12 MiB contacts corpus (~119k matches measured), one email pass
+    plus one phone pass plus every token digest, all under the one
+    ``py.detach``, and the return is one ~11.8 MiB string, so the
+    GIL-held residue is the argument borrow plus that single string's
+    marshalling: ``replace_many`` dense's no-list-shape class exactly
+    (the structural contrast with ``find_patterns``' per-match tuples).
+
+    Measured on the dev box (ambient load ~3.5, 3 samples): worst gaps
+    ~12ms of 36-40ms walls (ratio 0.33-0.34, every sample) — the ping
+    floor plus the end-of-call marshalling of the ~11.8 MiB result
+    string. The scrub's double scan is fast enough that this residue is
+    structurally a third of the wall, so the cell takes the bespoke
+    0.60 ratio budget (``_SCRUB_PII_12MIB_RATIO_BUDGET``, the
+    QC-Yes/b64 derivation shape: ~1.8x above the worst measured ratio,
+    ~40% below the ~1.0 a detach regression shows when a held double
+    scan pins the whole wall as one gap); the 100ms ceiling
+    independently holds ~8x over the worst gap."""
+    corpus = contacts(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.scrub_pii, corpus),
+            ratio_budget=_SCRUB_PII_12MIB_RATIO_BUDGET,
+        )
     )
 
 

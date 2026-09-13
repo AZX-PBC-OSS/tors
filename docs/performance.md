@@ -16,6 +16,15 @@ pass, only the argument borrow and the return marshalling under the GIL.
 ≤ 1024): 11 ms worst gaps over ~460 ms walls at 12 MiB, the ping floor plus
 that bounded list, with no streaming twin warranted.
 
+One measured nuance: when the native pass is very fast, the O(output)
+return-marshalling residue is a structurally larger fraction of the wall, and
+those cells carry bespoke ratio budgets derived from their bands —
+`b64_encode_bytes` (output 4/3x input, budget 0.80), the quick-check-skipped
+`finalize` cells (wall shrank ~3x, budget 0.60), and `scrub_pii` (the double
+scan completes 12 MiB of contact-dense text in ~36-40 ms while marshalling
+its ~11.8 MiB result costs ~12 ms: worst gaps ~12 ms, ratio ~0.33, budget
+0.60). A detach regression still fails every one of these at ratio ~1.0.
+
 ## Fast paths
 
 Already-normalized 12 MiB text returns the original object after a SIMD
@@ -37,6 +46,12 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
+- `scrub_pii`, contact-dense prose (~119k matches at 12 MiB): ~7.5x faster
+  than the quoted chain it ports (two `re.sub` passes, one Python callback
+  per match — 0.003 ms vs 0.019 ms at 1 KiB, 0.283 ms vs 2.140 ms at
+  100 KiB; the callback count dominates, so the ratio is load-stable), and
+  contact-free text costs two memchr probes and the identity return
+  (~0.002 ms at 100 KiB).
 - `minhash_signature`, `num_perm=128`, vs the pure-Python MinHash loop it
   replaces (the same tokens, shingles, XXH64, and permutation arithmetic
   in Python): 0.02 ms vs 3.4 ms at 1 KiB (~170x), 1.6 ms vs 281 ms at

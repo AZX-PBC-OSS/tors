@@ -1,7 +1,6 @@
-"""The docs' worked examples for the #28 features, pinned: every output
-literal README.md, docs/api.md, and docs/recipe-transcripts.md show for
-``chunk_by_lines`` and the ``None``-entry hierarchy splice is re-derived
-here against the built extension, the
+"""The docs' worked examples, pinned: every output literal README.md,
+docs/api.md, and docs/recipe-transcripts.md show for the features their
+sections document is re-derived here against the built extension, the
 ``test_diff_opcodes_lines.py::TestReconstruction::test_readme_worked_example``
 discipline. The README says "the output above is what they actually
 return"; this file is what keeps that sentence true: a behavior change
@@ -275,6 +274,33 @@ class TestContentHashExamples:
         }
         expected = "b0df18f8e089f15fb56fa51c241151213e67b82e7b656de29b1bafedb3785464"
         assert tors.content_hash(request) == expected
+
+
+class TestScrubPiiExamples:
+    """docs/api.md's scrub_pii section, pinned the same way: the two
+    worked examples' literal outputs (default rules, default salt — the
+    digests are deterministic, so a behavior change that would turn the
+    doc into a lie fails here first), plus the two re-fire-corner
+    inputs' convergence the section's idempotence paragraph describes."""
+
+    def test_rejection_excerpt_example(self) -> None:
+        assert tors.scrub_pii(
+            "unknown candidate fungai.chetima@example.com called from +14155552671 twice"
+        ) == ("unknown candidate @example.com~3aa8d1d0bb1a called from +14~115f5ee5ea90 twice")
+
+    def test_domestic_number_with_spare_digit_run_example(self) -> None:
+        # The domestic spelling's token prefix is "+1 " (the third code
+        # point is the space), and the bare digit run survives the "+"
+        # anchoring.
+        assert tors.scrub_pii("ring +1 (415) 555-2671 about ticket 4096") == (
+            "ring +1 ~dc750721a848 about ticket 4096"
+        )
+
+    def test_the_refire_corner_inputs_converge_as_documented(self) -> None:
+        for text in ("a@b.co9@x.yz", "x@b.co@w.vu"):
+            once = tors.scrub_pii(text)
+            twice = tors.scrub_pii(once)
+            assert tors.scrub_pii(twice) is twice
 
 
 class TestTranscriptRecipeExamples:

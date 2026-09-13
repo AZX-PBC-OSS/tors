@@ -112,6 +112,7 @@ import pytest
 
 import tors
 from reference import (
+    contacts,
     content_object,
     corpus_b64,
     corpus_utf8,
@@ -122,6 +123,7 @@ from reference import (
     reference_finalize,
     reference_minhash_signature,
     reference_scrub_log_text,
+    reference_scrub_pii,
     scrub_corpus,
 )
 from tors import (
@@ -343,6 +345,60 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
     print(
         f"html_unescape no-& prose 12MiB: tors {tors_ms:.2f}ms "
         f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+def _quoted_scrub_chain(text: str) -> str:
+    """The quoted chain ``tors.scrub_pii`` replaces: the pure-Python
+    reference oracle at the unsalted spelling (two ``re.sub`` passes, one
+    Python callback per match, ~119k matches at 12 MiB of the contacts
+    corpus)."""
+    return reference_scrub_pii(text, None, salt="")
+
+
+@pytest.mark.parametrize("size_bytes", [1 * 1024, 100 * 1024], ids=["1KiB", "100KiB"])
+def test_scrub_pii_beats_the_quoted_chain_on_contact_prose(size_bytes: int) -> None:
+    """The wall headline for the scrub: ``tors.scrub_pii`` (both rules,
+    unsalted) vs the quoted chain over the contacts corpus (one email and
+    one human-spelled E.164 number per sentence). The chain's cost is
+    structural: two whole-text ``re.sub`` passes whose every match invokes
+    a Python callback, so the native double scan wins ~7.5x regardless of
+    load (the callback count, not the machine, dominates). Measured on the
+    dev box (ambient load ~3.5, min-of-7 after warmup):
+
+        size     tors        chain       tors/chain
+        1 KiB    0.003ms     0.019ms     0.13
+        100 KiB  0.283ms     2.140ms     0.13
+
+    Asserted with the same 0.9 margin as the other wall cells (~7x of
+    headroom). The default-salt spelling measures identically (0.279ms at
+    100 KiB): the salt is digest material only, never a scan shape."""
+    corpus = contacts(size_bytes)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(lambda t: tors.scrub_pii(t, salt=""), corpus, samples=samples)
+    chain_ms = _min_wall_ms(_quoted_scrub_chain, corpus, samples=samples)
+    assert tors_ms < _MARGIN * chain_ms, (
+        f"contacts {size_bytes // 1024}KiB: tors {tors_ms:.3f}ms vs chain "
+        f"{chain_ms:.3f}ms (ratio {tors_ms / chain_ms:.2f}): the native double "
+        "scan lost more than the tolerance margin to the two-pass "
+        "regex+callback chain"
+    )
+
+
+def test_scrub_pii_identity_path_is_measured_not_asserted() -> None:
+    """The degenerate path, measured and not asserted (the no-``&``
+    precedent): on contact-free prose the scrub is two memchr anchored
+    scans that find nothing (no ``@``, no ``+``), ~0.002ms at 100 KiB
+    measured, and the identity return hands back the input object with
+    zero marshalling. The quoted chain pays the same nothing-plus-regex-
+    overhead class (~0.1ms), so there is no race to assert here — the
+    wall cells that matter are the contact-bearing ones above."""
+    corpus = prose(100 * 1024)
+    tors_ms = _min_wall_ms(tors.scrub_pii, corpus)
+    chain_ms = _min_wall_ms(_quoted_scrub_chain, corpus)
+    print(
+        f"scrub_pii no-contacts prose 100KiB: tors {tors_ms:.3f}ms "
+        f"chain {chain_ms:.3f}ms ratio {tors_ms / chain_ms:.2f}"
     )
 
 
