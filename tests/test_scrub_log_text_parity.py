@@ -65,11 +65,11 @@ from hypothesis import strategies as st
 
 import tors
 from reference import (
-    SCRUB_RULES,
     _PG_DETAIL_ESCAPED_RE,
     _PG_DETAIL_RE,
     _URI_CRED_RE,
     _URI_PARAM_CRED_RE,
+    SCRUB_RULES,
     reference_scrub_log_text,
     scrub_corpus,
 )

@@ -26,7 +26,7 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
                 return Err(PyValueError::new_err(format!(
                     "rules must be one of ('pg_detail_lines', 'uri_userinfo', \
                      'uri_query_creds'), not {other:?}"
-                )))
+                )));
             }
         }
     }
