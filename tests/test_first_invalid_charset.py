@@ -270,7 +270,9 @@ class TestTaskQRuleShapes:
         different verdicts under ``rest="é"`` — correct per the data
         model, surprising when NFC/NFD must agree. A caller who needs
         the two forms to agree normalizes first (``tors.normalize`` /
-        ``tors.nfc``) before validating."""
+        ``tors.nfc``) before validating. Normalization does not fold
+        confusables (visually similar but distinct codepoints stay
+        distinct); allow-list exactly the codepoints you mean."""
         assert first_invalid_charset(["é"], rest="é") == -1
         assert first_invalid_charset(["é"], rest="é") == 0
         assert reference_first_invalid_charset(["é"], None, "é") == -1
@@ -302,9 +304,11 @@ class TestTaskQRuleShapes:
         """The huge-set build: 10_000 distinct non-ASCII codepoints spell
         a set whose tail sorts/dedups (O(set log set), inside the
         detach) and still validates per codepoint — members pass,
-        one missing codepoint offends. The build cost is the set
-        builds, not the batch scan (the ~64 ns fixed band covers the
-        few-dozen-codepoint ASCII rule; a 10k tail pays its sort)."""
+        one missing codepoint offends. Hoist huge spellings to module
+        constants (define once, reuse); the per-call build is part of the
+        measured band for the few-dozen-codepoint ASCII rules (~64 ns
+        fixed), while the 10k-tail sort cost is deferred (correctness
+        pinned here, unmeasured beyond the ASCII band)."""
         huge = "".join(chr(cp) for cp in range(0x1000, 0x1000 + 10_000))
         member = chr(0x1000) + chr(0x1000 + 9_999)
         assert first_invalid_charset([member], rest=huge) == -1
@@ -770,6 +774,7 @@ _OFFENDER_CASES: list[tuple[list[str], str | None, str, tuple[int, int, str] | N
     (["e" + _E_ACUTE], None, _E_ACUTE, (0, 0, "e")),
     ([_CRAB + "x"], None, _CRAB, (0, 1, "x")),
     ([_E_ACUTE + "東" + _CRAB], None, _E_ACUTE + "東" + _MATH_X, (0, 2, _CRAB)),
+    (["\U0001F1EB\U0001F1F7"], None, "\U0001F1EB", (0, 1, "\U0001F1F7")),
 ]
 
 _OFFENDER_IDS = [
@@ -798,6 +803,7 @@ _OFFENDER_IDS = [
     "ascii-head-outside-a-non-ascii-set",
     "astral-member-then-ascii-offender-at-codepoint-position-one",
     "mixed-widths-offender-past-multibyte-codepoints",
+    "flag-partial-offender-is-mid-grapheme",
 ]
 
 
@@ -837,6 +843,65 @@ def test_char_position_is_a_codepoint_index_not_a_byte_offset() -> None:
     got = first_invalid_offender(["ok_" + _CRAB], rest="ok_")
     assert got == (0, 3, _CRAB)
     assert len(got[2]) == 1
+
+
+def test_offender_position_may_land_inside_a_grapheme_cluster_dont_slice() -> None:
+    """The mid-grapheme pin: a flag pair is one grapheme but two codepoints,
+    so the partial flag under ``rest="🇫"`` offends at codepoint 1 — inside
+    the grapheme. Do not slice the item at that position for display (it
+    would split the grapheme); build messages from ``(item, char)`` — the
+    tuple already carries the losing codepoint."""
+    flag = "\U0001F1EB\U0001F1F7"  # 🇫🇷: 2 regional indicators, 1 grapheme
+    assert first_invalid_offender([flag], rest="\U0001F1EB") == (0, 1, "\U0001F1F7")
+    assert first_invalid_offender([flag], rest="\U0001F1EB") == reference_first_invalid_offender(
+        [flag], None, "\U0001F1EB"
+    )
+    assert first_invalid_charset([flag], rest="\U0001F1EB") == 0
+
+
+def test_empty_batch_is_minus_one_even_when_every_item_would_offend() -> None:
+    """The vacuous-validity edge, pinned explicitly: an empty batch answers
+    ``-1``/``None`` even under spellings where every item would offend
+    (``first=""``, ``rest=""``) — the api.md clause."""
+    for first, rest in (("", "a"), ("a", ""), ("", ""), (None, "")):
+        assert first_invalid_charset([], first=first, rest=rest) == -1
+        assert first_invalid_offender([], first=first, rest=rest) is None
+
+
+def test_set_arg_errors_beat_the_items_walk_first_beats_rest() -> None:
+    """The both-bad precedence pin (pyo3 left-to-right extraction order):
+    ``first``/``rest`` conversion errors fire before the GIL-held items walk
+    validates entries, and ``first`` beats ``rest`` — so a call that is wrong
+    on two axes at once reports the set argument, deterministically."""
+    # A bad entry plus a bad rest type: the rest TypeError wins (not the
+    # entry's TypeError).
+    with pytest.raises(TypeError, match="not an instance of 'str'"):
+        first_invalid_charset(["ok", 123], rest=123)  # type: ignore[arg-type,list-item]
+    # A bad entry plus a bad first type: the first TypeError wins.
+    with pytest.raises(TypeError, match="not an instance of 'str'"):
+        first_invalid_charset(["ok", 123], first=123, rest="a")  # type: ignore[arg-type,list-item]
+    # first beats rest: the reported value is first's (int vs bytes
+    # disambiguate the two otherwise-identical messages).
+    try:
+        first_invalid_charset(["a"], first=123, rest=b"x")  # type: ignore[arg-type]
+    except TypeError as exc:
+        assert "'int'" in str(exc)
+    else:
+        raise AssertionError("expected TypeError for first=123")
+    try:
+        first_invalid_charset(["a"], first=b"x", rest=123)  # type: ignore[arg-type]
+    except TypeError as exc:
+        assert "'bytes'" in str(exc)
+    else:
+        raise AssertionError("expected TypeError for first=b'x'")
+    # A lone surrogate in the sets beats one in the items (rest's position
+    # 3 reported, not the item's position 1).
+    with pytest.raises(UnicodeEncodeError) as excinfo:
+        first_invalid_charset(["a\ud800"], rest="xyz\ud800")
+    assert "position 3" in str(excinfo.value)
+    # The offender spelling shares the walk, so the same precedence holds.
+    with pytest.raises(TypeError, match="not an instance of 'str'"):
+        first_invalid_offender(["ok", 123], rest=123)  # type: ignore[arg-type,list-item]
 
 
 def test_offender_never_equals_minus_one_spell_the_check_is_none() -> None:

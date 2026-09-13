@@ -3220,7 +3220,9 @@ pass per batch: the index into `items` of the first item not built entirely
 from the caller's two sets — `first` the set of codepoints allowed at
 position 0, `rest` the set allowed at every position after it (and at
 position 0 too when `first` is `None`, the uniform spelling: one set
-everywhere) — or `-1` when every item passes. An empty item is an offender,
+everywhere) — or `-1` when every item passes. An empty batch answers `-1`
+even under spellings where every item would offend (`first=""`,
+`rest=""`): vacuously valid, no items to offend. An empty item is an offender,
 wherever it sits. `first=""` allows nothing at position 0 (every item
 offends); `rest=""` allows nothing after position 0 (under the uniform
 spelling every item offends; with a non-empty `first`, only single-codepoint
@@ -3245,6 +3247,9 @@ different inputs and get different verdicts — `first_invalid_charset(["é"],
 rest="é")` is `-1` while `first_invalid_charset(["é"], rest="é")`
 is `0`, correctly per the per-codepoint engine. When NFC and NFD forms
 must agree, normalize (`tors.normalize` / `tors.nfc`) before validating.
+Normalization does not fold confusables (visually similar but distinct
+codepoints, e.g. Latin A vs Cyrillic А, stay distinct under NFC); allow-list
+exactly the codepoints you mean.
 
 Membership is per codepoint, not per grapheme cluster: a ZWJ family emoji
 (5 codepoints), a flag pair (2 regional indicators), or a base letter plus
@@ -3284,7 +3289,9 @@ set, generators, scalars; a non-`str` entry raises `TypeError`); `first` and
 `rest` must be exactly `str`, both keyword-only, `rest` required, `first`
 defaulting to `None`; lone surrogates raise `UnicodeEncodeError` at the
 argument boundary (the standard str-in boundary, paid by every item and both
-set arguments). The contract is proven against a pure-Python membership-loop
+set arguments). Error precedence on both-bad calls is pyo3 left-to-right
+extraction order: `first` beats `rest`, and set-argument conversion errors
+beat the items-walk entry errors. The contract is proven against a pure-Python membership-loop
 oracle plus the equivalent anchored regexes rebuilt from the same set halves
 over hypothesis-generated inputs (tests/test_first_invalid_charset.py).
 
@@ -3292,13 +3299,17 @@ GIL model: one GIL-held walk of the items sequence (the standard str-in
 borrow class, O(items) handles; the one-time O(input) UTF-8 materialization
 applies per non-ASCII item object on first extraction, so a batch of
 never-before-touched non-ASCII items holds the GIL for that
-materialization — the non-ASCII worst-hold cell), then the set builds and
+materialization — unmeasured for this function: no dedicated non-ASCII cell,
+same str-in materialization class as every other function), then the set builds and
 the whole batch scan under one `py.detach`, then a single int return — no
 marshalling class at all. The set builds are O(set) over the ASCII spelling
 plus O(set log set) over the non-ASCII tail (sort + dedup, inside the
 detach): negligible for the few-dozen-codepoint ASCII rules this validator
-exists for (the ~64 ns fixed band above), a real sort for a 10k-codepoint
-non-ASCII spelling. At realistic batch sizes the whole call sits far under
+exists for (the ~64 ns fixed band above, which includes both per-call set
+builds — hoist huge set spellings to module constants: define once, reuse
+the same string), a real sort for a 10k-codepoint
+non-ASCII spelling whose sort cost is deferred (correctness pinned,
+unmeasured beyond the ASCII band). At realistic batch sizes the whole call sits far under
 the 10 ms ping floor, so the GIL cell is ceiling-only (the `utf8_is_valid`
 class), pinned in tests/test_gil_release.py. The core is a trivial one-pass
 membership walk (one-bit-per-codepoint ASCII mask plus a sorted non-ASCII
@@ -3328,6 +3339,11 @@ item's FIRST offending position, `None` when every item passes.
   count codepoints, never UTF-8 byte offsets: in `"🦀x"` the `x` sits at
   position 1 (its byte offset would be 4). `offending_char` is that
   codepoint as a 1-char `str`, a 4-byte astral codepoint included.
+  `char_position` may land inside a grapheme cluster — the flag-partial
+  `(0, 1, "🇷")` under `rest="🇫"` is one grapheme but offends at codepoint
+  1 — so do not slice the item at that position for display (it would split
+  the grapheme); build messages from `(item, char)`, which the tuple already
+  carries.
 - **The empty item reports `(i, 0, "")`**: an empty item is an offender
   with no codepoint at position 0 to name, so the char field is empty
   exactly when the item is — a message builder branches on it.
@@ -3371,7 +3387,9 @@ walk, so every boundary refusal (a bare `str`, non-sequences, non-`str`
 entries, non-`str` `first`/`rest`, lone surrogates; the
 walk-validates-the-whole-list-first precedence) raises the same exception
 with the byte-identical message, pinned by raising both spellings on the
-same bad input and comparing them. No new error classes.
+same bad input and comparing them. Error precedence on both-bad calls is
+pyo3 left-to-right extraction order: `first` beats `rest`, and set-argument
+conversion errors beat the items-walk entry errors. No new error classes.
 
 One engine, one scan, and the int path pays nothing for the detail: the
 walk stops at the first offending codepoint, and at that stop point it

@@ -989,12 +989,19 @@ def refined_soundex(text: str) -> str: ...
 # and the whole batch scan under one GIL-released pass, then a single int
 # return: no marshalling class at all (the count_matches shape). The
 # answer is the INDEX of the first item not built entirely from the two
-# sets, -1 when all pass; the scan short-circuits at the first offender,
+# sets, -1 when all pass (empty batch answers -1 even when every item
+# would offend); the scan short-circuits at the first offender,
 # but the argument walk validates the whole sequence up front (a bad
 # entry anywhere raises at the boundary, past a first offender or not).
 # Batch-only by design: per-item validation is under a detach round trip,
 # so per-item calls would be slower than the regexes this replaces; the
 # batch form — one detach, one pass — is the only shape that wins.
+# Per-scalar engine with no normalization (normalize with tors.normalize
+# first when NFC/NFD must agree, which still does not fold confusables:
+# allow-list exactly the codepoints you mean); huge set spellings belong
+# in module constants, their per-call build inside the measured band.
+# Both-bad precedence is extraction order: first beats rest, set-argument
+# errors beat the items walk.
 def first_invalid_charset(
     items: Sequence[str], *, first: str | None = None, rest: str
 ) -> int: ...
@@ -1005,7 +1012,9 @@ def first_invalid_charset(
 # consumer's per-character messages name the losing character and
 # position) — None when every item passes. char_position is a CODEPOINT
 # index within the item (the family's data model), never a UTF-8 byte
-# offset; offending_char is that codepoint as a 1-char str. The empty
+# offset, and may land inside a grapheme cluster (flag-partial (0, 1,
+# "🇷") under rest="🇫"): do not slice at that position, build messages
+# from (item, char); offending_char is that codepoint as a 1-char str. The empty
 # item reports (i, 0, ""): no offending character to name, the char
 # field empty exactly when the item is. Same engine, same walk, same
 # one-detach batch pass and the same argument contract (byte-identical

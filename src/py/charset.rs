@@ -57,7 +57,9 @@ fn borrow_str_sequence<R>(
 /// `items` of the first item not built entirely from the caller's two
 /// codepoint sets — `first` the set allowed at position 0, `rest` the set
 /// allowed at every position after it (and at position 0 too when `first`
-/// is `None`, the uniform spelling) — or `-1` when every item passes. The
+/// is `None`, the uniform spelling) — or `-1` when every item passes
+/// (an empty batch answers `-1` even under spellings where every item
+/// would offend: vacuously valid). The
 /// identifier-style rules a caller like TaskQ spells with anchored
 /// regexes (`\A[A-Za-z_][A-Za-z0-9_]*\Z` and kin), expressed as plain
 /// caller-supplied data and checked for a whole batch in one pass. The
@@ -65,7 +67,9 @@ fn borrow_str_sequence<R>(
 /// membership per codepoint (duplicates in a spelling harmless, order
 /// irrelevant; per scalar value with no normalization — precomposed é and
 /// decomposed e + U+0301 get different verdicts, so callers who need
-/// NFC/NFD to agree normalize with tors.normalize/nfc first); ranges,
+/// NFC/NFD to agree normalize with tors.normalize/nfc first, which still
+/// does not fold confusables — visually similar but distinct codepoints
+/// stay distinct, so allow-list exactly the codepoints you mean); ranges,
 /// escapes, and Unicode-category classes (`\w`,
 /// which would need property tables) are out of scope by charter
 /// (docs/design.md). An empty item is an offender, wherever it sits.
@@ -88,17 +92,24 @@ fn borrow_str_sequence<R>(
 /// non-`str` entry raises `TypeError`); `first`/`rest` must be exactly
 /// `str`, both keyword-only, `rest` required, `first` defaulting to
 /// `None`; lone surrogates raise `UnicodeEncodeError` at the standard
-/// str-in boundary, paid by every item and both set arguments.
+/// str-in boundary, paid by every item and both set arguments. Error
+/// precedence on both-bad calls is pyo3 left-to-right extraction order:
+/// `first` beats `rest`, and set-argument conversion errors beat the
+/// items-walk entry errors.
 ///
 /// GIL model: one GIL-held sequence walk borrowing each entry's UTF-8
 /// (the standard str-in class, O(items) handles; the one-time O(input)
 /// materialization applies per non-ASCII item object on first call, and
 /// to `first`/`rest` as usual — a batch of never-before-touched
-/// non-ASCII items holds the GIL for that materialization, the non-ASCII
-/// worst-hold cell), then set build + the whole batch scan
+/// non-ASCII items holds the GIL for that materialization, unmeasured for
+/// this function: no dedicated non-ASCII cell, same str-in class as every
+/// other function), then set build + the whole batch scan
 /// under one `py.detach` (the set builds are O(set) ASCII plus O(set log
 /// set) non-ASCII tail sort + dedup, inside the detach: negligible for the
-/// few-dozen-codepoint rules, a real sort for a 10k spelling), then a
+/// few-dozen-codepoint rules, a real sort for a 10k spelling whose cost is
+/// deferred — correctness pinned, unmeasured beyond the ASCII band — so
+/// hoist huge set spellings to module constants and the per-call build
+/// stays inside the measured band), then a
 /// single int return (the
 /// `grapheme_count`/`count_matches` no-marshalling shape). At realistic
 /// batch sizes the whole call sits far under the 10 ms ping floor, so the
@@ -132,7 +143,11 @@ pub fn first_invalid_charset(
 /// Semantics, each pinned in tests/test_first_invalid_charset.py:
 /// `char_position` is a CODEPOINT index within the item (the family's
 /// data model, membership per codepoint — never a UTF-8 byte offset),
-/// and `offending_char` is that codepoint as a 1-char str. The empty
+/// and `offending_char` is that codepoint as a 1-char str. It may land
+/// inside a grapheme cluster — the flag-partial `(0, 1, "🇷")` under
+/// `rest="🇫"` is one grapheme but offends at codepoint 1 — so do not
+/// slice the item at that position for display; build messages from
+/// `(item, char)`. The empty
 /// item reports `(i, 0, "")`: an empty item has no offending character,
 /// so the char field is empty exactly when the item is. The consistency
 /// invariant against the int spelling is structural — the Rust core's

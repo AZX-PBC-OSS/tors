@@ -20,7 +20,9 @@
 //! irrelevant: a set, however spelled. Membership is per scalar value with
 //! no normalization: precomposed é (U+00E9) and decomposed e + U+0301 are
 //! different inputs with different verdicts — callers who need NFC/NFD to
-//! agree normalize before validating.
+//! agree normalize before validating, which still does not fold
+//! confusables (visually similar but distinct codepoints stay distinct, so
+//! allow-list exactly the codepoints you mean).
 //!
 //! One scan answers both published spellings. The walk stops at the first
 //! offending codepoint of the first offending item, and at that stop point
