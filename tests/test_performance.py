@@ -1286,44 +1286,58 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
 
 # --- The random-generation family ---------------------------------------------
 #
-# Microsecond-scale cells: unlike the module's multi-ms corpora cells, both
-# sides here are syscall-plus-format calls measured in single-digit
-# microseconds, so the draws are min-of-25 (both sides get plenty of windows
-# to find an uncontended run) and the margins are regression nets over a
-# measured win-or-parity, not close races. Measured on the dev box (Apple
-# Silicon, quiet, min-of-25 after warm-up):
+# Microsecond-scale cells: unlike the module's multi-ms corpora cells, the
+# generators are syscall-plus-sampling/formatting calls measured in single
+# digits to low thousands of microseconds, so the draws are min-of-25 (both
+# sides get plenty of windows to find an uncontended run) and the margins
+# are regression nets over measured floors, not close races. Measured on
+# the dev box (Apple Silicon, quiet, min-of-25 after warm-up), at the old
+# byte-ladder size points' output equivalents (the length-first refactor
+# moved hex/b64url onto the char-sampling engine, so the rungs are spelled
+# as the output lengths the old byte rungs produced):
 #
-#     n         tors.random_hex   secrets.token_hex   ratio
-#     64 B      1.5us             1.5us               1.00 (parity: the call
-#                                                          overhead is the
-#                                                          whole cost)
-#     1 KiB     4.4us             4.8us               0.92
-#     64 KiB    266us             296us               0.90
+#     output                 tors.random_hex  secrets.token_hex*  ratio
+#     32 chars (old 16B)     4.3us            1.2us              3.7x
+#     2048 chars (old 1KiB)  58.9us           4.1us             14.4x
+#     131072 ch. (old 64KiB) 4.1ms            268us             15.3x
 #
-#     n         tors.random_b64url secrets.token_urlsafe
-#     64 B      1.2us             1.3us               0.92
-#     1 KiB     4.6us             5.9us               0.78
-#     64 KiB    278us             334us               0.83
+#     output                 tors.random_b64url  secrets.token_urlsafe*  ratio
+#     22 chars (old 16B)     4.2us               1.2us                  3.3x
+#     1366 chars (old 1KiB)  44.0us              5.6us                  7.8x
+#     87382 ch. (old 64KiB)  2.7ms               339us                  8.1x
 #
-#     tors.uuid4 1.1us   uuid.uuid4 1.3us             0.85
-#     tors.uuid7 0.9us   (no CI-safe comparator; absolute band below)
+#     tors.uuid4 1.1us  uuid.uuid4 1.3us  0.85x (byte path, unchanged)
+#     tors.uuid7 0.9-1.0us  (no CI-safe comparator; absolute band below)
 #
-# The margin story, honestly: tors never loses a leg (the fused
-# one-syscall-plus-format pass beats the stdlib's urandom-object-then-format
-# chain at every size, parity at the overhead floor), but the wins are
-# modest at these sizes because both sides are one OS syscall plus SIMD-ish
-# C formatting -- the value proposition measured elsewhere in this module is
-# the GIL release (tests/test_gil_release.py) and the seeded determinism
-# (tests/test_random.py), not a wall blowout. The 1.5x margins therefore
-# catch class regressions (an extra syscall per call would put ~+1.2us on a
-# ~1.5us floor, ~2x, and a per-char draw regression on the sampler would
-# add tens of microseconds at the 64 KiB legs), not fine tunings.
+# *at the byte count whose encoding is that output length (token_hex(n)
+# emits 2n chars, token_urlsafe(n) emits ceil(4n/3)).
+#
+# The margin story, honestly rewritten for the length-first refactor: hex
+# and b64url moved from byte-fill+encode onto the ONE char-sampling engine
+# (random_string/b62's — uniform per character at any length, the
+# maintainer's "I want a base62 id X characters long" mental model), and
+# that engine draws one u64 (8 stream bytes) per character where
+# byte-fill+encode consumed 0.5-0.75 bytes per output character. The
+# measured consequence: hex/b64url walls are b62-identical (hex(2048)
+# 58.9us vs b62(2048) 57.5us; hex(131072) 4.1ms vs b62(131072) 4.05ms),
+# ~3.5x the stdlib at real token sizes (4.3us vs 1.2us for a 32-char key:
+# both sides one syscall from the floor) and ~8-15x at bulk sizes. tors no
+# longer wins these races and the cells do not pretend otherwise: hex and
+# b64url take the b62 cells' shape — absolute ceilings over measured
+# floors, the stdlib number printed for context — because the positioned
+# regression is a lost block buffer (a per-char syscall spelling costs
+# ~1.2us/char: ~38us at 32 chars, ~2.5ms at 2048, ~157ms at 131072 —
+# every rung past its ceiling by 1.5x-5x). The value proposition measured
+# elsewhere is unchanged: the GIL release (tests/test_gil_release.py) and
+# the seeded determinism (tests/test_random.py). uuid4/uuid7 are the byte
+# path, untouched by the refactor, and uuid4 keeps its race cell (it won
+# before and still does: 1.1us vs 1.3us).
 
 
 def _min_wall_us_fn(op: Callable[[], object], samples: int = 25, warmup: int = 3) -> float:
     """Min-of-``samples`` wall in MICROSECONDS for a no-argument call: the
     random family's calls take no corpus argument (they generate their own
-    bytes), so this is the family's local spelling of the module's
+    output), so this is the family's local spelling of the module's
     ``_min_wall_ms`` shape (the ``test_grounded_performance.py``
     microsecond-cell precedent). 25 samples: a microsecond-scale sample is
     one scheduler hit away from its worst run, so both sides of a race need
@@ -1338,42 +1352,75 @@ def _min_wall_us_fn(op: Callable[[], object], samples: int = 25, warmup: int = 3
     return best * 1e6
 
 
-@pytest.mark.parametrize("n_bytes", [64, 1024, 64 * 1024], ids=["64B", "1KiB", "64KiB"])
-def test_random_hex_keeps_parity_or_better_with_secrets_token_hex(n_bytes: int) -> None:
-    """``secrets.token_hex(n)`` is the exact expression ``random_hex``
-    replaces (same 2n lowercase-hex format, same OS entropy source); the
-    cell is the module's shared race shape at microsecond scale: 1.5x over
-    a measured 0.90-1.00 (the table in the family's section header)."""
-    tors_us = _min_wall_us_fn(lambda: tors.random_hex(n_bytes))
-    stdlib_us = _min_wall_us_fn(lambda: secrets.token_hex(n_bytes))
-    assert tors_us < 1.5 * stdlib_us, (
-        f"random_hex({n_bytes}): tors {tors_us:.1f}us vs secrets.token_hex "
-        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x): the native pass lost "
-        "the syscall-plus-format race by more than the regression margin"
+@pytest.mark.parametrize(
+    ("length", "ceiling_us"),
+    [(32, 25.0), (2048, 500.0), (131_072, 30_000.0)],
+    ids=["32-char", "2KiB-char", "128KiB-char"],
+)
+def test_random_hex_absolute_band(length: int, ceiling_us: float) -> None:
+    """``random_hex`` is the char-sampling engine now (one engine with
+    ``random_string``/``random_b62``, uniform per character at any length):
+    measured 4.3us at 32 chars, 58.9us at 2048, 4.1ms at 131072 —
+    b62-identical walls, the honest price of the length-first uniform
+    contract. The ceiling is the class-regression net over those floors
+    (~6-8x): a lost block buffer (a per-char syscall spelling, ~1.2us/char)
+    measures ~38us / ~2.5ms / ~157ms at these rungs and fails every one.
+    The stdlib ratio printed below is context, not an assertion:
+    byte-fill+encode (``secrets.token_hex``) is a different engine class
+    that legitimately wins the bulk race."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_hex(length))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_hex(length // 2))
+    print(
+        f"random_hex({length}): tors {tors_us:.1f}us vs secrets.token_hex "
+        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x) [context: the engine-class "
+        "delta, not asserted]"
+    )
+    assert tors_us < ceiling_us, (
+        f"random_hex({length}): {tors_us:.1f}us, outside the absolute band "
+        f"(ceiling {ceiling_us:.0f}us; a per-char-syscall spelling measures "
+        "~1.2us/char and must fail this cell); the block-buffered sampler regressed"
     )
 
 
-@pytest.mark.parametrize("n_bytes", [64, 1024, 64 * 1024], ids=["64B", "1KiB", "64KiB"])
-def test_random_b64url_keeps_parity_or_better_with_secrets_token_urlsafe(n_bytes: int) -> None:
-    """``secrets.token_urlsafe(n)`` is the unpadded urlsafe expression
-    ``random_b64url(n)`` replaces; measured 0.78-0.92 across the ladder
-    (the family section's table), same 1.5x regression margin."""
-    tors_us = _min_wall_us_fn(lambda: tors.random_b64url(n_bytes))
-    stdlib_us = _min_wall_us_fn(lambda: secrets.token_urlsafe(n_bytes))
-    assert tors_us < 1.5 * stdlib_us, (
-        f"random_b64url({n_bytes}): tors {tors_us:.1f}us vs "
-        f"secrets.token_urlsafe {stdlib_us:.1f}us "
-        f"({tors_us / stdlib_us:.2f}x): the native pass lost the "
-        "syscall-plus-format race by more than the regression margin"
+@pytest.mark.parametrize(
+    ("length", "ceiling_us"),
+    [(22, 25.0), (1366, 400.0), (87_382, 25_000.0)],
+    ids=["22-char", "1366-char", "87382-char"],
+)
+def test_random_b64url_absolute_band(length: int, ceiling_us: float) -> None:
+    """``random_b64url`` is the same char-sampling engine over the 64-char
+    urlsafe alphabet (the opaque-token contract: every position
+    unconstrained, no padding concept): measured 4.2us at 22 chars,
+    44.0us at 1366, 2.7ms at 87382 — b62-identical walls, the honest
+    price of uniform output. Same ceiling rationale as the hex cell: the
+    positioned regression is a lost block buffer (~1.2us/char: ~26us /
+    ~1.6ms / ~105ms at these rungs, every one past its ceiling). The
+    stdlib ratio is context (``secrets.token_urlsafe`` byte-fills and
+    encodes, a different — and at bulk sizes, faster — engine class whose
+    final character is constrained)."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_b64url(length))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_urlsafe((3 * length) // 4))
+    print(
+        f"random_b64url({length}): tors {tors_us:.1f}us vs secrets.token_urlsafe "
+        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x) [context: the engine-class "
+        "delta, not asserted]"
+    )
+    assert tors_us < ceiling_us, (
+        f"random_b64url({length}): {tors_us:.1f}us, outside the absolute band "
+        f"(ceiling {ceiling_us:.0f}us; a per-char-syscall spelling measures "
+        "~1.2us/char and must fail this cell); the block-buffered sampler regressed"
     )
 
 
 def test_uuid4_keeps_parity_or_better_with_the_stdlib_constructor() -> None:
     """``uuid.uuid4()`` is the spelling ``tors.uuid4()`` replaces; measured
     1.1us vs 1.3us (the stdlib builds a Python object and formats it through
-    the uuid module's own machinery). 2.0x margin: the stdlib floor wobbles
-    more than the byte codecs' (object construction), and the cell's teeth
-    are class regressions (a per-call engine rebuild, an extra syscall)."""
+    the uuid module's own machinery). The byte path this call runs is
+    untouched by the length-first refactor (16-byte fill + uuid-crate
+    builder), so the pre-refactor race cell stands unchanged. 2.0x margin:
+    the stdlib floor wobbles more than the byte codecs' (object
+    construction), and the cell's teeth are class regressions (a per-call
+    engine rebuild, an extra syscall)."""
     tors_us = _min_wall_us_fn(tors.uuid4)
     stdlib_us = _min_wall_us_fn(stdlib_uuid.uuid4)
     assert tors_us < 2.0 * stdlib_us, (

@@ -3920,7 +3920,21 @@ tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 The universally hand-rolled helpers — token hex, urlsafe tokens, base62 ids,
 UUIDv4/v7 — as fast GIL-free tors primitives. The Python incumbents (`secrets`,
 `uuid`, `uuid_utils`) hold the GIL through their formatting passes; tors runs
-the whole draw-plus-format pass under one `py.detach`.
+the whole draw-plus-sample/format pass under one `py.detach`.
+
+**Length-first, uniformly.** Every token spelling takes the output length
+directly — "I want a base62 id X characters long" is the whole call, which is
+how backend callers actually think about ids, keys, and tokens (the
+maintainer's framing, and the reason `random_hex` and `random_b64url` were
+moved off their byte-count spellings). `random_hex(32)` is a 32-character hex
+key; `random_b62(22)` is a 22-character id; `random_b64url(43)` is a
+43-character urlsafe token; `random_string(n, alphabet)` is n characters of
+whatever alphabet you carry. All four are ONE char-sampling engine:
+`random_hex`/`random_b62`/`random_b64url` are exactly `random_string` over
+their fixed alphabets (pinned as literal equality in `tests/test_random.py`).
+The uuids are the family's other engine — bit-structured byte fills handed to
+the uuid crate's builders — because a UUID is a field layout, not a string
+length.
 
 **The security contract, stated first because it is the one way to misuse this
 family.** Two spellings, never interchangeable:
@@ -3948,24 +3962,20 @@ independent Python re-implementation of the documented construction
 (rand_core's PCG32 seed derivation, the RFC 8439 ChaCha block, Lemire's
 nearly-divisionless draw).
 
-Sampling has **no modulo bias**: `random_string`/`random_b62` draw alphabet
+Sampling has **no modulo bias**: all four token spellings (the
+`random_string` engine and its hex/b62/b64url delegations) draw alphabet
 indices with Lemire's nearly-divisionless method (reject exactly the draws
 whose product low-half falls below `2^64 mod n`, leaving every output the
 same number of preimages — uniform by construction; a plain `x % n` does not
-have this property). The byte-fill spellings (`random_hex`, `random_b64url`,
-`uuid4`) sample raw bytes, uniform by construction. One engine subtlety the
-tests pin honestly: `random_hex(n, seed=s)` and
-`random_string(2n, "0123456789abcdef", seed=s)` agree in distribution but
-not in value — byte-fill consumes n stream bytes while char sampling
-consumes at least 2n u64 draws, so the same seed gives different outputs.
+have this property). The uuids sample raw bytes, uniform by construction.
 
-Errors follow the repo taxonomy: a negative `length`/`n_bytes` raises
-`ValueError` naming the parameter and the accepted form; an empty alphabet
-raises `ValueError`; non-`str` alphabet, non-`int` length, and non-`int`
-non-`None` seed raise `TypeError`; an alphabet holding lone surrogates
-raises `UnicodeEncodeError` (the repo-wide str contract). `0` is legal
-everywhere and returns `""` (`secrets.token_hex(0)`'s own shape). There is
-no size cap: memory is the only bound.
+Errors follow the repo taxonomy, uniformly across the four token spellings:
+a negative `length` raises `ValueError` naming the parameter and the accepted
+form; an empty alphabet raises `ValueError`; non-`str` alphabet, non-`int`
+length, and non-`int` non-`None` seed raise `TypeError`; an alphabet holding
+lone surrogates raises `UnicodeEncodeError` (the repo-wide str contract).
+`0` is legal everywhere and returns `""` (`secrets.token_hex(0)`'s own
+shape). There is no size cap: memory is the only bound.
 
 No `tors.aio` twins: these are fast CPU/syscall calls, not the
 detached-transform input class the async surface exists for
@@ -3973,10 +3983,10 @@ detached-transform input class the async surface exists for
 
 ```python
 len(tors.random_hex(32))          # the unseeded spelling: fresh OS draw
-# 64                                # every call — never a pinned literal
+# 32                                # every call — never a pinned literal
 
-tors.random_hex(16, seed=42)      # the deterministic spelling: pin it in tests
-# '7848b5d711bc9883996317a3f9c90269'
+tors.random_hex(32, seed=42)      # the deterministic spelling: pin it in tests
+# '861225d7151bf9b14a3617ab9b534d19'
 ```
 
 ### `tors.random_string`
@@ -3999,15 +4009,25 @@ tors.random_string(12, "abcdef", seed=42)
 ### `tors.random_hex`
 
 ```python
-def random_hex(n_bytes: int, *, seed: int | None = None) -> str: ...
+def random_hex(length: int, *, seed: int | None = None) -> str: ...
 ```
 
-`secrets.token_hex(n_bytes)` parity: `2 * n_bytes` lowercase hex characters
-from one `n_bytes` entropy fill. The hex-key spelling.
+`length` lowercase hex characters — exactly
+`random_string(length, "0123456789abcdef")`, one engine — the hex-key
+spelling, by output length: a 32-char key is `random_hex(32)`.
+
+Odd lengths are legal and first-class: a 31-char hex id is a real shape, and
+`random_hex` produces it directly (the old byte-count spelling could not ask
+for it at all). Even lengths are what digest-shaped keys want — every 2
+characters are exactly one byte, so `random_hex(2 * n)` is byte-exact
+material. `secrets.token_hex(n)` and `random_hex(2 * n)` are the same uniform
+distribution over 2n-char hex strings — different draws, never different
+contracts; the `2 *` is the whole mapping (the stdlib thinks in bytes, this
+spelling in characters).
 
 ```python
-tors.random_hex(16, seed=42)
-# '7848b5d711bc9883996317a3f9c90269'
+tors.random_hex(32, seed=42)
+# '861225d7151bf9b14a3617ab9b534d19'
 ```
 
 ### `tors.random_b62`
@@ -4028,18 +4048,29 @@ tors.random_b62(22, seed=0)
 ### `tors.random_b64url`
 
 ```python
-def random_b64url(n_bytes: int, *, padded: bool = False, seed: int | None = None) -> str: ...
+def random_b64url(length: int, *, seed: int | None = None) -> str: ...
 ```
 
-RFC 4648 §5 urlsafe base64 (`A-Za-z0-9-_`; `+` and `/` never) of one
-`n_bytes` entropy fill. `secrets.token_urlsafe(n_bytes)` parity at the
-default `padded=False` (length `ceil(4n/3)`, no `=` tail); `padded=True`
-adds the `=` tail per the RFC (`(3 - n mod 3) mod 3` of them, total
-`4 * ceil(n/3)`).
+`length` characters uniform over the 64-character RFC 4648 §5 urlsafe
+alphabet (`A-Za-z0-9-_`; `+` and `/` never), every position unconstrained —
+exactly `random_string(length, B64URL_CHARS)`, one engine. The
+opaque-token spelling: a 43-char urlsafe token (the JWT-signature shape) is
+`random_b64url(43)`, and `secrets.token_urlsafe(32)` formats into the same
+43-character length class.
+
+**The boundary, stated honestly: this is the token contract, NOT "a valid
+base64 encoding of N random bytes."** An encoding's final character is
+constrained (an encoding of 32 bytes can only ever show 4 distinct final
+characters at length 43; this spelling shows all 64), and lengths that are
+not valid base64 output lengths (41, 45, ...) are legal here — a uniform
+token has no alignment constraint. There is no `padded=` parameter: padding
+is an encoding concept, not a token concept, and `=` never appears.
+Callers who want encodable random material should take `random_hex` of even
+length — byte-exact via hex.
 
 ```python
-tors.random_b64url(9, seed=7), tors.random_b64url(9, padded=True, seed=7)
-# ('GUVKJ7dS-QWQ', 'GUVKJ7dS-QWQ')   # 9 ≡ 0 mod 3: no padding either way
+tors.random_b64url(43, seed=7)
+# 'Bi8SLaf0s_a4pi-vqthbTaOstZjDweDcEC5hW7S_CNp'
 ```
 
 ### `tors.uuid4`

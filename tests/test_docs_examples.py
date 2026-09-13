@@ -352,10 +352,11 @@ class TestRandomGenerationExamples:
     doc and this pin move together, in the same commit."""
 
     def test_family_intro_examples(self) -> None:
-        # "len(tors.random_hex(32)) / # 64": the unseeded spelling's shape.
-        assert len(tors.random_hex(32)) == 64
-        # The deterministic spelling's literal.
-        assert tors.random_hex(16, seed=42) == "7848b5d711bc9883996317a3f9c90269"
+        # "len(tors.random_hex(32)) / # 32": the unseeded spelling's shape —
+        # 32 asks for 32 characters now, the length-first contract.
+        assert len(tors.random_hex(32)) == 32
+        # The deterministic spelling's literal (the 32-char hex-key example).
+        assert tors.random_hex(32, seed=42) == "861225d7151bf9b14a3617ab9b534d19"
 
     def test_random_string_example(self) -> None:
         assert tors.random_string(12, "abcdef", seed=42) == "dcabacecacae"
@@ -364,9 +365,9 @@ class TestRandomGenerationExamples:
         assert tors.random_b62(22, seed=0) == "1yrBtE6FUlG59Zjj3K2vVn"
 
     def test_random_b64url_example(self) -> None:
-        # 9 ≡ 0 mod 3: no padding either way, the doc's own parenthetical.
-        assert tors.random_b64url(9, seed=7) == "GUVKJ7dS-QWQ"
-        assert tors.random_b64url(9, padded=True, seed=7) == "GUVKJ7dS-QWQ"
+        # The 43-char token (the JWT-sig shape): one length parameter, no
+        # padded= spelling — the example moved with the contract.
+        assert tors.random_b64url(43, seed=7) == "Bi8SLaf0s_a4pi-vqthbTaOstZjDweDcEC5hW7S_CNp"
 
     def test_uuid4_example(self) -> None:
         assert tors.uuid4(seed=42) == "7848b5d7-11bc-4883-9963-17a3f9c90269"

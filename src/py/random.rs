@@ -1,11 +1,12 @@
 //! The pyo3 bindings for the random-generation family (`random_impl`'s
 //! core): the argument validation and seed reduction under the GIL, then
-//! ONE `py.detach` per call around the whole entropy fill + formatting pass,
-//! then the O(output) string marshalling — the family GIL model.
+//! ONE `py.detach` per call around the whole entropy draw +
+//! sampling/formatting pass, then the O(output) string marshalling — the
+//! family GIL model.
 //!
 //! GIL model: these are the crate's cheapest native passes (a syscall plus
-//! SIMD formatting; microseconds at real token/key sizes), but the discipline
-//! is the same one every surface keeps: the GIL-held residue of a call is the
+//! sampling or SIMD formatting; microseconds at real token/key sizes), but
+//! the discipline is the same one every surface keeps: the GIL-held residue of a call is the
 //! argument validation (and the seed's rare big-int mask, a Python-level `&`
 //! paid only when `|seed| >= 2^63`), plus the return marshalling. An OS
 //! entropy failure (effectively never post-boot; see `RandomError::Os`)
@@ -107,9 +108,14 @@ pub fn random_string(
         .map_err(into_pyerr)
 }
 
-/// `tors.random_hex(n_bytes, *, seed=None)`: `secrets.token_hex(n_bytes)`
-/// parity — `2 * n_bytes` lowercase hex characters from one n-byte entropy
-/// fill, as one GIL-released pass. The hex-key spelling of the family.
+/// `tors.random_hex(length, *, seed=None)`: `length` lowercase hex
+/// characters — exactly `random_string(length, "0123456789abcdef")` (one
+/// engine, delegated) — the length-first hex spelling: the caller asks for
+/// the id they want ("a 32-char hex key"), not for the bytes behind it.
+/// Odd lengths are legal (a 31-char hex id is a real shape); even lengths
+/// are what digest-shaped keys want (every 2 characters are exactly one
+/// byte). `secrets.token_hex(n)` and `random_hex(2 * n)` are the same
+/// uniform distribution over 2n-char hex strings — different draws.
 ///
 /// Entropy contract: the default (no `seed`) draws fresh bytes from the
 /// operating system's CSPRNG on every call — no process or thread RNG state,
@@ -120,24 +126,20 @@ pub fn random_string(
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `n_bytes=0` returns `""` (`secrets.token_hex(0)`'s own shape); negative
+/// `length=0` returns `""` (`secrets.token_hex(0)`'s own shape); negative
 /// raises `ValueError`; no size cap (memory is the only bound).
 ///
-/// GIL model: validation under the GIL, the fill + hex formatting under one
-/// `py.detach`, then the O(output) marshalling.
-#[pyfunction(signature = (n_bytes, *, seed = None))]
-pub fn random_hex(
-    py: Python<'_>,
-    n_bytes: i64,
-    seed: Option<Bound<'_, PyAny>>,
-) -> PyResult<String> {
-    if n_bytes < 0 {
+/// GIL model: validation under the GIL, the sampling + string build under
+/// one `py.detach`, then the O(output) marshalling.
+#[pyfunction(signature = (length, *, seed = None))]
+pub fn random_hex(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -> PyResult<String> {
+    if length < 0 {
         return Err(PyValueError::new_err(format!(
-            "n_bytes must be >= 0, got {n_bytes}"
+            "length must be >= 0, got {length}"
         )));
     }
     let seed = seed_to_u64(seed)?;
-    py.detach(|| random_impl::random_hex(n_bytes as usize, seed))
+    py.detach(|| random_impl::random_hex(length as usize, seed))
         .map_err(into_pyerr)
 }
 
@@ -169,12 +171,21 @@ pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
         .map_err(into_pyerr)
 }
 
-/// `tors.random_b64url(n_bytes, *, padded=False, seed=None)`: RFC 4648 §5
-/// urlsafe base64 (`A-Za-z0-9-_`; `+`/`/` never) of one n-byte entropy
-/// fill — `secrets.token_urlsafe(n_bytes)` parity at the default
-/// `padded=False` (length `ceil(4n/3)`, no `=` tail); `padded=True` adds
-/// the `=` tail per the RFC (`(3 - n mod 3) mod 3` of them, total
-/// `4 * ceil(n/3)`). The urlsafe-token spelling of the family.
+/// `tors.random_b64url(length, *, seed=None)`: `length` characters uniform
+/// over the 64-character RFC 4648 §5 urlsafe alphabet (`A-Za-z0-9-_`; `+`
+/// and `/` never), every position unconstrained — exactly
+/// `random_string(length, B64URL_CHARS)` (one engine, delegated). The
+/// length-first opaque-token spelling: "I want a 43-char urlsafe token"
+/// (the JWT-signature shape) is the whole call.
+///
+/// The boundary, stated honestly: this is NOT "a valid base64 encoding of
+/// N random bytes" — an encoding's final character is constrained (at 43
+/// characters, an encoding of 32 bytes can only ever show 4 distinct final
+/// characters; this spelling shows all 64), and lengths that are not valid
+/// base64 output lengths (41, 45, ...) are legal here. There is no
+/// `padded=` parameter: padding is an encoding concept, not a token
+/// concept, and `=` never appears. Callers who want encodable random
+/// material should take `random_hex` of even length (byte-exact via hex).
 ///
 /// Entropy contract: the default (no `seed`) draws fresh bytes from the
 /// operating system's CSPRNG on every call — no process or thread RNG state,
@@ -185,24 +196,22 @@ pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 /// for secrets, keys, or tokens (any adversary who learns the seed can
 /// reproduce the stream); the unseeded spelling is the secrets-safe one.
 ///
-/// `n_bytes=0` returns `""` either way; negative raises `ValueError`; no
-/// size cap.
+/// `length=0` returns `""`; negative raises `ValueError`; no size cap.
 ///
-/// GIL model: `random_hex`'s exactly.
-#[pyfunction(signature = (n_bytes, *, padded = false, seed = None))]
+/// GIL model: `random_string`'s exactly.
+#[pyfunction(signature = (length, *, seed = None))]
 pub fn random_b64url(
     py: Python<'_>,
-    n_bytes: i64,
-    padded: bool,
+    length: i64,
     seed: Option<Bound<'_, PyAny>>,
 ) -> PyResult<String> {
-    if n_bytes < 0 {
+    if length < 0 {
         return Err(PyValueError::new_err(format!(
-            "n_bytes must be >= 0, got {n_bytes}"
+            "length must be >= 0, got {length}"
         )));
     }
     let seed = seed_to_u64(seed)?;
-    py.detach(|| random_impl::random_b64url(n_bytes as usize, padded, seed))
+    py.detach(|| random_impl::random_b64url(length as usize, seed))
         .map_err(into_pyerr)
 }
 

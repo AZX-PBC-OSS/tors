@@ -3,11 +3,23 @@
 //! the three token spellings (hex / b62 / b64url) over a size ladder.
 //!
 //! These are the only benches in the tree with no corpus at all: the
-//! functions generate their own bytes (the input IS the output size), so
-//! there is nothing to share with `benches/common/mod.rs` and nothing for
-//! `tests/test_bench_corpus_parity.py` to pin — the throughput numbers are
-//! bytes-drawn (hex/b64url) or characters-emitted (b62) per call, labeled
-//! per size.
+//! functions generate their own output (the argument IS the output
+//! length), so there is nothing to share with `benches/common/mod.rs` and
+//! nothing for `tests/test_bench_corpus_parity.py` to pin — the
+//! throughput numbers are characters-emitted per call, labeled per size.
+//!
+//! The hex/b64url ladders are output-equivalent to the pre-length-first-
+//! refactor byte ladders: the old rungs drew n bytes and emitted their
+//! encoding (hex 2n chars, b64url ceil(4n/3) chars), the new engine takes
+//! the output length directly, so each rung keeps the output size the old
+//! one produced at the same point ([16, 64, 256, 1024, 64K] bytes ->
+//! hex [32, 128, 512, 2048, 131072] chars and b64url [22, 86, 342, 1366,
+//! 87382] chars). That makes the cross-refactor comparison honest — same
+//! tokens, new spelling — at the cost of the engine-class change the
+//! comparison records: char sampling consumes one u64 (8 stream bytes)
+//! per character where byte-fill+encode consumed ~0.5-0.75, so the
+//! measured delta is the price of uniform-per-character output
+//! (docs/performance.md's random table records it).
 //!
 //! The uuid4 pair is the comparison the family's design turns on:
 //! `tors_osrng_per_call` is the full shipped path — a FRESH `OsRng` fill
@@ -43,10 +55,12 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::hint::black_box;
 use tors::random_impl;
 
-/// The size ladder: token/key sizes real callers ask for (a 16-byte API key,
-/// 32-token, 256-byte session id, 1 KiB batch, 64 KiB bulk), plus the 22-char
-/// b62 id length the wall cells use.
-const BYTE_LADDER: [usize; 5] = [16, 64, 256, 1024, 64 * 1024];
+/// The size ladders: token/key sizes real callers ask for, spelled as the
+/// output lengths they are (a 32-char hex key, a 22-char b62 or b64url id,
+/// 1 KiB-class and 64 KiB-class bulk) — the hex/b64url rungs are the
+/// output equivalents of the old byte ladder (see the module docs).
+const HEX_LADDER: [usize; 5] = [32, 128, 512, 2048, 131_072];
+const B64URL_LADDER: [usize; 5] = [22, 86, 342, 1366, 87_382];
 const B62_LADDER: [usize; 5] = [22, 64, 256, 1024, 64 * 1024];
 
 fn bench_uuid_paths(c: &mut Criterion) {
@@ -68,19 +82,19 @@ fn bench_uuid_paths(c: &mut Criterion) {
 
 fn bench_token_ladders(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_hex");
-    for &n_bytes in &BYTE_LADDER {
-        group.throughput(Throughput::Bytes(n_bytes as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n_bytes), &n_bytes, |b, &n| {
-            b.iter(|| black_box(random_impl::random_hex(n, None).expect("os entropy")))
+    for &length in &HEX_LADDER {
+        group.throughput(Throughput::Bytes(length as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
+            b.iter(|| black_box(random_impl::random_hex(len, None).expect("os entropy")))
         });
     }
     group.finish();
 
     let mut group = c.benchmark_group("random_b64url");
-    for &n_bytes in &BYTE_LADDER {
-        group.throughput(Throughput::Bytes(n_bytes as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n_bytes), &n_bytes, |b, &n| {
-            b.iter(|| black_box(random_impl::random_b64url(n, false, None).expect("os entropy")))
+    for &length in &B64URL_LADDER {
+        group.throughput(Throughput::Bytes(length as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(length), &length, |b, &len| {
+            b.iter(|| black_box(random_impl::random_b64url(len, None).expect("os entropy")))
         });
     }
     group.finish();

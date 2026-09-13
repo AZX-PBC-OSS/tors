@@ -41,26 +41,38 @@
 //!   independently by the Python oracle in `tests/test_random.py`, which the
 //!   seeded pins must match (the pins do not merely freeze this module's
 //!   output).
-//! * The byte-fill generators (`random_hex`, `random_b64url`, `uuid4`)
-//!   consume exactly the first n stream bytes of one call (a single
-//!   `fill_bytes` over the output buffer).
-//! * The char-sampling generator (`random_string`, and `random_b62` through
-//!   it) consumes the stream as u64 words — 8 consecutive stream bytes,
-//!   little-endian, in order (the same word order rand_core's own
-//!   `BlockRng::next_u64` produces, "least significant first") — buffered
-//!   one 1024-byte block per `fill_bytes` so the unseeded spelling costs one
-//!   OS syscall per 128 words instead of one per word (`OsRng`'s
-//!   `try_next_u64` is a syscall per call). Buffering changes no output: the
-//!   u64 sequence is the stream's u64 sequence either way.
-//! * Consequently `random_hex(n, seed=s)` and
-//!   `random_string(2n, "0123456789abcdef", seed=s)` agree in distribution
-//!   but not in value: the same seed runs the same stream through different
-//!   consumers. The Python suite pins exactly that (statistical bucket
-//!   equivalence, never literal equality).
+//! * The byte-fill consumers are the uuids alone (`uuid4`, one 16-byte
+//!   `fill_bytes`; `uuid7`, one 10-byte counter/random fill): they consume
+//!   exactly the first n stream bytes of one call and hand them to the
+//!   uuid crate's builders, whose bit-structured fields are exactly what a
+//!   byte fill is for. (Before the length-first refactor `random_hex` and
+//!   `random_b64url` byte-filled and encoded here too; the maintainer
+//!   ergonomics directive — backend devs think "I want a base62 id X
+//!   characters long", so every token spelling takes the output length
+//!   directly — moved both onto the char-sampling engine, and the byte
+//!   path shrank to the uuids.)
+//! * The char-sampling engine is `random_string`, with `random_b62`,
+//!   `random_hex`, and `random_b64url` all delegating to it over their
+//!   fixed alphabets (one engine, never duplicated logic — the Python
+//!   suite pins the delegation as literal equality). It consumes the
+//!   stream as u64 words — 8 consecutive stream bytes, little-endian, in
+//!   order (the same word order rand_core's own `BlockRng::next_u64`
+//!   produces, "least significant first") — buffered one 1024-byte block
+//!   per `fill_bytes` so the unseeded spelling costs one OS syscall per
+//!   128 words instead of one per word (`OsRng`'s `try_next_u64` is a
+//!   syscall per call). Buffering changes no output: the u64 sequence is
+//!   the stream's u64 sequence either way.
+//! * Consequently `random_hex(n, seed=s)` IS
+//!   `random_string(n, "0123456789abcdef", seed=s)` — same length, same
+//!   stream consumption, same output, pinned literally (the
+//!   pre-refactor "agree in distribution but not in value" subtlety was
+//!   an artifact of hex byte-filling n bytes against 2n sampled
+//!   characters; it died with the byte path).
 //!
 //! # Unbiased alphabet sampling (the no-modulo-bias argument)
 //!
-//! `random_string`/`random_b62` draw alphabet indices with Lemire's
+//! All four token spellings (`random_string` itself, plus the hex/b62/
+//! b64url delegations) draw alphabet indices with Lemire's
 //! "nearly-divisionless" method (Fast Random Integer Generation in an
 //! Interval, ACM TOPLAS 2019): for a fresh u64 `x` and alphabet size `n`,
 //! compute the 128-bit product `m = x * n`, return `m >> 64`, and reject the
@@ -103,10 +115,14 @@
 //!
 //! Per the crate's dependency policy the hard parts are all maintained
 //! crates: rand (OsRng), rand_chacha (the stream), uuid (field layout and
-//! formatting), const-hex (hex formatting), base64 (the RFC 4648 §5 urlsafe
-//! engines). What this module owns is the tors-specific glue: the
-//! block-buffered word sampler, the Lemire index draw (the algorithm is
-//! transcribed with its proof sketch above), and the argument contracts.
+//! formatting) — and after the length-first refactor that is the whole
+//! list: const-hex and base64 served the old byte-fill+encode hex/b64url
+//! spellings and dropped out of this module (both crates stay in
+//! Cargo.toml for their other users — finalize/merkle's digest hex and
+//! `b64_impl`'s RFC 4648 core). What this module owns is the
+//! tors-specific glue: the block-buffered word sampler, the Lemire index
+//! draw (the algorithm is transcribed with its proof sketch above), and
+//! the argument contracts.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -115,13 +131,25 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng, TryRngCore};
 use uuid::Builder as UuidBuilder;
 
-use base64::Engine as _;
+/// The hex alphabet `random_hex` samples over: `[0-9a-f]`, lowercase —
+/// `random_hex` is exactly `random_string(length, HEX_CHARS)` — one
+/// engine, no copied logic — and this constant is what that delegation
+/// means.
+pub const HEX_CHARS: &str = "0123456789abcdef";
 
 /// The base62 alphabet `random_b62` samples over: `[0-9A-Za-z]`, the
 /// URL-safe, case-sensitive, human-transcribable set. `random_b62` is
 /// exactly `random_string(length, BASE62_CHARS)` — one engine, no copied
 /// logic — and this constant is what that delegation means.
 pub const BASE62_CHARS: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// The urlsafe-token alphabet `random_b64url` samples over: RFC 4648 §5's
+/// 64-character url-safe set (`A-Za-z0-9-_`; `+` and `/` never, and `=`
+/// is not a member — padding is an encoding concept, not a token
+/// concept). `random_b64url` is exactly `random_string(length,
+/// B64URL_CHARS)` — one engine, no copied logic — and this constant is
+/// what that delegation means.
+pub const B64URL_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// The error shapes of the family, mapped to Python exceptions by the pyo3
 /// layer (the cores themselves never see a Python type).
@@ -288,14 +316,16 @@ pub fn random_string(
     Ok(out)
 }
 
-/// `random_hex`'s core: `secrets.token_hex(n_bytes)` parity — 2n lowercase
-/// hex characters from one n-byte fill of the stream. `n_bytes == 0` returns
-/// the empty string (`secrets.token_hex(0)`'s own shape); const-hex is the
-/// same maintained encoder `finalize`'s digest already uses.
-pub fn random_hex(n_bytes: usize, seed: Option<u64>) -> Result<String, RandomError> {
-    let mut bytes = vec![0u8; n_bytes];
-    Source::new(seed).fill(&mut bytes)?;
-    Ok(const_hex::encode(&bytes))
+/// `random_hex`'s core: `random_string` over [`HEX_CHARS`] — the one
+/// engine, delegated, never duplicated. `length` lowercase hex characters,
+/// any length: odd is legal (a 31-char hex id is a real shape), and even
+/// lengths are what digest-shaped keys want (every 2 characters are
+/// exactly one byte, so `random_hex(2 * n)` is the byte-exact spelling
+/// for callers who need encodable random material). `secrets.token_hex(n)`
+/// and `random_hex(2 * n)` are the same uniform distribution over 2n-char
+/// hex strings — different draws, never different contracts.
+pub fn random_hex(length: usize, seed: Option<u64>) -> Result<String, RandomError> {
+    random_string(length, HEX_CHARS, seed)
 }
 
 /// `random_b62`'s core: `random_string` over [`BASE62_CHARS`] — the one
@@ -304,26 +334,18 @@ pub fn random_b62(length: usize, seed: Option<u64>) -> Result<String, RandomErro
     random_string(length, BASE62_CHARS, seed)
 }
 
-/// `random_b64url`'s core: RFC 4648 §5 urlsafe base64 (`A-Za-z0-9-_`, `+`/
-/// `/` never) of one n-byte fill, padded or not. `padded=True` uses the
-/// engine's `PAD` config (`=` tail, `(3 - n mod 3) mod 3` of them, total
-/// `4 * ceil(n/3)`); the default `padded=False` strips the tail
-/// (`secrets.token_urlsafe`'s own shape, length `ceil(4n/3)`). The base64
-/// crate's preconfigured `URL_SAFE`/`URL_SAFE_NO_PAD` engines are exactly
-/// these two combinations (verified in its source for 0.23, the same
-/// verification `b64_impl::encode` records for `STANDARD`).
-pub fn random_b64url(
-    n_bytes: usize,
-    padded: bool,
-    seed: Option<u64>,
-) -> Result<String, RandomError> {
-    let mut bytes = vec![0u8; n_bytes];
-    Source::new(seed).fill(&mut bytes)?;
-    Ok(if padded {
-        base64::engine::general_purpose::URL_SAFE.encode(&bytes)
-    } else {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
-    })
+/// `random_b64url`'s core: `random_string` over [`B64URL_CHARS`] — the one
+/// engine, delegated, never duplicated. `length` characters uniform over
+/// the 64-character RFC 4648 §5 urlsafe alphabet (`A-Za-z0-9-_`), every
+/// position unconstrained: the opaque-token contract, NOT "a valid base64
+/// encoding of N random bytes" (an encoding's final character is
+/// constrained — at 43 characters, an encoding of 32 bytes can only ever
+/// show 4 distinct final characters; this spelling shows all 64 — and
+/// lengths that are not valid base64 output lengths, like 41, are legal
+/// here). There is no `padded` spelling at all: padding is an encoding
+/// concept, not a token concept, and `=` can never appear.
+pub fn random_b64url(length: usize, seed: Option<u64>) -> Result<String, RandomError> {
+    random_string(length, B64URL_CHARS, seed)
 }
 
 /// `uuid4`'s core: one 16-byte fill handed to the uuid crate's zero-feature
@@ -371,8 +393,13 @@ mod tests {
     // (tests/test_random.py computes them against its independent PCG32 +
     // ChaCha20 + Lemire oracle; these crate-side copies pin the core without
     // the pyo3 layer, the b64 family's RFC-vector discipline). They were
-    // computed from this implementation AND cross-checked against that
-    // oracle before being committed.
+    // computed from that oracle BEFORE the length-first refactor's
+    // implementation changed, and then matched by it. One cross-reference
+    // the old byte-fill engines carried is deliberately gone: "uuid4(seed=0)'s
+    // first hex digits are hex(8, seed=0)'s" was an artifact of both
+    // consumers reading the same stream bytes — hex char-samples now, so the
+    // relationship is false, and the structural pin is the delegation
+    // equality below instead.
 
     #[test]
     fn lemire_threshold_matches_2_pow_64_mod_n() {
@@ -412,31 +439,39 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_is_prefix_continuous_across_fill_sizes() {
-        // One fill of 200 bytes starts with the same 64 bytes a fill of 64
-        // returns: the byte-fill generators consume the stream in order,
-        // which is what makes every golden pin size-independent.
-        let long = random_hex(200, Some(5)).unwrap();
-        let short = random_hex(64, Some(5)).unwrap();
-        assert_eq!(&long[..128], &short[..]);
+    fn the_char_engine_is_prefix_continuous_across_lengths() {
+        // The sampler consumes u64 words in order, so a longer seeded draw
+        // extends a shorter one character-for-character — the word-order
+        // property that makes every golden pin length-independent on the
+        // char path. (The old byte-fill prefix test died with the byte path:
+        // the uuids are its only consumers now, and uuid4's fixed 16-byte
+        // draw is pinned by its own goldens.)
+        assert_eq!(
+            &random_hex(64, Some(5)).unwrap()[..32],
+            &random_hex(32, Some(5)).unwrap()
+        );
+        assert_eq!(
+            &random_b64url(43, Some(9)).unwrap()[..22],
+            &random_b64url(22, Some(9)).unwrap()
+        );
     }
 
     #[test]
     fn seeded_hex_goldens() {
         // The same literals the Python suite pins (computed there against
         // its independent PCG32 + ChaCha20 + Lemire oracle first): these
-        // crate-side copies pin the core without the pyo3 layer.
+        // crate-side copies pin the core without the pyo3 layer. Odd lengths
+        // are pinned members of the ladder (31: a legal hex id shape).
         assert_eq!(random_hex(0, Some(0)).unwrap(), "");
-        assert_eq!(random_hex(8, Some(0)).unwrap(), "b2f7f581d6de3c06");
-        assert_eq!(random_hex(8, Some(1)).unwrap(), "9a3744504560639e");
+        assert_eq!(random_hex(8, Some(0)).unwrap(), "0fd2e314");
+        assert_eq!(random_hex(8, Some(1)).unwrap(), "9286e6a4");
         assert_eq!(
-            random_hex(16, Some(42)).unwrap(),
-            "7848b5d711bc9883996317a3f9c90269"
+            random_hex(31, Some(5)).unwrap(),
+            "9fddbe3cca89ec73270d1f133677747"
         );
         assert_eq!(
             random_hex(64, Some(7)).unwrap(),
-            "19454a27b752f905909507d6160ddc888e2df8b773098ef3f7bcd321a7caa748\
-             3a9afa8c98415d2fde7ae061aed1ef6821fb9ab3e89e9c7d07e32aa9c034fcd2"
+            "08f4267dbf6ea8fbab86463bb680c70710e85e4f03affac31420c55574847728"
         );
     }
 
@@ -449,11 +484,16 @@ mod tests {
 
     #[test]
     fn seeded_b64url_goldens() {
-        assert_eq!(random_b64url(0, false, Some(0)).unwrap(), "");
-        assert_eq!(random_b64url(3, false, Some(0)).unwrap(), "svf1");
-        assert_eq!(random_b64url(7, false, Some(9)).unwrap(), "G92VZnZGBA");
-        assert_eq!(random_b64url(1, true, Some(42)).unwrap(), "eA==");
-        assert_eq!(random_b64url(2, true, Some(42)).unwrap(), "eEg=");
+        assert_eq!(random_b64url(0, Some(0)).unwrap(), "");
+        assert_eq!(random_b64url(4, Some(0)).unwrap(), "B-3L");
+        assert_eq!(
+            random_b64url(22, Some(42)).unwrap(),
+            "gaGKKW0cEXGu8nuERoMZFe"
+        );
+        assert_eq!(
+            random_b64url(43, Some(7)).unwrap(),
+            "Bi8SLaf0s_a4pi-vqthbTaOstZjDweDcEC5hW7S_CNp"
+        );
     }
 
     #[test]
@@ -473,21 +513,6 @@ mod tests {
     }
 
     #[test]
-    fn the_goldens_cross_reference_one_stream() {
-        // uuid4(seed=0)'s first 16 hex digits (the string's first three
-        // dash-free groups, u[:8]+u[9:13]+u[14:18]) are hex(8, seed=0)'s 16
-        // digits with digit 12 replaced by the version nibble (3 -> 4):
-        // both consumers read the same stream, and the builder's documented
-        // with_version masking is the only difference.
-        let hex8 = random_hex(8, Some(0)).unwrap();
-        let v4 = uuid4(Some(0)).unwrap();
-        assert_eq!(&v4[..8], &hex8[..8]);
-        assert_eq!(&v4[9..13], &hex8[8..12]);
-        assert_eq!(&v4[14..15], "4");
-        assert_eq!(&v4[15..18], &hex8[13..16]);
-    }
-
-    #[test]
     fn seeded_multibyte_alphabet_golden() {
         // length 9, alphabet "éüß漢", seed 2 — the same literal the Python
         // suite pins: multibyte characters sampled as characters.
@@ -495,12 +520,20 @@ mod tests {
     }
 
     #[test]
-    fn b62_delegates_to_the_string_engine_exactly() {
+    fn the_named_spellings_delegate_to_the_string_engine_exactly() {
         for seed in [0u64, 1, 42, u64::MAX] {
             for length in [0usize, 1, 16, 128] {
                 assert_eq!(
                     random_b62(length, Some(seed)).unwrap(),
                     random_string(length, BASE62_CHARS, Some(seed)).unwrap()
+                );
+                assert_eq!(
+                    random_hex(length, Some(seed)).unwrap(),
+                    random_string(length, HEX_CHARS, Some(seed)).unwrap()
+                );
+                assert_eq!(
+                    random_b64url(length, Some(seed)).unwrap(),
+                    random_string(length, B64URL_CHARS, Some(seed)).unwrap()
                 );
             }
         }
@@ -530,23 +563,25 @@ mod tests {
     #[test]
     fn unseeded_outputs_have_the_documented_shapes() {
         let hex = random_hex(32, None).unwrap();
-        assert_eq!(hex.len(), 64);
+        assert_eq!(hex.len(), 32);
         assert!(
             hex.bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
         );
+        // Odd lengths are first-class on the unseeded path too.
+        assert_eq!(random_hex(31, None).unwrap().len(), 31);
         let b62 = random_b62(22, None).unwrap();
         assert_eq!(b62.len(), 22);
         assert!(b62.bytes().all(|b| b.is_ascii_alphanumeric()));
-        let b64 = random_b64url(3001, false, None).unwrap();
-        assert_eq!(b64.len(), (4_usize * 3001).div_ceil(3));
+        // Any length, including the non-multiple-of-4 token shapes; '=' can
+        // never appear (no padded spelling exists).
+        let b64 = random_b64url(3001, None).unwrap();
+        assert_eq!(b64.len(), 3001);
         assert!(
             b64.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         );
-        let b64_padded = random_b64url(3001, true, None).unwrap();
-        assert_eq!(b64_padded.len(), 4 * 3001_usize.div_ceil(3));
-        assert_eq!(&b64_padded[b64_padded.len() - 2..], "==");
+        assert!(!b64.contains('='));
     }
 
     #[test]

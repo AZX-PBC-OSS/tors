@@ -2623,41 +2623,50 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
 
 
 @pytest.mark.parametrize(
-    "n_bytes",
-    [512 * 1024, 1024 * 1024],
-    ids=["512KiB-drawn", "1MiB-drawn"],
+    "length",
+    [1024 * 1024, 2 * 1024 * 1024],
+    ids=["1MiB-chars", "2MiB-chars"],
 )
 def test_random_hex_generation_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
-    n_bytes: int,
+    length: int,
 ) -> None:
     """The random-generation claim, ceiling-only cells (the b64 12 MiB
-    precedent): the whole pass — the fresh OS-entropy fill (one getrandom
-    syscall per call, no process or thread RNG state) plus the hex
-    formatting — runs under one ``py.detach``, and the return is one string,
-    so the GIL-held residue is the O(output) marshalling alone (2x the drawn
-    bytes of ASCII here).
+    precedent): the whole pass — the block-buffered OS-entropy fills (one
+    getrandom syscall per 1024 bytes, no process or thread RNG state) plus
+    the per-character sampling and string build — runs under one
+    ``py.detach``, and the return is one string, so the GIL-held residue is
+    the O(output) marshalling alone (1 byte per ASCII hex character here).
+    The length-first refactor moved hex onto the char-sampling engine, so
+    the wall at a given output length is the b62-class wall (measured
+    ~31ns/char), not the old byte-fill wall: these cells hold the output
+    sizes the old byte-drawn cells produced (1 MiB and 2 MiB of hex
+    string), which now costs 8 MiB / 16 MiB of stream drawn through the
+    block buffer — thousands of syscalls, all detached.
 
     Measured on the dev box (Apple Silicon, quiet, 3 samples per cell):
 
-    - 512 KiB drawn (1 MiB output): worst gaps 10.7-11.0ms of 2.3-5.6ms
-      walls — the ping floor plus ~1ms of marshalling a 1 MiB string. The
-      wall sits under the 10ms ping floor, so the gap/wall ratio (1.9-4.7)
-      is this suite's documented sub-ping artifact, not evidence of
-      blocking; the cell asserts the 100ms ceiling (~9x margin) and records
-      the band. A detach regression (the fill held under the GIL) would
-      show the same wall but block the loop for it: 2-6ms held is under
-      the ping floor too, so the ceiling alone cannot separate that — the
-      cell's real regression teeth are at the 1 MiB-drawn size and in the
-      blowout class (a per-char syscall regression would put ~500ms of
-      held work behind one call and trip the ceiling by ~5x).
-    - 1 MiB drawn (2 MiB output): worst gaps 10.7-10.8ms of 4.5-4.8ms
+    - 1 MiB of output (2^20 chars): worst gaps ~11.1ms of ~33.5-33.8ms
+      walls — the ping floor; the whole generation+marshalling sequence
+      stays off the loop.
+    - 2 MiB of output (2^21 chars): worst gaps ~11.1ms of ~66.6-67.1ms
       walls, the same band.
+
+    The wall grew ~10x over the old byte-fill spelling at equal output
+    (the engine-class change the performance ledger records); the GIL
+    claim is unchanged — the gap is the floor, and the cell's ceiling
+    (100ms) still has ~9x margin over it. A detach regression (the fills
+    held under the GIL) would show the same wall but block the loop for
+    it: 33-67ms held is over the ping floor but under the ceiling, so the
+    ceiling alone cannot separate that — the cell's real regression teeth
+    are the blowout class (a per-char syscall regression would put ~1.2us
+    x 2^21 ~ 2.5s of held work behind one call and trip the ceiling by
+    ~25x).
 
     The seeded spelling (ChaCha20 userspace, no syscall at all) is strictly
     cheaper on the detached side; unseeded is the shape worth the cell."""
     asyncio.run(
         _assert_loop_stays_responsive(
-            lambda: asyncio.to_thread(tors.random_hex, n_bytes),
+            lambda: asyncio.to_thread(tors.random_hex, length),
             ratio_budget=None,
         )
     )

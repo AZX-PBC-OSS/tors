@@ -1,13 +1,22 @@
 //! `random_impl` never panics on arbitrary (seed, size, alphabet) inputs,
 //! and its seeded outputs carry the family's structural contracts: charset
-//! membership, exact lengths, the b64url padding math, the UUID field bits
-//! and canonical charset, the b62→random_string delegation, and
-//! same-input-same-output determinism. The fuzz bytes drive a FIXED-seed
-//! ChaCha stream (they choose the seed, the sizes, and the alphabet), so
-//! every assertion is deterministic — the unseeded OS path is deliberately
-//! not fuzzed (its output is not reproducible, so there is nothing to
-//! assert beyond the crash-freedom the seeded path already exercises); the
-//! Python suite owns the unseeded shape contracts.
+//! membership, exact lengths at ANY length (odd hex lengths and
+//! non-multiple-of-4 b64url lengths are first-class — the token contract
+//! has no alignment constraint), the UUID field bits and canonical
+//! charset, the four token spellings' delegation to `random_string` (one
+//! char-sampling engine), and same-input-same-output determinism. The fuzz
+//! bytes drive a FIXED-seed ChaCha stream (they choose the seed, the
+//! sizes, and the alphabet), so every assertion is deterministic — the
+//! unseeded OS path is deliberately not fuzzed (its output is not
+//! reproducible, so there is nothing to assert beyond the crash-freedom
+//! the seeded path already exercises); the Python suite owns the unseeded
+//! shape contracts.
+//!
+//! What died with the length-first refactor, so nobody re-pins it: the
+//! b64url padding-math invariant (the `padded=` parameter is gone —
+//! padding was an encoding concept, not a token concept) and the
+//! byte-fill length coupling (2n hex chars per n bytes drawn). Both are
+//! replaced by the plain exact-length contract over the token alphabets.
 //!
 //! `arbitrary`'s `String` is valid UTF-8 (no lone surrogates — the same
 //! bound `b64_decode`'s target documents), and it may be EMPTY: the
@@ -24,12 +33,12 @@ use tors::random_impl::{self, RandomError};
 struct Input {
     seed: u64,
     length: u8,
-    n_bytes: u8,
     alphabet: String,
-    padded: bool,
 }
 
-const HEX: &str = "0123456789abcdef";
+// Spelled in full, not imported: these are the independent charset pins
+// the assertions below check the crate's constants against.
+const HEX: &[u8] = b"0123456789abcdef";
 const B62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const B64URL: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -60,11 +69,9 @@ fuzz_target!(|input: Input| {
     let Input {
         seed,
         length,
-        n_bytes,
         alphabet,
-        padded,
     } = input;
-    let (length, n_bytes) = (length as usize, n_bytes as usize);
+    let length = length as usize;
     let seed = Some(seed);
 
     // random_string: the empty alphabet is the documented refusal; any
@@ -92,39 +99,45 @@ fuzz_target!(|input: Input| {
         Err(other) => panic!("unexpected error shape: {other:?}"),
     }
 
-    // random_hex: 2n lowercase hex, deterministic.
-    let hex_first = random_impl::random_hex(n_bytes, seed).unwrap();
+    // random_hex: the string engine over the hex alphabet — exact length
+    // (odd included), lowercase hex charset, deterministic.
+    let hex_first = random_impl::random_hex(length, seed).unwrap();
     assert_eq!(
         hex_first,
-        random_impl::random_hex(n_bytes, seed).unwrap(),
+        random_impl::random_hex(length, seed).unwrap(),
         "seeded random_hex is not deterministic"
     );
-    assert_eq!(hex_first.len(), 2 * n_bytes);
-    assert!(hex_first.bytes().all(|b| HEX.as_bytes().contains(&b)));
+    assert_eq!(
+        hex_first,
+        random_impl::random_string(length, random_impl::HEX_CHARS, seed).unwrap(),
+        "random_hex is not the string engine"
+    );
+    assert_eq!(hex_first.len(), length);
+    assert!(hex_first.bytes().all(|b| HEX.contains(&b)));
 
-    // random_b64url: urlsafe alphabet only, the padding math both ways,
-    // deterministic.
-    let b64_first = random_impl::random_b64url(n_bytes, padded, seed).unwrap();
+    // random_b64url: the string engine over the 64-char urlsafe alphabet —
+    // exact length at ANY length (no alignment constraint; the padding
+    // math died with the encoding contract), deterministic, '=' never.
+    let b64_first = random_impl::random_b64url(length, seed).unwrap();
     assert_eq!(
         b64_first,
-        random_impl::random_b64url(n_bytes, padded, seed).unwrap(),
+        random_impl::random_b64url(length, seed).unwrap(),
         "seeded random_b64url is not deterministic"
     );
-    let body_len = b64_first.trim_end_matches('=').len();
-    let pad = b64_first.len() - body_len;
-    assert!(
-        b64_first.as_bytes()[..body_len]
-            .iter()
-            .all(|b| B64URL.contains(b)),
-        "non-urlsafe character in the b64 body"
+    assert_eq!(
+        b64_first,
+        random_impl::random_string(length, random_impl::B64URL_CHARS, seed).unwrap(),
+        "random_b64url is not the string engine"
     );
-    if padded {
-        assert_eq!(pad, (3 - n_bytes % 3) % 3, "wrong '=' tail count");
-        assert_eq!(b64_first.len(), 4 * ((n_bytes + 2) / 3));
-    } else {
-        assert_eq!(pad, 0, "'=' in the unpadded spelling");
-        assert_eq!(b64_first.len(), (4 * n_bytes + 2) / 3);
-    }
+    assert_eq!(b64_first.len(), length, "wrong b64url token length");
+    assert!(
+        b64_first.bytes().all(|b| B64URL.contains(&b)),
+        "non-urlsafe character in the token"
+    );
+    assert!(
+        !b64_first.contains('='),
+        "'=' can never appear: no padded spelling exists"
+    );
 
     // uuid4: deterministic under seed, canonical v4 shape.
     let v4_first = random_impl::uuid4(seed).unwrap();
@@ -138,7 +151,7 @@ fuzz_target!(|input: Input| {
     // uuid7: unseeded and timestamp-carried, so only the shape and a
     // generous clock sanity (the 48-bit field — the first 12 hex digits,
     // which in the canonical string are u[:8] (the high 32 bits) and
-    // u[9:13] (the low 16) — within a day of now; a badly skewed host
+    // u[9..13] (the low 16) — within a day of now; a badly skewed host
     // clock is an environment finding, not a crash, and the day window
     // tolerates any sane CI runner).
     let v7 = random_impl::uuid7().unwrap();

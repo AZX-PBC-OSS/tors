@@ -8,35 +8,54 @@ and are safe for keys/tokens/secrets; ``seed=`` switches to a deterministic
 ChaCha20 stream that is a pure function of (seed, arguments) and therefore
 fully predictable — a test/fixture tool, never safe for secrets.
 
-Determinism is pinned by an independent oracle, not by frozen literals alone:
-``_oracle_hex``/``_oracle_string``/``_oracle_b64url``/``_oracle_uuid4``
-re-implement the DOCUMENTED construction in pure Python — rand_core's
-``seed_from_u64`` derivation (PCG32; see its comment for the spec-vs-source
-finding), the RFC 8439 ChaCha20 block stream, and Lemire's nearly-divisionless
-unbiased sampling — so a seeded pin asserts the extension equals the
-construction the docs promise, never merely "whatever the implementation
-emitted". Committed literal pins (added with the implementation, computed
-from it and cross-checked against the oracle) then guard cross-version
-stability independently; the b64 family's RFC 4648 vectors are the precedent
-for that double pinning.
+The family is length-first: every token spelling takes the OUTPUT length
+directly ("I want a base62 id X characters long" is the whole call), and
+``random_hex``/``random_b62``/``random_b64url`` are all ``random_string``
+over their fixed alphabets — one char-sampling engine (Lemire, no modulo
+bias) for the four string spellings, one byte-fill engine (the uuid
+crate's builders) for ``uuid4``/``uuid7``. ``random_b64url`` is the
+opaque-token contract — uniform over the 64-char urlsafe alphabet, every
+position unconstrained — NOT a base64 encoding of random bytes (an
+encoding's final character is constrained, and padding is an encoding
+concept with no spelling here).
 
-One subtlety the invariants class pins honestly: ``random_hex(n, seed=s)``
-and ``random_string(2n, "0123456789abcdef", seed=s)`` draw from the SAME
-distribution but NOT the same stream — byte-fill consumes n bytes while
-char-sampling consumes at least 2n u64 draws (>= 16n bytes) — so the same
-seed gives different outputs, and the distributional equivalence is pinned
-statistically (seeded bucket counts), never as literal equality.
+Determinism is pinned by an independent oracle, not by frozen literals
+alone: ``_oracle_string``/``_oracle_uuid4`` re-implement the DOCUMENTED
+construction in pure Python — rand_core's ``seed_from_u64`` derivation
+(PCG32; see its comment for the spec-vs-source finding), the RFC 8439
+ChaCha20 block stream, and Lemire's nearly-divisionless unbiased sampling
+— so a seeded pin asserts the extension equals the construction the docs
+promise, never merely "whatever the implementation emitted". The oracle
+shrank with the length-first refactor: hex/b64url were byte-fill+encode
+transcriptions before it and are string-engine spellings now, so their
+pins run through ``_oracle_string`` over the respective alphabets, and
+only ``uuid4`` keeps the byte view (``_oracle_bytes``). Committed literal
+pins (recomputed from the oracle BEFORE the implementation changed, so
+they pin the construction, not the code) then guard cross-version
+stability independently; the b64 family's RFC 4648 vectors are the
+precedent for that double pinning.
+
+Two cross-references the old byte-fill engines supported are dead, noted
+here so nobody re-pins them by accident: "uuid4(seed=0)'s first hex
+digits are hex(8, seed=0)'s" and "b64url(3, seed=0) decodes to
+hex(8, seed=0)'s first bytes" were one-shared-stream artifacts of
+hex/b64url byte-filling — hex char-samples now, the byte path is the
+uuids' alone, and uuid4's own goldens pin it. The "same distribution,
+never literal equality" hex-vs-string subtlety died the same way: hex IS
+the string engine, and the equality is pinned literally in
+``TestOneEngineDelegation``.
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import secrets
 import struct
 import time
 import uuid as stdlib_uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 from hypothesis import given, settings
@@ -61,7 +80,7 @@ _MASK64 = (1 << 64) - 1
 #
 # Every piece below is transcribed from the resolved crate sources (registry
 # paths cited per function), not from memory; the oracle's whole value is that
-# it is an independent second implementation of the spec the docs state.
+# it is an independent second implementation of the spec the docs states.
 
 _PCG_MUL = 6364136223846793005
 _PCG_INC = 11634580027462260723
@@ -136,7 +155,9 @@ def _chacha20_block(key: bytes, counter: int) -> bytes:
 
 def _oracle_bytes(n: int, seed: int) -> bytes:
     """The first ``n`` bytes of the seeded stream: block 0, block 1, ... in
-    order — exactly what one ``fill_bytes`` over an n-byte buffer consumes."""
+    order — exactly what one ``fill_bytes`` over an n-byte buffer consumes.
+    The uuids' byte view (the only byte-fill consumers left in the family
+    after the length-first refactor)."""
     key = _seed_from_u64(seed)
     out = bytearray()
     counter = 0
@@ -187,15 +208,6 @@ def _oracle_string(length: int, alphabet: str, seed: int) -> str:
     return "".join(chars[_lemire_below(words, len(chars))] for _ in range(length))
 
 
-def _oracle_hex(n: int, seed: int) -> str:
-    return _oracle_bytes(n, seed).hex()
-
-
-def _oracle_b64url(n: int, seed: int, *, padded: bool) -> str:
-    encoded = base64.urlsafe_b64encode(_oracle_bytes(n, seed)).decode("ascii")
-    return encoded if padded else encoded.rstrip("=")
-
-
 def _oracle_uuid4(seed: int) -> str:
     raw = bytearray(_oracle_bytes(16, seed))
     raw[6] = (raw[6] & 0x0F) | 0x40
@@ -214,16 +226,35 @@ def _assert_uuid_shape(value: str, version: str) -> None:
     assert all(c in HEX_CHARS for c in value.replace("-", ""))
 
 
+# The four token spellings as one callable shape, for the argument-contract
+# parametrizations below (they share the length-first argument, so they share
+# every length-contract test).
+_TOKEN_CALLS: list[tuple[str, Callable[[int], str]]] = [
+    ("random_string", lambda length: random_string(length, "ab")),
+    ("random_hex", random_hex),
+    ("random_b62", random_b62),
+    ("random_b64url", random_b64url),
+]
+
+
 class TestSeededConstructionMatchesTheOracle:
     """Every seeded function equals the documented construction at the pin
     parameters: seeds 0, 1 (the edge goldens), and 42, across sizes that
-    exercise each engine's paths (empty, single block, multi-block, every
-    b64url residue class mod 3, multibyte and single-char alphabets)."""
+    exercise each engine's paths (empty, single block, multi-block, odd hex
+    lengths — a 31-char hex id is legal —, non-multiple-of-4 b64url lengths
+    including the 43-char JWT-sig shape, multibyte and single-char
+    alphabets)."""
 
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
-    @pytest.mark.parametrize("n_bytes", [0, 1, 7, 64, 65, 512])
-    def test_hex(self, n_bytes: int, seed: int) -> None:
-        assert random_hex(n_bytes, seed=seed) == _oracle_hex(n_bytes, seed)
+    @pytest.mark.parametrize(
+        "length",
+        [0, 1, 7, 8, 16, 31, 32, 64, 65, 512],
+        ids=["0", "1", "7", "8", "16", "31", "32", "64", "65", "512"],
+    )
+    def test_hex(self, length: int, seed: int) -> None:
+        # The string engine over the hex alphabet: odd lengths are first-class
+        # (31, 65 in the ladder), no byte pairs anywhere.
+        assert random_hex(length, seed=seed) == _oracle_string(length, HEX_CHARS, seed)
 
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
     @pytest.mark.parametrize(
@@ -241,14 +272,10 @@ class TestSeededConstructionMatchesTheOracle:
         ids=["empty", "one-char", "binary", "hex", "b62", "multibyte", "single", "long"],
     )
     def test_string(self, length: int, alphabet: str, seed: int) -> None:
-        assert random_string(length, alphabet, seed=seed) == _oracle_string(
-            length, alphabet, seed
-        )
+        assert random_string(length, alphabet, seed=seed) == _oracle_string(length, alphabet, seed)
 
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
-    @pytest.mark.parametrize(
-        "length", [0, 1, 16, 32, 128], ids=["0", "1", "16", "32", "128"]
-    )
+    @pytest.mark.parametrize("length", [0, 1, 16, 32, 128], ids=["0", "1", "16", "32", "128"])
     def test_b62_delegates_to_the_string_engine(self, length: int, seed: int) -> None:
         # ONE engine: b62 is the random_string core over the base62 alphabet,
         # so it must equal both the direct spelling and the oracle.
@@ -256,13 +283,15 @@ class TestSeededConstructionMatchesTheOracle:
         assert random_b62(length, seed=seed) == _oracle_string(length, BASE62_CHARS, seed)
 
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
-    @pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
-    @pytest.mark.parametrize("n_bytes", [0, 1, 2, 3, 4, 6, 64, 65, 512])
-    def test_b64url(self, n_bytes: int, padded: bool, seed: int) -> None:
-        # 0, 1, and 2 mod 3 all present, plus a 64-byte block boundary.
-        assert random_b64url(n_bytes, padded=padded, seed=seed) == _oracle_b64url(
-            n_bytes, seed, padded=padded
-        )
+    @pytest.mark.parametrize(
+        "length",
+        [0, 1, 2, 3, 4, 22, 43, 64, 65, 512],
+        ids=["0", "1", "2", "3", "4", "22", "43", "64", "65", "512"],
+    )
+    def test_b64url(self, length: int, seed: int) -> None:
+        # Every residue mod 4 present (43 = 3, 22 = 2, 65 = 1): the token
+        # contract has no alignment constraint at all.
+        assert random_b64url(length, seed=seed) == _oracle_string(length, B64URL_CHARS, seed)
 
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
     def test_uuid4(self, seed: int) -> None:
@@ -272,32 +301,39 @@ class TestSeededConstructionMatchesTheOracle:
 class TestSeededGoldenLiterals:
     """The computed outputs at chosen parameters, committed as exact
     literals and sha256 digests — cross-version regression pins that stand
-    independently of the oracle (every literal below was ALSO verified
-    against the oracle-equality tests above before being committed; a
-    ChaCha/rand_core semantic change breaks these loudly, which is the
-    point: it is a finding, not a flake). The internal cross-references are
-    themselves pins: uuid4(seed=0)'s first two groups are hex(8, seed=0)'s
-    first 16 digits with the version nibble set, and b64url(3, seed=0)
-    decodes to hex(8, seed=0)'s first 3 bytes — one stream, three
-    consumers."""
+    independently of the oracle (every literal below was computed from the
+    oracle BEFORE the length-first refactor landed and then matched by the
+    implementation; a ChaCha/rand_core semantic change breaks these loudly,
+    which is the point: it is a finding, not a flake).
+
+    The internal cross-references the byte-fill engines used to carry are
+    gone with them: "uuid4(seed=0)'s hex digits are hex(8, seed=0)'s" and
+    "b64url(3, seed=0) decodes to hex(8, seed=0)'s first bytes" were
+    one-shared-stream artifacts of hex/b64url consuming raw stream bytes —
+    hex char-samples now, so the relationship is false and stays unpinned
+    (uuid4's own goldens below still pin the byte path). What replaces them
+    as the family's structural pin is the delegation equality in
+    ``TestOneEngineDelegation``.
+    """
 
     def test_hex_edge_goldens(self) -> None:
         assert random_hex(0, seed=0) == ""
         assert random_hex(0, seed=42) == ""
-        assert random_hex(8, seed=0) == "b2f7f581d6de3c06"
-        assert random_hex(8, seed=1) == "9a3744504560639e"
-        assert random_hex(16, seed=42) == "7848b5d711bc9883996317a3f9c90269"
+        assert random_hex(8, seed=0) == "0fd2e314"
+        assert random_hex(8, seed=1) == "9286e6a4"
+        assert random_hex(16, seed=42) == "861225d7151bf9b1"
+        # Odd lengths are legal and pinned: a 31-char hex id is a real shape.
+        assert random_hex(31, seed=5) == "9fddbe3cca89ec73270d1f133677747"
         assert (
             random_hex(64, seed=7)
-            == "19454a27b752f905909507d6160ddc888e2df8b773098ef3f7bcd321a7caa748"
-            "3a9afa8c98415d2fde7ae061aed1ef6821fb9ab3e89e9c7d07e32aa9c034fcd2"
+            == "08f4267dbf6ea8fbab86463bb680c70710e85e4f03affac31420c55574847728"
         )
 
     def test_hex_1kib_golden_via_digest(self) -> None:
-        # 1 KiB of hex output (512 bytes drawn): pinned by digest, the b64
+        # 1 KiB of hex output (1024 characters): pinned by digest, the b64
         # family's large-vector idiom.
-        digest = hashlib.sha256(random_hex(512, seed=7).encode("ascii")).hexdigest()
-        assert digest == "9f42910e2d2c1b816c8f95a58d0606d3b4bcca0f88bd5e2308840901db075fcf"
+        digest = hashlib.sha256(random_hex(1024, seed=7).encode("ascii")).hexdigest()
+        assert digest == "c2ffd75057a19d125653cb1bfbb94d59d81a80e1389676f41e12c74ca054f3ae"
 
     def test_string_goldens(self) -> None:
         assert random_string(8, "x", seed=99) == "xxxxxxxx"
@@ -313,33 +349,68 @@ class TestSeededGoldenLiterals:
         assert digest == "122e60ff5ff0014f68a63dccc3c5928b919cf44e907220458e8b88a4db2c51db"
 
     def test_b64url_goldens(self) -> None:
-        assert random_b64url(3, seed=0) == "svf1"
-        assert random_b64url(1, padded=True, seed=42) == "eA=="
-        assert random_b64url(2, padded=True, seed=42) == "eEg="
-        assert random_b64url(7, seed=9) == "G92VZnZGBA"
+        assert random_b64url(0, seed=0) == ""
+        assert random_b64url(4, seed=0) == "B-3L"
+        assert random_b64url(22, seed=42) == "gaGKKW0cEXGu8nuERoMZFe"
+        # The 43-char JWT-sig-shaped token (what token_urlsafe(32) formats as).
+        assert random_b64url(43, seed=7) == "Bi8SLaf0s_a4pi-vqthbTaOstZjDweDcEC5hW7S_CNp"
         digest = hashlib.sha256(random_b64url(65536, seed=5).encode("ascii")).hexdigest()
-        assert digest == "71881e3b69226086d5e408c049465e4a7c9c842a9a07ca4da68420007476ec2a"
+        assert digest == "3431c0493a841fd2dd334956fd90ebe6e0fc447a0506af6f7fb9e2953cf00779"
 
     def test_uuid4_goldens(self) -> None:
         assert uuid4(seed=0) == "b2f7f581-d6de-4c06-a822-fd6e7e8265fb"
         assert uuid4(seed=1) == "9a374450-4560-439e-8670-b7a17d492b27"
         assert uuid4(seed=42) == "7848b5d7-11bc-4883-9963-17a3f9c90269"
 
-    def test_the_goldens_cross_reference_one_stream(self) -> None:
-        # The byte-fill consumers read the same stream: uuid4(seed=0)'s
-        # first 16 hex digits (its first three dash-free groups,
-        # u[:8]+u[9:13]+u[14:18]) are hex(8, seed=0)'s 16 digits with digit
-        # 12 replaced by the version nibble (3 -> 4), and b64url(3, seed=0)
-        # is the urlsafe encoding of hex(8, seed=0)'s first three bytes.
-        hex8 = random_hex(8, seed=0)
-        v4 = uuid4(seed=0)
-        assert v4[:8] == hex8[:8]
-        assert v4[9:13] == hex8[8:12]
-        assert v4[14] == "4"
-        assert v4[15:18] == hex8[13:16]
-        urlsafe = random_b64url(3, seed=0)
-        pad = "=" * ((4 - len(urlsafe) % 4) % 4)
-        assert base64.urlsafe_b64decode(urlsafe + pad) == bytes.fromhex(hex8[:6])
+    def test_the_hex_and_string_goldens_are_one_engine(self) -> None:
+        # The direct spelling of the delegation pin at the golden points:
+        # hex(32, seed=42) IS string(32, hex, seed=42) — the same literal
+        # the string goldens commit, not a coincidence of two engines.
+        assert random_hex(32, seed=42) == random_string(32, HEX_CHARS, seed=42)
+        assert random_hex(32, seed=42) == "861225d7151bf9b14a3617ab9b534d19"
+
+
+class TestOneEngineDelegation:
+    """The engine story after the length-first refactor, pinned literally:
+    ``random_hex``/``random_b62``/``random_b64url`` are ``random_string``
+    over their alphabets — one char-sampling engine for all four token
+    spellings — so the same seed gives the SAME output through the named
+    spelling and the explicit ``random_string`` spelling (literal equality,
+    by construction: the named spellings delegate). The uuids are the
+    family's other engine (byte fills handed to the uuid crate's builders),
+    pinned by their own goldens above.
+
+    What died here, noted so nobody re-pins it: the old
+    "random_hex(n, seed=s) and random_string(2n, hex, seed=s) agree in
+    distribution but never in value" subtlety (byte-fill vs char-sampling
+    stream consumption) is obsolete — hex IS the string engine, at the same
+    length. The bucket-count statistics that proved the two engines agreed
+    in distribution died with it; uniformity is pinned structurally by the
+    oracle equality above (the oracle transcribes Lemire's rejection, so
+    any modulo shortcut breaks it).
+    """
+
+    @pytest.mark.parametrize("seed", [0, 1, 42, 2**64 - 1], ids=["0", "1", "42", "max"])
+    @pytest.mark.parametrize("length", [0, 1, 16, 128], ids=["0", "1", "16", "128"])
+    def test_hex_is_random_string_over_the_hex_alphabet(self, length: int, seed: int) -> None:
+        assert random_hex(length, seed=seed) == random_string(length, HEX_CHARS, seed=seed)
+
+    @pytest.mark.parametrize("seed", [0, 1, 42, 2**64 - 1], ids=["0", "1", "42", "max"])
+    @pytest.mark.parametrize("length", [0, 1, 16, 128], ids=["0", "1", "16", "128"])
+    def test_b64url_is_random_string_over_the_urlsafe_alphabet(
+        self, length: int, seed: int
+    ) -> None:
+        assert random_b64url(length, seed=seed) == random_string(length, B64URL_CHARS, seed=seed)
+
+    def test_seeded_output_is_prefix_continuous_across_lengths(self) -> None:
+        # The char engine consumes u64 words in order, so a longer seeded
+        # draw extends a shorter one character-for-character (the property
+        # the old byte-fill engines pinned on the byte path; the byte path
+        # is uuid-only now, and uuid4's fixed 16-byte draw has no length
+        # ladder to pin).
+        assert random_hex(64, seed=5)[:32] == random_hex(32, seed=5)
+        assert random_b64url(43, seed=9)[:22] == random_b64url(22, seed=9)
+        assert random_b62(64, seed=5)[:16] == random_b62(16, seed=5)
 
 
 class TestSeedDomain:
@@ -390,48 +461,40 @@ class TestSeedDomain:
 
 
 class TestValueErrors:
-    """The repo's size-argument taxonomy: negative counts are ValueError
-    naming the parameter and the accepted form (the chunkers' style), zero is
-    legal and returns the empty string (secrets.token_hex(0)'s own shape),
-    and there is no size cap by design."""
+    """The repo's size-argument taxonomy, now uniform across the four token
+    spellings (they share the length-first argument, so they share its
+    error): negative counts are ValueError naming the parameter and the
+    accepted form (the chunkers' style), zero is legal and returns the
+    empty string (secrets.token_hex(0)'s own shape), and there is no size
+    cap by design."""
 
+    @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
     @pytest.mark.parametrize("length", [-1, -1000], ids=["-1", "-1000"])
-    def test_negative_length_raises_value_error_naming_it(self, length: int) -> None:
+    def test_negative_length_raises_value_error_naming_it(self, name: str, length: int) -> None:
+        call = dict(_TOKEN_CALLS)[name]
         with pytest.raises(ValueError, match=f"length must be >= 0, got {length}"):
-            random_string(length, "ab")
-        with pytest.raises(ValueError, match=f"length must be >= 0, got {length}"):
-            random_b62(length)
-
-    @pytest.mark.parametrize("n_bytes", [-1, -1000], ids=["-1", "-1000"])
-    def test_negative_n_bytes_raises_value_error_naming_it(self, n_bytes: int) -> None:
-        with pytest.raises(ValueError, match=f"n_bytes must be >= 0, got {n_bytes}"):
-            random_hex(n_bytes)
-        with pytest.raises(ValueError, match=f"n_bytes must be >= 0, got {n_bytes}"):
-            random_b64url(n_bytes)
+            call(length)
 
     def test_empty_alphabet_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="alphabet must be a non-empty str"):
             random_string(8, "")
 
-    @pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
-    def test_zero_is_the_empty_string_everywhere(self, padded: bool) -> None:
+    def test_zero_is_the_empty_string_everywhere(self) -> None:
         # secrets.token_hex(0) == "" is the parity anchor for this shape.
         assert secrets.token_hex(0) == ""
         assert random_hex(0) == ""
         assert random_b62(0) == ""
         assert random_string(0, "ab") == ""
-        assert random_b64url(0, padded=padded) == ""
+        assert random_b64url(0) == ""
 
-    @pytest.mark.parametrize("not_an_int", ["8", 3.5, b"8", None, [8]], ids=str)
-    def test_non_int_length_and_n_bytes_raise_type_error(self, not_an_int: object) -> None:
+    @pytest.mark.parametrize("name", [name for name, _ in _TOKEN_CALLS])
+    @pytest.mark.parametrize(
+        "not_an_int", ["8", 3.5, b"8", None, [8]], ids=["str", "float", "bytes", "none", "list"]
+    )
+    def test_non_int_length_raises_type_error(self, name: str, not_an_int: object) -> None:
+        call = dict(_TOKEN_CALLS)[name]
         with pytest.raises(TypeError):
-            random_string(not_an_int, "ab")  # type: ignore[arg-type]
-        with pytest.raises(TypeError):
-            random_b62(not_an_int)  # type: ignore[arg-type]
-        with pytest.raises(TypeError):
-            random_hex(not_an_int)  # type: ignore[arg-type]
-        with pytest.raises(TypeError):
-            random_b64url(not_an_int)  # type: ignore[arg-type]
+            call(not_an_int)  # type: ignore[arg-type]
 
     @pytest.mark.parametrize(
         "not_a_str",
@@ -449,28 +512,36 @@ class TestValueErrors:
             random_string(8, "ab\ud800cd")
 
     def test_huge_outputs_complete_no_cap_by_design(self) -> None:
-        # 1 MiB of hex output from one call: no size cap exists (memory is
-        # the only bound), and the seeded spelling is digest-stable.
+        # 512 KiB of hex output from one call: no size cap exists (memory is
+        # the only bound), and the seeded spelling is digest-stable AND
+        # digest-pinned (the large-vector idiom).
         out = random_hex(512 * 1024)
-        assert len(out) == 1024 * 1024
+        assert len(out) == 512 * 1024
         assert set(out) <= set(HEX_CHARS)
 
         def seeded_digest() -> str:
             return hashlib.sha256(random_hex(512 * 1024, seed=3).encode()).hexdigest()
 
         assert seeded_digest() == seeded_digest()
+        assert seeded_digest() == "516ff0a3860664d6bfc6dc5201012acef43da36cf7171203f888ed91e912f664"
 
 
 class TestUnseededOutputShape:
-    """The unseeded contract: charset membership, exact lengths (the padding
-    math pinned at every residue mod 3), and the canonical UUID field layout —
-    properties of the output distribution, never pinned values (OS entropy is
-    the source)."""
+    """The unseeded contract: charset membership and exact lengths at any
+    length (odd hex lengths, non-multiple-of-4 b64url lengths — the token
+    contract has no alignment constraint), the distributional relationship
+    to the stdlib spellings, and the canonical UUID field layout —
+    properties of the output distribution, never pinned values (OS entropy
+    is the source)."""
 
-    @pytest.mark.parametrize("n_bytes", [1, 2, 3, 16, 32, 64, 1000])
-    def test_hex_is_2n_lowercase_hex(self, n_bytes: int) -> None:
-        out = random_hex(n_bytes)
-        assert len(out) == 2 * n_bytes
+    @pytest.mark.parametrize(
+        "length",
+        [1, 2, 7, 16, 31, 32, 64, 1000],
+        ids=["1", "2", "7", "16", "31", "32", "64", "1000"],
+    )
+    def test_hex_is_exact_length_lowercase_hex(self, length: int) -> None:
+        out = random_hex(length)
+        assert len(out) == length
         assert set(out) <= set(HEX_CHARS)
 
     @pytest.mark.parametrize("length", [1, 2, 16, 32, 64, 1000])
@@ -479,45 +550,64 @@ class TestUnseededOutputShape:
         assert len(out) == length
         assert set(out) <= set(BASE62_CHARS)
 
-    @pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
     @pytest.mark.parametrize(
-        "n_bytes",
-        [1, 2, 3, 4, 5, 6, 7, 64, 3000, 3001, 3002],
-        ids=["n=1", "n=2", "n=3", "n=4", "n=5", "n=6", "n=7", "n=64", "3000", "3001", "3002"],
+        "length",
+        [1, 2, 3, 4, 22, 42, 43, 44, 1000],
+        ids=["1", "2", "3", "4", "22", "42", "43", "44", "1000"],
     )
-    def test_b64url_lengths_and_padding_math(self, n_bytes: int, padded: bool) -> None:
-        out = random_b64url(n_bytes, padded=padded)
-        assert set(out) <= set(B64URL_CHARS) | {"="}
-        body = out.rstrip("=")
-        assert set(body) <= set(B64URL_CHARS)
-        pad = len(out) - len(body)
-        if padded:
-            # RFC 4648 §5: '=' tail only, count = (3 - n mod 3) mod 3, and
-            # the total is 4 * ceil(n/3).
-            assert pad == (3 - n_bytes % 3) % 3
-            assert len(out) == 4 * ((n_bytes + 2) // 3)
-        else:
-            assert pad == 0
-            # ceil(4n/3) exactly.
-            assert len(out) == (4 * n_bytes + 2) // 3
+    def test_b64url_is_exact_length_over_the_urlsafe_alphabet(self, length: int) -> None:
+        out = random_b64url(length)
+        assert len(out) == length
+        assert set(out) <= set(B64URL_CHARS)
+        # Padding was an encoding concept; the parameter is gone, so '=' can
+        # never appear (also implied by the charset check — pinned explicitly
+        # because the parameter's removal is the contract change).
+        assert "=" not in out
 
-    def test_token_hex_format_parity_with_secrets(self) -> None:
-        # Format parity (length + charset class), never value parity: the two
-        # spellings draw independently from the same OS source.
+    def test_token_hex_distributional_parity_with_secrets(self) -> None:
+        # secrets.token_hex(n) and random_hex(2n) are the SAME uniform
+        # distribution over 2n-char lowercase hex strings (every string
+        # equally likely); they are independent draws from the OS source, so
+        # never equal values — format parity is what is pinned, exactly the
+        # split the old format-parity test stated. The 2n mapping is the
+        # whole relationship: token_hex thinks in bytes, random_hex in
+        # characters.
         for n in (1, 16, 32, 64):
-            assert len(random_hex(n)) == len(secrets.token_hex(n)) == 2 * n
-            assert set(random_hex(n)) <= set(HEX_CHARS)
-            assert set(secrets.token_hex(n)) <= set(HEX_CHARS)
+            tors_out = random_hex(2 * n)
+            stdlib_out = secrets.token_hex(n)
+            assert len(tors_out) == len(stdlib_out) == 2 * n
+            assert set(tors_out) <= set(HEX_CHARS)
+            assert set(stdlib_out) <= set(HEX_CHARS)
 
-    def test_token_urlsafe_format_parity_with_secrets(self) -> None:
-        # secrets.token_urlsafe(n) is urlsafe-b64 of n bytes, unpadded: the
-        # exact format random_b64url(n) produces (padded=False default).
-        for n in (1, 16, 32, 64, 3001):
-            tors_out = random_b64url(n)
-            secrets_out = secrets.token_urlsafe(n)
-            assert len(tors_out) == len(secrets_out) == (4 * n + 2) // 3
-            assert set(tors_out) <= set(B64URL_CHARS)
-            assert set(secrets_out) <= set(B64URL_CHARS)
+    def test_the_jwt_shaped_length_matches_token_urlsafe_format(self) -> None:
+        # secrets.token_urlsafe(32) formats as 43 urlsafe chars — the same
+        # LENGTH class as random_b64url(43), the practical migration shape
+        # (a caller generating 43-char JWT-material tokens today). Same
+        # alphabet, same length; the contract difference is pinned below.
+        assert len(secrets.token_urlsafe(32)) == 43
+        assert len(random_b64url(43)) == 43
+        assert set(secrets.token_urlsafe(32)) <= set(B64URL_CHARS)
+
+    def test_b64url_is_a_token_not_an_encoding(self) -> None:
+        # The honest boundary, pinned: random_b64url(L) is a uniform random
+        # string over the 64-char urlsafe alphabet, every position
+        # unconstrained — NOT "a valid base64 encoding of N random bytes".
+        # Two proofs: a 41-char output (41 % 4 == 1) is legal here and is
+        # not a decodable base64 payload at all; and at 43 chars (decodable-
+        # shaped), the FINAL character ranges over the whole alphabet where
+        # an encoding of 32 bytes could only ever show 4 distinct values
+        # there (the last char carries just the low 2 bits of the final
+        # byte). Callers wanting encodable random material should take
+        # random_hex of even length (byte-exact via hex) — docs/api.md
+        # states the same boundary.
+        out41 = random_b64url(41)
+        assert len(out41) == 41
+        with pytest.raises(binascii.Error):
+            base64.urlsafe_b64decode(out41 + "===")
+        last_chars = {random_b64url(43, seed=s)[-1] for s in range(64)}
+        # Deterministic given the seeds (measured 41 distinct); an
+        # encoding-shaped regression caps at 4 and fails this hard.
+        assert len(last_chars) >= 32
 
     def test_uuid4_shape_on_unseeded_draws(self) -> None:
         for _ in range(64):
@@ -555,54 +645,11 @@ class TestUnseededOutputShape:
             uuid7(seed=1)  # type: ignore[call-arg]
 
 
-class TestStreamsDifferButDistributionsMatch:
-    """The engine subtlety, pinned honestly: the byte-fill engines (hex,
-    b64url, uuid4) consume exactly n stream bytes, while char-sampling
-    (random_string/b62) consumes u64 words — the same seed therefore gives
-    DIFFERENT outputs for random_hex(n, s) vs random_string(2n, hex, s)
-    (literal equality would indicate a wiring bug), and the equivalence of
-    the two OUTPUT distributions is what the bucket pins prove, statistically.
-
-    Statistics cannot prove the no-modulo-bias property itself (u64 modulo
-    bias over a <=64-char alphabet is ~2^-58, invisible at any sample size);
-    that property is pinned structurally, by the oracle equality above (the
-    oracle implements Lemire's rejection, so any modulo shortcut breaks it).
-    """
-
-    def test_same_seed_hex_vs_string_are_not_equal(self) -> None:
-        assert random_hex(16, seed=42) != random_string(32, HEX_CHARS, seed=42)
-
-    def test_bucket_counts_match_across_engines(self) -> None:
-        # 20 seeds x 4096 bytes: 163,840 hex chars per engine, per-char
-        # expectation 10,240. Both engines' counts must sit within 4 sigma
-        # (sigma ~= 98) of expectation — deterministic given the seeds, so
-        # the tolerance is robustness against future crate-version drift,
-        # not a flake allowance.
-        n, n_seeds = 4096, 20
-        total = n_seeds * n * 2
-        expected = total / 16
-        sigma = (total * (1 / 16) * (15 / 16)) ** 0.5
-        tolerance = 4 * sigma
-        hex_counts = {
-            c: "".join(random_hex(n, seed=s) for s in range(n_seeds)).count(c) for c in HEX_CHARS
-        }
-        string_counts = {
-            c: "".join(random_string(2 * n, HEX_CHARS, seed=s) for s in range(n_seeds)).count(c)
-            for c in HEX_CHARS
-        }
-        for engine, counts in (("hex", hex_counts), ("string", string_counts)):
-            assert len(counts) == 16, f"{engine}: a hex char went missing"
-            for char, count in counts.items():
-                assert abs(count - expected) <= tolerance, (
-                    f"{engine} char {char!r}: {count} vs {expected} (tolerance {tolerance})"
-                )
-
-
 class TestHypothesisProperties:
     """The contract over arbitrary shapes: seeded determinism at any
     length/seed (draw-verified twice per example), arbitrary alphabets
-    (multibyte included), stdlib-parity b64url over the oracle bytes, and
-    unseeded UUID shape."""
+    (multibyte included), the hex/b64url spellings as string-engine
+    transcriptions of the oracle, and the unseeded b64url token shape."""
 
     @given(
         length=st.integers(min_value=0, max_value=64),
@@ -632,33 +679,34 @@ class TestHypothesisProperties:
         assert out == _oracle_string(length, alphabet, seed)
 
     @given(
-        n_bytes=st.integers(min_value=0, max_value=96),
+        length=st.integers(min_value=0, max_value=96),
         seed=st.integers(min_value=0, max_value=2**64 - 1),
-        padded=st.booleans(),
     )
     @settings(max_examples=150)
-    def test_b64url_equals_the_stdlib_expression_over_oracle_bytes(
-        self, n_bytes: int, seed: int, padded: bool
-    ) -> None:
-        # The stdlib expression itself (base64.urlsafe_b64encode + strip) over
-        # the oracle's bytes: the encoder is pinned against the stdlib, the
-        # byte source against the construction.
-        assert random_b64url(n_bytes, padded=padded, seed=seed) == _oracle_b64url(
-            n_bytes, seed, padded=padded
-        )
+    def test_seeded_hex_and_b64url_are_the_string_engine(self, length: int, seed: int) -> None:
+        # The oracle transcribes the char-sampling construction, so these
+        # lanes pin both spellings against the documented engine at
+        # arbitrary (length, seed) — including odd hex lengths and every
+        # b64url residue mod 4.
+        assert random_hex(length, seed=seed) == _oracle_string(length, HEX_CHARS, seed)
+        assert random_b64url(length, seed=seed) == _oracle_string(length, B64URL_CHARS, seed)
 
-    @given(n_bytes=st.integers(min_value=0, max_value=256))
+    @given(length=st.integers(min_value=0, max_value=256))
     @settings(max_examples=100)
-    def test_unseeded_b64url_round_trips_through_the_stdlib_decoder(self, n_bytes: int) -> None:
-        out = random_b64url(n_bytes)
-        # unpadded needs its '=' tail restored for urlsafe_b64decode.
-        decoded = base64.urlsafe_b64decode(out + "=" * ((3 - n_bytes % 3) % 3))
-        assert len(decoded) == n_bytes
+    def test_unseeded_b64url_is_exact_length_over_the_alphabet(self, length: int) -> None:
+        # The old round-trip-through-the-decoder lane died with the encoding
+        # contract: a uniform token is not an encoding of anything. What the
+        # unseeded spelling owes is its own shape, at any length.
+        out = random_b64url(length)
+        assert len(out) == length
+        assert set(out) <= set(B64URL_CHARS)
+        assert "=" not in out
 
     @given(seed=st.integers(min_value=0, max_value=2**64 - 1))
     @settings(max_examples=75)
-    def test_seeded_hex_and_uuid4_match_the_oracle(self, seed: int) -> None:
-        assert random_hex(96, seed=seed) == _oracle_hex(96, seed)
+    def test_seeded_uuid4_matches_the_oracle(self, seed: int) -> None:
+        # The byte path's only seeded consumer: 16 stream bytes, version and
+        # variant nibbles set, canonical formatting.
         assert uuid4(seed=seed) == _oracle_uuid4(seed)
 
 

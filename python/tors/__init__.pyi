@@ -1147,21 +1147,33 @@ def refined_soundex(text: str) -> str: ...
 # for secrets, keys, or tokens (any adversary who learns the seed can
 # reproduce the stream); the unseeded spelling is the secrets-safe one.
 # The seed is any int, reduced mod 2**64 (two's complement for negatives).
-# All six are one GIL-released pass (fill + formatting under py.detach).
+# Length-first, uniformly: the four token spellings take the OUTPUT length
+# ("I want a base62 id X characters long" is the whole call), and all four
+# are one char-sampling engine — random_hex/random_b62/random_b64url are
+# exactly random_string over their fixed alphabets (Lemire, no modulo
+# bias). All six are one GIL-released pass (draw + sampling/formatting
+# under py.detach).
 def random_string(length: int, alphabet: str, *, seed: int | None = None) -> str: ...
 
-# secrets.token_hex(n_bytes) parity: 2*n_bytes lowercase hex characters.
-def random_hex(n_bytes: int, *, seed: int | None = None) -> str: ...
+# length lowercase hex characters ("0123456789abcdef"), uniform per
+# character: exactly random_string(length, HEX_CHARS). Odd lengths are
+# legal (a 31-char hex id is a real shape); even lengths are what
+# digest-shaped keys want (every 2 chars exactly one byte).
+# secrets.token_hex(n) is the same uniform distribution as random_hex(2*n)
+# — different draws.
+def random_hex(length: int, *, seed: int | None = None) -> str: ...
 
 # Exactly random_string(length, BASE62_CHARS): the [0-9A-Za-z] id spelling.
 def random_b62(length: int, *, seed: int | None = None) -> str: ...
 
-# RFC 4648 §5 urlsafe base64 (A-Za-z0-9-_, never + or /) of n_bytes fresh
-# bytes: secrets.token_urlsafe parity unpadded (the default), the '=' tail
-# per the RFC when padded=True.
-def random_b64url(
-    n_bytes: int, *, padded: bool = False, seed: int | None = None
-) -> str: ...
+# length characters uniform over the 64-char RFC 4648 §5 urlsafe alphabet
+# (A-Za-z0-9-_, never + or /), every position unconstrained: the
+# opaque-TOKEN contract, NOT a base64 encoding of N random bytes (an
+# encoding's final char is constrained; '=' never appears; there is no
+# padded= parameter — padding is an encoding concept, not a token
+# concept). Callers wanting encodable random material: random_hex of even
+# length (byte-exact via hex).
+def random_b64url(length: int, *, seed: int | None = None) -> str: ...
 
 # An RFC 4122 v4 UUID string (36 chars, lowercase, hyphens at 8/13/18/23):
 # 122 random bits, the uuid.uuid4() spelling. Deterministic under seed=

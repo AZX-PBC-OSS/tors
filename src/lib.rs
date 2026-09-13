@@ -228,15 +228,18 @@
 //! `secrets`' own per-call semantics) plus the formatting run under one
 //! `py.detach`, with the O(output) string marshalling as the only other
 //! residue. The unseeded calls are the crate's fastest native passes
-//! (syscall + SIMD formatting, microseconds at real token/key sizes), so
-//! the GIL residue is a larger fraction of a smaller wall — the generation
-//! cell in `tests/test_gil_release.py` is therefore ceiling-only (the b64
-//! 12 MiB precedent: a sub-ping-floor wall makes the ratio an artifact).
-//! The seeded spelling is the deterministic twin (ChaCha20 via
+//! (syscall + sampling or SIMD formatting, microseconds at real token/key
+//! sizes), so the GIL residue is a larger fraction of a smaller wall — the
+//! generation cell in `tests/test_gil_release.py` is therefore ceiling-only
+//! (the b64 12 MiB precedent: a sub-ping-floor wall makes the ratio an
+//! artifact). The seeded spelling is the deterministic twin (ChaCha20 via
 //! `seed_from_u64`): a pure function of (seed, arguments), fully
 //! predictable from the seed, never safe for secrets — the contract every
 //! surface of the family carries, pinned by `tests/test_random.py`. The
-//! char-sampling engine (`random_string`/`random_b62`) buffers its u64
+//! family is length-first (the four token spellings take the output length
+//! directly) over one char-sampling engine (`random_string`, with
+//! `random_hex`/`random_b62`/`random_b64url` delegating to it over their
+//! fixed alphabets) that buffers its u64
 //! draws one 1024-byte block per OS fill (one syscall per 128 draws rather
 //! than one per draw); the buffering changes cost, never the word
 //! sequence, so seeded output is identical either way (the engine spec in
