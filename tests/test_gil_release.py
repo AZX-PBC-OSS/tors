@@ -2526,27 +2526,38 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
 _UUID7_BATCH_BYTES = bytes.fromhex("01977420dc007abc9def98765432100f")
 _UUID7_BATCH_TEXT = "01977420-dc00-7abc-9def-98765432100f"
 
-# The trio's batch size: one call is ~60-90ns (16 bytes in, one int or one
-# 16-byte value out; measured 59-76ns inline, 63-85ns per loop iteration
-# with the generator bookkeeping), so a single call sits four orders of
-# magnitude under the 10ms ping floor and no single-call cell can mean
-# anything. The batch is sized by the diff_opcodes_near_identical
-# enlargement precedent: at 4M calls the walls (~440-610ms measured) sit
-# ~50x above the ping floor, which keeps the shared ratio budget
-# discriminating (the many-tiny-calls shape's structural gap band -- GIL
-# handoff contention between the heartbeat and a worker thread reacquiring
-# the GIL every ~70ns, tens of ms under load -- is wall-independent, so a
-# bigger wall shrinks its ratio: measured worst 0.13 at ambient load
-# 8.6-12.3, >=2x under the 0.30 budget). The catchable regression classes:
-# a wholesale hold of the loop (gap ~= wall ~= 1.0: both budgets, by far)
-# and a per-call GIL-held residue grown to ~100ms+. The one regression
-# this cell honestly CANNOT catch is a lost py.detach on the int-out pair:
-# the extraction itself is a handful of nanoseconds, so holding it changes
-# the per-call GIL-held time by less than the call machinery's own jitter
-# -- the detach on this surface is contract uniformity with the rest of
-# the crate, not a measurable GIL-release payoff (src/py/uuid.rs's doc
-# comment records the same reasoning from the implementation side).
-_UUID_BATCH_CALLS = 4_000_000
+# The trio's batch size and bespoke gap ceiling. One call is ~60-90ns (16
+# bytes in, one int or one 16-byte value out; measured 59-76ns inline,
+# 63-85ns per loop iteration with the generator bookkeeping), so a single
+# call sits four orders of magnitude under the 10ms ping floor and no
+# single-call cell can mean anything; the batch loop is the only honest
+# shape. The structural gap band of that shape is NOT the quiet-box
+# 10-11ms ping floor: a worker thread reacquiring the GIL every ~70ns
+# contends with the heartbeat for it, and under sustained ambient load
+# that handoff contention stretches worst gaps into the tens-to-low-
+# hundreds of ms -- measured 27-75ms at ambient load 8.6-12.3 (N=4M) and
+# 27-118ms at 17-19 (N=8M), a band that is roughly wall-independent
+# (per-tick reacquisition delay) while a wholesale GIL hold of the loop
+# shows gap ~= wall. N is therefore sized by separation, the
+# word_bounds-precedent derivation: at 8M calls the walls (~0.9-1.2s
+# measured) put the wholesale-hold regression class at ~0.9-1.2s of gap,
+# far above the load band, and the 400ms bespoke ceiling sits ~3.4x above
+# the worst measured loaded-band gap (118ms) and ~2.2-3x below the hold
+# class. The suite's shared 100ms ceiling is structurally at risk for
+# this shape under sustained load (the first full-gate run flaked on it:
+# all 3 samples dirty at ambient load 8-12, the int-out pair's detach
+# churn contending hardest), so this cell carries its own ceiling, the
+# word_bounds/list-shape situation; the shared 0.30 ratio budget stays
+# (2.7x above the worst measured loaded-band ratio, 0.11; the hold class
+# sits at ~1.0 and fails it by >3x). The one regression this cell
+# honestly CANNOT catch is a lost py.detach on the int-out pair: the
+# extraction itself is a handful of nanoseconds, invisible next to the
+# call machinery's own GIL traffic -- the detach on this surface is
+# contract uniformity with the rest of the crate, not a measurable
+# GIL-release payoff (src/py/uuid.rs's doc comment records the same
+# reasoning from the implementation side).
+_UUID_BATCH_CALLS = 8_000_000
+_UUID_CELL_CEILING_S = 0.400
 
 
 @pytest.mark.parametrize(
@@ -2562,31 +2573,48 @@ def test_uuid_helpers_batch_loop_keeps_the_event_loop_at_heartbeat_granularity(
     parse, which runs GIL-held by design -- there is no int-out tail to
     detach and a detach around a 36-byte scan would be overhead for its own
     sake), so a batch loop of the calls in a worker thread leaves the loop
-    ticking at heartbeat granularity over a ~440-610ms wall.
+    ticking at heartbeat granularity over a ~0.9-1.2s wall, even on a
+    heavily loaded box.
 
-    Both shared budgets are asserted. The gap band to expect is NOT the
-    quiet-box 10-11ms ping floor: a worker thread reacquiring the GIL
-    every ~70ns contends with the heartbeat for it, and under load that
-    handoff contention yields tens-of-ms worst gaps -- measured 27-75ms of
-    441-611ms walls (ratio 0.06-0.13) at ambient load 8.6-12.3, a
-    deliberately hostile calibration case; on a quiet box the band
-    collapses back toward the floor. The budgets' discriminators, sized
-    against that band: a wholesale hold of the loop shows gap ~= wall ~=
-    1.0 (fails the 0.30 ratio by >3x and the 100ms ceiling by >4x), and a
-    per-call residue grown to ~100ms+ trips the ceiling; a lost detach on
-    the extraction is invisible either way (nanoseconds of work), the
-    honest limitation recorded beside the constant above."""
+    The budgets, derived per the constant block above: the 400ms bespoke
+    gap ceiling (~3.4x above the measured loaded-band worst of 118ms at
+    ambient load 17-19) and the shared 0.30 ratio budget (2.7x above the
+    loaded-band worst ratio of 0.11). What they discriminate: a wholesale
+    hold of the loop (gap ~= wall ~= 0.9-1.2s, ratio ~1.0: both budgets,
+    by >2x) and a per-call GIL-held residue grown to the ~400ms class. A
+    lost detach on the extraction is invisible either way (nanoseconds of
+    work), the limitation recorded beside the constant; pass-on-first-clean
+    over 3 samples tolerates the transient single-sample starvation the
+    module's design already retries."""
     calls: dict[str, Callable[[], object]] = {
         "uuid7_timestamp_ms": lambda: tors.uuid7_timestamp_ms(_UUID7_BATCH_BYTES),
         "uuid_version": lambda: tors.uuid_version(_UUID7_BATCH_BYTES),
         "uuid_parse": lambda: tors.uuid_parse(_UUID7_BATCH_TEXT),
     }
+    call = calls[helper]
 
     def consume() -> int:
-        call = calls[helper]
         return sum(1 for _ in range(_UUID_BATCH_CALLS) if call() is not None)
 
-    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(consume)))
+    observed = [
+        asyncio.run(_gap_and_wall_during(lambda: asyncio.to_thread(consume)))
+        for _ in range(_SAMPLES)
+    ]
+    for gap, wall in observed:
+        if gap < _UUID_CELL_CEILING_S and gap < _RATIO_BUDGET * wall:
+            return
+    detail = "; ".join(
+        f"blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms batch "
+        f"({gap / wall:.0%}, over the {_UUID_CELL_CEILING_S * 1000:.0f}ms ceiling "
+        f"and/or the {_RATIO_BUDGET:.0%} ratio budget)"
+        for gap, wall in observed
+    )
+    raise AssertionError(
+        f"the uuid helper batch loop regressed in every one of {_SAMPLES} samples "
+        f"({detail}): either a per-call GIL-held residue grew into the hundreds "
+        "of ms or the loop lost its responsiveness class (src/py/uuid.rs, "
+        "tests/test_gil_release.py)"
+    )
 
 
 # The identifier rule's two halves (TaskQ's _IDENT_RE shape: letters and
