@@ -151,11 +151,11 @@ mod tests {
 
     const NUL_ESCAPE: &[u8] = b"\\u0000";
 
-    /// The independent oracle (the Python suite's `reference_find_unescaped`
-    ///, spelled in Rust): every position in order, a full backward run walk
-    /// per occurrence, no carried state, no engine — agreement between this
-    /// and `find_unescaped` over the exhaustive sweep below is evidence
-    /// about the contract, not a shared bug.
+    /// The independent oracle (`reference_find_unescaped`, the Python
+    /// suite's, spelled in Rust): every position in order, a full backward
+    /// run walk per occurrence, no carried state, no engine — agreement
+    /// between this and `find_unescaped` over the exhaustive sweep below is
+    /// evidence about the contract, not a shared bug.
     fn naive_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         let mut i = 0;
         while i + needle.len() <= haystack.len() {
@@ -177,9 +177,9 @@ mod tests {
 
     #[test]
     fn runs_zero_through_seven_decide_liveness() {
-        // The parity ladder: run k before the occurrence, live iff k is
-        // even (0 included: the occurrence at offset k with nothing before
-        // the run's backslashes... k=0 IS the offset-0 case).
+        // The parity ladder: a run of k backslashes before the occurrence,
+        // live iff k is even. k=0 is the offset-0 case (nothing before the
+        // occurrence, an even empty run).
         for k in 0..=7usize {
             let mut haystack = vec![b'\\'; k];
             haystack.extend_from_slice(NUL_ESCAPE);
