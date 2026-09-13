@@ -16,7 +16,7 @@ import base64
 import hashlib
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from hypothesis import strategies as st
 
@@ -166,6 +166,38 @@ def entities(target_bytes: int) -> str:
     """Prose dense with html5 entity refs (nine per sentence): the
     html_unescape corpus: ASCII in, non-ASCII decoded out."""
     return _repeat_to(target_bytes, _ENTITY_SENTENCE * 4 + "\n\n")
+
+
+# Exception-shaped text for tors.scrub_log_text's cells: a rendered asyncpg-style
+# failure whose DETAIL line quotes a caller-supplied key value (the row-value
+# leak the pg_detail_lines rule exists for; HINT kept — it is structural), a DSN
+# carrying both a userinfo password and a password-family query parameter (both
+# mask rules fire on it), and a repr()-flattened twin whose DETAIL run rides
+# literal \n separators (the escaped segmenter's shape). Every rule fires once
+# per unit, so a scrub cell over this corpus measures the scan+splice, never the
+# identity fast path. Pure ASCII: the GIL cell's argument borrow is then the
+# zero-copy class (the replace_many dense cell's shape); non-ASCII scrub shapes
+# are the differential battery's job (tests/test_scrub_log_text_parity.py), not
+# a corpus concern. benches/text.rs mirrors this constant (SCRUB_SENTENCE) and
+# tests/test_bench_corpus_parity.py pins the two byte-identical, so the bench
+# numbers and the Python-side cell numbers cross-reference on the same bytes.
+_SCRUB_SENTENCE = (
+    "Traceback (most recent call last):\n"
+    "  File 'worker/run.py', line 88, in run\n"
+    "JobError: duplicate key value violates unique constraint 'jobs_idempotency_key'\n"
+    "DETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\n"
+    "HINT: The SQL statement is unchanged.\n"
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback\n"
+    "JobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417-a3f2) "
+    "already exists.')\n"
+)
+
+
+def scrub_corpus(target_bytes: int) -> str:
+    """Rendered-exception text (real-newline DETAIL line, DSN with both
+    credential shapes, repr()-flattened DETAIL run): the scrub_log_text
+    corpus, every rule firing once per unit."""
+    return _repeat_to(target_bytes, _SCRUB_SENTENCE * 4 + "\n")
 
 
 # The bytes-in corpora for the bytes surface (decode_utf8 / finalize_utf8 /
@@ -547,6 +579,52 @@ def reference_replace_many(text: str, replacements: dict[str, str]) -> str:
             out.append(text[pos])
             pos += 1
     return "".join(out)
+
+
+# --- the scrub_log_text oracle (the TaskQ exception-text chain) --------------------
+#
+# ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
+# chain (src/taskq/obs/_redact_exc.py, the consumer it exists for), pinned
+# byte-identical to it: the four compiled regexes below are QUOTED VERBATIM
+# from that module, and the canonical rule order (pg_detail_lines' two
+# segmenters first, then uri_userinfo, then uri_query_creds) is _scrub_text's
+# own application order with the redaction flag on. The differential harness
+# (tests/test_scrub_log_text_parity.py) runs tors against this chain and,
+# when the TaskQ checkout is present, re-syncs these patterns against the live
+# module source — a TaskQ change to any of them is a visible re-sync request,
+# not a silent tors behavior change.
+_PG_DETAIL_RE = re.compile(r"^[ \t]*DETAIL:.*$", re.MULTILINE)
+_PG_DETAIL_ESCAPED_RE = re.compile(
+    r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)",
+    re.MULTILINE,
+)
+_URI_CRED_RE = re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@")
+_URI_PARAM_CRED_RE = re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)")
+
+#: The accepted rule names, in canonical application order.
+SCRUB_RULES: tuple[str, ...] = ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+
+#: Each rule's passes, in order: the DETAIL rule is one name over two
+#: segmenters (real-newline lines, then repr()-flattened escaped runs); the
+#: two URI rules are one pass each.
+_SCRUB_RULE_PASSES: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
+    "pg_detail_lines": ((_PG_DETAIL_RE, ""), (_PG_DETAIL_ESCAPED_RE, "")),
+    "uri_userinfo": ((_URI_CRED_RE, r"\1:***@"),),
+    "uri_query_creds": ((_URI_PARAM_CRED_RE, r"\1***"),),
+}
+
+
+def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> str:
+    """The scrub oracle: the TaskQ chain applied per rule selection. ``rules
+    is None`` runs the full chain in canonical order; a list/tuple selects a
+    sub-chain (deduped, canonical order — the same contract tors spells);
+    ``[]`` is the identity."""
+    selected = frozenset(rules) if rules is not None else None
+    names = SCRUB_RULES if selected is None else [n for n in SCRUB_RULES if n in selected]
+    for name in names:
+        for pattern, repl in _SCRUB_RULE_PASSES[name]:
+            text = pattern.sub(repl, text)
+    return text
 
 
 _BACKSLASH = 0x5C  # b"\\"[0], the parity byte the whole escape question turns on
