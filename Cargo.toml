@@ -135,8 +135,11 @@ jiff = { version = "0.2", default-features = false, features = ["std"] }
 # the loose forms tors rejects (braces, urn:, hyphen-less, uppercase), so
 # tors enforces strictness by canonical-encoding equality — input must be
 # byte-equal to the parsed value's re-encoded canonical form — and keeps its
-# own error taxonomy/position finding (uuid_impl.rs's module doc).
-uuid = { version = "1", default-features = false }
+# own error taxonomy/position finding (uuid_impl.rs's module doc). The caret
+# floor is 1.26 (caret + boundary-test posture: >=1.26, <2.0, with the
+# crate-adoption boundary pinned from both sides in src/uuid_impl.rs and
+# tests/test_uuid.py so a uuid 1.x grammar move fails as a boundary move).
+uuid = { version = "1.26", default-features = false }
 # The whole PDF surface (`pdf_extract`/`pdf_page_count`, `src/pdf_impl.rs`):
 # open + per-page text + markdown conversion, called directly under
 # `py.detach` — the crate ships pyo3 bindings of its own, but that wheel

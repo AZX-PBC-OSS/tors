@@ -386,6 +386,57 @@ class TestStrictCanonicalRejections:
         with pytest.raises(ValueError, match=r"exactly 36 characters .* got 37"):
             uuid_parse(thirty_six_characters)
 
+    @pytest.mark.parametrize(
+        "control",
+        ["\x00", "\r", "\t"],
+        ids=["nul", "carriage-return", "tab"],
+    )
+    def test_control_characters_at_a_hex_slot_are_not_hex(self, control: str) -> None:
+        # NUL/CR/TAB at a hex slot: NotHex at that position, never stripped
+        # or treated as whitespace.
+        with pytest.raises(ValueError, match=r"found .* at position 5"):
+            uuid_parse(DOC_V7_TEXT[:5] + control + DOC_V7_TEXT[6:])
+
+    def test_confusable_non_ascii_is_length_gated_not_hex_classified(self) -> None:
+        # Fullwidth "ａ" (U+FF41, 3 bytes) and Cyrillic "а" (U+0430, 2 bytes)
+        # look like "a" but are not ASCII: a 36-character text holding one
+        # is 38/37 bytes, so the byte-counting length gate fires first.
+        fullwidth = DOC_V7_TEXT[:5] + "ａ" + DOC_V7_TEXT[6:]
+        assert len(fullwidth) == 36
+        assert len(fullwidth.encode()) == 38
+        with pytest.raises(ValueError, match="got 38"):
+            uuid_parse(fullwidth)
+        cyrillic = DOC_V7_TEXT[:5] + "а" + DOC_V7_TEXT[6:]
+        assert len(cyrillic) == 36
+        assert len(cyrillic.encode()) == 37
+        with pytest.raises(ValueError, match="got 37"):
+            uuid_parse(cyrillic)
+
+    @pytest.mark.parametrize("position", [8, 13, 18, 23])
+    def test_multibyte_at_a_hyphen_slot_is_a_missing_hyphen(self, position: int) -> None:
+        # "é" (2 bytes) at a hyphen slot in a 36-BYTE text (35 characters):
+        # the hyphen-slot check fires, naming the position and the found
+        # character. Constructed as prefix + é + suffix-trimmed-to-36-bytes.
+        prefix = DOC_V7_TEXT[:position]
+        suffix = DOC_V7_TEXT[position + 1 :]
+        text = prefix + "é" + suffix[:-1]
+        assert len(text.encode()) == 36
+        assert text[position] == "é"
+        with pytest.raises(
+            ValueError, match=rf"expected '-' at position {position}, found 'é'"
+        ):
+            uuid_parse(text)
+
+    def test_letter_at_index_zero_vectors(self) -> None:
+        # Position 0 is a hex slot: "g" (beyond hex) is NotHex, "D"
+        # (uppercase hex) is Uppercase with the stdlib-divergence note.
+        with pytest.raises(ValueError, match=r"found 'g' at position 0"):
+            uuid_parse("g" + DOC_V7_TEXT[1:])
+        with pytest.raises(
+            ValueError, match=r"uppercase 'D' at position 0 .* stdlib"
+        ):
+            uuid_parse("D" + DOC_V7_TEXT[1:])
+
     @pytest.mark.parametrize("length", [0, 1, 15, 17, 32, 35, 37, 64])
     def test_wrong_bytes_length_message_names_the_count(self, length: int) -> None:
         with pytest.raises(ValueError, match=f"exactly 16 bytes for a UUID, got {length}"):
@@ -436,7 +487,10 @@ class TestArgumentContract:
     def test_uuid_parse_rejects_non_str_with_type_error(self, not_str: object) -> None:
         # uuid_parse is the text->bytes direction only: bytes in is a
         # TypeError, not an identity (the identity is the caller's to spell).
-        with pytest.raises(TypeError):
+        # pyo3's generic extraction message (not tors's hand-rolled
+        # "value must be bytes or str, not X" of the int-out pair): pinned
+        # so a binding-signature change cannot drift silently.
+        with pytest.raises(TypeError, match="not an instance of 'str'"):
             uuid_parse(not_str)  # type: ignore[arg-type]
 
     def test_lone_surrogate_str_raises_unicode_encode_error(self) -> None:

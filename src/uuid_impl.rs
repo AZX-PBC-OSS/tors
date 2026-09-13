@@ -201,14 +201,24 @@ pub fn parse_canonical(text: &str) -> Result<[u8; 16], TextError> {
             .zip(input)
             .position(|(canonical, given)| canonical != given)
             .expect("unequal byte slices always diverge");
+        // `position` is a byte index into ASCII-only input under the
+        // current crate grammar (parse_str accepted 36 bytes of any-case
+        // hex + hyphens), so `input[position] as char` would be exact
+        // today; decode the character anyway so a future grammar widening
+        // cannot turn this into mojibake (a raw byte cast of a multibyte
+        // lead byte).
+        let found_char = text[position..]
+            .chars()
+            .next()
+            .unwrap_or(char::REPLACEMENT_CHARACTER);
         return Err(match input[position] {
             b'A'..=b'F' => TextError::Uppercase {
                 position,
-                found: input[position] as char,
+                found: found_char,
             },
-            found => TextError::NotHex {
+            _ => TextError::NotHex {
                 position,
-                found: found as char,
+                found: found_char,
             },
         });
     }
@@ -442,10 +452,98 @@ mod tests {
                     found: ' ',
                 },
             ),
+            (
+                "01977\x0020-dc00-7abc-9def-98765432100f",
+                TextError::NotHex {
+                    position: 5,
+                    found: '\0',
+                },
+            ),
+            (
+                "01977\r20-dc00-7abc-9def-98765432100f",
+                TextError::NotHex {
+                    position: 5,
+                    found: '\r',
+                },
+            ),
+            (
+                "01977\t20-dc00-7abc-9def-98765432100f",
+                TextError::NotHex {
+                    position: 5,
+                    found: '\t',
+                },
+            ),
+            (
+                "g1977420-dc00-7abc-9def-98765432100f",
+                TextError::NotHex {
+                    position: 0,
+                    found: 'g',
+                },
+            ),
         ];
         for (text, expected) in cases {
             assert_eq!(parse_canonical(text).unwrap_err(), *expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn confusable_non_ascii_is_length_gated() {
+        // Fullwidth "ａ" (U+FF41, 3 bytes) and Cyrillic "а" (U+0430,
+        // 2 bytes) look like "a" but are not ASCII: a 36-character text
+        // holding one is 38/37 bytes, so the byte-counting length gate
+        // fires before any character classification.
+        let fullwidth = "01977ａ20-dc00-7abc-9def-98765432100f";
+        assert_eq!(fullwidth.chars().count(), 36);
+        assert_eq!(fullwidth.len(), 38);
+        assert_eq!(
+            parse_canonical(fullwidth).unwrap_err(),
+            TextError::Length(38)
+        );
+        let cyrillic = "01977а20-dc00-7abc-9def-98765432100f";
+        assert_eq!(cyrillic.chars().count(), 36);
+        assert_eq!(cyrillic.len(), 37);
+        assert_eq!(
+            parse_canonical(cyrillic).unwrap_err(),
+            TextError::Length(37)
+        );
+    }
+
+    #[test]
+    fn multibyte_at_each_hyphen_slot_is_a_missing_hyphen() {
+        // "é" (2 bytes) at each hyphen slot in a 36-BYTE text
+        // (35 characters): the hyphen-slot check names the byte position
+        // and the found character.
+        for &position in &[8usize, 13, 18, 23] {
+            let prefix = &DOC_V7_TEXT[..position];
+            let suffix = &DOC_V7_TEXT[position + 1..];
+            // Drop the last byte to hold 36 bytes total.
+            let text = format!("{}é{}", prefix, &suffix[..suffix.len() - 1]);
+            assert_eq!(text.len(), 36, "{text:?}");
+            assert_eq!(
+                parse_canonical(&text).unwrap_err(),
+                TextError::MissingHyphen {
+                    position,
+                    found: 'é'
+                },
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_at_index_zero_reports_its_own_position() {
+        // The encoding-comparison route (crate accepts uppercase) decodes
+        // the found character rather than casting the raw byte, so the
+        // position-0 uppercase vector is exact even under a future
+        // grammar widening.
+        let text = format!("D{}", &DOC_V7_TEXT[1..]);
+        assert_eq!(
+            parse_canonical(&text).unwrap_err(),
+            TextError::Uppercase {
+                position: 0,
+                found: 'D'
+            }
+        );
     }
 
     #[test]

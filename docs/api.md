@@ -2583,9 +2583,10 @@ variant, where this answers the nibble question unconditionally.
 validation-primitive direction. **The stdlib `uuid.UUID` accepts strictly
 more than this, deliberately not matched here**: it parses braced text
 (`{...}`), the URN prefix (`urn:uuid:...`), hyphen-less hex, and uppercase,
-while `uuid_parse` accepts exactly one grammar — 36 characters, hyphens at
-positions 8/13/18/23 (the 8-4-4-4-12 groups), lowercase hexadecimal
-elsewhere — raising `ValueError` naming the problem, the position
+while `uuid_parse` accepts exactly one grammar — 36 ASCII characters
+(36 bytes), hyphens at positions 8/13/18/23 (the 8-4-4-4-12 groups),
+lowercase hexadecimal elsewhere — raising `ValueError` naming the problem,
+the position
 (0-based), and the accepted form otherwise. A caller using this as a gate
 wants one grammar, the canonical one every producer emits, not the
 stdlib's permissive union; that closed-set strictness is the same contract
@@ -2625,8 +2626,9 @@ tors.uuid_parse(str(u).upper())
 # form deliberately does not)
 ```
 
-GIL model: the bytes spelling borrows the argument zero-copy and the bit
-extraction runs under `py.detach`; the str spelling validates and
+GIL model: the bytes spelling borrows the argument, copies the 16 bytes,
+and the bit extraction (field read) runs detached under `py.detach`; the
+str spelling validates and
 transcodes under the GIL (the whole input is 36 bytes, smaller than the
 call's own marshalling residue — a detached parse would be overhead for
 its own sake) with the extraction detached after it, keeping the crate's

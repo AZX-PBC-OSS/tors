@@ -37,8 +37,9 @@
 //! received type otherwise). `bytes` follows the bytes-in surface's
 //! exactly-`bytes` convention (test_b64.py's TestBytesOnlyArgumentContract
 //! doctrine): `bytearray`/`memoryview` are `TypeError`, not silently
-//! accepted -- the borrow is a zero-copy alias of the immutable buffer,
-//! and writable views would race the detached read. A wrong-length `bytes`
+//! accepted -- the bytes spelling borrows the immutable buffer and copies
+//! the 16 bytes out, and writable views would race the detached field
+//! read. A wrong-length `bytes`
 //! is `ValueError` naming the count (the fixed-width analogue of
 //! `mask must be exactly one character`). A `str` holding lone surrogates
 //! fails the UTF-8 borrow itself (`UnicodeEncodeError`, the chunk_text_iter
@@ -54,8 +55,9 @@ use crate::uuid_impl;
 /// under the GIL: the str spelling validates and transcodes here (the
 /// issue's shape: the whole input is 36 bytes, smaller than the call's own
 /// marshalling residue, so a detached parse would be overhead for its own
-/// sake), the bytes spelling is the zero-copy borrow plus the fixed-width
-/// length check. Anything else is `TypeError` naming what was received.
+/// sake), the bytes spelling borrows the argument, copies the 16 bytes
+/// (`try_into`), and checks the fixed-width length. Anything else is
+/// `TypeError` naming what was received.
 fn uuid16_from_value(value: &Bound<'_, PyAny>) -> PyResult<[u8; 16]> {
     if let Ok(text) = value.cast::<PyString>() {
         let text = text.to_str()?;
