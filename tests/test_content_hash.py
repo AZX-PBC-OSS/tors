@@ -1559,8 +1559,18 @@ class TestProtocolBoundary:
 
     def test_protocol_boundary_limit_minus1_limit_limit_plus1(self) -> None:
         lim = sys.getrecursionlimit()
-        _assert_parity(self._chain_depth(lim - 1))
-        _assert_parity(self._chain_depth(lim))
+        for depth in (lim - 1, lim):
+            obj = self._chain_depth(depth)
+            try:
+                expected = _oracle(obj)
+            except RecursionError:
+                # json's C budget is tighter on <=3.11 (it already raises
+                # at lim-1) while tors counts protocol frames exactly
+                # against sys.getrecursionlimit(): pin tors's side (must
+                # hash) when the oracle cannot reach the boundary.
+                content_hash(obj)
+            else:
+                assert content_hash(obj) == expected
         with pytest.raises(RecursionError):
             content_hash(self._chain_depth(lim + 1))
 
