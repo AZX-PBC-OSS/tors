@@ -186,6 +186,80 @@
 //! of the same data would assert the standard library against itself:
 //! vacuous, and negative value in the wired lists it would have to
 //! occupy.
+//!
+//! # utf16_byte_len: the interop twin (#52)
+//!
+//! `tors.utf16_byte_len(s)` answers `len(s.encode("utf-16-le"))` — the
+//! UTF-16 byte length, 2 bytes per BMP codepoint and 4 per astral
+//! codepoint (the surrogate pair) — without building the 2n `bytes`
+//! object. The maintainer's framing: a util to convert a UTF8/UTF16
+//! python `len()` into bytes for the API, because backend devs need
+//! byte caps for storage AND interop — UTF-16 is the code-unit world of
+//! JavaScript, Java, Windows, and .NET, where column caps
+//! (`NVARCHAR`), wire caps, and size checks count UTF-16 units, and the
+//! Python spelling of the count allocates the whole copy. It ships as
+//! the utf8 twin's sibling in the same binding module: one family, the
+//! "len() to bytes" pair.
+//!
+//! The core is ARITHMETIC over the borrowed UTF-8 view, not a field
+//! read, and the arithmetic is derived rather than table-driven:
+//!
+//! ```text
+//! utf16 bytes = 2 * (#codepoints + #astral codepoints)
+//! ```
+//!
+//! every codepoint is one 2-byte UTF-16 unit, and an astral codepoint is
+//! a 2-unit surrogate pair (4 bytes = 2 + 2 more). Over a valid UTF-8
+//! view both counts are byte classes, no decoding:
+//!
+//! * `#codepoints` is the count of lead bytes — every UTF-8 sequence has
+//!   exactly one lead, and the continuation bytes are exactly
+//!   `0x80..=0xBF`, so `(b & 0xC0) != 0x80` selects the leads;
+//! * `#astral` is the count of bytes `>= 0xF0` — in valid UTF-8 those
+//!   are exactly the 4-byte lead bytes `0xF0..=0xF4` (one per astral
+//!   codepoint; `0xF5..=0xFF` never occur in valid UTF-8), and a 4-byte
+//!   sequence is exactly an astral codepoint (overlong forms are
+//!   invalid UTF-8, which a `&str` rules out by construction).
+//!
+//! One pass, two byte-class predicates, no allocation. The corners the
+//! identity buys: no astral codepoints means exactly `2 * len(s)` in
+//! Python `len()` (the codepoint count) for ALL BMP text — CJK and
+//! combining marks included, where the UTF-8 byte count diverges — and
+//! pure ASCII additionally means `2 *` the UTF-8 byte count; every
+//! answer is even. The identity is proved three ways: against a
+//! `chars()`-based naive count (the per-codepoint spec) in
+//! `utf16_byte_len_tests` below, over a boundary battery and an
+//! EXHAUSTIVE length-<=3 sweep of the boundary alphabet — both sides of
+//! the identity are additive over concatenation, so sweep agreement is
+//! agreement on every input — and against the stdlib oracle
+//! `len(s.encode("utf-16-le"))` Python-side
+//! (tests/test_utf8_byte_len.py, the byte-len family file).
+//!
+//! The cost model is the utf8 twin's exactly (same str-in borrow, same
+//! CPython UTF-8 view cache): ASCII is a zero-copy alias; a non-ASCII
+//! object's first call — the cold-cache case — materializes and caches
+//! the view under the GIL (encode-parity cost; `encode` reads that
+//! cache and never fills it); repeat calls borrow it zero-copy and pay
+//! only this scan, which runs detached (real O(n) work, unlike the
+//! utf8 twin's nominal one-field-read detach — see the wrapper's docs).
+//! Lone surrogates never reach this function either (the borrow raises
+//! first); the stdlib relation there is REFUSAL PARITY with the
+//! replaced expression, not the asymmetry a first draft assumed — the
+//! strict `encode("utf-16-le")` refuses lone surrogates exactly like
+//! the utf-8 codec does, so both twins refuse the same strings their
+//! replaced expressions refuse, the borrow's utf-8-flavored error and
+//! the stdlib's surrogatepass acceptance mode being the two honest
+//! differences (the wrapper's docs and the Python battery pin both).
+//!
+//! No fuzz target for this function either, and the honest version of
+//! the utf8 argument: this core DOES have input-dependent logic (the
+//! two byte-class counts), but its correctness reduces to the UTF-8
+//! well-formedness facts above plus additivity, and the exhaustive
+//! sweep closes exactly that space — every `String` a fuzzer could
+//! build is a concatenation of codepoints from classes the sweep
+//! already enumerated, so a differential target against
+//! `str::encode_utf16` would re-prove a closed theorem at negative
+//! value in the wired lists it would have to occupy.
 
 /// The byte offset of the first live (even-run) occurrence of `needle` in
 /// `haystack` — the first occurrence whose maximal preceding backslash run
@@ -253,6 +327,52 @@ pub fn utf8_byte_len(s: &str) -> usize {
     s.len()
 }
 
+// --- #52: the UTF-16 byte-length interop twin -----------------------------------------
+//
+// The arithmetic core, the utf8 twin's sibling. See the module docs'
+// "utf16_byte_len" section for the derivation (the identity, the two
+// byte classes, the additivity argument behind the exhaustive sweep),
+// the cache trade it inherits from the same str-in borrow, the
+// surrogate divergence, and the no-fuzz rationale; the wrapper in
+// src/py/scan.rs carries the Python-facing contract.
+
+/// The UTF-16 byte length of `s` — 2 bytes per BMP codepoint, 4 per
+/// astral codepoint (the surrogate pair) — the answer
+/// `len(s.encode("utf-16-le"))` computes by allocating and copying the
+/// whole 2n `bytes` object first.
+///
+/// The body is one pass of byte-class arithmetic over the UTF-8 view,
+/// deliberately: the module docs derive the identity
+/// `utf16 bytes = 2 * (#codepoints + #astral)`, where over valid UTF-8
+/// `#codepoints` is the lead-byte count (`(b & 0xC0) != 0x80`) and
+/// `#astral` is the count of 4-byte leads (`b >= 0xF0`, exactly
+/// `0xF0..=0xF4` in valid UTF-8) — no decoding, no allocation, and the
+/// per-byte work is two compares a compiler can classify in vector
+/// width. The identity is proved against the `chars()`-based naive
+/// count over the boundary battery and an exhaustive length-<=3 sweep
+/// (both sides additive over concatenation, so the sweep is exhaustive)
+/// in `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
+///
+/// The cost model is the borrow's, the utf8 twin's exactly (ASCII
+/// zero-copy alias; cold-cache first call materializes-and-caches the
+/// UTF-8 view, encode-parity; repeat calls O(1) borrow plus this scan).
+/// Lone surrogates never reach this function: the borrow raises
+/// `UnicodeEncodeError` first — for this twin REFUSAL PARITY with the
+/// replaced expression (the strict `encode("utf-16-le")` refuses lone
+/// surrogates too; the borrow's utf-8-flavored error and the stdlib's
+/// surrogatepass acceptance mode are the two honest differences — the
+/// wrapper's docs and the Python battery pin both).
+pub fn utf16_byte_len(s: &str) -> usize {
+    // The derivation's two counts in one fused pass: one unit per
+    // codepoint (its lead byte), one more per astral codepoint (its
+    // 4-byte lead) — doubled at the end. See the module docs.
+    let mut units = 0usize;
+    for &b in s.as_bytes() {
+        units += usize::from((b & 0xC0) != 0x80) + usize::from(b >= 0xF0);
+    }
+    2 * units
+}
+
 #[cfg(test)]
 mod utf8_byte_len_tests {
     use super::*;
@@ -307,6 +427,142 @@ mod utf8_byte_len_tests {
         assert_eq!(unit.len(), 32);
         let text = unit.repeat(32_768);
         assert_eq!(utf8_byte_len(&text), 32 * 32_768);
+    }
+}
+
+#[cfg(test)]
+mod utf16_byte_len_tests {
+    use super::*;
+
+    /// The independent oracle: the naive per-codepoint spelling of the
+    /// contract — 2 bytes per BMP codepoint, 4 per astral — one `chars()`
+    /// pass, the spec by definition. Agreement between this and the
+    /// byte-class arithmetic is evidence about the derivation, not a
+    /// shared bug (the Python battery adds the stdlib oracle,
+    /// `len(s.encode("utf-16-le"))`, as the third vote).
+    fn naive_utf16_byte_len(s: &str) -> usize {
+        s.chars()
+            .map(|c| if (c as u32) > 0xFFFF { 4 } else { 2 })
+            .sum()
+    }
+
+    #[test]
+    fn boundary_codepoints_answer_the_unit_table() {
+        // 2 bytes across the whole BMP (every UTF-8 sequence class), 4
+        // above it — including all four 4-byte lead values 0xF0-0xF4,
+        // the rows an astral predicate that caught only 0xF0 would
+        // answer 2 for and fail here.
+        assert_eq!(utf16_byte_len(""), 0);
+        assert_eq!(utf16_byte_len("a"), 2);
+        assert_eq!(utf16_byte_len("\u{7f}"), 2);
+        assert_eq!(utf16_byte_len("\u{80}"), 2);
+        assert_eq!(utf16_byte_len("\u{7ff}"), 2);
+        assert_eq!(utf16_byte_len("\u{800}"), 2);
+        assert_eq!(utf16_byte_len("\u{ffff}"), 2);
+        assert_eq!(utf16_byte_len("\u{10000}"), 4);
+        assert_eq!(utf16_byte_len("\u{40000}"), 4); // 0xF1 lead
+        assert_eq!(utf16_byte_len("\u{80000}"), 4); // 0xF2 lead
+        assert_eq!(utf16_byte_len("\u{c0000}"), 4); // 0xF3 lead
+        assert_eq!(utf16_byte_len("\u{10ffff}"), 4); // 0xF4 lead
+    }
+
+    #[test]
+    fn mixed_content_answers_the_sum_of_its_unit_costs() {
+        assert_eq!(utf16_byte_len("caf\u{e9}"), 8);
+        assert_eq!(utf16_byte_len("\u{6771}\u{4eac}"), 4); // UTF-8 answers 6
+        assert_eq!(utf16_byte_len("\u{1f600}"), 4);
+        assert_eq!(utf16_byte_len("e\u{301}"), 4);
+        assert_eq!(utf16_byte_len("\u{1f468}\u{200d}\u{1f469}"), 4 + 2 + 4);
+        assert_eq!(utf16_byte_len("\u{0}"), 2); // a real NUL: one unit
+    }
+
+    #[test]
+    fn the_derivation_identity_holds_against_the_naive_count() {
+        // The proof battery: every boundary class, dense mixes, and the
+        // scale ladder — the byte-class arithmetic against the
+        // `chars()`-based naive count, the identity the module docs
+        // derive.
+        let rows = [
+            "",
+            "a",
+            "\u{7f}\u{80}\u{7ff}",
+            "\u{800}\u{ffff}\u{6771}",
+            "\u{10000}\u{40000}\u{80000}\u{c0000}\u{10ffff}",
+            "Torque caf\u{e9} \u{6771}\u{4eac} \u{1f600}",
+            "abc\u{e9}\u{1f600}def\u{6771}",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+        ];
+        for row in rows {
+            assert_eq!(utf16_byte_len(row), naive_utf16_byte_len(row), "{row:?}");
+        }
+        let ascii = "k".repeat(1000);
+        assert_eq!(utf16_byte_len(&ascii), naive_utf16_byte_len(&ascii));
+        let cjk = "\u{6771}\u{4eac}".repeat(1000);
+        assert_eq!(utf16_byte_len(&cjk), naive_utf16_byte_len(&cjk));
+        let astral = "\u{1f600}".repeat(1000);
+        assert_eq!(utf16_byte_len(&astral), naive_utf16_byte_len(&astral));
+        // the corners, stated as identities the naive count also gives:
+        // no astral -> 2 per codepoint for ALL BMP text ...
+        assert_eq!(utf16_byte_len(&cjk), 2 * cjk.chars().count());
+        // ... pure ASCII -> additionally 2 per UTF-8 byte ...
+        assert_eq!(utf16_byte_len(&ascii), 2 * ascii.len());
+        // ... and every astral codepoint is the 4-byte pair.
+        assert_eq!(utf16_byte_len(&astral), 4000);
+    }
+
+    #[test]
+    fn the_exhaustive_short_string_sweep_matches_the_naive_count() {
+        // Every string of length <= 3 over the boundary alphabet (one
+        // representative per UTF-8 sequence class, all four 4-byte lead
+        // values, the combining mark, the ZWJ, and a real NUL): both
+        // sides of the identity are additive over concatenation (UTF-16
+        // bytes sum per codepoint; the byte-class counts sum per
+        // codepoint), so agreement here is agreement on EVERY input —
+        // the sweep is the exhaustive proof, not a sample (the Python
+        // battery runs the same sweep against the stdlib oracle).
+        let alphabet = [
+            "a",
+            "\u{7f}",
+            "\u{80}",
+            "\u{7ff}",
+            "\u{800}",
+            "\u{ffff}",
+            "caf\u{e9}",
+            "\u{301}",
+            "\u{200d}",
+            "\u{6771}",
+            "\u{1f600}",
+            "\u{10000}",
+            "\u{40000}",
+            "\u{80000}",
+            "\u{c0000}",
+            "\u{10ffff}",
+            "\u{0}",
+        ];
+        for &a in &alphabet {
+            assert_eq!(utf16_byte_len(a), naive_utf16_byte_len(a));
+            for &b in &alphabet {
+                let mut two = String::from(a);
+                two.push_str(b);
+                assert_eq!(utf16_byte_len(&two), naive_utf16_byte_len(&two));
+                for &c in &alphabet {
+                    let mut three = two.clone();
+                    three.push_str(c);
+                    assert_eq!(utf16_byte_len(&three), naive_utf16_byte_len(&three));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_one_mib_scale_string_answers_its_naive_length() {
+        // The 1 MiB ladder top, utf16 leg: the identity holds at the
+        // scale where the replaced expression allocates the whole UTF-16
+        // copy of the text (two bytes per codepoint over this mix).
+        let unit = "Torque spec, caf\u{e9} \u{6771}\u{4eac} \u{1f600} \u{40000} e\u{301}\u{0}\n\n";
+        let text = unit.repeat(1 + (1024 * 1024) / unit.len());
+        assert!(text.len() >= 1024 * 1024);
+        assert_eq!(utf16_byte_len(&text), naive_utf16_byte_len(&text));
     }
 }
 

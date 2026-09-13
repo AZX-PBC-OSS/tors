@@ -150,3 +150,79 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
     py.detach(|| scan_impl::utf8_byte_len(s))
 }
+
+/// `tors.utf16_byte_len(s)`: the UTF-16 byte length of `s` — 2 bytes per
+/// BMP codepoint, 4 per astral codepoint (the surrogate pair) — the
+/// answer `len(s.encode("utf-16-le"))` computes by allocating and
+/// copying the whole 2n `bytes` object first. The interop twin of
+/// `utf8_byte_len` (the maintainer's "convert a UTF8/UTF16 python
+/// len() into bytes for the API" pair, same binding module): UTF-16 is
+/// the code-unit world of JavaScript, Java, Windows, and .NET —
+/// `String.prototype.length` counts UTF-16 units, and an astral emoji
+/// is length 2 there — so column caps (`NVARCHAR`), wire caps, and
+/// interop size checks in that world are UTF-16 bytes, and the Python
+/// spelling of the count allocates the entire copy to take it.
+///
+/// The implementation is the utf8 twin's borrow plus derived
+/// arithmetic, no FFI: the standard str-in borrow hands the core a
+/// Rust `&str`, and the core derives the answer from its UTF-8 bytes —
+/// `2 * (#codepoints + #astral)`, `#codepoints` the lead-byte count,
+/// `#astral` the count of 4-byte leads (bytes `>= 0xF0`) — one pass,
+/// no allocation, no per-codepoint decoding. The derivation, its
+/// proof against a `chars()`-based naive count, and the exhaustive
+/// boundary sweep are `src/scan_impl.rs`'s; the stdlib-oracle parity
+/// (`len(s.encode("utf-16-le"))` over generated text, every reference
+/// corpus, and the same sweep) is tests/test_utf8_byte_len.py's, the
+/// byte-len family file. The corners the identity buys: no astral
+/// codepoints means exactly `2 * len(s)` for ALL BMP text (CJK and
+/// combining marks included, where the UTF-8 byte count diverges), and
+/// pure ASCII means `2 *` the UTF-8 byte count.
+///
+/// Cost model, the utf8 twin's exactly (same borrow, same CPython
+/// UTF-8 view cache):
+///
+/// * ASCII: the borrow is a zero-copy alias and the scan is one
+///   detached pass — the answer is exactly `2 * len(s)` in UTF-8 bytes.
+/// * Non-ASCII, first call on the object (a cold UTF-8 cache): the
+///   borrow materializes and caches the view under the GIL
+///   (encode-parity cost; `encode` reads that cache and never fills
+///   it), then the scan runs detached.
+/// * Non-ASCII, repeat calls on the same object: an O(1) zero-copy
+///   borrow plus the detached scan — against the expression's full
+///   2n alloc+encode on every call.
+///
+/// **The surrogate lane is REFUSAL PARITY with the replaced expression,
+/// measured and pinned** (a first-draft claim that the stdlib's
+/// utf-16-le encode accepts lone surrogates was wrong — the strict
+/// codec refuses them, and the battery caught it): the exact expression
+/// this function replaces, `len(s.encode("utf-16-le"))`, raises
+/// `UnicodeEncodeError` on the same strings this function refuses —
+/// same reason ("surrogates not allowed"), the utf-8 codec's own
+/// policy. The refusal happens at the str-in borrow every tors function
+/// performs (the crate-wide str-in contract: the borrow must
+/// materialize the object's UTF-8 view before any arithmetic runs), so
+/// the error is the borrow's own and its `.encoding` is `"utf-8"` — the
+/// flavor of the step that actually fails — where the expression's
+/// error says `"utf-16-le"` (and, on a multi-surrogate run, reports
+/// only the first unit; the borrow's error, identical to the utf-8
+/// encode's, names the whole run). The one acceptance path the stdlib
+/// does offer — `errors="surrogatepass"`, one 2-byte unit per lone
+/// surrogate — is a mode tors deliberately does not: no str-argument
+/// tors function can see past the UTF-8 view. Pinned
+/// attribute-for-attribute in tests/test_utf8_byte_len.py.
+///
+/// GIL model: the borrow is the call's GIL-held residue (the
+/// cold-cache first call's materialization — there is no way to fill
+/// an object's cache without the GIL; the `finalize` first-call class),
+/// and the `py.detach` around the core carries REAL work here — the
+/// O(n) byte-class scan, memchr-class, far under the 10 ms heartbeat
+/// floor at 12 MiB (the wall and heartbeat cells carry the numbers) —
+/// where the utf8 twin's detach is nominal around one field read; the
+/// heartbeat cell in tests/test_gil_release.py is ceiling-only like
+/// the twin's. A single `int` return, no marshalling class. No aio
+/// twin: the GIL-held residue is the borrow alone, and the scan
+/// detaches.
+#[pyfunction]
+pub fn utf16_byte_len(py: Python<'_>, s: &str) -> usize {
+    py.detach(|| scan_impl::utf16_byte_len(s))
+}

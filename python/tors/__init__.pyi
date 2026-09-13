@@ -234,6 +234,48 @@ def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
 # is nominal. No aio twin (an O(1)-to-borrow call needs no thread hop).
 def utf8_byte_len(s: str) -> int: ...
 
+# The interop twin (#52, the "len() to bytes" pair's other half): the
+# UTF-16 byte length of a str — 2 bytes per BMP codepoint, 4 per astral
+# codepoint (the surrogate pair) — len(s.encode("utf-16-le")) with the
+# 2n copy taken out. The world that caps in these units: UTF-16 is the
+# code-unit world of JavaScript, Java, Windows, and .NET (an astral
+# emoji is length 2 in JS), so column caps (NVARCHAR), wire caps, and
+# interop size checks there are UTF-16 bytes.
+#
+# Implementation: the utf8 twin's standard str-in borrow (NOT
+# hand-rolled UCS arithmetic, NOT FFI) plus derived arithmetic over the
+# UTF-8 view — 2 * (#codepoints + #astral), both counts byte classes
+# (lead bytes; bytes >= 0xF0) — one pass, no allocation; the corners:
+# no astral codepoints -> exactly 2 * len(s) for ALL BMP text (where
+# the UTF-8 byte count diverges on CJK and combining marks), pure
+# ASCII -> 2 * the UTF-8 byte count, and every answer is even.
+#
+# Cache semantics: the utf8 twin's exactly (same borrow, same
+# CPython-internal UTF-8 view cache): ASCII is a zero-copy alias; a
+# non-ASCII input's FIRST call — exactly the cold-cache case —
+# materializes and caches the view (encode-parity cost, GIL-held; a
+# prior encode does not warm it: encode reads the cache and never fills
+# it); repeat calls borrow zero-copy and pay only the detached
+# byte-class scan.
+#
+# Surrogates: REFUSAL PARITY with the replaced expression, measured —
+# the strict encode("utf-16-le") raises UnicodeEncodeError on lone
+# surrogates exactly like encode("utf-8") ("surrogates not allowed"),
+# so utf16_byte_len refuses the same strings the expression itself
+# refuses. The tors error is the str-in borrow's own (the crate-wide
+# contract, every str-argument tors function's lane): .encoding "utf-8"
+# (the flavor of the step that fails, materializing the UTF-8 view),
+# where the expression's error says "utf-16-le". The stdlib's
+# errors="surrogatepass" mode WOULD encode them (one unit each) — a
+# mode tors deliberately does not offer.
+#
+# GIL note: a single int return (no marshalling class); the GIL-held
+# residue is the borrow (the cold-cache first call's materialization,
+# under the 10ms ping floor at 12 MiB), and the detach carries the
+# real O(n) scan (memchr-class, sub-floor). No aio twin (the residue
+# is the borrow alone; the scan detaches).
+def utf16_byte_len(s: str) -> int: ...
+
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
 # pattern list compiled once (one detached build at construction), then
 # every call is the free function's scan classes minus the per-call

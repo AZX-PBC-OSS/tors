@@ -232,7 +232,19 @@
 //! the core is the borrowed `&str`'s `len()`, one field read. A single
 //! `int` return, no marshalling class, no error path past the borrow's
 //! own `UnicodeEncodeError` on lone surrogates (CPython's error,
-//! `encode`'s exact parity).
+//! `encode`'s exact parity). `utf16_byte_len` (the interop twin, same
+//! module, the "len() to bytes" pair) shares the borrow class exactly —
+//! same cache, same cold-first-call materialization — with one honest
+//! difference on each side of the detach: its core is an O(n) byte-class
+//! scan, so the detach carries real (still memchr-class, sub-floor at
+//! 12 MiB) work rather than the twin's nominal field read, and its
+//! surrogate lane is the same borrow error but PARITY with the replaced
+//! expression rather than the utf-8 twin's parity with `encode` — the
+//! strict `encode("utf-16-le")` refuses lone surrogates too ("surrogates
+//! not allowed"), so both twins refuse exactly the strings their
+//! replaced expressions refuse; the utf-16 expression's error carries
+//! its own codec label where the borrow's says utf-8, and the stdlib's
+//! `surrogatepass` acceptance mode is the one path tors does not offer.
 
 pub mod b64_impl;
 pub mod bm25_impl;
@@ -434,6 +446,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(utf8_byte_len, m)?)?;
+    m.add_function(wrap_pyfunction!(utf16_byte_len, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes_lines, m)?)?;

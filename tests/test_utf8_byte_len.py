@@ -110,21 +110,25 @@ cost, GIL-held; ``encode`` reads that cache and never fills it), and
 repeat calls borrow it zero-copy, with only the byte-class scan left to
 pay.
 
-The surrogate lane DIVERGES from the stdlib, loudly and deliberately:
-for ``utf8_byte_len`` the borrow's error is PARITY (``encode("utf-8")``
-raises the same ``UnicodeEncodeError`` on the same string — pinned
-attribute-for-attribute above), but ``encode("utf-16-le")`` ACCEPTS lone
-surrogates (UTF-16 code units can hold them; each encodes as one unit),
-while ``utf16_byte_len`` refuses the string at the same str-in borrow
-every tors function performs — the crate-wide str-in contract (the
-``finalize``/``fence``/``search`` families' lane), because the borrow
-must materialize the object's UTF-8 view before any arithmetic runs.
-The error is therefore the borrow's own ``UnicodeEncodeError`` with
-``.encoding == "utf-8"`` (not ``"utf-16-le"`` — there is no utf-16-side
-error to mirror), pinned below alongside the stdlib's success on the
-same string, so the asymmetry is stated exactly: for utf-8, ``encode``
-also raises (parity); for utf-16, the stdlib encode succeeds where tors
-raises.
+The surrogate lane is REFUSAL PARITY with the replaced expression,
+measured and pinned (a first-draft claim that the stdlib's utf-16-le
+encode ACCEPTS lone surrogates was wrong — the battery caught it before
+anything shipped): the STRICT ``encode("utf-16-le")`` — the codec of the
+exact expression this function replaces — refuses lone surrogates
+exactly like ``encode("utf-8")`` does ("surrogates not allowed"), so
+tors refuses the same strings the expression itself refuses. The two
+honest observable differences, both pinned below: the tors error is the
+str-in borrow's own — ``.encoding == "utf-8"`` (the borrow materializes
+the object's UTF-8 view before any arithmetic runs, and that is the
+step that fails; the expression's error says ``"utf-16-le"``, and on a
+multi-surrogate run it reports only the first unit where the
+utf-8-flavored error names the whole run) — and the stdlib's
+``errors="surrogatepass"`` mode WOULD encode lone surrogates (one
+2-byte unit each in utf-16-le; the 3-byte WTF-8 spelling in utf-8), an
+escape hatch tors deliberately does not offer: the crate-wide str-in
+contract (the ``finalize``/``fence``/``search`` families' lane — every
+str-argument tors function needs the UTF-8 view, so none has a
+surrogate mode).
 
 Pins in this file: the oracle equality ``utf8_byte_len(s) ==
 len(s.encode("utf-8"))`` over hypothesis-generated text (full Unicode
@@ -141,10 +145,12 @@ the motivating TaskQ byte-cap gate spelled with ``utf8_byte_len``. The
 an exhaustive boundary-alphabet sweep and every reference corpus; the
 hand-computed boundary battery including all four 4-byte lead values;
 the DERIVATION identity (``2 * (len(s) + #astral)``) as a direct pin;
-the evenness of every UTF-16 byte length; the surrogate DIVERGENCE
-(the borrow's ``utf-8``-flavored refusal pinned against the stdlib's
-success on the same string, and against ``utf8_byte_len``'s identical
-error); the same argument contract; the same cache pins; the BMP/ASCII/
+the evenness of every UTF-16 byte length; the surrogate lane's REFUSAL
+PARITY (the borrow's ``utf-8``-flavored error pinned against the
+replaced expression's own refusal — same reason, different codec label
+and span spelling — against ``utf8_byte_len``'s identical error, and
+against the ``surrogatepass`` mode tors does not offer); the same
+argument contract; the same cache pins; the BMP/ASCII/
 astral corners of the arithmetic; and the motivating interop cap gate
 spelled with ``utf16_byte_len``.
 """
@@ -522,9 +528,11 @@ def test_the_scope_and_idempotency_key_pattern_counts_not_copies() -> None:
 # (hand-computed rows cross-checked against the oracle so a wrong hand sum
 # fails loudly), the differential oracle over generated text plus the
 # derivation identity, the exhaustive boundary-alphabet sweep, the reference
-# corpora, the surrogate DIVERGENCE pin (against the stdlib's success and
-# against utf8_byte_len's identical error), the argument contract, the cache
-# pins, the arithmetic corners, and the motivating interop cap gate.
+# corpora, the surrogate REFUSAL-PARITY pin (against the replaced
+# expression's own refusal, against utf8_byte_len's identical error, and
+# against the surrogatepass mode tors does not offer), the argument
+# contract, the cache pins, the arithmetic corners, and the motivating
+# interop cap gate.
 
 
 _UTF16_BOUNDARY_LADDER: list[tuple[str, int]] = [
@@ -551,7 +559,7 @@ _UTF16_CONTENT_ROWS: list[tuple[str, int]] = [
     ("e\u0301", 4),  # a combining mark: two BMP units
     ("\U0001f468\u200d\U0001f469\u200d\U0001f467", 16),  # 3 pairs + 2 ZWJ units
     ("abc\u00e9\U0001f600def\u6771", 20),  # 8 BMP units + 1 pair
-    ("Torque caf\u00e9 \u6771\u4eac \U0001f600", 32),  # 14 BMP + 1 pair
+    ("Torque caf\u00e9 \u6771\u4eac \U0001f600", 34),  # 15 BMP + 1 pair
     ("a" * 100, 200),  # a compact-ASCII run
 ]
 
@@ -724,7 +732,7 @@ def test_utf16_reference_corpora_match_the_oracle_and_the_bmp_corner(
     assert utf16_byte_len(corpus) == 2 * len(corpus)
 
 
-# --- utf16: the surrogate DIVERGENCE from the stdlib --------------------------
+# --- utf16: the surrogate REFUSAL PARITY with the replaced expression -----------
 
 
 _UTF16_SURROGATE_CASES = [
@@ -754,28 +762,33 @@ _UTF16_SURROGATE_IDS = [
 
 
 @pytest.mark.parametrize("text", _UTF16_SURROGATE_CASES, ids=_UTF16_SURROGATE_IDS)
-def test_utf16_lone_surrogates_raise_where_stdlib_utf16_succeeds(text: str) -> None:
-    """The DIVERGENCE pin, both halves on the same string: the stdlib's
-    ``encode("utf-16-le")`` ACCEPTS lone surrogates (UTF-16 code units can
-    hold them — each encodes as one unit), while ``utf16_byte_len``
-    refuses the string at the str-in borrow, exactly like every other
-    str-argument tors function, because the borrow must materialize the
-    object's UTF-8 view before any arithmetic runs. The error is the
-    borrow's own: ``.encoding`` is ``"utf-8"`` (there is no utf-16-side
-    error to mirror), the reason and positions are CPython's, and the
-    ``.object`` is the original str."""
+def test_utf16_lone_surrogates_raise_where_the_replaced_expression_raises(text: str) -> None:
+    """The surrogate lane, pinned as REFUSAL PARITY (measured; a
+    first-draft version of this pin asserted the stdlib's utf-16-le
+    encode ACCEPTS lone surrogates and failed — the strict codec refuses
+    them): ``len(s.encode("utf-16-le"))`` — the exact expression this
+    function replaces — raises ``UnicodeEncodeError`` on the same
+    strings ``utf16_byte_len`` refuses, same reason ("surrogates not
+    allowed"), the utf-8 codec's own policy. tors's error is the str-in
+    borrow's (every str-argument tors function's lane), so
+    ``.encoding`` is ``"utf-8"`` — the flavor of the step that actually
+    fails, materializing the UTF-8 view — while the expression's error
+    says ``"utf-16-le"``; on a multi-surrogate run the utf-16-flavored
+    error reports only the first unit, where the borrow's names the
+    whole run. The stdlib's ``surrogatepass`` mode WOULD encode the
+    string (one 2-byte unit per lone surrogate) — the escape hatch tors
+    deliberately does not offer, pinned for the record."""
     with pytest.raises(UnicodeEncodeError) as exc_info:
         utf16_byte_len(text)
     err = exc_info.value
     assert type(err) is UnicodeEncodeError
-    assert err.encoding == "utf-8"  # the str-in borrow's error, not a utf-16 one
+    assert err.encoding == "utf-8"  # the str-in borrow's error, the utf-8 flavor
     assert err.reason == "surrogates not allowed"
     assert err.object is text
-    assert len(text[err.start : err.end]) == 1  # the offending lone surrogate
-    assert 0xD800 <= ord(text[err.start : err.end]) <= 0xDFFF
-    # The utf-8 twin raises the identical error on the same string: one
-    # shared lane (the borrow), two documented relations to the stdlib —
-    # parity for utf-8 (above), divergence for utf-16 (here).
+    span = text[err.start : err.end]
+    assert span and all(0xD800 <= ord(ch) <= 0xDFFF for ch in span)  # a surrogate run
+    # The utf-8 twin raises the IDENTICAL error on the same string: one
+    # shared lane (the borrow), pinned attribute-for-attribute.
     with pytest.raises(UnicodeEncodeError) as utf8_exc_info:
         utf8_byte_len(text)
     twin = utf8_exc_info.value
@@ -786,10 +799,19 @@ def test_utf16_lone_surrogates_raise_where_stdlib_utf16_succeeds(text: str) -> N
         err.end,
         err.object,
     )
-    # The divergence's other half, pinned: the stdlib utf-16-le encode
-    # SUCCEEDS on the same string, one unit per codepoint (lone surrogates
-    # included) — the exact behavior tors declines to mirror.
-    raw = text.encode("utf-16-le")
+    # The replaced expression's own refusal, same string: the strict
+    # utf-16-le codec raises too — parity in the refusal DECISION, the
+    # codec label (and, on surrogate runs, the span spelling) the only
+    # flavor differences.
+    with pytest.raises(UnicodeEncodeError) as stdlib_exc_info:
+        text.encode("utf-16-le")
+    stdlib_err = stdlib_exc_info.value
+    assert stdlib_err.encoding == "utf-16-le"
+    assert stdlib_err.reason == err.reason
+    assert stdlib_err.object is text
+    # The escape hatch tors does not offer, pinned: surrogatepass encodes
+    # every codepoint — lone surrogates included — as one unit.
+    raw = text.encode("utf-16-le", "surrogatepass")
     assert len(raw) == 2 * len(text)
 
 
@@ -800,10 +822,12 @@ def test_the_utf16_surrogate_error_is_the_borrow_lane_not_a_utf16_error() -> Non
     ``UnicodeEncodeError`` before any tors code runs), NOT a tors-side
     utf-16 validation. The observable consequences pinned: ``.encoding``
     is ``"utf-8"`` and the reported span names the surrogate's CODEPOINT
-    position in the original str (encode's own behavior for the utf-8
-    flavor), so a future wrapper change (catching and re-raising, or a
-    validation pass of our own with utf-16-flavored attributes) cannot
-    silently narrow the lane."""
+    position in the original str — exactly the utf-8 encode's own error
+    on the same string (the borrow's failure IS a utf-8 materialization
+    failure), while the replaced expression's utf-16-le error carries
+    its own codec label; a future wrapper change (catching and
+    re-raising, or a validation pass of our own with utf-16-flavored
+    attributes) cannot silently narrow the lane."""
     text = "prefix \ud800 suffix"
     with pytest.raises(UnicodeEncodeError) as exc_info:
         utf16_byte_len(text)
@@ -811,16 +835,29 @@ def test_the_utf16_surrogate_error_is_the_borrow_lane_not_a_utf16_error() -> Non
     assert err.encoding == "utf-8"
     assert err.object is text
     assert text[err.start : err.end] == "\ud800"
-    # The parity twin for contrast, same string: utf-8's encode raises the
-    # SAME exception (the utf8 function's error is PARITY), utf-16-le's
-    # encode succeeds (the utf16 function's error is DIVERGENCE) — the
-    # asymmetry the docstrings state, pinned as behavior.
-    with pytest.raises(UnicodeEncodeError) as parity_exc_info:
+    # The borrow's error is the utf-8 encode's own, attribute-for-
+    # attribute (same reason, same span) — the step that fails is the
+    # utf-8 materialization, so CPython reports it in utf-8's flavor.
+    with pytest.raises(UnicodeEncodeError) as utf8_exc_info:
         text.encode("utf-8")
-    parity_err = parity_exc_info.value
-    assert (parity_err.encoding, parity_err.reason) == (err.encoding, err.reason)
-    assert (parity_err.start, parity_err.end) == (err.start, err.end)
-    assert text.encode("utf-16-le")  # succeeds: the divergence's other half
+    utf8_err = utf8_exc_info.value
+    assert (utf8_err.encoding, utf8_err.reason, utf8_err.start, utf8_err.end) == (
+        err.encoding,
+        err.reason,
+        err.start,
+        err.end,
+    )
+    # The replaced expression's refusal, same string: same reason and
+    # (single surrogate) the same span, its own codec label the one
+    # difference; and the surrogatepass mode below is the acceptance
+    # path tors does not offer.
+    with pytest.raises(UnicodeEncodeError) as stdlib_exc_info:
+        text.encode("utf-16-le")
+    stdlib_err = stdlib_exc_info.value
+    assert stdlib_err.encoding == "utf-16-le"
+    assert stdlib_err.reason == err.reason
+    assert (stdlib_err.start, stdlib_err.end) == (err.start, err.end)
+    assert len(text.encode("utf-16-le", "surrogatepass")) == 2 * len(text)
 
 
 # --- utf16: the argument contract (the utf8 twin's exactly) --------------------
