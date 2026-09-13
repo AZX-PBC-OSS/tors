@@ -302,7 +302,7 @@ mod tests {
         // included) crossed with every haystack over the same alphabet up
         // to length 7 — 39,348 pairs, the complete small space of
         // run/overlap/adjacency interactions at that size, no sampling.
-        let alphabet = [b'\\', b'u', b'0'];
+        let alphabet = *b"\\u0";
         let mut needles: Vec<Vec<u8>> = Vec::new();
         for &a in &alphabet {
             needles.push(vec![a]);
