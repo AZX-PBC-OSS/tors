@@ -135,6 +135,7 @@ use std::hash::Hasher as _;
 
 use twox_hash::XxHash64;
 
+use crate::segmentation_impl::real_word_segments;
 #[cfg(test)]
 use crate::tokenize_impl::normalized_word_tokens;
 use crate::tokenize_impl::normalized_word_tokens_stream;
@@ -253,9 +254,25 @@ const WIDE_WINDOW_COUNT_FIRST: usize = 1024;
 /// can ever fill one. Returns `min(tokens, limit)` -- callers comparing
 /// against `limit` learn exactly "fewer than `limit`" vs "at least
 /// `limit`" with at most `limit` tokens walked.
+///
+/// Allocation-free by construction: counts `real_word_segments` directly,
+/// never the lowercased `String` stream. The counts are identical because
+/// `str::to_lowercase` maps every non-empty segment to a non-empty token
+/// (char-wise lowercasing never deletes: each input char yields >= 1
+/// output char), so the stream's `!term.is_empty()` filter never fires on
+/// the no-knob path and no token is ever dropped or added. The previous
+/// spelling iterated `normalized_word_tokens_stream` -- ~3M transient
+/// `String` alloc/free cycles on the gate's 13.5MB probe -- which is O(1)
+/// live but peaks RSS on glibc (CI #74: ~570-615MB self peak vs ~29MB on
+/// macOS, where freed arenas return faster); this spelling walks `&str`
+/// slices with zero allocation, so the huge-window short-circuit holds
+/// only the interpreter + input string resident.
 fn token_count_up_to(text: &str, limit: usize) -> usize {
+    if limit == 0 {
+        return 0;
+    }
     let mut n = 0usize;
-    for _ in normalized_word_tokens_stream(text) {
+    for _ in real_word_segments(text) {
         n += 1;
         if n >= limit {
             break;
@@ -640,6 +657,34 @@ mod tests {
         // retention-free when the limit exceeds the stream.
         assert_eq!(token_count_up_to(&text, usize::MAX), 240_000);
         assert_eq!(token_count_up_to(&text, 10), 10);
+    }
+
+    #[test]
+    fn token_count_up_to_matches_the_token_stream() {
+        // The allocation-free rewrite's equivalence pin: counting
+        // `real_word_segments` must equal counting the lowercased stream
+        // (lowercasing never empties, so the stream's empty-filter never
+        // fires). Covers empty/whitespace/case/unicode plus the limit cap.
+        let samples = [
+            "",
+            "   ",
+            "one two three",
+            "Hello, WORLD! one two three",
+            "café société naïve",
+            "a\u{1f}b c",
+            "\u{1f469}\u{200d}\u{1f52c} test",
+        ];
+        for text in samples {
+            let full = normalized_word_tokens_stream(text).count();
+            assert_eq!(token_count_up_to(text, usize::MAX), full, "{text:?}");
+            for limit in [0, 1, 2, 3, 10] {
+                assert_eq!(
+                    token_count_up_to(text, limit),
+                    full.min(limit),
+                    "{text:?} limit={limit}"
+                );
+            }
+        }
     }
 
     #[test]
