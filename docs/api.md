@@ -3317,6 +3317,10 @@ item's FIRST offending position, `None` when every item passes.
   tuple's first field IS the int spelling's answer. The differential
   battery pins it against the reference oracle extended to return the
   detail (tests/test_first_invalid_charset.py).
+- A `== -1` / `!= -1` test ported from the int spelling does not
+  transfer: a tuple never equals `-1`, so an `!= -1` invalidity guard
+  fires on every batch and an `== -1` validity guard never does, both
+  silently. The clean spelling is `is None` / `is not None`.
 
 ```python
 import string

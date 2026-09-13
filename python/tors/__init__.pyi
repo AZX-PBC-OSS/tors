@@ -1010,7 +1010,9 @@ def first_invalid_charset(
 # field empty exactly when the item is. Same engine, same walk, same
 # one-detach batch pass and the same argument contract (byte-identical
 # refusals) as the int spelling; the int answer is the tuple's item
-# index, -1 exactly when the tuple is None. See docs/api.md's
+# index, -1 exactly when the tuple is None. A == -1 test does not
+# transfer from the int spelling (a tuple never equals -1): spell the
+# check is None / is not None. See docs/api.md's
 # "Building rejection messages".
 def first_invalid_offender(
     items: Sequence[str], *, first: str | None = None, rest: str
