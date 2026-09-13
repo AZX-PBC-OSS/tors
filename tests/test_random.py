@@ -1152,24 +1152,74 @@ class TestNoRngStateGuard:
         # published graph's uuid with no children; the lockfile's uuid ->
         # getrandom edge is that dev unification, not the library path.
         import pathlib
+        import re
 
-        import tomllib
-
-        manifest = tomllib.loads(
-            (pathlib.Path(__file__).parent.parent / "Cargo.toml").read_text(encoding="utf-8")
+        cargo_text = (pathlib.Path(__file__).parent.parent / "Cargo.toml").read_text(
+            encoding="utf-8"
         )
-        uuid_dep = manifest["dependencies"]["uuid"]
-        assert uuid_dep.get("default-features") is False
-        for feat in uuid_dep.get("features", []):
-            assert feat not in ("rng", "fast-rng", "v4", "v7"), f"uuid feature: {feat}"
-        rand_dep = manifest["dependencies"]["rand"]
-        assert rand_dep.get("default-features") is False
-        assert "thread-rng" not in rand_dep.get("features", [])
-        assert "fast-rng" not in rand_dep.get("features", [])
-        assert "small_rng" not in rand_dep.get("features", [])
-        dev_uuid = manifest["dev-dependencies"]["uuid"]
-        for feat in dev_uuid.get("features", []):
-            assert feat not in ("fast-rng",), f"dev uuid feature: {feat}"
+        # tomllib is 3.11+; on 3.10 fall back to tomli when present,
+        # else a minimal section-scoped manual parse (keeps the guard
+        # effective on all versions without a new dependency).
+        try:
+            import tomllib as _toml
+        except ModuleNotFoundError:  # Python 3.10: no stdlib tomllib.
+            try:
+                import tomli as _toml  # type: ignore[no-redef]
+            except ModuleNotFoundError:
+                _toml = None  # type: ignore[assignment]
+
+        if _toml is not None:
+            manifest = _toml.loads(cargo_text)
+            uuid_dep = manifest["dependencies"]["uuid"]
+            assert uuid_dep.get("default-features") is False
+            for feat in uuid_dep.get("features", []):
+                assert feat not in ("rng", "fast-rng", "v4", "v7"), f"uuid feature: {feat}"
+            rand_dep = manifest["dependencies"]["rand"]
+            assert rand_dep.get("default-features") is False
+            assert "thread-rng" not in rand_dep.get("features", [])
+            assert "fast-rng" not in rand_dep.get("features", [])
+            assert "small_rng" not in rand_dep.get("features", [])
+            dev_uuid = manifest["dev-dependencies"]["uuid"]
+            for feat in dev_uuid.get("features", []):
+                assert feat not in ("fast-rng",), f"dev uuid feature: {feat}"
+        else:
+
+            def _dep_fields(section: str, name: str) -> tuple[bool | None, list[str]]:
+                current: str | None = None
+                for line in cargo_text.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("[") and stripped.endswith("]"):
+                        current = stripped[1:-1].strip()
+                        continue
+                    if current != section:
+                        continue
+                    m = re.match(rf"{re.escape(name)}\s*=\s*\{{([^}}]*)\}}", stripped)
+                    if not m:
+                        continue
+                    body = m.group(1)
+                    default_features: bool | None = None
+                    dm = re.search(r"default-features\s*=\s*(true|false)", body)
+                    if dm:
+                        default_features = dm.group(1) == "true"
+                    feats: list[str] = []
+                    fm = re.search(r"features\s*=\s*\[([^\]]*)\]", body)
+                    if fm:
+                        feats = re.findall(r'"([^"]+)"', fm.group(1))
+                    return default_features, feats
+                raise AssertionError(f"dependency not found: [{section}] {name}")
+
+            default_features, feats = _dep_fields("dependencies", "uuid")
+            assert default_features is False
+            for feat in feats:
+                assert feat not in ("rng", "fast-rng", "v4", "v7"), f"uuid feature: {feat}"
+            default_features, feats = _dep_fields("dependencies", "rand")
+            assert default_features is False
+            assert "thread-rng" not in feats
+            assert "fast-rng" not in feats
+            assert "small_rng" not in feats
+            _, dev_feats = _dep_fields("dev-dependencies", "uuid")
+            for feat in dev_feats:
+                assert feat not in ("fast-rng",), f"dev uuid feature: {feat}"
 
     def test_os_failures_map_to_runtime_error_in_the_binding(self) -> None:
         # The Os-error half of the mapping contract, pinned as text for

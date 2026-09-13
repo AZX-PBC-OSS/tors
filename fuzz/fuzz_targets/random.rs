@@ -221,13 +221,19 @@ fuzz_target!(|input: Input| {
         "uuid7 timestamp {ts} is not within 5s of now {now}"
     );
 
-    // An impossible length is the catchable Memory error, never an
-    // allocation attempt: 2^62 output characters is past any 64-bit
-    // allocator's reach, so try_reserve refuses without touching the
-    // allocator — safe to assert on every fuzz input, and it pins the
-    // MemoryError corpus shape the Python suite asserts as MemoryError.
+    // An impossible length is the catchable Memory error, never an abort —
+    // via the reserve's CAPACITY check (no allocation attempted, so this is
+    // ASan-safe): 2^61 four-byte chars saturate the worst-case byte product
+    // to 2^63, past isize::MAX, so try_reserve refuses without consulting
+    // the allocator. The 2^62 one-byte-char arm (allocator refusal) lives
+    // only in the non-fuzz unit test
+    // (`an_impossible_length_is_a_memory_error_not_an_abort`): under ASan
+    // the fuzz build sets allocator_may_return_null=0 and aborts requests
+    // over ~1TB (max 0x10000000000), so a 2^62-byte try_reserve aborts
+    // instead of returning null. This arm pins the same MemoryError
+    // corpus shape the Python suite asserts as MemoryError.
     assert!(matches!(
-        random_impl::random_string(1 << 62, "ab", seed),
+        random_impl::random_string(1 << 61, "\u{1F600}", seed),
         Err(RandomError::Memory(_))
     ));
 
