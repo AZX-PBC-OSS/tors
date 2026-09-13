@@ -742,9 +742,11 @@ the whole memmem scan plus the per-hit parity walk under one `py.detach`, and
 `bool`/`int` returns, so there is no marshalling class at all and no error path
 past the empty-needle `ValueError` (raised under the GIL, before the detach).
 The 12 MiB pass sits well under the 10 ms heartbeat floor (memchr-class;
-measured 0.25 ms no-match and 0.79 ms over a 72,520-rejected-hit false-positive
-corpus), so the heartbeat cells are ceiling-only. No aio twin: a sub-millisecond
-call needs no thread hop.
+≈0.26 ms no-match and ≈0.70 ms over a 72,520-rejected-hit false-positive
+corpus — box- and load-dependent figures from the wall cells in
+tests/test_unescaped_scan.py, same order as the ≈0.25/≈0.79 ms inline
+band in tests/test_gil_release.py), so the heartbeat cells are
+ceiling-only. No aio twin: a sub-millisecond call needs no thread hop.
 
 ## `tors.CompiledPatterns`
 

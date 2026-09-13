@@ -168,6 +168,15 @@ _GOLDEN_PARITY_CASES: list[tuple[bytes, bytes, int]] = _RUN_LADDER + [
     (_NUL_ESCAPE, _NUL_ESCAPE, 0),
     (b"\\u00", _NUL_ESCAPE, -1),
     (b"plain text, no escapes here", _NUL_ESCAPE, -1),
+    # Buffer-end shapes: the needle live at the very end (run 2, even, hit
+    # at 2, no tail past the match) and the rejected-at-end shape (run 1,
+    # odd, -1 with no tail to walk past — the scan must not read past the
+    # buffer nor invent a tail hit).
+    (b"\\" * 2 + _NUL_ESCAPE, _NUL_ESCAPE, 2),
+    (b"\\" + _NUL_ESCAPE, _NUL_ESCAPE, -1),
+    # Adjacent live-live: two live occurrences back to back answer the
+    # FIRST, not the last.
+    (_NUL_ESCAPE + _NUL_ESCAPE, _NUL_ESCAPE, 0),
 ]
 
 _GOLDEN_PARITY_IDS = _RUN_LADDER_IDS + [
@@ -182,6 +191,9 @@ _GOLDEN_PARITY_IDS = _RUN_LADDER_IDS + [
     "needle-is-the-whole-haystack",
     "needle-longer-than-haystack",
     "no-occurrence",
+    "live-at-buffer-end-no-tail",
+    "rejected-at-buffer-end-no-tail",
+    "adjacent-live-live-answers-first",
 ]
 
 
@@ -496,8 +508,8 @@ def test_every_needle_over_a_tiny_alphabet_matches_the_reference() -> None:
     """The deterministic sweep (the suite's exhaustive-small-alphabet idiom):
     every needle of 1-2 bytes over ``{b"\\", b"u", b"0"}`` (12 needles,
     self-overlapping ones like ``b"\\\\"`` and ``b"00"`` included) crossed
-    with every haystack over the same alphabet up to length 7 (3,279
-    haystacks): 39,348 pairs, the complete small space of run/overlap/
+    with every haystack over the same alphabet up to length 7 (3,280
+    haystacks): 39,360 pairs, the complete small space of run/overlap/
     adjacency interactions at that size, no sampling at all."""
     alphabet = (b"\\", b"u", b"0")
     needles: list[bytes] = []

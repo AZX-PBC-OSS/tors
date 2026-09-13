@@ -36,8 +36,10 @@ otherwise use:
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
 - `find_unescaped`/`contains_unescaped`: the escape-parity scan answers "is
   this `\u0000` a real NUL or the literal text?" straight from raw serialized
-  JSON in one detached pass — measured 0.25 ms at 12 MiB with no occurrence
-  and 0.79 ms over a 72,520-rejected-hit false-positive corpus, where the
+  JSON in one detached pass — ≈0.26 ms at 12 MiB with no occurrence
+  and ≈0.70 ms over a 72,520-rejected-hit false-positive corpus (box- and
+  load-dependent; the wall cells in tests/test_unescaped_scan.py, same
+  order as the inline band in tests/test_gil_release.py), where the
   hand-rolled find-and-count-backslashes loop it replaces takes 13 ms (and
   the confirm-by-re-parse guard the algorithm was lifted from pays a full
   parse plus a recursive walk per prefilter hit).

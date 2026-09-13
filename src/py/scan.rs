@@ -80,5 +80,7 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
     refuse_empty_needle(needle)?;
     Ok(py
         .detach(|| scan_impl::find_unescaped(haystack, needle))
-        .map_or(-1, |hit| hit as isize))
+        .map_or(-1, |hit| {
+            isize::try_from(hit).expect("haystack offset fits in isize")
+        }))
 }

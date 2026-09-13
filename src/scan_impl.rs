@@ -86,11 +86,13 @@
 //!   walk and this walk take the same steps on every input, and the
 //!   carried start's join branch never fired past the first hit, where
 //!   it answered `0` — what the walk's own `run_back` already held.
-//!   Verified before the removal: 460,639 exhaustive instrumented pairs
-//!   over tiny alphabets (zero join firings past the first hit, zero
-//!   re-walks, the two loops step-for-step identical) and a
-//!   2,082,050-pair adversarial differential sweep on top of the
-//!   suite's own net.
+//!   Verified before the removal by an instrumented differential over the
+//!   exhaustive small-alphabet sweep plus a backslash-dense adversarial
+//!   sweep (zero join firings past the first hit, zero re-walks, the two
+//!   loops step-for-step identical); the linear-walk bound itself is pinned
+//!   reproducibly by `backward_walk_budget_is_linear` below (total backward
+//!   steps <= haystack length over the long-run and many-hit shapes), so no
+//!   historical pair count is load-bearing here.
 //!
 //! # Preconditions (enforced by the wrapper before this runs)
 //!
@@ -123,6 +125,7 @@
 /// haystack is walked backward at most once across the whole scan (the
 /// module docs' cost argument).
 pub fn find_unescaped(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    assert!(!needle.is_empty(), "empty needle");
     let finder = memchr::memmem::Finder::new(needle);
     // `from` is the next occurrence search's origin: 0, then one byte
     // past each rejected hit — the resume rule that keeps self-overlapping
@@ -302,8 +305,12 @@ mod tests {
         // The exhaustive sweep, the Python suite's tiny-alphabet idiom:
         // every 1-2 byte needle over {\\, u, 0} (self-overlapping ones
         // included) crossed with every haystack over the same alphabet up
-        // to length 7 — 39,348 pairs, the complete small space of
-        // run/overlap/adjacency interactions at that size, no sampling.
+        // to length 7 — 39,360 pairs (12 needles x 3,280 haystacks), the
+        // complete small space of run/overlap/adjacency interactions at
+        // that size, no sampling. Level-by-level: each length built once
+        // from the previous length's snapshot, so every haystack occurs
+        // exactly once (a cumulative extend-from-all would duplicate short
+        // haystacks into 16,384 entries for the same 3,280 distinct).
         let alphabet = *b"\\u0";
         let mut needles: Vec<Vec<u8>> = Vec::new();
         for &a in &alphabet {
@@ -313,17 +320,20 @@ mod tests {
             }
         }
         let mut haystacks: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut level: Vec<Vec<u8>> = vec![Vec::new()];
         for _ in 0..7 {
             let mut next = Vec::new();
-            for base in &haystacks {
+            for base in &level {
                 for &c in &alphabet {
                     let mut extended = base.clone();
                     extended.push(c);
                     next.push(extended);
                 }
             }
-            haystacks.extend(next);
+            haystacks.extend(next.iter().cloned());
+            level = next;
         }
+        assert_eq!(haystacks.len(), 3_280);
         for needle in &needles {
             for haystack in &haystacks {
                 assert_eq!(
@@ -333,5 +343,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "empty needle")]
+    fn empty_needle_is_a_core_precondition_violation() {
+        // The pub core (`pub mod scan_impl` in lib.rs) enforces the
+        // non-empty-needle precondition itself; the pyo3 wrapper's
+        // ValueError is the Python spelling of the same refusal.
+        let _ = find_unescaped(b"haystack", b"");
+    }
+
+    #[test]
+    fn buffer_end_and_adjacent_live_shapes() {
+        // Buffer-end goldens: the needle live at the very end (run 2,
+        // even, hit at 2, no tail past the match) and the rejected-at-end
+        // shape (run 1, odd, -1 with no tail to walk past).
+        assert_eq!(
+            find_unescaped(&[b"\\\\", NUL_ESCAPE].concat(), NUL_ESCAPE),
+            Some(2)
+        );
+        assert_eq!(
+            find_unescaped(&[b"\\", NUL_ESCAPE].concat(), NUL_ESCAPE),
+            None
+        );
+        // Adjacent live-live: two live occurrences back to back answer the
+        // FIRST, not the last.
+        assert_eq!(
+            find_unescaped(&[NUL_ESCAPE, NUL_ESCAPE].concat(), NUL_ESCAPE),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn backward_walk_budget_is_linear() {
+        // The runs-are-disjoint cost proof, reproducibly: instrument the
+        // same walk the core runs and assert total backward steps <=
+        // haystack length over the long-run shape and the 10k-rejected
+        // shape. Every walk stays inside its own maximal backslash run
+        // and at most one hit per run walks, so no byte is walked twice.
+        fn counted(haystack: &[u8], needle: &[u8]) -> (Option<usize>, usize) {
+            let finder = memchr::memmem::Finder::new(needle);
+            let mut from = 0;
+            let mut steps = 0usize;
+            while let Some(rel) = finder.find(&haystack[from..]) {
+                let hit = from + rel;
+                let mut run_back = hit;
+                while run_back > 0 && haystack[run_back - 1] == b'\\' {
+                    run_back -= 1;
+                    steps += 1;
+                }
+                if (hit - run_back).is_multiple_of(2) {
+                    return (Some(hit), steps);
+                }
+                from = hit + 1;
+            }
+            (None, steps)
+        }
+        let mut run_then_needle = vec![b'\\'; 100_000];
+        run_then_needle.extend_from_slice(NUL_ESCAPE);
+        let (got, steps) = counted(&run_then_needle, NUL_ESCAPE);
+        assert_eq!(got, Some(100_000));
+        assert!(
+            steps <= run_then_needle.len(),
+            "walked {steps} steps over {} bytes",
+            run_then_needle.len()
+        );
+        let corpus = [b"\\", NUL_ESCAPE].concat().repeat(10_000);
+        let (got, steps) = counted(&corpus, NUL_ESCAPE);
+        assert_eq!(got, None);
+        assert!(
+            steps <= corpus.len(),
+            "walked {steps} steps over {} bytes",
+            corpus.len()
+        );
     }
 }
