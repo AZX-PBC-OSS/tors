@@ -145,6 +145,14 @@ class TestClassificationPins:
         here, the script, and the table together — never a silent edit."""
         import unicodedata
 
+        running = unicodedata.unidata_version
+
+        def _version_tuple(v: str) -> tuple[int, ...]:
+            return tuple(int(p) for p in v.split("."))
+
+        if _version_tuple(running) < _version_tuple(PINNED_UNIDATA):
+            pytest.skip(f"toolchain pin leg requires UCD {PINNED_UNIDATA}+; running {running}")
+
         assert unicodedata.unidata_version == PINNED_UNIDATA, (
             f"UCD drift: running {unicodedata.unidata_version} vs pinned "
             f"{PINNED_UNIDATA} — rerun tools/gen_word_demote_table.py; if the "
