@@ -44,6 +44,17 @@
 //! pinned, the same discipline `replace_many`'s order-freedom argument
 //! inverts.
 //!
+//! > [!WARNING]
+//! > The default chain can leave a credential fragment by design:
+//! > `pg://u:p\nDETAIL:x@h')` scrubs to `pg://u:p')` (the DETAIL deletion
+//! > eats the `@`, the userinfo mask then has nothing to anchor on). Kept
+//! > for byte-identity with the consumer chain
+//! > (`src/taskq/obs/_redact_exc.py::_scrub_text`); do NOT reorder to
+//! > "fix" it. Safe pattern when credential removal outranks DETAIL
+//! > parity: run `uri_userinfo` separately (it gives `pg://u:***@h')`
+//! > here), trading the chain's parity for the mask, visibly at the call
+//! > site.
+//!
 //! The passes never rescan their own output (`re.sub`'s no-cascade
 //! semantics) and only allocate when they fire, so the crate-wide `Cow`
 //! identity convention holds one level up: `tors.scrub_log_text(s, rules)`
@@ -756,7 +767,13 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
         if !nonempty || !text[end..].starts_with('@') {
             // No `@` in (colon, end): any anchor starting before `end`
             // would hit the same terminator first (passwords cannot cross
-            // whitespace), so it cannot match either — skip them.
+            // whitespace), so it cannot match either — skip them. Lemma: a
+            // skipped anchor's colon lies at or after this anchor's colon
+            // because the username class excludes `:` and `/`, so no second
+            // `://` can start inside the username before its colon.
+            // debug_assert below documents the bound the skip relies on:
+            // the failed tail end never precedes its colon.
+            debug_assert!(end >= colon + 1);
             fail_end = fail_end.max(end);
             continue;
         }
@@ -919,11 +936,12 @@ mod tests {
 
     #[test]
     fn space_table_exhaustive_definition_holds() {
-        // The definition exhaustive over 0..0x110000: is_python_space is
-        // exactly White_Space + U+001C..U+001F. Tautological against the
-        // definition by construction — its job is to fail if a future edit
-        // touches the definition without updating the seam docs and the
-        // Python-side exhaustive re-vs-isspace pin.
+        // Definition self-check over 0..0x110000, not UCD coverage: it is
+        // tautological against the definition by construction — its job is
+        // only to fail if a future edit touches the definition without
+        // updating the seam docs. UCD coverage lives in the split-out pins:
+        // the Python-side exhaustive re-vs-isspace pin and the
+        // file-separator spot checks (both directions of the seam).
         for cp in 0..=0x10FFFFu32 {
             let Some(c) = char::from_u32(cp) else {
                 continue;
@@ -1040,6 +1058,11 @@ mod tests {
         );
         // A scheme inside the password is masked with it.
         assert_eq!(scrub("a://u:p://q@h", RuleSet::ALL), "a://u:***@h");
+        // Uppercase/IP/port shape: host grammar is untouched by the mask.
+        assert_eq!(
+            scrub("http://u:p@192.168.1.1:8080/x", RuleSet::ALL),
+            "http://u:***@192.168.1.1:8080/x"
+        );
     }
 
     #[test]
@@ -1060,6 +1083,17 @@ mod tests {
         );
         for text in ["?Password=x&passwords=y&pwd=", "?password=&x=1"] {
             assert_eq!(scrub(text, RuleSet::ALL), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn param_names_are_prefix_free() {
+        for (i, a) in PARAM_NAMES.iter().enumerate() {
+            for (j, b) in PARAM_NAMES.iter().enumerate() {
+                if i != j {
+                    assert!(!b.starts_with(a), "{a:?} is a prefix of {b:?}");
+                }
+            }
         }
     }
 

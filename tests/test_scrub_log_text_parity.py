@@ -159,7 +159,10 @@ class TestClassificationPins:
                 timeout=10,
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError) as exc:
-            pytest.skip(f"rustc not available: {exc}")
+            # The pin leg guarantees rustc (the regen recipe needs it), so a
+            # missing toolchain is a failure, not a skip: skipping would
+            # silently waive the tripwire this test exists to enforce.
+            pytest.fail(f"rustc not available on the pin leg: {exc}")
             return
         assert PINNED_RUSTC in out, (
             f"rustc drift: {out!r} vs pinned {PINNED_RUSTC} — rerun "
@@ -268,6 +271,7 @@ _CORPUS: list[str] = [
     "://u:pw@h",
     "a://:pw@h",
     "HTTP://U:PW@H",
+    "http://u:p@192.168.1.1:8080/x",
     "a+b-c.d1://u:pw@h",
     "mailto:user:pass@host",
     "scheme://user:pa?password=zz@host",
@@ -578,7 +582,12 @@ class TestExhaustiveSweep:
 # --- the timing-lane wall cell: the needle-chain linearity contract ---------------------
 
 
-def _min_wall_ms(op, samples: int = 3, warmup: int = 1) -> float:
+def _min_wall_ms(op, samples: int = 7, warmup: int = 1) -> float:
+    # Min-of-7 like _FAST_CELL_SAMPLES in tests/test_performance.py: the
+    # 60ms ceilings below sit ~60-140x above the measured linear band, but a
+    # min-of-3 can still flake under scheduler load on short samples, and a
+    # debug (maturin-develop) build runs an order of magnitude slower than
+    # release — run timing cells in release, compare min-of-7 to the ceiling.
     for _ in range(warmup):
         op()
     best = float("inf")
@@ -595,7 +604,7 @@ def test_scrub_escaped_needle_chain_wall_stays_linear_on_the_ws_run_shape() -> N
     worst shape of the needle-chain lane above (3,200 ``\\nDETAIL:`` needles
     sharing one line, then a 200k trailing-whitespace run) scrubs inside
     60ms. Derivation: the memoized pass is linear and measures ~0.4ms on
-    this box (min-of-3), so 60ms is a ~140x sanity margin that only a
+    this box (min-of-7, release), so 60ms is a ~140x sanity margin that only a
     complexity regression can reach — the shape is the red-team P1 repro
     whose PRE-fix cost was ~350ms here (per-needle line-state
     recomputation, O(K*M) on exactly this input), so a return to the

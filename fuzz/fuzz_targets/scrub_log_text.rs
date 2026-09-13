@@ -74,6 +74,16 @@ fuzz_target!(|s: &str| {
             "?password=***&x=1"
         }
     );
+    // All four names, not just `password=`: the alternation's other arms.
+    for name in ["passphrase", "passwd", "pwd"] {
+        let named_in = format!("?{name}={payload}&x=1");
+        let named_want = if payload.is_empty() {
+            format!("?{name}=&x=1")
+        } else {
+            format!("?{name}=***&x=1")
+        };
+        assert_eq!(scrub_log_text(&named_in, RuleSet::ALL).as_ref(), named_want);
+    }
     let detail_payload = s.replace('\n', "");
     let detail_in = format!("x\nDETAIL:{detail_payload}\ny");
     assert_eq!(scrub_log_text(&detail_in, RuleSet::ALL).as_ref(), "x\n\ny");

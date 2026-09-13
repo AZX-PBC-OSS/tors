@@ -163,6 +163,9 @@ class TestUriUserinfo:
     def test_scheme_grammar_letters_digits_plus_dot_dash(self) -> None:
         assert scrub_log_text("DB+sql-x.9://u:pw@h") == "DB+sql-x.9://u:***@h"
 
+    def test_uppercase_ip_port_shape_masks_too(self) -> None:
+        assert scrub_log_text("http://u:p@192.168.1.1:8080/x") == "http://u:***@192.168.1.1:8080/x"
+
     def test_a_run_starting_with_a_digit_has_no_letter_start(self) -> None:
         text = "1st://u:pw@h"
         assert scrub_log_text(text) is text

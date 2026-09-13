@@ -157,13 +157,24 @@ Three rules, one closed set:
 `pg_detail_lines` → `uri_userinfo` → `uri_query_creds`, each rule a whole
 pass over the current text before the next begins (a DETAIL deletion can
 eat the `@` a userinfo mask anchors on — rule interaction is why the order
-is a contract, not a caller choice). Ordering warning: the full chain can
-leave a credential fragment by design — `scrub("pg://u:p\\nDETAIL:x@h')")`
-is `"pg://u:p')"` (the DETAIL deletion eats the `@`, the userinfo mask
-then has nothing to anchor on, the password `p` survives). The order is
-kept for byte-identity with the chain; do NOT reorder to "fix" the
-fragment (each rule alone still masks: `uri_userinfo` gives
-`"pg://u:***@h')"`). `rules=[]` is the identity; duplicates
+is a contract, not a caller choice).
+
+> [!WARNING]
+> The default chain can leave a credential fragment by design:
+> `scrub("pg://u:p\\nDETAIL:x@h')")` is `"pg://u:p')"` (the DETAIL deletion
+> eats the `@`, the userinfo mask then has nothing to anchor on, the
+> password `p` survives). The order is kept for byte-identity with the
+> consumer chain (`src/taskq/obs/_redact_exc.py::_scrub_text`, the scrub a
+> worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of
+> it reaches a log line, a span, or an exported attribute — up to four
+> passes per text, ~24 per failed job across its message/traceback/span
+> texts); do NOT reorder to "fix" the fragment. Safe pattern when
+> credential removal outranks DETAIL parity: run `uri_userinfo` separately
+> (e.g. `scrub_log_text(text, ["uri_userinfo"])`, which gives
+> `"pg://u:***@h')"` here) — trading the chain's DETAIL parity for the
+> mask, deliberately and visibly at the call site.
+
+`rules=[]` is the identity; duplicates
 dedupe and caller order is irrelevant; an unknown name raises `ValueError`
 naming the accepted set. A pass never rescans its own output.
 

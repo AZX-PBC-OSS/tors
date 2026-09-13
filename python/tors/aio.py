@@ -22,7 +22,11 @@ batch pipeline, and the input-scaling text/byte pipeline codecs
 ``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``); each a single native pass
 whose cost scales with its input (``scrub_log_text``: four linear scans +
 splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
-document. Every other tors function keeps exactly one spelling
+document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
+are KiB-scale (a single message/traceback scrubs in microseconds, well
+under the hop cost — prefer the sync spelling there); its ``aio`` twin is
+for MB-scale aggregates only (batched logs, multi-MB exception corpora),
+where the hop is noise next to the pass. Every other tors function keeps exactly one spelling
 (the sync one); call it directly from a coroutine when the input is
 small; a synchronous call that finishes in microseconds does not need
 asyncio at all, and wrapping it here would be lying about a cost that

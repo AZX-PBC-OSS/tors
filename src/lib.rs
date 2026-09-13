@@ -214,7 +214,9 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
-//! The scrub surface (`scrub_log_text`) adds no residue class: it is
+//! The scrub surface (`scrub_impl::scrub_log_text`, the `tors.scrub_log_text`
+//! named-rule port of the consumer chain
+//! `src/taskq/obs/_redact_exc.py::_scrub_text`) adds no residue class: it is
 //! `detached_transform`'s shape over a multi-pass core. The argument
 //! borrow plus the O(rules) name walk (the standard str-in borrow class,
 //! three handles at most) and the ValueError construction on a bad name
@@ -224,8 +226,10 @@
 //! marshalling on the fired lane, and nothing at all on the identity lane
 //! (no rule fired: the original object comes back). The surface it
 //! replaces is the worst GIL-tax offender in its consumer's error path
-//! (`re.sub` never releases the GIL; up to four passes per text and up to
-//! ~24 passes per failed job, all on the event loop), which is the whole
+//! (`re.sub` never releases the GIL; four passes per text — the two DETAIL
+//! segmenters plus the two URI masks — times ~6 texts per failed job
+//! (`str(exc)`/`repr(exc)`/rendered traceback/span attributes: up to ~24
+//! passes, all on the event loop), which is the whole
 //! case for the port: measured bands in `tests/test_gil_release.py` and
 //! `tests/test_performance.py`.
 //!
