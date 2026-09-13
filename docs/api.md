@@ -2483,14 +2483,20 @@ hashlib.sha256(
 ).hexdigest()
 ```
 
-`tors.content_hash(obj)` returns that string, byte-identical, pinned
+`tors.content_hash(obj)` returns that string, byte-identical — for
+surrogate-free input where `json.dumps` succeeds; where `json.dumps`
+rejects (mixed unsortable keys, over-limit ints, circular references) both
+sides raise the same exception type, and lone-surrogate `str` input is the
+documented exclusion below — pinned
 differentially against the oracle over every contract below
 (`tests/test_content_hash.py`) and literal-pinned at the byte level
 crate-side (`src/canon_impl.rs`). Deterministic by construction: any dict
 key order yields the same hash, and an equal-value `list` and `tuple`
 hash identically (tuples serialize as lists, recursively).
 
-**The type contract.** Leaves: `str`, `int` (arbitrary precision), `float`,
+**The type contract.** Leaves: `str` (lone-surrogate strings excluded —
+they raise `UnicodeEncodeError` where `json.dumps` succeeds, the
+documented divergence below), `int` (arbitrary precision), `float`,
 `bool`, `None`. Containers: `list`, `tuple`, `dict`. Anything else raises
 `TypeError` naming the type (`set`, `frozenset`, `bytes`, `bytearray`,
 custom classes, plain `Enum`, views, iterators alike). Circular references
@@ -2549,25 +2555,44 @@ hash is `sha2`, the hex is `const_hex`, and every float/int spelling is
 Python's own.
 
 **The surrogate divergence (documented, pinned).** A `str` holding lone
-surrogates — value or key — raises `UnicodeEncodeError` ("surrogates not
-allowed") from the standard str borrow, the crate-wide boundary every
-str-in surface here documents, where `json.dumps` ACCEPTS lone surrogates
-(it emits `\udXXX` escapes for them). Real astral text (valid surrogate
-pairs) hashes with full parity. The other divergence lane: the walk is
-iterative, so tors accepts nesting deeper than `json.dumps`, which
-`RecursionError`s at an interpreter-version-dependent depth.
+surrogates — value or key, exact or subclass — raises `UnicodeEncodeError`
+("surrogates not allowed") from the standard str borrow, the crate-wide
+boundary every str-in surface here documents, where `json.dumps` ACCEPTS
+lone surrogates (it emits `\udXXX` escapes for them). Real astral text
+(valid surrogate pairs) hashes with full parity. The other divergence
+lanes: the walk is iterative, so tors accepts nesting deeper than
+`json.dumps`, which `RecursionError`s at an interpreter-version-dependent
+depth — bounded by the untrusted-input ceiling (`MAX_TOTAL_DEPTH`
+150k total frames exact+protocol, `MAX_WALK_NODES` 2M visited objects;
+100k exact levels hash, 200k raises `RecursionError`); and mixed
+exact+protocol interleavings diverge by construction (json counts every
+container against one C budget, tors counts only protocol frames against
+the interpreter budget), pinned as a documented divergence, not parity.
+
+**Subclass hooks run to completion under the GIL.** A dict subclass's
+`.items()` and a list/tuple subclass's `__iter__` are pulled to completion
+before the child walk begins; a hook yielding an unbounded stream aborts
+at `MAX_PROTOCOL_ITEMS` (1M pulled items per container) with `ValueError`,
+bounded never infinite. Treat `content_hash` as trusted-input-only for
+subclass instances with attacker-controlled hooks — the same posture
+`json.dumps` itself has.
 
 **GIL model.** The object walk and the leaf spellings run under the GIL
 (the standard arg-walk class scaled to an object, O(tree): one borrow
 plus copy per str, one i64 read per int, one `repr` call per float); the
-canonical-form emission and the SHA-256 run under one `py.detach`,
-streaming into the hasher. At 12 MiB of the records corpus the walk's
+canonical-form emission, the SHA-256, AND the owned tree's teardown run
+under one `py.detach` (the tree moves into the detached closure, so no
+deep-tree `Drop` tail holds the GIL after the digest), streaming into the
+hasher. At 12 MiB of the records corpus the walk's
 worst heartbeat gap measured 23-32ms of 42-60ms walls (the stdlib
 spelling holds ~the whole wall: ratio 1.00 inline vs tors's 0.45-0.60;
 `tests/test_gil_release.py`), and the wall race with the full stdlib
 expression is a measured dead heat at 64 KiB-12 MiB
 (`tests/test_performance.py`): the value is the GIL release and the
-parity guarantees, not raw speed over the C encoder.
+parity guarantees, not raw speed over the C encoder. At 1 MiB the wall
+stays within 1.5x the stdlib expression (`tests/test_content_hash.py`'s
+wall-ceiling pin); the exotic-key delegated sort (`list.sort` over live
+objects) is the known slow lane versus the str/int fast paths.
 
 ```python
 a = {"title": "Q3 outage report", "severity": "high", "tags": ["grid", "north"]}

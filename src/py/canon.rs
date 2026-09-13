@@ -17,13 +17,33 @@
 //! the work) already run detached, so the release covers the byte-heavy
 //! half of the call.
 //!
+//! SUBCLASS HOOKS RUN TO COMPLETION UNDER THE GIL: a dict subclass's
+//! `.items()` and a list/tuple subclass's `__iter__` are interpreter calls
+//! the walk must drive to completion before the child walk begins. A hook
+//! yielding an unbounded stream therefore holds the GIL until the
+//! per-container materialization cap (`MAX_PROTOCOL_ITEMS`) aborts it with
+//! `ValueError` -- bounded, never silent, never infinite. Treat
+//! `content_hash` as trusted-input-only for subclass instances with
+//! attacker-controlled hooks, the same posture `json.dumps` itself has
+//! (it materializes unboundedly and would spin forever).
+//!
+//! UNTRUSTED-INPUT CEILING: exact containers nest without consulting the
+//! interpreter's recursion budget, so the walk enforces its own total cap
+//! (`MAX_TOTAL_DEPTH` open frames, exact+protocol, plus `MAX_WALK_NODES`
+//! visited objects). Past either cap the walk raises `RecursionError`
+//! (depth) or `ValueError` (node count) instead of growing the owned tree
+//! without bound. The documented deep-nesting superset lives INSIDE the
+//! ceiling (100k exact levels hash; 200k raises); size the caps for the
+//! caller's threat model before hashing adversarial input.
+//!
 //! The walk is ITERATIVE (an explicit frame stack), not recursive: depth
 //! costs heap, never the call stack, so any tree the interpreter can hold
-//! walks clean for EXACT containers (json.dumps itself `RecursionError`s
-//! on deep trees at a version-dependent depth -- a documented divergence
-//! lane: tors accepts deeper input than the stdlib spelling,
-//! deterministically). The subclass lane is capped instead, at json's
-//! own failure boundary for it (the runaway guard, below).
+//! walks clean for EXACT containers up to the ceiling above (json.dumps
+//! itself `RecursionError`s on deep trees at a version-dependent depth --
+//! a documented divergence lane: tors accepts deeper input than the stdlib
+//! spelling, deterministically, within its cap). The subclass lane is
+//! capped instead, at json's own failure boundary for it (the runaway
+//! guard, below).
 //!
 //! # Subclass containers: json.dumps's own protocol iteration
 //!
@@ -69,15 +89,28 @@
 //! forever instead. The guard: PROTOCOL frames (subclass containers
 //! only) are counted against `sys.getrecursionlimit()`, read under the
 //! GIL once at walk start; at the cap the walk raises `RecursionError`
-//! -- json's own failure class. EXACT containers are uncapped,
-//! preserving the documented deep-nesting superset (tors green at
-//! 100k/150k exact levels where json.dumps raises). The rule: exact
-//! nesting is the superset lane; protocol nesting is json parity, its
-//! failure boundary included. On interpreters where json's budget IS
-//! the Python recursion limit (3.10/3.11) the boundary matches; on
+//! -- json's own failure class. EXACT containers are uncapped by the
+//! INTERPRETER budget but capped by the untrusted-input ceiling above
+//! (`MAX_TOTAL_DEPTH` total frames, `MAX_WALK_NODES` visited objects),
+//! preserving the documented deep-nesting superset inside the ceiling
+//! (tors green at 100k exact levels where json.dumps raises; 200k raises
+//! tors's own `RecursionError`). The rule: exact nesting is the superset
+//! lane up to the ceiling; protocol nesting is json parity, its failure
+//! boundary included. On interpreters where json's budget IS the Python
+//! recursion limit (3.10/3.11) the boundary matches within one frame
+//! (`>=` vs C's `>`: deliberately conservative, same error class); on
 //! 3.12+ json's C-stack budget is looser than the recursion limit, so
 //! tors's cap is deliberately conservative there -- the same error
 //! class, a tighter boundary, never a silent loop.
+//!
+//! MIXED NESTING DIVERGES BY CONSTRUCTION: json counts EVERY container
+//! against one C budget, tors counts only protocol frames against the
+//! interpreter budget (exact frames count only against the much larger
+//! `MAX_TOTAL_DEPTH`). An interleaving of exact and protocol nesting can
+//! therefore raise under json while tors succeeds (or vice versa at the
+//! ceiling). Pinned as a documented divergence, not parity:
+//! `tests/test_content_hash.py`'s interleaved exact+protocol differential
+//! pins the shape.
 //!
 //! # Key handling: classify, sort, THEN coerce (json.dumps's own order)
 //!
@@ -155,6 +188,25 @@ use pyo3::types::{PyAny, PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTup
 
 use crate::canon_impl::Canon;
 
+/// Untrusted-input ceiling: total OPEN frames (exact + protocol) the
+/// iterative walk will hold. 100k-deep exact trees (the pinned superset
+/// lane) pass with headroom; 200k-deep adversarial nesting raises
+/// `RecursionError` instead of materializing 200k `Canon` nodes plus the
+/// marker/work stacks GIL-held. Tune down for stricter postures.
+pub(crate) const MAX_TOTAL_DEPTH: usize = 150_000;
+/// Untrusted-input ceiling: total visited objects (leaves + containers).
+/// The 12 MiB records corpus walks ~1M nodes; the cap sits at 2x that, so
+/// legitimate corpora pass while breadth-DoS (a multi-million-element
+/// list) raises `ValueError` instead of growing the owned tree unbounded.
+pub(crate) const MAX_WALK_NODES: usize = 2_000_000;
+/// Per-container protocol materialization cap: a subclass `__iter__` /
+/// `.items()` result is pulled to completion under the GIL, so an
+/// unbounded hook (an infinite iterator) would spin forever. Past this
+/// many pulled items the walk aborts with `ValueError`. Legitimate
+/// containers (10k-key dicts, 1 MiB corpora) sit orders of magnitude
+/// below it.
+pub(crate) const MAX_PROTOCOL_ITEMS: usize = 1_000_000;
+
 /// A dict key's classification: which coercion bucket it falls into.
 /// Infallible to compute (a storage read or a type check, nothing that
 /// can raise), and deliberately materializing nothing -- the sort must
@@ -194,8 +246,12 @@ struct Reprs<'py> {
     float_repr: Bound<'py, PyAny>,
 }
 
-fn classify_key(key: &Bound<'_, PyAny>) -> KeyKind {
-    if key.is_none() {
+/// Classifies a dict key into its coercion bucket. Infallible except for
+/// the float storage read: a successful `PyFloat` cast always extracts an
+/// f64, so a failure propagates as a real error (`?`) rather than
+/// silently coercing into a NaN key.
+fn classify_key(key: &Bound<'_, PyAny>) -> PyResult<KeyKind> {
+    Ok(if key.is_none() {
         KeyKind::Null
     } else if let Ok(b) = key.cast::<PyBool>() {
         KeyKind::Bool(b.is_true())
@@ -207,12 +263,12 @@ fn classify_key(key: &Bound<'_, PyAny>) -> KeyKind {
             Err(_) => KeyKind::BigInt,
         }
     } else if let Ok(f) = key.cast::<PyFloat>() {
-        KeyKind::Float(f.extract::<f64>().unwrap_or(f64::NAN))
+        KeyKind::Float(f.extract::<f64>()?)
     } else if key.cast::<PyString>().is_ok() {
         KeyKind::Str
     } else {
         KeyKind::Unknown
-    }
+    })
 }
 
 /// The offending type's name, for the two house-worded TypeErrors.
@@ -316,7 +372,9 @@ fn walk_leaf(obj: &Bound<'_, PyAny>, reprs: &Reprs<'_>) -> PyResult<Option<Canon
         }));
     }
     if let Ok(f) = obj.cast::<PyFloat>() {
-        let v = f.extract::<f64>().unwrap_or(f64::NAN);
+        // Same `?` discipline as `classify_key`: never silently coerce an
+        // extraction failure into NaN.
+        let v = f.extract::<f64>()?;
         let spelling = if v.is_finite() {
             spell_float(obj, reprs)?
         } else if v.is_nan() {
@@ -351,7 +409,7 @@ fn dict_pairs<'py>(
     let mut entries: Vec<KeyEntry<'_>> = Vec::with_capacity(dict.len());
     let mut values: Vec<Bound<'_, PyAny>> = Vec::with_capacity(dict.len());
     for (key, value) in dict.iter() {
-        let kind = classify_key(&key);
+        let kind = classify_key(&key)?;
         entries.push(KeyEntry { handle: key, kind });
         values.push(value);
     }
@@ -436,14 +494,25 @@ fn dict_pairs<'py>(
         // exactly one entry.
         let mut index_of: HashMap<(usize, usize), usize> = HashMap::with_capacity(n);
         for (i, (entry, value)) in entries.iter().zip(&values).enumerate() {
-            index_of.insert((entry.handle.as_ptr() as usize, value.as_ptr() as usize), i);
+            let id = (entry.handle.as_ptr() as usize, value.as_ptr() as usize);
+            debug_assert!(
+                !index_of.contains_key(&id),
+                "duplicate (key, value) identity pair: the dict holds two entries sharing both objects"
+            );
+            index_of.insert(id, i);
         }
-        let tuples: Vec<Bound<'py, PyTuple>> = entries
-            .iter()
-            .zip(&values)
-            .map(|(entry, value)| (entry.handle.clone(), value.clone()).into_pyobject(py))
-            .collect::<PyResult<_>>()?;
-        let list = PyList::new(py, tuples)?;
+        // Single materialization: the pairs are appended straight into
+        // the Python list CPython sorts in place (no intermediate Rust
+        // `Vec<PyTuple>` -> `PyList::new` copy; the delegated path already
+        // pays one interpreter sort, it must not also pay a double
+        // collect). The delegated sort is the known slow lane vs. the
+        // byte/numeric fast paths above: one `list.sort()` over live
+        // objects, documented here so a caller sorting exotic key zoos at
+        // scale can read the cost.
+        let list = PyList::empty(py);
+        for (entry, value) in entries.iter().zip(&values) {
+            list.append((entry.handle.clone(), value.clone()).into_pyobject(py)?)?;
+        }
         list.call_method0("sort")?;
         let mut order = Vec::with_capacity(n);
         for item in list.iter() {
@@ -509,11 +578,23 @@ fn sorted_items_protocol<'py>(
 ) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let items = obj.call_method0("items")?;
     let iter = items.try_iter()?;
-    let mut materialized: Vec<Bound<'py, PyAny>> = Vec::new();
+    // Single materialization, bounded: each yielded element is appended
+    // straight into the Python list CPython sorts in place (no Rust Vec
+    // -> PyList copy). The pull runs to completion under the GIL, so the
+    // cap is what bounds a malicious unbounded `.items()` -- past it the
+    // walk aborts with ValueError instead of spinning forever.
+    let list = PyList::empty(py);
+    let mut pulled: usize = 0;
     for item in iter {
-        materialized.push(item?);
+        let item = item?;
+        pulled += 1;
+        if pulled > MAX_PROTOCOL_ITEMS {
+            return Err(PyValueError::new_err(format!(
+                "content_hash() subclass .items() yielded more than {MAX_PROTOCOL_ITEMS} items: refusing an unbounded hook result"
+            )));
+        }
+        list.append(item)?;
     }
-    let list = PyList::new(py, materialized)?;
     list.call_method0("sort")?;
     Ok(list.iter().collect())
 }
@@ -595,13 +676,17 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
     // recursive call at every container, so protocol-mediated nesting
     // dies by RecursionError at the interpreter's recursion budget; the
     // iterative walk counts its PROTOCOL frames against the same limit
-    // (read here, under the GIL, once per call) and raises past it.
-    // EXACT containers are uncapped: the documented deep-nesting
-    // superset lives on the exact lane.
+    // (read here, under the GIL, once per call) and raises at-or-past it.
+    // The `>=` (vs C's `>`) is deliberately conservative by one frame:
+    // same error class, boundary within one, never a silent loop.
+    // EXACT containers bypass the interpreter budget but count against
+    // MAX_TOTAL_DEPTH below: the deep-nesting superset lives inside the
+    // untrusted-input ceiling, not outside all bounds.
     let recursion_cap: usize = PyModule::import(py, "sys")?
         .call_method0("getrecursionlimit")?
         .extract()?;
     let mut protocol_depth: usize = 0;
+    let mut nodes: usize = 0;
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut markers: HashSet<usize> = HashSet::new();
     let mut finished: Option<Canon> = None;
@@ -674,8 +759,8 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                             // json's own per-pair gate, at json's own
                             // point in the order: the item must be a
                             // 2-sized tuple read from concrete storage
-                            // (an overriding __getitem__ ignored), or
-                            // the shared ValueError fires.
+                            // (an overriding __getitem__ ignored -- see
+                            // below), or the shared ValueError fires.
                             let pair = match item.cast::<PyTuple>() {
                                 Ok(pair) if pair.len() == 2 => pair,
                                 _ => {
@@ -684,9 +769,16 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                                     ));
                                 }
                             };
+                            // `Bound<PyTuple>::get_item` reads the tuple's
+                            // concrete storage slot (`PyTuple_GET_ITEM`
+                            // semantics): a tuple-subclass override of
+                            // `__getitem__` is NOT consulted, matching the
+                            // C encoder's direct slot read. Pinned by the
+                            // `GetItemLiar` differential below.
+                            debug_assert_eq!(pair.len(), 2, "pair length checked above");
                             let key = pair.get_item(0)?;
                             let value = pair.get_item(1)?;
-                            let kind = classify_key(&key);
+                            let kind = classify_key(&key)?;
                             *open_key = Some(spell_key(&kind, &key, &reprs)?);
                             Ok(Some(value))
                         }
@@ -718,7 +810,13 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
         //    items, so the two are byte-equivalent there). A SUBCLASS
         //    container delegates to the interpreter's own protocol --
         //    json.dumps's subclass iteration, never the concrete storage
-        //    -- under the runaway guard.
+        //    -- under the runaway guard and the untrusted-input ceiling.
+        nodes += 1;
+        if nodes > MAX_WALK_NODES {
+            return Err(PyValueError::new_err(format!(
+                "content_hash() argument visits more than {MAX_WALK_NODES} objects: refusing an unbounded tree"
+            )));
+        }
         if let Some(leaf) = walk_leaf(&obj, &reprs)? {
             finished = Some(leaf);
             continue;
@@ -731,6 +829,15 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
                 "maximum recursion depth exceeded while walking a subclass container",
             ));
         }
+        // Total-depth ceiling (exact + protocol): the exact lane's DoS
+        // bound. `stack.len()` is the count of currently open frames;
+        // pushing past the ceiling raises RecursionError instead of
+        // materializing an unbounded owned tree GIL-held.
+        if stack.len() >= MAX_TOTAL_DEPTH {
+            return Err(PyRecursionError::new_err(format!(
+                "content_hash() nesting exceeds the {MAX_TOTAL_DEPTH}-frame untrusted-input ceiling"
+            )));
+        }
         if obj.cast::<PyList>().is_ok() || obj.cast::<PyTuple>().is_ok() {
             // The list/tuple lanes. json's `encoder_listencode_list`
             // materializes FIRST (PySequence_Fast -> PyObject_GetIter on
@@ -739,7 +846,17 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
             // (its collect cannot raise, so the order is unobservable
             // there).
             let children = if protocol {
-                let children: Vec<Bound<'_, PyAny>> = obj.try_iter()?.collect::<PyResult<_>>()?;
+                // Bounded pull: an infinite `__iter__` aborts here with
+                // ValueError instead of spinning GIL-held forever.
+                let mut children: Vec<Bound<'_, PyAny>> = Vec::new();
+                for child in obj.try_iter()? {
+                    children.push(child?);
+                    if children.len() > MAX_PROTOCOL_ITEMS {
+                        return Err(PyValueError::new_err(format!(
+                            "content_hash() subclass __iter__ yielded more than {MAX_PROTOCOL_ITEMS} items: refusing an unbounded hook result"
+                        )));
+                    }
+                }
                 enter_marker(&mut markers, &obj)?;
                 children
             } else {
@@ -804,23 +921,28 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// form, where the canonical form is EXACTLY
 /// `json.dumps(obj, sort_keys=True, separators=(",", ":"))` with default
 /// `ensure_ascii` and `allow_nan` -- byte-identical with the stdlib
-/// expression the doc site spells out, pinned differentially against it
+/// expression the doc site spells out for surrogate-free input where json
+/// succeeds, pinned differentially against it
 /// (tests/test_content_hash.py) and literal-pinned at the byte level
 /// (src/canon_impl.rs).
 ///
-/// Accepted leaves: `str`, `int` (arbitrary precision), `float`, `bool`,
+/// Accepted leaves: `str` (lone-surrogate strings excluded -- they raise
+/// `UnicodeEncodeError` where json succeeds, the documented divergence),
+/// `int` (arbitrary precision), `float`, `bool`,
 /// `None`; containers: `list`, `tuple` (serializes as a list -- equal-value
 /// list/tuple hash identically), `dict` (keys sorted before
 /// stringification, `str`/`int`/`float`/`bool`/`None` keys coerced to
 /// their json string form). Container SUBCLASSES are iterated exactly as
 /// json.dumps iterates them -- a dict subclass through its (overridable)
-/// `.items()`, a list/tuple subclass through its `__iter__` -- never
+/// `.items()`, a list/tuple subclass through its `__iter__`, each hook run
+/// to completion under the GIL and bounded by `MAX_PROTOCOL_ITEMS` -- never
 /// their concrete storage, so hiding/faking/reordering subclasses hash
 /// identically on both sides; non-pair `items()` yields raise json's own
 /// `ValueError: items must return 2-tuples`, and subclass chains nested
 /// past `sys.getrecursionlimit()` raise `RecursionError` on both sides
-/// (EXACT containers nest arbitrarily deep: the documented deep-nesting
-/// superset). Anything else raises `TypeError` naming the
+/// (EXACT containers nest deeper than json up to the `MAX_TOTAL_DEPTH`
+/// untrusted-input ceiling: the documented deep-nesting superset, bounded).
+/// Anything else raises `TypeError` naming the
 /// type; circular references raise `ValueError`; a str holding lone
 /// surrogates raises `UnicodeEncodeError` where json.dumps accepts it
 /// (the crate-wide str-borrow divergence, documented).
@@ -828,10 +950,16 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// GIL model: the object walk and the leaf spellings run under the GIL
 /// (the standard arg-walk class, O(tree): one borrow+copy per str, one
 /// storage read per int, one repr call per float -- the module docs
-/// above); the canonical-form emission and the SHA-256 run under one
-/// `py.detach`. Deterministic: any dict key order yields the same hash.
+/// above); the canonical-form emission, the SHA-256, AND the owned tree's
+/// teardown all run under one `py.detach` (the tree is moved into the
+/// detached closure, so no deep-tree `Drop` tail holds the GIL after the
+/// digest). Deterministic: any dict key order yields the same hash.
 #[pyfunction]
 pub fn content_hash(py: Python<'_>, obj: Bound<'_, PyAny>) -> PyResult<String> {
     let tree = walk(py, obj)?;
-    Ok(py.detach(|| crate::canon_impl::digest_hex(&tree)))
+    Ok(py.detach(move || {
+        let digest = crate::canon_impl::digest_hex(&tree);
+        drop(tree);
+        digest
+    }))
 }

@@ -86,12 +86,32 @@ fn build(data: &[u8], cursor: &mut usize, depth: usize) -> Canon {
         4 => Canon::Int((next(data, cursor) as i64) - 128), // small ints, negatives
         5 => {
             // A big-int spelling: decimal digits only, the shape the walk
-            // materializes via Python's int->str.
+            // materializes via Python's int->str. An empty digit run would
+            // spell "" (or "-": never a real int spelling, and past the
+            // 4300-digit `int_max_str_digits` boundary the interesting
+            // inputs are long runs, not empty ones), so it normalizes to
+            // "0" -- the builder stays total and every emitted spelling is
+            // a genuine integer form, including the >4300-digit shapes the
+            // interpreter limit governs.
             let len = (next(data, cursor) as usize) % 65;
-            let digits: String = next_slice(data, cursor, len)
+            let mut digits: String = next_slice(data, cursor, len)
                 .iter()
                 .map(|&b| char::from(b'0' + b % 10))
                 .collect();
+            if digits.is_empty() {
+                digits.push('0');
+            } else {
+                // Bias toward the digit-limit boundary: some inputs grow a
+                // >4300-digit tail, the shape the walk's
+                // `sys.set_int_max_str_digits` parity governs.
+                if next(data, cursor) % 4 == 0 {
+                    let tail = 4300 + (next(data, cursor) as usize) * 7;
+                    digits.reserve(tail);
+                    for _ in 0..tail {
+                        digits.push(char::from(b'0' + next(data, cursor) % 10));
+                    }
+                }
+            }
             let signed = if next(data, cursor) % 2 == 0 { "-" } else { "" };
             Canon::BigInt(format!("{signed}{digits}"))
         }

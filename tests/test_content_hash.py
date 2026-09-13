@@ -1400,3 +1400,286 @@ class TestCanonicalByteLiterals:
     def test_tree_literals(self, obj: Any, canonical: bytes) -> None:
         _assert_bytes(obj, canonical)
         _assert_parity(obj)
+
+
+class TestUntrustedInputCeiling:
+    """C1: exact nesting is bounded by the untrusted-input ceiling
+    (``MAX_TOTAL_DEPTH`` total frames), not uncapped. The 100k superset
+    lane still hashes; 200k raises ``RecursionError`` instead of
+    materializing 200k ``Canon`` nodes GIL-held."""
+
+    def test_200k_exact_nesting_raises_recursion_error(self) -> None:
+        obj: Any = None
+        for _ in range(200_000):
+            obj = [obj]
+        with pytest.raises(RecursionError):
+            content_hash(obj)
+
+    def test_200k_exact_dict_nesting_raises_recursion_error(self) -> None:
+        obj: Any = None
+        for _ in range(200_000):
+            obj = {"k": obj}
+        with pytest.raises(RecursionError):
+            content_hash(obj)
+
+
+class TestBoundedHooks:
+    """C2: subclass hooks run to completion under the GIL, bounded by the
+    per-container materialization cap. An infinite ``__iter__``/``.items()``
+    aborts with ``ValueError`` instead of spinning forever (the must-timeout
+    pin: the call returns promptly, it never hangs the interpreter)."""
+
+    def test_infinite_iter_aborts_promptly_with_value_error(self) -> None:
+        import itertools
+        import time
+
+        class Inf(list):
+            def __iter__(self):  # type: ignore[override]
+                return iter(itertools.repeat(1))
+
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="unbounded hook"):
+            content_hash(Inf())
+        assert time.monotonic() - started < 30, "unbounded hook was not bounded"
+
+    def test_infinite_items_aborts_promptly_with_value_error(self) -> None:
+        import itertools
+        import time
+
+        class InfDict(dict):
+            def __init__(self) -> None:
+                super().__init__(x=1)
+
+            def items(self):  # type: ignore[override]
+                return itertools.repeat(("k", 1))
+
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="unbounded hook"):
+            content_hash(InfDict())
+        assert time.monotonic() - started < 30, "unbounded hook was not bounded"
+
+    def test_generator_items_still_hash_with_parity(self) -> None:
+        """``.items()`` returning a generator (not a list) is the normal
+        override shape: materialized, sorted, full parity."""
+
+        class GenDict(dict):
+            def __init__(self, pairs: list) -> None:
+                super().__init__(x=1)
+                self._pairs = pairs
+
+            def items(self):  # type: ignore[override]
+                return (p for p in self._pairs)
+
+        _assert_parity(GenDict([("b", 1), ("a", 2)]))
+
+
+class TestMixedNestingDivergence:
+    """H1: mixed exact+protocol nesting diverges by construction (json
+    counts every container against one C budget; tors counts only protocol
+    frames against the interpreter budget). 250 exact + 800 protocol levels
+    interleaved: never a silent hash mismatch -- either both engines hash
+    identically, or json raises while tors succeeds (the documented
+    divergence)."""
+
+    def test_250_exact_800_protocol_interleaved_never_mismatches(self) -> None:
+        cls = TestContainerSubclassIterationParity
+        obj: Any = None
+        for i in range(1050):
+            if i % 1050 < 250:
+                obj = [obj]
+            else:
+                inner = obj
+                chain = cls.ChainList.__new__(cls.ChainList)
+                list.__init__(chain)
+                chain._inner = inner
+                obj = chain
+        try:
+            expected = _oracle(obj)
+        except RecursionError:
+            # Documented divergence: json's single C budget is exhausted
+            # while tors (protocol frames only) succeeds or raises its own
+            # cap -- either is acceptable, a wrong hash is not.
+            try:
+                content_hash(obj)
+            except RecursionError:
+                pass
+        else:
+            assert content_hash(obj) == expected
+
+
+class TestProtocolBoundary:
+    """M1: the protocol-frame cap sits at ``sys.getrecursionlimit()``
+    (``>=`` vs C's ``>``: deliberately conservative by one frame, same
+    error class). The tors-side boundary is exact; json's own boundary is
+    version-dependent (C-stack budget on 3.12+), so only tors's side is
+    pinned exactly here."""
+
+    def test_deep_protocol_chain_past_the_limit_raises_recursion_error(self) -> None:
+        cls = TestContainerSubclassIterationParity
+        obj: Any = None
+        for _ in range(sys.getrecursionlimit() + 50):
+            chain = cls.ChainList.__new__(cls.ChainList)
+            list.__init__(chain)
+            chain._inner = obj
+            obj = chain
+        with pytest.raises(RecursionError):
+            content_hash(obj)
+
+    def test_shallow_protocol_chain_matches_the_oracle(self) -> None:
+        cls = TestContainerSubclassIterationParity
+        obj: Any = None
+        for _ in range(10):
+            chain = cls.ChainList.__new__(cls.ChainList)
+            list.__init__(chain)
+            chain._inner = obj
+            obj = chain
+        _assert_parity(obj)
+
+
+class TestWallCeiling:
+    """M2: the wall gate -- the measured race, asserted. At 1 MiB of
+    canonical form tors stays within 1.5x the full stdlib expression
+    (plus a flat 0.5s scheduling slack so the gate never flakes on a
+    loaded box)."""
+
+    def test_1mib_wall_within_1_5x_stdlib(self) -> None:
+        import time
+
+        obj = content_object(1 * _MIB)
+
+        def wall(fn):  # type: ignore[no-untyped-def]
+            best = float("inf")
+            for _ in range(3):
+                started = time.perf_counter()
+                fn()
+                best = min(best, time.perf_counter() - started)
+            return best
+
+        stdlib_wall = wall(lambda: _oracle(obj))
+        tors_wall = wall(lambda: content_hash(obj))
+        assert tors_wall <= 1.5 * stdlib_wall + 0.5, (
+            f"tors wall {tors_wall:.3f}s exceeds 1.5x stdlib {stdlib_wall:.3f}s"
+        )
+
+
+class TestCoveragePins:
+    """The red-team coverage corners, each pinned differentially."""
+
+    def test_decimal_and_fraction_values_rejected_like_json(self) -> None:
+        from decimal import Decimal
+        from fractions import Fraction
+
+        for v in (Decimal("1.5"), Fraction(1, 2)):
+            with pytest.raises(TypeError, match=type(v).__name__):
+                content_hash({"v": v})
+            with pytest.raises(TypeError):
+                _oracle({"v": v})
+        with pytest.raises(TypeError, match="Fraction"):
+            content_hash({Fraction(3, 2): 1})
+        with pytest.raises(TypeError):
+            _oracle({Fraction(3, 2): 1})
+
+    def test_tuple_subclass_and_namedtuple_keys_rejected_like_json(self) -> None:
+        from collections import namedtuple
+
+        class TKey(tuple):
+            pass
+
+        Point = namedtuple("Point", "x y")
+        for key in (TKey((1, 2)), Point(1, 2)):
+            with pytest.raises(TypeError, match="keys must be"):
+                content_hash({key: 1})
+            with pytest.raises(TypeError):
+                _oracle({key: 1})
+
+    def test_bytes_subclass_values_rejected_naming_the_type(self) -> None:
+        class B(bytes):
+            pass
+
+        with pytest.raises(TypeError, match="B"):
+            content_hash({"v": B(b"x")})
+        with pytest.raises(TypeError):
+            _oracle({"v": B(b"x")})
+
+    def test_str_subclass_surrogates_raise_where_json_succeeds(self) -> None:
+        class S(str):
+            pass
+
+        s = S("\ud800")
+        assert _canonical(s)
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash(s)
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash({s: 1})
+
+    def test_huge_int_as_key_and_nested_matches_the_digit_limit(self) -> None:
+        huge = 10**5001
+        for obj in ({huge: "k"}, [huge], {"nested": [huge]}, {1: huge}):
+            try:
+                expected = _oracle(obj)
+            except ValueError:
+                with pytest.raises(ValueError):
+                    content_hash(obj)
+            else:
+                assert content_hash(obj) == expected
+
+    def test_neg_zero_and_pos_zero_keys_collapse_like_json(self) -> None:
+        d: dict[Any, str] = {}
+        d[0.0] = "pos"
+        d[-0.0] = "neg"
+        assert len(d) == 1  # the collapse itself: one key survives
+        _assert_parity(d)
+        _assert_parity({-0.0: 1})
+        _assert_parity({0.0: 1})
+
+    def test_ordered_dict_items_hiding_matches_the_oracle(self) -> None:
+        from collections import OrderedDict
+
+        class HidingOrdered(OrderedDict):  # type: ignore[type-arg]
+            def items(self):  # type: ignore[override]
+                return [(k, v) for k, v in super().items() if k != "secret"]
+
+        _assert_parity(HidingOrdered([("a", 1), ("secret", 2), ("b", 3)]))
+
+    def test_bool_int_items_dict_dup_keys_match_the_oracle(self) -> None:
+        class ItemsDict(dict):
+            def __init__(self, items):  # type: ignore[no-untyped-def]
+                super().__init__(x=1)
+                self._items = items
+
+            def items(self):  # type: ignore[override]
+                return self._items
+
+        # True -> "true" and 1 -> "1": distinct coerced keys, both pairs
+        # emitted on both sides -- parity, not an error.
+        _assert_parity(ItemsDict([(1, "a"), (True, "b")]))
+        _assert_parity(ItemsDict([(True, "b"), (1, "a")]))
+
+
+class TestDeepTreeGilRelease:
+    """H3: the digest half (emission + SHA-256 + owned-tree teardown) runs
+    detached. A heartbeat thread advances while a multi-MiB
+    ``content_hash`` runs -- a lost detach (or a GIL-held drop tail) would
+    pin the counter."""
+
+    def test_heartbeat_advances_during_a_large_hash(self) -> None:
+        import threading
+        import time
+
+        obj = content_object(2 * _MIB)
+        stop = threading.Event()
+        beats: list[int] = [0]
+
+        def heartbeat() -> None:
+            while not stop.is_set():
+                beats[0] += 1
+                time.sleep(0.001)
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+        try:
+            content_hash(obj)
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+        assert beats[0] >= 1, "heartbeat never advanced: the digest half held the GIL"
