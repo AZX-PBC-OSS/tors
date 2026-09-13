@@ -19,7 +19,8 @@ chunking family, the retrieval/scoring primitives, the diff engine, the
 batch pipeline, and the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
-``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``); each a single native pass
+``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``,
+``scrub_pii``); each a single native pass
 whose cost scales with its input (``scrub_log_text``: four linear scans +
 splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
 document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
@@ -79,8 +80,8 @@ __all__: list[str] = []
 # retrieval/scoring primitives, the diff engine, the batch pipeline, and
 # the input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
-# truncate_ellipsis, strip_controls, scrub_log_text: each a single native pass whose cost
-# scales with its input (scrub_log_text: four linear scans + splice under
+# truncate_ellipsis, strip_controls, scrub_log_text, scrub_pii: each a single native pass
+# whose cost scales with its input (scrub_log_text: four linear scans + splice under
 # one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
 # forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
@@ -108,6 +109,7 @@ _WRAPPED = (
     "finalize_utf8",
     "normalize",
     "scrub_log_text",
+    "scrub_pii",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",

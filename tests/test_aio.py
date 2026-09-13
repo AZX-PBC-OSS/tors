@@ -160,6 +160,7 @@ class TestAwaitCorrectness:
             ("b64_decode", ("aGVsbG8gd29ybGQ=",), {}),
             ("truncate_ellipsis", ("hello world", 6), {}),
             ("strip_controls", ("a\x00b\x7fc",), {}),
+            ("scrub_pii", ("a@b.co +1 415 555 2671",), {}),
             (
                 "scrub_log_text",
                 ("job failed\nDETAIL:  Key (k)=('v') s. dsn=pg://u:pw@h/db?password=x",),

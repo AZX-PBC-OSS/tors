@@ -20,6 +20,12 @@ async def scrub_log_text(
     text: str,
     rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
 ) -> str: ...
+async def scrub_pii(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone"]] | None = None,
+    *,
+    salt: str | None = None,
+) -> str: ...
 async def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
 async def finalize_utf8(
     raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
