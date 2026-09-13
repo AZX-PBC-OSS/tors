@@ -21,7 +21,7 @@ use pyo3::exceptions::{
     PyAttributeError, PyMemoryError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyInt};
+use pyo3::types::{PyAny, PyBytes, PyInt};
 
 use crate::random_impl::{self, RandomError};
 
@@ -303,4 +303,62 @@ pub fn uuid4(py: Python<'_>, seed: Option<Bound<'_, PyAny>>) -> PyResult<String>
 #[pyfunction]
 pub fn uuid7(py: Python<'_>) -> PyResult<String> {
     py.detach(random_impl::uuid7).map_err(into_pyerr)
+}
+
+/// `tors.uuid4_bytes(*, seed=None)`: the RFC 4122 version-4 UUID's 16 raw
+/// bytes — version and variant nibbles set, NO canonical formatting — from
+/// one 16-byte entropy fill: the buffer `uuid4` formats. The bytes-out
+/// spelling for consumers who re-wrap the canonical str back into bytes
+/// anyway (`UUID(bytes=...)` construction, `.hex()` slicing): one native
+/// draw and the field layout, no format-then-reparse roundtrip.
+///
+/// Entropy contract: the default (no `seed`) draws fresh bytes from the
+/// operating system's CSPRNG on every call — no process or thread RNG state,
+/// so it is fork-safe, matching `secrets`' own per-call semantics — safe for
+/// keys, tokens, and secrets. `seed=` switches to a deterministic ChaCha20
+/// stream: the output becomes a pure function of (seed, arguments), fully
+/// predictable from the seed — a reproducible-test/fixture tool, NEVER safe
+/// for secrets, keys, or tokens (any adversary who learns the seed can
+/// reproduce the stream); the unseeded spelling is the secrets-safe one.
+///
+/// Uniqueness is probabilistic (122 random bits), `uuid4`'s own guarantee.
+/// Fixed size: 16 bytes, always — there is no length argument, so the
+/// token spellings' memory-bound class does not exist here.
+///
+/// GIL model: `uuid4`'s exactly (the 16-byte `bytes` marshalling after the
+/// GIL is reacquired).
+#[pyfunction(signature = (*, seed = None))]
+pub fn uuid4_bytes(py: Python<'_>, seed: Option<Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+    let seed = seed_to_u64(seed)?;
+    let bytes = py
+        .detach(|| random_impl::uuid4_bytes(seed))
+        .map_err(into_pyerr)?;
+    Ok(PyBytes::new(py, &bytes).into_any().unbind())
+}
+
+/// `tors.uuid7_bytes()`: the RFC 9562 version-7 UUID's 16 raw bytes —
+/// 48-bit Unix-epoch milliseconds + version 7 + variant + 74 random bits
+/// (12-bit rand_a + 62-bit rand_b) from one OS draw, NO canonical
+/// formatting: the buffer `uuid7` formats. The bytes-out spelling for the
+/// same re-wrap consumers (`UUID(bytes=...)`, `.hex()[:12]` timestamp
+/// slicing).
+///
+/// No `seed=` parameter, by design: the millisecond timestamp is external
+/// state, so a seeded uuid7 would still vary with the clock — the
+/// deterministic tool is `uuid4(seed=...)`.
+///
+/// The uniqueness boundary, stated honestly: probabilistically unique (74
+/// random bits per millisecond, distinct timestamps across milliseconds),
+/// NOT counter-monotonic — `uuid7`'s own boundary, on the buffer spelling.
+/// The caller-visible contract is the timestamp itself: the first 6 bytes
+/// big-endian are the 48-bit millisecond field
+/// (`int.from_bytes(b[:6], "big")`), whose hex spelling is `.hex()[:12]` —
+/// the two consumer slice shapes. Fixed size: 16 bytes, always.
+///
+/// GIL model: `uuid7`'s exactly (the 16-byte `bytes` marshalling after the
+/// GIL is reacquired).
+#[pyfunction]
+pub fn uuid7_bytes(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let bytes = py.detach(random_impl::uuid7_bytes).map_err(into_pyerr)?;
+    Ok(PyBytes::new(py, &bytes).into_any().unbind())
 }

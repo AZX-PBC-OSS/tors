@@ -1193,6 +1193,24 @@ def uuid4(*, seed: int | None = None) -> str: ...
 # call's Unix epoch milliseconds.
 def uuid7() -> str: ...
 
+# The uuid4 buffer spelling: the same 16 raw bytes uuid4 formats (version
+# and variant nibbles set, NO canonical hyphenation) — for consumers who
+# re-wrap the str back into bytes anyway (UUID(bytes=...), .hex() slicing):
+# one native draw and the field layout, no format-then-reparse roundtrip.
+# Same seed contract as uuid4 (any int-like, reduced mod 2**64) and the
+# same security paragraph above (seed= is predictable, never for secrets).
+# Fixed 16 bytes: no length argument, so the token spellings' memory-bound
+# class does not exist here.
+def uuid4_bytes(*, seed: int | None = None) -> bytes: ...
+
+# The uuid7 buffer spelling: the same 16 raw bytes uuid7 formats —
+# 48-bit Unix-millisecond timestamp + 74 random bits, NO canonical
+# hyphenation. The consumer slice shapes: the first 6 bytes big-endian are
+# the timestamp (int.from_bytes(b[:6], "big")), and .hex()[:12] is its hex
+# spelling. No seed parameter (uuid7's own rationale: the timestamp is
+# external state); probabilistically unique, NOT counter-monotonic.
+def uuid7_bytes() -> bytes: ...
+
 
 # GIL note: one GIL-held walk of the items sequence (the standard str-in
 # borrow class, O(items) handles, over any Sequence), then the set builds

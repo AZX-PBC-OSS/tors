@@ -4130,6 +4130,45 @@ int(u[:8] + u[9:13], 16)  # the call's Unix epoch milliseconds
 # 1789275923041
 ```
 
+### `tors.uuid4_bytes` / `tors.uuid7_bytes`
+
+```python
+def uuid4_bytes(*, seed: int | None = None) -> bytes: ...
+def uuid7_bytes() -> bytes: ...
+```
+
+The uuids' 16 raw bytes — the same buffers `uuid4`/`uuid7` format, version
+and variant fields set, **no canonical formatting** — because the surveyed
+consumers re-wrap the canonical str back into bytes anyway: id-assignment
+call sites construct `UUID(bytes=...)` from the str's decoded bytes, and
+timestamp slicing takes `.hex()[:12]`. The str spellings force those sites
+into a format-then-reparse roundtrip (36-char format, hyphen strip, hex
+re-decode); the bytes spellings are one native draw and the field layout,
+no roundtrip:
+
+```python
+u = uuid.UUID(bytes=tors.uuid7_bytes())  # the re-wrap shape, native
+u.version, u.variant
+# (7, RFC_4122)
+
+tors.uuid7_bytes().hex()[:12]  # the timestamp-slice shape
+# '01a09927e261'               # the call's Unix epoch milliseconds, hex
+```
+
+Contracts: `uuid4_bytes(seed=s)` yields exactly the 16 bytes whose
+canonical hyphenated form is `uuid4(seed=s)` — one construction, two return
+spellings, pinned as literal equality in `tests/test_random.py` (the seeded
+bytes are pure functions of the seed, pinned against the same independent
+oracle). `uuid7_bytes()[:6]` big-endian is the call's Unix-epoch
+milliseconds (`int.from_bytes(b[:6], "big")` — the `u[:8] + u[9:13]`
+field's own bytes), the same 60-second clock tolerance `uuid7`'s timestamp
+contract carries. The seed contract and security warning are `uuid4`'s own
+(any int-like, reduced mod 2^64; a seeded stream is fully predictable —
+never for secrets), and `uuid7_bytes` takes no `seed=` for `uuid7`'s own
+reason. Fixed 16 bytes always: there is no length argument, so the token
+spellings' memory bound does not exist here. No `tors.aio` twins (the
+family's own rule: fast CPU/syscall calls).
+
 ## `tors.first_invalid_charset`
 
 ```python

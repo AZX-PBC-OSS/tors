@@ -1,6 +1,7 @@
 //! The random-generation family's pure-Rust core: `random_string`,
-//! `random_hex`, `random_b62`, `random_b64url`, `uuid4`, `uuid7` (the pyo3
-//! bindings live in `py/random.rs`; the criterion bench in `benches/random.rs`
+//! `random_hex`, `random_b62`, `random_b64url`, `uuid4`, `uuid7`, and the
+//! uuids' bytes spellings `uuid4_bytes`/`uuid7_bytes` (the pyo3 bindings
+//! live in `py/random.rs`; the criterion bench in `benches/random.rs`
 //! drives this module directly, and the fuzz target in
 //! `fuzz/fuzz_targets/random.rs`).
 //!
@@ -45,12 +46,16 @@
 //!   `fill_bytes`; `uuid7`, one 10-byte counter/random fill): they consume
 //!   exactly the first n stream bytes of one call and hand them to the
 //!   uuid crate's builders, whose bit-structured fields are exactly what a
-//!   byte fill is for. (Before the length-first refactor `random_hex` and
-//!   `random_b64url` byte-filled and encoded here too; the maintainer
-//!   ergonomics directive — backend devs think "I want a base62 id X
-//!   characters long", so every token spelling takes the output length
-//!   directly — moved both onto the char-sampling engine, and the byte
-//!   path shrank to the uuids.)
+//!   byte fill is for. `uuid4_bytes`/`uuid7_bytes` return those builders'
+//!   16-byte buffers pre-formatting (the bytes-out spellings for consumers
+//!   who re-wrap the canonical str back into bytes anyway), and the string
+//!   spellings are the canonical formatting of the same buffers — one
+//!   construction per uuid, two return spellings. (Before the
+//!   length-first refactor `random_hex` and `random_b64url` byte-filled
+//!   and encoded here too; the maintainer ergonomics directive — backend
+//!   devs think "I want a base62 id X characters long", so every token
+//!   spelling takes the output length directly — moved both onto the
+//!   char-sampling engine, and the byte path shrank to the uuids.)
 //! * The char-sampling engine is `random_string`, with `random_b62`,
 //!   `random_hex`, and `random_b64url` all delegating to it over their
 //!   fixed alphabets (one engine, never duplicated logic — the Python
@@ -129,7 +134,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::rngs::OsRng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng, TryRngCore};
-use uuid::Builder as UuidBuilder;
+use uuid::{Builder as UuidBuilder, Uuid};
 
 /// The hex alphabet `random_hex` samples over: `[0-9a-f]`, lowercase —
 /// `random_hex` is exactly `random_string(length, HEX_CHARS)` — one
@@ -385,27 +390,41 @@ pub fn random_b64url(length: usize, seed: Option<u64>) -> Result<String, RandomE
     random_string(length, B64URL_CHARS, seed)
 }
 
-/// `uuid4`'s core: one 16-byte fill handed to the uuid crate's zero-feature
-/// `Builder::from_random_bytes` (it sets the version-4 and RFC 4122 variant
-/// nibbles; verified in the resolved source: byte 6 `(b & 0x0f) | 0x40`,
-/// byte 8 `(b & 0x3f) | 0x80`), formatted canonical: 36 chars, lowercase
-/// hex, hyphens at 8/13/18/23. Seeded calls are pure functions of the seed
-/// (the pins and the Python oracle freeze exactly this construction).
-pub fn uuid4(seed: Option<u64>) -> Result<String, RandomError> {
+/// `uuid4_bytes`' core — and `uuid4`'s, shared: one 16-byte fill handed to
+/// the uuid crate's zero-feature `Builder::from_random_bytes` (it sets the
+/// version-4 and RFC 4122 variant nibbles; verified in the resolved
+/// source: byte 6 `(b & 0x0f) | 0x40`, byte 8 `(b & 0x3f) | 0x80`),
+/// returned as the raw 16 bytes — no canonical formatting. This is the
+/// bytes-out spelling for consumers who re-wrap the canonical str back
+/// into bytes anyway (`UUID(bytes=...)` construction, `.hex()` slicing):
+/// one draw and the field layout, no format-then-reparse roundtrip.
+/// Seeded calls are pure functions of the seed (the pins and the Python
+/// oracle freeze exactly this construction); `uuid4` formats this same
+/// buffer, so the two spellings are one construction by code, not by
+/// coincidence.
+pub fn uuid4_bytes(seed: Option<u64>) -> Result<[u8; 16], RandomError> {
     let mut bytes = [0u8; 16];
     Source::new(seed).fill(&mut bytes)?;
-    Ok(UuidBuilder::from_random_bytes(bytes)
-        .into_uuid()
-        .to_string())
+    Ok(*UuidBuilder::from_random_bytes(bytes).into_uuid().as_bytes())
 }
 
-/// `uuid7`'s core: see the module docs' "uuid7's boundary" section for the
-/// honest statement (probabilistically unique, not counter-monotonic, no
-/// seed parameter because the timestamp is external state). The 10-byte
-/// counter/random draw is one OS fill; the builder consumes 74 of its 80
-/// bits (rand_a's top nibble and rand_b's top 2 bits are the version and
-/// variant nibbles' territory).
-pub fn uuid7() -> Result<String, RandomError> {
+/// `uuid4`'s core: the canonical string of [`uuid4_bytes`]' buffer — 36
+/// chars, lowercase hex, hyphens at 8/13/18/23. The pre-format bytes ARE
+/// the construction; this spelling is their canonical formatting.
+pub fn uuid4(seed: Option<u64>) -> Result<String, RandomError> {
+    Ok(Uuid::from_bytes(uuid4_bytes(seed)?).to_string())
+}
+
+/// `uuid7_bytes`' core — and `uuid7`'s, shared: see the module docs'
+/// "uuid7's boundary" section for the honest statement (probabilistically
+/// unique, not counter-monotonic, no seed parameter because the timestamp
+/// is external state). The 10-byte counter/random draw is one OS fill; the
+/// builder consumes 74 of its 80 bits (rand_a's top nibble and rand_b's
+/// top 2 bits are the version and variant nibbles' territory). Returned
+/// as the raw 16 bytes, no canonical formatting — the bytes-out spelling
+/// for the same re-wrap consumers [`uuid4_bytes`] serves; `uuid7`
+/// formats this same buffer.
+pub fn uuid7_bytes() -> Result<[u8; 16], RandomError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| {
@@ -416,10 +435,18 @@ pub fn uuid7() -> Result<String, RandomError> {
     let mut counter_random = [0u8; 10];
     Source::new(None).fill(&mut counter_random)?;
     Ok(
-        UuidBuilder::from_unix_timestamp_millis(millis, &counter_random)
+        *UuidBuilder::from_unix_timestamp_millis(millis, &counter_random)
             .into_uuid()
-            .to_string(),
+            .as_bytes(),
     )
+}
+
+/// `uuid7`'s core: the canonical string of [`uuid7_bytes`]' buffer. The
+/// pre-format bytes ARE the construction (timestamp read + one OS draw +
+/// the builder's field layout); this spelling is their canonical
+/// formatting.
+pub fn uuid7() -> Result<String, RandomError> {
+    Ok(Uuid::from_bytes(uuid7_bytes()?).to_string())
 }
 
 #[cfg(test)]
@@ -550,6 +577,34 @@ mod tests {
     }
 
     #[test]
+    fn seeded_uuid4_bytes_goldens() {
+        // The uuid4 goldens' own buffers, unhyphenated — the same literals
+        // the string pins commit, as bytes — plus the DRY pin: the string
+        // spelling is the canonical formatting of the bytes spelling, one
+        // construction behind both.
+        assert_eq!(
+            uuid4_bytes(Some(0)).unwrap(),
+            [
+                0xb2, 0xf7, 0xf5, 0x81, 0xd6, 0xde, 0x4c, 0x06, 0xa8, 0x22, 0xfd, 0x6e, 0x7e, 0x82,
+                0x65, 0xfb
+            ]
+        );
+        assert_eq!(
+            uuid4_bytes(Some(42)).unwrap(),
+            [
+                0x78, 0x48, 0xb5, 0xd7, 0x11, 0xbc, 0x48, 0x83, 0x99, 0x63, 0x17, 0xa3, 0xf9, 0xc9,
+                0x02, 0x69
+            ]
+        );
+        for seed in [0u64, 1, 42] {
+            assert_eq!(
+                uuid4(Some(seed)).unwrap(),
+                Uuid::from_bytes(uuid4_bytes(Some(seed)).unwrap()).to_string()
+            );
+        }
+    }
+
+    #[test]
     fn seeded_multibyte_alphabet_golden() {
         // length 9, alphabet "éüß漢", seed 2 — the same literal the Python
         // suite pins: multibyte characters sampled as characters.
@@ -676,6 +731,26 @@ mod tests {
                 assert!(value.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
             }
             assert!(seen.insert(v4));
+        }
+    }
+
+    #[test]
+    fn unseeded_uuid_bytes_shapes_and_distinctness() {
+        // The bytes spellings carry the same field layout on the raw
+        // buffer: version nibble at byte 6's high half (4 / 7), RFC 4122
+        // variant at byte 8's high nibble (8..=0xb) — and the same
+        // distinctness arithmetic as the string spellings.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..2048 {
+            let v4 = uuid4_bytes(None).unwrap();
+            let v7 = uuid7_bytes().unwrap();
+            for (bytes, version) in [(&v4, 4u8), (&v7, 7u8)] {
+                assert_eq!(bytes.len(), 16);
+                assert_eq!(bytes[6] >> 4, version);
+                assert!((8..=0xb).contains(&(bytes[8] >> 4)));
+            }
+            assert!(seen.insert(v4));
+            assert!(seen.insert(v7));
         }
     }
 }

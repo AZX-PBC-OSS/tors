@@ -1,5 +1,6 @@
 """Contract gate for the random-generation family: ``random_string``,
-``random_hex``, ``random_b62``, ``random_b64url``, ``uuid4``, ``uuid7``.
+``random_hex``, ``random_b62``, ``random_b64url``, ``uuid4``, ``uuid7``,
+and the uuids' bytes spellings ``uuid4_bytes``/``uuid7_bytes``.
 
 The security contract under test, stated once here because every surface
 repeats it: unseeded calls draw fresh OS-entropy bytes on every call (no
@@ -63,7 +64,16 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tors import random_b62, random_b64url, random_hex, random_string, uuid4, uuid7
+from tors import (
+    random_b62,
+    random_b64url,
+    random_hex,
+    random_string,
+    uuid4,
+    uuid4_bytes,
+    uuid7,
+    uuid7_bytes,
+)
 
 # The charset literals this file pins against, defined locally and spelled in
 # full rather than imported: the canonical-charset constants on the sibling
@@ -210,11 +220,20 @@ def _oracle_string(length: int, alphabet: str, seed: int) -> str:
     return "".join(chars[_lemire_below(words, len(chars))] for _ in range(length))
 
 
-def _oracle_uuid4(seed: int) -> str:
+def _oracle_uuid4_bytes(seed: int) -> bytes:
+    """The seeded uuid4's 16 pre-format bytes: the first 16 stream bytes
+    with the version-4 and RFC 4122 variant nibbles set — the uuid crate's
+    ``Builder::from_random_bytes`` field layout, transcribed (byte 6
+    ``(b & 0x0f) | 0x40``, byte 8 ``(b & 0x3f) | 0x80``). This is the
+    construction ``uuid4_bytes`` owes (and ``uuid4`` formats)."""
     raw = bytearray(_oracle_bytes(16, seed))
     raw[6] = (raw[6] & 0x0F) | 0x40
     raw[8] = (raw[8] & 0x3F) | 0x80
-    return str(stdlib_uuid.UUID(bytes=bytes(raw)))
+    return bytes(raw)
+
+
+def _oracle_uuid4(seed: int) -> str:
+    return str(stdlib_uuid.UUID(bytes=_oracle_uuid4_bytes(seed)))
 
 
 # --- Shared shape helpers -----------------------------------------------------
@@ -317,6 +336,12 @@ class TestSeededConstructionMatchesTheOracle:
     @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
     def test_uuid4(self, seed: int) -> None:
         assert uuid4(seed=seed) == _oracle_uuid4(seed)
+
+    @pytest.mark.parametrize("seed", [0, 1, 42], ids=["seed0", "seed1", "seed42"])
+    def test_uuid4_bytes(self, seed: int) -> None:
+        # The byte path's pre-format buffer, the same construction the
+        # string spelling formats: 16 stream bytes, fields set.
+        assert uuid4_bytes(seed=seed) == _oracle_uuid4_bytes(seed)
 
 
 class TestSeededGoldenLiterals:
@@ -432,6 +457,101 @@ class TestOneEngineDelegation:
         assert random_hex(64, seed=5)[:32] == random_hex(32, seed=5)
         assert random_b64url(43, seed=9)[:22] == random_b64url(22, seed=9)
         assert random_b62(64, seed=5)[:16] == random_b62(16, seed=5)
+
+
+class TestUuidBytesSpellings:
+    """``uuid4_bytes``/``uuid7_bytes``: the uuids' pre-format 16 bytes as
+    first-class returns — the same buffer the string spellings format, no
+    canonical formatting (no hyphens, no lowercase-hex dance), exposed
+    because the surveyed consumers re-wrap the str back into exactly this
+    shape anyway (``UUID(bytes=...)`` at the id-assignment call sites,
+    ``.hex()[:12]`` timestamp slicing): one native draw instead of
+    draw-format-reparse. The uuid paths are fixed-size (16 bytes), so the
+    length-scaled allocation class (TestMemoryBound) does not exist here."""
+
+    def test_uuid4_bytes_is_the_buffer_behind_the_uuid4_string(self) -> None:
+        # The DRY pin: uuid4(seed=s) IS the canonical hyphenated form of
+        # uuid4_bytes(seed=s) — same 16 bytes, one construction; the string
+        # spelling formats what the bytes spelling returns.
+        for seed in (0, 1, 42, 2**64 - 1):
+            raw = uuid4_bytes(seed=seed)
+            assert str(stdlib_uuid.UUID(bytes=raw)) == uuid4(seed=seed)
+
+    def test_uuid4_bytes_goldens(self) -> None:
+        # The uuid4 goldens' own bytes, unhyphenated — the same literals
+        # the string pins commit, pinned as the buffer itself.
+        assert uuid4_bytes(seed=0).hex() == "b2f7f581d6de4c06a822fd6e7e8265fb"
+        assert uuid4_bytes(seed=1).hex() == "9a3744504560439e8670b7a17d492b27"
+        assert uuid4_bytes(seed=42).hex() == "7848b5d711bc4883996317a3f9c90269"
+
+    def test_unseeded_uuid4_bytes_shapes(self) -> None:
+        # Version nibble at byte 6's high half, RFC 4122 variant at byte
+        # 8's high nibble (8..=0xb) — the field layout, on the raw buffer.
+        for _ in range(64):
+            b = uuid4_bytes()
+            assert len(b) == 16
+            assert b[6] >> 4 == 4
+            assert 8 <= b[8] >> 4 <= 11
+
+    def test_unseeded_uuid7_bytes_shapes(self) -> None:
+        for _ in range(64):
+            b = uuid7_bytes()
+            assert len(b) == 16
+            assert b[6] >> 4 == 7
+            assert 8 <= b[8] >> 4 <= 11
+
+    def test_uuid7_bytes_timestamp_is_the_callers_now(self) -> None:
+        # The first 6 bytes big-endian are the 48-bit Unix-epoch
+        # millisecond field — uuid7()'s own caller-visible contract, on
+        # the bytes spelling.
+        for _ in range(8):
+            before = time.time() * 1000
+            b = uuid7_bytes()
+            after = time.time() * 1000
+            ts = int.from_bytes(b[:6], "big")
+            assert before - 60_000 <= ts <= after + 60_000
+
+    def test_the_uuid_constructor_consumer_shape(self) -> None:
+        # The surveyed re-wrap shape, pinned as a docs example too: the
+        # stdlib constructor over the raw bytes carries version, variant,
+        # and (for v7) the timestamp through intact.
+        u7 = stdlib_uuid.UUID(bytes=uuid7_bytes())
+        assert u7.version == 7
+        assert u7.variant == stdlib_uuid.RFC_4122
+        u4 = stdlib_uuid.UUID(bytes=uuid4_bytes())
+        assert u4.version == 4
+        assert u4.variant == stdlib_uuid.RFC_4122
+
+    def test_the_hex_slice_consumer_shape(self) -> None:
+        # The other surveyed shape: tors.uuid7_bytes().hex()[:12] is the
+        # timestamp prefix — the 12 hex digits consumers slice off the
+        # canonical string (u[:8] + u[9:13] there, .hex()[:12] here).
+        before = time.time() * 1000
+        prefix = uuid7_bytes().hex()[:12]
+        after = time.time() * 1000
+        ts = int(prefix, 16)
+        assert before - 60_000 <= ts <= after + 60_000
+
+    def test_unseeded_bytes_are_distinct(self) -> None:
+        # Birthday arithmetic unchanged from the string spellings (122
+        # random bits for v4; 74 per millisecond for v7): any repeat among
+        # 2048 draws is a broken engine, not bad luck.
+        assert len({uuid4_bytes() for _ in range(2048)}) == 2048
+        assert len({uuid7_bytes() for _ in range(2048)}) == 2048
+
+    def test_uuid4_bytes_seed_contract_matches_uuid4(self) -> None:
+        # TypeError parity with uuid4: a non-int-like seed names the
+        # parameter; the parameter is keyword-only (uuid4's own shape).
+        with pytest.raises(TypeError, match="seed must be an int or None"):
+            uuid4_bytes(seed="42")  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            uuid4_bytes(1)  # type: ignore[misc,call-arg]
+
+    def test_uuid7_bytes_takes_no_seed(self) -> None:
+        # uuid7's own rationale, inherited: the timestamp is external
+        # state, so there is no seed parameter to refuse or accept.
+        with pytest.raises(TypeError):
+            uuid7_bytes(seed=1)  # type: ignore[call-arg]
 
 
 class TestSeedDomain:
@@ -839,6 +959,13 @@ class TestHypothesisProperties:
         # variant nibbles set, canonical formatting.
         assert uuid4(seed=seed) == _oracle_uuid4(seed)
 
+    @given(seed=st.integers(min_value=0, max_value=2**64 - 1))
+    @settings(max_examples=75)
+    def test_seeded_uuid4_bytes_matches_the_oracle(self, seed: int) -> None:
+        # The same construction, pre-formatting: the buffer the string
+        # spelling formats, at arbitrary seeds.
+        assert uuid4_bytes(seed=seed) == _oracle_uuid4_bytes(seed)
+
 
 class TestDocstringSecurityContract:
     """The security contract must be LOUD on every seeded surface: the
@@ -847,8 +974,15 @@ class TestDocstringSecurityContract:
 
     @pytest.mark.parametrize(
         "func",
-        [random_string, random_hex, random_b62, random_b64url, uuid4],
-        ids=["random_string", "random_hex", "random_b62", "random_b64url", "uuid4"],
+        [random_string, random_hex, random_b62, random_b64url, uuid4, uuid4_bytes],
+        ids=[
+            "random_string",
+            "random_hex",
+            "random_b62",
+            "random_b64url",
+            "uuid4",
+            "uuid4_bytes",
+        ],
     )
     def test_seeded_surfaces_carry_the_predictability_warning(self, func: object) -> None:
         # Whitespace-normalized: the docstring's phrases span the Rust doc
@@ -861,5 +995,12 @@ class TestDocstringSecurityContract:
 
     def test_uuid7_documents_the_no_seed_rationale(self) -> None:
         doc = " ".join((uuid7.__doc__ or "").lower().split())
+        assert "external state" in doc
+        assert "probabilistically unique" in doc
+
+    def test_uuid7_bytes_documents_the_no_seed_rationale(self) -> None:
+        # The bytes spelling inherits the rationale and must carry it
+        # itself: the timestamp is external state, so no seed parameter.
+        doc = " ".join((uuid7_bytes.__doc__ or "").lower().split())
         assert "external state" in doc
         assert "probabilistically unique" in doc

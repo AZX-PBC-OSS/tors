@@ -220,7 +220,8 @@
 //! dicts for the diagnostics flavor.
 //!
 //! The random-generation surface (`random_string`/`random_hex`/
-//! `random_b62`/`random_b64url`/`uuid4`/`uuid7`, `random_impl`) adds a new
+//! `random_b62`/`random_b64url`/`uuid4`/`uuid7` and the uuids' bytes
+//! spellings `uuid4_bytes`/`uuid7_bytes`, `random_impl`) adds a new
 //! axis rather than a new residue class: entropy. The default spelling has
 //! no input to borrow at all — the argument validation is the whole
 //! GIL-held prelude, and the entire draw (a fresh per-call OS fill via
@@ -678,7 +679,9 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(random_b62, m)?)?;
     m.add_function(wrap_pyfunction!(random_b64url, m)?)?;
     m.add_function(wrap_pyfunction!(uuid4, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid4_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(uuid7, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(uuid7_timestamp_ms, m)?)?;
     m.add_function(wrap_pyfunction!(uuid_version, m)?)?;
     m.add_function(wrap_pyfunction!(uuid_parse, m)?)?;

@@ -17,6 +17,7 @@ commit.
 from __future__ import annotations
 
 import time
+import uuid as stdlib_uuid
 
 import tors
 
@@ -384,3 +385,25 @@ class TestRandomGenerationExamples:
         assert value[14] == "7"
         ts = int(value[:8] + value[9:13], 16)
         assert before - 60_000 <= ts <= after + 60_000
+
+    def test_uuid4_bytes_bytes_uuid4_bytes_example(self) -> None:
+        # The bytes spellings' contract line, pinned: uuid4_bytes(seed=s)
+        # is exactly the 16 bytes whose canonical hyphenated form is
+        # uuid4(seed=s) — the doc's "one construction, two return
+        # spellings" claim, at the doc's own example seed.
+        raw = tors.uuid4_bytes(seed=42)
+        assert len(raw) == 16
+        assert stdlib_uuid.UUID(bytes=raw) == stdlib_uuid.UUID(tors.uuid4(seed=42))
+
+    def test_uuid7_bytes_consumer_shape_examples(self) -> None:
+        # The doc's two consumer shapes, pinned: the stdlib constructor
+        # over the raw bytes carries version and variant through, and the
+        # .hex()[:12] slice is the timestamp prefix (the u[:8] + u[9:13]
+        # field's own bytes), both within the ±60s clock window.
+        u = stdlib_uuid.UUID(bytes=tors.uuid7_bytes())
+        assert (u.version, u.variant) == (7, stdlib_uuid.RFC_4122)
+        before = time.time() * 1000
+        prefix = tors.uuid7_bytes().hex()[:12]
+        after = time.time() * 1000
+        assert len(prefix) == 12
+        assert before - 60_000 <= int(prefix, 16) <= after + 60_000
