@@ -983,3 +983,18 @@ def daitch_mokotoff(text: str) -> list[str]: ...
 # ASCII-letters-only pre-filter and upstream-panic-avoidance note as
 # soundex.
 def refined_soundex(text: str) -> str: ...
+
+# GIL note: one GIL-held walk of the items sequence (the standard str-in
+# borrow class, O(items) handles, over any Sequence), then the set builds
+# and the whole batch scan under one GIL-released pass, then a single int
+# return: no marshalling class at all (the count_matches shape). The
+# answer is the INDEX of the first item not built entirely from the two
+# sets, -1 when all pass; the scan short-circuits at the first offender,
+# but the argument walk validates the whole sequence up front (a bad
+# entry anywhere raises at the boundary, past a first offender or not).
+# Batch-only by design: per-item validation is under a detach round trip,
+# so per-item calls would be slower than the regexes this replaces; the
+# batch form — one detach, one pass — is the only shape that wins.
+def first_invalid_charset(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> int: ...

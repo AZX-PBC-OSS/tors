@@ -12,8 +12,9 @@
 //! multi-pattern search), [`scan_impl`] (escape-parity byte scan),
 //! [`truncate_impl`] (boundary-safe and
 //! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
-//! scrub), and [`scrub_impl`] (named-rule log scrubbing: the TaskQ
-//! exception-text chain); they are
+//! scrub), [`charset_impl`] (batch codepoint-set validation for
+//! identifier-style rules), and [`scrub_impl`] (named-rule log scrubbing:
+//! the TaskQ exception-text chain); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -214,6 +215,17 @@
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
 //!
+//! The charset-validation surface (`first_invalid_charset`) is
+//! `count_matches`' extreme point over a batch argument: one GIL-held
+//! walk of the items sequence (the standard str-in borrow class,
+//! O(items) handles — the `get_close_matches` candidate-walk shape, over
+//! any `Sequence`), then the set builds and the whole batch scan under
+//! one `py.detach`, then a single int return: no marshalling class at
+//! all. At the batch sizes that motivate the function (hundreds of
+//! items, the bulk pre-flight / tag-batch shape) the whole call sits far
+//! under the 10ms ping floor, so its GIL cell is ceiling-only (the
+//! `utf8_is_valid` class), pinned in tests/test_gil_release.py.
+//!
 //! The scrub surface (`scrub_impl::scrub_log_text`, the `tors.scrub_log_text`
 //! named-rule port of the consumer chain
 //! `src/taskq/obs/_redact_exc.py::_scrub_text`) adds no residue class: it is
@@ -268,6 +280,7 @@
 
 pub mod b64_impl;
 pub mod bm25_impl;
+pub mod charset_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
@@ -351,6 +364,7 @@ pub(crate) fn detached_transform(
 pub mod py;
 
 use py::bm25::*;
+use py::charset::*;
 use py::chunk::*;
 use py::codec::*;
 use py::compiled_patterns::CompiledPatterns;
@@ -526,6 +540,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nysiis, m)?)?;
     m.add_function(wrap_pyfunction!(daitch_mokotoff, m)?)?;
     m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
+    m.add_function(wrap_pyfunction!(first_invalid_charset, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
     m.add_class::<CompiledPatterns>()?;
     Ok(())
