@@ -2659,6 +2659,7 @@ dependencies = [
  "strsim",
  "unicode-normalization",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

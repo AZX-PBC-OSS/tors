@@ -2471,6 +2471,7 @@ dependencies = [
  "similar",
  "unicode-normalization",
  "unicode-segmentation",
+ "uuid",
 ]
 
 [[package]]

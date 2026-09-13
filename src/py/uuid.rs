@@ -24,8 +24,11 @@
 //! validate-and-transcode (there is no int-out tail to detach), and the
 //! return marshalling (the `PyBytes` construction) needs the GIL anyway,
 //! so a detach around the 36-byte parse would wrap nothing measurable.
-//! Its entire GIL-held cost is that parse, ~0.3µs (pinned by the same
-//! heartbeat cell, which batches it like the others).
+//! Its entire GIL-held cost is that parse, ~70ns a call (re-measured
+//! after the `uuid`-crate adoption: the crate's const-fn parser +
+//! canonical-encode-compare is faster than the hand-rolled scan it
+//! replaced; pinned by the same heartbeat cell, which batches it like
+//! the others).
 //!
 //! # Argument contract
 //!

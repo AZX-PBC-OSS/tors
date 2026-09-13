@@ -10,19 +10,36 @@
 //! why it keeps getting reimplemented slightly wrong. This module is
 //! tors's one spelling of it.
 //!
-//! # Why no `uuid` crate
+//! # The `uuid` crate underneath, the strictness layer on top
 //!
-//! The whole surface is two field reads over a fixed 16-byte buffer plus a
-//! 36-character strict parse. The `uuid` crate's value is its
-//! version-specific constructors (v1/v4/v5/v6/v7 generation, namespacing,
-//! serde integration); none of that is this surface, which never generates
-//! an ID and never formats one. What would remain is a parsed-UUID
-//! intermediate this API has no use for, paid as a new dependency for
-//! three shifts and a nibble read. Hand-rolled is the point (zero new
-//! crate deps), and the parse below is small enough to pin exhaustively
-//! crate-side (every error class, the boundary battery) plus
-//! differentially on the Python side against the stdlib `uuid` module
-//! where it is strict enough (tests/test_uuid.py).
+//! The hex grammar work is delegated to the `uuid` crate (the uuid-rs
+//! org's, Apache-2.0 OR MIT, `default-features = false`: parse/encode
+//! need no features, and the config pulls ZERO transitive dependencies,
+//! `cargo tree`-verified). `Uuid::parse_str` is the battle-tested
+//! structural parse, and an accepted input's bytes are the crate's
+//! `as_bytes()` -- the hex-to-nibble transcode is upstream's, not tors's;
+//! no hand-rolled code path in this module produces output bytes. What
+//! the crate deliberately does NOT provide is the strict-canonical
+//! contract: parse_str accepts the loose forms tors exists to reject
+//! (braced text, the URN prefix, hyphen-less hex, any-case hex), so
+//! strictness remains tors's own thin layer on top -- canonical-encoding
+//! equality: a 36-character input is accepted only if it is byte-equal
+//! to its parsed value's re-encoded canonical form
+//! (`hyphenated().encode_lower`). That one comparison is the whole
+//! layer, and the layer is the point: the strict contract is not the
+//! crate's default, it is tors's. The error taxonomy (tors's own
+//! messages, the first-divergent positions) is irreducible -- the crate
+//! exposes no parse-failure positions on its error type -- so the
+//! position scan stays too, but it runs only on the rejection path and
+//! names a character for a message; it never produces a value. The two
+//! field reads stay direct one-liners over the buffer: the crate's
+//! `get_version_num` is the identical shift behind a newtype wrap plus a
+//! usize cast (nothing complex is delegated by wrapping it), and it has
+//! no v7 timestamp accessor (`get_timestamp` is the v1/v6/v7-agnostic
+//! seconds+nanos shape, and the unix-millisecond decode underneath it is
+//! `pub(crate)`), so the direct big-endian read is the simpler spelling
+//! either way. Generation features (v4/v7/rng) are off: this surface
+//! never generates an ID, it reads one back out.
 //!
 //! # Layout (RFC 9562 section 5.7)
 //!
@@ -46,13 +63,20 @@
 //! every RFC 9562 producer emits -- not the stdlib's permissive union
 //! (the same closed-set strictness as every other tors argument: the
 //! `errors=`/`boundary=` convention, `b64_decode`'s validate-by-default).
-//! The rejections are pins, not parity: tests/test_uuid.py's
-//! divergence battery proves the stdlib accepts each loose form in the
-//! same test that pins tors rejecting it.
+//! The mechanics: tors's own length gate first (the exact-count message),
+//! the crate's parse second (structure and transcode), the
+//! canonical-encoding comparison third (strictness), and
+//! `classify_divergence` last, naming the first divergence for the
+//! message taxonomy on whatever the crate's parser itself rejected. The
+//! rejections are pins, not parity: tests/test_uuid.py's divergence
+//! battery proves the stdlib accepts each loose form in the same test
+//! that pins tors rejecting it.
 //!
 //! Pure Rust, no pyo3 types: the pyo3 wrappers in `src/py/uuid.rs` add
 //! only the argument dispatch (the bytes-or-str union), the GIL model,
 //! and the return marshalling.
+
+use uuid::Uuid;
 
 /// The rejection shapes of `parse_canonical`: one variant per distinct
 /// message, `message()` rendering each (the pyo3 layer attaches them to
@@ -72,12 +96,24 @@ pub enum TextError {
     /// length at 36): "found '-' at position P, where a hex digit belongs".
     StrayHyphen { position: usize },
     /// A hex position holding `A`-`F`: the loudest divergence (the stdlib
-    /// accepts uppercase), so the message says so:
+    /// accepts uppercase, and so does the crate's parser -- only the
+    /// canonical-encoding comparison catches it), so the message says so:
     /// "found uppercase C at position P" plus the stdlib note.
     Uppercase { position: usize, found: char },
     /// A hex position holding anything else (including whitespace and
     /// non-ASCII): "found C at position P".
     NotHex { position: usize, found: char },
+    /// The drift fallback: a 36-character input the crate's parser rejected
+    /// whose divergence the scan could not name. Unreachable under every
+    /// `uuid` 1.x grammar measured -- the scan's accepted set (hyphens at
+    /// 8/13/18/23, lowercase hex) is a subset of the crate's 36-character
+    /// grammar (any-case hex), so a crate rejection always contains a
+    /// divergence the scan finds -- kept so a future grammar narrowing
+    /// degrades to a ValueError naming the accepted form instead of a
+    /// panic (and the round-trip battery fails loudly on any such
+    /// narrowing long before this could ship): the accepted form, no
+    /// position (none was diagnosable).
+    NotCanonical,
 }
 
 impl TextError {
@@ -108,6 +144,9 @@ impl TextError {
             TextError::NotHex { position, found } => {
                 format!("UUID text must be lowercase hex: found {found:?} at position {position}")
             }
+            TextError::NotCanonical => {
+                String::from("UUID text must be 8-4-4-4-12 hyphenated lowercase hex")
+            }
         }
     }
 }
@@ -124,50 +163,95 @@ const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
 /// character itself is rejected at its position before that could matter
 /// (a multi-byte char is never `-` or a hex digit, and its start position
 /// is always scanned), so accepted input is pure ASCII by construction.
+///
+/// The acceptance work is split: `Uuid::parse_str` owns the structural
+/// parse (hyphen placement, hex digits -- and the transcode: the accepted
+/// input's bytes are `*parsed.as_bytes()`, the crate's own decode), and
+/// canonical-encoding equality owns the strictness -- the parsed value is
+/// re-encoded through `hyphenated().encode_lower` and must be byte-equal
+/// to the input. Under the crate's 36-character grammar (hyphens exactly
+/// at 8/13/18/23, ASCII hex of either case elsewhere) that comparison
+/// rejects exactly one loose form: uppercase hex, which parses but
+/// re-encodes lowercase; every other loose form (braces, urn, hyphen-less)
+/// is a different length and never reaches it. Rejections route to
+/// `classify_divergence` when the crate's parser itself refused, or to the
+/// first-mismatch position when the encoding comparison did.
 pub fn parse_canonical(text: &str) -> Result<[u8; 16], TextError> {
     if text.len() != 36 {
         return Err(TextError::Length(text.len()));
     }
-    let mut out = [0u8; 16];
-    // The hex-digit count so far: even nibbles take the high half of their
-    // byte, odd nibbles the low half of the same byte.
-    let mut digits = 0usize;
+    let parsed = match Uuid::parse_str(text) {
+        Ok(parsed) => parsed,
+        Err(_) => return Err(classify_divergence(text)),
+    };
+    let mut canonical = [0u8; 36];
+    let encoded = parsed.hyphenated().encode_lower(&mut canonical);
+    let input = text.as_bytes();
+    if encoded.as_bytes() != input {
+        // The first mismatching index: under the crate's grammar the
+        // mismatching byte is an uppercase hex digit (lowercase hex and
+        // the hyphens re-encode identically), so this is the Uppercase
+        // arm. The catch-all is drift insurance -- if a future uuid 1.x
+        // ever let some other byte survive parse_str at 36 characters,
+        // the input still gets a ValueError naming the position and
+        // character, never a panic.
+        let position = encoded
+            .as_bytes()
+            .iter()
+            .zip(input)
+            .position(|(canonical, given)| canonical != given)
+            .expect("unequal byte slices always diverge");
+        return Err(match input[position] {
+            b'A'..=b'F' => TextError::Uppercase {
+                position,
+                found: input[position] as char,
+            },
+            found => TextError::NotHex {
+                position,
+                found: found as char,
+            },
+        });
+    }
+    Ok(*parsed.as_bytes())
+}
+
+/// The first divergence of a 36-character input the crate's parser itself
+/// rejected, as the left-to-right single pass the message taxonomy pins:
+/// hyphen slots first (`MissingHyphen`), then hex slots (`StrayHyphen`,
+/// `Uppercase`, `NotHex`). This scan names a character and position for a
+/// message; it produces no bytes (the transcode lives in the crate, and
+/// this path only runs on rejection). Its accepted set -- hyphens at
+/// 8/13/18/23, lowercase hex elsewhere -- is a subset of the crate's
+/// 36-character grammar (the same shape with any-case hex), so a crate
+/// rejection always contains a divergence this scan finds; the
+/// fall-through arm is unreachable today and is the `NotCanonical` drift
+/// fallback, not a panic.
+fn classify_divergence(text: &str) -> TextError {
     for (position, c) in text.char_indices() {
         if HYPHEN_POSITIONS.contains(&position) {
             if c != '-' {
-                return Err(TextError::MissingHyphen { position, found: c });
+                return TextError::MissingHyphen { position, found: c };
             }
         } else {
-            let digit = match c {
-                '-' => return Err(TextError::StrayHyphen { position }),
-                '0'..='9' => c as u8 - b'0',
-                'a'..='f' => c as u8 - b'a' + 10,
-                'A'..='F' => {
-                    return Err(TextError::Uppercase { position, found: c });
-                }
-                _ => return Err(TextError::NotHex { position, found: c }),
-            };
-            if digits.is_multiple_of(2) {
-                out[digits / 2] = digit << 4;
-            } else {
-                out[digits / 2] |= digit;
+            match c {
+                '-' => return TextError::StrayHyphen { position },
+                '0'..='9' | 'a'..='f' => {}
+                'A'..='F' => return TextError::Uppercase { position, found: c },
+                _ => return TextError::NotHex { position, found: c },
             }
-            digits += 1;
         }
     }
-    // Every hyphen position held a hyphen and every other position a hex
-    // digit (any other character, multi-byte included, already returned),
-    // so exactly 32 digits filled all 16 bytes.
-    debug_assert_eq!(
-        digits, 32,
-        "36 accepted positions always hold 4 hyphens + 32 digits"
-    );
-    Ok(out)
+    TextError::NotCanonical
 }
 
 /// The version nibble (byte 6's high half), 0-15, for any UUID of any
 /// variant: the field itself. The variant (byte 8's top two bits) is a
-/// different field and deliberately not consulted.
+/// different field and deliberately not consulted. Kept as the direct
+/// shift over the buffer rather than the crate's `get_version_num`: that
+/// method is this identical shift behind a newtype wrap plus a usize cast
+/// (see the module docs -- no complexity is delegated by the wrap), and
+/// the u48 timestamp read below stays direct anyway (the crate has no
+/// public v7 accessor), so one spelling style covers both reads.
 pub fn version_nibble(bytes: &[u8; 16]) -> u8 {
     bytes[6] >> 4
 }
@@ -446,5 +530,115 @@ mod tests {
             // either way, no input may panic.
             let _ = parse_canonical(shape);
         }
+    }
+
+    // --- the adoption boundary pins ---------------------------------------
+    //
+    // The crate adoption's own regression net: these call the `uuid` crate
+    // DIRECTLY to prove which side of the parse_str/strictness-layer
+    // boundary each input class lands on, so a future uuid 1.x that moves
+    // the boundary (a grammar change in either direction) fails HERE
+    // first, with a message naming the boundary, instead of silently
+    // moving rejections between tors's routes.
+
+    #[test]
+    fn the_crate_parses_what_the_strictness_layer_rejects_uppercase() {
+        // The strictness layer's whole job in one pin: uppercase hex is
+        // INSIDE the crate's grammar (parse_str accepts it -- proven by
+        // calling the crate) and OUTSIDE tors's (the canonical-encoding
+        // comparison rejects it). Uppercase is the only loose form that is
+        // 36 characters, so it is the only one that reaches the comparison
+        // at all; braces/urn/simple are length-gated before it.
+        let upper = DOC_V7_TEXT.to_uppercase();
+        assert!(Uuid::parse_str(&upper).is_ok());
+        assert_eq!(
+            parse_canonical(&upper).unwrap_err(),
+            TextError::Uppercase {
+                position: 9,
+                found: 'D'
+            }
+        );
+    }
+
+    #[test]
+    fn the_crate_parses_the_wrapper_forms_tors_length_gates() {
+        // The other three stdlib loose forms, each proven crate-accepted
+        // and tors-rejected through the length gate (38/45/32): the route
+        // split of the strictness layer, pinned so a uuid 1.x grammar
+        // change that somehow made one of these 36 characters (or stopped
+        // parsing one) is caught as a boundary move, not a silent pass.
+        let braced = format!("{{{DOC_V7_TEXT}}}");
+        let urn = format!("urn:uuid:{DOC_V7_TEXT}");
+        let simple = DOC_V7_TEXT.replace('-', "");
+        assert!(Uuid::parse_str(&braced).is_ok());
+        assert!(Uuid::parse_str(&urn).is_ok());
+        assert!(Uuid::parse_str(&simple).is_ok());
+        assert_eq!(parse_canonical(&braced).unwrap_err(), TextError::Length(38));
+        assert_eq!(parse_canonical(&urn).unwrap_err(), TextError::Length(45));
+        assert_eq!(parse_canonical(&simple).unwrap_err(), TextError::Length(32));
+    }
+
+    #[test]
+    fn every_uppercase_position_is_reported_at_its_own_index() {
+        // One mutated letter position per group (skipping digits, whose
+        // uppercase is themselves, and the hyphen slots): each reports its
+        // own index, the first-mismatch semantics of the encoding
+        // comparison.
+        for &position in &[9, 10, 15, 16, 17, 20, 21, 22, 35] {
+            let mut chars: Vec<char> = DOC_V7_TEXT.chars().collect();
+            chars[position] = chars[position].to_ascii_uppercase();
+            let found = chars[position];
+            let text: String = chars.into_iter().collect();
+            assert_eq!(
+                parse_canonical(&text).unwrap_err(),
+                TextError::Uppercase { position, found },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn everything_the_strict_scan_accepts_the_crate_accepts() {
+        // The subset invariant classify_divergence's soundness rests on:
+        // canonical renderings (what the strict scan accepts) are all
+        // inside the crate's permissive grammar. If a future uuid 1.x
+        // ever NARROWED its grammar below tors's, this fails first -- and
+        // the round-trip test above fails with it -- long before the
+        // NotCanonical drift fallback could be reached in production.
+        let canonical = |bytes: &[u8; 16]| {
+            let hex = const_hex::encode(bytes);
+            format!(
+                "{}-{}-{}-{}-{}",
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
+            )
+        };
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..200 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let mut bytes = [0u8; 16];
+            for (i, slot) in bytes.iter_mut().enumerate() {
+                *slot = (state >> ((i % 8) * 8)) as u8;
+            }
+            let text = canonical(&bytes);
+            assert!(Uuid::parse_str(&text).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_drift_fallback_message_names_the_accepted_form() {
+        // NotCanonical is unreachable through parse_canonical under every
+        // measured grammar (the subset pin above); pin its message anyway
+        // so the fallback, if a future grammar narrowing ever reaches it,
+        // degrades to a precise ValueError rather than an unpinned string.
+        assert_eq!(
+            TextError::NotCanonical.message(),
+            "UUID text must be 8-4-4-4-12 hyphenated lowercase hex"
+        );
     }
 }

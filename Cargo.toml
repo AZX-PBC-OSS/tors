@@ -120,6 +120,23 @@ regex = "1"
 # UNLICENSE (the memchr election precedent). default-features off with
 # std only — no timezone database needed (fixed offsets + civil types).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# The UUIDv7 helper trio's parse/encode engine (src/uuid_impl.rs,
+# `uuid_parse`/`uuid_version`/`uuid7_timestamp_ms`): the uuid-rs org's crate,
+# adopted for the hex grammar work (parse + canonical encode) per the
+# maintainer policy of preferring a maintained, compliant crate over
+# hand-rolling. Apache-2.0 OR MIT, passes deny.toml's allowlist through SPDX
+# expression evaluation with no config change. default-features = false:
+# parse_str/from_bytes/get_version_num/hyphenated().encode_lower need NO
+# features, verified `cargo tree` shows zero transitive dependencies in this
+# config; the generation features (v4/v7/rng) stay off — tors's surface has
+# no generator (every producer from uuid.uuid7() to uuid_utils already does
+# that job), it reads fields back out. The strict-canonical CONTRACT stays
+# tors's own thin layer on top: the crate's parse_str deliberately accepts
+# the loose forms tors rejects (braces, urn:, hyphen-less, uppercase), so
+# tors enforces strictness by canonical-encoding equality — input must be
+# byte-equal to the parsed value's re-encoded canonical form — and keeps its
+# own error taxonomy/position finding (uuid_impl.rs's module doc).
+uuid = { version = "1", default-features = false }
 # The whole PDF surface (`pdf_extract`/`pdf_page_count`, `src/pdf_impl.rs`):
 # open + per-page text + markdown conversion, called directly under
 # `py.detach` — the crate ships pyo3 bindings of its own, but that wheel
