@@ -165,8 +165,15 @@ pub enum RandomError {
     /// string carries the OS error's own message.
     Os(String),
     /// `uuid7`'s timestamp source failed: the system clock reads before the
-    /// Unix epoch (clock skew backwards past 1970), or (theoretically) past
-    /// the u64 millisecond horizon (year ~584 million).
+    /// Unix epoch (clock skew backwards past 1970). The forward horizon is
+    /// NOT the u64 millisecond check in this core (year ~584 million): the
+    /// uuid 1.26 builder silently TRUNCATES the timestamp above 2^48
+    /// milliseconds (year ~10,892; verified in its source — `timestamp.rs`
+    /// masks `millis_high` to the 48 bits the field holds), long before any
+    /// u64 overflow. That truncation is unreachable in practice — no real
+    /// system clock reads year 10,892 — so it is recorded from the
+    /// source-read, not from a reachable failure shape; only a mocked clock
+    /// past the horizon can hit it.
     Clock(String),
     /// The output string's reservation failed: the requested length's
     /// worst-case byte size does not fit in memory. The usize is that
