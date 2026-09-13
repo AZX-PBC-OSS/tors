@@ -60,6 +60,20 @@ fn bench_scrub_pii(c: &mut Criterion) {
             },
         );
     }
+    // Degenerate-domain guard (pins the linear domain split): 50k `a.`
+    // pairs, both the non-match (`…a`) and the match (`…zz`) spellings.
+    // The backward sweep is O(run), never O(run²); sha2 runs only for
+    // spans that actually match (the non-match allocates nothing).
+    let dots = "a.".repeat(50_000);
+    for (id, text) in [
+        ("degenerate_domain_non_match", format!("x@{dots}a")),
+        ("degenerate_domain_match", format!("x@{dots}zz")),
+    ] {
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(BenchmarkId::new(id, format!("{}B", text.len())), &text, |bench, text| {
+            bench.iter(|| scrub_pii(black_box(text), PiiRules::BOTH, tors::pii_impl::DEFAULT_SALT))
+        });
+    }
     group.finish();
 }
 

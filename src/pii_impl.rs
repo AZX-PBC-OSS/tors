@@ -55,7 +55,8 @@
 //!     and scrub-twice convergence cannot be chained adversarially
 //!     through chosen digests. Second, the match must start at a CLEAN
 //!     boundary — its first char not glued to a `~` or a lowercase
-//!     `a`-`f`, the token-interior alphabet — so a run starting inside
+//!     `a`-`f` (the token-interior alphabet: hex `a`-`f` + `~`, exactly;
+//!     `g`/`z`/`A`-`F` are clean and still match) — so a run starting inside
 //!     an email token's digest can never flow out through a separator
 //!     into following text and compose a fresh "number" out of hex
 //!     digits (`…~e292cb255128 4096` stays untouched); in real text a
@@ -144,6 +145,22 @@
 //! permissive; every documented non-match of the source (`+`-less digit
 //! runs, one-letter TLDs, non-ASCII domains, a separator right after
 //! the `+`) is a pinned non-match here, never tightened.
+//!
+//! Threat model: diagnostic-preserving, NOT adversarial-robust. The
+//! narrow grammars are the parity contract at `salt=""` (widening them
+//! silently would break byte-identity), so attacker-controlled
+//! formatting bypasses by design — `/ : , ;` split runs, fullwidth
+//! U+FF0B and fullwidth spaces bypass, IDN/non-ASCII domains leak whole,
+//! RFC local chars outside `[A-Za-z0-9._%+-]` fragment-leak (`a!`
+//! survives), bare 10/11-digit and short `+`-led runs never match. For
+//! adversarial threat, NFKC-normalize + canonicalize before scrub; see
+//! `docs/api.md`'s scrub_pii section for the full residual-risk list.
+//!
+//! Performance: one linear `memchr`-anchored pass per rule, `Cow::Borrowed`
+//! identity when nothing matches, `py.detach` around the whole scan on
+//! the Python side, and `sha2` digests computed only for spans that
+//! actually matched (never per candidate). The degenerate-domain bench
+//! (`a.` × 50k) pins the linear domain split.
 
 use std::borrow::Cow;
 
@@ -514,11 +531,11 @@ fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
             // eleven with an ASCII leading `1`, carrying a separator (a
             // bare digit run is an id, not a phone), and starting at a
             // CLEAN boundary: the match's first char not glued to a `~`
-            // or a lowercase `a`-`f` — the token-interior alphabet — so
+            // or a lowercase `a`-`f` (hex `a`-`f` + `~`, exactly) — so
             // no run starting inside a token's digest can flow out
             // through a separator into following text and compose a
             // fresh "number" out of hex digits. In real text a digit
-            // run glued to a letter or tilde is an identifier fragment,
+            // run glued to hex/tilde is an identifier fragment,
             // the same reasoning as the bare cut.
             let nanp_shape = run.digits == 10 || (run.digits == 11 && run.first_digit == Some('1'));
             let match_start = run_start + run.leading_spaces;
@@ -970,14 +987,35 @@ mod tests {
     fn a_match_start_glued_to_hex_or_tilde_is_an_identifier_fragment() {
         // The clean-boundary rule: a domestic match's first char may not
         // be glued to `~` or a lowercase a-f — the token-interior
-        // alphabet — so a run starting inside a token's digest can never
-        // flow out into following text and compose a fresh "number" out
-        // of hex digits.
-        for text in ["job255128-4096", "value~255-123-4567", "ref c415-555-2671"] {
+        // alphabet (hex a-f + `~`, exactly; NOT "letters" in general) —
+        // so a run starting inside a token's digest can never flow out
+        // into following text and compose a fresh "number" out of hex
+        // digits.
+        for text in [
+            "job255128-4096",
+            "value~255-123-4567",
+            "ref c415-555-2671",
+            "ref a415-555-2671",
+            "ref f415-555-2671",
+        ] {
             assert_eq!(scrub(text, phone_only(), ""), text, "{text}");
         }
-        // A clean boundary is anything else — letters outside the hex
-        // alphabet included, and every word-separated spelling.
+        // A clean boundary is anything else — g/z, uppercase A-F, and
+        // every word-separated spelling. Only lowercase a-f and `~` are
+        // dirty by design.
+        for (text, matched, prefix_glue) in [
+            ("jobg415-555-2671", "415-555-2671", "jobg"),
+            ("jobz415-555-2671", "415-555-2671", "jobz"),
+            ("jobG415-555-2671", "415-555-2671", "jobG"),
+            ("jobA415-555-2671", "415-555-2671", "jobA"),
+            ("jobF415-555-2671", "415-555-2671", "jobF"),
+        ] {
+            assert_eq!(
+                scrub(text, phone_only(), ""),
+                format!("{prefix_glue}415~{}", digest("", matched)),
+                "{text}"
+            );
+        }
         assert_eq!(
             scrub("item 415-555-2671", phone_only(), ""),
             format!("item 415~{}", digest("", "415-555-2671"))
@@ -1103,5 +1141,22 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
         assert!(is_nd('\u{1FBF7}')); // segmented digit seven: Nd, not No
         assert!(!is_nd('\u{00B2}')); // superscript two: No
         assert!(!is_nd('\u{2169}')); // Roman numeral: Nl
+        // Table hygiene: sorted, non-overlapping, and the committed
+        // Unicode 16.0.0 count (760). The per-interpreter exhaustive pin
+        // lives in tests/test_scrub_pii.py::TestNdExhaustive (unicodedata
+        // as oracle, observed through `+`-anchored matches).
+        assert_eq!(ND_RANGES.len(), 71);
+        let mut total = 0u32;
+        let mut prev_hi = 0u32;
+        for &(lo, hi) in &ND_RANGES {
+            assert!(lo <= hi, "{lo:#X}..={hi:#X}");
+            assert!(lo > prev_hi, "unsorted/overlapping at {lo:#X}");
+            total += hi - lo + 1;
+            prev_hi = hi;
+        }
+        assert_eq!(total, 760);
+        assert!(!is_nd('\u{FF0B}')); // fullwidth plus: not a digit
+        assert!(!is_nd('~'));
+        assert!(!is_nd('+'));
     }
 }

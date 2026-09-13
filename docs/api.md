@@ -171,32 +171,75 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
     more middle class characters, a final digit — the middle counts
     separators, so a long spelling matches on seven digits
     (`+1 415 555`) while `+1234567` never does. The separators are the ones
-    humans and upstream APIs use (`( ) - . ` and space — two numbers split
-    by one space are ONE match); the digit class is Unicode Nd (every
-    decimal-digit script); and a `~` or a second `+` breaks a run. A `+`
-    before a run marks international intent for the whole run: the grammar
-    matches, or the run is the ported non-match, and the domestic matcher
-    never fires behind a `+` — `+ (415) 555-2671` stays untouched, exactly
-    as the source leaves it. `ticket 4096` above survives untouched.
+    humans and upstream APIs use (`( ) - . ` and space); the digit class is
+    Unicode Nd (every decimal-digit script); and a `~` or a second `+`
+    breaks a run. One run is ONE match: two numbers split by one space
+    (`+4712345678 1234567890`) are a single match with a single digest
+    over the whole run (space-bridged over-merge, documented not fixed).
+    A `+` before a run marks international intent for the whole run: the
+    grammar matches, or the run is the ported non-match, and the domestic
+    matcher never fires behind a `+` — `+ (415) 555-2671` stays untouched,
+    exactly as the source leaves it. `ticket 4096` above survives
+    untouched.
   - *domestic* (the extension past the ported source): un-plussed NANP
     shapes — a full run of exactly ten digits, or eleven with an ASCII
     leading `1`, in any `( ) - . ` spelling, `1 (415) 555-2671` and
-    `1-415-555-2671` included. Two discipline rules, both load-bearing:
-    the match must carry at least one SEPARATOR, so a bare unseparated
+    `1-415-555-2671` included. THREE discipline rules, all load-bearing:
+    (1) the match must carry at least one SEPARATOR, so a bare unseparated
     digit run is never scrubbed even at exactly ten digits — it is an
     order number or id (the same reasoning that anchors the
     international matcher on `+`), and the requirement is also what
     keeps a token's own digest hex unmatchable, so phone-only stays
     strictly idempotent and scrub-twice convergence cannot be chained
-    adversarially through chosen digests; and no partial match inside a
-    longer run — twelve-plus digits is an id, not a phone. Leading
-    spaces are skipped, trailing separators survive, and non-NANP
-    un-plussed domestic (`020 …` shapes) is out of scope: the `+` form
-    is the international spelling of those. One reachable interaction
-    is documented rather than fixed: an email token whose DOMAIN spells
-    a domestic number (`user@555.1234567.co`) has its digit half
-    re-tokenized by the phone pass — over-redaction in the safe
-    direction, converging on the second scrub like every other shape.
+    adversarially through chosen digests; (2) the match must start at a
+    CLEAN boundary — its first char not glued to `~` or a lowercase
+    `a`-`f` (the token-interior alphabet: hex `a`-`f` + `~`, exactly, not
+    "letters" — `g`/`z`/`A`-`F` are clean and still match), so a run
+    starting inside a token digest can never flow out through a separator
+    into following text (`…~e292cb255128 4096` stays untouched); and
+    (3) no partial match inside a longer run — twelve-plus digits is an
+    id, not a phone. Leading spaces are skipped (word separation); a
+    leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
+    the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
+    whole); trailing separators survive past the last digit, same as
+    international; and non-NANP un-plussed domestic (`020 …` shapes) is
+    out of scope: the `+` form is the international spelling of those.
+    One reachable interaction is documented rather than fixed: an email
+    token whose DOMAIN spells a domestic number (`user@555.1234567.co`)
+    has its digit half re-tokenized by the phone pass — over-redaction
+    in the safe direction, converging on the second scrub like every
+    other shape.
+
+**Threat model: diagnostic-preserving, NOT adversarial-robust.** The
+grammars above are parity-correct against the ported source at
+`salt=""`, and parity is exactly why they are narrow: widening them
+silently would break the byte-identical contract. The residual
+bypassables below are DOCUMENTED, not fixed — attacker-controlled
+formatting bypasses this scrubber, and that is the expected trade-off
+for a scrubber that must never eat order numbers, byte counts, and
+timestamps:
+
+- `/`, `:`, `,`, `;` (and every other non-class char) split runs:
+  `a/b.co`, `a:b.co`, `a,b.co` never match, exactly as the source
+  leaves them.
+- Fullwidth `＋` (U+FF0B) is not the literal `+`, and fullwidth/odd
+  spaces are not the ASCII space class: `＋12345678` stays untouched.
+- IDN / non-ASCII domains leak whole: the email classes are ASCII-only,
+  so `a@exämple.com` never matches (the documented non-match).
+- RFC local characters outside `[A-Za-z0-9._%+-]` fragment-leak: `!`,
+  `#`, `$`, `&`, `'`, `*`, `/`, `=`, `?`, `^`, `` ` ``, `{`, `|`, `}`,
+  `~` split the local part, so `a!b@x.co` scrubs `b@x.co` and the `a!`
+  survives (pinned in the battery).
+- Bare digit runs never match even at ten/eleven digits (`4155552671`,
+  `14155552671` are order numbers), and short `+`-led runs never match
+  (`+1234567`, seven digits, is the ported non-match).
+
+If your threat includes adversarial formatting (an attacker choosing
+the spelling to dodge the scrubber), canonicalize BEFORE scrubbing:
+NFKC-normalize (folds fullwidth alphanumerics and compatibility spaces
+toward their ASCII spellings), then canonicalize separators/domains to
+the grammar above — and treat the scrub as one layer, not the whole
+control.
 
 `rules=None` applies both rules in the canonical order — the email
 substitution over the whole string first, then the phone substitution over
@@ -212,7 +255,11 @@ domain-separation tag (frozen: changing it would silently change every
 deployment's token values). A KNOWN salt, the public default included, does
 not make the digest secret: the E.164 space is small enough to enumerate, so
 an attacker with a candidate list can still confirm whether a specific
-address appeared. The tokens are redaction, not pseudonymization crypto;
+number appeared — and the same holds for EMAIL addresses (common
+local-parts on common domains are enumerable too) and for `salt=""`
+(the unsalted migration lane re-publishes the source chain's documented
+weakness by design: byte-identical tokens with an unsalted upstream).
+The tokens are redaction, not pseudonymization crypto;
 deployments that care pass their own secret salt, and a consumer migrating
 from an unsalted upstream scrubber passes `salt=""` to keep its token values
 byte-identical — any other salt changes them.
@@ -224,16 +271,24 @@ output is a fixed point unless an email token is immediately followed by
 own local part the match consumed (`x@b.co@w.vu`). A token's digest hex is
 local-part material, so a second pass fires once more on that boundary and
 then holds: **scrubbing twice always converges**. If your excerpts can chain
-emails like that and you need a guaranteed fixed point, scrub twice;
+emails like that and you need a guaranteed fixed point, scrub twice
+(`scrub_pii(scrub_pii(x))` — the documented helper shape; the fuzz target
+and the hypothesis ports pin that the third pass is the identity);
 everything else is one pass. Phone-only is strictly idempotent.
 
 `tors.scrub_pii(s, ...) is s` exactly when no active rule matches. A `str`
 holding lone surrogates is refused at the argument boundary with
 `UnicodeEncodeError` ("surrogates not allowed"), the same boundary every
-str-in function here documents — the ported chain diverges there by design
-(its classes never match a surrogate, so it returns such text with the
-matches around it still scrubbed), and the divergence is pinned in both
-directions by the parity gates.
+str-in function here documents — the ported chain diverges there by design:
+its classes never match a surrogate, so it returns such text with the
+matches AROUND the surrogate still scrubbed (scrub-plus-surround), while
+tors refuses the whole call at the boundary. Pin the call-site shape
+accordingly (sanitize-or-skip surrogates before scrubbing if your pipeline
+ingests lone-surrogate text), and see the parity gates which pin the
+divergence in both directions. Live re-sync cadence/owner: the quoted pin
+in `tests/reference.py` is the CI oracle; the live source module is
+re-checked manually whenever its grammar changes and at least once per
+Unicode/dependency bump (owner: the scrub_pii maintainer).
 
 **Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 

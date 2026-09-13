@@ -676,3 +676,63 @@ class TestDomesticPhoneZoo:
             salt="",
         )
         assert scrub_pii(once, ["contact_phone"], salt="") == once
+
+    def test_hex_or_tilde_glued_runs_are_identifier_fragments(self) -> None:
+        # H2/H3: the clean-boundary rule pins `~` + lowercase a-f as the
+        # exact dirty set (the token-interior alphabet), not "letters".
+        for text in (
+            "job255128-4096",
+            "value~255-123-4567",
+            "ref c415-555-2671",
+            "ref a415-555-2671",
+            "ref f415-555-2671",
+        ):
+            assert scrub_pii(text, ["contact_phone"], salt="") == text, text
+
+    def test_non_hex_letters_are_clean_boundaries(self) -> None:
+        # g/z and uppercase A-F are clean: the domestic shape still fires.
+        for text, matched in (
+            ("jobg415-555-2671", "415-555-2671"),
+            ("jobz415-555-2671", "415-555-2671"),
+            ("jobG415-555-2671", "415-555-2671"),
+            ("jobA415-555-2671", "415-555-2671"),
+            ("jobF415-555-2671", "415-555-2671"),
+        ):
+            out = scrub_pii(text, ["contact_phone"], salt="")
+            assert out != text, text
+            assert matched not in out, text
+
+
+class TestNdExhaustive:
+    """H1: the Nd table is pinned exhaustively per interpreter, not by
+    representatives. Every codepoint the running interpreter calls Nd
+    must behave as a digit in the phone grammar (observable through
+    ``+``-anchored matches); No/Nl numerics must never do so. Nd
+    assignments are append-only across Unicode versions, so the Rust
+    table (Unicode 16.0.0) covers every older interpreter's Nd set:
+    the assertion is one-directional (interpreter-Nd ⇒ tors-digit)."""
+
+    def test_every_interpreter_nd_digit_matches(self) -> None:
+        import unicodedata
+
+        nds = [chr(i) for i in range(0x110000) if unicodedata.category(chr(i)) == "Nd"]
+        assert len(nds) > 600  # sanity: the table is not empty/trivial
+        for c in nds:
+            text = "+" + c * 8
+            out = scrub_pii(text, ["contact_phone"], salt="")
+            assert out != text, f"U+{ord(c):04X} is Nd but did not match"
+
+    def test_no_nl_numerics_never_match(self) -> None:
+        import unicodedata
+
+        # Representative No/Nl pins (fast) plus an exhaustive sweep that
+        # every No/Nl codepoint breaks the digit run ("+12<c>45678" must
+        # stay untouched because the run dies at <c>).
+        assert scrub_pii("+12\u00b2345678", ["contact_phone"], salt="") == "+12\u00b2345678"
+        assert scrub_pii("+12\u216945678", ["contact_phone"], salt="") == "+12\u216945678"
+        assert scrub_pii("\uFF0B12345678", ["contact_phone"], salt="") == "\uFF0B12345678"
+        for i in range(0x110000):
+            c = chr(i)
+            if unicodedata.category(c) in ("No", "Nl"):
+                text = "+12" + c + "45678"
+                assert scrub_pii(text, ["contact_phone"], salt="") == text, f"U+{i:04X}"

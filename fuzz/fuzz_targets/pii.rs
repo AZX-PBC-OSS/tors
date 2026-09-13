@@ -54,7 +54,105 @@
 use std::borrow::Cow;
 
 use libfuzzer_sys::fuzz_target;
-use tors::pii_impl::{PiiRules, is_nd, scrub_pii};
+use tors::pii_impl::{PiiRules, scrub_pii};
+
+/// Independent Nd table for the oracle side of this harness: an
+/// own transcription of Unicode 16.0.0 Nd ranges, deliberately NOT
+/// imported from `pii_impl::is_nd` (which it checks). If the two
+/// tables ever disagree, the phone-match invariants below fail and
+/// the harness — not the transform — names the drift.
+const ORACLE_ND_RANGES: [(u32, u32); 71] = [
+    (0x0030, 0x0039),
+    (0x0660, 0x0669),
+    (0x06F0, 0x06F9),
+    (0x07C0, 0x07C9),
+    (0x0966, 0x096F),
+    (0x09E6, 0x09EF),
+    (0x0A66, 0x0A6F),
+    (0x0AE6, 0x0AEF),
+    (0x0B66, 0x0B6F),
+    (0x0BE6, 0x0BEF),
+    (0x0C66, 0x0C6F),
+    (0x0CE6, 0x0CEF),
+    (0x0D66, 0x0D6F),
+    (0x0DE6, 0x0DEF),
+    (0x0E50, 0x0E59),
+    (0x0ED0, 0x0ED9),
+    (0x0F20, 0x0F29),
+    (0x1040, 0x1049),
+    (0x1090, 0x1099),
+    (0x17E0, 0x17E9),
+    (0x1810, 0x1819),
+    (0x1946, 0x194F),
+    (0x19D0, 0x19D9),
+    (0x1A80, 0x1A89),
+    (0x1A90, 0x1A99),
+    (0x1B50, 0x1B59),
+    (0x1BB0, 0x1BB9),
+    (0x1C40, 0x1C49),
+    (0x1C50, 0x1C59),
+    (0xA620, 0xA629),
+    (0xA8D0, 0xA8D9),
+    (0xA900, 0xA909),
+    (0xA9D0, 0xA9D9),
+    (0xA9F0, 0xA9F9),
+    (0xAA50, 0xAA59),
+    (0xABF0, 0xABF9),
+    (0xFF10, 0xFF19),
+    (0x0104A0, 0x0104A9),
+    (0x010D30, 0x010D39),
+    (0x010D40, 0x010D49),
+    (0x011066, 0x01106F),
+    (0x0110F0, 0x0110F9),
+    (0x011136, 0x01113F),
+    (0x0111D0, 0x0111D9),
+    (0x0112F0, 0x0112F9),
+    (0x011450, 0x011459),
+    (0x0114D0, 0x0114D9),
+    (0x011650, 0x011659),
+    (0x0116C0, 0x0116C9),
+    (0x0116D0, 0x0116E3),
+    (0x011730, 0x011739),
+    (0x0118E0, 0x0118E9),
+    (0x011950, 0x011959),
+    (0x011BF0, 0x011BF9),
+    (0x011C50, 0x011C59),
+    (0x011D50, 0x011D59),
+    (0x011DA0, 0x011DA9),
+    (0x011F50, 0x011F59),
+    (0x016130, 0x016139),
+    (0x016A60, 0x016A69),
+    (0x016AC0, 0x016AC9),
+    (0x016B50, 0x016B59),
+    (0x016D70, 0x016D79),
+    (0x01CCF0, 0x01CCF9),
+    (0x01D7CE, 0x01D7FF),
+    (0x01E140, 0x01E149),
+    (0x01E2F0, 0x01E2F9),
+    (0x01E4F0, 0x01E4F9),
+    (0x01E5F1, 0x01E5FA),
+    (0x01E950, 0x01E959),
+    (0x01FBF0, 0x01FBF9),
+];
+
+#[inline]
+fn oracle_is_nd(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_digit();
+    }
+    let cp = c as u32;
+    ORACLE_ND_RANGES
+        .binary_search_by(|&(lo, hi)| {
+            if cp < lo {
+                std::cmp::Ordering::Greater
+            } else if cp > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
 
 fn is_local_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-')
@@ -65,7 +163,7 @@ fn is_domain_char(c: char) -> bool {
 }
 
 fn is_phone_class_char(c: char) -> bool {
-    is_nd(c) || matches!(c, '-' | '.' | ' ' | '(' | ')')
+    oracle_is_nd(c) || matches!(c, '-' | '.' | ' ' | '(' | ')')
 }
 
 fn is_phone_sep_char(c: char) -> bool {
@@ -109,7 +207,7 @@ fn email_match_at(chars: &[char], start: usize) -> Option<usize> {
 /// digit at char index 6 or beyond (the middle holds at least six
 /// chars). Returns the match END (char index) on success.
 fn intl_match_at(chars: &[char], start: usize) -> Option<usize> {
-    if chars[start] != '+' || start + 1 >= chars.len() || !is_nd(chars[start + 1]) {
+    if chars[start] != '+' || start + 1 >= chars.len() || !oracle_is_nd(chars[start + 1]) {
         return None;
     }
     let mut run_end = start + 2;
@@ -120,7 +218,7 @@ fn intl_match_at(chars: &[char], start: usize) -> Option<usize> {
     // holding an Nd char (index start+8 makes the middle exactly six).
     ((start + 8)..run_end)
         .rev()
-        .find(|&idx| is_nd(chars[idx]))
+        .find(|&idx| oracle_is_nd(chars[idx]))
         .map(|idx| idx + 1)
 }
 
@@ -158,7 +256,7 @@ fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
         let mut seen_non_space = false;
         let mut leading_spaces = 0;
         while j < chars.len() && is_phone_class_char(chars[j]) {
-            if is_nd(chars[j]) {
+            if oracle_is_nd(chars[j]) {
                 digits += 1;
                 if first_digit.is_none() {
                     first_digit = Some(chars[j]);

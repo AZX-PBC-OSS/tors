@@ -132,10 +132,16 @@ _SALT_LANES: list[str | None] = [None, "", "site-secret"]
 # past the source's + anchored grammar) would fire anywhere in `text`.
 # A faithful test-side mirror of the landed grammar — a FULL un-plussed
 # class run of exactly ten Nd digits, or eleven with an ASCII leading
-# '1', carrying at least one separator inside the match span — used only
-# to route inputs between the parity lanes (conservative by design: an
-# input this flags whose domestic shape the email pass then consumes
-# still agrees between the engines, and is simply not asserted here).
+# '1', carrying at least one separator inside the match span, starting
+# at a CLEAN boundary (the first char not glued to `~` or a lowercase
+# a-f, the token-interior alphabet) — used only to route inputs between
+# the parity lanes (conservative by design: an input this flags whose
+# domestic shape the email pass then consumes still agrees between the
+# engines, and is simply not asserted here). The clean-boundary clause
+# is load-bearing: without it hex-glued runs (`job255128-4096`,
+# `value~255-123-4567`) route to the extension lane even though both
+# engines leave them untouched, hiding parity agreement.
+_TOKEN_INTERIOR = frozenset("~abcdef")
 _DOMESTIC_SEPARATORS = "-. ()"
 
 
@@ -166,10 +172,12 @@ def has_domestic_shape(text: str) -> bool:
                 digits == 10 or (digits == 11 and first_digit == "1")
             ):
                 k = run_start
-                while text[k] == " ":
+                while k < n and text[k] == " ":
                     k += 1
-                if any(ch in _DOMESTIC_SEPARATORS for ch in text[k:last_digit]):
-                    return True
+                if k < n and any(ch in _DOMESTIC_SEPARATORS for ch in text[k:last_digit]):
+                    clean = k == 0 or text[k - 1] not in _TOKEN_INTERIOR
+                    if clean:
+                        return True
             i = j
         else:
             i += 1
@@ -250,6 +258,50 @@ class TestHypothesisDifferential:
         assert tors.scrub_pii(twice, salt="") == twice
 
 
+# --- Fuzz-invariant ports (fuzz/fuzz_targets/pii.rs, hypothesis spelling) ------
+#
+# The fuzz target asserts two structural invariants the differential lanes
+# above do not: (a) no match of the INPUT survives verbatim into the
+# converged (twice-scrubbed) output, and (b) the converged output is a
+# fixed point (a third pass is the identity object). The tests below are
+# the Python port of exactly those two asserts, over the same composed
+# alphabet plus a domestic-seeded strategy (below) so the domestic
+# extension is covered too.
+
+
+def _input_contacts_present_in(text: str) -> list[str]:
+    """Contact pieces of the zoo present verbatim in `text`."""
+    return [p for p in list(SCRUB_PII_EMAILS) + list(SCRUB_PII_PHONES) if p in text]
+
+
+class TestFuzzInvariantPorts:
+    @given(text=_composed_text)
+    @settings(max_examples=200, deadline=None)
+    def test_no_input_match_survives_convergence(self, text: str) -> None:
+        once = tors.scrub_pii(text, salt="")
+        twice = tors.scrub_pii(once, salt="")
+        # The converged output is a fixed point (fuzz: third pass Borrowed).
+        assert tors.scrub_pii(twice, salt="") == twice
+        # Any contact piece the first pass removed must stay gone
+        # (fuzz: any_survivor over the converged output).
+        for contact in _input_contacts_present_in(text):
+            if contact not in once:
+                assert contact not in twice, contact
+
+    @given(text=_composed_text)
+    @settings(max_examples=150, deadline=None)
+    def test_phone_only_converges_without_survivors(self, text: str) -> None:
+        once = tors.scrub_pii(text, ["contact_phone"], salt="")
+        assert tors.scrub_pii(once, ["contact_phone"], salt="") == once
+        for contact in [p for p in SCRUB_PII_PHONES if p in text]:
+            if contact not in once:
+                assert contact not in tors.scrub_pii(once, ["contact_phone"], salt="")
+
+
+# Domestic-seeded convergence is defined after the extension lane
+# (it seeds from _DOMESTIC_CASES); see TestDomesticSeededConvergence.
+
+
 # --- The extension lane: the domestic matcher past the source -----------------
 #
 # The source's phone grammar is + anchored, so it leaves every un-plussed
@@ -303,14 +355,100 @@ class TestDomesticExtension:
         assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
 
     @pytest.mark.parametrize(
-        "text", _DOMESTIC_NON_MATCHES, ids=[f"shared-nonmatch-{i}" for i in range(7)]
+        "text", _DOMESTIC_NON_MATCHES, ids=[f"shared-nonmatch-{i}" for i in range(len(_DOMESTIC_NON_MATCHES))]
     )
     def test_the_discipline_cuts_are_shared_non_matches(self, text: str) -> None:
         assert reference_scrub_pii(text, None, salt="") == text
         assert tors.scrub_pii(text, salt="") == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "job255128-4096",
+            "value~255-123-4567",
+            "ref c415-555-2671",
+            "ref a415-555-2671",
+            "ref f415-555-2671",
+            "x~e292cb255128 4096",
+        ],
+        ids=[
+            "hex-glued-job",
+            "tilde-glued-value",
+            "hex-c-glued",
+            "hex-a-glued",
+            "hex-f-glued",
+            "digest-tail-composition",
+        ],
+    )
+    def test_hex_or_tilde_glued_runs_are_shared_non_matches(self, text: str) -> None:
+        # The clean-boundary rule (H2): a domestic match's first char may
+        # not be glued to `~` or a lowercase a-f. Both engines leave these
+        # untouched, and the guard must NOT route them to the extension
+        # lane (it mirrors clean, so parity is asserted here, not skipped).
+        assert not has_domestic_shape(text)
+        assert reference_scrub_pii(text, None, salt="") == text
+        assert tors.scrub_pii(text, salt="") == text
+
+    @pytest.mark.parametrize(
+        ("text", "matched"),
+        [
+            ("jobg415-555-2671", "415-555-2671"),
+            ("jobz415-555-2671", "415-555-2671"),
+            ("jobG415-555-2671", "415-555-2671"),
+            ("jobA415-555-2671", "415-555-2671"),
+            ("jobF415-555-2671", "415-555-2671"),
+        ],
+        ids=["g-clean", "z-clean", "G-clean", "A-clean", "F-clean"],
+    )
+    def test_non_hex_letters_are_clean_boundaries(self, text: str, matched: str) -> None:
+        # H3: clean means exactly `~` + lowercase a-f are dirty. g/z and
+        # uppercase A-F are clean, so the domestic shape still fires.
+        assert has_domestic_shape(text)
+        token = f"{matched[:3]}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+        assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
+
+
+# Domestic-seeded convergence: compositions built from the extension
+# lane's own cases (plus separators and re-fire glue), so hypothesis
+# covers the domestic matcher structurally, not just via the generic
+# alphabet above.
+_DOMESTIC_SEEDS = [c[0] for c in _DOMESTIC_CASES] + [
+    "415-555-2671, 415-555-2672",
+    "(415) 555-2671 415-555-2672 +14155552673",
+    "job255128-4096",
+    "value~255-123-4567",
+    "~",
+    " ",
+    ", ",
+]
+_domestic_composed = st.lists(st.sampled_from(_DOMESTIC_SEEDS), min_size=0, max_size=12).map("".join)
+
+
+class TestDomesticSeededConvergence:
+    @given(text=_domestic_composed)
+    @settings(max_examples=200, deadline=None)
+    def test_domestic_compositions_converge(self, text: str) -> None:
+        twice = tors.scrub_pii(tors.scrub_pii(text, salt=""), salt="")
+        assert tors.scrub_pii(twice, salt="") == twice
+
+    @given(text=_domestic_composed)
+    @settings(max_examples=150, deadline=None)
+    def test_domestic_phone_only_is_idempotent(self, text: str) -> None:
+        once = tors.scrub_pii(text, ["contact_phone"], salt="")
+        assert tors.scrub_pii(once, ["contact_phone"], salt="") == once
+
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
+#
+# Re-sync cadence / owner: the quoted pin in tests/reference.py is the CI
+# oracle; the live module is re-checked manually on a machine that holds
+# it (a) whenever the source telemetry-safety module changes grammar or
+# token shape, and (b) at least once per Unicode/dependency bump that
+# could move the Nd table (the UCD CPython's `re` matches on). Owner: the
+# scrub_pii maintainer for this repo. A grammar change upstream is a
+# parity re-sync request (update reference.py + the parity corpus), never
+# a drive-by grammar widening here — the `salt=""` byte-identical
+# contract forbids silent widening.
 #
 # TORS_SCRUB_PII_ORACLE carries the full locator —
 # "path/to/module.py:entry_point" (a private machine's path and the
