@@ -367,10 +367,13 @@ pub fn random_b62(length: usize, seed: Option<u64>) -> Result<String, RandomErro
 /// position unconstrained: the opaque-token contract, NOT "a valid base64
 /// encoding of N random bytes" (an encoding's final character is
 /// constrained — at 43 characters, an encoding of 32 bytes can only ever
-/// show 4 distinct final characters; this spelling shows all 64 — and
-/// lengths that are not valid base64 output lengths, like 41, are legal
-/// here). There is no `padded` spelling at all: padding is an encoding
-/// concept, not a token concept, and `=` can never appear.
+/// show 16 distinct final characters, the final char carrying the final
+/// byte's low 4 bits shifted into place; the 31-byte encoding is the
+/// 4-distinct case, its final char carrying just the low 2 bits; this
+/// spelling shows all 64 — and lengths that are not valid base64 output
+/// lengths, like 41, are legal here). There is no `padded` spelling at
+/// all: padding is an encoding concept, not a token concept, and `=` can
+/// never appear.
 pub fn random_b64url(length: usize, seed: Option<u64>) -> Result<String, RandomError> {
     random_string(length, B64URL_CHARS, seed)
 }

@@ -4063,13 +4063,15 @@ opaque-token spelling: a 43-char urlsafe token (the JWT-signature shape) is
 
 **The boundary, stated honestly: this is the token contract, NOT "a valid
 base64 encoding of N random bytes."** An encoding's final character is
-constrained (an encoding of 32 bytes can only ever show 4 distinct final
-characters at length 43; this spelling shows all 64), and lengths that are
-not valid base64 output lengths (41, 45, ...) are legal here — a uniform
-token has no alignment constraint. There is no `padded=` parameter: padding
-is an encoding concept, not a token concept, and `=` never appears.
-Callers who want encodable random material should take `random_hex` of even
-length — byte-exact via hex.
+constrained (an encoding of 32 bytes can only ever show 16 distinct final
+characters at length 43 — the final char carries the final byte's low 4
+bits, shifted into place; the 31-byte encoding is the 4-distinct case, its
+final char carrying just the low 2 bits; this spelling shows all 64), and
+lengths that are not valid base64 output lengths (41, 45, ...) are legal
+here — a uniform token has no alignment constraint. There is no `padded=`
+parameter: padding is an encoding concept, not a token concept, and `=`
+never appears. Callers who want encodable random material should take
+`random_hex` of even length — byte-exact via hex.
 
 ```python
 tors.random_b64url(43, seed=7)

@@ -51,6 +51,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import os
 import secrets
 import struct
 import time
@@ -637,19 +638,43 @@ class TestUnseededOutputShape:
         # Two proofs: a 41-char output (41 % 4 == 1) is legal here and is
         # not a decodable base64 payload at all; and at 43 chars (decodable-
         # shaped), the FINAL character ranges over the whole alphabet where
-        # an encoding of 32 bytes could only ever show 4 distinct values
-        # there (the last char carries just the low 2 bits of the final
-        # byte). Callers wanting encodable random material should take
-        # random_hex of even length (byte-exact via hex) — docs/api.md
-        # states the same boundary.
+        # an encoding of 32 bytes could only ever show 16 distinct values
+        # there (the last char carries the final byte's low 4 bits, shifted
+        # into place; the 31-byte encoding is the 4-distinct case, its last
+        # char carrying just the low 2 bits). Callers wanting encodable
+        # random material should take random_hex of even length (byte-exact
+        # via hex) — docs/api.md states the same boundary.
         out41 = random_b64url(41)
         assert len(out41) == 41
         with pytest.raises(binascii.Error):
             base64.urlsafe_b64decode(out41 + "===")
         last_chars = {random_b64url(43, seed=s)[-1] for s in range(64)}
         # Deterministic given the seeds (measured 41 distinct); an
-        # encoding-shaped regression caps at 4 and fails this hard.
+        # encoding-shaped regression caps at 16 and fails this hard.
         assert len(last_chars) >= 32
+
+    def test_the_encoding_side_final_char_arithmetic_is_what_the_docs_state(
+        self,
+    ) -> None:
+        # The corrected arithmetic, pinned empirically against the stdlib
+        # encoder (the red-team finding was this very number being wrong in
+        # the docs): 5000 fresh 32-byte draws — coupon-collector arithmetic
+        # says all 16 finals appear with overwhelming certainty (the chance
+        # any one is missing is ~16 * (15/16)**5000, ~1e-215) — so exactly
+        # 16 distinct final characters, each the final byte's low 4 bits
+        # shifted; and the 31-byte case, the 4-distinct one, alongside it.
+        finals32 = {
+            base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=")[-1] for _ in range(5000)
+        }
+        assert len(finals32) == 16
+        # Every one of the 16 is the low nibble shifted left two: the char
+        # index is a multiple of 4 in the RFC 4648 §5 alphabet.
+        b64url_bytes = B64URL_CHARS.encode("ascii")
+        assert all(b64url_bytes.index(c) % 4 == 0 for c in finals32)
+        finals31 = {
+            base64.urlsafe_b64encode(os.urandom(31)).rstrip(b"=")[-1] for _ in range(2000)
+        }
+        assert len(finals31) == 4
 
     def test_uuid4_shape_on_unseeded_draws(self) -> None:
         for _ in range(64):

@@ -189,12 +189,15 @@ pub fn random_b62(py: Python<'_>, length: i64, seed: Option<Bound<'_, PyAny>>) -
 ///
 /// The boundary, stated honestly: this is NOT "a valid base64 encoding of
 /// N random bytes" — an encoding's final character is constrained (at 43
-/// characters, an encoding of 32 bytes can only ever show 4 distinct final
-/// characters; this spelling shows all 64), and lengths that are not valid
-/// base64 output lengths (41, 45, ...) are legal here. There is no
-/// `padded=` parameter: padding is an encoding concept, not a token
-/// concept, and `=` never appears. Callers who want encodable random
-/// material should take `random_hex` of even length (byte-exact via hex).
+/// characters, an encoding of 32 bytes can only ever show 16 distinct
+/// final characters, the final char carrying the final byte's low 4 bits
+/// shifted into place; the 31-byte encoding is the 4-distinct case, its
+/// final char carrying just the low 2 bits; this spelling shows all 64),
+/// and lengths that are not valid base64 output lengths (41, 45, ...) are
+/// legal here. There is no `padded=` parameter: padding is an encoding
+/// concept, not a token concept, and `=` never appears. Callers who want
+/// encodable random material should take `random_hex` of even length
+/// (byte-exact via hex).
 ///
 /// Entropy contract: the default (no `seed`) draws fresh bytes from the
 /// operating system's CSPRNG on every call — no process or thread RNG state,
