@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-78 functions plus two small helper classes, grouped by what they do; the
+79 functions plus two small helper classes, grouped by what they do; the
 `documents` extra adds seven document-extraction functions and its own helper
 types. Full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
@@ -142,6 +142,7 @@ types. Full signatures, argument contracts, and edge cases are in the
 | Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text`, `CompiledPatterns` |
 | Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
 | Byte lengths without the encode copy | `utf8_byte_len`, `utf16_byte_len` |
+| Batch charset validation | `first_invalid_charset`, `CHARSET_B62`/`_B64URL`/`_HEX_LOWER`/`_HEX_UPPER`/`_HEX_MIXED` (pinned alphabets that pair with the validator as data) |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |
 | JSON repair (json_repair port) | `repair_json`, `repair_json_loads`, `repair_json_diagnostics` |
 | Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded` |
