@@ -582,6 +582,28 @@ def reference_replace_many(text: str, replacements: dict[str, str]) -> str:
     return "".join(out)
 
 
+def reference_first_invalid_charset(items: Sequence[str], first: str | None, rest: str) -> int:
+    """The membership-loop oracle for ``tors.first_invalid_charset``: the
+    positional rule spelled directly in pure Python. ``first`` (when given)
+    is the set of codepoints allowed at position 0, ``rest`` the set allowed
+    at every position after it (and at position 0 too when ``first`` is
+    ``None``, the uniform spelling); an empty item is an offender; the
+    answer is the first offending item's index, ``-1`` when all pass. The
+    membership test is per codepoint (``ch in set`` over a one-codepoint
+    needle is exact membership, never substring semantics), and the whole
+    oracle shares no machinery with the tors side (bitmaps, sorted vectors,
+    bytes-vs-codepoints), so agreement is evidence about the contract."""
+    for idx, item in enumerate(items):
+        if not item:
+            return idx
+        allowed_first = rest if first is None else first
+        if item[0] not in allowed_first:
+            return idx
+        if any(ch not in rest for ch in item[1:]):
+            return idx
+    return -1
+
+
 # --- the scrub_log_text oracle (the TaskQ exception-text chain) --------------------
 #
 # ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
