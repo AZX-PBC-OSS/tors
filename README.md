@@ -127,7 +127,7 @@ actually return.
 
 ## What's inside
 
-73 functions plus two small helper classes, grouped by what they do; the
+75 functions plus two small helper classes, grouped by what they do; the
 `documents` extra adds seven document-extraction functions and its own helper
 types. Full signatures, argument contracts, and edge cases are in the
 [API reference](docs/api.md).
@@ -140,6 +140,7 @@ types. Full signatures, argument contracts, and edge cases are in the
 | Diffing (`difflib`-compatible) | `diff_opcodes`, `diff_opcodes_lines` |
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |
 | Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `CompiledPatterns` |
+| Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |
 | JSON repair (json_repair port) | `repair_json`, `repair_json_loads`, `repair_json_diagnostics` |
 | Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded` |
