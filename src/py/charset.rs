@@ -108,8 +108,9 @@ fn borrow_str_sequence<R>(
 /// set) non-ASCII tail sort + dedup, inside the detach: negligible for the
 /// few-dozen-codepoint rules, a real sort for a 10k spelling whose cost is
 /// deferred — correctness pinned, unmeasured beyond the ASCII band — so
-/// hoist huge set spellings to module constants and the per-call build
-/// stays inside the measured band), then a
+/// hoist huge set spellings to module constants (define once, reuse the
+/// same string: the str-in borrow stays warm; the per-call build itself
+/// is unchanged, still the sort the band does not cover), then a
 /// single int return (the
 /// `grapheme_count`/`count_matches` no-marshalling shape). At realistic
 /// batch sizes the whole call sits far under the 10 ms ping floor, so the

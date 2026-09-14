@@ -999,8 +999,10 @@ def refined_soundex(text: str) -> str: ...
 # Per-scalar engine with no normalization (normalize with tors.normalize
 # first when NFC/NFD must agree, which still does not fold confusables:
 # allow-list exactly the codepoints you mean); huge set spellings belong
-# in module constants, their per-call build inside the measured band.
-# Both-bad precedence is extraction order: first beats rest, set-argument
+# in module constants (define once, reuse the same string: the str-in
+# borrow stays warm — the per-call set build itself is unchanged, its
+# 10k-spelling sort unmeasured beyond the ASCII band). Both-bad
+# precedence is extraction order: first beats rest, set-argument
 # errors beat the items walk.
 def first_invalid_charset(
     items: Sequence[str], *, first: str | None = None, rest: str
