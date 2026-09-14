@@ -3,29 +3,42 @@
 //! full-output differential, the strongest shape:
 //!
 //! * The oracle side of this harness transcribes the two quoted
-//!   grammars plus the domestic extension (char-space, per-position,
-//!   the regex engine's own order of operations — try every start,
-//!   greedy runs, backtracked split/final-digit — spelled nothing like
-//!   the byte scanners the transform drives) with its own Nd table,
-//!   then computes the expected output by running the transform's own
-//!   pipeline order: the email pass over the input, then the phone
-//!   grammar over the email pass's result, token breakers and all. The
-//!   transform's output must be byte-identical at both salts, for the
-//!   BOTH-rules pipeline and for phone-only. This subsumes every
-//!   accounting corner the earlier survivor-counting shape could not
-//!   express: an email pass eating a phone-shaped local part whole
-//!   (`440..1.0III0@…` consuming `…440..1`), an email token's verbatim
-//!   domain carrying a phone shape the phone pass cannot scrub (glued
-//!   to hex-alphabet letters), and the digest-hex reconstruction
-//!   corners (a token's hex tail is local-part material, so a token
-//!   followed by `@`-shaped text can re-spell an eaten match) — all of
-//!   those are exact output, not counted absence.
+//!   grammars plus both extensions past the source (the domestic
+//!   matcher and the api-key families; char-space, per-position, the
+//!   regex engine's own order of operations — try every start, greedy
+//!   runs, backtracked split/final-digit — spelled nothing like the
+//!   byte scanners the transform drives) with its own Nd table, then
+//!   computes the expected output by running the transform's own
+//!   pipeline order: the keys pass over the input (its own salt —
+//!   `salt=None` resolves per rule, so the defaults lane digests keys
+//!   with `KEYS_DEFAULT_SALT` and contacts with `DEFAULT_SALT`), then
+//!   the email pass over the keys result, then the phone grammar over
+//!   the email pass's result, token breakers and all. The transform's
+//!   output must be byte-identical at every salt lane, for the
+//!   all-rules pipeline and for each single-rule pipeline. This
+//!   subsumes every accounting corner the earlier survivor-counting
+//!   shape could not express: an email pass eating a phone-shaped
+//!   local part whole (`440..1.0III0@…` consuming `…440..1`), an email
+//!   token's verbatim domain carrying a phone shape the phone pass
+//!   cannot scrub (glued to hex-alphabet letters), the digest-hex
+//!   reconstruction corners (a token's hex tail is local-part material,
+//!   so a token followed by `@`-shaped text can re-spell an eaten
+//!   match), and the keys-rule corners (a key tail swallowing a
+//!   phone-shaped digit run, a key token's digest hex feeding the email
+//!   pass) — all of those are exact output, not counted absence.
 //! * Convergence, structurally: the second pass over the differential
 //!   output is a fixed point (a third pass is the identity), and
-//!   phone-only is strictly idempotent.
+//!   phone-only and keys-only are strictly idempotent.
 //! * The identity path never lies: a borrowed return is exactly the
 //!   expected output being the input (no match existed on either side
 //!   of the differential).
+//!
+//! The keys grammar here transcribes the scanner EXACTLY — the family
+//! table in longest-prefix-first order with fall-through on a too-short
+//! tail, the maximal `[A-Za-z0-9_-]` tail run, the prefix-boundary rule
+//! (a prefix glued to a preceding key-charset char is mid-token), and
+//! the JWT segment grammar behind the `Bearer eyJ` marker — so a drift
+//! on either side fails as a differential mismatch naming the input.
 //!
 //! The oracle's digests are spelled independently (sha2 + const-hex,
 //! the same hand-synced-to-root pin discipline the normalize target's
@@ -206,6 +219,119 @@ fn token_ends_at_chars(chars: &[char], pos: usize) -> bool {
     pos > TOKEN_HEX
         && chars.get(pos - 1 - TOKEN_HEX) == Some(&'~')
         && chars[pos - TOKEN_HEX..pos].iter().all(|&c| is_token_hex(c))
+}
+
+/// Whether `s` starts with `prefix` at char index `at` — the char-space
+/// prefix compare the key family table drives.
+fn starts_with_at(chars: &[char], at: usize, prefix: &str) -> bool {
+    prefix
+        .chars()
+        .enumerate()
+        .all(|(k, pc)| chars.get(at + k) == Some(&pc))
+}
+
+/// The key-tail charset every family shares (and the JWT segments'
+/// base64url): `[A-Za-z0-9_-]`, char-space twin of the scanner's byte
+/// class.
+fn is_key_tail_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
+/// The family table, the scanner's own order: (literal prefix, minimum
+/// tail length), LONGEST-PREFIX-FIRST with fall-through on a too-short
+/// tail. An independent transcription of `pii_impl::KEY_FAMILIES` —
+/// the same hand-synced pin discipline as the Nd table above.
+const KEY_FAMILIES: &[(&str, usize)] = &[
+    ("github_pat_", 22),
+    ("sk-svcacct-", 20),
+    ("sk-proj-", 20),
+    ("sk-ant-", 20),
+    ("azxdev_", 20),
+    ("ghp_", 36),
+    ("AIza", 35),
+    ("fw-", 20),
+    ("fw_", 20),
+    ("ak-", 20),
+    ("wk-", 20),
+    ("wd-", 43),
+    ("cn-", 20),
+    ("sk-", 20),
+    ("w-", 43),
+];
+
+/// The JWT family at one position, char-space: the `Bearer eyJ` marker,
+/// then three maximal `[A-Za-z0-9_-]+` segments single-dot separated
+/// (the marker consumed the first segment's `eyJ` head, so at least one
+/// more charset char is required before the first dot). The match END,
+/// or None.
+fn jwt_match_at_chars(chars: &[char], start: usize) -> Option<usize> {
+    const MARKER: &str = "Bearer eyJ";
+    if !starts_with_at(chars, start, MARKER) {
+        return None;
+    }
+    let mut i = start + MARKER.len();
+    for seg in 0..3 {
+        let run_start = i;
+        while i < chars.len() && is_key_tail_char(chars[i]) {
+            i += 1;
+        }
+        if i == run_start {
+            return None; // an empty segment: the grammar's `+` is one-or-more
+        }
+        if seg < 2 {
+            if i >= chars.len() || chars[i] != '.' {
+                return None; // the single dot into the next segment
+            }
+            i += 1;
+        }
+    }
+    Some(i)
+}
+
+/// The key match set with each match's token-prefix length:
+/// `(start, end, prefix_len)` triples, char indices. Transcribes the
+/// scanner exactly — the prefix-boundary rule first (a prefix glued to
+/// a preceding key-charset char is mid-token and never fires), then the
+/// family table longest-first with fall-through, then the JWT marker
+/// grammar (no table family shares its `B` head). The tail run is
+/// maximal; a non-matching position advances one char.
+fn key_matches_of(s: &str) -> Vec<(usize, usize, usize)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if i > 0 && is_key_tail_char(chars[i - 1]) {
+            i += 1; // a mid-token prefix: the boundary rule
+            continue;
+        }
+        let mut hit = None;
+        for &(prefix, min_tail) in KEY_FAMILIES {
+            if !starts_with_at(&chars, i, prefix) {
+                continue;
+            }
+            let tail_start = i + prefix.chars().count();
+            let mut tail_end = tail_start;
+            while tail_end < chars.len() && is_key_tail_char(chars[tail_end]) {
+                tail_end += 1;
+            }
+            if tail_end - tail_start >= min_tail {
+                hit = Some((i, tail_end, prefix.chars().count()));
+                break;
+            }
+            // A too-short tail falls through to the shorter prefixes.
+        }
+        if hit.is_none() {
+            hit = jwt_match_at_chars(&chars, i).map(|end| (i, end, "Bearer".len()));
+        }
+        match hit {
+            Some((start, end, plen)) => {
+                found.push((start, end, plen));
+                i = end;
+            }
+            None => i += 1,
+        }
+    }
+    found
 }
 
 /// The email grammar at one start position: the maximal local run, a
@@ -429,56 +555,117 @@ fn phone_token(salt: &str, matched: &str) -> String {
     format!("{prefix}~{}", token_digest(salt, matched))
 }
 
-/// The expected BOTH-rules output: the email pass over the input, then
-/// the phone grammar over the email pass's result — the transform's own
-/// pipeline order, token breakers and all (the phone match set is
-/// computed on the intermediate exactly as the transform does).
-fn expected_both(s: &str, salt: &str) -> String {
+/// The key token for a matched credential: the family prefix verbatim
+/// (the first `prefix_len` chars of the match — the non-secret half
+/// that says which credential to rotate), `~`, the digest of the FULL
+/// match.
+fn key_token(salt: &str, matched: &str, prefix_len: usize) -> String {
+    let prefix: String = matched.chars().take(prefix_len).collect();
+    format!("{prefix}~{}", token_digest(salt, matched))
+}
+
+/// Substitute every key triple (leftmost, non-overlapping, in order)
+/// with its token, char-space — `substitute`'s shape over the
+/// prefix-length triples.
+fn substitute_keys(chars: &[char], spans: &[(usize, usize, usize)], salt: &str) -> String {
+    let mut out = String::with_capacity(chars.len());
+    let mut pos = 0;
+    for &(start, end, plen) in spans {
+        if start > pos {
+            out.extend(chars[pos..start].iter());
+        }
+        let matched: String = chars[start..end].iter().collect();
+        out.push_str(&key_token(salt, &matched, plen));
+        pos = end;
+    }
+    out.extend(chars[pos..].iter());
+    out
+}
+
+/// The expected all-rules output: the keys pass over the input (the
+/// keys rule's own salt), then the email pass over the keys result,
+/// then the phone grammar over the email pass's result — the
+/// transform's own pipeline order, token breakers and all (each pass's
+/// match set is computed on the intermediate exactly as the transform
+/// does).
+fn expected_both(s: &str, contact_salt: &str, keys_salt: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
-    let emails = matches_of(s, email_match_at);
-    let mid = substitute(&chars, &emails, |m| email_token(salt, m));
+    let keys = key_matches_of(s);
+    let after_keys = substitute_keys(&chars, &keys, keys_salt);
+    let after_keys_chars: Vec<char> = after_keys.chars().collect();
+    let emails = matches_of(&after_keys, email_match_at);
+    let mid = substitute(&after_keys_chars, &emails, |m| email_token(contact_salt, m));
     let mid_chars: Vec<char> = mid.chars().collect();
     let phones = phone_matches_of(&mid);
-    substitute(&mid_chars, &phones, |m| phone_token(salt, m))
+    substitute(&mid_chars, &phones, |m| phone_token(contact_salt, m))
 }
 
 /// The expected phone-only output: the phone grammar over the raw
-/// input, no email pass.
-fn expected_phone_only(s: &str, salt: &str) -> String {
+/// input, no other pass (the contact salt is the only one it reads).
+fn expected_phone_only(s: &str, contact_salt: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let phones = phone_matches_of(s);
-    substitute(&chars, &phones, |m| phone_token(salt, m))
+    substitute(&chars, &phones, |m| phone_token(contact_salt, m))
+}
+
+/// The expected keys-only output: the key grammar over the raw input,
+/// no other pass (the keys salt is the only one it reads).
+fn expected_keys_only(s: &str, keys_salt: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let keys = key_matches_of(s);
+    substitute_keys(&chars, &keys, keys_salt)
 }
 
 fuzz_target!(|s: &str| {
     let phone_only = PiiRules {
         email: false,
         phone: true,
+        keys: false,
     };
-    for salt in ["", tors::pii_impl::DEFAULT_SALT] {
+    let keys_only = PiiRules {
+        email: false,
+        phone: false,
+        keys: true,
+    };
+    // The salt lanes: unsalted ("" for every rule — the source-parity
+    // spelling), an explicit string (one salt for EVERY rule — the
+    // binding's explicit-salt semantic), and the per-rule defaults
+    // (salt=None's resolution: contacts DEFAULT_SALT, keys
+    // KEYS_DEFAULT_SALT — the lane that pins the split).
+    for (contact_salt, keys_salt) in [
+        ("", ""),
+        (tors::pii_impl::DEFAULT_SALT, tors::pii_impl::DEFAULT_SALT),
+        (
+            tors::pii_impl::DEFAULT_SALT,
+            tors::pii_impl::KEYS_DEFAULT_SALT,
+        ),
+    ] {
         // The full-output differential: the transcription's own pipeline
-        // (email pass, then the phone grammar over the email output,
-        // token breakers and all) must produce byte-identical output to
-        // the transform, at both salts. This subsumes survivor
-        // accounting: email-eaten phone shapes, domain-borne phone
-        // shapes the phone pass cannot scrub, and the digest-hex
-        // reconstruction corners are all exact output, not counted
+        // (keys pass, email pass over its result, phone grammar over
+        // that, token breakers and all) must produce byte-identical
+        // output to the transform, at every salt lane. This subsumes
+        // survivor accounting: email-eaten phone shapes, domain-borne
+        // phone shapes the phone pass cannot scrub, the digest-hex
+        // reconstruction corners, and the keys-rule corners (a key tail
+        // swallowing a phone-shaped digit run; a key token's digest hex
+        // feeding the email pass) are all exact output, not counted
         // absence. A disagreement here is either a transform bug or an
         // oracle drift — the panic names the input either way.
-        let out = scrub_pii(s, PiiRules::BOTH, salt);
+        let out = scrub_pii(s, PiiRules::BOTH, contact_salt, keys_salt);
         assert_eq!(
             out.as_ref(),
-            &expected_both(s, salt),
-            "the BOTH-rules pipeline diverged from the oracle at salt {salt:?}"
+            &expected_both(s, contact_salt, keys_salt),
+            "the all-rules pipeline diverged from the oracle at salts \
+             {contact_salt:?}/{keys_salt:?}"
         );
 
         // Convergence, structurally: the second pass over the
         // differential output is a fixed point (a third pass is the
         // identity).
-        let twice = scrub_pii(out.as_ref(), PiiRules::BOTH, salt);
+        let twice = scrub_pii(out.as_ref(), PiiRules::BOTH, contact_salt, keys_salt);
         assert!(
             matches!(
-                scrub_pii(twice.as_ref(), PiiRules::BOTH, salt),
+                scrub_pii(twice.as_ref(), PiiRules::BOTH, contact_salt, keys_salt),
                 Cow::Borrowed(_)
             ),
             "the converged output is not a fixed point on {s:?}"
@@ -486,15 +673,37 @@ fuzz_target!(|s: &str| {
 
         // Phone-only: the phone grammar over the raw input, and the
         // pass is strictly idempotent.
-        let once = scrub_pii(s, phone_only, salt);
+        let once = scrub_pii(s, phone_only, contact_salt, contact_salt);
         assert_eq!(
             once.as_ref(),
-            &expected_phone_only(s, salt),
-            "the phone-only pipeline diverged from the oracle at salt {salt:?}"
+            &expected_phone_only(s, contact_salt),
+            "the phone-only pipeline diverged from the oracle at salt {contact_salt:?}"
         );
         assert!(
-            matches!(scrub_pii(once.as_ref(), phone_only, salt), Cow::Borrowed(_)),
+            matches!(
+                scrub_pii(once.as_ref(), phone_only, contact_salt, contact_salt),
+                Cow::Borrowed(_)
+            ),
             "phone-only is not idempotent on {s:?}"
+        );
+
+        // Keys-only: the key grammar over the raw input (the keys salt),
+        // and the pass is strictly idempotent — a key token is a fixed
+        // point by construction (the prefix ends `-`/`_` or is
+        // `AIza`/`Bearer`, the next byte is `~`, and no family prefix
+        // can be spelled inside 12 lowercase digest hex).
+        let konce = scrub_pii(s, keys_only, contact_salt, keys_salt);
+        assert_eq!(
+            konce.as_ref(),
+            &expected_keys_only(s, keys_salt),
+            "the keys-only pipeline diverged from the oracle at salt {keys_salt:?}"
+        );
+        assert!(
+            matches!(
+                scrub_pii(konce.as_ref(), keys_only, contact_salt, keys_salt),
+                Cow::Borrowed(_)
+            ),
+            "keys-only is not idempotent on {s:?}"
         );
     }
 });
