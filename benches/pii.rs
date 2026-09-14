@@ -55,6 +55,7 @@ fn bench_scrub_pii(c: &mut Criterion) {
                         black_box(text),
                         PiiRules::BOTH,
                         tors::pii_impl::DEFAULT_SALT,
+                        tors::pii_impl::KEYS_DEFAULT_SALT,
                     )
                 })
             },
@@ -79,6 +80,7 @@ fn bench_scrub_pii(c: &mut Criterion) {
                         black_box(text),
                         PiiRules::BOTH,
                         tors::pii_impl::DEFAULT_SALT,
+                        tors::pii_impl::KEYS_DEFAULT_SALT,
                     )
                 })
             },

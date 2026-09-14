@@ -1,5 +1,6 @@
 """Contract gate for ``tors.scrub_pii``: replace contact material (email
-addresses, ``+``-led phone numbers) inside free text with correlation
+addresses, ``+``-led phone numbers) and credential material (the
+evidence-backed api-key families) inside free text with correlation
 tokens, the scrub an error excerpt or rejection message needs before it
 reaches telemetry — the one store a data purge cannot reach.
 
@@ -29,14 +30,30 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
   match inside a longer run, and never firing behind a ``+``
   (international territory: match or the source's non-match).
 - token shapes: ``@domain~<12 hex>`` for email, ``prefix~<12 hex>`` for
-  phone; the digest is ``sha256(salt + match)`` truncated to 12 hex
-  chars, so ``salt=""`` is the source chain's unsalted digest exactly.
-- the rules contract: ``None`` = both rules in the canonical order
-  (email substitution first, then phone over its result — an email's
-  local part may carry the ``+``-led runs the phone rule would eat);
-  ``[]`` = the identity (the original object); duplicates deduped and
-  order irrelevant; an unknown name is a ``ValueError`` naming the
-  accepted set.
+  phone, ``<family prefix>~<12 hex>`` for a key (the prefix verbatim —
+  the non-secret half that tells the operator WHICH credential to
+  rotate); every digest is ``sha256(salt + match)`` truncated to 12 hex
+  chars, so ``salt=""`` is the source chain's unsalted digest exactly —
+  and ``salt=None`` salts the contact rules with ``tors/scrub_pii/v1``
+  and the keys rule with its own ``tors/scrub_keys/v1`` tag, so a key
+  digest can never alias a contact digest.
+- the api_keys rule's grammar: the evidence-backed closed family set —
+  OpenAI ``sk-``/``sk-proj-``/``sk-svcacct-``, Anthropic ``sk-ant-``,
+  Google ``AIza``, Fireworks ``fw-``/``fw_``, Modal ``ak-``/``wk-``,
+  GitHub ``ghp_``/``github_pat_``, the minted ``azxdev_``/``wd-``/``w-``/
+  ``cn-`` shapes, and marker-scoped ``Bearer`` JWTs (a bare ``eyJ`` never
+  matches: one consumer's API legitimately carries eyJ-shaped non-secret
+  cursors) — each a literal prefix plus a minimal ``[A-Za-z0-9_-]`` tail
+  consumed maximally, tried longest-prefix-first with fall-through, and
+  never firing mid-token (a prefix glued to a preceding key-charset char
+  is that token's fragment, the ``xak-...`` cut).
+- the rules contract: ``None`` = every rule in the canonical order
+  (api_keys FIRST — a key's tail can spell a dash-separated domestic
+  phone run and its local part an email, so the key pass must eat the
+  whole credential before the contact passes scan — then email, then
+  phone over its result); ``[]`` = the identity (the original object);
+  duplicates deduped and order irrelevant; an unknown name is a
+  ``ValueError`` naming the accepted set.
 - the salt contract: ``None`` = tors's documented default constant (a
   known, non-secret tag), ``""`` = unsalted (source parity), and the
   digest is the only field a salt touches.
@@ -94,6 +111,82 @@ _ARABIC_TWELVE = "".join(chr(0x0660 + i % 10) for i in range(12))
 _FULLWIDTH_EIGHT = "".join(chr(0xFF10 + i) for i in range(8))
 _ARABIC_FIVE = "".join(chr(0x0665 + i) for i in range(5))
 _O_UMLAUT = chr(0x00F6)
+
+# API-key material: real-shaped synthetic keys for every family of the
+# evidence-backed closed set. The tails are deterministic 62-char-alphabet
+# cycles, letters-only below length 53, so no battery vector accidentally
+# carries a phone or email shape (a bare in-run digit block is inert to
+# both contact matchers); the interaction pins below build the composed
+# shapes deliberately.
+_KEY_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _key_tail(n: int) -> str:
+    return "".join(_KEY_ALPHABET[i % len(_KEY_ALPHABET)] for i in range(n))
+
+
+def _key_token(prefix: str, match: str, salt: str = "") -> str:
+    return f"{prefix}~{_hex12(salt + match)}"
+
+
+# A JWT exactly the shape the family grammar states: the `Bearer ` marker,
+# a first segment beginning `eyJ`, and two more base64url segments
+# (middle and signature, any length >= 1 each).
+_JWT = (
+    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+    "dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe"
+)
+
+# The family table as the contract states it: (whole synthetic key, the
+# token's verbatim family prefix). Lengths at each family's own minimum
+# or a realistic multiple: ghp_ at exactly 36, AIza at exactly 35, the
+# minted shapes at their exact tails (azxdev_ 20, wd- 43, w- 43, cn- 20),
+# github_pat_ at its 22 floor, the sk- families at 20-plus.
+_OPENAI = "sk-" + _key_tail(48)
+_KEY_VECTORS: tuple[tuple[str, str], ...] = (
+    (_OPENAI, "sk-"),
+    ("sk-proj-" + _key_tail(48), "sk-proj-"),
+    ("sk-svcacct-" + _key_tail(48), "sk-svcacct-"),
+    ("sk-ant-api03-" + _key_tail(95), "sk-ant-"),
+    ("AIza" + _key_tail(35), "AIza"),
+    ("fw-" + _key_tail(48), "fw-"),
+    ("fw_" + _key_tail(48), "fw_"),
+    ("ak-" + _key_tail(48), "ak-"),
+    ("wk-" + _key_tail(48), "wk-"),
+    ("ghp_" + _key_tail(36), "ghp_"),
+    ("github_pat_" + _key_tail(22), "github_pat_"),
+    ("azxdev_" + _key_tail(20), "azxdev_"),
+    ("wd-" + _key_tail(43), "wd-"),
+    ("w-" + _key_tail(43), "w-"),
+    ("cn-" + _key_tail(20), "cn-"),
+    (_JWT, "Bearer"),
+)
+
+# The documented non-matches: one-under tails at every distinct minimum,
+# the uppercase spelling, the bare prefix, the mid-token prefix (the
+# boundary rule), the unmarked/lowercase/degenerate JWT spellings.
+_KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
+    ("sk-one-under", "sk-" + _key_tail(19)),
+    ("sk-bare", "sk-"),
+    ("ski-uppercase", "SKI-" + _key_tail(48)),
+    ("aiza-one-under", "AIza" + _key_tail(34)),
+    ("ghp-one-under", "ghp_" + _key_tail(35)),
+    ("github-pat-one-under", "github_pat_" + _key_tail(21)),
+    ("azxdev-one-under", "azxdev_" + _key_tail(19)),
+    ("wd-one-under", "wd-" + _key_tail(42)),
+    ("w-one-under", "w-" + _key_tail(42)),
+    ("cn-one-under", "cn-" + _key_tail(19)),
+    ("fw-one-under", "fw-" + _key_tail(19)),
+    ("ak-one-under", "ak-" + _key_tail(19)),
+    ("wk-one-under", "wk-" + _key_tail(19)),
+    ("midtoken-prefix", "xak-" + _key_tail(48)),
+    ("bearer-lowercase", "bearer " + _JWT[len("Bearer ") :]),
+    ("bare-eyJ-cursor", _JWT[len("Bearer ") :]),
+    ("jwt-two-segments", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln"),
+    ("jwt-degenerate-first-segment", "Bearer eyJ.a.b.c"),
+    ("jwt-empty-middle-segment", "Bearer eyJhbGciOiJIUzI1Ni..dozjgNryP4J3"),
+)
 
 
 class TestEmailZoo:
@@ -298,11 +391,13 @@ class TestPhoneZoo:
 
 
 class TestRulesContract:
-    def test_none_is_both_rules_in_the_canonical_order(self) -> None:
+    def test_none_is_every_rule_in_the_canonical_order(self) -> None:
+        # keys FIRST (a key's tail can spell a domestic phone run, its
+        # local part an email), then email, then phone over its result.
         text = "a@b.co +14155552671"
-        assert scrub_pii(text) == scrub_pii(text, ["contact_email", "contact_phone"])
+        assert scrub_pii(text) == scrub_pii(text, ["api_keys", "contact_email", "contact_phone"])
         # ...and the order the caller lists them in is irrelevant.
-        assert scrub_pii(text, ["contact_phone", "contact_email"]) == scrub_pii(text)
+        assert scrub_pii(text, ["contact_phone", "contact_email", "api_keys"]) == scrub_pii(text)
 
     def test_empty_rules_is_the_identity_object(self) -> None:
         text = "a@b.co +14155552671"
@@ -322,12 +417,12 @@ class TestRulesContract:
         with pytest.raises(ValueError) as exc:
             scrub_pii("a@b.co", ["emails"])
         assert str(exc.value) == (
-            "rules must be one of ('contact_email', 'contact_phone'), not \"emails\""
+            "rules must be one of ('contact_email', 'contact_phone', 'api_keys'), not \"emails\""
         )
 
     def test_a_valid_name_plus_an_unknown_one_still_raises(self) -> None:
         with pytest.raises(ValueError, match="contact_phone"):
-            scrub_pii("a@b.co", ["contact_email", "ssn"])
+            scrub_pii("a@b.co", ["api_keys", "ssn"])
 
     def test_a_bare_string_is_not_a_rules_sequence(self) -> None:
         # pyo3's sequence extraction refuses a str (it would iterate
@@ -720,6 +815,220 @@ class TestDomesticPhoneZoo:
             out = scrub_pii(text, ["contact_phone"], salt="")
             assert out != text, text
             assert matched not in out, text
+
+
+class TestApiKeyZoo:
+    """The api_keys rule: the credential scrub, an extension past the
+    source's two-rule contact contract the same way the domestic phone
+    matcher is. The leak vector is the error text itself: provider and
+    platform error strings can quote the credential back (five private
+    consumers evidenced; the strongest, a platform whose own code
+    comments that a vendor auth failure "can quote the key" and keeps the
+    full text in an admin-served ledger), and telemetry is the one store
+    a purge cannot reach. The family set is the evidence-backed closed
+    set — Slack xox, Stripe, and AWS AKIA shapes are deliberately absent
+    (zero evidence) — each family a literal prefix plus a minimal
+    ``[A-Za-z0-9_-]`` tail, longest-prefix-first with fall-through, never
+    mid-token. The token keeps the family prefix verbatim (WHICH
+    credential to rotate) over the digest of the full match; ``salt=None``
+    salts key digests with tors's own ``tors/scrub_keys/v1`` tag so a key
+    digest can never alias a contact digest."""
+
+    @pytest.mark.parametrize(
+        ("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS]
+    )
+    def test_every_family_scrubs_with_its_verbatim_prefix(self, text: str, prefix: str) -> None:
+        # The token is <family prefix>~<first 12 hex of sha256(salt +
+        # FULL match)>: the prefix verbatim (the non-secret half), the
+        # digest over prefix + tail, derived here independently of both
+        # tors and the parity oracle (hashlib, the third-transcription
+        # discipline).
+        assert scrub_pii(text, ["api_keys"], salt="") == _key_token(prefix, text)
+        # The default-rules call composes identically: keys first, and
+        # every battery vector is contact-inert by construction.
+        assert scrub_pii(text, salt="") == _key_token(prefix, text)
+
+    @pytest.mark.parametrize(
+        ("label", "text"), _KEY_NON_MATCHES, ids=[n for n, _ in _KEY_NON_MATCHES]
+    )
+    def test_the_documented_non_matches_are_identity(self, label: str, text: str) -> None:
+        # One under every distinct minimum, the uppercase spelling, the
+        # bare prefix, the mid-token prefix, and the JWT spellings that
+        # are not three maximal base64url segments behind the marker.
+        # Identity at default rules: no key family fires and no contact
+        # shape rides inside (the tails are contact-inert by design).
+        assert scrub_pii(text, salt="") is text
+
+    def test_keys_at_string_start_and_end(self) -> None:
+        # The boundary rule's clean edge cases: position 0 is clean, a
+        # key running to the string's end matches, and the first
+        # non-charset byte (punctuation, whitespace) ends the tail.
+        key = "cn-" + _key_tail(20)
+        assert scrub_pii(key, salt="") == _key_token("cn-", key)
+        assert scrub_pii(key + " rotated", salt="") == _key_token("cn-", key) + " rotated"
+        assert scrub_pii("rotate " + key, salt="") == "rotate " + _key_token("cn-", key)
+        assert scrub_pii(key + "!", salt="") == _key_token("cn-", key) + "!"
+        # A dot is not tail charset for any family (only the JWT grammar
+        # carries dots, inside its own marker-scoped shape).
+        assert scrub_pii(key + ".x.co", salt="") == _key_token("cn-", key) + ".x.co"
+
+    def test_the_longest_prefix_wins_and_falls_through(self) -> None:
+        # `sk-ant-` outranks bare `sk-` when its own grammar holds...
+        key = "sk-ant-" + _key_tail(40)
+        assert scrub_pii(key, ["api_keys"], salt="") == _key_token("sk-ant-", key)
+        # ...and when it does not (one under the Anthropic minimum), the
+        # longest-first discipline falls through to the bare `sk-`
+        # family, whose tail swallows the `ant-` spelling: still
+        # scrubbed, with the generic prefix. `wd-` shows the other side:
+        # no fall-through to `w-` (the prefixes disagree at their second
+        # char), so one under stays one under.
+        short = "sk-ant-" + _key_tail(19)
+        assert scrub_pii(short, ["api_keys"], salt="") == _key_token("sk-", short)
+
+    def test_a_prefix_glued_to_a_charset_char_is_mid_token(self) -> None:
+        # The boundary rule: `x` is tail-charset material, so the `ak-`
+        # inside `xak-...` is that token's fragment, never a family head
+        # — the same reasoning as the phone rule's clean-boundary cut.
+        text = "xak-" + _key_tail(48)
+        assert scrub_pii(text, ["api_keys"], salt="") == text
+        # A second key glued directly after a key token's digest hex is
+        # mid-token the same way (the hex is charset material),
+        # conservative and documented; word-separated keys both scrub.
+        first = scrub_pii("sk-" + _key_tail(48), ["api_keys"], salt="")
+        second = "ghp_" + _key_tail(36)
+        glued = first + second
+        assert scrub_pii(glued, ["api_keys"], salt="") == glued
+        assert scrub_pii(first + " " + second, ["api_keys"], salt="") == (
+            first + " " + _key_token("ghp_", second)
+        )
+
+    def test_glued_keys_merge_into_one_maximal_tail(self) -> None:
+        # The tail run is maximal: a second key's whole spelling is
+        # charset material for the first family's tail, so the pair is
+        # ONE match (over-redaction in the safe direction).
+        a = "sk-" + _key_tail(48)
+        b = "ghp_" + _key_tail(36)
+        assert scrub_pii(a + b, ["api_keys"], salt="") == _key_token("sk-", a + b)
+
+    def test_the_jwt_family_is_marker_scoped(self) -> None:
+        # A bare eyJ-shaped triple is never touched: one consumer's API
+        # legitimately carries eyJ-shaped non-secret cursors, so the JWT
+        # family fires only behind the literal `Bearer ` marker.
+        cursor = _JWT[len("Bearer ") :]
+        assert scrub_pii(cursor, salt="") is cursor
+        # Segments are [A-Za-z0-9_-]+ of any length >= 1: a 4-char middle
+        # segment is a fine JWT shape, three segments being the grammar.
+        jwt = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln.dozjgNryP4J3jVmNHc0FKW3YtV9"
+        assert scrub_pii(jwt, ["api_keys"], salt="") == _key_token("Bearer", jwt)
+
+    def test_none_uses_the_keys_default_tag_not_the_contact_tag(self) -> None:
+        # salt=None resolves PER RULE: the contact rules keep
+        # "tors/scrub_pii/v1" and the keys rule salts with its own
+        # "tors/scrub_keys/v1" tag — a key digest can never alias a
+        # contact digest at the default settings.
+        key = "sk-" + _key_tail(48)
+        assert scrub_pii(key) == f"sk-~{_hex12('tors/scrub_keys/v1' + key)}"
+        assert scrub_pii(key) != f"sk-~{_hex12('tors/scrub_pii/v1' + key)}"
+
+    def test_the_default_salt_splits_per_rule(self) -> None:
+        key = "sk-" + _key_tail(48)
+        text = "a@b.co " + key
+        assert scrub_pii(text) == (
+            f"@b.co~{_hex12('tors/scrub_pii/v1' + 'a@b.co')} "
+            f"sk-~{_hex12('tors/scrub_keys/v1' + key)}"
+        )
+
+    def test_an_explicit_salt_applies_to_every_rule(self) -> None:
+        key = "sk-" + _key_tail(48)
+        text = "a@b.co +14155552671 " + key
+        assert scrub_pii(text, salt="site") == (
+            f"@b.co~{_hex12('site' + 'a@b.co')} "
+            f"+14~{_hex12('site' + '+14155552671')} "
+            f"sk-~{_hex12('site' + key)}"
+        )
+
+    def test_empty_salt_is_the_unsalted_digest_for_every_rule(self) -> None:
+        key = "sk-" + _key_tail(48)
+        text = "a@b.co +14155552671 " + key
+        assert scrub_pii(text, salt="") == (
+            f"@b.co~{_hex12('a@b.co')} "
+            f"+14~{_hex12('+14155552671')} "
+            f"sk-~{_hex12(key)}"
+        )
+
+    def test_keys_only_leaves_contact_material_alone(self) -> None:
+        text = "a@b.co +14155552671 " + _OPENAI
+        assert scrub_pii(text, ["api_keys"], salt="") == (
+            f"a@b.co +14155552671 {_key_token('sk-', _OPENAI)}"
+        )
+
+    def test_none_composes_every_rule_keys_first(self) -> None:
+        key = "sk-" + _key_tail(48)
+        text = "a@b.co +14155552671 " + key
+        expected = (
+            f"@b.co~{_hex12('a@b.co')} "
+            f"+14~{_hex12('+14155552671')} "
+            f"{_key_token('sk-', key)}"
+        )
+        assert scrub_pii(text, salt="") == expected
+        # ...and caller order is irrelevant, duplicates dedupe.
+        assert scrub_pii(text, ["contact_phone", "api_keys", "contact_email"], salt="") == expected
+        assert scrub_pii(key, ["api_keys", "api_keys"], salt="") == _key_token("sk-", key)
+
+    def test_a_key_shaped_email_local_part_is_eaten_by_the_keys_pass(self) -> None:
+        # keys BEFORE email, both orders of the composition pinned: the
+        # keys pass tokenizes the key-shaped local part first, and the
+        # email pass never sees the address whole — it fires on the key
+        # token's digest hex as a fresh local part (hex is local-class
+        # material), so the domain tokens too and the token prefix
+        # survives. The email-only call eats the whole address as ONE
+        # match (every key char is local-class), the divergence the pass
+        # order exists to prevent. The composed output converges.
+        key = "sk-" + _key_tail(48)
+        text = key + "@x.co"
+        keys_first = scrub_pii(text, salt="")
+        hex12 = _hex12(key)
+        assert keys_first == f"sk-~@x.co~{_hex12(hex12 + '@x.co')}"
+        assert scrub_pii(text, ["contact_email"], salt="") == _email_token(text)
+        assert scrub_pii(keys_first, salt="") is keys_first
+
+    def test_a_key_bearing_a_phone_shape_is_eaten_whole(self) -> None:
+        # keys BEFORE phone: a dash-separated ten-digit run inside a key
+        # tail would be a domestic match if the phone pass ran first; the
+        # canonical order runs keys first, so the phone pass sees only
+        # the token (its `~` + 12 hex is a breaker) and the digits never
+        # surface. The phone-only contrast shows what the order prevents.
+        key = "sk-proj-415-555-2671" + _key_tail(20)
+        text = "leaked " + key + " in an error"
+        out = scrub_pii(text, salt="")
+        assert out == f"leaked {_key_token('sk-proj-', key)} in an error"
+        assert "415~" not in out
+        phone_only = scrub_pii(text, ["contact_phone"], salt="")
+        assert "-41~" in phone_only  # the domestic matcher ate the run
+
+    def test_a_number_after_a_key_token_keeps_its_clean_run(self) -> None:
+        # A key token's digest (`~` + 12 hex) is a token span for the
+        # phone pass's existing generic breaker, and the byte after it is
+        # a clean boundary: the number after a scrubbed key scrubs
+        # exactly, never composed with the digest tail.
+        key = "fw-" + _key_tail(48)
+        text = key + " 415-555-2671"
+        assert scrub_pii(text, salt="") == (
+            f"{_key_token('fw-', key)} {_phone_token('415-555-2671')}"
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS]
+    )
+    def test_key_tokens_are_fixed_points(self, text: str, prefix: str) -> None:
+        # Idempotence by construction, verified per family: the token's
+        # prefix ends in `-`/`_` (or is `AIza`/`Bearer`), the byte after
+        # it is `~` (never tail charset), and no family prefix can be
+        # spelled inside 12 lowercase digest hex — so the second scrub
+        # never fires a rule and returns the original object.
+        once = scrub_pii(text, salt="")
+        assert once == _key_token(prefix, text)
+        assert scrub_pii(once, salt="") is once
 
 
 class TestNdExhaustive:

@@ -221,10 +221,11 @@
 //! dicts for the diagnostics flavor.
 //!
 //! The contact-scrub surface (`scrub_pii`, the telemetry-safety port)
-//! adds no residue class: `detached_transform`'s shape over a two-rule
+//! adds no residue class: `detached_transform`'s shape over a three-rule
 //! pass — the text borrow plus the `rules=`/`salt=` validation under the
-//! GIL, then the whole double scan (both grammars' matchers, both
-//! splices, every token digest) under one `py.detach`, then either the
+//! GIL, then the whole scan (the keys, email, and phone matchers, every
+//! splice, every token digest — the keys pass rides the same single
+//! detach) under one `py.detach`, then either the
 //! identity return (no active rule matched) or the O(output) string
 //! marshalling, pinned by `tests/test_gil_release.py` (worst gaps
 //! ~12ms of 36-40ms walls at 12 MiB of contact-dense text: the
