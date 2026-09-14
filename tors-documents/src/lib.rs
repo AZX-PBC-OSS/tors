@@ -1072,8 +1072,10 @@ fn refuse_over_ceiling(
     Err(InputError::Refused(format!(
         "the document is {} and the input ceiling is {} (an explicit max_bytes is binding \
          on every engine lane — pdf and HTML included — and is checked before any work \
-         runs; the 32 MiB default, by contrast, is enforced after the read, on the \
-         anydoc and office_oxide lanes only): split the file, or pass a larger max_bytes",
+         runs; under the default max_bytes=None the read is bounded in two phases: the \
+         metered anydoc and office_oxide lanes refuse during the read at the 32 MiB \
+         ceiling, while the pdf and HTML lanes read under the 512 MiB backstop): split \
+         the file, or pass a larger max_bytes",
         render_size(size as usize),
         render_size(limit),
     )))

@@ -674,7 +674,7 @@ fn convert(
 /// as an `OutOfMemory` io error rather than an allocation abort. This is the
 /// piece that closes issue #80 symptoms 2 and 3: the read is self-limiting
 /// regardless of what the file's stat claimed. Callers guarantee
-/// `buf.len() <= ceiling` on entry (the prefix is always <= SNIFF_PREFIX,
+/// `buf.len() <= ceiling` on entry (the prefix is always <= SNIFF_PREFIX + 1,
 /// which is below any ceiling used here).
 pub fn read_bounded_into<R: std::io::Read>(
     mut reader: R,
@@ -686,14 +686,27 @@ pub fn read_bounded_into<R: std::io::Read>(
         if buf.len() > ceiling {
             return Ok((buf, true));
         }
-        // ceiling + 1 - buf.len() >= 1 here, so `want >= 1`.
-        let want = std::cmp::min(CHUNK, ceiling + 1 - buf.len());
+        // The `buf.len() > ceiling` guard above guarantees
+        // `ceiling.saturating_add(1) - buf.len() >= 1`, so `want >= 1`; the
+        // saturating add keeps the reader sound even at `ceiling == usize::MAX`
+        // (a plain `ceiling + 1` would overflow there).
+        let want = std::cmp::min(CHUNK, ceiling.saturating_add(1) - buf.len());
         let start = buf.len();
         buf.try_reserve_exact(want).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::OutOfMemory, "input too large to buffer")
         })?;
         buf.resize(start + want, 0);
-        let n = reader.read(&mut buf[start..]).map_err(std::io::Error::from)?;
+        let n = match reader.read(&mut buf[start..]) {
+            Ok(n) => n,
+            // Retry a signal that landed mid-read, for parity with the
+            // `read_to_end` this loop replaced (CPython installs handlers
+            // without SA_RESTART, so EINTR reaches us). Real io errors return.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                buf.truncate(start);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         buf.truncate(start + n);
         if n == 0 {
             return Ok((buf, false));
@@ -708,7 +721,9 @@ pub fn read_bounded_into<R: std::io::Read>(
 /// the unmetered pdf/html lanes and any input whose lane cannot be told from
 /// the prefix (a truncated ZIP central directory) return `fallback`. Only
 /// complete lines of the prefix are considered, so a prefix cut mid-line does
-/// not skew the CSV heuristic.
+/// not skew the CSV heuristic — but the untrimmed prefix is checked too, so a
+/// long partial final line (a CSV row wider than the prefix, no trailing
+/// newline) whose completeness the trim would erase is still metered.
 pub fn provisional_read_ceiling(
     prefix: &[u8],
     name_hint: Option<&str>,
@@ -716,16 +731,24 @@ pub fn provisional_read_ceiling(
     backend: Backend,
     fallback: usize,
 ) -> usize {
+    let is_metered = |bytes: &[u8]| {
+        resolve(bytes, name_hint, format)
+            .ok()
+            .and_then(|kind| engine_for(kind, backend).ok())
+            .is_some_and(|engine| matches!(engine, Engine::Anydoc | Engine::OfficeOxide))
+    };
     // Drop a trailing partial line so the CSV witness sees only whole lines.
     let end = match prefix.iter().rposition(|&b| b == b'\n') {
         Some(nl) => nl + 1,
         None => prefix.len(),
     };
     let head = &prefix[..end];
-    let metered = resolve(head, name_hint, format)
-        .ok()
-        .and_then(|kind| engine_for(kind, backend).ok())
-        .is_some_and(|engine| matches!(engine, Engine::Anydoc | Engine::OfficeOxide));
+    // Meter if EITHER the trimmed head OR the untrimmed prefix resolves to a
+    // metered lane. The trim protects the mid-line-cut delimiter case; the
+    // untrimmed check closes the long-row CSV gap where the trim would drop the
+    // only witness lines. OR-ing errs toward metering (the safe direction) and
+    // never removes a metered detection the trim already found.
+    let metered = is_metered(head) || is_metered(prefix);
     if metered { DEFAULT_ANYDOC_INPUT_LIMIT } else { fallback }
 }
 
@@ -2218,5 +2241,33 @@ mod tests {
             PROVISIONAL_FALLBACK,
         );
         assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT); // still CSV from the two complete lines
+    }
+
+    #[test]
+    fn read_bounded_usize_max_ceiling_does_not_overflow() {
+        use std::io::Cursor;
+        // The pub reader must be sound at the extreme ceiling: `ceiling + 1`
+        // would overflow, but `saturating_add(1)` keeps `want` well-formed.
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![0u8; 10]), Vec::new(), usize::MAX).unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert!(!over);
+    }
+
+    #[test]
+    fn provisional_long_row_csv_is_metered_from_untrimmed_prefix() {
+        // A CSV whose second row is wider than the prefix, with no trailing
+        // newline: trimming to complete lines leaves one line (not CSV), so the
+        // metering must come from the UNTRIMMED prefix, which sees both rows.
+        let mut prefix = b"unit,status\na,".to_vec();
+        prefix.extend(std::iter::repeat(b'x').take(80 * 1024));
+        let c = provisional_read_ceiling(
+            &prefix,
+            None,
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
     }
 }

@@ -159,9 +159,10 @@ def to_markdown(
     ``format=`` and the content markers alone). ``password=`` unlocks an
     encrypted PDF (the PDF kinds only; a password on any other format is
     a clean error); an explicit ``max_bytes=`` is binding on every engine
-    lane, checked before a byte is read or copied, while ``None`` keeps
-    the 32 MiB default (enforced after the read, on the anydoc/oxide
-    lanes only). Returns ``(Format, markdown)``: the format the
+    lane, checked before a byte is read or copied, while ``None`` bounds
+    the read in two phases: the metered anydoc/oxide lanes refuse during
+    the read at the 32 MiB default ceiling, and the pdf/HTML lanes read
+    under the finite 512 MiB backstop. Returns ``(Format, markdown)``: the format the
     conversion actually used. The whole read+sniff+convert pass runs
     GIL-free."""
     resolved, output = _native_to_markdown(
@@ -224,8 +225,9 @@ def pdf_classify(
     ``password=`` for an encrypted PDF. ``backend=`` is ``"auto"``/``"oxide"``
     (the pdf_oxide lane, byte-identical; ``"anydoc"`` is refused: its PDF
     surface is the ``to_markdown``/``to_text`` conversion pair); an explicit
-    ``max_bytes=`` binds before the read, ``None`` leaves the pdf lane
-    unmetered."""
+    ``max_bytes=`` binds before the read, ``None`` reads the pdf lane
+    under the finite 512 MiB backstop (a memory-safety floor, raised with
+    an explicit ``max_bytes=``)."""
     return PdfClassification(
         _native_pdf_classify(_coerce_path(path), data, password, backend, max_bytes)
     )
@@ -245,8 +247,9 @@ def pdf_extract(
     (the pdf_oxide lane, byte-identical; ``"anydoc"`` is refused: the
     per-page probe is the OCR-routing signal and anydoc has none; its PDF
     surface is the ``to_markdown``/``to_text`` conversion pair); an
-    explicit ``max_bytes=`` binds before the read, ``None`` leaves the pdf
-    lane unmetered."""
+    explicit ``max_bytes=`` binds before the read, ``None`` reads the pdf
+    lane under the finite 512 MiB backstop (a memory-safety floor, raised
+    with an explicit ``max_bytes=``)."""
     return _native_pdf_extract(_coerce_path(path), data, password, backend, max_bytes)
 
 
@@ -265,7 +268,8 @@ def pdf_link_uris(
     lane, byte-identical; ``"anydoc"`` is refused: it has no annotation
     surface; its PDF surface is the ``to_markdown``/``to_text``
     conversion pair); an explicit ``max_bytes=`` binds before the read,
-    ``None`` leaves the pdf lane unmetered."""
+    ``None`` reads the pdf lane under the finite 512 MiB backstop (a
+    memory-safety floor, raised with an explicit ``max_bytes=``)."""
     return _native_pdf_link_uris(_coerce_path(path), data, password, backend, max_bytes)
 
 
@@ -282,7 +286,8 @@ def pdf_page_count(
     ``"anydoc"`` is refused: its reader reports a count only inside the
     NeedsOcr refusal; its PDF surface is the ``to_markdown``/``to_text``
     conversion pair); an explicit ``max_bytes=`` binds before the read,
-    ``None`` leaves the pdf lane unmetered."""
+    ``None`` reads the pdf lane under the finite 512 MiB backstop (a
+    memory-safety floor, raised with an explicit ``max_bytes=``)."""
     return _native_pdf_page_count(_coerce_path(path), data, password, backend, max_bytes)
 
 
