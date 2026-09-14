@@ -256,17 +256,21 @@ const WIDE_WINDOW_COUNT_FIRST: usize = 1024;
 /// `limit`" with at most `limit` tokens walked.
 ///
 /// Allocation-free by construction: counts `real_word_segments` directly,
-/// never the lowercased `String` stream. The counts are identical because
-/// `str::to_lowercase` maps every non-empty segment to a non-empty token
-/// (char-wise lowercasing never deletes: each input char yields >= 1
-/// output char), so the stream's `!term.is_empty()` filter never fires on
-/// the no-knob path and no token is ever dropped or added. The previous
-/// spelling iterated `normalized_word_tokens_stream` -- ~3M transient
-/// `String` alloc/free cycles on the gate's 13.5MB probe -- which is O(1)
-/// live but peaks RSS on glibc (CI #74: ~570-615MB self peak vs ~29MB on
-/// macOS, where freed arenas return faster); this spelling walks `&str`
-/// slices with zero allocation, so the huge-window short-circuit holds
-/// only the interpreter + input string resident.
+/// never the lowercased `String` stream (the previous spelling ran ~3M
+/// transient `String` alloc/free cycles on the gate's 13.5MB probe -- O(1)
+/// live, but churn this spelling simply does not pay). The counts are
+/// identical because `str::to_lowercase` maps every non-empty segment to a
+/// non-empty token (char-wise lowercasing never deletes: each input char
+/// yields >= 1 output char), so the stream's `!term.is_empty()` filter
+/// never fires on the no-knob path and no token is ever dropped or added.
+/// This spelling walks `&str` slices with zero allocation, so the
+/// huge-window short-circuit holds only the interpreter + input string
+/// resident. The CI #74 memory saga ended with the finding that the
+/// ~570-615MB readings once attributed to a glibc RSS peak were a
+/// workload-invariant `resource.getrusage` fiction on the ubuntu runners
+/// (true peaks ~15-38MB by `/proc` VmHWM; no retaining allocation exists)
+/// -- the gate in `tests/test_minhash.py` now reads the kernel high-water
+/// mark, and this zero-alloc spelling is what it pins.
 fn token_count_up_to(text: &str, limit: usize) -> usize {
     if limit == 0 {
         return 0;
