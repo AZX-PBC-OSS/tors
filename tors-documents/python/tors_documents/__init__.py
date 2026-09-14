@@ -160,8 +160,9 @@ def to_markdown(
     encrypted PDF (the PDF kinds only; a password on any other format is
     a clean error); an explicit ``max_bytes=`` is binding on every engine
     lane, checked before a byte is read or copied, while ``None`` bounds
-    the read in two phases: the metered anydoc/oxide lanes refuse during
-    the read at the 32 MiB default ceiling, and the pdf/HTML lanes read
+    the read in two phases: the metered anydoc/oxide/HTML lanes refuse during
+    the read at the 32 MiB default ceiling (HTML amplifies ~23x input,
+    measured), and the pdf lane reads
     under the finite 512 MiB backstop. Returns ``(Format, markdown)``: the format the
     conversion actually used. The whole read+sniff+convert pass runs
     GIL-free."""

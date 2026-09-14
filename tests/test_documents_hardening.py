@@ -448,6 +448,11 @@ import threading, time
 # 400 MB of HTML whose whole body is a <script> the engine drops by
 # construction: the OUTPUT is 5 bytes, so the probe's GIL window is the
 # input side alone (the copy), not an O(output) return marshalling.
+# Under the HTML lane's 32 MiB input ceiling (the ~23x amplification bound)
+# this 400 MB upload now refuses with a ValueError naming the lane ceiling —
+# caught below: the refusal happens AFTER the input copy, so the GIL window
+# the probe measures (the detached 400 MB memcpy) is unchanged, and the
+# caught-refusal path also pins the ceiling end-to-end.
 data = b"<html><body><p>tiny</p><script>" + b"A" * (400 * 1024 * 1024) \
     + b"</script></body></html>"
 from tors_documents import to_text
@@ -466,12 +471,21 @@ def monitor():
 t = threading.Thread(target=monitor)
 t.start()
 t0 = time.perf_counter()
-fmt, out = to_text(data=data)
-wall = time.perf_counter() - t0
-stop.set()
-t.join()
+outcome = "converted"
+try:
+    fmt, out = to_text(data=data)
+except ValueError as exc:
+    # the lane ceiling refusal (expected at 400 MB): the input copy already
+    # ran, detached, so the heartbeat window is intact. try/finally so the
+    # monitor can never outlive the measurement (a leaked non-daemon
+    # monitor would hang the child past any deadline).
+    outcome = f"refused: {exc}"
+finally:
+    wall = time.perf_counter() - t0
+    stop.set()
+    t.join()
 hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
-print(f"resolved={fmt} output_len={len(out)} wall={wall:.2f}s max_gap={max(gaps) * 1000:.1f}ms")
+print(f"outcome={outcome} wall={wall:.2f}s max_gap={max(gaps) * 1000:.1f}ms")
 print(hwm.strip())
 """
 
@@ -489,14 +503,22 @@ def test_a_400mb_data_call_keeps_the_gil_at_heartbeat_granularity() -> None:
     after (the caller's bytes plus the engine-bound Vec), just on
     different sides of the detach: red measured VmHWM 838,328 kB, and
     the green run must stay in the same neighborhood (the win this fix
-    buys is GIL residency, not memory)."""
+    buys is GIL residency, not memory). Under the HTML lane's 32 MiB
+    input ceiling the call now also refuses with the lane-ceiling
+    ValueError — asserted: the refusal must name the html lane's 32 MiB
+    ceiling, measured after the copy, so this probe pins both the GIL
+    window and the ceiling in one pass."""
     report = _run_or_fail(_HEARTBEAT_PROBE, timeout=180)
     found = re.search(r"max_gap=(\d+(?:\.\d+)?)ms", report)
     assert found, f"the probe did not report its max gap:\n{report}"
     max_gap_ms = float(found.group(1))
-    assert "output_len=5" in report, (
-        f"the probe's fixture changed shape (the output is no longer tiny, "
-        f"so the window is no longer the copy alone):\n{report}"
+    assert "refused:" in report, (
+        f"the fixture no longer refuses: a 400 MB HTML upload under None is "
+        f"over the HTML lane's 32 MiB ceiling and must refuse naming it (the "
+        f"GIL window measured below is the copy, which runs either way):\n{report}"
+    )
+    assert "html-to-markdown-rs" in report and "32.0 MiB" in report, (
+        f"the refusal did not name the HTML lane's 32 MiB ceiling:\n{report}"
     )
     assert max_gap_ms < 30.0, (
         f"the GIL was held {max_gap_ms:.1f} ms through a 400 MB data= call — "
@@ -652,3 +674,39 @@ class TestBoundedRead:
         # engine lane's input ceiling is ..." — asserting the read-phase
         # phrase proves metering survived the blinded prefix.
         assert "default read ceiling" in done.stderr, done.stderr
+
+    def test_html_lane_refuses_during_the_read_under_none(self, tmp_path):
+        # The HTML lane amplifies at a measured ~23x input (a 48 MiB doctype
+        # HTML peaked at 1118 MiB RSS converting successfully pre-fix), so it
+        # meters like anydoc/office_oxide: over the 32 MiB lane ceiling, the
+        # refusal must come from the phase-2 provisional ceiling DURING the
+        # read (message names the default read ceiling), not from a
+        # backstop-sized buffer and a post-read check.
+        p = tmp_path / "big.html"
+        with open(p, "wb") as f:
+            f.write(b"<!doctype html><html><body>\n<h1>t</h1>\n")
+            f.write(b"<p>lorem ipsum dolor sit amet</p>\n" * 1024 * 1024)
+        assert p.stat().st_size > 32 * 1024 * 1024
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        assert "default read ceiling" in done.stderr, done.stderr
+
+    def test_data_lane_html_over_the_default_refuses_post_read(self, tmp_path):
+        # data= bytes are already resident (no read to bound), so the HTML
+        # lane's ceiling must ALSO run as the core's post-read check on the
+        # copy: a 34 MiB HTML buffer under None refuses, never converts.
+        p = tmp_path / "payload.html"
+        with open(p, "wb") as f:
+            f.write(b"<!doctype html><html><body>\n<h1>t</h1>\n")
+            f.write(b"<p>lorem ipsum dolor sit amet</p>\n" * 1024 * 1024)
+        assert p.stat().st_size > 32 * 1024 * 1024
+        code = (f'from tors_documents import to_text\n'
+                f'to_text(data=open({str(p)!r}, "rb").read())')
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        # data= skips the read phase entirely, so this refusal is the core's
+        # post-read shape: it names the lane ceiling and the byte size.
+        assert "32.0 MiB" in done.stderr, done.stderr

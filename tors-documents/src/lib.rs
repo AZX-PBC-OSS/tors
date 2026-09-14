@@ -88,7 +88,7 @@ pyo3::create_exception!(
 /// default in either direction. `None` (the default) still runs no
 /// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
 /// (pdf_oxide's own resource limits govern here); the pdf lane instead
 /// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
 /// memory-safety floor rather than a lane policy.
@@ -251,7 +251,7 @@ impl PdfClassification {
 /// default in either direction. `None` (the default) still runs no
 /// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
 /// (pdf_oxide's own resource limits govern here); the pdf lane instead
 /// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
 /// memory-safety floor rather than a lane policy.
@@ -340,7 +340,7 @@ pub fn pdf_extract(
 /// default in either direction. `None` (the default) still runs no
 /// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
 /// (pdf_oxide's own resource limits govern here); the pdf lane instead
 /// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
 /// memory-safety floor rather than a lane policy.
@@ -439,7 +439,7 @@ pub fn pdf_page_count(
 /// default in either direction. `None` (the default) still runs no
 /// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
 /// (pdf_oxide's own resource limits govern here); the pdf lane instead
 /// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
 /// memory-safety floor rather than a lane policy.
@@ -528,21 +528,22 @@ pub fn pdf_link_uris(
 /// read forever: the ceiling ran only in the core, only after the
 /// read). `None` (the default) keeps the default-ceiling doctrine
 /// exactly as before: the measured 32 MiB, checked after the read, on
-/// the anydoc and office_oxide lanes only: anydoc's csv lane measures
-/// ~36x on benign shapes but ~146x worst case on adversarial ones (a
+/// the lanes that amplify input into resident memory: anydoc
+/// (~36x on benign csv shapes but ~146x worst case on adversarial ones (a
 /// 24 MiB many-short-cells csv peaked at 3.4 GiB, stable across sizes,
 /// so the 32 MiB default ceiling budgets ~4.6 GiB worst case: size
-/// workers for that or pass a lower `max_bytes`), and office_oxide
-/// 0.1.10 added per-part decompression caps (512 MiB per part, declared
+/// workers for that or pass a lower `max_bytes`), office_oxide
+/// 0.1.10 (per-part decompression caps of 512 MiB per part, declared
 /// and actual, XML depth 256 on a 16 MiB parse stack) but still has no
 /// total-across-parts cap and no output cap (a 399 KiB zip carrying a
 /// 400 MiB part converts at ~1.6 GiB peak; a 600 MiB part is refused
-/// pre-decompression), so the input ceiling remains the only aggregate
-/// guard on the opt-in `backend="oxide"` lane; the pdf_oxide and HTML
-/// lanes run no lane-specific 32 MiB policy under the default, but they
-/// no longer read unbounded either: they read under [`MAX_INPUT_READ`],
-/// the finite 512 MiB backstop, a memory-safety floor rather than a lane
-/// policy.
+/// pre-decompression), and HTML (~23x input: the converter holds the
+/// whole input and output at once; a 48 MiB doctype HTML peaked at
+/// 1118 MiB, measured). The pdf lane runs no lane-specific 32 MiB
+/// policy under the default (pdf_oxide's own resource limits govern
+/// there), but it no longer reads unbounded either: it reads under
+/// [`MAX_INPUT_READ`], the finite 512 MiB backstop, a memory-safety
+/// floor rather than a lane policy.
 ///
 /// `backend` picks the engine where they overlap: `"auto"` (the default;
 /// the native layer takes `None` as the same choice) routes by the
@@ -878,9 +879,10 @@ enum InputError {
     Refused(String),
 }
 
-/// The finite backstop the unmetered lanes (pdf/HTML) read under when the
+/// The finite backstop the unmetered pdf lane reads under when the
 /// caller passed no `max_bytes`: the two-phase read's `None` ceiling once the
-/// prefix sniff resolves to an unmetered lane. Large enough to be no practical
+/// prefix sniff positively resolves to pdf (the only unmetered lane; every
+/// other lane meters at the 32 MiB default). Large enough to be no practical
 /// limit on a real document, finite enough that a lying stat or a sparse hole
 /// can no longer make the read unbounded.
 pub(crate) const MAX_INPUT_READ: usize = 512 * 1024 * 1024;
@@ -900,8 +902,8 @@ impl Source<'_> {
     /// `max_bytes=` the four functions now take had nowhere to land
     /// before). `None` runs no lane-specific policy on the pdf lane, the
     /// unchanged doctrine: the 32 MiB default is the core's post-read
-    /// check on the anydoc/office_oxide lanes only: lanes these PDF-only
-    /// calls never run; the pdf lane instead reads under
+    /// check on the amplified lanes (anydoc/office_oxide/html): lanes
+    /// these PDF-only calls never run; the pdf lane instead reads under
     /// [`MAX_INPUT_READ`], the finite 512 MiB backstop.
     fn into_bytes(self, max_bytes: Option<usize>) -> Result<Vec<u8>, InputError> {
         // The PDF-only calls have no format/backend to sniff by; a real PDF
@@ -922,10 +924,11 @@ impl Source<'_> {
     /// cannot wait for the lane to be known (the red-team findings:
     /// `max_bytes=65536` on `/dev/zero` read forever because the ceiling
     /// ran only post-read in the core, and a caller budgeting on a PDF
-    /// or HTML document got the full parse: those lanes never saw the
+    /// got the full parse: that lane never saw the
     /// knob). `None` keeps the core's post-read 32 MiB check on the
-    /// anydoc and office_oxide lanes exactly as before; every other lane
-    /// (pdf, HTML) still runs no lane-specific policy, but reads under
+    /// amplified lanes (anydoc, office_oxide, and now HTML, which
+    /// measures ~23x input) exactly as before; the pdf lane runs no
+    /// lane-specific policy, but reads under
     /// [`MAX_INPUT_READ`], the finite 512 MiB backstop this function
     /// enforces via the two-phase read below, rather than unbounded.
     fn into_input(
@@ -1083,8 +1086,8 @@ fn refuse_over_ceiling(
         "the document is {} and the input ceiling is {} (an explicit max_bytes is binding \
          on every engine lane — pdf and HTML included — and is checked before any work \
          runs; under the default max_bytes=None the read is bounded in two phases: the \
-         metered anydoc and office_oxide lanes refuse during the read at the 32 MiB \
-         ceiling, while the pdf and HTML lanes read under the 512 MiB backstop): split \
+         metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB \
+         ceiling, while the pdf lane reads under the 512 MiB backstop): split \
          the file, or pass a larger max_bytes",
         render_size(size as usize),
         render_size(limit),
@@ -1094,7 +1097,8 @@ fn refuse_over_ceiling(
 /// The over-the-read-ceiling refusal. Renders the CEILING, not the bytes
 /// read: past the cap the real size is unknown, so "the document is N" would
 /// be a false size. When `max_bytes` was explicit it names the knob; under
-/// None it names the MAX_INPUT_READ backstop and how to raise it.
+/// None it names the lane ceiling that was hit (the 32 MiB default on the
+/// metered lanes, the MAX_INPUT_READ backstop on pdf) and how to raise it.
 fn over_ceiling_refusal(max_bytes: Option<usize>, ceiling: usize) -> InputError {
     let detail = if max_bytes.is_some() {
         format!(

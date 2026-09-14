@@ -4948,7 +4948,7 @@ heartbeat-granularity and 8-thread byte-identical concurrency gates).
 |---|---|
 | `OSError` | the file is missing or unreadable (IO): a missing path is `FileNotFoundError`, a directory `IsADirectoryError` on Linux (the matched subclass, errno text in the message) |
 | `TypeError` | neither `path` nor `data=` was passed; a non-str `path=` (`to_markdown(123)` names `path`, never os.fspath's bare error); a non-bytes `data=` (the refusal names the type only, never the value's content or a heap address, the `password=` doctrine); a wrong-typed `pages=` entry (a bool, float, or str where a 0-based int belongs); a non-str `backend=` (a bool, int, float, or bytes: `b"anydoc"` is a str-shaped value of the wrong type, not a lane name); a non-int `max_bytes=` (a bool, str, or float; a bool would launder through an int extraction as 1, so the type is refused first); a non-str `password=`; all argument-contract failures, raised under the GIL before any work runs |
-| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc and office_oxide lanes refuse during the read at the 32 MiB ceiling, and the pdf and HTML lanes read under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
+| `ValueError` | an unknown `format=` name; content and extension both fail to name a format; a `backend=`+format pair the forced engine cannot read; on the PDF-only family, `backend="anydoc"`: a capability refusal (not a format one: PDF+anydoc converts) naming the per-page surface the call needs and the `to_markdown`/`to_text` pair that is anydoc's whole PDF surface, raised before any work runs; an invalid `pages=` selection; a malformed document; an encrypted PDF without its `password=` (every entry fails closed: the door check raises at open); an input over `max_bytes=` (an explicit budget binds every lane, the PDF-only family included, checked before a byte is read or copied; under the default the metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB ceiling, and the pdf lane reads under the 512 MiB backstop); a non-regular `path=`: a FIFO, device, or socket is a typed refusal naming `path` and the kind, before open(2) can block (directories keep their `OSError` above); a NUL byte inside `path=` (CPython's own `open("a\0b")` convention, naming `path`) |
 | `NeedsOcrError` (a `ValueError` subclass) | the anydoc backend hit a PDF with scanned/image-only pages: route the document to an OCR stage |
 
 **Format resolution order**: a mislabeled or extensionless file (a temp-file download,
@@ -5068,9 +5068,11 @@ before any work runs: the file's size at open (a `path=` call never reads an
 over-budget byte), the buffer's length on entry (a `data=` call never copies
 one). `max_bytes=None` (the default) is the two-phase doctrine: the read is
 bounded from the start, a prefix sniff picks the lane, and then the metered
-anydoc and office_oxide lanes — the two that amplify input into resident
-memory — refuse *during* the read at the 32 MiB default ceiling, while the
-pdf and HTML lanes read under the finite 512 MiB backstop (a memory-safety
+lanes — the ones that amplify input into resident
+memory: anydoc, office_oxide, and HTML (~23x input; the HTML converter holds
+the whole input and output at once, a 48 MiB doctype HTML peaked at 1118 MiB)
+— refuse *during* the read at the 32 MiB default ceiling, while the
+pdf lane reads under the finite 512 MiB backstop (a memory-safety
 floor, not a lane policy). The lane is unknowable before the container sniff,
 which is why only the explicit budget can be checked fully pre-read. Over the
 ceiling, the call raises `ValueError` naming the ceiling and the `max_bytes=`
@@ -5266,8 +5268,9 @@ call away. `max_bytes=` is the input budget: an explicit value binds pre-read
 exactly as on the conversion pair, the `path=`'s size at open, the `data=`
 length on entry, never an over-budget byte read or copied; `None` (the default)
 reads the pdf lane under the finite 512 MiB backstop (a memory-safety floor,
-raised with an explicit `max_bytes=`); the 32 MiB default ceiling is the anydoc
-and office_oxide lanes' during-the-read check, lanes these PDF-only calls never run.
+raised with an explicit `max_bytes=`); the 32 MiB default ceiling is the
+amplified lanes' (anydoc, office_oxide, HTML) during-the-read check, lanes
+these PDF-only calls never run.
 `password=` unlocks an encrypted PDF; without it the entry fails closed,
 `ValueError` at open, never empty output masquerading as "no content" (the empty
 strings above are for unlocked documents; a contract failure precedes the work,
