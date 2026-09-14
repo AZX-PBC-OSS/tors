@@ -630,3 +630,25 @@ class TestBoundedRead:
             "the end-of-file sentinel was dropped or corrupted across the "
             "phase-1/phase-2 prefix splice"
         )
+
+    def test_content_blind_prefix_on_extensionless_file_still_meters_the_read(self, tmp_path):
+        # A 64 KiB content-blind leader (blank lines) pushes the CSV witness
+        # past the sniff prefix, and with no extension the name gives resolve()
+        # nothing either. An unresolvable prefix must err toward metering: the
+        # read refuses at the 32 MiB provisional ceiling DURING the read, it
+        # must not hand out the 512 MiB fallback and defer the refusal to the
+        # core's post-read check (which buffers the whole file first).
+        p = tmp_path / "payload"  # deliberately extensionless
+        with open(p, "wb") as f:
+            f.write(b"\n" * (80 * 1024))  # leader: no csv witness inside 64 KiB
+            f.write(b"unit,status\n")
+            f.write(b"a,ok\n" * (8 * 1024 * 1024))
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        # "default read ceiling" is the phase-2 provisional message. The
+        # post-read refusal instead says "the document is N and the anydoc
+        # engine lane's input ceiling is ..." — asserting the read-phase
+        # phrase proves metering survived the blinded prefix.
+        assert "default read ceiling" in done.stderr, done.stderr

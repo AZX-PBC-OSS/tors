@@ -718,8 +718,15 @@ pub fn read_bounded_into<R: std::io::Read>(
 /// judged from a prefix. Content markers decide, exactly as `resolve()` does,
 /// so a `.pdf`-named CSV is treated as the metered lane it really is. A
 /// metered lane (anydoc/office_oxide) returns `DEFAULT_ANYDOC_INPUT_LIMIT`;
-/// the unmetered pdf/html lanes and any input whose lane cannot be told from
-/// the prefix (a truncated ZIP central directory) return `fallback`. Only
+/// only a prefix that POSITIVELY resolves to an unmetered lane (pdf/html)
+/// returns `fallback`. A prefix whose lane cannot be told at all (a truncated
+/// ZIP central directory, a content-blind leader) also returns the metered
+/// ceiling, erring safe: content that never resolves is refused by `resolve()`
+/// anyway, and content that resolves only past the prefix is either a metered
+/// lane (the same 32 MiB ceiling, post-read — enforced here during the read)
+/// or a marker-buried pdf/HTML (an explicit `max_bytes=` unlocks it). Without
+/// this, a 64 KiB content-blind leader on an extensionless metered file would
+/// hand the attacker the fallback and move the refusal post-read. Only
 /// complete lines of the prefix are considered, so a prefix cut mid-line does
 /// not skew the CSV heuristic — but the untrimmed prefix is checked too, so a
 /// long partial final line (a CSV row wider than the prefix, no trailing
@@ -731,11 +738,14 @@ pub fn provisional_read_ceiling(
     backend: Backend,
     fallback: usize,
 ) -> usize {
-    let is_metered = |bytes: &[u8]| {
+    // Some(true) = a metered lane (anydoc/office_oxide); Some(false) =
+    // positively unmetered (pdf_oxide/html); None = the prefix does not
+    // resolve at all. None is deliberately NOT the fallback: see below.
+    let lane = |bytes: &[u8]| {
         resolve(bytes, name_hint, format)
             .ok()
             .and_then(|kind| engine_for(kind, backend).ok())
-            .is_some_and(|engine| matches!(engine, Engine::Anydoc | Engine::OfficeOxide))
+            .map(|engine| matches!(engine, Engine::Anydoc | Engine::OfficeOxide))
     };
     // Drop a trailing partial line so the CSV witness sees only whole lines.
     let end = match prefix.iter().rposition(|&b| b == b'\n') {
@@ -743,16 +753,16 @@ pub fn provisional_read_ceiling(
         None => prefix.len(),
     };
     let head = &prefix[..end];
-    // Meter if EITHER the trimmed head OR the untrimmed prefix resolves to a
-    // metered lane. The trim protects the mid-line-cut delimiter case; the
-    // untrimmed check closes the long-row CSV gap where the trim would drop the
-    // only witness lines. OR-ing errs toward metering (the safe direction) and
-    // never removes a metered detection the trim already found.
-    let metered = is_metered(head) || is_metered(prefix);
-    if metered {
-        DEFAULT_ANYDOC_INPUT_LIMIT
-    } else {
+    // Meter unless a view POSITIVELY resolves to an unmetered lane. The trim
+    // protects the mid-line-cut delimiter case; the untrimmed check closes the
+    // long-row CSV gap where the trim would drop the only witness lines. An
+    // all-None prefix (unresolvable content, no name to consult) meters — the
+    // safe direction, matching the OR's own bias toward metering.
+    let unmetered = lane(head) == Some(false) || lane(prefix) == Some(false);
+    if unmetered {
         fallback
+    } else {
+        DEFAULT_ANYDOC_INPUT_LIMIT
     }
 }
 
@@ -2220,12 +2230,30 @@ mod tests {
     }
 
     #[test]
-    fn provisional_truncated_zip_prefix_falls_back() {
+    fn provisional_unresolvable_prefix_errs_toward_the_metered_ceiling() {
         // A ZIP local-file header with no central directory cannot be resolved
-        // from a prefix; degrade to the fallback, not a metered guess.
+        // from the prefix, and neither a metered nor an unmetered lane can be
+        // told: the read errs SAFE at the metered ceiling, never the fallback.
+        // Content that stays unresolvable is refused by resolve() anyway; an
+        // extensionless metered file behind a content-blind leader must not
+        // buy the fallback (a 64 KiB leader would else defeat read metering).
         let c = provisional_read_ceiling(
             b"PK\x03\x04\x14\x00",
             None,
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_positively_unmetered_prefix_keeps_the_fallback() {
+        // The fallback is reserved for prefixes that POSITIVELY resolve to an
+        // unmetered lane (pdf/html) — here by name hint over pdf content.
+        let c = provisional_read_ceiling(
+            b"%PDF-1.4\n",
+            Some("x.pdf"),
             None,
             Backend::Auto,
             PROVISIONAL_FALLBACK,
