@@ -1424,6 +1424,21 @@ class TestUntrustedInputCeiling:
         with pytest.raises(RecursionError):
             content_hash(obj)
 
+    def test_node_count_ceiling_at_2m_hashes_one_over_refuses(self) -> None:
+        # The MAX_WALK_NODES half of the ceiling (the depth half is pinned
+        # above): the walk counts every visited object, so a leaf list of
+        # N entries visits N + 1 nodes. Exactly at the cap (2M nodes) the
+        # call hashes and matches the oracle -- the 12 MiB records corpus
+        # walks ~1M nodes, so the cap sits above legitimate breadth --
+        # and one node past it is the breadth-DoS refusal: a
+        # multi-million-element list raises ValueError instead of growing
+        # the owned tree unbounded. The message is generic (no cap value
+        # leaked), matching the other bounds.
+        at_cap = [None] * 1_999_999  # 1_999_999 leaves + the list = 2M nodes
+        _assert_parity(at_cap)
+        with pytest.raises(ValueError, match="visits too many objects"):
+            content_hash([None] * 2_000_000)  # 2_000_001 nodes
+
 
 class TestBoundedHooks:
     """C2: subclass hooks run to completion under the GIL, bounded by the
