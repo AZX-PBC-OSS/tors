@@ -84,11 +84,14 @@ pyo3::create_exception!(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
 /// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Encrypted documents fail closed (`ValueError`, pdf_oxide's security
 /// rule: a security state is never masked as "all pages empty"):
@@ -244,11 +247,14 @@ impl PdfClassification {
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
 /// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: a missing/unreadable file raises `OSError`; anything that fails
 /// to parse as a PDF raises `ValueError` with pdf_oxide's reason; a `path=`
@@ -330,11 +336,14 @@ pub fn pdf_extract(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
 /// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
 /// that do not parse as a PDF, `ValueError` naming `path` for a
@@ -426,11 +435,14 @@ pub fn pdf_page_count(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
 /// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: `OSError` (matched subclass) for a missing/unreadable `path=`;
 /// `ValueError` for bytes that do not parse as a PDF, and for a
@@ -527,7 +539,10 @@ pub fn pdf_link_uris(
 /// 400 MiB part converts at ~1.6 GiB peak; a 600 MiB part is refused
 /// pre-decompression), so the input ceiling remains the only aggregate
 /// guard on the opt-in `backend="oxide"` lane; the pdf_oxide and HTML
-/// lanes stay unmetered under the default.
+/// lanes run no lane-specific 32 MiB policy under the default, but they
+/// no longer read unbounded either: they read under [`MAX_INPUT_READ`],
+/// the finite 512 MiB backstop, a memory-safety floor rather than a lane
+/// policy.
 ///
 /// `backend` picks the engine where they overlap: `"auto"` (the default;
 /// the native layer takes `None` as the same choice) routes by the
@@ -881,10 +896,11 @@ impl Source<'_> {
     /// all before a byte is read or copied, because a budget that
     /// skipped this family would be a budget the pdf lane never saw (the
     /// `max_bytes=` the four functions now take had nowhere to land
-    /// before). `None` keeps the pdf lane unmetered, the unchanged
-    /// doctrine: the 32 MiB default is the core's post-read check on the
-    /// anydoc/office_oxide lanes only: lanes these PDF-only calls never
-    /// run.
+    /// before). `None` runs no lane-specific policy on the pdf lane, the
+    /// unchanged doctrine: the 32 MiB default is the core's post-read
+    /// check on the anydoc/office_oxide lanes only: lanes these PDF-only
+    /// calls never run; the pdf lane instead reads under
+    /// [`MAX_INPUT_READ`], the finite 512 MiB backstop.
     fn into_bytes(self, max_bytes: Option<usize>) -> Result<Vec<u8>, InputError> {
         // The PDF-only calls have no format/backend to sniff by; a real PDF
         // resolves to the unmetered lane and gets the MAX_INPUT_READ fallback,
@@ -904,9 +920,11 @@ impl Source<'_> {
     /// `max_bytes=65536` on `/dev/zero` read forever because the ceiling
     /// ran only post-read in the core, and a caller budgeting on a PDF
     /// or HTML document got the full parse: those lanes never saw the
-    /// knob). `None` keeps the default doctrine exactly: the core's
-    /// post-read 32 MiB check, on the anydoc and office_oxide lanes
-    /// only.
+    /// knob). `None` keeps the core's post-read 32 MiB check on the
+    /// anydoc and office_oxide lanes exactly as before; every other lane
+    /// (pdf, HTML) still runs no lane-specific policy, but reads under
+    /// [`MAX_INPUT_READ`], the finite 512 MiB backstop this function
+    /// enforces via the two-phase read below, rather than unbounded.
     fn into_input(
         self,
         max_bytes: Option<usize>,

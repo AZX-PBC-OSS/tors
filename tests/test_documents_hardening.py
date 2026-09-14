@@ -281,10 +281,13 @@ class TestAnExplicitBudgetBindsEveryLane:
 
     def test_no_budget_keeps_the_default_ceiling_doctrine_exactly(self, tmp_path: Path) -> None:
         """max_bytes=None is the untouched default: the pdf/HTML lanes
-        stay unmetered (the 32 MiB default is the core's post-read check,
-        on the anydoc/oxide lanes only: the lane is unknowable before
-        the container sniff, which is exactly why only the explicit
-        budget can be pre-read)."""
+        still run no lane-specific policy (the 32 MiB default is the
+        core's post-read check, on the anydoc/oxide lanes only: the lane
+        is unknowable before the container sniff, which is exactly why
+        only the explicit budget can be pre-read), but they now read
+        under the 512 MiB MAX_INPUT_READ backstop rather than unbounded;
+        that ceiling sits far above any real document, so this small
+        fixture PDF still converts unmolested."""
         path = tmp_path / "two.pdf"
         path.write_bytes(_PDF_BYTES)
         resolved, markdown = to_markdown(str(path))
