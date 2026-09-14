@@ -17,6 +17,7 @@ from __future__ import annotations
 import itertools
 import json
 import random
+import re
 from typing import Any
 
 import pytest
@@ -353,13 +354,498 @@ class TestDifferentialParity:
             json_repair_lib.loads(raw, strict=True, skip_json_loads=True)
 
 
+class TestLoneSurrogateEscapeDivergence:
+    r"""The lone-surrogate-escape class, pinned on both engines (api.md "Lone surrogates").
+
+    A `\uXXXX` escape decoding to an unpaired surrogate (a high half not
+    directly followed by a `\udCXX` low-half escape, or a bare low half) is
+    the one string-value class where byte-parity with the oracle is
+    architecturally out of reach, so it is classified — api.md Divergences
+    → "Lone surrogates" entry; the pinned unit tests in
+    src/json_repair/string.rs (the escape decoder) and
+    src/json_repair/strict.rs (the strict fast path); policy thread
+    https://github.com/AZX-PBC-OSS/tors/issues/57 (CLOSED, keep-U+FFFD lean)
+    — instead of oracle-compared for equality. (Review shorthand for this
+    class is api.md "Lone surrogates"; the traceable pins are the api.md entry, the two Rust
+    unit pins, and #57.) Mechanism: upstream decodes every `\u`
+    escape with chr(int(hex, 16)) and a Python str carries the raw lone
+    surrogate onward — json.dumps re-emits it as the identical escape text
+    on the str lane, and the raw surrogate itself comes back on the loads
+    lane (and with ensure_ascii=False). A Rust String cannot hold
+    U+D800..U+DFFF (char::from_u32 rejects the block), so the port's escape
+    decoder maps a lone half to U+FFFD. Preserving the escape TEXT in the
+    value instead would match the str lane but corrupt the value (six
+    characters of escape text where the oracle holds one surrogate), still
+    diverge on the loads lane (pyo3 marshals strings through Rust str), and
+    break the str/loads internal consistency pinned below — a full fix
+    needs a raw-slice value representation, a maintainer decision, not a
+    parser patch.
+
+    This pin holds the classified line on the exact minimal shapes so a
+    change on EITHER side — a json-repair re-sync that alters the class, or
+    a tors policy change — fails here and forces re-classification, the
+    same tripwire role the §9.4/§9.5/§9.6 pins above play for their
+    classes. Reachability note: the hypothesis mutation lane CAN draw this
+    class even though _base_text excludes the surrogate block and
+    backslash — json.dumps reintroduces `\uXXXX` escapes (and `\"`)
+    over that alphabet and _mutate corrupts the dumped text: the value
+    ["A" + chr(0x0D80) + "1"] dumps as '["A\u0d801"]' and
+    _mutate(..., seed=43064841) deletes the 0 to yield '["A\ud801"]'
+    (issue #57), pinned as test_mutation_reachable_ud801_diverges below.
+    The mutation differential therefore skips surrogate-shaped inputs
+    explicitly (see test_differential_on_mutations); Hypothesis replays its
+    example DB on every run, so a recorded hit replays into that skip
+    instead of failing as a mystery flake.
+    """
+
+    # (raw, oracle str-lane spelling, tors str-lane spelling). The oracle
+    # preserves the escape text (json.dumps of the raw surrogate re-emits
+    # it, lowercased); tors maps every lone half to U+FFFD (api.md "Lone surrogates").
+    _LONE_STR_CASES: list[tuple[str, str, str]] = [
+        ('["\\ud800"]', '["\\ud800"]', '["\\ufffd"]'),
+        ('["\\udc00"]', '["\\udc00"]', '["\\ufffd"]'),
+        ('["\\udbff"]', '["\\udbff"]', '["\\ufffd"]'),  # high-half range end
+        ('["\\udfff"]', '["\\udfff"]', '["\\ufffd"]'),  # low-half range end
+        ('["\\uD800"]', '["\\ud800"]', '["\\ufffd"]'),  # uppercase: dumps lowercases
+        ('{"k":"\\ud800"}', '{"k": "\\ud800"}', '{"k": "\\ufffd"}'),
+        ('{"\\ud800": 1}', '{"\\ud800": 1}', '{"\\ufffd": 1}'),
+        (
+            '{"\\udc00\\ud800": 1}',
+            '{"\\udc00\\ud800": 1}',
+            '{"\\ufffd\\ufffd": 1}',
+        ),  # key: low-then-high
+        (
+            '{"k":"\\udc00\\ud800"}',
+            '{"k": "\\udc00\\ud800"}',
+            '{"k": "\\ufffd\\ufffd"}',
+        ),  # value: low-then-high
+        ('["\\ud83d x"]', '["\\ud83d x"]', '["\\ufffd x"]'),
+        ('["a\\ud800b"]', '["a\\ud800b"]', '["a\\ufffdb"]'),
+        (
+            '["\\udc00\\ud800"]',
+            '["\\udc00\\ud800"]',
+            '["\\ufffd\\ufffd"]',
+        ),  # reversed pair
+        (
+            '["\\ud800\\ud800"]',
+            '["\\ud800\\ud800"]',
+            '["\\ufffd\\ufffd"]',
+        ),  # doubled high half
+        (
+            '["\\ud800\\u0041"]',
+            '["\\ud800A"]',
+            '["\\ufffdA"]',
+        ),  # high + valid non-low: the \\u0041 still decodes to A
+        (
+            '["\\ud800\\u41"]',
+            '["\\ud800\\\\u41"]',
+            '["\\ufffd\\\\u41"]',
+        ),  # high + truncated: the short escape stays literal text
+        (
+            '["A\\ud801"]',
+            '["A\\ud801"]',
+            '["A\\ufffd"]',
+        ),  # seed-43064841 product shape (issue #57)
+    ]
+
+    # (raw, oracle loads-lane value, tors loads-lane value): the oracle
+    # carries the raw surrogate in the Python str; tors carries U+FFFD.
+    _LONE_LOADS_CASES: list[tuple[str, list[str], list[str]]] = [
+        ('["\\ud800"]', ["\ud800"], ["\ufffd"]),
+        ('["a\\ud800b"]', ["a\ud800b"], ["a\ufffdb"]),
+        ('["\\udbff"]', ["\udbff"], ["\ufffd"]),
+        ('["\\udc00\\ud800"]', ["\udc00\ud800"], ["\ufffd\ufffd"]),
+        ('["\\ud800\\u0041"]', ["\ud800A"], ["\ufffdA"]),
+    ]
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_STR_CASES,
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    def test_oracle_preserves_the_lone_surrogate(
+        self, raw: str, want_oracle: str, want_tors: str
+    ) -> None:
+        # The str lane: json.dumps re-emits the raw lone surrogate as the
+        # identical escape text, on the repair lane (skip_json_loads) and
+        # the json.loads fast lane alike. want_tors is asserted alongside
+        # so a silent oracle re-sync that alters the class fails here too.
+        assert json_repair_lib.repair_json(raw, skip_json_loads=True) == want_oracle
+        assert json_repair_lib.repair_json(raw) == want_oracle
+        assert tors.repair_json(raw, skip_json_loads=True) == want_tors
+        assert tors.repair_json(raw) == want_tors
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_STR_CASES,
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    def test_tors_maps_lone_halves_to_the_replacement_char(
+        self, raw: str, want_oracle: str, want_tors: str
+    ) -> None:
+        # api.md "Lone surrogates": the escape decoder's lone-surrogate arm (string.rs) and the
+        # strict fast path's (strict.rs) agree — U+FFFD on every spelling,
+        # on both lanes.
+        assert tors.repair_json(raw, skip_json_loads=True) == want_tors
+        assert tors.repair_json(raw) == want_tors
+        assert json_repair_lib.repair_json(raw, skip_json_loads=True) == want_oracle
+        assert json_repair_lib.repair_json(raw) == want_oracle
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_LOADS_CASES,
+        ids=[
+            "bare-high",
+            "embedded",
+            "high-range-end",
+            "reversed-pair",
+            "high-then-valid-non-low",
+        ],
+    )
+    def test_loads_lane_split(self, raw: str, want_oracle: list[str], want_tors: list[str]) -> None:
+        # The loads lane: the raw lone surrogate inside the Python str on
+        # the oracle side (both lanes — the fast lane is stdlib json.loads
+        # semantics), U+FFFD on the tors side.
+        assert json_repair_lib.loads(raw, skip_json_loads=True) == want_oracle
+        assert json_repair_lib.loads(raw) == want_oracle
+        assert tors.repair_json_loads(raw, skip_json_loads=True) == want_tors
+        assert tors.repair_json_loads(raw) == want_tors
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_STR_CASES,
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_ensure_ascii_false_lane_split(
+        self, raw: str, want_oracle: str, want_tors: str, lane: str
+    ) -> None:
+        # ensure_ascii=False on both lanes (not just skip_json_loads): the
+        # raw surrogate itself, unescaped, vs U+FFFD — full 16-shape matrix
+        # (low, ends, reversed, doubled, truncated, key shapes), not a
+        # single bare-high probe.
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        got_oracle = json_repair_lib.repair_json(raw, ensure_ascii=False, **kwargs)
+        got_tors = tors.repair_json(raw, ensure_ascii=False, **kwargs)
+        assert got_oracle == json.dumps(json.loads(want_oracle), ensure_ascii=False)
+        assert got_tors == json.dumps(json.loads(want_tors), ensure_ascii=False)
+        assert got_oracle != got_tors
+        assert "\ufffd" in got_tors
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_STR_CASES,
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_strict_lane_split(
+        self, raw: str, want_oracle: str, want_tors: str, lane: str
+    ) -> None:
+        # strict=True shows the same classified split as the repair parser,
+        # on both lanes and every shape — including high + valid-non-low,
+        # where the strict decoder must leave the non-low escape unconsumed
+        # for normal decoding (same as the string path: '["\\ufffdA"]').
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        assert json_repair_lib.repair_json(raw, strict=True, **kwargs) == want_oracle
+        assert tors.repair_json(raw, strict=True, **kwargs) == want_tors
+
+    @pytest.mark.parametrize(
+        ("raw", "want_oracle", "want_tors"),
+        _LONE_STR_CASES,
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_schema_lane_split(
+        self, raw: str, want_oracle: str, want_tors: str, lane: str
+    ) -> None:
+        # A surrogate under a schema diverges the same way on both lanes;
+        # the schema itself is orthogonal to the api.md "Lone surrogates"
+        # arm, so a permissive True schema pins the split on every shape
+        # (low, ends, reversed, doubled, truncated, key shapes).
+        pytest.importorskip("jsonschema")
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        assert json_repair_lib.repair_json(raw, schema=True, **kwargs) == want_oracle
+        assert tors.repair_json(raw, schema=True, **kwargs) == want_tors
+
+    @pytest.mark.parametrize(
+        "raw",
+        [case[0] for case in _LONE_STR_CASES],
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "uppercase-hex",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "value-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "high-then-truncated",
+            "seed-43064841-shape",
+        ],
+    )
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_diagnostics_agree_with_loads(self, raw: str, lane: str) -> None:
+        # The diagnostics spelling is the loads spelling on every shape and
+        # lane — the full 16x2 matrix — AND the oracle split is pinned here,
+        # not just tors↔tors internal consistency: tors value != oracle
+        # loads on every shape. Diagnostics stay empty on this arm (P1
+        # telescope note: distinct lone halves collapse to one U+FFFD with
+        # no diagnostic emitted — documented at call time).
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        value, diags = tors.repair_json_diagnostics(raw, **kwargs)
+        assert value == tors.repair_json_loads(raw, **kwargs)
+        assert value != json_repair_lib.loads(raw, **kwargs)
+        assert diags == []
+
+    def test_fffd_telescope_collapses_distinct_halves_with_empty_diagnostics(self) -> None:
+        # P1 pre-existing telescope pin: distinct lone halves collapse to
+        # one U+FFFD spelling with empty diagnostics — information loss
+        # documented at call time (no surrogate-arm diagnostic exists).
+        assert tors.repair_json('["\\ud800"]', skip_json_loads=True) == '["\\ufffd"]'
+        assert tors.repair_json('["\\udc00"]', skip_json_loads=True) == '["\\ufffd"]'
+        assert tors.repair_json_loads('["\\ud800"]', skip_json_loads=True) == ["\ufffd"]
+        assert tors.repair_json_loads('["\\udc00"]', skip_json_loads=True) == ["\ufffd"]
+        for raw in ('["\\ud800"]', '["\\udc00"]'):
+            value, diags = tors.repair_json_diagnostics(raw, skip_json_loads=True)
+            assert value == ["\ufffd"]
+            assert diags == []
+
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_schema_pattern_enum_flip_on_fffd(self, lane: str) -> None:
+        # P3 pin: a schema constraining the FFFD spelling flips validation
+        # against the oracle, because the repaired VALUE differs. Tors holds
+        # U+FFFD so pattern "^\\ufffd$" / enum ["\ufffd"] pass; the oracle
+        # holds the raw surrogate so both raise ValueError.
+        pytest.importorskip("jsonschema")
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        raw = '{"a": "\\ud800"}'
+        for schema in (
+            {"type": "object", "properties": {"a": {"type": "string", "pattern": "^\\ufffd$"}}},
+            {"type": "object", "properties": {"a": {"enum": ["\ufffd"]}}},
+        ):
+            assert tors.repair_json(raw, schema=schema, **kwargs) == '{"a": "\\ufffd"}'
+            with pytest.raises(ValueError):
+                json_repair_lib.repair_json(raw, schema=schema, **kwargs)
+
+    def test_mutation_reachable_ud801_diverges(self) -> None:
+        # Issue #57's exact route into this class: the value
+        # ["A" + chr(0x0D80) + "1"] dumps as '["A\\u0d801"]' and
+        # _mutate(..., seed=43064841) deletes the 0 to yield '["A\\ud801"]'
+        # — a lone high surrogate reached through the hypothesis mutation
+        # lane even though _base_text excludes Cs and backslash. Classified
+        # api.md "Lone surrogates": tors maps to U+FFFD, the oracle preserves the escape text.
+        value = ["A" + chr(0x0D80) + "1"]
+        mutated = _mutate(json.dumps(value), 43064841)
+        assert mutated == '["A\\ud801"]'
+        assert tors.repair_json(mutated, skip_json_loads=True) == '["A\\ufffd"]'
+        assert json_repair_lib.repair_json(mutated, skip_json_loads=True) == ('["A\\ud801"]')
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '["\\ud83d\\ude00"]',
+            '["\\ud83d\\ude00",]',
+            '["\\uD83D\\uDE00"]',
+        ],
+        ids=["pair", "pair-trailing-comma", "pair-uppercase-hex"],
+    )
+    def test_well_formed_pairs_stay_byte_identical_on_the_str_lane(self, raw: str) -> None:
+        # A well-formed pair is NOT the divergence (api.md "Lone surrogates"): the port combines
+        # the halves into the astral scalar and re-emits the identical pair
+        # bytes (lowercased: the uppercase spelling normalizes), and the
+        # oracle's raw halves serialize to the same text — byte-identical on
+        # both lanes, the repair lane included (the trailing comma forces
+        # it). A regression in the pair-vs-lone boundary
+        # (decode_surrogate_pair) diverges here.
+        assert tors.repair_json(raw, skip_json_loads=True) == '["\\ud83d\\ude00"]'
+        assert tors.repair_json(raw, skip_json_loads=True) == (
+            json_repair_lib.repair_json(raw, skip_json_loads=True)
+        )
+        # The loads lane is the pair face of the same architecture line
+        # (api.md "Lone surrogates"): tors combines (stdlib json.loads semantics, pinned
+        # natively in test_json_repair_native.py) while the oracle's repair
+        # parser leaves the two raw halves in the value. On the default
+        # lane both take the stdlib fast path and agree.
+        assert tors.repair_json_loads('["\\ud83d\\ude00",]', skip_json_loads=True) == ["\U0001f600"]
+        assert json_repair_lib.loads('["\\ud83d\\ude00",]', skip_json_loads=True) == [
+            "\ud83d\ude00"
+        ]
+        assert tors.repair_json_loads('["\\ud83d\\ude00"]') == ["\U0001f600"]
+        assert json_repair_lib.loads('["\\ud83d\\ude00"]') == ["\U0001f600"]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '["\\ud800"]',
+            '["\\udc00"]',
+            '["\\udbff"]',
+            '["\\udfff"]',
+            '{"k":"\\ud800"}',
+            '{"\\ud800": 1}',
+            '{"\\udc00\\ud800": 1}',
+            '["\\ud83d x"]',
+            '["a\\ud800b"]',
+            '["\\udc00\\ud800"]',
+            '["\\ud800\\ud800"]',
+            '["\\ud800\\u0041"]',
+            '["\\ud83d\\ude00",]',
+            '"\\ud800"',
+        ],
+        ids=[
+            "bare-high",
+            "bare-low",
+            "high-range-end",
+            "low-range-end",
+            "object-value",
+            "object-key",
+            "key-low-then-high",
+            "high-then-space",
+            "embedded",
+            "reversed-pair",
+            "doubled-high",
+            "high-then-valid-non-low",
+            "well-formed-pair",
+            "top-level-bare-string",
+        ],
+    )
+    @pytest.mark.parametrize("lane", ["default", "skip_json_loads"])
+    def test_tors_spellings_stay_internally_consistent(self, raw: str, lane: str) -> None:
+        # The invariant a naive "preserve the escape text in the value"
+        # fix would break: the loads spelling is exactly json.loads of the
+        # str spelling, on every shape and lane.
+        kwargs: dict[str, Any] = {} if lane == "default" else {"skip_json_loads": True}
+        s = tors.repair_json(raw, **kwargs)
+        if s == "":
+            # Only the top-level bare-string repair lane collapses to the
+            # "" sentinel (see test_top_level_bare_string_sentinel_faces):
+            # there is no str spelling to round-trip, so the loads spelling
+            # must be that same sentinel — asserted, not skipped.
+            assert raw == '"\\ud800"'
+            assert kwargs == {"skip_json_loads": True}
+            assert tors.repair_json_loads(raw, **kwargs) == ""
+        else:
+            assert tors.repair_json_loads(raw, **kwargs) == json.loads(s)
+
+    def test_top_level_bare_string_sentinel_faces(self) -> None:
+        # The repair lane collapses a top-level lone-surrogate string to
+        # the '' sentinel on BOTH engines (the same collapse as '""'), so
+        # the top-level spelling is the one agreeing face of the class.
+        assert json_repair_lib.repair_json('"\\ud800"', skip_json_loads=True) == ""
+        assert tors.repair_json('"\\ud800"', skip_json_loads=True) == ""
+        assert json_repair_lib.loads('"\\ud800"', skip_json_loads=True) == ""
+        assert tors.repair_json_loads('"\\ud800"', skip_json_loads=True) == ""
+        # The default lane takes the json.loads fast path instead, where
+        # the api.md "Lone surrogates" arm of the strict decoder shows the same classified
+        # split as the repair parser.
+        assert json_repair_lib.repair_json('"\\ud800"') == '"\\ud800"'
+        assert tors.repair_json('"\\ud800"') == '"\\ufffd"'
+
+
 _base_text = st.text(
-    # bmp-only, no backslash: astral chars dump as surrogate-pair escapes
-    # and a mutation landing inside one leaves a lone surrogate escape:
-    # the documented §9.2 divergence (Rust str cannot hold lone surrogates;
-    # upstream preserves and re-emits them), unreachable by design here so
-    # the mutation differential stays an honest port-bug detector. Escape
-    # handling itself stays covered by the corpus's dedicated escaping
+    # BMP-only (max_codepoint=0xFFFF: no astral chars, so json.dumps never
+    # emits a surrogate-pair escape here), no raw surrogates (Cs+) and no
+    # backslash — but json.dumps reintroduces `\uXXXX` escapes for non-ASCII
+    # BMP chars (plus `\"` for quotes) and _mutate corrupts that dumped
+    # text, so a delete landing inside an escape CAN yield a surrogate-range
+    # half: ["A" + chr(0x0D80) + "1"] dumps as '["A\u0d801"]' and seed
+    # 43064841 deletes the 0 to give '["A\ud801"]' (issue #57) — the api.md "Lone surrogates"
+    # lone-surrogate class (tors U+FFFD vs oracle preservation), reachable,
+    # not unreachable. The mutation differential therefore skips
+    # surrogate-shaped inputs explicitly (see
+    # test_differential_on_mutations) instead of relying on this alphabet,
+    # which only keeps the RAW-value side surrogate-free. Escape handling
+    # itself stays covered by the corpus's dedicated escaping
     # cases (both sides, pinned).
     alphabet=st.characters(
         min_codepoint=0x20,
@@ -451,7 +937,12 @@ def _parses(s: str) -> bool:
 # lookahead memos (brackets, delimiters, escape runs) plus one ordinary
 # filler. All strings up to _SWEEP_MAXLEN over this alphabet that contain a
 # delimiter and a bracket exercise every memo-site interaction at
-# exhaustively small sizes.
+# exhaustively small sizes. Intentionally blind to the full `\X` escape set
+# (not just `\uXXXX`): the alphabet has no escape-letter chars (u, n, t, r,
+# b, f, v, 0-9, a-f, d, /), so no sweep raw forms `\u`/`\n`/`\t`-shaped
+# escapes at all — surrogate or otherwise; that class (api.md "Lone
+# surrogates") is pinned separately in TestLoneSurrogateEscapeDivergence,
+# including the uppercase pair spelling.
 _SWEEP_ALPHABET = ["[", "]", "{", "}", '"', "\\", "x"]
 _SWEEP_MAXLEN = 6
 
@@ -517,6 +1008,10 @@ class TestEscapedObjectSpliceGrid:
     silently drops the bracket from the value. 27 of these 224 shapes
     diverged before the splice learned to clear the memo; any future
     memo/splice interaction regression diverges on at least one of them.
+    Intentionally blind to the full `\\X` escape set like the structural
+    sweep above (no escape-letter chars in the grid ingredients): the
+    api.md "Lone surrogates" surrogate class is pinned separately in
+    TestLoneSurrogateEscapeDivergence.
     """
 
     @pytest.mark.parametrize("raw", _splice_grid_raws())
@@ -527,6 +1022,72 @@ class TestEscapedObjectSpliceGrid:
         got_loads = tors.repair_json_loads(raw, skip_json_loads=True)
         want_loads = json_repair_lib.loads(raw, skip_json_loads=True)
         assert got_loads == want_loads
+
+
+# A `\uXXXX` escape in the surrogate range (U+D800..U+DFFF): the api.md "Lone surrogates"
+# lone-surrogate class. json.dumps emits these only for raw surrogates
+# (which _base_text excludes) — but _mutate corrupts the dumped text, so a
+# delete landing inside a `\u0d8x`-shaped escape can CREATE one (seed
+# 43064841 on ["A" + chr(0x0D80) + "1"]: '["A\u0d801"]' minus the 0 is
+# '["A\ud801"]', issue #57). The mutation differential skips these inputs
+# explicitly so the next hit is a classified skip, not a mystery flake.
+# Anchored skip (H1): a bare `\\u[dD]...` search is over-broad — it fires on
+# well-formed pairs (`\ud83d\ude00`, byte-identical on the str lane) and on
+# escaped literals (`\\ud800`, backslash-escaped text, not an escape). So the
+# skip counts preceding backslashes (odd = escaped literal, not an escape)
+# and excludes a high half directly followed by an unescaped `\udc..`-`\udf..`
+# low half (the non-divergent pair): only an unescaped LONE half skips.
+_UNICODE_ESCAPE_RE = re.compile(r"\\u[0-9a-fA-F]{4}")
+
+
+def _count_preceding_backslashes(s: str, pos: int) -> int:
+    n = 0
+    i = pos - 1
+    while i >= 0 and s[i] == "\\":
+        n += 1
+        i -= 1
+    return n
+
+
+def _has_lone_surrogate_escape(s: str) -> bool:
+    r"""True iff ``s`` holds an unescaped lone-surrogate `\uXXXX` escape.
+
+    Well-formed high+low pairs and backslash-escaped literals return False.
+    """
+    matches = list(_UNICODE_ESCAPE_RE.finditer(s))
+    # (start, end, codepoint) for unescaped escapes only.
+    live: list[tuple[int, int, int]] = []
+    for m in matches:
+        if _count_preceding_backslashes(s, m.start()) % 2 == 1:
+            continue  # escaped literal text, not an escape
+        try:
+            cp = int(m.group(0)[2:], 16)
+        except ValueError:
+            continue
+        live.append((m.start(), m.end(), cp))
+    for idx, (start, end, cp) in enumerate(live):
+        is_high = 0xD800 <= cp <= 0xDBFF
+        is_low = 0xDC00 <= cp <= 0xDFFF
+        if not (is_high or is_low):
+            continue
+        if is_high:
+            # Valid pair: directly followed by an unescaped low half.
+            if idx + 1 < len(live) and live[idx + 1][0] == end:
+                nxt = live[idx + 1][2]
+                if 0xDC00 <= nxt <= 0xDFFF:
+                    continue
+            return True
+        # Low half: part of a pair only when directly preceded by an
+        # unescaped high half; otherwise lone.
+        if idx > 0 and live[idx - 1][1] == start:
+            prev = live[idx - 1][2]
+            if 0xD800 <= prev <= 0xDBFF:
+                continue
+        return True
+    return False
+
+
+_SURROGATE_ESCAPE_RE = _UNICODE_ESCAPE_RE  # legacy alias: use _has_lone_surrogate_escape
 
 
 class TestHypothesisInvariants:
@@ -571,4 +1132,33 @@ class TestHypothesisInvariants:
         # fenced scalars are excluded below for the §9.4 split).
         mutated = _mutate(json.dumps(value), seed)
         assume("```json" not in mutated)  # §9.4 fenced-scalar divergence
+        # api.md "Lone surrogates" divergence (api.md Divergences entry;
+        # src/json_repair/string.rs + strict.rs; policy thread
+        # https://github.com/AZX-PBC-OSS/tors/issues/57, CLOSED): tors maps
+        # a surrogate-range half to U+FFFD while the oracle preserves it,
+        # so any surrogate-shaped mutation is a classified skip, never a
+        # port-bug signal. Hypothesis replays its example DB on every run:
+        # a recorded hit (e.g. seed 43064841) replays into this assume as a
+        # skip, not a mystery flake.
+        assume(not _has_lone_surrogate_escape(mutated))
         assert tors.repair_json(mutated) == json_repair_lib.repair_json(mutated)
+
+
+class TestAnchoredSurrogateSkip:
+    """H1 pin: the mutation skip fires only on observed-divergent shapes."""
+
+    @pytest.mark.parametrize(
+        ("raw", "skips"),
+        [
+            ('["\\ud800"]', True),  # lone high: divergent, skip
+            ('["\\udc00"]', True),  # lone low: divergent, skip
+            ('["\\ud800\\u0041"]', True),  # high + valid non-low: lone, skip
+            ('["\\ud800\\u41"]', True),  # high + truncated: lone, skip
+            ('["\\ud83d\\ude00"]', False),  # valid pair: str-lane agrees, no skip
+            ('["\\uD83D\\uDE00"]', False),  # valid pair uppercase: no skip
+            ('["\\\\ud800"]', False),  # escaped literal: not an escape, no skip
+            ('["plain"]', False),
+        ],
+    )
+    def test_skip_is_anchored_not_text_shaped(self, raw: str, skips: bool) -> None:
+        assert _has_lone_surrogate_escape(raw) is skips
