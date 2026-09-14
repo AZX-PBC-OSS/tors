@@ -639,6 +639,14 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(strip_controls, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_log_text, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_pii, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_pii_report, m)?)?;
+    // The canonical key-family tuple, in the scanner table's order: the
+    // single source is `pii_impl::KEY_FAMILY_NAMES`, so the export can
+    // never drift from the scanner (and the battery pins the literal).
+    m.add(
+        "KEY_FAMILIES",
+        pyo3::types::PyTuple::new(m.py(), pii_impl::KEY_FAMILY_NAMES)?,
+    )?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;

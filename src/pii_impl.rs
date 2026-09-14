@@ -83,23 +83,37 @@
 //!     being the international spelling of those).
 //! * **Keys rule** (the credential extension past the source) — the
 //!   evidence-backed closed set of provider/platform key families, each
-//!   a literal prefix plus a minimal `[A-Za-z0-9_-]` tail consumed
-//!   maximally: OpenAI `sk-`/`sk-proj-`/`sk-svcacct-` (20+), Anthropic
-//!   `sk-ant-` (20+), Google `AIza` (35+), Fireworks `fw-`/`fw_` (20+),
-//!   Modal `ak-`/`wk-` (20+), GitHub `ghp_` (36+) and `github_pat_`
-//!   (22+), the minted shapes `azxdev_` (20+), `wd-` (43+), `w-` (43+),
-//!   `cn-` (20+), and MARKER-SCOPED JWTs — `Bearer eyJ` plus three
-//!   maximal base64url segments, single-dot separated (a bare `eyJ`
-//!   never matches: one consumer's API legitimately carries eyJ-shaped
+//!   a literal prefix plus a minimal tail consumed maximally (the shared
+//!   `[A-Za-z0-9_-]` alphabet except where the family names its own):
+//!   OpenAI `sk-`/`sk-proj-`/`sk-svcacct-` (20+), Anthropic `sk-ant-`
+//!   (20+), Google `AIza` (35+), Fireworks `fw-`/`fw_` (20+), Modal
+//!   `ak-`/`wk-` (20+), GitHub `ghp_` (36+) and `github_pat_` (22+),
+//!   the minted shapes `azxdev_` (20+), `wd-` (43+), `w-` (43+),
+//!   `cn-` (20+), MARKER-SCOPED JWTs — `Bearer eyJ` plus three maximal
+//!   base64url segments, single-dot separated (a bare `eyJ` never
+//!   matches: one consumer's API legitimately carries eyJ-shaped
 //!   non-secret cursors, and redacting those would destroy the
-//!   diagnostic this scrubber exists to preserve). The leak vector is
+//!   diagnostic this scrubber exists to preserve) — AWS `AKIA`/`ASIA` +
+//!   `[0-9A-Z]{16,}` (the access-key ID; AWS SECRET keys carry no
+//!   prefix and stay a documented exclusion), xAI `xai-` (20+), GCP
+//!   OAuth `ya29.` (20+), the PEM SPAN family (`-----BEGIN <words>
+//!   PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both
+//!   markers required; the PKCS#8 bare header carries no algorithm
+//!   words and stays a documented exclusion), and Azure `AccountKey=` +
+//!   `[A-Za-z0-9+/=]{40,}` (Azure client secrets carry no distinctive
+//!   prefix and stay a documented exclusion, Mistral keys with them).
+//!   The rule takes a per-family selection (`families=`: `None` is
+//!   every family this version knows; a list selects exactly those —
+//!   the binding walks the names into a private mask, and an unselected
+//!   family whose grammar holds is detected but preserved verbatim).
+//!   The leak vector is
 //!   the error text itself: provider and platform error strings can
 //!   quote the credential back — five private consumers evidenced, the
 //!   strongest a platform whose own code comments that a vendor auth
 //!   failure "can quote the key" and keeps the full text in an
-//!   admin-served ledger. Slack `xox`, Stripe, and AWS `AKIA` shapes are
-//!   deliberately absent (zero evidence): growing the set is a
-//!   new-evidence decision, never a drive-by. Three discipline rules:
+//!   admin-served ledger. Slack `xox` and Stripe shapes are deliberately
+//!   absent (zero evidence): growing the set is a new-evidence decision,
+//!   never a drive-by. Three discipline rules:
 //!   the prefixes are tried LONGEST-FIRST with fall-through (a
 //!   too-short `sk-ant-` tail falls through to the bare `sk-` family,
 //!   whose own tail swallows the `ant-` spelling — still scrubbed, with
@@ -176,14 +190,16 @@
 //!   letter-bearing fragments behind, and a digest tail followed by an
 //!   adjacent number splits at the token — the tail never composes, and
 //!   the number scrubs exactly. Key tokens are fixed points by
-//!   construction, every family: the prefix ends in `-` or `_` (or is
-//!   `AIza`/`Bearer`), the byte after it is `~`, never tail charset, so
-//!   no family can re-fire at the token's own head — and no family
-//!   prefix can be spelled inside 12 lowercase digest hex (the
-//!   distinctive second characters — `z` in `AIza`/`azxdev_`, `k` in
-//!   `ak-`, `n` in `cn-`, `w` in `fw-`/`wk-`, `h` in `ghp_`, the space in
-//!   `Bearer eyJ` — are all outside `[0-9a-f]`), so the digest half is
-//!   inert too. A key token's `~` + 12 hex is a token span for the phone
+//!   construction, every family: the prefix ends in `-`/`_`/`=`/`.`
+//!   (or is a bare head — `AIza`, `AKIA`/`ASIA`, `Bearer`, `PEM`), the
+//!   byte after it is `~`, never tail charset, so no family can re-fire
+//!   at the token's own head — and no family prefix can be spelled
+//!   inside 12 lowercase digest hex (the distinctive characters — `z`
+//!   in `AIza`/`azxdev_`, `k` in `ak-`, `n` in `cn-`, `w` in `fw-`/`wk-`,
+//!   `h` in `ghp_`, `y` in `ya29.`, the uppercase in `AKIA`/`ASIA`/
+//!   `PEM`/`AccountKey=`, the space in `Bearer eyJ`, the `-`/`.`/`=`
+//!   tails — are all outside `[0-9a-f]`), so the digest half is inert
+//!   too. A key token's `~` + 12 hex is a token span for the phone
 //!   pass's existing breaker, so a number after it keeps its clean run.
 //!   `tests/test_scrub_pii.py` and the unit tests below pin the fixed
 //!   point per family.
@@ -237,9 +253,11 @@
 //! own documented cuts: punctuation inside a key splits the tail
 //! (`sk-…/…-rest` never matches whole), an unlisted provider's key
 //! shape leaks whole (the family set is closed on evidence — the
-//! exclusion is deliberate, and a new family is a new-evidence decision),
-//! and the kept family prefix is a coarse provider label, not a
-//! credential. For
+//! exclusion is deliberate, and a new family is a new-evidence
+//! decision; the named exclusions are prefix-less shapes — AWS secret
+//! keys, Azure client secrets, Mistral keys — plus Slack `xox` and
+//! Stripe, all on zero distinctive-prefix evidence), and the kept
+//! family prefix is a coarse provider label, not a credential. For
 //! adversarial threat, map Zs/Zl/Zp plus `\t\n\r\f\v` to U+0020 and
 //! canonicalize separators/domains before scrub (`tors.nfkc` alone is
 //! insufficient); see `docs/api.md`'s scrub_pii section for the full
@@ -247,8 +265,9 @@
 //!
 //! Performance: one linear pass per rule — `memchr`-anchored for the
 //! `@` and phone-class scans, a first-byte-dispatched table walk for the
-//! key families (one `matches!` per byte on prose, at most fifteen
-//! prefix compares on an anchor hit) — `Cow::Borrowed`
+//! key families (one `matches!` per byte on prose, at most twenty
+//! prefix compares on an anchor hit) plus the marker grammars on their
+//! disjoint heads — `Cow::Borrowed`
 //! identity when nothing matches, `py.detach` around the whole scan on
 //! the Python side (the keys pass rides that same single detach; no new
 //! GIL class), and `sha2` digests computed only for spans that
@@ -276,6 +295,99 @@ pub const DEFAULT_SALT: &str = "tors/scrub_pii/v1";
 /// for every rule (the migration lane). Pinned in
 /// `tests/test_scrub_pii.py`'s salt lanes.
 pub const KEYS_DEFAULT_SALT: &str = "tors/scrub_keys/v1";
+
+/// One api-key family: the evidence-backed closed set's identity, in the
+/// canonical order the `families=` names and the `tors.KEY_FAMILIES`
+/// tuple mirror. The discriminant IS the selection-mask bit (bit i is
+/// `ALL[i]`): thirteen families fit a `u16` with room to grow, and the
+/// binding walks names into that mask — an implementation detail, never
+/// a public bit arithmetic surface.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyFamily {
+    OpenAi,
+    Anthropic,
+    Google,
+    Fireworks,
+    Modal,
+    GitHub,
+    Minted,
+    Jwt,
+    Aws,
+    Xai,
+    GcpOauth,
+    Pem,
+    Azure,
+}
+
+impl KeyFamily {
+    /// Every family in the canonical order: the scanner table's order,
+    /// the `families=` closed set's order, the `KEY_FAMILIES` tuple's
+    /// order — one order everywhere, so a new family has exactly one
+    /// place to land.
+    pub const ALL: [KeyFamily; 13] = [
+        KeyFamily::OpenAi,
+        KeyFamily::Anthropic,
+        KeyFamily::Google,
+        KeyFamily::Fireworks,
+        KeyFamily::Modal,
+        KeyFamily::GitHub,
+        KeyFamily::Minted,
+        KeyFamily::Jwt,
+        KeyFamily::Aws,
+        KeyFamily::Xai,
+        KeyFamily::GcpOauth,
+        KeyFamily::Pem,
+        KeyFamily::Azure,
+    ];
+
+    /// The `families=` name: lowercase, the tuple's spelling.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            KeyFamily::OpenAi => "openai",
+            KeyFamily::Anthropic => "anthropic",
+            KeyFamily::Google => "google",
+            KeyFamily::Fireworks => "fireworks",
+            KeyFamily::Modal => "modal",
+            KeyFamily::GitHub => "github",
+            KeyFamily::Minted => "minted",
+            KeyFamily::Jwt => "jwt",
+            KeyFamily::Aws => "aws",
+            KeyFamily::Xai => "xai",
+            KeyFamily::GcpOauth => "gcp_oauth",
+            KeyFamily::Pem => "pem",
+            KeyFamily::Azure => "azure",
+        }
+    }
+
+    /// The selection-mask bit for this family.
+    pub(crate) const fn bit(&self) -> u16 {
+        1u16 << (*self as u16)
+    }
+}
+
+/// The canonical family-name tuple in `ALL` order: the single source
+/// the binding's `KEY_FAMILIES` export and the unknown-name `ValueError`
+/// both spell from, so the message can never drift from the tuple.
+pub const KEY_FAMILY_NAMES: [&str; 13] = [
+    "openai",
+    "anthropic",
+    "google",
+    "fireworks",
+    "modal",
+    "github",
+    "minted",
+    "jwt",
+    "aws",
+    "xai",
+    "gcp_oauth",
+    "pem",
+    "azure",
+];
+
+/// Every family this version knows: the `families=None` selection and
+/// the `PiiRules::BOTH` default. A new family sets one more bit here —
+/// and nowhere else in the selection path.
+pub const KEY_FAMILY_MASK_ALL: u16 = (1u16 << KeyFamily::ALL.len()) - 1;
 
 /// The digest half of every token: 12 lowercase hex chars.
 const TOKEN_HEX: usize = 12;
@@ -428,11 +540,12 @@ fn token_digest(salt: &str, matched: &str) -> String {
 /// run length after each candidate dot — the exact backtracking order
 /// of the regex (longest middle first), without its quadratic rescan.
 /// `Cow::Borrowed` when nothing matches.
-fn scrub_email_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
+fn email_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut pos = 0; // where the search for the next `@` resumes
     let mut emitted = 0; // the prefix of `text` already pushed to `out`
     let mut out: Option<String> = None;
+    let mut rec = rec;
     while let Some(rel) = memchr(b'@', &bytes[pos..]) {
         let at = pos + rel;
         // The local part: the maximal run of class bytes immediately
@@ -485,6 +598,18 @@ fn scrub_email_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
         let matched = &text[local_start..end];
         let domain = &text[at + 1..end];
         let token = format!("@{domain}~{}", token_digest(salt, matched));
+        if let Some(r) = rec.as_deref_mut() {
+            // The verbatim head is `@domain` itself, mapping to the
+            // match's own tail `[at..end)`.
+            r.edits.push(PassEdit {
+                start: local_start,
+                end,
+                token: token.clone(),
+                verbatim_src: at,
+                verbatim_len: end - at,
+            });
+            r.kinds.push(SpanKind::Email);
+        }
         let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
         buf.push_str(&text[emitted..local_start]);
         buf.push_str(&token);
@@ -679,11 +804,12 @@ fn token_ends_at(text: &str, pos: usize) -> bool {
 /// and the byte after a token is a clean boundary. Non-matching runs
 /// are spent whole — no partial match inside a longer run.
 /// `Cow::Borrowed` when nothing matches.
-fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
+fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut pos = 0;
     let mut emitted = 0;
     let mut out: Option<String> = None;
+    let mut rec = rec;
     while pos < bytes.len() {
         // A token span (`~` + 12 digest hex) is a breaker: runs never
         // start inside a digest, so step over the whole span. The bytes
@@ -756,6 +882,18 @@ fn scrub_phone_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
             &text[start..prefix_end],
             token_digest(salt, matched)
         );
+        if let Some(r) = rec.as_deref_mut() {
+            // The verbatim head is the match's own first three code
+            // points, mapping to the match's head.
+            r.edits.push(PassEdit {
+                start,
+                end,
+                token: token.clone(),
+                verbatim_src: start,
+                verbatim_len: prefix_end - start,
+            });
+            r.kinds.push(SpanKind::Phone);
+        }
         let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
         buf.push_str(&text[emitted..start]);
         buf.push_str(&token);
@@ -782,44 +920,86 @@ fn is_key_tail_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
 }
 
-/// The family table: (literal prefix, minimum tail length), ordered
-/// LONGEST-PREFIX-FIRST — at one scan position the entries are tried in
-/// this order and the first whose own grammar holds wins, so `sk-ant-`
-/// outranks bare `sk-`, and a too-short `sk-ant-` tail FALLS THROUGH to
-/// the `sk-` family, whose tail swallows the `ant-` spelling (still
-/// scrubbed, the generic prefix). Entries whose prefixes share no head
-/// (`github_pat_` vs `ghp_`) cannot tie at one position; the length-desc
-/// order is the table's one total order anyway. This is the
-/// evidence-backed closed set — the leaked-credential shapes five
-/// private consumers evidenced; Slack `xox`, Stripe, and AWS `AKIA` are
-/// deliberately absent (zero evidence), and growing the set is a
-/// new-evidence decision, never a drive-by.
-const KEY_FAMILIES: &[(&[u8], usize)] = &[
-    (b"github_pat_", 22),
-    (b"sk-svcacct-", 20),
-    (b"sk-proj-", 20),
-    (b"sk-ant-", 20),
-    (b"azxdev_", 20),
-    (b"ghp_", 36),
-    (b"AIza", 35),
-    (b"fw-", 20),
-    (b"fw_", 20),
-    (b"ak-", 20),
-    (b"wk-", 20),
-    (b"wd-", 43),
-    (b"cn-", 20),
-    (b"sk-", 20),
-    (b"w-", 43),
+/// The tail alphabet a family consumes maximally. Most families share
+/// the key-tail charset; the marker families carry their own — the
+/// access-key ID alphabet (`[0-9A-Z]`, no lowercase anywhere in it) and
+/// the connection-string secret alphabet (`[A-Za-z0-9+/=]`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyTailClass {
+    Shared,
+    Aws,
+    Azure,
+}
+
+/// One tail-class predicate per class, ASCII-only like the shared one.
+#[inline]
+fn is_aws_tail_byte(b: u8) -> bool {
+    b.is_ascii_uppercase() || b.is_ascii_digit()
+}
+
+#[inline]
+fn is_azure_tail_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')
+}
+
+#[inline]
+fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
+    match class {
+        KeyTailClass::Shared => is_key_tail_byte,
+        KeyTailClass::Aws => is_aws_tail_byte,
+        KeyTailClass::Azure => is_azure_tail_byte,
+    }
+}
+
+/// The family table: (literal prefix, family, minimum tail length, tail
+/// class), ordered LONGEST-PREFIX-FIRST — at one scan position the
+/// entries are tried in this order and the first whose own grammar holds
+/// wins, so `sk-ant-` outranks bare `sk-`, and a too-short `sk-ant-`
+/// tail FALLS THROUGH to the `sk-` family, whose tail swallows the
+/// `ant-` spelling (still scrubbed, the generic prefix). Entries whose
+/// prefixes share no head (`github_pat_` vs `ghp_`) cannot tie at one
+/// position; the length-desc order is the table's one total order
+/// anyway. This is the evidence-backed closed set — the
+/// leaked-credential shapes the consumers evidenced; Slack `xox` and
+/// Stripe stay deliberately absent (zero evidence), and growing the set
+/// is a new-evidence decision, never a drive-by. The JWT and PEM
+/// families live outside this table (their grammars are marker/span
+/// shapes, not prefix-plus-tail), tried after it on their disjoint head
+/// bytes (`B`/`-`, which no table prefix starts with).
+const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
+    (b"github_pat_", KeyFamily::GitHub, 22, KeyTailClass::Shared),
+    (b"sk-svcacct-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    (b"AccountKey=", KeyFamily::Azure, 40, KeyTailClass::Azure),
+    (b"sk-proj-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    (b"sk-ant-", KeyFamily::Anthropic, 20, KeyTailClass::Shared),
+    (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
+    (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
+    (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    (b"AIza", KeyFamily::Google, 35, KeyTailClass::Shared),
+    (b"AKIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"ASIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
+    (b"fw-", KeyFamily::Fireworks, 20, KeyTailClass::Shared),
+    (b"fw_", KeyFamily::Fireworks, 20, KeyTailClass::Shared),
+    (b"ak-", KeyFamily::Modal, 20, KeyTailClass::Shared),
+    (b"wk-", KeyFamily::Modal, 20, KeyTailClass::Shared),
+    (b"wd-", KeyFamily::Minted, 43, KeyTailClass::Shared),
+    (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
+    (b"sk-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    (b"w-", KeyFamily::Minted, 43, KeyTailClass::Shared),
 ];
 
-/// The first bytes any family prefix (or the JWT marker) can start with:
-/// the per-byte dispatch that keeps the walk linear-cheap on prose (one
-/// `matches!` per byte; an anchor hit pays at most fifteen prefix
-/// compares). Every table prefix and the `Bearer` marker begin with one
+/// The first bytes any family prefix (or the JWT/PEM marker) can start
+/// with: the per-byte dispatch that keeps the walk linear-cheap on
+/// prose (one `matches!` per byte; an anchor hit pays at most twenty
+/// prefix compares). Every table prefix and both markers begin with one
 /// of these, so nothing is missed by the filter.
 #[inline]
 fn is_key_anchor(b: u8) -> bool {
-    matches!(b, b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B')
+    matches!(
+        b,
+        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-'
+    )
 }
 
 /// The JWT family at one position: the literal marker `Bearer eyJ`,
@@ -857,26 +1037,184 @@ fn jwt_match_at(bytes: &[u8], start: usize) -> Option<usize> {
     Some(i)
 }
 
+/// The PEM label word class: `[A-Za-z0-9]`, ASCII only, so the marker
+/// parse walks raw bytes.
+#[inline]
+fn is_pem_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+/// One PEM label production — `<words> PRIVATE KEY-----` — at
+/// `words_start` (the first byte after `-----BEGIN ` or `-----END `):
+/// one-or-more `[A-Za-z0-9]+` words, single-space separated, then the
+/// fixed ` PRIVATE KEY-----` tail, the FIRST position where a complete
+/// word is followed by the tail winning (so `RSA` in
+/// `RSA PRIVATE KEY-----` is the words; a doubled space, a non-word
+/// byte, or a missing tail fails the marker — and the PKCS#8 bare
+/// `BEGIN PRIVATE KEY` header with it: no algorithm words, a
+/// new-evidence decision like any other family shape). Returns the words
+/// end and the marker end.
+fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
+    const TAIL: &[u8] = b" PRIVATE KEY-----";
+    let mut p = words_start;
+    loop {
+        let w = p;
+        while p < bytes.len() && is_pem_word_byte(bytes[p]) {
+            p += 1;
+        }
+        if w == p {
+            return None; // an empty word: the label ran out or doubled its space
+        }
+        if bytes[p..].starts_with(TAIL) {
+            return Some((p, p + TAIL.len()));
+        }
+        if p >= bytes.len() || bytes[p] != b' ' {
+            return None;
+        }
+        p += 1;
+    }
+}
+
+/// The PEM family at one position, over a hoisted END-literal index:
+/// `-----BEGIN ` + algorithm words + ` PRIVATE KEY-----`, then any
+/// bytes including newlines (the key body), then `-----END ` + the SAME
+/// words + ` PRIVATE KEY-----`. Both markers required — an
+/// unterminated BEGIN is a documented non-match — and the first
+/// `-----END ` at or past the body start whose words parse AND equal
+/// the BEGIN's terminates the block (an unparseable or mismatched END
+/// is skipped, a later matching one still terminates). The whole block
+/// is the match; the token prefix is the constant `PEM` (never input
+/// material, so the report's offset map collapses the whole token to
+/// the replaced span's end). Returns the match END on success.
+/// `index` is the pass's one `-----END ` sweep (see `pem_end_index`),
+/// built lazily here on the first VALID header (headers are rare;
+/// dashes are not — an eager sweep would tax every dash-bearing
+/// input): each BEGIN then binary-searches its body start and verifies
+/// only true literals in increasing position order — the same candidate
+/// order as a forward scan, without the per-anchor re-scan.
+fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<Vec<usize>>) -> Option<usize> {
+    const BEGIN: &[u8] = b"-----BEGIN ";
+    const END_HEAD: &[u8] = b"-----END ";
+    if !bytes[start..].starts_with(BEGIN) {
+        return None;
+    }
+    let (words_end, body_start) = pem_marker_end(bytes, start + BEGIN.len())?;
+    let words = &bytes[start + BEGIN.len()..words_end];
+    let ends = index.get_or_insert_with(|| pem_end_index(bytes));
+    let mut idx = ends.partition_point(|&e| e < body_start);
+    while idx < ends.len() {
+        let cand = ends[idx];
+        idx += 1;
+        if let Some((end_words_end, end)) = pem_marker_end(bytes, cand + END_HEAD.len())
+            && &bytes[cand + END_HEAD.len()..end_words_end] == words
+        {
+            return Some(end);
+        }
+        // Unparseable or mismatched END: keep searching.
+    }
+    None
+}
+
+/// The pass's one `-----END ` sweep: every position where the END
+/// literal opens, in increasing order. Built lazily on the first valid
+/// PEM header (headers are rare; dashes are not — an eager sweep would
+/// tax every dash-bearing input), then shared by every BEGIN in the
+/// pass: the per-anchor cost drops from a full-suffix re-scan to a
+/// binary search plus one verification per true literal.
+fn pem_end_index(bytes: &[u8]) -> Vec<usize> {
+    const END_HEAD: &[u8] = b"-----END ";
+    let mut ends = Vec::new();
+    let mut q = 0;
+    while q < bytes.len() {
+        let Some(rel) = memchr(b'-', &bytes[q..]) else {
+            break;
+        };
+        let cand = q + rel;
+        q = cand + 1; // one-char steps: overlapping markers stay exact
+        if bytes[cand..].starts_with(END_HEAD) {
+            ends.push(cand);
+        }
+    }
+    ends
+}
+
 /// The keys pass: every leftmost match of a family grammar becomes
 /// `<family prefix>~<digest>` — the prefix VERBATIM (the non-secret half
 /// that tells the operator WHICH credential to rotate: `sk-` vs
 /// `sk-ant-` vs `github_pat_`), the digest over the FULL match (prefix +
-/// tail). One linear walk: a byte no prefix can start with advances one
-/// byte; an anchor byte pays the boundary check first — a prefix glued
-/// to a preceding key-charset char is MID-TOKEN and never fires
-/// (`xak-…`: in real text a key glued to a word is that word's fragment,
-/// the same reasoning as the phone rule's clean-boundary cut, and it is
-/// what keeps a second key glued to a token's digest hex from firing) —
-/// then the table longest-first with fall-through, then the JWT marker
-/// grammar (its `B` head shares no prefix with any table family). The
-/// tail run is MAXIMAL: a key glued to further charset material is one
-/// long key, over-redaction in the safe direction. `Cow::Borrowed` when
-/// nothing matches.
-fn scrub_keys_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
+/// tail) — except PEM, whose token prefix is the constant `PEM`. One
+/// linear walk: a byte no prefix can start with advances one byte; an
+/// anchor byte pays the boundary check first — a prefix glued to a
+/// preceding key-charset char is MID-TOKEN and never fires (`xak-…`: in
+/// real text a key glued to a word is that word's fragment, the same
+/// reasoning as the phone rule's clean-boundary cut, and it is what
+/// keeps a second key glued to a token's digest hex from firing) — then
+/// the table longest-first with fall-through (a too-short tail falls
+/// through to the shorter prefixes), then the JWT marker grammar (its
+/// `B` head shares no prefix with any table family), then the PEM span
+/// grammar (its `-` head likewise). The tail run is MAXIMAL: a key
+/// glued to further charset material is one long key, over-redaction in
+/// the safe direction. `Cow::Borrowed` when nothing matches.
+/// The report's span kind: the contact rule that fired, or the key
+/// family that did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpanKind {
+    Email,
+    Phone,
+    Key(KeyFamily),
+}
+
+/// One substitution a recorded pass made, in the pass's OWN input
+/// coordinates: the replaced span, the token emitted, and the token's
+/// verbatim head — the token's `[0..verbatim_len)` maps affinely to
+/// `[verbatim_src..verbatim_src + verbatim_len)` (the bytes the token
+/// kept: a key's family prefix, a phone token's three code points, an
+/// email token's `@domain`), while the `~` + digest half has no
+/// preimage and collapses to the replaced span's end (see `map_back`).
+/// PEM tokens keep nothing (`verbatim_len` 0: `PEM` is a constant, and
+/// no later match can land inside the head anyway — every token's `~`
+/// blocks the email walk-back).
+pub struct PassEdit {
+    pub start: usize,
+    pub end: usize,
+    pub token: String,
+    pub verbatim_src: usize,
+    pub verbatim_len: usize,
+}
+
+/// What a recorded pass hands the report: its substitutions (in
+/// pass-input coordinates) with their kinds, plus — keys pass only —
+/// the per-family SKIPPED counts (detected-but-unselected matches, in
+/// `ALL` order; zeros elsewhere).
+#[derive(Default)]
+pub struct PassRec {
+    pub edits: Vec<PassEdit>,
+    pub kinds: Vec<SpanKind>,
+    pub skipped: [usize; 13],
+}
+
+/// The keys pass core: every leftmost match of a family grammar over
+/// `text`, `mask`-selected. A match whose family is selected becomes
+/// its token (recorded into `rec` when present); a match whose family
+/// is NOT selected is DETECTED but not redacted — the span is spent
+/// whole and preserved verbatim (counted in `rec.skipped`, never
+/// re-scanned inside: the preserved span stays whole, the "we preserved
+/// a JWT, log it separately" semantic) — and a family whose grammar
+/// fails (too-short tail) falls through to the shorter prefixes exactly
+/// as before. `Cow::Borrowed` when nothing matched (selected or not: a
+/// skipped span still passes its bytes through untouched).
+fn keys_pass_impl<'a>(
+    text: &'a str,
+    salt: &str,
+    mask: u16,
+    rec: Option<&mut PassRec>,
+) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut pos = 0;
     let mut emitted = 0;
     let mut out: Option<String> = None;
+    let mut rec = rec;
+    let mut pem_ends: Option<Vec<usize>> = None;
     while pos < bytes.len() {
         let b = bytes[pos];
         if !is_key_anchor(b) {
@@ -887,35 +1225,61 @@ fn scrub_keys_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
             pos += 1; // a mid-token prefix: the boundary rule
             continue;
         }
-        let mut hit: Option<(&'static [u8], usize)> = None;
-        for &(prefix, min_tail) in KEY_FAMILIES {
+        // (family, verbatim prefix length in the token, match end). The
+        // verbatim length is the matched head's own length for the
+        // table/JWT families (the token keeps the head verbatim) and 0
+        // for PEM (the token's `PEM` is a constant).
+        let mut hit: Option<(KeyFamily, usize, usize)> = None;
+        for &(prefix, family, min_tail, class) in KEY_FAMILIES {
             if prefix[0] != b || !bytes[pos..].starts_with(prefix) {
                 continue;
             }
             let tail_start = pos + prefix.len();
             let mut tail_end = tail_start;
-            while tail_end < bytes.len() && is_key_tail_byte(bytes[tail_end]) {
+            let class_ok = tail_predicate(class);
+            while tail_end < bytes.len() && class_ok(bytes[tail_end]) {
                 tail_end += 1;
             }
             if tail_end - tail_start >= min_tail {
-                hit = Some((prefix, tail_end));
+                hit = Some((family, prefix.len(), tail_end));
                 break;
             }
             // A too-short tail falls through to the shorter prefixes.
         }
         if hit.is_none() && b == b'B' {
-            hit = jwt_match_at(bytes, pos).map(|end| (b"Bearer".as_slice(), end));
+            hit = jwt_match_at(bytes, pos).map(|end| (KeyFamily::Jwt, b"Bearer".len(), end));
         }
-        let Some((prefix, end)) = hit else {
+        if hit.is_none() && b == b'-' {
+            hit = pem_match_at(bytes, pos, &mut pem_ends).map(|end| (KeyFamily::Pem, 0, end));
+        }
+        let Some((family, verbatim_len, end)) = hit else {
             pos += 1;
             continue;
         };
+        if mask & family.bit() == 0 {
+            if let Some(r) = rec.as_deref_mut() {
+                r.skipped[family as usize] += 1;
+            }
+            pos = end; // spent whole, preserved verbatim
+            continue;
+        }
         let matched = &text[pos..end];
-        let token = format!(
-            "{}~{}",
-            std::str::from_utf8(prefix).expect("family prefixes are ASCII"),
-            token_digest(salt, matched)
-        );
+        let head = if family == KeyFamily::Pem {
+            "PEM"
+        } else {
+            &text[pos..pos + verbatim_len]
+        };
+        let token = format!("{head}~{}", token_digest(salt, matched));
+        if let Some(r) = rec.as_deref_mut() {
+            r.edits.push(PassEdit {
+                start: pos,
+                end,
+                token: token.clone(),
+                verbatim_src: pos,
+                verbatim_len,
+            });
+            r.kinds.push(SpanKind::Key(family));
+        }
         let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
         buf.push_str(&text[emitted..pos]);
         buf.push_str(&token);
@@ -932,21 +1296,29 @@ fn scrub_keys_pass<'a>(text: &'a str, salt: &str) -> Cow<'a, str> {
 }
 
 /// Which rules a call applies. `scrub_pii` with no rule is the
-/// identity (the caller's `rules=[]`).
+/// identity (the caller's `rules=[]`). `key_families` scopes the keys
+/// rule to a subset of families (the `families=` selection as a private
+/// mask over the scanner's family table — an implementation detail, no
+/// public bit arithmetic); it is meaningless when `keys` is false, and
+/// with `keys` true a zero mask selects nothing (the identity — the
+/// Python binding refuses that spelling outright).
 #[derive(Clone, Copy)]
 pub struct PiiRules {
     pub email: bool,
     pub phone: bool,
     pub keys: bool,
+    pub key_families: u16,
 }
 
 impl PiiRules {
     /// The default `rules=None`: every rule in the canonical order —
-    /// keys first, then email, then phone.
+    /// keys first, then email, then phone — over every key family this
+    /// version knows.
     pub const BOTH: PiiRules = PiiRules {
         email: true,
         phone: true,
         keys: true,
+        key_families: KEY_FAMILY_MASK_ALL,
     };
 }
 
@@ -955,13 +1327,12 @@ impl PiiRules {
 /// the borrow, and over an `Owned` intermediate folds back into it —
 /// fired, its own output; unfired, the intermediate itself. Neither
 /// branch copies, the zero-copy discipline the two-stage spelling paid
-/// for, kept whole as the pipeline grew to three stages.
-fn fold_stage<'a>(
-    mid: Cow<'a, str>,
-    active: bool,
-    pass: for<'x, 'y> fn(&'x str, &'y str) -> Cow<'x, str>,
-    salt: &str,
-) -> Cow<'a, str> {
+/// for, kept whole as the pipeline grew to three stages. Generic over
+/// the pass so the keys stage can close over its family mask.
+fn fold_stage<'a, P>(mid: Cow<'a, str>, active: bool, mut pass: P, salt: &str) -> Cow<'a, str>
+where
+    P: for<'x, 'y> FnMut(&'x str, &'y str) -> Cow<'x, str>,
+{
     match mid {
         Cow::Borrowed(t) => {
             if active {
@@ -988,21 +1359,213 @@ fn fold_stage<'a>(
 /// part, so the credential must be eaten before the contact passes
 /// scan), then the email substitution over its result, then the phone
 /// substitution over that — each exactly once, no cascade — or
-/// whichever subset `rules` selects. The contact rules digest with
+/// whichever subset `rules` selects (the keys rule over whichever
+/// subset `rules.key_families` selects). The contact rules digest with
 /// `contact_salt` and the keys rule with `keys_salt`: the `salt=None`
 /// per-rule defaults (`DEFAULT_SALT` / `KEYS_DEFAULT_SALT`) never alias
 /// a contact digest with a key digest, an explicit string salts every
 /// rule alike, and `""` is unsalted for every rule. `Cow::Borrowed` —
-/// the identity path — exactly when no active rule matches.
+/// the identity path — exactly when no active rule matches (a skipped,
+/// unselected family still passes its bytes through untouched).
 pub fn scrub_pii<'a>(
     text: &'a str,
     rules: PiiRules,
     contact_salt: &str,
     keys_salt: &str,
 ) -> Cow<'a, str> {
-    let after_keys = fold_stage(Cow::Borrowed(text), rules.keys, scrub_keys_pass, keys_salt);
-    let after_email = fold_stage(after_keys, rules.email, scrub_email_pass, contact_salt);
-    fold_stage(after_email, rules.phone, scrub_phone_pass, contact_salt)
+    let mask = rules.key_families;
+    let after_keys = fold_stage(
+        Cow::Borrowed(text),
+        rules.keys,
+        |t, s| keys_pass_impl(t, s, mask, None),
+        keys_salt,
+    );
+    let after_email = fold_stage(
+        after_keys,
+        rules.email,
+        |t, s| email_pass_impl(t, s, None),
+        contact_salt,
+    );
+    fold_stage(
+        after_email,
+        rules.phone,
+        |t, s| phone_pass_impl(t, s, None),
+        contact_salt,
+    )
+}
+
+/// Map a position in a pass's OUTPUT back to the pass's input, through
+/// that pass's recorded edits: a position in copied material shifts by
+/// the cumulative delta; a position inside a token's verbatim head maps
+/// affinely to its source bytes (the head IS those bytes); a position
+/// at or past the token's `~` — the derived digest half, which has no
+/// preimage — collapses to the replaced span's end. Monotone by
+/// construction, so mapped spans stay ordered and well-formed: a later
+/// match that began inside a token's digest is recorded from that
+/// token's input end (the first position whose material is real input —
+/// exactly the keys-before-email corner's shape), and a match that ran
+/// into a token's verbatim head maps back onto the producing span (the
+/// input bytes fed two tokens; both spans are recorded).
+/// The offset-map cursor: a monotone sweep over one pass's edits for
+/// a NON-DECREASING position stream. Each pass emits its spans
+/// left-to-right, and every map is monotone, so every mapping stream
+/// in the report qualifies — one sweep per pass, O(edits + spans)
+/// total instead of O(edits × spans). Private to the report assembly;
+/// callers must feed non-decreasing positions.
+struct BackMap<'e> {
+    edits: &'e [PassEdit],
+    idx: usize,
+    delta: isize,
+}
+
+impl<'e> BackMap<'e> {
+    fn new(edits: &'e [PassEdit]) -> Self {
+        BackMap {
+            edits,
+            idx: 0,
+            delta: 0,
+        }
+    }
+
+    fn map(&mut self, pos: usize) -> usize {
+        while self.idx < self.edits.len() {
+            let e = &self.edits[self.idx];
+            let new_start = (e.start as isize + self.delta) as usize;
+            if pos < new_start {
+                break; // before this edit: copied material, identity by delta
+            }
+            let new_end = new_start + e.token.len();
+            if pos < new_end {
+                let off = pos - new_start;
+                return if off < e.verbatim_len {
+                    e.verbatim_src + off
+                } else {
+                    e.end
+                };
+            }
+            self.delta += e.token.len() as isize - (e.end - e.start) as isize;
+            self.idx += 1;
+        }
+        (pos as isize - self.delta) as usize
+    }
+}
+
+/// The single-position spelling of the cursor above: a fresh sweep per
+/// call. Test-only (the unit pins below exercise the arithmetic
+/// directly); the report sweeps each pass once via `BackMap`.
+#[cfg(test)]
+fn map_back(edits: &[PassEdit], pos: usize) -> usize {
+    BackMap::new(edits).map(pos)
+}
+
+/// One redaction span, INPUT byte coordinates (the binding renders
+/// codepoint indices): the rule that fired, or the key family that did.
+pub struct ReportSpan {
+    pub kind: SpanKind,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The `scrub_pii_report` accounting, in pipeline order: the scrubbed
+/// text, the per-rule redacted counts, the per-family redacted counts
+/// (`key_counts`, `ALL` order) and skipped counts (`skipped_counts`,
+/// families NOT in the active selection that would have matched anyway
+/// — detection ran, redaction did not), and the redaction spans in
+/// input coordinates, ordered by start.
+pub struct ScrubReport {
+    pub text: String,
+    pub email_count: usize,
+    pub phone_count: usize,
+    pub key_counts: [usize; 13],
+    pub skipped_counts: [usize; 13],
+    pub spans: Vec<ReportSpan>,
+}
+
+/// Scrub `text` exactly as `scrub_pii` would for the same arguments,
+/// and account for every redaction: the keys substitution over the
+/// input (its spans are already input coordinates), then the email
+/// substitution over its result, then the phone substitution over that
+/// — each pass recorded, each later span mapped back through the
+/// earlier passes' substitutions by `map_back`, the three span sets
+/// merged in start order. Counts and spans cover only ACTIVE rules; a
+/// skipped (unselected but matching) family counts in `skipped_counts`
+/// and leaves no span.
+pub fn scrub_pii_report(
+    text: &str,
+    rules: PiiRules,
+    contact_salt: &str,
+    keys_salt: &str,
+) -> ScrubReport {
+    // The same Cow fold as `scrub_pii` (one owned string out, zero
+    // transient copies on clean input), each stage recorded.
+    let mask = rules.key_families;
+    let mut krec = PassRec::default();
+    let mut erec = PassRec::default();
+    let mut prec = PassRec::default();
+    let after_keys = fold_stage(
+        Cow::Borrowed(text),
+        rules.keys,
+        |t, s| keys_pass_impl(t, s, mask, Some(&mut krec)),
+        keys_salt,
+    );
+    let after_email = fold_stage(
+        after_keys,
+        rules.email,
+        |t, s| email_pass_impl(t, s, Some(&mut erec)),
+        contact_salt,
+    );
+    let final_text = fold_stage(
+        after_email,
+        rules.phone,
+        |t, s| phone_pass_impl(t, s, Some(&mut prec)),
+        contact_salt,
+    )
+    .into_owned();
+    let mut key_counts = [0usize; 13];
+    for kind in &krec.kinds {
+        if let SpanKind::Key(f) = kind {
+            key_counts[*f as usize] += 1;
+        }
+    }
+    let mut spans: Vec<ReportSpan> =
+        Vec::with_capacity(krec.edits.len() + erec.edits.len() + prec.edits.len());
+    for (e, kind) in krec.edits.iter().zip(krec.kinds.iter()) {
+        spans.push(ReportSpan {
+            kind: *kind,
+            start: e.start,
+            end: e.end,
+        });
+    }
+    // One sweep per pass: every span stream is left-to-right, every map
+    // monotone — O(edits + spans), never O(edits × spans).
+    let mut kmap = BackMap::new(&krec.edits);
+    for e in &erec.edits {
+        spans.push(ReportSpan {
+            kind: SpanKind::Email,
+            start: kmap.map(e.start),
+            end: kmap.map(e.end),
+        });
+    }
+    let mut emap = BackMap::new(&erec.edits);
+    let mut kmap2 = BackMap::new(&krec.edits);
+    for e in &prec.edits {
+        let s2 = emap.map(e.start);
+        let e2 = emap.map(e.end);
+        spans.push(ReportSpan {
+            kind: SpanKind::Phone,
+            start: kmap2.map(s2),
+            end: kmap2.map(e2),
+        });
+    }
+    spans.sort_by_key(|s| s.start); // stable: start ties keep keys<email<phone
+    ScrubReport {
+        text: final_text,
+        email_count: erec.edits.len(),
+        phone_count: prec.edits.len(),
+        key_counts,
+        skipped_counts: krec.skipped,
+        spans,
+    }
 }
 
 #[cfg(test)]
@@ -1037,7 +1600,8 @@ mod tests {
                 PiiRules {
                     email: false,
                     phone: false,
-                    keys: false
+                    keys: false,
+                    key_families: KEY_FAMILY_MASK_ALL,
                 },
                 "",
                 ""
@@ -1052,6 +1616,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(
             scrub("a@b.co", rules, ""),
@@ -1073,6 +1638,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         // The largest dot with a two-letter tail wins; the tail's own
         // trailing class bytes survive the match.
@@ -1098,6 +1664,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         // The first match ends before "9"; the resume makes "9" the next
         // local part.
@@ -1117,6 +1684,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(scrub("a@b.cö", rules, ""), "a@b.cö");
         assert_eq!(scrub("a@ö.co", rules, ""), "a@ö.co");
@@ -1131,6 +1699,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         for text in [
             r#""user@name"@example.com"#,
@@ -1156,6 +1725,7 @@ mod tests {
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         let dots: String = "a.".repeat(50_000);
         let non_match = format!("x@{dots}a");
@@ -1174,6 +1744,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(
             scrub("+14155552671", rules, ""),
@@ -1198,6 +1769,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(
             scrub("read 4096 bytes in 1200 ms", rules, ""),
@@ -1214,6 +1786,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         let matched = "+4712345678 1234567890";
         assert_eq!(
@@ -1228,6 +1801,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(
             scrub("call +1 (415) 555-2671 , ok", rules, ""),
@@ -1241,6 +1815,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         assert_eq!(
             scrub("+1+4155552671", rules, ""),
@@ -1255,6 +1830,7 @@ mod tests {
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         }
     }
 
@@ -1528,6 +2104,7 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
             email: false,
             phone: true,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         let once = scrub("+14155552671 +14155552672", rules, "");
         assert!(matches!(scrub_pii(&once, rules, "", ""), Cow::Borrowed(_)));
@@ -1539,6 +2116,7 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         let once = scrub("a@b.co9@x.yz", rules, "");
         let twice = scrub(&once, rules, "");
@@ -1556,6 +2134,7 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
             email: true,
             phone: false,
             keys: false,
+            key_families: KEY_FAMILY_MASK_ALL,
         };
         let once = scrub("x@b.co@w.vu", rules, "");
         let twice = scrub(&once, rules, "");
@@ -1653,6 +2232,7 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
             email: false,
             phone: false,
             keys: true,
+            key_families: KEY_FAMILY_MASK_ALL,
         }
     }
 
@@ -1668,6 +2248,37 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
     const JWT: &str = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
 eyJzdWIiOiIxMjM0NTY3ODkwIn0.\
 dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
+
+    /// An AWS-tail cycle: uppercase letters and digits only (the
+    /// access-key ID alphabet — no lowercase anywhere in it).
+    fn aws_tail(n: usize) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        (0..n)
+            .map(|i| ALPHABET[i % ALPHABET.len()] as char)
+            .collect()
+    }
+
+    /// An Azure-tail cycle: the connection-string secret alphabet.
+    fn azure_tail(n: usize) -> String {
+        const ALPHABET: &[u8] =
+            b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=";
+        (0..n)
+            .map(|i| ALPHABET[i % ALPHABET.len()] as char)
+            .collect()
+    }
+
+    /// A PEM block: the BEGIN marker with algorithm words, base64 body
+    /// lines (contact-inert by construction — no separators, no `@`),
+    /// and the END marker with the same words.
+    fn pem_block(words: &str) -> String {
+        format!(
+            "-----BEGIN {words} PRIVATE KEY-----\n\
+             MIIEpAIBAAKCAQEA7b\n\
+             qY4sLk2MnOpQrStUvW\n\
+             xYz0123456789ABCD\n\
+             -----END {words} PRIVATE KEY-----"
+        )
+    }
 
     fn key_vectors() -> Vec<(String, &'static str)> {
         let t48 = key_tail(48);
@@ -1688,6 +2299,12 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("w-{}", key_tail(43)), "w-"),
             (format!("cn-{}", key_tail(20)), "cn-"),
             (JWT.to_string(), "Bearer"),
+            ("AKIAIOSFODNN7EXAMPLE".to_string(), "AKIA"),
+            (format!("ASIA{}", aws_tail(16)), "ASIA"),
+            (format!("xai-{}", key_tail(20)), "xai-"),
+            (format!("ya29.{}", key_tail(20)), "ya29."),
+            (pem_block("RSA"), "PEM"),
+            (format!("AccountKey={}", azure_tail(44)), "AccountKey="),
         ]
     }
 
@@ -1725,6 +2342,40 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("fw-{}", key_tail(19)),
             format!("ak-{}", key_tail(19)),
             format!("wk-{}", key_tail(19)),
+            format!("AKIA{}", aws_tail(15)), // one under the access-key ID
+            format!("akia{}", aws_tail(16)), // lowercase: not the prefix
+            format!("ASIA{}", aws_tail(15)),
+            format!("xai-{}", key_tail(19)),
+            "XAI-".to_string() + &key_tail(20),
+            format!("ya29.{}", key_tail(19)),
+            "YA29.".to_string() + &key_tail(20),
+            format!("AccountKey={}", azure_tail(39)),
+            "Accountkey=".to_string() + &azure_tail(44),
+            format!("xAKIA{}", aws_tail(16)), // mid-token prefix
+            format!("xxai-{}", key_tail(20)),
+            format!("xya29.{}", key_tail(20)),
+            format!("xAccountKey={}", azure_tail(40)),
+            {
+                let full = pem_block("RSA");
+                full[..full.len() - "-----END RSA PRIVATE KEY-----".len()].to_string()
+            }, // unterminated BEGIN
+            pem_block("RSA").replace(
+                "-----END RSA PRIVATE KEY-----",
+                "-----END EC PRIVATE KEY-----",
+            ), // mismatched words
+            "-----BEGIN PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n-----END PRIVATE KEY-----"
+                .to_string(), // no algorithm words
+            "-----begin rsa private key-----\nMIIEpAIBAAKCAQEA7b\n-----end rsa private key-----"
+                .to_string(), // lowercase markers
+            "-----BEGIN RSA  PRIVATE KEY-----\nMIIE\n-----END RSA  PRIVATE KEY-----".to_string(), // doubled space
+            "-----BEGIN RSA-EC PRIVATE KEY-----\nMIIE\n-----END RSA-EC PRIVATE KEY-----"
+                .to_string(), // hyphen word
+            "-----BEGIN RSA_EC PRIVATE KEY-----\nMIIE\n-----END RSA_EC PRIVATE KEY-----"
+                .to_string(), // underscore word
+            // Split across the concatenation: the joined shape trips
+            // push protection (a synthetic vector, not a secret).
+            "xoxb-".to_string() + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUv", // Slack: excluded
+            "sk_test_51MZABCDefghijklmnOP0123456789abcdefghiJ".to_string(), // Stripe: excluded
             format!("xak-{t48}"), // mid-token prefix (the boundary rule)
             "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln".to_string(), // lowercase marker
             // The non-secret cursor class: eyJ-shaped, never behind Bearer.
@@ -1853,6 +2504,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
                 email: false,
                 phone: true,
                 keys: false,
+                key_families: KEY_FAMILY_MASK_ALL,
             },
             "",
         );
@@ -1911,5 +2563,244 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
                 digest("site", &key)
             )
         );
+    }
+
+    // --- Per-family selection and the report ---------------------------------
+
+    fn keys_with_mask(mask: u16) -> PiiRules {
+        PiiRules {
+            email: false,
+            phone: false,
+            keys: true,
+            key_families: mask,
+        }
+    }
+
+    #[test]
+    fn the_table_is_longest_prefix_first() {
+        // The table's one total order, pinned structurally: whenever
+        // one prefix is a proper prefix of another, the longer comes
+        // first — so a 14th nesting family has exactly one place to
+        // land, and drift fails here instead of as a fall-through
+        // mystery. (The known nestings are the `sk-*` group and
+        // `github_pat_`/`ghp_`.)
+        for (i, (a, _, _, _)) in KEY_FAMILIES.iter().enumerate() {
+            for (b, _, _, _) in &KEY_FAMILIES[i + 1..] {
+                // A shorter prefix before a longer one it opens is the
+                // misorder (the longer would never win); the reverse —
+                // the `sk-*` group, `github_pat_`/`ghp_` — is the
+                // discipline working.
+                assert!(
+                    !(b.starts_with(a) && a.len() < b.len()),
+                    "misordered nesting: {a:?} at {i} opens {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_family_names_agree_with_all_in_order() {
+        // The single order everywhere: ALL[i].name() is NAMES[i], the
+        // discriminant is the mask bit, and ALL is the full mask. The
+        // Python battery pins the literal tuple; this pins the wiring.
+        assert_eq!(KeyFamily::ALL.len(), KEY_FAMILY_NAMES.len());
+        for (i, f) in KeyFamily::ALL.iter().enumerate() {
+            assert_eq!(f.name(), KEY_FAMILY_NAMES[i]);
+            assert_eq!(f.bit(), 1u16 << i);
+            assert_eq!(*f as usize, i);
+        }
+        assert_eq!(KEY_FAMILY_MASK_ALL, (1u16 << 13) - 1);
+    }
+
+    #[test]
+    fn a_five_part_jwe_keeps_parts_four_and_five_verbatim() {
+        // The grammar is exactly three maximal segments: a 5-part JWE
+        // behind Bearer scrubs through the third segment and keeps
+        // parts 4-5 verbatim (the residual-risk red-team pin).
+        assert_eq!(
+            scrub("Bearer eyJa.b.c.d.e", keys_only(), ""),
+            format!("Bearer~{}.d.e", digest("", "Bearer eyJa.b.c"))
+        );
+    }
+
+    #[test]
+    fn an_unselected_family_is_detected_not_redacted() {
+        // The mask consults AFTER the grammar holds: a holding but
+        // unselected family spends its span whole and preserves it
+        // verbatim (no fall-through past a hold, no re-scan inside).
+        let jwt_bit = KeyFamily::Jwt.bit();
+        let no_jwt = KEY_FAMILY_MASK_ALL & !jwt_bit;
+        let key = format!("sk-{}", key_tail(48));
+        let text = format!("{JWT} {key}");
+        assert_eq!(
+            scrub(&text, keys_with_mask(no_jwt), ""),
+            format!("{JWT} sk-~{}", digest("", &key))
+        );
+        // The single-family lane: only JWTs fire, an sk- key glued
+        // beside one survives whole.
+        assert_eq!(
+            scrub(&text, keys_with_mask(jwt_bit), ""),
+            format!("Bearer~{} {key}", digest("", JWT))
+        );
+    }
+
+    #[test]
+    fn pem_blocks_match_whole_and_span_lines() {
+        // The whole multi-line block is one match; the token is the
+        // constant PEM head over the full block's digest.
+        let block = pem_block("EC");
+        assert_eq!(
+            scrub(&block, keys_only(), ""),
+            format!("PEM~{}", digest("", &block))
+        );
+        // An empty body is still both markers: a match with nothing
+        // between them.
+        let empty = "-----BEGIN RSA PRIVATE KEY----------END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(empty, keys_only(), ""),
+            format!("PEM~{}", digest("", empty))
+        );
+        // The search skips a mismatched END for a later matching one:
+        // the stranger's END line is body material, and the block runs
+        // whole to its own END.
+        let nested = "-----BEGIN RSA PRIVATE KEY-----\n\
+             MIIEpAIBAAKCAQEA7b\n\
+             -----END EC PRIVATE KEY-----\n\
+             -----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(nested, keys_only(), ""),
+            format!("PEM~{}", digest("", nested))
+        );
+    }
+
+    #[test]
+    fn azure_tokens_keep_the_marker_and_span_connection_strings() {
+        // The realistic context: the marker plus its secret inside a
+        // storage connection string — the match is the marker and its
+        // maximal tail only, the `;`-separated fields around it survive.
+        let secret = azure_tail(44);
+        let text = format!(
+            "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey={secret};EndpointSuffix=core"
+        );
+        let matched = format!("AccountKey={secret}");
+        assert_eq!(
+            scrub(&text, keys_only(), ""),
+            format!(
+                "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=~{};EndpointSuffix=core",
+                digest("", &matched)
+            )
+        );
+    }
+
+    #[test]
+    fn map_back_is_identity_without_edits() {
+        assert_eq!(map_back(&[], 0), 0);
+        assert_eq!(map_back(&[], 41), 41);
+    }
+
+    #[test]
+    fn map_back_folds_verbatim_affine_and_collapses_digests() {
+        // One keys edit: "sk-KEY(48)" [0,51) became "sk-~hex12" [0,16).
+        // Copied material before shifts by nothing; the verbatim head
+        // maps affinely; the `~`+hex collapses to the replaced end; the
+        // material after shifts by the delta.
+        let edits = vec![PassEdit {
+            start: 0,
+            end: 51,
+            token: format!("sk-~{}", "a".repeat(12)),
+            verbatim_src: 0,
+            verbatim_len: 3,
+        }];
+        assert_eq!(map_back(&edits, 0), 0);
+        assert_eq!(map_back(&edits, 2), 2); // inside "sk-": affine
+        assert_eq!(map_back(&edits, 3), 51); // the `~`: collapse
+        assert_eq!(map_back(&edits, 9), 51); // mid-hex: collapse
+        assert_eq!(map_back(&edits, 16), 51); // token end: the replaced end
+        assert_eq!(map_back(&edits, 17), 52); // past the token: delta -35
+        assert_eq!(map_back(&edits, 30), 65);
+    }
+
+    #[test]
+    fn the_report_counts_spans_and_sorts() {
+        // The assembly contract, byte coordinates: keys spans direct,
+        // email spans mapped through the keys edits, phone spans through
+        // both — merged in start order with per-rule and per-family
+        // counts, skipped in ALL order.
+        let key = format!("sk-{}", key_tail(48));
+        let text = format!("a@b.co {key} 415-555-2671");
+        let rep = scrub_pii_report(&text, PiiRules::BOTH, "", "");
+        assert_eq!(rep.text, scrub(&text, PiiRules::BOTH, ""));
+        assert_eq!(rep.email_count, 1);
+        assert_eq!(rep.phone_count, 1);
+        assert_eq!(rep.key_counts[KeyFamily::OpenAi as usize], 1);
+        assert_eq!(rep.key_counts.iter().sum::<usize>(), 1);
+        assert_eq!(rep.skipped_counts, [0; 13]);
+        // Sorted by start: the email span [0,6) first, then the key
+        // span, then the phone span (mapped through the keys edit's
+        // delta back to its input position).
+        let key_start = 7;
+        let phone_start = key_start + key.len() + 1;
+        assert_eq!(rep.spans.len(), 3);
+        assert!(matches!(rep.spans[0].kind, SpanKind::Email));
+        assert_eq!((rep.spans[0].start, rep.spans[0].end), (0, 6));
+        assert!(matches!(
+            rep.spans[1].kind,
+            SpanKind::Key(KeyFamily::OpenAi)
+        ));
+        assert_eq!(
+            (rep.spans[1].start, rep.spans[1].end),
+            (key_start, key_start + key.len())
+        );
+        assert!(matches!(rep.spans[2].kind, SpanKind::Phone));
+        assert_eq!(
+            (rep.spans[2].start, rep.spans[2].end),
+            (phone_start, phone_start + 12)
+        );
+        assert_eq!(&text[phone_start..phone_start + 12], "415-555-2671");
+    }
+
+    #[test]
+    fn the_report_sweeps_two_edits_for_a_late_email() {
+        // The delta accumulates over every edit, not just the first: an
+        // email after TWO keys maps through both tokens' deltas to its
+        // input position.
+        let a = format!("sk-{}", key_tail(48));
+        let b = format!("fw-{}", key_tail(48));
+        let text = format!("{a} {b} a@b.co");
+        let rep = scrub_pii_report(&text, PiiRules::BOTH, "", "");
+        assert_eq!(rep.spans.len(), 3);
+        let email_at = a.len() + 1 + b.len() + 1;
+        assert!(matches!(rep.spans[2].kind, SpanKind::Email));
+        assert_eq!(
+            (rep.spans[2].start, rep.spans[2].end),
+            (email_at, email_at + 6)
+        );
+        assert_eq!(&text[email_at..email_at + 6], "a@b.co");
+    }
+
+    #[test]
+    fn the_report_skips_unselected_families_without_spans() {
+        let key = format!("sk-{}", key_tail(48));
+        let text = format!("{JWT} {key}");
+        let no_jwt = KEY_FAMILY_MASK_ALL & !KeyFamily::Jwt.bit();
+        let rep = scrub_pii_report(
+            &text,
+            PiiRules {
+                email: false,
+                phone: false,
+                keys: true,
+                key_families: no_jwt,
+            },
+            "",
+            "",
+        );
+        assert_eq!(rep.key_counts[KeyFamily::OpenAi as usize], 1);
+        assert_eq!(rep.skipped_counts[KeyFamily::Jwt as usize], 1);
+        assert_eq!(rep.skipped_counts.iter().sum::<usize>(), 1);
+        assert_eq!(rep.spans.len(), 1);
+        assert!(matches!(
+            rep.spans[0].kind,
+            SpanKind::Key(KeyFamily::OpenAi)
+        ));
     }
 }

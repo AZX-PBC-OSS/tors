@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import ModuleType
 
 from tors._tors import (
+    KEY_FAMILIES,
     CompiledLemmaDict,
     CompiledPatterns,
     apply_pipeline,
@@ -75,6 +76,7 @@ from tors._tors import (
     replace_many_masked,
     scrub_log_text,
     scrub_pii,
+    scrub_pii_report,
     sentence_bounds,
     sentence_bounds_iter,
     sentence_count,
@@ -135,6 +137,7 @@ __all__ = [
     "chunk_text_iter",
     "CompiledLemmaDict",
     "CompiledPatterns",
+    "KEY_FAMILIES",
     "contains_unescaped",
     "content_hash",
     "count_matches",
@@ -189,6 +192,7 @@ __all__ = [
     "replace_many_masked",
     "scrub_log_text",
     "scrub_pii",
+    "scrub_pii_report",
     "sentence_bounds",
     "sentence_bounds_iter",
     "sentence_count",

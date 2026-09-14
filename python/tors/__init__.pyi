@@ -68,7 +68,11 @@ def strip_controls(text: str) -> str: ...
 # every rule). The phone rule's digit class is Unicode Nd (every
 # decimal digit script), and bare digit runs never match (the "+"
 # anchoring is deliberate: order numbers and byte counts must
-# survive).
+# survive). families=None scrubs every key family this version knows
+# (the set grows on new families -- callers needing stability list
+# names explicitly); a list selects exactly those families (order
+# irrelevant, duplicates deduped); unknown names and [] are
+# ValueErrors; the selection is ignored when api_keys is not active.
 # tors.scrub_pii(s, ...) is s exactly when no active rule matches.
 #
 # GIL note: detached_transform's shape, the same as
@@ -79,7 +83,32 @@ def scrub_pii(
     rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
     *,
     salt: str | None = None,
+    families: Sequence[str] | None = None,
 ) -> str: ...
+
+# The canonical key-family tuple, in the scanner table's order: the
+# base for "all but X" comprehensions
+# (families=[f for f in tors.KEY_FAMILIES if f != "jwt"]) and the set
+# the families= unknown-name error names. The set grows on new
+# families (semver-visible); list names explicitly for stability.
+KEY_FAMILIES: tuple[str, ...]
+
+# The report twin of scrub_pii: the same scrub for the same arguments
+# (report["text"] == scrub_pii(...) byte-exact) plus the accounting --
+# per-rule counts plus per-family counts (lowercase family names,
+# absent types omitted) under "redacted", the detected-but-preserved
+# families under "skipped" (the "preserved a JWT, log it separately"
+# signal; always {} when families=None), and the redaction spans under
+# "spans" (ordered by start, codepoint indices into the INPUT text,
+# {"type": <rule> | "api_keys:<family>", "start": int, "end": int}).
+# Empty input is the empty accounting. Same single-detach GIL model.
+def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict[str, object]: ...
 
 
 # Named-rule log and exception-text scrubbing, byte-identical to the

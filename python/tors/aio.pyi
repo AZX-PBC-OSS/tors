@@ -21,7 +21,15 @@ async def scrub_pii(
     rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
     *,
     salt: str | None = None,
+    families: Sequence[str] | None = None,
 ) -> str: ...
+async def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict[str, object]: ...
 async def scrub_log_text(
     text: str,
     rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,

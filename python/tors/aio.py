@@ -110,6 +110,7 @@ _WRAPPED = (
     "normalize",
     "scrub_log_text",
     "scrub_pii",
+    "scrub_pii_report",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",
