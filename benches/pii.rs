@@ -75,7 +75,8 @@ fn bench_scrub_pii(c: &mut Criterion) {
         "AKIAIOSFODNN7EXAMPLE",
         "AccountKey=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX",
     );
-    let pem_block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n-----END RSA PRIVATE KEY-----\n";
+    let pem_block =
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n-----END RSA PRIVATE KEY-----\n";
     for (id, text) in [
         (
             "keys_dense",
