@@ -1321,6 +1321,28 @@ class TestDuplicateAlphabetsAreWeighted:
             assert len(out) - out.count("a") == out.count("b")
 
 
+class TestSamplingIsOverScalarValues:
+    """The scalar-values contract (api.md, the binding, and the core):
+    sampling is over Unicode scalar values, NOT grapheme clusters — a
+    combining mark in the alphabet is its own draw position and can
+    land without its base. A cluster-aware (grapheme) sampler would
+    never emit the bare mark; the engine does."""
+
+    def test_a_combining_mark_lands_without_its_base(self) -> None:
+        # "a" + U+0301 COMBINING ACUTE ACCENT: two scalar values. Under
+        # seed 1 the mark is drawn alone (no base, exactly 1 char); under
+        # seed 0 the base is. Both are legal outputs of the scalar-values
+        # sampler and impossible shapes for a cluster-aware one.
+        alphabet = "a\u0301"
+        assert random_string(1, alphabet, seed=0) == "a"
+        assert random_string(1, alphabet, seed=1) == "\u0301"
+
+    def test_marks_stack_without_their_base(self) -> None:
+        # Two draws both landing on the mark (seed 4): a bare double
+        # stack — no cluster sampler can produce it from this alphabet.
+        assert random_string(2, "a\u0301", seed=4) == "\u0301\u0301"
+
+
 class TestUniformityAtScale:
     """HIGH-2's Python half: the seeded stream is uniform at a scale
     where eyeballing goldens proves nothing — and the pins fail under
