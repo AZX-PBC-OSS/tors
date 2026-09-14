@@ -1343,6 +1343,29 @@ class TestKeyFamiliesContract:
         with pytest.raises(TypeError):
             scrub_pii("a@b.co", families={"jwt"})  # type: ignore[arg-type]
 
+    def test_non_string_family_elements_are_type_errors(self) -> None:
+        # Element-wise extraction: an int, None, or bytes element is a
+        # TypeError, never a silent skip or a str() coercion.
+        for bad in (["jwt", 42], ["jwt", None], [b"jwt"]):
+            with pytest.raises(TypeError):
+                scrub_pii("a@b.co", families=bad)  # type: ignore[list-item]
+
+    def test_a_surrogate_family_name_is_refused(self) -> None:
+        # Lone surrogates never reach the closed-set compare: the str
+        # extraction refuses them with UnicodeEncodeError first (the
+        # crate-wide str contract, same as a surrogate salt).
+        with pytest.raises(UnicodeEncodeError):
+            scrub_pii("a@b.co", families=["\ud800"])
+
+    def test_empty_rules_is_identity_regardless_of_families(self) -> None:
+        # rules=[] is the identity even with a valid selection — and the
+        # boundary validation still runs first (an unknown name raises
+        # before the identity short-circuits).
+        text = "a@b.co " + _OPENAI
+        assert scrub_pii(text, [], families=["jwt"], salt="") is text
+        with pytest.raises(ValueError, match="must be one of"):
+            scrub_pii(text, [], families=["nope"])
+
     def test_the_mask_meets_the_fall_through(self) -> None:
         # The longest-first discipline crossed with the selection: the
         # mask is consulted AFTER the winning family is determined —
@@ -1555,7 +1578,8 @@ def _reconstruct(
             assert isinstance(prev["start"], int)
             key_match = text[prev["start"] : prev["end"]]
             matched = _hex12(keys_salt + key_match) + core
-            domain = matched.split("@", 1)[1]
+            _local, sep, domain = matched.partition("@")
+            assert sep, (span, matched)
             token = f"@{domain}~{_hex12(contact_salt + matched)}"
             assert pieces and pieces[-1][0] == "token"
             staged_token = pieces[-1][4]
@@ -1563,7 +1587,8 @@ def _reconstruct(
             pieces[-1][4] = staged_token[: staged_token.index("~") + 1]
         elif typ == "contact_email":
             matched = core
-            domain = matched.split("@", 1)[1]
+            _local, sep, domain = matched.partition("@")
+            assert sep, (span, matched)
             token = f"@{domain}~{_hex12(contact_salt + matched)}"
         elif typ == "contact_phone" and start < frontier:
             # The affine-nesting corner: the number lived inside the
@@ -1665,6 +1690,15 @@ class TestScrubPiiReport:
         text = "read 4096 bytes across 3 pages in 1200 ms"
         rep = scrub_pii_report(text, salt="")
         assert rep == {"text": text, "redacted": {}, "skipped": {}, "spans": []}
+
+    def test_empty_rules_is_an_empty_accounting(self) -> None:
+        # rules=[] runs no pass: empty accounting even over key-bearing
+        # text (and the families knob validates first, as in scrub_pii).
+        text = f"a@b.co {_OPENAI}"
+        rep = scrub_pii_report(text, [], salt="", families=["jwt"])
+        assert rep == {"text": text, "redacted": {}, "skipped": {}, "spans": []}
+        with pytest.raises(ValueError, match="must be one of"):
+            scrub_pii_report(text, [], families=["nope"])
 
     def test_skipped_names_the_preserved_families(self) -> None:
         # The "we preserved a JWT, log it separately" signal: families
@@ -1890,6 +1924,13 @@ class TestScrubPiiReport:
         mutated = [dict(s) for s in rep["spans"]]
         mutated[1] = {**mutated[1], "end": mutated[1]["end"] - 1}
         assert _reconstruct(text, mutated, "", "") != rep["text"]
+        # Dropped spans and swapped types break it too (the oracle
+        # checks presence and kind, not just coordinates).
+        assert _reconstruct(text, rep["spans"][:-1], "", "") != rep["text"]
+        swapped = [dict(s) for s in rep["spans"]]
+        swapped[1] = {**swapped[1], "type": "contact_email"}
+        with pytest.raises(AssertionError):
+            _reconstruct(text, swapped, "", "")
 
     def test_reconstruction_holds_over_composed_excerpts(self) -> None:
         # The strong invariant over realistic compositions: keys (every

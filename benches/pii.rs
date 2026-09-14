@@ -61,6 +61,54 @@ fn bench_scrub_pii(c: &mut Criterion) {
             },
         );
     }
+    // Keys-rule lanes (the contact corpus above never fires the keys
+    // pass — these do): one key per sentence across the table families
+    // (shared-charset tails, an AWS ID, an Azure marker, a GCP dot, a
+    // full multi-line PEM block), plus the two adversarial shapes — a
+    // dash-dense non-match input (the PEM `-` anchor filter on prose
+    // that never opens a header) and a run of unterminated BEGINs (the
+    // END-index path: one sweep shared by every BEGIN, never a
+    // per-anchor re-scan).
+    let key_sentence = format!(
+        "rotated {} and {} and {} ok. ",
+        "sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV",
+        "AKIAIOSFODNN7EXAMPLE",
+        "AccountKey=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX",
+    );
+    let pem_block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n-----END RSA PRIVATE KEY-----\n";
+    for (id, text) in [
+        (
+            "keys_dense",
+            repeat_to(100 * 1024, &format!("{key_sentence}{pem_block}")),
+        ),
+        (
+            "dashes_no_header",
+            repeat_to(100 * 1024, "well-known - state-of-the-art - up-to-date - "),
+        ),
+        (
+            "unterminated_begins",
+            repeat_to(
+                100 * 1024,
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n",
+            ),
+        ),
+    ] {
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new(id, format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    scrub_pii(
+                        black_box(text),
+                        PiiRules::BOTH,
+                        tors::pii_impl::DEFAULT_SALT,
+                        tors::pii_impl::KEYS_DEFAULT_SALT,
+                    )
+                })
+            },
+        );
+    }
     // Degenerate-domain guard (pins the linear domain split): 50k `a.`
     // pairs, both the non-match (`…a`) and the match (`…zz`) spellings.
     // The backward sweep is O(run), never O(run²); sha2 runs only for
