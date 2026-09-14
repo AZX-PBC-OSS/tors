@@ -143,9 +143,7 @@ _AKIA = "AKIAIOSFODNN7EXAMPLE"
 
 # The Azure storage-key tail: the connection-string secret alphabet
 # ([A-Za-z0-9+/=] — base64 plus the padding/trailing `=`).
-_AZURE_ALPHABET = (
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
-)
+_AZURE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
 
 
 def _azure_tail(n: int) -> str:
@@ -872,9 +870,8 @@ class TestDomesticPhoneZoo:
         # the source's own documented non-match — never a domestic
         # fallback. The middle counts separators, so the long
         # seven-digit spelling matches while the short one never does.
-        assert (
-            scrub_pii("+415-555-2671", ["contact_phone"], salt="")
-            == _phone_token("+415-555-2671")
+        assert scrub_pii("+415-555-2671", ["contact_phone"], salt="") == _phone_token(
+            "+415-555-2671"
         )
         assert (
             scrub_pii("ring +1 415 555 now", ["contact_phone"], salt="")
@@ -897,9 +894,7 @@ class TestDomesticPhoneZoo:
         # separator that makes it matchable). Safe direction; converges.
         matched = "user@555.1234567.co"
         once = scrub_pii(matched, salt="")
-        assert once == (
-            f"@555~{_hex12('555.1234567')}.co~{_hex12(matched)}"
-        )
+        assert once == (f"@555~{_hex12('555.1234567')}.co~{_hex12(matched)}")
         twice = scrub_pii(once, salt="")
         assert scrub_pii(twice, salt="") == twice
 
@@ -954,9 +949,7 @@ class TestApiKeyZoo:
     salts key digests with tors's own ``tors/scrub_keys/v1`` tag so a key
     digest can never alias a contact digest."""
 
-    @pytest.mark.parametrize(
-        ("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS]
-    )
+    @pytest.mark.parametrize(("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS])
     def test_every_family_scrubs_with_its_verbatim_prefix(self, text: str, prefix: str) -> None:
         # The token is <family prefix>~<first 12 hex of sha256(salt +
         # FULL match)>: the prefix verbatim (the non-secret half), the
@@ -1089,9 +1082,7 @@ class TestApiKeyZoo:
         # The composed pipeline scrubs the contact half; the glued key
         # survives whole — the documented mid-token cut applied to
         # contact glue.
-        assert scrub_pii("+14155552671" + key, salt="") == (
-            f"+14~{_hex12('+14155552671')}{key}"
-        )
+        assert scrub_pii("+14155552671" + key, salt="") == (f"+14~{_hex12('+14155552671')}{key}")
 
     def test_glued_keys_merge_into_one_maximal_tail(self) -> None:
         # The tail run is maximal: a second key's whole spelling is
@@ -1142,9 +1133,7 @@ class TestApiKeyZoo:
         key = "sk-" + _key_tail(48)
         text = "a@b.co +14155552671 " + key
         assert scrub_pii(text, salt="") == (
-            f"@b.co~{_hex12('a@b.co')} "
-            f"+14~{_hex12('+14155552671')} "
-            f"sk-~{_hex12(key)}"
+            f"@b.co~{_hex12('a@b.co')} +14~{_hex12('+14155552671')} sk-~{_hex12(key)}"
         )
 
     def test_keys_only_leaves_contact_material_alone(self) -> None:
@@ -1156,11 +1145,7 @@ class TestApiKeyZoo:
     def test_none_composes_every_rule_keys_first(self) -> None:
         key = "sk-" + _key_tail(48)
         text = "a@b.co +14155552671 " + key
-        expected = (
-            f"@b.co~{_hex12('a@b.co')} "
-            f"+14~{_hex12('+14155552671')} "
-            f"{_key_token('sk-', key)}"
-        )
+        expected = f"@b.co~{_hex12('a@b.co')} +14~{_hex12('+14155552671')} {_key_token('sk-', key)}"
         assert scrub_pii(text, salt="") == expected
         # ...and caller order is irrelevant, duplicates dedupe.
         assert scrub_pii(text, ["contact_phone", "api_keys", "contact_email"], salt="") == expected
@@ -1208,9 +1193,7 @@ class TestApiKeyZoo:
             f"{_key_token('fw-', key)} {_phone_token('415-555-2671')}"
         )
 
-    @pytest.mark.parametrize(
-        ("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS]
-    )
+    @pytest.mark.parametrize(("text", "prefix"), _KEY_VECTORS, ids=[v[1] for v in _KEY_VECTORS])
     def test_key_tokens_are_fixed_points(self, text: str, prefix: str) -> None:
         # Idempotence by construction, verified per family: the token's
         # prefix ends in `-`/`_` (or is `AIza`/`Bearer`), the byte after
@@ -1310,8 +1293,7 @@ class TestKeyFamiliesContract:
         with pytest.raises(ValueError) as exc:
             scrub_pii("a@b.co", families=["ssn"])
         assert str(exc.value) == (
-            f"families must be one of ({', '.join(repr(f) for f in KEY_FAMILIES)}), "
-            'not "ssn"'
+            f'families must be one of ({", ".join(repr(f) for f in KEY_FAMILIES)}), not "ssn"'
         )
         # ...and the derived spelling equals the landed literal.
         assert str(exc.value) == (
@@ -1516,8 +1498,15 @@ def _reconstruct(
     # lands in the final join). email_pieces tracks every staged email
     # span for the remnant branch (a nested phone may come between the
     # overlapping email and the key, so `prev` is not reliable there).
+    # key_spans lets the email branch truncate a head it ate from a
+    # LATER key token (the match ran past the span text's end).
     pieces: list[list[object]] = []
     email_pieces: list[tuple[int, int]] = []
+    key_spans: list[tuple[int, int, str]] = [
+        (s["start"], s["end"], s["type"])
+        for s in spans
+        if isinstance(s["type"], str) and s["type"].startswith("api_keys:")
+    ]
     frontier = 0
     prev: dict[str, object] | None = None
     for span in spans:
@@ -1531,10 +1520,27 @@ def _reconstruct(
             pieces.append(["text", text[frontier:start]])
             frontier = start
         if typ == "contact_email":
-            # Email spans never overlap (stage-2 matches are disjoint
-            # and the map is monotone); the corners touch at most — an
-            # overlap here is a span bug, fail loud.
+            # Email spans never overlap a processed span (stage-2
+            # matches are disjoint and the map is monotone); the corners
+            # touch at most — an overlap here is a span bug, fail loud.
             assert start >= frontier, (span, prev)
+            # ...nor start inside a key span (walk-backs never land
+            # inside a token's head).
+            assert not any(ks < start < ke for (ks, ke, _) in key_spans), (span, key_spans)
+            core = text[start:end]
+            # Head-truncation (the 4th corner): the match may have run
+            # into a LATER key token's verbatim head — the span's end is
+            # then clamped to the key's end, but the match only ate the
+            # head, so the span text overstates it. At most one key span
+            # can overlap (a match never spans a token's `~`); an affine
+            # end needs no fix (the span text already equals the match).
+            for ks, ke, _ktyp in key_spans:
+                if start < ks < end:
+                    assert end <= ke, (span, ks, ke)
+                    if end == ke:
+                        fam = _ktyp[len("api_keys:") :]
+                        core = text[start:ks] + _family_token_prefix(fam, text[ks:ke])
+                    break
         if (
             typ == "contact_email"
             and prev is not None
@@ -1548,7 +1554,7 @@ def _reconstruct(
             # token loses its eaten hex half (only its head survives).
             assert isinstance(prev["start"], int)
             key_match = text[prev["start"] : prev["end"]]
-            matched = _hex12(keys_salt + key_match) + text[start:end]
+            matched = _hex12(keys_salt + key_match) + core
             domain = matched.split("@", 1)[1]
             token = f"@{domain}~{_hex12(contact_salt + matched)}"
             assert pieces and pieces[-1][0] == "token"
@@ -1556,7 +1562,7 @@ def _reconstruct(
             assert isinstance(staged_token, str)
             pieces[-1][4] = staged_token[: staged_token.index("~") + 1]
         elif typ == "contact_email":
-            matched = text[start:end]
+            matched = core
             domain = matched.split("@", 1)[1]
             token = f"@{domain}~{_hex12(contact_salt + matched)}"
         elif typ == "contact_phone" and start < frontier:
@@ -1577,9 +1583,7 @@ def _reconstruct(
             matched = text[start:end]
             token = f"{matched[:3]}~{_hex12(contact_salt + matched)}"
             assert stoken[off + shift : off + shift + (end - start)] == matched
-            pieces[-1][4] = (
-                stoken[: off + shift] + token + stoken[off + shift + (end - start) :]
-            )
+            pieces[-1][4] = stoken[: off + shift] + token + stoken[off + shift + (end - start) :]
             pieces[-1][5] = shift + len(token) - (end - start)
             prev = span
             continue
@@ -1736,6 +1740,21 @@ class TestScrubPiiReport:
         ]
         assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
 
+    def test_an_email_eating_a_whole_key_head_pins_the_truncation_corner(self) -> None:
+        # The fourth corner (hypothesis-found, first-run failure): the
+        # email's domain run flows into a key token's verbatim head up to
+        # the `~` — the span's end clamps to the key's end, but the match
+        # only ate the head, so the span text overstates it and the
+        # reconstruction must truncate to the head.
+        key = "AIza" + _key_tail(35)
+        text = "a@b.co." + key
+        rep = scrub_pii_report(text, salt="")
+        assert rep["spans"] == [
+            {"type": "contact_email", "start": 0, "end": len(text)},
+            {"type": "api_keys:google", "start": 7, "end": len(text)},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
     def test_two_numbers_in_one_domain_fire_the_shift_path(self) -> None:
         # Two domestic runs inside one email token's domain: the second
         # affine replace lands on the shifted staged token (the helper's
@@ -1879,9 +1898,9 @@ class TestScrubPiiReport:
         pieces = [v[0] for v in _KEY_VECTORS]
         contacts = ["a@b.co", "user@555.1234567.co", "+14155552671", "415-555-2671"]
         seps = [" ", "\n", ", ", " | ", "rotated ", "leaked ", "! "]
-        texts = [
-            f"{a}{s}{b}" for a in pieces for b in contacts for s in seps[:3]
-        ] + [f"{c}{s}{k}" for c in contacts for k in pieces for s in seps[:3]]
+        texts = [f"{a}{s}{b}" for a in pieces for b in contacts for s in seps[:3]] + [
+            f"{c}{s}{k}" for c in contacts for k in pieces for s in seps[:3]
+        ]
         for text in texts:
             rep = scrub_pii_report(text, salt="")
             assert _reconstruct(text, rep["spans"], "", "") == rep["text"], text
@@ -2006,7 +2025,7 @@ class TestNdExhaustive:
         # stay untouched because the run dies at <c>).
         assert scrub_pii("+12\u00b2345678", ["contact_phone"], salt="") == "+12\u00b2345678"
         assert scrub_pii("+12\u216945678", ["contact_phone"], salt="") == "+12\u216945678"
-        assert scrub_pii("\uFF0B12345678", ["contact_phone"], salt="") == "\uFF0B12345678"
+        assert scrub_pii("\uff0b12345678", ["contact_phone"], salt="") == "\uff0b12345678"
         for i in range(0x110000):
             c = chr(i)
             if unicodedata.category(c) in ("No", "Nl"):
