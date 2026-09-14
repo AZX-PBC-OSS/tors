@@ -505,6 +505,19 @@ class TestArgumentContract:
             with pytest.raises(UnicodeEncodeError):
                 call("\ud800" * 36)  # type: ignore[arg-type]
 
+    def test_the_returns_are_genuine_bytes_and_int(self) -> None:
+        # The marshalling shape, the byte-len family's genuine-return pin
+        # class: uuid_parse answers a genuine bytes (bytearray and
+        # memoryview both compare equal to their bytes, so every == pin
+        # above passes for them too), and the int-out pair answers
+        # genuine int (uuid_version of a nil UUID answers 0, which
+        # False == 0 would satisfy).
+        parsed = uuid_parse(DOC_V7_TEXT)
+        assert type(parsed) is bytes
+        assert type(uuid_version(DOC_V7_BYTES)) is int
+        assert type(uuid7_timestamp_ms(DOC_V7_BYTES)) is int
+        assert type(uuid_version(bytes(16))) is int  # the nil UUID's 0
+
 
 class TestStdlibDivergencePins:
     """Where the stdlib is looser than tors, the divergence is recorded as a
