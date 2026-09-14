@@ -667,6 +667,40 @@ fn convert(
     Ok((resolved, engine, markdown))
 }
 
+/// Read from `reader` into `buf` (which may already hold a prefix) until EOF
+/// or one byte past `ceiling`. Returns the bytes and whether the input
+/// exceeded `ceiling`. Never allocates more than `ceiling + 1 + CHUNK` and
+/// never grows through infallible `reserve`, so an oversized input surfaces
+/// as an `OutOfMemory` io error rather than an allocation abort. This is the
+/// piece that closes issue #80 symptoms 2 and 3: the read is self-limiting
+/// regardless of what the file's stat claimed. Callers guarantee
+/// `buf.len() <= ceiling` on entry (the prefix is always <= SNIFF_PREFIX,
+/// which is below any ceiling used here).
+pub fn read_bounded_into<R: std::io::Read>(
+    mut reader: R,
+    mut buf: Vec<u8>,
+    ceiling: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    const CHUNK: usize = 64 * 1024;
+    loop {
+        if buf.len() > ceiling {
+            return Ok((buf, true));
+        }
+        // ceiling + 1 - buf.len() >= 1 here, so `want >= 1`.
+        let want = std::cmp::min(CHUNK, ceiling + 1 - buf.len());
+        let start = buf.len();
+        buf.try_reserve_exact(want).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::OutOfMemory, "input too large to buffer")
+        })?;
+        buf.resize(start + want, 0);
+        let n = reader.read(&mut buf[start..]).map_err(std::io::Error::from)?;
+        buf.truncate(start + n);
+        if n == 0 {
+            return Ok((buf, false));
+        }
+    }
+}
+
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
 /// the content markers, which beat the name hint's extension, and the
 /// extension resolves through the same [`Kind::from_name`] vocabulary the
@@ -2034,5 +2068,57 @@ mod tests {
         // a misdetected format (the mislabeled-extension doctrine).
         let err = convert_err("workbook.xlsx", &workbook);
         assert!(matches!(err, DocumentError::Convert(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn read_bounded_exactly_at_ceiling_is_accepted() {
+        use std::io::Cursor;
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![7u8; 200]), Vec::new(), 200).unwrap();
+        assert_eq!(bytes.len(), 200);
+        assert!(!over);
+    }
+
+    #[test]
+    fn read_bounded_one_past_ceiling_is_flagged() {
+        use std::io::Cursor;
+        let (_, over) =
+            super::read_bounded_into(Cursor::new(vec![7u8; 201]), Vec::new(), 200).unwrap();
+        assert!(over);
+    }
+
+    #[test]
+    fn read_bounded_infinite_stream_is_bounded_without_doubling() {
+        use std::io::Read as _;
+        // io::repeat is infinite; the read must stop and must not over-allocate.
+        let r: std::io::Repeat = std::io::repeat(0u8);
+        let (bytes, over) =
+            super::read_bounded_into(r.take(u64::MAX), Vec::new(), 1_000_000).unwrap();
+        assert!(over);
+        // capacity stays near the ceiling, proving no geometric doubling.
+        assert!(
+            bytes.capacity() <= 1_000_000 + 1 + 64 * 1024,
+            "capacity {} overshot",
+            bytes.capacity()
+        );
+    }
+
+    #[test]
+    fn read_bounded_empty_reader_returns_empty() {
+        use std::io::Cursor;
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(Vec::<u8>::new()), Vec::new(), 200).unwrap();
+        assert!(bytes.is_empty());
+        assert!(!over);
+    }
+
+    #[test]
+    fn read_bounded_continues_from_a_prefix() {
+        use std::io::Cursor;
+        // buf already holds 3 bytes (a "prefix"); reader adds 2 more; ceiling 10.
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![9u8; 2]), vec![1u8, 2, 3], 10).unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 9, 9]);
+        assert!(!over);
     }
 }
