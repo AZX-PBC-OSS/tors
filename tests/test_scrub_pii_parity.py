@@ -16,14 +16,20 @@ entry point>(text)``.
 
 tors's phone rule carries one deliberate extension past that contract:
 the domestic NANP matcher (un-plussed shapes the source leaves
-untouched). The lanes are split accordingly: every QUOTED-PIN lane below
+untouched), and the api_keys rule carries a second (the credential
+families). The lanes are split accordingly: every QUOTED-PIN lane below
 routes on the domestic guard — the input guard for single-rule lanes,
 the email-pass-output guard for BOTH-rules lanes (the matcher runs on
 the email pass's result, and the email local removal can trim a
-too-long digit run into a phone shape) — parity is asserted exactly
+too-long digit run into a phone shape) — and on the keys guard for
+every lane where api_keys is active (the input guard suffices there:
+the keys pass runs BEFORE the email pass, so a key-free input leaves it
+the identity and the email-pass output the domestic guard needs is the
+same both engines produce) — parity is asserted exactly
 where the source's own semantics apply — and ``TestDomesticExtension``
-pins the other side in both directions (the oracle must leave the shape, tors must
-scrub exactly the span), so a regression on either side of the extension
+/ ``TestApiKeyExtension``
+pin the other side in both directions (the oracle must leave the shape, tors must
+scrub exactly the span), so a regression on either side of an extension
 fails loudly instead of surfacing as a parity mystery.
 
 The live re-sync lane is env-gated and NEVER runs in CI:
@@ -127,6 +133,7 @@ _RULES_LANES: list[list[str] | None] = [
     ["contact_phone", "contact_email"],
     ["contact_email"],
     ["contact_phone"],
+    ["api_keys"],
     [],
 ]
 
@@ -276,27 +283,119 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
     return has_domestic_shape(email_pass)
 
 
+# The api-key guard: whether tors's keys rule (the credential extension
+# past the source's two-rule contact contract) would fire anywhere in
+# `text`. A faithful test-side mirror of the landed grammar — the family
+# table longest-prefix-first with fall-through, the maximal tail run of
+# the shared [A-Za-z0-9_-] charset, the prefix-boundary rule (a prefix
+# glued to a preceding key-charset char is mid-token, the `xak-` cut),
+# and the JWT marker scoping — used only to route inputs between the
+# lanes, the same posture as `has_domestic_shape`. The scanner's
+# first-byte dispatch is a pure optimization and is deliberately NOT
+# mirrored: every family prefix is tried at every clean position, which
+# is behaviorally identical and one less thing to drift.
+_KEY_FAMILIES: tuple[tuple[str, int], ...] = (
+    ("github_pat_", 22),
+    ("sk-svcacct-", 20),
+    ("sk-proj-", 20),
+    ("sk-ant-", 20),
+    ("azxdev_", 20),
+    ("ghp_", 36),
+    ("AIza", 35),
+    ("fw-", 20),
+    ("fw_", 20),
+    ("ak-", 20),
+    ("wk-", 20),
+    ("wd-", 43),
+    ("cn-", 20),
+    ("sk-", 20),
+    ("w-", 43),
+)
+_KEY_TAIL = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+_BEARER_MARKER = "Bearer eyJ"
+
+
+def _jwt_span_at(text: str, start: int) -> int | None:
+    """The JWT family at one position: the `Bearer eyJ` marker plus three
+    maximal `[A-Za-z0-9_-]+` segments, single-dot separated (the marker
+    consumed the first segment's `eyJ` head, so the grammar needs at
+    least one more charset char before the first dot — the degenerate
+    `Bearer eyJ.a.b` is a non-match). The end offset, or None."""
+    if not text.startswith(_BEARER_MARKER, start):
+        return None
+    i = start + len(_BEARER_MARKER)
+    for seg in range(3):
+        run_start = i
+        while i < len(text) and text[i] in _KEY_TAIL:
+            i += 1
+        if i == run_start:
+            return None
+        if seg < 2:
+            if i >= len(text) or text[i] != ".":
+                return None
+            i += 1
+    return i
+
+
+def has_api_key_shape(text: str) -> bool:
+    n = len(text)
+    for i in range(n):
+        if i > 0 and text[i - 1] in _KEY_TAIL:
+            continue  # a mid-token prefix: the boundary rule
+        for prefix, min_tail in _KEY_FAMILIES:
+            if not text.startswith(prefix, i):
+                continue
+            j = i + len(prefix)
+            while j < n and text[j] in _KEY_TAIL:
+                j += 1
+            if j - (i + len(prefix)) >= min_tail:
+                return True
+            # a too-short tail falls through to the shorter prefixes
+        if _jwt_span_at(text, i) is not None:
+            return True
+    return False
+
+
+def _both_lane_diverges(text: str, salt: str | None) -> bool:
+    """The BOTH-rules router, both extensions at once: key shapes guard
+    on the INPUT (the keys pass runs BEFORE the email pass, so a key-free
+    input leaves it the identity and the email-pass output the domestic
+    guard inspects is the same both engines produce), and the domestic
+    matcher still guards on the EMAIL-PASS OUTPUT per the existing
+    design. Key-bearing rows pin in TestApiKeyExtension instead."""
+    if has_api_key_shape(text):
+        return True
+    return _both_lane_has_domestic_shape(text, salt)
+
+
 @pytest.mark.parametrize("salt", _SALT_LANES, ids=["default-salt", "unsalted", "custom-salt"])
 @pytest.mark.parametrize("text", CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))])
 def test_quoted_pin_parity(text: str, salt: str | None) -> None:
-    """The CI oracle lane, both rules (the canonical order): every corpus
-    shape at every salt spelling — tors's documented default, the
+    """The CI oracle lane, every rule at the canonical order: every corpus
+    shape at every salt spelling — tors's documented defaults (the
+    per-rule contact/keys split), the
     unsalted source-parity spelling, and a caller secret. Domestic-bearing
-    inputs route to the extension lane (the source has no domestic
-    grammar to be parity-checked against)."""
-    if _both_lane_has_domestic_shape(text, salt):
-        pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
+    and key-bearing inputs route to their extension lanes (the source has
+    no domestic or key grammar to be parity-checked against)."""
+    if _both_lane_diverges(text, salt):
+        pytest.skip("domestic or api-key shape: pinned in the extension lanes, not the parity lane")
     assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
 
 
-def _rules_lane_has_domestic_shape(text: str, rules: list[str] | None) -> bool:
-    """The rules-lane router: BOTH-rules lanes (None and both canonical
-    orders) route on the email-pass output — the matcher runs there, and
-    the email local removal can trim a too-long digit run into a phone
-    shape. Single-rule lanes run their matcher on the input (phone-only
-    never sees the email pass; email-only never runs the phone matcher),
-    and the identity lane skips nothing extra: the input guard stands."""
-    if rules is None or set(rules) == {"contact_email", "contact_phone"}:
+def _rules_lane_diverges(text: str, rules: list[str] | None) -> bool:
+    """The rules-lane router: lanes where api_keys is active (None and
+    any set naming it) route key shapes on the input — the keys pass runs
+    before the email pass, so input-guarding suffices; BOTH-rules lanes
+    (None and both contact orders) still route the domestic matcher on
+    the email-pass output, the existing design; single-rule lanes keep
+    the input guard (the identity lane skips nothing extra: the existing
+    conservative posture)."""
+    wanted = None if rules is None else set(rules)
+    if (wanted is None or "api_keys" in wanted) and has_api_key_shape(text):
+        return True
+    if wanted is None or wanted == {"contact_email", "contact_phone"}:
         return _both_lane_has_domestic_shape(text, "")
     return has_domestic_shape(text)
 
@@ -305,10 +404,11 @@ def _rules_lane_has_domestic_shape(text: str, rules: list[str] | None) -> bool:
 @pytest.mark.parametrize("text", CORPUS, ids=[f"corpus-{i}" for i in range(len(CORPUS))])
 def test_quoted_pin_rules_parity(text: str, rules: list[str] | None) -> None:
     """The rules lanes over the unsalted spelling (the source chain's own
-    digest): both canonical orders, each subset, and the identity — the
-    last one pinning that the oracle and tors agree on doing nothing."""
-    if _rules_lane_has_domestic_shape(text, rules):
-        pytest.skip("domestic shape: pinned in TestDomesticExtension, not the parity lane")
+    digest): the canonical None order, both contact orders, each subset,
+    and the identity — the last one pinning that the oracle and tors
+    agree on doing nothing."""
+    if _rules_lane_diverges(text, rules):
+        pytest.skip("domestic or api-key shape: pinned in the extension lanes, not the parity lane")
     assert tors.scrub_pii(text, rules, salt="") == reference_scrub_pii(text, rules, salt="")
 
 
@@ -343,16 +443,18 @@ class TestHypothesisDifferential:
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_both_rules_match_the_quoted_pin(self, text: str, salt: str | None) -> None:
-        assume(not _both_lane_has_domestic_shape(text, salt))
+        assume(not _both_lane_diverges(text, salt))
         assert tors.scrub_pii(text, salt=salt) == reference_scrub_pii(text, salt=salt)
 
     @pytest.mark.parametrize(
-        "rules", [["contact_email"], ["contact_phone"], []], ids=["email", "phone", "identity"]
+        "rules",
+        [["contact_email"], ["contact_phone"], ["api_keys"], []],
+        ids=["email", "phone", "keys", "identity"],
     )
     @given(text=_composed_text)
     @settings(max_examples=150, deadline=None)
     def test_rule_subsets_match_the_quoted_pin(self, text: str, rules: list[str]) -> None:
-        assume(not has_domestic_shape(text))
+        assume(not _rules_lane_diverges(text, rules))
         assert tors.scrub_pii(text, rules, salt="") == reference_scrub_pii(text, rules, salt="")
 
     @given(text=_composed_text)
@@ -722,14 +824,14 @@ class TestLiveResyncLane:
     def test_the_corpus_matches_the_live_module(self) -> None:
         live = _live_oracle()
         for text in CORPUS:
-            if _both_lane_has_domestic_shape(text, ""):
-                continue  # the extension lane's territory; the live module has no domestic grammar
+            if _both_lane_diverges(text, ""):
+                continue  # the extension lanes' territory; the live module has neither grammar
             assert tors.scrub_pii(text, salt="") == live(text), text
 
     @given(text=_composed_text)
     @settings(max_examples=300, deadline=None)
     def test_compositions_match_the_live_module(self, text: str) -> None:
-        assume(not _both_lane_has_domestic_shape(text, ""))
+        assume(not _both_lane_diverges(text, ""))
         live = _live_oracle()
         assert tors.scrub_pii(text, salt="") == live(text)
 
@@ -905,3 +1007,153 @@ class TestDomesticSeedCoverage:
         assert any(s.startswith(" ") or s.startswith("  ") for s in _DOMESTIC_SEEDS), (
             "no leading-space seed"
         )
+
+
+# --- The api-keys extension lane: the keys rule past the source -----------------
+#
+# The source's contract is two contact rules; tors's api_keys rule is the
+# credential extension, pinned the way the domestic matcher is: the
+# quoted oracle leaves every key shape whole (it has no key grammar), and
+# tors scrubs exactly the span — both directions named, so a regression
+# on either side fails as itself instead of surfacing as a parity
+# mystery. The key material here is independently spelled from
+# tests/test_scrub_pii.py's zoo (a rot-13 offset into the same 62-char
+# alphabet: different bytes, the same charset class), the file's
+# independent-transcription posture.
+
+_KEYS_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _key_tail(n: int) -> str:
+    return "".join(_KEYS_ALPHABET[(i + 13) % 62] for i in range(n))
+
+
+_KEYS_JWT = (
+    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+)
+
+# (the key's literal shape, the token's family prefix, the tail length)
+_KEYS_TABLE: tuple[tuple[str, str, int], ...] = (
+    ("sk-", "sk-", 48),
+    ("sk-proj-", "sk-proj-", 48),
+    ("sk-svcacct-", "sk-svcacct-", 48),
+    ("sk-ant-api03-", "sk-ant-", 95),
+    ("AIza", "AIza", 35),
+    ("fw-", "fw-", 48),
+    ("fw_", "fw_", 48),
+    ("ak-", "ak-", 48),
+    ("wk-", "wk-", 48),
+    ("ghp_", "ghp_", 36),
+    ("github_pat_", "github_pat_", 22),
+    ("azxdev_", "azxdev_", 20),
+    ("wd-", "wd-", 43),
+    ("w-", "w-", 43),
+    ("cn-", "cn-", 20),
+)
+
+# (input, the span tors scrubs, the token's family prefix): every family
+# at its own shape, the JWT, the keys-before-phone order (the
+# dash-separated ten-digit run inside the tail — the phone pass must see
+# only the token), and a key embedded in error prose.
+_KEYS_CASES: list[tuple[str, str, str]] = [
+    (shape + _key_tail(n), shape + _key_tail(n), prefix)
+    for shape, prefix, n in _KEYS_TABLE
+] + [
+    (_KEYS_JWT, _KEYS_JWT, "Bearer"),
+    (
+        f"leaked sk-proj-415-555-2671{_key_tail(20)} in an error",
+        f"sk-proj-415-555-2671{_key_tail(20)}",
+        "sk-proj-",
+    ),
+]
+
+_KEYS_NON_MATCHES: list[str] = [
+    # The grammar cuts, shared by BOTH engines: one-under tails at every
+    # distinct minimum, the uppercase spelling, the bare prefix, the
+    # mid-token prefix, and the unmarked/degenerate JWT spellings.
+    "sk-" + _key_tail(19),
+    "sk-",
+    "SKI-" + _key_tail(48),
+    "AIza" + _key_tail(34),
+    "ghp_" + _key_tail(35),
+    "github_pat_" + _key_tail(21),
+    "azxdev_" + _key_tail(19),
+    "wd-" + _key_tail(42),
+    "w-" + _key_tail(42),
+    "cn-" + _key_tail(19),
+    "fw-" + _key_tail(19),
+    "ak-" + _key_tail(19),
+    "xak-" + _key_tail(48),
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKx",
+    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln",
+    "Bearer eyJ.a.b.c",
+]
+
+
+class TestApiKeyExtension:
+    @pytest.mark.parametrize(
+        ("text", "matched", "prefix"),
+        _KEYS_CASES,
+        ids=[f"{c[2]}-{i}" for i, c in enumerate(_KEYS_CASES)],
+    )
+    def test_the_quoted_oracle_leaves_the_shape(self, text: str, matched: str, prefix: str) -> None:
+        # The oracle is the two-rule contact contract: no key grammar, no
+        # domestic grammar — every key shape (the digit-bearing tail
+        # included) survives it whole.
+        assert reference_scrub_pii(text, None, salt="") == text
+
+    @pytest.mark.parametrize(
+        ("text", "matched", "prefix"),
+        _KEYS_CASES,
+        ids=[f"{c[2]}-{i}" for i, c in enumerate(_KEYS_CASES)],
+    )
+    def test_tors_scrubs_exactly_the_span(self, text: str, matched: str, prefix: str) -> None:
+        # The unsalted digest, derived independently (hashlib): the family
+        # prefix verbatim over the digest of the FULL matched key. The
+        # phone-bearing key pins the pass order — the whole key is one
+        # span, the phone pass never sees the digit run — and every
+        # output converges.
+        token = f"{prefix}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+        assert text.count(matched) == 1
+        once = tors.scrub_pii(text, salt="")
+        assert once == text.replace(matched, token, 1)
+        twice = tors.scrub_pii(once, salt="")
+        assert tors.scrub_pii(twice, salt="") == twice
+
+    @pytest.mark.parametrize(
+        "text",
+        _KEYS_NON_MATCHES,
+        ids=[f"key-nonmatch-{i}" for i in range(len(_KEYS_NON_MATCHES))],
+    )
+    def test_the_grammar_cuts_are_shared_non_matches(self, text: str) -> None:
+        # Both engines leave these untouched, and the guard must NOT
+        # route them to the extension lane (it mirrors the boundary rule
+        # and the minimums exactly), so parity is asserted here, never
+        # skipped.
+        assert not has_api_key_shape(text)
+        assert reference_scrub_pii(text, None, salt="") == text
+        assert tors.scrub_pii(text, salt="") == text
+
+    def test_the_guard_routes_every_key_case(self) -> None:
+        # The mirror must agree with the landed scanner's routing: every
+        # extension case (the embedded-in-prose and phone-bearing
+        # spellings included) flags, so the parity lanes skip exactly
+        # what this lane pins.
+        for text, _matched, _prefix in _KEYS_CASES:
+            assert has_api_key_shape(text), text
+
+    def test_the_corpus_is_key_free_so_the_parity_lanes_assert_it(self) -> None:
+        # The existing quoted-pin lanes stay meaningful only while the
+        # corpus (and the composed hypothesis alphabet's pieces) carry no
+        # key shape: a key-bearing row would silently SKIP instead of
+        # asserting parity. Pinned so a future corpus edit that adds one
+        # fails loudly here instead of quietly thinning the differential.
+        # (`+`, hex, and the zoo's letters cannot compose a family prefix
+        # — no piece ends in a family head's lead chars — and the
+        # hypothesis lanes route composed exceptions out with the guard.)
+        for row in CORPUS:
+            assert not has_api_key_shape(row), row
+        for piece in _PIECES:
+            assert not has_api_key_shape(piece), piece
