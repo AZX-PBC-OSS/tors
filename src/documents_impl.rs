@@ -701,6 +701,34 @@ pub fn read_bounded_into<R: std::io::Read>(
     }
 }
 
+/// The most bytes worth reading before the authoritative `resolve()` runs,
+/// judged from a prefix. Content markers decide, exactly as `resolve()` does,
+/// so a `.pdf`-named CSV is treated as the metered lane it really is. A
+/// metered lane (anydoc/office_oxide) returns `DEFAULT_ANYDOC_INPUT_LIMIT`;
+/// the unmetered pdf/html lanes and any input whose lane cannot be told from
+/// the prefix (a truncated ZIP central directory) return `fallback`. Only
+/// complete lines of the prefix are considered, so a prefix cut mid-line does
+/// not skew the CSV heuristic.
+pub fn provisional_read_ceiling(
+    prefix: &[u8],
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    fallback: usize,
+) -> usize {
+    // Drop a trailing partial line so the CSV witness sees only whole lines.
+    let end = match prefix.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => nl + 1,
+        None => prefix.len(),
+    };
+    let head = &prefix[..end];
+    let metered = resolve(head, name_hint, format)
+        .ok()
+        .and_then(|kind| engine_for(kind, backend).ok())
+        .is_some_and(|engine| matches!(engine, Engine::Anydoc | Engine::OfficeOxide));
+    if metered { DEFAULT_ANYDOC_INPUT_LIMIT } else { fallback }
+}
+
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
 /// the content markers, which beat the name hint's extension, and the
 /// extension resolves through the same [`Kind::from_name`] vocabulary the
@@ -2120,5 +2148,75 @@ mod tests {
             super::read_bounded_into(Cursor::new(vec![9u8; 2]), vec![1u8, 2, 3], 10).unwrap();
         assert_eq!(bytes, vec![1, 2, 3, 9, 9]);
         assert!(!over);
+    }
+
+    const PROVISIONAL_FALLBACK: usize = 512 * 1024 * 1024;
+
+    #[test]
+    fn provisional_csv_prefix_picks_the_metered_ceiling() {
+        // Two comma lines: the CSV heuristic routes to the anydoc lane.
+        let prefix = b"unit,status\na,ok\nb,ok\n";
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("data.csv"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_pdf_prefix_stays_unmetered() {
+        let c = provisional_read_ceiling(
+            b"%PDF-1.4\n...",
+            Some("x.pdf"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, PROVISIONAL_FALLBACK);
+    }
+
+    #[test]
+    fn provisional_pdf_named_csv_is_metered_by_content() {
+        // Content beats name: a .pdf-named CSV must still get the metered ceiling.
+        let prefix = b"unit,status\na,ok\nb,ok\n";
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("x.pdf"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_truncated_zip_prefix_falls_back() {
+        // A ZIP local-file header with no central directory cannot be resolved
+        // from a prefix; degrade to the fallback, not a metered guess.
+        let c = provisional_read_ceiling(
+            b"PK\x03\x04\x14\x00",
+            None,
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, PROVISIONAL_FALLBACK);
+    }
+
+    #[test]
+    fn provisional_partial_last_line_does_not_skew_csv() {
+        // A prefix cut mid-line must not miscount; only complete lines are fed.
+        let prefix = b"a,b\nc,d\ne,"; // last line incomplete
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("f.csv"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT); // still CSV from the two complete lines
     }
 }
