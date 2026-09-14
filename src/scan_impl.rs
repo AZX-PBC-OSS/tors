@@ -351,6 +351,16 @@ pub fn utf8_byte_len(s: &str) -> usize {
 /// here (measured 4.2 GB/s scalar on that box, slower than the
 /// expression the function exists to beat — the wall cells in
 /// tests/test_performance.py record both lanes).
+///
+/// TARGET-DEPENDENCE, stated: this loop auto-vectorizes on NEON and
+/// NOT on SSE2-baseline x86-64 (the CI runners measured it 10-25x
+/// slower than the arm64 band there, slower than the encode
+/// expression) — which is why the ASCII fast path above
+/// (`is_ascii`, the one portably-SIMD part, then `2 * len`) exists:
+/// the ASCII lane is target-independent and wins everywhere, and only
+/// this non-ASCII loop is target-dependent (the wall cells assert the
+/// ASCII win outright and the non-ASCII lane at a cross-arch
+/// no-catastrophe bound, with both targets' measured numbers).
 const UTF16_COUNT_CHUNK: usize = 16;
 
 /// The single narrowing step shared by the core below: `2 * (codepoints
@@ -420,6 +430,22 @@ pub(crate) fn utf16_combine_counts(codepoints: u64, astral: u64) -> Option<usize
 /// surrogatepass acceptance mode are the two honest differences — the
 /// wrapper's docs and the Python battery pin both).
 pub fn utf16_byte_len(s: &str) -> Option<usize> {
+    // The pure-ASCII fast path: every ASCII codepoint is a one-unit BMP
+    // codepoint, so the answer is exactly `2 * len` — and `is_ascii` is
+    // the one part of this scan that IS portably SIMD (std spells it in
+    // widened word loads on every target, arm64 and x86-64 baseline
+    // alike), so this lane wins the race against the encode expression
+    // outright everywhere. The general path's chunk loop auto-vectorizes
+    // on NEON but NOT on SSE2-baseline x86-64 (CI's runners measured it
+    // 10-25x slower than the calibrated band there), which is exactly why
+    // this fast path exists rather than a "the chunk loop is fast
+    // everywhere" assumption: the ASCII lane — the common interop case —
+    // is target-independent, and only the non-ASCII lane is
+    // target-dependent (the wall cells in tests/test_performance.py
+    // state both lanes' measured numbers).
+    if s.is_ascii() {
+        return utf16_combine_counts(s.len() as u64, 0);
+    }
     // The derivation's two counts, one chunked pass: one unit per
     // codepoint (its lead byte), one more per astral codepoint (its
     // 4-byte lead) — doubled once at the end via utf16_combine_counts.

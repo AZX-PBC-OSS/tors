@@ -72,12 +72,15 @@ otherwise use:
   allocates and encodes the full 2n `bytes` object just to count it;
   `tors` derives the count from the borrowed UTF-8 view (2 bytes per
   codepoint plus 2 more per astral codepoint, both counts byte classes)
-  in one chunked pass with no allocation (bench artifact on the
-  calibration box, arm64 rustc release: ~30 GB/s; re-measure on your
-  target): ~2.2 µs at 64 KiB
-  against the expression's ~9-10 µs, ~34 µs at 1 MiB against ~145 µs,
-  ~400 µs at 12 MiB against ~1.7 ms — ratios 0.21-0.26 on every warm
-  lane, both corpus kinds (the scan is representation-independent).
+  with no allocation. CROSS-ARCH, stated: pure-ASCII text takes a
+  portably-SIMD `is_ascii` fast path (`2 * len`) that wins outright on
+  every target; non-ASCII text runs the chunked counting loop, a bench
+  artifact that auto-vectorizes on arm64 NEON (~30 GB/s there:
+  ~2.2 µs at 64 KiB against the expression's ~9-10 µs, ~34 µs at 1 MiB
+  against ~145 µs) but NOT on SSE2-baseline x86-64 (the CI runners
+  measured it 2.2-2.5x SLOWER than the expression there — the value on
+  that target is the zero-allocation and the GIL release, not the wall
+  win; the wall cells assert the cross-arch no-catastrophe bound).
   The one lane the expression wins, recorded: a fresh non-ASCII
   object's first call pays the borrow's UTF-8-cache materialization
   (the utf8 twin's cold class) before the scan, while the utf-16
