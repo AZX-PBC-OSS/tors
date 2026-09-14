@@ -129,7 +129,8 @@ actually return.
 
 ## What's inside
 
-104 functions plus two small helper classes and five pinned charset constants,
+107 functions plus two small helper classes and six pinned constants (five
+charset alphabets and the key-family tuple),
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
 edge cases are in the [API reference](docs/api.md).

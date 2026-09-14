@@ -86,7 +86,7 @@ def scrub_pii(
     families: Sequence[str] | None = None,
 ) -> str: ...
 
-# The canonical key-family tuple, in the scanner table's order: the
+# The canonical key-family tuple, in the KeyFamily discriminant order: the
 # base for "all but X" comprehensions
 # (families=[f for f in tors.KEY_FAMILIES if f != "jwt"]) and the set
 # the families= unknown-name error names. The set grows on new
