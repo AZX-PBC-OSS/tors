@@ -472,16 +472,14 @@ credential-rotation queue. Always `{}` when `families=None`; `{}` when
 codepoint indices into the INPUT, each typed `<rule>`
 (`contact_email`, `contact_phone`) or `api_keys:<family>`
 (`api_keys:openai`, `api_keys:jwt`, …). `text[start:end]` is the match
-it replaced, with three documented exceptions where passes compose: a
+it replaced, with two documented exceptions where passes compose: a
 match that began inside a prior token's digest is recorded from that
-token's input end (only the input-side suffix is addressable), a
+token's input end (only the input-side suffix is addressable), and a
 match that ran into a prior token's verbatim head overlaps the
 producing span (the input bytes fed two tokens; both spans are
-recorded, keys before email before phone at shared starts), and a
-match that ends at a prior token's `~` is recorded through to the
-producing span's end — the digest half has no preimage, so the span
-covers the whole key while the match ate only its verbatim head;
-reconstruction uses the head, not the span. Empty input
+recorded, keys before email before phone at shared starts; a span END
+at the head boundary maps affinely to the head end, so the span text
+is exactly what the match ate). Empty input
 is the empty report: `{"text": "", "redacted": {}, "skipped": {},
 "spans": []}`. Salt, idempotence, and the surrogate boundary behave
 exactly as documented above.

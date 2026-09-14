@@ -1423,15 +1423,18 @@ pub fn scrub_pii<'a>(
 /// Map a position in a pass's OUTPUT back to the pass's input, through
 /// that pass's recorded edits: a position in copied material shifts by
 /// the cumulative delta; a position inside a token's verbatim head maps
-/// affinely to its source bytes (the head IS those bytes); a position
-/// at or past the token's `~` — the derived digest half, which has no
-/// preimage — collapses to the replaced span's end. Monotone by
-/// construction, so mapped spans stay ordered and well-formed: a later
-/// match that began inside a token's digest is recorded from that
-/// token's input end (the first position whose material is real input —
-/// exactly the keys-before-email corner's shape), and a match that ran
-/// into a token's verbatim head maps back onto the producing span (the
-/// input bytes fed two tokens; both spans are recorded).
+/// affinely to its source bytes (the head IS those bytes), INCLUDING
+/// the head-end boundary itself (a span END at the `~` slot consumed
+/// the head through its last byte, so its preimage end is the head
+/// end); a position strictly past the head — the derived digest half,
+/// which has no preimage — collapses to the replaced span's end.
+/// Monotone by construction, so mapped spans stay ordered and
+/// well-formed: a later match that began inside a token's digest is
+/// recorded from that token's input end (the first position whose
+/// material is real input — exactly the keys-before-email corner's
+/// shape), and a match that ran into a token's verbatim head maps back
+/// onto the producing span (the input bytes fed two tokens; both spans
+/// are recorded).
 /// The offset-map cursor: a monotone sweep over one pass's edits for
 /// a NON-DECREASING position stream. Each pass emits its spans
 /// left-to-right, and every map is monotone, so every mapping stream
@@ -1463,7 +1466,7 @@ impl<'e> BackMap<'e> {
             let new_end = new_start + e.token.len();
             if pos < new_end {
                 let off = pos - new_start;
-                return if off < e.verbatim_len {
+                return if off <= e.verbatim_len {
                     e.verbatim_src + off
                 } else {
                     e.end
@@ -2728,7 +2731,9 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
     fn map_back_folds_verbatim_affine_and_collapses_digests() {
         // One keys edit: "sk-KEY(48)" [0,51) became "sk-~hex12" [0,16).
         // Copied material before shifts by nothing; the verbatim head
-        // maps affinely; the `~`+hex collapses to the replaced end; the
+        // maps affinely INCLUDING its end boundary (a span END at the
+        // `~` slot ate the head through its last byte); strictly past
+        // the head the `~`+hex collapses to the replaced end; the
         // material after shifts by the delta.
         let edits = vec![PassEdit {
             start: 0,
@@ -2739,7 +2744,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
         }];
         assert_eq!(map_back(&edits, 0), 0);
         assert_eq!(map_back(&edits, 2), 2); // inside "sk-": affine
-        assert_eq!(map_back(&edits, 3), 51); // the `~`: collapse
+        assert_eq!(map_back(&edits, 3), 3); // head end: affine (span END)
         assert_eq!(map_back(&edits, 9), 51); // mid-hex: collapse
         assert_eq!(map_back(&edits, 16), 51); // token end: the replaced end
         assert_eq!(map_back(&edits, 17), 52); // past the token: delta -35

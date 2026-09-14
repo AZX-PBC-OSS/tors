@@ -1551,12 +1551,12 @@ def _reconstruct(
             # inside a token's head).
             assert not any(ks < start < ke for (ks, ke, _) in key_spans), (span, key_spans)
             core = text[start:end]
-            # Head-truncation (the 4th corner): the match may have run
-            # into a LATER key token's verbatim head — the span's end is
-            # then clamped to the key's end, but the match only ate the
-            # head, so the span text overstates it. At most one key span
-            # can overlap (a match never spans a token's `~`); an affine
-            # end needs no fix (the span text already equals the match).
+            # Head overlap: the match may have run into a LATER key
+            # token's verbatim head (BackMap maps the `~`-slot end
+            # affinely to the head end, so the span text is exactly what
+            # the match ate). At most one key span can overlap (a match
+            # never spans a token's `~`); a legacy overstatement end
+            # (span end clamped to the key end) truncates to the head.
             for ks, ke, _ktyp in key_spans:
                 if start < ks < end:
                     assert end <= ke, (span, ks, ke)
@@ -1775,18 +1775,17 @@ class TestScrubPiiReport:
         assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
 
     def test_an_email_eating_a_whole_key_head_pins_the_truncation_corner(self) -> None:
-        # The fourth corner (hypothesis-found, first-run failure): the
-        # email's domain run flows into a key token's verbatim head up to
-        # the `~` — the span's end clamps to the key's end, but the match
-        # only ate the head, so the span text overstates it and the
-        # reconstruction must truncate to the head.
+        # The email's domain run flows into a key token's verbatim head
+        # up to the `~`: the span end maps affinely to the head end, so
+        # the span text is exactly what the match ate.
         key = "AIza" + _key_tail(35)
         text = "a@b.co." + key
         rep = scrub_pii_report(text, salt="")
         assert rep["spans"] == [
-            {"type": "contact_email", "start": 0, "end": len(text)},
+            {"type": "contact_email", "start": 0, "end": 11},
             {"type": "api_keys:google", "start": 7, "end": len(text)},
         ]
+        assert text[0:11] == "a@b.co.AIza"
         assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
 
     def test_two_numbers_in_one_domain_fire_the_shift_path(self) -> None:
