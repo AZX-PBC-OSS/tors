@@ -61,13 +61,17 @@ The cuts below are decisions, not oversights:
   `scrub_pii`) follows the same charter from the other direction: each is
   a hand-rolled scanner for one pinned grammar (a ported call-site
   contract), never a general pattern surface. `scrub_pii`'s rule set is
-  the closed two-name contact set — email addresses and `+`-led phone
-  numbers — because that is the contract the adopted telemetry-safety
-  module states; other redaction grammars (credential-shaped material,
-  national identifiers) are separate follow-up contracts with their own
-  pinned sources, not silent extensions of this one, the same way C1
+  the closed three-name set — the ported contact pair (email addresses
+  and `+`-led phone numbers) plus the api_keys credential families —
+  where the contact pair is the adopted telemetry-safety module's own
+  contract and the key families are their own evidence-backed closed set
+  (five private consumers; a follow-up contract that landed as its own
+  pinned rule, not a silent widening of the ported one), the same way C1
   controls are a follow-up to `strip_controls` rather than a widening of
-  it.
+  it. Further redaction grammars (national identifiers and the
+  zero-evidence credential shapes — Slack xox, Stripe, AWS AKIA) remain
+  separate follow-up contracts with their own
+  pinned sources, not silent extensions of this one.
 - **A general RNG engine surface.** The random-generation family is a
   closed set of named generators — `random_string`, `random_hex`,
   `random_b62`, `random_b64url`, `uuid4`, `uuid7` — over exactly two

@@ -119,27 +119,35 @@ tors.strip_controls("score: 4\x00\x01great\x7f")
 ```python
 def scrub_pii(
     text: str,
-    rules: Sequence[Literal["contact_email", "contact_phone"]] | None = None,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
     *,
     salt: str | None = None,
 ) -> str: ...
 ```
 
-Replace contact material — email addresses and `+`-led phone numbers — inside
+Replace contact material — email addresses and `+`-led phone numbers —
+and credential material — provider/platform API keys — inside
 free text with correlation tokens, in one GIL-released pass. The call-site
 driver: telemetry is the one store a data purge cannot reach, so an error
 excerpt, rejection message, or response-body excerpt that echoes a person's
-address or number must be scrubbed before it reaches the log — the shape
-upstream APIs produce when they echo request content back in an error string.
-A port of a private consumer's telemetry-safety module, pinned byte-identical
-to it at `salt=""`.
+address or number — or the credential the request authenticated with —
+must be scrubbed before it reaches the log: provider and platform error
+text can quote the credential back (five private consumers evidenced; the
+strongest, a platform whose own code comments that a vendor auth failure
+"can quote the key" and keeps the full text in an admin-served ledger).
+The contact rules are a port of a private consumer's telemetry-safety
+module, pinned byte-identical to it at `salt=""`; the api_keys rule is an
+extension past that contract.
 
 What the tokens are: `@domain~<digest>` for an email (the domain is the
 non-identifying half an operator actually reasons about — "the ambiguity is on
 the corporate domain"), `prefix~<digest>` for a phone number, where `prefix`
 is the match's first three code points (a canonical E.164's country code:
 `"+47"` compact, `"+1 "` for a domestic spelling where the third code point is
-the space) and `<digest>` is the first 12 hex chars of `sha256(salt + match)`.
+the space), and `<family prefix>~<digest>` for an API key, where the family
+prefix is kept VERBATIM (`sk-`, `sk-ant-`, `github_pat_`, `AIza`, `Bearer`) —
+the non-secret half that tells the operator WHICH credential to rotate. In
+every rule `<digest>` is the first 12 hex chars of `sha256(salt + match)`.
 A token is a correlation handle, not a secret: it lets an operator tie two log
 lines to the same address without the record holding the address.
 
@@ -151,7 +159,7 @@ tors.scrub_pii("ring +1 (415) 555-2671 about ticket 4096")
 # "ring +1 ~dc750721a848 about ticket 4096"
 ```
 
-The two rules, a closed set (anything else is a `ValueError` naming it):
+The three rules, a closed set (anything else is a `ValueError` naming it):
 
 - `contact_email` — the deliberately permissive local part
   `[A-Za-z0-9._%+\-]+`, a domain of ASCII letters/digits/dots/hyphens, and a
@@ -220,6 +228,44 @@ The two rules, a closed set (anything else is a `ValueError` naming it):
     has its digit half re-tokenized by the phone pass — over-redaction
     in the safe direction, converging on the second scrub like every
     other shape.
+- `api_keys` (the credential extension past the ported source) — the
+  evidence-backed closed set of provider/platform key families, each a
+  literal prefix plus a minimal `[A-Za-z0-9_-]` tail consumed MAXIMALLY
+  (a key glued to further charset material is one long key):
+
+  | family | shape (`tail` is `[A-Za-z0-9_-]`) | token prefix |
+  |---|---|---|
+  | OpenAI | `sk-` / `sk-proj-` / `sk-svcacct-` + tail{20,} | the matched prefix verbatim |
+  | Anthropic | `sk-ant-` + tail{20,} | `sk-ant-` |
+  | Google | `AIza` + tail{35,} | `AIza` |
+  | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
+  | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
+  | GitHub | `ghp_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
+  | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
+  | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
+
+  Deliberately EXCLUDED, on zero evidence: Slack `xox…`, Stripe
+  `sk_live_`/`pk_live_`, AWS `AKIA…`. The set is closed on evidence —
+  the families five private consumers' leaked-credential shapes
+  backed — and growing it is a new-evidence decision, never a
+  drive-by; an unlisted provider's key shape passes through whole.
+  The JWT family is MARKER-SCOPED (`Bearer eyJ…` only): a bare `eyJ…`
+  triple is never touched, because one consumer's API legitimately
+  carries eyJ-shaped non-secret cursors in its payloads, and redacting
+  those would destroy the diagnostic this scrubber exists to preserve.
+  Three discipline rules. (1) The prefixes are tried LONGEST-FIRST with
+  fall-through: `sk-ant-` outranks bare `sk-` when its own grammar
+  holds, and a too-short `sk-ant-` tail falls through to the `sk-`
+  family, whose tail swallows the `ant-` spelling — still scrubbed,
+  with the generic prefix. (2) A prefix glued to a preceding
+  key-charset char is MID-TOKEN and never fires: `xak-…` survives
+  whole, the same reasoning as the phone rule's clean-boundary cut (in
+  real text a key glued to a word is that word's fragment), and it is
+  what keeps a second key glued to a token's digest hex from firing.
+  (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
+  scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
+  inside its own marker-scoped shape). The digest is of the FULL match
+  (prefix + tail).
 
 **Threat model: diagnostic-preserving, NOT adversarial-robust.** The
 grammars above are parity-correct against the ported source at
@@ -277,6 +323,26 @@ timestamps:
   token breaker: the number after it scrubs even when glued
   hex-dirty. Over-redaction in the safe direction — and the reason a
   digest tail can never suppress the number after it.
+- Punctuation inside a key splits the tail: `sk-abc…/…rest` never
+  matches whole, and an inserted `/`, `:`, `;`, or `.` leaks the key's
+  fragments — the same attacker-formatting trade-off as the contact
+  grammars (the tail charset is deliberately narrow: widening it would
+  eat identifiers that merely look key-shaped).
+- An unlisted provider's key shape leaks WHOLE: the family table is the
+  evidence-backed closed set above — Slack `xox…`, Stripe, and AWS
+  `AKIA…` are excluded on zero evidence, not overlooked — and a new
+  family is a new-evidence decision with its own pins, never a
+  silent widening.
+- A bare `eyJ…` triple (no `Bearer ` marker) is never touched, even
+  three well-shaped base64url segments: one consumer's API legitimately
+  carries eyJ-shaped non-secret cursors, so the JWT family fires only
+  behind the marker — the deliberate under-redaction side of that
+  scoping.
+- The kept family prefix is a coarse provider label (`sk-` vs
+  `sk-ant-`), not a credential: it exists so the token tells the
+  operator which credential to rotate. It narrows the search space for
+  whoever already holds the log — the same known-salt reasoning as
+  below, priced in.
 
 If your threat includes adversarial formatting (an attacker choosing
 the spelling to dodge the scrubber), canonicalize BEFORE scrubbing —
@@ -303,22 +369,40 @@ def canonicalize_for_scrub(text: str) -> str:
 
 Then scrub the canonicalized text.
 
-`rules=None` applies both rules in the canonical order — the email
-substitution over the whole string first, then the phone substitution over
-its result, each exactly once — because an email's local part may itself
+`rules=None` applies every rule in the canonical order — the keys
+substitution over the whole string first, then the email substitution over
+its result, then the phone substitution over that, each exactly once —
+because the credential must be eaten whole before the contact passes scan
+(a key's tail can spell a dash-separated domestic phone run, and a whole
+key can spell an email local part: `sk-…@x.co` would otherwise be one
+email match), and an email's local part may itself
 carry a `+`-led digit run (`user+14155552671@example.com` is one email, and
-the phone rule must see its token, never the address). `[]` is the identity
+the phone rule must see its token, never the address). One reachable
+composition is documented rather than fixed: the keys pass eats a
+key-shaped local part and leaves `<family>~<digest>@domain`, whose digest
+hex is itself local-part material, so the email pass tokens
+`hex@domain` — over-redaction in the safe direction, converging on the
+second scrub. `[]` is the identity
 (the original object); duplicates dedupe and listing order is irrelevant;
 each name restricts the scrub to that rule.
 
-**The salt trade-off, stated plainly.** `salt=None` uses tors's documented
-default `"tors/scrub_pii/v1"` — a fixed, non-secret, versioned
-domain-separation tag (frozen: changing it would silently change every
-deployment's token values). A KNOWN salt, the public default included, does
+**The salt trade-off, stated plainly.** `salt=None` resolves PER RULE:
+the contact rules use tors's documented default `"tors/scrub_pii/v1"`
+and the keys rule its own `"tors/scrub_keys/v1"` — a fixed, non-secret,
+versioned domain-separation tag each (frozen: changing either would
+silently change every deployment's token values), and deliberately
+different so a key digest can never alias a contact digest at the
+default settings. An explicit salt string salts every rule alike (the
+`""` spelling is unsalted for every rule — the migration lane:
+byte-identical tokens with an unsalted upstream). A KNOWN salt, the public defaults
+included, does
 not make the digest secret: the E.164 space is small enough to enumerate, so
 an attacker with a candidate list can still confirm whether a specific
 number appeared — and the same holds for EMAIL addresses (common
-local-parts on common domains are enumerable too) and for `salt=""`
+local-parts on common domains are enumerable too), for API keys
+(provider key alphabets are smaller than their length suggests: the
+secret tail of an `sk-` key is ~62^20, far beyond enumeration, but the
+PREFIX half is kept in the clear by design — see above), and for `salt=""`
 (the unsalted migration lane re-publishes the source chain's documented
 weakness by design: byte-identical tokens with an unsalted upstream).
 The digest is `sha256(salt + match)` with plain concatenation, so
@@ -345,7 +429,13 @@ emails like that and you need a guaranteed fixed point, scrub twice
 asserts convergence structurally — no input match survives verbatim into
 the converged output and the third pass is the identity — not token-exact
 values, which the parity gates pin; the hypothesis ports mirror that
-boundary); everything else is one pass. Phone-only is strictly idempotent.
+boundary); everything else is one pass. Phone-only is strictly idempotent,
+and keys-only is too, by construction: a key token's family prefix ends
+`-` or `_` (or is `AIza`/`Bearer`), the byte after it is `~` — never tail
+charset — and no family prefix can be spelled inside 12 lowercase digest
+hex, so the second scrub never re-fires (a key token's `~` + 12 hex is a
+breaker for the phone pass as well, so a number after it keeps its own
+clean run).
 
 `tors.scrub_pii(s, ...) is s` exactly when no active rule matches. A `str`
 holding lone surrogates is refused at the argument boundary with

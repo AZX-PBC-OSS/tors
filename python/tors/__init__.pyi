@@ -40,31 +40,43 @@ def finalize(text: str) -> tuple[str, str]: ...
 # GIL note: detached_transform's shape, the same as normalize.
 def strip_controls(text: str) -> str: ...
 
-# Replace contact material (email addresses, `+`-led phone numbers) inside
+# Replace contact material (email addresses, `+`-led phone numbers) and
+# credential material (the evidence-backed api-key families) inside
 # free text with correlation tokens: `@domain~<12 hex>` for an email,
 # `<first three code points>~<12 hex>` for a phone number (the E.164
-# dialling prefix: "+47" compact, "+1 " for a domestic spelling). A port
-# of a private consumer's telemetry-safety module, pinned byte-identical
-# to it at salt="" (tests/reference.py's quoted-pin oracle is the
-# transcription). rules=None applies both rules in the canonical order
-# (email substitution first, then phone over its result -- an email's
-# local part may itself contain a `+`-led digit run); [] is the identity
-# (the original object); an unknown name is a ValueError naming the
-# accepted set. salt=None is tors's documented default constant
-# "tors/scrub_pii/v1" (a fixed, non-secret domain-separation tag: a
-# KNOWN salt still leaves candidate-list confirmation possible -- the
+# dialling prefix: "+47" compact, "+1 " for a domestic spelling), and
+# `<family prefix>~<12 hex>` for an API key (the prefix verbatim --
+# sk-, sk-ant-, github_pat_, AIza, Bearer -- the non-secret half that
+# tells the operator WHICH credential to rotate). The contact rules are
+# a port of a private consumer's telemetry-safety module, pinned
+# byte-identical to it at salt="" (tests/reference.py's quoted-pin
+# oracle is the transcription); the api_keys rule is the credential
+# extension past that contract (the JWT family is marker-scoped: a
+# bare eyJ triple is never touched, the non-secret-cursor hazard).
+# rules=None applies every rule in the canonical order (the keys pass
+# FIRST -- a key's tail can spell a domestic phone run and a whole key
+# an email local part -- then email, then phone over its result); []
+# is the identity (the original object); an unknown name is a
+# ValueError naming the accepted set. salt=None resolves PER RULE: the
+# contact rules keep "tors/scrub_pii/v1" and the keys rule its own
+# "tors/scrub_keys/v1" tag (a fixed, non-secret domain-separation tag
+# per rule -- a key digest can never alias a contact digest; a KNOWN
+# salt still leaves candidate-list confirmation possible -- the
 # tokens are redaction, not pseudonymization crypto; deployments that
 # care pass their own salt, and a consumer migrating from an unsalted
-# scrubber passes salt="" to keep its token values byte-identical).
-# The phone rule's digit class is Unicode Nd (every decimal digit
-# script), and bare digit runs never match (the "+" anchoring is
-# deliberate: order numbers and byte counts must survive).
+# scrubber passes salt="" to keep its token values byte-identical for
+# every rule). The phone rule's digit class is Unicode Nd (every
+# decimal digit script), and bare digit runs never match (the "+"
+# anchoring is deliberate: order numbers and byte counts must
+# survive).
 # tors.scrub_pii(s, ...) is s exactly when no active rule matches.
 #
-# GIL note: detached_transform's shape, the same as normalize/strip_controls.
+# GIL note: detached_transform's shape, the same as
+# normalize/strip_controls -- the keys pass rides the same single
+# detach.
 def scrub_pii(
     text: str,
-    rules: Sequence[Literal["contact_email", "contact_phone"]] | None = None,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
     *,
     salt: str | None = None,
 ) -> str: ...
