@@ -941,28 +941,37 @@ impl Source<'_> {
                 // The stat is no longer the authority on how much to read: a
                 // lying stat (procfs' st_size=0) or a sparse hole made the
                 // old read_to_end unbounded. The bounded read is the ceiling.
-                let (bytes, over) = match max_bytes {
+                let (bytes, over, used_ceiling) = match max_bytes {
                     // Explicit budget: it is the ceiling, no sniff needed.
-                    Some(limit) => documents_impl::read_bounded_into(file, Vec::new(), limit)
-                        .map_err(map_read_err)?,
+                    Some(limit) => {
+                        let (b, o) = documents_impl::read_bounded_into(file, Vec::new(), limit)
+                            .map_err(map_read_err)?;
+                        (b, o, limit)
+                    }
                     None => {
                         // Phase 1: a bounded prefix, then a content-only lane guess.
                         let (prefix, _prefix_over) =
                             documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX)
                                 .map_err(map_read_err)?;
-                        // SNIFF_PREFIX (64 KiB) < any ceiling picked below (>= 32 MiB),
-                        // so _prefix_over is always false here.
+                        // We ignore whether the prefix alone exceeded SNIFF_PREFIX
+                        // (_prefix_over is true for any file over 64 KiB): phase 2
+                        // re-reads from the current file position and the real
+                        // ceiling (>= 32 MiB) governs the refusal below.
                         let ceiling = documents_impl::provisional_read_ceiling(
                             &prefix, hint_name.as_deref(), format, backend, MAX_INPUT_READ);
                         // Phase 2: continue from the SAME file (position is already past
                         // the prefix), prepending the prefix we already read.
-                        documents_impl::read_bounded_into(file, prefix, ceiling)
-                            .map_err(map_read_err)?
+                        let (b, o) = documents_impl::read_bounded_into(file, prefix, ceiling)
+                            .map_err(map_read_err)?;
+                        (b, o, ceiling)
                     }
                 };
                 if over {
-                    let ceiling = max_bytes.unwrap_or(MAX_INPUT_READ);
-                    return Err(over_ceiling_refusal(max_bytes, ceiling));
+                    // The honest number: the ceiling phase 2 actually enforced
+                    // (the explicit budget, or the provisional lane ceiling under
+                    // None), never the 512 MiB backstop when a metered lane's
+                    // 32 MiB was what was hit.
+                    return Err(over_ceiling_refusal(max_bytes, used_ceiling));
                 }
                 Ok((bytes, hint_name))
             }
