@@ -478,13 +478,10 @@ token's input end (only the input-side suffix is addressable), a
 match that ran into a prior token's verbatim head overlaps the
 producing span (the input bytes fed two tokens; both spans are
 recorded, keys before email before phone at shared starts), and a
-match that ENDS exactly at a prior token's verbatim-head boundary can
-overstate its extent — `text[start:end]` reaches to the producing
-key span's end where the exact image ends at the head (the head's
-final byte fed both the head and the following match; `AIza`-,
-`AKIA`/`ASIA`-, `Bearer`-, and `ya29.`-final heads reach here, their
-last byte continuing the charset the following rule matched into).
-Empty input
+match that ends at a prior token's `~` is recorded through to the
+producing span's end — the digest half has no preimage, so the span
+covers the whole key while the match ate only its verbatim head;
+reconstruction uses the head, not the span. Empty input
 is the empty report: `{"text": "", "redacted": {}, "skipped": {},
 "spans": []}`. Salt, idempotence, and the surrogate boundary behave
 exactly as documented above.

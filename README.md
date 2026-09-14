@@ -129,7 +129,7 @@ actually return.
 
 ## What's inside
 
-107 functions plus two small helper classes and six pinned constants (five
+105 functions plus two small helper classes and six pinned constants (five
 charset alphabets and the key-family tuple),
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and

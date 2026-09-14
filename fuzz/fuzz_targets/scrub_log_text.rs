@@ -30,7 +30,7 @@ fn legal_payload(s: &str) -> String {
 
 fuzz_target!(|s: &str| {
     // Convergence, not strict idempotence, on the full chain — the
-    // honest contract, found by this harness on CI (crash-a2d92f3d):
+    // honest contract, found by this harness on CI (crash-9268942a):
     // a password-param replacement (`***`) can DELETE a `/` that was
     // blocking a userinfo match (`x://u?pwd=a/b&:pw@h`: pass 1's param
     // value eats the `/`, pass 2's user class now spans `***&`), so

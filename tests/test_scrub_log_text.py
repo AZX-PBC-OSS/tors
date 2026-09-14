@@ -464,7 +464,7 @@ class TestHypothesisInvariants:
         `/` that was capping the userinfo user run (`u?pwd=a` stops at
         the `/`), so pass 2's user class spans the `***` and the `&`
         (`u?pwd=***&`) and the userinfo rule fires — the same shape CI's
-        fuzz-smoke found (crash-a2d92f3d). Pass 3 re-matches the
+        fuzz-smoke found (crash-9268942a). Pass 3 re-matches the
         already-`***` password to itself: the fixed point."""
         text = "x://u?pwd=a/b&:pw@h"
         once = scrub_log_text(text)
