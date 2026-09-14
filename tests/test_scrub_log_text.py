@@ -29,7 +29,13 @@ What this gate pins, oracle-derived literal by literal:
 - identity return: ``scrub_log_text(s, rules) is s`` exactly when no rule
   fires — including the ``***`` fixed points, where a rule fires but the
   spliced output equals the input: those return a fresh object.
-- idempotence: scrubbing the scrubbed output is a value no-op.
+- convergence, not strict idempotence: scrubbing the scrubbed output is a
+  fixed point BY the second pass. The one non-idempotence class is
+  cross-rule: a password-param replacement deletes a ``/`` that was
+  capping the userinfo user run, so the second pass finds one more
+  redaction (``x://u?pwd=a/b&:pw@h`` — pinned literally, with oracle
+  parity at both passes); the source chain behaves identically, and the
+  third pass is always the fixed point (pinned over hypothesis).
 """
 
 from __future__ import annotations
@@ -441,9 +447,33 @@ class TestCredentialPayloadEquivalence:
 class TestHypothesisInvariants:
     @given(_ANY_TEXT)
     @settings(max_examples=300)
-    def test_never_raises_and_is_idempotent(self, text: str) -> None:
+    def test_never_raises_and_converges_by_the_second_pass(self, text: str) -> None:
+        # Convergence, not strict idempotence: a param replacement can
+        # delete a `/` that was blocking a userinfo match, so the second
+        # pass may find one more redaction (the corner pinned literally
+        # below); the third pass is the fixed point. The source chain
+        # behaves identically — the parity harness pins both passes.
         once = scrub_log_text(text)
-        assert scrub_log_text(once) == once
+        twice = scrub_log_text(once)
+        assert scrub_log_text(twice) == twice
+
+    def test_the_param_mask_can_unblock_a_userinfo_match_on_pass_two(self) -> None:
+        """The one documented non-idempotence class, pinned literally
+        with oracle parity at BOTH passes: pass 1's param value eats the
+        `/` that was capping the userinfo user run (`u?pwd=a` stops at
+        the `/`), so pass 2's user class spans the `***` and the `&`
+        (`u?pwd=***&`) and the userinfo rule fires — the same shape CI's
+        fuzz-smoke found (crash-a2d92f3d). Pass 3 re-matches the
+        already-`***` password to itself: the fixed point."""
+        text = "x://u?pwd=a/b&:pw@h"
+        once = scrub_log_text(text)
+        twice = scrub_log_text(once)
+        assert once == "x://u?pwd=***&:pw@h"
+        assert twice == "x://u?pwd=***&:***@h"
+        assert scrub_log_text(twice) == twice
+        # The source chain, byte-identical at every pass.
+        assert once == reference_scrub_log_text(text)
+        assert twice == reference_scrub_log_text(once)
 
     @given(_ANY_TEXT)
     @settings(max_examples=300)

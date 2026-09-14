@@ -181,7 +181,12 @@ naming the accepted set. A pass never rescans its own output.
 `tors.scrub_log_text(s, rules) is s` exactly when no rule fires — including
 the `***` fixed points, where a rule fires and splices to an equal value:
 those return a fresh, equal string. Scrubbing the scrubbed output is a
-value no-op.
+fixed point by the second pass, with one documented cross-rule exception
+to strict idempotence: a password-param replacement deletes a `/` that was
+capping a userinfo user run, so the second pass can find one more
+redaction (`x://u?pwd=a/b&:pw@h` scrubs to `x://u?pwd=***&:pw@h`, and a
+second scrub claims the password too) — the ported chain behaves
+identically, and a third scrub is always the fixed point.
 
 ```python
 tors.scrub_log_text(

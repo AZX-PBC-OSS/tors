@@ -1152,6 +1152,21 @@ mod tests {
     }
 
     #[test]
+    fn a_param_mask_can_unblock_a_userinfo_match_on_pass_two() {
+        // The one non-idempotence class, cross-rule (CI fuzz-found,
+        // crash-a2d92f3d): pass 1's param value eats the `/` capping the
+        // userinfo user run, so pass 2's user class spans the `***` and
+        // the `&` and the userinfo rule fires; pass 3 re-matches the
+        // already-`***` password to itself — the fixed point.
+        let text = "x://u?pwd=a/b&:pw@h";
+        let once = scrub(text, RuleSet::ALL);
+        assert_eq!(once, "x://u?pwd=***&:pw@h");
+        let twice = scrub(&once, RuleSet::ALL);
+        assert_eq!(twice, "x://u?pwd=***&:***@h");
+        assert_eq!(scrub(&twice, RuleSet::ALL), twice);
+    }
+
+    #[test]
     fn empty_input_is_identity() {
         assert!(matches!(scrub_log_text("", RuleSet::ALL), Cow::Borrowed(_)));
     }

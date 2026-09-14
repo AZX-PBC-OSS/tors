@@ -29,11 +29,25 @@ fn legal_payload(s: &str) -> String {
 }
 
 fuzz_target!(|s: &str| {
-    // Idempotence, on the full chain and on every single-rule lane.
+    // Convergence, not strict idempotence, on the full chain — the
+    // honest contract, found by this harness on CI (crash-a2d92f3d):
+    // a password-param replacement (`***`) can DELETE a `/` that was
+    // blocking a userinfo match (`x://u?pwd=a/b&:pw@h`: pass 1's param
+    // value eats the `/`, pass 2's user class now spans `***&`), so
+    // the second pass finds one more redaction — the source chain
+    // behaves identically (parity pinned at BOTH passes in the pytest
+    // battery), and the third pass re-matches the already-`***`
+    // password to itself, a fixed point. The single-rule lanes keep
+    // STRICT idempotence: the mechanism needs two rules interacting,
+    // and each rule's own replacement is its fixed point (`***`
+    // re-matches to `***`, `\1:***@`'s password half likewise).
     let once = scrub_log_text(s, RuleSet::ALL);
+    let twice = scrub_log_text(once.as_ref(), RuleSet::ALL);
+    let thrice = scrub_log_text(twice.as_ref(), RuleSet::ALL);
     assert_eq!(
-        scrub_log_text(once.as_ref(), RuleSet::ALL).as_ref(),
-        once.as_ref()
+        thrice.as_ref(),
+        twice.as_ref(),
+        "the chain did not converge by the second pass"
     );
     for rule in [
         RuleSet::PG_DETAIL_LINES,
