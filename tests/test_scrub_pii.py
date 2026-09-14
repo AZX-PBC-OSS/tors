@@ -84,7 +84,7 @@ from hypothesis import strategies as st
 from reference import SCRUB_PII_EMAILS as EMAILS
 from reference import SCRUB_PII_PHONES as PHONES
 from reference import SCRUB_PII_SEPARATORS as SEPARATORS
-from tors import scrub_pii
+from tors import KEY_FAMILIES, scrub_pii, scrub_pii_report
 
 
 # The unsalted digest (salt=""), spelled directly against hashlib so the
@@ -129,6 +129,74 @@ def _key_token(prefix: str, match: str, salt: str = "") -> str:
     return f"{prefix}~{_hex12(salt + match)}"
 
 
+# The AWS access-key tail: uppercase letters and digits only ([0-9A-Z] —
+# the access-key ID alphabet, no lowercase anywhere in it).
+_AWS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _aws_tail(n: int) -> str:
+    return "".join(_AWS_ALPHABET[i % len(_AWS_ALPHABET)] for i in range(n))
+
+
+# The documented example shape: AKIA + a 16-char access-key ID.
+_AKIA = "AKIAIOSFODNN7EXAMPLE"
+
+# The Azure storage-key tail: the connection-string secret alphabet
+# ([A-Za-z0-9+/=] — base64 plus the padding/trailing `=`).
+_AZURE_ALPHABET = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+)
+
+
+def _azure_tail(n: int) -> str:
+    return "".join(_AZURE_ALPHABET[i % len(_AZURE_ALPHABET)] for i in range(n))
+
+
+# PEM material: a multi-line SPAN family. The body is base64 lines (no
+# separators, no `@`), so an unterminated block stays identity under the
+# contact passes too — the near-miss pins below demand it.
+_PEM_BODY = (
+    "MIIEpAIBAAKCAQEA7b",
+    "qY4sLk2MnOpQrStUvW",
+    "xYz0123456789ABCD",
+)
+
+
+def _pem_block(words: str, body: tuple[str, ...] = _PEM_BODY) -> str:
+    lines = [f"-----BEGIN {words} PRIVATE KEY-----", *body, f"-----END {words} PRIVATE KEY-----"]
+    return "\n".join(lines)
+
+
+_RSA_PEM = _pem_block("RSA")
+
+# The token-prefix-to-family map for the battery vectors (one prefix
+# per vector; the multi-prefix families list each of theirs).
+_PREFIX_FAMILY = {
+    "sk-": "openai",
+    "sk-proj-": "openai",
+    "sk-svcacct-": "openai",
+    "sk-ant-": "anthropic",
+    "AIza": "google",
+    "fw-": "fireworks",
+    "fw_": "fireworks",
+    "ak-": "modal",
+    "wk-": "modal",
+    "ghp_": "github",
+    "github_pat_": "github",
+    "azxdev_": "minted",
+    "wd-": "minted",
+    "w-": "minted",
+    "cn-": "minted",
+    "Bearer": "jwt",
+    "AKIA": "aws",
+    "ASIA": "aws",
+    "xai-": "xai",
+    "ya29.": "gcp_oauth",
+    "PEM": "pem",
+    "AccountKey=": "azure",
+}
+
+
 # A JWT exactly the shape the family grammar states: the `Bearer ` marker,
 # a first segment beginning `eyJ`, and two more base64url segments
 # (middle and signature, any length >= 1 each).
@@ -161,6 +229,12 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     ("w-" + _key_tail(43), "w-"),
     ("cn-" + _key_tail(20), "cn-"),
     (_JWT, "Bearer"),
+    (_AKIA, "AKIA"),
+    ("ASIA" + _aws_tail(16), "ASIA"),
+    ("xai-" + _key_tail(20), "xai-"),
+    ("ya29." + _key_tail(20), "ya29."),
+    (_RSA_PEM, "PEM"),
+    ("AccountKey=" + _azure_tail(44), "AccountKey="),
 )
 
 # The documented non-matches: one-under tails at every distinct minimum,
@@ -180,6 +254,52 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
     ("fw-one-under", "fw-" + _key_tail(19)),
     ("ak-one-under", "ak-" + _key_tail(19)),
     ("wk-one-under", "wk-" + _key_tail(19)),
+    ("aws-one-under", "AKIA" + _aws_tail(15)),
+    ("aws-lowercase", "akia" + _aws_tail(16)),
+    ("asia-one-under", "ASIA" + _aws_tail(15)),
+    ("aws-midtoken", "x" + _AKIA),
+    ("xai-one-under", "xai-" + _key_tail(19)),
+    ("xai-uppercase", "XAI-" + _key_tail(20)),
+    ("gcp-one-under", "ya29." + _key_tail(19)),
+    ("gcp-uppercase", "YA29." + _key_tail(20)),
+    ("gcp-midtoken", "xya29." + _key_tail(20)),
+    ("pem-unterminated", _pem_block("RSA")[: -len("-----END RSA PRIVATE KEY-----")]),
+    (
+        "pem-mismatched-words",
+        _pem_block("RSA").replace("-----END RSA PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),
+    ),
+    (
+        "pem-empty-words",
+        "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_BODY) + "\n-----END PRIVATE KEY-----",
+    ),
+    (
+        "pem-lowercase",
+        "-----begin rsa private key-----\n"
+        + "\n".join(_PEM_BODY)
+        + "\n-----end rsa private key-----",
+    ),
+    ("pem-glued", "abc" + _RSA_PEM),
+    (
+        "pem-doubled-space",
+        "-----BEGIN RSA  PRIVATE KEY-----\nMIIE\n-----END RSA  PRIVATE KEY-----",
+    ),
+    (
+        "pem-hyphen-word",
+        "-----BEGIN RSA-EC PRIVATE KEY-----\nMIIE\n-----END RSA-EC PRIVATE KEY-----",
+    ),
+    (
+        "pem-underscore-word",
+        "-----BEGIN RSA_EC PRIVATE KEY-----\nMIIE\n-----END RSA_EC PRIVATE KEY-----",
+    ),
+    # Split across the concatenation: the joined shape trips push
+    # protection (a synthetic vector, not a secret).
+    ("slack-xox-excluded", "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUv"),
+    ("stripe-test-excluded", "sk_test_51MZABCDefghijklmnOP0123456789abcdefghiJ"),
+    ("bare-b64-secret-excluded", "MIIEpAIBAAKCAQEA7bqY4sLk2MnOpQrStUvWxYz0123456789ABCD"),
+    ("azure-without-marker-excluded", _azure_tail(44)),
+    ("azure-one-under", "AccountKey=" + _azure_tail(39)),
+    ("azure-lowercase-k", "Accountkey=" + _azure_tail(44)),
+    ("azure-midtoken", "xAccountKey=" + _azure_tail(40)),
     ("midtoken-prefix", "xak-" + _key_tail(48)),
     ("bearer-lowercase", "bearer " + _JWT[len("Bearer ") :]),
     ("bare-eyJ-cursor", _JWT[len("Bearer ") :]),
@@ -859,6 +979,53 @@ class TestApiKeyZoo:
         # shape rides inside (the tails are contact-inert by design).
         assert scrub_pii(text, salt="") is text
 
+    def test_jwt_segments_beyond_the_third_survive_verbatim(self) -> None:
+        # The grammar is exactly three maximal segments (the residual-risk
+        # red-team pin, in the contract gate): a 4-segment spell keeps
+        # `.d`, a 5-part JWE keeps `.d.e`.
+        assert scrub_pii("Bearer eyJa.b.c.d", ["api_keys"], salt="") == (
+            f"Bearer~{_hex12('Bearer eyJa.b.c')}.d"
+        )
+        assert scrub_pii("Bearer eyJa.b.c.d.e", ["api_keys"], salt="") == (
+            f"Bearer~{_hex12('Bearer eyJa.b.c')}.d.e"
+        )
+
+    def test_an_empty_body_pem_is_still_both_markers(self) -> None:
+        # Adjacent markers with nothing between them: both markers are
+        # present, so the degenerate block matches whole.
+        text = "-----BEGIN RSA PRIVATE KEY----------END RSA PRIVATE KEY-----"
+        assert scrub_pii(text, ["api_keys"], salt="") == _key_token("PEM", text)
+
+    def test_a_mismatched_end_inside_the_body_does_not_terminate(self) -> None:
+        # The first END whose words verify wins: the stranger's END line
+        # is body material, and the block runs whole to its own END.
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEpAIBAAKCAQEA7b\n"
+            "-----END EC PRIVATE KEY-----\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        assert scrub_pii(text, ["api_keys"], salt="") == _key_token("PEM", text)
+
+    def test_an_azure_key_inside_a_connection_string(self) -> None:
+        # The realistic context: the match is the marker plus its maximal
+        # tail only, and the `;`-separated fields around it survive.
+        secret = _azure_tail(44)
+        matched = "AccountKey=" + secret
+        text = f"DefaultEndpointsProtocol=https;AccountName=acct;{matched};EndpointSuffix=core"
+        assert scrub_pii(text, ["api_keys"], salt="") == (
+            "DefaultEndpointsProtocol=https;AccountName=acct;"
+            f"{_key_token('AccountKey=', matched)};EndpointSuffix=core"
+        )
+
+    def test_a_dot_after_a_ya29_key_is_not_the_tail(self) -> None:
+        # The `ya29.` dot is prefix, not tail: the tail stops at the next
+        # dot, and `.x.co` survives the match.
+        key = "ya29." + _key_tail(20)
+        assert scrub_pii(key + ".x.co", ["api_keys"], salt="") == (
+            f"{_key_token('ya29.', key)}.x.co"
+        )
+
     def test_keys_at_string_start_and_end(self) -> None:
         # The boundary rule's clean edge cases: position 0 is clean, a
         # key running to the string's end matches, and the first
@@ -1053,6 +1220,763 @@ class TestApiKeyZoo:
         once = scrub_pii(text, salt="")
         assert once == _key_token(prefix, text)
         assert scrub_pii(once, salt="") is once
+
+
+class TestKeyFamiliesContract:
+    """The per-family selection: ``families=`` scopes the api_keys rule to
+    a closed set of family names — the library's own closed-set-of-strings
+    convention (the ``rules=`` / ``parse_errors_mode`` shape, not bit
+    flags: a frozen ``(1<<N)-1`` sentinel would silently exclude the next
+    family, and a second paradigm in a strings API is overengineering).
+    ``None`` is every family this version knows (the set grows on new
+    families — callers needing stability list names explicitly); a list
+    selects exactly those families (duplicates dedupe, order is
+    irrelevant); ``[]`` and unknown names are ``ValueError``s; and the
+    knob is ignored when api_keys is not in the active rules."""
+
+    def test_key_families_is_the_pinned_canonical_tuple(self) -> None:
+        # The canonical family-name tuple, in the scanner table's order:
+        # the base for "all but X" comprehensions, and the set the
+        # unknown-name error names.
+        assert KEY_FAMILIES == (
+            "openai",
+            "anthropic",
+            "google",
+            "fireworks",
+            "modal",
+            "github",
+            "minted",
+            "jwt",
+            "aws",
+            "xai",
+            "gcp_oauth",
+            "pem",
+            "azure",
+        )
+        assert isinstance(KEY_FAMILIES, tuple)
+
+    def test_a_single_family_selects_only_that_family(self) -> None:
+        # families=["jwt"] scrubs only JWTs: the OpenAI key is preserved
+        # whole (its grammar held, but its family is unselected — the
+        # scanner spends the match without redacting it).
+        text = f"{_JWT} {_OPENAI}"
+        assert scrub_pii(text, ["api_keys"], families=["jwt"], salt="") == (
+            f"{_key_token('Bearer', _JWT)} {_OPENAI}"
+        )
+
+    def test_all_but_jwt_leaves_jwts_verbatim_while_scrubbing_everything_else(self) -> None:
+        # The maintainer's pinned use case: every family but "jwt" — the
+        # JWT survives verbatim (preserved for separate logging) while an
+        # OpenAI and an Anthropic key in the same excerpt still scrub.
+        anthropic = "sk-ant-api03-" + _key_tail(95)
+        text = f"leaked {_OPENAI} and {_JWT} and {anthropic}"
+        families = [f for f in KEY_FAMILIES if f != "jwt"]
+        assert scrub_pii(text, families=families, salt="") == (
+            f"leaked {_key_token('sk-', _OPENAI)} and {_JWT} and {_key_token('sk-ant-', anthropic)}"
+        )
+
+    def test_all_but_one_family_is_still_exact(self) -> None:
+        # The same recipe for an AWS key beside an OpenAI key: excluding
+        # "aws" preserves the AKIA shape whole while the sk- key scrubs.
+        text = f"{_AKIA} {_OPENAI}"
+        families = [f for f in KEY_FAMILIES if f != "aws"]
+        assert scrub_pii(text, families=families, salt="") == (
+            f"{_AKIA} {_key_token('sk-', _OPENAI)}"
+        )
+
+    def test_duplicates_dedupe_and_order_is_irrelevant(self) -> None:
+        text = f"{_JWT} {_AKIA}"
+        assert scrub_pii(text, ["api_keys"], families=["jwt", "jwt"], salt="") == scrub_pii(
+            text, ["api_keys"], families=["jwt"], salt=""
+        )
+        assert scrub_pii(text, ["api_keys"], families=["jwt", "aws"], salt="") == scrub_pii(
+            text, ["api_keys"], families=["aws", "jwt"], salt=""
+        )
+
+    def test_empty_families_is_a_value_error_not_a_silent_no_op(self) -> None:
+        # A silent no-op would be a misconfiguration trap: selecting
+        # nothing is refused, with the recipe for what to write instead.
+        with pytest.raises(ValueError) as exc:
+            scrub_pii("a@b.co", families=[])
+        assert str(exc.value) == (
+            "families selects no key families; use None for all or list names"
+        )
+
+    def test_unknown_names_name_the_accepted_set(self) -> None:
+        # The exact parse_errors_mode shape: the closed set as a tuple,
+        # the offender in Rust's Debug quoting. The set is derived from
+        # the tuple (not re-spelled) so only the tuple pin reddens when
+        # the 14th family lands.
+        with pytest.raises(ValueError) as exc:
+            scrub_pii("a@b.co", families=["ssn"])
+        assert str(exc.value) == (
+            f"families must be one of ({', '.join(repr(f) for f in KEY_FAMILIES)}), "
+            'not "ssn"'
+        )
+        # ...and the derived spelling equals the landed literal.
+        assert str(exc.value) == (
+            "families must be one of ('openai', 'anthropic', 'google', "
+            "'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', "
+            "'xai', 'gcp_oauth', 'pem', 'azure'), not \"ssn\""
+        )
+
+    def test_a_valid_name_plus_an_unknown_one_still_raises(self) -> None:
+        with pytest.raises(ValueError, match="gcp_oauth"):
+            scrub_pii("a@b.co", families=["jwt", "nope"])
+
+    def test_families_is_harmless_when_api_keys_is_inactive(self) -> None:
+        # An irrelevant knob never changes the scrub: a valid selection
+        # over a contact-only call is simply ignored, documented.
+        assert scrub_pii("a@b.co", ["contact_email"], families=["jwt"], salt="") == (
+            _email_token("a@b.co")
+        )
+        assert scrub_pii("a@b.co", ["contact_email"], families=["jwt"]) == scrub_pii(
+            "a@b.co", ["contact_email"]
+        )
+
+    def test_invalid_families_still_raise_when_api_keys_is_inactive(self) -> None:
+        # The validation is at the argument boundary, never late: an
+        # unknown name or an empty selection raises even though the knob
+        # would have been ignored — the closed-set discipline holds
+        # wherever the parameter is spelled.
+        with pytest.raises(ValueError, match="must be one of"):
+            scrub_pii("a@b.co", ["contact_email"], families=["nope"])
+        with pytest.raises(ValueError, match="selects no key families"):
+            scrub_pii("a@b.co", ["contact_email"], families=[])
+
+    def test_a_bare_string_is_not_a_families_sequence(self) -> None:
+        # The same sequence boundary as rules=: a bare string is a
+        # TypeError, never an iterated character list.
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", families="jwt")  # type: ignore[arg-type]
+
+    def test_a_tuple_is_accepted_like_a_list(self) -> None:
+        assert scrub_pii(_JWT, ["api_keys"], families=("jwt",), salt="") == (
+            _key_token("Bearer", _JWT)
+        )
+
+    def test_a_set_is_not_a_families_sequence(self) -> None:
+        # The same sequence boundary as rules=: a set is a TypeError
+        # (symmetric with the rules= pin).
+        with pytest.raises(TypeError):
+            scrub_pii("a@b.co", families={"jwt"})  # type: ignore[arg-type]
+
+    def test_the_mask_meets_the_fall_through(self) -> None:
+        # The longest-first discipline crossed with the selection: the
+        # mask is consulted AFTER the winning family is determined —
+        # a one-under sk-ant- tail falls through to sk- FIRST, then the
+        # mask decides.
+        short = "sk-ant-" + _key_tail(19)
+        # Anthropic selected, openai not: the fall-through winner is
+        # sk- (unselected) — detected, preserved whole, counted.
+        rep = scrub_pii_report(short, ["api_keys"], families=["anthropic"], salt="")
+        assert rep["text"] == short
+        assert rep["redacted"] == {}
+        assert rep["skipped"] == {"openai": 1}
+        # Openai selected: the same short key scrubs as generic sk-.
+        assert scrub_pii(short, ["api_keys"], families=["openai"], salt="") == (
+            _key_token("sk-", short)
+        )
+        # Both selected: still the generic prefix (the Anthropic grammar
+        # never held).
+        assert scrub_pii(short, ["api_keys"], families=["openai", "anthropic"], salt="") == (
+            _key_token("sk-", short)
+        )
+        # The other side: wd- has no fall-through to w- (the prefixes
+        # disagree at the second char), so one under stays one under —
+        # no detection, no skip, the identity object.
+        wd_short = "wd-" + _key_tail(42)
+        assert scrub_pii(wd_short, ["api_keys"], families=["minted"], salt="") is wd_short
+        rep = scrub_pii_report(wd_short, ["api_keys"], families=["minted"], salt="")
+        assert rep == {"text": wd_short, "redacted": {}, "skipped": {}, "spans": []}
+
+    def test_a_preserved_span_is_the_identity_object(self) -> None:
+        # The zero-alloc discipline extends to the skipped path: a
+        # detected-but-unselected match passes its bytes through
+        # untouched, so the call returns the original object.
+        assert scrub_pii(_JWT, ["api_keys"], families=["openai"], salt="") is _JWT
+        assert scrub_pii(_OPENAI, ["api_keys"], families=["jwt"], salt="") is _OPENAI
+
+    @pytest.mark.parametrize("family", [f for f in KEY_FAMILIES])
+    def test_every_single_family_selection_round(self, family: str) -> None:
+        # The mask-bit wiring, all thirteen: selecting exactly one
+        # family scrubs every vector of that family and preserves every
+        # other family's vectors whole (a bit swap between two families
+        # reddens here, not as a parity mystery).
+        own = [key for key, prefix in _KEY_VECTORS if _PREFIX_FAMILY[prefix] == family]
+        assert own, family
+        for key in own:
+            assert scrub_pii(key, ["api_keys"], families=[family], salt="") == (
+                _key_token(_family_token_prefix(family, key), key)
+            ), (family, key)
+        for key, prefix in _KEY_VECTORS:
+            if _PREFIX_FAMILY[prefix] != family:
+                assert scrub_pii(key, ["api_keys"], families=[family], salt="") == key, (
+                    family,
+                    key,
+                )
+
+    def test_the_new_families_scrub_verbatim_prefixes(self) -> None:
+        # The five new families, end to end through the families= lens:
+        # each selected alone scrubs with its verbatim prefix, and all
+        # five fire under the default selection.
+        pem = _pem_block("EC")
+        azure = "AccountKey=" + _azure_tail(44)
+        xai = "xai-" + _key_tail(20)
+        gcp = "ya29." + _key_tail(20)
+        for key, prefix, family in (
+            (_AKIA, "AKIA", "aws"),
+            (xai, "xai-", "xai"),
+            (gcp, "ya29.", "gcp_oauth"),
+            (pem, "PEM", "pem"),
+            (azure, "AccountKey=", "azure"),
+        ):
+            assert scrub_pii(key, ["api_keys"], families=[family], salt="") == (
+                _key_token(prefix, key)
+            ), family
+            assert scrub_pii(key, salt="") == _key_token(prefix, key), family
+
+
+_REPORT_CONTACT_SALT = "tors/scrub_pii/v1"
+_REPORT_KEYS_SALT = "tors/scrub_keys/v1"
+
+
+def _family_token_prefix(family: str, matched: str) -> str:
+    """The token's verbatim family prefix for one matched key: the
+    matched head for the longest-first table families, the constant for
+    the marker/span families. The test-side transcription of the
+    scanner's own prefix table (the file's third-transcription
+    discipline: hashlib digests, hand-spelled prefixes)."""
+    table = {
+        "anthropic": ("sk-ant-",),
+        "google": ("AIza",),
+        "fireworks": ("fw-", "fw_"),
+        "modal": ("ak-", "wk-"),
+        "github": ("github_pat_", "ghp_"),
+        "minted": ("azxdev_", "wd-", "w-", "cn-"),
+        "jwt": ("Bearer",),
+        "aws": (),
+        "xai": ("xai-",),
+        "gcp_oauth": ("ya29.",),
+        "pem": (),
+        "azure": ("AccountKey=",),
+    }
+    if family == "openai":
+        for prefix in ("sk-svcacct-", "sk-proj-", "sk-"):
+            if matched.startswith(prefix):
+                return prefix
+        raise AssertionError(f"no openai head in {matched!r}")
+    if family == "aws":
+        # Non-tautological: the head is asserted from the input, never
+        # mirrored from the implementation (a wrong-head token must fail
+        # here, not agree).
+        assert matched.startswith("AKIA") != matched.startswith("ASIA"), matched
+        return "AKIA" if matched.startswith("AKIA") else "ASIA"
+    if family == "pem":
+        return "PEM"
+    for prefix in table[family]:
+        if matched.startswith(prefix):
+            return prefix
+    raise AssertionError(f"no {family} head in {matched!r}")
+
+
+def _reconstruct(
+    text: str, spans: list[dict[str, object]], contact_salt: str, keys_salt: str
+) -> str:
+    """Rebuild the scrubbed output from the input, the report's spans,
+    and the digest construction — the strong invariant, pinned: the
+    walk below must reproduce ``report["text"]`` byte-exactly. Spans are
+    consumed in start order; three shapes need more than a blind splice,
+    each the offset map's exact contract:
+
+    - a ``contact_email`` span that starts exactly where the preceding
+      ``api_keys`` span ended consumed that key token's digest hex as its
+      local part (the keys-before-email corner): the digest is over
+      ``hex12 + input[span]``, the hex re-derived from the key match.
+    - an ``api_keys`` span overlapped by a preceding email span (the
+      email's domain run flowed into the key token's verbatim head): the
+      key contributes its token's REMNANT — the head the email ate is
+      gone, only ``token[offset:]`` survives.
+    - a ``contact_phone`` span inside a preceding email span (the domain
+      spelled a number): the phone token replaces the affine substring
+      of the staged email token, not a frontier slice.
+    """
+    # The discipline first: spans live inside the input, ordered by
+    # start — a map_back bug emitting out-of-range or unordered spans
+    # must fail here, never slice-and-agree below.
+    assert all(
+        isinstance(s["start"], int)
+        and isinstance(s["end"], int)
+        and 0 <= s["start"] <= s["end"] <= len(text)
+        for s in spans
+    ), spans
+    assert [s["start"] for s in spans] == sorted(s["start"] for s in spans), spans
+    # Pieces in emission order: passthrough slices and tokens (the
+    # tokens mutable in place, so the affine-nesting corner's replace
+    # lands in the final join). email_pieces tracks every staged email
+    # span for the remnant branch (a nested phone may come between the
+    # overlapping email and the key, so `prev` is not reliable there).
+    pieces: list[list[object]] = []
+    email_pieces: list[tuple[int, int]] = []
+    frontier = 0
+    prev: dict[str, object] | None = None
+    for span in spans:
+        typ = span["type"]
+        assert isinstance(typ, str)
+        start = span["start"]
+        end = span["end"]
+        assert isinstance(start, int) and isinstance(end, int)
+        assert start >= 0 and end >= start
+        if start > frontier:
+            pieces.append(["text", text[frontier:start]])
+            frontier = start
+        if typ == "contact_email":
+            # Email spans never overlap (stage-2 matches are disjoint
+            # and the map is monotone); the corners touch at most — an
+            # overlap here is a span bug, fail loud.
+            assert start >= frontier, (span, prev)
+        if (
+            typ == "contact_email"
+            and prev is not None
+            and isinstance(prev["type"], str)
+            and prev["type"].startswith("api_keys:")
+            and prev["end"] == start
+        ):
+            # The hex-consumption corner: the match was
+            # hex12 + the input suffix; the hex is the preceding key
+            # token's digest half, re-derived here — and the staged key
+            # token loses its eaten hex half (only its head survives).
+            assert isinstance(prev["start"], int)
+            key_match = text[prev["start"] : prev["end"]]
+            matched = _hex12(keys_salt + key_match) + text[start:end]
+            domain = matched.split("@", 1)[1]
+            token = f"@{domain}~{_hex12(contact_salt + matched)}"
+            assert pieces and pieces[-1][0] == "token"
+            staged_token = pieces[-1][4]
+            assert isinstance(staged_token, str)
+            pieces[-1][4] = staged_token[: staged_token.index("~") + 1]
+        elif typ == "contact_email":
+            matched = text[start:end]
+            domain = matched.split("@", 1)[1]
+            token = f"@{domain}~{_hex12(contact_salt + matched)}"
+        elif typ == "contact_phone" and start < frontier:
+            # The affine-nesting corner: the number lived inside the
+            # preceding email token's verbatim domain half — replace the
+            # corresponding substring of the staged token in place. The
+            # offset is in ORIGINAL token coordinates; the piece's shift
+            # carries the length change of earlier nested replaces (two
+            # numbers can share one domain).
+            assert pieces and pieces[-1][0] == "token" and pieces[-1][1] == "contact_email"
+            assert len(pieces[-1]) == 6
+            _, _, sstart, send, stoken, shift = pieces[-1]
+            assert isinstance(sstart, int) and isinstance(send, int)
+            assert isinstance(stoken, str) and isinstance(shift, int)
+            at = text[sstart:send].index("@") + sstart
+            assert at < start
+            off = start - at
+            matched = text[start:end]
+            token = f"{matched[:3]}~{_hex12(contact_salt + matched)}"
+            assert stoken[off + shift : off + shift + (end - start)] == matched
+            pieces[-1][4] = (
+                stoken[: off + shift] + token + stoken[off + shift + (end - start) :]
+            )
+            pieces[-1][5] = shift + len(token) - (end - start)
+            prev = span
+            continue
+        elif typ == "contact_phone":
+            matched = text[start:end]
+            token = f"{matched[:3]}~{_hex12(contact_salt + matched)}"
+        else:
+            assert typ.startswith("api_keys:")
+            family = typ[len("api_keys:") :]
+            matched = text[start:end]
+            prefix = _family_token_prefix(family, matched)
+            token = f"{prefix}~{_hex12(keys_salt + matched)}"
+            if start < frontier:
+                # The email-ate-the-head corner is the ONLY overlap an
+                # api_keys span may arrive in — anything else is a span
+                # bug, fail loud. The overlapping email is found by
+                # coordinates, not by `prev` (a nested phone replace may
+                # sit between them); exactly one email span can overlap
+                # (email images are disjoint-or-touching).
+                overlapped = [e for e in email_pieces if e[0] <= start < e[1]]
+                assert len(overlapped) == 1, (span, email_pieces)
+                email_end = overlapped[0][1]
+                # The email-ate-the-head corner: only the token's
+                # remnant survives past the email splice.
+                offset = email_end - start if email_end < end else len(prefix)
+                token = token[offset:]
+                pieces.append(["token", typ, start, end, token, 0])
+                frontier = end
+                prev = span
+                continue
+        pieces.append(["token", typ, start, end, token, 0])
+        if typ == "contact_email":
+            email_pieces.append((start, end))
+        frontier = end
+        prev = span
+    pieces.append(["text", text[frontier:]])
+    return "".join(p[1] if p[0] == "text" else p[4] for p in pieces)
+
+
+class TestScrubPiiReport:
+    """``tors.scrub_pii_report``: the same scrub under the same single
+    detach, plus the accounting — per-rule and per-family redacted
+    counts, the skipped (detected-but-preserved) families, and the
+    input-coordinate spans. The ``"text"`` field is the scrubbed string
+    itself (``report["text"] == scrub_pii(...)`` for the same arguments,
+    the consistency the fuzz target asserts byte-exact in Rust)."""
+
+    def test_the_dict_shape_on_a_composed_excerpt(self) -> None:
+        key2 = "sk-proj-" + _key_tail(48)
+        text = f"a@b.co {_OPENAI} {key2} {_JWT}"
+        rep = scrub_pii_report(text, salt="")
+        assert rep["text"] == scrub_pii(text, salt="")
+        assert rep["redacted"] == {"contact_email": 1, "api_keys": 3, "openai": 2, "jwt": 1}
+        assert rep["skipped"] == {}
+        email_end = len("a@b.co")
+        key1_start = email_end + 1
+        key1_end = key1_start + len(_OPENAI)
+        key2_start = key1_end + 1
+        key2_end = key2_start + len(key2)
+        jwt_start = key2_end + 1
+        jwt_end = jwt_start + len(_JWT)
+        assert rep["spans"] == [
+            {"type": "contact_email", "start": 0, "end": email_end},
+            {"type": "api_keys:openai", "start": key1_start, "end": key1_end},
+            {"type": "api_keys:openai", "start": key2_start, "end": key2_end},
+            {"type": "api_keys:jwt", "start": jwt_start, "end": jwt_end},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_empty_input_is_the_empty_report(self) -> None:
+        assert scrub_pii_report("") == {
+            "text": "",
+            "redacted": {},
+            "skipped": {},
+            "spans": [],
+        }
+
+    def test_no_match_is_an_empty_accounting(self) -> None:
+        text = "read 4096 bytes across 3 pages in 1200 ms"
+        rep = scrub_pii_report(text, salt="")
+        assert rep == {"text": text, "redacted": {}, "skipped": {}, "spans": []}
+
+    def test_skipped_names_the_preserved_families(self) -> None:
+        # The "we preserved a JWT, log it separately" signal: families
+        # NOT in the active selection that would have matched anyway —
+        # detection runs, redaction does not.
+        text = f"{_JWT} {_OPENAI}"
+        families = [f for f in KEY_FAMILIES if f != "jwt"]
+        rep = scrub_pii_report(text, families=families, salt="")
+        assert rep["text"] == f"{_JWT} {_key_token('sk-', _OPENAI)}"
+        assert rep["redacted"] == {"api_keys": 1, "openai": 1}
+        assert rep["skipped"] == {"jwt": 1}
+        assert rep["spans"] == [
+            {
+                "type": "api_keys:openai",
+                "start": len(_JWT) + 1,
+                "end": len(_JWT) + 1 + len(_OPENAI),
+            }
+        ]
+        # ...and skipped is always {} when families=None, even with keys
+        # present (nothing was preserved on purpose).
+        full = scrub_pii_report(text, salt="")
+        assert full["skipped"] == {}
+        assert full["redacted"] == {"api_keys": 2, "openai": 1, "jwt": 1}
+
+    def test_a_single_family_reports_its_own_counts(self) -> None:
+        text = f"{_JWT} {_OPENAI}"
+        rep = scrub_pii_report(text, ["api_keys"], families=["jwt"], salt="")
+        assert rep["text"] == f"{_key_token('Bearer', _JWT)} {_OPENAI}"
+        assert rep["redacted"] == {"api_keys": 1, "jwt": 1}
+        assert rep["skipped"] == {"openai": 1}
+        assert rep["spans"] == [{"type": "api_keys:jwt", "start": 0, "end": len(_JWT)}]
+
+    def test_spans_are_codepoint_indices_into_the_input(self) -> None:
+        # A two-byte é and a four-byte emoji precede the key: byte
+        # offsets would overshoot, codepoint indices slice the str
+        # exactly (the reconstruction below indexes the str, so it pins
+        # the units).
+        text = "caf\u00e9 \U0001f600 " + _OPENAI
+        rep = scrub_pii_report(text, salt="")
+        assert len(rep["spans"]) == 1
+        span = rep["spans"][0]
+        assert span["type"] == "api_keys:openai"
+        assert text[span["start"] : span["end"]] == _OPENAI
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_codepoint_indices_cover_email_and_phone_spans(self) -> None:
+        # The byte-to-codepoint walk is per-pass, not per-rule: an email
+        # after non-ASCII and a phone after an emoji must slice exactly
+        # too.
+        for text, match in (
+            ("caf\u00e9 a@b.co", "a@b.co"),
+            ("\U0001f600 415-555-2671", "415-555-2671"),
+        ):
+            rep = scrub_pii_report(text, salt="")
+            assert len(rep["spans"]) == 1
+            span = rep["spans"][0]
+            assert text[span["start"] : span["end"]] == match
+            assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_an_email_eating_a_key_head_with_a_number_in_its_domain(self) -> None:
+        # The three-deep corner hypothesis found: the email's domain run
+        # flows into a key token's verbatim head (overlapping the key
+        # span) while the domain ALSO spells a number (a nested phone
+        # span sorts between them) — the remnant branch must find the
+        # overlapping email by coordinates, not by recency.
+        key = "sk-" + _key_tail(48)
+        text = "user@555.1234567.co." + key
+        rep = scrub_pii_report(text, salt="")
+        assert rep["spans"] == [
+            {"type": "contact_email", "start": 0, "end": 22},
+            {"type": "contact_phone", "start": 5, "end": 16},
+            {"type": "api_keys:openai", "start": 20, "end": len(text)},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_two_numbers_in_one_domain_fire_the_shift_path(self) -> None:
+        # Two domestic runs inside one email token's domain: the second
+        # affine replace lands on the shifted staged token (the helper's
+        # shift path — and the report's — fires only here).
+        text = "user@555.1234567g890-123-4567.co"
+        rep = scrub_pii_report(text, salt="")
+        assert rep["spans"] == [
+            {"type": "contact_email", "start": 0, "end": len(text)},
+            {"type": "contact_phone", "start": 5, "end": 16},
+            {"type": "contact_phone", "start": 17, "end": 29},
+        ]
+        assert text[5:16] == "555.1234567"
+        assert text[17:29] == "890-123-4567"
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_the_offset_map_survives_all_three_passes(self) -> None:
+        # The later passes run on later stages: a phone number AFTER a
+        # scrubbed key shifts in stage coordinates, and an email after a
+        # key token sits in stage material — both spans must name the
+        # INPUT positions, pinned literally.
+        key = "fw-" + _key_tail(48)
+        phone = "415-555-2671"
+        email = "a@b.co"
+        text = f"{key} {phone} {email}"
+        rep = scrub_pii_report(text, salt="")
+        key_end = len(key)
+        phone_start = key_end + 1
+        phone_end = phone_start + len(phone)
+        email_start = phone_end + 1
+        assert rep["spans"] == [
+            {"type": "api_keys:fireworks", "start": 0, "end": key_end},
+            {"type": "contact_phone", "start": phone_start, "end": phone_end},
+            {"type": "contact_email", "start": email_start, "end": len(text)},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_a_key_shaped_local_part_pins_the_hex_consumption_corner(self) -> None:
+        # The keys-before-email corner: the keys pass eats the key-shaped
+        # local part, and the email pass fires on hex12@domain — a match
+        # that BEGAN inside the key token's digest. The offset map
+        # records it from the token's input end (the first position whose
+        # material is real input), and the reconstruction re-derives the
+        # consumed hex from the preceding key span.
+        text = _OPENAI + "@x.co"
+        rep = scrub_pii_report(text, salt="")
+        assert rep["redacted"] == {"contact_email": 1, "api_keys": 1, "openai": 1}
+        assert rep["skipped"] == {}
+        assert rep["spans"] == [
+            {"type": "api_keys:openai", "start": 0, "end": len(_OPENAI)},
+            {"type": "contact_email", "start": len(_OPENAI), "end": len(text)},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_an_email_domain_that_spells_a_number_pins_the_affine_corner(self) -> None:
+        # The phone pass re-tokens the domestic shape the email token's
+        # verbatim DOMAIN spelled: the phone span maps back through the
+        # token's verbatim head to the input's own domain digits.
+        text = "user@555.1234567.co"
+        rep = scrub_pii_report(text, salt="")
+        assert rep["spans"] == [
+            {"type": "contact_email", "start": 0, "end": len(text)},
+            {"type": "contact_phone", "start": 5, "end": 16},
+        ]
+        assert text[5:16] == "555.1234567"
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_report_text_matches_scrub_pii_for_every_rule_lane(self) -> None:
+        # The consistency contract, per lane: the report's text is the
+        # scrub's output for the same arguments (the fuzz target asserts
+        # the same in Rust, byte-exact, over arbitrary input).
+        key = "sk-proj-415-555-2671" + _key_tail(20)
+        text = f"a@b.co +14155552671 {key} {_JWT}"
+        for rules in (None, ["api_keys"], ["contact_email"], ["contact_phone"], []):
+            for families in (None, ["jwt"], [f for f in KEY_FAMILIES if f != "jwt"]):
+                rep = scrub_pii_report(text, rules, salt="", families=families)
+                assert rep["text"] == scrub_pii(text, rules, salt="", families=families)
+                assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    def test_salt_semantics_flow_through_the_report(self) -> None:
+        # An explicit salt salts every rule alike; None resolves per
+        # rule (the contact tag and the keys tag) — pinned through the
+        # report's tokens, with the reconstruction carrying each salt.
+        text = f"a@b.co {_OPENAI}"
+        site = scrub_pii_report(text, salt="site")
+        assert site["text"] == (
+            f"@b.co~{_hex12('site' + 'a@b.co')} {_key_token('sk-', _OPENAI, salt='site')}"
+        )
+        assert _reconstruct(text, site["spans"], "site", "site") == site["text"]
+        defaulted = scrub_pii_report(text)
+        assert defaulted["text"] == (
+            f"@b.co~{_hex12(_REPORT_CONTACT_SALT + 'a@b.co')} "
+            f"sk-~{_hex12(_REPORT_KEYS_SALT + _OPENAI)}"
+        )
+        assert (
+            _reconstruct(text, defaulted["spans"], _REPORT_CONTACT_SALT, _REPORT_KEYS_SALT)
+            == defaulted["text"]
+        )
+
+    def test_rules_subsets_scope_the_accounting(self) -> None:
+        text = f"a@b.co +14155552671 {_OPENAI}"
+        keys_only = scrub_pii_report(text, ["api_keys"], salt="")
+        assert keys_only["redacted"] == {"api_keys": 1, "openai": 1}
+        assert keys_only["skipped"] == {}
+        assert [s["type"] for s in keys_only["spans"]] == ["api_keys:openai"]
+        email_only = scrub_pii_report(text, ["contact_email"], salt="", families=["jwt"])
+        assert email_only["redacted"] == {"contact_email": 1}
+        assert email_only["skipped"] == {}
+        assert [s["type"] for s in email_only["spans"]] == ["contact_email"]
+        phone_only = scrub_pii_report(text, ["contact_phone"], salt="")
+        assert phone_only["redacted"] == {"contact_phone": 1}
+        assert phone_only["skipped"] == {}
+        assert [s["type"] for s in phone_only["spans"]] == ["contact_phone"]
+        assert _reconstruct(text, phone_only["spans"], "", "") == phone_only["text"]
+
+    def test_two_skips_of_one_family_count_together(self) -> None:
+        anthropic = "sk-ant-api03-" + _key_tail(95)
+        text = f"{_JWT} {_JWT} {anthropic}"
+        rep = scrub_pii_report(text, ["api_keys"], families=["anthropic"], salt="")
+        assert rep["text"] == f"{_JWT} {_JWT} {_key_token('sk-ant-', anthropic)}"
+        assert rep["redacted"] == {"api_keys": 1, "anthropic": 1}
+        assert rep["skipped"] == {"jwt": 2}
+
+    def test_a_mutated_span_breaks_the_reconstruction(self) -> None:
+        # The oracle's teeth (the pyi-guard pattern): shifting a span's
+        # start by one must NOT reconstruct — a helper that agrees with
+        # wrong spans is decoration.
+        text = f"a@b.co {_OPENAI}"
+        rep = scrub_pii_report(text, salt="")
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+        mutated = [dict(s) for s in rep["spans"]]
+        mutated[0] = {**mutated[0], "start": mutated[0]["start"] + 1}
+        assert _reconstruct(text, mutated, "", "") != rep["text"]
+        mutated = [dict(s) for s in rep["spans"]]
+        mutated[1] = {**mutated[1], "end": mutated[1]["end"] - 1}
+        assert _reconstruct(text, mutated, "", "") != rep["text"]
+
+    def test_reconstruction_holds_over_composed_excerpts(self) -> None:
+        # The strong invariant over realistic compositions: keys (every
+        # family), contacts, and separators in both orders — the splices
+        # plus the digest construction reproduce the report's text.
+        pieces = [v[0] for v in _KEY_VECTORS]
+        contacts = ["a@b.co", "user@555.1234567.co", "+14155552671", "415-555-2671"]
+        seps = [" ", "\n", ", ", " | ", "rotated ", "leaked ", "! "]
+        texts = [
+            f"{a}{s}{b}" for a in pieces for b in contacts for s in seps[:3]
+        ] + [f"{c}{s}{k}" for c in contacts for k in pieces for s in seps[:3]]
+        for text in texts:
+            rep = scrub_pii_report(text, salt="")
+            assert _reconstruct(text, rep["spans"], "", "") == rep["text"], text
+            assert rep["text"] == scrub_pii(text, salt=""), text
+
+    @given(
+        pieces=st.lists(
+            st.sampled_from(
+                [v[0] for v in _KEY_VECTORS]
+                + [
+                    "a@b.co",
+                    "user@555.1234567.co",
+                    "user@555.1234567g890-123-4567.co",
+                    "+14155552671",
+                    "415-555-2671",
+                    " ",
+                    "\n",
+                    ",",
+                    ".",
+                    "!",
+                    "-",
+                    "~",
+                    "x",
+                    "9",
+                    "@",
+                    "Bearer ",
+                    "-----BEGIN ",
+                    "glued",
+                ]
+            ),
+            max_size=10,
+        )
+    )
+    @settings(max_examples=100)
+    def test_reconstruction_holds_over_glued_compositions(self, pieces: list[str]) -> None:
+        # The adversarial spelling of the invariant: keys glued to
+        # contacts and to each other with zero or one separator — the
+        # zero-gap hex corner, mid-token cuts, and maximal tails all
+        # compose here, and the reconstruction must still reproduce the
+        # report's text exactly.
+        text = "".join(pieces)
+        rep = scrub_pii_report(text, salt="")
+        assert rep["text"] == scrub_pii(text, salt="")
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
+    @given(
+        pieces=st.lists(
+            st.sampled_from(
+                [v[0] for v in _KEY_VECTORS]
+                + [
+                    "a@b.co",
+                    "+14155552671",
+                    "415-555-2671",
+                    " ",
+                    "\n",
+                    ",",
+                    ".",
+                    "~",
+                    "-",
+                    "@",
+                ]
+            ),
+            max_size=8,
+        ),
+        families=st.sampled_from(
+            [
+                None,
+                ["jwt"],
+                ["aws"],
+                ["openai", "aws"],
+                [f for f in KEY_FAMILIES if f != "jwt"],
+            ]
+        ),
+    )
+    @settings(max_examples=100)
+    def test_reconstruction_holds_under_family_selection(
+        self, pieces: list[str], families: list[str] | None
+    ) -> None:
+        # The selection matrix, structured-random: unselected families
+        # spend whole and count skipped (never re-scanned inside), and
+        # the reconstruction still reproduces the report's text — with
+        # the per-rule salts the selection does not disturb.
+        text = "".join(pieces)
+        rep = scrub_pii_report(text, salt="", families=families)
+        assert rep["text"] == scrub_pii(text, salt="", families=families)
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+        if families is None:
+            assert rep["skipped"] == {}
+        selected = set(KEY_FAMILIES if families is None else families)
+        for span in rep["spans"]:
+            assert isinstance(span["type"], str)
+            if span["type"].startswith("api_keys:"):
+                assert span["type"][len("api_keys:") :] in selected, span
+        for skipped_family in rep["skipped"]:
+            assert skipped_family not in selected
 
 
 class TestNdExhaustive:

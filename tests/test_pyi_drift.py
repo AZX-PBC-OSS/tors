@@ -23,9 +23,11 @@ markers, and defaults are diffed against the live function directly;
 annotations (parameters and return) are pinned structurally (every parameter
 annotated, every def return-annotated) because the stub is their only home.
 Constants have no signature at all, so their pin is structural the same way:
-present in the stub, annotated exactly ``str``, a live ``str`` — their
-content is contract (byte-exact, in tests/test_first_invalid_charset.py),
-not this guard's job, and the stub deliberately does not re-spell it. The
+present in the stub, annotated exactly ``str`` (lexical data, a live
+``str``) or ``tuple[str, ...]`` (a closed name tuple like KEY_FAMILIES,
+a live tuple of ``str``) — their content is contract (byte-exact, in
+tests/test_first_invalid_charset.py and tests/test_scrub_pii.py), not
+this guard's job, and the stub deliberately does not re-spell it. The
 default comparison resolves the stub's literal expressions against the
 live default values, so ``True``/``"strict"``/``None`` literals are compared
 by value, and any non-literal default in a future stub fails loudly (the
@@ -206,6 +208,49 @@ def test_no_stub_name_is_both_a_def_and_a_constant() -> None:
     )
 
 
+def _constant_shape(annotation: ast.expr, name: str) -> str:
+    """The stub's constant type spelling: ``str`` (lexical data) or
+    ``tuple[str, ...]`` (a closed name tuple like KEY_FAMILIES) — anything
+    else fails loudly; teach the guard the shape first, the same doctrine
+    as the non-literal-default refusal."""
+    if isinstance(annotation, ast.Name) and annotation.id == "str":
+        return "str"
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id == "tuple"
+        and isinstance(annotation.slice, ast.Tuple)
+        and len(annotation.slice.elts) == 2
+        and isinstance(annotation.slice.elts[0], ast.Name)
+        and annotation.slice.elts[0].id == "str"
+        and isinstance(annotation.slice.elts[1], ast.Constant)
+        and annotation.slice.elts[1].value is Ellipsis
+    ):
+        return "tuple[str, ...]"
+    raise AssertionError(
+        f"{name}: the stub's constant annotation must be exactly str or "
+        f"tuple[str, ...] (got {ast.unparse(annotation)}); teach the guard "
+        "the shape before publishing other constant types"
+    )
+
+
+def _check_constant(name: str, annotation: ast.expr, live: Any) -> None:
+    """The constants pin in one place (the signature test below and axis 7
+    of the teeth test share it): the annotation's shape must match the live
+    value — ``str`` is lexical data, ``tuple[str, ...]`` a tuple of ``str``."""
+    shape = _constant_shape(annotation, name)
+    if shape == "str":
+        assert isinstance(live, str), (
+            f"{name}: a published constant is lexical data: the live "
+            f"value must be str, not {type(live).__name__}"
+        )
+    else:
+        assert isinstance(live, tuple) and all(isinstance(v, str) for v in live), (
+            f"{name}: a published name tuple must be a tuple of str, not "
+            f"{type(live).__name__}"
+        )
+
+
 def test_every_stub_signature_matches_the_live_function() -> None:
     """The full-signature pin: for every exported function, the stub's
     parameter names in order, keyword-only markers, and literal defaults must
@@ -213,10 +258,11 @@ def test_every_stub_signature_matches_the_live_function() -> None:
     ``#[pyfunction]`` declaration in ``src/lib.rs``), and the stub must be
     fully annotated (every parameter, plus the return). A drift on any axis
     fails naming the function and the axis. Published constants have no
-    signature: their pin is presence (the name-set test), a live ``str``
-    (they are lexical data), and the annotation spelled exactly ``str`` —
-    a future constant of another type must teach this guard its shape
-    first, the same doctrine as the non-literal-default refusal."""
+    signature: their pin is presence (the name-set test) plus the
+    shape-matched live value (``str`` lexical data, ``tuple[str, ...]``
+    name tuples) — a future constant of another type must teach this
+    guard its shape first, the same doctrine as the non-literal-default
+    refusal."""
     stubs = _stub_defs()
     constants = _stub_constants()
     for name in tors.__all__:
@@ -224,17 +270,7 @@ def test_every_stub_signature_matches_the_live_function() -> None:
             f"{name}: missing from the stub (the name-set test)"
         )
         if name in constants:
-            live = getattr(tors, name)
-            assert isinstance(live, str), (
-                f"{name}: a published constant is lexical data: the live "
-                f"value must be str, not {type(live).__name__}"
-            )
-            annotation = constants[name].annotation
-            assert isinstance(annotation, ast.Name) and annotation.id == "str", (
-                f"{name}: the stub's constant annotation must be exactly "
-                f"str (got {ast.unparse(annotation)}); teach the guard the "
-                "shape before publishing other constant types"
-            )
+            _check_constant(name, constants[name].annotation, getattr(tors, name))
             continue
         stub_fn = stubs[name]
         stub_params = _stub_params(stub_fn)
@@ -350,3 +386,22 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
     assert shadowed_constant != base, "the mutation did not apply: fix the guard test"
     assert def_names(shadowed_constant) & constant_names(shadowed_constant) == {"CHARSET_B62"}
     assert not (def_names(base) & constant_names(base))
+    # Axis 7: a name tuple's annotation mistyped as str (the shape pin):
+    # the guard must reject the mismatch rather than treating every
+    # constant as lexical data.
+    mistyped_tuple = base.replace("KEY_FAMILIES: tuple[str, ...]\n", "KEY_FAMILIES: str\n", 1)
+    assert mistyped_tuple != base, "the mutation did not apply: fix the guard test"
+    (mistyped_node,) = [
+        node
+        for node in ast.parse(mistyped_tuple).body
+        if isinstance(node, ast.AnnAssign) and node.target.id == "KEY_FAMILIES"
+    ]
+    assert _constant_shape(mistyped_node.annotation, "KEY_FAMILIES") == "str"
+    try:
+        _check_constant("KEY_FAMILIES", mistyped_node.annotation, tors.KEY_FAMILIES)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the mistyped tuple constant did not fail the pin: the guard is decoration"
+        )

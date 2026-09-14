@@ -286,22 +286,30 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
 # The api-key guard: whether tors's keys rule (the credential extension
 # past the source's two-rule contact contract) would fire anywhere in
 # `text`. A faithful test-side mirror of the landed grammar — the family
-# table longest-prefix-first with fall-through, the maximal tail run of
-# the shared [A-Za-z0-9_-] charset, the prefix-boundary rule (a prefix
-# glued to a preceding key-charset char is mid-token, the `xak-` cut),
-# and the JWT marker scoping — used only to route inputs between the
-# lanes, the same posture as `has_domestic_shape`. The scanner's
-# first-byte dispatch is a pure optimization and is deliberately NOT
-# mirrored: every family prefix is tried at every clean position, which
-# is behaviorally identical and one less thing to drift.
+# table longest-prefix-first with fall-through, the maximal tail run in
+# the family's own charset (the shared [A-Za-z0-9_-] for most, [0-9A-Z]
+# for the AWS pair, [A-Za-z0-9+/=] for the Azure marker), the
+# prefix-boundary rule (a prefix glued to a preceding key-charset char is
+# mid-token, the `xak-` cut — the PEM block's leading `-` run included),
+# the JWT marker scoping, and the PEM span (both markers, same words) —
+# used only to route inputs between the lanes, the same posture as
+# `has_domestic_shape`. The scanner's first-byte dispatch is a pure
+# optimization and is deliberately NOT mirrored: every family prefix is
+# tried at every clean position, which is behaviorally identical and one
+# less thing to drift.
 _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("github_pat_", 22),
     ("sk-svcacct-", 20),
+    ("AccountKey=", 40),
     ("sk-proj-", 20),
     ("sk-ant-", 20),
     ("azxdev_", 20),
+    ("ya29.", 20),
     ("ghp_", 36),
     ("AIza", 35),
+    ("xai-", 20),
+    ("AKIA", 16),
+    ("ASIA", 16),
     ("fw-", 20),
     ("fw_", 20),
     ("ak-", 20),
@@ -314,7 +322,31 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
 _KEY_TAIL = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 )
+# The two per-family tail alphabets past the shared charset: the AWS
+# access-key ID alphabet (uppercase + digits — no lowercase anywhere in
+# it) and the Azure connection-string secret alphabet (base64 plus the
+# padding/trailing `=`). Every other prefix family — xai-, ya29., the
+# JWT segments included — runs on the shared charset above.
+_KEY_TAIL_AWS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+_KEY_TAIL_AZURE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+)
+_PEM_WORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
 _BEARER_MARKER = "Bearer eyJ"
+
+
+def _key_charset_for(prefix: str) -> frozenset[str]:
+    """The tail class one table prefix scans: the AWS/Azure alphabets for
+    their own markers, the shared charset for everything else — the one
+    tail-class branch a 14th family with a new alphabet extends (a
+    shared-charset family touches the table only)."""
+    if prefix in ("AKIA", "ASIA"):
+        return _KEY_TAIL_AWS
+    if prefix == "AccountKey=":
+        return _KEY_TAIL_AZURE
+    return _KEY_TAIL
 
 
 def _jwt_span_at(text: str, start: int) -> int | None:
@@ -339,6 +371,35 @@ def _jwt_span_at(text: str, start: int) -> int | None:
     return i
 
 
+_PEM_BEGIN = "-----BEGIN "
+_PEM_CLOSE = " PRIVATE KEY-----"
+
+
+def _pem_span_at(text: str, start: int) -> int | None:
+    """The PEM family at one position: `-----BEGIN <words> PRIVATE
+    KEY-----`, any bytes (newlines included), then `-----END <the same
+    words> PRIVATE KEY-----` — `<words>` one-or-more `[A-Za-z0-9]+`
+    runs, single-space separated (an empty, doubled-space, or non-alnum
+    spelling never opens a block). Both markers required: an
+    unterminated BEGIN or mismatched END words is a non-match, and the
+    whole block is the one span. The end offset, or None."""
+    if not text.startswith(_PEM_BEGIN, start):
+        return None
+    words_at = start + len(_PEM_BEGIN)
+    close = text.find(_PEM_CLOSE, words_at)
+    if close < 0:
+        return None
+    words = text[words_at:close]
+    parts = words.split(" ")
+    if any(part == "" or any(c not in _PEM_WORD_CHARS for c in part) for part in parts):
+        return None
+    marker = "-----END " + words + _PEM_CLOSE
+    end = text.find(marker, close + len(_PEM_CLOSE))
+    if end < 0:
+        return None
+    return end + len(marker)
+
+
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
@@ -347,13 +408,16 @@ def has_api_key_shape(text: str) -> bool:
         for prefix, min_tail in _KEY_FAMILIES:
             if not text.startswith(prefix, i):
                 continue
+            charset = _key_charset_for(prefix)
             j = i + len(prefix)
-            while j < n and text[j] in _KEY_TAIL:
+            while j < n and text[j] in charset:
                 j += 1
             if j - (i + len(prefix)) >= min_tail:
                 return True
             # a too-short tail falls through to the shorter prefixes
         if _jwt_span_at(text, i) is not None:
+            return True
+        if _pem_span_at(text, i) is not None:
             return True
     return False
 
@@ -1018,8 +1082,12 @@ class TestDomesticSeedCoverage:
 # on either side fails as itself instead of surfacing as a parity
 # mystery. The key material here is independently spelled from
 # tests/test_scrub_pii.py's zoo (a rot-13 offset into the same 62-char
-# alphabet: different bytes, the same charset class), the file's
-# independent-transcription posture.
+# alphabet: different bytes, the same charset class — and the AWS/Azure
+# tails a rot-13 offset into their own alphabets, the same posture), the
+# file's independent-transcription posture. The five newer families (the
+# AWS pair, xai-, ya29., the PEM span, the Azure marker) ride the same
+# table, and `TestApiKeyFamilyRouting` below pins the `families=` mask
+# over the closed set (selected redacts, unselected preserves whole).
 
 _KEYS_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -1028,38 +1096,98 @@ def _key_tail(n: int) -> str:
     return "".join(_KEYS_ALPHABET[(i + 13) % 62] for i in range(n))
 
 
+# The AWS access-key tail: uppercase letters and digits only ([0-9A-Z] —
+# the access-key ID alphabet, no lowercase anywhere in it), rot-13-offset
+# into its own 36-char alphabet (different bytes from the battery's
+# offset-zero spelling, same class).
+_KEY_AWS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _key_aws_tail(n: int) -> str:
+    return "".join(_KEY_AWS_ALPHABET[(i + 13) % 36] for i in range(n))
+
+
+# The Azure storage-key tail: the connection-string secret alphabet
+# ([A-Za-z0-9+/=] — base64 plus the padding/trailing `=`), the same
+# rot-13-offset posture into its 65-char alphabet.
+_KEY_AZURE_ALPHABET = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+)
+
+
+def _key_azure_tail(n: int) -> str:
+    return "".join(_KEY_AZURE_ALPHABET[(i + 13) % 65] for i in range(n))
+
+
+# PEM material: a multi-line SPAN family, raised by its own block builder
+# (body lines independently spelled from the battery's, same base64-line
+# shape). The body is base64 lines (no separators, no `@`), so an
+# unterminated block stays identity under the contact passes too — the
+# near-miss pins below demand it.
+_PEM_BODY = (
+    "MIIBoQIBAAJBAKzv",
+    "tCx2DeFgHiJkLmNoP",
+    "qRsTuVwXyZ012345",
+)
+
+
+def _pem_block(words: str, body: tuple[str, ...] = _PEM_BODY) -> str:
+    lines = [f"-----BEGIN {words} PRIVATE KEY-----", *body, f"-----END {words} PRIVATE KEY-----"]
+    return "\n".join(lines)
+
+
+_PEM_EC = _pem_block("EC")
+
+# The tail builder per tail class: the one branch a 14th family with a
+# new alphabet extends, next to the guard's `_key_charset_for`.
+_KEY_TAIL_BUILDERS = {"std": _key_tail, "aws": _key_aws_tail, "azure": _key_azure_tail}
+
+
+def _key_case(shape: str, prefix: str, n: int, kind: str) -> tuple[str, str, str]:
+    key = shape + _KEY_TAIL_BUILDERS[kind](n)
+    return (key, key, prefix)
+
+
 _KEYS_JWT = (
     "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
     "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
     "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 
-# (the key's literal shape, the token's family prefix, the tail length)
-_KEYS_TABLE: tuple[tuple[str, str, int], ...] = (
-    ("sk-", "sk-", 48),
-    ("sk-proj-", "sk-proj-", 48),
-    ("sk-svcacct-", "sk-svcacct-", 48),
-    ("sk-ant-api03-", "sk-ant-", 95),
-    ("AIza", "AIza", 35),
-    ("fw-", "fw-", 48),
-    ("fw_", "fw_", 48),
-    ("ak-", "ak-", 48),
-    ("wk-", "wk-", 48),
-    ("ghp_", "ghp_", 36),
-    ("github_pat_", "github_pat_", 22),
-    ("azxdev_", "azxdev_", 20),
-    ("wd-", "wd-", 43),
-    ("w-", "w-", 43),
-    ("cn-", "cn-", 20),
+# (the key's literal shape, the token's family prefix, the tail length, the
+# tail class): every prefix family at its own floor or a realistic
+# multiple — the AWS pair at their 16 floor (uppercase-only tails), xai-
+# and ya29. at their 20 floor, the Azure marker at its 40 floor — so the
+# minimums pin exactly, not loosely.
+_KEYS_TABLE: tuple[tuple[str, str, int, str], ...] = (
+    ("sk-", "sk-", 48, "std"),
+    ("sk-proj-", "sk-proj-", 48, "std"),
+    ("sk-svcacct-", "sk-svcacct-", 48, "std"),
+    ("sk-ant-api03-", "sk-ant-", 95, "std"),
+    ("AIza", "AIza", 35, "std"),
+    ("fw-", "fw-", 48, "std"),
+    ("fw_", "fw_", 48, "std"),
+    ("ak-", "ak-", 48, "std"),
+    ("wk-", "wk-", 48, "std"),
+    ("ghp_", "ghp_", 36, "std"),
+    ("github_pat_", "github_pat_", 22, "std"),
+    ("azxdev_", "azxdev_", 20, "std"),
+    ("wd-", "wd-", 43, "std"),
+    ("w-", "w-", 43, "std"),
+    ("cn-", "cn-", 20, "std"),
+    ("AKIA", "AKIA", 16, "aws"),
+    ("ASIA", "ASIA", 16, "aws"),
+    ("xai-", "xai-", 20, "std"),
+    ("ya29.", "ya29.", 20, "std"),
+    ("AccountKey=", "AccountKey=", 40, "azure"),
 )
 
 # (input, the span tors scrubs, the token's family prefix): every family
-# at its own shape, the JWT, the keys-before-phone order (the
-# dash-separated ten-digit run inside the tail — the phone pass must see
-# only the token), and a key embedded in error prose.
+# at its own shape, the JWT, the PEM span block, the keys-before-phone
+# order (the dash-separated ten-digit run inside the tail — the phone
+# pass must see only the token), and a key embedded in error prose.
 _KEYS_CASES: list[tuple[str, str, str]] = [
-    (shape + _key_tail(n), shape + _key_tail(n), prefix)
-    for shape, prefix, n in _KEYS_TABLE
+    _key_case(shape, prefix, n, kind) for shape, prefix, n, kind in _KEYS_TABLE
 ] + [
     (_KEYS_JWT, _KEYS_JWT, "Bearer"),
     (
@@ -1067,12 +1195,17 @@ _KEYS_CASES: list[tuple[str, str, str]] = [
         f"sk-proj-415-555-2671{_key_tail(20)}",
         "sk-proj-",
     ),
+    (_PEM_EC, _PEM_EC, "PEM"),
 ]
 
 _KEYS_NON_MATCHES: list[str] = [
     # The grammar cuts, shared by BOTH engines: one-under tails at every
     # distinct minimum, the uppercase spelling, the bare prefix, the
-    # mid-token prefix, and the unmarked/degenerate JWT spellings.
+    # mid-token prefix, and the unmarked/degenerate JWT spellings — plus
+    # the five newer families' own cuts: one-under AWS/xai/gcp/Azure
+    # tails, the lowercase (or uppercase, where the family is lowercase)
+    # spellings, the mid-token markers, and the unterminated, mismatched,
+    # empty-words, lowercase, and glued PEM blocks.
     "sk-" + _key_tail(19),
     "sk-",
     "SKI-" + _key_tail(48),
@@ -1089,6 +1222,25 @@ _KEYS_NON_MATCHES: list[str] = [
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKx",
     "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln",
     "Bearer eyJ.a.b.c",
+    "AKIA" + _key_aws_tail(15),
+    "akia" + _key_aws_tail(16),
+    "ASIA" + _key_aws_tail(15),
+    "x" + "AKIA" + _key_aws_tail(16),
+    "xai-" + _key_tail(19),
+    "XAI-" + _key_tail(20),
+    "ya29." + _key_tail(19),
+    "YA29." + _key_tail(20),
+    "xya29." + _key_tail(20),
+    "\n".join(["-----BEGIN EC PRIVATE KEY-----", *_PEM_BODY]),
+    _pem_block("EC").replace(
+        "-----END EC PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"
+    ),
+    "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_BODY) + "\n-----END PRIVATE KEY-----",
+    "-----begin ec private key-----\n" + "\n".join(_PEM_BODY) + "\n-----end ec private key-----",
+    "abc" + _PEM_EC,
+    "AccountKey=" + _key_azure_tail(39),
+    "Accountkey=" + _key_azure_tail(44),
+    "xAccountKey=" + _key_azure_tail(40),
 ]
 
 
@@ -1144,6 +1296,18 @@ class TestApiKeyExtension:
         for text, _matched, _prefix in _KEYS_CASES:
             assert has_api_key_shape(text), text
 
+    def test_the_guard_agrees_with_the_scanner_over_cases_and_cuts(self) -> None:
+        # The shared-miss killer: for every extension case and every
+        # grammar cut, the guard's verdict must equal the scanner's own
+        # (scrubbed vs whole) under families=None — if both miss a
+        # shape, one side still disagrees with the scrub outcome here.
+        for text, _matched, _prefix in _KEYS_CASES:
+            assert has_api_key_shape(text), text
+            assert tors.scrub_pii(text, ["api_keys"], salt="") != text, text
+        for text in _KEYS_NON_MATCHES:
+            assert not has_api_key_shape(text), text
+            assert tors.scrub_pii(text, ["api_keys"], salt="") == text, text
+
     def test_the_corpus_is_key_free_so_the_parity_lanes_assert_it(self) -> None:
         # The existing quoted-pin lanes stay meaningful only while the
         # corpus (and the composed hypothesis alphabet's pieces) carry no
@@ -1157,3 +1321,143 @@ class TestApiKeyExtension:
             assert not has_api_key_shape(row), row
         for piece in _PIECES:
             assert not has_api_key_shape(piece), piece
+
+
+# --- The family-selection routing: the `families=` mask over the closed set --
+#
+# `families=None` is all thirteen families; a recipe names its subset.
+# The scanner still walks longest-prefix-first and the FIRST family whose
+# grammar HOLDS wins the span: selected, it redacts; unselected, the span
+# is spent whole and preserved verbatim (counted as skipped, no redaction
+# inside it); a family whose grammar FAILS (a too-short tail) falls
+# through to shorter prefixes as today. So with `families=[one]`, inputs
+# bearing only other families are parity-assertable directly — tors and
+# the oracle both leave them whole — and the selected family's own shapes
+# pin in the extension lane. The routing tables below derive from the one
+# case table above, so the 14th family joins them by joining it.
+_ALL_KEY_FAMILIES: tuple[str, ...] = (
+    "openai",
+    "anthropic",
+    "google",
+    "fireworks",
+    "modal",
+    "github",
+    "minted",
+    "jwt",
+    "aws",
+    "xai",
+    "gcp_oauth",
+    "pem",
+    "azure",
+)
+
+# Token prefix -> recipe family: the new families' markers are
+# unambiguous (AKIA/ASIA, xai-, ya29., the PEM block, AccountKey=) and
+# the JWT is its own recipe; the old prefixes' grouping follows the
+# recipe's names as read. Only the new-family selections below are
+# exercised, so an old case is "other" under every one of them no matter
+# which old name it carries — a regroup of the old names cannot redden a
+# routing pin, only the registry pin above names the set.
+_KEY_TOKEN_FAMILY: dict[str, str] = {
+    "sk-": "openai",
+    "sk-proj-": "openai",
+    "sk-svcacct-": "openai",
+    "sk-ant-": "anthropic",
+    "AIza": "google",
+    "fw-": "fireworks",
+    "fw_": "fireworks",
+    "ak-": "modal",
+    "wk-": "modal",
+    "ghp_": "github",
+    "github_pat_": "github",
+    "azxdev_": "minted",
+    "wd-": "minted",
+    "w-": "minted",
+    "cn-": "minted",
+    "Bearer": "jwt",
+    "AKIA": "aws",
+    "ASIA": "aws",
+    "xai-": "xai",
+    "ya29.": "gcp_oauth",
+    "PEM": "pem",
+    "AccountKey=": "azure",
+}
+
+# The selections this lane exercises: each new family alone (its own
+# shapes pin, everything else passes through) and the all-but-jwt recipe
+# (the JWT passes through).
+_NEW_FAMILIES: tuple[str, ...] = ("aws", "xai", "gcp_oauth", "pem", "azure")
+_ALL_BUT_JWT: list[str] = [f for f in _ALL_KEY_FAMILIES if f != "jwt"]
+
+# (selecting family, input, span, token prefix): every case whose family
+# is NOT the selection passes through whole ...
+_ROUTING_UNSELECTED: list[tuple[str, str, str, str]] = [
+    (family, text, matched, prefix)
+    for family in _NEW_FAMILIES
+    for text, matched, prefix in _KEYS_CASES
+    if _KEY_TOKEN_FAMILY[prefix] != family
+]
+# ... and every case whose family IS the selection scrubs exactly.
+_ROUTING_SELECTED: list[tuple[str, str, str, str]] = [
+    (family, text, matched, prefix)
+    for family in _NEW_FAMILIES
+    for text, matched, prefix in _KEYS_CASES
+    if _KEY_TOKEN_FAMILY[prefix] == family
+]
+
+
+class TestApiKeyFamilyRouting:
+    def test_the_registry_lists_the_closed_set(self) -> None:
+        # getattr, not a top-level import: before the core lands there is
+        # no such name, and the empty default fails this equality — the
+        # correct red, in one test, not at collection.
+        assert set(getattr(tors, "KEY_FAMILIES", ())) == set(_ALL_KEY_FAMILIES)
+
+    @pytest.mark.parametrize(
+        ("family", "text", "matched", "prefix"),
+        _ROUTING_UNSELECTED,
+        ids=[f"{f}-leaves-{p}-{k}" for k, (f, _t, _m, p) in enumerate(_ROUTING_UNSELECTED)],
+    )
+    def test_unselected_families_leave_the_shape_whole(
+        self, family: str, text: str, matched: str, prefix: str
+    ) -> None:
+        # With `families=[one new family]`, every other family's shape is
+        # parity-assertable directly: tors spends the span whole and
+        # preserves it verbatim (the keys-only lane, so the contact passes
+        # cannot touch the phone-bearing key either), and the oracle — no
+        # key grammar under any lane — leaves it whole. Asserted equal,
+        # never skipped. (Red until the core lands: `families=` is still
+        # a TypeError there.)
+        assert has_api_key_shape(text)  # non-vacuous: the all-family guard flags it
+        assert reference_scrub_pii(text, ["api_keys"], salt="") == text
+        got = tors.scrub_pii(text, ["api_keys"], salt="", families=[family])
+        assert got == text
+        assert got == reference_scrub_pii(text, ["api_keys"], salt="")
+
+    @pytest.mark.parametrize(
+        ("family", "text", "matched", "prefix"),
+        _ROUTING_SELECTED,
+        ids=[f"{f}-scrubs-{p}" for f, _t, _m, p in _ROUTING_SELECTED],
+    )
+    def test_the_selected_family_scrubs_exactly_the_span(
+        self, family: str, text: str, matched: str, prefix: str
+    ) -> None:
+        # The other side of the mask: the selecting recipe redacts exactly
+        # the span — the family prefix verbatim over the digest of the
+        # FULL match, PEM block newlines included. (Red until the core
+        # lands, same TypeError.)
+        token = _unsalted_token(prefix, matched)
+        assert text.count(matched) == 1
+        assert tors.scrub_pii(text, ["api_keys"], salt="", families=[family]) == text.replace(
+            matched, token, 1
+        )
+
+    def test_all_but_jwt_leaves_a_jwt_whole(self) -> None:
+        # The all-but-jwt recipe's routing: jwt unselected, its span spent
+        # whole and preserved verbatim — parity-assertable directly, both
+        # engines leaving it whole. (Red until the core lands.)
+        assert has_api_key_shape(_KEYS_JWT)
+        assert reference_scrub_pii(_KEYS_JWT, ["api_keys"], salt="") == _KEYS_JWT
+        got = tors.scrub_pii(_KEYS_JWT, ["api_keys"], salt="", families=_ALL_BUT_JWT)
+        assert got == _KEYS_JWT
+        assert got == reference_scrub_pii(_KEYS_JWT, ["api_keys"], salt="")

@@ -35,10 +35,15 @@
 //!
 //! The keys grammar here transcribes the scanner EXACTLY — the family
 //! table in longest-prefix-first order with fall-through on a too-short
-//! tail, the maximal `[A-Za-z0-9_-]` tail run, the prefix-boundary rule
-//! (a prefix glued to a preceding key-charset char is mid-token), and
-//! the JWT segment grammar behind the `Bearer eyJ` marker — so a drift
-//! on either side fails as a differential mismatch naming the input.
+//! tail, the per-family tail alphabets (the shared key charset, the AWS
+//! uppercase-only run, the Azure base64-plus-`=` run), the PEM span
+//! (words-pinned BEGIN/END markers, the first verifying END wins) and
+//! the JWT segment grammar behind their markers, the prefix-boundary
+//! rule (a prefix glued to a preceding key-charset char is mid-token,
+//! before any family), and the mask selection (the first holding
+//! grammar wins; an unselected span is spent whole and preserved
+//! verbatim) — so a drift on either side fails as a differential
+//! mismatch naming the input.
 //!
 //! The oracle's digests are spelled independently (sha2 + const-hex,
 //! the same hand-synced-to-root pin discipline the normalize target's
@@ -50,7 +55,7 @@
 use std::borrow::Cow;
 
 use libfuzzer_sys::fuzz_target;
-use tors::pii_impl::{PiiRules, scrub_pii};
+use tors::pii_impl::{KEY_FAMILY_MASK_ALL, KeyFamily, PiiRules, scrub_pii, scrub_pii_report};
 
 /// Independent Nd table for the oracle side of this harness: an
 /// own transcription of Unicode 16.0.0 Nd ranges, deliberately NOT
@@ -237,26 +242,97 @@ fn is_key_tail_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
 }
 
+/// The family indices into `KeyFamily::ALL` — the spec's name order
+/// (`openai`, `anthropic`, `google`, `fireworks`, `modal`, `github`,
+/// `minted`, `jwt`, `aws`, `xai`, `gcp_oauth`, `pem`, `azure`), the
+/// same hand-synced pin discipline as the Nd table above; bit `i` of
+/// the selection mask is family `ALL[i]` (`KEY_FAMILY_MASK_ALL` is all
+/// thirteen).
+const FAM_OPENAI: usize = 0;
+const FAM_ANTHROPIC: usize = 1;
+const FAM_GOOGLE: usize = 2;
+const FAM_FIREWORKS: usize = 3;
+const FAM_MODAL: usize = 4;
+const FAM_GITHUB: usize = 5;
+const FAM_MINTED: usize = 6;
+const FAM_JWT: usize = 7;
+const FAM_AWS: usize = 8;
+const FAM_XAI: usize = 9;
+const FAM_GCP_OAUTH: usize = 10;
+const FAM_PEM: usize = 11;
+const FAM_AZURE: usize = 12;
+
+/// The per-family tail alphabet: most families share the key charset,
+/// AWS access-key IDs are uppercase-plus-digits only, Azure storage
+/// secrets run the base64-plus-`=` alphabet. The span families (JWT,
+/// PEM) carry no tail run and never appear in this table — a new
+/// tail-run family is one row below plus one arm in `tail_run_end`,
+/// nothing else moves.
+#[derive(Clone, Copy)]
+enum TailClass {
+    Key,
+    Aws,
+    Azure,
+}
+
+/// The AWS tail alphabet `[0-9A-Z]`: lowercase ends the run (an `AKIA`
+/// head glued to lowercase tail material is a shorter, non-matching
+/// head — the scanner's own maximal-run spelling).
+fn is_aws_tail_char(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, 'A'..='Z')
+}
+
+/// The Azure tail alphabet `[A-Za-z0-9+/=]`: the connection-string
+/// secret alphabet, padding and trailing `=` consumed into the run.
+fn is_azure_tail_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')
+}
+
+/// The maximal tail run for one alphabet class from `at` — the
+/// char-space twin of the scanner's byte run.
+fn tail_run_end(chars: &[char], at: usize, class: TailClass) -> usize {
+    let mut end = at;
+    while end < chars.len()
+        && match class {
+            TailClass::Key => is_key_tail_char(chars[end]),
+            TailClass::Aws => is_aws_tail_char(chars[end]),
+            TailClass::Azure => is_azure_tail_char(chars[end]),
+        }
+    {
+        end += 1;
+    }
+    end
+}
+
 /// The family table, the scanner's own order: (literal prefix, minimum
-/// tail length), LONGEST-PREFIX-FIRST with fall-through on a too-short
-/// tail. An independent transcription of `pii_impl::KEY_FAMILIES` —
-/// the same hand-synced pin discipline as the Nd table above.
-const KEY_FAMILIES: &[(&str, usize)] = &[
-    ("github_pat_", 22),
-    ("sk-svcacct-", 20),
-    ("sk-proj-", 20),
-    ("sk-ant-", 20),
-    ("azxdev_", 20),
-    ("ghp_", 36),
-    ("AIza", 35),
-    ("fw-", 20),
-    ("fw_", 20),
-    ("ak-", 20),
-    ("wk-", 20),
-    ("wd-", 43),
-    ("cn-", 20),
-    ("sk-", 20),
-    ("w-", 43),
+/// tail length, family index, tail alphabet), LONGEST-PREFIX-FIRST with
+/// fall-through on a too-short tail. An independent transcription of
+/// `pii_impl::KEY_FAMILIES` — the same hand-synced pin discipline as
+/// the Nd table above. Rows whose prefixes share no head byte can never
+/// tie at one position, so the order among them is immaterial; only the
+/// `sk-` prefix chain (`sk-svcacct-`/`sk-proj-`/`sk-ant-` over bare
+/// `sk-`) exercises the fall-through.
+const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
+    ("github_pat_", 22, FAM_GITHUB, TailClass::Key),
+    ("sk-svcacct-", 20, FAM_OPENAI, TailClass::Key),
+    ("AccountKey=", 40, FAM_AZURE, TailClass::Azure),
+    ("sk-proj-", 20, FAM_OPENAI, TailClass::Key),
+    ("sk-ant-", 20, FAM_ANTHROPIC, TailClass::Key),
+    ("azxdev_", 20, FAM_MINTED, TailClass::Key),
+    ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
+    ("ghp_", 36, FAM_GITHUB, TailClass::Key),
+    ("AIza", 35, FAM_GOOGLE, TailClass::Key),
+    ("AKIA", 16, FAM_AWS, TailClass::Aws),
+    ("ASIA", 16, FAM_AWS, TailClass::Aws),
+    ("xai-", 20, FAM_XAI, TailClass::Key),
+    ("fw-", 20, FAM_FIREWORKS, TailClass::Key),
+    ("fw_", 20, FAM_FIREWORKS, TailClass::Key),
+    ("ak-", 20, FAM_MODAL, TailClass::Key),
+    ("wk-", 20, FAM_MODAL, TailClass::Key),
+    ("wd-", 43, FAM_MINTED, TailClass::Key),
+    ("cn-", 20, FAM_MINTED, TailClass::Key),
+    ("sk-", 20, FAM_OPENAI, TailClass::Key),
+    ("w-", 43, FAM_MINTED, TailClass::Key),
 ];
 
 /// The JWT family at one position, char-space: the `Bearer eyJ` marker,
@@ -288,14 +364,95 @@ fn jwt_match_at_chars(chars: &[char], start: usize) -> Option<usize> {
     Some(i)
 }
 
-/// The key match set with each match's token-prefix length:
-/// `(start, end, prefix_len)` triples, char indices. Transcribes the
-/// scanner exactly — the prefix-boundary rule first (a prefix glued to
-/// a preceding key-charset char is mid-token and never fires), then the
-/// family table longest-first with fall-through, then the JWT marker
-/// grammar (no table family shares its `B` head). The tail run is
-/// maximal; a non-matching position advances one char.
-fn key_matches_of(s: &str) -> Vec<(usize, usize, usize)> {
+/// Parse a PEM label's words at `i`: `word( SP word)*` closed by
+/// ` PRIVATE KEY-----`, the greedy terminator-first transcription — at
+/// each word end the close is tried before the single space into the
+/// next word, so `RSA PRIVATE KEY-----` closes with words `RSA` while
+/// bare `PRIVATE KEY-----` (words would have to be empty) and
+/// double-spaced labels fail. Returns the words' span (for the
+/// BEGIN/END equality check) and the index past the closing dashes.
+fn pem_label_at(chars: &[char], mut i: usize) -> Option<((usize, usize), usize)> {
+    const CLOSE: &str = " PRIVATE KEY-----";
+    let wstart = i;
+    loop {
+        let mut j = i;
+        while j < chars.len() && chars[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        if j == i {
+            return None; // an empty word: a leading or double space
+        }
+        if starts_with_at(chars, j, CLOSE) {
+            return Some(((wstart, j), j + CLOSE.chars().count()));
+        }
+        if j < chars.len() && chars[j] == ' ' {
+            i = j + 1; // exactly one single space into the next word
+            continue;
+        }
+        return None;
+    }
+}
+
+/// The PEM family at one position, char-space: `-----BEGIN `, the words
+/// grammar, any body chars including newlines, then the FIRST
+/// `-----END ` whose words parse AND equal the BEGIN words (an earlier
+/// END naming other words is skipped, not fatal; an END whose words
+/// fail to parse is skipped the same way — mismatch or absence alike
+/// is a non-match). The match END, or None.
+///
+/// Adversarial-time note: entry is gated on the literal `-----BEGIN `
+/// (prose pays one prefix compare per position, nothing more), and the
+/// END search is a single monotonic forward pass — each `-----END `
+/// candidate is visited once, stepping one char so overlapping markers
+/// stay exact. There is deliberately NO body-length cap: "any chars" is
+/// transcribed literally, so `B` BEGINs with no verifying END cost
+/// `O(B·n)`; at fuzz scale that is noise, the same class as the
+/// oracle's existing maximal-tail rescans. A cap would be a semantic
+/// choice the differential must catch, not one smuggled into the oracle.
+fn pem_match_at_chars(chars: &[char], start: usize) -> Option<usize> {
+    const OPEN: &str = "-----BEGIN ";
+    const MARKER: &str = "-----END ";
+    if !starts_with_at(chars, start, OPEN) {
+        return None;
+    }
+    let ((wstart, wend), mut k) = pem_label_at(chars, start + OPEN.chars().count())?;
+    while k + MARKER.chars().count() <= chars.len() {
+        if starts_with_at(chars, k, MARKER)
+            && let Some(((wstart2, wend2), end)) = pem_label_at(chars, k + MARKER.chars().count())
+            && chars[wstart2..wend2] == chars[wstart..wend]
+        {
+            return Some(end);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// One key-span hit: char-space `(start, end)`, the token-prefix length
+/// (`plen` — 3 for PEM, whose token prefix is the literal `PEM`, not
+/// input material), the family index into `KeyFamily::ALL`, and whether
+/// the lane's mask selects it. Unselected hits are spent whole and
+/// preserved verbatim downstream: never redacted, never re-entered.
+struct KeyHit {
+    start: usize,
+    end: usize,
+    plen: usize,
+    fam: usize,
+    selected: bool,
+}
+
+/// The key match set at one lane mask: every position whose grammar
+/// HOLDS, in the scanner's leftmost walk. Transcribes the scanner
+/// exactly — the prefix-boundary rule first (a prefix glued to a
+/// preceding key-charset char is mid-token and never fires, before any
+/// family), then the family table longest-first with fall-through, then
+/// the span families (their `-`/`B` heads share no byte with any table
+/// prefix, so trying them after the table IS longest-first). The FIRST
+/// holding grammar wins its span even when its family is unselected —
+/// there is no fall-through past a hold on mask grounds; the mask only
+/// decides redact versus spent-whole-verbatim, recorded per hit. The
+/// tail run is maximal; a non-matching position advances one char.
+fn key_matches_of(s: &str, mask: u16) -> Vec<KeyHit> {
     let chars: Vec<char> = s.chars().collect();
     let mut found = Vec::new();
     let mut i = 0;
@@ -305,27 +462,33 @@ fn key_matches_of(s: &str) -> Vec<(usize, usize, usize)> {
             continue;
         }
         let mut hit = None;
-        for &(prefix, min_tail) in KEY_FAMILIES {
+        for &(prefix, min_tail, fam, class) in KEY_FAMILIES {
             if !starts_with_at(&chars, i, prefix) {
                 continue;
             }
             let tail_start = i + prefix.chars().count();
-            let mut tail_end = tail_start;
-            while tail_end < chars.len() && is_key_tail_char(chars[tail_end]) {
-                tail_end += 1;
-            }
+            let tail_end = tail_run_end(&chars, tail_start, class);
             if tail_end - tail_start >= min_tail {
-                hit = Some((i, tail_end, prefix.chars().count()));
+                hit = Some((tail_end, prefix.chars().count(), fam));
                 break;
             }
             // A too-short tail falls through to the shorter prefixes.
         }
         if hit.is_none() {
-            hit = jwt_match_at_chars(&chars, i).map(|end| (i, end, "Bearer".len()));
+            hit = pem_match_at_chars(&chars, i).map(|end| (end, "PEM".len(), FAM_PEM));
+        }
+        if hit.is_none() {
+            hit = jwt_match_at_chars(&chars, i).map(|end| (end, "Bearer".len(), FAM_JWT));
         }
         match hit {
-            Some((start, end, plen)) => {
-                found.push((start, end, plen));
+            Some((end, plen, fam)) => {
+                found.push(KeyHit {
+                    start: i,
+                    end,
+                    plen,
+                    fam,
+                    selected: mask & (1u16 << fam) != 0,
+                });
                 i = end;
             }
             None => i += 1,
@@ -564,33 +727,45 @@ fn key_token(salt: &str, matched: &str, prefix_len: usize) -> String {
     format!("{prefix}~{}", token_digest(salt, matched))
 }
 
-/// Substitute every key triple (leftmost, non-overlapping, in order)
-/// with its token, char-space — `substitute`'s shape over the
-/// prefix-length triples.
-fn substitute_keys(chars: &[char], spans: &[(usize, usize, usize)], salt: &str) -> String {
+/// Substitute every key hit (leftmost, non-overlapping, in order):
+/// selected hits become their token — the family prefix verbatim (the
+/// first `plen` chars of the match, via `key_token`), except PEM whose
+/// token prefix is the literal `PEM` — while unselected hits are spent
+/// whole and preserved verbatim (the skipped semantics: no redaction
+/// inside, the scan resumes after the end), char-space.
+fn substitute_keys(chars: &[char], hits: &[KeyHit], salt: &str) -> String {
     let mut out = String::with_capacity(chars.len());
     let mut pos = 0;
-    for &(start, end, plen) in spans {
-        if start > pos {
-            out.extend(chars[pos..start].iter());
+    for hit in hits {
+        if hit.start > pos {
+            out.extend(chars[pos..hit.start].iter());
         }
-        let matched: String = chars[start..end].iter().collect();
-        out.push_str(&key_token(salt, &matched, plen));
-        pos = end;
+        if hit.selected {
+            let matched: String = chars[hit.start..hit.end].iter().collect();
+            if hit.fam == FAM_PEM {
+                out.push_str(&format!("PEM~{}", token_digest(salt, &matched)));
+            } else {
+                out.push_str(&key_token(salt, &matched, hit.plen));
+            }
+        } else {
+            out.extend(chars[hit.start..hit.end].iter());
+        }
+        pos = hit.end;
     }
     out.extend(chars[pos..].iter());
     out
 }
 
-/// The expected all-rules output: the keys pass over the input (the
-/// keys rule's own salt), then the email pass over the keys result,
-/// then the phone grammar over the email pass's result — the
-/// transform's own pipeline order, token breakers and all (each pass's
-/// match set is computed on the intermediate exactly as the transform
-/// does).
-fn expected_both(s: &str, contact_salt: &str, keys_salt: &str) -> String {
+/// The expected all-rules output at one lane mask: the keys pass over
+/// the input (the keys rule's own salt, the lane's family mask —
+/// unselected spans flow through preserved verbatim), then the email
+/// pass over the keys result, then the phone grammar over the email
+/// pass's result — the transform's own pipeline order, token breakers
+/// and all (each pass's match set is computed on the intermediate
+/// exactly as the transform does).
+fn expected_both(s: &str, contact_salt: &str, keys_salt: &str, mask: u16) -> String {
     let chars: Vec<char> = s.chars().collect();
-    let keys = key_matches_of(s);
+    let keys = key_matches_of(s, mask);
     let after_keys = substitute_keys(&chars, &keys, keys_salt);
     let after_keys_chars: Vec<char> = after_keys.chars().collect();
     let emails = matches_of(&after_keys, email_match_at);
@@ -608,102 +783,157 @@ fn expected_phone_only(s: &str, contact_salt: &str) -> String {
     substitute(&chars, &phones, |m| phone_token(contact_salt, m))
 }
 
-/// The expected keys-only output: the key grammar over the raw input,
-/// no other pass (the keys salt is the only one it reads).
-fn expected_keys_only(s: &str, keys_salt: &str) -> String {
+/// The expected keys-only output at one lane mask: the key grammar
+/// over the raw input, no other pass (the keys salt is the only one it
+/// reads) — selected spans tokenized, unselected spans verbatim.
+fn expected_keys_only(s: &str, keys_salt: &str, mask: u16) -> String {
     let chars: Vec<char> = s.chars().collect();
-    let keys = key_matches_of(s);
+    let keys = key_matches_of(s, mask);
     substitute_keys(&chars, &keys, keys_salt)
 }
 
 fuzz_target!(|s: &str| {
-    let phone_only = PiiRules {
-        email: false,
-        phone: true,
-        keys: false,
+    // The family-selection bits, resolved off `KeyFamily::ALL` by name
+    // (bit `i` is family `ALL[i]`): the mask lanes are mask-ALL (today's
+    // three salt lanes, behavior unchanged), all-but-jwt, and
+    // single-family aws. Lanes are multiplicative, so each lane computes
+    // each output once and reuses it across its asserts.
+    let bit = |name: &str| {
+        1u16 << KeyFamily::ALL
+            .iter()
+            .position(|f| f.name() == name)
+            .expect("the oracle names families off KeyFamily::ALL")
     };
-    let keys_only = PiiRules {
-        email: false,
-        phone: false,
-        keys: true,
-    };
-    // The salt lanes: unsalted ("" for every rule — the source-parity
-    // spelling), an explicit string (one salt for EVERY rule — the
-    // binding's explicit-salt semantic), and the per-rule defaults
-    // (salt=None's resolution: contacts DEFAULT_SALT, keys
-    // KEYS_DEFAULT_SALT — the lane that pins the split).
-    for (contact_salt, keys_salt) in [
-        ("", ""),
-        (tors::pii_impl::DEFAULT_SALT, tors::pii_impl::DEFAULT_SALT),
-        (
-            tors::pii_impl::DEFAULT_SALT,
-            tors::pii_impl::KEYS_DEFAULT_SALT,
-        ),
-    ] {
-        // The full-output differential: the transcription's own pipeline
-        // (keys pass, email pass over its result, phone grammar over
-        // that, token breakers and all) must produce byte-identical
-        // output to the transform, at every salt lane. This subsumes
-        // survivor accounting: email-eaten phone shapes, domain-borne
-        // phone shapes the phone pass cannot scrub, the digest-hex
-        // reconstruction corners, and the keys-rule corners (a key tail
-        // swallowing a phone-shaped digit run; a key token's digest hex
-        // feeding the email pass) are all exact output, not counted
-        // absence. A disagreement here is either a transform bug or an
-        // oracle drift — the panic names the input either way.
-        let out = scrub_pii(s, PiiRules::BOTH, contact_salt, keys_salt);
-        assert_eq!(
-            out.as_ref(),
-            &expected_both(s, contact_salt, keys_salt),
-            "the all-rules pipeline diverged from the oracle at salts \
-             {contact_salt:?}/{keys_salt:?}"
-        );
-
-        // Convergence, structurally: the second pass over the
-        // differential output is a fixed point (a third pass is the
-        // identity).
-        let twice = scrub_pii(out.as_ref(), PiiRules::BOTH, contact_salt, keys_salt);
-        assert!(
-            matches!(
-                scrub_pii(twice.as_ref(), PiiRules::BOTH, contact_salt, keys_salt),
-                Cow::Borrowed(_)
+    let masks = [
+        KEY_FAMILY_MASK_ALL,
+        KEY_FAMILY_MASK_ALL ^ bit("jwt"),
+        bit("aws"),
+    ];
+    for mask in masks {
+        // The salt lanes: unsalted ("" for every rule — the source-parity
+        // spelling), an explicit string (one salt for EVERY rule — the
+        // binding's explicit-salt semantic), and the per-rule defaults
+        // (salt=None's resolution: contacts DEFAULT_SALT, keys
+        // KEYS_DEFAULT_SALT — the lane that pins the split).
+        for (contact_salt, keys_salt) in [
+            ("", ""),
+            (tors::pii_impl::DEFAULT_SALT, tors::pii_impl::DEFAULT_SALT),
+            (
+                tors::pii_impl::DEFAULT_SALT,
+                tors::pii_impl::KEYS_DEFAULT_SALT,
             ),
-            "the converged output is not a fixed point on {s:?}"
-        );
+        ] {
+            let rules = PiiRules {
+                email: true,
+                phone: true,
+                keys: true,
+                key_families: mask,
+            };
+            // The full-output differential: the transcription's own pipeline
+            // (keys pass at the lane mask, email pass over its result, phone
+            // grammar over that, token breakers and all) must produce
+            // byte-identical output to the transform, at every salt lane and
+            // every mask lane. This subsumes survivor accounting: email-eaten
+            // phone shapes, domain-borne phone shapes the phone pass cannot
+            // scrub, the digest-hex reconstruction corners, and the keys-rule
+            // corners (a key tail swallowing a phone-shaped digit run; a key
+            // token's digest hex feeding the email pass; an unselected span
+            // flowing verbatim into the contact passes) are all exact output,
+            // not counted absence. A disagreement here is either a transform
+            // bug or an oracle drift — the panic names the input either way.
+            let out = scrub_pii(s, rules, contact_salt, keys_salt);
+            assert_eq!(
+                out.as_ref(),
+                &expected_both(s, contact_salt, keys_salt, mask),
+                "the all-rules pipeline diverged from the oracle at salts \
+                 {contact_salt:?}/{keys_salt:?} mask {mask:#06x}"
+            );
 
-        // Phone-only: the phone grammar over the raw input, and the
-        // pass is strictly idempotent.
-        let once = scrub_pii(s, phone_only, contact_salt, contact_salt);
-        assert_eq!(
-            once.as_ref(),
-            &expected_phone_only(s, contact_salt),
-            "the phone-only pipeline diverged from the oracle at salt {contact_salt:?}"
-        );
-        assert!(
-            matches!(
-                scrub_pii(once.as_ref(), phone_only, contact_salt, contact_salt),
-                Cow::Borrowed(_)
-            ),
-            "phone-only is not idempotent on {s:?}"
-        );
+            // The report-vs-scrub consistency: the report's text is the
+            // scrub's text for the same args, in every lane (pure Rust, no
+            // marshalling — the report path cannot drift from the text path).
+            let rep = scrub_pii_report(s, rules, contact_salt, keys_salt);
+            assert_eq!(
+                rep.text,
+                out.as_ref(),
+                "scrub_pii_report text diverged from scrub_pii at salts \
+                 {contact_salt:?}/{keys_salt:?} mask {mask:#06x}"
+            );
 
-        // Keys-only: the key grammar over the raw input (the keys salt),
-        // and the pass is strictly idempotent — a key token is a fixed
-        // point by construction (the prefix ends `-`/`_` or is
-        // `AIza`/`Bearer`, the next byte is `~`, and no family prefix
-        // can be spelled inside 12 lowercase digest hex).
-        let konce = scrub_pii(s, keys_only, contact_salt, keys_salt);
-        assert_eq!(
-            konce.as_ref(),
-            &expected_keys_only(s, keys_salt),
-            "the keys-only pipeline diverged from the oracle at salt {keys_salt:?}"
-        );
-        assert!(
-            matches!(
-                scrub_pii(konce.as_ref(), keys_only, contact_salt, keys_salt),
-                Cow::Borrowed(_)
-            ),
-            "keys-only is not idempotent on {s:?}"
-        );
+            // Convergence, structurally: the second pass over the
+            // differential output is a fixed point (a third pass is the
+            // identity).
+            let twice = scrub_pii(out.as_ref(), rules, contact_salt, keys_salt);
+            assert!(
+                matches!(
+                    scrub_pii(twice.as_ref(), rules, contact_salt, keys_salt),
+                    Cow::Borrowed(_)
+                ),
+                "the converged output is not a fixed point on {s:?}"
+            );
+
+            // Keys-only: the key grammar over the raw input at the lane mask
+            // (the keys salt), and the pass is strictly idempotent — a key
+            // token is a fixed point by construction (the prefix ends
+            // `-`/`_`/`=`/`.` or is `AIza`/`AKIA`/`ASIA`/`PEM`/`Bearer`,
+            // the next byte is `~`, and no family prefix is spellable
+            // inside 12 lowercase digest hex: every prefix carries a
+            // distinctive char outside `[0-9a-f]` — an uppercase
+            // `A`/`K`/`I`/`S`/`P`/`E`/`M`/`B`, a lowercase `y`, or a
+            // `-`, `_`, `.`, or `=`).
+            let keys_only = PiiRules {
+                email: false,
+                phone: false,
+                keys: true,
+                key_families: mask,
+            };
+            let konce = scrub_pii(s, keys_only, contact_salt, keys_salt);
+            assert_eq!(
+                konce.as_ref(),
+                &expected_keys_only(s, keys_salt, mask),
+                "the keys-only pipeline diverged from the oracle at salt \
+                 {keys_salt:?} mask {mask:#06x}"
+            );
+            assert!(
+                matches!(
+                    scrub_pii(konce.as_ref(), keys_only, contact_salt, keys_salt),
+                    Cow::Borrowed(_)
+                ),
+                "keys-only is not idempotent on {s:?}"
+            );
+            let krep = scrub_pii_report(s, keys_only, contact_salt, keys_salt);
+            assert_eq!(
+                krep.text,
+                konce.as_ref(),
+                "scrub_pii_report text diverged from keys-only scrub_pii at salt \
+                 {keys_salt:?} mask {mask:#06x}"
+            );
+
+            // Phone-only: the phone grammar over the raw input, and the
+            // pass is strictly idempotent. The mask is inert with keys
+            // off, so this runs only on the mask-ALL lanes (today's
+            // asserts, unchanged).
+            if mask == KEY_FAMILY_MASK_ALL {
+                let phone_only = PiiRules {
+                    email: false,
+                    phone: true,
+                    keys: false,
+                    key_families: mask,
+                };
+                let once = scrub_pii(s, phone_only, contact_salt, contact_salt);
+                assert_eq!(
+                    once.as_ref(),
+                    &expected_phone_only(s, contact_salt),
+                    "the phone-only pipeline diverged from the oracle at salt {contact_salt:?}"
+                );
+                assert!(
+                    matches!(
+                        scrub_pii(once.as_ref(), phone_only, contact_salt, contact_salt),
+                        Cow::Borrowed(_)
+                    ),
+                    "phone-only is not idempotent on {s:?}"
+                );
+            }
+        }
     }
 });
