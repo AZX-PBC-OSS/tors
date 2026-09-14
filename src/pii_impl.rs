@@ -1075,24 +1075,38 @@ fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// The PEM family at one position, over a hoisted END-literal index:
-/// `-----BEGIN ` + algorithm words + ` PRIVATE KEY-----`, then any
-/// bytes including newlines (the key body), then `-----END ` + the SAME
-/// words + ` PRIVATE KEY-----`. Both markers required — an
-/// unterminated BEGIN is a documented non-match — and the first
-/// `-----END ` at or past the body start whose words parse AND equal
-/// the BEGIN's terminates the block (an unparseable or mismatched END
-/// is skipped, a later matching one still terminates). The whole block
-/// is the match; the token prefix is the constant `PEM` (never input
-/// material, so the report's offset map collapses the whole token to
-/// the replaced span's end). Returns the match END on success.
+/// The PEM family at one position, over a hoisted END-literal index
+/// plus a per-words failure memo: `-----BEGIN ` + algorithm words +
+/// ` PRIVATE KEY-----`, then any bytes including newlines (the key
+/// body), then `-----END ` + the SAME words + ` PRIVATE KEY-----`.
+/// Both markers required — an unterminated BEGIN is a documented
+/// non-match — and the first `-----END ` at or past the body start
+/// whose words parse AND equal the BEGIN's terminates the block (an
+/// unparseable or mismatched END is skipped, a later matching one
+/// still terminates). The whole block is the match; the token prefix
+/// is the constant `PEM` (never input material, so the report's offset
+/// map collapses the whole token to the replaced span's end). Returns
+/// the match END on success.
 /// `index` is the pass's one `-----END ` sweep (see `pem_end_index`),
 /// built lazily here on the first VALID header (headers are rare;
 /// dashes are not — an eager sweep would tax every dash-bearing
-/// input): each BEGIN then binary-searches its body start and verifies
+/// input). Each BEGIN then binary-searches its body start and verifies
 /// only true literals in increasing position order — the same candidate
-/// order as a forward scan, without the per-anchor re-scan.
-fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<Vec<usize>>) -> Option<usize> {
+/// order as a forward scan, without the per-anchor re-scan. `failed`
+/// maps each seen words value to the furthest END index already
+/// verified-and-failed for it: verification is deterministic (same
+/// bytes, same words, same verdict), and BEGINs arrive in increasing
+/// position order, so a later BEGIN resumes past its words' failures
+/// instead of re-verifying them — each (words, candidate) pair is
+/// verified at most once, and a mismatched-END flood costs O(ENDs),
+/// not O(BEGINs × ENDs). A verifying END returns immediately without
+/// touching the memo (a later BEGIN may legitimately re-verify it).
+fn pem_match_at(
+    bytes: &[u8],
+    start: usize,
+    index: &mut Option<Vec<usize>>,
+    failed: &mut Vec<(Vec<u8>, usize)>,
+) -> Option<usize> {
     const BEGIN: &[u8] = b"-----BEGIN ";
     const END_HEAD: &[u8] = b"-----END ";
     if !bytes[start..].starts_with(BEGIN) {
@@ -1101,16 +1115,26 @@ fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<Vec<usize>>) -> O
     let (words_end, body_start) = pem_marker_end(bytes, start + BEGIN.len())?;
     let words = &bytes[start + BEGIN.len()..words_end];
     let ends = index.get_or_insert_with(|| pem_end_index(bytes));
-    let mut idx = ends.partition_point(|&e| e < body_start);
+    let resume = failed
+        .iter()
+        .find(|(w, _)| w.as_slice() == words)
+        .map(|(_, i)| i + 1)
+        .unwrap_or(0);
+    let mut idx = ends.partition_point(|&e| e < body_start).max(resume);
     while idx < ends.len() {
         let cand = ends[idx];
-        idx += 1;
         if let Some((end_words_end, end)) = pem_marker_end(bytes, cand + END_HEAD.len())
             && &bytes[cand + END_HEAD.len()..end_words_end] == words
         {
             return Some(end);
         }
-        // Unparseable or mismatched END: keep searching.
+        // Unparseable or mismatched END: record the failure for these
+        // words and keep searching.
+        match failed.iter_mut().find(|(w, _)| w.as_slice() == words) {
+            Some(slot) => slot.1 = idx,
+            None => failed.push((words.to_vec(), idx)),
+        }
+        idx += 1;
     }
     None
 }
@@ -1215,6 +1239,7 @@ fn keys_pass_impl<'a>(
     let mut out: Option<String> = None;
     let mut rec = rec;
     let mut pem_ends: Option<Vec<usize>> = None;
+    let mut pem_failed: Vec<(Vec<u8>, usize)> = Vec::new();
     while pos < bytes.len() {
         let b = bytes[pos];
         if !is_key_anchor(b) {
@@ -1250,7 +1275,8 @@ fn keys_pass_impl<'a>(
             hit = jwt_match_at(bytes, pos).map(|end| (KeyFamily::Jwt, b"Bearer".len(), end));
         }
         if hit.is_none() && b == b'-' {
-            hit = pem_match_at(bytes, pos, &mut pem_ends).map(|end| (KeyFamily::Pem, 0, end));
+            hit = pem_match_at(bytes, pos, &mut pem_ends, &mut pem_failed)
+                .map(|end| (KeyFamily::Pem, 0, end));
         }
         let Some((family, verbatim_len, end)) = hit else {
             pos += 1;

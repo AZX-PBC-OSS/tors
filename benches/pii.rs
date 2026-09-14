@@ -110,6 +110,31 @@ fn bench_scrub_pii(c: &mut Criterion) {
             },
         );
     }
+    // Mismatched-END flood at scaling block counts (the quadratic
+    // regression instrument): N RSA BEGINs each followed by N EC ENDs
+    // no BEGIN can terminate at. Per-words failure memoization makes
+    // each (words, candidate) pair verify once — the series must scale
+    // ~linearly in N (a 4x-per-doubling series is the memo failing).
+    for blocks in [500usize, 1000, 2000, 4000, 8000] {
+        let begins = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n".repeat(blocks);
+        let ends = "-----END EC PRIVATE KEY-----\n".repeat(blocks);
+        let text = format!("{begins}{ends}");
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("mismatched_ends", format!("{blocks}blocks")),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    scrub_pii(
+                        black_box(text),
+                        PiiRules::BOTH,
+                        tors::pii_impl::DEFAULT_SALT,
+                        tors::pii_impl::KEYS_DEFAULT_SALT,
+                    )
+                })
+            },
+        );
+    }
     // Degenerate-domain guard (pins the linear domain split): 50k `a.`
     // pairs, both the non-match (`…a`) and the match (`…zz`) spellings.
     // The backward sweep is O(run), never O(run²); sha2 runs only for
