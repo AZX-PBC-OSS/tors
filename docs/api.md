@@ -122,6 +122,7 @@ def scrub_pii(
     rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
     *,
     salt: str | None = None,
+    families: Sequence[str] | None = None,
 ) -> str: ...
 ```
 
@@ -230,10 +231,11 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
     other shape.
 - `api_keys` (the credential extension past the ported source) — the
   evidence-backed closed set of provider/platform key families, each a
-  literal prefix plus a minimal `[A-Za-z0-9_-]` tail consumed MAXIMALLY
+  literal prefix plus a minimal tail (the shared `[A-Za-z0-9_-]`
+  alphabet except where the table names its own) consumed MAXIMALLY
   (a key glued to further charset material is one long key):
 
-  | family | shape (`tail` is `[A-Za-z0-9_-]`) | token prefix |
+  | family | shape (`tail` is `[A-Za-z0-9_-]` except where the row names its own alphabet) | token prefix |
   |---|---|---|
   | OpenAI | `sk-` / `sk-proj-` / `sk-svcacct-` + tail{20,} | the matched prefix verbatim |
   | Anthropic | `sk-ant-` + tail{20,} | `sk-ant-` |
@@ -243,9 +245,20 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | GitHub | `ghp_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
   | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
+  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
+  | XAI | `xai-` + tail{20,} | `xai-` |
+  | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
+  | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both markers required; an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
+  | Azure | `AccountKey=` + `[A-Za-z0-9+/=]{40,}` | `AccountKey=` |
 
-  Deliberately EXCLUDED, on zero evidence: Slack `xox…`, Stripe
-  `sk_live_`/`pk_live_`, AWS `AKIA…`. The set is closed on evidence —
+  AWS `AKIA`/`ASIA` access-key IDs are now INCLUDED, evidence-backed
+  (the table's `aws` row). Deliberately EXCLUDED, on zero evidence:
+  Slack `xox…` and Stripe `sk_live_`/`pk_live_`. Three further
+  exclusions are shape decisions, not evidence gaps, each with its why:
+  the AWS secret key (the 40-char secret carries no public prefix —
+  undetectable without false-positive shape matching), Azure client
+  secrets (no distinctive public prefix), and Mistral keys (no
+  distinctive public prefix). The set is closed on evidence —
   the families five private consumers' leaked-credential shapes
   backed — and growing it is a new-evidence decision, never a
   drive-by; an unlisted provider's key shape passes through whole.
@@ -264,8 +277,27 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   what keeps a second key glued to a token's digest hex from firing.
   (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
   scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
-  inside its own marker-scoped shape). The digest is of the FULL match
+  inside its own marker-scoped shape; the `ya29.` dot is prefix, not
+  tail — see the table). The digest is of the FULL match
   (prefix + tail).
+
+**Key-family selection (`families=`).** The family set is closed:
+
+```python
+tors.KEY_FAMILIES: tuple[str, ...]
+# ("openai", "anthropic", "google", "fireworks", "modal", "github",
+#  "minted", "jwt", "aws", "xai", "gcp_oauth", "pem", "azure")
+```
+
+the canonical tuple, in scanner-table order, and the base for all-but-X
+selections (`[f for f in tors.KEY_FAMILIES if f != "jwt"]`). `families=None` (the
+default) is every key family this version knows; the set grows when new
+families land — semver-visible — so callers needing stability list names
+explicitly. A list selects exactly those families (order irrelevant,
+duplicates deduped; tuples accepted); a bare string is a `TypeError`,
+never an iterated character list. A valid selection is harmless —
+ignored — when `api_keys` is not in the active rules, but validation is
+still at the boundary: an unknown name is a `ValueError` naming the accepted set — `families must be one of ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure'), not "ssn"` — and `[]` is a `ValueError`, never a silent no-op — `families selects no key families; use None for all or list names`.
 
 **Threat model: diagnostic-preserving, NOT adversarial-robust.** The
 grammars above are parity-correct against the ported source at
@@ -326,13 +358,34 @@ timestamps:
 - Punctuation inside a key splits the tail: `sk-abc…/…rest` never
   matches whole, and an inserted `/`, `:`, `;`, or `.` leaks the key's
   fragments — the same attacker-formatting trade-off as the contact
-  grammars (the tail charset is deliberately narrow: widening it would
-  eat identifiers that merely look key-shaped).
+  grammars (the shared tail charset is deliberately narrow — the Azure
+  row names its own wider alphabet — and widening it would eat
+  identifiers that merely look key-shaped).
 - An unlisted provider's key shape leaks WHOLE: the family table is the
-  evidence-backed closed set above — Slack `xox…`, Stripe, and AWS
-  `AKIA…` are excluded on zero evidence, not overlooked — and a new
-  family is a new-evidence decision with its own pins, never a
-  silent widening.
+  evidence-backed closed set above — Slack `xox…` and Stripe are
+  excluded on zero evidence (AWS `AKIA`/`ASIA` moved to the table on
+  evidence), the prefix-less shapes pass through as documented above —
+  and a new family is a new-evidence decision with its own pins, never
+  a silent widening.
+- Contact-glue under-redaction: a key glued with ZERO separator to
+  preceding contact material is mid-token under the boundary rule and
+  survives whole, and no later pass recovers it — a phone number's last
+  digit (`+14155552671sk-…`), an email domain's last letter
+  (`a@b.cosk-…`), a prior token's digest hex (`+14~abc123def456sk-…`):
+  field concatenation without separators, the machine-plausible form.
+  The composed call still scrubs the contact half; the key half leaks.
+  Separate fields before scrubbing if concatenations are in threat.
+- Preserved-span cloaking under family selection: a span an unselected
+  family spends whole stays whole — including any selected family's key
+  inside it (a key in a deselected PEM block's body, a key shape inside
+  a deselected JWT's segments). Deselecting families reintroduces leak
+  risk for material inside the preserved spans; `families=None` is the
+  only full-coverage selection, and `report["skipped"]` names exactly
+  what each narrowed call preserved.
+- >3-segment JWT/JWE survival: the JWT grammar is exactly three
+  segments, so a 5-part JWE behind `Bearer ` scrubs through the third
+  segment and keeps parts 4-5 verbatim. Split or reject multi-dot
+  `Bearer` material before scrubbing if JWEs are in threat.
 - A bare `eyJ…` triple (no `Bearer ` marker) is never touched, even
   three well-shaped base64url segments: one consumer's API legitimately
   carries eyJ-shaped non-secret cursors, so the JWT family fires only
@@ -386,6 +439,49 @@ second scrub. `[]` is the identity
 (the original object); duplicates dedupe and listing order is irrelevant;
 each name restricts the scrub to that rule.
 
+**The report twin: `tors.scrub_pii_report`.** The same scrub under the
+same single GIL-released pass, plus the accounting:
+
+```python
+def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict: ...
+```
+
+`report["text"] == scrub_pii(text, rules, salt=salt, families=families)`
+for the same arguments, byte-exact — the shape below is the accounting
+for that string:
+
+```python
+{"text": <scrubbed str>, "redacted": {"contact_email": 1, "api_keys": 3, "openai": 2, "jwt": 1}, "skipped": {"jwt": 1}, "spans": [{"type": "api_keys:openai", "start": 12, "end": 64}]}
+```
+
+`redacted` counts what scrubbed: per-rule totals (`contact_email`,
+`contact_phone`, `api_keys`) plus per-family totals under their lowercase
+names (`openai`, `jwt`, …) — absent types omitted. `skipped` counts what
+detection saw but redaction preserved: families NOT in the active
+selection that would have matched anyway (detection runs, redaction does
+not) — the "preserved a JWT, log it separately" signal: select
+all-but-jwt, scrub, then route `report["skipped"]` to the separate
+credential-rotation queue. Always `{}` when `families=None`; `{}` when
+`api_keys` is inactive. `spans` mark every redaction, ordered by start —
+codepoint indices into the INPUT, each typed `<rule>`
+(`contact_email`, `contact_phone`) or `api_keys:<family>`
+(`api_keys:openai`, `api_keys:jwt`, …). `text[start:end]` is the match
+it replaced, with two documented exceptions where passes compose: a
+match that began inside a prior token's digest is recorded from that
+token's input end (only the input-side suffix is addressable), and a
+match that ran into a prior token's verbatim head overlaps the
+producing span (the input bytes fed two tokens; both spans are
+recorded, keys before email before phone at shared starts). Empty input
+is the empty report: `{"text": "", "redacted": {}, "skipped": {},
+"spans": []}`. Salt, idempotence, and the surrogate boundary behave
+exactly as documented above.
+
 **The salt trade-off, stated plainly.** `salt=None` resolves PER RULE:
 the contact rules use tors's documented default `"tors/scrub_pii/v1"`
 and the keys rule its own `"tors/scrub_keys/v1"` — a fixed, non-secret,
@@ -431,7 +527,8 @@ the converged output and the third pass is the identity — not token-exact
 values, which the parity gates pin; the hypothesis ports mirror that
 boundary); everything else is one pass. Phone-only is strictly idempotent,
 and keys-only is too, by construction: a key token's family prefix ends
-`-` or `_` (or is `AIza`/`Bearer`), the byte after it is `~` — never tail
+`-`, `_`, `=`, or `.`, or is a bare head (`AIza`, `Bearer`, `PEM`, the
+4-char `AKIA`/`ASIA` head), the byte after it is `~` — never tail
 charset — and no family prefix can be spelled inside 12 lowercase digest
 hex, so the second scrub never re-fires (a key token's `~` + 12 hex is a
 breaker for the phone pass as well, so a number after it keeps its own
@@ -451,7 +548,7 @@ in `tests/reference.py` is the CI oracle; the live source module is
 re-checked manually whenever its grammar changes and at least once per
 Unicode/dependency bump (owner: the scrub_pii maintainer).
 
-**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The thread-hop costs tens of microseconds: noise next to a millisecond pass, real overhead next to a microsecond-scale excerpt — prefer the sync spelling below ~100KB of error-excerpt text, `tors.aio` above it.
+**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The thread-hop costs tens of microseconds: noise next to a millisecond pass, real overhead next to a microsecond-scale excerpt — prefer the sync spelling below ~100KB of error-excerpt text, `tors.aio` above it. `await tors.aio.scrub_pii_report(...)` is the report twin under the same hop.
 
 ## `tors.scrub_log_text`
 
