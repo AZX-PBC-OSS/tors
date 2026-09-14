@@ -1,55 +1,36 @@
-//! `scrub_pii` never panics on an arbitrary string, and redaction
-//! completeness holds in the exact shape the contract allows:
+//! `scrub_pii` never panics on an arbitrary string, and its output is
+//! EXACTLY the pipeline the contract describes — asserted as a
+//! full-output differential, the strongest shape:
 //!
-//! * No phone match of the input survives verbatim in the pass-one
-//!   output — unconditionally: every token carries a `~` (and email
-//!   tokens an `@` head) that breaks digit runs, and unmatched text
-//!   cannot hold a full run (the scan is total), so a surviving match
-//!   string would itself be a phone match of the output, and none can
-//!   be constructed across a token boundary.
-//! * Email-match strings CAN reappear in the pass-one output — by
-//!   reconstruction, not by survival: a token's digest hex is
-//!   local-part material, so a token immediately followed by `@`-shaped
-//!   text can spell out an input match by coincidence (the hex suffix
-//!   plays the local part). Two reachable shapes: two ADJACENT email
-//!   matches (their tokens land back-to-back), and a match whose end is
-//!   followed by an unmatched `@`-run whose own local part the match
-//!   consumed. Both are exactly why the surface documents re-scrubbing:
-//!   pass two eats every `@` that local-part material can reach.
-//! * After the second pass (the documented convergence point) NO match
-//!   of the input survives, absolutely: every `@` in the converged
-//!   output is preceded by a non-local character or has no valid domain
-//!   (else pass two would have fired on it), so the converged output
-//!   holds no email match at all — and no phone match either, because a
-//!   replacement can never remove a digit-run breaker without inserting
-//!   one (`@` or `~`) in its place. The completeness invariant is
-//!   asserted there, in its absolute form, alongside the structural
-//!   convergence claim (a third pass is the identity).
-//! * The identity path never lies: a borrowed return implies no match
-//!   existed (a match that fired without allocating is silent
-//!   under-redaction by definition).
-//! * Phone-only is strictly idempotent — with the domestic matcher in
-//!   the grammar, by construction rather than by luck: every phone
-//!   match ends at its run's last digit (the remainder is
-//!   separator-only), no run spans a token boundary (the `~` is not
-//!   class), and a token's interior can hold no domestic match — the
-//!   prefix is at most three codepoints and the digest hex carries no
-//!   separator, while every domestic match requires one. The bare-run
-//!   cut is what buys that: a ten-digit digest-hex run is not a match.
+//! * The oracle side of this harness transcribes the two quoted
+//!   grammars plus the domestic extension (char-space, per-position,
+//!   the regex engine's own order of operations — try every start,
+//!   greedy runs, backtracked split/final-digit — spelled nothing like
+//!   the byte scanners the transform drives) with its own Nd table,
+//!   then computes the expected output by running the transform's own
+//!   pipeline order: the email pass over the input, then the phone
+//!   grammar over the email pass's result, token breakers and all. The
+//!   transform's output must be byte-identical at both salts, for the
+//!   BOTH-rules pipeline and for phone-only. This subsumes every
+//!   accounting corner the earlier survivor-counting shape could not
+//!   express: an email pass eating a phone-shaped local part whole
+//!   (`440..1.0III0@…` consuming `…440..1`), an email token's verbatim
+//!   domain carrying a phone shape the phone pass cannot scrub (glued
+//!   to hex-alphabet letters), and the digest-hex reconstruction
+//!   corners (a token's hex tail is local-part material, so a token
+//!   followed by `@`-shaped text can re-spell an eaten match) — all of
+//!   those are exact output, not counted absence.
+//! * Convergence, structurally: the second pass over the differential
+//!   output is a fixed point (a third pass is the identity), and
+//!   phone-only is strictly idempotent.
+//! * The identity path never lies: a borrowed return is exactly the
+//!   expected output being the input (no match existed on either side
+//!   of the differential).
 //!
-//! Boundary: this target asserts STRUCTURAL invariants only (no match survives, converged output is a fixed point) — never exact token values, which tests/test_scrub_pii_parity.py pins byte-exact.
-//!
-//! The completeness checks need a matcher, and the transform is not one,
-//! so this target carries its own: char-space, per-position
-//! transcriptions of the quoted grammars plus the domestic extension
-//! (the regex engine's own order of operations — try every start,
-//! greedy runs, backtracked split/final-digit — spelled nothing like
-//! the byte scanners the transform drives). Agreement between the two
-//! spellings is exactly what the invariants assert. Both reachable
-//! reconstruction shapes were found by exactly this harness (an
-//! independent re-derivation of the body over corpus plus 500k
-//! deterministic random compositions) before the target ever ran under
-//! libFuzzer.
+//! The oracle's digests are spelled independently (sha2 + const-hex,
+//! the same hand-synced-to-root pin discipline the normalize target's
+//! oracle uses) so the token construction is a transcription too, not
+//! a call into the code under test.
 
 #![no_main]
 
@@ -172,6 +153,61 @@ fn is_phone_sep_char(c: char) -> bool {
     matches!(c, '-' | '.' | ' ' | '(' | ')')
 }
 
+fn is_token_hex(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, 'a'..='f')
+}
+
+/// A token span in char space: `~` + 12 digest hex, exactly as the
+/// transform's byte-level `token_span_end_at` defines it (a prefix, a
+/// `~`, twelve lowercase-hex digest chars). Returns the span END (char
+/// index, exclusive).
+fn token_span_end_at_chars(chars: &[char], tilde: usize) -> Option<usize> {
+    if chars.get(tilde) != Some(&'~') {
+        return None;
+    }
+    const TOKEN_HEX: usize = 12;
+    let end = tilde + 1 + TOKEN_HEX;
+    if end > chars.len() {
+        return None;
+    }
+    if chars[tilde + 1..end].iter().all(|&c| is_token_hex(c)) {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+/// The token span covering `off` (strictly inside), or `None` — the
+/// char-space twin of the transform's `token_span_containing`: a run
+/// starting inside a digest is digest tail, not a number's head.
+fn token_span_containing_chars(chars: &[char], off: usize) -> Option<usize> {
+    const TOKEN_HEX: usize = 12;
+    let lo = off.saturating_sub(TOKEN_HEX);
+    let hi = off.min(chars.len().saturating_sub(1));
+    for tilde in lo..=hi {
+        if chars.get(tilde) != Some(&'~') {
+            continue;
+        }
+        if let Some(end) = token_span_end_at_chars(chars, tilde)
+            && tilde <= off
+            && off < end
+        {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Whether a token span ends exactly at `pos` — the char-space twin of
+/// the transform's `token_ends_at`: the byte after a finished token is
+/// a clean boundary.
+fn token_ends_at_chars(chars: &[char], pos: usize) -> bool {
+    const TOKEN_HEX: usize = 12;
+    pos > TOKEN_HEX
+        && chars.get(pos - 1 - TOKEN_HEX) == Some(&'~')
+        && chars[pos - TOKEN_HEX..pos].iter().all(|&c| is_token_hex(c))
+}
+
 /// The email grammar at one start position: the maximal local run, a
 /// literal `@`, then the domain's greedy split (longest middle first,
 /// the largest dot with a two-plus-letter tail inside the maximal
@@ -229,13 +265,25 @@ fn intl_match_at(chars: &[char], start: usize) -> Option<usize> {
 /// of exactly ten Nd digits, or eleven with an ASCII leading `1`,
 /// carrying at least one separator inside the match span (the bare-run
 /// cut), never behind a `+` (international territory), leading spaces
-/// skipped. Char indices, never bytes: the grammars must agree on units
-/// with each other (never with the transform's byte offsets).
+/// skipped — with the transform's token-span semantics transcribed
+/// exactly: the scan steps over `~` + 12-hex token spans (a run never
+/// forms from digest material, so a number following a token keeps its
+/// own clean run and matches), and a match starting exactly at a
+/// token's end is clean (the finished token is a word boundary). Char
+/// indices, never bytes: the grammars must agree on units with each
+/// other (never with the transform's byte offsets).
 fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
     let chars: Vec<char> = s.chars().collect();
     let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
+        // A token head at the cursor: step over the whole span.
+        if chars[i] == '~'
+            && let Some(end) = token_span_end_at_chars(&chars, i)
+        {
+            i = end;
+            continue;
+        }
         if chars[i] == '+' {
             if let Some(end) = intl_match_at(&chars, i) {
                 found.push((i, end));
@@ -247,6 +295,13 @@ fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
         }
         if !is_phone_class_char(chars[i]) {
             i += 1;
+            continue;
+        }
+        // A run starting inside a token digest is digest tail: resume
+        // after the token so the composed run never forms and the real
+        // number following it keeps its own clean run.
+        if let Some(end) = token_span_containing_chars(&chars, i) {
+            i = end;
             continue;
         }
         // A class run starting at i (never at a `+`: those broke above).
@@ -280,10 +335,14 @@ fn phone_matches_of(s: &str) -> Vec<(usize, usize)> {
             if nanp {
                 let start = run_start + leading_spaces;
                 let end = last_digit_idx.unwrap() + 1;
-                // The clean-boundary rule: the match's first char not
-                // glued to a `~` or a lowercase a-f (the token-interior
-                // alphabet), so no digest-born run can compose a match.
-                let clean = start == 0 || !matches!(chars[start - 1], '~' | 'a'..='f');
+                // The clean-boundary rule, exactly as the transform
+                // spells it: the match's first char not glued to a `~`
+                // or a lowercase a-f (the token-interior alphabet) —
+                // UNLESS the match starts exactly where a token span
+                // ends (the finished token is a word boundary).
+                let clean = start == 0
+                    || !matches!(chars[start - 1], '~' | 'a'..='f')
+                    || token_ends_at_chars(&chars, start);
                 if clean && chars[start..end].iter().any(|&c| is_phone_sep_char(c)) {
                     found.push((start, end));
                     i = end;
@@ -317,136 +376,125 @@ fn matches_of(s: &str, match_at: fn(&[char], usize) -> Option<usize>) -> Vec<(us
     found
 }
 
-/// Leftmost-non-overlapping occurrences of `needle` in `chars`, the
-/// `str::matches` order spelled in char space (the spans above are char
-/// indices, so the survivor accounting must agree on units with them,
-/// never with byte offsets).
-fn occurrences_in(chars: &[char], needle: &[char]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    if needle.is_empty() {
-        return out;
-    }
-    let mut i = 0;
-    while i + needle.len() <= chars.len() {
-        if chars[i..i + needle.len()] == *needle {
-            out.push((i, i + needle.len()));
-            i += needle.len();
-        } else {
-            i += 1;
+/// The token digest, spelled independently of the transform: sha256
+/// (salt || matched) truncated to 12 lowercase hex chars, via sha2 +
+/// const-hex directly (the same hand-synced pin discipline as the
+/// normalize target's oracle) — the transform routes through its own
+/// token_digest, so the construction is a transcription too.
+fn token_digest(salt: &str, matched: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(matched.as_bytes());
+    let digest = hasher.finalize();
+    const_hex::encode(&digest.as_slice()[..6])
+}
+
+/// Substitute every span (leftmost, non-overlapping, in order) with the
+/// token the token_of closure emits for it, char-space.
+fn substitute(
+    chars: &[char],
+    spans: &[(usize, usize)],
+    token_of: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::with_capacity(chars.len());
+    let mut pos = 0;
+    for &(start, end) in spans {
+        if start > pos {
+            out.extend(chars[pos..start].iter());
         }
+        let matched: String = chars[start..end].iter().collect();
+        out.push_str(&token_of(&matched));
+        pos = end;
     }
+    out.extend(chars[pos..].iter());
     out
 }
 
-/// Positional survivor check: an input occurrence survives iff NO span
-/// covers it, and a replacement never reintroduces one (every token
-/// carries a `~` no grammar can span, and neither token half alone holds
-/// a match — the digest hex has no separator/`+`/`@`, the prefix at most
-/// three codepoints), so the output must hold exactly the uncovered
-/// count per distinct string. A bare `contains` check false-positives on
-/// benign dual-copy inputs (`call (415) 555-2671 ref 999(415) 555-2671`:
-/// the standalone match scrubs while the id-embedded copy survives whole,
-/// and the substring still `contains`-matches); the accounting here
-/// separates the two. Coverage is tested against EVERY span, not just
-/// spans of the same string: adjacent email matches can embed one
-/// another's text (`A@a.Az.A@a.Az` spans `A@a.Az` and `.A@a.Az`, the
-/// second covering the input's other occurrence of the first), and a
-/// per-string subtraction miscounts that as a survivor (crash-effd9780).
-fn assert_no_survivors(s: &str, out: &str, spans: &[(usize, usize)], label: &str) {
-    use std::collections::HashMap;
+/// The email token for a matched address: `@domain~digest`, the domain
+/// being the match's own domain portion verbatim (the single `@` in
+/// the span splits local from domain — the local class excludes `@`).
+fn email_token(salt: &str, matched: &str) -> String {
+    let at = matched
+        .find('@')
+        .expect("an email match holds exactly one @");
+    let domain = &matched[at + 1..];
+    format!("@{domain}~{}", token_digest(salt, matched))
+}
+
+/// The phone token for a matched number: the match's first three code
+/// points, `~`, the digest.
+fn phone_token(salt: &str, matched: &str) -> String {
+    let prefix: String = matched.chars().take(3).collect();
+    format!("{prefix}~{}", token_digest(salt, matched))
+}
+
+/// The expected BOTH-rules output: the email pass over the input, then
+/// the phone grammar over the email pass's result — the transform's own
+/// pipeline order, token breakers and all (the phone match set is
+/// computed on the intermediate exactly as the transform does).
+fn expected_both(s: &str, salt: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
-    let out_chars: Vec<char> = out.chars().collect();
-    let mut per_string: HashMap<String, ()> = HashMap::new();
-    for (start, end) in spans {
-        let matched: String = chars.iter().skip(*start).take(end - start).collect();
-        per_string.entry(matched).or_insert(());
-    }
-    for matched in per_string.keys() {
-        let needle: Vec<char> = matched.chars().collect();
-        let want = occurrences_in(&chars, &needle)
-            .iter()
-            .filter(|&&(a, b)| !spans.iter().any(|&(c, d)| a < d && c < b))
-            .count();
-        let got = occurrences_in(&out_chars, &needle).len();
-        assert!(
-            got == want,
-            "{label} on {s:?}: {matched:?} occurs {got}x in the output, want {want}x"
-        );
-    }
+    let emails = matches_of(s, email_match_at);
+    let mid = substitute(&chars, &emails, |m| email_token(salt, m));
+    let mid_chars: Vec<char> = mid.chars().collect();
+    let phones = phone_matches_of(&mid);
+    substitute(&mid_chars, &phones, |m| phone_token(salt, m))
+}
+
+/// The expected phone-only output: the phone grammar over the raw
+/// input, no email pass.
+fn expected_phone_only(s: &str, salt: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let phones = phone_matches_of(s);
+    substitute(&chars, &phones, |m| phone_token(salt, m))
 }
 
 fuzz_target!(|s: &str| {
-    let emails = matches_of(s, email_match_at);
-    let phones = phone_matches_of(s);
-
-    for salt in ["", tors::pii_impl::DEFAULT_SALT] {
-        let out = scrub_pii(s, PiiRules::BOTH, salt);
-        let got = out.as_ref();
-
-        // Pass one: phone matches never survive verbatim (a survivor
-        // would be a phone match of the output, and no digit run can be
-        // constructed across a token boundary: see the module docs).
-        // Counted positionally per distinct string, so a benign dual-copy
-        // (a scrubbed standalone plus an id-embedded copy) is not a
-        // survivor.
-        assert_no_survivors(
-            s,
-            got,
-            &phones,
-            "a phone match of the input survived pass one",
-        );
-
-        // The identity path never lies, in the stronger direction: a
-        // borrowed return means NO match existed (a match that fired
-        // without allocating is silent under-redaction by definition).
-        match out {
-            Cow::Borrowed(_) => {
-                assert!(
-                    emails.is_empty() && phones.is_empty(),
-                    "identity return on {s:?} but a match existed"
-                );
-            }
-            Cow::Owned(_) => {}
-        }
-
-        // The converged output (pass two, the documented fixed point):
-        // no match of the input survives at all, and a third pass is
-        // the identity — convergence, pinned structurally rather than
-        // by value equality alone.
-        let twice = scrub_pii(got, PiiRules::BOTH, salt);
-        let twice = twice.as_ref();
-        let all: Vec<(usize, usize)> = emails.iter().chain(phones.iter()).copied().collect();
-        assert_no_survivors(
-            s,
-            twice,
-            &all,
-            "a match of the input survived into the converged output",
-        );
-        assert!(
-            matches!(scrub_pii(twice, PiiRules::BOTH, salt), Cow::Borrowed(_)),
-            "the converged output is not a fixed point on {s:?}"
-        );
-    }
-
-    // Phone-only: no email pass runs, so the reconstruction shape
-    // cannot arise, no phone-match survivor is possible at all, and the
-    // pass is strictly idempotent (every match ends at its run's last
-    // digit, no run spans a token's `~`, and the domestic separator
-    // requirement leaves a token's hex interior unmatchable).
     let phone_only = PiiRules {
         email: false,
         phone: true,
     };
-    let once = scrub_pii(s, phone_only, "");
-    let once = once.as_ref();
-    assert_no_survivors(
-        s,
-        once,
-        &phones,
-        "a phone match survived phone-only pass one",
-    );
-    assert!(
-        matches!(scrub_pii(once, phone_only, ""), Cow::Borrowed(_)),
-        "phone-only is not idempotent on {s:?}"
-    );
+    for salt in ["", tors::pii_impl::DEFAULT_SALT] {
+        // The full-output differential: the transcription's own pipeline
+        // (email pass, then the phone grammar over the email output,
+        // token breakers and all) must produce byte-identical output to
+        // the transform, at both salts. This subsumes survivor
+        // accounting: email-eaten phone shapes, domain-borne phone
+        // shapes the phone pass cannot scrub, and the digest-hex
+        // reconstruction corners are all exact output, not counted
+        // absence. A disagreement here is either a transform bug or an
+        // oracle drift — the panic names the input either way.
+        let out = scrub_pii(s, PiiRules::BOTH, salt);
+        assert_eq!(
+            out.as_ref(),
+            &expected_both(s, salt),
+            "the BOTH-rules pipeline diverged from the oracle at salt {salt:?}"
+        );
+
+        // Convergence, structurally: the second pass over the
+        // differential output is a fixed point (a third pass is the
+        // identity).
+        let twice = scrub_pii(out.as_ref(), PiiRules::BOTH, salt);
+        assert!(
+            matches!(
+                scrub_pii(twice.as_ref(), PiiRules::BOTH, salt),
+                Cow::Borrowed(_)
+            ),
+            "the converged output is not a fixed point on {s:?}"
+        );
+
+        // Phone-only: the phone grammar over the raw input, and the
+        // pass is strictly idempotent.
+        let once = scrub_pii(s, phone_only, salt);
+        assert_eq!(
+            once.as_ref(),
+            &expected_phone_only(s, salt),
+            "the phone-only pipeline diverged from the oracle at salt {salt:?}"
+        );
+        assert!(
+            matches!(scrub_pii(once.as_ref(), phone_only, salt), Cow::Borrowed(_)),
+            "phone-only is not idempotent on {s:?}"
+        );
+    }
 });
