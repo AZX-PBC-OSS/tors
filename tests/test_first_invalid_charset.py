@@ -278,8 +278,16 @@ class TestTaskQRuleShapes:
         assert reference_first_invalid_charset(["é"], None, "é") == -1
         assert reference_first_invalid_charset(["é"], None, "é") == 0
         # After NFC both forms are the one-codepoint é, so both pass.
-        assert first_invalid_charset([tors.normalize("é")], rest="é") == -1
         assert first_invalid_charset([tors.normalize("é")], rest="é") == -1
+        assert first_invalid_charset([tors.normalize("é")], rest="é") == -1
+        # Confusables stay distinct under NFC, pinned: Cyrillic А (U+0410)
+        # looks like Latin A but is a different scalar, and normalize does
+        # not fold it — a Latin-only allow-list rejects it before and after
+        # normalization; allow-list exactly the codepoints you mean.
+        assert first_invalid_charset(["\u0410"], rest="A") == 0
+        assert first_invalid_charset([tors.normalize("\u0410")], rest="A") == 0
+        assert first_invalid_charset(["\u0410"], rest="\u0410") == -1
+        assert reference_first_invalid_charset(["\u0410"], None, "A") == 0
 
     def test_membership_is_per_codepoint_not_per_grapheme_cluster(self) -> None:
         """Codepoints, not grapheme clusters: a ZWJ family emoji (5
