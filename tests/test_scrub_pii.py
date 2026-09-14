@@ -902,6 +902,30 @@ class TestApiKeyZoo:
             first + " " + _key_token("ghp_", second)
         )
 
+    def test_a_key_glued_to_contact_material_is_mid_token(self) -> None:
+        # The boundary rule's reach past words (red-team pin, landed
+        # behavior): a key glued with ZERO separator to a phone number's
+        # last digit, an email domain's last letter, or a prior token's
+        # digest hex is mid-token exactly the way `xak-` is — the keys
+        # pass leaves it WHOLE, and no later pass can recover it (the
+        # contact passes still scrub their own matches). Pinned so any
+        # future widening of the boundary rule is a deliberate grammar
+        # change with this corner named, never a drift.
+        key = "sk-" + _key_tail(48)
+        for text in (
+            "+14155552671" + key,
+            "415-555-2671" + key,
+            "a@b.co" + key,
+            "+14~abc123def456" + key,
+        ):
+            assert scrub_pii(text, ["api_keys"], salt="") == text
+        # The composed pipeline scrubs the contact half; the glued key
+        # survives whole — the documented mid-token cut applied to
+        # contact glue.
+        assert scrub_pii("+14155552671" + key, salt="") == (
+            f"+14~{_hex12('+14155552671')}{key}"
+        )
+
     def test_glued_keys_merge_into_one_maximal_tail(self) -> None:
         # The tail run is maximal: a second key's whole spelling is
         # charset material for the first family's tail, so the pair is
