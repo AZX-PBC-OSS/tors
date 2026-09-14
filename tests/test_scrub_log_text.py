@@ -47,6 +47,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from tors import scrub_log_text
+
 from reference import reference_scrub_log_text
 
 PG = ["pg_detail_lines"]
