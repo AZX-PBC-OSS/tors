@@ -879,8 +879,13 @@ sweep are in `src/scan_impl.rs`). The corners the identity buys: no astral
 codepoints means exactly `2 * len(s)` for ALL BMP text — CJK and combining
 marks included, where the UTF-8 byte count diverges — pure ASCII means `2 *`
 the UTF-8 byte count, and every answer is even. The final doubling is
-checked arithmetic: past ~1 GiB of astral-dense text on 32-bit targets it
-raises `OverflowError` instead of wrapping (never fires on 64-bit).
+checked arithmetic that refuses instead of wrapping — and it is
+unreachable for real inputs on every width: a `&str` is at most
+`isize::MAX` bytes and `#codepoints + #astral` never exceeds one per
+byte, so the doubled answer is at most `2 * isize::MAX`, which fits
+`usize` on 32-bit and 64-bit alike. The `OverflowError` contract is the
+loud refusal if that invariant ever breaks, pinned at synthetic
+boundary counts crate-side (the injectable combine unit).
 
 The cost model, measured — all wall numbers below are
 CPython-3.12 calibration-box figures (arm64, release build; re-measure

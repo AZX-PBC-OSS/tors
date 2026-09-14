@@ -245,7 +245,8 @@ def utf8_byte_len(s: str) -> int: ...
 # Implementation: the utf8 twin's standard str-in borrow (NOT
 # hand-rolled UCS arithmetic, NOT FFI) plus derived arithmetic over the
 # UTF-8 view — 2 * (#codepoints + #astral), both counts byte classes
-# (lead bytes; bytes >= 0xF0) — one pass, no allocation; the corners:
+# (lead bytes; 4-byte leads 0xF0..=0xF4) — one pass, no allocation; the
+# corners:
 # no astral codepoints -> exactly 2 * len(s) for ALL BMP text (where
 # the UTF-8 byte count diverges on CJK and combining marks), pure
 # ASCII -> 2 * the UTF-8 byte count, and every answer is even.
@@ -276,9 +277,11 @@ def utf8_byte_len(s: str) -> int: ...
 # the utf-16-le error reports only the first unit (first-unit span);
 # (3) errors="surrogatepass" is unsupported. See docs/api.md.
 #
-# Overflow: 2 * (codepoints + astral) is checked — past ~1 GiB of
-# astral-dense text on 32-bit targets this raises OverflowError instead
-# of wrapping (never fires on 64-bit).
+# Overflow: 2 * (codepoints + astral) is checked, and unreachable for
+# real inputs on every width (a &str is at most isize::MAX bytes and
+# the count sum never exceeds one per byte, so the doubled answer is at
+# most 2 * isize::MAX, which fits usize on 32-bit and 64-bit alike):
+# OverflowError is the loud refusal if that invariant ever breaks.
 #
 # GIL note: a single int return (no marshalling class); the GIL-held
 # residue is the borrow (the cold-cache first call's materialization,

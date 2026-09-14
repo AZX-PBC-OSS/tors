@@ -363,9 +363,10 @@ const UTF16_COUNT_CHUNK: usize = 16;
 ///   target-width-dependent point, so the 32-bit overflow path is covered
 ///   by unit (see the combine test) rather than by a gigabyte fixture.
 ///
-/// Tier note: 32-bit targets are tier-3 for this function — the
-/// overflow leg past ~1 GiB of astral-dense text is contract-pinned by
-/// the combine unit, not exercised in CI (wheels are 64-bit-only; no
+/// Tier note: no real input can reach the `None` leg on any width —
+/// see [`utf16_byte_len`]'s docs for the `2 * isize::MAX` bound — so
+/// the refusal is contract-pinned by the combine unit at synthetic
+/// boundary counts, not exercised in CI (wheels are 64-bit-only; no
 /// 32-bit leg builds this target).
 pub(crate) fn utf16_combine_counts(codepoints: u64, astral: u64) -> Option<usize> {
     let doubled = codepoints.checked_add(astral)?.checked_mul(2)?;
@@ -394,18 +395,20 @@ pub(crate) fn utf16_combine_counts(codepoints: u64, astral: u64) -> Option<usize
 /// over concatenation, so the sweep is exhaustive) in
 /// `utf16_byte_len_tests`, and against the stdlib oracle Python-side.
 ///
-/// Fallible, no panic: the return is `Option<usize>` — `None` past
-/// ~1 GiB of astral-dense text on 32-bit targets (the only width on
-/// which the doubling can overflow `usize`). The accumulators are
-/// `u64`, so no per-chunk add can wrap before the single narrowing
-/// step: any `&str` is shorter than `isize::MAX` bytes, hence holds
-/// fewer than `isize::MAX` codepoints — far below `u64::MAX` — and the
-/// only checked point is the final [`utf16_combine_counts`] narrow,
-/// which the Python wrapper maps to `OverflowError` (see
-/// `src/py/scan.rs`). There is no `expect` on this path, in this
-/// module or the wrapper: overflow travels as a value, never as a
-/// panic (no unwinding, no `catch_unwind`). On 64-bit the `None` leg
-/// never fires (it would take exabytes).
+/// Fallible, no panic: the return is `Option<usize>`, and the `None`
+/// leg is unreachable for real inputs on every width: any `&str` is
+/// shorter than `isize::MAX` bytes, and `#codepoints + #astral` never
+/// exceeds one per byte (a 1-byte codepoint contributes one unit, an
+/// astral codepoint two per four bytes), so the doubled sum is at most
+/// `2 * isize::MAX` = `usize::MAX - 1`, which fits on 32-bit and
+/// 64-bit alike. The accumulators are `u64`, so no per-chunk add can
+/// wrap before the single narrowing step either; the only checked
+/// point is the final [`utf16_combine_counts`] narrow, which the
+/// Python wrapper maps to `OverflowError` (see `src/py/scan.rs`) — the
+/// loud refusal if the byte-bound invariant ever breaks, pinned at
+/// synthetic boundary counts by the combine unit. There is no `expect`
+/// on this path, in this module or the wrapper: overflow travels as a
+/// value, never as a panic (no unwinding, no `catch_unwind`).
 ///
 /// The cost model is the borrow's, the utf8 twin's exactly (ASCII
 /// zero-copy alias; cold-cache first call materializes-and-caches the
@@ -715,9 +718,10 @@ mod utf16_byte_len_tests {
     #[test]
     #[cfg(target_pointer_width = "32")]
     fn thirty_two_bit_targets_refuse_gigabyte_scale_counts() {
-        // 32-bit-only tier-3 leg: counts past ~1 GiB of astral-dense
-        // text refuse via the combine narrow (mapped to
-        // `OverflowError` Python-side) rather than wrapping.
+        // 32-bit-only leg: the combine narrow refuses synthetic boundary
+        // counts (mapped to `OverflowError` Python-side) rather than
+        // wrapping — no real input can reach the narrow's `None` on any
+        // width (the `2 * isize::MAX` bound in `utf16_byte_len`'s docs).
         // Synthetic counts — the allocation itself would OOM the
         // runner, so the helper carries the contract; the 64-bit
         // shape of the same boundary is pinned portably in

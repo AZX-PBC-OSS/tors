@@ -197,9 +197,13 @@ pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
 /// > mode, since every one needs the UTF-8 view first. Refusal parity
 /// > otherwise: the strict codec refuses the same strings tors refuses.
 ///
-/// Overflow: `2 * (codepoints + astral)` is checked arithmetic — past
-/// ~1 GiB of astral-dense text on 32-bit targets it raises
-/// `OverflowError` instead of wrapping; on 64-bit it never fires.
+/// Overflow: `2 * (codepoints + astral)` is checked arithmetic, and
+/// unreachable for real inputs on every width — a `&str` is at most
+/// `isize::MAX` bytes and the count sum never exceeds one per byte, so
+/// the doubled answer is at most `2 * isize::MAX`, which fits `usize`
+/// on 32-bit and 64-bit alike. The `OverflowError` is the loud refusal
+/// if that invariant ever breaks, pinned at synthetic boundary counts
+/// crate-side (the injectable combine unit).
 ///
 /// The implementation is the utf8 twin's borrow plus derived
 /// arithmetic, no FFI: the standard str-in borrow hands the core a
@@ -263,9 +267,13 @@ pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
 /// detaches.
 #[pyfunction]
 pub fn utf16_byte_len(py: Python<'_>, s: &str) -> PyResult<usize> {
-    // Fallible core, no unwinding: the core returns Option (None past
-    // ~1 GiB of astral-dense text on 32-bit targets), mapped here to
-    // the Python-side OverflowError contract. No catch_unwind, no
+    // Fallible core, no unwinding: the core returns Option — the None
+    // leg is unreachable for real inputs on every width (a &str is at
+    // most isize::MAX bytes and the count sum never exceeds one per
+    // byte, so the doubled answer is at most 2 * isize::MAX, which fits
+    // usize on 32-bit and 64-bit alike) — mapped here to the
+    // Python-side OverflowError contract so an invariant break refuses
+    // loudly. No catch_unwind, no
     // expect on this path — overflow travels as a value, so there is
     // no panic to mask and no unwind/GIL-restore assumption to make.
     py.detach(|| scan_impl::utf16_byte_len(s)).ok_or_else(|| {

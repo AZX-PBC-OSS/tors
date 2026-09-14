@@ -1076,14 +1076,17 @@ def test_utf16_exhaustive_sweep_count_and_alphabet_contract() -> None:
 
 
 def test_overflow_contract_documents_the_32bit_boundary() -> None:
-    """The 32-bit overflow contract, stated without a gigabyte: on 64-bit
-    (this runner) `2 * (codepoints + astral)` cannot overflow `usize`,
-    so large-but-reasonable inputs — including 12 MiB of astral text —
-    answer exactly. Past ~1 GiB of astral-dense text on a 32-bit target
-    the checked arithmetic raises `OverflowError` instead of wrapping
-    (crate-side `utf16_combine_counts` injectable unit plus the
-    32-bit-only tier-3 leg in `src/scan_impl.rs`;
-    the Python wrapper maps the failure to `OverflowError`)."""
+    """The overflow contract, stated without a gigabyte: the checked
+    doubling cannot fire for any real input on any width (a ``&str`` is
+    at most ``isize::MAX`` bytes and ``codepoints + astral`` never
+    exceeds one per byte, so the doubled sum is at most
+    ``2 * isize::MAX``, which fits ``usize`` on 32-bit and 64-bit
+    alike), so large-but-reasonable inputs — including 12 MiB of astral
+    text — answer exactly. The refusal is pinned at synthetic boundary
+    counts (crate-side ``utf16_combine_counts`` injectable unit plus the
+    32-bit-only leg in `src/scan_impl.rs`;
+    the Python wrapper maps the failure to `OverflowError`) — the loud
+    tripwire if the byte-bound invariant ever breaks."""
     import struct
 
     assert struct.calcsize("P") == 8  # documents this leg ran 64-bit
