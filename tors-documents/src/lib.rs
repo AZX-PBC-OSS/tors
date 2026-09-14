@@ -731,7 +731,9 @@ fn convert(
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;
     let converted = match py.detach(move || {
-        let (bytes, hint) = source.into_input(max_bytes, format, backend).map_err(input_document_error)?;
+        let (bytes, hint) = source
+            .into_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
         core(
             bytes,
             hint.as_deref(),
@@ -905,7 +907,8 @@ impl Source<'_> {
         // The PDF-only calls have no format/backend to sniff by; a real PDF
         // resolves to the unmetered lane and gets the MAX_INPUT_READ fallback,
         // which is the correct ceiling for them.
-        self.into_input(max_bytes, None, Backend::Auto).map(|(b, _)| b)
+        self.into_input(max_bytes, None, Backend::Auto)
+            .map(|(b, _)| b)
     }
 
     /// The bytes and the name hint: the convert spine's entry (the
@@ -976,7 +979,12 @@ impl Source<'_> {
                         // re-reads from the current file position and the real
                         // ceiling (>= 32 MiB) governs the refusal below.
                         let ceiling = documents_impl::provisional_read_ceiling(
-                            &prefix, hint_name.as_deref(), format, backend, MAX_INPUT_READ);
+                            &prefix,
+                            hint_name.as_deref(),
+                            format,
+                            backend,
+                            MAX_INPUT_READ,
+                        );
                         // Phase 2: continue from the SAME file (position is already past
                         // the prefix), prepending the prefix we already read.
                         let (b, o) = documents_impl::read_bounded_into(file, prefix, ceiling)
@@ -1013,7 +1021,9 @@ fn map_read_err(e: std::io::Error) -> InputError {
     if e.kind() == std::io::ErrorKind::OutOfMemory {
         InputError::Refused(
             "the document is too large to buffer within the read ceiling: \
-             split the file or pass a smaller max_bytes".into())
+             split the file or pass a smaller max_bytes"
+                .into(),
+        )
     } else {
         InputError::Io(e)
     }
@@ -1087,11 +1097,15 @@ fn refuse_over_ceiling(
 /// None it names the MAX_INPUT_READ backstop and how to raise it.
 fn over_ceiling_refusal(max_bytes: Option<usize>, ceiling: usize) -> InputError {
     let detail = if max_bytes.is_some() {
-        format!("exceeds the max_bytes ceiling of {}: split the file or pass a larger max_bytes",
-                render_size(ceiling))
+        format!(
+            "exceeds the max_bytes ceiling of {}: split the file or pass a larger max_bytes",
+            render_size(ceiling)
+        )
     } else {
-        format!("exceeds the {} default read ceiling: pass an explicit max_bytes to raise it",
-                render_size(ceiling))
+        format!(
+            "exceeds the {} default read ceiling: pass an explicit max_bytes to raise it",
+            render_size(ceiling)
+        )
     };
     InputError::Refused(format!("the document {detail}"))
 }

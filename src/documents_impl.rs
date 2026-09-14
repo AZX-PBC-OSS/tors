@@ -749,7 +749,11 @@ pub fn provisional_read_ceiling(
     // only witness lines. OR-ing errs toward metering (the safe direction) and
     // never removes a metered detection the trim already found.
     let metered = is_metered(head) || is_metered(prefix);
-    if metered { DEFAULT_ANYDOC_INPUT_LIMIT } else { fallback }
+    if metered {
+        DEFAULT_ANYDOC_INPUT_LIMIT
+    } else {
+        fallback
+    }
 }
 
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
@@ -2260,14 +2264,8 @@ mod tests {
         // newline: trimming to complete lines leaves one line (not CSV), so the
         // metering must come from the UNTRIMMED prefix, which sees both rows.
         let mut prefix = b"unit,status\na,".to_vec();
-        prefix.extend(std::iter::repeat(b'x').take(80 * 1024));
-        let c = provisional_read_ceiling(
-            &prefix,
-            None,
-            None,
-            Backend::Auto,
-            PROVISIONAL_FALLBACK,
-        );
+        prefix.extend(std::iter::repeat_n(b'x', 80 * 1024));
+        let c = provisional_read_ceiling(&prefix, None, None, Backend::Auto, PROVISIONAL_FALLBACK);
         assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
     }
 }
