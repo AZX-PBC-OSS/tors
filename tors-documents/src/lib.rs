@@ -29,7 +29,6 @@
 //! every function here: the O(output) string marshalling, plus
 //! `to_markdown`/`to_text`'s two-string tuple.
 
-use std::io::Read as _;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -717,7 +716,7 @@ fn convert(
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;
     let converted = match py.detach(move || {
-        let (bytes, hint) = source.into_input(max_bytes).map_err(input_document_error)?;
+        let (bytes, hint) = source.into_input(max_bytes, format, backend).map_err(input_document_error)?;
         core(
             bytes,
             hint.as_deref(),
@@ -862,6 +861,17 @@ enum InputError {
     Refused(String),
 }
 
+/// The finite backstop the unmetered lanes (pdf/HTML) read under when the
+/// caller passed no `max_bytes`: the two-phase read's `None` ceiling once the
+/// prefix sniff resolves to an unmetered lane. Large enough to be no practical
+/// limit on a real document, finite enough that a lying stat or a sparse hole
+/// can no longer make the read unbounded.
+pub(crate) const MAX_INPUT_READ: usize = 512 * 1024 * 1024;
+/// The prefix read before the content-only lane guess: 64 KiB is enough for
+/// every content marker `resolve` consults, and is far under any ceiling the
+/// guess can pick (>= 32 MiB), so the prefix read is never itself "over".
+const SNIFF_PREFIX: usize = 64 * 1024;
+
 impl Source<'_> {
     /// The bytes alone: the PDF family's entry (no name to consult:
     /// those functions are PDF-only by construction). `max_bytes` is the
@@ -876,7 +886,10 @@ impl Source<'_> {
     /// anydoc/office_oxide lanes only: lanes these PDF-only calls never
     /// run.
     fn into_bytes(self, max_bytes: Option<usize>) -> Result<Vec<u8>, InputError> {
-        Ok(self.into_input(max_bytes)?.0)
+        // The PDF-only calls have no format/backend to sniff by; a real PDF
+        // resolves to the unmetered lane and gets the MAX_INPUT_READ fallback,
+        // which is the correct ceiling for them.
+        self.into_input(max_bytes, None, Backend::Auto).map(|(b, _)| b)
     }
 
     /// The bytes and the name hint: the convert spine's entry (the
@@ -894,12 +907,17 @@ impl Source<'_> {
     /// knob). `None` keeps the default doctrine exactly: the core's
     /// post-read 32 MiB check, on the anydoc and office_oxide lanes
     /// only.
-    fn into_input(self, max_bytes: Option<usize>) -> Result<(Vec<u8>, Option<String>), InputError> {
+    fn into_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
         match self {
             Source::Path(path) => {
                 // parse_path already validated the Unicode, so the hint is
                 // always representable; `.to_str()` cannot fail here.
-                let hint = path.to_str().map(str::to_string);
+                let hint_name = path.to_str().map(str::to_string);
                 // The fast refusal, before open(2) is ever entered: a FIFO
                 // with no writer blocks inside open (the GIL released, the
                 // thread unreclaimable), and /dev/zero reads unboundedly
@@ -919,24 +937,58 @@ impl Source<'_> {
                 let meta = file.metadata().map_err(InputError::Io)?;
                 refuse_non_regular(&path, meta.file_type())?;
                 refuse_over_ceiling(max_bytes, Some(meta.file_type()), meta.len())?;
-                // std::fs::read's own shape, on the verified handle: the
-                // capacity hint from the fstat size (an explicit budget
-                // already bounds it; the default lane keeps parity with
-                // the pre-fix allocation).
-                let size = usize::try_from(meta.len()).unwrap_or(0);
-                let mut bytes = Vec::with_capacity(size);
-                file.read_to_end(&mut bytes).map_err(InputError::Io)?;
-                Ok((bytes, hint))
+
+                // The stat is no longer the authority on how much to read: a
+                // lying stat (procfs' st_size=0) or a sparse hole made the
+                // old read_to_end unbounded. The bounded read is the ceiling.
+                let (bytes, over) = match max_bytes {
+                    // Explicit budget: it is the ceiling, no sniff needed.
+                    Some(limit) => documents_impl::read_bounded_into(file, Vec::new(), limit)
+                        .map_err(map_read_err)?,
+                    None => {
+                        // Phase 1: a bounded prefix, then a content-only lane guess.
+                        let (prefix, _prefix_over) =
+                            documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX)
+                                .map_err(map_read_err)?;
+                        // SNIFF_PREFIX (64 KiB) < any ceiling picked below (>= 32 MiB),
+                        // so _prefix_over is always false here.
+                        let ceiling = documents_impl::provisional_read_ceiling(
+                            &prefix, hint_name.as_deref(), format, backend, MAX_INPUT_READ);
+                        // Phase 2: continue from the SAME file (position is already past
+                        // the prefix), prepending the prefix we already read.
+                        documents_impl::read_bounded_into(file, prefix, ceiling)
+                            .map_err(map_read_err)?
+                    }
+                };
+                if over {
+                    let ceiling = max_bytes.unwrap_or(MAX_INPUT_READ);
+                    return Err(over_ceiling_refusal(max_bytes, ceiling));
+                }
+                Ok((bytes, hint_name))
             }
             Source::Data(bytes) => {
                 // The data lane's twin gate: the budget refuses before the
                 // copy (the bytes are already resident: the caller's own
-                // memory, but the parse it would feed is not free).
+                // memory, but the parse it would feed is not free). No new
+                // backstop: resident bytes cannot grow past themselves.
                 refuse_over_ceiling(max_bytes, None, bytes.len() as u64)?;
                 // The one copy, inside the detach (the enum's docs).
                 Ok((bytes.to_vec(), None))
             }
         }
+    }
+}
+
+/// io::OutOfMemory from the bounded reader means the input was too large to
+/// buffer within the ceiling: a value refusal (ValueError), not an
+/// environment failure. Every other io error stays Io (OSError).
+fn map_read_err(e: std::io::Error) -> InputError {
+    if e.kind() == std::io::ErrorKind::OutOfMemory {
+        InputError::Refused(
+            "the document is too large to buffer within the read ceiling: \
+             split the file or pass a smaller max_bytes".into())
+    } else {
+        InputError::Io(e)
     }
 }
 
@@ -998,6 +1050,21 @@ fn refuse_over_ceiling(
         render_size(size as usize),
         render_size(limit),
     )))
+}
+
+/// The over-the-read-ceiling refusal. Renders the CEILING, not the bytes
+/// read: past the cap the real size is unknown, so "the document is N" would
+/// be a false size. When `max_bytes` was explicit it names the knob; under
+/// None it names the MAX_INPUT_READ backstop and how to raise it.
+fn over_ceiling_refusal(max_bytes: Option<usize>, ceiling: usize) -> InputError {
+    let detail = if max_bytes.is_some() {
+        format!("exceeds the max_bytes ceiling of {}: split the file or pass a larger max_bytes",
+                render_size(ceiling))
+    } else {
+        format!("exceeds the {} default read ceiling: pass an explicit max_bytes to raise it",
+                render_size(ceiling))
+    };
+    InputError::Refused(format!("the document {detail}"))
 }
 
 /// One size for a ceiling refusal, legible at every scale: the core's

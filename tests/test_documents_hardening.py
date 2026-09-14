@@ -545,3 +545,45 @@ class TestDocstringHonesty:
             "sniff's docstring still carries the false bounded-scan claim"
         )
         assert "package" in doc.lower(), "the docstring must name the package parse it does"
+
+
+class TestBoundedRead:
+    def test_oversized_sparse_pdf_refuses_not_aborts(self, tmp_path):
+        # Symptom 2: a 1 TiB sparse .pdf must refuse, not SIGKILL (was rc=-9).
+        p = tmp_path / "huge.pdf"
+        with open(p, "wb") as f:
+            f.write(b"%PDF-1.4\n"); f.truncate(1024**4)
+        code = f'from tors_documents import pdf_page_count\npdf_page_count({str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134), \
+            f"process was killed by a signal (rc={done.returncode})"
+        assert "ValueError" in done.stderr
+
+    def test_metered_lane_refuses_after_prefix_not_after_full_read(self, tmp_path):
+        # Symptom 1: a 40 MiB CSV under None refuses (over the 32 MiB lane
+        # ceiling) without the SIGKILL/abort the unbounded read risked.
+        p = tmp_path / "big.csv"
+        with open(p, "wb") as f:
+            f.write(b"unit,status\n"); f.write(b"a,ok\n" * (8 * 1024 * 1024))
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+
+    def test_pdf_page_count_zero_budget_is_a_clean_value_error(self, tmp_path):
+        # The PDF-only calls bypass convert()'s zero-check; the guard must
+        # live in the shared path so max_bytes=0 is a ValueError everywhere.
+        p = tmp_path / "x.pdf"; p.write_bytes(_PDF_BYTES)
+        code = f'from tors_documents import pdf_page_count\npdf_page_count({str(p)!r}, max_bytes=0)'
+        done = _probe(code, timeout=30)
+        assert "ValueError" in done.stderr and "max_bytes" in done.stderr
+
+    @pytest.mark.skipif(not Path("/proc/self/status").exists(),
+                        reason="procfs is Linux-only (see issue #86)")
+    def test_zero_stat_file_is_bounded_by_the_read_not_the_stat(self):
+        # Symptom 3: /proc/self/maps is S_ISREG with st_size=0 but reads
+        # unbounded; a small explicit budget must refuse by bytes read.
+        code = ('from tors_documents import to_text\n'
+                'to_text(path="/proc/self/maps", max_bytes=64, format="csv")')
+        done = _probe(code, timeout=30)
+        assert "ValueError" in done.stderr
