@@ -47,6 +47,7 @@ import pytest
 
 from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
     _COMPAT_SENTENCE,
+    _CONTACTS_SENTENCE,
     _DECOMPOSED_SENTENCE,
     _DIFF_DELETE_FRACTION,
     _DIFF_INSERT_FRACTION,
@@ -57,28 +58,36 @@ from reference import (  # noqa: I001 -- the shared oracle module (tests/referen
     _DIFF_REPLACE_FRACTIONS,
     _DIFF_WORD_SWAP,
     _ENTITY_SENTENCE,
+    _ESCAPE_LITERAL_TEXT,
     _PROSE_SENTENCE,
+    _SCRUB_SENTENCE,
     SEARCH_DENSE_PATTERNS,
     SEARCH_SPARSE_PATTERNS,
+    UNESCAPED_NEEDLE,
     corpus_utf8,
+    unescaped_false_positive,
 )
 
 _MIB = 1024 * 1024
 _BENCHES_DIR = Path(__file__).resolve().parent.parent / "benches"
 _BENCH_SOURCES: dict[str, str] = {
     # The one Rust-side source for the shared corpus recipes (every bench does
-    # `mod common;`), plus the text bench, the only one with recipes of its own.
+    # `mod common;`), plus the two benches with recipes of their own.
     "common/mod.rs": (_BENCHES_DIR / "common" / "mod.rs").read_text(encoding="utf-8"),
     "text.rs": (_BENCHES_DIR / "text.rs").read_text(encoding="utf-8"),
     # The diff bench: pair corpora built from the shared prose recipe (see the
     # module docstring for the built-corpus parity mechanism).
     "diff.rs": (_BENCHES_DIR / "diff.rs").read_text(encoding="utf-8"),
+    # The pii bench: its contacts corpus is bench-local (the text.rs
+    # precedent for a one-bench kind), pinned here against reference.py.
+    "pii.rs": (_BENCHES_DIR / "pii.rs").read_text(encoding="utf-8"),
 }
 
 # Each pinned source's expected sentence constants and corpus kinds: the shared
 # three in the common module; the text-bench-only two (the compat corpus that
 # still pays the K-forms' full pass under the quick-check fast paths, and
-# the entity-bearing prose corpus) in text.rs.
+# the entity-bearing prose corpus) in text.rs; the pii-bench-only contacts
+# corpus (the scrub_pii wall/GIL cells' recipe) in pii.rs.
 _EXPECTED_SENTENCES: dict[str, dict[str, str]] = {
     "common/mod.rs": {
         "PROSE_SENTENCE": _PROSE_SENTENCE,
@@ -87,11 +96,16 @@ _EXPECTED_SENTENCES: dict[str, dict[str, str]] = {
     "text.rs": {
         "COMPAT_SENTENCE": _COMPAT_SENTENCE,
         "ENTITY_SENTENCE": _ENTITY_SENTENCE,
+        "SCRUB_SENTENCE": _SCRUB_SENTENCE,
+    },
+    "pii.rs": {
+        "CONTACTS_SENTENCE": _CONTACTS_SENTENCE,
     },
 }
 _EXPECTED_KINDS: dict[str, list[str]] = {
     "common/mod.rs": ["prose", "decomposed", "crlf"],
-    "text.rs": ["compat", "entities"],
+    "text.rs": ["compat", "entities", "scrub"],
+    "pii.rs": ["contacts"],
 }
 
 # The bench's quantization, pinned textually: byte-length division (Rust ``str::len()`` is
@@ -124,10 +138,15 @@ _B64_RENDER = re.compile(
 
 
 def _decode_rust_literal(literal: str) -> str:
-    """Decode the Rust escape subset these literals use: ``\\u{…}`` plus ``\\t``, ``\\r``,
-    ``\\n``."""
+    """Decode the Rust escape subset these literals use: ``\\u{…}`` plus
+    ``\\t``, ``\\r``, ``\\n``, and ``\\\\`` (a literal backslash, protected
+    through a NUL sentinel so the control-char passes below leave it a
+    backslash — the scrub corpus's repr-flattened line needs it, and no
+    bench literal carries a real NUL)."""
     decoded = re.sub(r"\\u\{([0-9a-fA-F]+)\}", lambda m: chr(int(m.group(1), 16)), literal)
-    return decoded.replace("\\t", "\t").replace("\\r", "\r").replace("\\n", "\n")
+    decoded = decoded.replace("\\\\", "\x00")
+    decoded = decoded.replace("\\t", "\t").replace("\\r", "\r").replace("\\n", "\n")
+    return decoded.replace("\x00", "\\")
 
 
 def _bench_facts(source: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -149,7 +168,7 @@ def _rust_repeat_to(target_bytes: int, unit: str) -> str:
     return unit * max(1, target_bytes // len(unit.encode("utf-8")))
 
 
-@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs"])
+@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs", "pii.rs"])
 def test_bench_sentences_are_byte_identical_to_the_reference_sentences(
     source: str,
 ) -> None:
@@ -163,7 +182,7 @@ def test_bench_sentences_are_byte_identical_to_the_reference_sentences(
     )
 
 
-@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs"])
+@pytest.mark.parametrize("source", ["common/mod.rs", "text.rs", "pii.rs"])
 def test_bench_quantization_semantics_are_pinned(source: str) -> None:
     assert _REPEAT_TO.search(_BENCH_SOURCES[source]), (
         f"benches/{source}'s repeat_to no longer matches the pinned quantization "
@@ -177,7 +196,15 @@ def test_every_bench_builds_its_corpora_from_the_common_module() -> None:
     triplicated corpus recipes cannot quietly re-grow inside a bench file;
     the corpus identity above is only meaningful while the benches actually
     build from ``benches/common/mod.rs``."""
-    for name in ("normalize.rs", "bytes.rs", "text.rs", "utf8.rs", "diff.rs", "search.rs"):
+    for name in (
+        "normalize.rs",
+        "bytes.rs",
+        "text.rs",
+        "utf8.rs",
+        "diff.rs",
+        "search.rs",
+        "canon.rs",
+    ):
         source = (_BENCHES_DIR / name).read_text(encoding="utf-8")
         assert _USES_COMMON.search(source), (
             f"benches/{name} no longer declares `mod common;`: its corpora are "
@@ -217,15 +244,19 @@ def test_text_bench_measures_the_b64_rendering_of_the_prose_corpus() -> None:
         ("common/mod.rs", "prose"),
         ("common/mod.rs", "decomposed"),
         ("common/mod.rs", "crlf"),
+        ("pii.rs", "contacts"),
         ("text.rs", "compat"),
         ("text.rs", "entities"),
+        ("text.rs", "scrub"),
     ],
     ids=[
         "common-prose",
         "common-decomposed",
         "common-crlf",
+        "pii-contacts",
         "text-compat",
         "text-entities",
+        "text-scrub",
     ],
 )
 def test_bench_corpus_is_byte_identical_to_the_reference_corpus(
@@ -400,4 +431,109 @@ def test_search_bench_pattern_sets_match_reference() -> None:
     )
     assert arrays["DENSE_PATTERNS"] == list(SEARCH_DENSE_PATTERNS), (
         "benches/search.rs's dense pattern set drifted from reference.py's SEARCH_DENSE_PATTERNS"
+    )
+
+
+# --- The unescaped-scan bench's needle and corpus ------------------------------------
+#
+# The escape-parity group's corpora are the shared prose recipe (the sparse
+# shape is the plain prose bytes, so the wiring pin and the corpus-identity
+# tests above already cover it) plus one search-bench-local constant pair:
+# the escape-text needle and the false-positive literal. What can drift is
+# those two constants and the corpus assembled from them, so the needle and
+# the literal are parsed out of benches/search.rs, decoded, and cross-checked
+# against reference.py's UNESCAPED_NEEDLE and _ESCAPE_LITERAL_TEXT, the
+# corpus is rebuilt in Python from the parsed constants and compared to
+# ``unescaped_false_positive``'s output, and the bench's driving statements
+# are pinned textually (the diff.rs pinned-statements precedent), so the
+# bench numbers and the Python-side GIL/wall cells cross-reference on the
+# same bytes.
+
+_UNESCAPED_NEEDLE_PIN = re.compile(r'const UNESCAPED_NEEDLE: &\[u8\] = b"(?P<literal>[^"]*)";')
+_FALSE_POSITIVE_LITERAL_PIN = re.compile(
+    r'const FALSE_POSITIVE_LITERAL: &str = "(?P<literal>[^"]*)";'
+)
+
+
+def _decode_rust_backslash_literal(literal: str) -> str:
+    """Decode the Rust escape subset the two scan constants use — ``\\\\``
+    (an escaped backslash) and plain characters, nothing else. A constant
+    that grows a new escape shape fails the assert rather than being
+    silently mis-decoded (the decoder must be taught first)."""
+    out: list[str] = []
+    i = 0
+    while i < len(literal):
+        if literal[i] == "\\":
+            assert i + 1 < len(literal) and literal[i + 1] == "\\", (
+                f"the pinned literal {literal!r} uses an escape shape the "
+                "decoder does not know; teach it the shape first"
+            )
+            out.append("\\")
+            i += 2
+        else:
+            out.append(literal[i])
+            i += 1
+    return "".join(out)
+
+
+def test_unescaped_scan_bench_constants_match_reference() -> None:
+    """The needle and the false-positive literal, parsed and decoded out of
+    the bench source, must equal reference.py's constants by value: the
+    needle is the six-byte escape text, the literal the seven-byte
+    backslash-escaped rendering of it, and any drift (a dropped backslash,
+    a swapped constant) would point the bench at a different escape-parity
+    question than every Python-side cell measures."""
+    source = (_BENCHES_DIR / "search.rs").read_text(encoding="utf-8")
+    needle_match = _UNESCAPED_NEEDLE_PIN.search(source)
+    literal_match = _FALSE_POSITIVE_LITERAL_PIN.search(source)
+    assert needle_match and literal_match, (
+        "benches/search.rs no longer declares the UNESCAPED_NEEDLE and "
+        "FALSE_POSITIVE_LITERAL constants the escape-parity group drives"
+    )
+    needle = _decode_rust_backslash_literal(needle_match["literal"]).encode("utf-8")
+    assert needle == UNESCAPED_NEEDLE, (
+        "benches/search.rs's UNESCAPED_NEEDLE drifted from reference.py's "
+        f"(decoded {needle!r})"
+    )
+    literal = _decode_rust_backslash_literal(literal_match["literal"])
+    assert literal == _ESCAPE_LITERAL_TEXT, (
+        "benches/search.rs's FALSE_POSITIVE_LITERAL drifted from reference.py's "
+        f"_ESCAPE_LITERAL_TEXT (decoded {literal!r})"
+    )
+
+
+@pytest.mark.parametrize("target_bytes", [1, 1024, 12 * _MIB], ids=["1B-floor", "1KiB", "12MiB"])
+def test_unescaped_scan_bench_corpus_is_byte_identical_to_reference(
+    target_bytes: int,
+) -> None:
+    """The dense corpus, rebuilt in Python from the bench's parsed constants
+    (the shared, already-pinned prose sentence plus the decoded literal, the
+    pinned 4x unit assembly and ``\\n\\n`` suffix, the pinned quantization),
+    must be byte-identical to ``reference.unescaped_false_positive`` — the
+    same identity the shared corpora carry, extended to the one
+    search-bench-local corpus."""
+    source = (_BENCHES_DIR / "search.rs").read_text(encoding="utf-8")
+    needle_match = _UNESCAPED_NEEDLE_PIN.search(source)
+    literal_match = _FALSE_POSITIVE_LITERAL_PIN.search(source)
+    assert needle_match and literal_match
+    literal = _decode_rust_backslash_literal(literal_match["literal"])
+    assert literal == _ESCAPE_LITERAL_TEXT  # the constants test, re-derived here
+    # The builder's load-bearing statements, pinned textually: the unit is
+    # the sentence + literal, assembled 4x with the "\n\n" suffix, and the
+    # bench drives find_unescaped with the pinned needle over both shapes.
+    for pin in (
+        'let unit = format!("{}{}", PROSE_SENTENCE, FALSE_POSITIVE_LITERAL).repeat(4) + "\\n\\n";',
+        "scan_impl::find_unescaped(black_box(data), black_box(UNESCAPED_NEEDLE))",
+    ):
+        assert pin in source, (
+            f"benches/search.rs no longer contains the pinned statement {pin!r}: "
+            "the escape-parity group's corpus or scan call is no longer built "
+            "the way the Python-side cells measure"
+        )
+    unit = (_PROSE_SENTENCE + literal) * 4 + "\n\n"
+    rebuilt = _rust_repeat_to(target_bytes, unit).encode("utf-8")
+    assert rebuilt == unescaped_false_positive(target_bytes), (
+        f"the unescaped-scan bench's dense corpus ({len(rebuilt)}B rebuilt from "
+        "parsed constants) is not reference.unescaped_false_positive's output "
+        "at the same target"
     )

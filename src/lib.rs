@@ -9,9 +9,17 @@
 //! [`segmentation_impl`] (UAX #29 grapheme/word segmentation),
 //! [`utf8_impl`] (SIMD UTF-8 validity), [`diff_impl`] (character-level
 //! opcode diffs in difflib's shape), [`search_impl`] (leftmost-longest
-//! multi-pattern search), [`truncate_impl`] (boundary-safe and
-//! ellipsis-marked truncation), and [`controls_impl`] (C0/DEL control-run
-//! scrub); they are
+//! multi-pattern search), [`scan_impl`] (escape-parity byte scan),
+//! [`truncate_impl`] (boundary-safe and
+//! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
+//! scrub), [`charset_impl`] (batch codepoint-set validation for
+//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
+//! the TaskQ exception-text chain), [`hash_impl`] (the one-shot
+//! md5/sha1/sha256/sha512/hmac hashing surface), [`random_impl`]
+//! (the random-generation family: random
+//! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
+//! and [`pii_impl`] (contact-material scrub, the
+//! telemetry-safety port); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -204,16 +212,198 @@
 //! The JSON repair surface (`repair_json`/`repair_json_loads`/
 //! `repair_json_diagnostics`) runs the whole repair detached: the strict
 //! fast path, the repair parser, the schema alignment, and the validator
-//! compile+check, so a malformed multi-megabyte model dump never holds
-//! the GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
+//! compile+check, so a malformed multi-megabyte model dump never holds the
+//! GIL. The GIL-held residue is the `schema=` argument walk (O(schema)
 //! handles; each dict/list entry pays the standard str-in borrow class)
 //! and the return marshalling: the O(output) string for `repair_json`, the
 //! O(result) object-tree construction for the loads/diagnostics spellings
 //! (the `word_bounds` list-marshalling class), plus O(diagnostics) small
 //! dicts for the diagnostics flavor.
+//!
+//! The contact-scrub surface (`scrub_pii`, the telemetry-safety port)
+//! adds no residue class: `detached_transform`'s shape over a three-rule
+//! pass — the text borrow plus the `rules=`/`salt=` validation under the
+//! GIL, then the whole scan (the keys, email, and phone matchers, every
+//! splice, every token digest — the keys pass rides the same single
+//! detach) under one `py.detach`, then either the
+//! identity return (no active rule matched) or the O(output) string
+//! marshalling, pinned by `tests/test_gil_release.py` (worst gaps
+//! ~12ms of 36-40ms walls at 12 MiB of contact-dense text: the
+//! marshalling of a fast wall, the b64/QC-Yes budget shape).
+//!
+//! The random-generation surface (`random_string`/`random_hex`/
+//! `random_b62`/`random_b64url`/`uuid4`/`uuid7` and the uuids' bytes
+//! spellings `uuid4_bytes`/`uuid7_bytes`, `random_impl`) adds a new
+//! axis rather than a new residue class: entropy. The default spelling has
+//! no input to borrow at all — the argument validation is the whole
+//! GIL-held prelude, and the entire draw (a fresh per-call OS fill via
+//! `rand`'s `OsRng`, no process or thread RNG state, hence fork-safe,
+//! `secrets`' own per-call semantics) plus the formatting run under one
+//! `py.detach`, with the O(output) string marshalling as the only other
+//! residue. The unseeded calls are the crate's fastest native passes
+//! (syscall + sampling or SIMD formatting, microseconds at real token/key
+//! sizes), so the GIL residue is a larger fraction of a smaller wall — the
+//! generation cell in `tests/test_gil_release.py` is therefore ceiling-only
+//! (the b64 12 MiB precedent: a sub-ping-floor wall makes the ratio an
+//! artifact). The seeded spelling is the deterministic twin (ChaCha20 via
+//! `seed_from_u64`): a pure function of (seed, arguments), fully
+//! predictable from the seed, never safe for secrets — the contract every
+//! surface of the family carries, pinned by `tests/test_random.py`. The
+//! family is length-first (the four token spellings take the output length
+//! directly) over one char-sampling engine (`random_string`, with
+//! `random_hex`/`random_b62`/`random_b64url` delegating to it over their
+//! fixed alphabets) that buffers its u64
+//! draws one 1024-byte block per OS fill (one syscall per 128 draws rather
+//! than one per draw); the buffering changes cost, never the word
+//! sequence, so seeded output is identical either way (the engine spec in
+//! `random_impl`'s docs). No `aio` twins: fast CPU/syscall calls, not the
+//! detached-transform input class (docs/async.md).
+//!
+//! The MinHash surface (`minhash_signature`) adds one list-returning shape
+//! with a structurally bounded marshalling class: the argument borrow plus
+//! the bounds validation and the seed reduction (one `__index__` call and
+//! the mask, no instance-dunder dispatch) under the GIL, the whole
+//! tokenize + shingle + XXH64 + min-sweep under one `py.detach` (the sweep
+//! is the dominant cost, O(distinct shingles * num_perm) after the
+//! dedup-first pass), then the `num_perm`-element int-list marshalling
+//! after — at most 1024 fresh `PyLong`s, two orders of magnitude under the
+//! word_bounds 3.67M-tuple band at the same corpus size, so no streaming
+//! twin is warranted (the list is the answer, and it is small by
+//! contract). Resident memory past the answer is the live
+//! `shingle_size`-deep token window plus the distinct-hash set plus the
+//! coefficients — O(tokens) hashing with O(distinct + num_perm) retained,
+//! the token list streamed, never materialized (docs/api.md carries the
+//! measured bands and the caller-side input-size guidance; there is no
+//! `deadline_ms` here, the cost shape is linear, not superlinear).
+//!
+//! The object content-addressing surface (`content_hash`) adds a residue
+//! class of its own, the arg-walk class scaled to a whole object tree:
+//! the walk that materializes the canonical form's owned value tree runs
+//! under the GIL (one `to_str` borrow plus copy per str — the standard
+//! str-in class per string object, first-call UTF-8 materialization
+//! included; one i64 storage read per fast-path int; one Python `repr`
+//! call per float or big int; one CPython `list.sort` per dict whose keys
+//! are not all-str or all-int — the exotic-key shapes, where delegation
+//! to the interpreter's own timsort is what buys byte-exact json.dumps
+//! parity, NaN keys and exact int/float cross-comparisons included), and
+//! then the canonical-form emission plus the SHA-256 run under one
+//! `py.detach`, streaming into the hasher with no intermediate buffer.
+//! The walk is iterative (an explicit frame stack), so tree depth costs
+//! heap, never the call stack: any nesting the interpreter can build
+//! hashes clean, where `json.dumps` itself `RecursionError`s at a
+//! version-dependent depth — a documented divergence lane, the accepted
+//! superset. `tests/test_gil_release.py`'s content_hash cell pins the
+//! walk's band at 12 MiB of the records corpus; the return is a single
+//! 64-char hex string, so there is no marshalling class to speak of.
+//!
+//! The one-shot hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/
+//! `sha512_hex`/`hmac_sha256_hex` and their raw-digest twins
+//! `md5_digest`/`sha1_digest`/`sha256_digest`/`sha512_digest`/
+//! `hmac_sha256_digest`) adds no residue class at all: each argument
+//! pays the standard str-in borrow class (zero-copy for
+//! ASCII/cached str inputs, the one-time O(input) UTF-8 materialization on
+//! the first non-ASCII call — on the two-argument HMAC spellings that cost
+//! applies per str argument, so two non-ASCII str inputs pay two
+//! materializations; the measured HMAC wall cells use bytes, equivalently
+//! the ASCII zero-copy lane) or the zero-copy immutable `PyBytes` borrow
+//! (the bytes-in family: no materialization class exists for bytes, and
+//! exactly-`bytes` is the doctrine — a `bytearray`/`memoryview` is a
+//! TypeError rather than a copy the detached read would race; callers
+//! holding one wrap it first, `tors.sha256_hex(bytes(buf))`, then hash),
+//! then the
+//! whole digest computation runs under one `py.detach` — the hex
+//! spellings include the O(digest-size) hex formatting inside it, the
+//! digest spellings return the raw bytes — and the residue reduces to
+//! marshalling one short `String` (O(32..128), fixed by algorithm) or
+//! one fixed-size `PyBytes` (the `b64_decode` bytes-return class,
+//! 16/20/32/64 bytes), three orders of magnitude under the
+//! 10ms ping floor at every input size. `md5_*`/`sha1_*` (either
+//! spelling) are checksum/legacy-interop only, never security (see
+//! `hash_impl`'s scope section). `hmac_sha256_hex` and
+//! `hmac_sha256_digest` borrow two
+//! arguments under the GIL and run the keyed digest (key derivation
+//! included) under the same single detach. The honest hashlib
+//! comparison, measured: CPython's own `hashlib` releases the GIL for
+//! updates of 2048+ bytes (the `_hashlib` threshold), so at multi-MiB
+//! sizes the stdlib is also loop-friendly and tors's GIL release is not a
+//! latency win there; below that threshold (the webhook/request-signing
+//! sizes this surface exists for) `hashlib` holds the GIL, but a
+//! sub-2048-byte digest is microseconds, immaterial to loop latency
+//! either way. The GIL cells in `tests/test_gil_release.py` pin the
+//! ceiling-only band (12 MiB digest walls sit at the tens-of-ms scale,
+//! the b64 12 MiB precedent) and record the measured hashlib red side
+//! rather than asserting one it does not have.
+//!
+//! The charset-validation surface (`first_invalid_charset` and its
+//! offender-detail spelling `first_invalid_offender`, two projections of
+//! the one core scan) is `count_matches`' extreme point over a batch
+//! argument: one GIL-held walk of the items sequence (the standard str-in
+//! borrow class, O(items) handles — the `get_close_matches` candidate-walk
+//! shape, over any `Sequence`), then the set builds and the whole batch
+//! scan under one `py.detach`, then a single int return (the offender
+//! spelling: one small tuple, built only when an offender is found) — no
+//! marshalling class at all. At the batch sizes that motivate the
+//! functions (hundreds of items, the bulk pre-flight / tag-batch shape)
+//! the whole call sits far under the 10ms ping floor, so the GIL cell is
+//! ceiling-only (the `utf8_is_valid` class), pinned in
+//! tests/test_gil_release.py.
+//!
+//! The scrub surface (`scrub_impl::scrub_log_text`, the `tors.scrub_log_text`
+//! named-rule port of the consumer chain
+//! `src/taskq/obs/_redact_exc.py::_scrub_text`) adds no residue class: it is
+//! `detached_transform`'s shape over a multi-pass core. The argument
+//! borrow plus the O(rules) name walk (the standard str-in borrow class,
+//! three handles at most) and the ValueError construction on a bad name
+//! run under the GIL; then the whole rule chain — DETAIL line scan,
+//! escaped-run scan, userinfo scan, query-param scan, and the splice —
+//! runs under one `py.detach`; the residue is the single output string's
+//! marshalling on the fired lane, and nothing at all on the identity lane
+//! (no rule fired: the original object comes back). The surface it
+//! replaces is the worst GIL-tax offender in its consumer's error path
+//! (`re.sub` never releases the GIL; four passes per text — the two DETAIL
+//! segmenters plus the two URI masks — times ~6 texts per failed job
+//! (`str(exc)`/`repr(exc)`/rendered traceback/span attributes: up to ~24
+//! passes, all on the event loop), which is the whole
+//! case for the port: measured bands in `tests/test_gil_release.py` and
+//! `tests/test_performance.py`.
+//!
+//! The escape-parity scan surface (`contains_unescaped`/`find_unescaped`)
+//! adds no residue class at all: it is `utf8_is_valid`'s extreme point
+//! applied to search — two zero-copy `PyBytes` borrows (the haystack and
+//! the needle), the whole memmem occurrence loop plus the parity walk
+//! under one `py.detach`, and a `bool`/`int` return, so there is no
+//! marshalling class and no error path past the empty-needle `ValueError`
+//! (raised under the GIL, before the detach). The whole pass at 12 MiB
+//! sits well under the 10 ms heartbeat floor (memchr-class throughput),
+//! so both corpus shapes' heartbeat cells are ceiling-only, the
+//! b64/utf8_is_valid budget class. Its pinned companion
+//! (`utf8_byte_len`, #52, same binding module) is the one surface whose
+//! GIL-held residue IS its work on a first non-ASCII call: the standard
+//! str-in borrow materializes and caches the UTF-8 view under the GIL
+//! (O(n), the `finalize` first-call class; ASCII is a zero-copy alias and
+//! repeat calls O(1), strictly better than `len(s.encode())`'s
+//! re-copy-every-call), while the detach around the core is nominal —
+//! the core is the borrowed `&str`'s `len()`, one field read. A single
+//! `int` return, no marshalling class, no error path past the borrow's
+//! own `UnicodeEncodeError` on lone surrogates (CPython's error,
+//! `encode`'s exact parity). `utf16_byte_len` (the interop twin, same
+//! module, the "len() to bytes" pair) shares the borrow class exactly —
+//! same cache, same cold-first-call materialization — with one honest
+//! difference on each side of the detach: its core is an O(n) byte-class
+//! scan, so the detach carries real (still memchr-class, sub-floor at
+//! 12 MiB) work rather than the twin's nominal field read, and its
+//! surrogate lane is the same borrow error but PARITY with the replaced
+//! expression rather than the utf-8 twin's parity with `encode` — the
+//! strict `encode("utf-16-le")` refuses lone surrogates too ("surrogates
+//! not allowed"), so both twins refuse exactly the strings their
+//! replaced expressions refuse; the utf-16 expression's error carries
+//! its own codec label where the borrow's says utf-8, and the stdlib's
+//! `surrogatepass` acceptance mode is the one path tors does not offer.
 
 pub mod b64_impl;
 pub mod bm25_impl;
+pub mod canon_impl;
+pub mod charset_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
@@ -226,13 +416,16 @@ pub mod finalize_impl;
 pub mod forms_impl;
 pub mod fuzzy_impl;
 pub mod grounded_impl;
+pub mod hash_impl;
 pub mod html_impl;
 pub mod html_table;
 pub mod json_repair;
 pub mod json_schema_impl;
 pub mod merkle_impl;
+pub mod minhash_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
+pub mod pii_impl;
 // The documents surface is feature-gated (`documents`): its engines
 // (pdf_oxide, anydoc, office_oxide, html-to-markdown-rs) are optional deps
 // so the base build and the base PyPI wheel stay lean, and its pyo3
@@ -248,6 +441,9 @@ pub mod gfm_strip_impl;
 #[cfg(feature = "documents")]
 pub mod pdf_impl;
 pub mod pipeline_impl;
+pub mod random_impl;
+pub mod scan_impl;
+pub mod scrub_impl;
 pub mod search_impl;
 pub mod segmentation_impl;
 pub mod simhash_impl;
@@ -257,6 +453,7 @@ pub mod truncate_impl;
 pub mod url_impl;
 pub mod utf16_impl;
 pub mod utf8_impl;
+pub mod uuid_impl;
 
 use std::borrow::Cow;
 
@@ -295,6 +492,8 @@ pub(crate) fn detached_transform(
 pub mod py;
 
 use py::bm25::*;
+use py::canon::*;
+use py::charset::*;
 use py::chunk::*;
 use py::codec::*;
 use py::compiled_patterns::CompiledPatterns;
@@ -304,19 +503,26 @@ use py::fence::*;
 use py::forms::*;
 use py::fuzzy::*;
 use py::grounded::*;
+use py::hash::*;
 use py::html::*;
 use py::json_repair::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
+use py::minhash::*;
 use py::normalize::*;
 use py::phonetic::*;
+use py::pii::*;
 use py::pipeline::*;
+use py::random::*;
+use py::scan::*;
+use py::scrub::*;
 use py::search::*;
 use py::segmentation::*;
 use py::simhash::*;
 use py::tfidf::*;
 use py::truncate::*;
 use py::url::*;
+use py::uuid::*;
 
 /// The shared core of every `*_iter` streaming iterator (the
 /// segmentation, find_patterns, and chunking families'): the input kept
@@ -407,6 +613,10 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utf8_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(decode_utf16, m)?)?;
     m.add_function(wrap_pyfunction!(utf16_is_valid, m)?)?;
+    m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
+    m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
+    m.add_function(wrap_pyfunction!(utf8_byte_len, m)?)?;
+    m.add_function(wrap_pyfunction!(utf16_byte_len, m)?)?;
     m.add_function(wrap_pyfunction!(detect_encoding, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes, m)?)?;
     m.add_function(wrap_pyfunction!(diff_opcodes_lines, m)?)?;
@@ -427,9 +637,30 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(truncate_to_bounds, m)?)?;
     m.add_function(wrap_pyfunction!(truncate_ellipsis, m)?)?;
     m.add_function(wrap_pyfunction!(strip_controls, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_log_text, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_pii, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_pii_report, m)?)?;
+    // The canonical key-family tuple, in the scanner table's order: the
+    // single source is `pii_impl::KEY_FAMILY_NAMES`, so the export can
+    // never drift from the scanner (and the battery pins the literal).
+    m.add(
+        "KEY_FAMILIES",
+        pyo3::types::PyTuple::new(m.py(), pii_impl::KEY_FAMILY_NAMES)?,
+    )?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
+    m.add_function(wrap_pyfunction!(content_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(md5_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha1_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha256_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(sha512_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(hmac_sha256_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(md5_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha1_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha256_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(sha512_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(hmac_sha256_digest, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_cdc, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_text_iter, m)?)?;
@@ -444,6 +675,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
+    m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;
     m.add_function(wrap_pyfunction!(quote, m)?)?;
     m.add_function(wrap_pyfunction!(quote_plus, m)?)?;
     m.add_function(wrap_pyfunction!(unquote, m)?)?;
@@ -463,6 +695,19 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nysiis, m)?)?;
     m.add_function(wrap_pyfunction!(daitch_mokotoff, m)?)?;
     m.add_function(wrap_pyfunction!(refined_soundex, m)?)?;
+    m.add_function(wrap_pyfunction!(first_invalid_charset, m)?)?;
+    m.add_function(wrap_pyfunction!(first_invalid_offender, m)?)?;
+    m.add_function(wrap_pyfunction!(random_string, m)?)?;
+    m.add_function(wrap_pyfunction!(random_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(random_b62, m)?)?;
+    m.add_function(wrap_pyfunction!(random_b64url, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid4, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid4_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid7_timestamp_ms, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid_version, m)?)?;
+    m.add_function(wrap_pyfunction!(uuid_parse, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
     m.add_class::<CompiledPatterns>()?;
     Ok(())

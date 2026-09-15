@@ -1,6 +1,8 @@
 """The ``__init__.pyi`` drift guard: every name ``tors.__all__`` exports (and
-no others) must appear as a ``def`` in ``python/tors/__init__.pyi``, and each
-stub's full signature (argument names in order, keyword-only markers,
+no others) must appear in ``python/tors/__init__.pyi`` — functions and
+classes as a ``def``, published constants as an annotated constant entry
+(``CHARSET_B62: str`` and kin), never both under one name — and each stub
+``def``'s full signature (argument names in order, keyword-only markers,
 defaults, and per-parameter/return annotations) must match the live
 function.
 
@@ -20,7 +22,13 @@ declarations in ``src/lib.rs``), but not annotations): names, keyword-only
 markers, and defaults are diffed against the live function directly;
 annotations (parameters and return) are pinned structurally (every parameter
 annotated, every def return-annotated) because the stub is their only home.
-The default comparison resolves the stub's literal expressions against the
+Constants have no signature at all, so their pin is structural the same way:
+present in the stub, annotated exactly ``str`` (lexical data, a live
+``str``) or ``tuple[str, ...]`` (a closed name tuple like KEY_FAMILIES,
+a live tuple of ``str``) — their content is contract (byte-exact, in
+tests/test_first_invalid_charset.py and tests/test_scrub_pii.py), not
+this guard's job, and the stub deliberately does not re-spell it. The
+default comparison resolves the stub's literal expressions against the
 live default values, so ``True``/``"strict"``/``None`` literals are compared
 by value, and any non-literal default in a future stub fails loudly (the
 guard does not guess).
@@ -77,6 +85,30 @@ def _stub_defs() -> dict[str, ast.FunctionDef]:
         defs[node.name] = stripped
     assert defs, "no top-level defs parsed from the pyi: the guard is broken"
     return defs
+
+
+def _stub_constants() -> dict[str, ast.AnnAssign]:
+    """The pyi's top-level annotated assignments — the published module
+    constants (``CHARSET_B62: str`` and kin) — by name. Value-less by
+    assertion: a stub constant carries its type only, never its content
+    (the live module is the single spelling of a 62-character alphabet; a
+    stub value would be a second place to typo it, and the byte-exact
+    pins live in tests/test_first_invalid_charset.py)."""
+    tree = ast.parse(_PYI.read_text(encoding="utf-8"))
+    constants: dict[str, ast.AnnAssign] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.AnnAssign):
+            continue
+        assert isinstance(node.target, ast.Name), (
+            f"{ast.unparse(node.target)}: a stub constant must be a plain "
+            "name (the guard does not guess at richer targets)"
+        )
+        assert node.value is None, (
+            f"{node.target.id}: the stub spells a constant's type, not its "
+            "content; the live module is the single spelling"
+        )
+        constants[node.target.id] = node
+    return constants
 
 
 def _stub_params(fn: ast.FunctionDef) -> list[tuple[str, str, Any]]:
@@ -140,12 +172,13 @@ def _live_params(fn: Callable[..., Any]) -> list[tuple[str, str, Any]]:
     return out
 
 
-def test_every_dunder_all_name_and_no_others_has_a_pyi_def() -> None:
+def test_every_dunder_all_name_and_no_others_has_a_pyi_entry() -> None:
     """``tors.__all__`` is the runtime truth (what the package re-exports);
-    the stub must carry exactly that set as top-level ``def``s: no missing
-    entries (a new function that ships untyped), no extra ones (a stub for a
-    function that no longer exists)."""
-    stubbed = set(_stub_defs())
+    the stub must carry exactly that set — functions and classes as
+    top-level ``def``s, published constants as annotated constant entries:
+    no missing entries (a new function or constant that ships untyped), no
+    extra ones (a stub entry for a name that no longer exists)."""
+    stubbed = set(_stub_defs()) | set(_stub_constants())
     exported = set(tors.__all__)
     assert stubbed == exported, (
         "python/tors/__init__.pyi drifted from tors.__all__: missing from the "
@@ -155,16 +188,90 @@ def test_every_dunder_all_name_and_no_others_has_a_pyi_def() -> None:
     )
 
 
+def test_no_stub_name_is_both_a_def_and_a_constant() -> None:
+    """The partition pin: a stub name is a ``def`` (function or class) or
+    an annotated constant, never both. A name spelled both ways is the
+    shadowing defect, and it slips past both other pins: the name-set
+    test unions defs ∪ constants (the name appears either way, so the
+    duplicate is invisible), and the signature test's constants
+    continue-path exempts the same-named ``def`` from signature checking
+    — a drifted shadowed ``def`` would ship untyped-pinned and
+    undetected. The stub's grammar has no dual form; neither may the
+    guard tolerate one."""
+    shadowed = set(_stub_defs()) & set(_stub_constants())
+    assert not shadowed, (
+        "python/tors/__init__.pyi name shadowing: "
+        f"{sorted(shadowed)} is spelled as both a def and an annotated "
+        "constant; the def would escape the signature pin via the "
+        "constants path — a published name is one or the other, never "
+        "both: delete one of the two entries"
+    )
+
+
+def _constant_shape(annotation: ast.expr, name: str) -> str:
+    """The stub's constant type spelling: ``str`` (lexical data) or
+    ``tuple[str, ...]`` (a closed name tuple like KEY_FAMILIES) — anything
+    else fails loudly; teach the guard the shape first, the same doctrine
+    as the non-literal-default refusal."""
+    if isinstance(annotation, ast.Name) and annotation.id == "str":
+        return "str"
+    if (
+        isinstance(annotation, ast.Subscript)
+        and isinstance(annotation.value, ast.Name)
+        and annotation.value.id == "tuple"
+        and isinstance(annotation.slice, ast.Tuple)
+        and len(annotation.slice.elts) == 2
+        and isinstance(annotation.slice.elts[0], ast.Name)
+        and annotation.slice.elts[0].id == "str"
+        and isinstance(annotation.slice.elts[1], ast.Constant)
+        and annotation.slice.elts[1].value is Ellipsis
+    ):
+        return "tuple[str, ...]"
+    raise AssertionError(
+        f"{name}: the stub's constant annotation must be exactly str or "
+        f"tuple[str, ...] (got {ast.unparse(annotation)}); teach the guard "
+        "the shape before publishing other constant types"
+    )
+
+
+def _check_constant(name: str, annotation: ast.expr, live: Any) -> None:
+    """The constants pin in one place (the signature test below and axis 7
+    of the teeth test share it): the annotation's shape must match the live
+    value — ``str`` is lexical data, ``tuple[str, ...]`` a tuple of ``str``."""
+    shape = _constant_shape(annotation, name)
+    if shape == "str":
+        assert isinstance(live, str), (
+            f"{name}: a published constant is lexical data: the live "
+            f"value must be str, not {type(live).__name__}"
+        )
+    else:
+        assert isinstance(live, tuple) and all(isinstance(v, str) for v in live), (
+            f"{name}: a published name tuple must be a tuple of str, not "
+            f"{type(live).__name__}"
+        )
+
+
 def test_every_stub_signature_matches_the_live_function() -> None:
     """The full-signature pin: for every exported function, the stub's
     parameter names in order, keyword-only markers, and literal defaults must
     equal the live function's (``inspect`` over the pyo3 text signature; the
     ``#[pyfunction]`` declaration in ``src/lib.rs``), and the stub must be
     fully annotated (every parameter, plus the return). A drift on any axis
-    fails naming the function and the axis."""
+    fails naming the function and the axis. Published constants have no
+    signature: their pin is presence (the name-set test) plus the
+    shape-matched live value (``str`` lexical data, ``tuple[str, ...]``
+    name tuples) — a future constant of another type must teach this
+    guard its shape first, the same doctrine as the non-literal-default
+    refusal."""
     stubs = _stub_defs()
+    constants = _stub_constants()
     for name in tors.__all__:
-        assert name in stubs, f"{name}: missing from the stub (the name-set test)"
+        assert name in stubs or name in constants, (
+            f"{name}: missing from the stub (the name-set test)"
+        )
+        if name in constants:
+            _check_constant(name, constants[name].annotation, getattr(tors, name))
+            continue
         stub_fn = stubs[name]
         stub_params = _stub_params(stub_fn)
         live_params = _live_params(getattr(tors, name))
@@ -205,9 +312,10 @@ def test_every_stub_signature_matches_the_live_function() -> None:
 def test_the_guard_itself_catches_each_drift_axis() -> None:
     """The guard's teeth, proven: mutating a copy of the pyi text on each
     axis (a missing keyword argument, a changed default, a lost keyword-only
-    marker, a dropped annotation) must make the signature comparison
-    disagree; a drift guard that cannot fail is decoration. Runs against an
-    in-memory mutated parse; the shipped pyi is untouched."""
+    marker, a dropped annotation, a vanished constant entry, a def shadowing
+    a constant entry) must make the relevant comparison disagree; a drift
+    guard that cannot fail is decoration. Runs against an in-memory mutated
+    parse; the shipped pyi is untouched."""
 
     def signature_of(source: str, name: str) -> list[tuple[str, str, Any]]:
         tree = ast.parse(source)
@@ -219,6 +327,20 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
             node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
         )
         return fn
+
+    def constant_names(source: str) -> set[str]:
+        return {
+            node.target.id
+            for node in ast.parse(source).body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+
+    def def_names(source: str) -> set[str]:
+        return {
+            node.name
+            for node in ast.parse(source).body
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+        }
 
     base = _PYI.read_text(encoding="utf-8")
     live_b64 = _live_params(tors.b64_decode)
@@ -250,3 +372,36 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
     )
     tree = ast.parse(unannotated)
     assert one_def(tree, "b64_decode").args.args[0].annotation is None  # the mutation applied
+    # Axis 5: a published constant's stub entry vanishes (the name-set pin
+    # over the constants half of the guard).
+    missing_constant = base.replace("CHARSET_B62: str\n", "", 1)
+    assert missing_constant != base, "the mutation did not apply: fix the guard test"
+    assert "CHARSET_B62" not in constant_names(missing_constant)
+    assert "CHARSET_B62" in constant_names(base)
+    # Axis 6: a def shadows a published constant's entry (the partition
+    # pin): the name-set union is blind to the duplicate, and the
+    # signature test's constants continue-path would exempt the def from
+    # signature checking.
+    shadowed_constant = base + "\ndef CHARSET_B62(x: int) -> int: ...\n"
+    assert shadowed_constant != base, "the mutation did not apply: fix the guard test"
+    assert def_names(shadowed_constant) & constant_names(shadowed_constant) == {"CHARSET_B62"}
+    assert not (def_names(base) & constant_names(base))
+    # Axis 7: a name tuple's annotation mistyped as str (the shape pin):
+    # the guard must reject the mismatch rather than treating every
+    # constant as lexical data.
+    mistyped_tuple = base.replace("KEY_FAMILIES: tuple[str, ...]\n", "KEY_FAMILIES: str\n", 1)
+    assert mistyped_tuple != base, "the mutation did not apply: fix the guard test"
+    (mistyped_node,) = [
+        node
+        for node in ast.parse(mistyped_tuple).body
+        if isinstance(node, ast.AnnAssign) and node.target.id == "KEY_FAMILIES"
+    ]
+    assert _constant_shape(mistyped_node.annotation, "KEY_FAMILIES") == "str"
+    try:
+        _check_constant("KEY_FAMILIES", mistyped_node.annotation, tors.KEY_FAMILIES)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the mistyped tuple constant did not fail the pin: the guard is decoration"
+        )

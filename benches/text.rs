@@ -43,6 +43,12 @@
 //! are linear single-pass cores, so every leg keeps this file's default
 //! sampling.
 //!
+//! The `scrub_log_text` group benches the named-rule scrub chain over the
+//! exception-shaped corpus (the text.rs-local `scrub` recipe, pinned to
+//! `reference.scrub_corpus` by the corpus-parity gate) at the same ladder:
+//! every rule fires once per unit, so the cells measure the four
+//! memchr/memmem scan passes plus the splice, never the identity fast path.
+//!
 //! These guard tors against its own regressions across versions — the
 //! cross-implementation wall-time claims are owned by tests/test_performance.py
 //! (only the Python side can run the stdlib/reference), and the GIL-release
@@ -74,6 +80,7 @@ use std::hint::black_box;
 use tors::b64_impl;
 use tors::forms_impl;
 use tors::html_impl;
+use tors::scrub_impl::{self, RuleSet};
 use tors::segmentation_impl;
 use tors::url_impl;
 
@@ -87,6 +94,14 @@ const COMPAT_SENTENCE: &str = "The quarte\u{0301}rly oil sa\u{0301}mple interval
 // Entity-bearing prose — mirrors tests/reference.py's `_ENTITY_SENTENCE`
 // (nine HTML5 refs per sentence): the html_unescape corpus.
 const ENTITY_SENTENCE: &str = "The quarterly &amp; field &lt;outage&gt; interval &quot;adjusted&quot; after &#233; the bushing &copy; changed &nbsp; for torque &there4; specs. ";
+
+// Exception-shaped text — mirrors tests/reference.py's `_SCRUB_SENTENCE`
+// (a rendered asyncpg-style failure with a DETAIL line, a DSN carrying
+// both credential shapes, and a repr()-flattened DETAIL run whose escaped
+// newline is a literal backslash-n, spelled `\\n` here and `\\n` there):
+// the scrub_log_text corpus, every rule firing once per unit, so the
+// scrub cells measure the scan+splice, never the identity fast path.
+const SCRUB_SENTENCE: &str = "Traceback (most recent call last):\n  File 'worker/run.py', line 88, in run\nJobError: duplicate key value violates unique constraint 'jobs_idempotency_key'\nDETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\nHINT: The SQL statement is unchanged.\nconnect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback\nJobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.')\n";
 
 fn repeat_to(target_bytes: usize, unit: &str) -> String {
     unit.repeat((target_bytes / unit.len()).max(1))
@@ -103,6 +118,13 @@ fn entities(target_bytes: usize) -> String {
     repeat_to(
         target_bytes,
         &format!("{}{}", ENTITY_SENTENCE.repeat(4), "\n\n"),
+    )
+}
+
+fn scrub(target_bytes: usize) -> String {
+    repeat_to(
+        target_bytes,
+        &format!("{}{}", SCRUB_SENTENCE.repeat(4), "\n"),
     )
 }
 
@@ -252,6 +274,26 @@ fn bench_unquote(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_scrub_log_text(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scrub_log_text");
+    for target_bytes in [1024, 1024 * 1024, 12 * 1024 * 1024, 100 * 1024 * 1024] {
+        let corpus = scrub(target_bytes);
+        group.throughput(Throughput::Bytes(corpus.len() as u64));
+        // The full four-pass rule chain (the only spelling the Python-side
+        // cells measure), the DETAIL deletions leaving the output ~87% of
+        // the input: a linear scan+splice at every leg, so this file's
+        // default sampling convention holds.
+        group.bench_with_input(
+            BenchmarkId::new("exceptions", format!("{}B", corpus.len())),
+            &corpus,
+            |b, text| {
+                b.iter(|| scrub_impl::scrub_log_text(black_box(text), black_box(RuleSet::ALL)))
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_tors_text(c: &mut Criterion) {
     bench_html(c);
     bench_forms(c);
@@ -260,6 +302,7 @@ fn bench_tors_text(c: &mut Criterion) {
     bench_b64_decode(c);
     bench_quote(c);
     bench_unquote(c);
+    bench_scrub_log_text(c);
 }
 
 criterion_group!(benches, bench_tors_text);

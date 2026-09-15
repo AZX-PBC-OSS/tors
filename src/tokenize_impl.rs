@@ -185,12 +185,28 @@ pub(crate) fn strip_accents_from(token: &str) -> Cow<'_, str> {
 /// those could in principle be the step that empties a token; it never
 /// fires on the `strip_accents = false` default path (nothing upstream of
 /// it can produce `""` from a non-empty real-word segment).
+/// The no-knob token stream (`strip_accents = false`, no stemmer, no
+/// lemma dict: the path `minhash_impl` and every default caller ride) as a
+/// lazy iterator: `real_word_segments`, lowercased, empty terms dropped.
+/// Collecting it is exactly `normalized_word_tokens(text, false, None,
+/// None)` (which delegates here when every knob is off, so the stream and
+/// the `Vec` spelling cannot drift). The streaming shape lets wide-window
+/// callers hold only their live window instead of the whole token list.
+pub(crate) fn normalized_word_tokens_stream(text: &str) -> impl Iterator<Item = String> + '_ {
+    real_word_segments(text)
+        .map(|segment| segment.to_lowercase())
+        .filter(|term| !term.is_empty())
+}
+
 pub(crate) fn normalized_word_tokens(
     text: &str,
     strip_accents: bool,
     stemmer: Option<&Stemmer>,
     lemma_dict: Option<&HashMap<String, String>>,
 ) -> Vec<String> {
+    if !strip_accents && stemmer.is_none() && lemma_dict.is_none() {
+        return normalized_word_tokens_stream(text).collect();
+    }
     real_word_segments(text)
         .filter_map(|segment| {
             let lowered = segment.to_lowercase();

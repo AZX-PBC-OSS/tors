@@ -72,19 +72,60 @@ min-of-5 after warmup):
     Its value is the GIL release (pinned in tests/test_gil_release.py), CPython-parity
     guarantees (tests/test_decode_utf8.py), and its role inside ``finalize_utf8``.
     Deliberately recorded, not thresholded away.
+
+``tors.minhash_signature`` vs the pure-Python oracle
+(``reference.reference_minhash_signature``, the transcribed MinHash: same tokens
+via ``word_bounds``, same shingles, XXH64 via the pinned ``xxhash`` package, the
+same SplitMix64-to-affine arithmetic in Python bigints), at the default
+``num_perm=128``, prose corpus, measured on the dev box (macOS/arm64, tors
+min-of-7 after warmup, oracle single sample -- its wall is seconds-scale and
+deterministic work, so one sample is the conservative denominator; the
+difflib-race precedent):
+
+    size    tors        oracle      tors/oracle
+    1 KiB   0.02ms      3.4ms       0.006  (~170x)
+    100KiB  1.6ms       280.9ms     0.006  (~175x)
+    1 MiB   17.7ms      2886.5ms    0.006  (~163x)
+
+The margin is 0.5, not the near-parity 0.9 elsewhere in this file: the oracle is
+slow Python (an O(shingles x num_perm) bigint inner loop), so the criterion the
+cell pins is ``the native pass keeps its advantage`` (a regression to within 2x
+of pure Python fails it), not a close race; the measured ratios leave ~80x
+headroom, so load asymmetry cannot flake it.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import html
+import json
+import re
+import secrets
+import string
 import time
+import uuid as stdlib_uuid
 from collections.abc import Callable
 
 import pytest
 
 import tors
-from reference import corpus_b64, corpus_utf8, crlf, decomposed, entities, prose, reference_finalize
+from reference import (
+    contacts,
+    content_object,
+    corpus_b64,
+    corpus_utf8,
+    crlf,
+    decomposed,
+    entities,
+    prose,
+    reference_finalize,
+    reference_minhash_signature,
+    reference_scrub_log_text,
+    reference_scrub_pii,
+    scrub_corpus,
+)
 from tors import (
     chunk_by_lines,
     chunk_by_paragraphs,
@@ -307,6 +348,255 @@ def test_html_unescape_no_ampersand_path_is_measured_not_asserted() -> None:
     )
 
 
+def _quoted_scrub_chain(text: str) -> str:
+    """The quoted chain ``tors.scrub_pii`` replaces: the pure-Python
+    reference oracle at the unsalted spelling (two ``re.sub`` passes, one
+    Python callback per match, ~119k matches at 12 MiB of the contacts
+    corpus)."""
+    return reference_scrub_pii(text, None, salt="")
+
+
+@pytest.mark.parametrize("size_bytes", [1 * 1024, 100 * 1024], ids=["1KiB", "100KiB"])
+def test_scrub_pii_beats_the_quoted_chain_on_contact_prose(size_bytes: int) -> None:
+    """The wall headline for the scrub: ``tors.scrub_pii`` (both rules,
+    unsalted) vs the quoted chain over the contacts corpus (one email and
+    one human-spelled E.164 number per sentence). The chain's cost is
+    structural: two whole-text ``re.sub`` passes whose every match invokes
+    a Python callback, so the native double scan wins ~5.5x regardless of
+    load (the callback count, not the machine, dominates). Measured on the
+    dev box (ambient load ~3.5, min-of-7 after warmup):
+
+        size     tors        chain       tors/chain
+        1 KiB    0.003ms     0.019ms     0.13
+        100 KiB  0.386ms     2.140ms     0.18
+
+    Asserted with the same 0.9 margin as the other wall cells (~5x of
+    headroom). The default-salt spelling measures identically (0.279ms at
+    100 KiB): the salt is digest material only, never a scan shape."""
+    corpus = contacts(size_bytes)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(lambda t: tors.scrub_pii(t, salt=""), corpus, samples=samples)
+    chain_ms = _min_wall_ms(_quoted_scrub_chain, corpus, samples=samples)
+    assert tors_ms < _MARGIN * chain_ms, (
+        f"contacts {size_bytes // 1024}KiB: tors {tors_ms:.3f}ms vs chain "
+        f"{chain_ms:.3f}ms (ratio {tors_ms / chain_ms:.2f}): the native double "
+        "scan lost more than the tolerance margin to the two-pass "
+        "regex+callback chain"
+    )
+
+
+def test_scrub_pii_identity_path_is_measured_not_asserted() -> None:
+    """The degenerate path, measured and not asserted (the no-``&``
+    precedent): on contact-free prose the scrub is two memchr anchored
+    scans that find nothing (no ``@``, no ``+``), ~0.088ms at 100 KiB
+    measured, and the identity return hands back the input object with
+    zero marshalling. The quoted chain pays the same nothing-plus-regex-
+    overhead class (~0.1ms), so there is no race to assert here — the
+    wall cells that matter are the contact-bearing ones above."""
+    corpus = prose(100 * 1024)
+    tors_ms = _min_wall_ms(tors.scrub_pii, corpus)
+    chain_ms = _min_wall_ms(_quoted_scrub_chain, corpus)
+    print(
+        f"scrub_pii no-contacts prose 100KiB: tors {tors_ms:.3f}ms "
+        f"chain {chain_ms:.3f}ms ratio {tors_ms / chain_ms:.2f}"
+    )
+
+
+# --- The one-shot hashing surface -------------------------------------------------
+#
+# The honest hashlib comparison, measured on the dev box (Apple Silicon,
+# ambient load 7.8-9.7): hashlib's digest engines are OpenSSL-backed with
+# hardware SHA extensions, and at throughput sizes they win or tie —
+# sha256 ~1.1-1.2x (a real stdlib win, recorded below and asserted
+# nowhere; absolute figures move with box and load, the band is the
+# statement), sha1 1.06-1.11, md5 0.88-1.03 and sha512 ~0.98 (dead heats).
+# tors's genuine wall wins are the sizes this surface exists for, where
+# per-call overhead dominates the engine: hashing a SHORT ASCII STR (the
+# cache-key/ETag spelling, where hashlib makes the caller encode first;
+# ASCII is the zero-copy borrow lane, non-ASCII pays the one-time O(input)
+# UTF-8 materialization, so the win narrows there — the asserted cell pins
+# the ASCII band and a recorded micro-cell covers "é"*512 alongside it)
+# at 0.40-0.54 of the stdlib expression, and HMAC at request-signature
+# sizes at ~0.31-0.36 of even the stdlib's fastest one-shot spelling
+# (``hmac.digest(...).hex()``, measured against explicitly so the
+# asserted cell does not race a slow opponent).
+# Micro-scale cells draw more samples: a sub-µs sample is one scheduler
+# hit away from its minimum, so min-of-15 gives the short side enough
+# draws to find an uncontended window (the _FAST_CELL_SAMPLES
+# derivation, sized for this surface's µs-scale cells).
+_HASH_MICRO_SAMPLES = 15
+
+
+@pytest.mark.parametrize(
+    "tors_fn_name", ["md5_hex", "sha1_hex", "sha256_hex", "sha512_hex"]
+)
+@pytest.mark.parametrize("size_bytes", [1024, 12 * _MIB], ids=["1KiB", "12MiB"])
+def test_digest_wall_time_vs_hashlib_is_measured_not_asserted(
+    tors_fn_name: str, size_bytes: int
+) -> None:
+    """The digest engines head-to-head at bytes-throughput sizes, measured
+    and not asserted, the decode_utf8/b64_decode precedent: hashlib's
+    OpenSSL engines (hardware SHA extensions) win or tie at every size
+    where the engine dominates the call. Measured (min-of-3 after warmup,
+    prose corpus bytes; absolute figures move with box and ambient load,
+    the band — sha256 ~1.1-1.2x, sha1 ~1.06-1.11, md5/sha512 dead heats —
+    is the load-stable statement, not any single pair):
+
+        algorithm   size    tors        hashlib     tors/hashlib
+        md5         1 KiB   ~0.001ms    ~0.001ms    0.88
+        sha1        1 KiB   ~0.001ms    ~0.001ms    0.69
+        sha256      1 KiB   ~0.001ms    ~0.001ms    0.83
+        sha512      1 KiB   ~0.001ms    ~0.001ms    0.74
+        md5         12 MiB  ~15.0ms     ~14.5ms     ~1.03
+        sha1        12 MiB  ~4.4ms      ~4.2ms      ~1.06
+        sha256      12 MiB  ~4-5ms      ~4ms        ~1.1-1.2
+        sha512      12 MiB  ~7.2ms      ~7.4ms      ~0.98
+
+    The sha256/sha1 losses are real and recorded, not thresholded away:
+    the surface's value at these sizes is the parity digest (pinned
+    differentially in tests/test_hash.py), the str convenience, and the
+    GIL story told in tests/test_gil_release.py (hashlib releases the GIL
+    for 2048+-byte updates, so the honest claim there is uniformity, not a
+    latency win). The wall wins this surface can assert are the
+    short-str and hmac cells below, the request-signing sizes where the
+    per-call overhead is the cost."""
+    raw = corpus_utf8("prose", size_bytes)
+    tors_fn = getattr(tors, tors_fn_name)
+    stdlib_fn = getattr(hashlib, tors_fn_name.removesuffix("_hex"))
+    tors_ms = _min_wall_ms(tors_fn, raw)
+    std_ms = _min_wall_ms(lambda r: stdlib_fn(r).hexdigest(), raw)
+    print(
+        f"{tors_fn_name} {size_bytes // 1024}KiB: tors {tors_ms:.3f}ms "
+        f"hashlib {std_ms:.3f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [128, 512], ids=["128B", "512B"])
+def test_sha256_hex_beats_encode_plus_hashlib_on_short_strings(size_bytes: int) -> None:
+    """The short-str wall win, asserted on ASCII str: hashing a str directly vs the
+    expression a hashlib caller must write
+    (``hashlib.sha256(s.encode("utf-8")).hexdigest()``), the cache-key /
+    ETag / request-ID spelling. tors pays one pyo3 call and the borrowed
+    UTF-8 (zero-copy on ASCII/cached inputs); the stdlib expression pays
+    ``str.encode`` (a fresh bytes object), the hash-object constructor,
+    and the ``hexdigest`` call.
+    Measured 0.17µs vs 0.33µs at 128B and 0.28µs vs 0.52µs at 512B
+    (ratios 0.40-0.54, min-of-many at load ~10); asserted with the 0.9
+    margin, ~1.7-2.2x of headroom. ASCII-scoped on purpose: non-ASCII str
+    pays the one-time O(input) UTF-8 materialization (see the recorded
+    micro-cell below), so the win narrows there."""
+    text = prose(4096)[:size_bytes]
+    tors_ms = _min_wall_ms(tors.sha256_hex, text, samples=_HASH_MICRO_SAMPLES)
+    std_ms = _min_wall_ms(
+        lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest(),
+        text,
+        samples=_HASH_MICRO_SAMPLES,
+    )
+    assert tors_ms < _MARGIN * std_ms, (
+        f"sha256_hex str {size_bytes}B: tors {tors_ms:.4f}ms vs "
+        f"encode+hashlib {std_ms:.4f}ms (ratio {tors_ms / std_ms:.2f}): the "
+        "one-call str spelling lost more than the tolerance margin to the "
+        "encode-then-hash expression"
+    )
+
+
+def test_sha256_hex_non_ascii_short_str_is_measured_not_asserted() -> None:
+    """The non-ASCII companion to the asserted ASCII cell above, recorded
+    not asserted: ``"é" * 512`` (512 chars, 1024 UTF-8 bytes) pays the
+    one-time O(input) UTF-8 materialization through pyo3's ``to_str``
+    borrow on top of the digest, where the ASCII lane above is zero-copy
+    — so the ~2x win narrows and no threshold is pinned here. Kept
+    record-only by design: no regression band or ceiling is asserted on
+    this shape. What IS
+    pinned is value parity (the digest equals the UTF-8-bytes spelling
+    on both sides); the walls are printed so the run's log carries the
+    recorded shape."""
+    text = "é" * 512
+    assert tors.sha256_hex(text) == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    tors_ms = _min_wall_ms(tors.sha256_hex, text, samples=_HASH_MICRO_SAMPLES)
+    std_ms = _min_wall_ms(
+        lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest(),
+        text,
+        samples=_HASH_MICRO_SAMPLES,
+    )
+    print(
+        f"sha256_hex non-ascii 512ch: tors {tors_ms:.4f}ms vs "
+        f"encode+hashlib {std_ms:.4f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key_len", "data_len"), [(32, 256), (131, 200)], ids=["request", "long-key"]
+)
+def test_hmac_sha256_hex_beats_the_fastest_stdlib_hmac_spelling(
+    key_len: int, data_len: int
+) -> None:
+    """The request-signing wall win, asserted against the stdlib's
+    FASTEST spelling, not the common slow one: ``hmac.digest(key, data,
+    "sha256").hex()`` is CPython's optimized one-shot C path (the one the
+    docs point performance-sensitive callers at), measured 0.92µs where
+    the idiomatic ``hmac.new(...).hexdigest()`` costs 1.12µs. tors's one
+    call (0.29µs) beats even the fast spelling by ~3x (ratio ~0.31; the
+    long-key/short-data RFC 4231 case-6 shape ~0.36), because the stdlib
+    spelling still pays two CPython calls (``hmac.digest`` plus ``.hex()``)
+    against tors's single pyo3 call. The webhook-verification loop is
+    exactly this shape: one HMAC per request, overhead-dominated."""
+    key = b"k" * key_len
+    data = b"d" * data_len
+    tors_ms = _min_wall_ms(
+        lambda _: tors.hmac_sha256_hex(key, data), None, samples=_HASH_MICRO_SAMPLES
+    )
+    std_ms = _min_wall_ms(
+        lambda _: hmac.digest(key, data, "sha256").hex(), None, samples=_HASH_MICRO_SAMPLES
+    )
+    assert tors_ms < _MARGIN * std_ms, (
+        f"hmac_sha256_hex k={key_len} d={data_len}: tors {tors_ms:.4f}ms vs "
+        f"hmac.digest+hex {std_ms:.4f}ms (ratio {tors_ms / std_ms:.2f}): the "
+        "one-call native HMAC lost more than the tolerance margin to the "
+        "stdlib's fastest one-shot spelling"
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [1024, 100 * 1024], ids=["1KiB", "100KiB"])
+def test_scrub_log_text_beats_the_regex_chain_on_exception_text(size_bytes: int) -> None:
+    """The scrub wall cells, at the two sizes the consumer's error path
+    actually pays: a single failed job scrubs a message and a traceback at
+    up to ~100 KB scale, and the issue's own cost profile for the chain
+    (~20-35µs/KiB, ~2-3.4ms at 100 KB) is what these cells measure against
+    the corpus that fires every rule once per unit (the DETAIL line, both
+    credential shapes on the DSN, the repr()-flattened run).
+
+    The comparator is the pinned regex chain itself (the four TaskQ
+    patterns as compiled in ``tests/reference.py``, the same spellings the
+    differential suite races tors against), so the wall race and the parity
+    harness cross-reference on one oracle. Measured on the dev box (min-of-7
+    at 1 KiB, min-of-3 at 100 KiB, after warmup):
+
+        size    tors        chain      tors/chain
+        1 KiB   0.001ms     0.045ms    0.03
+        100 KiB 0.064ms     2.735ms    0.02
+
+    A ~30-40x win, asserted with the shared 0.9 margin: the chain is four
+    whole-text ``re.sub`` passes while tors is four linear memchr/memmem
+    scans + splice under one ``py.detach``. The 1 KiB cell is fast-cell
+    territory (µs-scale samples) and draws ``_FAST_CELL_SAMPLES``
+    accordingly; even at that scale the margin
+    absorbs a loaded runner many times over. The GIL-release side of the
+    same surface is pinned in tests/test_gil_release.py (the 96 MiB
+    heartbeat cell; the chain holds the loop for ~2.5s of a ~2.76s wall at
+    that size, the red side this port exists for)."""
+    corpus = scrub_corpus(size_bytes)
+    tors_ms = _min_wall_ms(tors.scrub_log_text, corpus, samples=_samples_for(size_bytes))
+    chain_ms = _min_wall_ms(
+        reference_scrub_log_text, corpus, samples=_samples_for(size_bytes)
+    )
+    assert tors_ms < _MARGIN * chain_ms, (
+        f"scrub_log_text {size_bytes}B: tors {tors_ms:.3f}ms vs chain "
+        f"{chain_ms:.3f}ms (ratio {tors_ms / chain_ms:.3f}): the hand-rolled "
+        "scan+splice lost the wall race it exists to win"
+    )
+
+
 @pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
 @pytest.mark.parametrize("size_bytes", [1 * _MIB, 12 * _MIB], ids=["1MiB", "12MiB"])
 def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -> None:
@@ -333,6 +623,320 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
         f"grapheme_count {corpus_kind} {size_bytes // _MIB}MiB took {took_ms:.0f}ms, "
         "outside the absolute band (measured ~118-123ms at 12 MiB, ceiling 400ms "
         "with 3.3x margin); the cluster scan regressed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The utf8_byte_len wall cells (#52): tors.utf8_byte_len(s) vs
+# len(s.encode("utf-8")), the expression it replaces. The full measured
+# lane table (ambient load ~10-18 on the calibration box, macOS, 16 cores,
+# min-of-7 after warmup unless noted):
+#
+#     ASCII (prose), the TaskQ serialized-JSON case (ensure_ascii=True
+#     output is pure ASCII): tors is FLAT ~0.1µs at every size (the
+#     zero-copy alias: compact ASCII data is its own UTF-8, nothing to
+#     build), while the expression pays alloc+memcpy every call:
+#
+#         size    tors        encode     ratio
+#         1 KiB   0.08-0.13µs 0.13µs     0.7-1.0  (a dead heat: both sides are
+#                                                   pure call overhead; recorded,
+#                                                   not asserted)
+#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.9µs
+#                                                 of pure alloc+memcpy per
+#                                                 success — the figure every
+#                                                 doc site cites for the
+#                                                 terminal case)
+#         1 MiB   0.13µs      14.3µs     0.009
+#         12 MiB  0.13µs      184µs      0.0007
+#
+#     non-ASCII (decomposed), the cache lanes (the borrow's UTF-8 view is
+#     materialized once per OBJECT and cached by CPython; the sharing with
+#     encode is one-directional — the str-in borrow fills the cache and
+#     encode reads it but never fills it, observed on CPython 3.12 here
+#     and expected from the sources on 3.10-3.14 — see docs/cache-proof.md
+#     for the per-version Objects/unicodeobject.c links and the
+#     ripgrep recipe (`unicode_fill_utf8`, the only writer, reachable
+#     solely from PyUnicode_AsUTF8AndSize, while unicode_encode_utf8
+#     returns a copy of a filled cache and writes nothing on a miss).
+#     Semantic pins are the contract; timing is not):
+#
+#         64 KiB:  cold-encode 21.8µs | first-call 26.7µs | warm-encode 1.8µs
+#                  | cached-tors 0.08µs
+#         1 MiB:   cold-encode 355.8µs | first-call 409.7µs | warm-encode 14.8µs
+#                  | cached-tors 0.13µs
+#         12 MiB:  cold-encode 4.9ms | first-call 4.7ms | warm-encode 196µs
+#                  | cached-tors 0.13µs
+#
+#     The honest reading: on a FRESH non-ASCII object the first call is
+#     encode-parity (the materialization IS an encode - ucs2lib encoder
+#     pass plus a malloc plus a second full memcpy into the permanent
+#     cache, measured within ~10-20% of a cold encode), so the win there
+#     is only the absence of a Python-visible bytes object; the win is on
+#     REPEAT calls on the same object (the warm-encode lane itself is 20-
+#     1600x the cached call), and unconditionally on ASCII.
+#
+#     Both sharing directions, measured (a red-team pass reported the
+#     reverse of the recorded one; re-measured to adjudicate, min-of-7
+#     FRESH 12 MiB objects per lane, this box at ambient load ~6-7):
+#     tors-primed encode 177µs (the consult: one memcpy out of the filled
+#     cache - the recorded 184µs lane, reproduced); encode-primed FIRST
+#     utf8_byte_len 3.85-4.79ms, indistinguishable from the cold
+#     first-call lane (3.91-4.22ms) - a prior encode does NOT warm the
+#     tors lane. The reported 0.12-0.21µs "first call after encode" is
+#     this table's own cached-tors band (0.13µs), i.e. a warm object: the
+#     measurement to make that number is a cached call, not a first call.
+#     The same re-measurement pass re-checked the disputed 64 KiB figure
+#     (P2-2): the ASCII expression cell landed 0.75µs here (min-of-7,
+#     same load) against the recorded 0.9µs - the same class, and the
+#     lane table's 0.9µs stands as the ONE figure cited everywhere; the
+#     ~1.5µs the binding/test docstrings had carried matches no recorded
+#     lane (the nearest class is the non-ASCII warm encode's single
+#     1.8µs memcpy, which is not the terminal case - the terminal's
+#     serialized result is ASCII).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes"),
+    [
+        ("ascii", 64 * 1024),
+        ("ascii", 1 * _MIB),
+        ("nonascii-cached", 64 * 1024),
+        ("nonascii-cached", 1 * _MIB),
+    ],
+    ids=["ascii-64KiB", "ascii-1MiB", "nonascii-cached-64KiB", "nonascii-cached-1MiB"],
+)
+def test_utf8_byte_len_beats_the_encode_expression_on_both_winnable_lanes(
+    corpus_kind: str, size_bytes: int
+) -> None:
+    """The race, asserted only where it is honestly winnable. Two lanes:
+    ``ascii`` (prose, the TaskQ serialized case — compact ASCII is its own
+    UTF-8, so the borrow is a zero-copy alias and the call is O(1) with no
+    allocation, while the expression pays alloc+memcpy every call) and
+    ``nonascii-cached`` (decomposed, the methodology's warmup having primed
+    the object's UTF-8 cache, so the race is the repeat-call semantics:
+    the cached O(1) borrow against the expression's warm one-memcpy copy
+    out of the same cache). Measured ratios 0.14/0.009 (ASCII 64 KiB/1 MiB)
+    and 0.05/0.008 (non-ASCII cached 64 KiB/1 MiB) against the shared 0.9
+    margin: the fresh-object non-ASCII lane, where the first call is
+    encode-parity by construction, is measured and recorded in the cell
+    below, never asserted."""
+    corpus = prose(size_bytes) if corpus_kind == "ascii" else decomposed(size_bytes)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.utf8_byte_len, corpus, samples=samples)
+    enc_ms = _min_wall_ms(lambda s: len(s.encode("utf-8")), corpus, samples=samples)
+    assert tors_ms < _MARGIN * enc_ms, (
+        f"utf8_byte_len {corpus_kind} {size_bytes // 1024}KiB: tors {tors_ms * 1000:.2f}µs vs "
+        f"encode {enc_ms * 1000:.2f}µs (ratio {tors_ms / enc_ms:.3f}): the count lost more "
+        "than the tolerance margin to the copy it exists to avoid"
+    )
+
+
+def test_utf8_byte_len_ascii_calls_stay_o1_at_12mib() -> None:
+    """The O(1) pin the ratio race cannot make by itself: at 12 MiB the
+    ASCII call must stay in the call-overhead band (measured ~0.13µs flat
+    from 1 KiB to 12 MiB), under a 5µs ceiling (~40x margin; µs-scale
+    samples draw the fast-cell sample count, min-of-7, since one preempted
+    run can set a min-of-3). A per-call O(n) regression - a validation
+    pass over the borrowed bytes, a lost zero-copy alias in a pyo3 upgrade
+    - lands at the encode class (~180µs at 12 MiB) and blows through by
+    ~36x. The same regression class on the non-ASCII path is caught by the
+    nonascii-cached race leg (the cached lane would regress to the
+    materialization class)."""
+    corpus = prose(12 * _MIB)
+    tors_us = _min_wall_ms(tors.utf8_byte_len, corpus, samples=_FAST_CELL_SAMPLES) * 1000
+    assert tors_us < 5.0, (
+        f"utf8_byte_len ASCII 12MiB took {tors_us:.2f}µs, outside the O(1) call band "
+        "(measured ~0.13µs flat across sizes, ceiling 5µs); the borrow stopped being "
+        "a zero-copy alias or gained a per-call scan"
+    )
+
+
+def test_utf8_byte_len_fresh_object_lanes_are_measured_not_asserted() -> None:
+    """The lanes where there is no win to assert, recorded instead (the
+    decode_utf8/b64_decode precedent): the 1 KiB ASCII race is a dead heat
+    (both sides ~0.1µs of pure call overhead - the 1 KiB memcpy is
+    invisible at that size), and a non-ASCII FRESH object's first call is
+    encode-parity by construction (the materialization is an encode: the
+    same ucs-to-UTF-8 pass plus a malloc plus a second memcpy into the
+    permanent cache; measured within ~10-20% of a cold encode at 1 MiB).
+    The parity is the honest cost of the route the implementation chose
+    (borrow, not hand-rolled arithmetic), and the reason the asserted
+    cells above carry only the lanes that are structurally winnable."""
+    one_kib = prose(1024)
+    tors_us = _min_wall_ms(tors.utf8_byte_len, one_kib, samples=_FAST_CELL_SAMPLES) * 1000
+    enc_us = (
+        _min_wall_ms(lambda s: len(s.encode("utf-8")), one_kib, samples=_FAST_CELL_SAMPLES) * 1000
+    )
+    print(f"utf8_byte_len ASCII 1KiB: tors {tors_us:.2f}µs encode {enc_us:.2f}µs (dead heat)")
+    # The cold lanes need a FRESH object per timed call, so the copies are
+    # built up front (a generator would build each corpus inside the timed
+    # lambda) and the helper runs with warmup=0 — every sample is a first
+    # contact with its own object.
+    size = 1 * _MIB
+    cold_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    cold_us = (
+        _min_wall_ms(
+            lambda _: len(next(cold_copies).encode("utf-8")),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    fresh_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    first_us = (
+        _min_wall_ms(
+            lambda _: tors.utf8_byte_len(next(fresh_copies)),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    print(
+        f"utf8_byte_len non-ASCII 1MiB fresh-object: cold-encode {cold_us:.1f}µs "
+        f"first-call {first_us:.1f}µs (parity, no assert)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The utf16_byte_len wall cells (#52, the interop twin):
+# tors.utf16_byte_len(s) vs len(s.encode("utf-16-le")), the expression it
+# replaces. CROSS-ARCH lane table (the calibration box, arm64 NEON, and
+# the CI 3.12 leg, x86-64 SSE2-baseline — the chunk loop auto-vectorizes
+# on the first and not on the second, which is why the ASCII fast path
+# in src/scan_impl.rs exists: is_ascii is the one portably-SIMD part,
+# so the ASCII lane is target-independent and the non-ASCII lane is
+# target-dependent, both stated):
+#
+#     the warm lanes (repeat calls on one object):
+#
+#         ASCII (the fast path — 2*len after a std-SIMD is_ascii scan):
+#         wins outright on EVERY target (arm64 ~0.1x of the expression,
+#         x86-baseline comparable; the expression pays its 2n alloc +
+#         widen pass everywhere) — asserted at the shared 0.9 margin.
+#
+#         non-ASCII (the chunk loop): arm64 0.21-0.25 of the expression
+#         at 64 KiB / 1 MiB (the ~30 GB/s NEON scan); x86-64 SSE2-baseline
+#         (the CI runners) 2.2-2.5x SLOWER — the loop does not
+#         auto-vectorize there and the expression is memcpy-class C. The
+#         value on that target is the zero-allocation and the GIL release,
+#         not the wall win — asserted at a 4.0 cross-arch bound (no
+#         catastrophe; the win itself is recorded, per-lane, not
+#         asserted cross-arch).
+#
+#         12 MiB ASCII: the fast-path pin — ~0.4ms arm64, ~1.5-2.5ms
+#         x86-baseline, ceiling 4.0ms. The regression the ceiling is
+#         sized for is the loss of the fast path on the non-vectorizing
+#         target (the chunk loop measured ~10ms there, 10-25x the band)
+#         and any superlinear blowup anywhere.
+#
+#     The honest lane, recorded not asserted: a FRESH non-ASCII object's
+#     first call pays the UTF-8-cache materialization (the utf8 twin's
+#     cold class, GIL-held) before the scan — measured 376µs at 1 MiB
+#     against the expression's own cold 146µs. The utf-16 expression
+#     never materializes UTF-8 at all, so the cold first call is the one
+#     lane the expression wins; every call after it is the warm lanes
+#     above, and no call ever allocates the 2n bytes object.
+# ---------------------------------------------------------------------------
+
+_UTF16_CROSS_ARCH_MARGIN = 4.0
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes"),
+    [
+        ("ascii", 64 * 1024),
+        ("ascii", 1 * _MIB),
+        ("nonascii-cached", 64 * 1024),
+        ("nonascii-cached", 1 * _MIB),
+    ],
+    ids=["ascii-64KiB", "ascii-1MiB", "nonascii-cached-64KiB", "nonascii-cached-1MiB"],
+)
+def test_utf16_byte_len_beats_the_encode_expression_on_the_warm_lanes(
+    corpus_kind: str, size_bytes: int
+) -> None:
+    """The race, asserted per lane where it is honestly winnable: the
+    ASCII lanes win outright on EVERY target (the is_ascii fast path is
+    std-SIMD everywhere — 2*len after the scan, against the expression's
+    2n alloc + widen), so they keep the shared 0.9 margin; the non-ASCII
+    lanes run the chunk loop, which auto-vectorizes on NEON (measured
+    0.21-0.25 of the expression) but NOT on SSE2-baseline x86-64 (the CI
+    runners measured 2.2-2.5x slower there — the expression is
+    memcpy-class C), so the cross-arch assertion is the 4.0 no-catastrophe
+    bound with both lanes' numbers recorded in the module comment above.
+    The one lane the expression always wins — a FRESH non-ASCII object's
+    first call, where the borrow materializes the UTF-8 cache — is
+    measured and recorded in the cell below, never asserted."""
+    corpus = prose(size_bytes) if corpus_kind == "ascii" else decomposed(size_bytes)
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.utf16_byte_len, corpus, samples=samples)
+    enc_ms = _min_wall_ms(lambda s: len(s.encode("utf-16-le")), corpus, samples=samples)
+    margin = _MARGIN if corpus_kind == "ascii" else _UTF16_CROSS_ARCH_MARGIN
+    assert tors_ms < margin * enc_ms, (
+        f"utf16_byte_len {corpus_kind} {size_bytes // 1024}KiB: tors {tors_ms * 1000:.2f}µs vs "
+        f"encode {enc_ms * 1000:.2f}µs (ratio {tors_ms / enc_ms:.3f}): outside the "
+        f"{corpus_kind} lane's {margin}x cross-arch bound (the lane table in this "
+        "module's comment records both targets' measured numbers)"
+    )
+
+
+def test_utf16_byte_len_warm_ascii_calls_stay_in_the_fast_path_band_at_12mib() -> None:
+    """The fast-path pin (the utf8 twin's O(1) pin, translated to this
+    core's ASCII lane): at 12 MiB the warm ASCII call is the is_ascii
+    scan + a multiply — measured ~0.4ms on arm64, ~1.5-2.5ms on the
+    SSE2-baseline CI runners — under a 4.0ms cross-arch ceiling. The
+    regression the ceiling is sized for is the loss of the ASCII fast
+    path on the non-vectorizing target (the chunk loop measured ~10ms
+    there, 10-25x over) and any superlinear blowup anywhere; a
+    constant-factor scan change is bench-visible, not cell-caught, and
+    this cell does not pretend otherwise."""
+    corpus = prose(12 * _MIB)
+    tors_ms = _min_wall_ms(tors.utf16_byte_len, corpus, samples=_SAMPLES)
+    assert tors_ms < 4.0, (
+        f"utf16_byte_len ASCII 12MiB took {tors_ms * 1000:.0f}µs, outside the fast-path "
+        "band (measured ~0.4ms arm64 / ~1.5-2.5ms x86-baseline, ceiling 4.0ms); the "
+        "ASCII fast path was lost or the scan went superlinear "
+        "(the chunk loop measured ~10ms on the non-vectorizing target)"
+    )
+
+
+def test_utf16_byte_len_fresh_object_first_call_is_measured_not_asserted() -> None:
+    """The lane the expression wins, recorded (the decode_utf8/b64_decode/
+    utf8-twin precedent): a fresh non-ASCII object's first call pays the
+    borrow's UTF-8-cache materialization (GIL-held, the utf8 twin's cold
+    class, encode-utf-8-parity in cost) before the scan — and the utf-16
+    expression never materializes UTF-8 at all, so on a cold object the
+    expression is the cheaper call (measured 146µs against 376µs at
+    1 MiB on this box). The trade buys every subsequent call (the warm
+    lanes above, 4-5x) and the absence of a 2n bytes object per call;
+    the ASCII lane has no cold case at all (compact ASCII is its own
+    UTF-8)."""
+    size = 1 * _MIB
+    cold_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    cold_us = (
+        _min_wall_ms(
+            lambda _: len(next(cold_copies).encode("utf-16-le")),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    fresh_copies = iter([decomposed(size) for _ in range(_FAST_CELL_SAMPLES)])
+    first_us = (
+        _min_wall_ms(
+            lambda _: tors.utf16_byte_len(next(fresh_copies)),
+            "",
+            warmup=0,
+            samples=_FAST_CELL_SAMPLES,
+        )
+        * 1000
+    )
+    print(
+        f"utf16_byte_len non-ASCII 1MiB fresh-object: cold-encode {cold_us:.1f}µs "
+        f"first-call {first_us:.1f}µs (the borrow's materialization lane, no assert)"
     )
 
 
@@ -733,4 +1337,347 @@ def test_chunk_by_lines_absolute_band_holds() -> None:
         "(measured ~0.6ms at 12 MiB, ceiling 10ms; the pre-fast-path per-char "
         "spelling measured ~13.6ms and must fail this cell); the "
         "line scan regressed"
+    )
+
+
+# --- The random-generation family ---------------------------------------------
+#
+# Microsecond-scale cells: unlike the module's multi-ms corpora cells, the
+# generators are syscall-plus-sampling/formatting calls measured in single
+# digits to low thousands of microseconds, so the draws are min-of-25 (both
+# sides get plenty of windows to find an uncontended run) and the margins
+# are regression nets over measured floors, not close races. Measured on
+# the dev box (Apple Silicon, quiet, min-of-25 after warm-up), at the old
+# byte-ladder size points' output equivalents (the length-first refactor
+# moved hex/b64url onto the char-sampling engine, so the rungs are spelled
+# as the output lengths the old byte rungs produced):
+#
+#     output                 tors.random_hex  secrets.token_hex*  ratio
+#     32 chars (old 16B)     4.3us            1.2us              3.7x
+#     2048 chars (old 1KiB)  58.9us           4.1us             14.4x
+#     131072 ch. (old 64KiB) 4.1ms            268us             15.3x
+#
+#     output                 tors.random_b64url  secrets.token_urlsafe*  ratio
+#     22 chars (old 16B)     4.2us               1.2us                  3.3x
+#     1366 chars (old 1KiB)  44.0us              5.6us                  7.8x
+#     87382 ch. (old 64KiB)  2.7ms               339us                  8.1x
+#
+#     tors.uuid4 1.1us  uuid.uuid4 1.3us  0.85x (byte path, unchanged)
+#     tors.uuid7 0.9-1.0us  (no CI-safe comparator; absolute band below)
+#
+# *at the byte count whose encoding is that output length (token_hex(n)
+# emits 2n chars, token_urlsafe(n) emits ceil(4n/3)).
+#
+# The margin story, honestly rewritten for the length-first refactor: hex
+# and b64url moved from byte-fill+encode onto the ONE char-sampling engine
+# (random_string/b62's — uniform per character at any length, the
+# maintainer's "I want a base62 id X characters long" mental model), and
+# that engine draws one u64 (8 stream bytes) per character where
+# byte-fill+encode consumed 0.5-0.75 bytes per output character. The
+# measured consequence: hex/b64url walls are b62-identical (hex(2048)
+# 58.9us vs b62(2048) 57.5us; hex(131072) 4.1ms vs b62(131072) 4.05ms),
+# ~3.5x the stdlib at real token sizes (4.3us vs 1.2us for a 32-char key:
+# both sides one syscall from the floor) and ~8-15x at bulk sizes. tors no
+# longer wins these races and the cells do not pretend otherwise: hex and
+# b64url take the b62 cells' shape — absolute ceilings over measured
+# floors, the stdlib number printed for context — because the positioned
+# regression is a lost block buffer (a per-char syscall spelling costs
+# ~1.2us/char: ~38us at 32 chars, ~2.5ms at 2048, ~157ms at 131072 —
+# every rung past its ceiling by 1.5x-5x). The value proposition measured
+# elsewhere is unchanged: the GIL release (tests/test_gil_release.py) and
+# the seeded determinism (tests/test_random.py). uuid4/uuid7 are the byte
+# path, untouched by the refactor, and uuid4 keeps its race cell (it won
+# before and still does: 1.1us vs 1.3us).
+
+
+def _min_wall_us_fn(op: Callable[[], object], samples: int = 25, warmup: int = 3) -> float:
+    """Min-of-``samples`` wall in MICROSECONDS for a no-argument call: the
+    random family's calls take no corpus argument (they generate their own
+    output), so this is the family's local spelling of the module's
+    ``_min_wall_ms`` shape (the ``test_grounded_performance.py``
+    microsecond-cell precedent). 25 samples: a microsecond-scale sample is
+    one scheduler hit away from its worst run, so both sides of a race need
+    many more draws than the millisecond cells' 3-7 to find their floor."""
+    for _ in range(warmup):
+        op()
+    best = float("inf")
+    for _ in range(samples):
+        started = time.monotonic()
+        op()
+        best = min(best, time.monotonic() - started)
+    return best * 1e6
+
+
+@pytest.mark.parametrize(
+    ("length", "ceiling_us"),
+    [(32, 25.0), (2048, 500.0), (131_072, 30_000.0)],
+    ids=["32-char", "2KiB-char", "128KiB-char"],
+)
+def test_random_hex_absolute_band(length: int, ceiling_us: float) -> None:
+    """``random_hex`` is the char-sampling engine now (one engine with
+    ``random_string``/``random_b62``, uniform per character at any length):
+    measured 4.3us at 32 chars, 58.9us at 2048, 4.1ms at 131072 —
+    b62-identical walls, the honest price of the length-first uniform
+    contract. The ceiling is the class-regression net over those floors
+    (~6-8x): a lost block buffer (a per-char syscall spelling, ~1.2us/char)
+    measures ~38us / ~2.5ms / ~157ms at these rungs and fails every one.
+    The stdlib ratio printed below is context, not an assertion:
+    byte-fill+encode (``secrets.token_hex``) is a different engine class
+    that legitimately wins the bulk race."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_hex(length))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_hex(length // 2))
+    print(
+        f"random_hex({length}): tors {tors_us:.1f}us vs secrets.token_hex "
+        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x) [context: the engine-class "
+        "delta, not asserted]"
+    )
+    assert tors_us < ceiling_us, (
+        f"random_hex({length}): {tors_us:.1f}us, outside the absolute band "
+        f"(ceiling {ceiling_us:.0f}us; a per-char-syscall spelling measures "
+        "~1.2us/char and must fail this cell); the block-buffered sampler regressed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("length", "ceiling_us"),
+    [(22, 25.0), (1366, 400.0), (87_382, 25_000.0)],
+    ids=["22-char", "1366-char", "87382-char"],
+)
+def test_random_b64url_absolute_band(length: int, ceiling_us: float) -> None:
+    """``random_b64url`` is the same char-sampling engine over the 64-char
+    urlsafe alphabet (the opaque-token contract: every position
+    unconstrained, no padding concept): measured 4.2us at 22 chars,
+    44.0us at 1366, 2.7ms at 87382 — b62-identical walls, the honest
+    price of uniform output. Same ceiling rationale as the hex cell: the
+    positioned regression is a lost block buffer (~1.2us/char: ~26us /
+    ~1.6ms / ~105ms at these rungs, every one past its ceiling). The
+    stdlib ratio is context (``secrets.token_urlsafe`` byte-fills and
+    encodes, a different — and at bulk sizes, faster — engine class whose
+    final character is constrained)."""
+    tors_us = _min_wall_us_fn(lambda: tors.random_b64url(length))
+    stdlib_us = _min_wall_us_fn(lambda: secrets.token_urlsafe((3 * length) // 4))
+    print(
+        f"random_b64url({length}): tors {tors_us:.1f}us vs secrets.token_urlsafe "
+        f"{stdlib_us:.1f}us ({tors_us / stdlib_us:.2f}x) [context: the engine-class "
+        "delta, not asserted]"
+    )
+    assert tors_us < ceiling_us, (
+        f"random_b64url({length}): {tors_us:.1f}us, outside the absolute band "
+        f"(ceiling {ceiling_us:.0f}us; a per-char-syscall spelling measures "
+        "~1.2us/char and must fail this cell); the block-buffered sampler regressed"
+    )
+
+
+def test_uuid4_keeps_parity_or_better_with_the_stdlib_constructor() -> None:
+    """``uuid.uuid4()`` is the spelling ``tors.uuid4()`` replaces; measured
+    1.1us vs 1.3us (the stdlib builds a Python object and formats it through
+    the uuid module's own machinery). The byte path this call runs is
+    untouched by the length-first refactor (16-byte fill + uuid-crate
+    builder), so the pre-refactor race cell stands unchanged. 2.0x margin:
+    the stdlib floor wobbles more than the byte codecs' (object
+    construction), and the cell's teeth are class regressions (a per-call
+    engine rebuild, an extra syscall)."""
+    tors_us = _min_wall_us_fn(tors.uuid4)
+    stdlib_us = _min_wall_us_fn(stdlib_uuid.uuid4)
+    assert tors_us < 2.0 * stdlib_us, (
+        f"tors.uuid4: {tors_us:.1f}us vs uuid.uuid4 {stdlib_us:.1f}us "
+        f"({tors_us / stdlib_us:.2f}x): the native pass lost more than the "
+        "regression margin to the stdlib constructor"
+    )
+
+
+def test_the_no_stdlib_comparator_generators_absolute_bands_hold() -> None:
+    """``random_b62``/``random_string`` (no stdlib spelling exists for
+    base62/alphabetic sampling) and ``uuid7`` (no CI-safe comparator: the
+    stdlib has no v7, and uuid_utils is not a dependency this suite may
+    assume) take absolute ceilings over measured floors, the
+    ``chunk_by_paragraphs`` no-comparator shape at microsecond scale.
+
+    The 22-char rungs' derivation, honest numbers on both instruments
+    (the red-team cell-teeth finding closed here): the floors are ~4.2us
+    (b62) / ~4.1us (string) — one 1024-byte block fill for the whole id,
+    22 Lemire draws — and the positioned regression (a lost block buffer,
+    one syscall per draw) costs 0.83us per syscall as measured on this
+    box (``os.urandom(8)``, min-of-200), so 22 draws are ~19-20us of
+    syscalls locally, ~22 x 1.2us = ~26us on the lane's per-char number.
+    The old ceilings had no teeth against that: 30us sat ABOVE both
+    projections (the regression passed the string rung outright), and
+    25us tripped the lane number by ~6% and the local projection not at
+    all (19 < 25). 15us trips the regression on BOTH instruments by ~25%
+    (local) / ~75% (lane) while keeping ~3.6x headroom over the floor for
+    load — the min-of-25 sampler's protection.
+
+    - ``random_b62(22)`` and ``random_string(22, "ab")``: same engine,
+      same 15us ceiling (the multibyte-capable push path measures the
+      same floor at this size).
+    - ``uuid7()`` measured ~0.9us. Ceiling 25us (~28x): catches a per-call
+      engine-class regression (a rebuilt ChaCha, a second syscall), not
+      tunings."""
+    b62_us = _min_wall_us_fn(lambda: tors.random_b62(22))
+    assert b62_us < 15.0, (
+        f"random_b62(22) took {b62_us:.1f}us, outside the absolute band "
+        "(floor ~4.2us, ceiling 15us; a lost block buffer — one syscall "
+        "per draw — measures ~19-20us locally / ~26us on the lane's "
+        "per-char number and must fail this cell); the block-buffered "
+        "sampler regressed"
+    )
+    string_us = _min_wall_us_fn(lambda: tors.random_string(22, "ab"))
+    assert string_us < 15.0, (
+        f"random_string(22, 'ab') took {string_us:.1f}us, outside the "
+        "absolute band (floor ~4.1us, ceiling 15us; a lost block buffer "
+        "measures ~19-26us and must fail this cell); the block-buffered "
+        "sampler regressed"
+    )
+    uuid7_us = _min_wall_us_fn(tors.uuid7)
+    assert uuid7_us < 25.0, (
+        f"uuid7() took {uuid7_us:.1f}us, outside the absolute band (measured "
+        "~0.9us, ceiling 25us); the one-syscall-plus-format pass regressed"
+    )
+
+
+# The minhash race's tolerance margin: measured tors/oracle ratios
+# 0.005-0.007 across the ladder (the module docstring's table), so 0.5
+# leaves ~80x headroom while still failing a lost-native-advantage
+# regression (the native pass within 2x of the pure-Python bigint loop).
+# The _GCM_WALL_MARGIN precedent: the assertion pins the relationship,
+# not a close race.
+_MINHASH_WALL_MARGIN = 0.5
+
+
+@pytest.mark.parametrize(
+    "size_bytes", [1 * 1024, 100 * 1024, 1 * _MIB], ids=["1KiB", "100KiB", "1MiB"]
+)
+def test_minhash_signature_beats_the_pure_python_oracle_on_the_doc_ladder(
+    size_bytes: int,
+) -> None:
+    """``minhash_signature`` vs its transcribed pure-Python oracle over a
+    document-size ladder at the default ``num_perm=128`` (prose corpus).
+    The oracle is slow by construction -- one Python-level bigint affine
+    per (shingle, permutation) pair, O(shingles x 128) interpreted
+    iterations -- which is the point: it is the expression a caller
+    without tors would run, and the measured ~160-175x gap is the native
+    pass's wall-time case. The oracle draws a single sample (its wall is
+    deterministic work at 3ms-2.8s across the ladder, and noise only
+    ever adds time, making the single sample conservative for the
+    denominator); tors draws the size-appropriate min-of-N (7 under
+    4 MiB). The 0.5 margin is the criterion, not a calibration: it fails
+    a regression that brings the native pass within 2x of pure Python
+    while no realistic load asymmetry can flake it at ~37x headroom."""
+    corpus = prose(size_bytes)
+    tors_ms = _min_wall_ms(tors.minhash_signature, corpus, samples=_samples_for(size_bytes))
+    started = time.perf_counter()
+    reference_minhash_signature(corpus)
+    oracle_ms = (time.perf_counter() - started) * 1000.0
+    assert tors_ms < _MINHASH_WALL_MARGIN * oracle_ms, (
+        f"prose {size_bytes // 1024}KiB: tors {tors_ms:.2f}ms vs oracle "
+        f"{oracle_ms:.1f}ms (ratio {tors_ms / oracle_ms:.4f}): the native "
+        "tokenize+shingle+hash+sweep pass lost more than the margin to the "
+        "pure-Python MinHash loop"
+    )
+
+
+def _stdlib_content_hash(obj: object) -> str:
+    """The stdlib expression ``tors.content_hash`` replaces: the exact
+    canonical-form spelling the contract defines, hashed with hashlib."""
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "size_bytes", [64 * 1024, 1 * _MIB, 12 * _MIB], ids=["64KiB", "1MiB", "12MiB"]
+)
+def test_content_hash_wall_time_vs_the_stdlib_is_measured_not_asserted(
+    size_bytes: int,
+) -> None:
+    """``tors.content_hash`` vs the full stdlib spelling over the records
+    corpus (``reference.content_object``), measured and deliberately not
+    asserted: a structural dead heat, because the two sides do equivalent
+    work. CPython's C encoder builds the whole canonical string in one
+    GIL-held pass (fast: no Python-level per-value calls for str/int, the
+    same storage reads tors's walk makes), then pays ``str.encode`` (a
+    second full-size GIL-held copy) and a released-GIL ``sha256``; tors
+    pays the GIL-held walk (borrow+copy per str into the owned tree, i64
+    reads, one ``repr`` call per float) and a detached emit+hash. Measured
+    on the dev box (min-of-7 below 4 MiB, min-of-3 above, after warmup):
+
+        size     tors        stdlib     tors/stdlib
+        64 KiB   0.20ms      0.21ms     0.97
+        1 MiB    3.38ms      3.37ms     1.00
+        12 MiB   41.87ms     41.79ms    1.00
+
+    Every cell a dead heat (0.97-1.00): no wall win to assert, and none
+    pretended at -- the value is the GIL release (the stdlib holds the
+    loop for ``json.dumps`` + ``str.encode``, ~the whole wall, inline
+    ratio 1.00-1.02 vs tors's 0.45-0.60, pinned in tests/test_gil_release.
+    py), the byte-exact parity contract (tests/test_content_hash.py, whose
+    differential this cell re-asserts at each measured size), and the
+    detached half of the call. The same dead-heat precedent as
+    ``decode_utf8`` and ``b64_decode``: recorded, not thresholded away.
+    """
+    obj = content_object(size_bytes)
+    assert tors.content_hash(obj) == _stdlib_content_hash(obj)  # parity at the measured size
+    samples = _samples_for(size_bytes)
+    tors_ms = _min_wall_ms(tors.content_hash, obj, samples=samples)
+    std_ms = _min_wall_ms(_stdlib_content_hash, obj, samples=samples)
+    print(
+        f"content_hash {size_bytes // 1024}KiB: tors {tors_ms:.2f}ms "
+        f"stdlib {std_ms:.2f}ms ratio {tors_ms / std_ms:.2f}"
+    )
+
+
+# --- The batch-charset validator wall race ---------------------------------------
+#
+# The batch-only design's premise, raced against the expression it replaces:
+# the per-item anchored-regex loop an enqueue path spells around identifier
+# validators (TaskQ's _IDENT_RE shape).
+
+# The identifier rule's two halves (letters and underscore at position 0,
+# digits joining after) and the equivalent anchored regex, rebuilt from the
+# same halves.
+_IDENT_FIRST = string.ascii_letters + "_"
+_IDENT_REST = string.ascii_letters + string.digits + "_"
+_IDENT_RE = re.compile(rf"\A[{_IDENT_FIRST}][{_IDENT_REST}]*\Z")
+
+
+def _ident_items(count: int) -> list[str]:
+    """``count`` deterministic identifier-shaped items (the job/queue/worker/
+    tag spellings an enqueue path validates): the all-valid batch, the shape
+    where both sides of the race do full work with no short-circuit."""
+    shapes = ("job_{n}", "queue_eu_{n}", "worker_{n}", "tag_{n}")
+    return [shapes[n % 4].format(n=n) for n in range(count)]
+
+
+@pytest.mark.parametrize("count", [100, 1000], ids=["100-items", "1000-items"])
+def test_first_invalid_charset_beats_the_per_item_regex_loop_on_the_same_batch(
+    count: int,
+) -> None:
+    """The whole-batch tors call vs ``all(_IDENT_RE.match(i) for i in
+    items)`` over the same all-valid identifier batch, min-of-7 per side
+    after warmup (the fast-cell discipline: the native samples are
+    µs-scale) with the suite's 0.9 margin.
+
+    Measured on the dev box (ambient load 5.5, min-of-7): 100 items tors
+    2.0 µs vs the regex loop's 9.7 µs (ratio 0.20); 1000 items 14.0 µs
+    vs 96.7 µs (0.14) — ~5-7x inside the margin. The honest other half,
+    recorded in docs/api.md's section and deliberately not asserted here
+    because it is a LOSS: a per-item tors call (one item per call)
+    measures ~0.25 µs against ~0.08 µs for one regex match — the detach
+    round trip paid per call — which is exactly why the API is
+    batch-only: the win exists only when one call covers the batch, and
+    the crossover is already at single-digit item counts (measured ~0.5
+    at a 10-item batch)."""
+    items = _ident_items(count)
+    tors_ms = _min_wall_ms(
+        lambda its: tors.first_invalid_charset(its, first=_IDENT_FIRST, rest=_IDENT_REST),
+        items,
+        samples=_FAST_CELL_SAMPLES,
+    )
+    re_ms = _min_wall_ms(
+        lambda its: all(_IDENT_RE.match(item) for item in its), items, samples=_FAST_CELL_SAMPLES
+    )
+    assert tors_ms < _MARGIN * re_ms, (
+        f"{count}-item identifier batch: tors {tors_ms * 1000:.1f}µs vs the "
+        f"per-item regex loop {re_ms * 1000:.1f}µs (ratio {tors_ms / re_ms:.2f}): the "
+        "batch call lost more than the tolerance margin to the regex loop it replaces"
     )

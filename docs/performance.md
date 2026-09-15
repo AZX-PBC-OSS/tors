@@ -12,6 +12,18 @@ event loop's worst heartbeat gap to 10-14 ms; the pure-Python pipeline
 it for 92-108 ms, ~6-12x worse. At 32 MiB: 16-21 ms vs 250-272 ms. Every
 function holds the same discipline: one `py.detach` around the whole native
 pass, only the argument borrow and the return marshalling under the GIL.
+`minhash_signature`'s marshalling is bounded by contract (`num_perm` ints,
+≤ 1024): 11 ms worst gaps over ~460 ms walls at 12 MiB, the ping floor plus
+that bounded list, with no streaming twin warranted.
+
+One measured nuance: when the native pass is very fast, the O(output)
+return-marshalling residue is a structurally larger fraction of the wall, and
+those cells carry bespoke ratio budgets derived from their bands —
+`b64_encode_bytes` (output 4/3x input, budget 0.80), the quick-check-skipped
+`finalize` cells (wall shrank ~3x, budget 0.60), and `scrub_pii` (the double
+scan completes 12 MiB of contact-dense text in ~36-40 ms while marshalling
+its ~11.8 MiB result costs ~12 ms: worst gaps ~12 ms, ratio ~0.33, budget
+0.60). A detach regression still fails every one of these at ratio ~1.0.
 
 ## Fast paths
 
@@ -34,10 +46,148 @@ otherwise use:
   the stdlib's only spelling is decode-and-catch.
 - `find_patterns`: `pyahocorasick` holds the GIL for its entire scan (no
   `ALLOW_THREADS` anywhere in its scan iterator); `tors` releases it.
+- `scrub_pii`, contact-dense prose (~119k matches at 12 MiB): ~5.5x faster
+  than the quoted chain it ports (two `re.sub` passes, one Python callback
+  per match — 0.003 ms vs 0.019 ms at 1 KiB, 0.386 ms vs 2.140 ms at
+  100 KiB; the callback count dominates, so the ratio is load-stable), and
+  contact-free text costs two memchr probes and the identity return
+  (~0.088 ms at 100 KiB).
+- `minhash_signature`, `num_perm=128`, vs the pure-Python MinHash loop it
+  replaces (the same tokens, shingles, XXH64, and permutation arithmetic
+  in Python): 0.02 ms vs 3.4 ms at 1 KiB (~170x), 1.6 ms vs 281 ms at
+  100 KiB (~175x), 17.7 ms vs 2.89 s at 1 MiB (~163x). The sweep is
+  O(distinct shingles × num_perm) after the dedup-first pass: the prose
+  corpus rides a handful of distinct shingles, so 1 MiB costs ~17 ms at
+  `num_perm=512` exactly as at the default, and 1 KiB costs ~0.04 ms even
+  at 512 (pre-dedup this row read 0.03/3.6/38.2 ms with ~100 ms at 1 MiB
+  under 512: the sweep, not the tokenize, dominated there). The hashing
+  pass itself is O(tokens × shingle_size) — every step re-hashes the
+  whole live window — so wide windows scale with the width: 100 KiB at
+  shingle 3/64/256 costs ~2/~9/~32 ms (dev box, macOS/arm64, release,
+  min-of-2). The worst case the caller-size bound is calibrated on is
+  the distinct-rich corpus (every token unique: the
+  `minhash_signature_distinct` bench row, k=128/1024, and the Python
+  worst-case cell): 1 MiB costs ~104 ms at k=128 and ~226 ms at k=1024
+  (criterion medians, 10 samples, same dev box) — ~100M affine ops with
+  no `deadline_ms` on the call, hence the bound-the-input-first lever
+  api.md documents. Resident window memory is O(min(tokens,
+  shingle_size)), and widths past 1024 tokens over a short stream never
+  materialize at all (retention-free count first: ~13.5 MB at width 10⁹
+  peaks ~30 MB, not the ~145 MB the retaining shape held).
+- `first_invalid_charset`: a 1000-item identifier batch validates in ~14 µs
+  against ~97 µs for the per-item anchored-regex loop (~7x), and the
+  batch-only shape is the point — a per-item tors call (~0.25 µs) loses to
+  one compiled regex match (~0.08 µs), so only the one-detach batch wins.
+- `find_unescaped`/`contains_unescaped`: the escape-parity scan answers "is
+  this `\u0000` a real NUL or the literal text?" straight from raw serialized
+  JSON in one detached pass — ≈0.26 ms at 12 MiB with no occurrence
+  and ≈0.70 ms over a 72,520-rejected-hit false-positive corpus (box- and
+  load-dependent; the wall cells in tests/test_unescaped_scan.py, same
+  order as the inline band in tests/test_gil_release.py), where the
+  hand-rolled find-and-count-backslashes loop it replaces takes 13 ms (and
+  the confirm-by-re-parse guard the algorithm was lifted from pays a full
+  parse plus a recursive walk per prefilter hit).
+- `utf8_byte_len`: `len(s.encode("utf-8"))` allocates the full `bytes`
+  object just to count it; `tors` reads the count off the borrowed UTF-8
+  view — flat ~0.1 µs from 1 KiB to 12 MiB on ASCII (compact ASCII is its
+  own UTF-8, a zero-copy alias; the expression pays ~0.9 µs at 64 KiB, the
+  TaskQ result-cap size, and ~180 µs at 12 MiB) and ~0.1 µs on repeat calls
+  over a cached non-ASCII object, where even the warm expression pays a full
+  copy out of the same cache (~196 µs at 12 MiB). The honest lanes,
+  recorded: a fresh non-ASCII object's first call — the cold-cache case — is
+  encode-parity (the cache materialization IS an encode — the encoder pass
+  plus a malloc plus a second memcpy, ~4.7 ms at 12 MiB against a cold
+  encode's ~4.9 ms), 1 KiB is a dead heat (pure call overhead on both
+  sides), and the cache sharing with `encode` is one-directional: the
+  str-in borrow fills the cache — `encode` then reads it, a ~184 µs copy at
+  12 MiB instead of ~4.9 ms — but a prior `encode` fills nothing, so the
+  first `utf8_byte_len` after an encode still pays the full materialization
+  (measured ~3.8-4.8 ms at 12 MiB; observed on CPython 3.12 here, expected
+  from the sources on 3.10–3.14 — see `docs/cache-proof.md` for the
+  per-version `Objects/unicodeobject.c` links. Semantic pins are the
+  contract; timing is not). That first-call
+  materialization is the function's one GIL-held O(n) pass (~5 ms at
+  12 MiB, under the heartbeat interval); the full lane table is in
+  `tests/test_performance.py` (both sharing directions re-measured
+  in-process), the criterion core-vs-copy group in
+  `benches/search.rs` (`core` ~0.5 ns flat against the `memcpy_floor`'s
+  ~65 GiB/s bench artifact on the calibration box).
+- `utf16_byte_len`: the interop twin — `len(s.encode("utf-16-le"))`
+  allocates and encodes the full 2n `bytes` object just to count it;
+  `tors` derives the count from the borrowed UTF-8 view (2 bytes per
+  codepoint plus 2 more per astral codepoint, both counts byte classes)
+  with no allocation. CROSS-ARCH, stated: pure-ASCII text takes a
+  portably-SIMD `is_ascii` fast path (`2 * len`) that wins outright on
+  every target; non-ASCII text runs the chunked counting loop, a bench
+  artifact that auto-vectorizes on arm64 NEON (~30 GB/s there:
+  ~2.2 µs at 64 KiB against the expression's ~9-10 µs, ~34 µs at 1 MiB
+  against ~145 µs) but NOT on SSE2-baseline x86-64 (the CI runners
+  measured it 2.2-2.5x SLOWER than the expression there — the value on
+  that target is the zero-allocation and the GIL release, not the wall
+  win; the wall cells assert the cross-arch no-catastrophe bound).
+  The one lane the expression wins, recorded: a fresh non-ASCII
+  object's first call pays the borrow's UTF-8-cache materialization
+  (the utf8 twin's cold class) before the scan, while the utf-16
+  expression never touches UTF-8 — 376 µs against 146 µs at 1 MiB, the
+  trade buying every later call at 4-5x and no 2n allocation per call;
+  one-shot counts of fresh non-ASCII strings are not the recommended
+  lane. The lane table is in `tests/test_performance.py` (including the
+  fresh-object end-to-end bench), the criterion group in
+  `benches/search.rs` (the chunked scan against the `rust_utf16_shape`
+  baseline; the utf8 group races `core` against the `memcpy_floor`).
 - The diffing and fuzzy functions bound their superlinear worst cases with
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a
   `TimeoutError`.
+
+## One-shot hashing vs hashlib, honestly measured
+
+The hashing surface (`md5_hex`/`sha1_hex`/`sha256_hex`/`sha512_hex`/
+`hmac_sha256_hex`, each with a raw-digest `_digest` twin) is the one tors
+family where the stdlib alternative is
+C-native and fast, so the honest tables, measured (Apple Silicon, ambient
+load ~8-10, min-of-3 after warmup, prose corpus bytes; the ledger cells are
+`tests/test_performance.py`'s). `md5_hex` and `sha1_hex` are
+checksum/legacy-interop primitives only, never security: both are broken
+for security since the 2000s (practical md5 collisions date to 2004,
+sha1's first public collision to 2017) — their cells below are the
+Content-MD5/ETag/quick-compare jobs, never signatures, certificates, or
+passwords. The `_digest` spellings are each `_hex` twin's computation
+minus the hex tail (same digest, the O(digest-size) hex formatting and
+its marshalling dropped for one fixed-size bytes return), so the tables
+below cover them unchanged — no separate cells.
+
+- Raw digest throughput, tors vs `hashlib` (OpenSSL, hardware SHA
+  extensions): **hashlib wins or ties every engine-dominated cell** —
+  sha256 12 MiB ~4-5 ms vs ~4 ms (ratio ~1.1-1.2x), sha1 4.2-4.4 vs
+  3.7-4.2 (~1.06-1.11), md5 ~15.0 vs ~14.5 (~1.03), sha512 ~7.2 vs ~7.4
+  (~0.98). Absolute figures move run to run (box, ambient load ~8-10,
+  min-of-3 after warmup); the load-stable statement is the band, not
+  any single pair. Recorded, asserted
+  nowhere: at these sizes the surface's value is the parity digest, the
+  str convenience, and the GIL uniformity, not throughput.
+- Short-str hashing (the cache-key/ETag/request-ID spelling, where
+  `hashlib` makes you encode first): **tors wins ~2x on ASCII str** —
+  `sha256_hex(s)` at 0.40-0.54 of `hashlib.sha256(s.encode("utf-8"))
+  .hexdigest()` (0.17 µs vs 0.33 µs at 128 B; 0.28 vs 0.52 at 512 B),
+  asserted in the wall cells. ASCII is the zero-copy lane (pyo3's
+  `to_str` borrow); non-ASCII str pays the one-time O(input) UTF-8
+  materialization on the first call, so the win narrows there — the
+  wall cells pin the ASCII band and record a non-ASCII micro-cell
+  alongside it.
+- HMAC at request-signature sizes: **tors wins ~3x against even the
+  stdlib's fastest spelling** — 0.29 µs vs `hmac.digest(key, data,
+  "sha256").hex()`'s 0.92 µs (ratio ~0.31; the idiomatic `hmac.new(...)
+  .hexdigest()` costs 1.12 µs), asserted.
+- GIL: tors releases the GIL for the whole digest (hex formatting
+  included) at every size; `hashlib` releases it for updates of 2048+
+  bytes (the `_hashopenssl` threshold), so at multi-MiB sizes the stdlib
+  is loop-friendly too — worst heartbeat gaps at the ~10 ms ping floor
+  for both at 12 MiB and 96 MiB (measured in `tests/test_gil_release.py`,
+  recorded, not asserted as a stdlib failure). The tors difference is
+  uniformity (no 2048-byte threshold, no held hex tail) plus the
+  µs-scale short-call wins above; a 12 MiB digest walls at 4-8 ms on the
+  calibration hardware, under the ping floor itself.
 
 ## Chunking
 
@@ -92,6 +242,84 @@ document to the per-codepoint decoder):
 
 Outputs are differential-pinned identical across every one of these shapes;
 the wall contracts gate in `tests/test_performance.py`.
+
+## Random generation
+
+Measured on the dev box (Apple Silicon, quiet; min-of-25 after warm-up,
+`tests/test_performance.py`'s microsecond cells; criterion's
+`benches/random.rs` for the bench-side rows):
+
+- The length-first refactor moved `random_hex`/`random_b64url` onto the
+  char-sampling engine (`random_string`/`random_b62`'s own), and the
+  honest consequence is a measured engine-class change, not a tuning: the
+  engine draws one u64 (8 stream bytes) per output character where the
+  old byte-fill+encode spellings consumed 0.5–0.75 bytes per character.
+  The new spellings' walls are b62-identical (criterion: hex 4.2µs for a
+  32-char key where b62 takes 4.4µs for a 22-char id; 4.25ms vs 2.13ms at
+  the 64 KiB-class rungs) and sit ~3.5x over the stdlib byte-fill+encode
+  expressions at real token sizes (4.3µs vs 1.2µs for a 32-char hex key —
+  both sides one syscall from the floor) and ~8–15x at bulk sizes
+  (131072-char hex 4.1ms vs `secrets.token_hex(65536)` 268µs; 87382-char
+  b64url 2.7ms vs `secrets.token_urlsafe(65536)` 339µs). tors no longer
+  wins these wall races and the ledger says so instead of thresholding
+  around it: the measured value of the tors spelling is the GIL release
+  (the generation cell in `tests/test_gil_release.py`: a 2 MiB hex draw
+  holds the loop's worst heartbeat gap to ~11ms, the ping floor), the
+  seeded determinism, and the uniform-per-character contract itself —
+  every position unconstrained at any length, which the byte-fill
+  spellings could not offer (odd hex lengths, non-multiple-of-4 b64url
+  lengths, unconstrained final characters). At token sizes the call is
+  still microseconds; at bulk encodable-material sizes, the stdlib
+  byte-fill expressions are the faster tool and nothing here pretends
+  otherwise.
+- The size ladder (criterion, characters emitted): `random_hex` ~4.2µs at
+  32–128 chars (the syscall floor), 16.8µs at 512, 66.6µs at 2048, 4.25ms
+  at 131072; `random_b64url` 4.6µs at 22, 14.8µs at 342, 46.1µs at 1366,
+  2.96ms at 87382; `random_b62` (the same engine, length-first all along)
+  4.4µs for a 22-char id, 33.8µs at 1 KiB, 2.13ms at 64 KiB chars —
+  reconfirmed unchanged by the refactor.
+- `uuid4` full path (fresh `OsRng` fill + builder + format) vs the uuid
+  crate's own `Uuid::new_v4()`: ~parity, 1.03µs vs 1.01µs — the byte path
+  the refactor did not touch — and that comparator is itself
+  getrandom-per-call in uuid 1.26 (verified in its source; the
+  thread-cached engine is the separate opt-in `fast-rng` feature), so the
+  pair measures tors's wrapper tax over the crate's equivalent: zero.
+- `uuid7`: 0.89µs (re-confirmed 0.9–1.0µs by the wall cells; the recorded
+  band is 0.79–0.9µs). Against `uuid_utils` (the Rust-extension
+  incumbent, measured in a throwaway venv on the same box and interpreter,
+  3.14.7): `uuid_utils.uuid7` (native object return, process-local
+  counter engine) 0.04µs and `uuid_utils.compat.uuid7` (str return) 0.21µs
+  — 4-20x faster than tors, bought with exactly the statefulness tors
+  declines: a process-local monotonic counter (no syscall per call) where
+  tors draws fresh OS entropy per call for the family's fork-safety
+  contract. A strictly-monotonic counter is also a different uniqueness
+  promise (see docs/api.md's uuid7 boundary note); pick the product
+  promise, not just the number.
+
+## Object content hashing
+
+`content_hash` vs the full stdlib spelling
+(`sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()`)
+is a measured dead heat at every scale over the records corpus
+(`tests/test_performance.py`, min-of-N):
+
+| size | tors | stdlib | ratio |
+|---|---|---|---|
+| 64 KiB | 0.20ms | 0.21ms | 0.97 |
+| 1 MiB | 3.38ms | 3.37ms | 1.00 |
+| 12 MiB | 41.87ms | 41.79ms | 1.00 |
+
+Both sides do equivalent work (CPython's C encoder builds the canonical
+string in one GIL-held pass, then pays `str.encode` and a released-GIL
+`sha256`; tors pays a GIL-held walk into an owned tree plus a detached
+emit-and-hash), so no wall win is asserted anywhere on this surface. The
+value is the GIL release — the stdlib holds the loop for `json.dumps` +
+`str.encode`, inline ratio 1.00-1.02 in every sample against tors's
+0.45-0.60 at 12 MiB (`tests/test_gil_release.py`) — and the byte-exact
+parity contract. The detached half (emission + SHA-256) benches at
+~870 MiB/s on the records corpus and ~786 MiB/s on an escape-heavy
+every-codepoint corpus (`benches/canon.rs`): the full `ensure_ascii`
+escape table costs ~10% over raw-run copying.
 
 ## List returns have a cost at scale
 

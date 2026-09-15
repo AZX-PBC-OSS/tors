@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from hypothesis import strategies as st
 
@@ -134,6 +135,18 @@ _ENTITY_SENTENCE = (
     "&#233; the bushing &copy; changed &nbsp; for torque &there4; specs. "
 )
 
+# Contact-bearing prose for tors.scrub_pii's cells: the error-excerpt shape the
+# function exists for (an upstream rejection echoing a candidate's address and
+# number), one email plus one human-spelled E.164 number per sentence, with a
+# bare digit run ("ticket 4096") riding along as the deliberate non-match the
+# phone rule's `+` anchoring must leave alone. ``benches/common/mod.rs`` builds
+# the same bytes (the CONTACTS_SENTENCE pin in tests/test_bench_corpus_parity.py),
+# so the bench numbers and the Python-side wall/GIL cells cross-reference.
+_CONTACTS_SENTENCE = (
+    "The intake desk rang fungai.chetima@example.com at +1 (415) 555-2671 "
+    "twice about ticket 4096, no answer. "
+)
+
 
 def _repeat_to(target_bytes: int, unit: str) -> str:
     return unit * max(1, target_bytes // len(unit.encode("utf-8")))
@@ -168,6 +181,45 @@ def entities(target_bytes: int) -> str:
     return _repeat_to(target_bytes, _ENTITY_SENTENCE * 4 + "\n\n")
 
 
+def contacts(target_bytes: int) -> str:
+    """Prose with one email and one human-spelled E.164 number per sentence
+    (plus a bare digit run per sentence the phone rule must leave alone):
+    the scrub_pii corpus, the contact-dense error-excerpt shape."""
+    return _repeat_to(target_bytes, _CONTACTS_SENTENCE * 4 + "\n\n")
+
+
+# Exception-shaped text for tors.scrub_log_text's cells: a rendered asyncpg-style
+# failure whose DETAIL line quotes a caller-supplied key value (the row-value
+# leak the pg_detail_lines rule exists for; HINT kept — it is structural), a DSN
+# carrying both a userinfo password and a password-family query parameter (both
+# mask rules fire on it), and a repr()-flattened twin whose DETAIL run rides
+# literal \n separators (the escaped segmenter's shape). Every rule fires once
+# per unit, so a scrub cell over this corpus measures the scan+splice, never the
+# identity fast path. Pure ASCII: the GIL cell's argument borrow is then the
+# zero-copy class (the replace_many dense cell's shape); non-ASCII scrub shapes
+# are the differential battery's job (tests/test_scrub_log_text_parity.py), not
+# a corpus concern. benches/text.rs mirrors this constant (SCRUB_SENTENCE) and
+# tests/test_bench_corpus_parity.py pins the two byte-identical, so the bench
+# numbers and the Python-side cell numbers cross-reference on the same bytes.
+_SCRUB_SENTENCE = (
+    "Traceback (most recent call last):\n"
+    "  File 'worker/run.py', line 88, in run\n"
+    "JobError: duplicate key value violates unique constraint 'jobs_idempotency_key'\n"
+    "DETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\n"
+    "HINT: The SQL statement is unchanged.\n"
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback\n"
+    "JobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417-a3f2) "
+    "already exists.')\n"
+)
+
+
+def scrub_corpus(target_bytes: int) -> str:
+    """Rendered-exception text (real-newline DETAIL line, DSN with both
+    credential shapes, repr()-flattened DETAIL run): the scrub_log_text
+    corpus, every rule firing once per unit."""
+    return _repeat_to(target_bytes, _SCRUB_SENTENCE * 4 + "\n")
+
+
 # The bytes-in corpora for the bytes surface (decode_utf8 / finalize_utf8 /
 # b64_encode_bytes): the named str corpora rendered to UTF-8. benches/bytes.rs
 # builds the same bytes in Rust and tests/test_bench_corpus_parity.py pins that
@@ -178,13 +230,15 @@ _CORPUS_BUILDERS: dict[str, Callable[[int], str]] = {
     "compat": compat,
     "crlf": crlf,
     "entities": entities,
+    "contacts": contacts,
+    "scrub": scrub_corpus,
 }
 
 
 def corpus_utf8(kind: str, target_bytes: int) -> bytes:
-    """The ``kind`` corpus (``prose`` / ``decomposed`` / ``crlf`` / ``entities``)
-    as UTF-8 bytes, the byte-compatible counterpart of the str corpora, for the
-    bytes-in API."""
+    """The ``kind`` corpus (``prose`` / ``decomposed`` / ``compat`` / ``crlf``
+    / ``entities`` / ``contacts`` / ``scrub``) as UTF-8 bytes, the
+    byte-compatible counterpart of the str corpora, for the bytes-in API."""
     return _CORPUS_BUILDERS[kind](target_bytes).encode("utf-8")
 
 
@@ -355,6 +409,84 @@ SEARCH_DENSE_PATTERNS: tuple[str, ...] = (
 # search-side choice). The few-matches shape the GIL cell measures.
 SEARCH_SPARSE_PATTERNS: tuple[str, ...] = ("monthly", "weekly", "annually")
 
+# The escape-parity scan's needle and corpora (the issue #50 surface):
+# ``tors.contains_unescaped`` / ``tors.find_unescaped`` answer, over raw bytes,
+# whether a six-byte escape text is "live" (preceded by an even run of
+# backslashes) or literal text. ``benches/search.rs`` mirrors both constants
+# (the needle and the false-positive injection unit), and
+# ``tests/test_bench_corpus_parity.py`` pins the mirrors, so the bench numbers
+# and the Python-side cell numbers cross-reference on the same bytes.
+UNESCAPED_NEEDLE: bytes = b"\\u0000"
+
+# orjson's rendering of the literal six-character TEXT "\u0000": the
+# backslash itself escaped, so the text spans SEVEN bytes (two backslashes
+# then ``u0000``) and the needle occurs once, at +1, behind a single
+# backslash — an odd run, a rejected hit. Every occurrence in the
+# false-positive corpus is therefore a false positive: the exact shape a
+# confirm-by-re-parse walk exists to clear, and the hit-dense workload the
+# bench and the GIL/wall cells drive (a corpus of real NUL escapes would
+# answer at the first hit and measure nothing).
+_ESCAPE_LITERAL_TEXT = "\\\\u0000"
+
+
+def unescaped_false_positive(target_bytes: int) -> bytes:
+    """Prose with one literal escape text (the seven-byte two-backslash
+    rendering) injected per sentence: pure ASCII, deterministic,
+    unit-quantized like every ``reference`` corpus, and every needle
+    occurrence sits behind an odd backslash run, so the scan rejects every
+    hit and runs to the end — the worst case for both wall time and GIL
+    release (no early exit), at a realistic orjson false-positive density
+    (one literal per 166-byte prose sentence: 173.5 bytes of corpus per
+    injection once the seven-byte literal and the paragraph break are
+    amortized)."""
+    return _repeat_to(target_bytes, (_PROSE_SENTENCE + _ESCAPE_LITERAL_TEXT) * 4 + "\n\n").encode(
+        "utf-8"
+    )
+
+
+# --- content_hash object corpus -------------------------------------------------------
+#
+# The JSON-shaped object tree for ``tors.content_hash``'s cells: the 1 MiB
+# parity case in ``tests/test_content_hash.py``, the 12 MiB GIL cell in
+# ``tests/test_gil_release.py``, and the wall cells in
+# ``tests/test_performance.py``. A document dict of records, each a pure
+# function of its index (the no-rng determinism every corpus here follows):
+# ``{"id": int, "name": str, "note": str, "score": float, "tags": list[str],
+# "active": bool}``, the str-heavy shape a serialized API response or a model
+# batch row actually has. The ``note`` carries the shared prose sentence twice
+# so the payload bytes cross-reference the same recipe every other corpus
+# family measures.
+#
+# Sizing: ``target_bytes`` counts the CANONICAL form's bytes
+# (``json.dumps(record, sort_keys=True, separators=(",", ":"))``), quantized
+# to whole records via the canonical size of record 0, computed at call time
+# from the builder itself (the same dynamic-unit idiom ``_repeat_to`` uses;
+# the ``id`` and ``name`` fields stay fixed-width, and the ``score`` repr is
+# fixed-width per residue class, so record 0's size is representative to
+# within a few bytes across any build).
+
+
+def _content_record(i: int) -> dict[str, object]:
+    """Record ``i``: every field a pure function of ``i``, no rng."""
+    return {
+        "id": i,
+        "name": f"record-{i:06d}",
+        "note": _PROSE_SENTENCE * 2,
+        "score": (i % 40) * 0.125,
+        "tags": ["alpha", "beta"] if i % 2 else [],
+        "active": i % 3 == 0,
+    }
+
+
+def content_object(target_bytes: int) -> dict[str, object]:
+    """The ``tors.content_hash`` corpus at ``target_bytes`` of canonical form:
+    ``{"schema": 2, "count": n, "records": [...]}`` with ``n`` whole records
+    (``max(1, target // per-record canonical bytes)``, so a 12 MiB target
+    lands within one record of 12 MiB of canonical output)."""
+    unit = len(json.dumps(_content_record(0), sort_keys=True, separators=(",", ":"))) + 1
+    n = max(1, target_bytes // unit)
+    return {"schema": 2, "count": n, "records": [_content_record(i) for i in range(n)]}
+
 
 # --- shared differential oracles -------------------------------------------------------
 #
@@ -515,7 +647,264 @@ def reference_replace_many(text: str, replacements: dict[str, str]) -> str:
     return "".join(out)
 
 
+def reference_first_invalid_charset(items: Sequence[str], first: str | None, rest: str) -> int:
+    """The membership-loop oracle for ``tors.first_invalid_charset``: the
+    positional rule spelled directly in pure Python. ``first`` (when given)
+    is the set of codepoints allowed at position 0, ``rest`` the set allowed
+    at every position after it (and at position 0 too when ``first`` is
+    ``None``, the uniform spelling); an empty item is an offender; the
+    answer is the first offending item's index, ``-1`` when all pass. The
+    membership test is per codepoint (``ch in set`` over a one-codepoint
+    needle is exact membership, never substring semantics), and the whole
+    oracle shares no machinery with the tors side (bitmaps, sorted vectors,
+    bytes-vs-codepoints), so agreement is evidence about the contract."""
+    for idx, item in enumerate(items):
+        if not item:
+            return idx
+        allowed_first = rest if first is None else first
+        if item[0] not in allowed_first:
+            return idx
+        if any(ch not in rest for ch in item[1:]):
+            return idx
+    return -1
+
+
+def reference_first_invalid_offender(
+    items: Sequence[str], first: str | None, rest: str
+) -> tuple[int, int, str] | None:
+    """The offender-detail oracle for ``tors.first_invalid_offender``: the
+    membership loop above re-spelled to return the detail a rejection
+    message needs — ``(item_index, char_position, offending_char)`` for the
+    first offending item's first offending position, ``None`` when every
+    item passes. ``char_position`` counts CODEPOINTS within the item (the
+    family's data model: ``item[position]`` is the offending codepoint, a
+    1-char ``str``, never a byte offset), and the empty item — an offender
+    with no codepoint at position 0 to name — reports ``(idx, 0, "")``: the
+    char field is empty exactly when the item is. Shares no machinery with
+    the tors side, so agreement is evidence about the contract."""
+    for idx, item in enumerate(items):
+        if not item:
+            return (idx, 0, "")
+        allowed_first = rest if first is None else first
+        if item[0] not in allowed_first:
+            return (idx, 0, item[0])
+        for position, ch in enumerate(item[1:], start=1):
+            if ch not in rest:
+                return (idx, position, ch)
+    return None
+
+
+# --- the scrub_log_text oracle (the TaskQ exception-text chain) --------------------
+#
+# ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
+# chain (src/taskq/obs/_redact_exc.py, the consumer it exists for), pinned
+# byte-identical to it: the four compiled regexes below are QUOTED VERBATIM
+# from that module, and the canonical rule order (pg_detail_lines' two
+# segmenters first, then uri_userinfo, then uri_query_creds) is _scrub_text's
+# own application order with the redaction flag on. The differential harness
+# (tests/test_scrub_log_text_parity.py) runs tors against this chain and,
+# when the TaskQ checkout is present, re-syncs these patterns against the live
+# module source — a TaskQ change to any of them is a visible re-sync request,
+# not a silent tors behavior change.
+_PG_DETAIL_RE = re.compile(r"^[ \t]*DETAIL:.*$", re.MULTILINE)
+_PG_DETAIL_ESCAPED_RE = re.compile(
+    r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)",
+    re.MULTILINE,
+)
+_URI_CRED_RE = re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@")
+_URI_PARAM_CRED_RE = re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)")
+
+#: The accepted rule names, in canonical application order.
+SCRUB_RULES: tuple[str, ...] = ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+
+#: Each rule's passes, in order: the DETAIL rule is one name over two
+#: segmenters (real-newline lines, then repr()-flattened escaped runs); the
+#: two URI rules are one pass each.
+_SCRUB_RULE_PASSES: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
+    "pg_detail_lines": ((_PG_DETAIL_RE, ""), (_PG_DETAIL_ESCAPED_RE, "")),
+    "uri_userinfo": ((_URI_CRED_RE, r"\1:***@"),),
+    "uri_query_creds": ((_URI_PARAM_CRED_RE, r"\1***"),),
+}
+
+
+def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> str:
+    """The scrub oracle: the TaskQ chain applied per rule selection. ``rules
+    is None`` runs the full chain in canonical order; a list/tuple selects a
+    sub-chain (deduped, canonical order — the same contract tors spells);
+    ``[]`` is the identity."""
+    selected = frozenset(rules) if rules is not None else None
+    names = SCRUB_RULES if selected is None else [n for n in SCRUB_RULES if n in selected]
+    for name in names:
+        for pattern, repl in _SCRUB_RULE_PASSES[name]:
+            text = pattern.sub(repl, text)
+    return text
+
+
+_BACKSLASH = 0x5C  # b"\\"[0], the parity byte the whole escape question turns on
+
+
+def reference_find_unescaped(haystack: bytes, needle: bytes) -> int:
+    """The escape-parity oracle (the ``reference_find_patterns`` shape): a
+    brute-force backward parity walk, pure-Python ``bytes`` operations only,
+    independent of every implementation detail on the tors side (memmem
+    engine, resume arithmetic). An occurrence of ``needle``
+    at offset ``i`` counts only when the maximal run of backslashes
+    immediately before ``i`` has even length (0 is even: an occurrence at
+    offset 0 is live); a rejected hit advances the scan one byte past the
+    hit, not past the whole match, so self-overlapping needles stay correct;
+    no live occurrence answers ``-1`` (``bytes.find``'s sentinel).
+
+    This is also the manual parity loop the wall cells race: the hand-rolled
+    expression a consumer writes today (find the needle in the raw bytes,
+    count the backslash run before each hit), the exact algorithm TaskQ
+    verified against a re-parse walk before lifting it here."""
+    pos = 0
+    while True:
+        hit = haystack.find(needle, pos)
+        if hit == -1:
+            return -1
+        run = 0
+        j = hit - 1
+        while j >= 0 and haystack[j] == _BACKSLASH:
+            run += 1
+            j -= 1
+        if run % 2 == 0:
+            return hit
+        pos = hit + 1
+
+
 _OPCODE_TAGS = frozenset({"equal", "replace", "delete", "insert"})
+
+
+# --- scrub_pii: the contact-rules scrub oracle -------------------------------------
+#
+# The quoted-pin oracle for ``tors.scrub_pii``: a private consumer's
+# telemetry-safety module, transcribed here as pure Python with the digest
+# salt parameterized. Provenance (H1: the CI oracle is a transcription, and
+# the live lane never runs in CI, so the transcription carries its own
+# freshness pin):
+# source revision: scrub-pii-oracle-r1 (private telemetry-safety module,
+# grammar + token shape as transcribed; no source spelling lives in this
+# repo — the live locator stays env-gated in test_scrub_pii_parity.py).
+# transcription date: 2026-09-13 (bump on every re-sync; CI fails after
+# SCRUB_PII_ORACLE_FRESH_DAYS). UCD: 16.0.0 (the UCD CPython's `re` digit
+# class matches on; the Rust Nd tables pin the same UCD — a bump on either
+# side re-opens the re-sync). The source chain itself digests UNSALTED, so
+# ``salt=""`` reproduces its token values byte-for-byte (the migration lane:
+# a consumer swapping the source call for tors keeps every stored token by
+# passing ``salt=""``); tors's own default (``SCRUB_PII_DEFAULT_SALT`` below)
+# is a different, documented constant, so default-salt tokens differ from
+# the source's by design. The two pattern shapes and both token fields are
+# quoted as literals, never paraphrased: this file is the contract
+# ``tests/test_scrub_pii.py`` and ``tests/test_scrub_pii_parity.py``
+# differentially pin tors against, and the parity harness never imports the
+# source module (the optional live lane in test_scrub_pii_parity.py is the
+# only code that does, env-gated, never in CI).
+
+SCRUB_PII_DEFAULT_SALT = "tors/scrub_pii/v1"
+"""tors's documented default digest salt (mirrors ``pii_impl::DEFAULT_SALT``;
+the salt=None differential lane pins the two literals equal). A fixed,
+non-secret domain-separation tag, frozen: changing it would silently change
+every deployment's token values."""
+
+# H1 provenance pin: the transcription's own freshness clock. The CI oracle
+# is a transcription and the live lane never runs in CI, so CI fails when
+# this goes stale (N-day freshness) or when the interpreter's UCD moves
+# past the pinned tables (see TestOracleFreshness).
+SCRUB_PII_ORACLE_REVISION = "scrub-pii-oracle-r1"
+SCRUB_PII_ORACLE_DATE = "2026-09-13"
+SCRUB_PII_ORACLE_UCD = "16.0.0"
+SCRUB_PII_ORACLE_FRESH_DAYS = 90
+
+_SCRUB_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_SCRUB_PHONE_RE = re.compile(r"\+\d[\d\-. ()]{6,}\d")
+
+_SCRUB_TOKEN_HEX = 12
+
+# The zoo pieces the scrub gates compose from (tests/test_scrub_pii.py's
+# edge battery pins each shape literally; tests/test_scrub_pii_parity.py's
+# corpus and hypothesis lanes compose them structurally): representative
+# email spellings, phone spellings, and the separators real error excerpts
+# put between them.
+SCRUB_PII_EMAILS: tuple[str, ...] = (
+    "fungai.chetima@example.com",
+    "ada+tag@azx.io",
+    "ada@azx.test",
+    "a@b.co",
+    "A@B.CO",
+    "a%b@x.co",
+    "a_b@x.co",
+    "xxa@b.co",
+    "a@b.co.uk",
+    "a@.b.co",
+    "a@b..co",
+)
+SCRUB_PII_PHONES: tuple[str, ...] = (
+    "+14155552671",
+    "+1 (415) 555-2671",
+    "+1 415 555 2671",
+    "+4712345678",
+    "+44 20 7946 0958",
+    "+12345678",
+)
+SCRUB_PII_SEPARATORS: tuple[str, ...] = (" ", ", ", "\n", " - ", " | ", "")
+
+
+def _scrub_digest(value: str, salt: str) -> str:
+    """The token digest: ``sha256(salt + value)`` truncated to 12 hex chars.
+    ``salt=""`` is the source chain's unsalted digest exactly (the
+    concatenation is why: an empty salt leaves the value alone)."""
+    return hashlib.sha256((salt + value).encode("utf-8")).hexdigest()[:_SCRUB_TOKEN_HEX]
+
+
+def _scrub_email_token(value: str, salt: str) -> str:
+    """An email address as it may appear in a log line: ``@domain~digest``.
+    The domain (the non-identifying half an operator reasons about) plus a
+    digest of the whole address. A degenerate value with no ``@``, no local
+    part, or no domain gets the digest alone (the whole string is then the
+    local part, and echoing it would be the leak this exists to prevent)."""
+    local, sep, domain = value.rpartition("@")
+    if not sep or not local or not domain:
+        return f"~{_scrub_digest(value, salt)}"
+    return f"@{domain}~{_scrub_digest(value, salt)}"
+
+
+def _scrub_phone_token(value: str, salt: str) -> str:
+    """A phone number as it may appear in a log line: ``prefix~digest``. The
+    prefix is the first three CODE POINTS of the value, emitted only when it
+    starts with ``+`` (a canonical E.164, where those three are the country
+    code — coarse, operational, non-identifying); any other spelling gets the
+    digest alone."""
+    if value.startswith("+"):
+        return f"{value[:3]}~{_scrub_digest(value, salt)}"
+    return f"~{_scrub_digest(value, salt)}"
+
+
+def reference_scrub_pii(
+    text: str,
+    rules: list[str] | tuple[str, ...] | None = None,
+    *,
+    salt: str | None = None,
+) -> str:
+    """The scrub oracle: replace contact material inside free text with the
+    tokens above. ``rules=None`` applies both rules in the canonical order —
+    the email substitution over the whole string FIRST, then the phone
+    substitution over its result (each exactly once, no cascade) — because an
+    email's local part may contain the ``+``-led digit runs the phone rule
+    would otherwise eat. ``rules`` restricts to a subset (``[]`` is the
+    identity). ``salt=None`` is tors's documented default constant."""
+    effective_salt = SCRUB_PII_DEFAULT_SALT if salt is None else salt
+    wanted = {"contact_email", "contact_phone"} if rules is None else set(rules)
+    scrubbed = text
+    if "contact_email" in wanted:
+        scrubbed = _SCRUB_EMAIL_RE.sub(
+            lambda m: _scrub_email_token(m.group(0), effective_salt), scrubbed
+        )
+    if "contact_phone" in wanted:
+        scrubbed = _SCRUB_PHONE_RE.sub(
+            lambda m: _scrub_phone_token(m.group(0), effective_salt), scrubbed
+        )
+    return scrubbed
 
 
 def assert_opcodes_are_valid(
@@ -576,3 +965,147 @@ def _joined(parts: list[str], whole: str | list[str]) -> bool:
         return "".join(parts) == whole
     flattened = [token for part in parts for token in (part if isinstance(part, list) else [part])]
     return flattened == list(whole)
+
+
+# --- MinHash oracle --------------------------------------------------------------------
+#
+# The pure-Python MinHash oracle for tests/test_minhash.py: the same token
+# stream, the same shingle construction, the same shingle hash, and the same
+# permutation arithmetic as ``tors.minhash_signature``, each transcribed from
+# the pinned contract in ``src/minhash_impl.rs``'s module docs, so agreement
+# between the two is evidence about that contract, not a shared bug.
+#
+# One deliberate non-self-containment, named here: the token stream comes
+# from ``tors.word_bounds`` (the UAX #29 segmentation) rather than a pure
+# Python reimplementation. UAX #29 word segmentation has no stdlib spelling
+# and hand-deriving it would duplicate the unicode-segmentation tables; the
+# segmentation surface carries its own independent contract gate
+# (tests/test_segmentation.py), so the oracle stands on it and pins
+# everything DOWNSTREAM: the whitespace-segment skip, the lowercase fold,
+# the shingle join, the XXH64 shingle hash, and the whole
+# SplitMix64-to-affine permutation pipeline.
+
+# The Mersenne prime the affine permutations live over: h_i(x) = (a_i * x +
+# b_i) mod p, p = 2^61 - 1, the standard MinHash field.
+_MINHASH_MERSENNE = (1 << 61) - 1
+# The u64 MAX sentinel: every element of the empty-shingle-set signature
+# (empty text, or fewer tokens than shingle_size).
+_MINHASH_EMPTY = (1 << 64) - 1
+# The shingle framing: NOT a U+001F join. UAX #29 WB4 (ignore
+# Extend/Format/ZWJ) glues a following combining mark, ZWJ, or SOFT HYPHEN
+# onto U+001F, so the token stream holds tokens like "\x1f\u0301" and no
+# separator join over it is injective. The frame is the injective
+# length-prefixed spelling ``LE64(n) || (LE64(len) || bytes)*`` the Rust
+# core hashes (``src/minhash_impl.rs``), transcribed here byte for byte.
+def _minhash_frame(window: list[str]) -> bytes:
+    import struct
+
+    out = struct.pack("<Q", len(window))
+    for token in window:
+        raw = token.encode("utf-8")
+        out += struct.pack("<Q", len(raw)) + raw
+    return out
+
+# SplitMix64 (Steele/Marsaglia's fixed arithmetic, the standard
+# fixture-grade 64-bit generator): the state advance and mixer constants.
+_SPLITMIX64_GAMMA = 0x9E3779B97F4A7C15
+_SPLITMIX64_M1 = 0xBF58476D1CE4E5B9
+_SPLITMIX64_M2 = 0x94D049BB133111EB
+
+# The Unicode White_Space property's exact 25 codepoints: Rust's
+# ``char::is_whitespace`` (the skip the Rust tokenizer applies), NOT
+# ``str.isspace``/``str.strip`` -- Python's own space predicate also counts
+# U+001C..U+001F, which Rust keeps as real word tokens.
+_WHITESPACE = frozenset(
+    chr(cp)
+    for cp in (
+        list(range(0x0009, 0x000E))  # TAB LF VT FF CR
+        + [0x0020, 0x0085, 0x00A0, 0x1680]
+        + list(range(0x2000, 0x200B))
+        + [0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
+    )
+)
+
+
+def reference_minhash_tokens(text: str) -> list[str]:
+    """The token stream ``minhash_signature`` shingles: ``tors.word_bounds``
+    segments, segments made entirely of White_Space codepoints skipped
+    (Rust's ``char::is_whitespace`` set, the module comment's parity note),
+    each lowercased with Python's full Unicode ``str.lower`` (the same full
+    case mapping, SpecialCasing included, Rust's ``str::to_lowercase``
+    implements).
+
+    Known skew, named: the two lowercasings ride different Unicode tables
+    (the interpreter's own vs the ``unicode-segmentation``-era tables the
+    crate pins), so a future SpecialCasing revision could fold one exotic
+    token differently on the two sides. The oracle differential (astral
+    draws included) and the tricky-unicode rows are the tripwire; a
+    divergence fails there, not silently."""
+    import tors
+
+    tokens: list[str] = []
+    for start, end in tors.word_bounds(text):
+        segment = text[start:end]
+        if not all(ch in _WHITESPACE for ch in segment):
+            tokens.append(segment.lower())
+    return tokens
+
+
+def _splitmix64(state: int) -> tuple[int, int]:
+    """One SplitMix64 step: ``(state', output)`` -- advance the state by the
+    golden-ratio gamma mod 2^64, then mix a copy of the new state (xorshift
+    twice through the two mixer constants, final xorshift-right)."""
+    state = (state + _SPLITMIX64_GAMMA) & _U64_MASK
+    z = state
+    z = ((z ^ (z >> 30)) * _SPLITMIX64_M1) & _U64_MASK
+    z = ((z ^ (z >> 27)) * _SPLITMIX64_M2) & _U64_MASK
+    z = z ^ (z >> 31)
+    return state, z
+
+
+def reference_minhash_coefficients(num_perm: int, seed: int) -> list[tuple[int, int]]:
+    """The ``(a_i, b_i)`` pairs, the pinned derivation: a SplitMix64 stream
+    seeded with ``seed`` reduced mod 2^64 (two's complement for negatives),
+    two draws per permutation -- ``a_i`` first, in ``[1, 2^61 - 2]`` (a zero
+    multiplier would collapse the permutation to a constant, so it is
+    excluded), then ``b_i`` in ``[0, 2^61 - 2]``. Fixture-grade
+    determinism, not crypto: the same arithmetic is pinned in
+    ``src/minhash_impl.rs`` and golden-pinned by the test battery."""
+    state = seed & _U64_MASK
+    pairs: list[tuple[int, int]] = []
+    for _ in range(num_perm):
+        state, za = _splitmix64(state)
+        state, zb = _splitmix64(state)
+        a = za % (_MINHASH_MERSENNE - 1) + 1
+        b = zb % _MINHASH_MERSENNE
+        pairs.append((a, b))
+    return pairs
+
+
+def reference_minhash_signature(
+    text: str, *, num_perm: int = 128, shingle_size: int = 3, seed: int = 0
+) -> list[int]:
+    """The MinHash oracle: ``reference_minhash_tokens``' stream cut into
+    consecutive ``shingle_size``-token shingles framed with the injective
+    length-prefixed spelling (``_minhash_frame``), each frame hashed with
+    XXH64 (seed 0; the pinned ``xxhash`` package wrapping the C reference
+    implementation of the same frozen spec twox-hash implements on the
+    Rust side), then ``signature[i] = min over shingles of
+    (a_i * x + b_i) mod (2^61 - 1)`` over the
+    ``reference_minhash_coefficients`` pairs. Fewer tokens than
+    ``shingle_size`` (empty text included) is the empty-shingle-set
+    convention: every element the u64 MAX sentinel."""
+    import xxhash
+
+    tokens = reference_minhash_tokens(text)
+    if len(tokens) < shingle_size:
+        return [_MINHASH_EMPTY] * num_perm
+    coefficients = reference_minhash_coefficients(num_perm, seed)
+    signature = [_MINHASH_EMPTY] * num_perm
+    for i in range(len(tokens) - shingle_size + 1):
+        x = xxhash.xxh64_intdigest(_minhash_frame(tokens[i : i + shingle_size]))
+        for j, (a, b) in enumerate(coefficients):
+            h = (a * x + b) % _MINHASH_MERSENNE
+            if h < signature[j]:
+                signature[j] = h
+    return signature

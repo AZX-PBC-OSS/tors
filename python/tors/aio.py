@@ -19,9 +19,15 @@ chunking family, the retrieval/scoring primitives, the diff engine, the
 batch pipeline, and the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
-``truncate_ellipsis``, ``strip_controls``); each a single native pass
-whose cost scales with its input, e.g. ``finalize`` over a 12 MiB
-document. Every other tors function keeps exactly one spelling
+``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``,
+``scrub_pii``); each a single native pass
+whose cost scales with its input (``scrub_log_text``: four linear scans +
+splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
+document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
+are KiB-scale (a single message/traceback scrubs in microseconds, well
+under the hop cost — prefer the sync spelling there); its ``aio`` twin is
+for MB-scale aggregates only (batched logs, multi-MB exception corpora),
+where the hop is noise next to the pass. Every other tors function keeps exactly one spelling
 (the sync one); call it directly from a coroutine when the input is
 small; a synchronous call that finishes in microseconds does not need
 asyncio at all, and wrapping it here would be lying about a cost that
@@ -74,12 +80,15 @@ __all__: list[str] = []
 # retrieval/scoring primitives, the diff engine, the batch pipeline, and
 # the input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
-# truncate_ellipsis, strip_controls: each a single native pass whose cost
-# scales with its input, the 12 MiB-document shape this module exists
+# truncate_ellipsis, strip_controls, scrub_log_text, scrub_pii: each a single native pass
+# whose cost scales with its input (scrub_log_text: four linear scans + splice under
+# one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
 # forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
-# detect_encoding's guess) stay sync-only: the thread hop would cost more
-# than the call itself.
+# detect_encoding's guess, the random generators — a block-buffered
+# syscall plus sampling/formatting at every realistic token/key size) stay
+# sync-only: the thread
+# hop would cost more than the call itself.
 _WRAPPED = (
     "apply_pipeline",
     "b64_decode",
@@ -99,6 +108,9 @@ _WRAPPED = (
     "finalize",
     "finalize_utf8",
     "normalize",
+    "scrub_log_text",
+    "scrub_pii",
+    "scrub_pii_report",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",

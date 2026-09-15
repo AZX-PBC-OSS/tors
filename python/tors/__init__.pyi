@@ -1,5 +1,5 @@
 from collections.abc import Iterator, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, SupportsIndex
 
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
 # STEMMER_LANGUAGES (this is that same list, spelled as a type). Shared by
@@ -39,6 +39,94 @@ def finalize(text: str) -> tuple[str, str]: ...
 #
 # GIL note: detached_transform's shape, the same as normalize.
 def strip_controls(text: str) -> str: ...
+
+# Replace contact material (email addresses, `+`-led phone numbers) and
+# credential material (the evidence-backed api-key families) inside
+# free text with correlation tokens: `@domain~<12 hex>` for an email,
+# `<first three code points>~<12 hex>` for a phone number (the E.164
+# dialling prefix: "+47" compact, "+1 " for a domestic spelling), and
+# `<family prefix>~<12 hex>` for an API key (the prefix verbatim --
+# sk-, sk-ant-, github_pat_, AIza, Bearer -- the non-secret half that
+# tells the operator WHICH credential to rotate). The contact rules are
+# a port of a private consumer's telemetry-safety module, pinned
+# byte-identical to it at salt="" (tests/reference.py's quoted-pin
+# oracle is the transcription); the api_keys rule is the credential
+# extension past that contract (the JWT family is marker-scoped: a
+# bare eyJ triple is never touched, the non-secret-cursor hazard).
+# rules=None applies every rule in the canonical order (the keys pass
+# FIRST -- a key's tail can spell a domestic phone run and a whole key
+# an email local part -- then email, then phone over its result); []
+# is the identity (the original object); an unknown name is a
+# ValueError naming the accepted set. salt=None resolves PER RULE: the
+# contact rules keep "tors/scrub_pii/v1" and the keys rule its own
+# "tors/scrub_keys/v1" tag (a fixed, non-secret domain-separation tag
+# per rule -- a key digest can never alias a contact digest; a KNOWN
+# salt still leaves candidate-list confirmation possible -- the
+# tokens are redaction, not pseudonymization crypto; deployments that
+# care pass their own salt, and a consumer migrating from an unsalted
+# scrubber passes salt="" to keep its token values byte-identical for
+# every rule). The phone rule's digit class is Unicode Nd (every
+# decimal digit script), and bare digit runs never match (the "+"
+# anchoring is deliberate: order numbers and byte counts must
+# survive). families=None scrubs every key family this version knows
+# (the set grows on new families -- callers needing stability list
+# names explicitly); a list selects exactly those families (order
+# irrelevant, duplicates deduped); unknown names and [] are
+# ValueErrors; the selection is ignored when api_keys is not active.
+# tors.scrub_pii(s, ...) is s exactly when no active rule matches.
+#
+# GIL note: detached_transform's shape, the same as
+# normalize/strip_controls -- the keys pass rides the same single
+# detach.
+def scrub_pii(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> str: ...
+
+# The canonical key-family tuple, in the KeyFamily discriminant order: the
+# base for "all but X" comprehensions
+# (families=[f for f in tors.KEY_FAMILIES if f != "jwt"]) and the set
+# the families= unknown-name error names. The set grows on new
+# families (semver-visible); list names explicitly for stability.
+KEY_FAMILIES: tuple[str, ...]
+
+# The report twin of scrub_pii: the same scrub for the same arguments
+# (report["text"] == scrub_pii(...) byte-exact) plus the accounting --
+# per-rule counts plus per-family counts (lowercase family names,
+# absent types omitted) under "redacted", the detected-but-preserved
+# families under "skipped" (the "preserved a JWT, log it separately"
+# signal; always {} when families=None), and the redaction spans under
+# "spans" (ordered by start, codepoint indices into the INPUT text,
+# {"type": <rule> | "api_keys:<family>", "start": int, "end": int}).
+# Empty input is the empty accounting. Same single-detach GIL model.
+def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict[str, object]: ...
+
+
+# Named-rule log and exception-text scrubbing, byte-identical to the
+# TaskQ exception-text chain (the four compiled regexes this ports are
+# quoted in tests/reference.py and re-synced against the live source by
+# tests/test_scrub_log_text_parity.py). rules=None runs the full chain in
+# canonical order (pg_detail_lines -> uri_userinfo -> uri_query_creds);
+# [] is the identity; duplicates dedupe and caller order is irrelevant.
+# An unknown name raises ValueError naming the accepted set.
+# tors.scrub_log_text(s, rules) is s exactly when no rule fires (the ***
+# fixed points fire and return a fresh, equal string).
+#
+# GIL note: detached_transform's shape (the rules= name walk under the
+# GIL, the whole multi-rule pass under one detach).
+def scrub_log_text(
+    text: str,
+    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+) -> str: ...
 def nfc(text: str) -> str: ...
 def nfd(text: str) -> str: ...
 def nfkc(text: str) -> str: ...
@@ -164,6 +252,131 @@ def find_patterns_iter(patterns: list[str], text: str) -> Iterator[tuple[int, in
 # (counting is offset-free). count_matches(p, t) == len(find_patterns(p, t)),
 # pinned. A single int return: no marshalling class at all.
 def count_matches(patterns: list[str], text: str) -> int: ...
+
+# The escape-parity byte scan: an occurrence of needle at offset i counts
+# only when the maximal run of b"\\" immediately before i has EVEN length
+# (0 is even, so an occurrence at offset 0 counts); an odd run means the
+# run's backslash pairs escape each other and the leftover one escapes the
+# occurrence's first byte, so the occurrence is literal text. The
+# motivating case is JSON's \u0000: a real NUL codepoint and the literal
+# six-character text render byte-ambiguously (the literal contains the
+# escape at +1, behind one backslash), and PostgreSQL jsonb rejects only
+# the real one (SQLSTATE 22P05) — parity settles it without re-parsing.
+#
+# BYTES IN, BYTE OFFSETS OUT — read this twice: find_unescaped's return
+# indexes the haystack's BYTES, never str codepoints. Over multibyte UTF-8
+# content the byte offset and the decoded text's character offset are
+# different numbers (find_patterns needed a byte→char mapping for exactly
+# this confusion; this API has none because the input is bytes and the
+# contract is byte-space end to end: haystack[i:i + len(needle)] is the
+# needle). find_unescaped returns -1 when no live occurrence exists
+# (bytes.find's own sentinel, kept over Optional[int] deliberately).
+# Rejected (odd-run) hits advance the scan one byte past the hit, not
+# past the whole match, so self-overlapping needles stay correct. An empty
+# needle raises ValueError("empty needle") (it would match at every
+# position, the find_patterns empty-pattern rationale). Exactly bytes on
+# both arguments (bytearray/memoryview/str -> TypeError): the bytes-in
+# surface's zero-copy immutable-borrow contract. No JSON knowledge lives
+# in the functions: parity is the mechanism, "needle is an escape
+# sequence" is the caller's reading of it.
+#
+# GIL note: utf8_is_valid's class exactly — two zero-copy PyBytes borrows,
+# the whole scan under one py.detach, bool/int returns so no marshalling
+# class exists, and no error path past the empty-needle ValueError (which
+# fires under the GIL, before the detach). Ceiling-only heartbeat budget;
+# no aio twin (a memchr-class scan at document scale is a
+# sub-heartbeat-floor call).
+def contains_unescaped(haystack: bytes, needle: bytes) -> bool: ...
+def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
+
+# The scan surface's pinned companion (#52): the UTF-8 byte length of a
+# str — len(s.encode("utf-8")) with the copy taken out. The count a
+# caller wants when a size cap sits in front of a store (TaskQ's
+# idempotency-key/scope byte caps per enqueue, the terminal's re-encode
+# of a serialized result of up to 64 KiB per success — a double pass:
+# the byte count existed inside the serializer's output and was
+# discarded by the .decode()). Companion, not standalone: it ships in
+# the scan family's binding module with the same harness patterns, and
+# honest sizing says the win is large inputs and hot paths only.
+#
+# Cache semantics (the deliberate implementation: the standard str-in
+# borrow, not hand-rolled UCS arithmetic — a Rust &str IS its UTF-8
+# bytes, so the core is one field read): ASCII is a zero-copy alias, so
+# the call is O(1) with no allocation; a non-ASCII input's FIRST call —
+# exactly the cold-cache case — materializes and caches the UTF-8 view
+# on the str object (a CPython-internal cache, not a Python-visible
+# bytes, filled by this borrow and by any earlier str-in tors call on
+# the same object, read but never filled by encode: a prior
+# len(s.encode()) does not warm it) — encode-parity cost, no
+# Python-visible object; repeat calls on the same object are O(1),
+# strictly better than len(s.encode()), which re-copies every call.
+#
+# Error parity: a str holding lone surrogates raises UnicodeEncodeError —
+# CPython's own error from the borrow (the same exception encode raises,
+# attributes included); no tors-side error path exists.
+#
+# GIL note: a single int return (no marshalling class); the call's only
+# O(n) work is the borrow itself — the first non-ASCII call's
+# materialization is GIL-held (the standard str-in first-call class),
+# under the 10ms ping floor at 12 MiB; the detach around the O(1) core
+# is nominal. No aio twin (an O(1)-to-borrow call needs no thread hop).
+def utf8_byte_len(s: str) -> int: ...
+
+# The interop twin (#52, the "len() to bytes" pair's other half): the
+# UTF-16 byte length of a str — 2 bytes per BMP codepoint, 4 per astral
+# codepoint (the surrogate pair) — len(s.encode("utf-16-le")) with the
+# 2n copy taken out. The world that caps in these units: UTF-16 is the
+# code-unit world of JavaScript, Java, Windows, and .NET (an astral
+# emoji is length 2 in JS), so column caps (NVARCHAR), wire caps, and
+# interop size checks there are UTF-16 bytes.
+#
+# Implementation: the utf8 twin's standard str-in borrow (NOT
+# hand-rolled UCS arithmetic, NOT FFI) plus derived arithmetic over the
+# UTF-8 view — 2 * (#codepoints + #astral), both counts byte classes
+# (lead bytes; 4-byte leads 0xF0..=0xF4) — one pass, no allocation; the
+# corners:
+# no astral codepoints -> exactly 2 * len(s) for ALL BMP text (where
+# the UTF-8 byte count diverges on CJK and combining marks), pure
+# ASCII -> 2 * the UTF-8 byte count, and every answer is even.
+#
+# Cache semantics: the utf8 twin's exactly (same borrow, same
+# CPython-internal UTF-8 view cache): ASCII is a zero-copy alias; a
+# non-ASCII input's FIRST call — exactly the cold-cache case —
+# materializes and caches the view (encode-parity cost, GIL-held; a
+# prior encode does not warm it: encode reads the cache and never fills
+# it); repeat calls borrow zero-copy and pay only the detached
+# byte-class scan.
+#
+# Surrogates: REFUSAL PARITY with the replaced expression, measured —
+# the strict encode("utf-16-le") raises UnicodeEncodeError on lone
+# surrogates exactly like encode("utf-8") ("surrogates not allowed"),
+# so utf16_byte_len refuses the same strings the expression itself
+# refuses. The tors error is the str-in borrow's own (the crate-wide
+# contract, every str-argument tors function's lane): .encoding "utf-8"
+# (the flavor of the step that fails, materializing the UTF-8 view),
+# where the expression's error says "utf-16-le". The stdlib's
+# errors="surrogatepass" mode WOULD encode them (one unit each) — a
+# mode tors deliberately does not offer.
+#
+# ⚠ Breaking differences from len(s.encode("utf-16-le")): (1) the
+# error's .encoding is "utf-8", not "utf-16-le" (encoding-label switch
+# for callers matching on it); (2) on a multi-surrogate run the
+# borrow's (start, end) names the whole run (utf-8 whole-run span) where
+# the utf-16-le error reports only the first unit (first-unit span);
+# (3) errors="surrogatepass" is unsupported. See docs/api.md.
+#
+# Overflow: 2 * (codepoints + astral) is checked, and unreachable for
+# real inputs on every width (a &str is at most isize::MAX bytes and
+# the count sum never exceeds one per byte, so the doubled answer is at
+# most 2 * isize::MAX, which fits usize on 32-bit and 64-bit alike):
+# OverflowError is the loud refusal if that invariant ever breaks.
+#
+# GIL note: a single int return (no marshalling class); the GIL-held
+# residue is the borrow (the cold-cache first call's materialization,
+# under the 10ms ping floor at 12 MiB), and the detach carries the
+# real O(n) scan (memchr-class, sub-floor). No aio twin (the residue
+# is the borrow alone; the scan detaches).
+def utf16_byte_len(s: str) -> int: ...
 
 # GIL note (the CompiledLemmaDict discipline, over the search surface): the
 # pattern list compiled once (one detached build at construction), then
@@ -455,11 +668,127 @@ def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: 
 # ValueError otherwise). Identity contract: is s exactly when == s.
 def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*") -> str: ...
 
+# The object content hash: lowercase-hex SHA-256 of the canonical form,
+# EXACTLY json.dumps(obj, sort_keys=True, separators=(",", ":")) with
+# default ensure_ascii and allow_nan -- byte-identical with the stdlib
+# expression, pinned differentially against it. Leaves: str, int
+# (arbitrary precision), float (Python's own repr spelling; NaN/Infinity/
+# -Infinity literals), bool, None; containers: list, tuple (serializes as
+# a list), dict (keys sorted BEFORE stringification; str/int/float/bool/
+# None keys coerced to their json string form). Anything else raises
+# TypeError naming the type; circular references raise ValueError; a str
+# holding lone surrogates raises UnicodeEncodeError where json.dumps
+# accepts it (the crate-wide str-borrow divergence, documented in
+# docs/api.md). Deterministic: any dict key order yields the same hash.
+#
+# GIL note: the object walk and leaf spellings run under the GIL (the
+# standard arg-walk class, O(tree): one borrow+copy per str, one storage
+# read per int, one repr call per float); the canonical-form emission and
+# the SHA-256 run under one py.detach. No tors.aio twin: a fast one-shot
+# call (see docs/async.md's family list).
+#
+# Bounds (generic ValueError, no bound values leaked): subclass hooks run to
+# completion under the GIL and abort past the per-container bound; exotic-key
+# dicts (any float/big-int/mixed/NaN/subclass key) delegate to CPython's own
+# list.sort and abort past 100k keys in one dict or 500k delegated pairs per
+# call; exact+protocol nesting aborts past the untrusted-input ceiling
+# (100k exact levels hash, 200k raises RecursionError). Protocol nesting past
+# ~1000 (sys.getrecursionlimit()) raises RecursionError even where stdlib
+# 3.12+ succeeds (documented conservative divergence). Treat content_hash as
+# trusted-input-only for subclass hooks, for depth beyond ~10-20k frames,
+# and for breadth beyond ~200-500k visited objects.
+def content_hash(
+    obj: str | int | float | bool | None | list | tuple | dict,
+) -> str: ...
+
 # Domain-separated SHA-256 (RFC 6962-style: leaves hash 0x00‖chunk, internal
 # nodes hash 0x01‖left‖right): not the crate's undifferentiated default,
 # which is forgeable (CVE-2012-2459-class leaf/internal-node confusion).
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
+
+# One-shot hashing, the request-signing/content-check primitives. Each
+# algorithm computes its digest once and offers two output spellings:
+# lowercase hex (the _hex names) and the raw digest bytes (the _digest
+# names — the call sites that base64-encode a signature, chain a digest
+# back in as a key, or slice a stable int off it). The whole digest (hex
+# formatting included, on the hex spellings) runs under one
+# py.detach. str input is its UTF-8 bytes (tors.sha256_hex(s) ==
+# hashlib.sha256(s.encode("utf-8")).hexdigest(); hashlib itself refuses
+# str — the convenience is deliberate). bytes input is exactly bytes
+# (bytearray/memoryview raise TypeError, the bytes-in family's
+# immutable-buffer doctrine — wrap first, bytes(buf), then hash); a lone
+# surrogate raises UnicodeEncodeError
+# at the argument boundary (the crate-wide str-in contract). Stateless
+# one-shot only: no hash object, no streaming surface (tors is stateless
+# by charter; for incremental feeding, hashlib's object API is the right
+# tool and is not duplicated).
+#
+# SECURITY: md5 and sha1 — either spelling, _hex or _digest — are
+# checksum/legacy-interop only (Content-MD5, S3 ETags, cache-busting,
+# quick compares) — broken for security since the 2000s (md5 collisions
+# since 2004, sha1's first practical collision 2017). Never use either
+# for signatures, certificates, or passwords; the sha256/sha512/hmac
+# names are the security side.
+def md5_hex(data: str | bytes) -> str: ...
+def sha1_hex(data: str | bytes) -> str: ...
+def sha256_hex(data: str | bytes) -> str: ...
+def sha512_hex(data: str | bytes) -> str: ...
+def md5_digest(data: str | bytes) -> bytes: ...
+def sha1_digest(data: str | bytes) -> bytes: ...
+def sha256_digest(data: str | bytes) -> bytes: ...
+def sha512_digest(data: str | bytes) -> bytes: ...
+
+# HMAC-SHA-256, the request-signing primitive (webhook signatures, AWS
+# SigV4-style HMAC chains, API auth): byte-identical to
+# hmac.new(key, data, hashlib.sha256).hexdigest(), in the same two
+# output spellings (hmac_sha256_digest returns the raw 32 bytes — the
+# shape the base64-encoding webhook schemes want). Each argument carries
+# the hashing family's str|bytes contract independently (a str key is
+# its UTF-8 bytes, the spelling a webhook secret arrives in); any key
+# length is legal, empty included (parity with stdlib hmac). The key is
+# held in memory for the call and is not zeroized on return — the same
+# posture as the stdlib hmac/hashlib spelling. A non-ASCII str argument
+# pays the one-time O(input) UTF-8 materialization independently per
+# argument; the measured HMAC wall cells use bytes key+data, equivalently
+# the ASCII zero-copy lane. GIL model:
+# both borrows under the GIL, the whole keyed digest (key derivation
+# included) plus hex formatting under one detach.
+def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...
+def hmac_sha256_digest(key: str | bytes, data: str | bytes) -> bytes: ...
+
+
+# The UUIDv7 helper trio (RFC 9562 layout): the keyset-pagination /
+# time-bucketed-query primitives over time-ordered IDs. uuid7_timestamp_ms
+# returns the 48-bit big-endian unix-millisecond field (the leading six
+# bytes; datetime.fromtimestamp(ms / 1000, UTC) is the ID's creation
+# instant), ValueError naming the found version when the version nibble is
+# not 7. uuid_version returns the version nibble (byte 6's high half,
+# 0-15) for any UUID of any variant: the field itself, no variant check
+# (the variant is byte 8's top two bits, a different field, out of scope).
+# uuid_parse is canonical text -> the 16 raw bytes, strict: exactly 36
+# characters, hyphens at 8/13/18/23, lowercase hex elsewhere, ValueError
+# naming the problem and the accepted form otherwise (positions 0-based).
+# The stdlib uuid.UUID also accepts braces, urn:uuid:, hyphen-less hex,
+# and uppercase; tors deliberately does not (the validation-primitive
+# contract, the same closed-set strictness as errors=/boundary=), pinned
+# as deliberate divergences in tests/test_uuid.py.
+#
+# GIL note: the bytes spelling borrows the argument zero-copy and the bit
+# extraction runs under py.detach; the str spelling validates and
+# transcodes under the GIL (36 bytes, smaller than the call's own
+# marshalling residue -- a detached parse would be overhead for its own
+# sake) with the extraction detached after it, so the int-out pair keeps
+# the crate's GIL-free-core contract uniform. uuid_parse is the trio's
+# zero-detach member: its whole work is that 36-byte parse (no int-out
+# tail exists to detach) and it runs GIL-held by design, ~70ns a call
+# (re-measured after the uuid-crate adoption). Exactly
+# bytes or str for the int-out pair (bytearray/memoryview: TypeError, the
+# bytes-in surface's exactly-bytes contract); exactly str for uuid_parse.
+def uuid7_timestamp_ms(value: bytes | str) -> int: ...
+def uuid_version(value: bytes | str) -> int: ...
+def uuid_parse(value: str) -> bytes: ...
+
 
 # FastCDC 2020 content-defined chunking: (start, end) byte spans (not
 # codepoints: a byte-level primitive, unlike word_bounds/sentence_bounds),
@@ -683,6 +1012,42 @@ def simhash64(text: str) -> int: ...
 # for the distance; thresholds corpus-dependent).
 def simhash128(text: str) -> int: ...
 
+# The recall-side near-dup complement to the simhash family (simhash is
+# the precision side; minhash recalls similar shingle sets at corpus
+# scale, the quantity an LSH-banding table -- caller state, tors stays
+# stateless -- buckets on). num_perm min-hashes over shingle_size-token
+# word shingles (the tf_idf/bm25 UAX #29 token stream, lowercased, each
+# window hashed under the injective length-prefixed framing); each element is min over shingles of
+# (a_i * x + b_i) mod (2^61 - 1), x the shingle's XXH64 (frozen-spec,
+# deterministic across processes/machines/versions), (a_i, b_i) derived
+# from seed by a pinned SplitMix64 stream. The signature is
+# deterministic given the segmentation tables: identical across
+# processes, machines, and platforms within one tors version, but a
+# release that bumps unicode-segmentation can change signatures (re-
+# fingerprinting every affected document) -- re-baseline persisted
+# signatures/LSH tables on upgrade. The agreement fraction of two
+# signatures estimates their shingle-set Jaccard similarity with standard
+# error sqrt(J(1-J)/num_perm) (~0.044 at 128). Empty text / whitespace
+# only / fewer tokens than shingle_size: every element 2**64 - 1 (the
+# empty-set sentinel, outside the affine range). num_perm in [1, 1024]
+# and shingle_size >= 1, else ValueError (an in-range value out of
+# bounds); an int outside the i64 range the binding extracts raises
+# OverflowError instead (pyo3, the truncate_to_bounds-identical
+# pattern); seed is any int reduced mod
+# 2**64 (two's complement for negatives), and all three ride __index__
+# (numpy integers work; bool is rejected with TypeError in every
+# position, including as an __index__ result; a raising __index__
+# propagates). GIL: borrow + validation
+# under the GIL, the whole pass under one detach, then the
+# num_perm-element int list. No aio twin: a fast one-shot call.
+def minhash_signature(
+    text: str,
+    *,
+    num_perm: int = 128,
+    shingle_size: int = 3,
+    seed: int = 0,
+) -> list[int]: ...
+
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased
 # (Unicode-correct str.lower, not ASCII-only). TF is the raw term count
@@ -841,3 +1206,144 @@ def daitch_mokotoff(text: str) -> list[str]: ...
 # ASCII-letters-only pre-filter and upstream-panic-avoidance note as
 # soundex.
 def refined_soundex(text: str) -> str: ...
+
+
+# The random-generation family. SECURITY CONTRACT, the same paragraph on
+# every seeded surface: the default (no seed) draws fresh bytes from the
+# operating system's CSPRNG on every call — no process or thread RNG state,
+# so it is fork-safe, matching secrets' own per-call semantics — safe for
+# keys, tokens, and secrets. seed= switches to a deterministic ChaCha20
+# stream: the output becomes a pure function of (seed, arguments), fully
+# predictable from the seed — a reproducible-test/fixture tool, NEVER safe
+# for secrets, keys, or tokens (any adversary who learns the seed can
+# reproduce the stream); the unseeded spelling is the secrets-safe one.
+# The seed is any int-like — an int instance (bools, IntEnums) or any
+# __index__ object, the same convention length accepts — reduced mod 2**64
+# (two's complement for negatives).
+# Length-first, uniformly: the four token spellings take the OUTPUT length
+# ("I want a base62 id X characters long" is the whole call), and all four
+# are one char-sampling engine — random_hex/random_b62/random_b64url are
+# exactly random_string over their fixed alphabets (Lemire, no modulo
+# bias). All six are one GIL-released pass (draw + sampling/formatting
+# under py.detach).
+# The seed contract shared by every seeded spelling below: any int-like —
+# an int instance (bools, IntEnums) or any __index__ object — reduced mod
+# 2**64, or None for the unseeded OS-entropy spelling. A non-int-like seed
+# raises TypeError naming the int-like (__index__) convention.
+_SeedLike = int | SupportsIndex
+def random_string(
+    length: int, alphabet: str, *, seed: _SeedLike | None = None
+) -> str: ...
+
+# length lowercase hex characters ("0123456789abcdef"), uniform per
+# character: exactly random_string(length, HEX_CHARS). Odd lengths are
+# legal (a 31-char hex id is a real shape); even lengths are what
+# digest-shaped keys want (every 2 chars exactly one byte).
+# secrets.token_hex(n) is the same uniform distribution as random_hex(2*n)
+# — different draws.
+def random_hex(length: int, *, seed: _SeedLike | None = None) -> str: ...
+
+# Exactly random_string(length, BASE62_CHARS): the [0-9A-Za-z] id spelling.
+def random_b62(length: int, *, seed: _SeedLike | None = None) -> str: ...
+
+# length characters uniform over the 64-char RFC 4648 §5 urlsafe alphabet
+# (A-Za-z0-9-_, never + or /), every position unconstrained: the
+# opaque-TOKEN contract, NOT a base64 encoding of N random bytes (an
+# encoding's final char is constrained; '=' never appears; there is no
+# padded= parameter — padding is an encoding concept, not a token
+# concept). Callers wanting encodable random material: random_hex of even
+# length (byte-exact via hex).
+def random_b64url(length: int, *, seed: _SeedLike | None = None) -> str: ...
+
+# An RFC 4122 v4 UUID string (36 chars, lowercase, hyphens at 8/13/18/23):
+# 122 random bits, the uuid.uuid4() spelling. Deterministic under seed=
+# (predictable — the security contract above).
+def uuid4(*, seed: _SeedLike | None = None) -> str: ...
+
+# An RFC 9562 v7 UUID string: 48-bit Unix-millisecond timestamp + 74 random
+# bits. No seed parameter: the timestamp is external state (a seeded uuid7
+# would still vary with the clock; the deterministic tool is uuid4(seed=...)).
+# Probabilistically unique, NOT counter-monotonic: same-millisecond calls
+# order by their random bits and a backwards clock step flows into the
+# timestamp (uuid_utils' strict monotonicity is a different product
+# promise). The caller-visible contract is the timestamp: the canonical
+# string's first two dash-free groups, int(u[:8] + u[9:13], 16), are the
+# call's Unix epoch milliseconds.
+def uuid7() -> str: ...
+
+# The uuid4 buffer spelling: the same 16 raw bytes uuid4 formats (version
+# and variant nibbles set, NO canonical hyphenation) — for consumers who
+# re-wrap the str back into bytes anyway (UUID(bytes=...), .hex() slicing):
+# one native draw and the field layout, no format-then-reparse roundtrip.
+# Same seed contract as uuid4 (any int-like, reduced mod 2**64) and the
+# same security paragraph above (seed= is predictable, never for secrets).
+# Fixed 16 bytes: no length argument, so the token spellings' memory-bound
+# class does not exist here.
+def uuid4_bytes(*, seed: _SeedLike | None = None) -> bytes: ...
+
+# The uuid7 buffer spelling: the same 16 raw bytes uuid7 formats —
+# 48-bit Unix-millisecond timestamp + 74 random bits, NO canonical
+# hyphenation. The consumer slice shapes: the first 6 bytes big-endian are
+# the timestamp (int.from_bytes(b[:6], "big")), and .hex()[:12] is its hex
+# spelling. No seed parameter (uuid7's own rationale: the timestamp is
+# external state); probabilistically unique, NOT counter-monotonic.
+def uuid7_bytes() -> bytes: ...
+
+
+# GIL note: one GIL-held walk of the items sequence (the standard str-in
+# borrow class, O(items) handles, over any Sequence), then the set builds
+# and the whole batch scan under one GIL-released pass, then a single int
+# return: no marshalling class at all (the count_matches shape). The
+# answer is the INDEX of the first item not built entirely from the two
+# sets, -1 when all pass (empty batch answers -1 even when every item
+# would offend); the scan short-circuits at the first offender,
+# but the argument walk validates the whole sequence up front (a bad
+# entry anywhere raises at the boundary, past a first offender or not).
+# Batch-only by design: per-item validation is under a detach round trip,
+# so per-item calls would be slower than the regexes this replaces; the
+# batch form — one detach, one pass — is the only shape that wins.
+# Per-scalar engine with no normalization (normalize with tors.normalize
+# first when NFC/NFD must agree, which still does not fold confusables:
+# allow-list exactly the codepoints you mean); huge set spellings belong
+# in module constants (define once, reuse the same string: the str-in
+# borrow stays warm — the per-call set build itself is unchanged, its
+# 10k-spelling sort unmeasured beyond the ASCII band). Both-bad
+# precedence is extraction order: first beats rest, set-argument
+# errors beat the items walk.
+def first_invalid_charset(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> int: ...
+
+# The offender-detail spelling of the same scan: (item_index,
+# char_position, offending_char) for the first offending item's FIRST
+# offending position — the detail a rejection message needs (the
+# consumer's per-character messages name the losing character and
+# position) — None when every item passes. char_position is a CODEPOINT
+# index within the item (the family's data model), never a UTF-8 byte
+# offset, and may land inside a grapheme cluster (flag-partial (0, 1,
+# "🇷") under rest="🇫"): do not slice at that position, build messages
+# from (item, char); offending_char is that codepoint as a 1-char str. The empty
+# item reports (i, 0, ""): no offending character to name, the char
+# field empty exactly when the item is. Same engine, same walk, same
+# one-detach batch pass and the same argument contract (byte-identical
+# refusals) as the int spelling; the int answer is the tuple's item
+# index, -1 exactly when the tuple is None. A == -1 test does not
+# transfer from the int spelling (a tuple never equals -1): spell the
+# check is None / is not None. See docs/api.md's
+# "Building rejection messages".
+def first_invalid_offender(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> tuple[int, int, str] | None: ...
+
+# Pinned common alphabets for first_invalid_charset: module constants, not
+# functions (no signature to diff). The stub carries their type only —
+# never their content: the live module is the single spelling of a
+# 62-character alphabet, and the byte-exact contract pins live in
+# tests/test_first_invalid_charset.py. See docs/api.md's "Common
+# alphabets" for what ships, what deliberately does not (padded base64,
+# UUID, digits), and why.
+CHARSET_B62: str
+CHARSET_B64URL: str
+CHARSET_HEX_LOWER: str
+CHARSET_HEX_MIXED: str
+CHARSET_HEX_UPPER: str

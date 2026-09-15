@@ -29,6 +29,23 @@ unicode-normalization = "0.1"
 # byte-identical to hashlib.sha256(...).hexdigest(), the expression a normalize-then-hash
 # dedupe gate computes.
 sha2 = "0.11"
+# The one-shot hashing surface (`src/hash_impl.rs`): the same RustCrypto
+# family sha2 already comes from, so one dependency line per algorithm and
+# nothing hand-rolled (a digest implementation is the worst kind of
+# hand-rolling: every line is a maintenance burden and a correctness risk
+# the maintained crates already carry test vectors against). md-5/sha1:
+# checksum/ETag/legacy-interop only, never security (broken since the
+# 2000s; the docs carry the note everywhere they are named). default-
+# features = false: the digest computation needs none of the crates' std
+# conveniences (the sha2 line above predates this surface and keeps its
+# own default for finalize's in-scan hasher; feature unification is
+# per-crate, so these lines only govern their own crates).
+md-5 = { version = "0.11", default-features = false }
+sha1 = { version = "0.11", default-features = false }
+# hmac_sha256_hex's HMAC construction (RFC 2104) over the sha2 engine: the
+# request-signing primitive (webhook signatures, AWS SigV4-style chains).
+# default-features = false: same reasoning as md-5/sha1 above.
+hmac = { version = "0.13", default-features = false }
 # hex-encoding of that digest: const-hex is the maintained drop-in for the `hex` crate
 # (no release since 2020, open "Unmaintained?" issue), same `encode(bytes) -> String`
 # call shape.
@@ -105,6 +122,31 @@ jsonschema = { version = "0.55", default-features = false }
 # criterion's transitive, so the direct edge adds no new package — the same
 # precedent as aho-corasick and encoding_rs.
 serde_json = "1"
+# The random-generation surface (`src/random_impl.rs`): OsRng, the per-call
+# OS CSPRNG source (getrandom/getentropy syscall) behind the unseeded
+# spelling of random_string/random_hex/random_b62/random_b64url/uuid4/uuid7.
+# default-features = false + os_rng only: none of rand's samplers,
+# distributions, thread-rng, or SmallRng machinery is used — tors owns the
+# u64 stream consumption (Lemire sampling, documented in random_impl.rs) and
+# needs only the OsRng type + its RngCore::fill_bytes. MIT OR Apache-2.0.
+# Already in the lock as the dev tree's transitive (criterion), so this
+# direct edge adds no new package to the tree at all — the aho-corasick/
+# serde_json precedent; what is new is only the base-build runtime reach:
+# rand, rand_core, getrandom (the os_rng feature's platform syscall crate).
+rand = { version = "0.9", default-features = false, features = ["os_rng"] }
+# The seeded spelling's deterministic stream: ChaCha20Rng built via
+# rand_core's seed_from_u64 (the PCG32 derivation documented in
+# random_impl.rs and re-implemented by the tests' oracle). default-features
+# off (std unneeded — tors fills byte buffers, never samples the crate's
+# own distributions). MIT OR Apache-2.0; also already in the lock (the dev
+# tree's transitive), so no new package; pulls ppv-lite86 for the SSE2
+# backend in addition to rand_core.
+rand_chacha = { version = "0.9", default-features = false }
+# rand_core's traits directly (SeedableRng::seed_from_u64, RngCore/TryRngCore
+# for the two fill spellings): the engine code speaks rand_core's vocabulary,
+# not a re-export chain through rand or rand_chacha. No features (the trait
+# surface is core), no new package (already in the tree via both).
+rand_core = { version = "0.9", default-features = false }
 # The single-number extraction grammar behind schema-mode numeric coercion
 # ("$50.0", "USD 50", "1,234.789" — one token, maximal munch, percent
 # suffix). Already in the tree as the jsonschema crate's pattern-validation
@@ -120,6 +162,49 @@ regex = "1"
 # UNLICENSE (the memchr election precedent). default-features off with
 # std only — no timezone database needed (fixed offsets + civil types).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# minhash_signature's shingle hash: XXH64 (twox-hash 2.1). The dep survey
+# (issue #62, 2026-09) measured the three candidates over the prose corpus
+# at ~30-byte shingles: XXH64 2.1 ns/shingle vs inline FNV-1a 5.9 vs
+# sha256-truncate 20.6, and found the end-to-end Jaccard-estimation quality
+# statistically indistinguishable between them over 2280 controlled pairs
+# (the affine stage over the Mersenne prime dominates the randomness; the
+# input hash's job is injectivity, which all three provide) — so the
+# fastest well-maintained one wins. XXH64 is the frozen-spec algorithm
+# (final since xxHash 0.7.0, 2016: the digest for a given seed and byte
+# stream is part of the spec, not an implementation detail), which is
+# exactly the stability a cross-version signature contract needs; MIT
+# (deny.toml's allowlist verbatim, no new entries); 240M downloads /
+# 52M recent, releases into 2026-08. default-features = false with
+# xxhash64+std: the crate is a ZERO-dependency leaf this way — its
+# defaults pull rand (+chacha20/getrandom) for the random-builder API
+# this crate never touches.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64", "std"] }
+# The UUIDv7 helper trio's parse/encode engine (src/uuid_impl.rs,
+# `uuid_parse`/`uuid_version`/`uuid7_timestamp_ms`): the uuid-rs org's crate,
+# adopted for the hex grammar work (parse + canonical encode) per the
+# maintainer policy of preferring a maintained, compliant crate over
+# hand-rolling. Apache-2.0 OR MIT, passes deny.toml's allowlist through SPDX
+# expression evaluation with no config change. default-features = false:
+# parse_str/from_bytes/get_version_num/hyphenated().encode_lower need NO
+# features, verified `cargo tree` shows zero transitive dependencies in this
+# config; the generation features (v4/v7/rng) stay off on the library path —
+# the random-generation family's uuid4/uuid7 draw their bytes from tors's
+# own rng and hand them to the crate's zero-feature builders
+# (`Builder::from_random_bytes` for v4, `Builder::from_unix_timestamp_millis`
+# for v7; the v4/v7/rng flags gate only the crate's own-rng `new_v4`/`now_v7`
+# constructors, which tors does not call), and the field-reading trio reads
+# fields back out with no generator at all. The strict-canonical CONTRACT stays
+# tors's own thin layer on top: the crate's parse_str deliberately accepts
+# the loose forms tors rejects (braces, urn:, hyphen-less, uppercase), so
+# tors enforces strictness by canonical-encoding equality — input must be
+# byte-equal to the parsed value's re-encoded canonical form — and keeps its
+# own error taxonomy/position finding (uuid_impl.rs's module doc). The caret
+# floor is 1.26 (caret + boundary-test posture: >=1.26, <2.0, with the
+# crate-adoption boundary pinned from both sides in src/uuid_impl.rs and
+# tests/test_uuid.py so a uuid 1.x grammar move fails as a boundary move);
+# the random-generation branch's own `uuid = "1"` line — same zero features
+# — deduped into this one at the merge, the stricter floor subsuming it.
+uuid = { version = "1.26", default-features = false }
 # The whole PDF surface (`pdf_extract`/`pdf_page_count`, `src/pdf_impl.rs`):
 # open + per-page text + markdown conversion, called directly under
 # `py.detach` — the crate ships pyo3 bindings of its own, but that wheel
@@ -204,9 +289,22 @@ documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-mar
 [dev-dependencies]
 criterion = "0.8"
 strsim = "0.11.1"
+# The random bench's uuid4 comparator only: `Uuid::new_v4()` (the crate's
+# own getrandom-per-call rng path — verified in its source; the
+# thread-cached engine is the separate opt-in fast-rng feature) is what
+# benches/random.rs measures the per-call-OsRng design against. The v4
+# feature pulls only uuid's `rng` (getrandom, already in the lock) — and
+# because this is a dev-dependency, the features unify ONLY into
+# test/bench builds: the published crate's uuid stays the zero-feature
+# builder set the library path uses.
+uuid = { version = "1", features = ["v4"] }
 
 [[bench]]
 name = "normalize"
+harness = false
+
+[[bench]]
+name = "canon"
 harness = false
 
 [[bench]]
@@ -242,6 +340,10 @@ name = "integrity"
 harness = false
 
 [[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
 name = "redaction"
 harness = false
 
@@ -255,4 +357,16 @@ harness = false
 
 [[bench]]
 name = "json_repair"
+harness = false
+
+[[bench]]
+name = "random"
+harness = false
+
+[[bench]]
+name = "minhash"
+harness = false
+
+[[bench]]
+name = "pii"
 harness = false

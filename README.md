@@ -27,7 +27,9 @@ so the GIL is free for the rest of your program while it runs.
 
 That covers the functions with a stdlib equivalent (`normalize`'s pipeline
 mirrors `unicodedata.normalize` + a few `re.sub` calls; `quote`/`unquote`
-mirror `urllib.parse`; `b64_encode_bytes`/`b64_decode` mirror `base64`). Where
+mirror `urllib.parse`; `b64_encode_bytes`/`b64_decode` mirror `base64`; the
+one-shot hashing family mirrors `hashlib`/`hmac`; the random-generation
+family mirrors `secrets`/`uuid`). Where
 the stdlib has no equivalent at all (Unicode text segmentation: grapheme
 clusters, word and sentence boundaries; leftmost-longest multi-pattern search;
 edit-distance and phonetic matching; content-defined chunking; SimHash
@@ -127,25 +129,33 @@ actually return.
 
 ## What's inside
 
-73 functions plus two small helper classes, grouped by what they do; the
-`documents` extra adds seven document-extraction functions and its own helper
-types. Full signatures, argument contracts, and edge cases are in the
-[API reference](docs/api.md).
+105 functions plus two small helper classes and six pinned constants (five
+charset alphabets and the key-family tuple),
+grouped by what they do; the `documents` extra adds seven document-extraction
+functions and its own helper types. Full signatures, argument contracts, and
+edge cases are in the [API reference](docs/api.md).
 
 | family | functions |
 |---|---|
 | Unicode normalization & forms | `normalize`, `finalize`, `nfc`/`nfd`/`nfkc`/`nfkd`, `html_unescape`, `strip_controls` |
+| Contact & credential scrub | `scrub_pii`(+`_report`), `KEY_FAMILIES` |
 | UTF-8 / UTF-16 / base64 codecs | `decode_utf8`, `finalize_utf8`, `utf8_is_valid`, `decode_utf16`, `utf16_is_valid`, `b64_encode_bytes`, `b64_decode`, `detect_encoding` |
+| Hashing & request signing | `md5_hex`, `sha1_hex`, `sha256_hex`, `sha512_hex`, `hmac_sha256_hex` + raw-digest `_digest` twins (md5/sha1: checksum/legacy-interop only, broken for security since the 2000s — never signatures, certificates, or passwords) |
+| Random generation (keys, tokens, ids) | `random_string`, `random_hex`, `random_b62`, `random_b64url`, `uuid4`(+`_bytes`), `uuid7`(+`_bytes`) |
 | Text segmentation (UAX #29) | `grapheme_count`, `word_bounds`(+`_iter`), `word_count`, `sentence_bounds`(+`_iter`), `sentence_count` |
 | Diffing (`difflib`-compatible) | `diff_opcodes`, `diff_opcodes_lines` |
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |
-| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `CompiledPatterns` |
+| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text`, `CompiledPatterns` |
+| Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
+| Byte lengths without the encode copy | `utf8_byte_len`, `utf16_byte_len` |
+| Batch charset validation | `first_invalid_charset`, `first_invalid_offender` (the same scan's offender detail — item index, codepoint position, character — for rejection messages), `CHARSET_B62`/`_B64URL`/`_HEX_LOWER`/`_HEX_UPPER`/`_HEX_MIXED` (pinned alphabets that pair with the validator as data) |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |
 | JSON repair (json_repair port) | `repair_json`, `repair_json_loads`, `repair_json_diagnostics` |
 | Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded` |
 | URL encoding | `quote`, `quote_plus`, `unquote`, `unquote_plus` |
 | Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical` |
-| Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `merkle_root`, `merkle_diff` |
+| Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `minhash_signature`, `merkle_root`, `merkle_diff`, `content_hash` |
+| UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |
 | Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris` |
 

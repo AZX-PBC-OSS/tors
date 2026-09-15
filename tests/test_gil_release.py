@@ -220,6 +220,69 @@ the dev box, ambient load 6.9-7.3, 3 samples per cell):
   millions of matches are the streaming-API question the word_bounds
   finding already raised, recorded again in docs/async.md.
 
+unescaped-scan cells (``contains_unescaped``/``find_unescaped``, the
+escape-parity byte scan; measured on the calibration box, macOS, 16
+cores, ambient load ~6-17, 3 samples per cell, corpora from
+``reference``: the plain prose bytes for the sparse shape and
+``unescaped_false_positive`` for the hit-dense all-rejected shape):
+
+- Both cells ceiling-only (the b64 12 MiB / utf8_is_valid precedent):
+  the scan is memchr-class — measured 0.25ms (sparse, no occurrence) and
+  0.79ms (dense, 72,520 rejected hits) inline at 12 MiB — so the walls
+  sit an order of magnitude under the 10ms ping floor and any gap/wall
+  ratio is the suite's documented sub-ping artifact. Measured worst gaps
+  10.3-11.1ms (the floor plus ~0.3-1.1ms of to_thread dispatch and the
+  two argument borrows) of 0.4-1.3ms walls, both shapes, both spellings
+  (``contains`` measured the same band: it is the same scan by
+  construction, pinned by the invariant test in
+  tests/test_unescaped_scan.py). The 100ms ceiling alone is the
+  assertion (~9x margin); the same limitation as every sub-floor cell
+  applies: a held ~1ms scan is invisible under the floor either way, so
+  these cells pin that the whole memmem loop plus the parity walk leaves
+  the loop at the floor at all, and the wall cells in
+  tests/test_unescaped_scan.py carry the throughput side.
+
+utf8_byte_len cells (the byte-count companion, #52; measured on the
+calibration box, macOS, 16 cores, ambient load ~10-18, 3 samples per
+cell, corpora from ``reference``: plain prose for the ASCII lane,
+``decomposed`` with a FRESH object per sample for the non-ASCII
+first-call lane):
+
+- Both cells ceiling-only, for two different structural reasons. The
+  ASCII lane is O(1) end to end (compact ASCII is its own UTF-8, so the
+  str-in borrow is a zero-copy alias; everything past the borrow is a
+  field read and a single int out): measured worst gaps 10.2-11.3ms of
+  0.1-0.4ms walls — the ping floor plus to_thread dispatch, the call
+  itself ~0.1µs — the b64 12 MiB / utf8_is_valid sub-floor artifact.
+  Nothing O(n) exists to detach on this lane, so it pins that the call
+  leaves the loop at the floor at all; the O(1) band is pinned in wall
+  time by tests/test_performance.py.
+- The non-ASCII first-call lane is the function's one heavy lane, made
+  structural by the fresh-object-per-sample design: the borrow's
+  materialization of the UTF-8 view is GIL-held O(n) (the cold-cache case:
+  the borrow fills the cache, ``encode`` only reads it, so only a str-in
+  call — not a prior encode — ends the cold lane; there is no way to fill
+  an object's cache without the GIL), measured 4.6-5.6ms walls
+  inline at 12 MiB with worst gaps 10.6-10.8ms — the materialization
+  (~5ms) sits under the 10ms ping interval itself, so the loop never
+  misses a tick beyond the floor at this size; the 100ms ceiling holds
+  ~10x, and the linear envelope (~0.4-0.5ms of GIL hold per MiB) puts a
+  ~200 MiB non-ASCII string at the ceiling (the recorded scale
+  guidance). The gap/wall ratio is ~1.0 by construction (the wall IS
+  the GIL-held materialization), which is why this leg is ceiling-only
+  like the D-form fast-path cell, not because the wall is sub-floor.
+
+utf16_byte_len cell (the interop twin, #52; same corpus shapes and
+fresh-object-per-sample design): both legs ceiling-only for the twin's
+two reasons, with the one honest structural difference — this core's
+detach carries REAL work (the O(n) byte-class scan, ~30 GB/s, ~0.4ms
+at 12 MiB — an order under the ping floor) where the twin's is nominal
+around a field read. The ASCII leg's whole call is the zero-copy alias
+borrow plus the detached scan, sub-floor end to end; the non-ASCII
+first-call leg's worst gap is the same GIL-held materialization as the
+twin's (~5ms at 12 MiB, under the ping interval), with the scan
+detached behind it.
+
 cells (``replace_many`` dense, ``sentence_bounds`` list,
 ``diff_opcodes_lines`` near-identical, all at 12 MiB; measured on the dev
 box, ambient load 2.0, 5 samples per cell, corpora from
@@ -361,6 +424,46 @@ end-of-call marshalling alignment):
   on every member; the light members' can't-discriminate-a-held-
   sub-ceiling-wall limitation and the mid-weight members' fast-box
   caveat are stated in the cell's docstring.
+
+hashing cells (``sha256_hex``/``sha512_hex``/``sha256_digest`` plus
+``hmac_sha256_hex``/``hmac_sha256_digest`` with a short key, all at
+12 MiB, measured on the
+dev box this section was calibrated on, Apple Silicon, ambient load
+7.8-9.7, 3 samples per cell, the prose corpus's UTF-8 bytes):
+
+- The walls are the story: 4-5ms (sha256) and 7-8ms (sha512) for one
+  12 MiB digest, at or under the 10ms ping floor itself, so every
+  worst-gap/wall ratio is the suite's documented sub-ping artifact and
+  both cells are ceiling-only (``ratio_budget=None``, the b64 12 MiB /
+  find_patterns sparse / chunking light-member precedent): measured
+  worst gaps 10.1-10.7ms — the ping floor plus the zero-copy argument
+  borrow and the O(64..128) hex-string marshalling, nothing else, the
+  no-residue-class claim of src/lib.rs's hashing paragraph measured
+  directly.
+- The honest hashlib red side, measured and NOT asserted: CPython's
+  ``hashlib`` releases the GIL for digest updates of 2048+ bytes (the
+  ``_hashopenssl`` threshold), so at digest-scale sizes the stdlib is
+  loop-friendly too — measured at 12 MiB (worst gaps 10.4-10.8ms of
+  4-8ms walls, the ping floor) and at 96 MiB (10.9-11.1ms of 33-38ms
+  walls for sha256, 11.1ms of 117-121ms for md5: the floor against
+  walls 3-12x over it). There is therefore no GIL-blocked stdlib red
+  row to assert against at any size where the work is visible: below
+  the 2048-byte threshold hashlib holds the GIL, but a sub-threshold
+  digest is ~11µs (measured), invisible under the floor either way.
+  The urllib red-side precedent applies: the red side is measured live
+  and recorded in the cell below, and what is asserted is the value
+  parity (the 12 MiB differential anchor).
+- The discriminating-power limitation, stated (the chunking family's
+  light-member note, verbatim precedent): on this hardware a lost
+  detach at 12 MiB shows a sub-floor wall (inline tors measured
+  10.7ms worst gaps of 5ms walls — the floor, indistinguishable from
+  the green band), so no budget the green cells use could discriminate
+  it here. What a detach regression would look like on slower
+  hardware, measured at 96 MiB (where the sha256 wall clears the floor
+  ~4x): to_thread worst gaps 11.1ms of 39-40ms (ratio 0.28) vs inline
+  39.0-39.7ms of 39-40ms (ratio 1.00, the whole wall held) — the
+  one-call lost-detach shape, recorded so the next reader knows the
+  ceiling-only design is a hardware-speed statement, not a no-op.
 """
 
 from __future__ import annotations
@@ -368,7 +471,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import difflib
+import hashlib
 import itertools
+import json
 import string
 import time
 import urllib.parse
@@ -380,7 +485,10 @@ import tors
 from reference import (
     SEARCH_DENSE_PATTERNS,
     SEARCH_SPARSE_PATTERNS,
+    UNESCAPED_NEEDLE,
     compat,
+    contacts,
+    content_object,
     corpus_b64,
     corpus_utf8,
     decomposed,
@@ -390,6 +498,8 @@ from reference import (
     prose,
     reference_finalize,
     reference_normalize,
+    scrub_corpus,
+    unescaped_false_positive,
 )
 
 # The timing lane: every test in this module is a measurement cell (worst
@@ -442,6 +552,31 @@ _WORD_BOUNDS_RATIO_BUDGET = 0.85
 # shows (the whole transform held); the 100ms ceiling independently holds
 # ~2.3x margin. Same derivation shape as _B64_RATIO_BUDGET below.
 _QC_YES_12MIB_RATIO_BUDGET = 0.60
+
+# The 12 MiB scrub_pii cell's ratio budget, same derivation: the scrub's
+# double scan is fast enough that the 12 MiB contacts corpus completes in
+# ~36-40ms while the O(output) marshalling of its ~11.8 MiB result string
+# costs ~12ms, so the residue is structurally ~33-34% of the wall (measured,
+# every sample) where the shared 0.30 cannot hold. 0.60 sits ~1.8x above
+# the worst measured ratio and ~40% below the ~1.0 a detach regression
+# shows (a held double scan pins the whole ~36ms wall as one gap); the
+# 100ms ceiling independently holds ~8x over the worst gap.
+_SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
+
+# content_hash's own ratio budget (the object-walk residue class, a new
+# class: the GIL-held walk materializes the whole value tree -- one borrow
+# plus copy per str, one i64 read per int, one repr call per float -- and
+# the canonical-form emission plus SHA-256 run detached under one
+# py.detach, so the residue is structurally ~half the call rather than a
+# small marshalling tail). Measured on the dev box over two load windows
+# (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
+# (reference.content_object) at 12 MiB, ~30.7k records): worst gaps
+# 23.3-32.2ms of 41.9-60.4ms walls, ratios 0.45-0.60, the loaded window's
+# 0.60 the worst observed. 0.80 sits ~1.3x above that worst ratio and
+# ~20% below the ~1.0 the lost-detach shape shows in every sample (the
+# red row below, measured 1.00-1.02); the 100ms ceiling holds ~3x margin
+# over the worst gap. Same derivation shape as _B64_RATIO_BUDGET.
+_CONTENT_HASH_RATIO_BUDGET = 0.80
 
 # The line-heavy corpus for the chunking family's cells (#30 item 5): the
 # chat-thread/log shape the streaming twins' own docstrings justify
@@ -767,6 +902,15 @@ def _stdlib_b64_expression(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
+def _stdlib_content_hash_expression(obj: object) -> str:
+    """The stdlib expression ``tors.content_hash`` replaces (the red side):
+    the exact canonical-form spelling the contract defines, hashed with
+    hashlib."""
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
     """The inline-run red idiom (the module docstring's reference-finalize
     "run inline on the loop instead, it is ratio ~1.0" note): call the
@@ -786,6 +930,7 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
         ("reference-finalize", 12 * _MIB, _RATIO_BUDGET),
         ("reference-finalize", 32 * _MIB, _RATIO_BUDGET),
         ("stdlib-b64-encode", 96 * _MIB, _B64_RATIO_BUDGET),
+        ("stdlib-content-hash", 12 * _MIB, _CONTENT_HASH_RATIO_BUDGET),
         ("inline-chunk_text", 12 * _MIB, None),
         ("inline-chunk_by_words", 12 * _MIB, None),
         ("inline-chunk_by_sentences", 12 * _MIB, None),
@@ -796,6 +941,7 @@ async def _call_inline_on_the_loop(fn: Callable[[], object]) -> object:
         "ref-finalize-12MiB",
         "ref-finalize-32MiB",
         "inline-stdlib-b64-96MiB",
+        "inline-stdlib-content-hash-12MiB",
         "inline-chunk_text-12MiB",
         "inline-chunk_by_words-12MiB",
         "inline-chunk_by_sentences-12MiB",
@@ -837,6 +983,24 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
       left the 100ms ceiling as the row's only discriminator with a
       box-speed-dependent margin, and the row measured a CLEAN sample on
       CI twice with no code change: the flake that moved it inline.
+    - The stdlib content_hash expression (``sha256(json.dumps(...,
+      sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()``
+      over the records corpus) at 12 MiB, run inline on the loop: worst
+      gaps 44.9-50.0ms of 44.8-49.4ms walls (ratio 1.00-1.02, measured
+      under ambient load 10-16), missing the 0.80 ratio budget in every
+      sample on any box speed -- ``json.dumps`` + ``str.encode`` are two
+      GIL-held C calls covering ~the whole wall, the one-call lost-detach
+      shape the green content_hash cell's budget exists to discriminate.
+      The 100ms ceiling does NOT discriminate here (walls ~45ms under it
+      even on this box), so the ratio budget is the row's only budget,
+      which is why the row carries the green cell's own 0.80 rather than
+      a ceiling-only ``None``: a tors detach regression pins the whole
+      walk+emit wall (the tors inline shape measured ratio 1.00 in every
+      sample) and fails it regardless of how fast the box runs the work.
+      In the to_thread placement the same expression measures ratio 0.89
+      (the worker's loop ticks between the three calls), under the 0.80
+      budget by only ~10%: box-dependent, which is why the row runs
+      inline (the b64 96 MiB row's rationale).
     - The chunking family's heavy members (``inline-*`` rows), run inline
       on the event loop via ``_call_inline_on_the_loop``: the green
       family cell's own calls at its own params
@@ -900,6 +1064,23 @@ def test_the_gil_held_red_sides_fail_their_budgets_in_every_sample(
             asyncio.run(
                 _gap_and_wall_during(
                     lambda: _call_inline_on_the_loop(lambda: _stdlib_b64_expression(corpus))
+                )
+            )
+            for _ in range(_SAMPLES)
+        ]
+    elif cell == "stdlib-content-hash":
+        # The stdlib content_hash expression, inline on the loop (the b64
+        # row's placement rationale): json.dumps and str.encode are
+        # GIL-held C calls covering ~the whole wall, so inline the worst
+        # gap IS the wall (ratio ~1.0 in every sample on every box,
+        # missing the 0.80 ratio budget), while the to_thread placement
+        # only reaches ~0.89 (the loop ticks between the three calls) --
+        # box-dependent margin, not a discriminator.
+        obj = content_object(size_bytes)
+        observed = [
+            asyncio.run(
+                _gap_and_wall_during(
+                    lambda: _call_inline_on_the_loop(lambda: _stdlib_content_hash_expression(obj))
                 )
             )
             for _ in range(_SAMPLES)
@@ -1302,6 +1483,176 @@ def test_utf8_is_valid_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     )
 
 
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("sparse", 12 * _MIB, None),
+        ("false-positive", 12 * _MIB, None),
+    ],
+    ids=["sparse-12MiB-ceiling-only", "false-positive-12MiB-ceiling-only"],
+)
+def test_unescaped_scan_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The escape-parity scan claim: the whole pass — the memmem occurrence
+    loop and the per-hit backward run walk — runs under ``py.detach``, and
+    the call's GIL-held residue is the two zero-copy
+    ``PyBytes`` borrows alone (a ``bool``/``int`` return, so no marshalling
+    class at all; the empty-needle ``ValueError`` is the only error path and
+    it fires before the detach), the ``utf8_is_valid`` extreme point applied
+    to search. Two corpus shapes: ``sparse`` (plain prose bytes, no
+    occurrence: the pure scan) and ``false-positive`` (one literal
+    ``\\\\u0000`` per sentence, every one of its ~72,520 occurrences behind
+    an odd run and rejected: the full scan plus the per-hit parity work,
+    no early exit — the worst case for both wall time and GIL release).
+
+    Both cells ceiling-only by the b64 12 MiB / utf8_is_valid precedent:
+    the scan is memchr-class (measured inline 0.25ms sparse / 0.79ms dense
+    at 12 MiB on the calibration box), so the wall sits an order of
+    magnitude under the 10ms ping floor and any gap/wall ratio is the
+    suite's documented sub-ping artifact. Measured on the calibration box
+    (macOS, 16 cores, ambient load ~6-17, 3 samples per cell): worst gaps
+    10.3-11.1ms of 0.4-1.3ms walls, both shapes and both spellings (the
+    module docstring's ledger). The 100ms ceiling alone is the assertion
+    (~9x margin); the sub-floor limitation is the same as every
+    ceiling-only cell's: a held ~1ms scan is invisible under the floor
+    either way, so this cell pins that the scan leaves the loop at the
+    floor at all, and the wall cells in tests/test_unescaped_scan.py carry
+    the throughput side."""
+    corpus = (
+        corpus_utf8("prose", size_bytes)
+        if corpus_kind == "sparse"
+        else unescaped_false_positive(size_bytes)
+    )
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.find_unescaped, corpus, UNESCAPED_NEEDLE),
+            ratio_budget=ratio_budget,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("ascii", 12 * _MIB, None),
+        ("non-ascii-first-call", 12 * _MIB, None),
+    ],
+    ids=["ascii-12MiB-ceiling-only", "non-ascii-first-call-12MiB-ceiling-only"],
+)
+def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The byte-count claim, and its honest limit: the call's only O(n)
+    work is the str-in borrow itself — CPython materializes the UTF-8 view
+    under the GIL on a non-ASCII object's first contact, the cold-cache
+    case exactly (a prior ``encode`` does not warm it: ``encode`` reads
+    this cache and never fills it, so only a str-in call ends the cold
+    lane; there is no way to fill an object's cache without holding the
+    GIL; the ``finalize`` cells' first-call class) — while everything past
+    the borrow is O(1)
+    (the ``py.detach`` around the core is nominal, kept for the family
+    shape) and the return is a single int, so there is no marshalling
+    class and no error path past the borrow's own ``UnicodeEncodeError``
+    on lone surrogates.
+
+    Two legs, both ceiling-only:
+
+    - ``ascii`` (prose): the borrow is a zero-copy alias (compact ASCII
+      data is its own UTF-8), so the whole call is O(1) end to end and
+      the wall sits five orders of magnitude under the 10ms ping floor —
+      the sub-ping artifact, the b64 12 MiB / utf8_is_valid precedent.
+      The pin's limit, stated: nothing O(n) exists to detach, so this
+      leg cannot discriminate a detach regression; it pins that the call
+      leaves the loop at the floor at all, and the wall cells in
+      tests/test_performance.py carry the O(1) band.
+    - ``non-ascii-first-call`` (decomposed, a FRESH object per sample so
+      every sample carries the worst case): the materialization itself
+      is GIL-held O(n), measured ~4.7-5.7ms inline at 12 MiB on the
+      calibration box (the encoder pass plus a malloc plus the second
+      memcpy into the permanent cache, within ~10-20% of a cold
+      ``encode`` of the same object). The gap/wall ratio here is ~1.0 by
+      construction (the wall IS the GIL-held materialization — the
+      D-form fast-path cell's situation, not a detach regression), so
+      the 100ms ceiling alone is the assertion, holding ~20x margin at
+      this size; the linear envelope (~0.4-0.5ms of GIL hold per MiB)
+      puts a ~200 MiB non-ASCII string at the ceiling, the recorded
+      scale guidance for this function's one heavy lane.
+    """
+    if corpus_kind == "ascii":
+        corpus = _CORPORA["prose"](size_bytes)
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf8_byte_len, corpus),
+                ratio_budget=ratio_budget,
+            )
+        )
+    else:
+        copies = iter([_CORPORA["decomposed"](size_bytes) for _ in range(_SAMPLES)])
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf8_byte_len, next(copies)),
+                ratio_budget=ratio_budget,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("corpus_kind", "size_bytes", "ratio_budget"),
+    [
+        ("ascii", 12 * _MIB, None),
+        ("non-ascii-first-call", 12 * _MIB, None),
+    ],
+    ids=["ascii-12MiB-ceiling-only", "non-ascii-first-call-12MiB-ceiling-only"],
+)
+def test_utf16_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int, ratio_budget: float | None
+) -> None:
+    """The interop twin's cell, and the one honest difference from the
+    utf8 twin's: the detach around this core carries REAL work (the
+    O(n) byte-class scan, ~30 GB/s — measured ~0.4ms at 12 MiB, an
+    order under the 10ms ping floor), where the twin's detach is
+    nominal around one field read. The GIL-held residue is the same
+    borrow class: the cold-cache first call's materialization of the
+    UTF-8 view (there is no way to fill an object's cache without
+    holding the GIL; a prior ``encode`` does not warm it), with the
+    scan detached behind it.
+
+    Two legs, both ceiling-only, the twin's reasons:
+
+    - ``ascii`` (prose): the borrow is a zero-copy alias and the scan
+      is detached, so the whole call's GIL-held residue is call
+      overhead — the wall (~0.4ms at 12 MiB) sits an order under the
+      ping floor, and the pin's limit is the utf8 twin's: a sub-floor
+      call cannot discriminate a detach regression by gap alone, it
+      pins that the call leaves the loop at the floor at all (the wall
+      cells in tests/test_performance.py carry the scan band).
+    - ``non-ascii-first-call`` (decomposed, a FRESH object per sample):
+      the materialization is GIL-held O(n) — the utf8 twin's measured
+      ~4.7-5.7ms inline class at 12 MiB — with the detached scan
+      (~0.4ms) behind it, so the worst gap is the materialization
+      itself, still under the 10ms ping interval; the 100ms ceiling
+      holds ~20x, and the linear envelope is the twin's (~0.4-0.5ms of
+      GIL hold per MiB, a ~200 MiB non-ASCII string at the ceiling).
+    """
+    if corpus_kind == "ascii":
+        corpus = _CORPORA["prose"](size_bytes)
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf16_byte_len, corpus),
+                ratio_budget=ratio_budget,
+            )
+        )
+    else:
+        copies = iter([_CORPORA["decomposed"](size_bytes) for _ in range(_SAMPLES)])
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.to_thread(tors.utf16_byte_len, next(copies)),
+                ratio_budget=ratio_budget,
+            )
+        )
+
+
 @pytest.mark.parametrize("size_bytes", [32 * _MIB], ids=["32MiB"])
 def test_diff_opcodes_near_identical_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
@@ -1538,6 +1889,75 @@ def test_replace_many_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.replace_many, text, replacements)
+        )
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [96 * _MIB], ids=["96MiB"])
+def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The scrub claim, the replace_many dense cell's shape over the
+    surface it exists for: the whole four-pass rule chain (DETAIL line
+    scan, escaped-run scan, userinfo scan, query-param scan, plus the
+    splice) detached under one ``py.detach``, over the exception-shaped
+    scrub corpus where every rule fires once per unit, and the return is
+    one string, so the GIL-held residue is the argument borrow plus that
+    single string's marshalling — ``detached_transform``'s classes, the
+    no-list-shape prediction again.
+
+    The 96 MiB size is the cell's own derivation, not the suite's usual
+    12 MiB: the scrub core is memchr/memmem-scanned Rust, so 12 MiB walls
+    only 8-10ms — at the 10ms ping floor, where the ratio is the
+    documented sub-ping artifact (the b64 12 MiB precedent) and cannot
+    carry the shared budget. 96 MiB walls 56-72ms, clearing the floor ~6x.
+
+    Measured on the dev box (ambient load ~4, 3 samples per side): worst
+    gaps 11.1-13.6ms of 56-72ms walls (ratio 0.19-0.20) — the ping floor
+    plus the one output string's marshalling (the DETAIL deletions leave
+    the output ~87% of the input). The cell takes the shared budgets: the
+    0.30 ratio sits ~1.5x above the worst measured ratio and ~70% below
+    the ~1.0 a detach regression shows, and the 100ms ceiling holds ~7x
+    over the worst gap. The red side, measured in the same placement: the
+    four-pass ``re.sub`` chain this port replaces holds the loop for
+    2487-2489ms of 2759-2762ms walls (ratio 0.90) over the same corpus —
+    ``re.sub`` never releases the GIL, the exact GIL-tax the port exists
+    to remove (up to four passes per text and ~24 per failed job in the
+    consumer's error path)."""
+    text = scrub_corpus(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.scrub_log_text, text))
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_scrub_pii_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The scrub claim on the contact-dense shape the function exists
+    for: one email and one human-spelled E.164 number per sentence of
+    the 12 MiB contacts corpus (~119k matches measured), one email pass
+    plus one phone pass plus every token digest, all under the one
+    ``py.detach``, and the return is one ~11.8 MiB string, so the
+    GIL-held residue is the argument borrow plus that single string's
+    marshalling: ``replace_many`` dense's no-list-shape class exactly
+    (the structural contrast with ``find_patterns``' per-match tuples).
+
+    Measured on the dev box (ambient load ~3.5, 3 samples): worst gaps
+    ~12ms of 36-40ms walls (ratio 0.33-0.34, every sample) — the ping
+    floor plus the end-of-call marshalling of the ~11.8 MiB result
+    string. The scrub's double scan is fast enough that this residue is
+    structurally a third of the wall, so the cell takes the bespoke
+    0.60 ratio budget (``_SCRUB_PII_12MIB_RATIO_BUDGET``, the
+    QC-Yes/b64 derivation shape: ~1.8x above the worst measured ratio,
+    ~40% below the ~1.0 a detach regression shows when a held double
+    scan pins the whole wall as one gap); the 100ms ceiling
+    independently holds ~8x over the worst gap."""
+    corpus = contacts(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.scrub_pii, corpus),
+            ratio_budget=_SCRUB_PII_12MIB_RATIO_BUDGET,
         )
     )
 
@@ -2242,4 +2662,413 @@ def test_get_close_matches_beats_difflib_on_the_bulk_corpus() -> None:
         f"bulk get_close_matches: tors {tors_wall * 1000:.0f}ms vs difflib "
         f"{difflib_wall * 1000:.0f}ms (ratio {tors_wall / difflib_wall:.4f}): the native "
         "sweep lost more than the tolerance margin to the quadratic stdlib matcher"
+    )
+
+
+@pytest.mark.parametrize(
+    "length",
+    [1024 * 1024, 2 * 1024 * 1024],
+    ids=["1MiB-chars", "2MiB-chars"],
+)
+def test_random_hex_generation_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    length: int,
+) -> None:
+    """The random-generation claim, ceiling-only cells (the b64 12 MiB
+    precedent): the whole pass — the block-buffered OS-entropy fills (one
+    getrandom syscall per 1024 bytes, no process or thread RNG state) plus
+    the per-character sampling and string build — runs under one
+    ``py.detach``, and the return is one string, so the GIL-held residue is
+    the O(output) marshalling alone (1 byte per ASCII hex character here).
+    The length-first refactor moved hex onto the char-sampling engine, so
+    the wall at a given output length is the b62-class wall (measured
+    ~31ns/char), not the old byte-fill wall: these cells hold the output
+    sizes the old byte-drawn cells produced (1 MiB and 2 MiB of hex
+    string), which now costs 8 MiB / 16 MiB of stream drawn through the
+    block buffer — thousands of syscalls, all detached.
+
+    Measured on the dev box (Apple Silicon, quiet, 3 samples per cell):
+
+    - 1 MiB of output (2^20 chars): worst gaps ~11.1ms of ~33.5-33.8ms
+      walls — the ping floor; the whole generation+marshalling sequence
+      stays off the loop.
+    - 2 MiB of output (2^21 chars): worst gaps ~11.1ms of ~66.6-67.1ms
+      walls, the same band.
+
+    The wall grew ~10x over the old byte-fill spelling at equal output
+    (the engine-class change the performance ledger records); the GIL
+    claim is unchanged — the gap is the floor, and the cell's ceiling
+    (100ms) still has ~9x margin over it. A detach regression (the fills
+    held under the GIL) would show the same wall but block the loop for
+    it: 33-67ms held is over the ping floor but under the ceiling, so the
+    ceiling alone cannot separate that — the cell's real regression teeth
+    are the blowout class (a per-char syscall regression would put ~1.2us
+    x 2^21 ~ 2.5s of held work behind one call and trip the ceiling by
+    ~25x).
+
+    The seeded spelling (ChaCha20 userspace, no syscall at all) is strictly
+    cheaper on the detached side; unseeded is the shape worth the cell."""
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.random_hex, length),
+            ratio_budget=None,
+        )
+    )
+
+
+@pytest.mark.parametrize("corpus_kind", ["prose", "decomposed"])
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_minhash_signature_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    corpus_kind: str, size_bytes: int
+) -> None:
+    """The MinHash claim: the whole tokenize + shingle + XXH64 + min-sweep
+    (the sweep is the dominant cost, O(shingles x num_perm)) runs under one
+    ``py.detach``, and the return marshalling is bounded by contract at
+    ``num_perm`` ints (<= 1024), so the GIL-held residue is the argument
+    borrow plus at most a thousand fresh ints -- two orders of magnitude
+    under the word_bounds 3.67M-tuple band at the same corpus size, the
+    structural reason no streaming twin exists for this shape.
+
+    Measured on the dev box (macOS/arm64, ambient load ~2, 3 samples per
+    cell, ``num_perm`` 128):
+
+    - prose 12 MiB: worst gap 11.1ms of 456-466ms walls (ratio 0.024):
+      the ping floor plus the borrow and the 128-int marshalling.
+    - decomposed 12 MiB: the same band plus the str-in one-time O(input)
+      UTF-8 materialization on the first sample (the class every str-in
+      function pays), still at the floor scale.
+
+    Every sample sits deep inside both shared budgets (~12x on the ratio,
+    ~9x on the ceiling)."""
+    corpus = _CORPORA[corpus_kind](size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.minhash_signature, corpus))
+    )
+
+
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The object-walk residue class, pinned: ``tors.content_hash``'s walk
+    materializes the whole value tree under the GIL (the standard arg-walk
+    class scaled to an object: one ``to_str`` borrow plus copy per str,
+    one i64 storage read per fast-path int, one Python ``repr`` call per
+    float or big int, one CPython sort per non-str/int-keyed dict), then
+    the canonical-form emission and the SHA-256 run under one
+    ``py.detach``. The residue is therefore structurally ~half the call,
+    not a small marshalling tail: measured on the dev box over two load
+    windows (ambient load ~2 and ~10-16, 3-5 samples, the records corpus
+    (``reference.content_object``) at 12 MiB, ~30.7k records of str/int/
+    float/bool/list fields): worst gaps 23.3-32.2ms of 41.9-60.4ms walls,
+    ratios 0.45-0.60, every sample inside both budgets (the 0.80 ratio
+    budget ~1.3x above the worst observed ratio, the 100ms ceiling ~3x
+    above the worst gap). The corpus is all-ASCII, so no first-call
+    UTF-8-materialization band exists: every sample pays the same walk
+    (compact-ASCII ``to_str`` borrows are zero-copy aliases; the copy into
+    the owned tree is the cost).
+
+    What the detach buys, and what it cannot: the stdlib spelling
+    (``sha256(json.dumps(...).encode()).hexdigest()``) holds the GIL for
+    ``json.dumps`` plus ``str.encode``, ~the whole wall -- inline it
+    measures ratio 1.00-1.02 in every sample (the red row), and even in
+    this to_thread placement 0.89 -- where tors's worst is 0.60 under the
+    same load. The walk itself is irreducible without an interpreter-free
+    object format: every step is a CPython API call, so the O(tree) walk
+    is the documented price of the parity contract, and the emitted-bytes
+    half of the call is what the detach removes.
+
+    No 32 MiB twin: the wall cell (tests/test_performance.py) records the
+    size curve as a measured dead heat with the stdlib at 64 KiB-12 MiB,
+    and the residue/wall ratio is the load-stable constant this cell
+    pins, not a size-dependent quantity."""
+    obj = content_object(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.content_hash, obj),
+            ratio_budget=_CONTENT_HASH_RATIO_BUDGET,
+        )
+    )
+
+
+# --- The one-shot hashing surface -------------------------------------------------
+#
+# sha256_hex/sha512_hex/sha256_digest plus the HMAC spellings at 12 MiB:
+# ceiling-only cells (walls at or under the ping floor on the calibration
+# hardware), plus the measured-not-asserted hashlib red-side recording
+# cell (the urllib red-side precedent: the stdlib releases the GIL for
+# 2048+-byte digest updates, so there is no GIL-blocked red row to
+# assert; see the module docstring's hashing paragraph for the full
+# measured story, including the 96 MiB inline lost-detach discrimination
+# measurements). The digest and HMAC rows pin src/lib.rs's hashing
+# paragraph directly: the `_digest` spellings marshal a fixed-size
+# PyBytes instead of the hex string, and the HMAC spellings borrow two
+# arguments, all under the same single detach — measured here, not just
+# claimed for the hex spellings.
+
+
+@pytest.mark.parametrize(
+    "fn_name",
+    ["sha256_hex", "sha512_hex", "sha256_digest"],
+    ids=["sha256", "sha512", "sha256-digest"],
+)
+def test_hash_digest_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    fn_name: str,
+) -> None:
+    """The hashing surface's GIL claim, at the size the wall-vs-hashlib
+    comparison is told (tests/test_performance.py): one 12 MiB digest in a
+    worker thread, the whole computation (hex formatting included on the
+    `_hex` spellings) under one ``py.detach``, and the loop ticks at the
+    ping floor through it — measured 10.1-10.7ms worst gaps (the floor
+    plus the argument borrow and the O(64..128) hex marshalling, or the
+    fixed-size PyBytes on the `_digest` spelling; the crate GIL model's
+    no-residue-class claim for this surface, measured directly on hex,
+    digest, and HMAC rows alike).
+
+    Ceiling-only (``ratio_budget=None``, the b64 12 MiB / find_patterns
+    sparse precedent): the 12 MiB digest walls on the calibration hardware
+    are 4-5ms (sha256) and 7-8ms (sha512), at or under the 10ms ping
+    floor, so any gap/wall ratio is the documented sub-ping artifact. The
+    limitation, stated rather than thresholded away (the chunking
+    family's light-member note): a lost detach at this size holds a
+    sub-floor wall on this hardware and no budget here discriminates it;
+    the 96 MiB measurements in the module docstring (to_thread 0.28 vs
+    inline 1.00) are what the regression looks like where the wall clears
+    the floor, and the 100ms ceiling is the pin that catches it on
+    hardware slow enough for a held 12 MiB digest to reach it."""
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    fn = getattr(tors, fn_name)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(fn, corpus),
+            ratio_budget=None,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "fn_name", ["hmac_sha256_hex", "hmac_sha256_digest"], ids=["hmac-hex", "hmac-digest"]
+)
+def test_hmac_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    fn_name: str,
+) -> None:
+    """The HMAC spellings' GIL claim: a short key over 12 MiB of data in a
+    worker thread, the whole keyed digest (key derivation included, hex
+    formatting included on the hex spelling) under one ``py.detach`` —
+    both borrows under the GIL, nothing else held. Ceiling-only like the
+    digest cells above (the 12 MiB HMAC wall sits at the same
+    engine-dominated scale, at or under the ping floor); the 100ms
+    ceiling is the pin. The short key is the request-signing shape (a
+    webhook secret, bytes, not blocks)."""
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    fn = getattr(tors, fn_name)
+    key = b"corpus-key"
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(fn, key, corpus),
+            ratio_budget=None,
+        )
+    )
+
+
+def test_hashlib_red_side_is_measured_and_value_parity_is_asserted() -> None:
+    """The stdlib red side for the hashing surface, measured live in the
+    same to_thread cell style and recorded, not budget-asserted (the
+    urllib red-side precedent): CPython's ``hashlib`` releases the GIL for
+    digest updates of 2048+ bytes (the ``_hashopenssl`` threshold), so at
+    digest-scale sizes the stdlib keeps the loop at the ping floor too and
+    asserting a blocked red row would be manufacturing a win the
+    measurement does not show. Below the threshold hashlib does hold the
+    GIL, but a sub-threshold digest is ~11µs of held GIL (measured),
+    invisible under the 10ms floor either way — the honest statement is
+    that tors's GIL release is uniform at every size while hashlib's
+    starts at 2048 bytes, and that this surface's GIL value over the
+    stdlib is the µs-scale uniformity plus the never-held hex tail, not a
+    latency win at digest sizes. What IS asserted is the value parity
+    (the 12 MiB differential anchor, the same equality the hypothesis
+    gates in tests/test_hash.py prove at generated sizes, here at corpus
+    scale); the bands are printed so every run's log carries the recorded
+    shape."""
+    import hashlib
+
+    corpus = corpus_utf8("prose", 12 * _MIB)
+    # The 12 MiB parity anchors (one inline call each side).
+    assert tors.md5_hex(corpus) == hashlib.md5(corpus).hexdigest()
+    assert tors.sha1_hex(corpus) == hashlib.sha1(corpus).hexdigest()
+    assert tors.sha256_hex(corpus) == hashlib.sha256(corpus).hexdigest()
+    assert tors.sha512_hex(corpus) == hashlib.sha512(corpus).hexdigest()
+
+    note = "hashlib red side (recorded, not asserted; GIL released for 2048+-byte updates): "
+    for name, red in (
+        ("hashlib.sha256", lambda raw: hashlib.sha256(raw).hexdigest()),
+        ("hashlib.sha512", lambda raw: hashlib.sha512(raw).hexdigest()),
+    ):
+        observed = [
+            asyncio.run(
+                _gap_and_wall_during(lambda red=red: asyncio.to_thread(red, corpus))
+            )
+            for _ in range(_SAMPLES)
+        ]
+        for gap, wall in observed:
+            print(
+                f"{note}{name} blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms "
+                f"operation ({gap / wall:.0%})"
+            )
+
+
+# The UUIDv7 helper trio's fixed v7 (timestamp field 1_750_000_000_000 ms,
+# version 7, RFC 4122 variant; the same fixed UUID docs/api.md's example and
+# tests/test_uuid.py's doc-example pin use), in both accepted spellings.
+# Self-contained literals (no uuid import): the timing lane builds its own
+# corpora, the chatlog precedent.
+_UUID7_BATCH_BYTES = bytes.fromhex("01977420dc007abc9def98765432100f")
+_UUID7_BATCH_TEXT = "01977420-dc00-7abc-9def-98765432100f"
+
+# The trio's batch size and bespoke gap ceiling. One call is ~60-90ns (16
+# bytes in, one int or one 16-byte value out; measured 59-76ns inline,
+# 63-85ns per loop iteration with the generator bookkeeping), so a single
+# call sits four orders of magnitude under the 10ms ping floor and no
+# single-call cell can mean anything; the batch loop is the only honest
+# shape. The structural gap band of that shape is NOT the quiet-box
+# 10-11ms ping floor: a worker thread reacquiring the GIL every ~70ns
+# contends with the heartbeat for it, and under sustained ambient load
+# that handoff contention stretches worst gaps into the tens-to-low-
+# hundreds of ms -- measured 27-75ms at ambient load 8.6-12.3 (N=4M) and
+# 27-118ms at 17-19 (N=8M), a band that is roughly wall-independent
+# (per-tick reacquisition delay) while a wholesale GIL hold of the loop
+# shows gap ~= wall. N is therefore sized by separation, the
+# word_bounds-precedent derivation: at 8M calls the walls (~0.9-1.2s
+# measured) put the wholesale-hold regression class at ~0.9-1.2s of gap,
+# far above the load band, and the 400ms bespoke ceiling sits ~3.4x above
+# the worst measured loaded-band gap (118ms) and ~2.2-3x below the hold
+# class. The suite's shared 100ms ceiling is structurally at risk for
+# this shape under sustained load (the first full-gate run flaked on it:
+# all 3 samples dirty at ambient load 8-12, the int-out pair's detach
+# churn contending hardest), so this cell carries its own ceiling, the
+# word_bounds/list-shape situation; the shared 0.30 ratio budget stays
+# (2.7x above the worst measured loaded-band ratio, 0.11; the hold class
+# sits at ~1.0 and fails it by >3x). The one regression this cell
+# honestly CANNOT catch is a lost py.detach on the int-out pair: the
+# extraction itself is a handful of nanoseconds, invisible next to the
+# call machinery's own GIL traffic -- the detach on this surface is
+# contract uniformity with the rest of the crate, not a measurable
+# GIL-release payoff (src/py/uuid.rs's doc comment records the same
+# reasoning from the implementation side).
+_UUID_BATCH_CALLS = 8_000_000
+_UUID_CELL_CEILING_S = 0.400
+
+
+@pytest.mark.parametrize(
+    "helper",
+    ["uuid7_timestamp_ms", "uuid_version", "uuid_parse"],
+)
+def test_uuid_helpers_batch_loop_keeps_the_event_loop_at_heartbeat_granularity(
+    helper: str,
+) -> None:
+    """The UUIDv7 helper trio's GIL claim, at its honest scale: every call's
+    GIL-held residue is sub-µs (the int-out pair's argument borrow plus one
+    int out, with the bit extraction detached; uuid_parse's whole 36-byte
+    parse, which runs GIL-held by design -- there is no int-out tail to
+    detach and a detach around a 36-byte scan would be overhead for its own
+    sake), so a batch loop of the calls in a worker thread leaves the loop
+    ticking at heartbeat granularity over a ~0.9-1.2s wall, even on a
+    heavily loaded box.
+
+    The budgets, derived per the constant block above: the 400ms bespoke
+    gap ceiling (~3.4x above the measured loaded-band worst of 118ms at
+    ambient load 17-19) and the shared 0.30 ratio budget (2.7x above the
+    loaded-band worst ratio of 0.11). What they discriminate: a wholesale
+    hold of the loop (gap ~= wall ~= 0.9-1.2s, ratio ~1.0: both budgets,
+    by >2x) and a per-call GIL-held residue grown to the ~400ms class. A
+    lost detach on the extraction is invisible either way (nanoseconds of
+    work), the limitation recorded beside the constant; pass-on-first-clean
+    over 3 samples tolerates the transient single-sample starvation the
+    module's design already retries."""
+    calls: dict[str, Callable[[], object]] = {
+        "uuid7_timestamp_ms": lambda: tors.uuid7_timestamp_ms(_UUID7_BATCH_BYTES),
+        "uuid_version": lambda: tors.uuid_version(_UUID7_BATCH_BYTES),
+        "uuid_parse": lambda: tors.uuid_parse(_UUID7_BATCH_TEXT),
+    }
+    call = calls[helper]
+
+    def consume() -> int:
+        return sum(1 for _ in range(_UUID_BATCH_CALLS) if call() is not None)
+
+    observed = [
+        asyncio.run(_gap_and_wall_during(lambda: asyncio.to_thread(consume)))
+        for _ in range(_SAMPLES)
+    ]
+    for gap, wall in observed:
+        if gap < _UUID_CELL_CEILING_S and gap < _RATIO_BUDGET * wall:
+            return
+    detail = "; ".join(
+        f"blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms batch "
+        f"({gap / wall:.0%}, over the {_UUID_CELL_CEILING_S * 1000:.0f}ms ceiling "
+        f"and/or the {_RATIO_BUDGET:.0%} ratio budget)"
+        for gap, wall in observed
+    )
+    raise AssertionError(
+        f"the uuid helper batch loop regressed in every one of {_SAMPLES} samples "
+        f"({detail}): either a per-call GIL-held residue grew into the hundreds "
+        "of ms or the loop lost its responsiveness class (src/py/uuid.rs, "
+        "tests/test_gil_release.py)"
+    )
+
+
+# The identifier rule's two halves (TaskQ's _IDENT_RE shape: letters and
+# underscore at position 0, digits joining after), the rule this module's
+# cell, the wall race in tests/test_performance.py, and the bench group in
+# benches/search.rs all drive.
+_IDENT_FIRST = string.ascii_letters + "_"
+_IDENT_REST = string.ascii_letters + string.digits + "_"
+
+
+def _ident_items(count: int) -> list[str]:
+    """A deterministic all-valid identifier batch (the job/queue/worker/tag
+    spellings an enqueue path validates), local to this module (the
+    chatlog/_close_matches_corpus precedent: only this module's cells
+    consume it)."""
+    shapes = ("job_{n}", "queue_eu_{n}", "worker_{n}", "tag_{n}")
+    return [shapes[n % 4].format(n=n) for n in range(count)]
+
+
+@pytest.mark.parametrize("count", [100_000, 1_000_000], ids=["100k-items", "1M-items"])
+def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    count: int,
+) -> None:
+    """The batch-validator claim: the whole batch pass (set builds + scan)
+    runs under one ``py.detach``, and the call's GIL-held residue is the
+    O(items) argument walk (the standard str-in borrow class, the
+    ``get_close_matches`` candidate-walk shape over a Sequence) plus a
+    single int return: no marshalling class at all.
+
+    Ceiling-only by the ``utf8_is_valid`` precedent, honestly so. The
+    function exists for batches of hundreds of items, where the whole
+    call measures ~2 µs (the wall race in tests/test_performance.py):
+    far under the 10 ms ping floor, no realistic batch can produce a
+    measurable gap at all. These cells pin the detach claim at batch
+    sizes a thousandfold and ten-thousandfold past realistic, and there
+    the measured worst gaps stay in the ping-floor band — the walk's
+    contiguous GIL hold never exceeds one ping period (even the 1M-item
+    walk's hold sits under the floor, so the worst gap is the floor
+    itself, not the walk) — so the 100 ms ceiling (~9x margin) is the
+    assertion and any ratio is the suite's documented sub-floor
+    artifact. A detach regression at these sub-ceiling walls would hold
+    the loop for the whole ~2-20 ms wall and still pass the ceiling:
+    the same can't-discriminate-a-held-sub-ceiling-wall limitation the
+    ``utf8_is_valid`` cells state for their own sub-floor walls,
+    recorded here rather than thresholded away; the wall race and the
+    bench carry the performance contract instead.
+
+    Measured on the dev box (ambient load 5.5-8.7, 3 samples per cell):
+    100k items worst gaps 11.0-11.1 ms of 1.7-3.0 ms walls; 1M items
+    10.5-11.4 ms of 16.4-19.7 ms walls (the floor band: the scan is
+    detached, the walk's hold is under the ping period)."""
+    items = _ident_items(count)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.first_invalid_charset, items, first=_IDENT_FIRST, rest=_IDENT_REST
+            ),
+            ratio_budget=None,
+        )
     )

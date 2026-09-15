@@ -114,6 +114,540 @@ tors.strip_controls("score: 4\x00\x01great\x7f")
 
 **Async**: `await tors.aio.strip_controls(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
+## `tors.scrub_pii`
+
+```python
+def scrub_pii(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> str: ...
+```
+
+Replace contact material — email addresses and `+`-led phone numbers —
+and credential material — provider/platform API keys — inside
+free text with correlation tokens, in one GIL-released pass. The call-site
+driver: telemetry is the one store a data purge cannot reach, so an error
+excerpt, rejection message, or response-body excerpt that echoes a person's
+address or number — or the credential the request authenticated with —
+must be scrubbed before it reaches the log: provider and platform error
+text can quote the credential back (five private consumers evidenced; the
+strongest, a platform whose own code comments that a vendor auth failure
+"can quote the key" and keeps the full text in an admin-served ledger).
+The contact rules are a port of a private consumer's telemetry-safety
+module, pinned byte-identical to it at `salt=""`; the api_keys rule is an
+extension past that contract.
+
+What the tokens are: `@domain~<digest>` for an email (the domain is the
+non-identifying half an operator actually reasons about — "the ambiguity is on
+the corporate domain"), `prefix~<digest>` for a phone number, where `prefix`
+is the match's first three code points (a canonical E.164's country code:
+`"+47"` compact, `"+1 "` for a domestic spelling where the third code point is
+the space), and `<family prefix>~<digest>` for an API key, where the family
+prefix is kept VERBATIM (`sk-`, `sk-ant-`, `github_pat_`, `AIza`, `Bearer`) —
+the non-secret half that tells the operator WHICH credential to rotate. In
+every rule `<digest>` is the first 12 hex chars of `sha256(salt + match)`.
+A token is a correlation handle, not a secret: it lets an operator tie two log
+lines to the same address without the record holding the address.
+
+```python
+tors.scrub_pii("unknown candidate fungai.chetima@example.com called from +14155552671 twice")
+# "unknown candidate @example.com~3aa8d1d0bb1a called from +14~115f5ee5ea90 twice"
+
+tors.scrub_pii("ring +1 (415) 555-2671 about ticket 4096")
+# "ring +1 ~dc750721a848 about ticket 4096"
+```
+
+The three rules, a closed set (anything else is a `ValueError` naming it):
+
+- `contact_email` — the deliberately permissive local part
+  `[A-Za-z0-9._%+\-]+`, a domain of ASCII letters/digits/dots/hyphens, and a
+  two-plus-letter ASCII tail after the largest dot the greedy backtracking
+  can reach (`a@b.co9` scrubs `a@b.co` and leaves the `9`; `a@b.c.d` never
+  matches; `a@.b.co` matches with the domain kept verbatim). URLs, `mailto:`
+  links, and code spans get no special treatment: whatever email sits inside
+  them matches — over-matching costs a token where a literal string would
+  have read fine, while under-matching leaks. Plus-addressed spellings match
+  whole, the tag included: `ada+tag@azx.io` is one match, multiple tags and
+  a trailing `+` included (pinned in the battery).
+- `contact_phone`, two matchers —
+  - *international*: anchored on a literal `+` because a bare digit run is an
+    order number, byte count, or timestamp, and redacting that would destroy
+    the diagnostic the scrubber exists to preserve. The grammar is the
+    ported `\+\d[\d\-. ()]{6,}\d`: a digit directly after the `+`, six or
+    more middle class characters, a final digit — the middle counts
+    separators, so a long spelling matches on seven digits
+    (`+1 415 555`) while `+1234567` never does. The separators are the ones
+    humans and upstream APIs use (`( ) - . ` and space); the digit class is
+    Unicode Nd (every decimal-digit script); and a `~` or a second `+`
+    breaks a run. One run is ONE match: two numbers split by one space
+    (`+4712345678 1234567890`) are a single match with a single digest
+    over the whole run (space-bridged over-merge, documented not fixed).
+    A `+` before a run marks international intent for the whole run: the
+    grammar matches, or the run is the ported non-match, and the domestic
+    matcher never fires behind a `+` — `+ (415) 555-2671` stays untouched,
+    exactly as the source leaves it. `ticket 4096` above survives
+    untouched.
+  - *domestic* (the extension past the ported source): un-plussed NANP
+    shapes — a full run of exactly ten digits, or eleven with an ASCII
+    leading `1`, in any `( ) - . ` spelling, `1 (415) 555-2671` and
+    `1-415-555-2671` included. THREE discipline rules, all load-bearing:
+    (1) the match must carry at least one SEPARATOR, so a bare unseparated
+    digit run is never scrubbed even at exactly ten digits — it is an
+    order number or id (the same reasoning that anchors the
+    international matcher on `+`), and the requirement is also what
+    keeps a token's own digest hex unmatchable, so phone-only stays
+    strictly idempotent and scrub-twice convergence cannot be chained
+    adversarially through chosen digests; (2) the match must start at a
+    CLEAN boundary — its first char glued to neither `~` nor a lowercase
+    `a`-`f` (the token-interior alphabet: hex `a`-`f` plus `~`, exactly —
+    conjunction, not disjunction: either predecessor alone is dirty; not
+    "letters" — `g`/`z`/`A`-`F` are clean and still match), so a run
+    starting inside a token digest can never flow out through a separator
+    into following text (`…~e292cb255128 4096` stays untouched) — and a
+    token span itself (`~` + 12 digest hex) is a breaker: runs never
+    start inside a digest (the scan resumes after the token instead of
+    spending a composed digest-plus-number run whole, which would
+    silently swallow the real number after it), and the byte after a
+    token is a clean boundary even when the digest ends hex-dirty, so
+    an adjacent number still scrubs exactly; and
+    (3) no partial match inside a longer run — twelve-plus digits is an
+    id, not a phone. Leading spaces are skipped (word separation); a
+    leading structural separator (`-`, `.`, `(`, `)`) is ABSORBED into
+    the match, not stripped (`x -415-555-2671` scrubs `-415-555-2671`
+    whole); trailing separators survive past the last digit, same as
+    international; and eleven digits not led by ASCII `1` are excluded
+    (the NANP trunk-prefix shape) — ten-digit runs carry no
+    leading-digit check at all, so a `0`-led ten-digit shape
+    (`020-794-6095`) scrubs like any other and only its eleven-digit
+    `0`-led spelling stays out (the `+` form is the international
+    spelling of those).
+    One reachable interaction is documented rather than fixed: an email
+    token whose DOMAIN spells a domestic number (`user@555.1234567.co`)
+    has its digit half re-tokenized by the phone pass — over-redaction
+    in the safe direction, converging on the second scrub like every
+    other shape.
+- `api_keys` (the credential extension past the ported source) — the
+  evidence-backed closed set of provider/platform key families, each a
+  literal prefix plus a minimal tail (the shared `[A-Za-z0-9_-]`
+  alphabet except where the table names its own) consumed MAXIMALLY
+  (a key glued to further charset material is one long key):
+
+  | family | shape (`tail` is `[A-Za-z0-9_-]` except where the row names its own alphabet) | token prefix |
+  |---|---|---|
+  | OpenAI | `sk-` / `sk-proj-` / `sk-svcacct-` + tail{20,} | the matched prefix verbatim |
+  | Anthropic | `sk-ant-` + tail{20,} | `sk-ant-` |
+  | Google | `AIza` + tail{35,} | `AIza` |
+  | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
+  | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
+  | GitHub | `ghp_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
+  | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
+  | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
+  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
+  | XAI | `xai-` + tail{20,} | `xai-` |
+  | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
+  | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both markers required; an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
+  | Azure | `AccountKey=` + `[A-Za-z0-9+/=]{40,}` | `AccountKey=` |
+
+  AWS `AKIA`/`ASIA` access-key IDs are now INCLUDED, evidence-backed
+  (the table's `aws` row). Deliberately EXCLUDED, on zero evidence:
+  Slack `xox…` and Stripe `sk_live_`/`pk_live_`. Three further
+  exclusions are shape decisions, not evidence gaps, each with its why:
+  the AWS secret key (the 40-char secret carries no public prefix —
+  undetectable without false-positive shape matching), Azure client
+  secrets (no distinctive public prefix), and Mistral keys (no
+  distinctive public prefix). The set is closed on evidence —
+  the families five private consumers' leaked-credential shapes
+  backed — and growing it is a new-evidence decision, never a
+  drive-by; an unlisted provider's key shape passes through whole.
+  The JWT family is MARKER-SCOPED (`Bearer eyJ…` only): a bare `eyJ…`
+  triple is never touched, because one consumer's API legitimately
+  carries eyJ-shaped non-secret cursors in its payloads, and redacting
+  those would destroy the diagnostic this scrubber exists to preserve.
+  Three discipline rules. (1) The prefixes are tried LONGEST-FIRST with
+  fall-through: `sk-ant-` outranks bare `sk-` when its own grammar
+  holds, and a too-short `sk-ant-` tail falls through to the `sk-`
+  family, whose tail swallows the `ant-` spelling — still scrubbed,
+  with the generic prefix. (2) A prefix glued to a preceding
+  key-charset char is MID-TOKEN and never fires: `xak-…` survives
+  whole, the same reasoning as the phone rule's clean-boundary cut (in
+  real text a key glued to a word is that word's fragment), and it is
+  what keeps a second key glued to a token's digest hex from firing.
+  (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
+  scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
+  inside its own marker-scoped shape; the `ya29.` dot is prefix, not
+  tail — see the table). The digest is of the FULL match
+  (prefix + tail).
+
+**Key-family selection (`families=`).** The family set is closed:
+
+```python
+tors.KEY_FAMILIES: tuple[str, ...]
+# ("openai", "anthropic", "google", "fireworks", "modal", "github",
+#  "minted", "jwt", "aws", "xai", "gcp_oauth", "pem", "azure")
+```
+
+the canonical tuple, in the KeyFamily discriminant order, and the base for all-but-X
+selections (`[f for f in tors.KEY_FAMILIES if f != "jwt"]`). `families=None` (the
+default) is every key family this version knows; the set grows when new
+families land — semver-visible — so callers needing stability list names
+explicitly. A list selects exactly those families (order irrelevant,
+duplicates deduped; tuples accepted); a bare string is a `TypeError`,
+never an iterated character list. A valid selection is harmless —
+ignored — when `api_keys` is not in the active rules, but validation is
+still at the boundary: an unknown name is a `ValueError` naming the accepted set — `families must be one of ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure'), not "ssn"` — and `[]` is a `ValueError`, never a silent no-op — `families selects no key families; use None for all or list names`.
+
+**Threat model: diagnostic-preserving, NOT adversarial-robust.** The
+grammars above are parity-correct against the ported source at
+`salt=""`, and parity is exactly why they are narrow: widening them
+silently would break the byte-identical contract. The residual
+bypassables below are DOCUMENTED, not fixed — attacker-controlled
+formatting bypasses this scrubber, and that is the expected trade-off
+for a scrubber that must never eat order numbers, byte counts, and
+timestamps:
+
+- `/`, `:`, `,`, `;` (and every other non-class char) split runs:
+  `a/b.co`, `a:b.co`, `a,b.co` never match, exactly as the source
+  leaves them.
+- Fullwidth `＋` (U+FF0B) is not the literal `+`, and fullwidth/odd
+  spaces are not the ASCII space class: `＋12345678` stays untouched.
+- IDN / non-ASCII domains leak whole: the email classes are ASCII-only,
+  so `a@exämple.com` never matches (the documented non-match).
+- RFC local characters outside `[A-Za-z0-9._%+-]` fragment-leak: `!`,
+  `#`, `$`, `&`, `'`, `*`, `/`, `=`, `?`, `^`, `` ` ``, `{`, `|`, `}`,
+  `~` split the local part, so `a!b@x.co` scrubs `b@x.co` and the `a!`
+  survives (pinned in the battery).
+- RFC quoted-string locals leak WHOLE, not as fragments: `"user@name"@example.com`
+  and `"a@b"@x.co` never match at all — `"` is outside the local class,
+  and the quote immediately before the real `@` blocks the match, so the
+  whole address survives. Canonicalize (strip RFC quotes / split
+  display-names) before scrubbing if quoted locals are in threat; no
+  grammar widening — widening would break the `salt=""` byte-identical
+  contract.
+- IP-literal and dotted-quad domains leak WHOLE: `user@[192.168.1.1]`
+  never matches (`[` breaks the domain run) and `user@192.168.1.1` never
+  matches (the trailing quad has no two-letter ASCII tail), so the whole
+  address survives. Canonicalize (normalize IP literals / dotted quads to
+  a scrubbed spelling) before scrubbing if these spellings are in threat;
+  no grammar widening (parity).
+- IDN / non-ASCII domains leak whole: the email classes are ASCII-only,
+  so `a@exämple.com` never matches (the documented non-match). For
+  internationalized domains, idna-to-punycode BEFORE scrubbing
+  (`user@exämple.com` → `user@xn--exmple-cua.com`) so the ASCII grammar
+  can see it — and treat the pre-image as sensitive until that step runs.
+- Bare digit runs never match even at ten/eleven digits (`4155552671`,
+  `14155552671` are order numbers), and short `+`-led runs never match
+  (`+1234567`, seven digits, is the ported non-match).
+- Extensions survive past the last digit: `415-555-2671 x1234` scrubs
+  `415-555-2671` and leaves ` x1234` untouched, same as international
+  (trailing separators survive; the extension is not part of the match).
+- NPA/NXX are unvalidated: any ten-digit NANP-width run with a separator
+  matches — area/exchange codes are never checked against the NANP plan.
+- Email-then-phone composition over-redacts in the safe direction: the
+  email local removal can trim a too-long digit run into exactly ten
+  (or eleven-with-`1`) digits that then scrub (`1415 555 2671
+  12345a@b.co` scrubs the trimmed `1415 555 2671` though the input run
+  was sixteen digits). No digits leak; the id is partially tokenized.
+  The parity lanes route these inputs to the extension lane.
+- A natural (non-email) `~` + 12-lowercase-hex span is treated as a
+  token breaker: the number after it scrubs even when glued
+  hex-dirty. Over-redaction in the safe direction — and the reason a
+  digest tail can never suppress the number after it.
+- Punctuation inside a key splits the tail: `sk-abc…/…rest` never
+  matches whole, and an inserted `/`, `:`, `;`, or `.` leaks the key's
+  fragments — the same attacker-formatting trade-off as the contact
+  grammars (the shared tail charset is deliberately narrow — the Azure
+  row names its own wider alphabet — and widening it would eat
+  identifiers that merely look key-shaped).
+- An unlisted provider's key shape leaks WHOLE: the family table is the
+  evidence-backed closed set above — Slack `xox…` and Stripe are
+  excluded on zero evidence (AWS `AKIA`/`ASIA` moved to the table on
+  evidence), the prefix-less shapes pass through as documented above —
+  and a new family is a new-evidence decision with its own pins, never
+  a silent widening.
+- Contact-glue under-redaction: a key glued with ZERO separator to
+  preceding contact material is mid-token under the boundary rule and
+  survives whole, and no later pass recovers it — a phone number's last
+  digit (`+14155552671sk-…`), an email domain's last letter
+  (`a@b.cosk-…`), a prior token's digest hex (`+14~abc123def456sk-…`):
+  field concatenation without separators, the machine-plausible form.
+  The composed call still scrubs the contact half; the key half leaks.
+  Separate fields before scrubbing if concatenations are in threat.
+- Preserved-span cloaking under family selection: a span an unselected
+  family spends whole stays whole — including any selected family's key
+  inside it (a key in a deselected PEM block's body, a key shape inside
+  a deselected JWT's segments). Deselecting families reintroduces leak
+  risk for material inside the preserved spans; `families=None` is the
+  only full-coverage selection, and `report["skipped"]` names exactly
+  what each narrowed call preserved.
+- >3-segment JWT/JWE survival: the JWT grammar is exactly three
+  segments, so a 5-part JWE behind `Bearer ` scrubs through the third
+  segment and keeps parts 4-5 verbatim. Split or reject multi-dot
+  `Bearer` material before scrubbing if JWEs are in threat.
+- A bare `eyJ…` triple (no `Bearer ` marker) is never touched, even
+  three well-shaped base64url segments: one consumer's API legitimately
+  carries eyJ-shaped non-secret cursors, so the JWT family fires only
+  behind the marker — the deliberate under-redaction side of that
+  scoping.
+- The kept family prefix is a coarse provider label (`sk-` vs
+  `sk-ant-`), not a credential: it exists so the token tells the
+  operator which credential to rotate. It narrows the search space for
+  whoever already holds the log — the same known-salt reasoning as
+  below, priced in.
+
+If your threat includes adversarial formatting (an attacker choosing
+the spelling to dodge the scrubber), canonicalize BEFORE scrubbing —
+and treat the scrub as one layer, not the whole control. `tors.nfkc`
+alone is insufficient: NFKC folds fullwidth alphanumerics and some
+compatibility spaces, but it does not fold every separator the phone
+grammar splits on. Map explicitly first:
+
+```python
+import re, unicodedata
+
+_SEP = re.compile(r"[\t\n\r\f\v\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+")
+
+def canonicalize_for_scrub(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    # Zs/Zl/Zp + \t\n\r\f\v -> U+0020: every Unicode space separator
+    # (Zs, Zl, Zp) plus ASCII whitespace the grammar does not class.
+    text = _SEP.sub(" ", text)
+    # Then canonicalize separators/domains to the grammar above:
+    # `/ : , ;` -> " " (or ""), fullwidth ＋ (U+FF0B) -> "+",
+    # IDN -> idna punycode, RFC quotes -> stripped.
+    return text
+```
+
+Then scrub the canonicalized text.
+
+`rules=None` applies every rule in the canonical order — the keys
+substitution over the whole string first, then the email substitution over
+its result, then the phone substitution over that, each exactly once —
+because the credential must be eaten whole before the contact passes scan
+(a key's tail can spell a dash-separated domestic phone run, and a whole
+key can spell an email local part: `sk-…@x.co` would otherwise be one
+email match), and an email's local part may itself
+carry a `+`-led digit run (`user+14155552671@example.com` is one email, and
+the phone rule must see its token, never the address). One reachable
+composition is documented rather than fixed: the keys pass eats a
+key-shaped local part and leaves `<family>~<digest>@domain`, whose digest
+hex is itself local-part material, so the email pass tokens
+`hex@domain` — over-redaction in the safe direction, converging on the
+second scrub. `[]` is the identity
+(the original object); duplicates dedupe and listing order is irrelevant;
+each name restricts the scrub to that rule.
+
+**The report twin: `tors.scrub_pii_report`.** The same scrub under the
+same single GIL-released pass, plus the accounting:
+
+```python
+def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict: ...
+```
+
+`report["text"] == scrub_pii(text, rules, salt=salt, families=families)`
+for the same arguments, byte-exact — the shape below is the accounting
+for that string:
+
+```python
+{"text": <scrubbed str>, "redacted": {"contact_email": 1, "api_keys": 3, "openai": 2, "jwt": 1}, "skipped": {"jwt": 1}, "spans": [{"type": "api_keys:openai", "start": 12, "end": 64}]}
+```
+
+`redacted` counts what scrubbed: per-rule totals (`contact_email`,
+`contact_phone`, `api_keys`) plus per-family totals under their lowercase
+names (`openai`, `jwt`, …) — absent types omitted. `skipped` counts what
+detection saw but redaction preserved: families NOT in the active
+selection that would have matched anyway (detection runs, redaction does
+not) — the "preserved a JWT, log it separately" signal: select
+all-but-jwt, scrub, then route `report["skipped"]` to the separate
+credential-rotation queue. Always `{}` when `families=None`; `{}` when
+`api_keys` is inactive. `spans` mark every redaction, ordered by start —
+codepoint indices into the INPUT, each typed `<rule>`
+(`contact_email`, `contact_phone`) or `api_keys:<family>`
+(`api_keys:openai`, `api_keys:jwt`, …). `text[start:end]` is the match
+it replaced, with two documented exceptions where passes compose: a
+match that began inside a prior token's digest is recorded from that
+token's input end (only the input-side suffix is addressable), and a
+match that ran into a prior token's verbatim head overlaps the
+producing span (the input bytes fed two tokens; both spans are
+recorded, keys before email before phone at shared starts; a span END
+at the head boundary maps affinely to the head end, so the span text
+is exactly what the match ate). Empty input
+is the empty report: `{"text": "", "redacted": {}, "skipped": {},
+"spans": []}`. Salt, idempotence, and the surrogate boundary behave
+exactly as documented above.
+
+**The salt trade-off, stated plainly.** `salt=None` resolves PER RULE:
+the contact rules use tors's documented default `"tors/scrub_pii/v1"`
+and the keys rule its own `"tors/scrub_keys/v1"` — a fixed, non-secret,
+versioned domain-separation tag each (frozen: changing either would
+silently change every deployment's token values), and deliberately
+different so a key digest can never alias a contact digest at the
+default settings. An explicit salt string salts every rule alike (the
+`""` spelling is unsalted for every rule — the migration lane:
+byte-identical tokens with an unsalted upstream). A KNOWN salt, the public defaults
+included, does
+not make the digest secret: the E.164 space is small enough to enumerate, so
+an attacker with a candidate list can still confirm whether a specific
+number appeared — and the same holds for EMAIL addresses (common
+local-parts on common domains are enumerable too), for API keys
+(provider key alphabets are smaller than their length suggests: the
+secret tail of an `sk-` key is ~62^20, far beyond enumeration, but the
+PREFIX half is kept in the clear by design — see above), and for `salt=""`
+(the unsalted migration lane re-publishes the source chain's documented
+weakness by design: byte-identical tokens with an unsalted upstream).
+The digest is `sha256(salt + match)` with plain concatenation, so
+`salt`/`match` boundaries can alias (`salt="a"` + `match="bc"` digests
+like `salt="ab"` + `match="c"`) — a second reason the salt is
+domain-separation, not a key. The digest is 12 hex chars (48 bits):
+at ~119k distinct matches the birthday merge rate is ~2.5% — two
+different contacts sharing one token — frozen-for-stability (widening
+the digest would break the `salt=""` byte-identical contract).
+The tokens are redaction, not pseudonymization crypto;
+deployments that care pass their own secret salt, and a consumer migrating
+from an unsalted upstream scrubber passes `salt=""` to keep its token values
+byte-identical — any other salt changes them.
+
+**Idempotence, as it true is.** Tokens are individually fixed points, and the
+output is a fixed point unless an email token is immediately followed by
+`@`-shaped text — reachable when two email matches were adjacent
+(`a@b.co9@x.yz`) or when a match is followed by an unmatched `@`-run whose
+own local part the match consumed (`x@b.co@w.vu`). A token's digest hex is
+local-part material, so a second pass fires once more on that boundary and
+then holds: **scrubbing twice always converges**. If your excerpts can chain
+emails like that and you need a guaranteed fixed point, scrub twice
+(`scrub_pii(scrub_pii(x))` — the documented helper shape; the fuzz target
+asserts convergence structurally — no input match survives verbatim into
+the converged output and the third pass is the identity — not token-exact
+values, which the parity gates pin; the hypothesis ports mirror that
+boundary); everything else is one pass. Phone-only is strictly idempotent,
+and keys-only is too, by construction: a key token's family prefix ends
+`-`, `_`, `=`, or `.`, or is a bare head (`AIza`, `Bearer`, `PEM`, the
+4-char `AKIA`/`ASIA` head), the byte after it is `~` — never tail
+charset — and no family prefix can be spelled inside 12 lowercase digest
+hex, so the second scrub never re-fires (a key token's `~` + 12 hex is a
+breaker for the phone pass as well, so a number after it keeps its own
+clean run).
+
+`tors.scrub_pii(s, ...) is s` exactly when no active rule matches. A `str`
+holding lone surrogates is refused at the argument boundary with
+`UnicodeEncodeError` ("surrogates not allowed"), the same boundary every
+str-in function here documents — the ported chain diverges there by design:
+its classes never match a surrogate, so it returns such text with the
+matches AROUND the surrogate still scrubbed (scrub-plus-surround), while
+tors refuses the whole call at the boundary. Pin the call-site shape
+accordingly (sanitize-or-skip surrogates before scrubbing if your pipeline
+ingests lone-surrogate text), and see the parity gates which pin the
+divergence in both directions. Live re-sync cadence/owner: the quoted pin
+in `tests/reference.py` is the CI oracle; the live source module is
+re-checked manually whenever its grammar changes and at least once per
+Unicode/dependency bump (owner: the scrub_pii maintainer).
+
+**Async**: `await tors.aio.scrub_pii(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The thread-hop costs tens of microseconds: noise next to a millisecond pass, real overhead next to a microsecond-scale excerpt — prefer the sync spelling below ~100KB of error-excerpt text, `tors.aio` above it. `await tors.aio.scrub_pii_report(...)` is the report twin under the same hop.
+
+## `tors.scrub_log_text`
+
+```python
+def scrub_log_text(
+    text: str,
+    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+) -> str: ...
+```
+
+Named-rule log and exception-text scrubbing, four linear scans + splice
+under one `py.detach`: the
+TaskQ exception-text chain as a primitive (the scrub a worker applies to
+`str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
+line, a span, or an exported attribute), byte-identical to the consumer's
+four compiled regexes — pinned by a differential harness that races tors
+against the exact chain (see [Design and scope](design.md) for why this is
+a *named-rule* surface rather than a pattern parameter).
+
+Three rules, one closed set:
+
+- `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
+  values, so the whole line is dropped. Both separator spellings: real
+  newlines (line content deleted, the newline kept — a blank line is left
+  behind; a CRLF line's `\r` is consumed with the content), and the
+  `repr()`-flattened `\nDETAIL:` runs a traceback's final line carries
+  (consumed up to the next escaped separator or the closing quote, which is
+  preserved — `PostgresError('msg\nDETAIL: … exists.')` comes back as
+  `PostgresError('msg')`). Two shapes the source chain treats as
+  non-matches are pinned as specified behavior, not quietly fixed: an
+  escaped run with no closing quote and no trailing escaped newline is
+  left alone, and one terminated by a real newline with no quote before it
+  is left alone (both unreachable from `repr()` output).
+- `uri_userinfo` — `scheme://user:password@host` becomes
+  `scheme://user:***@host`: scheme and username preserved verbatim, empty
+  username handled, password ending at the first `@`.
+- `uri_query_creds` — `[?&](password|passphrase|passwd|pwd)=value` becomes
+  `[?&]name=***`: name preserved, exact lowercase, value running to
+  whitespace, `&`, or `@`.
+
+`rules=None` (the default) runs the full chain in canonical order:
+`pg_detail_lines` → `uri_userinfo` → `uri_query_creds`, each rule a whole
+pass over the current text before the next begins (a DETAIL deletion can
+eat the `@` a userinfo mask anchors on — rule interaction is why the order
+is a contract, not a caller choice).
+
+> [!WARNING]
+> The default chain can leave a credential fragment by design:
+> `scrub("pg://u:p\\nDETAIL:x@h')")` is `"pg://u:p')"` (the DETAIL deletion
+> eats the `@`, the userinfo mask then has nothing to anchor on, the
+> password `p` survives). The order is kept for byte-identity with the
+> consumer chain (`src/taskq/obs/_redact_exc.py::_scrub_text`, the scrub a
+> worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of
+> it reaches a log line, a span, or an exported attribute — up to four
+> passes per text, ~24 per failed job across its message/traceback/span
+> texts); do NOT reorder to "fix" the fragment. Safe pattern when
+> credential removal outranks DETAIL parity: run `uri_userinfo` separately
+> (e.g. `scrub_log_text(text, ["uri_userinfo"])`, which gives
+> `"pg://u:***@h')"` here) — trading the chain's DETAIL parity for the
+> mask, deliberately and visibly at the call site.
+
+`rules=[]` is the identity; duplicates
+dedupe and caller order is irrelevant; an unknown name raises `ValueError`
+naming the accepted set. A pass never rescans its own output.
+
+`tors.scrub_log_text(s, rules) is s` exactly when no rule fires — including
+the `***` fixed points, where a rule fires and splices to an equal value:
+those return a fresh, equal string. Scrubbing the scrubbed output is a
+fixed point by the second pass, with one documented cross-rule exception
+to strict idempotence: a password-param replacement deletes a `/` that was
+capping a userinfo user run, so the second pass can find one more
+redaction (`x://u?pwd=a/b&:pw@h` scrubs to `x://u?pwd=***&:pw@h`, and a
+second scrub claims the password too) — the ported chain behaves
+identically, and a third scrub is always the fixed point.
+
+```python
+tors.scrub_log_text(
+    "JobError: duplicate key\n"
+    "DETAIL:  Key (idempotency_key)=(customer-4417-a3f2) already exists.\n"
+    "HINT: unchanged"
+)
+# "JobError: duplicate key\n\nHINT: unchanged"  (blank line left behind)
+tors.scrub_log_text(
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback"
+)
+# "connect dsn=postgresql://worker:***@db.internal:5432/prod?password=***"
+tors.scrub_log_text("JobError('duplicate key\\nDETAIL:  Key (idempotency_key)=(customer-4417) exists.')")
+# "JobError('duplicate key')"  (closing quote preserved)
+tors.scrub_log_text(
+    "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod",
+    ["uri_userinfo"],
+)
+# "connect dsn=postgresql://worker:***@db.internal:5432/prod"  (one rule alone)
+```
+
+**Async**: `await tors.aio.scrub_log_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 ## `tors.nfc` / `tors.nfd` / `tors.nfkc` / `tors.nfkd`
 
 ```python
@@ -678,6 +1212,285 @@ marshalling class at all.
 tors.count_matches(["cat", "catalogue"], "the cat sat in the catalogue")
 # 2
 ```
+
+## `tors.contains_unescaped` / `tors.find_unescaped`
+
+```python
+def contains_unescaped(haystack: bytes, needle: bytes) -> bool: ...
+def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
+```
+
+Escape-parity-aware byte search in one GIL-released native pass: an occurrence of
+`needle` at byte offset `i` counts only when the maximal run of `\` immediately
+before `i` has **even** length (an empty run is even, so an occurrence at offset
+0 counts). An odd run means the run's backslash pairs escape each other and the
+leftover one escapes the occurrence's first byte — the occurrence is literal
+text, not the sequence. `find_unescaped` returns the offset of the first
+unescaped occurrence, `-1` when none exists (`bytes.find`'s own sentinel, kept
+over `Optional[int]` deliberately: it is the spelling stdlib callers already
+branch on); `contains_unescaped` is the boolean spelling of the same question.
+
+The motivating case is JSON, and it is byte-ambiguous by construction: a
+serializer (orjson is the measured consumer) renders a real NUL codepoint
+(U+0000) as the six-byte escape text `\u0000` and the literal six-character
+text of the same spelling as seven bytes (the backslash itself escaped), and
+the second contains the first at offset +1 — so a plain substring test answers
+"yes" for both. PostgreSQL settles it downstream: a real NUL is fatal in a
+`jsonb` column (SQLSTATE 22P05), the literal text is fine, so a pipeline that
+binds serialized JSON must know which one it holds before the INSERT — reject
+the wrong one and you either refuse legal text or ship a value that fails the
+bind. The stdlib's only spelling is find-then-re-parse-the-whole-value-and-
+recursively-walk-it; the parity rule answers from the raw bytes directly:
+
+```python
+tors.find_unescaped(b'"a\\u0000b"', b"\\u0000")  # 2: the real NUL escape
+tors.find_unescaped(b'"a\\\\u0000b"', b"\\u0000")  # -1: the literal text
+tors.contains_unescaped(b'"a\\\\u0000b"', b"\\u0000")  # False
+```
+
+Contract details, each pinned in tests/test_unescaped_scan.py:
+
+- **The offsets are byte offsets, not `str` indices**: the return indexes the
+  `bytes` it was handed — `haystack[i:i + len(needle)] == needle` for every
+  answer that is not `-1`. Over multibyte UTF-8 content the byte offset and the
+  decoded text's character offset are different numbers (`find_patterns` needed
+  a byte→char mapping for exactly this confusion; this API has none, because
+  the input is bytes and the contract is byte-space end to end).
+- **Rejected hits advance the scan one byte past the hit, not past the whole
+  match**, so self-overlapping needles stay correct: the two-byte needle
+  `b"00"` in a haystack of one backslash then `000` rejects the hit at 1 and
+  finds the overlapping live hit at 2, which a resume-at-match-end scan would
+  skip entirely.
+- An empty needle raises `ValueError("empty needle")` (it would match at every
+  position and has no parity meaning, the `find_patterns` empty-pattern
+  rationale); both arguments take exactly `bytes` (`bytearray` / `memoryview` /
+  `str` raise `TypeError`, the bytes-in surface's zero-copy immutable-borrow
+  contract).
+- **No JSON knowledge lives in the functions**: parity is the mechanism;
+  "the needle is an escape sequence, so even means live and odd means literal"
+  is the caller's reading of it. Any backslash-escaped grammar (printf format
+  strings, shell quotes, regex sources) can drive the same scan.
+
+GIL behavior: `utf8_is_valid`'s class exactly — two zero-copy `PyBytes` borrows,
+the whole memmem scan plus the per-hit parity walk under one `py.detach`, and
+`bool`/`int` returns, so there is no marshalling class at all and no error path
+past the empty-needle `ValueError` (raised under the GIL, before the detach).
+The 12 MiB pass sits well under the 10 ms heartbeat floor (memchr-class;
+≈0.26 ms no-match and ≈0.70 ms over a 72,520-rejected-hit false-positive
+corpus — box- and load-dependent figures from the wall cells in
+tests/test_unescaped_scan.py, same order as the ≈0.25/≈0.79 ms inline
+band in tests/test_gil_release.py), so the heartbeat cells are
+ceiling-only. No aio twin: a sub-millisecond call needs no thread hop.
+
+## `tors.utf8_byte_len`
+
+```python
+def utf8_byte_len(s: str) -> int: ...
+```
+
+The UTF-8 byte length of a `str`: `len(s.encode("utf-8"))` with the copy taken
+out. That expression allocates a full `bytes` object, measures it, and throws
+it away — pure waste whenever only the count is wanted, which is the shape of
+every size cap in front of a store. The motivating sites are TaskQ's:
+`client/_args.py` checks idempotency-key and scope byte caps on every enqueue,
+and `backend/_terminal.py` re-encodes a serialized result of up to
+64 KiB (`MAX_RESULT_BYTES`) on every success just to take its length — a
+genuine double pass, the byte count having existed inside the serializer's
+output and been discarded by the `.decode()` that produced the `str`.
+
+Fresh vs repeat, stated up front (the cold-lane economics the lane table
+pins: cold-encode 4.9 ms | first-call 4.7 ms | warm-encode 196 µs |
+cached-tors 0.13 µs at 12 MiB): a terminal fresh `str` per success never
+repeats on the same object, so the one-shot lane is encode-parity by
+construction — the win there is only the absence of a Python-visible
+`bytes` object, not wall time. The wall-time win is repeat counts on the
+same object (O(1) cached borrow vs a fresh alloc+memcpy per `encode`)
+and every ASCII count (zero-copy alias, flat ~0.1 µs). Memory on every
+lane is zero-alloc: one field read off the borrowed `&str` (the chunked
+count is the utf16 twin's shape; this twin allocates nothing).
+
+A companion, not a standalone motivation: this ships in the scan family's
+binding module as the pinned companion of `contains_unescaped`/
+`find_unescaped`, same module and same harness patterns — and honest sizing
+says it would not stand alone (a short-string encode is a few hundred
+nanoseconds; the win is large inputs and hot paths, where the copy is the
+cost — the 64 KiB terminal case is ~0.9 µs of pure alloc+memcpy per success,
+the lane table's ASCII 64 KiB expression cell).
+
+The implementation is the standard str borrow, not arithmetic over CPython's
+internal UCS storage: pyo3's `to_str` hands the core a Rust `&str`, whose
+`len()` IS its UTF-8 byte length — one field read, the mechanism dried into
+the language instead of hand-rolled (an unsafe `PyUnicode_KIND`/data walk with
+surrogate-pair arithmetic would exist only to avoid one cached materialization).
+The cost model that buys, measured — all wall numbers below are
+CPython-3.12 calibration-box figures (arm64, release build; re-measure
+per target — semantic pins are the contract, timing is not; the full
+lane table is in `tests/test_performance.py`):
+
+- **ASCII** (serialized JSON with `ensure_ascii=True` is pure ASCII): compact
+  ASCII data is its own UTF-8, so the borrow is a zero-copy alias and the call
+  is O(1) with no allocation at all — measured flat ~0.1 µs from 1 KiB to
+  12 MiB, against the expression's alloc+memcpy every call (~0.9 µs at 64 KiB,
+  ~14 µs at 1 MiB, ~180 µs at 12 MiB).
+- **Non-ASCII, first call on the object (a cold UTF-8 cache)**: CPython
+  materializes and caches the UTF-8 view on the `str` object (an internal
+  cache, not a Python-visible `bytes`), so the first call is O(n) —
+  encode-parity in cost class (measured within ~10-20% of a cold encode: the
+  same encoder pass plus a malloc plus a second memcpy into the permanent
+  cache), with no Python-visible object to allocate and collect. What "cold"
+  means, exactly: the cache is filled by the str-in borrow itself — this
+  call, or any earlier str-in tors call on the same object — and nothing
+  else fills it. `encode` shares the cache but only reads it, so the sharing
+  is one-directional: after one `utf8_byte_len`, a subsequent
+  `len(s.encode())` on the same 12 MiB object dropped from ~4.9 ms to
+  ~184 µs, measured — while a prior `len(s.encode())` does not warm this
+  lane at all: the first `utf8_byte_len` after an encode still pays the full
+  materialization (measured ~3.8-4.8 ms at 12 MiB on fresh objects, the cold
+  class exactly; observed on CPython 3.12 here, expected from the sources
+  on 3.10–3.14 — see `docs/cache-proof.md` for the per-version
+  `Objects/unicodeobject.c` links — where the encode path reads the cache
+  and only the `PyUnicode_AsUTF8AndSize` borrow writes it). Semantic pins
+  (same object, same answer) are the contract; timing is not — the cache
+  is CPython-internal and the wall cells record it, never assert it.
+- **Non-ASCII, repeat calls on the same object**: O(1) — strictly better than
+  the expression, which re-copies on every call (measured ~0.1 µs against the
+  warm expression's 1.8 µs at 64 KiB and 196 µs at 12 MiB).
+
+```python
+tors.utf8_byte_len("café")  # 5: three ASCII bytes + one two-byte é
+tors.utf8_byte_len("\U0001f600")  # 4: one astral codepoint, four bytes
+# the byte-cap gate the TaskQ terminal spells on every success:
+if tors.utf8_byte_len(serialized_result) > 64 * 1024:
+    reject()  # over MAX_RESULT_BYTES — no bytes object built to find out
+```
+
+Error parity is exact: a `str` holding lone surrogates cannot be UTF-8-encoded,
+and the borrow raises CPython's own `UnicodeEncodeError` (pyo3 propagates it
+before any tors code runs) — the same exception `encode` raises, attributes
+included (`.encoding`, `.reason`, `.start`/`.end`, `.object`, pinned
+attribute-for-attribute in tests/test_utf8_byte_len.py); there is no
+tors-side error path. The argument takes exactly `str` (`bytes` /
+`bytearray` / `memoryview` / `int` raise `TypeError`).
+
+GIL behavior: a single `int` return, no marshalling class — and one honest
+difference from the scan twins: the call's only O(n) work is the borrow
+itself, which is GIL-held (a non-ASCII object's first call materializes the
+UTF-8 view under the GIL; there is no way to fill an object's cache without
+it). At 12 MiB that materialization measures ~5 ms, under the 10 ms heartbeat
+interval, so the heartbeat cells are ceiling-only; the linear envelope
+(~0.4-0.5 ms of GIL hold per MiB) puts a ~200 MiB non-ASCII string at the
+100 ms ceiling — the recorded scale guidance for this one heavy lane. No aio
+twin: an O(1)-to-borrow call needs no thread hop.
+
+## `tors.utf16_byte_len`
+
+```python
+def utf16_byte_len(s: str) -> int: ...
+```
+
+The UTF-16 byte length of a `str`: `len(s.encode("utf-16-le"))` with the
+2n copy taken out — 2 bytes per BMP codepoint, 4 per astral codepoint (a
+surrogate pair). This is the other half of the `len()` → bytes pair
+`utf8_byte_len` opens (the maintainer's ask: a util to convert a UTF8/UTF16
+python `len()` into bytes for the API, because backend devs need byte caps
+for storage and interop). UTF-16 is the code-unit world of JavaScript,
+Java, Windows, and .NET — `String.prototype.length` counts UTF-16 units,
+and an astral emoji is length 2 there — so column caps (`NVARCHAR`), wire
+caps, and interop size checks in that world are UTF-16 bytes, and the
+Python spelling of the count allocates and copies the entire 2n `bytes`
+object just to throw it away.
+
+The implementation is the utf8 twin's borrow plus derived arithmetic, no
+FFI: the standard str borrow hands the core a Rust `&str`, and the core
+derives the answer from its UTF-8 bytes — UTF-16 bytes =
+`2 * (#codepoints + #astral codepoints)`, where over valid UTF-8
+`#codepoints` is the lead-byte count and `#astral` is the count of 4-byte
+lead bytes (`matches!(b, 0xF0..=0xF4)` — `0xF5..=0xFF` never occur in a
+`&str`, so the closed range fails safe) — one pass of byte-class
+arithmetic, no allocation, no per-codepoint decoding (the derivation, its
+proof against a `chars()`-based naive count, and the exhaustive boundary
+sweep are in `src/scan_impl.rs`). The corners the identity buys: no astral
+codepoints means exactly `2 * len(s)` for ALL BMP text — CJK and combining
+marks included, where the UTF-8 byte count diverges — pure ASCII means `2 *`
+the UTF-8 byte count, and every answer is even. The final doubling is
+checked arithmetic that refuses instead of wrapping — and it is
+unreachable for real inputs on every width: a `&str` is at most
+`isize::MAX` bytes and `#codepoints + #astral` never exceeds one per
+byte, so the doubled answer is at most `2 * isize::MAX`, which fits
+`usize` on 32-bit and 64-bit alike. The `OverflowError` contract is the
+loud refusal if that invariant ever breaks, pinned at synthetic
+boundary counts crate-side (the injectable combine unit).
+
+The cost model, measured — all wall numbers below are
+CPython-3.12 calibration-box figures (arm64, release build; re-measure
+per target — semantic pins are the contract, timing is not; the full
+lane table is in `tests/test_performance.py`):
+
+- **Warm lanes, both corpus kinds alike** — the scan is
+  representation-independent and the utf-16 expression pays its 2n
+  alloc + encode pass on every kind: measured ~2.2 µs at 64 KiB against
+  the expression's 8.8-10.4 µs, ~34 µs at 1 MiB against 142-147 µs, and
+  ~400 µs at 12 MiB against 1.7-1.8 ms — ratios 0.21-0.26 on every warm
+  lane. Repeat counts on the same object stay O(1)-borrow plus the
+  detached scan; memory is zero-alloc on every lane (field read plus the
+  chunked count, no `bytes` object on any lane).
+- **Non-ASCII, first call on the object (a cold UTF-8 cache)**: the
+  borrow materializes and caches the UTF-8 view first (the utf8 twin's
+  cold class — encode-parity cost, GIL-held, and a prior `encode` does
+  not warm it; observed on CPython 3.12 here, expected from the sources
+  on 3.10–3.14 — see `docs/cache-proof.md`), then the scan runs
+  detached. Measured 376 µs at 1 MiB against the utf-16 expression's own
+  cold 146 µs — the one lane the expression wins, because it never
+  touches UTF-8 at all; `utf16_byte_len` is NOT recommended for one-shot
+  counts of fresh non-ASCII strings. The trade buys every subsequent
+  call at 4-5x and the absence of a 2n `bytes` object per call. The
+  fresh-object end-to-end bench is the `measured_not_asserted` cell in
+  `tests/test_performance.py`.
+
+```python
+tors.utf16_byte_len("café")  # 8: four BMP codepoints, 2 bytes each
+tors.utf16_byte_len("\U0001f600")  # 4: one astral codepoint, a surrogate pair
+tors.utf16_byte_len("東京")  # 4: two BMP codepoints — the UTF-8 count is 6
+# a JS/Windows column cap, counted without the 2n copy:
+if tors.utf16_byte_len(s) > 280:  # over 140 UTF-16 units: NVARCHAR(140)'s budget
+    reject()
+```
+
+The surrogate lane is REFUSAL PARITY with the replaced expression, measured
+and pinned (a first-draft claim that the stdlib's utf-16-le encode accepts
+lone surrogates was wrong — the test battery caught it): the strict
+`encode("utf-16-le")` refuses lone surrogates exactly like the utf-8 codec
+does ("surrogates not allowed"), so the function refuses the same strings
+the expression itself refuses.
+
+> **⚠ Breaking differences from the replaced expression.** The refusal
+> decision is parity; the error SHAPE is not:
+> (1) `.encoding` is `"utf-8"` (the str-in borrow materializing the UTF-8
+> view is the step that fails) where the expression's error says
+> `"utf-16-le"` — an encoding-label switch a caller matching on
+> `.encoding` will observe;
+> (2) on a multi-surrogate run the borrow's `(start, end)` names the
+> whole run where the utf-16-le error reports only the first unit —
+> a whole-run span vs a first-unit span;
+> (3) `errors="surrogatepass"` (one 2-byte unit per lone surrogate, the
+> 3-byte WTF-8 spelling in utf-8) is unsupported — no str-argument tors
+> function offers a surrogate mode, since every one needs the UTF-8 view
+> first.
+> Pinned attribute-for-attribute in tests/test_utf8_byte_len.py, the
+> byte-len family file (including the `encode("utf-16")` BOM form, which
+> answers the le length plus the 2-byte BOM). The argument takes exactly `str` (`bytes` /
+`bytearray` / `memoryview` / `int` raise `TypeError`) — it counts a `str`,
+not decodes bytes; the decode side of UTF-16 is `decode_utf16`.
+
+GIL behavior: the borrow is the call's GIL-held residue (a non-ASCII
+object's first call materializes the UTF-8 view under the GIL — the utf8
+twin's class, ~5 ms at 12 MiB, under the 10 ms heartbeat interval), and the
+detach carries the real O(n) scan (~0.4 ms at 12 MiB, memchr-class) where
+the utf8 twin's detach is nominal around one field read. The heartbeat
+cells are ceiling-only; the linear envelope (~0.4-0.5 ms of GIL hold per
+MiB) puts a ~200 MiB non-ASCII string at the 100 ms ceiling, the twin's
+recorded scale guidance. No aio twin: the GIL-held residue is the borrow
+alone, and the scan detaches.
 
 ## `tors.CompiledPatterns`
 
@@ -2086,6 +2899,182 @@ tors.chunk_cdc(b"hello world " * 10_000)
 # [(0, 65534), (65534, 120000)]
 ```
 
+## `tors.content_hash`
+
+```python
+def content_hash(obj: str | int | float | bool | None | list | tuple | dict) -> str: ...
+```
+
+The object content hash: the lowercase-hex SHA-256 of the object's
+**canonical form**, where the canonical form is EXACTLY
+
+```python
+json.dumps(obj, sort_keys=True, separators=(",", ":"))
+```
+
+with `json.dumps`'s defaults `ensure_ascii=True` and `allow_nan` — so the
+oracle is the stdlib itself, total and always available:
+
+```python
+hashlib.sha256(
+    json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+```
+
+`tors.content_hash(obj)` returns that string, byte-identical — for
+surrogate-free input where `json.dumps` succeeds; where `json.dumps`
+rejects (mixed unsortable keys, over-limit ints, circular references) both
+sides raise the same exception type, and lone-surrogate `str` input is the
+documented exclusion below — pinned
+differentially against the oracle over every contract below
+(`tests/test_content_hash.py`) and literal-pinned at the byte level
+crate-side (`src/canon_impl.rs`). Deterministic by construction: any dict
+key order yields the same hash, and an equal-value `list` and `tuple`
+hash identically (tuples serialize as lists, recursively).
+
+**The type contract.** Leaves: `str` (lone-surrogate strings excluded —
+they raise `UnicodeEncodeError` where `json.dumps` succeeds, the
+documented divergence below), `int` (arbitrary precision), `float`,
+`bool`, `None`. Containers: `list`, `tuple`, `dict`. Anything else raises
+`TypeError` naming the type (`set`, `frozenset`, `bytes`, `bytearray`,
+custom classes, plain `Enum`, views, iterators alike). Circular references
+raise `ValueError` on both sides (`json.dumps`'s own marker semantics: a
+shared sibling is fine, only a true cycle raises).
+
+**Dict keys: coercion, then json's own sort order.** Non-str keys are
+coerced exactly as `json.dumps` coerces them: `1` -> `"1"`, `True` ->
+`"true"`, `None` -> `"null"`, `1.0` -> `"1.0"`, `nan`/`inf` -> `"NaN"`/
+`"Infinity"`. Keys are sorted BEFORE stringification — all-int keys come
+out in numeric order (`2` before `10`), where the same digits as str keys
+sort lexicographically (`"10"` before `"2"`). The exotic key shapes — any
+float key, big-int keys, mixed int/float, NaN keys, and any
+str/int-SUBCLASS key (whose overridden rich comparison `json.dumps`'s
+sort honors) — are sorted by delegating to CPython's own `list.sort` over
+the dict's own `(key, value)` items: the very tuples `json.dumps` sorts,
+the same timsort, so the output order matches the running interpreter
+byte-for-byte, including the corners no reimplementation would dare: two
+distinct NaN objects legally coexist as dict keys, and their output order
+is timsort's behavior, not a mathematical property. Mixed unsortable key
+types (`{1: ..., "a": ...}`) raise the sort's own `TypeError`,
+byte-identical with `json.dumps`'s; non-coercible key types (`tuple`,
+`bytes`, ...) raise `TypeError` naming the key type.
+
+**Strings: the `ensure_ascii` escape table.** Inside a string the raw
+bytes are exactly printable ASCII (U+0020-U+007E) minus `"` and `\` — the
+forward slash is never escaped. Everything else is escaped: `\"`, `\\`,
+the five short escapes `\b` `\t` `\n` `\f` `\r` (U+0008/9/A/C/D), `\u00XX`
+lowercase for the other controls and for DEL (U+007F is outside printable
+ASCII), `\uXXXX` lowercase for all non-ASCII, and astral codepoints as
+surrogate-pair escapes: `chr(0x1F600)` -> `"\ud83d\ude00"`. Every
+codepoint U+0000-U+007F and the BMP/astral boundary codepoints are pinned
+as values and as dict keys.
+
+**Floats: Python's own repr, never reimplemented.** Finite floats are
+materialized via Python's float `repr` during the walk (tors does not
+reimplement float formatting — exact by construction, `0.1` is `"0.1"`,
+`1e16` is `"1e+16"`, `5e-324` is `"5e-324"`, `sys.float_info.max` is its
+full 17-digit spelling). Non-finite values use json's `allow_nan`
+literals: `NaN`, `Infinity`, `-Infinity`.
+
+**Ints: arbitrary precision.** The i64 fast path covers
+`-(2**63)`..`2**63-1` (a storage read plus fixed-buffer decimal digits;
+measured 4.8ns per int against 29.3ns for the repr call, ~6x), and
+everything beyond falls back to Python's own `int`->`str`, so the
+interpreter's `sys.set_int_max_str_digits` limit raises identically on
+both sides (`ValueError` on 3.11+; on 3.10, no limit, both sides hash).
+
+**Why the emitter is hand-written.** No maintained crate emits this byte
+format: `serde_json` and `orjson` both output raw UTF-8 for non-ASCII
+strings with their own escape rules and no `ensure_ascii` mode at all.
+The contract here is the stdlib's exact wire format, so the emission is
+tors's own ~150 lines (`src/canon_impl.rs`) rather than a dependency that
+approximates it. Nothing else is hand-rolled where a crate exists: the
+hash is `sha2`, the hex is `const_hex`, and every float/int spelling is
+Python's own.
+
+**The surrogate divergence (documented, pinned).** A `str` holding lone
+surrogates — value or key, exact or subclass — raises `UnicodeEncodeError`
+("surrogates not allowed") from the standard str borrow, the crate-wide
+boundary every str-in surface here documents, where `json.dumps` ACCEPTS
+lone surrogates (it emits `\udXXX` escapes for them). Real astral text
+(valid surrogate pairs) hashes with full parity. The other divergence
+lanes: the walk is iterative, so tors accepts nesting deeper than
+`json.dumps`, which `RecursionError`s at an interpreter-version-dependent
+depth — bounded by the untrusted-input ceiling (`MAX_TOTAL_DEPTH`
+150k total frames exact+protocol, `MAX_WALK_NODES` 2M visited objects;
+100k exact levels hash, 200k raises `RecursionError`); and mixed
+exact+protocol interleavings diverge by construction (json counts every
+container against one C budget, tors counts only protocol frames against
+the interpreter budget), pinned as a documented divergence, not parity.
+
+**Subclass hooks run to completion under the GIL.** A dict subclass's
+`.items()` and a list/tuple subclass's `__iter__` are pulled to completion
+before the child walk begins; a hook yielding an unbounded stream aborts
+with a generic `ValueError` (the per-container bound is a DoS backstop, its
+value deliberately not leaked), bounded never infinite. Treat
+`content_hash` as trusted-input-only for subclass instances with
+attacker-controlled hooks — the same posture `json.dumps` itself has
+(it materializes unboundedly and would spin forever). The same
+trusted-input-only posture covers depth/breadth beyond a modest envelope
+(depth on the order of 10-20k frames, visited objects on the order of
+200-500k nodes): the untrusted-input ceiling (`MAX_TOTAL_DEPTH` 150k total
+frames exact+protocol, `MAX_WALK_NODES` 2M visited objects; 100k exact
+levels hash, 200k raises `RecursionError`) is test-fitted to the pinned
+superset lane, not to an adversarial wall/RSS budget — a 149k-deep exact
+tree still holds tens of MiB GIL-held before the ceiling fires.
+
+**Protocol nesting past ~1000 is unsupported.** Subclass containers are
+counted against `sys.getrecursionlimit()` and raise `RecursionError` at the
+cap. On 3.10/3.11 that matches `json.dumps`'s own boundary; on 3.12+ the
+stdlib C-stack budget is looser (a legit 2k-deep subclass chain hashes under
+`json.dumps` at ~100k frames on 3.14 while tors raises at ~1000) — a
+deliberate conservative divergence, same error class, tighter boundary,
+never a silent hash. Exact nesting is the deep lane (100k levels hash);
+protocol nesting is the parity lane up to the interpreter limit.
+
+**Delegated sorts are bounded.** Exotic-key dicts (any float/big-int/
+mixed/NaN/subclass key) sort by delegating to CPython's own `list.sort`
+over live `(key, value)` tuples — O(n log n) Python comparisons plus one
+hash entry and one tuple per key, all GIL-held (≈100 MiB for 1M exotic
+keys). Past `MAX_DELEGATED_SORT_KEYS` (100k) keys in one dict, or
+`MAX_TOTAL_DELEGATED_PAIRS` (500k) delegated pairs walked in one call, the
+walk refuses with a generic `ValueError`. The str and int/bool fast paths
+take no interpreter sort and cost nothing against these bounds.
+
+**GIL model.** The object walk and the leaf spellings run under the GIL
+(the standard arg-walk class scaled to an object, O(tree): one borrow
+plus copy per str, one i64 read per int, one `repr` call per float); the
+canonical-form emission, the SHA-256, AND the owned tree's teardown run
+under one `py.detach` (the tree moves into the detached closure, so no
+deep-tree `Drop` tail holds the GIL after the digest), streaming into the
+hasher. At 12 MiB of the records corpus the walk's
+worst heartbeat gap measured 23-32ms of 42-60ms walls (the stdlib
+spelling holds ~the whole wall: ratio 1.00 inline vs tors's 0.45-0.60;
+`tests/test_gil_release.py`), and the wall race with the full stdlib
+expression is a measured dead heat at 64 KiB-12 MiB
+(`tests/test_performance.py`): the value is the GIL release and the
+parity guarantees, not raw speed over the C encoder. At 1 MiB the wall
+stays within 1.5x the stdlib expression (`tests/test_content_hash.py`'s
+wall-ceiling pin); the exotic-key delegated sort (`list.sort` over live
+objects) is the known slow lane versus the str/int fast paths.
+
+```python
+a = {"title": "Q3 outage report", "severity": "high", "tags": ["grid", "north"]}
+b = {"tags": ["grid", "north"], "severity": "high", "title": "Q3 outage report"}
+tors.content_hash(a) == tors.content_hash(b)
+# True: equal content, any key order, one dedup key
+tors.content_hash(a)
+# '558be2127fa557b06ffd3dd0735697e14022546c969c6c37b01cf6278a178cf2'
+
+request = {"model": "guss-9", "messages": [{"role": "user", "text": "Summarize the Q3 report."}]}
+tors.content_hash(request)
+# 'b0df18f8e089f15fb56fa51c241151213e67b82e7b656de29b1bafedb3785464'
+```
+
+**Async**: no `tors.aio.content_hash` twin: a fast one-shot call over an
+in-memory object, not a large-input pass worth a thread dispatch (see
+[Async use](async.md)).
+
 ## `tors.merkle_root`
 
 ```python
@@ -2168,6 +3157,346 @@ tors.merkle_diff([b"a", b"b", b"c"], [b"a", b"X", b"c"])
 tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
 # [2, 3]: every trailing index beyond the shorter list's length
 ```
+
+## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex` and their `_digest` twins
+
+```python
+def md5_hex(data: str | bytes) -> str: ...        # 32 lowercase hex chars
+def sha1_hex(data: str | bytes) -> str: ...       # 40
+def sha256_hex(data: str | bytes) -> str: ...     # 64
+def sha512_hex(data: str | bytes) -> str: ...     # 128
+def hmac_sha256_hex(key: str | bytes, data: str | bytes) -> str: ...  # 64
+
+def md5_digest(data: str | bytes) -> bytes: ...   # 16 raw digest bytes
+def sha1_digest(data: str | bytes) -> bytes: ...  # 20
+def sha256_digest(data: str | bytes) -> bytes: ...  # 32
+def sha512_digest(data: str | bytes) -> bytes: ...  # 64
+def hmac_sha256_digest(key: str | bytes, data: str | bytes) -> bytes: ...  # 32
+```
+
+The one-shot hashing primitives a text pipeline keeps reaching for, each
+algorithm in two output spellings over ONE digest computation: the
+lowercase-hex `_hex` names and the raw-digest-bytes `_digest` names. The
+hex spellings are the cache-key/ETag/request-ID shapes: webhook signature
+verification and API auth (`hmac_sha256_hex`, the GitHub/Stripe/Slack
+HMAC-SHA-256 convention), ETag and Content-MD5 checks against object
+stores (`md5_hex`), quick content compares and legacy-interop digests
+(`sha1_hex`), and dedup-cache keys / content addressing
+(`sha256_hex`/`sha512_hex` — the same engine `finalize`'s hash tail and
+`merkle_root`'s leaves use, without the normalize stage). The digest
+spellings serve the call sites that want the bytes themselves: signature
+schemes that base64-encode the digest, key-derivation chains that feed a
+digest back in as a key, certificate/content thumbprints, advisory-lock
+ints sliced off the front — see
+[Raw digest bytes](#raw-digest-bytes-the-_digest-spellings). Every
+algorithm is the maintained RustCrypto implementation (`md-5`, `sha1`,
+`sha2`, `hmac`); nothing is hand-rolled, the same dependency policy as the
+rest of the crate. Byte-identical to the stdlib spellings in both output
+shapes —
+`tors.sha256_hex(data) == hashlib.sha256(data).hexdigest()`,
+`tors.sha256_digest(data) == hashlib.sha256(data).digest()`,
+`tors.hmac_sha256_hex(key, data) == hmac.new(key, data,
+hashlib.sha256).hexdigest()` — and internally one computation:
+`tors.sha256_hex(data) == tors.sha256_digest(data).hex()`. All pinned by
+exact differentials over hypothesis corpora plus the primary-source
+known-answer vectors (RFC 1321, FIPS 180-4, RFC 4231's every
+HMAC-SHA-256 case) in `tests/test_hash.py`.
+
+**`md5_hex`/`md5_digest` and `sha1_hex`/`sha1_digest` are
+checksum/legacy-interop primitives, never security primitives — either
+spelling.** Both are broken and have been since the 2000s: practical md5
+collisions date to 2004, sha1's first public collision to 2017 (Google's
+SHAttered). Use them for Content-MD5, S3 ETags, cache-busting,
+rsync-style quick compares — never for signatures, certificates, or
+password handling. The security side of this surface is
+`sha256`/`sha512`/`hmac_sha256`, either spelling. The HMAC key is held
+in memory for the call and is not zeroized on return — the same posture
+as the stdlib `hmac`/`hashlib` spelling, which likewise keeps key
+material in ordinary memory.
+
+**str input is its UTF-8 bytes, on purpose.** `hashlib` raises TypeError on
+str and makes every caller spell `s.encode("utf-8")` first; tors takes the
+str directly — `tors.sha256_hex(s) == hashlib.sha256(s.encode("utf-8"))
+.hexdigest()` — because the str-in convention is crate-wide (`normalize`,
+`finalize`, the segmentation family). A str holding lone surrogates
+therefore raises `UnicodeEncodeError` at the argument boundary, the same
+crate-wide contract. bytes input is exactly `bytes`: `bytearray` and
+`memoryview` raise TypeError rather than being copied, the bytes-in
+family's immutable-buffer doctrine (`b64_encode_bytes`,
+tests/test_b64.py) — callers holding one wrap it first,
+`tors.sha256_hex(bytes(buf))`, then hash. Any input length is legal, empty included (the
+empty-input digests are pinned known-answer vectors); there are no
+ValueError paths on this surface.
+
+**Stateless one-shot only — streaming/incremental hashing is out of
+scope by charter.** No hash object, no streaming update surface: every
+spelling here hashes its whole input in one call, and tors is stateless
+by charter ([Design and scope](design.md)), so a `hashlib`-style
+constructor object is exactly the persistent-handle shape that charter
+cuts (the two measured exceptions, `CompiledPatterns` and
+`CompiledLemmaDict`, exist for per-call re-materialization costs a digest
+object doesn't have: `hashlib.sha256()` construction is O(1)). A caller
+hashing a stream hashes chunk digests and combines them (the
+`merkle_root` shape, or a running HMAC chain over chunks); for incremental
+feeding, `hashlib`'s object API is the right tool and is not duplicated.
+
+**GIL model.** The argument borrow (zero-copy for ASCII/cached str, for
+bytes always; on the two-argument HMAC spellings the one-time O(input)
+UTF-8 materialization applies independently per str argument, so two
+non-ASCII str inputs pay two materializations — the measured HMAC wall
+cells use bytes key+data, equivalently the ASCII zero-copy lane) runs
+under the GIL; the whole digest computation — update
+and finalize, plus the O(digest-size) hex formatting on the `_hex`
+spellings — runs under one `py.detach`. The GIL-held residue is the
+marshalling of one short hex string (the `_hex` names) or one fixed-size
+`PyBytes` of 16/20/32/64 bytes (the `_digest` names — the
+`b64_decode` bytes-return class). The honest
+comparison with `hashlib`, measured (Apple Silicon, min-of-3):
+CPython's `hashlib` releases the GIL for digest updates of 2048+ bytes
+(the `_hashopenssl` threshold), so at multi-MiB sizes the stdlib is
+loop-friendly too and tors's GIL release is uniformity, not a latency
+win; below the threshold `hashlib` holds the GIL but a sub-2048-byte
+digest is microseconds, immaterial either way. On raw throughput the
+OpenSSL engines (hardware SHA extensions) win or tie at engine-dominated
+  sizes — sha256 12 MiB ~4-5ms (tors) vs ~4ms (hashlib), ratio ~1.1-1.2x
+  (absolute figures move with box and load; the band is the statement),
+  sha1 ~1.06-1.11, md5 and sha512 dead heats — recorded, not hidden. The wall
+  wins tors can assert are the sizes this surface exists for, where
+  per-call overhead dominates the engine: hashing a short ASCII str at 0.40-0.54
+  of `hashlib.sha256(s.encode("utf-8")).hexdigest()` (the encode is a real
+  cost the stdlib makes you pay; non-ASCII str pays a one-time O(input)
+  UTF-8 materialization, so the win narrows there), and HMAC at request-signature sizes at
+  ~0.31 of even the stdlib's fastest one-shot spelling
+  (`hmac.digest(key, data, "sha256").hex()`). Full tables:
+  [Performance](performance.md).
+
+  **No `deadline_ms`.** Every deadline-bearing primitive in this crate
+  protects against an adversarial-input superlinear blowup. This surface
+  has no such shape: hashing cost is linear in the input length, with no
+  superlinear structure for an adversary to feed — a caller already
+  controls the one lever that bounds the cost (how many bytes they pass).
+
+### Raw digest bytes: the `_digest` spellings
+
+The five `_digest` names return the digest as raw `bytes` — the same
+engines, the same single detach, the same contracts as their `_hex`
+twins (str input is its UTF-8 bytes; exactly-`bytes` in, so
+`bytearray`/`memoryview` raise TypeError — wrap first, `bytes(buf)`;
+a lone surrogate raises
+UnicodeEncodeError at the borrow; any key length legal, empty included;
+the key borrowed and validated before the data; empty input legal) —
+without the hex tail. One digest computation per call, two output
+spellings to choose from; `tors.md5_digest(x)` is exactly
+`bytes.fromhex(tors.md5_hex(x))`.
+
+The raw bytes are what a second consumer layer wants, the shapes a
+hex string forces to decode first:
+
+- **Base64 webhook signatures.** The webhook schemes that sign with
+  HMAC and *base64*-encode the digest (not hex) need
+  `hmac_sha256_digest`: `urlsafe_b64encode` over the raw 32 bytes is
+  the signature, verified with `hmac.compare_digest` (below).
+- **Key derivation chains.** A labelled subkey is a digest fed back in
+  as an HMAC key — `hmac_sha256_digest(hmac_sha256_digest(root,
+  label), data)` — the HKDF-style extract/expand shape; a hex string
+  would have to be decoded before every link.
+- **Content/certificate thumbprints and digest-sliced ints.** A
+  stable identifier for an arbitrary name — an advisory-lock int
+  (`int.from_bytes(sha256_digest(name)[:8], "big")`) or a thumbprint
+  key — is a slice or re-encoding of the raw bytes.
+
+`md5_digest` and `sha1_digest` carry their twins' warning verbatim:
+checksum/legacy-interop only, never security. And the streaming
+boundary above is the whole family's: the `_digest` spellings are
+one-shot too — there is no incremental feeding surface on either
+spelling, by charter.
+
+A base64-signature webhook verification, the `hmac_sha256_digest`
+shape (the secret is the bytes after the `whsec_` prefix; the signed
+content is `"{msg_id}.{timestamp}.{payload}"`; the verify compare is
+`hmac.compare_digest`, never `==`):
+
+```python
+import base64
+import hmac as hmac_module
+import tors
+
+secret = base64.b64decode("whsec_3f9d2a8c".partition("_")[2])
+signed_content = (
+    "msg_5fXn0.1731634200."
+    '{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+).encode("utf-8")
+
+signature = base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content))
+# b'q8IyxOXFC_mgdZj-GSqtTl2vj3eTIgMM0HQQ-FfRQVw='
+
+hmac_module.compare_digest(
+    signature,
+    base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content)),
+)
+# True
+```
+
+A digest-sliced advisory-lock int (the stable-identifier shape: a
+64-bit int for an arbitrary resource name):
+
+```python
+import tors
+
+lock_id = int.from_bytes(tors.sha256_digest("tenant:42:resource:7")[:8], "big")
+# 15284293306093710542
+```
+
+A labelled derivation chain (the extract-then-expand shape: the label
+derives an intermediate key, the data expands it — both links consume
+the raw digest bytes):
+
+```python
+import tors
+
+root = b"root-key-material"
+subkey = tors.hmac_sha256_digest(
+    tors.hmac_sha256_digest(root, "tors/db-session-key"), "user:42"
+)
+subkey.hex()  # the 32 raw bytes, hex for inspection
+# "cc3ccddeaa0718afe52e67b9011b49dfe29ae01571495a75e17eea1f59f6e7b6"
+```
+
+A webhook-verification shape with the hex spelling, for the schemes that
+compare hex signatures (the `str` key and payload spell exactly how
+they arrive off the wire; `hmac.compare_digest` stays the right compare):
+
+```python
+import hmac as hmac_module
+import tors
+
+secret = "whsec_3f9d2a8c"
+payload = '{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+
+expected = tors.hmac_sha256_hex(secret, payload)
+# "43ec3b86ee42fdcf9640ded30e94104b4a11b9fd43f1624b30471f7b13e76a12"
+
+hmac_module.compare_digest(expected, tors.hmac_sha256_hex(secret, payload))
+# True
+```
+
+An S3/HTTP ETag check (the md5 checksum use; the value is the normalized
+body's digest, matching what the store computed):
+
+```python
+import tors
+
+body = tors.normalize("line one  \n\n\n\nline two\r\n")
+# "line one\n\nline two"
+
+tors.md5_hex(body)
+# "487f5cc2c45cc57e638d9fce8c33d95c"
+
+tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"  # the declared ETag
+# True
+```
+
+`==` is the correct compare here: an ETag is a non-secret checksum, so
+a timing side channel has nothing to leak. Secret comparisons (HMAC
+signatures, tokens) must use `hmac.compare_digest` as in the webhook
+cells above — never `==`.
+
+## `tors.uuid7_timestamp_ms` / `tors.uuid_version` / `tors.uuid_parse`
+
+```python
+def uuid7_timestamp_ms(value: bytes | str) -> int: ...
+def uuid_version(value: bytes | str) -> int: ...
+def uuid_parse(value: str) -> bytes: ...
+```
+
+The UUIDv7 field operations: the hex-grammar work (the structural parse
+and the canonical encode) delegated to the Rust `uuid` crate — the uuid-rs
+org's, Apache-2.0 OR MIT, no default features, zero transitive
+dependencies — with tors's own thin strictness layer on top (generating
+IDs is not this surface's job — every producer from `uuid.uuid7()` to
+`uuid_utils` already does that — reading the standard time-ordered ID's
+fields back out is). A store keyed by UUIDv7 IDs ends up reimplementing
+these three operations at every site that paginates by recency or buckets
+by time: the 48-bit unix-millisecond timestamp (keyset cursors and
+time-bucketed queries against an ID column), the version nibble that says
+whether that timestamp means anything, and a strict text-to-bytes parse at
+the ID-validation boundary. 16 bytes in, integer out — trivial, which is
+exactly why it keeps getting reimplemented slightly wrong.
+
+`uuid7_timestamp_ms` returns the leading six bytes as a big-endian
+unix-millisecond timestamp (RFC 9562 section 5.7's `unix_ts_ms` field):
+`datetime.datetime.fromtimestamp(ms / 1000, UTC)` is the ID's creation
+instant. It raises `ValueError` naming the version actually found when the
+version nibble is not 7 — the field is only defined for v7, and the nil
+UUID's all-zero field must not silently answer `0`.
+
+`uuid_version` returns the version nibble (byte 6's high half), `0`-`15`, for
+any UUID of any variant: the field itself, not an RFC-4122-ness check. The
+variant is a different field (byte 8's top two bits) and out of scope; the
+stdlib `uuid.UUID.version` property refuses to answer off the RFC 4122
+variant, where this answers the nibble question unconditionally.
+
+`uuid_parse` is canonical text to the 16 raw bytes, strict, the
+validation-primitive direction. **The stdlib `uuid.UUID` accepts strictly
+more than this, deliberately not matched here**: it parses braced text
+(`{...}`), the URN prefix (`urn:uuid:...`), hyphen-less hex, and uppercase,
+while `uuid_parse` accepts exactly one grammar — 36 ASCII characters
+(36 bytes), hyphens at positions 8/13/18/23 (the 8-4-4-4-12 groups),
+lowercase hexadecimal elsewhere — raising `ValueError` naming the problem,
+the position
+(0-based), and the accepted form otherwise. A caller using this as a gate
+wants one grammar, the canonical one every producer emits, not the
+stdlib's permissive union; that closed-set strictness is the same contract
+`b64_decode`'s `validate=True` default and the `errors=`/`boundary=`
+parameters already establish. The divergences are pinned, not accidental:
+`tests/test_uuid.py` proves the stdlib accepts each loose form in the same
+test that pins tors rejecting it. The parse mechanics behind the contract:
+`Uuid::parse_str` (the crate's) owns structure and the text-to-bytes
+transcode, and tors's strictness layer is one comparison — accepted text
+must be byte-equal to its parsed value's re-encoded canonical form, which
+is what rejects the crate's (and the stdlib's) loose spellings at exactly
+the canonical grammar. The strict contract is not the crate's default,
+which is precisely why the layer is tors's own.
+
+The int-out pair takes exactly `bytes` (16 bytes, `ValueError` naming the
+count otherwise; `bytearray`/`memoryview` are `TypeError`, the bytes-in
+surface's borrows-the-argument-copies-the-16-bytes contract: the bytes
+spelling borrows the argument, copies the 16 bytes out) or canonical `str`
+(same strict grammar, same errors); `uuid_parse` takes exactly `str`. A
+`str` holding lone surrogates fails the borrow itself
+(`UnicodeEncodeError`) before any grammar check runs.
+
+```python
+import datetime
+import uuid
+
+# any v7 works; this one is fixed so the outputs below are literals
+u = uuid.UUID("01977420-dc00-7abc-9def-98765432100f")
+tors.uuid_version(u.bytes)  # 7
+tors.uuid7_timestamp_ms(u.bytes)  # 1750000000000
+tors.uuid7_timestamp_ms(str(u))  # 1750000000000: canonical text accepted too
+datetime.datetime.fromtimestamp(1750000000000 / 1000, datetime.timezone.utc)
+# datetime.datetime(2025, 6, 15, 15, 6, 40, tzinfo=datetime.timezone.utc)
+tors.uuid_parse(str(u)) == u.bytes  # True
+tors.uuid_parse(str(u).upper())
+# ValueError: UUID text must be lowercase hex: found uppercase 'D' at
+# position 9 (the stdlib uuid module accepts uppercase; tors's canonical
+# form deliberately does not)
+```
+
+GIL model: the bytes spelling borrows the argument, copies the 16 bytes,
+and the bit extraction (field read) runs detached under `py.detach`; the
+str spelling validates and
+transcodes under the GIL (the whole input is 36 bytes, smaller than the
+call's own marshalling residue — a detached parse would be overhead for
+its own sake) with the extraction detached after it, keeping the crate's
+GIL-free-core contract uniform across the trio. `uuid_parse` is that
+contract's honest exception: its whole work *is* the 36-byte parse (there
+is no int-out tail to detach) and it runs GIL-held by design, ~70ns a call
+(re-measured after the `uuid`-crate adoption; the crate's const-fn parser
+is faster than the hand-rolled scan it replaced).
+Every per-call GIL-held residue on this surface is sub-microsecond; the
+heartbeat cell in `tests/test_gil_release.py` pins the batch-loop band.
 
 ## `tors.simhash64`
 
@@ -2290,6 +3619,198 @@ tors.simhash128("the quick brown fox jumps over the lazy dog")
 # 317101931942163558849153286541522090150
 tors.simhash128("")
 # 0
+```
+
+## `tors.minhash_signature`
+
+```python
+def minhash_signature(
+    text: str,
+    *,
+    num_perm: int = 128,
+    shingle_size: int = 3,
+    seed: int = 0,
+) -> list[int]: ...
+```
+
+The MinHash signature of `text`, one GIL-released native pass: the
+recall-side near-duplicate complement to the SimHash family. `simhash64`/
+`simhash128` are the precision side — one compact fingerprint, cheap to
+store and compare, but a weak recall instrument at corpus scale (two
+paraphrased documents sit far apart in Hamming space however related
+their vocabulary). MinHash is the recall side: `num_perm` min-hashes per
+document, and the fraction of positions on which two signatures agree
+estimates the Jaccard similarity of the two documents' shingle sets — the
+quantity a corpus-scale ingestion pipeline (100k+ documents) bands into an
+LSH table and recalls candidate pairs on (Broder's MinHash, the primitive
+behind near-duplicate detection at web scale).
+
+**The estimator contract.** For shingle sets `A` and `B`, each position
+`i` of the two signatures agrees exactly when the shingle achieving the
+minimum of `h_i` over `A ∪ B` lies in `A ∩ B`, which happens with
+probability `J(A, B) = |A ∩ B| / |A ∪ B|`. So
+`E[agreement] = J` and the standard error over `k = num_perm` positions is
+`sqrt(J(1 - J) / k)` — `O(1/sqrt(k))`, about 0.044 at the default
+`num_perm = 128` at the worst case `J = 0.5`, halving with every 4x in
+`num_perm`. The comparison is one expression at the call site:
+
+```python
+sum(x == y for x, y in zip(sig_a, sig_b)) / len(sig_a)
+```
+
+**Tokenization and shingling.** Tokens are the same tokenizer
+`tf_idf`/`bm25_rank` ride: UAX #29 word segments (`word_bounds`' own
+segmentation), segments made entirely of whitespace skipped, each
+lowercased with Unicode-correct case folding — so `"Hello, WORLD!"` and
+`"hello, world!"` signature identically, and whitespace shape (tabs,
+newlines, runs) is invisible. A shingle is `shingle_size` consecutive
+tokens hashed under an injective length-prefixed framing: the window's
+token count as one little-endian u64, then per token its UTF-8 byte
+length as one little-endian u64 followed by the bytes themselves, the
+whole frame fed to XXH64 (seed 0). Length-prefix codes are uniquely
+decodable, so the framing is injective by construction — deliberately,
+because "no UAX #29 token can contain U+001F" is false: U+001F is not
+whitespace, so the segmenter keeps it (`tors.word_bounds("a\x1fb")` is
+the three tokens `["a", "\x1f", "b"]`), and UAX #29 WB4 (ignore
+Extend/Format/ZWJ) then glues a following combining mark, ZWJ, or SOFT
+HYPHEN onto it (`tors.word_bounds("\x1f\u0301")` is the single token
+`["\x1f\u0301"]`). A `token + U+001F + token` join would rest on the
+narrower (and segmentation-table-sensitive) claim that U+001F never
+mixes into a longer segment; the framing rests on nothing the segmenter
+can take away. Both directions are pinned in `tests/test_minhash.py`:
+the `\x1f`-adjacent mark corpus (every combining mark in U+0300–U+036F,
+plus ZWJ and SOFT HYPHEN, attaches) and the framing's injectivity over a
+separator-bearing window domain. Word shingles,
+not character shingles: natural-text near-duplicates preserve word
+sequence far more often than exact character spans — a reflowed paragraph
+or a swapped word shifts character k-grams wholesale while word k-grams
+survive, which is what recall at corpus scale needs.
+
+**The pinned arithmetic (the determinism contract).** Every element is
+fixed, documented arithmetic, platform-independent (integer ops only), so
+the same text at the same parameters produces the identical signature
+across processes, machines, and platforms within one tors version — the
+same stability requirement the simhash family states for its FNV-1a. The
+boundary that claim stops at: the signature is a function of the crate's
+UAX #29 segmentation tables (`unicode-segmentation`, pinned in
+`Cargo.lock`) as well as of the frozen arithmetic, so a tors release that
+bumps those tables can change signatures — re-fingerprinting every
+affected document. This surface's advertised use is persisted signatures
+and LSH tables at corpus scale, where a re-fingerprinting upgrade
+silently invalidates the table: a caller persisting either across tors
+versions must re-baseline on upgrade (within a version nothing varies —
+the arithmetic and XXH64 are frozen):
+
+- each shingle is hashed with XXH64, seed 0: the frozen-spec algorithm
+  (final since xxHash 0.7.0 — the digest for a given seed and byte stream
+  is part of the spec, not an implementation detail), via `twox-hash`;
+- `signature[i] = min` over shingles of `(a_i * x + b_i) mod p`, with
+  `p = 2^61 - 1` (the Mersenne prime, the standard MinHash field) and the
+  `(a_i, b_i)` pairs derived from `seed` by a SplitMix64 stream — `a_i`
+  in `[1, p-1]` (a zero multiplier would collapse the permutation to a
+  constant), `b_i` in `[0, p-1)`, two draws per permutation in
+  permutation order (so a smaller `num_perm` yields a prefix of a larger
+  signature at the same seed). `rand` is deliberately not involved: it is
+  not in tors's dependency tree and its stream internals are not a
+  semver-stable contract, while the ~8-line SplitMix64 derivation is
+  golden-pinned on both the Rust and Python sides
+  (`tests/test_minhash.py`).
+
+This is fixture-grade determinism, not cryptography: nothing here resists
+an adversary crafting collisions, and nothing needs to.
+
+**The empty-shingle-set convention.** Empty text, whitespace-only text,
+or fewer tokens than `shingle_size` yields `num_perm` copies of the u64
+MAX sentinel (`2**64 - 1`): deterministic, seed-invariant, and unable to
+collide with any real minimum (the affine outputs live in
+`[0, 2**61 - 1)`, a disjoint range). Two empty documents agree at every
+position, an empty-vs-nonempty pair at none, and an all-sentinel
+signature is a stable digest an LSH table can bucket empty documents
+under.
+
+**The LSH table is caller state.** tors stays stateless
+([design.md](design.md)): this function computes one document's signature
+and keeps nothing; the banding table, the candidate store, and the
+threshold calibration are the caller's. A banding helper (cut a signature
+into `r`-element bands and hash them for table keys) is a future
+companion question, not something hidden inside this core.
+
+**Bounds.** `num_perm` must be in `[1, 1024]` and `shingle_size` at least
+1; an in-range value outside those bounds raises `ValueError` naming the
+bounds before any work runs, while an int outside the i64 range the
+binding extracts (`num_perm=10**30`) raises pyo3's own `OverflowError`
+at extraction instead — the `truncate_to_bounds`-identical pattern for
+every i64-typed size argument.
+`seed` is any int, reduced mod `2**64` with two's-complement semantics
+for negatives (`seed=-1` is `seed=2**64 - 1`). All three int parameters
+are accepted through the `__index__` protocol (numpy integers and other
+int-likes work; the slot is dispatched, never the instance's own
+`__and__`, so masking cannot alter the value) — and `__index__` itself
+is caller code: it runs exactly once, with its own side effects, and
+its own failure propagates unchanged rather than masking as a parameter
+error. `bool` is rejected explicitly in every position (`num_perm=True`
+is a `TypeError`, not 1), including as an `__index__` result; anything
+without `__index__` (str, float, None, bytes) and an `__index__`
+returning a non-int are `TypeError`. A non-str
+`text` raises `TypeError`; text bearing lone surrogates raises
+`UnicodeEncodeError` (the crate-wide str-borrow contract). Cost is
+`O(tokens × shingle_size)` hashing (every step re-hashes the whole live
+window under the length-prefixed framing — widths 64/256 on 100 KiB cost
+~9/~32 ms against ~2 ms at the default width on the dev box,
+macOS/arm64, release) plus `O(distinct × num_perm)` in the min-sweep, the
+dedup-first shape: each distinct shingle hash updates the minima once,
+so a repeated-token document rides its handful of distinct shingles
+rather than its thousands of occurrences. Resident memory is the live
+`shingle_size`-deep token window — `O(min(tokens, shingle_size))` —
+plus the distinct-hash set plus the `num_perm` coefficients: the token
+list is streamed, never retained
+(the pre-fix shape held the whole `Vec<String>` across the sweep, a
+measured ~77 MB transient at 12 MB of prose: 133 MB peak vs 56 MB after,
+same interpreter and corpus baseline). Past 1024 tokens of width the
+short stream never materializes at all: a retention-free token count
+decides "fewer tokens than the width" first, so a huge `shingle_size`
+over a large text answers the sentinel at the tokenizer transient
+(~13.5 MB at width 10⁹ peaks ~30 MB, not the ~145 MB the retaining
+shape held, same dev box). There is no
+`deadline_ms` on this call (unlike `diff_opcodes`): the sweep has no
+superlinear shape, only the linear ones above, so the lever is the
+caller's own input size — bound it before calling (truncate, chunk, or
+`max_bytes`-gate the read) rather than after. Measured (dev box,
+macOS/arm64, release): ~13.5 MB of repetitive prose at the default 128
+permutations completes in ~0.25 s, while 1 MiB of distinct-rich text
+(every token unique, the `minhash_signature_distinct` bench row and the
+Python worst-case cell) costs ~104 ms at k=128 and ~226 ms at k=1024
+(criterion medians, 10 samples) — the ~100M-affine-op worst case the
+caller bound is calibrated on; the suite's 2.5 s regression ceiling is
+~10x the repetitive nominal
+(see `tests/test_minhash.py`), a tripwire, not a target. No `aio`
+twin: a fast one-shot call.
+
+```python
+original = (
+    "The quarterly oil sample interval for field outages was adjusted after the bushing "
+    "torque specifications changed. Maintenance windows now close within fourteen days. "
+)
+edited = (
+    "The monthly oil sample interval for field outages was adjusted after the insulator "
+    "torque specifications changed. Maintenance windows now close within fourteen days. "
+)
+unrelated = "Pack my box with five dozen liquor jugs."
+
+a = tors.minhash_signature(original)
+b = tors.minhash_signature(edited)
+u = tors.minhash_signature(unrelated)
+a[:3]
+# [151086443443351341, 59387643775660493, 132191052063639682]
+sum(x == y for x, y in zip(a, b)) / len(a)
+# 0.6015625: near-duplicates — the two-word swap leaves most 3-word
+# shingles intact, so the estimated shingle-set Jaccard stays high
+# (exact J here: 0.6429)
+sum(x == y for x, y in zip(a, u)) / len(a)
+# 0.0: an unrelated text agrees on no positions
+tors.minhash_signature("")[:3]
+# [18446744073709551615, 18446744073709551615, 18446744073709551615]:
+# the empty-shingle-set sentinel
 ```
 
 ## `tors.CompiledLemmaDict`
@@ -2831,6 +4352,537 @@ no ASCII letters) → `""`.
 tors.refined_soundex("Robert"), tors.refined_soundex("Rupert")
 # ('R901096', 'R901096')
 ```
+
+## Random generation (`random_string` / `random_hex` / `random_b62` / `random_b64url` / `uuid4` / `uuid7`)
+
+The universally hand-rolled helpers — token hex, urlsafe tokens, base62 ids,
+UUIDv4/v7 — as fast GIL-free tors primitives. The Python incumbents (`secrets`,
+`uuid`, `uuid_utils`) hold the GIL through their formatting passes; tors runs
+the whole draw-plus-sample/format pass under one `py.detach`.
+
+**Length-first, uniformly.** Every token spelling takes the output length
+directly — "I want a base62 id X characters long" is the whole call, which is
+how backend callers actually think about ids, keys, and tokens (the
+maintainer's framing, and the reason `random_hex` and `random_b64url` were
+moved off their byte-count spellings). `random_hex(32)` is a 32-character hex
+key; `random_b62(22)` is a 22-character id; `random_b64url(43)` is a
+43-character urlsafe token; `random_string(n, alphabet)` is n characters of
+whatever alphabet you carry. All four are ONE char-sampling engine:
+`random_hex`/`random_b62`/`random_b64url` are exactly `random_string` over
+their fixed alphabets (pinned as literal equality in `tests/test_random.py`).
+The uuids are the family's other engine — bit-structured byte fills handed to
+the uuid crate's builders — because a UUID is a field layout, not a string
+length.
+
+**The security contract, stated first because it is the one way to misuse this
+family.** Two spellings, never interchangeable:
+
+- **Unseeded (the default)**: fresh bytes from the operating system's CSPRNG
+  on every call — `getrandom`/`getentropy` through `rand`'s `OsRng`, drawn
+  per call. There is no process or thread RNG state anywhere in tors, so a
+  `fork()` child cannot inherit and replay a parent's stream — fork-safe,
+  matching stdlib `secrets`' own per-call semantics exactly. This is the
+  spelling safe for keys, tokens, and secrets.
+- **Seeded (`seed=`)**: a deterministic ChaCha20 stream keyed by the seed.
+  The output is a pure function of (seed, arguments), **fully predictable
+  from the seed** — a reproducible-test/fixture tool, **NEVER safe for
+  secrets, keys, or tokens**: any adversary who learns the seed can
+  reproduce the stream (and 64-bit seeds are brute-forceable). A seeded
+  stream replays exactly across processes, threads, and forks by design —
+  same seed, same output — which is why it is never safe for secrets.
+  rand_core's
+  own docs say the same about the derivation ("not suitable for
+  cryptography ... the input size is only 64 bits"). Use the unseeded
+  spelling for anything an adversary must not guess.
+
+The seeded mode is deterministic cross-platform (ChaCha20 plus Lemire
+sampling plus the crate formatters are platform-independent arithmetic), so
+seeded outputs are safe to pin as test fixtures; `tests/test_random.py`
+pins them two ways — against committed literals, and against an
+independent Python re-implementation of the documented construction
+(rand_core's PCG32 seed derivation, the RFC 8439 ChaCha block, Lemire's
+nearly-divisionless draw).
+
+Sampling has **no modulo bias**: all four token spellings (the
+`random_string` engine and its hex/b62/b64url delegations) draw alphabet
+indices with Lemire's nearly-divisionless method (reject exactly the draws
+whose product low-half falls below `2^64 mod n`, leaving every output the
+same number of preimages — uniform by construction; a plain `x % n` does not
+have this property). The uuids sample raw bytes, uniform by construction.
+The committed goldens pin determinism (same seed, same output), never
+unbiasedness on their own — a modulo transcription reproduces short
+goldens without ever hitting its < 2^-58-per-draw rejection region; the
+unbiasedness claim is owned by the 300k-draw chi-square/exact-count pins
+in `tests/test_random.py` (whose digests a `%` transcription fails in
+full) and the crate-side reject-path unit.
+
+Errors follow the repo taxonomy, uniformly across the four token spellings:
+a negative `length` raises `ValueError` naming the parameter and the accepted
+form; an empty alphabet raises `ValueError`; non-`str` alphabet and non-`int`
+length raise `TypeError`, as does a `seed` that is neither `None` nor int-like
+(an `int` instance — bools and `IntEnum`s ride along — or any `__index__`
+object: the same int-like convention `length` and every size param in the
+crate accept; an `__index__` that itself raises surfaces its own error); an
+alphabet holding
+lone surrogates raises `UnicodeEncodeError` (the repo-wide str contract).
+`0` is legal everywhere and returns `""` (`secrets.token_hex(0)`'s own
+shape). There is no size cap inside the argument: `length` is `Py_ssize_t`
+(2^63 - 1 on 64-bit — anything wider raises `OverflowError` at extraction),
+and memory is the only bound inside that — a catchable `MemoryError`: an
+impossible length is refused before any allocation is attempted
+(`try_reserve`), the exact shape `'x' * n` and `secrets.token_hex(n)` give
+for the same request — never a process abort.
+
+No `tors.aio` twins: these are fast CPU/syscall calls, not the
+detached-transform input class the async surface exists for
+([Async use](async.md)).
+
+```python
+len(tors.random_hex(32))          # the unseeded spelling: fresh OS draw
+# 32                                # every call — never a pinned literal
+
+tors.random_hex(32, seed=42)      # the deterministic spelling: pin it in tests
+# '861225d7151bf9b14a3617ab9b534d19'
+```
+
+### `tors.random_string`
+
+```python
+def random_string(length: int, alphabet: str, *, seed: int | SupportsIndex | None = None) -> str: ...
+```
+
+`length` characters sampled uniformly (Lemire, no modulo bias at any
+alphabet size) from any non-empty `alphabet` str, in one GIL-released pass.
+Multibyte characters are sampled as characters: the output is always exactly
+`length` characters over the alphabet's own characters.
+Duplicate characters are weighted, not deduplicated — each position is an
+independent draw over the alphabet's character positions, so `"aaab"`
+yields `a` with probability 3/4: dedupe the alphabet first for
+uniform-over-distinct-characters. Sampling is over Unicode scalar values,
+not grapheme clusters: a combining mark in the alphabet samples
+independently of its base character. The alphabet is materialized fresh on
+every call (no cross-call cache, by the fork-safe no-state discipline);
+cost is O(alphabet) to materialize plus O(length) draws. Bulk callers
+reusing one huge alphabet across many calls should prefer the
+stdlib. The only size ceiling is the argument itself (`Py_ssize_t`) and
+memory beyond it (`u64`-based sampling handles any alphabet a `str` can
+hold).
+
+```python
+tors.random_string(12, "abcdef", seed=42)
+# 'dcabacecacae'
+```
+
+### `tors.random_hex`
+
+```python
+def random_hex(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
+```
+
+`length` lowercase hex characters — exactly
+`random_string(length, "0123456789abcdef")`, one engine — the hex-key
+spelling, by output length: a 32-char key is `random_hex(32)`.
+
+Odd lengths are legal and first-class: a 31-char hex id is a real shape, and
+`random_hex` produces it directly (the old byte-count spelling could not ask
+for it at all). Even lengths are what digest-shaped keys want — every 2
+characters are exactly one byte, so `random_hex(2 * n)` is byte-exact
+material. `secrets.token_hex(n)` and `random_hex(2 * n)` are the same uniform
+distribution over 2n-char hex strings — different draws, never different
+contracts; the `2 *` is the whole mapping (the stdlib thinks in bytes, this
+spelling in characters).
+
+```python
+tors.random_hex(32, seed=42)
+# '861225d7151bf9b14a3617ab9b534d19'
+```
+
+### `tors.random_b62`
+
+```python
+def random_b62(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
+```
+
+Exactly `random_string(length, BASE62_CHARS)` — one engine, delegated — over
+`[0-9A-Za-z]`: the URL-safe, case-sensitive, human-transcribable id
+spelling.
+
+```python
+tors.random_b62(22, seed=0)
+# '1yrBtE6FUlG59Zjj3K2vVn'
+```
+
+### `tors.random_b64url`
+
+```python
+def random_b64url(length: int, *, seed: int | SupportsIndex | None = None) -> str: ...
+```
+
+`length` characters uniform over the 64-character RFC 4648 §5 urlsafe
+alphabet (`A-Za-z0-9-_`; `+` and `/` never), every position unconstrained —
+exactly `random_string(length, B64URL_CHARS)`, one engine. The
+opaque-token spelling: a 43-char urlsafe token (the JWT-signature shape) is
+`random_b64url(43)`, and `secrets.token_urlsafe(32)` formats into the same
+43-character length class.
+
+**The boundary, stated honestly: this is the token contract, NOT "a valid
+base64 encoding of N random bytes."** An encoding's final character is
+constrained (an encoding of 32 bytes can only ever show 16 distinct final
+characters at length 43 — the final char carries the final byte's low 4
+bits, shifted into place; the 31-byte encoding is the 4-distinct case, its
+final char carrying just the low 2 bits; this spelling shows all 64), and
+lengths that are not valid base64 output lengths (41, 45, ...) are legal
+here — a uniform token has no alignment constraint. There is no `padded=`
+parameter: padding is an encoding concept, not a token concept, and `=`
+never appears. Callers who want encodable random material should take
+`random_hex` of even length — byte-exact via hex.
+
+```python
+tors.random_b64url(43, seed=7)
+# 'Bi8SLaf0s_a4pi-vqthbTaOstZjDweDcEC5hW7S_CNp'
+```
+
+### `tors.uuid4`
+
+```python
+def uuid4(*, seed: int | SupportsIndex | None = None) -> str: ...
+```
+
+An RFC 4122 version-4 UUID string (36 chars, lowercase, hyphens at
+8/13/18/23) from one 16-byte entropy fill — the stdlib `uuid.uuid4()`
+spelling, GIL-released, with the family's optional deterministic mode.
+Uniqueness is probabilistic (122 random bits), the same guarantee
+`uuid.uuid4()` carries.
+
+```python
+tors.uuid4(seed=42)
+# '7848b5d7-11bc-4883-9963-17a3f9c90269'
+```
+
+### `tors.uuid7`
+
+```python
+def uuid7() -> str: ...
+```
+
+An RFC 9562 version-7 UUID string: 48-bit Unix-epoch milliseconds + version
+7 + variant + 74 random bits (12-bit `rand_a` + 62-bit `rand_b`) from one
+OS draw — the sortable-id spelling. **No `seed=` parameter, by design**: the
+timestamp is external state, so a seeded uuid7 would still vary with the
+clock — the deterministic tool is `uuid4(seed=...)`.
+
+**The uniqueness boundary, stated honestly**: probabilistically unique
+(birthday bound over 74 random bits within a millisecond, distinct
+timestamps across milliseconds), **NOT counter-monotonic**. Two calls within
+one millisecond are ordered by their random bits, not by call order; a
+backwards clock step flows straight into the timestamp. `uuid_utils`'
+strict-monotonic counter is a different product promise — its engine keeps
+process-local counter state (and pays no syscall per call, which is why it
+benchmarks faster; see [Performance](performance.md)), where tors draws
+fresh OS entropy per call for the same fork-safety the rest of this family
+carries. The caller-visible contract is the timestamp itself:
+
+```python
+u = tors.uuid7()
+u
+# '01a09927-e261-7153-8d74-283f6d488162'
+int(u[:8] + u[9:13], 16)  # the call's Unix epoch milliseconds
+# 1789275923041
+```
+
+### `tors.uuid4_bytes` / `tors.uuid7_bytes`
+
+```python
+def uuid4_bytes(*, seed: int | SupportsIndex | None = None) -> bytes: ...
+def uuid7_bytes() -> bytes: ...
+```
+
+The uuids' 16 raw bytes — the same buffers `uuid4`/`uuid7` format, version
+and variant fields set, **no canonical formatting** — because the surveyed
+consumers re-wrap the canonical str back into bytes anyway: id-assignment
+call sites construct `UUID(bytes=...)` from the str's decoded bytes, and
+timestamp slicing takes `.hex()[:12]`. The str spellings force those sites
+into a format-then-reparse roundtrip (36-char format, hyphen strip, hex
+re-decode); the bytes spellings are one native draw and the field layout,
+no roundtrip:
+
+```python
+u = uuid.UUID(bytes=tors.uuid7_bytes())  # the re-wrap shape, native
+u.version, u.variant
+# (7, RFC_4122)
+
+tors.uuid7_bytes().hex()[:12]  # the timestamp-slice shape
+# '01a09927e261'               # the call's Unix epoch milliseconds, hex
+```
+
+Contracts: `uuid4_bytes(seed=s)` yields exactly the 16 bytes whose
+canonical hyphenated form is `uuid4(seed=s)` — one construction, two return
+spellings, pinned as literal equality in `tests/test_random.py` (the seeded
+bytes are pure functions of the seed, pinned against the same independent
+oracle). `uuid7_bytes()[:6]` big-endian is the call's Unix-epoch
+milliseconds (`int.from_bytes(b[:6], "big")` — the `u[:8] + u[9:13]`
+field's own bytes), the same 5-second clock tolerance `uuid7`'s timestamp
+contract carries. The seed contract and security warning are `uuid4`'s own
+(any int-like, reduced mod 2^64; a seeded stream is fully predictable —
+never for secrets), and `uuid7_bytes` takes no `seed=` for `uuid7`'s own
+reason. Fixed 16 bytes always: there is no length argument, so the token
+spellings' memory bound does not exist here. No `tors.aio` twins (the
+family's own rule: fast CPU/syscall calls).
+
+## `tors.first_invalid_charset`
+
+```python
+def first_invalid_charset(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> int: ...
+```
+
+Batch codepoint-set validation for identifier-style rules, one GIL-released
+pass per batch: the index into `items` of the first item not built entirely
+from the caller's two sets — `first` the set of codepoints allowed at
+position 0, `rest` the set allowed at every position after it (and at
+position 0 too when `first` is `None`, the uniform spelling: one set
+everywhere) — or `-1` when every item passes. An empty batch answers `-1`
+even under spellings where every item would offend (`first=""`,
+`rest=""`): vacuously valid, no items to offend. An empty item is an offender,
+wherever it sits. `first=""` allows nothing at position 0 (every item
+offends); `rest=""` allows nothing after position 0 (under the uniform
+spelling every item offends; with a non-empty `first`, only single-codepoint
+items drawn from `first` can pass). The scan short-circuits at the first
+offender — no promise about work done past it, though the argument walk does
+validate the whole sequence up front (a bad entry anywhere raises at the
+boundary, past a first offender or not). The answer is always an item index,
+never a position within an item.
+
+The sets are **data, not patterns**: plain strings of permitted codepoints,
+membership per codepoint (never per byte; duplicate codepoints in a spelling
+are harmless and their order is irrelevant). No ranges, no escapes, no
+classes — an `^[a-z_][a-z0-9_]*$`-style rule is spelled by listing the
+codepoints — and no Unicode-category classes (`\w`), which would need
+property tables: the charter boundary already drawn for lexical data
+([design and scope](design.md)). A rule that needs `\w` is not expressible;
+a rule that needs specific codepoints is, whatever their script.
+
+Membership is per scalar value, with no normalization: precomposed `é`
+(U+00E9, one codepoint) and decomposed `e` + U+0301 (two codepoints) are
+different inputs and get different verdicts — `first_invalid_charset(["é"],
+rest="é")` is `-1` while `first_invalid_charset(["é"], rest="é")`
+is `0`, correctly per the per-codepoint engine. When NFC and NFD forms
+must agree, normalize (`tors.normalize` / `tors.nfc`) before validating.
+Normalization does not fold confusables (visually similar but distinct
+codepoints, e.g. Latin A vs Cyrillic А, stay distinct under NFC); allow-list
+exactly the codepoints you mean.
+
+Membership is per codepoint, not per grapheme cluster: a ZWJ family emoji
+(5 codepoints), a flag pair (2 regional indicators), or a base letter plus
+a combining mark (2 codepoints) each pass only when every constituent
+codepoint is in the set — one grapheme can still offend.
+
+**Batch-only by design, and honestly so.** The motivating consumer (an
+enqueue path) validates identifier-shaped strings with anchored regexes at
+84–950 ns per call, each under a single `py.detach` round trip — so a
+per-item tors call (~0.25 µs measured, against ~0.08 µs for one compiled
+regex match) is *slower* than the regex it would replace. The win exists
+only when one call covers the batch: one detach, one pass over all items.
+Measured on the dev box (min-of-7): the crossover is at single-digit item
+counts (~2x at a 10-item batch), ~5x at 100 items (2.0 µs vs the per-item
+regex loop's 9.7 µs), ~7x at 1000 (14.0 µs vs 96.7 µs). The Rust core alone
+measures ~64 ns fixed (the two set builds) plus ~5.4 ns per item
+(post-`#[inline]` band, `first_invalid_charset` group, `benches/search.rs`).
+Do not call this once
+per string; call it on the batch.
+
+```python
+import string
+
+ident_first = string.ascii_letters + "_"
+ident_rest = ident_first + string.digits
+tors.first_invalid_charset(["job_42", "queue_eu", "9bad"], first=ident_first, rest=ident_rest)
+# 2   ("9bad": a digit is not allowed at position 0)
+tors.first_invalid_charset(["job_42", "queue_eu"], first=ident_first, rest=ident_rest)
+# -1  (every item passes)
+tors.first_invalid_charset(["worker:01", "tag name"], rest=ident_rest + "-:.")
+# 1   (first=None: one set everywhere; "tag name" carries a space)
+```
+
+Argument contract: `items` is a sequence of `str` — a `list`, a `tuple`, or
+any `Sequence` (a bare `str` raises `TypeError`, as do non-sequences: dict,
+set, generators, scalars; a non-`str` entry raises `TypeError`); `first` and
+`rest` must be exactly `str`, both keyword-only, `rest` required, `first`
+defaulting to `None`; lone surrogates raise `UnicodeEncodeError` at the
+argument boundary (the standard str-in boundary, paid by every item and both
+set arguments). Error precedence on both-bad calls is pyo3 left-to-right
+extraction order: `first` beats `rest`, and set-argument conversion errors
+beat the items-walk entry errors. The contract is proven against a pure-Python membership-loop
+oracle plus the equivalent anchored regexes rebuilt from the same set halves
+over hypothesis-generated inputs (tests/test_first_invalid_charset.py).
+
+GIL model: one GIL-held walk of the items sequence (the standard str-in
+borrow class, O(items) handles; the one-time O(input) UTF-8 materialization
+applies per non-ASCII item object on first extraction, so a batch of
+never-before-touched non-ASCII items holds the GIL for that
+materialization — unmeasured for this function: no dedicated non-ASCII cell,
+same str-in materialization class as every other function), then the set builds and
+the whole batch scan under one `py.detach`, then a single int return — no
+marshalling class at all. The set builds are O(set) over the ASCII spelling
+plus O(set log set) over the non-ASCII tail (sort + dedup, inside the
+detach): negligible for the few-dozen-codepoint ASCII rules this validator
+exists for (the ~64 ns fixed band above, which includes both per-call set
+builds — hoist huge set spellings to module constants: define once, reuse
+the same string), a real sort for a 10k-codepoint
+non-ASCII spelling whose sort cost is deferred (correctness pinned,
+unmeasured beyond the ASCII band). At realistic batch sizes the whole call sits far under
+the 10 ms ping floor, so the GIL cell is ceiling-only (the `utf8_is_valid`
+class), pinned in tests/test_gil_release.py. The core is a trivial one-pass
+membership walk (one-bit-per-codepoint ASCII mask plus a sorted non-ASCII
+tail; no index arithmetic, no `unsafe`), which is why it ships no
+cargo-fuzz target: the hypothesis differentials over arbitrary Unicode
+cover its input space. The Rust core band is the one above — ~64 ns fixed
+(the two set builds) plus ~5.4 ns per item, post-`#[inline]`
+(`first_invalid_charset` group, `benches/search.rs`).
+
+### Building rejection messages: `tors.first_invalid_offender`
+
+```python
+def first_invalid_offender(
+    items: Sequence[str], *, first: str | None = None, rest: str
+) -> tuple[int, int, str] | None: ...
+```
+
+The integration survey's finding made the detail a function: the
+consumer's rejection UX names the losing CHARACTER and POSITION (its
+per-character messages), and an item index alone cannot. The offender
+spelling is the same scan answering that question: it returns
+`(item_index, char_position, offending_char)` for the first offending
+item's FIRST offending position, `None` when every item passes.
+
+- `char_position` is a **codepoint index** within the item — the family's
+  data model is codepoints (membership is per codepoint), so positions
+  count codepoints, never UTF-8 byte offsets: in `"🦀x"` the `x` sits at
+  position 1 (its byte offset would be 4). `offending_char` is that
+  codepoint as a 1-char `str`, a 4-byte astral codepoint included.
+  `char_position` may land inside a grapheme cluster — the flag-partial
+  `(0, 1, "🇷")` under `rest="🇫"` is one grapheme but offends at codepoint
+  1 — so do not slice the item at that position for display (it would split
+  the grapheme); build messages from `(item, char)`, which the tuple already
+  carries.
+- **The empty item reports `(i, 0, "")`**: an empty item is an offender
+  with no codepoint at position 0 to name, so the char field is empty
+  exactly when the item is — a message builder branches on it.
+- The consistency invariant with the int spelling is structural — the
+  Rust core's ONE scan returns the stop detail and each spelling projects
+  it — so `first_invalid_offender(...)` is `None` exactly when
+  `first_invalid_charset(...)` answers `-1`, and when not `None` the
+  tuple's first field IS the int spelling's answer. The differential
+  battery pins it against the reference oracle extended to return the
+  detail (tests/test_first_invalid_charset.py).
+- A `== -1` / `!= -1` test ported from the int spelling does not
+  transfer: a tuple never equals `-1`, so an `!= -1` invalidity guard
+  fires on every batch and an `== -1` validity guard never does, both
+  silently. The clean spelling is `is None` / `is not None`, pinned on
+  both branches (clean AND offending) in tests/test_first_invalid_charset.py.
+
+```python
+import string
+
+queue_first = string.ascii_letters + string.digits + "_"
+queue_rest = queue_first + ".-"
+names = ["jobs_eu", "foo:eu", "queue_us"]
+
+offender = tors.first_invalid_offender(names, first=queue_first, rest=queue_rest)
+# (1, 3, ":")   ("foo:eu": ":" is not allowed at position 3)
+
+def rejection(names, offender):
+    if offender is None:
+        return None
+    item, position, char = offender
+    if not char:  # the empty item: no offending character to name
+        return f"queue name {names[item]!r} is invalid: it is empty"
+    return f"queue name {names[item]!r} is invalid: {char!r} at position {position} is not allowed"
+
+rejection(names, offender)
+# "queue name 'foo:eu' is invalid: ':' at position 3 is not allowed"
+```
+
+The argument contract is the int spelling's exactly — the same shared
+walk, so every boundary refusal (a bare `str`, non-sequences, non-`str`
+entries, non-`str` `first`/`rest`, lone surrogates; the
+walk-validates-the-whole-list-first precedence) raises the same exception
+with the byte-identical message, pinned by raising both spellings on the
+same bad input and comparing them. Error precedence on both-bad calls is
+pyo3 left-to-right extraction order: `first` beats `rest`, and set-argument
+conversion errors beat the items-walk entry errors. No new error classes.
+
+One engine, one scan, and the int path pays nothing for the detail: the
+walk stops at the first offending codepoint, and at that stop point it
+already holds the position and the codepoint — the detail is free by
+construction, the only addition to the shared walk being the position
+counter (one integer add per codepoint, a dead field in the int
+projection). The scan is `#[inline]`, so each projection compiles away
+the fields it drops: without the inline the multi-word stop state
+crosses a call boundary and the int spelling paid ~10% on the criterion
+group's small cells for detail it discarded (measured); with it the band
+is back — the cells above are the post-extension numbers. The int
+spelling's performance cells (the wall race, the criterion group, the
+GIL ceiling cell) carry the family's contract unchanged, and this
+spelling adds no cells of its own: same engine, same walk, same
+one-detach batch pass, the only delta being the return — one small
+tuple, built only when an offender is found.
+
+### Common alphabets
+
+The scope question, answered up front: *is it worthwhile adding any other
+charset validators — b62, b64, hex, UUID?* No new validators. Named wrapper
+functions (`is_valid_b62`, `is_valid_b64url`, ...) would each delegate to
+the same core — N wrappers of zero performance gain, pure API surface and
+maintenance cost — so the generic `first_invalid_charset` stays the single
+engine. What *is* worth shipping is the data: the alphabets long enough
+that re-spelling them at every call site invites silent transcription
+errors (a wrong 62-character set still validates *something*). Those ship
+as pinned module constants — data, not code:
+
+| constant | alphabet | length | for |
+|---|---|---|---|
+| `tors.CHARSET_B62` | `0-9 A-Z a-z` | 62 | base62 ids |
+| `tors.CHARSET_B64URL` | `A-Z a-z 0-9 - _` — RFC 4648 §5, **unpadded** | 64 | JWT segments, url-safe tokens |
+| `tors.CHARSET_HEX_LOWER` | `0-9 a-f` | 16 | lowercase hex digests |
+| `tors.CHARSET_HEX_UPPER` | `0-9 A-F` | 16 | uppercase hex digests |
+| `tors.CHARSET_HEX_MIXED` | the 22-codepoint union of the two hex alphabets | 22 | case-insensitive hex digests |
+
+The `first=None` uniform spelling (one set at every position) makes each
+constant a single argument:
+
+```python
+ids = ["7xK9mQ2pZv", "0Zz8", "bad!"]
+tors.first_invalid_charset(ids, rest=tors.CHARSET_B62)
+# 2   ("bad!": "!" is outside the base62 alphabet)
+segments = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0="]
+tors.first_invalid_charset(segments, rest=tors.CHARSET_B64URL)
+# 1   (the second segment is padded — the OUT case below)
+```
+
+Three shapes are deliberately OUT, each for a structural reason:
+
+- **Standard/padded base64.** The `=` padding is positionally structured —
+  terminal only. A flat charset cannot express "positions `0..len-2` from
+  the alphabet, position `len-1` optionally `=`", and a charset that
+  admitted `=` would wrongly accept mid-string padding. `tors.b64_decode`
+  IS the strict base64 validator — decode-as-validation, which raises on
+  misplaced padding, wrong lengths, and non-alphabet codepoints alike, is
+  the right tool. That is why `CHARSET_B64URL` is the unpadded alphabet
+  and the padded segment above is an offender, not a pass.
+- **UUID.** The hyphens at fixed positions 8/13/18/23 are structure, not
+  charset; `first_invalid_charset` cannot express them. There is no
+  strict UUID validator in this release — hyphens are structure,
+  tracked on the uuid7-helpers branch — not a flat alphabet.
+- **Digits.** `"0123456789"` is trivially spelled with zero typo risk; not
+  worth a name.
+
+The constants' contents are contract, pinned byte-exact with the
+length/uniqueness/subset algebra that makes the family coherent
+(tests/test_first_invalid_charset.py); the stub carries their type (`str`)
+and is held to `tors.__all__` by the same drift guard as every function
+(tests/test_pyi_drift.py).
 
 ## `tors.documents`
 

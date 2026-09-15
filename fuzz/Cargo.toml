@@ -26,6 +26,11 @@ const-hex = "1.19"
 # re-answer its own question. Same hand-synced-to-root pin discipline as
 # sha2/const-hex above.
 unicode-segmentation = "1.13.3"
+# The unescaped target's find-loop oracle uses the same one-shot memmem
+# search the Python reference's `bytes.find` spells (hand-synced to the
+# root memchr pin; occurrence search only — the parity walk stays
+# independent).
+memchr = "2.8.3"
 
 [dependencies.tors]
 # The crates.io package is `tors-core` (the plain `tors` name is an unrelated,
@@ -64,6 +69,13 @@ bench = false
 [[bin]]
 name = "b64_decode"
 path = "fuzz_targets/b64_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canon"
+path = "fuzz_targets/canon.rs"
 test = false
 doc = false
 bench = false
@@ -160,6 +172,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "scrub_log_text"
+path = "fuzz_targets/scrub_log_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "json_repair"
 path = "fuzz_targets/json_repair.rs"
 test = false
@@ -176,6 +195,41 @@ bench = false
 [[bin]]
 name = "gfm_strip"
 path = "fuzz_targets/gfm_strip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unescaped"
+path = "fuzz_targets/unescaped.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hash"
+path = "fuzz_targets/hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "minhash"
+path = "fuzz_targets/minhash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "random"
+path = "fuzz_targets/random.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pii"
+path = "fuzz_targets/pii.rs"
 test = false
 doc = false
 bench = false

@@ -14,6 +14,8 @@
 mod _borrow;
 
 pub mod bm25;
+pub mod canon;
+pub mod charset;
 pub mod chunk;
 pub mod codec;
 pub mod compiled_patterns;
@@ -23,19 +25,26 @@ pub mod fence;
 pub mod forms;
 pub mod fuzzy;
 pub mod grounded;
+pub mod hash;
 pub mod html;
 pub mod json_repair;
 pub mod lemma_dict;
 pub mod merkle;
+pub mod minhash;
 pub mod normalize;
 pub mod phonetic;
+pub mod pii;
 pub mod pipeline;
+pub mod random;
+pub mod scan;
+pub mod scrub;
 pub mod search;
 pub mod segmentation;
 pub mod simhash;
 pub mod tfidf;
 pub mod truncate;
 pub mod url;
+pub mod uuid;
 
 /// Emits one eager-iterator `#[pyclass]`: the Python-visible class name,
 /// its per-class doc comment (the payload's `#[doc]` attribute lands on

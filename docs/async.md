@@ -11,10 +11,13 @@ It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`, the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, and
-`truncate_ellipsis`/`strip_controls`. Thread dispatch costs on the order of
+`truncate_ellipsis`/`strip_controls`/`scrub_log_text`/`scrub_pii`. Thread dispatch costs on the order of
 tens of microseconds: noise next to a millisecond-or-slower native pass over a
 real corpus or document, real overhead next to a microsecond-scale call over a
-short string. Wrapping every export would make the small, common calls slower
+short string. Exception-size guidance: `scrub_log_text`'s error-path inputs
+are KiB-scale (microseconds per call — prefer the sync spelling); its `aio`
+twin is for MB-scale aggregates only (batched logs, multi-MB corpora).
+Wrapping every export would make the small, common calls slower
 through this module than through the plain sync spelling, for no benefit, so
 the rest of `tors` keeps exactly one spelling: call it directly from a
 coroutine when the input is small enough that the whole thing finishes in
@@ -41,3 +44,11 @@ part anyway, so `await asyncio.to_thread(lambda: list(tors.word_bounds_iter(text
 covers the streaming shape when it is needed. Signatures are identical to the
 sync spellings, pinned by `tests/test_aio.py`; the stub `aio.pyi` is generated
 by `tools/gen_aio_stub.py`.
+
+The random-generation family (`random_string`, `random_hex`, `random_b62`,
+`random_b64url`, `uuid4`, `uuid7`) has no async twin either: every generator
+is a fast CPU/syscall call — a block-buffered getrandom draw plus
+sampling/formatting, microseconds at real token/key sizes — not the
+detached-transform input class this module exists for. A thread hop would
+cost more than the call at every realistic size; call them directly from a
+coroutine.

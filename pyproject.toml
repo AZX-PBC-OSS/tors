@@ -67,6 +67,14 @@ dev = [
     "json-repair==0.63.4",
     "jsonschema>=4.21",
     "maturin>=1.15.0",
+    # xxhash is the exact-pinned differential oracle hash for
+    # tests/test_minhash.py: minhash_signature's shingle hash is XXH64 (the
+    # frozen-spec algorithm, twox-hash on the Rust side), and this package
+    # wraps the C reference implementation of that same spec — the oracle
+    # hashes shingles the way the Rust core does through an independent
+    # implementation, the json-repair exact-pin precedent (a version bump is
+    # a deliberate parity re-sync).
+    "xxhash==4.0.1",
     # The document WRITERS behind tests/docgen.py's randomized lane: real
     # format bytes from the standard maintained generators (real Word
     # styles/numbering, real pptx layouts/notes parts, real xlsx

@@ -16,6 +16,24 @@ from tors import CompiledLemmaDict, _StemmerLanguage
 async def normalize(text: str) -> str: ...
 async def finalize(text: str) -> tuple[str, str]: ...
 async def strip_controls(text: str) -> str: ...
+async def scrub_pii(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> str: ...
+async def scrub_pii_report(
+    text: str,
+    rules: Sequence[Literal["contact_email", "contact_phone", "api_keys"]] | None = None,
+    *,
+    salt: str | None = None,
+    families: Sequence[str] | None = None,
+) -> dict[str, object]: ...
+async def scrub_log_text(
+    text: str,
+    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+) -> str: ...
 async def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
 async def finalize_utf8(
     raw: bytes, *, errors: Literal["strict", "replace"] = "strict"
