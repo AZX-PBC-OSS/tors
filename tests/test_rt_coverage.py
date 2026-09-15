@@ -254,6 +254,12 @@ class TestH5DataPathParity:
 
 
 class TestH6OomMapsToValueError:
+    @pytest.mark.skipif(
+        not Path("/proc/self/status").exists(),
+        reason="leg (b) forces a real allocation failure with Linux RLIMIT_AS "
+        "semantics (issue #86): the belt does not constrain malloc the same "
+        "way off Linux",
+    )
     def test_tiny_budget_and_real_alloc_failure_both_valueerror(self, tmp_path: Path) -> None:
         """HYPOTHESIS (surface: path=, the budget family): the OOM mapping is
         not a lie —

@@ -45,6 +45,15 @@ from pathlib import Path
 
 import pytest
 
+# Every probe in this module reads /proc/self/status (VmHWM/VmPeak) inside
+# its child, so on a non-Linux host the children would die on the read
+# instead of the assertion failing: skip the module there, the same shape
+# the hardening suite's procfs tests use.
+pytestmark = pytest.mark.skipif(
+    not Path("/proc/self/status").exists(),
+    reason="the same-class probes read /proc VmHWM: Linux-only (issue #86)",
+)
+
 # --- artifact builders -------------------------------------------------------
 
 
