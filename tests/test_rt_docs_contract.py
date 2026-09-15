@@ -44,7 +44,6 @@ the 512 MiB backstop).
 from __future__ import annotations
 
 import re
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -60,11 +59,6 @@ from tors_documents import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-
-_CONVENTIONAL = re.compile(
-    r"^(?:feat|fix|docs|perf|refactor|test|build|ci|chore|style|revert)"
-    r"(\([\w.-]+\))?!?: "
-)
 LIB_RS = REPO / "tors-documents" / "src" / "lib.rs"
 IMPL_RS = REPO / "src" / "documents_impl.rs"
 
@@ -420,52 +414,9 @@ class TestP6DocstringHonestySweep:
             )
 
 
-# --- P7: changelog mechanism (static, report-only) --------------------------
-
-
-class TestP7ChangelogMechanism:
-    """P7 (static): the 512 MiB backstop is a user-visible change
-    (docs/documents.md:129-135). This repo's changelog is release-please
-    generated (CHANGELOG.md's only touchers are 'chore(main): release'
-    commits; past behavior changes surface as entries at release time, e.g.
-    the 0.6.1 fixes), so the entry rides the PR's conventional commits.
-    The pin: every commit on this branch is conventional (feat/fix/docs
-    surface), and at least one carries the behavior/docs change."""
-
-    def test_the_backstop_change_rides_the_conventional_commit_mechanism(self) -> None:
-        changelog = REPO / "CHANGELOG.md"
-        assert changelog.exists(), "no CHANGELOG.md: past behavior changes got entries"
-        log = subprocess.run(
-            ["git", "-C", str(REPO), "log", "--format=%s", "main..HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert log.returncode == 0, log.stderr
-        subjects = [line for line in log.stdout.splitlines() if line.strip()]
-        assert subjects, "no commits between main and HEAD"
-        non_conventional = [
-            subject
-            for subject in subjects
-            if not _CONVENTIONAL.match(subject)
-        ]
-        assert not non_conventional, (
-            "commits without a conventional type will be invisible to "
-            f"release-please, so the 512 MiB backstop change would never "
-            f"get its changelog entry: {non_conventional}"
-        )
-        assert any(
-            re.match(r"^(feat|fix|docs)\(documents\)", subject) for subject in subjects
-        ), f"no user-visible (feat/fix/docs) documents commit on this branch: {subjects}"
-        touched = subprocess.run(
-            ["git", "-C", str(REPO), "log", "--format=%s", "main..HEAD", "--", "CHANGELOG.md"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # Report-only evidence: PRs here never hand-edit CHANGELOG.md (the
-        # release commit does); the convention, not an in-PR entry, is the pin.
-        assert not touched.stdout.strip(), (
-            "this branch edits CHANGELOG.md directly, against the "
-            f"release-please convention: {touched.stdout.splitlines()}"
-        )
+# --- P7: changelog mechanism -------------------------------------------------
+# Dropped: the branch-convention check it pinned (conventional subjects, no
+# hand-edited CHANGELOG.md) is already enforced in CI by the commitlint job
+# and release-please, and its `git log main..HEAD` range needs branch context
+# a shallow PR checkout does not have. Conventional-commit hygiene for this
+# branch lives in commitlint, where CI already runs it.
