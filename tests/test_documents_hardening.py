@@ -281,10 +281,13 @@ class TestAnExplicitBudgetBindsEveryLane:
 
     def test_no_budget_keeps_the_default_ceiling_doctrine_exactly(self, tmp_path: Path) -> None:
         """max_bytes=None is the untouched default: the pdf/HTML lanes
-        stay unmetered (the 32 MiB default is the core's post-read check,
-        on the anydoc/oxide lanes only: the lane is unknowable before
-        the container sniff, which is exactly why only the explicit
-        budget can be pre-read)."""
+        still run no lane-specific policy (the 32 MiB default is the
+        core's post-read check, on the anydoc/oxide lanes only: the lane
+        is unknowable before the container sniff, which is exactly why
+        only the explicit budget can be pre-read), but they now read
+        under the 512 MiB MAX_INPUT_READ backstop rather than unbounded;
+        that ceiling sits far above any real document, so this small
+        fixture PDF still converts unmolested."""
         path = tmp_path / "two.pdf"
         path.write_bytes(_PDF_BYTES)
         resolved, markdown = to_markdown(str(path))
@@ -445,6 +448,11 @@ import threading, time
 # 400 MB of HTML whose whole body is a <script> the engine drops by
 # construction: the OUTPUT is 5 bytes, so the probe's GIL window is the
 # input side alone (the copy), not an O(output) return marshalling.
+# Under the HTML lane's 32 MiB input ceiling (the ~23x amplification bound)
+# this 400 MB upload now refuses with a ValueError naming the lane ceiling —
+# caught below: the refusal happens AFTER the input copy, so the GIL window
+# the probe measures (the detached 400 MB memcpy) is unchanged, and the
+# caught-refusal path also pins the ceiling end-to-end.
 data = b"<html><body><p>tiny</p><script>" + b"A" * (400 * 1024 * 1024) \
     + b"</script></body></html>"
 from tors_documents import to_text
@@ -463,12 +471,21 @@ def monitor():
 t = threading.Thread(target=monitor)
 t.start()
 t0 = time.perf_counter()
-fmt, out = to_text(data=data)
-wall = time.perf_counter() - t0
-stop.set()
-t.join()
+outcome = "converted"
+try:
+    fmt, out = to_text(data=data)
+except ValueError as exc:
+    # the lane ceiling refusal (expected at 400 MB): the input copy already
+    # ran, detached, so the heartbeat window is intact. try/finally so the
+    # monitor can never outlive the measurement (a leaked non-daemon
+    # monitor would hang the child past any deadline).
+    outcome = f"refused: {exc}"
+finally:
+    wall = time.perf_counter() - t0
+    stop.set()
+    t.join()
 hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
-print(f"resolved={fmt} output_len={len(out)} wall={wall:.2f}s max_gap={max(gaps) * 1000:.1f}ms")
+print(f"outcome={outcome} wall={wall:.2f}s max_gap={max(gaps) * 1000:.1f}ms")
 print(hwm.strip())
 """
 
@@ -486,14 +503,22 @@ def test_a_400mb_data_call_keeps_the_gil_at_heartbeat_granularity() -> None:
     after (the caller's bytes plus the engine-bound Vec), just on
     different sides of the detach: red measured VmHWM 838,328 kB, and
     the green run must stay in the same neighborhood (the win this fix
-    buys is GIL residency, not memory)."""
+    buys is GIL residency, not memory). Under the HTML lane's 32 MiB
+    input ceiling the call now also refuses with the lane-ceiling
+    ValueError — asserted: the refusal must name the html lane's 32 MiB
+    ceiling, measured after the copy, so this probe pins both the GIL
+    window and the ceiling in one pass."""
     report = _run_or_fail(_HEARTBEAT_PROBE, timeout=180)
     found = re.search(r"max_gap=(\d+(?:\.\d+)?)ms", report)
     assert found, f"the probe did not report its max gap:\n{report}"
     max_gap_ms = float(found.group(1))
-    assert "output_len=5" in report, (
-        f"the probe's fixture changed shape (the output is no longer tiny, "
-        f"so the window is no longer the copy alone):\n{report}"
+    assert "refused:" in report, (
+        f"the fixture no longer refuses: a 400 MB HTML upload under None is "
+        f"over the HTML lane's 32 MiB ceiling and must refuse naming it (the "
+        f"GIL window measured below is the copy, which runs either way):\n{report}"
+    )
+    assert "html-to-markdown-rs" in report and "32.0 MiB" in report, (
+        f"the refusal did not name the HTML lane's 32 MiB ceiling:\n{report}"
     )
     assert max_gap_ms < 30.0, (
         f"the GIL was held {max_gap_ms:.1f} ms through a 400 MB data= call — "
@@ -545,3 +570,143 @@ class TestDocstringHonesty:
             "sniff's docstring still carries the false bounded-scan claim"
         )
         assert "package" in doc.lower(), "the docstring must name the package parse it does"
+
+
+class TestBoundedRead:
+    def test_oversized_sparse_pdf_refuses_not_aborts(self, tmp_path):
+        # Symptom 2: a 1 TiB sparse .pdf must refuse, not SIGKILL (was rc=-9).
+        p = tmp_path / "huge.pdf"
+        with open(p, "wb") as f:
+            f.write(b"%PDF-1.4\n")
+            f.truncate(1024**4)
+        code = f'from tors_documents import pdf_page_count\npdf_page_count({str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134), \
+            f"process was killed by a signal (rc={done.returncode})"
+        assert "ValueError" in done.stderr
+
+    def test_metered_lane_refuses_after_prefix_not_after_full_read(self, tmp_path):
+        # Symptom 1: a 40 MiB CSV under None refuses (over the 32 MiB lane
+        # ceiling) without the SIGKILL/abort the unbounded read risked.
+        p = tmp_path / "big.csv"
+        with open(p, "wb") as f:
+            f.write(b"unit,status\n")
+            f.write(b"a,ok\n" * (8 * 1024 * 1024))
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        # The message must name the ~32 MiB metered-lane ceiling: this proves
+        # the refusal came from the phase-2 provisional ceiling (the metered
+        # lane refusing during the read), not the old unbounded post-read path
+        # that would have buffered the whole file first.
+        assert "32.0 MiB" in done.stderr, done.stderr
+
+    def test_pdf_page_count_zero_budget_is_a_clean_value_error(self, tmp_path):
+        # The PDF-only calls bypass convert()'s zero-check; the guard must
+        # live in the shared path so max_bytes=0 is a ValueError everywhere.
+        p = tmp_path / "x.pdf"
+        p.write_bytes(_PDF_BYTES)
+        code = f'from tors_documents import pdf_page_count\npdf_page_count({str(p)!r}, max_bytes=0)'
+        done = _probe(code, timeout=30)
+        assert "ValueError" in done.stderr and "max_bytes" in done.stderr
+
+    @pytest.mark.skipif(not Path("/proc/self/status").exists(),
+                        reason="procfs is Linux-only (see issue #86)")
+    def test_zero_stat_file_is_bounded_by_the_read_not_the_stat(self):
+        # Symptom 3: /proc/self/maps is S_ISREG with st_size=0 but reads
+        # unbounded; a small explicit budget must refuse by bytes read.
+        code = ('from tors_documents import to_text\n'
+                'to_text(path="/proc/self/maps", max_bytes=64, format="csv")')
+        done = _probe(code, timeout=30)
+        assert "ValueError" in done.stderr
+
+    def test_large_file_round_trips_intact_through_the_prefix_splice(self, tmp_path):
+        # A >64 KiB file (past the SNIFF_PREFIX boundary) exercises the two-phase
+        # read: phase 1 buffers the prefix, phase 2 continues from the same
+        # handle and prepends it. The splice must be byte-correct across the
+        # 64 KiB seam, so a sentinel placed near the END of the file (well past
+        # the prefix) must survive into the extracted text. HTML routes to the
+        # unmetered lane, so this converts rather than refusing.
+        sentinel = "SPLICE_SENTINEL_c0ffee_past_the_prefix"
+        # ~200 KiB of filler paragraphs, then the sentinel last: comfortably
+        # past the 64 KiB prefix boundary.
+        filler = "<p>lorem ipsum dolor sit amet consectetur adipiscing</p>\n" * 3600
+        html = (
+            "<!doctype html><html><head><title>t</title></head><body>\n"
+            + filler
+            + f"<p>{sentinel}</p>\n</body></html>\n"
+        )
+        p = tmp_path / "big.html"
+        p.write_text(html, encoding="utf-8")
+        assert p.stat().st_size > 64 * 1024
+        code = (
+            "import sys\n"
+            "from tors_documents import to_text\n"
+            f"_fmt, text = to_text(path={str(p)!r})\n"
+            "sys.stdout.write(text)\n"
+        )
+        done = _probe(code, timeout=60)
+        assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+        assert sentinel in done.stdout, (
+            "the end-of-file sentinel was dropped or corrupted across the "
+            "phase-1/phase-2 prefix splice"
+        )
+
+    def test_content_blind_prefix_on_extensionless_file_still_meters_the_read(self, tmp_path):
+        # A 64 KiB content-blind leader (blank lines) pushes the CSV witness
+        # past the sniff prefix, and with no extension the name gives resolve()
+        # nothing either. An unresolvable prefix must err toward metering: the
+        # read refuses at the 32 MiB provisional ceiling DURING the read, it
+        # must not hand out the 512 MiB fallback and defer the refusal to the
+        # core's post-read check (which buffers the whole file first).
+        p = tmp_path / "payload"  # deliberately extensionless
+        with open(p, "wb") as f:
+            f.write(b"\n" * (80 * 1024))  # leader: no csv witness inside 64 KiB
+            f.write(b"unit,status\n")
+            f.write(b"a,ok\n" * (8 * 1024 * 1024))
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        # "default read ceiling" is the phase-2 provisional message. The
+        # post-read refusal instead says "the document is N and the anydoc
+        # engine lane's input ceiling is ..." — asserting the read-phase
+        # phrase proves metering survived the blinded prefix.
+        assert "default read ceiling" in done.stderr, done.stderr
+
+    def test_html_lane_refuses_during_the_read_under_none(self, tmp_path):
+        # The HTML lane amplifies at a measured ~23x input (a 48 MiB doctype
+        # HTML peaked at 1118 MiB RSS converting successfully pre-fix), so it
+        # meters like anydoc/office_oxide: over the 32 MiB lane ceiling, the
+        # refusal must come from the phase-2 provisional ceiling DURING the
+        # read (message names the default read ceiling), not from a
+        # backstop-sized buffer and a post-read check.
+        p = tmp_path / "big.html"
+        with open(p, "wb") as f:
+            f.write(b"<!doctype html><html><body>\n<h1>t</h1>\n")
+            f.write(b"<p>lorem ipsum dolor sit amet</p>\n" * 1024 * 1024)
+        assert p.stat().st_size > 32 * 1024 * 1024
+        code = f'from tors_documents import to_text\nto_text(path={str(p)!r})'
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        assert "default read ceiling" in done.stderr, done.stderr
+
+    def test_data_lane_html_over_the_default_refuses_post_read(self, tmp_path):
+        # data= bytes are already resident (no read to bound), so the HTML
+        # lane's ceiling must ALSO run as the core's post-read check on the
+        # copy: a 34 MiB HTML buffer under None refuses, never converts.
+        p = tmp_path / "payload.html"
+        with open(p, "wb") as f:
+            f.write(b"<!doctype html><html><body>\n<h1>t</h1>\n")
+            f.write(b"<p>lorem ipsum dolor sit amet</p>\n" * 1024 * 1024)
+        assert p.stat().st_size > 32 * 1024 * 1024
+        code = (f'from tors_documents import to_text\n'
+                f'to_text(data=open({str(p)!r}, "rb").read())')
+        done = _probe(code, timeout=60)
+        assert done.returncode not in (-9, -6, 137, 134)
+        assert "ValueError" in done.stderr
+        # data= skips the read phase entirely, so this refusal is the core's
+        # post-read shape: it names the lane ceiling and the byte size.
+        assert "32.0 MiB" in done.stderr, done.stderr

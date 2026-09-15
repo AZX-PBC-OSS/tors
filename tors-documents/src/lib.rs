@@ -29,7 +29,6 @@
 //! every function here: the O(output) string marshalling, plus
 //! `to_markdown`/`to_text`'s two-string tuple.
 
-use std::io::Read as _;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -85,11 +84,14 @@ pyo3::create_exception!(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Encrypted documents fail closed (`ValueError`, pdf_oxide's security
 /// rule: a security state is never masked as "all pages empty"):
@@ -245,11 +247,14 @@ impl PdfClassification {
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: a missing/unreadable file raises `OSError`; anything that fails
 /// to parse as a PDF raises `ValueError` with pdf_oxide's reason; a `path=`
@@ -331,11 +336,14 @@ pub fn pdf_extract(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: `OSError` for a missing/unreadable file, `ValueError` for bytes
 /// that do not parse as a PDF, `ValueError` naming `path` for a
@@ -427,11 +435,14 @@ pub fn pdf_page_count(
 /// An explicit budget binds this family pre-read exactly as it binds the
 /// conversion pair, the shared source-spine gate: the `path=`'s size at
 /// the stat and again on the open handle, the `data=` length before the
-/// copy; never a byte over budget is read or copied. `None` (the
-/// default) keeps the pdf lane unmetered, the unchanged doctrine: the
+/// copy; never a byte over budget is read or copied, and it overrides the
+/// default in either direction. `None` (the default) still runs no
+/// lane-specific policy on the pdf lane, the unchanged doctrine: the
 /// 32 MiB default ceiling is the core's post-read check on the
-/// anydoc/office_oxide lanes only, lanes these PDF-only calls never run
-/// (pdf_oxide's own resource limits govern here).
+/// amplified lanes (anydoc/office_oxide/html), lanes these PDF-only calls never run
+/// (pdf_oxide's own resource limits govern here); the pdf lane instead
+/// reads under [`MAX_INPUT_READ`], the finite 512 MiB backstop, a
+/// memory-safety floor rather than a lane policy.
 ///
 /// Errors: `OSError` (matched subclass) for a missing/unreadable `path=`;
 /// `ValueError` for bytes that do not parse as a PDF, and for a
@@ -517,18 +528,22 @@ pub fn pdf_link_uris(
 /// read forever: the ceiling ran only in the core, only after the
 /// read). `None` (the default) keeps the default-ceiling doctrine
 /// exactly as before: the measured 32 MiB, checked after the read, on
-/// the anydoc and office_oxide lanes only: anydoc's csv lane measures
-/// ~36x on benign shapes but ~146x worst case on adversarial ones (a
+/// the lanes that amplify input into resident memory: anydoc
+/// (~36x on benign csv shapes but ~146x worst case on adversarial ones (a
 /// 24 MiB many-short-cells csv peaked at 3.4 GiB, stable across sizes,
 /// so the 32 MiB default ceiling budgets ~4.6 GiB worst case: size
-/// workers for that or pass a lower `max_bytes`), and office_oxide
-/// 0.1.10 added per-part decompression caps (512 MiB per part, declared
+/// workers for that or pass a lower `max_bytes`), office_oxide
+/// 0.1.10 (per-part decompression caps of 512 MiB per part, declared
 /// and actual, XML depth 256 on a 16 MiB parse stack) but still has no
 /// total-across-parts cap and no output cap (a 399 KiB zip carrying a
 /// 400 MiB part converts at ~1.6 GiB peak; a 600 MiB part is refused
-/// pre-decompression), so the input ceiling remains the only aggregate
-/// guard on the opt-in `backend="oxide"` lane; the pdf_oxide and HTML
-/// lanes stay unmetered under the default.
+/// pre-decompression), and HTML (~23x input: the converter holds the
+/// whole input and output at once; a 48 MiB doctype HTML peaked at
+/// 1118 MiB, measured). The pdf lane runs no lane-specific 32 MiB
+/// policy under the default (pdf_oxide's own resource limits govern
+/// there), but it no longer reads unbounded either: it reads under
+/// [`MAX_INPUT_READ`], the finite 512 MiB backstop, a memory-safety
+/// floor rather than a lane policy.
 ///
 /// `backend` picks the engine where they overlap: `"auto"` (the default;
 /// the native layer takes `None` as the same choice) routes by the
@@ -717,7 +732,9 @@ fn convert(
     let password = parse_password(password)?;
     let max_bytes = parse_max_bytes(max_bytes)?;
     let converted = match py.detach(move || {
-        let (bytes, hint) = source.into_input(max_bytes).map_err(input_document_error)?;
+        let (bytes, hint) = source
+            .into_input(max_bytes, format, backend)
+            .map_err(input_document_error)?;
         core(
             bytes,
             hint.as_deref(),
@@ -862,6 +879,18 @@ enum InputError {
     Refused(String),
 }
 
+/// The finite backstop the unmetered pdf lane reads under when the
+/// caller passed no `max_bytes`: the two-phase read's `None` ceiling once the
+/// prefix sniff positively resolves to pdf (the only unmetered lane; every
+/// other lane meters at the 32 MiB default). Large enough to be no practical
+/// limit on a real document, finite enough that a lying stat or a sparse hole
+/// can no longer make the read unbounded.
+pub(crate) const MAX_INPUT_READ: usize = 512 * 1024 * 1024;
+/// The prefix read before the content-only lane guess: 64 KiB is enough for
+/// every content marker `resolve` consults, and is far under any ceiling the
+/// guess can pick (>= 32 MiB), so the prefix read is never itself "over".
+const SNIFF_PREFIX: usize = 64 * 1024;
+
 impl Source<'_> {
     /// The bytes alone: the PDF family's entry (no name to consult:
     /// those functions are PDF-only by construction). `max_bytes` is the
@@ -871,12 +900,17 @@ impl Source<'_> {
     /// all before a byte is read or copied, because a budget that
     /// skipped this family would be a budget the pdf lane never saw (the
     /// `max_bytes=` the four functions now take had nowhere to land
-    /// before). `None` keeps the pdf lane unmetered, the unchanged
-    /// doctrine: the 32 MiB default is the core's post-read check on the
-    /// anydoc/office_oxide lanes only: lanes these PDF-only calls never
-    /// run.
+    /// before). `None` runs no lane-specific policy on the pdf lane, the
+    /// unchanged doctrine: the 32 MiB default is the core's post-read
+    /// check on the amplified lanes (anydoc/office_oxide/html): lanes
+    /// these PDF-only calls never run; the pdf lane instead reads under
+    /// [`MAX_INPUT_READ`], the finite 512 MiB backstop.
     fn into_bytes(self, max_bytes: Option<usize>) -> Result<Vec<u8>, InputError> {
-        Ok(self.into_input(max_bytes)?.0)
+        // The PDF-only calls have no format/backend to sniff by; a real PDF
+        // resolves to the unmetered lane and gets the MAX_INPUT_READ fallback,
+        // which is the correct ceiling for them.
+        self.into_input(max_bytes, None, Backend::Auto)
+            .map(|(b, _)| b)
     }
 
     /// The bytes and the name hint: the convert spine's entry (the
@@ -890,16 +924,24 @@ impl Source<'_> {
     /// cannot wait for the lane to be known (the red-team findings:
     /// `max_bytes=65536` on `/dev/zero` read forever because the ceiling
     /// ran only post-read in the core, and a caller budgeting on a PDF
-    /// or HTML document got the full parse: those lanes never saw the
-    /// knob). `None` keeps the default doctrine exactly: the core's
-    /// post-read 32 MiB check, on the anydoc and office_oxide lanes
-    /// only.
-    fn into_input(self, max_bytes: Option<usize>) -> Result<(Vec<u8>, Option<String>), InputError> {
+    /// got the full parse: that lane never saw the
+    /// knob). `None` keeps the core's post-read 32 MiB check on the
+    /// amplified lanes (anydoc, office_oxide, and now HTML, which
+    /// measures ~23x input) exactly as before; the pdf lane runs no
+    /// lane-specific policy, but reads under
+    /// [`MAX_INPUT_READ`], the finite 512 MiB backstop this function
+    /// enforces via the two-phase read below, rather than unbounded.
+    fn into_input(
+        self,
+        max_bytes: Option<usize>,
+        format: Option<&str>,
+        backend: Backend,
+    ) -> Result<(Vec<u8>, Option<String>), InputError> {
         match self {
             Source::Path(path) => {
                 // parse_path already validated the Unicode, so the hint is
                 // always representable; `.to_str()` cannot fail here.
-                let hint = path.to_str().map(str::to_string);
+                let hint_name = path.to_str().map(str::to_string);
                 // The fast refusal, before open(2) is ever entered: a FIFO
                 // with no writer blocks inside open (the GIL released, the
                 // thread unreclaimable), and /dev/zero reads unboundedly
@@ -919,24 +961,74 @@ impl Source<'_> {
                 let meta = file.metadata().map_err(InputError::Io)?;
                 refuse_non_regular(&path, meta.file_type())?;
                 refuse_over_ceiling(max_bytes, Some(meta.file_type()), meta.len())?;
-                // std::fs::read's own shape, on the verified handle: the
-                // capacity hint from the fstat size (an explicit budget
-                // already bounds it; the default lane keeps parity with
-                // the pre-fix allocation).
-                let size = usize::try_from(meta.len()).unwrap_or(0);
-                let mut bytes = Vec::with_capacity(size);
-                file.read_to_end(&mut bytes).map_err(InputError::Io)?;
-                Ok((bytes, hint))
+
+                // The stat is no longer the authority on how much to read: a
+                // lying stat (procfs' st_size=0) or a sparse hole made the
+                // old read_to_end unbounded. The bounded read is the ceiling.
+                let (bytes, over, used_ceiling) = match max_bytes {
+                    // Explicit budget: it is the ceiling, no sniff needed.
+                    Some(limit) => {
+                        let (b, o) = documents_impl::read_bounded_into(file, Vec::new(), limit)
+                            .map_err(map_read_err)?;
+                        (b, o, limit)
+                    }
+                    None => {
+                        // Phase 1: a bounded prefix, then a content-only lane guess.
+                        let (prefix, _prefix_over) =
+                            documents_impl::read_bounded_into(&mut file, Vec::new(), SNIFF_PREFIX)
+                                .map_err(map_read_err)?;
+                        // We ignore whether the prefix alone exceeded SNIFF_PREFIX
+                        // (_prefix_over is true for any file over 64 KiB): phase 2
+                        // re-reads from the current file position and the real
+                        // ceiling (>= 32 MiB) governs the refusal below.
+                        let ceiling = documents_impl::provisional_read_ceiling(
+                            &prefix,
+                            hint_name.as_deref(),
+                            format,
+                            backend,
+                            MAX_INPUT_READ,
+                        );
+                        // Phase 2: continue from the SAME file (position is already past
+                        // the prefix), prepending the prefix we already read.
+                        let (b, o) = documents_impl::read_bounded_into(file, prefix, ceiling)
+                            .map_err(map_read_err)?;
+                        (b, o, ceiling)
+                    }
+                };
+                if over {
+                    // The honest number: the ceiling phase 2 actually enforced
+                    // (the explicit budget, or the provisional lane ceiling under
+                    // None), never the 512 MiB backstop when a metered lane's
+                    // 32 MiB was what was hit.
+                    return Err(over_ceiling_refusal(max_bytes, used_ceiling));
+                }
+                Ok((bytes, hint_name))
             }
             Source::Data(bytes) => {
                 // The data lane's twin gate: the budget refuses before the
                 // copy (the bytes are already resident: the caller's own
-                // memory, but the parse it would feed is not free).
+                // memory, but the parse it would feed is not free). No new
+                // backstop: resident bytes cannot grow past themselves.
                 refuse_over_ceiling(max_bytes, None, bytes.len() as u64)?;
                 // The one copy, inside the detach (the enum's docs).
                 Ok((bytes.to_vec(), None))
             }
         }
+    }
+}
+
+/// io::OutOfMemory from the bounded reader means the input was too large to
+/// buffer within the ceiling: a value refusal (ValueError), not an
+/// environment failure. Every other io error stays Io (OSError).
+fn map_read_err(e: std::io::Error) -> InputError {
+    if e.kind() == std::io::ErrorKind::OutOfMemory {
+        InputError::Refused(
+            "the document is too large to buffer within the read ceiling: \
+             split the file or pass a smaller max_bytes"
+                .into(),
+        )
+    } else {
+        InputError::Io(e)
     }
 }
 
@@ -993,11 +1085,33 @@ fn refuse_over_ceiling(
     Err(InputError::Refused(format!(
         "the document is {} and the input ceiling is {} (an explicit max_bytes is binding \
          on every engine lane — pdf and HTML included — and is checked before any work \
-         runs; the 32 MiB default, by contrast, is enforced after the read, on the \
-         anydoc and office_oxide lanes only): split the file, or pass a larger max_bytes",
+         runs; under the default max_bytes=None the read is bounded in two phases: the \
+         metered anydoc, office_oxide, and HTML lanes refuse during the read at the 32 MiB \
+         ceiling, while the pdf lane reads under the 512 MiB backstop): split \
+         the file, or pass a larger max_bytes",
         render_size(size as usize),
         render_size(limit),
     )))
+}
+
+/// The over-the-read-ceiling refusal. Renders the CEILING, not the bytes
+/// read: past the cap the real size is unknown, so "the document is N" would
+/// be a false size. When `max_bytes` was explicit it names the knob; under
+/// None it names the lane ceiling that was hit (the 32 MiB default on the
+/// metered lanes, the MAX_INPUT_READ backstop on pdf) and how to raise it.
+fn over_ceiling_refusal(max_bytes: Option<usize>, ceiling: usize) -> InputError {
+    let detail = if max_bytes.is_some() {
+        format!(
+            "exceeds the max_bytes ceiling of {}: split the file or pass a larger max_bytes",
+            render_size(ceiling)
+        )
+    } else {
+        format!(
+            "exceeds the {} default read ceiling: pass an explicit max_bytes to raise it",
+            render_size(ceiling)
+        )
+    };
+    InputError::Refused(format!("the document {detail}"))
 }
 
 /// One size for a ceiling refusal, legible at every scale: the core's

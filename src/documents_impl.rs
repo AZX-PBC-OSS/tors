@@ -408,9 +408,12 @@ pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
 /// with tight budgets must lower [`ConvertOptions::max_bytes`] or split
 /// the file. The name stays anydoc-branded (history: the knob was born
 /// anydoc-only and the payload crate's docs reference it by this name);
-/// the semantics are both amplified lanes. The pdf_oxide and HTML lanes
-/// are unmetered here: pdf_oxide's own resource limits govern there, and
-/// the HTML lane converts text it can size directly.
+/// the semantics are all amplified lanes. The pdf_oxide lane is unmetered
+/// here: pdf_oxide's own resource limits govern there. The HTML lane is
+/// metered like the others: its converter holds the whole input and output
+/// in memory at once, measured at ~23x input peak RSS (a 48 MiB doctype
+/// HTML peaked at 1118 MiB), so it gets the same input-side bound as the
+/// lanes that amplify by delimiter or container.
 pub const DEFAULT_ANYDOC_INPUT_LIMIT: usize = 32 * 1024 * 1024;
 
 /// The [MS-CFB] OLE compound-file signature: the legacy office container
@@ -455,11 +458,13 @@ pub struct ConvertOptions<'a> {
     /// ignored argument.
     pub password: Option<&'a str>,
     /// The engine-lane input ceiling, in bytes: it bounds input size on
-    /// the two lanes that amplify input into resident memory: anydoc
+    /// the lanes that amplify input into resident memory: anydoc
     /// (~146× RSS worst case on adversarial delimiter formats: a 24 MiB
-    /// csv → 3.42 GiB peak, a 12 MiB one → 1.73 GiB) and
+    /// csv → 3.42 GiB peak, a 12 MiB one → 1.73 GiB),
     /// office_oxide (a 399 KiB zip-bombed docx with a 400 MiB part →
-    /// 1.58 GiB peak on that lane, same date). `None` is the default:
+    /// 1.58 GiB peak on that lane, same date), and HTML (~23× input:
+    /// a 48 MiB doctype HTML → 1118 MiB peak, measured 2026-09-14).
+    /// `None` is the default:
     /// the 32 MiB [`DEFAULT_ANYDOC_INPUT_LIMIT`]; `Some(n)` raises or
     /// lowers it for callers with a bigger (or tighter) memory budget:
     /// at the measured multiple the default's anydoc-lane worst case is
@@ -469,8 +474,8 @@ pub struct ConvertOptions<'a> {
     /// but has no total-across-parts cap and no output cap: an opt-in
     /// lane whose caller accepts unbounded multi-part decompression risk
     /// by selecting it; the ceiling bounds the bytes handed in, never
-    /// the bytes they inflate to. The pdf_oxide and HTML lanes are
-    /// unmetered by this knob: their own limits govern.
+    /// the bytes they inflate to. The pdf_oxide lane is unmetered by
+    /// this knob: its own limits govern.
     pub max_bytes: Option<usize>,
 }
 
@@ -626,19 +631,20 @@ fn convert(
                 .into(),
         ));
     }
-    // The input ceiling: both document-holding lanes that amplify their
-    // input into resident memory: anydoc (~146x worst case on
-    // adversarial delimiter formats, and engine-side decompression caps
-    // on top; see [DEFAULT_ANYDOC_INPUT_LIMIT]) and office_oxide (512
-    // MiB per part since 0.1.10, but no total-across-parts cap and no
-    // output cap: a 399 KiB zip-bomb docx with a 400 MiB part peaked at
-    // 1.58 GiB RSS on the oxide lane, measured), so the
-    // opt-in lane gets the same input-side bound as the default one.
+    // The input ceiling: the lanes that amplify their input into resident
+    // memory: anydoc (~146x worst case on adversarial delimiter formats, and
+    // engine-side decompression caps on top; see [DEFAULT_ANYDOC_INPUT_LIMIT]),
+    // office_oxide (512 MiB per part since 0.1.10, but no total-across-parts
+    // cap and no output cap: a 399 KiB zip-bomb docx with a 400 MiB part
+    // peaked at 1.58 GiB RSS on the oxide lane, measured), and HTML (~23x
+    // input: the converter holds the whole input and output at once; a
+    // 48 MiB doctype HTML peaked at 1118 MiB, measured), so the last gets
+    // the same input-side bound as the first two.
     // What the ceiling does not do is bound office_oxide's DEcompression
     // beyond that per-part cap: that lane's caller accepts unbounded
     // multi-part decompression risk by selecting it (the honest state,
     // stated in [`ConvertOptions::max_bytes`]'s docs).
-    if engine == Engine::Anydoc || engine == Engine::OfficeOxide {
+    if engine == Engine::Anydoc || engine == Engine::OfficeOxide || engine == Engine::Html2Md {
         let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
         if bytes.len() > limit {
             return Err(DocumentError::Convert(format!(
@@ -665,6 +671,105 @@ fn convert(
         Engine::Html2Md => html_markdown(&bytes)?,
     };
     Ok((resolved, engine, markdown))
+}
+
+/// Read from `reader` into `buf` (which may already hold a prefix) until EOF
+/// or one byte past `ceiling`. Returns the bytes and whether the input
+/// exceeded `ceiling`. Never allocates more than `ceiling + 1 + CHUNK` and
+/// never grows through infallible `reserve`, so an oversized input surfaces
+/// as an `OutOfMemory` io error rather than an allocation abort. This is the
+/// piece that closes issue #80 symptoms 2 and 3: the read is self-limiting
+/// regardless of what the file's stat claimed. Callers guarantee
+/// `buf.len() <= ceiling` on entry (the prefix is always <= SNIFF_PREFIX + 1,
+/// which is below any ceiling used here).
+pub fn read_bounded_into<R: std::io::Read>(
+    mut reader: R,
+    mut buf: Vec<u8>,
+    ceiling: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    const CHUNK: usize = 64 * 1024;
+    loop {
+        if buf.len() > ceiling {
+            return Ok((buf, true));
+        }
+        // The `buf.len() > ceiling` guard above guarantees
+        // `ceiling.saturating_add(1) - buf.len() >= 1`, so `want >= 1`; the
+        // saturating add keeps the reader sound even at `ceiling == usize::MAX`
+        // (a plain `ceiling + 1` would overflow there).
+        let want = std::cmp::min(CHUNK, ceiling.saturating_add(1) - buf.len());
+        let start = buf.len();
+        buf.try_reserve_exact(want).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::OutOfMemory, "input too large to buffer")
+        })?;
+        buf.resize(start + want, 0);
+        let n = match reader.read(&mut buf[start..]) {
+            Ok(n) => n,
+            // Retry a signal that landed mid-read, for parity with the
+            // `read_to_end` this loop replaced (CPython installs handlers
+            // without SA_RESTART, so EINTR reaches us). Real io errors return.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                buf.truncate(start);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        buf.truncate(start + n);
+        if n == 0 {
+            return Ok((buf, false));
+        }
+    }
+}
+
+/// The most bytes worth reading before the authoritative `resolve()` runs,
+/// judged from a prefix. Content markers decide, exactly as `resolve()` does,
+/// so a `.pdf`-named CSV is treated as the metered lane it really is. A
+/// metered lane (anydoc/office_oxide/html) returns `DEFAULT_ANYDOC_INPUT_LIMIT`;
+/// only a prefix that POSITIVELY resolves to the unmetered pdf lane
+/// returns `fallback`. A prefix whose lane cannot be told at all (a truncated
+/// ZIP central directory, a content-blind leader) also returns the metered
+/// ceiling, erring safe: content that never resolves is refused by `resolve()`
+/// anyway, and content that resolves only past the prefix is either a metered
+/// lane (the same 32 MiB ceiling, post-read — enforced here during the read)
+/// or a marker-buried pdf (an explicit `max_bytes=` unlocks it). Without
+/// this, a 64 KiB content-blind leader on an extensionless metered file would
+/// hand the attacker the fallback and move the refusal post-read. Only
+/// complete lines of the prefix are considered, so a prefix cut mid-line does
+/// not skew the CSV heuristic — but the untrimmed prefix is checked too, so a
+/// long partial final line (a CSV row wider than the prefix, no trailing
+/// newline) whose completeness the trim would erase is still metered.
+pub fn provisional_read_ceiling(
+    prefix: &[u8],
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    fallback: usize,
+) -> usize {
+    // Some(true) = a metered lane (anydoc/office_oxide/html); Some(false) =
+    // positively unmetered (pdf_oxide); None = the prefix does not
+    // resolve at all. None is deliberately NOT the fallback: see below.
+    let lane = |bytes: &[u8]| {
+        resolve(bytes, name_hint, format)
+            .ok()
+            .and_then(|kind| engine_for(kind, backend).ok())
+            .map(|engine| engine != Engine::PdfOxide)
+    };
+    // Drop a trailing partial line so the CSV witness sees only whole lines.
+    let end = match prefix.iter().rposition(|&b| b == b'\n') {
+        Some(nl) => nl + 1,
+        None => prefix.len(),
+    };
+    let head = &prefix[..end];
+    // Meter unless a view POSITIVELY resolves to the unmetered pdf lane. The
+    // trim protects the mid-line-cut delimiter case; the untrimmed check
+    // closes the long-row CSV gap where the trim would drop the only witness
+    // lines. An all-None prefix (unresolvable content, no name to consult)
+    // meters — the safe direction, matching the OR's own bias toward metering.
+    let unmetered = lane(head) == Some(false) || lane(prefix) == Some(false);
+    if unmetered {
+        fallback
+    } else {
+        DEFAULT_ANYDOC_INPUT_LIMIT
+    }
 }
 
 /// Resolve the format: the explicit name (any leading dot tolerated) beats
@@ -2034,5 +2139,196 @@ mod tests {
         // a misdetected format (the mislabeled-extension doctrine).
         let err = convert_err("workbook.xlsx", &workbook);
         assert!(matches!(err, DocumentError::Convert(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn read_bounded_exactly_at_ceiling_is_accepted() {
+        use std::io::Cursor;
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![7u8; 200]), Vec::new(), 200).unwrap();
+        assert_eq!(bytes.len(), 200);
+        assert!(!over);
+    }
+
+    #[test]
+    fn read_bounded_one_past_ceiling_is_flagged() {
+        use std::io::Cursor;
+        let (_, over) =
+            super::read_bounded_into(Cursor::new(vec![7u8; 201]), Vec::new(), 200).unwrap();
+        assert!(over);
+    }
+
+    #[test]
+    fn read_bounded_infinite_stream_is_bounded_without_doubling() {
+        use std::io::Read as _;
+        // io::repeat is infinite; the read must stop and must not over-allocate.
+        let r: std::io::Repeat = std::io::repeat(0u8);
+        let (bytes, over) =
+            super::read_bounded_into(r.take(u64::MAX), Vec::new(), 1_000_000).unwrap();
+        assert!(over);
+        // capacity stays near the ceiling, proving no geometric doubling.
+        assert!(
+            bytes.capacity() <= 1_000_000 + 1 + 64 * 1024,
+            "capacity {} overshot",
+            bytes.capacity()
+        );
+    }
+
+    #[test]
+    fn read_bounded_empty_reader_returns_empty() {
+        use std::io::Cursor;
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(Vec::<u8>::new()), Vec::new(), 200).unwrap();
+        assert!(bytes.is_empty());
+        assert!(!over);
+    }
+
+    #[test]
+    fn read_bounded_continues_from_a_prefix() {
+        use std::io::Cursor;
+        // buf already holds 3 bytes (a "prefix"); reader adds 2 more; ceiling 10.
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![9u8; 2]), vec![1u8, 2, 3], 10).unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 9, 9]);
+        assert!(!over);
+    }
+
+    const PROVISIONAL_FALLBACK: usize = 512 * 1024 * 1024;
+
+    #[test]
+    fn provisional_csv_prefix_picks_the_metered_ceiling() {
+        // Two comma lines: the CSV heuristic routes to the anydoc lane.
+        let prefix = b"unit,status\na,ok\nb,ok\n";
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("data.csv"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_pdf_prefix_stays_unmetered() {
+        let c = provisional_read_ceiling(
+            b"%PDF-1.4\n...",
+            Some("x.pdf"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, PROVISIONAL_FALLBACK);
+    }
+
+    #[test]
+    fn provisional_html_prefix_meters() {
+        // The HTML lane amplifies at a measured ~23x input (a 48 MiB doctype
+        // HTML peaked at 1118 MiB): it meters like anydoc/office_oxide, and
+        // the fallback is the pdf lane's alone.
+        let c = provisional_read_ceiling(
+            b"<!doctype html><html><body>\n<h1>t</h1>\n",
+            Some("x.html"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_html_prefix_meters_by_content_not_name() {
+        // Content beats name: an html-named csv is metered; a csv-named html
+        // is metered too — the lane guess reads the prefix's markers.
+        let c = provisional_read_ceiling(
+            b"<!doctype html><html><body>\n<h1>t</h1>\n",
+            Some("x.csv"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_pdf_named_csv_is_metered_by_content() {
+        // Content beats name: a .pdf-named CSV must still get the metered ceiling.
+        let prefix = b"unit,status\na,ok\nb,ok\n";
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("x.pdf"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_unresolvable_prefix_errs_toward_the_metered_ceiling() {
+        // A ZIP local-file header with no central directory cannot be resolved
+        // from the prefix, and neither a metered nor an unmetered lane can be
+        // told: the read errs SAFE at the metered ceiling, never the fallback.
+        // Content that stays unresolvable is refused by resolve() anyway; an
+        // extensionless metered file behind a content-blind leader must not
+        // buy the fallback (a 64 KiB leader would else defeat read metering).
+        let c = provisional_read_ceiling(
+            b"PK\x03\x04\x14\x00",
+            None,
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    #[test]
+    fn provisional_positively_unmetered_prefix_keeps_the_fallback() {
+        // The fallback is reserved for prefixes that POSITIVELY resolve to an
+        // unmetered lane (pdf) — here by name hint over pdf content.
+        let c = provisional_read_ceiling(
+            b"%PDF-1.4\n",
+            Some("x.pdf"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, PROVISIONAL_FALLBACK);
+    }
+
+    #[test]
+    fn provisional_partial_last_line_does_not_skew_csv() {
+        // A prefix cut mid-line must not miscount; only complete lines are fed.
+        let prefix = b"a,b\nc,d\ne,"; // last line incomplete
+        let c = provisional_read_ceiling(
+            prefix,
+            Some("f.csv"),
+            None,
+            Backend::Auto,
+            PROVISIONAL_FALLBACK,
+        );
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT); // still CSV from the two complete lines
+    }
+
+    #[test]
+    fn read_bounded_usize_max_ceiling_does_not_overflow() {
+        use std::io::Cursor;
+        // The pub reader must be sound at the extreme ceiling: `ceiling + 1`
+        // would overflow, but `saturating_add(1)` keeps `want` well-formed.
+        let (bytes, over) =
+            super::read_bounded_into(Cursor::new(vec![0u8; 10]), Vec::new(), usize::MAX).unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert!(!over);
+    }
+
+    #[test]
+    fn provisional_long_row_csv_is_metered_from_untrimmed_prefix() {
+        // A CSV whose second row is wider than the prefix, with no trailing
+        // newline: trimming to complete lines leaves one line (not CSV), so the
+        // metering must come from the UNTRIMMED prefix, which sees both rows.
+        let mut prefix = b"unit,status\na,".to_vec();
+        prefix.extend(std::iter::repeat_n(b'x', 80 * 1024));
+        let c = provisional_read_ceiling(&prefix, None, None, Backend::Auto, PROVISIONAL_FALLBACK);
+        assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
     }
 }

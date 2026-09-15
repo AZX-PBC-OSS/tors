@@ -125,10 +125,16 @@ The rules in brief:
   excluding blanks), and the derived `.has_text` / `.image_only`. Encrypted
   documents fail closed on every entry (`ValueError` without `password=`).
 - `max_bytes=` is the input budget. An explicit value binds every engine lane
-  before a byte is read or copied; `None` keeps the 32 MiB default, a
-  post-read check on the amplifying lanes (anydoc, office_oxide) only. On the
-  PDF-only family `None` is unmetered: those calls never run either metered
-  lane.
+  before a byte is read or copied, overriding the default in either
+  direction; `None` reads under `MAX_INPUT_READ`, a finite 512 MiB read
+  ceiling enforced during the read itself (a bounded prefix picks the lane,
+  then the rest is read under that lane's ceiling), plus the existing
+  32 MiB default, a post-read check on the amplifying lanes (anydoc,
+  office_oxide, HTML — the HTML converter holds input and output at once,
+  ~23x input, measured) only. On the PDF-only family `None` has no lane-specific
+  32 MiB policy: those calls never run a metered lane, but they still
+  read bounded by the 512 MiB backstop, a memory-safety floor rather than a
+  lane policy, not unbounded.
 - Errors: `OSError` for a missing/unreadable file (the matched subclass, e.g.
   `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
   `ValueError` for an unknown format name, an undetectable file, an unusable
