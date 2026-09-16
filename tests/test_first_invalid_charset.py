@@ -71,6 +71,13 @@ Contract decisions at the argument boundary (each pinned below):
   refused with ``UnicodeEncodeError`` before any Rust code runs, the
   standard str-in boundary, paid by every item and by ``first``/``rest``
   alike.
+- the argument walk is BOUNDED (``content_hash``'s protocol-walk cap, the
+  same DoS backstop): the walk materializes every item's handle under the
+  GIL before the detached scan runs, so a sequence whose ``__iter__``
+  never stops would hold the GIL growing the batch until the process
+  dies: past the walk's ceiling the call aborts with a generic
+  ``ValueError`` (no cap value leaked), both spellings alike (one shared
+  walk, byte-identical refusals).
 
 No single stdlib primitive has these semantics, so the contract is proven
 the module decision's prescribed three ways: (a) a pure-Python membership
@@ -102,6 +109,8 @@ from __future__ import annotations
 import itertools
 import re
 import string
+import subprocess
+import sys
 from collections.abc import Sequence
 
 import pytest
@@ -1200,6 +1209,82 @@ class TestBatchScale:
             3,
             " ",
         )
+
+
+class TestItemsWalkIsBounded:
+    """The argument walk's DoS backstop: the walk pulls the whole sequence
+    under the GIL (every handle borrowed before the detached scan runs),
+    so an unbounded sequence (a ``Sequence`` whose ``__iter__`` never
+    stops; the walk iterates, it never consults ``__len__``) would hold
+    the GIL growing the handle vector until the process OOMs. The walk
+    carries ``content_hash``'s protocol-walk cap: past the ceiling the
+    call aborts with a generic ``ValueError`` instead of spinning. The
+    endless probe runs in a disposable subprocess so a regression hangs
+    the child (killed at the timeout, reported as a failure) instead of
+    hanging the suite; both spellings are probed because the cap lives on
+    the walk they share, and the refusal messages must stay
+    byte-identical (the argument-boundary migration promise). Green,
+    measured on this tree: the probe child refuses in ~0.15 s end to
+    end (interpreter startup plus the capped walk), so the 60 s backstop
+    sits ~400x above the green wall; the pre-fix hang dies at it."""
+
+    @staticmethod
+    def _endless_probe_child() -> str:
+        return (
+            "from collections.abc import Sequence\n"
+            "import tors\n"
+            "class Endless(Sequence):\n"
+            "    def __len__(self):\n"
+            "        return 0\n"
+            "    def __getitem__(self, i):\n"
+            "        raise IndexError(i)\n"
+            "    def __iter__(self):\n"
+            "        n = 0\n"
+            "        while True:\n"
+            "            yield f'job_{n}'\n"
+            "            n += 1\n"
+            "messages = []\n"
+            "for call in (\n"
+            "    lambda: tors.first_invalid_charset(Endless(), rest='a'),\n"
+            "    lambda: tors.first_invalid_offender(Endless(), rest='a'),\n"
+            "):\n"
+            "    try:\n"
+            "        call()\n"
+            "    except ValueError as exc:\n"
+            "        messages.append(str(exc))\n"
+            "    else:\n"
+            "        print('RETURNED')\n"
+            "        raise SystemExit(3)\n"
+            "print('REFUSED ' + ' || '.join(messages))\n"
+        )
+
+    def test_an_endless_sequence_aborts_with_value_error_instead_of_hanging(self) -> None:
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", self._endless_probe_child()],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "first_invalid_charset consumed an endless __iter__ until the "
+                "60s timeout: the argument walk is unbounded (the GIL-held "
+                "materialization needs content_hash's protocol-walk cap)"
+            )
+        assert proc.returncode == 0, f"the probe child failed: {proc.stderr[-800:]}"
+        head, _, messages = proc.stdout.strip().partition(" ")
+        assert head == "REFUSED", proc.stdout
+        # The cap lives on the shared walk: both spellings refuse, with
+        # the byte-identical message every other argument refusal carries
+        # (the migration promise: swapping the int call for the tuple
+        # call changes nothing about what raises or what it says).
+        int_message, _, offender_message = messages.partition(" || ")
+        assert int_message and int_message == offender_message, proc.stdout
+        # Generic on purpose (canon's discipline): the bound is a DoS
+        # backstop, not a contract: no cap value leaks in the message.
+        assert "1000000" not in int_message
+        assert "1_000_000" not in int_message
 
 
 # --- The pinned common alphabets ------------------------------------------------

@@ -3,11 +3,25 @@
 //! the offender detail a rejection message needs), each the
 //! argument-walk + one-detach shape over a str sequence.
 
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PySequence, PyString};
 
 use crate::charset_impl;
+
+/// The items walk's materialization cap: a batch of str borrows is pulled
+/// to completion under the GIL ([`borrow_str_sequence`]), so an unbounded
+/// sequence (a `Sequence` whose `__iter__` never stops; the ABC's own
+/// `__len__` is never trusted, only iterated) would hold the GIL growing
+/// the handle vector until the process dies. Past this many pulled items
+/// the walk aborts with `ValueError`. The same ceiling
+/// `canon_impl`'s protocol walk carries (`crate::py::canon::MAX_PROTOCOL_ITEMS`,
+/// same value, same generic-message discipline): legitimate batches sit
+/// orders of magnitude below it (the motivating consumer's enqueues are
+/// hundreds of items; the scale battery pins 100k), and the message is
+/// deliberately generic (no cap value): the bound is a DoS backstop, not
+/// a contract to advertise to sequence authors.
+pub(crate) const MAX_BATCH_ITEMS: usize = 1_000_000;
 
 /// The GIL-held items walk: [`crate::py::_borrow::borrow_str_list`]'s
 /// collect-handles-then-borrow shape, taken over any `Sequence` (a list, a
@@ -34,7 +48,11 @@ use crate::charset_impl;
 /// the scan's first-offender short-circuit is a scan property, never an
 /// argument-validation one. No empty-entry refusal exists here (the
 /// `EmptyPolicy::Allow` side of the shared walk's contract): an empty item
-/// is simply an offender the scan reports.
+/// is simply an offender the scan reports. The materialization is bounded
+/// ([`MAX_BATCH_ITEMS`]): a sequence that yields past it aborts the walk
+/// with a generic `ValueError` instead of holding the GIL forever:
+/// `content_hash`'s subclass-hook cap, the same DoS backstop for the same
+/// GIL-held pull.
 fn borrow_str_sequence<R>(
     items: &Bound<'_, PyAny>,
     run: impl FnOnce(&[Bound<'_, PyAny>], &[&str]) -> PyResult<R>,
@@ -45,7 +63,16 @@ fn borrow_str_sequence<R>(
         ));
     }
     let seq = items.cast::<PySequence>()?;
-    let handles: Vec<_> = seq.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    let mut handles: Vec<_> = Vec::new();
+    for handle in seq.try_iter()? {
+        let handle = handle?;
+        handles.push(handle);
+        if handles.len() > MAX_BATCH_ITEMS {
+            return Err(PyValueError::new_err(
+                "first_invalid_charset() items sequence yielded too many items: refusing an unbounded batch",
+            ));
+        }
+    }
     let mut borrowed: Vec<&str> = Vec::with_capacity(handles.len());
     for handle in &handles {
         borrowed.push(handle.extract::<&str>()?);

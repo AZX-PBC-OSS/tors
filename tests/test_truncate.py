@@ -128,6 +128,54 @@ class TestGraphemeSafety:
             got = truncate_to_bounds(text, max_chars, "word")
             assert ("\U0001f1fa" in got) == ("\U0001f1f8" in got), (max_chars, got)
 
+    def test_the_trailing_whitespace_trim_never_splits_a_prepend_cluster(self) -> None:
+        """U+0600 is a Prepend (GB9b: Prepend x All), so U+0600 + U+00A0 is
+        ONE grapheme cluster, and the cut at ``max_chars=2`` lands exactly
+        on that cluster's end. The trailing-whitespace trim must remove
+        whole whitespace clusters only: a codepoint-by-codepoint
+        ``str.trim_end`` takes the no-break space (White_Space=yes) and
+        leaves the Prepend half dangling: the never-mid-cluster promise
+        broken by the trim, on a result the cut itself had already made
+        whole. The cluster is not entirely whitespace (U+0600 is not), so
+        it survives whole at the budget that fits it."""
+        text = "\u0600\u00a0bbbb"
+        assert truncate_to_bounds(text, 2, "word") == "\u0600\u00a0"
+        assert truncate_to_bounds(text, 2, "sentence") == "\u0600\u00a0"
+
+    def test_the_trim_still_removes_pure_whitespace_clusters(self) -> None:
+        """The cluster-safe trim is still a trim: a dangling separator
+        space is one cluster entirely of whitespace, and it goes; word
+        and sentence mode alike, the documented reason the trim exists."""
+        assert truncate_to_bounds("cats are cute", 9, "word") == "cats are"
+        assert truncate_to_bounds("One. Two. Three.", 10, "sentence") == "One. Two."
+
+    @pytest.mark.parametrize("boundary", ["word", "sentence"])
+    def test_every_result_is_a_concatenation_of_whole_leading_clusters(
+        self, boundary: str
+    ) -> None:
+        """The module doc's invariant, stated as the result's shape: every
+        answer is some whole-number prefix of the input's grapheme
+        clusters: the cut lands on a cluster boundary AND the trim only
+        ever removes complete trailing clusters. The battery spells each
+        input's cluster structure explicitly (no grapheme segmenter on the
+        Python side to lean on), one cluster class per entry: the GB9b
+        Prepend pair, the Thai SARA AM combining sequence, a combining
+        accent, a regional-indicator flag pair, a ZWJ emoji chain."""
+        battery = [
+            ("\u0600\u00a0bbbb", ["\u0600\u00a0", "b", "b", "b", "b"]),
+            ("0\u0e33abc", ["0\u0e33", "a", "b", "c"]),
+            ("a\u0301b c", ["a\u0301", "b", " ", "c"]),
+            ("\U0001f1fa\U0001f1f8x", ["\U0001f1fa\U0001f1f8", "x"]),
+            ("\U0001f469\u200d\U0001f52cz", ["\U0001f469\u200d\U0001f52c", "z"]),
+        ]
+        for text, clusters in battery:
+            for max_chars in range(len(text) + 1):
+                got = truncate_to_bounds(text, max_chars, boundary)
+                whole_prefixes = {
+                    "".join(clusters[:k]) for k in range(len(clusters) + 1)
+                }
+                assert got in whole_prefixes, (boundary, max_chars, got)
+
 
 class TestArgumentContract:
     def test_negative_max_chars_raises_value_error(self) -> None:

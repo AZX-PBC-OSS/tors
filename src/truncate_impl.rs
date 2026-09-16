@@ -367,13 +367,19 @@ impl GraphemeIndex {
 ///   the budget when respecting a cluster boundary requires backing off
 ///   further; correctness takes priority over filling the last codepoint).
 /// * The result is then trimmed of trailing Unicode whitespace at the cut
-///   point (`str::trim_end`). Cutting exactly after a word boundary would
-///   otherwise leave a dangling separator space (word boundaries include
-///   the inter-word space as its own segment; sentence boundaries carry a
-///   trailing space on the preceding sentence per UAX #29 SB9-SB11: see
+///   point. Cutting exactly after a word boundary would otherwise leave a
+///   dangling separator space (word boundaries include the inter-word space
+///   as its own segment; sentence boundaries carry a trailing space on the
+///   preceding sentence per UAX #29 SB9-SB11: see
 ///   `segmentation_impl::sentence_bounds`'s docs), which this trims away.
-///   Trimming can only ever shrink the result further, so it cannot violate
-///   the `max_chars` invariant above.
+///   The trim is cluster-safe ([`trim_end_grapheme_safe`], not
+///   `str::trim_end`: the stdlib trim strips whitespace codepoint by
+///   codepoint, so a cut landing on a whole whitespace-carrying cluster
+///   (a Prepend plus a no-break space, one cluster per GB9b) would strip
+///   the cluster's whitespace half and end the result mid-cluster,
+///   violating the never-mid-cluster invariant above). Trimming can only
+///   ever shrink the result further, so it cannot violate the `max_chars`
+///   invariant above.
 pub fn truncate_to_bounds(text: &str, max_chars: usize, boundary: Boundary) -> Cow<'_, str> {
     if text.chars().count() <= max_chars {
         return Cow::Borrowed(text);
@@ -404,7 +410,33 @@ pub fn truncate_to_bounds(text: &str, max_chars: usize, boundary: Boundary) -> C
     // codepoint index back into a byte offset.
     let cut_idx = grapheme_starts.partition_point(|&g| g < cut_chars);
     let byte_cut = byte_starts[cut_idx];
-    Cow::Owned(text[..byte_cut].trim_end().to_string())
+    Cow::Owned(trim_end_grapheme_safe(&text[..byte_cut]).to_string())
+}
+
+/// The trailing-whitespace trim of a cut point, cluster-safe: whole
+/// trailing grapheme clusters that are entirely Unicode whitespace are
+/// removed, and the first mixed/non-whitespace cluster stops the trim.
+/// `str::trim_end`'s codepoint-by-codepoint strip is not valid here: it can
+/// split a cluster whose whitespace member trails a non-whitespace one
+/// (GB9b's Prepend × All: `"؀\u{a0}"` is ONE cluster, and `trim_end`
+/// strips the no-break space, leaving the Prepend half dangling). This
+/// trim only ever removes complete clusters, so its answer still ends at
+/// a cluster boundary of the original text: the never-mid-cluster
+/// invariant [`truncate_to_bounds`] promises survives the trim. The
+/// predicate is `char::is_whitespace` over the whole cluster, exactly
+/// `str::trim_end`'s class lifted to the cluster granularity: a
+/// pure-whitespace cluster ("\r\n", a lone no-break space) trims away; a
+/// cluster with any non-whitespace member (the Prepend pair, " " +
+/// combining accent) stays whole.
+fn trim_end_grapheme_safe(text: &str) -> &str {
+    let mut end = text.len();
+    for cluster in text.graphemes(true).rev() {
+        if !cluster.chars().all(char::is_whitespace) {
+            break;
+        }
+        end -= cluster.len();
+    }
+    &text[..end]
 }
 
 /// The marker `truncate_ellipsis` appends to a cut value: U+2026 HORIZONTAL

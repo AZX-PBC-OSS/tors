@@ -471,8 +471,12 @@ fn scan_replace<'a>(
 /// # Complexity
 ///
 /// One automaton build O(total key bytes) + one scan O(text) + one output
-/// build O(output): the per-match character counts are O(L), the same
-/// order the splice itself is; linear in everything it touches.
+/// build O(output). Each value's character count is computed once per
+/// call (O(total value bytes) across the map), and the per-match
+/// arithmetic reads only the matched span and what the splice writes
+/// (the mask rule truncates or pads to the span's count): a short key
+/// paired with a huge value costs the value once, never once per match,
+/// and the call stays linear in everything it touches.
 pub fn replace_many_masked<'a>(
     text: &'a str,
     replacements: &[(&str, &str)],
@@ -503,13 +507,24 @@ fn scan_replace_masked<'a>(
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
     let mut matched = false;
+    // Each value's character count is a per-value fact, computed once
+    // here rather than per match: the splice's per-match arithmetic
+    // reads only the matched span and what it writes (truncate to the
+    // span's count or pad to it), so a short key paired with a huge
+    // value must cost the value once, not once per match (a one-char
+    // key over an all-key text would otherwise be quadratic in the
+    // value's length).
+    let value_char_counts: HashMap<&str, usize> = values
+        .iter()
+        .map(|(key, value)| (*key, value.chars().count()))
+        .collect();
     for m in ac.find_iter(text) {
         matched = true;
         let span = &text[m.start()..m.end()];
         out.push_str(&text[last..m.start()]);
         let span_chars = span.chars().count();
         let value = values[span];
-        let value_chars = value.chars().count();
+        let value_chars = value_char_counts[span];
         if value_chars >= span_chars {
             // Truncation: the value's first L characters; the mask is
             // never consulted on this branch.
