@@ -1,7 +1,8 @@
 //! Contact- and credential-material scrub, the pure-Rust core of
 //! `tors.scrub_pii`.
 //!
-//! Replaces email addresses, `+`-led phone numbers, and provider/platform
+//! Replaces email addresses, phone numbers (the `+`-led international
+//! grammar plus the domestic NANP extension), and provider/platform
 //! API-key material inside free text with correlation tokens: the scrub
 //! an error excerpt, rejection message, or response-body excerpt needs
 //! before it reaches telemetry, because telemetry is the one store a
@@ -87,8 +88,9 @@
 //!   `[A-Za-z0-9_-]` alphabet except where the family names its own):
 //!   OpenAI `sk-`/`sk-proj-`/`sk-svcacct-` (20+), Anthropic `sk-ant-`
 //!   (20+), Google `AIza` (35+), Fireworks `fw-`/`fw_` (20+), Modal
-//!   `ak-`/`wk-` (20+), GitHub `ghp_` (36+) and `github_pat_` (22+),
-//!   the minted shapes `azxdev_` (20+), `wd-` (43+), `w-` (43+),
+//!   `ak-`/`wk-` (20+), GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (36+)
+//!   and `github_pat_` (22+), GitLab `glpat-` (20+), the minted shapes
+//!   `azxdev_` (20+), `wd-` (43+), `w-` (43+),
 //!   `cn-` (20+), MARKER-SCOPED JWTs — `Bearer eyJ` plus three maximal
 //!   base64url segments, single-dot separated (a bare `eyJ` never
 //!   matches: one consumer's API legitimately carries eyJ-shaped
@@ -98,10 +100,12 @@
 //!   prefix and stay a documented exclusion), xAI `xai-` (20+), GCP
 //!   OAuth `ya29.` (20+), the PEM SPAN family (`-----BEGIN <words>
 //!   PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both
-//!   markers required; the PKCS#8 bare header carries no algorithm
-//!   words and stays a documented exclusion), and Azure `AccountKey=` +
-//!   `[A-Za-z0-9+/=]{40,}` (Azure client secrets carry no distinctive
-//!   prefix and stay a documented exclusion, Mistral keys with them).
+//!   markers required; the PGP label's ` PRIVATE KEY BLOCK-----` close
+//!   is accepted the same way, and the PKCS#8 bare header carries no
+//!   algorithm words and stays a documented exclusion), and Azure
+//!   `AccountKey=` + `[A-Za-z0-9+/=]{40,}` (Azure client secrets carry
+//!   no distinctive prefix and stay a documented exclusion, Mistral
+//!   keys with them).
 //!   The rule takes a per-family selection (`families=`: `None` is
 //!   every family this version knows; a list selects exactly those —
 //!   the binding walks the names into a private mask, and an unselected
@@ -120,9 +124,13 @@
 //!   the generic prefix); a prefix glued to a preceding key-charset char
 //!   is MID-TOKEN and never fires (`xak-…` — the same reasoning as the
 //!   phone rule's clean-boundary cut, and what keeps a second key glued
-//!   to a token's digest hex from firing); and the tail run is MAXIMAL,
-//!   so a key glued to further charset material is one long key —
-//!   over-redaction in the safe direction.
+//!   to a token's digest hex from firing) UNLESS that byte ends a
+//!   complete escape sequence: `%XX`, `\uXXXX`, or `\X` (odd-backslash
+//!   counted): logs carry keys inside JSON strings, .NET spellings, and
+//!   URL encodings, and the escape's tail letter or digit is formatting
+//!   material, not the word a key head would be glued to; and the tail
+//!   run is MAXIMAL, so a key glued to further charset material is one
+//!   long key, over-redaction in the safe direction.
 //! * **Pass order** — the keys substitution over the whole string FIRST,
 //!   then the email substitution over its result, then the phone
 //!   substitution over that, each exactly once, no cascade. The keys
@@ -145,9 +153,13 @@
 //!   all over-redaction in the safe direction, converging on the second
 //!   scrub like every other shape.
 //! * **Tokens** — `@domain~<digest>` for an email match, `prefix~<digest>`
-//!   for a phone match, where `prefix` is the match's first three CODE
-//!   POINTS (a canonical E.164's country code — `"+47"` compact, `"+1 "`
-//!   for a domestic spelling where the third code point is the space),
+//!   for a phone match, where `prefix` is a `+`-led match's first three
+//!   CODE POINTS (a canonical E.164's dialling prefix: `"+47"` compact,
+//!   `"+1 "` for the international spelling of a NANP number, where the
+//!   third code point is the space); any other spelling gets the DIGEST
+//!   ALONE, because a domestic match's head digits are the area code,
+//!   the identifying half of the number, exactly the context a visible
+//!   prefix would surface;
 //!   and `<family-prefix>~<digest>` for a key match, where the family
 //!   prefix is kept VERBATIM (`sk-`, `sk-ant-`, `github_pat_`, `AIza`,
 //!   `Bearer`) — the non-secret half that tells the operator WHICH
@@ -304,7 +316,7 @@ pub const KEYS_DEFAULT_SALT: &str = "tors/scrub_keys/v1";
 /// One api-key family: the evidence-backed closed set's identity, in the
 /// canonical order the `families=` names and the `tors.KEY_FAMILIES`
 /// tuple mirror. The discriminant IS the selection-mask bit (bit i is
-/// `ALL[i]`): thirteen families fit a `u16` with room to grow, and the
+/// `ALL[i]`): fourteen families fit a `u16` with room to grow, and the
 /// binding walks names into that mask — an implementation detail, never
 /// a public bit arithmetic surface.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -322,6 +334,7 @@ pub enum KeyFamily {
     GcpOauth,
     Pem,
     Azure,
+    GitLab,
 }
 
 impl KeyFamily {
@@ -329,7 +342,7 @@ impl KeyFamily {
     /// the `families=` closed set's order, the `KEY_FAMILIES` tuple's
     /// order — one order everywhere, so a new family has exactly one
     /// place to land.
-    pub const ALL: [KeyFamily; 13] = [
+    pub const ALL: [KeyFamily; 14] = [
         KeyFamily::OpenAi,
         KeyFamily::Anthropic,
         KeyFamily::Google,
@@ -343,6 +356,7 @@ impl KeyFamily {
         KeyFamily::GcpOauth,
         KeyFamily::Pem,
         KeyFamily::Azure,
+        KeyFamily::GitLab,
     ];
 
     /// The `families=` name: lowercase, the tuple's spelling.
@@ -361,6 +375,7 @@ impl KeyFamily {
             KeyFamily::GcpOauth => "gcp_oauth",
             KeyFamily::Pem => "pem",
             KeyFamily::Azure => "azure",
+            KeyFamily::GitLab => "gitlab",
         }
     }
 
@@ -373,7 +388,7 @@ impl KeyFamily {
 /// The canonical family-name tuple in `ALL` order: the single source
 /// the binding's `KEY_FAMILIES` export and the unknown-name `ValueError`
 /// both spell from, so the message can never drift from the tuple.
-pub const KEY_FAMILY_NAMES: [&str; 13] = [
+pub const KEY_FAMILY_NAMES: [&str; 14] = [
     "openai",
     "anthropic",
     "google",
@@ -387,6 +402,7 @@ pub const KEY_FAMILY_NAMES: [&str; 13] = [
     "gcp_oauth",
     "pem",
     "azure",
+    "gitlab",
 ];
 
 /// Every family this version knows: the `families=None` selection and
@@ -794,8 +810,10 @@ fn token_ends_at(text: &str, pos: usize) -> bool {
 }
 
 /// The phone pass: every leftmost match of the two phone grammars
-/// becomes `prefix~digest` (`prefix` = the match's first three code
-/// points). One linear scan over the class runs: a run preceded by a
+/// becomes `prefix~digest` (`prefix` = a `+`-led match's first three
+/// code points, the dialling prefix; a domestic match emits `~digest`
+/// alone: its head digits are the area code, the identifying half a
+/// visible prefix would surface). One linear scan over the class runs: a run preceded by a
 /// `+` is international territory (the `+` plus the run matches when
 /// the run starts with a digit and its last digit sits at the eighth
 /// class character or beyond — the regex's own `{6,}` middle counting
@@ -874,28 +892,45 @@ fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> 
             pos = run.run_end;
             continue;
         };
-        // The token prefix: the match's first three code points. Every
-        // match holds at least nine (a `+`, a digit, six more class
-        // chars, a final digit), so three always exist.
-        let mut prefix_end = start;
-        for _ in 0..3 {
-            prefix_end += text[prefix_end..].chars().next().unwrap().len_utf8();
-        }
         let matched = &text[start..end];
-        let token = format!(
-            "{}~{}",
-            &text[start..prefix_end],
-            token_digest(salt, matched)
-        );
+        // The token prefix: a `+`-led match keeps its first three code
+        // points: the dialling prefix, coarse and non-identifying
+        // (every international match holds at least nine: a `+`, a
+        // digit, six more class chars, a final digit). A domestic match
+        // keeps NOTHING before the `~`: its head digits are the area
+        // code, the identifying half of the number, and echoing three of
+        // them in the clear is exactly the leak the token exists to
+        // prevent. The oracle's own rule (tests/reference.py
+        // `_scrub_phone_token`): the prefix only when the match starts
+        // with `+`.
+        let token = if plussed {
+            let mut prefix_end = start;
+            for _ in 0..3 {
+                prefix_end += text[prefix_end..].chars().next().unwrap().len_utf8();
+            }
+            let head = prefix_end - start;
+            (
+                format!(
+                    "{}~{}",
+                    &text[start..prefix_end],
+                    token_digest(salt, matched)
+                ),
+                head,
+            )
+        } else {
+            (format!("~{}", token_digest(salt, matched)), 0)
+        };
+        let (token, verbatim_len) = token;
         if let Some(r) = rec.as_deref_mut() {
-            // The verbatim head is the match's own first three code
-            // points, mapping to the match's head.
+            // The verbatim head is the dialling prefix the token kept:
+            // the `+`-led match's first three code points; a domestic
+            // token keeps nothing (`verbatim_len` 0, PEM's shape).
             r.edits.push(PassEdit {
                 start,
                 end,
                 token: token.clone(),
                 verbatim_src: start,
-                verbatim_len: prefix_end - start,
+                verbatim_len,
             });
             r.kinds.push(SpanKind::Phone);
         }
@@ -923,6 +958,49 @@ fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> 
 #[inline]
 fn is_key_tail_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+}
+
+/// Whether the key-charset byte at `pos - 1` is the LAST byte of a
+/// complete escape sequence: `%XX`, `\uXXXX`, or `\X` (a
+/// backslash-escaped char, odd-backslash counted, so an escaped
+/// backslash stays a literal and keeps its neighbor mid-token). Escaped
+/// text is a CLEAN boundary for the family scan: logs carry keys inside
+/// JSON strings (`\n`), .NET spellings (`\u0027`), and URL encodings
+/// (`%3D`), and the escape's tail letter or digit is formatting
+/// material, not the word a key head would be glued to; the head after
+/// it starts fresh. Token digests can never alias this (hex carries no
+/// `\` or `%`), so the token-adjacency cut is untouched, and a partial
+/// escape (`%3` + a key head, or `%3g`) is not a boundary: the grammar
+/// needs the complete sequence.
+#[inline]
+fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
+    // %XX: the percent sign plus two hex digits, the second being the
+    // key-charset byte itself.
+    if pos >= 3
+        && bytes[pos - 3] == b'%'
+        && bytes[pos - 2].is_ascii_hexdigit()
+        && bytes[pos - 1].is_ascii_hexdigit()
+    {
+        return true;
+    }
+    // \uXXXX: the backslash, the `u`, and four hex digits.
+    if pos >= 6
+        && bytes[pos - 6] == b'\\'
+        && bytes[pos - 5] == b'u'
+        && bytes[pos - 4].is_ascii_hexdigit()
+        && bytes[pos - 3].is_ascii_hexdigit()
+        && bytes[pos - 2].is_ascii_hexdigit()
+        && bytes[pos - 1].is_ascii_hexdigit()
+    {
+        return true;
+    }
+    // \X: an ODD run of backslashes directly before the final byte (an
+    // even run escapes itself, leaving the neighbor a literal).
+    let mut slashes = 0usize;
+    while slashes + 2 <= pos && bytes[pos - 2 - slashes] == b'\\' {
+        slashes += 1;
+    }
+    slashes % 2 == 1
 }
 
 /// The tail alphabet a family consumes maximally. Most families share
@@ -978,8 +1056,13 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"sk-proj-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
     (b"sk-ant-", KeyFamily::Anthropic, 20, KeyTailClass::Shared),
     (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
+    (b"glpat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
     (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    (b"gho_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    (b"ghu_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    (b"ghs_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    (b"ghr_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"AIza", KeyFamily::Google, 35, KeyTailClass::Shared),
     (b"AKIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
     (b"ASIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
@@ -1049,18 +1132,21 @@ fn is_pem_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric()
 }
 
-/// One PEM label production — `<words> PRIVATE KEY-----` — at
-/// `words_start` (the first byte after `-----BEGIN ` or `-----END `):
-/// one-or-more `[A-Za-z0-9]+` words, single-space separated, then the
-/// fixed ` PRIVATE KEY-----` tail, the FIRST position where a complete
-/// word is followed by the tail winning (so `RSA` in
-/// `RSA PRIVATE KEY-----` is the words; a doubled space, a non-word
-/// byte, or a missing tail fails the marker — and the PKCS#8 bare
-/// `BEGIN PRIVATE KEY` header with it: no algorithm words, a
-/// new-evidence decision like any other family shape). Returns the words
-/// end and the marker end.
+/// One PEM label production, `<words> PRIVATE KEY-----` (or the PGP
+/// spelling `<words> PRIVATE KEY BLOCK-----`), at `words_start` (the
+/// first byte after `-----BEGIN ` or `-----END `): one-or-more
+/// `[A-Za-z0-9]+` words, single-space separated, then the fixed tail,
+/// the FIRST position where a complete word is followed by a tail
+/// winning (so `RSA` in `RSA PRIVATE KEY-----` is the words; a doubled
+/// space, a non-word byte, or a missing tail fails the marker, and the
+/// PKCS#8 bare `BEGIN PRIVATE KEY` header with it: no algorithm words,
+/// a new-evidence decision like any other family shape). The `BLOCK`
+/// close is the PGP private-key label's own (`PGP PRIVATE KEY BLOCK`),
+/// tried before the bare close at each word end. Returns the words end
+/// and the marker end.
 fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
     const TAIL: &[u8] = b" PRIVATE KEY-----";
+    const BLOCK_TAIL: &[u8] = b" PRIVATE KEY BLOCK-----";
     let mut p = words_start;
     loop {
         let w = p;
@@ -1069,6 +1155,9 @@ fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
         }
         if w == p {
             return None; // an empty word: the label ran out or doubled its space
+        }
+        if bytes[p..].starts_with(BLOCK_TAIL) {
+            return Some((p, p + BLOCK_TAIL.len()));
         }
         if bytes[p..].starts_with(TAIL) {
             return Some((p, p + TAIL.len()));
@@ -1172,7 +1261,10 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 /// preceding key-charset char is MID-TOKEN and never fires (`xak-…`: in
 /// real text a key glued to a word is that word's fragment, the same
 /// reasoning as the phone rule's clean-boundary cut, and it is what
-/// keeps a second key glued to a token's digest hex from firing) — then
+/// keeps a second key glued to a token's digest hex from firing),
+/// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
+/// `\X`; see `escape_ends_before`), whose tail byte is formatting
+/// material and the head after it a fresh start; then
 /// the table longest-first with fall-through (a too-short tail falls
 /// through to the shorter prefixes), then the JWT marker grammar (its
 /// `B` head shares no prefix with any table family), then the PEM span
@@ -1192,12 +1284,13 @@ pub enum SpanKind {
 /// coordinates: the replaced span, the token emitted, and the token's
 /// verbatim head — the token's `[0..verbatim_len)` maps affinely to
 /// `[verbatim_src..verbatim_src + verbatim_len)` (the bytes the token
-/// kept: a key's family prefix, a phone token's three code points, an
-/// email token's `@domain`), while the `~` + digest half has no
-/// preimage and collapses to the replaced span's end (see `map_back`).
-/// PEM tokens keep nothing (`verbatim_len` 0: `PEM` is a constant, and
-/// no later match can land inside the head anyway — every token's `~`
-/// blocks the email walk-back).
+/// kept: a key's family prefix, a `+`-led phone token's dialling
+/// prefix, an email token's `@domain`), while the `~` + digest half has
+/// no preimage and collapses to the replaced span's end (see
+/// `map_back`). Tokens that keep nothing (PEM, and a domestic phone
+/// token whose head digits are the area code) carry `verbatim_len` 0;
+/// no later match can land inside a head anyway (every token's `~`
+/// blocks the walk-back).
 pub struct PassEdit {
     pub start: usize,
     pub end: usize,
@@ -1214,7 +1307,7 @@ pub struct PassEdit {
 pub struct PassRec {
     pub edits: Vec<PassEdit>,
     pub kinds: Vec<SpanKind>,
-    pub skipped: [usize; 13],
+    pub skipped: [usize; 14],
 }
 
 /// The keys pass core: every leftmost match of a family grammar over
@@ -1245,8 +1338,9 @@ fn keys_pass_impl<'a>(
             pos += 1;
             continue;
         }
-        if pos > 0 && is_key_tail_byte(bytes[pos - 1]) {
-            pos += 1; // a mid-token prefix: the boundary rule
+        if pos > 0 && is_key_tail_byte(bytes[pos - 1]) && !escape_ends_before(bytes, pos) {
+            pos += 1; // a mid-token prefix: the boundary rule (an escape
+            // sequence's tail byte is formatting, not a word)
             continue;
         }
         // (family, verbatim prefix length in the token, match end). The
@@ -1503,8 +1597,8 @@ pub struct ScrubReport {
     pub text: String,
     pub email_count: usize,
     pub phone_count: usize,
-    pub key_counts: [usize; 13],
-    pub skipped_counts: [usize; 13],
+    pub key_counts: [usize; 14],
+    pub skipped_counts: [usize; 14],
     pub spans: Vec<ReportSpan>,
 }
 
@@ -1548,7 +1642,7 @@ pub fn scrub_pii_report(
         contact_salt,
     )
     .into_owned();
-    let mut key_counts = [0usize; 13];
+    let mut key_counts = [0usize; 14];
     for kind in &krec.kinds {
         if let SpanKind::Key(f) = kind {
             key_counts[*f as usize] += 1;
@@ -1873,9 +1967,12 @@ mod tests {
             ("1 415 555 2671", "1 415 555 2671"),
             ("1415 555 2671", "1415 555 2671"),
         ] {
+            // Digest alone: a domestic match has no dialling prefix;
+            // its head digits are the area code, so the token keeps
+            // none of them (the oracle's `+`-only prefix rule).
             assert_eq!(
                 scrub(text, phone_only(), ""),
-                format!("{}~{}", &matched[..3], digest("", matched)),
+                format!("~{}", digest("", matched)),
                 "{text}"
             );
         }
@@ -1883,19 +1980,39 @@ mod tests {
 
     #[test]
     fn domestic_matches_skip_leading_spaces_and_spare_trailing_separators() {
+        // Digest alone in every token: the head digits are the area
+        // code, never echoed.
         assert_eq!(
             scrub("call 415-555-2671 ok", phone_only(), ""),
-            format!("call 415~{} ok", digest("", "415-555-2671"))
+            format!("call ~{} ok", digest("", "415-555-2671"))
         );
         // A leading structural separator is part of the spelling.
         assert_eq!(
             scrub("x -415-555-2671 , ok", phone_only(), ""),
-            format!("x -41~{} , ok", digest("", "-415-555-2671"))
+            format!("x ~{} , ok", digest("", "-415-555-2671"))
         );
         // Extensions survive past the last digit, same as international.
         assert_eq!(
             scrub("415-555-2671 x1234", phone_only(), ""),
-            format!("415~{} x1234", digest("", "415-555-2671"))
+            format!("~{} x1234", digest("", "415-555-2671"))
+        );
+    }
+
+    #[test]
+    fn international_tokens_still_carry_the_dialling_prefix() {
+        // The `+`-led control for the digest-alone domestic rule: a
+        // `+`-led match's first three code points ARE the dialling
+        // prefix (coarse, non-identifying) and stay in the token
+        // byte-exact, compact and spaced spellings alike. The domestic
+        // fix narrowed the prefix rule to the `+`-led branch and must
+        // not touch this.
+        assert_eq!(
+            scrub("+4712345678", phone_only(), ""),
+            format!("+47~{}", digest("", "+4712345678"))
+        );
+        assert_eq!(
+            scrub("call +1 (415) 555-2671 ok", phone_only(), ""),
+            format!("call +1 ~{} ok", digest("", "+1 (415) 555-2671"))
         );
     }
 
@@ -1934,13 +2051,13 @@ mod tests {
     #[test]
     fn unicode_nd_digits_spell_domestic_numbers() {
         // Ten Arabic-Indic digits, space-separated: a domestic match
-        // whose token prefix carries the script's own spelling.
+        // whose token is the digest alone, no Nd digit echoed ahead of
+        // the `~`; the script changes the digest input, not the rule.
         let arabic =
             "\u{0664}\u{0661}\u{0665} \u{0665}\u{0665}\u{0665} \u{0662}\u{0666}\u{0667}\u{0661}";
-        let prefix: String = arabic.chars().take(3).collect();
         assert_eq!(
             scrub(arabic, phone_only(), ""),
-            format!("{prefix}~{}", digest("", arabic))
+            format!("~{}", digest("", arabic))
         );
     }
 
@@ -1981,7 +2098,7 @@ mod tests {
         let (a, b) = ("415-555-2671", "415-555-2672");
         assert_eq!(
             scrub("415-555-2671, 415-555-2672", phone_only(), ""),
-            format!("415~{}, 415~{}", digest("", a), digest("", b))
+            format!("~{}, ~{}", digest("", a), digest("", b))
         );
     }
 
@@ -1996,11 +2113,7 @@ mod tests {
         let once = scrub(matched, PiiRules::BOTH, "");
         assert_eq!(
             once,
-            format!(
-                "@555~{}.co~{}",
-                digest("", "555.1234567"),
-                digest("", matched)
-            )
+            format!("@~{}.co~{}", digest("", "555.1234567"), digest("", matched))
         );
         let twice = scrub(&once, PiiRules::BOTH, "");
         assert!(matches!(
@@ -2028,7 +2141,8 @@ mod tests {
         }
         // A clean boundary is anything else — g/z, uppercase A-F, and
         // every word-separated spelling. Only lowercase a-f and `~` are
-        // dirty by design.
+        // dirty by design. The tokens are the digest alone (domestic:
+        // no prefix, the head digits are the area code).
         for (text, matched, prefix_glue) in [
             ("jobg415-555-2671", "415-555-2671", "jobg"),
             ("jobz415-555-2671", "415-555-2671", "jobz"),
@@ -2038,13 +2152,13 @@ mod tests {
         ] {
             assert_eq!(
                 scrub(text, phone_only(), ""),
-                format!("{prefix_glue}415~{}", digest("", matched)),
+                format!("{prefix_glue}~{}", digest("", matched)),
                 "{text}"
             );
         }
         assert_eq!(
             scrub("item 415-555-2671", phone_only(), ""),
-            format!("item 415~{}", digest("", "415-555-2671"))
+            format!("item ~{}", digest("", "415-555-2671"))
         );
     }
 
@@ -2086,7 +2200,7 @@ fungai.chetima@example.comread 4096 bytes in 1200 ms";
                 "digest tail swallowed the adjacent number in {once:?}"
             );
             assert!(
-                once.contains(&format!("{}~", &matched[..3])),
+                once.contains(&format!("~{}", digest("", matched))),
                 "the number did not scrub exactly in {once:?}"
             );
             let twice = scrub(&once, PiiRules::BOTH, "");
@@ -2298,12 +2412,18 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
     /// lines (contact-inert by construction — no separators, no `@`),
     /// and the END marker with the same words.
     fn pem_block(words: &str) -> String {
+        pem_block_close(words, " PRIVATE KEY")
+    }
+
+    /// The same span with a chosen label close: the PGP family spells
+    /// ` PRIVATE KEY BLOCK` before the closing dashes.
+    fn pem_block_close(words: &str, close: &str) -> String {
         format!(
-            "-----BEGIN {words} PRIVATE KEY-----\n\
+            "-----BEGIN {words}{close}-----\n\
              MIIEpAIBAAKCAQEA7b\n\
              qY4sLk2MnOpQrStUvW\n\
              xYz0123456789ABCD\n\
-             -----END {words} PRIVATE KEY-----"
+             -----END {words}{close}-----"
         )
     }
 
@@ -2320,6 +2440,11 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("ak-{t48}"), "ak-"),
             (format!("wk-{t48}"), "wk-"),
             (format!("ghp_{}", key_tail(36)), "ghp_"),
+            (format!("gho_{}", key_tail(36)), "gho_"),
+            (format!("ghu_{}", key_tail(36)), "ghu_"),
+            (format!("ghs_{}", key_tail(36)), "ghs_"),
+            (format!("ghr_{}", key_tail(36)), "ghr_"),
+            (format!("glpat-{}", key_tail(20)), "glpat-"),
             (format!("github_pat_{}", key_tail(22)), "github_pat_"),
             (format!("azxdev_{}", key_tail(20)), "azxdev_"),
             (format!("wd-{}", key_tail(43)), "wd-"),
@@ -2331,6 +2456,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("xai-{}", key_tail(20)), "xai-"),
             (format!("ya29.{}", key_tail(20)), "ya29."),
             (pem_block("RSA"), "PEM"),
+            (pem_block_close("PGP", " PRIVATE KEY BLOCK"), "PEM"),
             (format!("AccountKey={}", azure_tail(44)), "AccountKey="),
         ]
     }
@@ -2361,6 +2487,11 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("SKI-{t48}"),            // uppercase
             format!("AIza{}", key_tail(34)), // one under
             format!("ghp_{}", key_tail(35)), // one under
+            format!("gho_{}", key_tail(35)),
+            format!("ghu_{}", key_tail(35)),
+            format!("ghs_{}", key_tail(35)),
+            format!("ghr_{}", key_tail(35)),
+            format!("glpat-{}", key_tail(19)),
             format!("github_pat_{}", key_tail(21)),
             format!("azxdev_{}", key_tail(19)),
             format!("wd-{}", key_tail(42)),
@@ -2378,7 +2509,9 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             "YA29.".to_string() + &key_tail(20),
             format!("AccountKey={}", azure_tail(39)),
             "Accountkey=".to_string() + &azure_tail(44),
-            format!("xAKIA{}", aws_tail(16)), // mid-token prefix
+            format!("xAKIA{}", aws_tail(16)),   // mid-token prefix
+            format!("xgho_{}", key_tail(36)),   // mid-token prefix
+            format!("xglpat-{}", key_tail(20)), // mid-token prefix
             format!("xxai-{}", key_tail(20)),
             format!("xya29.{}", key_tail(20)),
             format!("xAccountKey={}", azure_tail(40)),
@@ -2472,6 +2605,107 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
     }
 
     #[test]
+    fn an_escape_sequence_tail_is_a_clean_boundary() {
+        // Logs carry keys inside JSON strings (`\n`), .NET spellings
+        // (`\u0027`), and URL encodings (`%3D`): the escape's tail
+        // letter/digit is key-charset material, but it is formatting,
+        // not the word a key head would be glued to; the head after it
+        // starts fresh and the family fires (the boundary rule's escape
+        // exception). A real newline fired before; the escaped spelling
+        // tokens identically.
+        let tail = key_tail(24);
+        let key = format!("sk-proj-{tail}");
+        let token = format!("sk-proj-~{}", digest("", &key));
+        for pre in ["\\n", "\\u0027", "%3D"] {
+            assert_eq!(
+                scrub(&format!("err:{pre}{key}"), keys_only(), ""),
+                format!("err:{pre}{token}"),
+                "{pre}"
+            );
+        }
+        // Every head class the boundary rule gates: another table
+        // prefix (glpat-), the JWT marker grammar, and the PEM span.
+        let gho = format!("gho_{}", key_tail(36));
+        assert_eq!(
+            scrub(&format!("auth:\\n{gho}"), keys_only(), ""),
+            format!("auth:\\ngho_~{}", digest("", &gho))
+        );
+        let pem = pem_block_close("PGP", " PRIVATE KEY BLOCK");
+        assert_eq!(
+            scrub(&format!("x\\n{pem}"), keys_only(), ""),
+            format!("x\\nPEM~{}", digest("", &pem))
+        );
+        assert_eq!(
+            scrub(&format!("x\\u0027{JWT}"), keys_only(), ""),
+            format!("x\\u0027Bearer~{}", digest("", JWT))
+        );
+    }
+
+    #[test]
+    fn an_escape_exception_needs_the_complete_sequence() {
+        // The exception opens only on a COMPLETE escape: a doubled
+        // backslash escapes itself (the neighbor stays a literal letter
+        // and the head mid-token), a percent sign without two hex
+        // digits is prose, and the escape tail must sit directly before
+        // the head.
+        let tail = key_tail(48);
+        assert!(matches!(
+            scrub_pii(&format!("err:\\\\nsk-{tail}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            scrub_pii(&format!("x%3sk-{tail}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+        // A complete escape NOT directly before the head leaves the
+        // intervening word letters between it and the head: the head is
+        // still that word's fragment.
+        assert!(matches!(
+            scrub_pii(&format!("x%41abcsk-{tail}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+        // ...while the complete spelling right before the head fires.
+        assert_eq!(
+            scrub(&format!("x%3Dsk-{tail}"), keys_only(), ""),
+            format!("x%3Dsk-~{}", digest("", &format!("sk-{tail}")))
+        );
+    }
+
+    #[test]
+    fn benign_escapes_without_keys_stay_identity() {
+        // The escape exception is not a grammar widening past keys:
+        // escaped or percent-encoded prose with no family head is the
+        // identity, exactly as before.
+        for text in [
+            "err: 100%3D and \\u0027 and \\n and %2F",
+            "C:\\Users\\n%41profiles",
+        ] {
+            assert!(
+                matches!(scrub_pii(text, PiiRules::BOTH, "", ""), Cow::Borrowed(_)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn pem_pgp_block_matches_whole() {
+        // The PGP label's ` BLOCK` close: the same span grammar, both
+        // markers required, the same constant PEM token.
+        let block = pem_block_close("PGP", " PRIVATE KEY BLOCK");
+        assert_eq!(
+            scrub(&block, keys_only(), ""),
+            format!("PEM~{}", digest("", &block))
+        );
+        // A PUBLIC KEY block is not the family: public keys are not
+        // secrets, and the label grammar names PRIVATE KEY.
+        let public = pem_block_close("PGP", " PUBLIC KEY BLOCK");
+        assert!(matches!(
+            scrub_pii(&public, keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
     fn the_tail_run_is_maximal() {
         // A second key glued to the first is charset material for its
         // tail: ONE long match, over-redaction in the safe direction.
@@ -2524,7 +2758,9 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("leaked sk-proj-~{} in an error", digest("", &phonekey))
         );
         // The contrast: without the keys rule the same text loses its
-        // digit run to the domestic matcher — the order is load-bearing.
+        // digit run to the domestic matcher (the leading `-` absorbed
+        // into the match); the order matters, and the token
+        // keeps no digits either way.
         let phone_only_out = scrub(
             &format!("leaked {phonekey} in an error"),
             PiiRules {
@@ -2535,7 +2771,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             },
             "",
         );
-        assert!(phone_only_out.contains("-41~"));
+        assert!(phone_only_out.contains(&format!("~{}", digest("", "-415-555-2671"))));
     }
 
     #[test]
@@ -2547,11 +2783,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
         let text = format!("{key} 415-555-2671");
         assert_eq!(
             scrub(&text, PiiRules::BOTH, ""),
-            format!(
-                "fw-~{} 415~{}",
-                digest("", &key),
-                digest("", "415-555-2671")
-            )
+            format!("fw-~{} ~{}", digest("", &key), digest("", "415-555-2671"))
         );
     }
 
@@ -2636,7 +2868,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             assert_eq!(f.bit(), 1u16 << i);
             assert_eq!(*f as usize, i);
         }
-        assert_eq!(KEY_FAMILY_MASK_ALL, (1u16 << 13) - 1);
+        assert_eq!(KEY_FAMILY_MASK_ALL, (1u16 << 14) - 1);
     }
 
     #[test]
@@ -2928,7 +3160,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
         assert_eq!(rep.phone_count, 1);
         assert_eq!(rep.key_counts[KeyFamily::OpenAi as usize], 1);
         assert_eq!(rep.key_counts.iter().sum::<usize>(), 1);
-        assert_eq!(rep.skipped_counts, [0; 13]);
+        assert_eq!(rep.skipped_counts, [0; 14]);
         // Sorted by start: the email span [0,6) first, then the key
         // span, then the phone span (mapped through the keys edit's
         // delta back to its input position).

@@ -620,7 +620,11 @@ class TestDomesticExtension:
         ("text", "matched"), _DOMESTIC_CASES, ids=[c[1] for c in _DOMESTIC_CASES]
     )
     def test_tors_scrubs_exactly_the_span(self, text: str, matched: str) -> None:
-        token = f"{matched[:3]}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+        # The token is the digest alone: a domestic match's head digits
+        # are the area code, so the token keeps no prefix (the oracle's
+        # `_scrub_phone_token` rule: the prefix only on a `+`-led
+        # match).
+        token = f"~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
         assert text.count(matched) == 1
         assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
 
@@ -676,7 +680,9 @@ class TestDomesticExtension:
         # H3: clean means exactly `~` + lowercase a-f are dirty. g/z and
         # uppercase A-F are clean, so the domestic shape still fires.
         assert has_domestic_shape(text)
-        token = f"{matched[:3]}~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
+        # Digest alone: a domestic token keeps no prefix (the head
+        # digits are the area code).
+        token = f"~{hashlib.sha256(matched.encode('utf-8')).hexdigest()[:12]}"
         assert tors.scrub_pii(text, salt="") == text.replace(matched, token, 1)
 
 
@@ -722,7 +728,7 @@ class TestEmailTokenAdjacentNumbers:
     def test_tors_scrubs_the_number_exactly(self, text: str, email: str, matched: str) -> None:
         domain = email.split("@")[1]
         email_token = _unsalted_token(f"@{domain}", email)
-        phone_token = _unsalted_token(matched[:3], matched)
+        phone_token = _unsalted_token("", matched)
         assert tors.scrub_pii(text, salt="") == text.replace(email, email_token).replace(
             matched, phone_token
         )
@@ -740,7 +746,7 @@ class TestEmailTokenAdjacentNumbers:
         assert "a@b.co" not in out
         assert matched in out
         email_token = _unsalted_token("@b.co", "a@b.co")
-        phone_token = _unsalted_token(matched[:3], matched)
+        phone_token = _unsalted_token("", matched)
         assert tors.scrub_pii(text, salt="") == email_token + phone_token
 
 
@@ -774,7 +780,7 @@ class TestZeroLedShapes:
     def test_ten_digit_zero_led_scrubs(self) -> None:
         matched = "020-794-6095"
         assert reference_scrub_pii(matched, None, salt="") == matched
-        assert tors.scrub_pii(matched, salt="") == _unsalted_token(matched[:3], matched)
+        assert tors.scrub_pii(matched, salt="") == _unsalted_token("", matched)
 
     def test_eleven_digit_zero_led_is_a_shared_non_match(self) -> None:
         text = "0-415-555-2671"
@@ -1334,7 +1340,7 @@ class TestApiKeyExtension:
 # bearing only other families are parity-assertable directly — tors and
 # the oracle both leave them whole — and the selected family's own shapes
 # pin in the extension lane. The routing tables below derive from the one
-# case table above, so the 14th family joins them by joining it.
+# case table above, so the 15th family joins them by joining it.
 _ALL_KEY_FAMILIES: tuple[str, ...] = (
     "openai",
     "anthropic",
@@ -1349,6 +1355,7 @@ _ALL_KEY_FAMILIES: tuple[str, ...] = (
     "gcp_oauth",
     "pem",
     "azure",
+    "gitlab",
 )
 
 # Token prefix -> recipe family: the new families' markers are
@@ -1369,6 +1376,11 @@ _KEY_TOKEN_FAMILY: dict[str, str] = {
     "ak-": "modal",
     "wk-": "modal",
     "ghp_": "github",
+    "gho_": "github",
+    "ghu_": "github",
+    "ghs_": "github",
+    "ghr_": "github",
+    "glpat-": "gitlab",
     "github_pat_": "github",
     "azxdev_": "minted",
     "wd-": "minted",

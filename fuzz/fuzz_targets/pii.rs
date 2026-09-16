@@ -242,12 +242,42 @@ fn is_key_tail_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
 }
 
+/// Whether the key-charset char at `i - 1` ends a complete escape
+/// sequence (`%XX`, `\uXXXX`, or `\X`; odd-backslash counted, so an
+/// escaped backslash stays a literal), the char-space twin of the
+/// scanner's `escape_ends_before`: escaped text is a CLEAN boundary,
+/// the escape's tail byte being formatting material, not a word.
+fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
+    if i >= 3
+        && chars[i - 3] == '%'
+        && chars[i - 2].is_ascii_hexdigit()
+        && chars[i - 1].is_ascii_hexdigit()
+    {
+        return true;
+    }
+    if i >= 6
+        && chars[i - 6] == '\\'
+        && chars[i - 5] == 'u'
+        && chars[i - 4].is_ascii_hexdigit()
+        && chars[i - 3].is_ascii_hexdigit()
+        && chars[i - 2].is_ascii_hexdigit()
+        && chars[i - 1].is_ascii_hexdigit()
+    {
+        return true;
+    }
+    let mut slashes = 0usize;
+    while slashes + 2 <= i && chars[i - 2 - slashes] == '\\' {
+        slashes += 1;
+    }
+    slashes % 2 == 1
+}
+
 /// The family indices into `KeyFamily::ALL` — the spec's name order
 /// (`openai`, `anthropic`, `google`, `fireworks`, `modal`, `github`,
-/// `minted`, `jwt`, `aws`, `xai`, `gcp_oauth`, `pem`, `azure`), the
-/// same hand-synced pin discipline as the Nd table above; bit `i` of
-/// the selection mask is family `ALL[i]` (`KEY_FAMILY_MASK_ALL` is all
-/// thirteen).
+/// `minted`, `jwt`, `aws`, `xai`, `gcp_oauth`, `pem`, `azure`,
+/// `gitlab`), the same hand-synced pin discipline as the Nd table
+/// above; bit `i` of the selection mask is family `ALL[i]`
+/// (`KEY_FAMILY_MASK_ALL` is all fourteen).
 const FAM_OPENAI: usize = 0;
 const FAM_ANTHROPIC: usize = 1;
 const FAM_GOOGLE: usize = 2;
@@ -261,6 +291,7 @@ const FAM_XAI: usize = 9;
 const FAM_GCP_OAUTH: usize = 10;
 const FAM_PEM: usize = 11;
 const FAM_AZURE: usize = 12;
+const FAM_GITLAB: usize = 13;
 
 /// The per-family tail alphabet: most families share the key charset,
 /// AWS access-key IDs are uppercase-plus-digits only, Azure storage
@@ -319,8 +350,13 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("sk-proj-", 20, FAM_OPENAI, TailClass::Key),
     ("sk-ant-", 20, FAM_ANTHROPIC, TailClass::Key),
     ("azxdev_", 20, FAM_MINTED, TailClass::Key),
+    ("glpat-", 20, FAM_GITLAB, TailClass::Key),
     ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
     ("ghp_", 36, FAM_GITHUB, TailClass::Key),
+    ("gho_", 36, FAM_GITHUB, TailClass::Key),
+    ("ghu_", 36, FAM_GITHUB, TailClass::Key),
+    ("ghs_", 36, FAM_GITHUB, TailClass::Key),
+    ("ghr_", 36, FAM_GITHUB, TailClass::Key),
     ("AIza", 35, FAM_GOOGLE, TailClass::Key),
     ("AKIA", 16, FAM_AWS, TailClass::Aws),
     ("ASIA", 16, FAM_AWS, TailClass::Aws),
@@ -365,14 +401,16 @@ fn jwt_match_at_chars(chars: &[char], start: usize) -> Option<usize> {
 }
 
 /// Parse a PEM label's words at `i`: `word( SP word)*` closed by
+/// ` PRIVATE KEY BLOCK-----` (the PGP label's own) or
 /// ` PRIVATE KEY-----`, the greedy terminator-first transcription — at
-/// each word end the close is tried before the single space into the
-/// next word, so `RSA PRIVATE KEY-----` closes with words `RSA` while
-/// bare `PRIVATE KEY-----` (words would have to be empty) and
-/// double-spaced labels fail. Returns the words' span (for the
-/// BEGIN/END equality check) and the index past the closing dashes.
+/// each word end the closes are tried (BLOCK first) before the single
+/// space into the next word, so `RSA PRIVATE KEY-----` closes with
+/// words `RSA` while bare `PRIVATE KEY-----` (words would have to be
+/// empty) and double-spaced labels fail. Returns the words' span (for
+/// the BEGIN/END equality check) and the index past the closing dashes.
 fn pem_label_at(chars: &[char], mut i: usize) -> Option<((usize, usize), usize)> {
     const CLOSE: &str = " PRIVATE KEY-----";
+    const BLOCK_CLOSE: &str = " PRIVATE KEY BLOCK-----";
     let wstart = i;
     loop {
         let mut j = i;
@@ -381,6 +419,9 @@ fn pem_label_at(chars: &[char], mut i: usize) -> Option<((usize, usize), usize)>
         }
         if j == i {
             return None; // an empty word: a leading or double space
+        }
+        if starts_with_at(chars, j, BLOCK_CLOSE) {
+            return Some(((wstart, j), j + BLOCK_CLOSE.chars().count()));
         }
         if starts_with_at(chars, j, CLOSE) {
             return Some(((wstart, j), j + CLOSE.chars().count()));
@@ -457,8 +498,9 @@ fn key_matches_of(s: &str, mask: u16) -> Vec<KeyHit> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if i > 0 && is_key_tail_char(chars[i - 1]) {
-            i += 1; // a mid-token prefix: the boundary rule
+        if i > 0 && is_key_tail_char(chars[i - 1]) && !escape_ends_before_at(&chars, i) {
+            i += 1; // a mid-token prefix: the boundary rule (an escape
+            // sequence's tail char is formatting, not a word)
             continue;
         }
         let mut hit = None;
@@ -711,11 +753,18 @@ fn email_token(salt: &str, matched: &str) -> String {
     format!("@{domain}~{}", token_digest(salt, matched))
 }
 
-/// The phone token for a matched number: the match's first three code
-/// points, `~`, the digest.
+/// The phone token for a matched number: a `+`-led match keeps its
+/// first three code points (the dialling prefix), `~`, the digest; any
+/// other spelling gets the digest alone: its head digits are the area
+/// code, the identifying half a visible prefix would surface (the
+/// oracle's `_scrub_phone_token` rule).
 fn phone_token(salt: &str, matched: &str) -> String {
-    let prefix: String = matched.chars().take(3).collect();
-    format!("{prefix}~{}", token_digest(salt, matched))
+    if matched.starts_with('+') {
+        let prefix: String = matched.chars().take(3).collect();
+        format!("{prefix}~{}", token_digest(salt, matched))
+    } else {
+        format!("~{}", token_digest(salt, matched))
+    }
 }
 
 /// The key token for a matched credential: the family prefix verbatim
