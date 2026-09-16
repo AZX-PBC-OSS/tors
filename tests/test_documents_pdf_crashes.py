@@ -318,7 +318,7 @@ if kind == "objstm":
 else:
     # A valid compressed xref stream: real entries for a valid document,
     # then the bomb as trailing bytes in the INFLATED data (binary data,
-    # never object syntax; pdf_oxide converted this pre-scan at every N).
+    # never object syntax; pdf_oxide converted this shape pre-fix at every N).
     offsets[1] = len(out)
     out += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
     offsets[2] = len(out)
