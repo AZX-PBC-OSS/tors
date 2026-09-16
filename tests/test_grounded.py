@@ -88,14 +88,14 @@ class TestExactContainment:
         assert is_grounded("exact", "exact") is True
 
     @given(claim=_TEXT, source=_TEXT)
-    @settings(max_examples=300)
+    @settings(max_examples=300, deadline=None)
     def test_exact_containment_agrees_with_python_in_operator(
         self, claim: str, source: str
     ) -> None:
         assert is_grounded(claim, source) == (claim in source)
 
     @given(source=_TEXT, claim=_TEXT)
-    @settings(max_examples=200)
+    @settings(max_examples=200, deadline=None)
     def test_a_claim_actually_taken_from_source_is_always_grounded(
         self, source: str, claim: str
     ) -> None:
@@ -132,7 +132,7 @@ class TestFuzzy:
         assert is_grounded("the cat sat", "a totally different sentence", fuzzy=True) is False
 
     @given(claim=_TEXT, source=_TEXT)
-    @settings(max_examples=300)
+    @settings(max_examples=300, deadline=None)
     def test_unwindowed_case_is_difflib_shaped_where_difflibs_own_alignment_is_forced(
         self, claim: str, source: str
     ) -> None:
@@ -182,7 +182,7 @@ class TestFuzzy:
         assert is_grounded("010", "120", fuzzy=True, threshold=0.7) is False
 
     @given(claim=_TEXT, source=_TEXT)
-    @settings(max_examples=200)
+    @settings(max_examples=200, deadline=None)
     def test_threshold_is_monotonic(self, claim: str, source: str) -> None:
         """If a (claim, source) pair clears a higher threshold, it must
         clear every lower one too; the fuzzy verdict is a single scalar
@@ -214,7 +214,7 @@ class TestFuzzy:
                 assert is_grounded(claim, source, fuzzy=True, threshold=1.0)
 
     @given(claim_source=_spliced())
-    @settings(max_examples=300)
+    @settings(max_examples=300, deadline=None)
     def test_a_spliced_claim_is_fuzzy_grounded_at_every_threshold(self, claim_source) -> None:
         """The superset contract as a property, not just the hand-rolled
         offset sweep above: a claim present verbatim at an arbitrary offset
@@ -231,7 +231,7 @@ class TestFuzzy:
         assert is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
 
     @given(claim=_TEXT, source=_TEXT)
-    @settings(max_examples=300)
+    @settings(max_examples=300, deadline=None)
     def test_threshold_one_fuzzy_is_exactly_exact_containment(
         self, claim: str, source: str
     ) -> None:
@@ -439,7 +439,7 @@ class TestFuzzy:
         assert is_grounded(claim, padded, fuzzy=True, threshold=0.85) is False  # 0.7561
 
     @given(claim=_TEXT, index=st.data())
-    @settings(max_examples=200)
+    @settings(max_examples=200, deadline=None)
     def test_a_one_substitution_near_match_at_any_offset_is_grounded(self, claim, index) -> None:
         """The guarantee as a property: splice a one-substitution near-match
         of the claim into padding at an arbitrary offset; it must clear the
@@ -458,7 +458,19 @@ class TestFuzzy:
         assert is_grounded(claim, source, fuzzy=True, threshold=0.85) is True, (claim, near, lead)
 
     @given(tail_evidence=_tail_evidence())
-    @settings(max_examples=150)
+    # deadline=None: the per-example cost is the pure-Python window-model
+    # oracle run twice (both placements x two thresholds), measured
+    # 6-67 ms on a quiet box, so hypothesis's default 200 ms per-example
+    # deadline turns any background CPU contention (a parallel build
+    # during a full-suite run) into a DeadlineExceeded flake: measured
+    # 305.20 ms against 136.65 ms on the immediate replay under
+    # artificial load, green the moment the box quiets (the full-suite
+    # "order-dependent" failure that passes in isolation). The same
+    # convention every other oracle differential in this suite carries
+    # (tests/test_scrub_pii_parity.py and its siblings put deadline=None
+    # on every differential cell); the wall contracts for this surface
+    # live in tests/test_grounded_performance.py, the timing lane.
+    @settings(max_examples=150, deadline=None)
     def test_partial_tail_evidence_is_position_invariant(self, tail_evidence) -> None:
         """Issue #40's class as a property: evidence shorter than the claim,
         flush with the source's end, must score exactly like the same
@@ -495,7 +507,7 @@ class TestFuzzy:
                 )
 
     @given(pair=_windowed_pair())
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_the_windowed_score_never_exceeds_the_ideal_region_score(self, pair) -> None:
         """Issue #40's class pinned from above, semantics-independently of
         the oracle (which models the scan, not the ideal): in the windowed
@@ -538,7 +550,7 @@ class TestFuzzy:
         assert is_grounded("x", "", fuzzy=True, threshold=0.0) is True
 
     @given(claim=_TEXT, source=_TEXT)
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_fuzzy_verdicts_match_the_lcs_window_model_on_realistic_text(
         self, claim: str, source: str
     ) -> None:
@@ -558,7 +570,7 @@ class TestFuzzy:
         claim=st.text(alphabet="ab", max_size=20),
         source=st.text(alphabet="ab", max_size=80),
     )
-    @settings(max_examples=200)
+    @settings(max_examples=200, deadline=None)
     def test_fuzzy_verdicts_match_the_lcs_window_model_on_repeated_characters(
         self, claim: str, source: str
     ) -> None:
