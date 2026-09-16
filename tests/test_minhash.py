@@ -597,6 +597,96 @@ class TestBoundsContract:
         sig = minhash_signature(_FOX)
         assert all(0 <= v < 2**61 for v in sig)
 
+    @pytest.mark.parametrize(
+        ("tokens", "shingle_size"),
+        [(20_000, 5_000), (40_000, 5_000), (100_000, 50_000)],
+    )
+    def test_fillable_wide_shingle_past_the_sweep_budget_raises_value_error(
+        self, tokens: int, shingle_size: int
+    ) -> None:
+        # The issue-#91 middle range: 1024 < shingle_size <= tokens fills
+        # the window, so the sentinel short-circuit cannot decide and every
+        # step re-hashes the whole live window -- (tokens - shingle_size +
+        # 1) * shingle_size token-hashes, unbounded. The binding counts
+        # retention-free and rejects shapes past the 2^26 token-hash budget
+        # with a ValueError naming the bound, before the detached pass
+        # (these shapes measured 0.6-15s pre-fix).
+        text = " ".join(f"w{i}" for i in range(tokens))
+        with pytest.raises(ValueError, match=r"token-hash budget"):
+            minhash_signature(text, num_perm=8, shingle_size=shingle_size)
+
+    def test_wide_shingle_just_under_the_budget_still_executes(self) -> None:
+        # The gate's allowed boundary: (20000 - 4000 + 1) * 4000 = 6.4e7
+        # token-hashes, just under the 2^26 budget -- the full sweep runs,
+        # and the signature is byte-identical to the pre-fix value (pinned
+        # in full; the oracle differential covers the narrow widths).
+        text = " ".join(f"w{i}" for i in range(20_000))
+        assert minhash_signature(text, num_perm=8, shingle_size=4_000) == [
+            280661199516102,
+            21719150915306,
+            33367424658904,
+            119062457005955,
+            137317581519668,
+            266273482503263,
+            39635225421427,
+            217535390845298,
+        ]
+
+    def test_sweep_budget_boundary_is_exact_on_both_sides(self) -> None:
+        # H1: the budget boundary itself. s = 4096 divides 2^26, so
+        # 20479 tokens give work exactly (20479 - 4096 + 1) * 4096 = 2^26
+        # -- the ceiling is inclusive and the full sweep RUNS, byte-for-
+        # byte the pinned signature (release-side execution: the debug
+        # cargo suite pins this boundary at the gate, where it is
+        # instant). One more token tips (20480 - 4096 + 1) * 4096 =
+        # 67,112,960 > 2^26 into the reject -- reported at the gate's
+        # walk cap, which here IS the stream length, so the message's
+        # "at least 67112960" is also the exact spend.
+        at_budget = " ".join(f"w{i}" for i in range(20_479))
+        started = time.perf_counter()
+        sig = minhash_signature(at_budget, num_perm=8, shingle_size=4_096)
+        elapsed = time.perf_counter() - started
+        assert sig == [
+            19447778664110,
+            340100930561109,
+            60003529736728,
+            44457144746778,
+            225489404642757,
+            21454188447635,
+            95003234104397,
+            18799151482463,
+        ]
+        assert elapsed < 5.0, f"exactly-at-budget sweep took {elapsed:.2f}s"
+        one_past = " ".join(f"w{i}" for i in range(20_480))
+        with pytest.raises(ValueError, match=r"at least 67112960 token-hashes"):
+            minhash_signature(one_past, num_perm=8, shingle_size=4_096)
+
+    def test_huge_width_sentinel_does_not_trip_the_budget_gate(self) -> None:
+        # H5: the sentinel short-circuit runs BEFORE the budget gate -- an
+        # unfillable window (however huge the width) answers the sentinel
+        # and never raises the sweep-budget ValueError. 10**9 is the
+        # pre-existing cell's width; 10**18 is four orders past the budget
+        # itself, where a gate-before-short-circuit ordering would reject
+        # every fillable-stream probe outright.
+        for width in (10**9, 10**18):
+            started = time.perf_counter()
+            sig = minhash_signature(_FOX, shingle_size=width)
+            elapsed = time.perf_counter() - started
+            assert sig == [_MINHASH_EMPTY] * 128
+            assert elapsed < 1.0, f"width {width} took {elapsed:.2f}s"
+        # The 1024/1025 boundary of the count-first path: one token short
+        # of a 1025-wide window is the sentinel (unfillable -- no gate,
+        # no sweep); one token at the width is fillable and executes (the
+        # narrowest shape the budget gate even walks the count for).
+        short = " ".join(f"w{i}" for i in range(1_024))
+        assert minhash_signature(short, num_perm=8, shingle_size=1_025) == [
+            _MINHASH_EMPTY
+        ] * 8
+        full = " ".join(f"w{i}" for i in range(1_025))
+        sig = minhash_signature(full, num_perm=8, shingle_size=1_025)
+        assert len(sig) == 8
+        assert all(v != _MINHASH_EMPTY for v in sig)
+
 
 class TestSeedContract:
     def test_negative_seed_is_twos_complement_mod_2_64(self) -> None:
@@ -908,6 +998,51 @@ class TestPerformanceSanity:
             elapsed = time.perf_counter() - started
             assert len(sig) == 128
             assert elapsed < 30.0, f"shingle {shingle_size} took {elapsed:.2f}s"
+
+    def test_over_budget_wide_shingle_rejects_fast(self) -> None:
+        # The issue-#91 tripwire: pre-fix this shape swept ~2.5e9
+        # token-hashes (~15s, GIL released but uninterruptible until
+        # completion); post-fix the retention-free count walk rejects it in
+        # ~3ms. The ceiling leaves oceans of CI-jitter room yet sits ~7x
+        # under the pre-fix wall, so a regression back to the sweep fails
+        # it.
+        text = " ".join(f"w{i}" for i in range(100_000))
+        started = time.perf_counter()
+        with pytest.raises(ValueError, match=r"token-hash budget"):
+            minhash_signature(text, num_perm=8, shingle_size=50_000)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"budget rejection took {elapsed:.2f}s"
+
+    def test_over_budget_reject_walk_is_capped_not_o_tokens(self) -> None:
+        # H2: the reject path's count walk stops at the gate's cap --
+        # floor(2^26/50000) + 50000 = 51342 tokens -- so the reject does
+        # not scale with the stream. The message is the deterministic
+        # proof: the reported minimum work at the cap is 1343 * 50000 =
+        # 67,150,000 token-hashes, whereas a full-stream walk (pre-fix)
+        # reported the exact 2,500,050,000 -- and held the GIL for the
+        # whole walk (measured 5.9ms per 100k tokens: ~1.5s GIL-held at
+        # 100M tokens, longer than the 0.4s sweep budget the gate exists
+        # to enforce). The 300k-token stream rides the same ~3ms reject;
+        # the ceiling is a tripwire, the message match is the teeth.
+        text = " ".join(f"w{i}" for i in range(300_000))
+        started = time.perf_counter()
+        with pytest.raises(ValueError, match=r"at least 67150000 token-hashes"):
+            minhash_signature(text, num_perm=8, shingle_size=50_000)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2.0, f"capped rejection took {elapsed:.2f}s"
+
+    def test_widest_allowed_shingle_completes_quickly(self) -> None:
+        # The widest shape the budget still allows on this corpus shape
+        # (6.4e7 of the 6.7e7 token-hash budget): the O(tokens x
+        # shingle_size) hashing pass runs in full and stays under a
+        # generous wall ceiling, ~12x the measured ~0.4s (the wide-shingle
+        # row's ceiling style).
+        text = " ".join(f"w{i}" for i in range(20_000))
+        started = time.perf_counter()
+        sig = minhash_signature(text, num_perm=8, shingle_size=4_000)
+        elapsed = time.perf_counter() - started
+        assert len(sig) == 8
+        assert elapsed < 5.0, f"widest allowed shape took {elapsed:.2f}s"
 
     def test_distinct_rich_worst_case_completes_within_budget(self) -> None:
         # HIGH3 worst-case pin: 1 MiB of distinct-rich text at k=1024 is

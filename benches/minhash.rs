@@ -3,8 +3,12 @@
 //! `tests/test_performance.py` measure, so the bench numbers and the cell
 //! numbers cross-reference) crossed with `num_perm` {64, 128, 512} (the
 //! default, half, and 4x: the sweep is O(distinct x num_perm), so the
-//! perm axis is the cost knob the ladder isolates), plus the
-//! distinct-rich worst-case row below.
+//! perm axis is the cost knob the ladder isolates), a shingle-width axis
+//! on the 100 KiB corpus (`s{3, 64, 256, 1024}`: the sweep re-hashes the
+//! whole live window per token, so the hashing pass scales with the width
+//! -- the knob whose fillable middle range was unbounded before the
+//! sweep-budget ceiling, issue #91), plus the distinct-rich worst-case row
+//! below.
 //!
 //! Run locally with `cargo bench --no-default-features --bench minhash`.
 //! CI only compiles it (`cargo bench --no-run`, equally with
@@ -47,6 +51,29 @@ fn bench_minhash_signature(c: &mut Criterion) {
                 },
             );
         }
+    }
+    // The shingle-width axis, the knob issue #91's unbounded middle range
+    // lived on: widths bracket the documented uses (the default 3, the
+    // timing row's 256) out to the count-first bound 1024, on the 100 KiB
+    // corpus at the default num_perm. Each step re-hashes the whole live
+    // window, so the hashing pass scales with the width.
+    let text = prose(100 * 1024);
+    group.throughput(Throughput::Bytes(text.len() as u64));
+    for shingle_size in [3usize, 64, 256, 1024] {
+        group.bench_with_input(
+            BenchmarkId::new(format!("s{shingle_size}"), 100 * 1024),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    minhash_impl::signature(
+                        black_box(text),
+                        black_box(128),
+                        black_box(shingle_size),
+                        0,
+                    )
+                })
+            },
+        );
     }
     group.finish();
 }
