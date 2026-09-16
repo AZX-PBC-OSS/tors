@@ -230,16 +230,17 @@ pub fn scrub_pii_report(
             skipped.set_item(KeyFamily::ALL[i].name(), c)?;
         }
     }
-    let spans = PyList::new(
-        py,
-        char_spans.iter().map(|(kind, start, end)| {
+    let span_dicts: Vec<Bound<'_, PyDict>> = char_spans
+        .iter()
+        .map(|(kind, start, end)| {
             let span = PyDict::new(py);
-            span.set_item("type", kind).expect("span dict");
-            span.set_item("start", start).expect("span dict");
-            span.set_item("end", end).expect("span dict");
-            span
-        }),
-    )?;
+            span.set_item("type", kind)?;
+            span.set_item("start", start)?;
+            span.set_item("end", end)?;
+            Ok(span)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let spans = PyList::new(py, span_dicts)?;
     let report = PyDict::new(py);
     report.set_item("text", out_text)?;
     report.set_item("redacted", redacted)?;

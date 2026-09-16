@@ -267,14 +267,19 @@
 //! `@` and phone-class scans, a first-byte-dispatched table walk for the
 //! key families (one `matches!` per byte on prose, at most twenty
 //! prefix compares on an anchor hit) plus the marker grammars on their
-//! disjoint heads — `Cow::Borrowed`
+//! disjoint heads (PEM hoists one END sweep per pass, bucketed by
+//! parsed words: O(ENDs) to build, O(log ENDs) per BEGIN) —
+//! `Cow::Borrowed`
 //! identity when nothing matches, `py.detach` around the whole scan on
 //! the Python side (the keys pass rides that same single detach; no new
 //! GIL class), and `sha2` digests computed only for spans that
-//! actually matched (never per candidate). The degenerate-domain bench
-//! (`a.` × 50k) pins the linear domain split.
+//! actually matched (never per candidate). The PEM family's END
+//! index is one linear sweep per pass bucketed by parsed words
+//! (O(ENDs) to build, O(log ENDs) per BEGIN). The degenerate-domain
+//! bench (`a.` × 50k) pins the linear domain split.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use memchr::memchr;
 use sha2::{Digest, Sha256};
@@ -1075,79 +1080,62 @@ fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// The PEM family at one position, over a hoisted END-literal index
-/// plus a per-words failure memo: `-----BEGIN ` + algorithm words +
-/// ` PRIVATE KEY-----`, then any bytes including newlines (the key
-/// body), then `-----END ` + the SAME words + ` PRIVATE KEY-----`.
-/// Both markers required — an unterminated BEGIN is a documented
-/// non-match — and the first `-----END ` at or past the body start
-/// whose words parse AND equal the BEGIN's terminates the block (an
-/// unparseable or mismatched END is skipped, a later matching one
-/// still terminates). The whole block is the match; the token prefix
+/// The PEM family at one position, over a hoisted END-literal index:
+/// `-----BEGIN ` + algorithm words + ` PRIVATE KEY-----`, then any bytes
+/// including newlines (the key body), then `-----END ` with the SAME
+/// words and ` PRIVATE KEY-----`. Both markers required — an unterminated
+/// BEGIN
+/// is a documented non-match — and the first `-----END ` at or past the
+/// body start whose words parse AND equal the BEGIN's terminates the
+/// block (an unparseable or mismatched END is skipped, a later matching
+/// one still terminates). The whole block is the match; the token prefix
 /// is the constant `PEM` (never input material, so the report's offset
 /// map collapses the whole token to the replaced span's end). Returns
 /// the match END on success.
 /// `index` is the pass's one `-----END ` sweep (see `pem_end_index`),
 /// built lazily here on the first VALID header (headers are rare;
 /// dashes are not — an eager sweep would tax every dash-bearing
-/// input). Each BEGIN then binary-searches its body start and verifies
-/// only true literals in increasing position order — the same candidate
-/// order as a forward scan, without the per-anchor re-scan. `failed`
-/// maps each seen words value to the furthest END index already
-/// verified-and-failed for it: verification is deterministic (same
-/// bytes, same words, same verdict), and BEGINs arrive in increasing
-/// position order, so a later BEGIN resumes past its words' failures
-/// instead of re-verifying them — each (words, candidate) pair is
-/// verified at most once, and a mismatched-END flood costs O(ENDs),
-/// not O(BEGINs × ENDs). A verifying END returns immediately without
-/// touching the memo (a later BEGIN may legitimately re-verify it).
-fn pem_match_at(
-    bytes: &[u8],
-    start: usize,
-    index: &mut Option<Vec<usize>>,
-    failed: &mut Vec<(Vec<u8>, usize)>,
-) -> Option<usize> {
+/// input). Each BEGIN then pays one hash probe on its words and one
+/// binary search inside that words' bucket — bucket membership IS
+/// words equality, so the first entry at or past the body start is the
+/// match by construction, and ENDs belonging to earlier blocks (before
+/// the body start) or to other words are never touched. A pass costs
+/// O(ENDs) to build plus O(log ENDs) per BEGIN: a flood of distinct
+/// BEGIN words against mismatched ENDs — the shape the old per-words
+/// failure memo degraded super-linearly on (~2.87 exponent measured) —
+/// is now a lookup that misses.
+fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<PemEndIndex>) -> Option<usize> {
     const BEGIN: &[u8] = b"-----BEGIN ";
-    const END_HEAD: &[u8] = b"-----END ";
     if !bytes[start..].starts_with(BEGIN) {
         return None;
     }
     let (words_end, body_start) = pem_marker_end(bytes, start + BEGIN.len())?;
     let words = &bytes[start + BEGIN.len()..words_end];
     let ends = index.get_or_insert_with(|| pem_end_index(bytes));
-    let resume = failed
-        .iter()
-        .find(|(w, _)| w.as_slice() == words)
-        .map(|(_, i)| i + 1)
-        .unwrap_or(0);
-    let mut idx = ends.partition_point(|&e| e < body_start).max(resume);
-    while idx < ends.len() {
-        let cand = ends[idx];
-        if let Some((end_words_end, end)) = pem_marker_end(bytes, cand + END_HEAD.len())
-            && &bytes[cand + END_HEAD.len()..end_words_end] == words
-        {
-            return Some(end);
-        }
-        // Unparseable or mismatched END: record the failure for these
-        // words and keep searching.
-        match failed.iter_mut().find(|(w, _)| w.as_slice() == words) {
-            Some(slot) => slot.1 = idx,
-            None => failed.push((words.to_vec(), idx)),
-        }
-        idx += 1;
-    }
-    None
+    let bucket = ends.get(words)?;
+    let first = bucket.partition_point(|&(cand, _)| cand < body_start);
+    bucket.get(first).map(|&(_, end)| end)
 }
 
-/// The pass's one `-----END ` sweep: every position where the END
-/// literal opens, in increasing order. Built lazily on the first valid
-/// PEM header (headers are rare; dashes are not — an eager sweep would
-/// tax every dash-bearing input), then shared by every BEGIN in the
-/// pass: the per-anchor cost drops from a full-suffix re-scan to a
-/// binary search plus one verification per true literal.
-fn pem_end_index(bytes: &[u8]) -> Vec<usize> {
+/// The END-literal index's shape: parsed END words → that words'
+/// `(candidate, marker_end)` pairs in increasing candidate order.
+/// Byte-vec keys are sound — the word class is ASCII-only
+/// (`is_pem_word_byte`), so the raw marker bytes hash as themselves.
+type PemEndIndex = HashMap<Vec<u8>, Vec<(usize, usize)>>;
+
+/// The pass's one `-----END ` sweep, bucketed by parsed words: every
+/// position where the END literal opens AND the marker after it parses,
+/// as `(candidate, marker_end)` pairs keyed by the END's own words,
+/// each bucket in increasing candidate order (one left-to-right sweep
+/// fills them). Built lazily on the first valid PEM header (headers are
+/// rare; dashes are not — an eager sweep would tax every dash-bearing
+/// input), then shared by every BEGIN in the pass: a BEGIN pays one
+/// hash probe plus a binary search inside its bucket, never a re-scan
+/// of the suffix. A candidate whose words do not parse is dropped at
+/// build time — BEGIN-independently, it can never match any BEGIN.
+fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
     const END_HEAD: &[u8] = b"-----END ";
-    let mut ends = Vec::new();
+    let mut ends: PemEndIndex = HashMap::new();
     let mut q = 0;
     while q < bytes.len() {
         let Some(rel) = memchr(b'-', &bytes[q..]) else {
@@ -1155,8 +1143,20 @@ fn pem_end_index(bytes: &[u8]) -> Vec<usize> {
         };
         let cand = q + rel;
         q = cand + 1; // one-char steps: overlapping markers stay exact
-        if bytes[cand..].starts_with(END_HEAD) {
-            ends.push(cand);
+        if bytes[cand..].starts_with(END_HEAD)
+            && let Some((words_end, end)) = pem_marker_end(bytes, cand + END_HEAD.len())
+        {
+            let bucket = ends
+                .entry(bytes[cand + END_HEAD.len()..words_end].to_vec())
+                .or_default();
+            // The invariant the lookup's partition_point leans on: one
+            // left-to-right sweep fills every bucket in increasing
+            // candidate order (debug-only: free in release).
+            debug_assert!(
+                bucket.last().is_none_or(|&(last_cand, _)| last_cand < cand),
+                "END bucket out of candidate order"
+            );
+            bucket.push((cand, end));
         }
     }
     ends
@@ -1238,8 +1238,7 @@ fn keys_pass_impl<'a>(
     let mut emitted = 0;
     let mut out: Option<String> = None;
     let mut rec = rec;
-    let mut pem_ends: Option<Vec<usize>> = None;
-    let mut pem_failed: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut pem_ends: Option<PemEndIndex> = None;
     while pos < bytes.len() {
         let b = bytes[pos];
         if !is_key_anchor(b) {
@@ -1275,8 +1274,7 @@ fn keys_pass_impl<'a>(
             hit = jwt_match_at(bytes, pos).map(|end| (KeyFamily::Jwt, b"Bearer".len(), end));
         }
         if hit.is_none() && b == b'-' {
-            hit = pem_match_at(bytes, pos, &mut pem_ends, &mut pem_failed)
-                .map(|end| (KeyFamily::Pem, 0, end));
+            hit = pem_match_at(bytes, pos, &mut pem_ends).map(|end| (KeyFamily::Pem, 0, end));
         }
         let Some((family, verbatim_len, end)) = hit else {
             pos += 1;
@@ -2700,6 +2698,171 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             scrub(nested, keys_only(), ""),
             format!("PEM~{}", digest("", nested))
         );
+    }
+
+    #[test]
+    fn pem_pairs_distinct_words_blocks_with_their_own_ends() {
+        // The adversarial distinct-words shape at small scale, semantics
+        // pinned: every BEGIN and every END carries its own words (the
+        // flood where per-words memoization degraded super-linearly).
+        // Each BEGIN skips the stranger's END and terminates at its own.
+        let mut text = String::new();
+        let mut expected = String::new();
+        for i in 0..8 {
+            let block = format!(
+                "-----BEGIN K{i} PRIVATE KEY-----\nbody{i}\n-----END L{i} PRIVATE KEY-----\n-----END K{i} PRIVATE KEY-----"
+            );
+            text.push_str(&block);
+            text.push('\n');
+            expected.push_str(&format!("PEM~{}\n", digest("", &block)));
+        }
+        assert_eq!(scrub(&text, keys_only(), ""), expected);
+        // The pure-miss flood: every BEGIN unterminated, every END a
+        // stranger's — nothing matches, the text survives whole.
+        let mut flood = String::new();
+        for i in 0..8 {
+            flood.push_str(&format!("-----BEGIN K{i} PRIVATE KEY-----\nbody{i}\n"));
+        }
+        for i in 0..8 {
+            flood.push_str(&format!("-----END L{i} PRIVATE KEY-----\n"));
+        }
+        assert_eq!(scrub(&flood, keys_only(), ""), flood);
+        // Position-awareness: an END ahead of any BEGIN belongs to no
+        // block — the BEGIN stays unterminated, a documented non-match.
+        let early_end = "-----END RSA PRIVATE KEY-----\n-----BEGIN RSA PRIVATE KEY-----";
+        assert_eq!(scrub(early_end, keys_only(), ""), early_end);
+    }
+
+    #[test]
+    fn pem_nested_same_words_ends_at_the_first_words_equal_end() {
+        // Nested interleaving with EQUAL words: the outer BEGIN's first
+        // at-or-past-body_start END with ITS words is the INNER one —
+        // the outer block ends there (the grammar has no nesting; the
+        // first words-equal END terminates, the same candidate the old
+        // linear walk verified first) and the trailing END survives
+        // verbatim.
+        let head = "-----BEGIN RSA PRIVATE KEY-----\n-----BEGIN RSA PRIVATE KEY-----\nbody\n";
+        let text = format!("{head}-----END RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----");
+        let matched_len = text.len() - "\n-----END RSA PRIVATE KEY-----".len();
+        assert_eq!(
+            scrub(&text, keys_only(), ""),
+            format!(
+                "PEM~{}\n-----END RSA PRIVATE KEY-----",
+                digest("", &text[..matched_len])
+            )
+        );
+        // The same nesting with MISMATCHED inner words: the inner END is
+        // a stranger's, the outer block runs whole to the last END.
+        let text = "-----BEGIN RSA PRIVATE KEY-----\n\
+                    -----BEGIN EC PRIVATE KEY-----\nbody\n\
+                    -----END EC PRIVATE KEY-----\n\
+                    -----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(text, keys_only(), ""),
+            format!("PEM~{}", digest("", text))
+        );
+    }
+
+    #[test]
+    fn pem_two_begins_sharing_words_share_one_end() {
+        // Two identical BEGINs, one END: the FIRST BEGIN's body runs to
+        // the END (swallowing the second BEGIN whole), the match
+        // consumes both — one token, and the second BEGIN is never
+        // rescanned.
+        let text = "-----BEGIN RSA PRIVATE KEY-----\n\
+                    -----BEGIN RSA PRIVATE KEY-----\nbody\n\
+                    -----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(text, keys_only(), ""),
+            format!("PEM~{}", digest("", text))
+        );
+        // An END BEFORE the BEGIN sits out of every bucket window: the
+        // partition_point skips it by position, and the first BEGIN
+        // matches from its own marker to the later END.
+        let lead = "-----END RSA PRIVATE KEY-----\n";
+        let text =
+            format!("{lead}-----BEGIN RSA PRIVATE KEY-----\nbody\n-----END RSA PRIVATE KEY-----");
+        assert_eq!(
+            scrub(&text, keys_only(), ""),
+            format!("{lead}PEM~{}", digest("", &text[lead.len()..]))
+        );
+    }
+
+    #[test]
+    fn pem_crlf_and_glued_mismatched_ends_match_whole() {
+        // CRLF endings: \r is body material on both sides of the block.
+        let block =
+            "-----BEGIN EC PRIVATE KEY-----\r\nMIIEpAIBAAKCAQEA7b\r\n-----END EC PRIVATE KEY-----";
+        assert_eq!(
+            scrub(block, keys_only(), ""),
+            format!("PEM~{}", digest("", block))
+        );
+        let tail = format!("{block}\r\nok");
+        assert_eq!(
+            scrub(&tail, keys_only(), ""),
+            format!("PEM~{}\r\nok", digest("", block))
+        );
+        // Glued headers (no newline at all) with a mismatched END
+        // between: the skip-then-match walk runs glued the same as
+        // newline-separated.
+        let text = "-----BEGIN RSA PRIVATE KEY----------END EC PRIVATE KEY----------END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(text, keys_only(), ""),
+            format!("PEM~{}", digest("", text))
+        );
+    }
+
+    #[test]
+    fn pem_detection_runs_before_selection_through_the_index() {
+        // PEM unselected: the grammar still runs (the bucket index is
+        // grammar, consulted before the mask), the span is spent whole
+        // and preserved, and the nested skip-mismatched-then-match shape
+        // counts ONE skip — one grammar match, not one per END.
+        let nested = "-----BEGIN RSA PRIVATE KEY-----\n\
+                      -----END EC PRIVATE KEY-----\n\
+                      -----END RSA PRIVATE KEY-----";
+        let no_pem = KEY_FAMILY_MASK_ALL & !KeyFamily::Pem.bit();
+        let rep = scrub_pii_report(nested, keys_with_mask(no_pem), "", "");
+        assert_eq!(rep.skipped_counts[KeyFamily::Pem as usize], 1);
+        assert_eq!(rep.skipped_counts.iter().sum::<usize>(), 1);
+        assert_eq!(rep.spans.len(), 0);
+        // Selected again: one redaction, one span.
+        let rep = scrub_pii_report(nested, keys_only(), "", "");
+        assert_eq!(rep.key_counts[KeyFamily::Pem as usize], 1);
+        assert_eq!(rep.spans.len(), 1);
+    }
+
+    #[test]
+    fn pem_words_stay_ascii_and_non_ascii_word_bytes_fail_the_marker() {
+        // A multibyte BODY is body material. A multibyte byte inside the
+        // END's words is a non-word byte: the marker parse fails there,
+        // the END is skipped, a later well-formed END still terminates —
+        // and the words key can never carry a non-ASCII byte through
+        // is_pem_word_byte.
+        let body = "\u{00e9}\u{4e16}\u{1f600}";
+        let text = format!("-----BEGIN RSA PRIVATE KEY-----{body}-----END RSA PRIVATE KEY-----");
+        assert_eq!(
+            scrub(&text, keys_only(), ""),
+            format!("PEM~{}", digest("", &text))
+        );
+        // The broken-words END (`R\u{00e9}S`: the parse dies on É) is
+        // skipped for the well-formed one — a candidate dropped at BUILD
+        // time in the index, the same skip the old walk made per lookup.
+        let text = "-----BEGIN RSA PRIVATE KEY-----\n\
+                    -----END R\u{00e9}S PRIVATE KEY-----\n\
+                    -----END RSA PRIVATE KEY-----";
+        assert_eq!(
+            scrub(text, keys_only(), ""),
+            format!("PEM~{}", digest("", text))
+        );
+        // A BEGIN whose words break on a non-ASCII byte fails its own
+        // marker parse: no match, the text survives whole.
+        let text =
+            "-----BEGIN R\u{00e9}S PRIVATE KEY-----\nbody\n-----END R\u{00e9}S PRIVATE KEY-----";
+        assert!(matches!(
+            scrub_pii(text, keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

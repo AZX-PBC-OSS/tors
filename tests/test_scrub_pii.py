@@ -1986,6 +1986,36 @@ class TestScrubPiiReport:
         assert rep["text"] == scrub_pii(text, salt="")
         assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
 
+    def test_report_spans_over_adversarial_pem_shapes(self) -> None:
+        # The #92/#93 corner: multibyte body bytes, a skipped
+        # non-ASCII-word END, nested markers — the PEM matcher's
+        # adversarial orderings — flowing through the report's span-dict
+        # closure. Spans are codepoint indices into the INPUT (é世 is
+        # two codepoints, three bytes), and the reconstruction must hold.
+        text = (
+            "-----BEGIN RSA PRIVATE KEY-----é世\n"
+            "-----END R\u00e9S PRIVATE KEY-----\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        rep = scrub_pii_report(text, salt="")
+        assert rep["text"] == scrub_pii(text, salt="")
+        assert rep["redacted"] == {"api_keys": 1, "pem": 1}
+        assert rep["skipped"] == {}
+        assert rep["spans"] == [{"type": "api_keys:pem", "start": 0, "end": len(text)}]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+        # Two CRLF-separated blocks: two spans in start order, the \r\n
+        # between them surviving as input material.
+        block = "-----BEGIN EC PRIVATE KEY-----\r\nMIIEpA\r\n-----END EC PRIVATE KEY-----"
+        text = f"{block}\r\n{block}"
+        rep = scrub_pii_report(text, salt="")
+        assert rep["text"] == scrub_pii(text, salt="")
+        assert rep["redacted"] == {"api_keys": 2, "pem": 2}
+        assert rep["spans"] == [
+            {"type": "api_keys:pem", "start": 0, "end": len(block)},
+            {"type": "api_keys:pem", "start": len(block) + 2, "end": len(text)},
+        ]
+        assert _reconstruct(text, rep["spans"], "", "") == rep["text"]
+
     @given(
         pieces=st.lists(
             st.sampled_from(
