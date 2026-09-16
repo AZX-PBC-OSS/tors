@@ -88,7 +88,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from reference import diff_pair_char_shuffled
-from tors import get_close_matches, similarity_ratio
+from tors import diff_opcodes, get_close_matches, similarity_ratio
 
 # The slow pair for the deadline cells: ~120k chars of char-shuffled
 # prose, whose unbounded diff costs ~1.5-2 s (the diff_opcodes deadline
@@ -332,6 +332,37 @@ def test_ratio_is_two_lcs_over_total_over_arbitrary_pairs(a: str, b: str) -> Non
         return
     expected = 2.0 * _lcs_length(a, b) / (len(a) + len(b))
     assert similarity_ratio(a, b) == expected
+
+
+def test_past_difflibs_autojunk_threshold_the_oracle_is_autojunk_false() -> None:
+    """The autojunk differential (the parity contract's third divergence
+    class, next to the repeated-flank rows above): difflib's
+    ``SequenceMatcher`` defaults to ``autojunk=True``, which junk-handles
+    every element appearing more than ``len(b)//100 + 1`` times once
+    ``len(b) >= 200`` — dropping it from matching — and
+    ``difflib.get_close_matches`` uses that default and cannot turn it
+    off. tors deliberately keeps the un-heuristic'd answer, so past the
+    threshold plain difflib diverges (here ``0.0`` vs ``0.9983…``, a
+    single ``replace`` op vs ``delete``+``equal``) while exact agreement
+    holds with ``SequenceMatcher(None, a, b, autojunk=False)`` — the
+    oracle spelling the docs name. Pinned across all three surfaces:
+    the scalar, the opcode list, and the close-match list (scored as
+    ``a=candidate, b=word``, the direction the list differential gates
+    on)."""
+    a, b = "y" + "x" * 300, "x" * 300
+    assert len(b) >= 200
+    oracle = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    # Plain difflib's default answer, both values pinned so the divergence
+    # can never become silent drift (the test_the_documented_divergence_rows
+    # discipline).
+    assert difflib.SequenceMatcher(None, a, b).ratio() == 0.0
+    assert difflib.SequenceMatcher(None, a, b).get_opcodes() == [("replace", 0, 301, 0, 300)]
+    assert similarity_ratio(a, b) == oracle.ratio()
+    assert diff_opcodes(a, b) == oracle.get_opcodes()
+    # get_close_matches: the candidate difflib's autojunk drops (ratio
+    # 0.0 there) is kept by tors, exactly as the autojunk=False score says.
+    assert difflib.get_close_matches(b, [a], 1, 0.6) == []
+    assert get_close_matches(b, [a], 1, 0.6) == [a]
 
 
 @given(st.text(max_size=24), st.text(max_size=24))

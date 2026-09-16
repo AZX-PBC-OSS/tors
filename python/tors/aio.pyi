@@ -82,6 +82,13 @@ async def chunk_hierarchical(
     *,
     overlap: int = 0,
 ) -> list[tuple[int, int]]: ...
+async def minhash_signature(
+    text: str,
+    *,
+    num_perm: int = 128,
+    shingle_size: int = 3,
+    seed: int = 0,
+) -> list[int]: ...
 async def tf_idf(
     corpus: list[str],
     *,

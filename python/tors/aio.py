@@ -107,6 +107,7 @@ _WRAPPED = (
     "diff_opcodes_lines",
     "finalize",
     "finalize_utf8",
+    "minhash_signature",
     "normalize",
     "scrub_log_text",
     "scrub_pii",

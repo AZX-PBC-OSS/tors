@@ -148,6 +148,15 @@ The rules in brief:
   lane; the default pdf_oxide lane returns empty output for scanned pages and
   leaves the OCR decision to `pdf_classify`/`pdf_extract`.
 
+**Warning: a malformed PDF can crash the process, and Python cannot catch it.**
+The `ValueError` for a malformed document above is the ordinary path, but
+pdf_oxide 0.3.78's parser recursion has no depth cap, so a crafted PDF (measured:
+a ~60 KB file whose trailer nests `[` arrays ~30k deep, surviving to at least
+depth 10k) exhausts the native stack and every entry point dies with SIGSEGV
+(exit -11): not a Python exception, invisible to `except BaseException`. The fix
+belongs upstream (see SECURITY.md); if you process untrusted files, run the PDF
+lanes in a subprocess or another sandbox.
+
 ## The engine matrix
 
 Four engines, routed per format family by head-to-head measurement (the full
