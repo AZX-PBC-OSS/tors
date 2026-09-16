@@ -570,7 +570,9 @@ pub fn pdf_link_uris(
 /// (a non-string format or backend; a bool, float, or str where a page
 /// index belongs), `ValueError` for a wrong value or shape (an unknown
 /// or empty `backend=` name; a negative, empty, or backwards `pages=`
-/// range; a non-Unicode path; a path with an embedded NUL byte:
+/// range, a range endpoint no PDF can carry (past the 8,388,607-object
+/// cross-reference ceiling, refused before the range is built); a
+/// non-Unicode path; a path with an embedded NUL byte:
 /// CPython's own `open()` refusal). The input-side and document
 /// failures are constructed after the GIL is reacquired: `OSError` for
 /// a missing/unreadable file (the matched subclass:
@@ -1388,6 +1390,22 @@ fn refuse_anydoc(capability: &str) -> PyErr {
     PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability).to_string())
 }
 
+/// The largest page index any PDF can carry, and therefore the ceiling a
+/// `pages=` range endpoint is refused above, under the GIL, before the
+/// range materializes: a page is an object with a cross-reference entry,
+/// and the PDF implementation limits (PDF Reference 1.7, Appendix C) cap
+/// both an array and a cross-reference section at 8,388,607 (2^23-1)
+/// elements/entries, so no document any reader accepts can index a page
+/// above it. Chosen over the other two candidates with the pin's own
+/// measurements (tests/test_documents_pdf_crashes.py's docstring):
+/// `usize::MAX / 8` is the theoretical `Vec` bound and `u32::MAX` the PDF
+/// integer bound, but both license allocations no valid PDF justifies:
+/// the measured bug was SIGABRT (`handle_alloc_error`, exit -6) at
+/// stop=10**11 (800 GiB requested), with 10**10 surviving overcommit only
+/// to waste 7.6 s. At 8,388,607 the materialized half-open range costs at
+/// worst 8 × 8,388,607 = 64 MiB of `usize`, once, bounded by construction.
+const PDF_MAX_PAGE_INDEX: usize = 8_388_607;
+
 /// Parse and normalize the `pages=` argument under the GIL, before any
 /// work runs: a single `int` (one 0-based page), a `list` of ints (the
 /// explicit set), or a 2-tuple `(start, stop)` (a half-open range, Python
@@ -1397,7 +1415,11 @@ fn refuse_anydoc(capability: &str) -> PyErr {
 /// to 1/0 (`isinstance(True, int)` holds): `pages=True` on the pre-fix
 /// wheel silently selected page 1. Wrong values or shapes
 /// raise `ValueError`: a negative, an empty list, an empty or backwards
-/// range, a tuple that is not a 2-tuple, an index too large for i64. The
+/// range, a tuple that is not a 2-tuple, an index too large for i64, or a
+/// range endpoint past the 8,388,607-object cross-reference ceiling
+/// ([`PDF_MAX_PAGE_INDEX`]: no PDF can carry it; refused before the range
+/// materializes, so the request can never allocate past 64 MiB of
+/// indices). The
 /// selection is then deduped into document order (the contract the core
 /// assumes), and bounds are validated against the real page count inside
 /// the detached pass.
@@ -1432,6 +1454,23 @@ fn parse_pages(pages: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<usize>>>
             return Err(PyValueError::new_err(format!(
                 "the pages= range ({start}, {stop}) selects no pages (ranges are half-open, indices 0-based: (1, 3) is the second and third pages)"
             )));
+        }
+        // The endpoint no PDF can carry, refused before the materialization
+        // below allocates it: [`PDF_MAX_PAGE_INDEX`] for the bound's own
+        // derivation (the measured bug: (start..stop).collect() under the
+        // GIL asked the allocator for 800 PB at stop=10**17 and died by
+        // SIGABRT, before anything read the document, which here is not
+        // even valid PDF bytes).
+        for endpoint in [start, stop] {
+            if endpoint > PDF_MAX_PAGE_INDEX {
+                return Err(PyValueError::new_err(format!(
+                    "the pages= range ({start}, {stop}) cannot name a page: page index \
+                     {endpoint} is beyond what any PDF can carry (every page is an object \
+                     with a cross-reference entry, and the implementation limit is \
+                     {PDF_MAX_PAGE_INDEX} entries), so the range is refused before it \
+                     can be built"
+                )));
+            }
         }
         (start..stop).collect()
     } else if let Ok(list) = pages.cast::<PyList>() {

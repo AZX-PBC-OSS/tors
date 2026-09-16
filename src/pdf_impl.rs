@@ -53,21 +53,94 @@
 //! is that join, so a full document range selected through `pages=`
 //! reproduces the whole-document conversion byte-for-byte.
 //!
-//! # One upstream robustness fact, measured and on record
+//! # The unbounded-recursion crash class: three in-repo layers plus upstream
 //!
-//! pdf_oxide 0.3.78's object parser (`parse_object` in its parser.rs) is
-//! mutually recursive with its array/dictionary parsers and has no depth
-//! cap: its `max_nesting: 100` parser-config field is dead code (zero
-//! uses outside parser_config.rs), so a 60,336-byte PDF carrying a
-//! 30,000-deep nested array in its trailer SIGSEGVs every entry point
-//! that opens the document (pdf_page_count, pdf_extract, pdf_classify,
-//! pdf_link_uris, to_markdown, to_text: all share this seam's `open()`;
-//! reproduced on pdf_page_count, to_markdown, and
-//! pdf_classify: exit -11, uncatchable). The crash is upstream, not
-//! fixable at this seam: a tors-side parser pre-scan would mean
-//! duplicating pdf_oxide's parser to defend against one defect, and is
-//! tracked by the new fuzz target, with the real fix (a depth cap in
-//! pdf_oxide's parser) to be reported upstream.
+//! pdf_oxide 0.3.78's object parser (`parse_object`, its parser.rs:169) is
+//! mutually recursive with its array/dictionary parsers (parser.rs:423,
+//! parser.rs:485; two frames per nesting level) and has no depth cap: its
+//! `ParserConfig::max_nesting: 100` (parser_config.rs:109) is dead code,
+//! zero uses outside that file. Measured on this box (8 MiB main stack,
+//! 2026-09-16): a trailer nesting `[` arrays 10,658 deep opens, 10,659
+//! SIGSEGVs, and a 20,000-deep one kills every entry point that opens a
+//! document (all six share this file's `open()`) with exit -11 in ~170 ms,
+//! uncatchable from Python (`except BaseException` never runs). A
+//! keyed-dictionary bomb (`<< /K ` per level) dies the same way at
+//! N≥12,000; bare `<< << <<` (no key between the opens) does not recurse,
+//! the lexer refuses it catchably. Upstream fix: commit 68da2cf8 on
+//! upstream's release/v0.3.79 branch, not on crates.io at this writing.
+//! Until a
+//! published release carries it, `open()` runs three in-repo layers, kept
+//! afterwards as defense-in-depth (a future upstream cap and these agree on
+//! the 100 value by construction):
+//!
+//! 1. **Raw nesting scan** ([`scan_document`]): one linear, allocation-free
+//!    byte walk before `PdfDocument::from_bytes`, counting `[`/`]` and
+//!    `<<`/`>>` nesting (a `<<` is a dictionary open, never a hex-string
+//!    open) and skipping the regions pdf_oxide's parser never recurses
+//!    through: `stream…endstream` payloads, literal strings `(…)` (escape-
+//!    and nesting-aware), hex strings, and `%` comments. It is a region
+//!    lexer (normal, comment, literal string, hex string, stream payload)
+//!    with no object model: O(bytes) time and O(1) state (a depth counter
+//!    and three indices; the walk allocates nothing), so over-depth comes
+//!    back as a catchable `InvalidPdf` refusal (the malformed-document
+//!    `ValueError` shape) instead of signal death. The cap is
+//!    [`MAX_OBJECT_NESTING`], pdf_oxide's own dead-config value. Measured
+//!    (release, this box, load ~1.5): ~1.0 ms/MiB, flat across 0.2/1.6/
+//!    6.5 MiB mixed-token fixtures (±15%); a depth bomb exits at the cap,
+//!    ~2 µs regardless of N.
+//! 2. **Compressed-object scan** (the same walk, collecting streams): a raw
+//!    byte walk cannot see inside compressed streams, and pdf_oxide parses
+//!    a `/Type /ObjStm` stream's contents with the same uncapped
+//!    `parse_object` (its objstm.rs:168); measured, the ObjStm bomb
+//!    SIGSEGVs at N=12,000 raw-equivalent. The walk therefore collects
+//!    every `/Type /ObjStm` and `/Type /XRef` stream it passes, inflates
+//!    the FlateDecode ones (flate2, the decoder pdf_oxide itself uses; its
+//!    inflate is capped at its flate.rs:155, its recursion is not)
+//!    under a hard [`MAX_INFLATED_BYTES`] ceiling, and runs the same
+//!    depth scan over the inflated (or, unfiltered, raw) payload. The
+//!    ceiling breach is the same catchable refusal: the scan must not open
+//!    a decompression-bomb path while closing the recursion one. Measured
+//!    residual of the class: pdf_oxide reads compressed xref-stream DATA as
+//!    packed binary rows and never recurses into it (the xref bomb
+//!    converts, pre-scan, at any depth), so the xref scan is containment
+//!    for attacker-shaped junk, not a crash fix. Two engine behaviors the
+//!    collection must mirror field for field, both measured as SIGSEGV
+//!    bypasses before the mirror existed (2026-09-16, ~1.1 KB documents,
+//!    rc=-11): pdf_oxide resolves filter names through a spec-abbreviation
+//!    and case-insensitive table (its decoders/mod.rs: ISO 32000-1 Table 6,
+//!    `/Fl` IS FlateDecode, and so is `/flatedecode`), and its stream
+//!    reader accepts a bare `stream` keyword with a CR-only or MISSING
+//!    end-of-line, starting the payload right after the keyword (its
+//!    parser.rs: "SPEC VIOLATION ... Accepting in lenient mode"). The
+//!    collection mirrors both spellings and all four EOL shapes, and an
+//!    ObjStm/XRef stream whose dict declares a filter pdf_oxide can decode
+//!    but this scan cannot (LZW, RunLength, ASCIIHex/85, the image
+//!    filters, Brotli) is refused outright, the same fail-closed posture
+//!    the office zip audit takes: a payload the scan cannot itself
+//!    inflate is a payload whose nesting it cannot bound, and the engine's
+//!    uncapped `parse_object` behind it is exactly what this layer exists
+//!    to guard.
+//! 3. **Stack headroom** ([`with_depth_headroom`]): every entry point runs
+//!    its whole native pass on a thread with a 256 MiB stack (virtual,
+//!    lazily paged) instead of the caller's 8 MiB main stack, and a
+//!    panicked `JoinHandle::join` maps to the same catchable `InvalidPdf`.
+//!    The parser's measured cost is ~790 bytes of stack per nesting level
+//!    (8 MiB dies at 10,659 levels), so the kill point moves from ~10.7k
+//!    levels to ~341k, and a pdf_oxide panic becomes a `ValueError` instead
+//!    of process death. Measured containment cost: ~22 µs spawn+join, ~34 µs
+//!    end-to-end on the two-page fixture (release, this box), noise
+//!    against any parse. One on-record limit of any linear scan: a document
+//!    crafted to lie about its stream boundaries (a `>>` glued to
+//!    `endstream`) can hide structure from the walks; this layer is that
+//!    shape's backstop.
+//!
+//! When pdf_oxide ships the real cap (0.3.79+, commit 68da2cf8), the layers
+//! stay: they are the seam's own memory-safety floor, not lane policy; they
+//! run regardless of `max_bytes` (the scans never read `ConvertOptions` or
+//! any ceiling), cost the one linear pass plus ~22 µs of containment
+//! measured above, and cover future regressions in the same class. The
+//! `documents_markdown` fuzz target remains the repro harness for the
+//! upstream defect and stays out of every run list until 0.3.79 publishes.
 
 use pdf_oxide::converters::ConversionOptions;
 use pdf_oxide::document::PdfDocument;
@@ -163,9 +236,460 @@ pub struct Classification {
     pub pages_needing_ocr: Vec<usize>,
 }
 
-/// Open the bytes, authenticating first when a password was supplied.
-/// `None` keeps pdf_oxide's own doctrine: the empty password is tried at
-/// open (the common "owner-encrypted, user-readable" shape), and a
+/// The object-nesting ceiling the scans enforce: pdf_oxide 0.3.78's own
+/// `ParserConfig::max_nesting` default (its parser_config.rs:109, "PDF spec
+/// recommended limit"), dead code upstream, enforced here instead. When
+/// upstream ships the parser cap (commit 68da2cf8, 0.3.79+),
+/// the two agree on this value by construction; the const stays as
+/// defense-in-depth either way.
+const MAX_OBJECT_NESTING: usize = 100;
+
+/// The hard ceiling on inflating one compressed stream for the scan (a
+/// `/Type /ObjStm` or `/Type /XRef` payload). Object streams hold only
+/// non-stream objects (dictionaries, page trees: the spec forbids streams
+/// inside them), so a legitimate one inflating past this implies a file far
+/// beyond the 512 MiB input backstop; the breach is refused catchably (the
+/// same `InvalidPdf` shape as every other scan refusal) so the depth
+/// defense cannot itself be turned into a decompression bomb: the scan
+/// never holds more than this many bytes per stream.
+const MAX_INFLATED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The stack pdf_oxide's parser runs on: 256 MiB, virtual and lazily paged
+/// (the resident cost is what a parse actually touches). The recursion that
+/// kills the process costs two frames per nesting level
+/// (`parse_object` → `parse_array`/`parse_dictionary`, parser.rs:169/:423/
+/// :485), so the stack is the crash surface: the caller's 8 MiB main thread
+/// dies at ~10.7k levels (measured, module docs above) and this holds
+/// ~32x more. A panic unwinds into `JoinHandle::join`, mapped to the same
+/// catchable `InvalidPdf` refusal as the scans (see
+/// [`with_depth_headroom`]) instead of process death.
+const PARSER_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+fn nesting_refusal() -> PdfError {
+    PdfError::InvalidPdf(format!(
+        "the document nests arrays/dictionaries more than {MAX_OBJECT_NESTING} levels deep: \
+         pdf_oxide 0.3.78's object parser has no depth cap (its ParserConfig::max_nesting is \
+         dead code; the parser cap lands upstream in 0.3.79, commit 68da2cf8) and would exhaust \
+         the native stack and kill the process, so the document is refused here, before parsing"
+    ))
+}
+
+/// The walks' one refusal for a compressed stream that inflates past
+/// [`MAX_INFLATED_BYTES`].
+fn inflated_size_refusal() -> PdfError {
+    PdfError::InvalidPdf(format!(
+        "a compressed object stream inflates past the {MAX_INFLATED_BYTES}-byte scan ceiling: \
+         refused before parsing (the ceiling bounds the scan's own memory, so the nesting \
+         defense cannot be turned into a decompression bomb)"
+    ))
+}
+
+/// Does `haystack` contain `needle`? (The dict slices are short; `windows`
+/// on an empty haystack is empty, so a malformed empty dict never matches.)
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// The `stream` keyword, only where a reader can mean it: the bytes
+/// `stream`, preceded over whitespace by a `>` (the dictionary close a
+/// stream object's dict always ends with). This is what keeps the word
+/// inside `endstream` (preceded by `d`), inside a name (`/stream`), or
+/// inside ordinary content from ever triggering the payload skip; a false
+/// trigger would swallow real structure and hide a bomb from the scan.
+/// Returns the position of that `>` and the payload start. The payload
+/// start mirrors pdf_oxide's own reader field for field (its parser.rs
+/// parse_stream_data): a CRLF or LF is skipped, a lone CR is skipped
+/// ("SPEC VIOLATION ... Accepting in lenient mode", its words), and NO
+/// end-of-line at all leaves the payload starting right after the keyword;
+/// the last two were measured as SIGSEGV bypasses of this scan before
+/// the mirror existed (an ObjStm bomb behind a CR-only or missing EOL
+/// sailed past the collection into the uncapped parse). Only a reader
+/// that puts whitespace BEFORE the end-of-line refuses on its own (its
+/// decompressor chokes on the space, catchably), so that one shape stays
+/// uncollected here and dies the same catchable death there.
+fn stream_keyword_extent(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
+    if !bytes[i..].starts_with(b"stream") {
+        return None;
+    }
+    let mut j = i;
+    while j > 0 && matches!(bytes[j - 1], b' ' | b'\t' | b'\r' | b'\n' | b'\0' | b'\x0c') {
+        j -= 1;
+    }
+    if j == 0 || bytes[j - 1] != b'>' {
+        return None;
+    }
+    let after = i + b"stream".len();
+    let skip = match bytes.get(after) {
+        Some(b'\n') => 1,
+        Some(b'\r') if bytes.get(after + 1) == Some(&b'\n') => 2,
+        Some(b'\r') => 1,
+        _ => 0,
+    };
+    Some((j - 1, after + skip))
+}
+
+/// The `endstream` that terminates a payload (pdf_oxide reads `/Length`,
+/// the scan does not need it: both stop here). Never found (a liar
+/// document): the payload runs to EOF and the walk ends.
+fn endstream_at(bytes: &[u8], from: usize) -> usize {
+    let mut k = from;
+    while k + b"endstream".len() <= bytes.len() {
+        if bytes[k..k + b"endstream".len()] == *b"endstream" {
+            return k;
+        }
+        k += 1;
+    }
+    bytes.len()
+}
+
+/// Layer 2: one stream object the walk collected, `/Type /ObjStm` or
+/// `/Type /XRef` in its dict (an object stream's contents parse with the
+/// same uncapped `parse_object` as raw bytes (pdf_oxide's objstm.rs:168),
+/// which is where the bomb class hides from a raw scan; a compressed xref
+/// stream's data is read as packed binary rows and never recurses, so its
+/// scan is containment for attacker-shaped junk). FlateDecode payloads:
+/// under pdf_oxide's full spelling vocabulary ([`dict_declares_flate`]),
+/// are inflated under [`MAX_INFLATED_BYTES`] first; a dict declaring a
+/// filter pdf_oxide can decode but this scan cannot is REFUSED (the
+/// engine would inflate what the scan cannot see into, and the uncapped
+/// parser behind it is what this layer guards: the fail-closed posture
+/// the office zip audit takes); unfiltered payloads are scanned as-is (an
+/// object stream needs no filter). The nested walk collects no streams of
+/// its own: the spec forbids streams inside object streams, and unbounded
+/// nesting of the scan itself would be the bug it exists to close.
+fn scan_stream_object(dict: &[u8], payload: &[u8]) -> Result<(), PdfError> {
+    if !bytes_contain(dict, b"/ObjStm") && !bytes_contain(dict, b"/XRef") {
+        return Ok(());
+    }
+    if let Some(filter) = dict_declares_undecodable_filter(dict) {
+        return Err(PdfError::InvalidPdf(format!(
+            "this document's object stream declares the {filter} filter: this pre-scan \
+             inflates FlateDecode and unfiltered object streams only, because the engine \
+             behind it parses their contents with an uncapped recursive object parser and \
+             this scan must bound what reaches it: refused as malformed"
+        )));
+    }
+    let inflated;
+    let scanned: &[u8] = if dict_declares_flate(dict) {
+        inflated = inflate_capped(payload)?;
+        &inflated
+    } else {
+        payload
+    };
+    scan_walk(scanned, false)
+}
+
+/// Whether a stream's dict declares the FlateDecode filter under
+/// pdf_oxide's full resolution vocabulary (its decoders/mod.rs
+/// `normalize_filter_name`): the exact or any-cased full name (its
+/// case-insensitive fallback), or the spec's Table 6 abbreviation `Fl`
+/// spelled exactly and standing as a whole name (a `/Fl` inside an array
+/// of filters qualifies; a longer name that merely begins with `Fl`
+/// (`/Flags`, `/Filter`) does not: the byte after the abbreviation must
+/// be a delimiter or whitespace, which is where a PDF name ends).
+/// Measured before this vocabulary existed: `/Fl` and `/flatedecode`
+/// object-stream bombs passed this scan un-inflated and died as SIGSEGV
+/// in the engine's parser.
+fn dict_declares_flate(dict: &[u8]) -> bool {
+    bytes_contain_ignore_ascii_case(dict, b"flatedecode") || name_declared(dict, b"Fl")
+}
+
+/// The filter names pdf_oxide resolves and decodes (its decoders/mod.rs:
+/// the exact names, the Table 6 abbreviations, the case-insensitive
+/// fallback) that this scan has no decoder for. A dict declaring one of
+/// these on an ObjStm/XRef stream is refused: the engine would hand the
+/// inflated bytes to the same uncapped `parse_object` this layer exists
+/// to guard, and the scan cannot bound bytes it cannot inflate.
+const UNDECODABLE_FILTERS: &[&str] = &[
+    "ASCIIHexDecode",
+    "ASCII85Decode",
+    "LZWDecode",
+    "RunLengthDecode",
+    "CCITTFaxDecode",
+    "DCTDecode",
+    "JBIG2Decode",
+    "JPXDecode",
+    "BrotliDecode",
+];
+
+/// The Table 6 abbreviations of [`UNDECODABLE_FILTERS`], each paired with
+/// the full name the refusal message names: exact-case, whole-name tokens
+/// (`/LZW` inside a filter array qualifies; `/LZWDecode` is the full name
+/// above).
+const UNDECODABLE_ABBREVIATIONS: &[(&[u8], &str)] = &[
+    (b"AHx", "ASCIIHexDecode"),
+    (b"A85", "ASCII85Decode"),
+    (b"LZW", "LZWDecode"),
+    (b"RL", "RunLengthDecode"),
+    (b"CCF", "CCITTFaxDecode"),
+    (b"DCT", "DCTDecode"),
+];
+
+/// The first undecodable filter a dict declares, if any: full names
+/// case-insensitively (pdf_oxide's fallback resolves every casing), and
+/// the abbreviations as whole names. Returns the declared spelling for
+/// the refusal message (the full name, whichever spelling declared it).
+fn dict_declares_undecodable_filter(dict: &[u8]) -> Option<&'static str> {
+    for name in UNDECODABLE_FILTERS {
+        if bytes_contain_ignore_ascii_case(dict, name.as_bytes()) {
+            return Some(name);
+        }
+    }
+    UNDECODABLE_ABBREVIATIONS
+        .iter()
+        .find(|(abbr, _)| name_declared(dict, abbr))
+        .map(|(_, full)| *full)
+}
+
+/// Whether `name` (all ASCII, exact case) appears in the dict as a whole
+/// PDF name: a `/` immediately before it, and a byte after it that ends a
+/// name (whitespace or a delimiter; anything else continues the name,
+/// so `/Flags` never declares `/Fl`).
+fn name_declared(dict: &[u8], name: &[u8]) -> bool {
+    let mut probe = 0;
+    while let Some(hit) = dict[probe..]
+        .windows(name.len() + 1)
+        .position(|window| &window[..1] == b"/" && &window[1..] == name)
+    {
+        let at = probe + hit;
+        probe = at + 1;
+        let after = at + 1 + name.len();
+        let ends_name = match dict.get(after) {
+            None => true,
+            Some(&b) => {
+                matches!(
+                    b,
+                    b'\0'
+                        | b'\t'
+                        | b'\n'
+                        | b'\x0c'
+                        | b'\r'
+                        | b' '
+                        | b'('
+                        | b')'
+                        | b'<'
+                        | b'>'
+                        | b'['
+                        | b']'
+                        | b'{'
+                        | b'}'
+                        | b'/'
+                        | b'%'
+                )
+            }
+        };
+        if ends_name {
+            return true;
+        }
+    }
+    false
+}
+
+/// `bytes_contain`, case-insensitive over ASCII (pdf_oxide resolves
+/// filter names through a lowercase fallback, so `/FLATEDECODE` and
+/// `/flatedecode` are the same filter to it).
+fn bytes_contain_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Inflate one zlib flow under the hard ceiling: `take(ceiling + 1)` stops
+/// the read one byte past the limit, so the breach is visible as a length
+/// without ever holding more than ceiling + 1 bytes. A corrupt flow returns
+/// an empty buffer rather than an error: pdf_oxide's own inflate fails the
+/// same way (its FlateDecode path is capped too, its flate.rs:155) and its
+/// error is already the catchable shape.
+fn inflate_capped(payload: &[u8]) -> Result<Vec<u8>, PdfError> {
+    use std::io::Read;
+    let mut inflated = Vec::new();
+    let mut decoder = flate2::read::ZlibDecoder::new(payload).take(MAX_INFLATED_BYTES + 1);
+    if decoder.read_to_end(&mut inflated).is_err() {
+        return Ok(Vec::new());
+    }
+    if inflated.len() as u64 > MAX_INFLATED_BYTES {
+        return Err(inflated_size_refusal());
+    }
+    Ok(inflated)
+}
+
+/// The walk itself. `collect_streams` marks the top-level pass (layers 1+2
+/// together); the nested pass over an inflated payload is depth-only.
+fn scan_walk(bytes: &[u8], collect_streams: bool) -> Result<(), PdfError> {
+    let n = bytes.len();
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    // The outermost `<<` since its last close: (start, end-after->>), so a
+    // `stream` keyword can look up the dict it belongs to. The extent check
+    // at the keyword (dict end == the guard's `>` + 1) is what discards a
+    // stale dict: the one recorded must be the dict that closed immediately
+    // before the keyword, or the stream is not scanned here (a stream
+    // without its dict is invalid PDF that pdf_oxide refuses
+    // catchably on its own).
+    let mut dict_open_at = 0usize;
+    let mut dict: Option<(usize, usize)> = None;
+    while i < n {
+        match bytes[i] {
+            // A comment runs to EOL: pdf_oxide's lexer drops it too.
+            b'%' => {
+                i += 1;
+                while i < n && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            // A literal string: balanced parens, backslash escapes the next
+            // byte. pdf_oxide never recurses into one; neither does this.
+            b'(' => {
+                i += 1;
+                let mut parens = 1usize;
+                while i < n && parens > 0 {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'(' => parens += 1,
+                        b')' => parens -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            // A dictionary open (`<<`, two bytes: a lone `<` is a hex string).
+            b'<' if bytes.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                if depth > MAX_OBJECT_NESTING {
+                    return Err(nesting_refusal());
+                }
+                if depth == 1 {
+                    dict_open_at = i;
+                }
+                i += 2;
+            }
+            // A hex string `<…>`: a token, not nesting; skip to its close.
+            b'<' => {
+                i += 1;
+                while i < n && bytes[i] != b'>' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'>' if bytes.get(i + 1) == Some(&b'>') => {
+                if depth == 1 {
+                    dict = Some((dict_open_at, i + 2));
+                }
+                depth = depth.saturating_sub(1);
+                i += 2;
+            }
+            // A lone `>` (a hex close handled at its `<`, or stray junk).
+            b'>' => i += 1,
+            b'[' => {
+                depth += 1;
+                if depth > MAX_OBJECT_NESTING {
+                    return Err(nesting_refusal());
+                }
+                i += 1;
+            }
+            // A close below zero floors there: junk in a binary region
+            // (xref gaps, comment tails) can never manufacture depth.
+            b']' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b's' if bytes[i..].starts_with(b"stream") => {
+                let Some((close_end, payload_start)) = stream_keyword_extent(bytes, i) else {
+                    i += 1;
+                    continue;
+                };
+                let payload_end = endstream_at(bytes, payload_start);
+                if collect_streams
+                    && let Some((dict_start, dict_end)) =
+                        dict.filter(|&(_, end)| end == close_end + 1)
+                {
+                    scan_stream_object(
+                        &bytes[dict_start..dict_end],
+                        &bytes[payload_start..payload_end],
+                    )?;
+                }
+                i = payload_end;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Layers 1+2 over one document's bytes: the raw nesting walk, plus the
+/// compressed-object scan for every `/Type /ObjStm` and `/Type /XRef`
+/// stream it passes. Runs before `PdfDocument::from_bytes` in
+/// [`open`], inside the bindings' `py.detach` regions: native work on
+/// native bytes, the error surfacing only through the post-detach mapping
+/// (`pdf_error` in the payload crate) as the malformed-document
+/// `ValueError`.
+fn scan_document(bytes: &[u8]) -> Result<(), PdfError> {
+    scan_walk(bytes, true)
+}
+
+/// The parser containment layer: run one entry point's whole native pass on
+/// a thread with the 256 MiB stack ([`PARSER_STACK_BYTES`]) instead of the
+/// caller's 8 MiB main stack, so any recursion path the scans missed needs
+/// ~32x deeper nesting to be lethal (the measured ~790 bytes of stack per
+/// level: 8 MiB dies at 10,659), and map a panicked
+/// `JoinHandle::join` to the same catchable `InvalidPdf` the scans raise
+/// (`from_pdf` adapts it for the one entry point whose error type wraps
+/// `PdfError`). The spawned thread never touches the GIL: every call site
+/// runs inside the bindings' `py.detach` regions, so this is native work on
+/// native bytes; spawn failure (an exhausted OS thread budget) is an
+/// environment failure, mapped to `PdfError::Io` → `OSError`, never a
+/// "malformed document" claim.
+fn with_depth_headroom<T, E>(
+    job: impl FnOnce() -> Result<T, E> + Send + 'static,
+    from_pdf: fn(PdfError) -> E,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let joined = std::thread::Builder::new()
+        .stack_size(PARSER_STACK_BYTES)
+        .spawn(job)
+        .map_err(|io| {
+            from_pdf(PdfError::Io(std::io::Error::other(format!(
+                "could not spawn the PDF parser thread: {io}"
+            ))))
+        })?;
+    joined.join().unwrap_or_else(|payload| {
+        Err(from_pdf(PdfError::InvalidPdf(format!(
+            "the PDF engine panicked while reading this document ({}): refused as malformed",
+            panic_text(payload)
+        ))))
+    })
+}
+
+/// The panic payload's text, or a placeholder for a non-string one (a
+/// panic's payload is `Any`; the two string shapes are what `panic!` with a
+/// formatted message produces).
+fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&'static str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// The identity adaptor: the four PDF-only entry points' error type is
+/// already `PdfError`.
+fn pdf_error_identity(err: PdfError) -> PdfError {
+    err
+}
+
+/// The one shared doorway, every entry point's first native step (module
+/// docs above): the depth scans run before pdf_oxide touches the bytes:
+/// [`scan_document`] refuses the over-nested and compressed-bomb shapes
+/// catchably, then the parse itself runs under the containment layer's
+/// stack. `None` keeps pdf_oxide's own doctrine: the empty password is
+/// tried at open (the common "owner-encrypted, user-readable" shape), and a
 /// document that stays locked fails its first content operation with
 /// `EncryptedPdf`: mapped to `ValueError` by the payload, fail closed: a
 /// security state is never masked as empty output. A supplied password
@@ -173,6 +697,7 @@ pub struct Classification {
 /// message that names what happened (pdf_oxide's `authenticate` returns
 /// `Ok(false)` for a wrong one: not an error, so the seam makes it one).
 fn open(bytes: Vec<u8>, password: Option<&str>) -> Result<PdfDocument, PdfError> {
+    scan_document(&bytes)?;
     let doc = PdfDocument::from_bytes(bytes)?;
     if let Some(password) = password {
         if !doc.authenticate(password.as_bytes())? {
@@ -198,42 +723,63 @@ fn open(bytes: Vec<u8>, password: Option<&str>) -> Result<PdfDocument, PdfError>
 /// Parse the document's bytes and extract per-page plain text plus the
 /// whole-document markdown: one pass over one open document, so the parse
 /// cost is paid once for both outputs. The bytes are the payload's to
-/// provide: a `path=` it read, or the caller's `data=` verbatim.
+/// provide: a `path=` it read, or the caller's `data=` verbatim. The whole
+/// pass (scans, parse, extraction) runs under [`with_depth_headroom`].
 pub fn extract(bytes: Vec<u8>, password: Option<&str>) -> Result<PdfExtract, PdfError> {
-    let doc = open(bytes, password)?;
-    let pages = doc
-        .page_indices()
-        .map(|page| doc.extract_text(page))
-        .collect::<Result<Vec<String>, PdfError>>()?;
-    let markdown = doc.to_markdown_all(&ConversionOptions::default())?;
-    Ok(PdfExtract { pages, markdown })
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            let pages = doc
+                .page_indices()
+                .map(|page| doc.extract_text(page))
+                .collect::<Result<Vec<String>, PdfError>>()?;
+            let markdown = doc.to_markdown_all(&ConversionOptions::default())?;
+            Ok(PdfExtract { pages, markdown })
+        },
+        pdf_error_identity,
+    )
 }
 
 /// The cheap page-count probe: parse the page tree, nothing else. For
 /// callers that gate expensive downstream work on page count (the
 /// docling-conversion caller's pre-flight) without paying for any content
-/// extraction.
+/// extraction. Runs under [`with_depth_headroom`], like every entry point.
 pub fn page_count(bytes: Vec<u8>, password: Option<&str>) -> Result<usize, PdfError> {
-    open(bytes, password)?.page_count()
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            doc.page_count()
+        },
+        pdf_error_identity,
+    )
 }
 
 /// The cheap text-vs-image preflight: page count plus the image-only page
 /// list, no content conversion. Encrypted documents fail closed
 /// (pdf_oxide's security rule, propagated as-is): a security state is never
-/// masked as "all pages empty".
+/// masked as "all pages empty". Runs under [`with_depth_headroom`], like
+/// every entry point.
 pub fn classify(bytes: Vec<u8>, password: Option<&str>) -> Result<Classification, PdfError> {
-    let doc = open(bytes, password)?;
-    let page_count = doc.page_count()?;
-    let classification = doc.classify_document()?;
-    Ok(Classification {
-        page_count,
-        page_kinds: classification
-            .pages
-            .iter()
-            .map(|k| PageKind::from_engine(*k))
-            .collect(),
-        pages_needing_ocr: classification.pages_needing_ocr,
-    })
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            let page_count = doc.page_count()?;
+            let classification = doc.classify_document()?;
+            Ok(Classification {
+                page_count,
+                page_kinds: classification
+                    .pages
+                    .iter()
+                    .map(|k| PageKind::from_engine(*k))
+                    .collect(),
+                pages_needing_ocr: classification.pages_needing_ocr,
+            })
+        },
+        pdf_error_identity,
+    )
 }
 
 /// The `/Annots` link-annotation walk: for every page, the URIs of its
@@ -262,22 +808,28 @@ pub fn classify(bytes: Vec<u8>, password: Option<&str>) -> Result<Classification
 /// skipped by the subtype filter; pdf_oxide tolerates malformed annotation
 /// dictionaries (its parse skips them) rather than poisoning the page.
 pub fn link_uris(bytes: Vec<u8>, password: Option<&str>) -> Result<Vec<Vec<String>>, PdfError> {
-    let doc = open(bytes, password)?;
-    let count = doc.page_count()?;
-    let mut out = Vec::with_capacity(count);
-    for page in doc.page_indices() {
-        let mut uris = Vec::new();
-        for annotation in doc.get_annotations(page)? {
-            if annotation.subtype_enum != AnnotationSubtype::Link {
-                continue;
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            let count = doc.page_count()?;
+            let mut out = Vec::with_capacity(count);
+            for page in doc.page_indices() {
+                let mut uris = Vec::new();
+                for annotation in doc.get_annotations(page)? {
+                    if annotation.subtype_enum != AnnotationSubtype::Link {
+                        continue;
+                    }
+                    if let Some(LinkAction::Uri(uri)) = annotation.action {
+                        uris.push(uri);
+                    }
+                }
+                out.push(uris);
             }
-            if let Some(LinkAction::Uri(uri)) = annotation.action {
-                uris.push(uri);
-            }
-        }
-        out.push(uris);
-    }
-    Ok(out)
+            Ok(out)
+        },
+        pdf_error_identity,
+    )
 }
 
 /// `markdown_pages`'s error: pdf_oxide's own parse/conversion failures, or
@@ -322,6 +874,22 @@ pub const PAGE_SEPARATOR: &str = "\n---\n\n";
 /// [`PAGE_SEPARATOR`], so `Some(&(0..n).collect::<Vec<_>>())` is
 /// byte-identical to `None` (the crate-side test pins this).
 pub fn markdown_pages(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+) -> Result<String, PagesError> {
+    let selected = pages.map(<[usize]>::to_vec);
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || markdown_pages_pass(bytes, selected.as_deref(), password.as_deref()),
+        PagesError::Pdf,
+    )
+}
+
+/// The pass [`markdown_pages`] runs under [`with_depth_headroom`], its own
+/// fn so the public signature the core calls stays `Option<&[usize]>` /
+/// `Option<&str>` while the closure carries owned selections.
+fn markdown_pages_pass(
     bytes: Vec<u8>,
     pages: Option<&[usize]>,
     password: Option<&str>,
@@ -589,6 +1157,150 @@ mod tests {
             link_uris(plain, None).unwrap(),
             vec![Vec::<String>::new(), Vec::<String>::new()]
         );
+    }
+
+    // --- the depth pre-scan: raw walk, then compressed-object scan ----------
+
+    /// One stream object's bytes: dict pairs + payload, the shape the walk's
+    /// stream collection keys on (dict close, `stream`, EOL, payload,
+    /// `endstream`).
+    fn stream_object(dict: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "<< {} /Length {} >>\nstream\n",
+            String::from_utf8_lossy(dict),
+            payload.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(payload);
+        out.extend_from_slice(b"\nendstream");
+        out
+    }
+
+    fn zlib_flow(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// Legit documents never trip the scan: the hand-built two-pager (real
+    /// dicts, arrays, strings, streams) survives the walk and the full
+    /// open() door with it in place.
+    #[test]
+    fn benign_documents_pass_the_pre_scan() {
+        let bytes = two_page_pdf("Alpha page text", "Beta page text");
+        scan_document(&bytes).unwrap();
+        extract(bytes, None).unwrap();
+    }
+
+    /// The regions pdf_oxide's parser never recurses through must not count
+    /// depth: a stream payload full of unbalanced `[`, a literal string's
+    /// parens (nested and escaped), a comment's `<<`s, and a `<`-hex-string
+    /// holding 0x3c bytes (`<<` spelled in hex), none of it moves the
+    /// counter. The negative control re-runs the same brackets OUTSIDE the
+    /// skipped regions: they do count there.
+    #[test]
+    fn regions_the_parser_never_recurses_through_are_skipped() {
+        let payload = b"[[[[[[[ unbalanced, no closes";
+        let doc = stream_object(b"/Type /Extra", payload);
+        scan_document(&doc).unwrap();
+
+        scan_document(b"( nested ( parens ) and \\( escaped \\) opens [ and << )").unwrap();
+
+        scan_document(b"% a comment full of [[[[ << << <<").unwrap();
+
+        // 0x3c is '<': a hex string spelling << << << must not nest.
+        scan_document(b"<< /K < 3c 3c 3c 3c > >> ").unwrap();
+
+        // The same brackets outside the skipped regions do count.
+        assert!(scan_document(&b"[[[[[[[ unbalanced".repeat(30)).is_err());
+    }
+
+    /// The counter is exact, not a heuristic: exactly 100 levels (the cap,
+    /// pdf_oxide's own dead-config value) passes, 101 refuses (arrays,
+    /// keyed dictionaries, and a mix), and stray closes floor at zero so a
+    /// binary region cannot manufacture depth below it.
+    #[test]
+    fn depth_counting_is_exact() {
+        assert!(scan_walk(&b"[".repeat(100), false).is_ok());
+        assert!(scan_walk(&b"[".repeat(101), false).is_err());
+        let open_dict = b"<< /K ".repeat(100);
+        assert!(scan_walk(&open_dict, false).is_ok());
+        let open_dict_over = b"<< /K ".repeat(101);
+        assert!(scan_walk(&open_dict_over, false).is_err());
+        // Mixed: each (array + keyed dict) pair is two levels.
+        let mut mixed = Vec::new();
+        for _ in 0..50 {
+            mixed.extend_from_slice(b"[ << /K ");
+        }
+        assert!(scan_walk(&mixed, false).is_ok());
+        mixed.extend_from_slice(b"[ << /K ");
+        assert!(scan_walk(&mixed, false).is_err());
+        // Floor: a pile of stray closes cannot go negative, so what
+        // follows is judged at its own depth, not an inherited one:
+        // 101 opens after 200 junk closes still refuse, 100 still pass.
+        let mut floored = b"]]] ".repeat(200);
+        floored.extend_from_slice(&b"[".repeat(101));
+        assert!(scan_walk(&floored, false).is_err());
+        let mut shallow = b"]]] ".repeat(200);
+        shallow.extend_from_slice(&b"[".repeat(100));
+        assert!(scan_walk(&shallow, false).is_ok());
+    }
+
+    /// The refusal's message names the ceiling and the why (the same text
+    /// the Python probes surface as their ValueError).
+    #[test]
+    fn over_depth_refusal_names_the_ceiling_and_the_reason() {
+        let err = scan_walk(&b"[".repeat(101), false).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("100"), "{message}");
+        assert!(message.contains("depth cap"), "{message}");
+        assert!(matches!(err, PdfError::InvalidPdf(_)));
+    }
+
+    /// Layer 2: a bomb hidden inside a FlateDecode object stream (the
+    /// shape the raw walk cannot see and pdf_oxide's objstm.rs:168 feeds
+    /// to the same uncapped parse_object; measured SIGSEGV at
+    /// raw-equivalent N=12,000 pre-scan) is inflated and scanned.
+    /// Unfiltered object streams (legal: /Filter is optional) are scanned
+    /// as-is, and a benign object stream still passes.
+    #[test]
+    fn compressed_object_stream_hiding_a_bomb_is_scanned() {
+        let mut bomb = b"1 0\n<< /Type /Catalog /X ".to_vec();
+        bomb.extend_from_slice(&b"[".repeat(201));
+        bomb.extend_from_slice(&b"]".repeat(201));
+        bomb.extend_from_slice(b" >>");
+        let compressed = stream_object(
+            b"/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode",
+            &zlib_flow(&bomb),
+        );
+        assert!(scan_document(&compressed).is_err());
+
+        let raw_objstm = stream_object(b"/Type /ObjStm /N 1 /First 4", &bomb);
+        assert!(scan_document(&raw_objstm).is_err());
+
+        let benign = stream_object(
+            b"/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode",
+            &zlib_flow(b"1 0\n<< /Type /Catalog /Pages 2 0 R >>"),
+        );
+        scan_document(&benign).unwrap();
+    }
+
+    /// A compressed xref stream's inflated data carrying the bomb bytes:
+    /// pdf_oxide reads that data as packed binary rows and never recurses
+    /// (measured: it converts, pre-scan, at any depth), so the scan here is
+    /// containment for attacker-shaped junk, and the junk refuses
+    /// catchably.
+    #[test]
+    fn compressed_xref_stream_junk_is_scanned() {
+        let mut rows = vec![0u8; 5 * 7]; // five valid /W [1 4 2] rows
+        rows.extend_from_slice(&b"[".repeat(201));
+        let xref = stream_object(
+            b"/Type /XRef /Size 5 /W [1 4 2] /Filter /FlateDecode",
+            &zlib_flow(&rows),
+        );
+        assert!(scan_document(&xref).is_err());
     }
 
     /// The pdfium-hazard property, as a Rust test: pdfium is not thread-safe
