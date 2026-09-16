@@ -390,19 +390,17 @@ pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
 /// 100 MiB csv → 3.7 GiB) was a benign-shape measurement; cells per
 /// byte, not file size, drives the multiple) and additionally caps
 /// decompression engine-side (its own package limits: 128 MiB per entry,
-/// 512 MiB total, a 4M× expansion bound). office_oxide 0.1.10 (its
-/// changelog #144/#151) now enforces MAX_PART_SIZE =
-/// 512 MiB per part: declared and actual bytes; XML nesting depth 256
-/// on its own 16 MB parse stack, but still has no total-across-parts
-/// cap and no output cap: measured the same day, a 399 KiB zip with a
-/// 400 MiB word/document.xml converts successfully at 1.58 GiB peak RSS
-/// in under a second (the ~400 MiB markdown handed over whole), while a
-/// 598 KiB zip declaring a 600 MiB part is refused pre-decompression
-/// ("decompression limit exceeded … more than 536870912 bytes", 0.03 s,
-/// ~20 MiB RSS). That is why the oxide lane gets the same input-side
-/// bound even though the bound does not (cannot) cap what a compressed
-/// container inflates to; selecting `backend="oxide"` accepts that risk
-/// (an opt-in lane, never the default). At the measured ~146×, the 32
+/// 512 MiB total, a 4M× expansion bound). office_oxide 0.1.10 enforces
+/// MAX_PART_SIZE = 512 MiB per part: declared and actual bytes; XML
+/// nesting depth 256 on its own 16 MB parse stack. Its remaining gap, no
+/// total-across-parts cap (measured: a 399 KiB zip with a 400 MiB
+/// word/document.xml converted successfully at 1.58 GiB peak RSS in under
+/// a second, the ~400 MiB markdown handed over whole), is closed at the
+/// seam: the oxide lane audits every container before the engine parses
+/// it and refuses when the parts' inflated bytes pass 512 MiB in total
+/// (see [`OXIDE_MAX_TOTAL_DECOMPRESSED`] and [`audit_oxide_container`]),
+/// so this input-side bound now composes with a decompression-side one
+/// instead of standing alone against it. At the measured ~146×, the 32
 /// MiB default ceiling's honest worst case on the anydoc lane is ~4.6
 /// GiB: not a survivable spike on a small ingestion worker; callers
 /// with tight budgets must lower [`ConvertOptions::max_bytes`] or split
@@ -415,6 +413,51 @@ pub fn anydoc_capability_refusal(capability: &str) -> DocumentError {
 /// HTML peaked at 1118 MiB), so it gets the same input-side bound as the
 /// lanes that amplify by delimiter or container.
 pub const DEFAULT_ANYDOC_INPUT_LIMIT: usize = 32 * 1024 * 1024;
+
+/// The oxide lane's total-decompression ceiling: 512 MiB, the most one
+/// container's parts may inflate to IN SUM on `backend="oxide"`, the same
+/// number anydoc's package limit carries and office_oxide's per-part cap
+/// names. office_oxide 0.1.10 bounds each part separately (its
+/// `MAX_PART_SIZE`, declared and actual) and nothing bounds their sum,
+/// and it never checks a declared size against the inflated bytes:
+/// measured on this tree, a 599 KiB docx whose two parts inflate to
+/// 300 MiB each (each far under the per-part cap) converted on
+/// `backend="oxide"` at ~2.1 GiB peak RSS in ~1.2 s, and with both parts
+/// declaring 1,000 bytes it converted identically. The ceiling is ours,
+/// enforced at the seam before the engine parses anything: see
+/// [`audit_oxide_container`].
+pub const OXIDE_MAX_TOTAL_DECOMPRESSED: u64 = 512 * 1024 * 1024;
+
+/// The zip record signatures the audit walks: local file header, central
+/// directory record, the two end-of-directory records (zip32 and the
+/// zip64 locator/record pair).
+const ZIP_LOCAL_HEADER_SIG: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
+const ZIP_CENTRAL_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+const ZIP_EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+const ZIP64_LOCATOR_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x07];
+const ZIP64_EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x06, 0x06];
+
+/// Little-endian field reads, bounds-checked: a truncated record is
+/// `None`, never a panic (the audit runs on attacker-shaped bytes).
+fn le16(bytes: &[u8], at: usize) -> Option<u16> {
+    let end = at.checked_add(2)?;
+    let window = bytes.get(at..end)?;
+    Some(u16::from_le_bytes([window[0], window[1]]))
+}
+
+fn le32(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    let window = bytes.get(at..end)?;
+    Some(u32::from_le_bytes([
+        window[0], window[1], window[2], window[3],
+    ]))
+}
+
+fn le64(bytes: &[u8], at: usize) -> Option<u64> {
+    let end = at.checked_add(8)?;
+    let window = bytes.get(at..end)?;
+    Some(u64::from_le_bytes(window.try_into().ok()?))
+}
 
 /// The [MS-CFB] OLE compound-file signature: the legacy office container
 /// (doc/ppt, and Excel's legacy `xls` inside the Excel kind). One
@@ -469,12 +512,13 @@ pub struct ConvertOptions<'a> {
     /// lowers it for callers with a bigger (or tighter) memory budget:
     /// at the measured multiple the default's anydoc-lane worst case is
     /// ~4.6 GiB, so tighter is often right. The honest limits of what it
-    /// bounds: anydoc additionally caps decompression engine-side (its
-    /// package limits), while office_oxide 0.1.10 caps 512 MiB per part
-    /// but has no total-across-parts cap and no output cap: an opt-in
-    /// lane whose caller accepts unbounded multi-part decompression risk
-    /// by selecting it; the ceiling bounds the bytes handed in, never
-    /// the bytes they inflate to. The pdf_oxide lane is unmetered by
+    /// bounds: the bytes handed in, never the bytes they inflate to. The
+    /// inflated side is bounded one lane deep: anydoc caps decompression
+    /// engine-side (its package limits), and the oxide lane caps what a
+    /// container's parts inflate to in total at the seam
+    /// ([`OXIDE_MAX_TOTAL_DECOMPRESSED`], 512 MiB across all parts, on
+    /// top of office_oxide's 512 MiB per-part cap). No lane has an
+    /// output-size cap beyond those. The pdf_oxide lane is unmetered by
     /// this knob: its own limits govern.
     pub max_bytes: Option<usize>,
 }
@@ -634,16 +678,16 @@ fn convert(
     // The input ceiling: the lanes that amplify their input into resident
     // memory: anydoc (~146x worst case on adversarial delimiter formats, and
     // engine-side decompression caps on top; see [DEFAULT_ANYDOC_INPUT_LIMIT]),
-    // office_oxide (512 MiB per part since 0.1.10, but no total-across-parts
-    // cap and no output cap: a 399 KiB zip-bomb docx with a 400 MiB part
-    // peaked at 1.58 GiB RSS on the oxide lane, measured), and HTML (~23x
-    // input: the converter holds the whole input and output at once; a
-    // 48 MiB doctype HTML peaked at 1118 MiB, measured), so the last gets
-    // the same input-side bound as the first two.
-    // What the ceiling does not do is bound office_oxide's DEcompression
-    // beyond that per-part cap: that lane's caller accepts unbounded
-    // multi-part decompression risk by selecting it (the honest state,
-    // stated in [`ConvertOptions::max_bytes`]'s docs).
+    // office_oxide (512 MiB per part since 0.1.10, plus the seam's
+    // total-across-parts audit below: [audit_oxide_container]; the 399 KiB
+    // zip-bomb docx with a 400 MiB part that peaked at 1.58 GiB RSS was
+    // measured through that per-part cap before the total audit existed),
+    // and HTML (~23x input: the converter holds the whole input and output
+    // at once; a 48 MiB doctype HTML peaked at 1118 MiB, measured), so the
+    // last gets the same input-side bound as the first two.
+    // What no ceiling here does is bound OUTPUT: the inflated bytes are
+    // capped on the office lanes (engine-side, or at the seam on the oxide
+    // lane) and nowhere else.
     if engine == Engine::Anydoc || engine == Engine::OfficeOxide || engine == Engine::Html2Md {
         let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
         if bytes.len() > limit {
@@ -924,6 +968,716 @@ fn looks_like_csv(bytes: &[u8]) -> bool {
     })
 }
 
+/// The oxide lane's decompression audit, run on every office container
+/// before [`office_oxide::Document::from_reader`] sees it: refuse a zip
+/// whose parts inflate past [`OXIDE_MAX_TOTAL_DECOMPRESSED`] in total.
+/// Two stages, both over the container's own zip central directory
+/// (parsed here, not through the `zip` crate: it is in the lock only as
+/// anydoc's and office_oxide's transitive, and the audit needs exactly
+/// four record layouts, not an archive API):
+///
+/// 1. the **declared pass** sums every entry's declared uncompressed size
+///    and refuses past the ceiling without inflating a byte: the honest
+///    multi-part bomb (600 MiB declared across two 300 MiB parts, each
+///    far under office_oxide's 512 MiB per-part cap, so that cap cannot
+///    fire) dies here sub-ms at ~40 MiB RSS;
+/// 2. the **actual pass** does not trust those sizes (they are
+///    attacker-controlled and office_oxide validates none of them:
+///    measured, parts declaring 1,000 bytes inflate to 300 MiB each and
+///    convert identically): it re-inflates every part itself, each under
+///    a hard `take(ceiling + 1)`, counts the bytes through a 64 KiB
+///    scratch (nothing is ever materialized at part size), and refuses
+///    when the running sum passes the ceiling. office_oxide reads a
+///    subset of the entries audited here, under its own per-part cap, so
+///    a container this audit passes cannot hand it more than the ceiling
+///    of inflated bytes in total.
+///
+/// The audit reads the exact spans the reader will: data located through
+/// each entry's LOCAL header (whose name/extra lengths can differ from
+/// the central record's), sized by the central directory's compressed
+/// size, rebased by the same prepend delta the reader computes (its
+/// search for the first central-directory signature). The directory
+/// resolution mirrors the reader's own ladder field for field,
+/// including the two places where the zip 8.6 reader's field choice is
+/// not what a spec reading would suggest: it counts records from the
+/// EOCD's on-this-disk field (not the total-entries field, whose only
+/// reader-visible roles are the empty-archive early accept and the
+/// zip64 sentinel trigger), and a zip64 locator that parses puts the
+/// candidate on a hard zip64 branch with no zip32 fallback. Both were
+/// measured as live bypass shapes before this mirror existed: an EOCD
+/// declaring 1 total entry against 5 on-this-disk, and one declaring 0
+/// total against 2 with the directory planted after the EOCD, each
+/// passed the audit while the engine inflated 600 MiB at ~2.1 GiB peak
+/// RSS from a ~600 KiB input (2026-09-16). Where the audit's model and
+/// the reader's acceptance can still part ways (a known extra field
+/// whose content parser rejects a record is the residual family), the
+/// union closes it: every end-of-directory candidate that resolves has
+/// its records audited, not just the one the reader would pick, so a
+/// reader that falls back to an earlier signature lands on records the
+/// audit has already bounded. Anything the directory parse cannot
+/// resolve is refused, never skipped: a container the reader can open
+/// while the audit cannot is precisely the shape that must fail closed.
+/// Legacy OLE containers (doc/xls/ppt) have no zip directory:
+/// office_oxide reads them through its own CFB reader, whose sector
+/// addressing is bounded by the input length.
+fn audit_oxide_container(bytes: &[u8]) -> Result<(), DocumentError> {
+    if is_ole_container(bytes) {
+        return Ok(());
+    }
+    let Some(parts) = zip_parts(bytes)? else {
+        return Ok(());
+    };
+    // Stage 1: declared sizes. One number, attacker-supplied, so the pass
+    // is a cheap pre-filter (sub-ms), not the bound.
+    let mut declared_total: u64 = 0;
+    for part in &parts {
+        declared_total = declared_total.saturating_add(part.uncompressed_size);
+        if declared_total > OXIDE_MAX_TOTAL_DECOMPRESSED {
+            return Err(Convert(format!(
+                "office_oxide: decompression limit exceeded: part '{}' declares {} uncompressed \
+                 bytes ({} across all parts), over this lane's {}-byte ceiling across all parts \
+                 of one container (office_oxide's own cap bounds each part separately and cannot \
+                 see the sum)",
+                part.name, part.uncompressed_size, declared_total, OXIDE_MAX_TOTAL_DECOMPRESSED,
+            )));
+        }
+    }
+    // Stage 2: the inflated bytes themselves, the bound the declared sizes
+    // cannot give.
+    let mut inflated_total: u64 = 0;
+    for part in &parts {
+        inflated_total = inflated_total.saturating_add(part_inflated_bytes(bytes, part)?);
+        if inflated_total > OXIDE_MAX_TOTAL_DECOMPRESSED {
+            return Err(Convert(format!(
+                "office_oxide: decompression limit exceeded: the container's parts inflate past \
+                 this lane's {}-byte ceiling across all parts while their declared sizes sum to \
+                 only {} (a declared size does not bound what a part inflates to)",
+                OXIDE_MAX_TOTAL_DECOMPRESSED, declared_total,
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One central-directory entry, the fields the audit consumes. The name is
+/// message-furniture only (lossy-decoded); `header_start` is the LOCAL
+/// header's position after the prepend rebase.
+struct ZipPart {
+    name: String,
+    method: u16,
+    encrypted: bool,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    header_start: u64,
+}
+
+/// Every central-directory entry the reader could resolve, or `None` when
+/// the bytes carry no end-of-central-directory signature at all (not a
+/// zip: office_oxide's own error paths stand, and they cannot inflate
+/// anything). Zip signatures that never resolve to a valid directory are
+/// an `Err`: the reader's directory search (its retry ladder, prepend
+/// handling, zip64 fallbacks) accepts strictly more shapes than this
+/// parse, and a container it can open while the audit cannot is the
+/// evasion shape. Candidates are tried last-first, the reader's own
+/// backward order, but not first-wins: the records of EVERY candidate
+/// that resolves (under [`resolve_eocd`], the reader's own acceptance
+/// rules) are unioned. The reader itself stops at the first candidate it
+/// accepts and only walks backwards again when one rejects, so the union
+/// is a superset of the records it can ever materialize, which is the
+/// point: a reader that rejects a candidate for a reason this mirror
+/// does not reproduce (a known extra field whose content parser errors
+/// is the residual family) falls back to an earlier signature whose
+/// records are already in the union, already bounded. A record walk is
+/// bounded by the end of file, not by the candidate's own position: the
+/// reader's records are read sequentially off the whole-file cursor and
+/// only the file's end stops them, so a directory planted after the end
+/// record (the total-entries-is-zero shape) is walked here exactly as
+/// the reader walks it.
+fn zip_parts(bytes: &[u8]) -> Result<Option<Vec<ZipPart>>, DocumentError> {
+    let unauditable = |why: &str| {
+        Convert(format!(
+            "office_oxide: the container's zip directory did not parse under this lane's \
+             decompression audit: {why}"
+        ))
+    };
+    let mut saw_signature = false;
+    let mut resolved_any = false;
+    let mut union: Vec<ZipPart> = Vec::new();
+    // Candidates by backward scan on the signature's last byte (the rare
+    // one: memchr's search over the reader's own whole-file range);
+    // `probe` shrinks past each hit so earlier signatures surface next.
+    let mut probe = bytes.len();
+    while let Some(hit) = memchr::memrchr(0x06, &bytes[..probe]) {
+        probe = hit;
+        let Some(pos) = hit.checked_sub(3) else { break };
+        if !bytes[pos..=hit].starts_with(&ZIP_EOCD_SIG) {
+            continue;
+        }
+        saw_signature = true;
+        let Some(found) = resolve_eocd(bytes, pos) else {
+            // The reader rejects this candidate (its disks, its comment,
+            // its zip64 follow-ups) and tries an earlier signature: so
+            // does this scan. Rejection is never silent acceptance of the
+            // remaining bytes; the union below still covers every earlier
+            // candidate that resolves.
+            continue;
+        };
+        let ResolvedEocd {
+            records,
+            base,
+            delta,
+        } = found;
+        if records == 0 {
+            // An empty directory contributes nothing; the reader's own
+            // missing-part error stands for the candidate it picks.
+            resolved_any = true;
+            continue;
+        }
+        let Some(base) = usize::try_from(base).ok() else {
+            continue;
+        };
+        // A record needs at least its 46 fixed bytes: an entry count the
+        // span between the directory's first record and the end of file
+        // cannot physically hold is forged, and walking it is waste (the
+        // reader's own sequential walk would die the same way, rejecting
+        // the candidate).
+        if records.saturating_mul(46) > bytes.len().saturating_sub(base) as u64 {
+            continue;
+        }
+        let mut parts = Vec::new();
+        let mut at = base;
+        let mut parsed = true;
+        for _ in 0..records {
+            match parse_cd_record(bytes, at, bytes.len(), delta) {
+                Some((next, part)) => {
+                    parts.push(part);
+                    at = next;
+                }
+                None => {
+                    parsed = false;
+                    break;
+                }
+            }
+        }
+        if parsed {
+            // Only a candidate whose records fully parse counts as
+            // resolved: one whose walk dies mid-record is a candidate the
+            // reader's own walk rejects the same way, so neither side
+            // ever reads a partial take, and the audit says so in its
+            // own refusal voice instead of handing the engine a silently
+            // emptier directory than any candidate declared.
+            resolved_any = true;
+            union.extend(parts);
+        }
+    }
+    if !saw_signature {
+        return Ok(None);
+    }
+    if resolved_any {
+        Ok(Some(union))
+    } else {
+        Err(unauditable(
+            "no end-of-directory candidate resolved to a central directory",
+        ))
+    }
+}
+
+/// One end-of-directory candidate, resolved the way the reader resolves
+/// it: `None` (from [`resolve_eocd`]) is a candidate the reader itself
+/// rejects (and so retries an earlier signature; this scan does the
+/// same), and the struct carries the three numbers the reader's
+/// directory walk is fully determined by: how many records it reads,
+/// where the first one sits, and the prepend delta it adds to every
+/// record's local-header offset.
+struct ResolvedEocd {
+    records: u64,
+    base: u64,
+    delta: u64,
+}
+
+/// Resolve one end-of-directory candidate at `pos` under the reader's own
+/// acceptance ladder: the fixed fields must read (a truncated record is
+/// rejected), the comment must fit to the end of file (the reader's
+/// relaxed rule: it may end early against garbage-after-comment writers,
+/// but never run past the end), the two disk fields must agree (the
+/// reader's multi-disk refusal), and a zip64-capped record (any of the
+/// three sentinel fields) with a parseable locator takes the reader's
+/// HARD zip64 branch ([`resolve_zip64`]) with no zip32 fallback. An
+/// absent locator leaves the zip32 values, exactly the reader's own
+/// fallback, and the zip32 resolution ([`resolve_zip32`]) models the
+/// two field choices that are not what the record's names suggest: the
+/// record count comes from the on-this-disk field, and a total-entries
+/// of zero takes the reader's early accept whose directory starts at the
+/// declared offset itself.
+fn resolve_eocd(bytes: &[u8], pos: usize) -> Option<ResolvedEocd> {
+    let comment_len = le16(bytes, pos + 20)? as usize;
+    let end = pos.checked_add(22)?.checked_add(comment_len)?;
+    if end > bytes.len() {
+        return None;
+    }
+    if le16(bytes, pos + 4)? != le16(bytes, pos + 6)? {
+        // multi-disk: the reader's UnsupportedArchive, a candidate rejection
+        return None;
+    }
+    let on_this_disk = u64::from(le16(bytes, pos + 8)?);
+    let total = u64::from(le16(bytes, pos + 10)?);
+    let cd_size = le32(bytes, pos + 12)?;
+    let cd_offset = u64::from(le32(bytes, pos + 16)?);
+    // The reader's may_be_zip64: any one of the three sentinel fields puts
+    // the candidate on the zip64 ladder (a locator that fails to parse
+    // falls back to these zip32 values, the reader's own behavior).
+    let zip64_capped =
+        total == u64::from(u16::MAX) || cd_size == u32::MAX || cd_offset == u64::from(u32::MAX);
+    if zip64_capped && let Some(locator) = read_zip64_locator(bytes, pos) {
+        return resolve_zip64(bytes, pos, locator);
+    }
+    resolve_zip32(bytes, pos, on_this_disk, total, cd_offset)
+}
+
+/// The zip32 resolution, the reader's two paths. A nonzero total takes the
+/// search path: the directory cannot start at or after this record, and
+/// its first record is the first central signature from the declared
+/// offset up to this record (prepended junk moved the real directory
+/// forward; the delta that search computes rebases every local offset).
+/// The record count is the on-this-disk field unioned with the total: the
+/// reader counts records from the on-this-disk field alone (zip 8.6's
+/// CentralDirectoryInfo reads that field, not the total, the divergence
+/// this union is written for), and the total is unioned in so the audited
+/// set covers either field a future reader might count from. A total of
+/// zero takes the reader's early accept instead: no search, the directory
+/// is the declared offset itself when that lies past this record (a
+/// trailing directory, delta zero, the saturating archive offset the
+/// reader computes clamps to zero), and when it does not, the directory
+/// would start on this record's own signature, a magic mismatch the
+/// reader's record parse rejects the whole candidate for.
+fn resolve_zip32(
+    bytes: &[u8],
+    pos: usize,
+    on_this_disk: u64,
+    total: u64,
+    cd_offset: u64,
+) -> Option<ResolvedEocd> {
+    if total == 0 {
+        if on_this_disk == 0 {
+            // The reader's empty archive: zero records walk, whatever the
+            // declared offset was, and its missing-part error stands.
+            return Some(ResolvedEocd {
+                records: 0,
+                base: pos as u64,
+                delta: 0,
+            });
+        }
+        let base = cd_offset.max(pos as u64);
+        if base == pos as u64 {
+            return None;
+        }
+        return Some(ResolvedEocd {
+            records: on_this_disk,
+            base,
+            delta: 0,
+        });
+    }
+    if cd_offset >= pos as u64 {
+        // the reader's "Invalid CDFH offset in EOCD": the directory cannot
+        // start at or after the end record on this path
+        return None;
+    }
+    let base = locate_cd_base(bytes, cd_offset, pos)?;
+    let delta = base as u64 - cd_offset;
+    Some(ResolvedEocd {
+        records: on_this_disk.max(total),
+        base: base as u64,
+        delta,
+    })
+}
+
+/// The zip64 end-of-directory locator, 20 bytes before the zip32 end
+/// record: its signature and the three fields the reader's hard zip64
+/// branch consumes (the disk the directory sits on, the offset of the
+/// zip64 end record itself, and the disk count). `None` when the record
+/// is missing or mistyped, which is NOT a candidate rejection: the
+/// reader's own fallback for an unparseable locator is the zip32 values,
+/// and [`resolve_eocd`] does the same.
+fn read_zip64_locator(bytes: &[u8], eocd_pos: usize) -> Option<(u32, u64, u32)> {
+    let locator = eocd_pos.checked_sub(20)?;
+    if !bytes
+        .get(locator..locator.checked_add(4)?)?
+        .starts_with(&ZIP64_LOCATOR_SIG)
+    {
+        return None;
+    }
+    Some((
+        le32(bytes, locator + 4)?,
+        le64(bytes, locator + 8)?,
+        le32(bytes, locator + 16)?,
+    ))
+}
+
+/// The hard zip64 branch a parseable locator puts the candidate on: the
+/// reader searches FORWARD from the locator's declared record offset for
+/// the first zip64 end-record signature before the locator (it does not
+/// trust the declared offset as the record's position: the delta it
+/// computes for the whole archive comes from where the record is FOUND),
+/// and every check along the way is a candidate rejection, never a zip32
+/// fallback: the record's own size field must equal the distance from
+/// the record to the locator, the record's extensible tail must fit
+/// before the end of file, the record's disk must be the locator's disk
+/// and its two disk fields must agree, the record must sit past
+/// `count x 46 + declared directory offset` (the directory has to fit
+/// before it), the on-this-disk count cannot exceed the total, and the
+/// rebased directory start (`declared offset + delta`) must not wrap.
+/// On success the directory is EXACTLY the rebased offset (the zip64
+/// path does no first-signature search, unlike the zip32 one), and
+/// `delta` rebases every local offset.
+fn resolve_zip64(
+    bytes: &[u8],
+    eocd_pos: usize,
+    (locator_disk, declared_record, disks): (u32, u64, u32),
+) -> Option<ResolvedEocd> {
+    let locator = eocd_pos.checked_sub(20)?;
+    // The reader's two locator-level candidate rejections.
+    if declared_record >= locator as u64 || disks > 1 {
+        return None;
+    }
+    let start = usize::try_from(declared_record).ok()?;
+    let window = bytes.get(start..locator)?;
+    // Forward search for the record, first hit wins (the reader's
+    // OptimisticMagicFinder over the same window).
+    let mut probe = 0;
+    while let Some(hit) = memchr::memchr(0x06, &window[probe..]) {
+        let at = probe + hit;
+        probe = at + 1;
+        let Some(record) = at.checked_sub(3) else {
+            continue;
+        };
+        if !window[record..=at].starts_with(&ZIP64_EOCD_SIG) {
+            continue;
+        }
+        let record = start + record;
+        let delta = record as u64 - declared_record;
+        // try_read_eocd64's checks, in the reader's order; a failed check
+        // rejects this POSITION (the search continues), not the candidate.
+        let record_size = le64(bytes, record + 4)?;
+        if record_size < 40 {
+            continue;
+        }
+        if record_size.checked_add(12) != Some((locator - record) as u64) {
+            continue;
+        }
+        // The record's fixed 56 bytes plus any extensible tail past the
+        // 44-byte minimum must fit before the end of file: the reader
+        // reads them off the whole-file cursor.
+        let tail = record_size.saturating_sub(44) as usize;
+        let record_end = record.checked_add(56)?.checked_add(tail)?;
+        if record_end > bytes.len() {
+            continue;
+        }
+        let disk = le32(bytes, record + 16)?;
+        let disk_with = le32(bytes, record + 20)?;
+        if disk_with != locator_disk {
+            continue;
+        }
+        let on_this_disk = le64(bytes, record + 24)?;
+        let count = le64(bytes, record + 32)?;
+        let cd_offset = le64(bytes, record + 48)?;
+        if (record as u64) < count.saturating_mul(46).saturating_add(cd_offset) {
+            continue;
+        }
+        // CentralDirectoryInfo's and read_central_header's checks: these
+        // reject the whole candidate, like the reader's retry ladder.
+        if disk != disk_with || on_this_disk > count {
+            return None;
+        }
+        let base = cd_offset.checked_add(delta)?;
+        return Some(ResolvedEocd {
+            records: count,
+            base,
+            delta,
+        });
+    }
+    // The locator parsed but no record resolved: the reader rejects the
+    // candidate outright: there is no zip32 fallback once the locator is
+    // parseable, the divergence the old optional-zip64 enrichment missed.
+    None
+}
+
+/// Where the central directory's records actually start. The common case
+/// is the declared offset; a prepended container (the reader's prepend
+/// handling) moved them together, so the fallback is the reader's own
+/// move: the first central-directory signature between the declared
+/// offset and the end record, and every local offset shifts by the same
+/// delta. The search anchors on the signature's LAST byte (0x02) and
+/// matches the four bytes ENDING there; anchoring on the first byte and
+/// matching forward, or matching AT the anchor, finds nothing (the
+/// signature never starts with its own last byte), which is exactly how
+/// the prepended shape used to die unauditable before this was pinned.
+fn locate_cd_base(bytes: &[u8], cd_offset: u64, limit: usize) -> Option<usize> {
+    let stated = usize::try_from(cd_offset).ok()?;
+    let stated_end = stated.checked_add(4)?;
+    if bytes.get(stated..stated_end)?.starts_with(&ZIP_CENTRAL_SIG) {
+        return Some(stated);
+    }
+    let window = bytes.get(stated..limit)?;
+    let mut probe = 0;
+    while let Some(hit) = memchr::memchr(0x02, &window[probe..]) {
+        let at = probe + hit;
+        probe = at + 1;
+        let Some(sig) = at.checked_sub(3) else {
+            continue;
+        };
+        if window[sig..=at].starts_with(&ZIP_CENTRAL_SIG) {
+            return Some(stated + sig);
+        }
+    }
+    None
+}
+
+/// One central-directory record: the fields the audit consumes plus the
+/// next record's offset (records end before `limit`, the end of the file:
+/// the reader reads records sequentially off the whole-file cursor and
+/// only the file's end stops them; a record run may cross the end
+/// record's own position, and a trailing directory past it is exactly the
+/// total-entries-is-zero shape). `delta` is the prepend rebase the reader
+/// applies to every local offset. The extra field is walked with the
+/// reader's own well-formedness rules ([`zip64_extra`]): a chunk the
+/// reader's parse would reject rejects the RECORD, which rejects the
+/// whole candidate, never a silent fall-back to the fixed values over
+/// bytes the reader would have refused.
+fn parse_cd_record(bytes: &[u8], at: usize, limit: usize, delta: u64) -> Option<(usize, ZipPart)> {
+    let fixed_end = at.checked_add(46)?;
+    if fixed_end > limit || !bytes[at..at + 4].starts_with(&ZIP_CENTRAL_SIG) {
+        return None;
+    }
+    let flags = le16(bytes, at + 8)?;
+    let method = le16(bytes, at + 10)?;
+    let mut compressed_size = le32(bytes, at + 20)? as u64;
+    let mut uncompressed_size = le32(bytes, at + 24)? as u64;
+    let name_len = le16(bytes, at + 28)? as usize;
+    let extra_len = le16(bytes, at + 30)? as usize;
+    let comment_len = le16(bytes, at + 32)? as usize;
+    let mut header_start = le32(bytes, at + 42)? as u64;
+    let name_end = fixed_end.checked_add(name_len)?;
+    let extra_end = name_end.checked_add(extra_len)?;
+    let record_end = extra_end.checked_add(comment_len)?;
+    if record_end > limit {
+        return None;
+    }
+    if let Some(extra) = bytes.get(name_end..extra_end) {
+        match zip64_extra(extra, uncompressed_size, compressed_size, header_start) {
+            Zip64Extra::Absent => {}
+            Zip64Extra::Parsed {
+                size,
+                compressed,
+                header,
+            } => {
+                uncompressed_size = size;
+                compressed_size = compressed;
+                header_start = header;
+            }
+            // A malformed extra field is a record the reader's own parse
+            // rejects the whole candidate for: this walk does the same,
+            // and the candidate scan moves to an earlier signature.
+            Zip64Extra::Malformed => return None,
+        }
+    }
+    let name = String::from_utf8_lossy(bytes.get(fixed_end..name_end)?).into_owned();
+    Some((
+        record_end,
+        ZipPart {
+            name,
+            method,
+            encrypted: flags & 1 == 1,
+            compressed_size,
+            uncompressed_size,
+            header_start: header_start.checked_add(delta)?,
+        },
+    ))
+}
+
+/// The extra-field ids the reader's own parse knows by number: for these,
+/// a chunk whose header or content cannot be read is a parse ERROR (the
+/// candidate is rejected), where an unknown id's same bytes are padding
+/// the reader skips past.
+const KNOWN_EXTRA_IDS: [u16; 7] = [0x0001, 0x000A, 0x5455, 0x6375, 0x7075, 0x9901, 0xA11E];
+
+/// The walk over one record's extra field, mirroring the reader's chunk
+/// loop field for field: every chunk's declared length must fit inside
+/// the extra field (the reader reads the chunk's content off its cursor
+/// and an overrun is a truncation error, not padding); a trailing run of
+/// one byte is padding (the reader's field-id read consumes it and stops
+/// the loop), while two or three trailing bytes that name a KNOWN id are
+/// a header the reader cannot finish (an error), and any other trailing
+/// bytes are padding. The zip64 extended-information field (id 0x0001)
+/// fills any fixed size field capped at 0xFFFFFFFF, read in the order the
+/// reader's own parse fills them (uncompressed, compressed, local
+/// offset; a field of 24+ bytes carries all three), and the walk
+/// continues past it; the reader parses every remaining chunk too, and
+/// any of them can still reject the record. `Malformed` is the reader's
+/// parse error; `Absent` leaves the fixed values standing, exactly the
+/// reader's behavior when no zip64 field is present; later zip64 fields
+/// override earlier ones, as they do in the reader's parse.
+enum Zip64Extra {
+    Absent,
+    Malformed,
+    Parsed {
+        size: u64,
+        compressed: u64,
+        header: u64,
+    },
+}
+
+fn zip64_extra(extra: &[u8], uncompressed: u64, compressed: u64, header_start: u64) -> Zip64Extra {
+    let mut probe = 0;
+    let mut parsed: Option<(u64, u64, u64)> = None;
+    while probe + 4 <= extra.len() {
+        let Some(id) = le16(extra, probe) else {
+            return Zip64Extra::Malformed;
+        };
+        let Some(len) = le16(extra, probe + 2) else {
+            return Zip64Extra::Malformed;
+        };
+        let Some(end) = probe
+            .checked_add(4)
+            .and_then(|at| at.checked_add(len as usize))
+        else {
+            return Zip64Extra::Malformed;
+        };
+        if end > extra.len() {
+            // the reader reads the chunk's content off its extra-field
+            // cursor: an overrun is a truncation error, never padding
+            return Zip64Extra::Malformed;
+        }
+        if id == 0x0001 {
+            let body = &extra[probe + 4..end];
+            let full = body.len() >= 24;
+            let mut at = 0;
+            // One field read under the reader's presence rule: `Some(None)`
+            // = the rule says stand pat on the fixed value, `None` = the
+            // rule says read and the chunk is too short for it (the
+            // reader's "ZIP64 extra field truncated" / "wrong length").
+            let mut read = |present: bool| -> Option<Option<u64>> {
+                if !full && !present {
+                    return Some(None);
+                }
+                let value = le64(body, at)?;
+                at += 8;
+                Some(Some(value))
+            };
+            let size = match read(uncompressed == u64::from(u32::MAX)) {
+                Some(Some(value)) => value,
+                Some(None) => uncompressed,
+                None => return Zip64Extra::Malformed,
+            };
+            let compressed = match read(compressed == u64::from(u32::MAX)) {
+                Some(Some(value)) => value,
+                Some(None) => compressed,
+                None => return Zip64Extra::Malformed,
+            };
+            let header = match read(header_start == u64::from(u32::MAX)) {
+                Some(Some(value)) => value,
+                Some(None) => header_start,
+                None => return Zip64Extra::Malformed,
+            };
+            parsed = Some((size, compressed, header));
+        }
+        probe = end;
+    }
+    // Two or three trailing bytes: a known id makes the header the reader
+    // cannot finish (an error); anything else is padding.
+    if extra.len() - probe >= 2
+        && let Some(id) = le16(extra, probe)
+        && KNOWN_EXTRA_IDS.contains(&id)
+    {
+        return Zip64Extra::Malformed;
+    }
+    match parsed {
+        Some((size, compressed, header)) => Zip64Extra::Parsed {
+            size,
+            compressed,
+            header,
+        },
+        None => Zip64Extra::Absent,
+    }
+}
+
+/// The bytes one part inflates to, counted (never materialized: the only
+/// buffer is a 64 KiB scratch) under a hard per-part
+/// `take(ceiling + 1)`. The span is the reader's own: data located
+/// through the LOCAL header (its name/extra lengths are the ones that
+/// matter and can differ from the central record's), sized by the
+/// central directory's compressed size, which is what the reader's
+/// `find_content` takes its compressed stream to. An entry the audit
+/// cannot bound (encrypted, an unsupported compression method: both are
+/// reader errors today) is refused here, before it can reach the engine.
+fn part_inflated_bytes(bytes: &[u8], part: &ZipPart) -> Result<u64, DocumentError> {
+    if part.encrypted {
+        return Err(Convert(format!(
+            "office_oxide: part '{}' is encrypted: this lane audits the bytes it inflates and \
+             cannot bound encrypted ones",
+            part.name,
+        )));
+    }
+    let header = usize::try_from(part.header_start).map_err(|_| {
+        Convert(format!(
+            "office_oxide: part '{}' names a local header this audit cannot address",
+            part.name,
+        ))
+    })?;
+    let data_start = (|| {
+        let fixed_end = header.checked_add(30)?;
+        if !bytes
+            .get(header..fixed_end)?
+            .starts_with(&ZIP_LOCAL_HEADER_SIG)
+        {
+            return None;
+        }
+        let name_len = le16(bytes, header + 26)? as usize;
+        let extra_len = le16(bytes, header + 28)? as usize;
+        fixed_end.checked_add(name_len)?.checked_add(extra_len)
+    })()
+    .ok_or_else(|| {
+        Convert(format!(
+            "office_oxide: part '{}' has an unreadable local header: the audit cannot locate \
+             the bytes the reader will inflate",
+            part.name,
+        ))
+    })?;
+    let compressed = usize::try_from(part.compressed_size).unwrap_or(usize::MAX);
+    let span_end = data_start.saturating_add(compressed).min(bytes.len());
+    let Some(span) = (data_start <= span_end).then(|| &bytes[data_start..span_end]) else {
+        return Ok(0);
+    };
+    match part.method {
+        // Stored: the inflated bytes are the span.
+        0 => Ok(span.len() as u64),
+        // Deflated: count the inflate under the per-part ceiling.
+        8 => {
+            use std::io::Read as _;
+            let decoder = flate2::read::DeflateDecoder::new(span);
+            let mut capped = decoder.take(OXIDE_MAX_TOTAL_DECOMPRESSED + 1);
+            let mut scratch = [0u8; 64 * 1024];
+            let mut count: u64 = 0;
+            loop {
+                match capped.read(&mut scratch) {
+                    Ok(0) => break,
+                    Ok(n) => count += n as u64,
+                    // a stream that dies mid-part: the reader's own inflate
+                    // dies the same way on the same bytes, so the count so
+                    // far is what it could have produced
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            Ok(count)
+        }
+        _ => Err(Convert(format!(
+            "office_oxide: part '{}' names compression method {}: this lane audits stored and \
+             deflated parts only, so the container is refused before it can inflate",
+            part.name, part.method,
+        ))),
+    }
+}
+
 /// The `backend="oxide"` office conversion: office_oxide's unified reader.
 /// Its `from_reader` takes the format explicitly, and anydoc's Excel kind
 /// covers both the xlsx family and legacy xls, so the shared container
@@ -933,8 +1687,11 @@ fn looks_like_csv(bytes: &[u8]) -> bool {
 /// check borrows them, then they move into the `Cursor` whole: zero
 /// copies (convert() already owns the Vec; `from_reader`'s `Read + Seek +
 /// 'static` bound demands ownership of the reader, not a second copy of
-/// the bytes).
+/// the bytes). Before any of that, the decompression audit
+/// ([`audit_oxide_container`]): office_oxide bounds each part at 512 MiB
+/// and nothing else, so the total across parts is refused here.
 fn office_markdown(bytes: Vec<u8>, kind: Kind) -> Result<String, DocumentError> {
+    audit_oxide_container(&bytes)?;
     let format = match kind {
         Kind::Docx => office_oxide::DocumentFormat::Docx,
         Kind::Excel => {
@@ -2330,5 +3087,191 @@ mod tests {
         prefix.extend(std::iter::repeat_n(b'x', 80 * 1024));
         let c = provisional_read_ceiling(&prefix, None, None, Backend::Auto, PROVISIONAL_FALLBACK);
         assert_eq!(c, DEFAULT_ANYDOC_INPUT_LIMIT);
+    }
+
+    // --- the oxide lane's decompression audit: the container shapes it
+    // must pass and refuse, at fixture scale. The gigabyte bombs are
+    // pinned end-to-end through the wheel in
+    // tests/test_documents_resource_bounds.py; these pin the parse and
+    // refusal logic itself on hand-built containers.
+
+    /// A minimal OPC-shaped zip: local headers, data, central directory,
+    /// EOCD, every offset and size honest unless `declare` overrides a
+    /// part's declared uncompressed size in the directory (the size-lie
+    /// shape). A method-8 part carries its content deflate-compressed (the
+    /// reader's method 8), anything else stored.
+    fn zip_container(parts: &[(&str, u16, &[u8], Option<u32>)]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut out = Vec::new();
+        let mut records: Vec<(u32, String, u16, u32, u32)> = Vec::new();
+        for (name, method, content, _declare) in parts {
+            let (data, csize, actual) = match *method {
+                8 => {
+                    let mut encoder = flate2::write::DeflateEncoder::new(
+                        Vec::new(),
+                        flate2::Compression::default(),
+                    );
+                    encoder.write_all(content).unwrap();
+                    let data = encoder.finish().unwrap();
+                    let len = data.len() as u32;
+                    (data, len, len)
+                }
+                _ => {
+                    let len = content.len() as u32;
+                    (content.to_vec(), len, len)
+                }
+            };
+            records.push((out.len() as u32, name.to_string(), *method, csize, actual));
+            out.extend_from_slice(&ZIP_LOCAL_HEADER_SIG);
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&csize.to_le_bytes());
+            out.extend_from_slice(&actual.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&data);
+        }
+        let cd_offset = out.len() as u32;
+        for (offset, name, method, csize, actual) in &records {
+            let declared = declare_of(parts, name).unwrap_or(*actual);
+            out.extend_from_slice(&ZIP_CENTRAL_SIG);
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&csize.to_le_bytes());
+            out.extend_from_slice(&declared.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+        }
+        let cd_size = out.len() as u32 - cd_offset;
+        out.extend_from_slice(&ZIP_EOCD_SIG);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(records.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(records.len() as u16).to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    /// The `declare` override of the named part (the builder's own table,
+    /// keyed by name so the central-directory loop above can stay a flat
+    /// walk).
+    fn declare_of(parts: &[(&str, u16, &[u8], Option<u32>)], name: &str) -> Option<u32> {
+        parts
+            .iter()
+            .find(|(part, ..)| *part == name)
+            .and_then(|(.., declare)| *declare)
+    }
+
+    #[test]
+    fn oxide_audit_passes_a_legit_container() {
+        // A docx-shaped container at fixture scale: stored meta parts and
+        // a deflated document part, every size honest. Both audit stages
+        // must clear it (the Python corpus pins the end-to-end convert on
+        // the engines' own bytes).
+        let mut document = b"<w:document><w:body><w:p><w:r><w:t>Quarterly Review</w:t>".to_vec();
+        document.extend(std::iter::repeat_n(b'x', 64 * 1024));
+        document.extend_from_slice(b"</w:t></w:r></w:p></w:body></w:document>");
+        let container = zip_container(&[
+            ("[Content_Types].xml", 0, b"<Types/>".as_slice(), None),
+            ("_rels/.rels", 0, b"<Relationships/>".as_slice(), None),
+            ("word/document.xml", 8, &document, None),
+        ]);
+        assert!(audit_oxide_container(&container).is_ok());
+    }
+
+    #[test]
+    fn oxide_audit_refuses_a_multi_part_bomb_on_declared_sizes() {
+        // Two parts declaring 300 MiB each: every one far under
+        // office_oxide's 512 MiB per-part cap (that cap cannot fire), so
+        // only the total across parts catches the bomb. The declared pass
+        // refuses without inflating a byte, naming the part that breaches,
+        // the sum, and the ceiling's own number.
+        let tiny = b"<w:document/>";
+        let container = zip_container(&[
+            ("word/document.xml", 0, tiny, Some(300 * 1024 * 1024)),
+            ("word/header1.xml", 0, tiny, Some(300 * 1024 * 1024)),
+        ]);
+        let Err(DocumentError::Convert(what)) = audit_oxide_container(&container) else {
+            panic!("the multi-part bomb must be refused");
+        };
+        assert!(what.contains("decompression limit exceeded"), "{what}");
+        assert!(what.contains("536870912"), "{what}");
+        assert!(what.contains("word/header1.xml"), "{what}");
+    }
+
+    #[test]
+    fn oxide_audit_counts_the_inflated_bytes_exactly() {
+        // The actual pass's number is the inflated count (the reader's own
+        // per-part take discipline, mirrored): a deflated part counts its
+        // content length, a stored one its span.
+        let mut content = Vec::new();
+        for _ in 0..6_000 {
+            content.extend_from_slice(b"<w:t>quarterly</w:t>");
+        }
+        let container = zip_container(&[("word/document.xml", 8, &content, None)]);
+        let parts = zip_parts(&container).unwrap().unwrap();
+        assert_eq!(parts.len(), 1);
+        let count = part_inflated_bytes(&container, &parts[0]).unwrap();
+        assert_eq!(count, content.len() as u64);
+        let stored = zip_container(&[("word/document.xml", 0, &content, None)]);
+        let parts = zip_parts(&stored).unwrap().unwrap();
+        assert_eq!(
+            part_inflated_bytes(&stored, &parts[0]).unwrap(),
+            content.len() as u64
+        );
+    }
+
+    #[test]
+    fn oxide_audit_refuses_a_method_it_cannot_bound() {
+        // An entry whose compression method the audit cannot inflate is a
+        // reader error today; the audit refuses it up front with the same
+        // outcome and the method named, rather than passing an unbounded
+        // part on to the engine.
+        let container = zip_container(&[("word/document.xml", 99, b"x", None)]);
+        let Err(DocumentError::Convert(what)) = audit_oxide_container(&container) else {
+            panic!("an unboundable method must be refused");
+        };
+        assert!(what.contains("compression method 99"), "{what}");
+    }
+
+    #[test]
+    fn oxide_audit_skips_non_zip_bytes_and_refuses_unresolvable_ones() {
+        // No end-of-directory signature anywhere: not a zip, the reader's
+        // own error path stands (OLE bytes take the same skip through the
+        // container check). An end-of-directory signature that never
+        // resolves to a directory is refused, never skipped: the reader's
+        // directory search is more tolerant than the audit's parse, and a
+        // container the engine can open while the audit cannot is the
+        // evasion shape.
+        assert!(audit_oxide_container(b"not a zip at all").is_ok());
+        let mut empty_directory = b"PK\x05\x06".to_vec();
+        empty_directory.extend_from_slice(&0u16.to_le_bytes()); // disk
+        empty_directory.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+        empty_directory.extend_from_slice(&1u16.to_le_bytes()); // one entry
+        empty_directory.extend_from_slice(&1u16.to_le_bytes());
+        empty_directory.extend_from_slice(&0u32.to_le_bytes()); // size
+        empty_directory.extend_from_slice(&0u32.to_le_bytes()); // offset
+        empty_directory.extend_from_slice(&0u16.to_le_bytes()); // comment
+        let Err(DocumentError::Convert(what)) = audit_oxide_container(&empty_directory) else {
+            panic!("zip signatures that resolve to nothing must be refused");
+        };
+        assert!(what.contains("zip directory did not parse"), "{what}");
     }
 }

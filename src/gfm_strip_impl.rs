@@ -919,6 +919,23 @@ fn strip_emphasis_and_links_at_depth(line: &str, depth: usize) -> String {
             esc = true;
         }
     }
+    // Both delimiter matches for the whole line, one forward pass, before
+    // the main loop (see [`match_delimiters_into`]): the main loop's link
+    // parses become table lookups. Per-character rescans here were the strip's one
+    // superlinear cost: a line of N unmatched `[` re-scanned from each `[`
+    // to end-of-line (12 s measured at 200k, 4x per doubling, the clean
+    // N²/2), and N unclosed `[a](` url-paren scans did it again (21 s at
+    // 200k) independently of the first. The matcher is what the scans were:
+    // the same first-closer-that-balances pairing, computed once. A line
+    // with neither `[` nor `(` skips even that: both tables are consulted
+    // only at those positions, so a delimiter-free line (the common prose
+    // case) pays no pairing pass and no table storage at all.
+    let mut delimiter_storage: Vec<Option<usize>> = Vec::new();
+    let (bracket_match, paren_match) = if chars.iter().any(|&c| c == '[' || c == '(') {
+        match_delimiters_into(&chars, &escaped_at, &mut delimiter_storage)
+    } else {
+        (<&[Option<usize>]>::default(), <&[Option<usize>]>::default())
+    };
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
     while i < chars.len() {
@@ -945,7 +962,7 @@ fn strip_emphasis_and_links_at_depth(line: &str, depth: usize) -> String {
         if c == '!'
             && i + 1 < chars.len()
             && chars[i + 1] == '['
-            && let Some((label, _url, next)) = parse_link(&chars, &escaped_at, i + 1)
+            && let Some((label, _url, next)) = parse_link(&chars, bracket_match, paren_match, i + 1)
         {
             // An image contributes its alt text only: the source is a
             // binary reference, noise for plain text.
@@ -954,7 +971,7 @@ fn strip_emphasis_and_links_at_depth(line: &str, depth: usize) -> String {
             continue;
         }
         if c == '['
-            && let Some((label, url, next)) = parse_link(&chars, &escaped_at, i)
+            && let Some((label, url, next)) = parse_link(&chars, bracket_match, paren_match, i)
         {
             if url == label || url == format!("mailto:{label}") {
                 out.push_str(&label);
@@ -1109,53 +1126,98 @@ fn is_autolink_content(content: &str) -> bool {
 }
 
 /// Parse `[label](url)` starting at `open` (which points at `[`). Returns
-/// the label, the url, and the index just past the closing `)`. A `]`
-/// inside the label arrives escaped from anydoc (`\]`, its in-label
-/// escaping), so bracket matching skips escaped ones.
-fn parse_link(chars: &[char], escaped_at: &[bool], open: usize) -> Option<(String, String, usize)> {
-    let close_bracket = find_unescaped_bracket_close(chars, escaped_at, open)?;
+/// the label, the url, and the index just past the closing `)`. Both
+/// delimiters are table lookups into the line's precomputed matches
+/// ([`match_delimiters`]): the label closes at the first `]` that returns
+/// the opener's bracket depth to zero, the url at the `)` that balances
+/// the `(` after `]`. A `]` inside the label arrives escaped from anydoc
+/// (`\]`, its in-label escaping), so bracket matching skips escaped ones
+/// (the precompute did the skipping); the url scan never consulted
+/// escapes and the lookup preserves that. The four shapes are the old
+/// scan's four: no balancing `]`, a `]` not followed by `(`, an unbalanced
+/// url `(`, all `None` (literal passthrough in the caller); otherwise
+/// `Some`. Recursive label-substring calls (the depth ladder below)
+/// precompute their own substring's tables: each level costs its own
+/// label's length, so the total stays O(line × depth) with
+/// [`MAX_INLINE_DEPTH`] bounding depth.
+fn parse_link(
+    chars: &[char],
+    bracket_match: &[Option<usize>],
+    paren_match: &[Option<usize>],
+    open: usize,
+) -> Option<(String, String, usize)> {
+    let close_bracket = bracket_match.get(open).copied().flatten()?;
     let next = close_bracket + 1;
     if next >= chars.len() || chars[next] != '(' {
         return None;
     }
-    let mut depth = 0;
-    let mut i = next;
-    while i < chars.len() {
-        match chars[i] {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    let label: String = chars[open + 1..close_bracket].iter().collect();
-                    let url: String = chars[next + 1..i].iter().collect();
-                    return Some((label, url, i + 1));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
+    let url_end = paren_match.get(next).copied().flatten()?;
+    let label: String = chars[open + 1..close_bracket].iter().collect();
+    let url: String = chars[next + 1..url_end].iter().collect();
+    Some((label, url, url_end + 1))
 }
 
-fn find_unescaped_bracket_close(chars: &[char], escaped_at: &[bool], open: usize) -> Option<usize> {
-    let mut depth = 0;
-    for (i, &c) in chars.iter().enumerate().skip(open) {
-        if escaped_at[i] {
-            continue;
-        }
+/// Both delimiter matches for one line, one forward pass:
+/// `bracket_match[open]` is the index of the first unescaped `]` that
+/// returns the bracket depth opened at `open` to zero, `paren_match[p]`
+/// the `)` that balances the `(` at `p`. Both are stack pairings: openers
+/// push their index, closers pop the most recent opener and record the
+/// match, which is exactly the first-closer-that-balances scan the two
+/// per-opener rescans performed (a depth counter returning to zero pairs
+/// the same two indices LIFO popping does), minus the quadratic: N
+/// unmatched `[` cost N scans of ~N chars through [`parse_link`], and N
+/// unclosed `[a](` url scans again through the paren loop; both now read
+/// one precomputed table. Forward-stack is also the only pairing that
+/// keeps the bytes: `[[x](y)` must leave the outer `[` literal (its depth
+/// never returns to zero; the inner `[x](y)` parses), which a
+/// `]`-anchored backward walk would break (it pairs the outer `[` with
+/// the LAST `]`, changing the line's bytes). Escapes matter for brackets
+/// only: anydoc escapes a label's `]`, so an escaped bracket is literal
+/// text and pairs nothing; the url-paren scan counted every paren
+/// regardless of escapes, and the paren stack preserves that exactly.
+/// Unmatched closers pop nothing, unmatched openers stay `None`: literal
+/// passthrough, the same answer the rescans gave.
+///
+/// The storage is the hot-path allocation review's answer (2026-09-16,
+/// measured on this box, benign link-bearing corpus, min of 3 children x
+/// 7 runs): the pairing itself is one linear pass, and the cost that
+/// mattered was the allocations around it: two `Vec<Option<usize>>` per
+/// line was +21% on the whole strip pass at 20k lines against the
+/// per-opener scans it replaced, so the two tables now share ONE
+/// caller-owned buffer (an empty `Vec` until a line actually needs
+/// tables: a delimiter-free line, the common prose case, allocates
+/// nothing at all, and the caller skips the pairing pass entirely for
+/// it), and fixed stack arrays were measured the wrong shape for the
+/// same job: 4 KiB of per-recursion-level stack that the depth-cap
+/// ladder (256 levels on the test harness's 2 MiB threads) overflowed.
+fn match_delimiters_into<'a>(
+    chars: &[char],
+    escaped_at: &[bool],
+    storage: &'a mut Vec<Option<usize>>,
+) -> (&'a [Option<usize>], &'a [Option<usize>]) {
+    storage.clear();
+    storage.resize(chars.len() * 2, None);
+    let (brackets, parens) = storage.split_at_mut(chars.len());
+    let mut open_brackets: Vec<usize> = Vec::new();
+    let mut open_parens: Vec<usize> = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
         match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
+            '[' if !escaped_at[i] => open_brackets.push(i),
+            ']' if !escaped_at[i] => {
+                if let Some(open) = open_brackets.pop() {
+                    brackets[open] = Some(i);
+                }
+            }
+            '(' => open_parens.push(i),
+            ')' => {
+                if let Some(open) = open_parens.pop() {
+                    parens[open] = Some(i);
                 }
             }
             _ => {}
         }
     }
-    None
+    (brackets, parens)
 }
 
 /// Put the lifted code spans back, replacing each `\u{0}<idx>\u{0}`
