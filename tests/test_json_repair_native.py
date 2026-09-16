@@ -1253,3 +1253,514 @@ class TestRepairDeadline:
             repair_json_loads(raw, schema={"type": "array"}, deadline_ms=1)
         with pytest.raises(TimeoutError):
             repair_json_loads(raw, schema={"type": "array"}, salvage=True, deadline_ms=1)
+
+    def test_salvage_unwrap_nested_repair_inherits_the_deadline(self) -> None:
+        # H2 escape, fixed: the salvage unwrap of a double-serialized
+        # container ran the nested repair() with a FRESH config that dropped
+        # the deadline — a parser-quadratic string content (the dup-key
+        # shape) ran its full unbounded quadratic (~4s at n=100k) inside a
+        # 100ms budget before the outer clock could fire. The nested call
+        # now inherits the caller's clock and its abort propagates.
+        nested = "[{" + '"a":1 "a":1 ' * 100_000 + "}]"
+        raw = '{"payload": ' + '"' + nested.replace('\\', '\\\\').replace('"', '\\"') + '"}'
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"payload": {"type": "object"}},
+            "required": ["payload"],
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, salvage=True, deadline_ms=100)
+        # Unbounded this shape needs ~4s; bounded it aborts at the budget
+        # plus one unwound frame (~0.1s). 1.5s clears both margins.
+        assert _time.perf_counter() - start < 1.5
+
+    @pytest.mark.parametrize(
+        "name,call",
+        [
+            ("repair_json", repair_json),
+            ("repair_json_loads", repair_json_loads),
+            ("repair_json_diagnostics", repair_json_diagnostics),
+        ],
+    )
+    def test_the_salvage_unwrap_escape_is_bounded_in_all_spellings(
+        self, name: str, call
+    ) -> None:
+        # The same escape through the other two spellings (all three route
+        # through repair(), so the shared-clock fix covers them; pinned
+        # spellings-by-spellings so a per-spelling fast path cannot reintroduce
+        # a leaky config).
+        nested = "[{" + '"a":1 "a":1 ' * 20_000 + "}]"
+        raw = '{"payload": ' + '"' + nested.replace('\\', '\\\\').replace('"', '\\"') + '"}'
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"payload": {"type": "object"}},
+            "required": ["payload"],
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            call(raw, schema=schema, salvage=True, deadline_ms=100)
+        assert _time.perf_counter() - start < 1.5
+
+    def test_allof_wrapping_anyof_stays_bounded(self) -> None:
+        # H2 composition: anyOf (whose loop head is the forced check) nested
+        # inside allOf (whose members ride the per-call entry sample) inside
+        # an object property: the abort must fire through both wrappers.
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "allOf": [
+                        {"anyOf": [{"type": "string", "enum": ["nope"]} for _ in range(20_000)]},
+                    ]
+                }
+            },
+            "required": ["value"],
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads('{"value": 123}', schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 2.0
+
+    def test_ref_fanout_over_a_huge_array_stays_bounded(self) -> None:
+        # H2: $ref-driven work over a large instance — every item's schema
+        # is a one-hop $ref, so the chain walk repeats per item; the
+        # per-item repair_value_d entry sample must keep the walk bounded.
+        schema: dict[str, Any] = {
+            "$defs": {"item": {"type": "integer"}},
+            "type": "array",
+            "items": {"$ref": "#/$defs/item"},
+        }
+        raw = "[" + ",".join(f'"{i}"' for i in range(300_000)) + "]"
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 2.0
+
+    # The schema layer's own alignment work (key ladder, union retries,
+    # coercion, fill-missing, validation) samples the same clock: before
+    # #79's fix none of it did, and a schema whose fast path SUCCEEDS
+    # swallowed the expiry whole (the post-fast-path check only runs when
+    # the fast path falls through).
+    _LADDER_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {f"property_{i:06}": {"type": "integer"} for i in range(1000)},
+    }
+    _LADDER_KEYS = 20_000
+
+    def test_the_schema_key_ladder_is_bounded_by_the_deadline(self) -> None:
+        # A 1000-property schema with near-miss keys drives the fuzzy
+        # ladder (an O(properties) jaro sweep + sort per unknown key)
+        # through repair_value; unbounded, 20k keys run ~5.5s. Under a 1ms
+        # budget the call must abort well under a second.
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(self._LADDER_KEYS)) + "}"
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=self._LADDER_SCHEMA, deadline_ms=1)
+        assert _time.perf_counter() - start < 1.0
+
+    def test_the_schema_union_branch_loop_is_bounded_by_the_deadline(self) -> None:
+        # A union whose winning branch sits at the end of a long anyOf:
+        # the losing branches burn the budget branch by branch, and the
+        # late win returns through the fast path (no fall-through check
+        # left to catch the expiry). The loop head must sample the clock.
+        schema: dict[str, Any] = {
+            "anyOf": [{"type": "string", "enum": ["nope"]} for _ in range(20_000)]
+            + [{"type": "string"}],
+        }
+        with pytest.raises(TimeoutError):
+            repair_json_loads("123", schema=schema, deadline_ms=1)
+
+    def test_a_generous_deadline_does_not_change_schema_path_output(self) -> None:
+        # Below the deadline the schema-path result is identical to the
+        # unbounded call (the schema-path mirror of the parser-path pin).
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "first_name": {"type": "string"},
+                **{f"property_{i:06}": {"type": "integer"} for i in range(50)},
+            },
+        }
+        raw = '{"First_Name": "Ada", "propertx_000000": 1}'
+        assert repair_json_loads(raw, schema=schema, deadline_ms=60_000) == repair_json_loads(
+            raw, schema=schema
+        )
+
+    # ---- Red-team pins: every schema-layer sample point is load-bearing.
+    # Each test below was mutation-verified: temporarily deleting the check
+    # it guards (the entry sample in repair_value_d, the forced union /
+    # type-union / ladder loop-head checks, the normalize_keys /
+    # prenormalize_dates / suggest_scan walk samples) makes exactly one of
+    # these fail, so a future refactor cannot silently disarm the clock.
+
+    def test_the_allof_member_fold_is_bounded_by_the_deadline(self) -> None:
+        # A long allOf member list whose fold work per member is trivial
+        # (boolean-true members) and whose branch bodies fire no other
+        # check: the per-member entry sample in repair_value_d is the only
+        # reader. Delete it and the fold sweeps all members and the fast
+        # path returns (no TimeoutError, ~140ms), so pytest.raises is the
+        # discriminator.
+        schema: dict[str, Any] = {
+            "allOf": [{"properties": {"y": {"type": "integer"}}}] + [True] * 100_000,
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads('{"y": "7"}', schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 2.0
+
+    def test_the_allof_fold_is_bounded_on_the_parser_path_too(self) -> None:
+        # The fold pin above rides the fast path, where the advisory walkers'
+        # own samples cover the same walk; with skip_json_loads=True the
+        # walkers never run and repair_value_d's per-member ENTRY sample is
+        # the only clock reader in the fold (mutation-verified: deleting it
+        # lets the 100k-member fold complete and the call return, masking
+        # the expiry — the tiny document gives the parser's separate counter
+        # no read, and validate's entry check is one increment past 100k
+        # unchecked calls, still short of a 256th).
+        schema: dict[str, Any] = {
+            "allOf": [{"properties": {"y": {"type": "integer"}}}] + [True] * 100_000,
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads('{"y": "7"}', schema=schema, skip_json_loads=True, deadline_ms=1)
+        assert _time.perf_counter() - start < 2.0
+
+    def test_the_allof_fold_over_a_huge_value_is_bounded_on_the_parser_path(self) -> None:
+        # The discriminator the 100k-member pin above cannot be: there the
+        # mutant is caught by the validator-compilation cost tripping the
+        # post-fast-path check (compile ~ fold for trivial members). Here
+        # the members compile free (booleans) and the EXPENSE lives in the
+        # fold itself: every Chain::True member re-runs
+        # normalize_missing_values over the whole value (O(members x
+        # value)), so with the walkers skipped the per-member ENTRY sample
+        # in repair_value_d is the only reader that can bound it. Mutation-
+        # verified: deleting the entry check walks all members (~seconds)
+        # and the call RETURNS (validate's single entry tick never reaches
+        # a 256th read), so pytest.raises is the discriminator.
+        big = "[" + ",".join(str(i % 10) for i in range(300_000)) + "]"
+        schema: dict[str, Any] = {"allOf": [True] * 4_000}
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(big, schema=schema, skip_json_loads=True, deadline_ms=50)
+        # Unbounded the fold walks 4000 x ~2MB (~1-4s); the sampled entry
+        # check latches within the first few hundred members (~a few
+        # hundred MB walked). 1.5s clears both margins.
+        assert _time.perf_counter() - start < 1.5
+
+    def test_union_branch_clones_cannot_stampede_past_the_budget(self) -> None:
+        # The forced union loop-head check bounds the loop to at most one
+        # clone+repair+validate unit past expiry. A heavy value makes the
+        # per-branch clone the O(n) unit and keeps the branch count under
+        # the 256-sample period (so the branch bodies' own sampled checks
+        # cannot substitute for the loop head): without the forced check
+        # all 120 clones run (~2.8s elapsed); with it the abort lands at
+        # the first branch past expiry (~0.3s elapsed, dominated by the
+        # fast-path parse). The elapsed number in the payload is the
+        # discriminator; the margins clear 5x both sides.
+        raw = '"' + "a" * 5_000_000 + '"'
+        schema: dict[str, Any] = {"anyOf": [{"type": "integer"}] * 120}
+        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        assert elapsed < 1500.0
+
+    def test_the_union_head_check_keeps_expired_branches_free(self) -> None:
+        # Mutation pin for the union loop head's CHECK half (the force half
+        # is pinned by the stampede test above): the head check must fire
+        # BEFORE a branch's clone, not inside it. Removing only the check
+        # (keeping the force) still aborts — one check deeper, at the
+        # branch body's entry — but then EVERY remaining branch pays a full
+        # value.clone() before its sticky check: 5000 branches x 2MB is
+        # ~0.5-1s of pure clones past a 1ms budget. With the check, the
+        # abort lands at the first head check (~the parse time).
+        raw = '"' + "a" * 2_000_000 + '"'
+        schema: dict[str, Any] = {"anyOf": [{"type": "integer"}] * 5_000}
+        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        assert elapsed < 300.0
+
+    def test_the_type_union_head_check_keeps_expired_branches_free(self) -> None:
+        # The repair_type_union mirror of the pin above: removing only the
+        # loop head's CHECK (keeping the force) still aborts one check
+        # deeper, at the branch body's own forced coerce entry — but then
+        # EVERY remaining kind pays a full value.clone() before that check:
+        # 40000 kinds x 2MB is ~1s of pure clones past a 1ms budget. With
+        # the check, the abort lands at the first head check (~the parse).
+        raw = '"' + "a" * 2_000_000 + '"'
+        schema: dict[str, Any] = {"type": ["integer"] * 40_000}
+        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        assert elapsed < 300.0
+
+    def test_the_type_union_branch_loop_is_bounded_by_the_deadline(self) -> None:
+        # repair_type_union's loop head (force + check) with branch bodies
+        # that fire no other check (coerce fails before validate, and the
+        # kind count stays under the 256-sample period): deleting the head
+        # check lets all 150 kinds clone the heavy value (~4s elapsed);
+        # with it the abort lands at the first kind past expiry (~3ms).
+        raw = '"' + "a" * 5_000_000 + '"'
+        schema: dict[str, Any] = {"type": ["integer"] * 150}
+        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        assert elapsed < 100.0
+
+    def test_the_ladder_sweep_cannot_stampede_past_the_budget(self) -> None:
+        # key_ladder's forced check bounds the loop to one O(properties)
+        # jaro sweep past expiry. Long property names make one sweep
+        # expensive (~1000 names x 2000 chars ~= 5-10ms), so without the
+        # check 500 unknown keys sweep for ~3s unbounded; with it the
+        # abort lands within one sweep of the budget.
+        props = {f"property_{i:06}" + "x" * 2000: {"type": "integer"} for i in range(1000)}
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": props,
+        }
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(500)) + "}"
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 1.0
+
+    def test_the_key_walk_cannot_sweep_a_huge_object_past_the_budget(self) -> None:
+        # The rename pass's per-key sample (the walker's top-of-function
+        # check fires once per CALL, so it cannot bound a single object's
+        # intra-call key loop): one flat object with 200k unknown keys
+        # against a 1000-property schema is O(keys x properties) fold
+        # scans; without the per-key sample the pass sweeps them all
+        # (~0.6-2s) before any later check consults the clock, and the
+        # wall blows the budget. With it the walk stops within ~256 keys
+        # of the expiry and the call aborts via the sticky error.
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {f"property_{i:06}": {"type": "integer"} for i in range(1000)},
+        }
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(200_000)) + "}"
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 1.0
+
+    @pytest.mark.parametrize(
+        "items_schema",
+        [{"type": "string"}, {"type": "string", "format": "date-time"}],
+        ids=["plain-strings", "date-strings"],
+    )
+    def test_the_schema_array_walks_sample_the_clock(self, items_schema: dict[str, Any]) -> None:
+        # The advisory walkers (normalize_keys, prenormalize_dates,
+        # suggest_scan) recursed through arrays of scalars with no clock
+        # read at all: a million-item array walked to completion (~0.2-0.3s)
+        # under a 1ms budget and the call returned. The per-call sample at
+        # the top of each walker latches the sticky error mid-walk, and the
+        # next phase-boundary check (is_valid's entry) turns it into the
+        # TimeoutError.
+        schema: dict[str, Any] = {"type": "array", "items": items_schema}
+        raw = (
+            "["
+            + ",".join(
+                '"2024-01-01T00:00:00Z"' if items_schema.get("format") else f'"s{i}"'
+                for i in range(500_000)
+            )
+            + "]"
+        )
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 2.0
+
+    def test_the_date_prenormalize_walk_stops_within_the_budget(self) -> None:
+        # Tightness pin for prenormalize_dates' own top-of-call sample
+        # (mutation-verified: the array-walks pin above passes even with
+        # the check deleted, because normalize_keys' identical sample
+        # covers the same call graph — but then the bound is one FULL date
+        # walk, not one sample period). The walk is made expensive per
+        # item without growing the input: 100 allOf members per item, each
+        # re-run through the date normalizer (~70us/item), so the unchecked
+        # walk of 100k items is ~7s while the sampled walk latches within
+        # its first ~1ms.
+        schema: dict[str, Any] = {
+            "type": "array",
+            "items": {"allOf": [{"type": "string", "format": "date-time"}] * 100},
+        }
+        raw = "[" + ",".join('"2024-01-01T00:00:00Z"' for _ in range(100_000)) + "]"
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert _time.perf_counter() - start < 0.5
+
+    def test_completed_schema_work_past_the_budget_is_returned(self) -> None:
+        # The soft-semantics contract on the schema path: work that
+        # COMPLETES past an expired budget still returns its answer (the
+        # deadline stops further work, it does not nullify done work). A
+        # 10k-property schema burns the 1ms budget compiling/walking, but
+        # the sampled-call count stays under the 256 period, so no clock
+        # read ever fires and the fast path returns the valid value.
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {f"p{i:06}": {"type": "integer"} for i in range(10_000)},
+        }
+        assert repair_json_loads("{}", schema=schema, deadline_ms=1) == {}
+
+    def test_validate_on_a_huge_valid_document_is_bounded(self) -> None:
+        # A huge valid document under a tiny budget: the key walks sample
+        # the clock, latch the sticky error, and the call aborts well under
+        # the wall (measured ~40ms) instead of paying the full validation.
+        # Under a budget sized for the document, the same call completes.
+        big = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(200_000)) + "]"
+        schema: dict[str, Any] = {"type": "array", "items": {"type": "object"}}
+        with pytest.raises(TimeoutError):
+            repair_json_loads(big, schema=schema, deadline_ms=1)
+        assert repair_json_loads(big, schema=schema, deadline_ms=5_000) == repair_json_loads(
+            big, schema=schema
+        )
+
+    def test_the_wide_union_validation_gate_is_bounded(self) -> None:
+        # H2 escape, fixed: the fast path's is_valid rode the crate's
+        # ERROR-CONSTRUCTING validate, and a wide failing union constructs
+        # one ValidationError per branch with the instance cloned into
+        # each: 5000 branches x a 2MB string measured ~7s INSIDE one
+        # validate() call, between sampled checks, under any budget (the
+        # crate's boolean is_valid is ~0ms on the same instance). is_valid
+        # now rides the boolean API and validate() is a force point (the
+        # clock is read before the opaque crate call), so the gate aborts
+        # at the budget instead.
+        raw = '"' + "a" * 2_000_000 + '"'
+        schema: dict[str, Any] = {"anyOf": [{"type": "integer"}] * 5_000}
+        for budget in (1, 100):
+            import time as _time
+
+            start = _time.perf_counter()
+            with pytest.raises(TimeoutError):
+                repair_json_loads(raw, schema=schema, deadline_ms=budget)
+            assert _time.perf_counter() - start < 1.0
+        # A wide union the value DOES satisfy still validates (the boolean
+        # path changed no outcome).
+        assert repair_json_loads("123", schema={"anyOf": [{"type": "integer"}] * 5_000}) == 123
+        # And the error message is preserved for ordinary failing shapes.
+        with pytest.raises(ValueError, match="anyOf"):
+            repair_json_loads('"abc"', schema={"anyOf": [{"type": "integer"}] * 3})
+
+    def test_suggest_scan_honors_the_budget(self) -> None:
+        # The diagnostics spelling on a valid document with a heavy ladder:
+        # bounded, the call aborts (the walks' sticky error surfaces; the
+        # suggest-only scan itself soft-stops but can no longer mask the
+        # expiry), and unbounded it reports a hint for every unknown key
+        # with the output unchanged.
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": True,
+            "properties": {f"property_{i:06}": {"type": "integer"} for i in range(300)},
+        }
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(5_000)) + "}"
+        with pytest.raises(TimeoutError):
+            repair_json_diagnostics(raw, schema=schema, deadline_ms=1)
+        value, hints = repair_json_diagnostics(raw, schema=schema)
+        assert len(hints) == 5_000
+        assert value == json.loads(raw)
+
+    @pytest.mark.parametrize(
+        "name,call",
+        [
+            ("repair_json", repair_json),
+            ("repair_json_loads", repair_json_loads),
+            ("repair_json_diagnostics", repair_json_diagnostics),
+        ],
+    )
+    def test_the_schema_path_timeout_message_names_the_called_spelling(
+        self, name: str, call
+    ) -> None:
+        # H3: the schema layer's abort rides the same DEADLINE_TAG payload
+        # and the same TimeoutError translation as the parser's, fronted
+        # with the called spelling's name (the ladder shape aborts on the
+        # schema layer's own checks under a 1ms budget).
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {f"property_{i:06}": {"type": "integer"} for i in range(1000)},
+        }
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(20_000)) + "}"
+        with pytest.raises(
+            TimeoutError,
+            match=rf"^{name} deadline exceeded: elapsed \d+\.\dms > deadline_ms 1\.0ms$",
+        ):
+            call(raw, schema=schema, deadline_ms=1)
+
+    def test_deadline_state_does_not_leak_across_calls(self) -> None:
+        # H5: the SchemaRepairer (and its deadline triple) is per-call: a
+        # call that timed out must not poison the next one, in either
+        # order.
+        schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {f"property_{i:06}": {"type": "integer"} for i in range(1000)},
+        }
+        raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(20_000)) + "}"
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+        assert repair_json_loads('{"property_000001": 5}', schema=schema) == {
+            "property_000001": 5
+        }
+        # And a completing call before a timing-out one leaves the clock
+        # armed and the abort intact.
+        assert repair_json_loads('{"property_000001": 5}', schema=schema) == {
+            "property_000001": 5
+        }
+        with pytest.raises(TimeoutError):
+            repair_json_loads(raw, schema=schema, deadline_ms=1)
+
+    def test_a_generous_deadline_does_not_change_date_and_union_shapes(self) -> None:
+        # H4 parity on the schema-heavy shapes: date pre-normalization,
+        # union retry, and the allOf fold produce byte-identical output
+        # under a generous deadline.
+        date_schema: dict[str, Any] = {
+            "type": "array",
+            "items": {"type": "string", "format": "date-time"},
+        }
+        date_raw = "[" + ",".join('"2024-01-01T00:00:00Z"' for _ in range(50_000)) + "]"
+        assert repair_json_loads(
+            date_raw, schema=date_schema, deadline_ms=60_000
+        ) == repair_json_loads(date_raw, schema=date_schema)
+
+        union_schema: dict[str, Any] = {
+            "anyOf": [{"type": "integer"}, {"type": "string"}, {"type": "object"}],
+        }
+        assert repair_json_loads(
+            '{"a": 1}', schema=union_schema, deadline_ms=60_000
+        ) == repair_json_loads('{"a": 1}', schema=union_schema)
+
+        all_of_schema: dict[str, Any] = {
+            "allOf": [{"properties": {"y": {"type": "integer"}}}, {"type": "object"}],
+        }
+        assert repair_json_loads(
+            '{"y": "7"}', schema=all_of_schema, deadline_ms=60_000
+        ) == repair_json_loads('{"y": "7"}', schema=all_of_schema)

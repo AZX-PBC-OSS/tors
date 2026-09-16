@@ -420,6 +420,14 @@ pub struct RepairConfig {
     pub diagnostics: bool,
     pub locale: NumericLocale,
     pub deadline_ms: Option<f64>,
+    /// An already-running clock to inherit (nested `repair` calls, e.g. the
+    /// schema layer's salvage unwrap): when set it replaces the fresh
+    /// `deadline_ms` clock, so the nested pass shares the caller's budget
+    /// and elapsed instead of restarting both. Internal plumbing, not part
+    /// of the stable config surface: leave it `None` unless you are
+    /// forwarding a caller's clock into a nested call.
+    #[doc(hidden)]
+    pub deadline_clock: Option<(std::time::Instant, f64)>,
 }
 
 /// One recorded action from [`repair`]: the structured successor of
@@ -470,7 +478,11 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     // budget (the deadline stops further work, it does not nullify done
     // work); the check after the block only keeps a budget the failed
     // fast path already burned from also paying for a full repair parse.
-    let deadline = cfg.deadline_ms.map(|ms| (std::time::Instant::now(), ms));
+    // An inherited clock (nested calls) replaces the fresh start entirely:
+    // the nested pass resumes the caller's budget, it does not get a new one.
+    let deadline = cfg
+        .deadline_clock
+        .or(cfg.deadline_ms.map(|ms| (std::time::Instant::now(), ms)));
     // The text every downstream stage sees: the fence-unwrapped payload when
     // the whole input is one fenced block, the input itself otherwise. A
     // same-line opening fence ("```[1,2]") makes the payload CommonMark's
@@ -493,6 +505,14 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     let mut repairer = schema_value
         .clone()
         .map(|root| SchemaRepairer::new(root, cfg.salvage, cfg.diagnostics, cfg.locale));
+    // Arm the repairer's copy of the same clock (the parser arms its own
+    // below): the schema alignment phases the repairer owns — key ladder,
+    // union retries, coercion, fill-missing, validation, on the fast path
+    // and inside the schema-guided parse — sample it, so fast-path work
+    // like the ladder cannot run unbounded past the budget.
+    if let (Some(rep), Some((started, ms))) = (repairer.as_mut(), deadline) {
+        rep.set_deadline(started, ms);
+    }
 
     // json_repair.py's fast-path block (lines 163-215): unless
     // skip_json_loads, run the strict parser over the whole text first. No

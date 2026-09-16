@@ -408,6 +408,7 @@ fn build_config(
         diagnostics,
         locale,
         deadline_ms,
+        deadline_clock: None,
     })
 }
 

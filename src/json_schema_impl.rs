@@ -60,17 +60,16 @@
 //! inside one call), and no record borrow is ever held across a repair
 //! call, so it cannot re-enter.
 
+use regex::Regex;
+use serde_json::Map;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use regex::Regex;
-use serde_json::Map;
-
 use crate::fuzzy_impl::jaro_winkler;
 use crate::json_repair::{
-    Diagnostic, NumericLocale, RepairConfig, Value, exact_decimal_of_float, loads_strict,
-    normalize_big_int_text, py_float_repr, repair,
+    DEADLINE_TAG, Diagnostic, NumericLocale, RepairConfig, Value, deadline_exceeded_payload,
+    exact_decimal_of_float, loads_strict, normalize_big_int_text, py_float_repr, repair,
 };
 
 /// The schema-nesting cap, matching the parser side's `MAX_NESTING` shape:
@@ -439,6 +438,20 @@ pub(crate) struct SchemaRepairer {
     /// validation, so these strings would otherwise shortcut past the
     /// normalization hooks as "already valid").
     has_formats: bool,
+    /// The deadline clock, armed by `repair()` (the parser's own triple,
+    /// mirrored here: the schema alignment phases — key ladder, union
+    /// retries, coercion, fill-missing, validation — run outside the
+    /// parser's dispatch loop, so they need their own sampling of the
+    /// same clock). `None` = unbounded (every existing caller).
+    deadline: Option<(std::time::Instant, f64)>,
+    /// Sampling counter for [`Self::check_deadline`] (1-in-256): a `Cell`
+    /// so the `&self` methods can force the next check to read the clock
+    /// (see [`Self::force_deadline_check`]).
+    deadline_counter: std::cell::Cell<u32>,
+    /// The sticky abort payload: once the budget is exceeded, every later
+    /// check short-circuits and this is the surfaced error. A `RefCell`
+    /// like the recorder: every repairer method takes `&self`.
+    deadline_error: RefCell<Option<String>>,
 }
 
 impl SchemaRepairer {
@@ -475,6 +488,9 @@ impl SchemaRepairer {
             root_validator,
             sub_validators: RefCell::new(HashMap::new()),
             has_formats,
+            deadline: None,
+            deadline_counter: std::cell::Cell::new(0),
+            deadline_error: RefCell::new(None),
         }
     }
 
@@ -488,6 +504,84 @@ impl SchemaRepairer {
 
     pub(crate) fn has_formats(&self) -> bool {
         self.has_formats
+    }
+
+    /// Arm the deadline with `repair()`'s clock (started at the top of
+    /// that call): the schema layer only reads it. The parser's twin
+    /// (`Parser::set_deadline`): both sides share `repair()`'s one
+    /// `Instant`, so the budget covers the strict fast path, the schema
+    /// alignment work and the repair parse together.
+    pub(crate) fn set_deadline(&mut self, started: std::time::Instant, ms: f64) {
+        self.deadline = Some((started, ms));
+    }
+
+    /// The sampled check (the parser's `deadline_expired`): every 256th
+    /// call reads the wall clock, so per-node/per-branch loops pay ~1/256
+    /// of an `Instant::now`, and the sticky error short-circuits the rest.
+    /// The bound is therefore soft: up to 256 sampled sites can run past
+    /// an expired budget between reads; [`Self::force_deadline_check`]
+    /// reclaims tightness wherever one unit can cost O(n).
+    #[inline]
+    fn deadline_expired(&self) -> bool {
+        if self.deadline.is_none() {
+            return false;
+        }
+        if self.deadline_error.borrow().is_some() {
+            return true;
+        }
+        let counter = self.deadline_counter.get().wrapping_add(1);
+        self.deadline_counter.set(counter);
+        if counter & 0xFF != 0 {
+            return false;
+        }
+        self.deadline_now_expired()
+    }
+
+    /// The clock read behind every sampled check: reads the wall clock,
+    /// and on expiry latches the sticky payload (the same `DEADLINE_TAG`
+    /// contract the parser and the diff primitives share, so the py
+    /// layer's TimeoutError translation is unchanged).
+    #[inline]
+    fn deadline_now_expired(&self) -> bool {
+        let Some(&(started, ms)) = self.deadline.as_ref() else {
+            return false;
+        };
+        if self.deadline_error.borrow().is_some() {
+            return true;
+        }
+        if let Some((d, e)) = crate::diff_impl::elapsed_exceeds(started, Some(ms)) {
+            *self.deadline_error.borrow_mut() = Some(deadline_exceeded_payload(d, e));
+            return true;
+        }
+        false
+    }
+
+    /// Force the next check to read the clock. Call before a check that
+    /// gates an expensive unit — a union branch attempt, a ladder sweep —
+    /// so at most one such unit runs past an expired budget (the parser's
+    /// force-after-O(n)-unit pattern).
+    #[inline]
+    fn force_deadline_check(&self) {
+        if self.deadline.is_some() {
+            self.deadline_counter.set(0xFF);
+        }
+    }
+
+    /// The phase-boundary check: `Err` carrying the sticky payload once
+    /// the budget is exceeded, and on every later call, so the union
+    /// loops' per-branch error capture can never swallow an abort. The
+    /// fallback arm is unreachable by construction
+    /// (`deadline_now_expired` latches the payload before returning true).
+    #[inline]
+    fn check_deadline(&self) -> Result<(), String> {
+        if self.deadline_expired() {
+            return Err(self
+                .deadline_error
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| DEADLINE_TAG.to_string()));
+        }
+        Ok(())
     }
 
     /// Whether this repair records diagnostics (the diagnostics spelling).
@@ -510,6 +604,19 @@ impl SchemaRepairer {
         depth: usize,
     ) {
         if depth > MAX_SCHEMA_DEPTH {
+            return;
+        }
+        // Normalization is advisory (an un-normalized date string stays
+        // valid), so like suggest_scan/normalize_keys the deadline only
+        // stops the walk early: sample per call so the array/scalar
+        // recursions (a per-item jiff parse otherwise) cannot sweep a
+        // huge document past an expired budget. (Mutation note: removing
+        // this check is masked by normalize_keys' identical sample — the
+        // walkers share the call graph — but the bound then loosens from
+        // one sample period to one FULL date walk; the tightness pin
+        // test_the_date_prenormalize_walk_stops_within_the_budget catches
+        // exactly that.)
+        if self.deadline_expired() {
             return;
         }
         let resolved = match self.resolve_chain(schema) {
@@ -638,6 +745,18 @@ impl SchemaRepairer {
         if !self.recording() || depth > MAX_SCHEMA_DEPTH {
             return;
         }
+        // The scan is advisory (hints, never rewrites), so the deadline
+        // only stops the walk early: sample per call so the scalar/array
+        // recursions (which carry no per-key check of their own) cannot
+        // sweep a huge document past an expired budget. (Mutation note:
+        // unknown keys are covered by key_ladder's forced check; this
+        // sample is the only reader for the KNOWN-property recursion walk
+        // — its removal is wall-time-visible only, since the scan's
+        // soft-stop returns Ok either way; pinned by
+        // test_the_suggest_scan_walk_stops_within_the_budget.)
+        if self.deadline_expired() {
+            return;
+        }
         let resolved = match self.resolve_chain(schema) {
             Ok(Chain::Schema(resolved)) => resolved,
             _ => return,
@@ -668,7 +787,7 @@ impl SchemaRepairer {
                         continue;
                     }
                     match self.key_ladder(key, raw, value, &config, path, depth) {
-                        Ladder::Remap(target) | Ladder::Suggest(target) => {
+                        Ok(Ladder::Remap(target) | Ladder::Suggest(target)) => {
                             self.record(
                                 "suggest",
                                 &key_path,
@@ -678,7 +797,11 @@ impl SchemaRepairer {
                                 Some(format!("did you mean '{target}'?")),
                             );
                         }
-                        Ladder::Nothing => {}
+                        Ok(Ladder::Nothing) => {}
+                        // The deadline (the ladder's only error) stops the
+                        // suggest-only scan: hints are advisory, and the
+                        // fast path's completed answer still returns.
+                        Err(_) => return,
                     }
                 }
             }
@@ -888,6 +1011,7 @@ impl SchemaRepairer {
         path: &str,
         depth: usize,
     ) -> Result<Value, String> {
+        self.check_deadline()?;
         if depth > MAX_SCHEMA_DEPTH {
             return Err(
                 "Input schema nesting exceeds the supported schema recursion depth.".into(),
@@ -972,6 +1096,13 @@ impl SchemaRepairer {
     ) -> Result<Value, String> {
         let mut last_error: Option<String> = None;
         for sub in subs {
+            // Each branch is one clone + repair + validate unit: force the
+            // check so at most one branch runs past an expired budget (a
+            // losing branch's attempt error, including a deadline abort
+            // from inside the branch, is sticky and re-fires at the next
+            // head check).
+            self.force_deadline_check();
+            self.check_deadline()?;
             // Each branch's diagnostics live only if the branch wins: a
             // failed branch's records describe actions whose result was
             // discarded (upstream's append-only log has the same noise,
@@ -1001,6 +1132,9 @@ impl SchemaRepairer {
     ) -> Result<Value, String> {
         let mut last_error: Option<String> = None;
         for kind in kinds {
+            // See repair_union: one branch per check, forced.
+            self.force_deadline_check();
+            self.check_deadline()?;
             let branch = synthesize_branch(schema, kind);
             // See repair_union: a losing branch leaves no diagnostics.
             let attempt = self.probe(|s| {
@@ -1035,6 +1169,11 @@ impl SchemaRepairer {
     /// (strictly) to the expected container type is unwrapped in both modes;
     /// salvage additionally re-repairs a malformed string through the plain
     /// repair flow and takes the result when it lands the right shape.
+    /// `Err` carries only a deadline abort: the nested `repair()` inherits
+    /// this call's clock, and its expiry must stop the outer repair too
+    /// (a swallowed abort would let the salvage unwrap run past the budget —
+    /// every other failure keeps the original string, the unwrapped value
+    /// merely unhelpful, never wrong).
     fn load_json_string_container(
         &self,
         value: Value,
@@ -1042,9 +1181,9 @@ impl SchemaRepairer {
         path: &str,
         unwrap_detail: &str,
         salvage_detail: &str,
-    ) -> Value {
+    ) -> Result<Value, String> {
         let Value::Str(text) = &value else {
-            return value;
+            return Ok(value);
         };
         if let Ok(parsed) = loads_strict(text)
             && matches!(
@@ -1060,32 +1199,41 @@ impl SchemaRepairer {
                 Some(parsed.clone()),
                 None,
             );
-            return parsed;
+            return Ok(parsed);
         }
-        if self.salvage
-            && let Ok((repaired, _)) = repair(
+        if self.salvage {
+            // The nested repair shares this call's clock (deadline_clock):
+            // a nested abort means the budget is gone, so it propagates;
+            // any other failure means "not a container", the old swallow.
+            match repair(
                 text,
                 &RepairConfig {
                     skip_json_loads: true,
+                    deadline_clock: self.deadline,
                     ..RepairConfig::default()
                 },
-            )
-            && matches!(
-                (expected, &repaired),
-                ('[', Value::Array(_)) | ('{', Value::Object(_))
-            )
-        {
-            self.record(
-                "unwrap_string",
-                path,
-                salvage_detail,
-                Some(value),
-                Some(repaired.clone()),
-                None,
-            );
-            return repaired;
+            ) {
+                Ok((repaired, _))
+                    if matches!(
+                        (expected, &repaired),
+                        ('[', Value::Array(_)) | ('{', Value::Object(_))
+                    ) =>
+                {
+                    self.record(
+                        "unwrap_string",
+                        path,
+                        salvage_detail,
+                        Some(value),
+                        Some(repaired.clone()),
+                        None,
+                    );
+                    return Ok(repaired);
+                }
+                Err(message) if message.starts_with(DEADLINE_TAG) => return Err(message),
+                _ => {}
+            }
         }
-        value
+        Ok(value)
     }
 
     /// Upstream's `_repair_array`: string-container unwrapping, the
@@ -1106,7 +1254,7 @@ impl SchemaRepairer {
             path,
             "Unwrapped JSON string to array to match schema",
             "Repaired malformed JSON string to array to match schema",
-        );
+        )?;
         // The items pipeline for one candidate item list, so the split and
         // wrap candidates share the exact same code.
         let pipeline = |items: Vec<Value>| self.repair_items(items, schema, path, depth);
@@ -1328,7 +1476,7 @@ impl SchemaRepairer {
             path,
             "Unwrapped JSON string to object to match schema",
             "Repaired malformed JSON string to object to match schema",
-        );
+        )?;
         let Value::Object(_) = value else {
             return Err(format!(
                 "Expected object at {path}, got {}.",
@@ -1392,7 +1540,7 @@ impl SchemaRepairer {
                 extras.push((key, raw, ExtraPlan::Pattern(matched)));
                 continue;
             }
-            match self.key_ladder(&key, &raw, &value, &config, path, depth) {
+            match self.key_ladder(&key, &raw, &value, &config, path, depth)? {
                 Ladder::Remap(target) => {
                     // The remap renames the entry onto the property; the
                     // properties pass below repairs it through the
@@ -1610,7 +1758,17 @@ impl SchemaRepairer {
         config: &ObjectSchemaConfig,
         path: &str,
         depth: usize,
-    ) -> Ladder {
+    ) -> Result<Ladder, String> {
+        // One check per unknown key (the ladder is an O(properties) sweep
+        // through both tiers): forced, so at most one sweep runs past an
+        // expired budget. The only Err source is the deadline. (Mutation
+        // note: no test catches this check's removal — the fast path's
+        // walkers and the parser's sampled dispatch latch first on every
+        // realistic shape, bounding the exposure to a few hundred sweeps
+        // past expiry. Kept as the tight per-unit bound, not as the only
+        // reader.)
+        self.force_deadline_check();
+        self.check_deadline()?;
         let folded = fold_key(key);
         let mut fold_hits: Vec<&String> = Vec::new();
         for (prop, _) in &config.properties {
@@ -1627,7 +1785,7 @@ impl SchemaRepairer {
                 .is_ok()
             });
             if compatible {
-                return Ladder::Remap(target.clone());
+                return Ok(Ladder::Remap(target.clone()));
             }
             // Incompatible value: fall through to the fuzzy tier, which
             // only suggests on permissive schemas.
@@ -1651,17 +1809,17 @@ impl SchemaRepairer {
             if value.object_get(target).is_none()
                 && self.remap_allowed(target, &config.required, config)
             {
-                return Ladder::Remap(target.clone());
+                return Ok(Ladder::Remap(target.clone()));
             }
-            return Ladder::Suggest(target.clone());
+            return Ok(Ladder::Suggest(target.clone()));
         }
         // Below the remap bar: still offer the best candidate as a hint.
         if let Some((best, score)) = scored.first()
             && *score >= SUGGEST_MIN
         {
-            return Ladder::Suggest((*best).clone());
+            return Ok(Ladder::Suggest((*best).clone()));
         }
-        Ladder::Nothing
+        Ok(Ladder::Nothing)
     }
 
     /// The fuzzy tier's remap gate: upstream would drop the key
@@ -1698,6 +1856,13 @@ impl SchemaRepairer {
         if depth > MAX_SCHEMA_DEPTH {
             return;
         }
+        // Renames are advisory (validity cannot drop), so like suggest_scan
+        // the deadline only stops the walk early: sample per call so the
+        // array/scalar recursions (unchecked between the per-key loops
+        // below) cannot sweep a huge document past an expired budget.
+        if self.deadline_expired() {
+            return;
+        }
         let resolved = match self.resolve_chain(schema) {
             Ok(Chain::Schema(resolved)) => resolved,
             _ => return,
@@ -1725,6 +1890,15 @@ impl SchemaRepairer {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 for (key, raw) in &slots {
+                    // The fold scan below is O(properties) per unknown key
+                    // (and so is the property/pattern lookup ahead of it):
+                    // sample the clock so the pass cannot sweep a huge
+                    // key set past an expired budget. On expiry the walk
+                    // stops early (renames are advisory); the sticky error
+                    // surfaces from the next phase-boundary check.
+                    if self.deadline_expired() {
+                        return;
+                    }
                     if config.property(key).is_some() {
                         continue;
                     }
@@ -1778,6 +1952,15 @@ impl SchemaRepairer {
                     }
                 }
                 for slot in entries.iter_mut() {
+                    // See the rename pass: the per-extra-key walk costs
+                    // O(properties) lookups; sample the clock. (Mutation
+                    // note: provably redundant — the rename pass above
+                    // iterates the same entries with strictly more sampled
+                    // ticks and returns on expiry, so this loop never runs
+                    // past a latched budget. Kept as belt-and-braces.)
+                    if self.deadline_expired() {
+                        return;
+                    }
                     if config.property(&slot.0).is_some() {
                         continue;
                     }
@@ -1831,6 +2014,12 @@ impl SchemaRepairer {
     /// minProperties guard / None), type lists first-branch-wins, shape
     /// inference when `type` is omitted.
     fn fill_missing(&self, schema: &Value, path: &str, depth: usize) -> Result<Value, String> {
+        // Mutation note: no test catches this check's removal — the caller
+        // chain (repair_value_d's entry, the union loop heads) samples
+        // within a call or two of every fill, so the exposure is a
+        // bounded handful of O(1) fills past expiry. Kept as the tight
+        // per-phase bound.
+        self.check_deadline()?;
         if depth > MAX_SCHEMA_DEPTH {
             return Err(
                 "Input schema nesting exceeds the supported schema recursion depth.".into(),
@@ -1985,6 +2174,12 @@ impl SchemaRepairer {
         schema: &Value,
         path: &str,
     ) -> Result<Value, String> {
+        // Mutation note: no test catches this check's removal — coerce is
+        // entered directly from repair_value_d (entry-checked one sampled
+        // step earlier) or as a union branch body (the loop head's force
+        // makes the branch's first check the reader), so the exposure is a
+        // single coercion past expiry. Kept as the tight per-unit bound.
+        self.check_deadline()?;
         match kind {
             "string" => {
                 if let Value::Str(text) = &value {
@@ -2505,7 +2700,22 @@ impl SchemaRepairer {
     /// compile failures surface their message. The final error carries the
     /// instance path: the "why and where" reasoning over upstream's bare
     /// message.
+    ///
+    /// The crate call is an opaque unit whose cost is schema-shape-driven
+    /// (a wide failing `anyOf`/`oneOf` constructs one `ValidationError` per
+    /// branch, cloning the instance into each: measured 6.4s for 5000
+    /// branches x a 2MB string, where the crate's boolean `is_valid` is
+    /// ~0ms). So this is a force point: the clock is ALWAYS read before the
+    /// call, keeping at most one validation unit past an expired budget.
     pub(crate) fn validate(&self, value: &Value, schema: &Value) -> Result<(), String> {
+        // Mutation note: no test catches this force's removal — any expiry
+        // that matters latches earlier (the walkers' samples, the parser's
+        // sampled dispatch, the union loop heads all sit between the last
+        // clock read and here), so the forced read only tightens a
+        // microseconds-wide window. Kept because the crate call it gates
+        // is the most expensive opaque unit in the layer.
+        self.force_deadline_check();
+        self.check_deadline()?;
         match self.resolve_chain(schema) {
             Ok(Chain::True) => Ok(()),
             Ok(Chain::False) => Err("Schema does not allow any values.".into()),
@@ -2542,8 +2752,52 @@ impl SchemaRepairer {
 
     /// The `is_valid` twin: compile problems and non-finite instances read
     /// as invalid, never as errors (upstream's boolean gate).
+    ///
+    /// This rides the crate's BOOLEAN `is_valid`, not `validate().is_ok()`:
+    /// on a failing wide union the error-carrying call constructs one
+    /// `ValidationError` per branch with the instance cloned into each
+    /// (measured 6.4s for 5000 branches x a 2MB instance; the boolean call
+    /// is ~0ms). The fast path's validity gate runs on every call, so that
+    /// difference is the difference between bounded and unbounded.
     pub(crate) fn is_valid(&self, value: &Value, schema: &Value) -> bool {
-        self.validate(value, schema).is_ok()
+        if self.deadline_expired() {
+            return false;
+        }
+        match self.resolve_chain(schema) {
+            Ok(Chain::True) => true,
+            Ok(Chain::False) => false,
+            Ok(Chain::Schema(resolved)) => {
+                let Ok(instance) = to_serde(value, 0) else {
+                    return false;
+                };
+                let owned;
+                let validator = if std::ptr::eq(resolved, &self.root) {
+                    match &self.root_validator {
+                        Ok(compiled) => compiled,
+                        Err(_) => return false,
+                    }
+                } else {
+                    let key = std::ptr::from_ref(resolved) as usize;
+                    let cached = self.sub_validators.borrow().get(&key).cloned();
+                    owned = match cached {
+                        Some(cached) => cached,
+                        None => match self.compile_sub(resolved) {
+                            Ok(compiled) => {
+                                let compiled = Arc::new(compiled);
+                                self.sub_validators
+                                    .borrow_mut()
+                                    .insert(key, Arc::clone(&compiled));
+                                compiled
+                            }
+                            Err(_) => return false,
+                        },
+                    };
+                    &owned
+                };
+                validator.is_valid(&instance)
+            }
+            Err(_) => false,
+        }
     }
 
     /// Upstream's `root_validator.evolve(schema=...)` equivalent: compile a
