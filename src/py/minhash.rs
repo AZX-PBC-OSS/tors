@@ -30,7 +30,15 @@ use crate::minhash_impl;
 ///
 /// Bounds: `num_perm` must be in `[1, 1024]` and `shingle_size` at least
 /// 1, each raising `ValueError` (naming the bounds) before any work
-/// runs; `seed` is any int, reduced mod 2^64 (two's complement for
+/// runs; a stream that fills a window wider than 1024 tokens also raises
+/// `ValueError` when the sweep it would cost -- `(tokens - shingle_size
+/// + 1) × shingle_size` token-hashes, the whole live window re-hashed
+/// per step -- exceeds the 2^26 budget (that middle range is otherwise
+/// unbounded; the count deciding it is retention-free, capped at
+/// `floor(2^26 / shingle_size) + shingle_size` tokens regardless of
+/// stream length, under the GIL, and short streams still answer the
+/// sentinel as before). `seed` is any int, reduced mod 2^64 (two's
+/// complement for
 /// negatives: `seed=-1` is `seed=2**64-1`). All three are accepted through
 /// the `__index__` protocol so int-likes (numpy integers included) work,
 /// with `bool` rejected explicitly in every position (including as an
@@ -40,10 +48,11 @@ use crate::minhash_impl;
 /// text bearing lone surrogates raises `UnicodeEncodeError` (the
 /// crate-wide str-borrow contract).
 ///
-/// GIL model: the text borrow and validation under the GIL, then the
-/// whole tokenize + shingle + hash + min-sweep under one `py.detach`,
-/// then the `num_perm`-element int-list marshalling (O(k), k <= 1024).
-/// No `aio` twin: a fast one-shot call.
+/// GIL model: the text borrow, the bounds, and the budget gate under the
+/// GIL, then the whole tokenize + shingle + hash + min-sweep under one
+/// `py.detach`, then the `num_perm`-element int-list marshalling (O(k),
+/// k <= 1024). The `aio` twin (`tors.aio.minhash_signature`) is the same
+/// call under `asyncio.to_thread`.
 #[pyfunction(signature = (text, *, num_perm = 128, shingle_size = 3, seed = 0))]
 pub fn minhash_signature(
     py: Python<'_>,
@@ -60,6 +69,26 @@ pub fn minhash_signature(
     if shingle_size < 1 {
         return Err(PyValueError::new_err(format!(
             "shingle_size must be at least 1, not {shingle_size}"
+        )));
+    }
+    // The wide-window sweep budget: past WIDE_WINDOW_COUNT_FIRST a stream
+    // that fills the window re-hashes the whole live window per token, so
+    // the pass is (tokens - shingle_size + 1) * shingle_size token-hashes
+    // -- unbounded in exactly the middle range the sentinel short-circuit
+    // cannot decide. Shapes past the budget raise here, under the GIL,
+    // before the detached pass; the short-stream case (the short-circuit's
+    // own, answered by the sentinel) and the width-bounded range at or
+    // below 1024 pass through untouched. The gate's own count walk is
+    // capped at floor(budget/shingle_size) + shingle_size tokens, so even
+    // a many-gigabyte stream is rejected without a GIL-held walk of the
+    // whole input, and the reported work is the minimum that shape would
+    // spend ("at least" -- the exact count is never walked past the cap).
+    if let Some(work) = minhash_impl::sweep_past_budget(text, shingle_size as usize) {
+        return Err(PyValueError::new_err(format!(
+            "shingle_size {shingle_size} over a stream that fills the window would sweep \
+             at least {work} token-hashes, past the {} (2^26) token-hash budget; use a \
+             smaller shingle_size",
+            minhash_impl::SHINGLE_SWEEP_BUDGET
         )));
     }
     Ok(py.detach(|| minhash_impl::signature(text, num_perm as usize, shingle_size as usize, seed)))

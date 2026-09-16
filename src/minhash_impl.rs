@@ -125,10 +125,15 @@
 //! the bounds under the GIL, then runs the whole tokenize + shingle +
 //! hash + min-sweep under one `py.detach`, and marshals the
 //! `Vec<u64>` to a `num_perm`-element int list after (O(k), k <= 1024 —
-//! the `diff_opcodes` list-marshalling class at a far smaller count). No
-//! `aio` twin: a fast one-shot call (hundreds of milliseconds at the
-//! whole-file sizes, single-digit at document scale) gains nothing from
-//! a thread dispatch.
+//! the `diff_opcodes` list-marshalling class at a far smaller count).
+//! The sweep-budget gate also runs under the GIL before the detach, and
+//! is itself bounded: its retention-free count walk stops at
+//! ⌊budget/shingle_size⌋ + shingle_size tokens (see `sweep_past_budget`),
+//! so even a G many-token stream is rejected without a GIL-held walk of
+//! the whole input. The `aio` twin (`tors.aio.minhash_signature`) is the
+//! same call dispatched through `asyncio.to_thread` — mechanically the
+//! hop the GIL-heartbeat cell pins — for callers that want the wait off
+//! the event loop entirely.
 
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hasher as _;
@@ -249,6 +254,23 @@ fn hash_live_window(window: &VecDeque<String>) -> u64 {
 /// an answer that is always the empty-set sentinel.
 const WIDE_WINDOW_COUNT_FIRST: usize = 1024;
 
+/// The token-hash budget one wide fillable-window sweep may spend: the
+/// ceiling the pyo3 binding turns into a `ValueError` and the core asserts
+/// for direct Rust callers. Every step of the sweep re-hashes the whole
+/// live window (`hash_live_window`), so a stream that fills a window past
+/// `WIDE_WINDOW_COUNT_FIRST` costs `(tokens - shingle_size + 1) ×
+/// shingle_size` token-hashes -- unbounded in exactly the middle range the
+/// sentinel short-circuit above cannot decide (the stream CAN fill the
+/// window). 2^26 token-hashes measures ~0.4 s at the repro's ~5.8 ns per
+/// framed window hash (20k tokens x 10^4 wide -> 583 ms is 10^8), the
+/// point where one call stops being the fast one-shot the GIL model
+/// promises, orders of magnitude past every documented width, so nothing
+/// a caller should be doing is refused. Widths at or below
+/// `WIDE_WINDOW_COUNT_FIRST` bound the per-token cost by the width
+/// itself and ride the documented caller-size lever instead: no count
+/// walk is spent on the default path.
+pub(crate) const SHINGLE_SWEEP_BUDGET: u128 = 1 << 26;
+
 /// The token count up to `limit`, streamed without retaining anything:
 /// the retention-free probe wide windows ride before deciding the stream
 /// can ever fill one. Returns `min(tokens, limit)` -- callers comparing
@@ -295,6 +317,71 @@ fn distinct_capacity_guess(text: &str) -> usize {
     (text.len() / 6).clamp(64, 8192)
 }
 
+/// The sweep-budget probe both validation layers ride: `Some(work)` -- a
+/// token-hash count the pass would spend, proven past
+/// [`SHINGLE_SWEEP_BUDGET`] -- when the shape sweeps over budget, `None`
+/// when the call may proceed. The None cases: any width at or below
+/// `WIDE_WINDOW_COUNT_FIRST` (the per-token cost is width-bounded there,
+/// and no count walk is spent on the default path), and a stream whose
+/// sweep cannot exceed the budget. The probe is retention-free and bounded
+/// -- O(min(tokens, ⌊budget/shingle_size⌋ + shingle_size)) tokens walked,
+/// never the O(tokens × shingle_size) pass it gates, and (the same bug
+/// class one level up) never O(tokens) either: the walk stops at the cap,
+/// so a huge stream is rejected without walking all of it.
+///
+/// `work` is the exact spend only when the stream ends at or under the
+/// cap (where the over-budget case is impossible, so `None`); past the
+/// cap the exact count is never walked and `work` is the MINIMUM any
+/// shape that deep would spend -- `(⌊budget/s⌋ + 1) × s` at the cap --
+/// which is all the reject decision needs (the pyo3 binding reports it
+/// as "at least {work}").
+pub(crate) fn sweep_past_budget(text: &str, shingle_size: usize) -> Option<u128> {
+    if shingle_size <= WIDE_WINDOW_COUNT_FIRST {
+        return None;
+    }
+    let s = shingle_size as u128;
+    // The first token count whose sweep must exceed the budget:
+    // `(tokens - s + 1) × s > B` has its first integer solution at
+    // `tokens = ⌊B/s⌋ + s` (one token earlier the work is at most
+    // `⌊B/s⌋ × s <= B` -- the exactly-at-budget boundary included), so a
+    // walk ending short of that cap proves the within-budget case
+    // outright, and reaching it proves the reject without walking on.
+    // The cap is the whole gate's cost bound: at most ⌊B/1025⌋ + 1025 ≈
+    // 66.5k tokens for every admissible width, usize::MAX tokens included.
+    let cap = SHINGLE_SWEEP_BUDGET / s + s;
+    // cap <= usize::MAX on every target, so the try_from cannot fail: for
+    // s > B the sum is s itself; for 1025 <= s <= B it is at most
+    // B/1025 + B < 2^27. (A saturated fallback here would silently disarm
+    // the gate -- the walk would never reach it -- hence the named panic.)
+    let cap = usize::try_from(cap)
+        .expect("budget/shingle_size + shingle_size fits usize for every admissible width");
+    if token_count_up_to(text, cap) < cap {
+        // The stream ended short of the cap: the count is exact and the
+        // inequality above puts its sweep at or under the budget -- the
+        // within-budget case, the exactly-at-budget boundary included.
+        return None;
+    }
+    // The walk reached the cap: tokens >= cap, so the sweep spends at
+    // least `(cap - s + 1) × s` token-hashes, which exceeds the budget
+    // by construction. Reported at the cap: the minimum provable work.
+    Some((cap as u128 - s + 1) * s)
+}
+
+/// The core half of the two-sided sweep-budget validation (the pyo3
+/// binding's `ValueError` is the other half): a fillable wide window whose
+/// sweep would run past the budget is a caller-shape bug, named in the
+/// panic (the num_perm ceiling's spelling) instead of silently grinding
+/// through the O(tokens × shingle_size) pass. Unreachable from the pyo3
+/// surface, which raises the `ValueError` before the detached pass.
+fn assert_sweep_within_budget(text: &str, shingle_size: usize) {
+    assert!(
+        sweep_past_budget(text, shingle_size).is_none(),
+        "shingle_size {shingle_size} over a fillable stream would sweep past the \
+         {SHINGLE_SWEEP_BUDGET}-token-hash core sanity budget (the pyo3 binding rejects \
+         this shape with a ValueError)"
+    );
+}
+
 /// The signature: `num_perm` min-hashes of the document's
 /// `shingle_size`-token word shingles. Every element starts at the u64
 /// MAX sentinel, which is simultaneously the min-identity (so the sweep
@@ -318,7 +405,13 @@ fn distinct_capacity_guess(text: &str) -> usize {
 /// occurrences equal minima over the distinct set, so the answer is
 /// byte-identical to the naive per-occurrence sweep. The distinct set is
 /// pre-sized from `distinct_capacity_guess` (a heuristic; growth rehashes
-/// as before). Note on the `HashSet`: it rides the std `RandomState`
+/// as before). Past `WIDE_WINDOW_COUNT_FIRST`, a stream that fills the
+/// window is budget-bounded: shapes whose `(tokens - shingle_size + 1) ×
+/// shingle_size` token-hash cost exceeds `SHINGLE_SWEEP_BUDGET` are a
+/// caller-shape bug -- the pyo3 binding rejects them with a `ValueError`
+/// and `assert_sweep_within_budget` names them for direct Rust callers --
+/// so the middle range the sentinel short-circuit cannot decide cannot
+/// sweep unbounded. Note on the `HashSet`: it rides the std `RandomState`
 /// hasher, whose per-process seed would matter if iteration order
 /// escaped — it cannot here (only the per-position minima and the set
 /// cardinality escape, both order-independent), so the signature stays
@@ -352,6 +445,7 @@ pub fn signature(text: &str, num_perm: usize, shingle_size: usize, seed: u64) ->
     {
         return sig;
     }
+    assert_sweep_within_budget(text, shingle_size);
     let coefficients = coefficients(num_perm, seed);
     let mut window: VecDeque<String> = VecDeque::new();
     let mut distinct: HashSet<u64> = HashSet::with_capacity(distinct_capacity_guess(text));
@@ -401,6 +495,7 @@ pub fn distinct_shingle_count(text: &str, shingle_size: usize) -> usize {
     {
         return 0;
     }
+    assert_sweep_within_budget(text, shingle_size);
     let mut window: VecDeque<String> = VecDeque::new();
     let mut seen: HashSet<u64> = HashSet::with_capacity(distinct_capacity_guess(text));
     for token in normalized_word_tokens_stream(text) {
@@ -698,6 +793,128 @@ mod tests {
         // named panic, not an allocator abort: the ceiling sits far above
         // the binding's 1024 cap.
         let _ = signature("one two three", (1 << 20) + 1, 3, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "core sanity budget")]
+    fn wide_fillable_sweep_past_the_budget_panics() {
+        // The sweep-budget backstop's core half (the binding's ValueError
+        // is the other half): a fillable wide window whose sweep would run
+        // past SHINGLE_SWEEP_BUDGET is named and aborted BEFORE the sweep,
+        // not ground through -- the probe's retention-free count walk is
+        // the only work paid. (20000 - 5000 + 1) * 5000 = 75,005,000 > 2^26.
+        let text = "w ".repeat(20_000);
+        let _ = signature(&text, 8, 5_000, 0);
+    }
+
+    #[test]
+    fn sweep_budget_gate_shapes() {
+        // The budget gate's None cases, probed directly (no sweep runs):
+        // widths at or below WIDE_WINDOW_COUNT_FIRST never walk the count,
+        // and a stream whose walk ends short of the gate's cap --
+        // floor(2^26/s) + s tokens -- is the within-budget case (the
+        // sentinel short-circuit's own short-stream shape included).
+        // (20000 - 4000 + 1) * 4000 = 64,004,000 < 2^26 passes: the cap
+        // for s=4000 is 16777 + 4000 = 20777 > 20000 tokens, so the walk
+        // ends short of it and the within-budget proof applies. The
+        // over-budget shape reports its minimum provable work at the cap
+        // (floor(2^26/5000) + 5000 = 18421; the walk stops there, never
+        // reaching the stream's 20000th token).
+        let text = "w ".repeat(20_000);
+        assert_eq!(sweep_past_budget(&text, 1_024), None);
+        assert_eq!(sweep_past_budget("one two three", usize::MAX), None);
+        assert_eq!(sweep_past_budget(&text, 4_000), None);
+        assert_eq!(sweep_past_budget(&text, 5_000), Some(67_110_000));
+        // The sentinel answers the gate exists to protect are untouched:
+        // the wide short-stream and huge-width shapes still return
+        // without ever reaching the assert.
+        assert_eq!(signature(&text, 8, usize::MAX, 0), vec![u64::MAX; 8]);
+        assert_eq!(distinct_shingle_count("one two three", usize::MAX), 0);
+    }
+
+    #[test]
+    fn sweep_budget_boundary_is_exact_on_both_sides() {
+        // H1: the budget boundary itself. s = 4096 divides 2^26, so
+        // tokens = 2^26/4096 + 4096 - 1 = 20479 gives work exactly
+        // 16384 * 4096 = 2^26 -- the call PROCEEDS (the budget is a
+        // ceiling, not an exclusive bound: the gate answers None, so the
+        // core backstop cannot fire and the sweep runs -- the release-side
+        // execution pin is tests/test_minhash.py's exactly-at golden) --
+        // and one more token tips (20480 - 4096 + 1) * 4096 = 67,112,960
+        // > 2^26 into the reject, reported at the cap (here the cap IS
+        // the stream: 20480 tokens, so the reported minimum is also the
+        // exact spend).
+        let at_budget = "w ".repeat(20_479);
+        assert_eq!(sweep_past_budget(&at_budget, 4_096), None);
+        let one_past = "w ".repeat(20_480);
+        assert_eq!(sweep_past_budget(&one_past, 4_096), Some(67_112_960));
+    }
+
+    #[test]
+    fn sweep_budget_reject_walk_is_capped_not_o_tokens() {
+        // H2: the reject path's count walk stops at the cap
+        // (floor(2^26/5000) + 5000 = 18421 tokens), so a stream ten times
+        // deeper than the cap pays the SAME bounded walk and reports the
+        // SAME minimum work -- 67,110,000, not the (200000 - 5000 + 1) *
+        // 5000 = 975,005,000 a full-stream walk would have computed. The
+        // pinned value is the deterministic proof the walk never scales
+        // with the stream: pre-fix this probe walked all 200k tokens
+        // GIL-held (measured 65.8ms per 1M tokens) before rejecting.
+        let deep = "w ".repeat(200_000);
+        assert_eq!(sweep_past_budget(&deep, 5_000), Some(67_110_000));
+        // The widest admissible width caps the same way: s = 1025 walks at
+        // most floor(2^26/1025) + 1025 = 65472 + 1025 = 66497 tokens.
+        assert_eq!(sweep_past_budget(&deep, 1_025), Some((65_472 + 1) * 1_025));
+    }
+
+    #[test]
+    fn sweep_budget_cap_arithmetic_cannot_overflow() {
+        // H3: the gate's only multiplication is (floor(B/s) + 1) * s in
+        // u128. For s > B the first factor is 1; for s <= B it is at most
+        // B/1025 + 1 -- so the product is bounded by ~(2^26/1025 + 1) *
+        // usize::MAX < 2^91, u128 headroom to spare (and the pre-cap
+        // exact-work spelling was safe too: both factors < 2^64 gives
+        // (2^64-1)^2 < 2^128). Pinned across the admissible widths
+        // including the usize extremes, with the over-budget property the
+        // cap exists to prove.
+        for &s in &[1_025usize, 4_096, 65_536, 500_000, usize::MAX] {
+            let s128 = s as u128;
+            let cap = usize::try_from(SHINGLE_SWEEP_BUDGET / s128 + s128)
+                .expect("cap fits usize for every admissible width");
+            let work_at_cap = (cap as u128 - s128 + 1) * s128;
+            assert!(
+                work_at_cap > SHINGLE_SWEEP_BUDGET,
+                "cap work for s={s} does not prove the reject"
+            );
+            assert!(
+                work_at_cap < 2u128.pow(91),
+                "cap work for s={s} near u128 limits"
+            );
+        }
+        // The exact-work spelling the gate replaced, at the u128 extremes
+        // it could have been fed: both factors bounded by usize::MAX, so
+        // the product is at most (2^64-1)^2 = 2^128 - 2^65 + 1 -- strictly
+        // inside u128, no overflow (debug panic or release wrap) possible.
+        let max = usize::MAX as u128; // 2^64 - 1
+        assert_eq!(max * max, u128::MAX - (1u128 << 65) + 2);
+        assert!((max - 1) * max < u128::MAX);
+    }
+
+    #[test]
+    fn fuzz_domain_stays_under_the_sweep_budget() {
+        // H6: the fuzz target's panic-freedom lane must never reach the
+        // core backstop's assert. Its widest legal shape is 16 KiB of
+        // single-character tokens -- 8192 tokens -- at the top of its
+        // shingle_size range (u16 % 1030 -> 1029): work =
+        // (8192 - 1029 + 1) * 1029 = 7,372,756 token-hashes, ~9x under
+        // the budget. Widening either fuzz bound re-balances this pin.
+        let max_tokens: usize = (16 * 1024_usize).div_ceil(2); // "a b c ...": 2n-1 bytes for n tokens
+        let work = (max_tokens as u128 - 1029 + 1) * 1029;
+        assert_eq!(max_tokens, 8192);
+        assert!(
+            work < SHINGLE_SWEEP_BUDGET,
+            "fuzz domain reaches the backstop"
+        );
     }
 
     #[test]

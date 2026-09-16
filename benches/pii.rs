@@ -110,11 +110,11 @@ fn bench_scrub_pii(c: &mut Criterion) {
             },
         );
     }
-    // Mismatched-END flood at scaling block counts (the quadratic
-    // regression instrument): N RSA BEGINs each followed by N EC ENDs
-    // no BEGIN can terminate at. Per-words failure memoization makes
-    // each (words, candidate) pair verify once — the series must scale
-    // ~linearly in N (a 4x-per-doubling series is the memo failing).
+    // Mismatched-END flood at scaling block counts: N RSA BEGINs each
+    // followed by N EC ENDs no BEGIN can terminate at. All BEGINs share
+    // words, so every END lands in one bucket and each BEGIN
+    // binary-searches past the flood — the series must scale ~linearly
+    // in N (a 4x-per-doubling series is the END index failing).
     for blocks in [500usize, 1000, 2000, 4000, 8000] {
         let begins = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7b\n".repeat(blocks);
         let ends = "-----END EC PRIVATE KEY-----\n".repeat(blocks);
@@ -122,6 +122,37 @@ fn bench_scrub_pii(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(text.len() as u64));
         group.bench_with_input(
             BenchmarkId::new("mismatched_ends", format!("{blocks}blocks")),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    scrub_pii(
+                        black_box(text),
+                        PiiRules::BOTH,
+                        tors::pii_impl::DEFAULT_SALT,
+                        tors::pii_impl::KEYS_DEFAULT_SALT,
+                    )
+                })
+            },
+        );
+    }
+    // The same flood with DISTINCT words per BEGIN and per END (the
+    // #92 shape the shared-words lane cannot see): every BEGIN's bucket
+    // is empty — each BEGIN pays one hash probe and a miss. The old
+    // per-words failure memo degraded super-linearly here (~2.87
+    // exponent measured; 67ms/659ms/3724ms/30053ms at
+    // 500/1000/2000/4000 blocks through the Python API). The series
+    // must scale ~linearly in N.
+    for blocks in [500usize, 1000, 2000, 4000, 8000] {
+        let begins: String = (0..blocks)
+            .map(|i| format!("-----BEGIN K{i} PRIVATE KEY-----\n"))
+            .collect();
+        let ends: String = (0..blocks)
+            .map(|i| format!("-----END L{i} PRIVATE KEY-----\n"))
+            .collect();
+        let text = format!("{begins}{ends}");
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("distinct_begin_words", format!("{blocks}blocks")),
             &text,
             |bench, text| {
                 bench.iter(|| {

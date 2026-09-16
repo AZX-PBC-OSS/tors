@@ -288,6 +288,15 @@ fn bench_repair_json(c: &mut Criterion) {
     // Built once outside the measured closures — repair() borrows the
     // config on every call.
     let cfg = RepairConfig::default();
+    // The deadline-armed twin (#79's clock): same cells at the middle size,
+    // so the arming cost (the sampled checks' counter branch on the
+    // no-deadline path, the reads on the armed one) is measured, not
+    // assumed. A generous budget changes no output (the parity pins), so
+    // any delta here is pure mechanism overhead.
+    let armed_cfg = RepairConfig {
+        deadline_ms: Some(60_000.0),
+        ..RepairConfig::default()
+    };
     let mut group = c.benchmark_group("repair_json");
     for target_bytes in [1024, 1024 * 1024, 12 * 1024 * 1024] {
         let valid = valid_json(target_bytes);
@@ -297,6 +306,13 @@ fn bench_repair_json(c: &mut Criterion) {
             &valid,
             |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&cfg))),
         );
+        if target_bytes == 1024 * 1024 {
+            group.bench_with_input(
+                BenchmarkId::new("valid_fast_path_armed", format!("{}B", valid.len())),
+                &valid,
+                |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&armed_cfg))),
+            );
+        }
 
         let malformed = malformed_llm_output(target_bytes);
         group.throughput(Throughput::Bytes(malformed.len() as u64));
@@ -305,6 +321,13 @@ fn bench_repair_json(c: &mut Criterion) {
             &malformed,
             |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&cfg))),
         );
+        if target_bytes == 1024 * 1024 {
+            group.bench_with_input(
+                BenchmarkId::new("malformed_armed", format!("{}B", malformed.len())),
+                &malformed,
+                |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&armed_cfg))),
+            );
+        }
 
         let fenced = fenced_json(target_bytes);
         group.throughput(Throughput::Bytes(fenced.len() as u64));
@@ -313,6 +336,13 @@ fn bench_repair_json(c: &mut Criterion) {
             &fenced,
             |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&cfg))),
         );
+        if target_bytes == 1024 * 1024 {
+            group.bench_with_input(
+                BenchmarkId::new("fenced_armed", format!("{}B", fenced.len())),
+                &fenced,
+                |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&armed_cfg))),
+            );
+        }
     }
     group.finish();
 }
@@ -327,6 +357,11 @@ fn bench_repair_json_schema(c: &mut Criterion) {
         schema: Some(schema),
         ..RepairConfig::default()
     };
+    let mut armed_cfg = RepairConfig {
+        schema: cfg.schema.clone(),
+        ..RepairConfig::default()
+    };
+    armed_cfg.deadline_ms = Some(60_000.0);
     let mut group = c.benchmark_group("repair_json_schema");
     for target_bytes in [1024, 1024 * 1024, 12 * 1024 * 1024] {
         let payload = schema_payload(target_bytes);
@@ -336,7 +371,65 @@ fn bench_repair_json_schema(c: &mut Criterion) {
             &payload,
             |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&cfg))),
         );
+        if target_bytes == 1024 * 1024 {
+            group.bench_with_input(
+                BenchmarkId::new("coerce_armed", format!("{}B", payload.len())),
+                &payload,
+                |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&armed_cfg))),
+            );
+        }
     }
+    // The key-ladder cell: a 1000-property schema and a payload of
+    // near-miss keys, the shape whose alignment cost is the ladder's
+    // O(properties) jaro sweep + sort per unknown key (the layer the
+    // deadline sampling rides on — #79). One representative size: the
+    // cost scales with keys x properties, so the cell pins the constant,
+    // not a size ladder. The numbered family leaves the top-2 jaro
+    // scores near-tied, so the ladder lands on its suggest tier — the
+    // sweep (the cell's cost) runs either way. Setup asserts the ladder
+    // actually ran (diagnostics on, then discarded: the measured config
+    // below runs with recording off, parity with the other cells).
+    let ladder_schema_text = format!(
+        r#"{{"type": "object", "additionalProperties": false, "properties": {{ {} }}}}"#,
+        (0..1000)
+            .map(|i| format!(r#""property_{i:06}": {{"type": "integer"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let ladder_schema = loads_strict(&ladder_schema_text).expect("ladder schema is valid JSON");
+    let ladder_cfg = RepairConfig {
+        schema: Some(ladder_schema),
+        ..RepairConfig::default()
+    };
+    let mut ladder_armed_cfg = RepairConfig {
+        schema: ladder_cfg.schema.clone(),
+        ..RepairConfig::default()
+    };
+    ladder_armed_cfg.deadline_ms = Some(60_000.0);
+    let ladder_payload = format!(
+        "{{{}}}",
+        (0..1000)
+            .map(|i| format!(r#""propertx_{i:06}": {i}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let setup_cfg = RepairConfig {
+        diagnostics: true,
+        ..ladder_cfg.clone()
+    };
+    let (_, diagnostics) = repair(&ladder_payload, &setup_cfg).expect("ladder payload repairs");
+    assert!(diagnostics.iter().any(|d| d.action == "suggest"));
+    group.throughput(Throughput::Bytes(ladder_payload.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("key_ladder", format!("{}B", ladder_payload.len())),
+        &ladder_payload,
+        |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&ladder_cfg))),
+    );
+    group.bench_with_input(
+        BenchmarkId::new("key_ladder_armed", format!("{}B", ladder_payload.len())),
+        &ladder_payload,
+        |bench, text| bench.iter(|| repair_opaque(black_box(text), black_box(&ladder_armed_cfg))),
+    );
     group.finish();
 }
 

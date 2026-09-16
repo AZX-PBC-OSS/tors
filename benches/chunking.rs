@@ -168,6 +168,20 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
                 })
             },
         );
+        // The overlap lookahead lane (#83): the same shape with the
+        // overlap engaged, so the per-transition lookahead (one extra
+        // cut per chunk) is tracked on the axis where it runs. Mirror of
+        // tools/bench_chunking.py's `hierarchical-default-2000-overlap`
+        // row.
+        group.bench_with_input(
+            BenchmarkId::new("default_2000_overlap_200", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    chunk_hierarchical_impl::chunk_hierarchical(black_box(text), 2000, None, 200)
+                })
+            },
+        );
     }
     // The degenerate single-character run, a never-matching custom
     // separator, and a whole-document budget: pure per-call machinery.

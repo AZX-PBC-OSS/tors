@@ -44,8 +44,13 @@ When reporting, include:
    reportable finding: pdf_oxide 0.3.78's `parse_object`/`parse_array` recursion
    has no depth cap (its `max_nesting` config is dead code), so a ~60 KB PDF with
    a 30k-deep trailer array crashes every entry point. It is noted in
-   `src/pdf_impl.rs`'s docs and exercised by the `documents_markdown` fuzz target;
-   the real fix belongs upstream.
+   `src/pdf_impl.rs`'s docs; the `documents_markdown` fuzz target is built and
+   committed as the repro harness but deliberately kept out of every run list
+   (the Makefile's `FUZZ_TARGETS`, ci.yml's smoke loop, fuzz.yml's weekly
+   matrix) — a known-crashing target in the always-run lists is a time bomb,
+   not a regression net — so no fuzz target exercises it yet. The real fix (a
+   depth cap in pdf_oxide's parser) belongs upstream; no upstream issue is on
+   record yet — link one here when it is filed.
 - **Supply chain**: the PyPI release pipeline (`publish.yml`, which builds and
   publishes both wheels, each through its own Trusted Publishing identity) uses
   PyPI Trusted Publishing (OIDC): there is no long-lived API token to leak, but a

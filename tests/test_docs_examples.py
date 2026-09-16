@@ -39,6 +39,17 @@ class TestReadmeExamples:
 
 
 class TestApiReferenceExamples:
+    def test_chunk_text_and_chunk_text_iter_overlap_examples(self) -> None:
+        # docs/api.md's chunk_text section, both output literals pinned
+        # byte-exact: the lossless default and the overlap=3 shape whose
+        # snapped starts (5, 14, 23) all survived #83's decline-the-snap
+        # lookahead unchanged (each transition's re-cut ends strictly past
+        # the predecessor's end, so none of the three snaps is declined).
+        text = "cats are cute and cats are fun"
+        assert tors.chunk_text(text, 12) == [(0, 8), (8, 17), (17, 26), (26, 30)]
+        assert tors.chunk_text(text, 12, overlap=3) == [(0, 8), (5, 17), (14, 26), (23, 30)]
+        assert list(tors.chunk_text_iter(text, 12)) == [(0, 8), (8, 17), (17, 26), (26, 30)]
+
     def test_scrub_log_text_detail_dsn_and_repr_examples(self) -> None:
         # docs/api.md's scrub_log_text section, pinned the same way: the
         # literals the doc shows, every rules= spelling included.

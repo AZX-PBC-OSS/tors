@@ -190,7 +190,31 @@ def _ref_chunk_hierarchical(
         else:
             target = max(cut[0] - overlap, 0)
             snapped = last_at_or_before(target)
-            start = snapped if snapped > start else cut[1]
+            # Decline-the-snap with lookahead (#83), mirroring production:
+            # the candidate is taken only when the chunk cut from it ends
+            # strictly past this chunk's end; otherwise the transition
+            # degrades to the zero-overlap cut.
+            if total - snapped <= max_chars:
+                next_end = total
+            else:
+                next_limit = snapped + max_chars
+                next_cut = None
+                for cut_list, end_list in zip(levels, ends, strict=True):
+                    idx = bisect_right(end_list, next_limit) - 1
+                    if idx >= 0 and cut_list[idx][0] > snapped:
+                        next_cut = cut_list[idx]
+                        break
+                if next_cut is None:
+                    end = last_at_or_before(next_limit)
+                    if end <= snapped:
+                        end = first_after(snapped)
+                    next_cut = (end, end)
+                next_end = next_cut[0]
+            start = (
+                snapped
+                if snapped > start and snapped < cut[0] and next_end > cut[0]
+                else cut[1]
+            )
     return chunks
 
 

@@ -8,7 +8,8 @@ tors.aio.tf_idf(corpus)` runs the native pass in a worker thread via
 `asyncio.to_thread`, and the event loop stays responsive for the whole call.
 
 It covers only the large-input functions: the chunking family, `tf_idf`,
-`bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`, the
+`bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
+`minhash_signature`, the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, and
 `truncate_ellipsis`/`strip_controls`/`scrub_log_text`/`scrub_pii`. Thread dispatch costs on the order of

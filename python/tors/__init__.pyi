@@ -144,6 +144,10 @@ def nfkd(text: str) -> str: ...
 def html_unescape(text: str) -> str: ...
 def grapheme_count(text: str) -> int: ...
 def word_bounds(text: str) -> list[tuple[int, int]]: ...
+# Single-thread only: holds a mutable native cursor (the class is not
+# frozen) and must not be drained from two threads — a concurrent
+# __next__ raises "RuntimeError: Already borrowed" (clean, no corruption);
+# the Compiled* classes are the shareable ones (frozen + Arc).
 def word_bounds_iter(text: str) -> Iterator[tuple[int, int]]: ...
 
 # GIL note: same shape as the list/iterator word_bounds pair: the whole
@@ -212,9 +216,12 @@ def diff_opcodes(
 # inside the detached region; TimeoutError constructed after the GIL is
 # reacquired), and the return marshalling constructs one 5-tuple per line
 # opcode with interned tag strings (op[0] is "equal" holds, exactly as it
-# does for difflib's own tuples). Indices address lines in
-# splitlines(keepends=True) shape (each line keeps its \n, the last may
-# lack one); a line diff's op count sits far below its char-level twin's.
+# does for difflib's own tuples). Indices address lines in '\n'-only
+# tokenization shape (a.split("\n")-with-terminators-reattached, each line
+# keeping its \n, the last may lack one) — not str.splitlines(keepends=True),
+# which additionally breaks on \r: a bare \r is not a break here, so a
+# \r-only file is one line, not several; a line diff's op count sits far
+# below its char-level twin's. See docs/api.md for the full contract.
 def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
@@ -384,7 +391,8 @@ def utf16_byte_len(s: str) -> int: ...
 # automaton build: one Arc refcount bump, the scan under one detach, the
 # same marshalling as the free spelling. Immutable after construction, so
 # sharing one across many calls and threads is sound with no
-# synchronization beyond the refcount. The replace spellings validate the
+# synchronization beyond the refcount (the *_iter objects are the
+# opposite: single-thread, see word_bounds_iter). The replace spellings validate the
 # replacements dict at call time (values change per call; the automaton is
 # the compiled part): it must key exactly the compiled pattern set, every
 # pattern paired with a value and no others (ValueError otherwise, naming
@@ -477,7 +485,12 @@ def dedent(text: str) -> str: ...
 # fence pre-pass and the json.loads fast-path attempt burn the budget too
 # (a fast path that completes past the budget still returns its answer).
 # It is a DoS backstop for the quadratic parser shapes shared with upstream
-# json_repair (splice rescans and the backslash-run string scan): a
+# json_repair (splice rescans and the backslash-run string scan); when a
+# schema is passed it also bounds the schema alignment layer (key-remap
+# ladder, union/type-union retries, coercion, fill, validation, same soft
+# bound, including the salvage unwrap's nested repair which inherits the
+# caller's budget).
+# A
 # bounded abort, not a speed-up; a completing parse is byte-identical
 # whether or not a deadline is set. The bound is soft (the tight loops
 # sample the clock 1-in-256, re-tightened after every O(n) splice/scan)
@@ -679,7 +692,10 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 # TypeError naming the type; circular references raise ValueError; a str
 # holding lone surrogates raises UnicodeEncodeError where json.dumps
 # accepts it (the crate-wide str-borrow divergence, documented in
-# docs/api.md). Deterministic: any dict key order yields the same hash.
+# docs/api.md). Deterministic: any dict key order yields the same hash,
+# except a dict holding two distinct NaN keys — their output order is
+# timsort's over an inconsistent comparator, insertion-order-dependent,
+# matching the json oracle (see docs/api.md).
 #
 # GIL note: the object walk and leaf spellings run under the GIL (the
 # standard arg-walk class, O(tree): one borrow+copy per str, one storage
@@ -688,8 +704,11 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 # call (see docs/async.md's family list).
 #
 # Bounds (generic ValueError, no bound values leaked): subclass hooks run to
-# completion under the GIL and abort past the per-container bound; exotic-key
-# dicts (any float/big-int/mixed/NaN/subclass key) delegate to CPython's own
+# completion under the GIL and abort past the per-container bound; dict
+# subclasses whose keys are all exact str/int/bool sort on the native fast
+# paths (no interpreter sort, nothing against these bounds), while
+# exotic-key subclass dicts (any float/big-int/mixed/NaN/subclass key)
+# delegate to CPython's own
 # list.sort and abort past 100k keys in one dict or 500k delegated pairs per
 # call; exact+protocol nesting aborts past the untrusted-input ceiling
 # (100k exact levels hash, 200k raises RecursionError). Protocol nesting past
@@ -819,7 +838,10 @@ def chunk_cdc(
 # the cost of the lossless-join guarantee. overlap must be < max_chars
 # (ValueError otherwise); a chunk shorter than the requested overlap
 # silently degrades to zero overlap for that one transition rather than
-# stall. The return marshalling is O(chunks) 2-tuples of ints (the
+# stall, and so does an overlap whose re-cut would land the next chunk
+# strictly inside its predecessor (the same text twice): the transition
+# falls back to the zero-overlap cut, so chunk ends always strictly
+# advance. The return marshalling is O(chunks) 2-tuples of ints (the
 # word_bounds list-shape class).
 def chunk_text(
     text: str,

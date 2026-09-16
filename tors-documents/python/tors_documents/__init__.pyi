@@ -113,7 +113,9 @@ def to_markdown(
     before a byte is read or copied, while ``None`` keeps the 32 MiB
     default (enforced after the read, on the anydoc/oxide lanes only).
     Returns ``(Format, markdown)``: the format the conversion actually
-    used. The whole read+sniff+convert pass runs GIL-free."""
+    used. The whole read+sniff+convert pass runs GIL-free. ⚠ A malformed
+    PDF can crash the process (uncatchable native stack exhaustion in the
+    pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
 
 def to_text(
     path: str | os.PathLike[str] | None = None,
@@ -127,7 +129,9 @@ def to_text(
     """The same conversion, routing, source, ``pages=``, ``password=``,
     and ``max_bytes=`` semantics as ``to_markdown``, with the markdown
     normalized to plain text: one text shape for every format and
-    engine. Returns ``(Format, text)``."""
+    engine. Returns ``(Format, text)``. ⚠ A malformed PDF can crash the
+    process (uncatchable native stack exhaustion in the pdf_oxide engine):
+    sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
 
 def sniff(data: bytes) -> Format | None:
     """The content-marker format detector over bytes alone: what
@@ -151,7 +155,9 @@ def pdf_classify(
     lane; ``"anydoc"`` is a capability refusal: its PDF surface is the
     ``to_markdown``/``to_text`` conversion pair); an explicit
     ``max_bytes=`` binds before the read, ``None`` leaves the lane
-    unmetered. Runs GIL-free."""
+    unmetered. Runs GIL-free. ⚠ A malformed PDF can crash the process
+    (uncatchable native stack exhaustion in the pdf_oxide engine): sandbox
+    untrusted PDFs (docs/documents.md, SECURITY.md)."""
 
 def pdf_extract(
     path: str | os.PathLike[str] | None = None,
@@ -168,7 +174,9 @@ def pdf_extract(
     per-page probe is the OCR-routing signal and anydoc has none; its
     PDF surface is the ``to_markdown``/``to_text`` conversion pair); an
     explicit ``max_bytes=`` binds before the read, ``None`` leaves the
-    lane unmetered."""
+    lane unmetered. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
 
 def pdf_page_count(
     path: str | os.PathLike[str] | None = None,
@@ -183,7 +191,9 @@ def pdf_page_count(
     its reader never returns on success; its PDF surface is the
     ``to_markdown``/``to_text`` conversion pair); an explicit
     ``max_bytes=`` binds before the read, ``None`` leaves the lane
-    unmetered."""
+    unmetered. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""
 
 def pdf_link_uris(
     path: str | os.PathLike[str] | None = None,
@@ -199,4 +209,6 @@ def pdf_link_uris(
     ``"anydoc"`` is a capability refusal: it has no annotation surface;
     its PDF surface is the ``to_markdown``/``to_text`` conversion pair);
     an explicit ``max_bytes=`` binds before the read, ``None`` leaves the
-    lane unmetered."""
+    lane unmetered. ⚠ A malformed PDF can crash the process (uncatchable
+    native stack exhaustion in the pdf_oxide engine): sandbox untrusted
+    PDFs (docs/documents.md, SECURITY.md)."""

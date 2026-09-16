@@ -50,14 +50,15 @@ hmac = { version = "0.13", default-features = false }
 # (no release since 2020, open "Unmaintained?" issue), same `encode(bytes) -> String`
 # call shape.
 const-hex = "1.19"
-# "simd-unsafe": the crate's own AVX2/NEON encode+decode kernels (Wojciech
-# Mula's vectorized algorithms), runtime-detected with a scalar fallback:
-# already-shipped, widely-exercised unsafe code in a 100M+-download crate,
-# not anything tors writes itself, matching the "lean on a mature crate for
-# the hard platform-specific part" pattern the rest of the tree already
-# follows (simdutf8, memchr, aho-corasick's Teddy prefilter). The feature's
-# name states its own tradeoff: it is unsafe, upstream, and opted into.
-base64 = { version = "0.23.1", features = ["simd-unsafe"] }
+# simd-unsafe is NOT enabled (it is in this crate's default feature set, so
+# it needs default-features = false to avoid): the general_purpose engine
+# that src/b64_impl.rs uses never runs the crate's SIMD kernels (its
+# internal_encode passes a no-op SIMD prefix; decode doesn't use the crate's
+# vector engine at all), so the feature bought no speedup — its only effect
+# was disabling the crate's forbid(unsafe_code) and shipping upstream unsafe
+# code for nothing. `std` alone keeps the crate all-safe on tors's behalf
+# (the rest of src/ is zero-unsafe).
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 unicode-segmentation = "1.13.3"
 memchr = "2.8.3"
 # utf8_is_valid's SIMD validity scan: "0.1" is the caret floor
@@ -86,9 +87,11 @@ aho-corasick = "1"
 # `algorithms::Sha256`, whose default hashing does NOT domain-separate leaf
 # and internal-node hashes (verified against the vendored source, not just
 # the docs); see merkle_impl.rs's module doc for the full reasoning.
-# Default features are just `std` (pulls `sha2`, already a dependency via
-# `finalize`'s hashing: no new transitive crate); the `keccak256` feature
-# (an optional `tiny-keccak` dependency) is left disabled, unused.
+# Default features are just `std` (pulls `sha2` 0.10.x — a second major
+# version alongside the direct sha2 0.11 above, so a new transitive crate,
+# though a small one from the already-audited RustCrypto family); the
+# `keccak256` feature (an optional `tiny-keccak` dependency) is left
+# disabled, unused.
 rs_merkle = "1.5"
 fastcdc = "5.0.0"
 # detect_encoding's guesser (the engine Firefox ships) plus the crate whose

@@ -120,11 +120,15 @@ def _hwm_kb(report: str) -> int:
 
 # The device-lane probe: /dev/zero under a 2 GiB RLIMIT_AS, so the pre-fix
 # unbounded read dies at the limit (MemoryError) instead of eating the box
-# at memory-bandwidth speed; and the post-fix refusal needs neither.
+# at memory-bandwidth speed; and the post-fix refusal needs neither. darwin
+# skips the belt: RLIMIT_AS is not reliable there and a 2 GiB cap can kill
+# the child's own imports — a pre-fix regression still dies loudly at the
+# probe deadline instead.
 _DEV_ZERO_PROBE = r"""
-import resource
-limit = 2 * 1024 ** 3
-resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+import resource, sys
+if sys.platform != "darwin":
+    limit = 2 * 1024 ** 3
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 from tors_documents import to_text
 try:
     out = to_text(path="/dev/zero", max_bytes=65536)
@@ -300,11 +304,12 @@ class TestAnExplicitBudgetBindsEveryLane:
         191.1 MiB and the anydoc engine lane's input ceiling is 65536
         bytes") a message only read bytes can produce, arriving 0.077s
         in; green: the binding's pre-read refusal names the knob, not a
-        lane) and by the child's VmHWM under a chunked-built fixture (the
-        red probe's first cut built the fixture as one 200 MB bytes
-        object, which masked the read in the high-water mark; chunked,
-        the read is the only 200 MB allocation the call can make, so a
-        green child never materializes the file)."""
+        lane) and, where procfs exists (Linux), by the child's VmHWM
+        under a chunked-built fixture (the red probe's first cut built
+        the fixture as one 200 MB bytes object, which masked the read in
+        the high-water mark; chunked, the read is the only 200 MB
+        allocation the call can make, so a green child never
+        materializes the file)."""
         code = rf"""
 import os, tempfile, time
 d = tempfile.mkdtemp()
@@ -323,9 +328,13 @@ try:
     print(f"CONVERTED {{out[0]}}")
 except ValueError as exc:
     elapsed = time.perf_counter() - t0
-    hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
     print(f"ValueError: {{exc}}")
-    print(f"elapsed={{elapsed:.3f}}s {{hwm.strip()}}")
+    print(f"elapsed={{elapsed:.3f}}s")
+    # The VmHWM half of the probe is Linux-shaped; the refusal evidence
+    # above runs everywhere.
+    if os.path.exists("/proc/self/status"):
+        hwm = next(l for l in open("/proc/self/status") if l.startswith("VmHWM"))
+        print(hwm.strip())
 finally:
     os.unlink(p)
     os.rmdir(d)
@@ -337,11 +346,15 @@ finally:
             f"the refusal is the core's POST-read message (the pre-fix shape — "
             f"the file was read first):\n{report}"
         )
-        peak = _hwm_kb(report)
-        assert peak < 100_000, (
-            f"the file was read before the refusal (VmHWM {peak} kB ~ the "
-            f"whole file resident — the pre-fix shape):\n{report}"
-        )
+        # The VmHWM half of the probe is Linux-shaped (the guard the 400 MB
+        # heartbeat probe's skipif carries); the refusal asserts above run
+        # everywhere.
+        if Path("/proc/self/status").exists():
+            peak = _hwm_kb(report)
+            assert peak < 100_000, (
+                f"the file was read before the refusal (VmHWM {peak} kB ~ the "
+                f"whole file resident — the pre-fix shape):\n{report}"
+            )
 
 
 # --- fix 2: the data= refusal carries the type, never the content ----------

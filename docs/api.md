@@ -959,13 +959,14 @@ def diff_opcodes(
 
 **Async**: `await tors.aio.diff_opcodes(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
-`difflib.SequenceMatcher(None, a, b).get_opcodes()`'s shape at native speed:
+`difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()`'s shape at native speed:
 `(tag, i1, i2, j1, j2)` tuples with `tag` in `{"equal", "replace", "delete",
 "insert"}`, ranges monotone/contiguous/covering both sides, adjacent delete+insert
 merged into `replace` exactly as difflib presents it, indices in Python `str`
 (codepoint) units. Character-level, like difflib on `str` operands: that is what
 makes difflib the parity oracle; `tors.diff_opcodes_lines` (below) is the
-line-level spelling. Exact agreement with difflib is pinned on the classes whose
+line-level spelling. Exact agreement with
+`difflib.SequenceMatcher(None, a, b, autojunk=False)` is pinned on the classes whose
 canonical opcode list is forced: verified by difflib's own answer carrying the
 canonical single-op shape (pure insert/delete, single-run replace, all-equal,
 empty operands); structural validity (the opcodes reconstruct both sides) is
@@ -975,6 +976,13 @@ difflib's longest-match recursion emits a non-minimal insert+delete split and
 Myers + run-maximization emits the minimal contiguous change) are documented
 and tested, never silent. The four tag strings are interned once per call, so
 `op[0] is "equal"` holds exactly as it does for difflib's own tuples.
+
+A third divergence class needs no repeated flanks at all: difflib's default
+`autojunk=True` junk-handles every element appearing more than `len(b)//100 + 1`
+times once `len(b) >= 200`, dropping it from matching, so past 200 elements the
+default-constructor spelling is not the oracle — `SequenceMatcher(None, a, b,
+autojunk=False)` is, and tors deliberately keeps the un-heuristic'd answer
+(`tests/test_similarity.py` pins the threshold).
 
 `deadline_ms` bounds the superlinear worst case: on hard inputs (few anchorable unique
 records: a character-level permutation is the measured shape) the Myers search's work
@@ -1516,6 +1524,11 @@ every single call for no reason. `CompiledPatterns(patterns)` builds it once und
 GIL-released pass; every method after that is the free function's exact scan minus the
 automaton build, sharing the compiled automaton by one `Arc` clone per call, sound to
 reuse across many calls and threads with no synchronization beyond that refcount.
+The `*_iter` objects are the opposite: an iterator returned by e.g.
+`word_bounds_iter` holds a mutable native cursor, belongs to one thread, and must
+not be drained concurrently — a concurrent `__next__` raises `RuntimeError: Already
+borrowed` (a clean exception, no corruption); the `Compiled*` classes are the
+shareable ones.
 
 Each method mirrors its free-function twin exactly: `cp.find(text) ==
 tors.find_patterns(patterns, text)`, `cp.count(text) == tors.count_matches(patterns,
@@ -1752,15 +1765,25 @@ empty-object splices, and a backslash-run string scan): a bounded *abort*,
 not a speed-up, since a completing parse is
 byte-identical whether or not a deadline is set, and a benign large document
 does not trip a generous budget (the deadline discriminates pathological
-*shape*, not *size*). It applies to all three spellings and is checked with
+*shape*, not *size*). When a schema is passed, the budget bounds the schema
+alignment layer too: the key-remap ladder, the union and type-union branch
+retries, scalar coercion, missing-key fill, and validation all sample the
+same clock, with the same soft bound (at most one key-ladder sweep or one
+union branch past expiry). It applies to all three spellings and is checked with
 the GIL released, so `TimeoutError` is raised after reacquiring it, the
 same shape as `diff_opcodes`, including the message:
 `"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
 
 Two limits. The bound is *soft*: the tight loops sample the clock
 1-in-256, but every O(n) unit (a buffer splice, a long scan, a wide span
-build) forces the very next check to read it, so at most one such unit
-runs past an expired budget (measured worst overshoot ~8% at n=1M). And
+build, one validation pass — the validator crate's error-carrying
+`validate` is the most expensive opaque unit, so the validity gate rides
+its boolean API and `validate()` always reads the clock before it) forces
+the very next check to read it, so at most one such unit
+runs past an expired budget (measured worst overshoot ~8% at n=1M). The
+schema alignment layer shares the same clock throughout, including the
+salvage unwrap's nested repair: a `salvage=True` call inherits the
+caller's budget inside the unwrap instead of restarting unbounded. And
 it bounds CPU *time*, not native stack growth: a runaway continuation
 recursion can still overflow the stack before the budget expires; that
 class is depth-guarded separately (`MAX_NESTING`), not time-bounded.
@@ -2170,7 +2193,7 @@ def get_close_matches(
 ) -> list[str]: ...
 ```
 
-`difflib.SequenceMatcher(None, a, b).ratio()` and `difflib.get_close_matches()`'s
+`difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()` and `difflib.get_close_matches()`'s
 shapes at native speed, over the same Myers engine `diff_opcodes` uses.
 `similarity_ratio` is `2.0 * M / T` (`T = len(a) + len(b)`, both in character units)
 with `M` the matched-character total over the Myers equal-ops, difflib's own formula
@@ -2188,6 +2211,14 @@ pairs, disjoint alphabets, pure insert/delete with differing flanks) and are bot
 valid but may diverge on repeated-flank contexts. difflib's anchored `M` is also
 direction-dependent (`similarity_ratio` is symmetric; difflib's `ratio()` is not, in
 general). `("", "")` is `1.0`, the convention both engines share.
+
+A third divergence class sits past difflib's `autojunk` threshold: with the default
+`autojunk=True` — the spelling `get_close_matches` uses internally and cannot turn
+off — any element appearing more than `len(b)//100 + 1` times in a `b` of 200+
+elements is junked before matching, so plain difflib's ratio collapses on such
+inputs (`"y" + "x"*300` vs `"x"*300`: difflib `0.0`) while tors keeps the
+un-heuristic'd answer (`0.9983…`), exact agreement holding with `autojunk=False` —
+the oracle's spelling above (`tests/test_similarity.py` pins the threshold).
 
 `get_close_matches` keeps every candidate scoring `similarity_ratio(candidate, word)
 >= cutoff` and returns the top `n` sorted by score descending, then by the candidate
@@ -2369,7 +2400,12 @@ boundary-safety invariants still hold regardless. `overlap` must be `< max_chars
 progress is possible). A chunk shorter than the requested `overlap` silently
 degrades to zero overlap for just that one transition rather than stall or violate
 the budget, a documented degradation under the one invariant that never breaks:
-forward progress (the chunk count can never exceed the codepoint count).
+forward progress (the chunk count can never exceed the codepoint count). The
+overlap is declined the same way — zero overlap for that one transition — when
+taking it would not buy new context: if the re-cut from the snapped start would
+land a span strictly inside the previous chunk (the same text embedded twice,
+the failure mode #83 fixed), the next chunk starts at the previous chunk's end
+instead, so a chunk is never contained in its predecessor.
 
 `max_chars < 1` or `overlap < 0` raise `ValueError`; an unrecognized `boundary` raises
 `ValueError` (the `truncate_to_bounds` spelling). `chunk_cdc`'s byte-level sibling:
@@ -2784,7 +2820,10 @@ paragraph/sentence/word boundary the way `chunk_text_overlapping`'s
 single-hierarchy overlap snap is (a documented simplification of the
 general multi-level case). A target at or before the chunk's own start
 silently degrades to zero overlap for just that one transition, the same
-snap-collapse `chunk_text` already applies.
+snap-collapse `chunk_text` already applies — and so does an overlap whose
+re-cut would land the next chunk strictly inside its predecessor (the same
+text twice, no new context): the transition falls back to the zero-overlap
+cut instead, so ends always strictly advance.
 
 `max_chars < 1` or `overlap < 0` raise `ValueError`; `overlap >= max_chars`
 raises `ValueError`. Empty `text` returns `[]`. An empty `separators` sequence
@@ -2939,7 +2978,12 @@ documented divergence below), `int` (arbitrary precision), `float`,
 `TypeError` naming the type (`set`, `frozenset`, `bytes`, `bytearray`,
 custom classes, plain `Enum`, views, iterators alike). Circular references
 raise `ValueError` on both sides (`json.dumps`'s own marker semantics: a
-shared sibling is fine, only a true cycle raises).
+shared sibling is fine, only a true cycle raises). One scoped exception-type
+divergence: *doubly* invalid input — a circular dict that also carries a
+non-coercible key — raises `ValueError` from `json.dumps` (its per-pair
+check interleaves coercion and cycle detection) and `TypeError` from
+`content_hash` (all keys of a dict are coerced before its values are
+walked); single-defect inputs raise the same type on both sides.
 
 **Dict keys: coercion, then json's own sort order.** Non-str keys are
 coerced exactly as `json.dumps` coerces them: `1` -> `"1"`, `True` ->
@@ -3038,7 +3082,13 @@ over live `(key, value)` tuples — O(n log n) Python comparisons plus one
 hash entry and one tuple per key, all GIL-held (≈100 MiB for 1M exotic
 keys). Past `MAX_DELEGATED_SORT_KEYS` (100k) keys in one dict, or
 `MAX_TOTAL_DELEGATED_PAIRS` (500k) delegated pairs walked in one call, the
-walk refuses with a generic `ValueError`. The str and int/bool fast paths
+walk refuses with a generic `ValueError`. Dict *subclasses* whose keys are
+all exact `str` (or exact `int`/`bool`, with no two keys comparing equal —
+a `True`/`1` tie sorts by value in the interpreter's timsort) sort natively
+in Rust on the same fast paths the exact lane uses, so a 100k-str-key
+`Counter`/`OrderedDict`/`defaultdict` hashes without touching the delegated
+bounds; subclass keys of any other type keep the delegated lane and its
+bounds. The str and int/bool fast paths
 take no interpreter sort and cost nothing against these bounds.
 
 **GIL model.** The object walk and the leaf spellings run under the GIL
@@ -3775,7 +3825,22 @@ shape held, same dev box). There is no
 `deadline_ms` on this call (unlike `diff_opcodes`): the sweep has no
 superlinear shape, only the linear ones above, so the lever is the
 caller's own input size — bound it before calling (truncate, chunk, or
-`max_bytes`-gate the read) rather than after. Measured (dev box,
+`max_bytes`-gate the read) rather than after. One guard does exist: a
+wide fillable shingle window (`shingle_size > 1024` with at least
+`shingle_size` tokens) costs `(tokens − shingle_size + 1) × shingle_size`
+token-hashes — work peaking near `shingle_size ≈ tokens/2`, not at the
+huge widths the sentinel short-circuit already absorbs — and past the
+sweep budget of 2^26 token-hashes (~0.4 s) the call raises `ValueError`
+naming the bound, the same two-sided pattern as `num_perm`'s cap
+(pinned in `tests/test_minhash.py`). The gate's own token count is
+capped at `⌊budget/shingle_size⌋ + shingle_size` tokens (≤ ~66.5k for
+every admissible width), so a huge stream is rejected in constant time
+without a GIL-held walk of the whole input, and the error reports the
+*minimum* provable spend past the cap ("at least N token-hashes"). The gate's own token count is
+capped at `⌊budget/shingle_size⌋ + shingle_size` tokens (≤ ~66.5k for
+every admissible width), so a huge stream is rejected in constant time
+without a GIL-held walk of the whole input, and the error reports the
+*minimum* provable spend past the cap ("at least N token-hashes"). Measured (dev box,
 macOS/arm64, release): ~13.5 MB of repetitive prose at the default 128
 permutations completes in ~0.25 s, while 1 MiB of distinct-rich text
 (every token unique, the `minhash_signature_distinct` bench row and the
@@ -3783,8 +3848,9 @@ Python worst-case cell) costs ~104 ms at k=128 and ~226 ms at k=1024
 (criterion medians, 10 samples) — the ~100M-affine-op worst case the
 caller bound is calibrated on; the suite's 2.5 s regression ceiling is
 ~10x the repetitive nominal
-(see `tests/test_minhash.py`), a tripwire, not a target. No `aio`
-twin: a fast one-shot call.
+(see `tests/test_minhash.py`), a tripwire, not a target. `await
+tors.aio.minhash_signature(...)` runs the call under `asyncio.to_thread`
+(see [Async use](async.md)).
 
 ```python
 original = (
