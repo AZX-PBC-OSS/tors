@@ -441,11 +441,15 @@ fn grapheme_index<'g>(
 /// necessarily a semantic word/sentence/paragraph boundary the way
 /// `chunk_text_overlapping`'s single-hierarchy overlap snap is; a
 /// documented simplification of the general multi-level case, not a
-/// silent gap. A target at or before the chunk's own start (a short
-/// trailing chunk, or a run of tight hard-cuts) silently degrades to zero
-/// overlap for just that one transition, the same documented
-/// snap-collapse [`crate::chunk_impl::chunk_text_overlapping`] already
-/// applies.
+/// silent gap. The snap is declined — zero overlap for just that one
+/// transition, the next chunk starting at `cut.1` — when it would not buy
+/// new context: a target at or before the chunk's own start (a short
+/// trailing chunk, or a run of tight hard-cuts), or a snapped start whose
+/// own chunk would end at or before the just-emitted chunk's end (a span
+/// strictly contained in its predecessor, the same text re-embedded;
+/// #83's decline-the-snap lookahead, the same rule
+/// [`crate::chunk_impl::chunk_text_overlapping`] applies). Either way the
+/// next chunk's end strictly advances past the current one's.
 pub fn chunk_hierarchical(
     text: &str,
     max_chars: usize,
@@ -533,7 +537,39 @@ pub fn chunk_hierarchical(
             let target = cut.0.saturating_sub(overlap);
             let g = grapheme_index(&mut graphemes, text, total);
             let snapped = g.last_at_or_before(target);
-            start = if snapped > start { snapped } else { cut.1 };
+            // Decline-the-snap with lookahead (#83): accept the candidate
+            // only when it starts past this chunk's own start, ends before
+            // this chunk's end, and the chunk cut from there ends strictly
+            // past this chunk's end. `next_end` is the loop body's own
+            // computation run from `snapped` (the levels are memoized, so
+            // this costs one partition_point per level, and the raw-cut
+            // fallback the same hard cut): a candidate whose own chunk
+            // would end at or before `cut.0` emits a span strictly
+            // contained in its predecessor (the same text re-embedded, no
+            // new context for the overlap to buy), so the snap is declined
+            // and the transition degrades to zero overlap (`start =
+            // cut.1`), the documented degradation.
+            let next_end = if total - snapped <= max_chars {
+                total
+            } else {
+                let next_limit = snapped + max_chars;
+                levels
+                    .iter_mut()
+                    .find_map(|slot| {
+                        slot.realize(text, total, &mut graphemes)
+                            .best_cut(snapped, next_limit)
+                    })
+                    .map(|(end, _next)| end)
+                    .unwrap_or_else(|| {
+                        let g = grapheme_index(&mut graphemes, text, total);
+                        g.hard_cut(snapped, next_limit)
+                    })
+            };
+            start = if snapped > start && snapped < cut.0 && next_end > cut.0 {
+                snapped
+            } else {
+                cut.1
+            };
         }
     }
     chunks
@@ -607,7 +643,11 @@ mod tests {
     /// over every level, `grapheme_safe_hard_cut` over the usize grid, the
     /// `partition_point` overlap snap) runs against the new spelling over
     /// a corpus × budget × overlap × hierarchy sweep below. The rewrite
-    /// claims bit-identical output; this is the pin.
+    /// claims bit-identical output; this is the pin. One deliberate
+    /// post-verbatim edit, mirrored on both sides in lockstep: #83's
+    /// decline-the-snap lookahead in the overlap branch (the oracle's
+    /// snap carried the same contained-chunk defect the production loop
+    /// did), so the pin compares fixed machine against fixed machine.
     fn chunk_hierarchical_reference(
         text: &str,
         max_chars: usize,
@@ -691,7 +731,29 @@ mod tests {
                 let target = cut.0.saturating_sub(overlap);
                 let ghi = grapheme_starts.partition_point(|&g| g <= target);
                 let snapped = if ghi > 0 { grapheme_starts[ghi - 1] } else { 0 };
-                start = if snapped > start { snapped } else { cut.1 };
+                // The production snap's decline-the-snap lookahead (#83),
+                // spelled against this oracle's own eager levels: kept in
+                // verbatim lockstep with chunk_hierarchical's, or the
+                // differential sweep below diverges exactly where one side
+                // declines a snap and the other accepts it. `next_end` is
+                // the oracle loop's own computation run from `snapped`.
+                let next_end = if total - snapped <= max_chars {
+                    total
+                } else {
+                    let next_limit = snapped + max_chars;
+                    levels
+                        .iter()
+                        .find_map(|level| level.best_cut(snapped, next_limit))
+                        .map(|(end, _next)| end)
+                        .unwrap_or_else(|| {
+                            grapheme_safe_hard_cut(&grapheme_starts, snapped, next_limit)
+                        })
+                };
+                start = if snapped > start && snapped < cut.0 && next_end > cut.0 {
+                    snapped
+                } else {
+                    cut.1
+                };
             }
         }
         chunks
@@ -776,6 +838,65 @@ mod tests {
                             "divergence: text={text:?} max_chars={max_chars} \
                              overlap={overlap} separators={seps:?}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lookahead_memoized_levels_match_the_eager_oracle_over_every_overlap() {
+        // H3, attacked: #83's lookahead re-consults the level slots
+        // (`realize` + `best_cut`) for the snapped candidate's window
+        // before the production cut for that window ever runs, so the
+        // question is whether realize-then-query through the lookahead can
+        // mutate the memoized state (a level built at lookahead time,
+        // filtered differently, or the grapheme index built early) in a
+        // way the subsequent production cut then inherits but the eager
+        // oracle does not see. `realize` is get_or_insert_with-pure (the
+        // build and its cut filter run exactly once, deterministically),
+        // so the answer should be no — this sweep pins it by running EVERY
+        // overlap value 0..max_chars-1 (not just the boundary-adjacent
+        // three the bitmap sweep uses: the accepted/declined alternation
+        // the lookahead decides is per-transition, and only the full
+        // overlap range walks every branch of it) over the differential
+        // corpus x three hierarchy shapes. Overlap > 0 transitions also
+        // re-assert #83's ends-advance invariant independently of the
+        // oracle, so a lockstep bug on both sides of the differential
+        // cannot hide here.
+        let separator_cases: Vec<Option<Vec<Option<&str>>>> =
+            vec![None, Some(vec![Some("\n"), None]), Some(vec![Some(" ")])];
+        for text in differential_corpus() {
+            let total = text.chars().count();
+            for max_chars in 1..=total.min(24) {
+                for overlap in 0..max_chars {
+                    for seps in &separator_cases {
+                        let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
+                        let new =
+                            chunk_hierarchical(&text, max_chars, sep_refs.as_deref(), overlap);
+                        let old = chunk_hierarchical_reference(
+                            &text,
+                            max_chars,
+                            sep_refs.as_deref(),
+                            overlap,
+                        );
+                        assert_eq!(
+                            new, old,
+                            "lookahead/production divergence: text={text:?} \
+                             max_chars={max_chars} overlap={overlap} separators={seps:?}"
+                        );
+                        if overlap > 0 {
+                            let mut prev_end = 0usize;
+                            for &(s, e) in &new {
+                                assert!(
+                                    e > prev_end,
+                                    "ends not strictly advancing under overlap={overlap}: \
+                                     text={text:?} max_chars={max_chars} separators={seps:?}"
+                                );
+                                let _ = s;
+                                prev_end = e;
+                            }
+                        }
                     }
                 }
             }
@@ -1337,6 +1458,18 @@ mod tests {
                 let _ = prev_start;
             }
         }
+    }
+
+    #[test]
+    fn overlapped_chunk_is_never_strictly_inside_its_predecessor() {
+        // #83's hierarchical shape, pinned: the snapped start used to
+        // resolve back to the same cut, emitting (2, 4) strictly inside
+        // (0, 4). The decline-the-snap lookahead now drops the overlap for
+        // exactly that transition (start = cut.1).
+        assert_eq!(
+            chunk_hierarchical("aaa bbbbbbbb", 5, None, 2),
+            vec![(0, 4), (4, 9), (7, 12)]
+        );
     }
 
     #[test]

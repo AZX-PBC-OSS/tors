@@ -343,6 +343,16 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
 /// starts at `chunk_end`, `chunk_text`'s own no-overlap rule), a
 /// documented degradation under the one invariant that must never break
 /// (forward progress), not a silent contract violation.
+///
+/// The same decline applies (#83) when the snapped start is strictly
+/// between `start` and `chunk_end` but the chunk cut from there would end
+/// at or before this chunk's own end: accepting it would emit a span
+/// strictly contained in its predecessor (the same text re-embedded, no
+/// new context for the overlap to buy). The candidate is accepted only
+/// when a lookahead cut from it ([`cut_end`], the loop body's own rule)
+/// ends strictly past `chunk_end`; otherwise that transition degrades to
+/// zero overlap, the same rule as above. Either way the next chunk's end
+/// strictly advances past the current one's.
 pub fn chunk_text_overlapping(
     text: &str,
     max_chars: usize,
@@ -382,37 +392,42 @@ pub fn chunk_text_overlapping(
     // a trimmed end, all grid boundaries by construction.
     let mut start_idx = 0usize;
     loop {
-        let remaining = total - start;
-        let chunk_end = if remaining <= max_chars {
-            total
-        } else {
-            let limit = start + max_chars;
-            let hi = ends.partition_point(|&end| end <= limit);
-            let cut = if hi > 0 && ends[hi - 1] > start {
-                ends[hi - 1]
-            } else {
-                grapheme_safe_hard_cut(&grapheme_starts, start, limit)
-            };
-            let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
-            let trimmed_idx = trimmed_end(&cluster_whitespace, start_idx, cut_idx);
-            if trimmed_idx > start_idx {
-                grapheme_starts[trimmed_idx]
-            } else {
-                cut
-            }
-        };
+        let chunk_end = cut_end(
+            &ends,
+            &grapheme_starts,
+            &cluster_whitespace,
+            total,
+            max_chars,
+            start,
+            start_idx,
+        );
         chunks.push((start, chunk_end));
         if chunk_end >= total {
             break;
         }
         // Snap `chunk_end - overlap` to the nearest boundary at or before
         // it; fall back to `chunk_end` (no overlap this transition) unless
-        // the snapped position is strictly between `start` and `chunk_end`,
-        // per the forward-progress guarantee documented above.
+        // the snapped position is strictly between `start` and `chunk_end`
+        // AND the chunk cut from there ends strictly past `chunk_end` (the
+        // [`cut_end`] lookahead: a candidate whose own chunk ends at or
+        // before this chunk's end is strictly contained in it — the same
+        // text re-embedded, no new context — so the overlap is declined,
+        // the documented degradation), per the forward-progress guarantee
+        // documented above.
         let target = chunk_end.saturating_sub(overlap);
         let snap_hi = ends.partition_point(|&end| end <= target);
         let snapped = if snap_hi > 0 { ends[snap_hi - 1] } else { 0 };
-        start = if snapped > start && snapped < chunk_end {
+        let snapped_idx = grapheme_starts.partition_point(|&g| g < snapped);
+        let snapped_end = cut_end(
+            &ends,
+            &grapheme_starts,
+            &cluster_whitespace,
+            total,
+            max_chars,
+            snapped,
+            snapped_idx,
+        );
+        start = if snapped > start && snapped < chunk_end && snapped_end > chunk_end {
             snapped
         } else {
             chunk_end
@@ -420,6 +435,44 @@ pub fn chunk_text_overlapping(
         start_idx = grapheme_starts.partition_point(|&g| g < start);
     }
     chunks
+}
+
+/// One chunk's end under `chunk_text`'s cut+trim rule, extracted verbatim
+/// from `chunk_text_overlapping`'s loop body so the overlap snap's
+/// lookahead asks the loop's own question — where would the chunk that
+/// starts at `start` (grid index `start_idx`) end? — instead of a second
+/// spelling that could drift from it: `total` when the remaining span
+/// fits the budget, else the largest cluster-safe boundary end in
+/// `(start, start + max_chars]` with the trailing-whitespace trim applied.
+/// The inputs are the call-level tables `chunk_text_overlapping` already
+/// holds, so the lookahead's answer is bit-identical to what the next
+/// iteration computes for the same start.
+fn cut_end(
+    ends: &[usize],
+    grapheme_starts: &[usize],
+    cluster_whitespace: &[bool],
+    total: usize,
+    max_chars: usize,
+    start: usize,
+    start_idx: usize,
+) -> usize {
+    if total - start <= max_chars {
+        return total;
+    }
+    let limit = start + max_chars;
+    let hi = ends.partition_point(|&end| end <= limit);
+    let cut = if hi > 0 && ends[hi - 1] > start {
+        ends[hi - 1]
+    } else {
+        grapheme_safe_hard_cut(grapheme_starts, start, limit)
+    };
+    let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
+    let trimmed_idx = trimmed_end(cluster_whitespace, start_idx, cut_idx);
+    if trimmed_idx > start_idx {
+        grapheme_starts[trimmed_idx]
+    } else {
+        cut
+    }
 }
 
 /// One content-defined chunk's byte span in the original input, `end`
@@ -880,6 +933,7 @@ mod tests {
             for overlap in 1..max_chars {
                 let chunks = chunk_text_overlapping(text, max_chars, overlap, Boundary::Word);
                 let mut prev_start: Option<usize> = None;
+                let mut prev_end: Option<usize> = None;
                 for &(start, end) in &chunks {
                     assert!(end - start <= max_chars);
                     if let Some(p) = prev_start {
@@ -888,9 +942,206 @@ mod tests {
                             "no forward progress at max_chars={max_chars}, overlap={overlap}"
                         );
                     }
+                    // The #83 invariant: every chunk's end advances strictly
+                    // past the previous chunk's end — a snapped start whose
+                    // own chunk would end at or before the predecessor's end
+                    // is declined, never emitted as a span strictly inside it.
+                    if let Some(p) = prev_end {
+                        assert!(
+                            end > p,
+                            "end did not advance past the previous chunk's end at \
+                             max_chars={max_chars}, overlap={overlap}"
+                        );
+                    }
                     prev_start = Some(start);
+                    prev_end = Some(end);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn overlapped_chunk_is_never_strictly_inside_its_predecessor() {
+        // #83's shapes, pinned: the snapped start used to resolve back to
+        // the same cut, emitting (4, 7) inside (3, 7) and (1, 2) inside
+        // (0, 2). The decline-the-snap lookahead now drops the overlap for
+        // exactly those transitions (start = chunk_end).
+        assert_eq!(
+            chunk_text_overlapping("aaa bbb ccc", 5, 2, Boundary::Word),
+            vec![(0, 3), (3, 7), (7, 11)]
+        );
+        assert_eq!(
+            chunk_text_overlapping(" .  ", 2, 1, Boundary::Word),
+            vec![(0, 2), (2, 4)]
+        );
+    }
+
+    /// The full chunk_text_overlapping contract over one
+    /// (text, max_chars, overlap, boundary) case, the overlap-era twin of
+    /// [`assert_contract`]: non-empty chunks, first start 0, starts
+    /// strictly advancing, ends strictly advancing (#83's invariant — the
+    /// decline-the-snap lookahead's whole point), no chunk contained in
+    /// its predecessor, every chunk edge on a grapheme-cluster boundary,
+    /// the <= max_chars budget on every chunk except the documented
+    /// single-oversized-cluster exception, and the overlap=0 spelling
+    /// byte-identical to [`chunk_text`].
+    fn assert_overlap_contract(text: &str, max_chars: usize, overlap: usize, boundary: Boundary) {
+        use crate::truncate_impl::grapheme_boundary_chars;
+        let chunks = chunk_text_overlapping(text, max_chars, overlap, boundary);
+        let grid = grapheme_boundary_chars(text);
+        let valid: std::collections::HashSet<usize> = grid.iter().copied().collect();
+        let mut prev_start = 0usize;
+        let mut prev_end = 0usize;
+        for (i, &(a, b)) in chunks.iter().enumerate() {
+            assert!(
+                b > a,
+                "empty chunk {a}..{b} for {text:?}/{max_chars}/{overlap}/{boundary:?}"
+            );
+            if i == 0 {
+                assert_eq!(
+                    a, 0,
+                    "first chunk must start at 0 for {text:?}/{max_chars}/{overlap}/{boundary:?}"
+                );
+            } else {
+                assert!(
+                    a > prev_start,
+                    "starts must strictly advance: {a} after {prev_start} for \
+                     {text:?}/{max_chars}/{overlap}/{boundary:?}"
+                );
+                assert!(
+                    b > prev_end,
+                    "#83: ends must strictly advance: {b} after {prev_end} for \
+                     {text:?}/{max_chars}/{overlap}/{boundary:?}"
+                );
+                assert!(
+                    !(a >= prev_start && b <= prev_end),
+                    "chunk {a}..{b} is contained in its predecessor \
+                     {prev_start}..{prev_end} for {text:?}/{max_chars}/{overlap}/{boundary:?}"
+                );
+            }
+            assert!(
+                valid.contains(&a) && valid.contains(&b),
+                "chunk edge mid-cluster for {text:?}/{max_chars}/{overlap}/{boundary:?}: \
+                 {a}..{b} in {chunks:?}"
+            );
+            if b - a > max_chars {
+                // The one documented exception: a single grapheme cluster
+                // wider than the budget, exactly as assert_contract's.
+                let a_idx = grid.iter().position(|&g| g == a).unwrap_or_else(|| {
+                    panic!("oversized chunk start {a} is not a grapheme boundary: {chunks:?}")
+                });
+                assert_eq!(
+                    grid.get(a_idx + 1),
+                    Some(&b),
+                    "budget exceeded without being a single oversized cluster for \
+                     {text:?}/{max_chars}/{overlap}/{boundary:?}: {chunks:?}"
+                );
+            }
+            prev_start = a;
+            prev_end = b;
+        }
+        assert_eq!(
+            chunk_text_overlapping(text, max_chars, 0, boundary),
+            chunk_text(text, max_chars, boundary),
+            "overlap=0 identity broke for {text:?}/{max_chars}/{boundary:?}"
+        );
+    }
+
+    #[test]
+    fn overlap_lookahead_properties_hold_over_the_exhaustive_tiny_corpus() {
+        // The #83 lookahead attacked at the smallest scales, where its
+        // boundary cases live: every string over {a, space, .} up to
+        // length 6 x every max_chars 1..=7 x every legal overlap x both
+        // boundaries, the full contract above on each. The alphabet puts
+        // whitespace (the trim paths the lookahead's cut_end follows) and
+        // a sentence terminator (the sentence-boundary paths) inside the
+        // exhaustive space; max_chars up to 7 drives cuts past every
+        // string length, exercising the final-chunk and snap-collapse
+        // corners of the acceptance rule.
+        let alphabet = ['a', ' ', '.'];
+        let mut texts = vec![String::new()];
+        for _ in 0..6 {
+            let mut frontier = Vec::new();
+            for text in &texts {
+                for &c in &alphabet {
+                    let mut next = text.clone();
+                    next.push(c);
+                    frontier.push(next);
+                }
+            }
+            texts.extend(frontier);
+        }
+        for text in texts.iter().filter(|t| !t.is_empty()) {
+            for max_chars in 1..=7 {
+                for overlap in 1..max_chars {
+                    for boundary in [Boundary::Word, Boundary::Sentence] {
+                        assert_overlap_contract(text, max_chars, overlap, boundary);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlap_lookahead_properties_hold_on_the_mixed_unicode_battery() {
+        // The same contract over the non-ASCII rows the tiny alphabet
+        // cannot spell — ZWJ chains, Thai SARA AM, decomposed accents,
+        // CRLF pairs — at every budget and every legal overlap: the snap
+        // candidates and the lookahead's cut_end are both cluster-safe
+        // structures, and neither may start splitting clusters now that
+        // the decline rule re-routes transitions (H4).
+        let cases = [
+            "a\r\nb. c\r d\ne",
+            "ab 0\u{0E33} cd. x0\u{0E33}y.",
+            "caf\u{e9} \u{6771}\u{4eac}\u{3002} \u{5927}\u{962a}\u{3002}",
+            "\u{1f469}\u{200d}\u{1f52c} says hi. \u{1100}\u{1161}\u{11a8}!",
+            "thumbs up \u{1F44D}\u{200D}\u{1F3FB} flag \u{1F1FA}\u{1F1F8}",
+            "e\u{0301}e\u{0301}e\u{0301} ",
+            "0\u{0E33}0\u{0E33}0\u{0E33}",
+        ];
+        for case in cases {
+            let total = case.chars().count();
+            for max_chars in 1..=(total + 2) {
+                for overlap in 1..max_chars {
+                    for boundary in [Boundary::Word, Boundary::Sentence] {
+                        assert_overlap_contract(case, max_chars, overlap, boundary);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hard_cut_run_degrades_every_transition_to_zero_overlap_contiguously() {
+        // H2's degenerate shape, pinned: a single 40-codepoint word gives
+        // the snap no boundary to snap to (the only segment end is the
+        // text's own end), so every transition declines the requested
+        // overlap and the output is exactly the zero-overlap partition —
+        // contiguous, covering, ends advancing. The degradation is the
+        // documented behavior, not a bug: there is no boundary-safe
+        // overlap this text can provide.
+        let text = "a".repeat(40);
+        let chunks = chunk_text_overlapping(&text, 5, 3, Boundary::Word);
+        assert_eq!(chunks, chunk_text(&text, 5, Boundary::Word));
+        for w in chunks.windows(2) {
+            assert_eq!(
+                w[1].0, w[0].1,
+                "declined transitions must stay contiguous: {chunks:?}"
+            );
+        }
+        // The mixed shape: a tight word run where the snapped chunk's own
+        // trim collapses it back onto the predecessor's end — the
+        // lookahead declines those transitions too, and the sequence
+        // degrades transition-by-transition rather than ever emitting a
+        // contained chunk or stalling.
+        let mixed = "aaaa bbbb cccc dddd";
+        let overlapped = chunk_text_overlapping(mixed, 6, 3, Boundary::Word);
+        assert_eq!(overlapped, [(0, 4), (4, 9), (9, 14), (14, 19)]);
+        let mut prev_end = 0usize;
+        for &(a, b) in &overlapped {
+            assert!(b > prev_end, "ends must still advance: {overlapped:?}");
+            let _ = a;
+            prev_end = b;
         }
     }
 

@@ -13,10 +13,14 @@
 //! its ASCII fast path, not the production code re-answering its own
 //! question), and a chunk exceeding `max_chars` is legal only as exactly
 //! one whole grapheme cluster (the documented oversized-cluster
-//! exception). Starts strictly increase, and ends never move backward,
-//! non-strictly: an overlapping window can legitimately re-offer the same
-//! cut to two consecutive chunks, so equal ends are legal, only a
-//! regressing end is a bug. Forward progress at the sequence level.
+//! exception). Starts strictly increase, and — since #83 — ends strictly
+//! advance past the previous chunk's end whenever overlap > 0: an
+//! overlapping window can no longer legitimately re-offer the same cut to
+//! two consecutive chunks (that emitted a chunk strictly inside its
+//! predecessor; the snap is now declined instead), so under overlap a
+//! failing-to-advance end is a bug. At overlap == 0 ends never move
+//! backward, non-strictly: only a regressing end is a bug there. Forward
+//! progress at the sequence level.
 //!
 //! `chunk_by_lines` and `chunk_by_paragraphs` carry more than
 //! structure: an inline random-access reference oracle each (the same
@@ -168,7 +172,7 @@ fn assert_cluster_safe(chunks: &[(usize, usize)], text: &str, budget: usize, wha
     }
 }
 
-fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
+fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str, overlap: usize) {
     let mut prev_start = None;
     let mut prev_end = None;
     for &(start, end) in chunks {
@@ -186,21 +190,23 @@ fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str) {
                 "{what}: starts not strictly increasing at {start}"
             );
         }
-        // Ends are monotone non-strictly: the allowance exists for
-        // chunk_hierarchical's overlap re-offer (one cut can
-        // legitimately serve two consecutive windows, a "\n\n" firing
-        // at 22 under budget 22 and overlap 4 yields (0, 22), (18, 22))
-        // so strict `>` would be wrong here. The unit windowers are
-        // not a second justification: chunk_by_segments' loop breaks
-        // right after its single clamped final chunk, and every window
-        // before it advances `stride >= 1` segments, so unit-chunker
-        // ends are always strictly increasing; they merely happen to
-        // satisfy this looser bound. What must never happen anywhere
-        // is an end moving backward.
+        // Ends strictly advance past the previous chunk's end when
+        // overlap > 0 (#83: the overlap re-offer that could emit a chunk
+        // strictly inside its predecessor — one cut serving two
+        // consecutive windows, a "\n\n" firing at 22 under budget 22 and
+        // overlap 4 yielding (0, 22), (18, 22) — is declined by the
+        // windowers now, not blessed). At overlap == 0 the looser
+        // non-decreasing bound is kept. The unit windowers are not a
+        // second justification for the loose bound: chunk_by_segments'
+        // loop breaks right after its single clamped final chunk, and
+        // every window before it advances `stride >= 1` segments, so
+        // unit-chunker ends are always strictly increasing; they merely
+        // happen to satisfy it. What must never happen anywhere is an end
+        // moving backward.
         if let Some(prev) = prev_end {
             assert!(
-                end >= prev,
-                "{what}: ends not monotonic at {end} after {prev}"
+                if overlap > 0 { end > prev } else { end >= prev },
+                "{what}: ends not advancing under overlap={overlap} at {end} after {prev}"
             );
         }
         prev_start = Some(start);
@@ -392,7 +398,7 @@ fuzz_target!(|input: Input| {
             separators,
             overlap,
         );
-        assert_basic_contract(&chunks, total, "chunk_hierarchical");
+        assert_basic_contract(&chunks, total, "chunk_hierarchical", overlap);
         assert_cluster_safe(&chunks, &input.text, budget, "chunk_hierarchical");
         // The whole-document-budget oracle, folded in at every budget
         // that can only ever emit the single first window: `max_chars
@@ -471,17 +477,17 @@ fuzz_target!(|input: Input| {
     for per_chunk in [1usize, 2, 3, 7, raw_budget] {
         let overlap = overlap % per_chunk;
         let words = tors::chunk_by_segment_impl::chunk_by_words(&input.text, per_chunk, overlap);
-        assert_basic_contract(&words, total, "chunk_by_words");
+        assert_basic_contract(&words, total, "chunk_by_words", overlap);
         assert_cluster_safe(&words, &input.text, usize::MAX, "chunk_by_words");
 
         let sentences =
             tors::chunk_by_segment_impl::chunk_by_sentences(&input.text, per_chunk, overlap);
-        assert_basic_contract(&sentences, total, "chunk_by_sentences");
+        assert_basic_contract(&sentences, total, "chunk_by_sentences", overlap);
         assert_cluster_safe(&sentences, &input.text, usize::MAX, "chunk_by_sentences");
 
         let paragraphs =
             tors::chunk_by_segment_impl::chunk_by_paragraphs(&input.text, per_chunk, overlap);
-        assert_basic_contract(&paragraphs, total, "chunk_by_paragraphs");
+        assert_basic_contract(&paragraphs, total, "chunk_by_paragraphs", overlap);
         assert_eq!(
             paragraphs,
             reference_window(&reference_paragraphs, per_chunk, overlap),
@@ -491,7 +497,7 @@ fuzz_target!(|input: Input| {
         );
 
         let lines = tors::chunk_by_segment_impl::chunk_by_lines(&input.text, per_chunk, overlap);
-        assert_basic_contract(&lines, total, "chunk_by_lines");
+        assert_basic_contract(&lines, total, "chunk_by_lines", overlap);
         assert_eq!(
             lines,
             reference_window(&reference_lines, per_chunk, overlap),

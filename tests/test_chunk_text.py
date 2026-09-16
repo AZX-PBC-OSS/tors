@@ -55,6 +55,13 @@ from tors import (
 # ---------------------------------------------------------------------------
 
 
+def _grapheme_boundary(text: str, p: int) -> bool:
+    # A codepoint index p is a grapheme-cluster boundary iff splitting
+    # there counts the same clusters on both sides (the same definition
+    # tests/test_chunk_hierarchical.py uses for the hierarchical chunker).
+    return grapheme_count(text[:p]) + grapheme_count(text[p:]) == grapheme_count(text)
+
+
 class TestChunkTextNoOverlap:
     def test_empty_text_is_no_chunks(self) -> None:
         assert chunk_text("", 5) == []
@@ -181,11 +188,14 @@ class TestChunkTextOverlap:
         # fails fast instead of hanging the test runner.
         assert len(chunks) <= len(text) + 1
         prev_start = -1
+        prev_end = -1
         for a, b in chunks:
             assert b > a
             assert b - a <= max_chars
             assert a > prev_start, "no forward progress"
+            assert b > prev_end, "end did not advance past the previous chunk's end"
             prev_start = a
+            prev_end = b
 
     def test_short_trailing_chunk_degrades_overlap_rather_than_stalling(self) -> None:
         # A short final chunk (shorter than the requested overlap) forces
@@ -194,10 +204,113 @@ class TestChunkTextOverlap:
         text = "aaaaaaaaaa b"  # a 10-char run, a space, one more char
         chunks = chunk_text(text, 10, overlap=8)
         prev_start = -1
-        for a, _b in chunks:
+        prev_end = -1
+        for a, b in chunks:
             assert a > prev_start
+            assert b > prev_end, "end did not advance past the previous chunk's end"
             prev_start = a
+            prev_end = b
         assert chunks[-1][1] == len(text)
+
+    def test_chunk_is_never_strictly_inside_its_predecessor(self) -> None:
+        # #83 regression: with overlap, the snapped start used to resolve
+        # back to the same cut, emitting a chunk strictly contained in the
+        # previous one ((4, 7) inside (3, 7); (1, 2) inside (0, 2)). The
+        # snap is now declined for exactly those transitions. Pinned
+        # outputs, hand-traced against the decline-the-snap rule.
+        assert chunk_text("aaa bbb ccc", 5, overlap=2) == [(0, 3), (3, 7), (7, 11)]
+        assert chunk_text(" .  ", 2, overlap=1) == [(0, 2), (2, 4)]
+
+    def test_chunk_text_iter_parity_with_overlap(self) -> None:
+        # The streaming twin must produce the identical (start, end)
+        # sequence under overlap, the same parity the overlap=0 tests pin:
+        # both spellings call the same core, but the parity is the pyo3
+        # marshalling contract, not an implementation detail.
+        for text in ("cats are cute and cats are fun", "One. Two. Three.", "a bb ccc dddd"):
+            for max_chars in range(2, 13):
+                for overlap in range(1, max_chars):
+                    for boundary in ("word", "sentence"):
+                        assert list(
+                            chunk_text_iter(text, max_chars, overlap=overlap, boundary=boundary)
+                        ) == chunk_text(text, max_chars, overlap=overlap, boundary=boundary)
+
+    def test_exhaustive_small_corpus_overlap_contract(self) -> None:
+        # The #83 lookahead attacked through the extension boundary at the
+        # smallest scales: every {a, space, .} string up to length 4 x
+        # every max_chars x every legal overlap, asserting starts advance,
+        # ends advance (#83), chunks are non-empty and in budget, and no
+        # chunk is contained in its predecessor. The Rust suite sweeps the
+        # same properties one alphabet size deeper; this pins the pyo3
+        # layer carries none of the Rust-side edges away.
+        alphabet = ("a", " ", ".")
+        texts = [""]
+        for _ in range(4):
+            texts = [t + c for t in texts for c in alphabet] + texts
+        for text in texts:
+            if not text:
+                continue
+            for max_chars in range(1, 6):
+                for overlap in range(1, max_chars):
+                    chunks = chunk_text(text, max_chars, overlap=overlap)
+                    prev_start, prev_end = 0, 0
+                    for i, (a, b) in enumerate(chunks):
+                        assert b > a, f"empty chunk in {chunks!r} for {text!r}"
+                        if i == 0:
+                            assert a == 0
+                        else:
+                            assert a > prev_start, f"start stalled for {text!r}: {chunks!r}"
+                            assert b > prev_end, f"end regressed for {text!r}: {chunks!r}"
+                            assert not (a >= prev_start and b <= prev_end), (
+                                f"contained chunk for {text!r}: {chunks!r}"
+                            )
+                        assert b - a <= max_chars or b - a <= len(text) + 2
+                        prev_start, prev_end = a, b
+
+    def test_hard_cut_run_degrades_every_transition_to_zero_overlap(self) -> None:
+        # The H2 degenerate shape, pinned: a single 40-codepoint word
+        # gives the snap no boundary to snap to, so every transition
+        # declines the requested overlap and the output is exactly the
+        # zero-overlap partition (contiguous, covering, ends advancing) —
+        # the documented degradation, not a stall or a contained chunk.
+        text = "a" * 40
+        assert chunk_text(text, 5, overlap=3) == chunk_text(text, 5)
+        # The mixed shape: a tight word run whose snapped chunk's own trim
+        # collapses it back onto the predecessor's end; those transitions
+        # decline too, and the sequence degrades transition-by-transition.
+        assert chunk_text("aaaa bbbb cccc dddd", 6, overlap=3) == [
+            (0, 4),
+            (4, 9),
+            (9, 14),
+            (14, 19),
+        ]
+
+    @given(
+        text=st.text(
+            alphabet=st.sampled_from(
+                ["0", "\u0e33", "e", "\u0301", ".", " ", "\U0001f469", "\u200d", "\r", "\n"]
+            ),
+            max_size=40,
+        ),
+        max_chars=st.integers(min_value=2, max_value=30),
+        data=st.data(),
+    )
+    @settings(max_examples=300)
+    def test_unicode_cluster_edges_survive_the_overlap_decline(
+        self, text: str, max_chars: int, data: st.DataObject
+    ) -> None:
+        # H4: the decline-the-snap lookahead re-routes transitions under
+        # overlap; neither the snap candidates nor the lookahead's own
+        # cut may start splitting grapheme clusters (ZWJ chains, Thai
+        # SARA AM, combining marks, CRLF), and ends must still advance.
+        overlap = data.draw(st.integers(min_value=1, max_value=max_chars - 1))
+        chunks = chunk_text(text, max_chars, overlap=overlap)
+        prev_start, prev_end = -1, -1
+        for a, b in chunks:
+            assert _grapheme_boundary(text, a), f"start {a} mid-cluster on {text!r}"
+            assert _grapheme_boundary(text, b), f"end {b} mid-cluster on {text!r}"
+            assert a > prev_start, f"start stalled on {text!r}"
+            assert b > prev_end, f"end regressed on {text!r}"
+            prev_start, prev_end = a, b
 
 
 # ---------------------------------------------------------------------------

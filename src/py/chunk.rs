@@ -97,9 +97,12 @@ pub fn chunk_cdc(
 /// the lossless-join guarantee for genuine overlap; every chunk's own
 /// `<= max_chars` and boundary-safety invariants still hold. `overlap`
 /// must be `< max_chars` (no forward progress otherwise), which raises
-/// `ValueError`; a chunk shorter than the requested overlap silently
-/// degrades to zero overlap for just that one transition rather than
-/// stall or violate the budget (documented on
+/// `ValueError`; the overlap is declined for a transition when it would
+/// not buy new context — a snapped start whose own chunk would end at or
+/// before the previous chunk's end (the same text re-embedded), or a
+/// chunk shorter than the requested overlap — silently degrading to zero
+/// overlap for just that one transition rather than stall, emit a chunk
+/// strictly inside its predecessor, or violate the budget (documented on
 /// `chunk_impl::chunk_text_overlapping`).
 ///
 /// `max_chars < 1` or `overlap < 0` raise `ValueError`; an unrecognized
@@ -423,10 +426,14 @@ pub fn chunk_by_paragraphs_iter(
 /// to the nearest grapheme boundary (not necessarily a semantic
 /// paragraph/sentence/word boundary; a documented simplification of the
 /// single-hierarchy overlap snap `chunk_text_overlapping` uses), with the
-/// same snap-collapse-to-zero-overlap degradation when the grapheme-snapped
-/// overlap target would reach the chunk's own start (a too-short chunk, or
-/// one whose overlap window is consumed by a multi-codepoint cluster such
-/// as `\r\n`).
+/// same decline-the-snap degradation when the overlap would not buy new
+/// context: a grapheme-snapped target reaching the chunk's own start (a
+/// too-short chunk, or one whose overlap window is consumed by a
+/// multi-codepoint cluster such as `\r\n`), or a snapped start whose own
+/// chunk would end at or before the previous chunk's end (a span strictly
+/// inside its predecessor, the same text re-embedded). Either way the
+/// transition silently degrades to zero overlap rather than stall or
+/// violate the invariants.
 ///
 /// `max_chars < 1` or `overlap < 0` raise `ValueError`. Empty `text`
 /// returns `[]`. An empty `separators` list is legal and skips straight to

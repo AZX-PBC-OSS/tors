@@ -294,6 +294,14 @@ class TestOverlap:
             if next_start < prev_end:
                 shared = text[next_start:prev_end]
                 assert shared, "overlap accepted but produced no shared text"
+        # The #83 invariant: every chunk's end advances strictly past the
+        # previous chunk's end, overlap or not — a snapped start that would
+        # re-emit the previous cut is declined, never emitted as a span
+        # strictly inside its predecessor.
+        prev_end = -1
+        for _s, e in chunks:
+            assert e > prev_end, "end did not advance past the previous chunk's end"
+            prev_end = e
 
     def test_short_trailing_chunk_degrades_overlap_rather_than_stall(self) -> None:
         # A short final chunk shorter than the requested overlap must not
@@ -305,6 +313,17 @@ class TestOverlap:
         starts = [s for s, _ in chunks]
         assert starts == sorted(set(starts))
         assert all(b > a for a, b in zip(starts, starts[1:], strict=False))
+        prev_end = -1
+        for _s, e in chunks:
+            assert e > prev_end, "end did not advance past the previous chunk's end"
+            prev_end = e
+
+    def test_chunk_is_never_strictly_inside_its_predecessor(self) -> None:
+        # #83 regression: with overlap, the snapped start used to resolve
+        # back to the same cut, emitting (2, 4) strictly inside (0, 4).
+        # The snap is now declined for exactly that transition. Pinned
+        # output, hand-traced against the decline-the-snap rule.
+        assert chunk_hierarchical("aaa bbbbbbbb", 5, overlap=2) == [(0, 4), (4, 9), (7, 12)]
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +438,31 @@ def test_chunk_starts_are_strictly_increasing(text: str, max_chars: int) -> None
     assert all(b > a for a, b in zip(starts, starts[1:], strict=False))
 
 
+@given(
+    text=_TEXT,
+    max_chars=st.integers(min_value=2, max_value=50),
+    data=st.data(),
+)
+@settings(max_examples=150)
+def test_chunk_starts_and_ends_advance_under_overlap(
+    text: str, max_chars: int, data: st.DataObject
+) -> None:
+    # The #83 invariant under overlap: a snapped start that would re-emit
+    # the previous chunk's cut — a chunk strictly inside its predecessor —
+    # is declined, so both starts and ends strictly advance on every
+    # transition. The overlap=0 property above pins the starts half alone;
+    # overlap is where the re-offer lived.
+    overlap = data.draw(st.integers(min_value=1, max_value=max_chars - 1))
+    chunks = chunk_hierarchical(text, max_chars, overlap=overlap)
+    prev_start = -1
+    prev_end = -1
+    for s, e in chunks:
+        assert s > prev_start, "starts not strictly increasing under overlap"
+        assert e > prev_end, "ends not strictly advancing under overlap"
+        prev_start = s
+        prev_end = e
+
+
 # ---------------------------------------------------------------------------
 # Grapheme-boundary alignment, the invariant the #22 rewrite (the shared
 # GraphemeIndex bitmap behind the cut filter, the raw-cut fallback, and the
@@ -467,3 +511,37 @@ def test_chunk_edges_are_grapheme_boundaries_custom_separators_and_overlap(
         for s, e in chunk_hierarchical(text, max_chars, separators=seps, overlap=overlap):
             assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
             assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"
+
+
+# The #83 lookahead's own cluster alphabet: ZWJ emoji chains (a multi-codepoint
+# cluster the ASCII fast path cannot spell), decomposed accents, Thai SARA AM,
+# and CRLF, under overlap — the decline-the-snap lookahead re-runs the raw-cut
+# fallback and the level cut filter for the snapped candidate's window, and
+# neither the accepted nor the declined route may split a cluster or regress
+# an end.
+_ZWJ_ALPHABET = st.text(
+    alphabet=st.sampled_from(
+        ["a", "\U0001f469", "\u200d", "\U0001f52c", "e", "\u0301", "\u0e33", " ", "\r", "\n"]
+    ),
+    max_size=40,
+)
+
+
+@given(
+    text=_ZWJ_ALPHABET,
+    max_chars=st.integers(min_value=2, max_value=30),
+    data=st.data(),
+)
+@settings(max_examples=200)
+def test_zwj_and_combining_edges_survive_the_overlap_lookahead(
+    text: str, max_chars: int, data: st.DataObject
+) -> None:
+    overlap = data.draw(st.integers(min_value=1, max_value=max_chars - 1))
+    chunks = chunk_hierarchical(text, max_chars, overlap=overlap)
+    prev_start, prev_end = -1, -1
+    for s, e in chunks:
+        assert _is_grapheme_boundary(text, s), f"start {s} mid-cluster on {text!r}"
+        assert _is_grapheme_boundary(text, e), f"end {e} mid-cluster on {text!r}"
+        assert s > prev_start, f"start stalled on {text!r}"
+        assert e > prev_end, f"end regressed on {text!r}"
+        prev_start, prev_end = s, e
