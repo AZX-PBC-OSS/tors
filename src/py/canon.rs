@@ -192,6 +192,7 @@
 //! pinned divergence (`tests/test_content_hash.py`::
 //! `TestSurrogateDivergence`).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::{PyRecursionError, PyTypeError, PyValueError};
@@ -542,8 +543,19 @@ fn dict_pairs<'py>(
         // cannot hold two entries with the same key AND value object
         // (inserting an equal key updates; two coexisting keys are
         // pairwise !=, and NaN's k != k lets the same KEY object coexist
-        // only under different values), so each identity pair maps to
-        // exactly one entry.
+        // only under different values), EXCEPT when a key's `__hash__`
+        // returns different values across calls: the same key object then
+        // lands in a different slot on reinsertion, and the dict holds
+        // one (key object, value object) pair twice. Duplicates are
+        // content-identical (same key object, same value object, the
+        // only shape that folds), so the sort order between them is
+        // unobservable in the output: the read-back hands out the
+        // recorded indices one per returned pair, keeping every entry,
+        // byte-identical with the json oracle (which emits the pair
+        // twice). The old spelling overwrote the first index on insert
+        // and then panicked on the read-back's second `remove`
+        // (`.expect("the sort returned a pair we did not build")`), a
+        // PanicException no `except Exception` can catch.
         if n > MAX_DELEGATED_SORT_KEYS {
             return Err(PyValueError::new_err(
                 "content_hash() dict has too many keys requiring interpreter sort: refusing an unbounded delegated sort",
@@ -556,13 +568,17 @@ fn dict_pairs<'py>(
             ));
         }
         let mut index_of: HashMap<(usize, usize), usize> = HashMap::with_capacity(n);
+        let mut dupes: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
         for (i, (entry, value)) in entries.iter().zip(&values).enumerate() {
             let id = (entry.handle.as_ptr() as usize, value.as_ptr() as usize);
-            debug_assert!(
-                !index_of.contains_key(&id),
-                "duplicate (key, value) identity pair: the dict holds two entries sharing both objects"
-            );
-            index_of.insert(id, i);
+            match index_of.entry(id) {
+                Entry::Occupied(seen) => {
+                    dupes.entry(id).or_insert_with(|| vec![*seen.get()]).push(i);
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(i);
+                }
+            }
         }
         // The delegated sort is the known slow lane vs. the
         // byte/numeric fast paths above: one `list.sort()` over live
@@ -580,9 +596,32 @@ fn dict_pairs<'py>(
                 .expect("the list holds (key, value) tuples");
             let key_ptr = pair.get_item(0)?.as_ptr() as usize;
             let value_ptr = pair.get_item(1)?.as_ptr() as usize;
-            let idx = index_of
-                .remove(&(key_ptr, value_ptr))
-                .expect("the sort returned a pair we did not build");
+            // A folded identity pair hands out its recorded indices one
+            // per returned pair (each duplicate is content-identical, so
+            // which index goes first is unobservable). The two error arms
+            // are unreachable for honest sorts (the list holds exactly
+            // the pairs index_of/dupes recorded) and exist so a corrupted
+            // sort can never panic: CPython detects a resized list mid-sort
+            // but not an equal-size in-place rewrite, so a comparison hook
+            // that swaps elements lands here as a ValueError, not a
+            // PanicException.
+            let idx = match dupes.get_mut(&(key_ptr, value_ptr)) {
+                Some(pending) if !pending.is_empty() => pending.remove(0),
+                Some(_) => {
+                    // More identical pairs came back than the dict held:
+                    // the sort's comparison hooks rewrote list elements.
+                    return Err(PyValueError::new_err(
+                        "content_hash() dict sort returned a pair the walk did not build: \
+                         a key's comparison hook mutated the entries mid-sort",
+                    ));
+                }
+                None => *index_of.get(&(key_ptr, value_ptr)).ok_or_else(|| {
+                    PyValueError::new_err(
+                        "content_hash() dict sort returned a pair the walk did not build: \
+                         a key's comparison hook mutated the entries mid-sort",
+                    )
+                })?,
+            };
             order.push(idx);
         }
         order

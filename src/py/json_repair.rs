@@ -79,14 +79,29 @@ fn py_to_value(_py: Python<'_>, obj: &Bound<'_, PyAny>, depth: usize) -> PyResul
         return Ok(Value::Null);
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
-        let mut entries = Vec::with_capacity(dict.len());
-        for (key, value) in dict.iter() {
+        // Snapshot the pairs BEFORE processing any of them (the
+        // _borrow.rs collect-handles-then-borrow shape): a value's own
+        // conversion can call back into Python (the BigInt spelling
+        // below runs an int subclass's `__str__`; PyObject_Str resolves
+        // the subclass hook) and that hook can mutate this very dict.
+        // Iterating the live dict across those callbacks trips pyo3's
+        // hard `panic!` in PyDictIterator ("dictionary changed size
+        // during iteration"), surfacing as a PanicException no
+        // `except Exception` can catch. The drain runs no Python code
+        // (refcount adjusts only), so the snapshot itself cannot trip
+        // that panic; afterwards a hook's mutation is invisible to the
+        // walk, one mid-drain is captured whole (the same snapshot
+        // semantics the content_hash walk documents for its protocol
+        // lane).
+        let snapshot: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = dict.iter().collect();
+        let mut entries = Vec::with_capacity(snapshot.len());
+        for (key, value) in &snapshot {
             let key = key
                 .cast::<PyString>()
                 .map_err(|_| PyValueError::new_err("Object keys must be strings."))?;
             entries.push((
                 key.to_str()?.to_owned(),
-                py_to_value(_py, &value, depth + 1)?,
+                py_to_value(_py, value, depth + 1)?,
             ));
         }
         return Ok(Value::Object(entries));
@@ -265,7 +280,12 @@ fn inject_model_defaults(
     let Ok(properties_dict) = properties.cast::<PyDict>() else {
         return Ok(());
     };
-    for (name, field) in fields_dict.iter() {
+    // Snapshot the fields before any user code runs (the py_to_value
+    // shape): a `default_factory` is a Python call, and one that mutates
+    // the model's own `model_fields` dict would trip pyo3's hard
+    // "dictionary changed size during iteration" panic mid-walk.
+    let field_pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = fields_dict.iter().collect();
+    for (name, field) in &field_pairs {
         // Required fields carry no default to inject.
         let required = field
             .getattr("is_required")
@@ -275,7 +295,7 @@ fn inject_model_defaults(
         if required {
             continue;
         }
-        let Ok(property) = properties_dict.get_item(&name) else {
+        let Ok(property) = properties_dict.get_item(name) else {
             continue;
         };
         let Some(property) = property else { continue };

@@ -63,7 +63,7 @@
 use regex::Regex;
 use serde_json::Map;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use crate::fuzzy_impl::jaro_winkler;
@@ -431,7 +431,35 @@ pub(crate) struct SchemaRepairer {
     /// subschema reference points into this call's own schema tree).
     /// Union repair (per branch, per value) and the tier-4 ambiguity
     /// probe otherwise recompile the same wrapper per call.
+    ///
+    /// The "points into this call's own schema tree" premise is ENFORCED,
+    /// not assumed: `root_addresses` below records every object node of
+    /// `self.root`, and only addresses in that set may use this map. A
+    /// transient schema (the type-union repair's synthesized per-type
+    /// branch, `synthesize_branch`, is a per-iteration stack local) can
+    /// be freed and its address REUSED by the next iteration's branch; a
+    /// pointer-keyed hit then validates one branch against another
+    /// branch's compiled validator (a `["string","integer"]` union with
+    /// `maxLength` rejected its integer branch with the string branch's
+    /// validator). Transient schemas are keyed by CONTENT instead
+    /// (`transient_validators`).
     sub_validators: RefCell<HashMap<usize, Arc<jsonschema::Validator>>>,
+    /// Compiled validators for transient subschemas (the type-union
+    /// repair's synthesized per-type branches; anything else an address
+    /// cannot be vouched for): keyed by the schema's serialized CONTENT,
+    /// never its address (a stack local's address is reused across loop
+    /// iterations, so a pointer key aliases one branch's validator onto
+    /// the next. Identical content is identical validation; a schema
+    /// whose content cannot be serialized (a non-finite float literal)
+    /// compiles fresh, uncached.
+    transient_validators: RefCell<HashMap<String, Arc<jsonschema::Validator>>>,
+    /// Every object node's address inside `self.root`: the set of schema
+    /// pointers that are stable and unique for the repairer's lifetime
+    /// (the tree is owned, never mutated after construction). This is the
+    /// soundness gate for the address-keyed `sub_validators` map above;
+    /// an address outside the set belongs to a transient whose lifetime
+    /// the repairer does not control, and must not be cached by address.
+    root_addresses: HashSet<usize>,
     /// Whether the schema tree declares any normalizable `format`
     /// (date/date-time/time/uuid, computed once): only then does the fast
     /// path pay for the format pre-pass (formats are never asserted by
@@ -480,6 +508,22 @@ impl SchemaRepairer {
             }
         };
         let has_formats = schema_has_formats(&root, 0);
+        // The root-tree address set (the sub_validators soundness gate):
+        // every object node's address, collected iteratively (the tree
+        // can be arbitrarily wide; only object nodes can resolve out of
+        // resolve_chain as a Schema, so only they need recording).
+        let mut root_addresses: HashSet<usize> = HashSet::new();
+        let mut node_stack: Vec<&Value> = vec![&root];
+        while let Some(node) = node_stack.pop() {
+            match node {
+                Value::Object(entries) => {
+                    root_addresses.insert(std::ptr::from_ref::<Value>(node) as usize);
+                    node_stack.extend(entries.iter().map(|(_, member)| member));
+                }
+                Value::Array(items) => node_stack.extend(items.iter()),
+                _ => {}
+            }
+        }
         SchemaRepairer {
             root,
             salvage,
@@ -487,6 +531,8 @@ impl SchemaRepairer {
             recorded: RefCell::new(diagnostics.then(Vec::new)),
             root_validator,
             sub_validators: RefCell::new(HashMap::new()),
+            transient_validators: RefCell::new(HashMap::new()),
+            root_addresses,
             has_formats,
             deadline: None,
             deadline_counter: std::cell::Cell::new(0),
@@ -2728,18 +2774,7 @@ impl SchemaRepairer {
                         Err(message) => return Err(message.clone()),
                     }
                 } else {
-                    let key = std::ptr::from_ref(resolved) as usize;
-                    let cached = self.sub_validators.borrow().get(&key).cloned();
-                    owned = match cached {
-                        Some(cached) => cached,
-                        None => {
-                            let compiled = Arc::new(self.compile_sub(resolved)?);
-                            self.sub_validators
-                                .borrow_mut()
-                                .insert(key, Arc::clone(&compiled));
-                            compiled
-                        }
-                    };
+                    owned = self.compiled_validator_for(resolved)?;
                     &owned
                 };
                 validator
@@ -2777,20 +2812,9 @@ impl SchemaRepairer {
                         Err(_) => return false,
                     }
                 } else {
-                    let key = std::ptr::from_ref(resolved) as usize;
-                    let cached = self.sub_validators.borrow().get(&key).cloned();
-                    owned = match cached {
-                        Some(cached) => cached,
-                        None => match self.compile_sub(resolved) {
-                            Ok(compiled) => {
-                                let compiled = Arc::new(compiled);
-                                self.sub_validators
-                                    .borrow_mut()
-                                    .insert(key, Arc::clone(&compiled));
-                                compiled
-                            }
-                            Err(_) => return false,
-                        },
+                    owned = match self.compiled_validator_for(resolved) {
+                        Ok(compiled) => compiled,
+                        Err(_) => return false,
                     };
                     &owned
                 };
@@ -2798,6 +2822,67 @@ impl SchemaRepairer {
             }
             Err(_) => false,
         }
+    }
+
+    /// The compiled validator for one non-root resolved (sub)schema, over
+    /// the two cache lanes. An address INSIDE the root tree is stable and
+    /// unique for the repairer's lifetime (the tree is owned, never
+    /// mutated after construction), so the address-keyed `sub_validators`
+    /// map applies. An address OUTSIDE it is a TRANSIENT: the type-union
+    /// repair's synthesized per-type branch (`synthesize_branch` at the
+    /// `repair_type_union` loop head) is a per-iteration stack local whose
+    /// address the next iteration's branch reuses, so an address key
+    /// aliases a later branch onto an earlier branch's validator (a
+    /// `["string","integer"]` union with `maxLength` rejected its integer
+    /// branch with the string branch's "not of type string". Transients
+    /// are keyed by serialized CONTENT instead: identical content is
+    /// identical validation, and the reused address can never alias. A
+    /// schema whose content cannot be serialized (a non-finite float
+    /// literal in a schema dict) compiles fresh, uncached, through the
+    /// same `compile_sub` every subschema used before the caches existed.
+    fn compiled_validator_for(
+        &self,
+        resolved: &Value,
+    ) -> Result<Arc<jsonschema::Validator>, String> {
+        let key = std::ptr::from_ref(resolved) as usize;
+        if self.root_addresses.contains(&key) {
+            // The borrow is taken as a STATEMENT, not in the match
+            // scrutinee: a scrutinee temporary lives for the whole match,
+            // and the miss arm's `borrow_mut` below would panic
+            // ("RefCell already borrowed").
+            let cached = self.sub_validators.borrow().get(&key).cloned();
+            return Ok(match cached {
+                Some(cached) => cached,
+                None => {
+                    let compiled = Arc::new(self.compile_sub(resolved)?);
+                    self.sub_validators
+                        .borrow_mut()
+                        .insert(key, Arc::clone(&compiled));
+                    compiled
+                }
+            });
+        }
+        let content = match prepare_for_validation(resolved, 0)
+            .and_then(|prepared| serde_json::to_string(&prepared).map_err(|err| err.to_string()))
+        {
+            Ok(content) => content,
+            // Uncacheable content: compile fresh (compile_sub's own
+            // prepare surfaces the schema's real compile error, if the
+            // failure was the schema itself and not the serialization).
+            Err(_) => return Ok(Arc::new(self.compile_sub(resolved)?)),
+        };
+        // Statement-then-match: see the sub_validators arm above.
+        let cached = self.transient_validators.borrow().get(&content).cloned();
+        Ok(match cached {
+            Some(cached) => cached,
+            None => {
+                let compiled = Arc::new(self.compile_sub(resolved)?);
+                self.transient_validators
+                    .borrow_mut()
+                    .insert(content, Arc::clone(&compiled));
+                compiled
+            }
+        })
     }
 
     /// Upstream's `root_validator.evolve(schema=...)` equivalent: compile a

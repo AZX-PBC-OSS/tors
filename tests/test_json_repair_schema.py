@@ -240,6 +240,29 @@ class TestSchemaStandard:
         with pytest.raises(ValueError, match="Expected null"):
             repair_json_loads('{"value": [{"name": "invalid"}],}', schema=schema)
 
+    def test_type_union_maxlength_applies_per_branch(self) -> None:
+        # A type-union schema validates each branch with ITS OWN compiled
+        # validator: the branches are synthesized per iteration as stack
+        # locals whose addresses a pointer-keyed cache reused, so the
+        # integer branch here was validated against the string branch's
+        # maxLength validator and a valid ``42`` raised ``42 is not of
+        # type "string"``. maxLength does not apply to integers: the
+        # integer branch passes, and the string branch's own invalid
+        # values still raise the ordinary ValueError.
+        schema = {
+            "type": "object",
+            "properties": {
+                "a": {"type": ["string", "integer"], "maxLength": 1},
+                "b": {"type": "integer"},
+            },
+        }
+        assert repair_json_loads('{"a": 42, "b": "7"}', schema=schema) == {
+            "a": 42,
+            "b": 7,
+        }
+        with pytest.raises(ValueError):
+            repair_json_loads('{"a": "toolong"}', schema=schema)
+
     def test_circular_ref_raises(self) -> None:
         # Upstream: test_schema_circular_ref_raises_definition_error.
         schema = {"$ref": "#/definitions/a", "definitions": {"a": {"$ref": "#/definitions/a"}}}
