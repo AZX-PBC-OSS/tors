@@ -7,7 +7,9 @@ eager model pins the current function while describing the simpler
 machine): paragraph ``windows(2)`` cuts, sentence/word cuts from
 ``tors.sentence_bounds``/``tors.word_bounds``, non-overlapping literal
 matches with the literal dropped, the grapheme-cut filter, the
-first-level-with-a-cut window walk, the grapheme-safe hard cut, and the
+first-level-with-a-verdict window walk (a separator match at the
+window's own start is a skip verdict: no chunk for the separator, the
+window resumes at its end), the grapheme-safe hard cut, and the
 overlap snap.
 
 Restricted to ASCII corpora the reference's grapheme model is exact:
@@ -150,6 +152,10 @@ def _ref_chunk_hierarchical(
     levels = [[(e, nx) for e, nx in cuts if gb[e] and gb[nx]] for cuts in levels]
     # Parallel strictly-increasing end arrays for the bisect below.
     ends = [[e for e, _ in cuts] for cuts in levels]
+    # The skip maps: per level, separator matches by their cut end, only
+    # for separator-dropping levels (next strictly past the end; a
+    # contiguous level's cuts have next == end and never skip).
+    skips = [{e: nx for e, nx in cut_list if nx > e} for cut_list in levels]
 
     def last_at_or_before(x: int) -> int:
         for i in range(min(x, total), -1, -1):
@@ -171,14 +177,28 @@ def _ref_chunk_hierarchical(
             chunks.append((start, total))
             break
         limit = start + max_chars
-        # The first level whose largest in-limit cut is also past `start`
-        # supplies the cut; later levels stay unconsulted.
+        # The window's verdict, mirroring production's fused per-slot
+        # search: per level, the separator-at-the-window-start skip beats
+        # the level's own cuts (a cut past the match would carry the
+        # separator as content), and the first level with a verdict
+        # (skip or cut) wins (later levels stay unconsulted). The skip:
+        # a window that opens on a separator match has no genuine cut,
+        # and the raw cut would slice the separator out as a chunk of its
+        # own; the separator is dropped between chunks, so the window
+        # resumes at its end, no chunk emitted.
         cut = None
-        for cut_list, end_list in zip(levels, ends, strict=True):
+        skip_to = None
+        for cut_list, end_list, skip_map in zip(levels, ends, skips, strict=True):
+            if start in skip_map:
+                skip_to = skip_map[start]
+                break
             idx = bisect_right(end_list, limit) - 1
             if idx >= 0 and cut_list[idx][0] > start:
                 cut = cut_list[idx]
                 break
+        if skip_to is not None:
+            start = skip_to
+            continue
         if cut is None:
             end = last_at_or_before(limit)
             if end <= start:
