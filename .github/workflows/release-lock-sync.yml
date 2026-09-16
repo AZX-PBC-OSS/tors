@@ -19,13 +19,22 @@ name: release-lock-sync
 on:
   pull_request:
     branches: [main]
+  # Both triggers exist because a GITHUB_TOKEN-authored release-please PR
+  # fires no pull_request workflows; push to the release-please branch is
+  # the shape that does run.
+  push:
+    branches: ["release-please--**"]
 
 permissions:
   contents: read
 
 jobs:
   sync-locks:
-    if: startsWith(github.head_ref, 'release-please--branches--main')
+    # head_ref covers the pull_request trigger; it is empty on push events,
+    # where the branch is ref_name instead.
+    if: >-
+      startsWith(github.head_ref, 'release-please--branches--main') ||
+      startsWith(github.ref_name, 'release-please--branches--main')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -33,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Refresh lockfiles to the release PR's versions
@@ -68,7 +77,7 @@ jobs:
         # attacker-influenceable text (actionlint's script-injection rule),
         # and a quoted environment indirection cannot escape the quoting.
         env:
-          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
         run: |
           if git diff --exit-code -- pyproject.toml uv.lock Cargo.lock tors-documents/Cargo.lock; then
             echo "lockfiles and documents pin already fresh, nothing to push"

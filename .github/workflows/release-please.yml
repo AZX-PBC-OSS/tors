@@ -6,8 +6,9 @@
 # `tors-documents` payload wheel, version-locked to `tors`: one release, two wheels;
 # publish.yml's publish-documents job asserts the lockstep before uploading), so the
 # registries never drift apart. The two Cargo.locks' own version fields for their
-# packages self-heal on the next `cargo build` (nothing in this repo builds Rust with
-# `--locked`), and release-lock-sync.yml refreshes them on the release PR itself.
+# packages self-heal on the next `cargo build`, and release-lock-sync.yml refreshes
+# them on the release PR itself — publish.yml's wheel builds pass `--locked`, so the
+# tag's locks must already be fresh (that sync is what makes them so).
 #
 # GitHub does not start workflow runs from events raised with the default GITHUB_TOKEN, so
 # a tag released this way will not auto-trigger publish.yml's `push: tags` step; see that
