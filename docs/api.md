@@ -126,7 +126,7 @@ def scrub_pii(
 ) -> str: ...
 ```
 
-Replace contact material — email addresses and `+`-led phone numbers —
+Replace contact material — email addresses and phone numbers —
 and credential material — provider/platform API keys — inside
 free text with correlation tokens, in one GIL-released pass. The call-site
 driver: telemetry is the one store a data purge cannot reach, so an error
@@ -143,9 +143,13 @@ extension past that contract.
 What the tokens are: `@domain~<digest>` for an email (the domain is the
 non-identifying half an operator actually reasons about — "the ambiguity is on
 the corporate domain"), `prefix~<digest>` for a phone number, where `prefix`
-is the match's first three code points (a canonical E.164's country code:
-`"+47"` compact, `"+1 "` for a domestic spelling where the third code point is
-the space), and `<family prefix>~<digest>` for an API key, where the family
+is the dialling prefix of a `+`-led match: its first three code points (a
+canonical E.164's country code: `"+47"` compact, `"+1 "` for the
+international spelling of a NANP number, where the third code point is the
+space), while any other spelling gets the digest alone: a domestic match's
+head digits are the area code, the identifying half of the number, exactly
+the context a visible prefix would surface, and `<family prefix>~<digest>`
+for an API key, where the family
 prefix is kept VERBATIM (`sk-`, `sk-ant-`, `github_pat_`, `AIza`, `Bearer`) —
 the non-secret half that tells the operator WHICH credential to rotate. In
 every rule `<digest>` is the first 12 hex chars of `sha256(salt + match)`.
@@ -223,7 +227,9 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
     leading-digit check at all, so a `0`-led ten-digit shape
     (`020-794-6095`) scrubs like any other and only its eleven-digit
     `0`-led spelling stays out (the `+` form is the international
-    spelling of those).
+    spelling of those). Its token is the digest alone, no digits of the
+    number in it; the `+`-led spelling of the same digits is what keeps
+    the dialling prefix.
     One reachable interaction is documented rather than fixed: an email
     token whose DOMAIN spells a domestic number (`user@555.1234567.co`)
     has its digit half re-tokenized by the phone pass — over-redaction
@@ -242,13 +248,14 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | Google | `AIza` + tail{35,} | `AIza` |
   | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
   | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
-  | GitHub | `ghp_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
+  | GitHub | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
+  | GitLab | `glpat-` + tail{20,} | verbatim |
   | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
   | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
   | XAI | `xai-` + tail{20,} | `xai-` |
   | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
-  | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both markers required; an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
+  | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----` (the PGP label's ` PRIVATE KEY BLOCK-----` close accepted the same way, both markers required); an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
   | Azure | `AccountKey=` + `[A-Za-z0-9+/=]{40,}` | `AccountKey=` |
 
   AWS `AKIA`/`ASIA` access-key IDs are now INCLUDED, evidence-backed
@@ -274,8 +281,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   key-charset char is MID-TOKEN and never fires: `xak-…` survives
   whole, the same reasoning as the phone rule's clean-boundary cut (in
   real text a key glued to a word is that word's fragment), and it is
-  what keeps a second key glued to a token's digest hex from firing.
-  (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
+  what keeps a second key glued to a token's digest hex from firing,
+  UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
+  `\X`): logs carry keys inside JSON strings (`\n`), .NET spellings
+  (`\u0027`), and URL encodings (`%3D`), and the escape's tail
+  letter/digit is formatting material, not the word a key head would be
+  glued to. The sequence must be COMPLETE and DIRECTLY before the head:
+  a doubled backslash escapes itself (the neighbor stays a literal, the
+  head stays mid-token), and a percent sign without two hex digits is
+  prose. (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
   scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
   inside its own marker-scoped shape; the `ya29.` dot is prefix, not
   tail — see the table). The digest is of the FULL match
@@ -286,7 +300,7 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
 ```python
 tors.KEY_FAMILIES: tuple[str, ...]
 # ("openai", "anthropic", "google", "fireworks", "modal", "github",
-#  "minted", "jwt", "aws", "xai", "gcp_oauth", "pem", "azure")
+#  "minted", "jwt", "aws", "xai", "gcp_oauth", "pem", "azure", "gitlab")
 ```
 
 the canonical tuple, in the KeyFamily discriminant order, and the base for all-but-X
@@ -297,7 +311,7 @@ explicitly. A list selects exactly those families (order irrelevant,
 duplicates deduped; tuples accepted); a bare string is a `TypeError`,
 never an iterated character list. A valid selection is harmless —
 ignored — when `api_keys` is not in the active rules, but validation is
-still at the boundary: an unknown name is a `ValueError` naming the accepted set — `families must be one of ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure'), not "ssn"` — and `[]` is a `ValueError`, never a silent no-op — `families selects no key families; use None for all or list names`.
+still at the boundary: an unknown name is a `ValueError` naming the accepted set — `families must be one of ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure', 'gitlab'), not "ssn"` — and `[]` is a `ValueError`, never a silent no-op — `families selects no key families; use None for all or list names`.
 
 **Threat model: diagnostic-preserving, NOT adversarial-robust.** The
 grammars above are parity-correct against the ported source at
@@ -2050,8 +2064,10 @@ or before `max_chars` (a single word/sentence longer than the budget, or `max_ch
 documented fallback, never a silent surprise, and still cluster-safe, so it
 can land short of `max_chars` when the budget would otherwise split a cluster. The one
 invariant that never breaks either way: the result never exceeds `max_chars`
-codepoints. The cut point is then trimmed of trailing whitespace (`str.rstrip`-
-equivalent): cutting right after a word/sentence boundary can otherwise leave a
+codepoints. The cut point is then trimmed of trailing whitespace: whole whitespace
+clusters only, so the trim never ends the result mid-cluster (a Prepend plus a
+no-break space is one cluster; its non-whitespace half keeps it whole):
+cutting right after a word/sentence boundary can otherwise leave a
 dangling separator space, since `word_bounds` segments the inter-word space on its own
 and `sentence_bounds` carries a sentence-terminal's trailing space on the preceding
 sentence (UAX #29 SB9-SB11).
@@ -2968,8 +2984,13 @@ documented exclusion below — pinned
 differentially against the oracle over every contract below
 (`tests/test_content_hash.py`) and literal-pinned at the byte level
 crate-side (`src/canon_impl.rs`). Deterministic by construction: any dict
-key order yields the same hash, and an equal-value `list` and `tuple`
-hash identically (tuples serialize as lists, recursively).
+key order yields the same hash; the one exception is a dict with distinct
+NaN keys: NaN never compares equal to NaN, so their output order is
+timsort's own rather than a mathematical property (the delegated-sort
+paragraph below), and each ordering still hashes exactly as the
+`json.dumps` oracle spells it, the parity that matters. An equal-value
+`list` and `tuple` hash identically (tuples serialize as lists,
+recursively).
 
 **The type contract.** Leaves: `str` (lone-surrogate strings excluded —
 they raise `UnicodeEncodeError` where `json.dumps` succeeds, the
@@ -4718,7 +4739,12 @@ items drawn from `first` can pass). The scan short-circuits at the first
 offender — no promise about work done past it, though the argument walk does
 validate the whole sequence up front (a bad entry anywhere raises at the
 boundary, past a first offender or not). The answer is always an item index,
-never a position within an item.
+never a position within an item. The argument walk is bounded, the same DoS
+backstop `content_hash`'s protocol walk carries: a sequence that yields past
+the walk's ceiling (1M items; legitimate batches sit orders of magnitude
+below it) aborts with a `ValueError` naming nothing, instead of holding the
+GIL while an unbounded `__iter__` (never trusted: the walk iterates, it does
+not consult `len`) grows the batch until the process dies.
 
 The sets are **data, not patterns**: plain strings of permitted codepoints,
 membership per codepoint (never per byte; duplicate codepoints in a spelling

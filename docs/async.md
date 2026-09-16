@@ -11,8 +11,14 @@ It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
 `minhash_signature`, the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
-`decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, and
-`truncate_ellipsis`/`strip_controls`/`scrub_log_text`/`scrub_pii`. Thread dispatch costs on the order of
+`decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, the
+fuzzy-matching and JSON-repair families
+(`levenshtein`/`jaro`/`jaro_winkler`, `similarity_ratio`/
+`get_close_matches`, `is_grounded`, and the `repair_json*` trio:
+quadratic and linear native passes whose documented measurements reach
+seconds and minutes on large inputs, exactly the calls that starve a loop
+un-wrapped), both truncate spellings, and
+`strip_controls`/`scrub_log_text`/`scrub_pii`. Thread dispatch costs on the order of
 tens of microseconds: noise next to a millisecond-or-slower native pass over a
 real corpus or document, real overhead next to a microsecond-scale call over a
 short string. Exception-size guidance: `scrub_log_text`'s error-path inputs
@@ -33,7 +39,11 @@ spelling and `tors.aio` is the caller's, made once at the call site, not a
 runtime guess. `tests/test_aio.py` pins this structurally (no branch in the
 wrapper body) as well as behaviorally (a heartbeat coroutine keeps ticking
 with worst gaps well under the call's own wall during a large `diff_opcodes`
-await).
+await), and pins the covered set against `tors.aio._WRAPPED`: the curated
+list is the contract, and every input-scaling function belongs in it,
+including the fuzzy/repair family, whose unwrapped twins would leave the
+minutes-scale calls (the ones that most need the thread hop) on the sync
+spelling alone.
 
 The streaming iterator constructors (`word_bounds_iter` and siblings,
 including the chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/
