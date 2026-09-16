@@ -64,9 +64,53 @@ def _ruff_format(text: str) -> str:
     return proc.stdout
 
 
+def _spells_any(node: ast.FunctionDef) -> bool:
+    """Whether one sync stub signature's annotations spell ``Any``.
+
+    Walks the annotation subtrees (parameters and return) only: a comment
+    or docstring elsewhere in the source may name the type in prose, and
+    the header must import ``Any`` exactly when a signature needs it (an
+    unused import in the stub is as stale as a missing one).
+    """
+    args = node.args
+    annotations = [
+        *(arg.annotation for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]),
+        args.vararg.annotation if args.vararg else None,
+        args.kwarg.annotation if args.kwarg else None,
+        node.returns,
+    ]
+    for annotation in annotations:
+        if annotation is None:
+            continue
+        for sub in ast.walk(annotation):
+            if (isinstance(sub, ast.Name) and sub.id == "Any") or (
+                isinstance(sub, ast.Attribute) and sub.attr == "Any"
+            ):
+                return True
+    return False
+
+
 def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
     tree = ast.parse(source)
     lines = source.split("\n")
+    # The body is collected first so the import header can react to it:
+    # `Any` travels only when a translated signature actually spells it
+    # (the repair family's `dict[str, Any] | bool | type[Any]` schema
+    # annotations); an unused import in the stub is as stale as a missing
+    # one, and ruff's F401/F821 gates read this file.
+    body: list[str] = []
+    translated = 0
+    needs_any = False
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in wrapped:
+            continue
+        chunk = "\n".join(lines[node.lineno - 1 : node.end_lineno]).rstrip()
+        chunk = chunk.replace(f"def {node.name}(", f"async def {node.name}(", 1)
+        body.append(chunk)
+        body.append("")
+        body.append("")
+        translated += 1
+        needs_any = needs_any or _spells_any(node)
     header = [
         '"""The awaitable spellings of tors\'s large-input functions (see',
         "``tors/aio.py`` for which functions and why only these). Signatures",
@@ -79,22 +123,13 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         '"""',
         "",
         "from collections.abc import Sequence",
-        "from typing import Literal",
+        f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
         "from tors import CompiledLemmaDict, _StemmerLanguage",
         "",
     ]
     out: list[str] = header
-    translated = 0
-    for node in tree.body:
-        if not isinstance(node, ast.FunctionDef) or node.name not in wrapped:
-            continue
-        chunk = "\n".join(lines[node.lineno - 1 : node.end_lineno]).rstrip()
-        chunk = chunk.replace(f"def {node.name}(", f"async def {node.name}(", 1)
-        out.append(chunk)
-        out.append("")
-        out.append("")
-        translated += 1
+    out.extend(body)
     raw = "\n".join(out).rstrip("\n") + "\n"
     return _ruff_format(raw), translated
 
