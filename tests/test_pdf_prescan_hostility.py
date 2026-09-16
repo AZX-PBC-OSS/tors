@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import zlib
 
 import pytest
@@ -118,11 +119,14 @@ _ENTRY_POINTS = [pdf_page_count, pdf_extract, pdf_classify, pdf_link_uris]
 def _probe(blob: bytes) -> subprocess.CompletedProcess[str]:
     """Every entry point opens the same document through the same
     pre-scan; one child per cell, the crash file's discipline: a
-    regression dies as a child's signal, never in the runner."""
-    path = "/tmp/opencode/prescan_cell.pdf"
-    with open(path, "wb") as fh:
-        fh.write(blob)
-    child = r"""
+    regression dies as a child's signal, never in the runner. The
+    cell's bytes go to a private temporary file (hermetic: no fixed
+    path, nothing shared between cells)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = f"{tmp}/cell.pdf"
+        with open(path, "wb") as fh:
+            fh.write(blob)
+        child = r"""
 import sys
 import tors.documents as d
 
@@ -133,12 +137,12 @@ try:
 except BaseException as exc:
     print(f"{type(exc).__name__}: {str(exc)[:200]}")
 """
-    return subprocess.run(
-        [sys.executable, "-c", child, path],
-        capture_output=True,
-        text=True,
-        timeout=60.0,
-    )
+        return subprocess.run(
+            [sys.executable, "-c", child, path],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
 
 
 def _assert_catchable(done: subprocess.CompletedProcess[str], detail: str) -> None:

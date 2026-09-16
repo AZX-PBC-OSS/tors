@@ -4,7 +4,7 @@ Provenance: json_repair by Stefano Baccianella (MIT),
 https://github.com/mangiucugna/json_repair, commit
 251d141786d0f6ff561f6ec04d90188a338e2470 (= 0.63.4).
 Upstream source: json_repair's tests/test_schema_guided_parse.py
-(the machine-local clone is /tmp/opencode/json_repair at commit 251d141).
+at commit 251d141.
 Contract: design-json-repair-port.md sections 4, 6, 8, 9.
 
 Mapping: ``repair_json(raw, schema=s, skip_json_loads=True, return_objects=True)``
