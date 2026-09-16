@@ -618,6 +618,121 @@ fn enter_marker(markers: &mut HashSet<usize>, obj: &Bound<'_, PyAny>) -> PyResul
     Ok(())
 }
 
+/// The protocol lane's native sort, tried before the delegated sort in
+/// [`sorted_items_protocol`]: when every pulled item is a concrete
+/// 2-tuple with an EXACT `str` / `int` / `bool` key -- the key shapes the
+/// exact lane sorts natively (`dict_pairs`' byte and i64 paths) -- the
+/// snapshot is ordered without the interpreter, byte-exact with json's
+/// own tuple sort and free of the delegated-sort bounds (no interpreter
+/// sort runs, so there is nothing to bound). `None` delegates: any other
+/// item shape (json sorts first, validates pairs lazily after), any
+/// subclass key (its overridden rich comparison would be honored by
+/// json's sort and silently ignored by a byte/numeric sort), any key
+/// beyond i64, mixed str/numeric shapes, and -- critically -- any two
+/// keys that COMPARE EQUAL: timsort falls the tuple tiebreak to the
+/// VALUES, which a key-only sort cannot honor. A `.items()` hook can
+/// legally yield both `(1, ..)` and `(True, ..)` (or one key twice),
+/// which no real dict can hold, so equal keys always delegate.
+fn protocol_native_sort<'py>(
+    list: &Bound<'py, PyList>,
+) -> PyResult<Option<Vec<Bound<'py, PyAny>>>> {
+    #[derive(Clone, Copy)]
+    enum Shape {
+        /// An exact `str` key: bytes borrowed for the sort.
+        Str,
+        /// An exact `bool`/`int` key, inside the i64 fast path's range.
+        Num(i64),
+    }
+    // Pass 1 -- classification, concrete reads only (infallible): every
+    // item an EXACT 2-tuple, every key an EXACT str / bool / int. The
+    // exact-instance gates mirror `dict_pairs`: a str/int-SUBCLASS key
+    // may override rich comparison, which json's sort honors and a
+    // byte/numeric sort would silently ignore.
+    let mut shapes: Vec<Shape> = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        if !item.is_exact_instance_of::<PyTuple>() {
+            return Ok(None);
+        }
+        let pair = item.cast::<PyTuple>().expect("the exact gate above");
+        if pair.len() != 2 {
+            return Ok(None);
+        }
+        let key = pair.get_item(0)?;
+        shapes.push(if key.is_exact_instance_of::<PyString>() {
+            Shape::Str
+        } else if key.is_exact_instance_of::<PyBool>() {
+            Shape::Num(
+                key.cast::<PyBool>()
+                    .expect("the exact gate above")
+                    .is_true() as i64,
+            )
+        } else if key.is_exact_instance_of::<PyInt>() {
+            match key
+                .cast::<PyInt>()
+                .expect("the exact gate above")
+                .extract::<i64>()
+            {
+                Ok(v) => Shape::Num(v),
+                // Beyond i64: the delegated lane's BigInt bucket.
+                Err(_) => return Ok(None),
+            }
+        } else {
+            return Ok(None);
+        });
+    }
+    let all_str = shapes.iter().all(|s| matches!(s, Shape::Str));
+    let all_num = shapes.iter().all(|s| matches!(s, Shape::Num(_)));
+    if !all_str && !all_num {
+        return Ok(None); // mixed key shapes: the delegated sort's TypeError lane
+    }
+    let items: Vec<Bound<'py, PyAny>> = list.iter().collect();
+    let order: Vec<usize> = if all_str {
+        let mut keyed: Vec<(String, usize)> = Vec::with_capacity(items.len());
+        for (i, shape) in shapes.iter().enumerate() {
+            let Shape::Str = shape else {
+                unreachable!("the all-str guard")
+            };
+            let tuple = items[i]
+                .cast::<PyTuple>()
+                .expect("the exact 2-tuple gate above");
+            let key = tuple.get_item(0).expect("the len-2 gate above");
+            // A lone-surrogate key raises here: the documented
+            // UnicodeEncodeError divergence, the same raise dict_pairs'
+            // str path makes.
+            keyed.push((
+                key.cast::<PyString>()
+                    .expect("the exact-str gate above")
+                    .to_str()?
+                    .to_owned(),
+                i,
+            ));
+        }
+        keyed.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        if keyed.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Ok(None); // equal keys: the value tiebreak must decide
+        }
+        keyed.into_iter().map(|(_, i)| i).collect()
+    } else {
+        let mut keyed: Vec<(i64, usize)> = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, shape)| match shape {
+                Shape::Num(v) => (*v, i),
+                Shape::Str => unreachable!("the all-num guard"),
+            })
+            .collect();
+        keyed.sort_by_key(|&(v, _)| v);
+        // The bool/int tie: True == 1, and a hook can yield (1, ..) and
+        // (True, ..) in either order -- timsort tiebreaks on the VALUES,
+        // which the numeric sort cannot honor, so equal keys delegate.
+        if keyed.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Ok(None);
+        }
+        keyed.into_iter().map(|(_, i)| i).collect()
+    };
+    Ok(Some(order.into_iter().map(|i| items[i].clone()).collect()))
+}
+
 /// A non-exact dict's items, spelled exactly as json.dumps spells them
 /// (Modules/_json.c's `encoder_listencode_dict`, the
 /// `sort_keys || !PyDict_CheckExact` branch -- and content_hash is
@@ -625,12 +740,13 @@ fn enter_marker(markers: &mut HashSet<usize>, obj: &Bound<'_, PyAny>) -> PyResul
 /// interpreter, the result materialized into a snapshot
 /// (`PyMapping_Items`'s own semantics: every yielded element pulled,
 /// the first error propagating, later mutations invisible), and that
-/// list sorted with CPython's own timsort over the pairs AS YIELDED --
-/// before any pair is validated or any key spelled, so an unsortable
-/// mix raises the sort's own TypeError first. The 2-tuple validation
-/// and the key coercion happen lazily at frame-pull time, pair by pair
-/// in sorted order -- json's own encode order, where a bad value at
-/// pair i raises before pair i+1 is validated.
+/// list sorted -- natively for all-exact-str / all-exact-int/bool keys
+/// ([`protocol_native_sort`]), else with CPython's own timsort over the
+/// pairs AS YIELDED -- before any pair is validated or any key spelled,
+/// so an unsortable mix raises the sort's own TypeError first. The
+/// 2-tuple validation and the key coercion happen lazily at frame-pull
+/// time, pair by pair in sorted order -- json's own encode order, where
+/// a bad value at pair i raises before pair i+1 is validated.
 fn sorted_items_protocol<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
@@ -655,6 +771,16 @@ fn sorted_items_protocol<'py>(
             ));
         }
         list.append(item)?;
+    }
+    // The native fast path first: an all-exact-str or all-exact-int/bool
+    // keyed snapshot -- the shape Counter / OrderedDict / defaultdict and
+    // plain dict subclasses yield -- is ordered without the interpreter,
+    // byte-exact with json's tuple sort, and free of the delegated-sort
+    // bounds below (no interpreter sort runs, so there is nothing to
+    // bound). `None` falls through to the delegated sort, whose caps and
+    // error order are unchanged.
+    if let Some(natively_sorted) = protocol_native_sort(&list)? {
+        return Ok(natively_sorted);
     }
     // The protocol sort is delegated work too: count it against the same
     // total-delegated bound as the exact exotic lane (HIGH-2), and refuse
@@ -1031,7 +1157,11 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// stdlib 3.12+ succeeds (tighter boundary, same error class). Exotic-key
 /// dicts (any float/big-int/mixed/NaN/subclass key) delegate their sort to
 /// CPython and are bounded by `MAX_DELEGATED_SORT_KEYS` per dict and
-/// `MAX_TOTAL_DELEGATED_PAIRS` total (generic `ValueError`). Treat
+/// `MAX_TOTAL_DELEGATED_PAIRS` total (generic `ValueError`); an
+/// exact-str/int-keyed dict SUBCLASS (Counter, OrderedDict, defaultdict, a
+/// plain subclass) takes the protocol lane's native sort instead -- no
+/// interpreter sort runs -- and costs nothing against those bounds, while
+/// other subclass key types keep the delegated bound. Treat
 /// `content_hash` as trusted-input-only for subclass hooks, for depth
 /// beyond ~10-20k frames, and for breadth beyond ~200-500k visited objects
 /// -- the same posture `json.dumps` itself has, which materializes
@@ -1047,7 +1177,11 @@ pub(crate) fn walk(py: Python<'_>, root: Bound<'_, PyAny>) -> PyResult<Canon> {
 /// above); the canonical-form emission, the SHA-256, AND the owned tree's
 /// teardown all run under one `py.detach` (the tree is moved into the
 /// detached closure, so no deep-tree `Drop` tail holds the GIL after the
-/// digest). Deterministic: any dict key order yields the same hash.
+/// digest). Deterministic: any dict key order yields the same hash --
+/// except a dict holding two distinct NaN keys, where the delegated sort
+/// runs over an inconsistent comparator (NaN compares unequal to itself)
+/// and the output order -- hence the hash -- depends on the insertion
+/// order, exactly matching the json oracle.
 #[pyfunction]
 pub fn content_hash(py: Python<'_>, obj: Bound<'_, PyAny>) -> PyResult<String> {
     let tree = walk(py, obj)?;

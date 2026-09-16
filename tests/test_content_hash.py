@@ -83,6 +83,7 @@ import hashlib
 import json
 import re
 import sys
+from collections import Counter, OrderedDict, defaultdict
 from enum import Enum
 from typing import Any
 
@@ -981,7 +982,7 @@ class TestSurrogateDivergence:
     def test_clean_astral_text_is_fine_on_both_sides(self) -> None:
         """The neighboring non-divergent lane: real astral text (valid
         surrogate pairs in UTF-16 terms) hashes with full parity."""
-        _assert_parity("emoji \U0001F600 and \U0001D538 math")
+        _assert_parity("emoji \U0001f600 and \U0001d538 math")
         _assert_parity({"😀": ["🎉", chr(0x10FFFF)]})
 
 
@@ -1723,6 +1724,12 @@ class TestCoveragePins:
         # emitted on both sides -- parity, not an error.
         _assert_parity(ItemsDict([(1, "a"), (True, "b")]))
         _assert_parity(ItemsDict([(True, "b"), (1, "a")]))
+        # The tie gate generalizes: any two keys that COMPARE EQUAL
+        # (1/True, 0/False -- or a hook yielding one key twice) fall the
+        # tuple tiebreak to the VALUES, so they stay on the delegated
+        # sort; only pairwise-distinct keys take the native fast path.
+        _assert_parity(ItemsDict([(1, "a"), (True, "b"), (2, "c"), (0, "d"), (False, "e")]))
+        _assert_parity(ItemsDict([(False, "e"), (0, "d"), (2, "c"), (True, "b"), (1, "a")]))
 
 
 class TestDeepTreeGilRelease:
@@ -1807,6 +1814,277 @@ class TestDelegatedSortBounds:
     def test_str_and_int_wide_dicts_ignore_the_delegated_bounds(self) -> None:
         _assert_parity({f"k{i:06d}": i for i in range(10_000)})
         _assert_parity({i: str(i) for i in range(10_000)})
+
+
+class TestProtocolNativeFastPath:
+    """Issue #94: exact-str/int-keyed dict SUBCLASSES (Counter,
+    OrderedDict, defaultdict, a plain subclass) take the protocol lane's
+    native sort -- the interpreter's timsort never runs, so the
+    delegated-sort bounds do not apply and any size hashes with parity.
+    Other subclass key types keep the delegated bound (the exotic cap is
+    preserved), keys that COMPARE EQUAL (the bool/int tie a hook can
+    yield) delegate, and two distinct NaN keys sort over an inconsistent
+    comparator -- insertion-order-dependent output, matching the json
+    oracle (the scoped determinism claim)."""
+
+    class SubDict(dict):
+        pass
+
+    @staticmethod
+    def _wrap(container: str, mapping: dict[Any, Any]) -> Any:
+        if container == "counter":
+            return Counter(mapping)
+        if container == "ordered-dict":
+            return OrderedDict(mapping)
+        if container == "default-dict":
+            return defaultdict(int, mapping)
+        assert container == "plain-subclass"
+        return TestProtocolNativeFastPath.SubDict(mapping)
+
+    @pytest.mark.parametrize(
+        "container", ["counter", "ordered-dict", "default-dict", "plain-subclass"]
+    )
+    def test_exact_str_keys_beyond_the_cap_hash_with_parity(self, container: str) -> None:
+        obj = self._wrap(container, {f"k{i:06d}": 1 for i in range(100_001)})
+        _assert_parity(obj)
+
+    @pytest.mark.parametrize(
+        "container", ["counter", "ordered-dict", "default-dict", "plain-subclass"]
+    )
+    def test_exact_int_keys_beyond_the_cap_hash_with_parity(self, container: str) -> None:
+        obj = self._wrap(container, {i: 1 for i in range(100_001)})
+        _assert_parity(obj)
+
+    def test_exotic_subclass_keys_keep_the_delegated_cap(self) -> None:
+        obj = TestProtocolNativeFastPath.SubDict({float(i) + 0.5: i for i in range(100_001)})
+        with pytest.raises(ValueError, match="delegated"):
+            content_hash(obj)
+
+    # A hook-yielded items snapshot: concrete storage holds a filler pair
+    # (the {} gate off), .items() returns a FRESH list per call -- real
+    # mappings' semantics (dict.items() builds a new list each call).
+    # Returning one PERSISTENT list makes the oracle itself stateful:
+    # json.dumps PyList_Sort's the hook-returned list IN PLACE (a
+    # red-team find, pinned by this comment), so with a hostile
+    # asymmetric __lt__ key its own output alternates across calls and
+    # no differential is definable.
+    class ItemsDict(dict):
+        def __init__(self, items, **kwargs: Any) -> None:
+            super().__init__(x=1, **kwargs)
+            self._items = items
+
+        def items(self):  # type: ignore[override]
+            return list(self._items)
+
+    def test_hook_yielded_duplicate_str_keys_fall_the_tiebreak_to_values(self) -> None:
+        """H2: a hook can yield one exact-str key TWICE (no real dict can
+        hold it). json's tuple sort tiebreaks equal keys on the VALUES --
+        ("a",1) sorts before ("a",2) -- while a key-only stable sort would
+        keep the yield order. The equal-key guard must delegate; if it
+        ever took the native path, the first pair's hash would differ."""
+        # yield order ("a",2) then ("a",1): the value tiebreak REVERSES it
+        obj = TestProtocolNativeFastPath.ItemsDict([("a", 2), ("a", 1)])
+        _assert_parity(obj)
+        # (json.loads collapses duplicate keys, so the canonical STRING is
+        # the order probe here, not a round-trip.)
+        assert _canonical(obj) == '{"a":1,"a":2}'
+        # duplicates non-adjacent in yield order, three-way on both keys
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [("b", 9), ("a", 5), ("b", 0), ("a", 2), ("a", 1)]
+        )
+        _assert_parity(obj)
+        # duplicate key AND value: the tiebreak lands on equality itself
+        obj = TestProtocolNativeFastPath.ItemsDict([("a", 1), ("a", 1)])
+        _assert_parity(obj)
+
+    @pytest.mark.parametrize("container", ["counter", "plain-subclass"])
+    def test_hook_str_keys_beyond_the_cap_hash_with_parity_across_a_hostile_alphabet(
+        self, container: str
+    ) -> None:
+        """H1, str half: UTF-8 byte order must equal Python's codepoint
+        order THROUGH the native fast path at scale, over the alphabet
+        that stresses it -- embedded NULs (byte 0x00 sorts first), the
+        0x7F/0x80 boundary, mixed case, BMP/astral boundaries
+        (U+D7FF/U+E000 straddle the surrogate block; U+FFFF/U+10000 the
+        BMP edge), and prefix keys. Shuffled insertion via the LCG."""
+        pieces = ["", "\x00", "\x00\x00", "Z", "z", "\x7f", "\x80", "é", "\U0001f600"]
+        keys = [p + f"{i:06d}" for i, p in enumerate(pieces * (100_005 // len(pieces)))]
+        obj = self._wrap(container, {keys[i]: i for i in _shuffled_order(len(keys), salt=11)})
+        _assert_parity(obj)
+        assert list(json.loads(_canonical(obj))) == sorted(keys)
+
+    @pytest.mark.parametrize("container", ["counter", "plain-subclass"])
+    def test_hook_int_keys_beyond_the_cap_with_negatives_and_i64_extremes(
+        self, container: str
+    ) -> None:
+        """H1, int half: the native numeric i64 sort through the protocol
+        lane at scale with negatives, mixed signs, and both i64 extremes
+        (the extraction boundaries), shuffled insertion."""
+        keys = [i - 50_002 for i in range(100_005)]
+        keys[0], keys[1] = 2**63 - 1, -(2**63)
+        order = _shuffled_order(len(keys), salt=12)
+        obj = self._wrap(container, {keys[i]: str(keys[i]) for i in order})
+        _assert_parity(obj)
+        assert list(json.loads(_canonical(obj))) == [str(k) for k in sorted(keys)]
+
+    def test_hook_bool_int_mix_without_a_tie_takes_the_native_numeric_path(self) -> None:
+        """H1: bool + int keys that are pairwise DISTINCT (True vs 2 vs
+        -5 vs the i64 extremes) sort together numerically through the
+        PROTOCOL lane -- bool as its 0/1 value -- exactly json's order."""
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(True, "t"), (2, "b"), (-5, "d"), (2**63 - 1, "m"), (-(2**63), "n"), (0, "z")]
+        )
+        _assert_parity(obj)
+        assert list(json.loads(_canonical(obj))) == [
+            "-9223372036854775808",
+            "-5",
+            "0",
+            "true",
+            "2",
+            "9223372036854775807",
+        ]
+
+    def test_hook_float_keys_delegate_to_the_interpreter_sort(self) -> None:
+        """H1: float keys are NOT an eligible native shape (float is not
+        exact bool/int) -- the whole snapshot delegates, at scale and in
+        the NaN corners (two distinct NaN keys: the inconsistent
+        comparator's insertion-order output, matching the oracle)."""
+        obj = TestProtocolNativeFastPath.SubDict({float(i) + 0.5: i for i in range(50_000)})
+        _assert_parity(obj)
+        nan1, nan2 = float("nan"), float("nan")
+        obj = self._wrap("counter", {1.5: "a", nan1: "n1", -0.0: "z", nan2: "n2", 2: "i"})
+        _assert_parity(obj)
+
+    def test_hook_subclass_keys_with_flipped_comparison_delegate(self) -> None:
+        """H3: the exact-instance gates hold through a HOOK too -- a
+        str/int SUBCLASS key with flipped __lt__ arriving via .items()
+        delegates (json honors the override; a byte/numeric sort would
+        silently ignore it). Both keys subclass: the flip REVERSES json's
+        output order, so a leaked byte/numeric sort flips the hash."""
+        cls = TestSubclassComparisonParity
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(cls.FlippedInt(3), "a"), (cls.FlippedInt(1), "b"), (2, "c")]
+        )
+        _assert_parity(obj)
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(cls.FlippedInt(3), "a"), (cls.FlippedInt(1), "b")]
+        )
+        _assert_parity(obj)
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(cls.FlippedStr("b"), 1), (cls.FlippedStr("a"), 2)]
+        )
+        _assert_parity(obj)
+        assert _canonical(obj) == '{"b":1,"a":2}'  # the flip, honored by json's sort
+        obj = TestProtocolNativeFastPath.ItemsDict([(cls.FlippedStr("b"), 1), ("a", 2)])
+        _assert_parity(obj)
+        # mixed exact + subclass through the hook: one non-exact key
+        # disqualifies the whole snapshot
+        obj = TestProtocolNativeFastPath.ItemsDict([("a", 1), (cls.FlippedInt(9), "x")])
+        _assert_parity(obj)
+
+    def test_hook_mixed_shape_type_error_message_matches_the_oracle(self) -> None:
+        """H4: the fast path's mixed-shape gate (str + int, str + float)
+        delegates, and the delegated sort's TypeError is byte-identical
+        with json.dumps's -- through the protocol lane this time."""
+        for obj in (
+            TestProtocolNativeFastPath.ItemsDict([(1, "a"), ("b", 2)]),
+            TestProtocolNativeFastPath.ItemsDict([("a", 1), (2.5, "b")]),
+            TestProtocolNativeFastPath.ItemsDict([(None, 1), (2, 3)]),
+        ):
+            with pytest.raises(TypeError) as tors_exc:
+                content_hash(obj)
+            with pytest.raises(TypeError) as oracle_exc:
+                _oracle(obj)
+            assert str(tors_exc.value) == str(oracle_exc.value)
+
+    def test_hook_surrogate_str_key_raises_unicode_encode_error_at_any_scale(self) -> None:
+        """H4: a lone-surrogate EXACT str key through the protocol lane
+        raises UnicodeEncodeError in the native path's borrow (after the
+        eligibility scan, before any value is walked) -- at 3 keys and at
+        100k, first or last in iteration order, wherever the scan reaches
+        it; json.dumps SUCCEEDS (the documented divergence is real)."""
+        small = self._wrap("counter", {"\ud800": 1, "b": 2, "c": 3})
+        assert _canonical(small)  # oracle succeeds: the divergence, pinned
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash(small)
+        big = self._wrap("counter", {f"k{i:06d}": i for i in range(100_000)} | {"\udfff": 0})
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            content_hash(big)
+
+    def test_hook_doubly_bad_inputs_follow_jsons_encode_order(self) -> None:
+        """H4: sort first, then lazy per-pair validation, through the
+        fast path: a circular value at sorted position 0 beats a set
+        value at position 1, and the reverse order flips the winner --
+        both engines agree on which error fires."""
+        cycle: list[Any] = []
+        cycle.append(cycle)
+        wins_circular = TestProtocolNativeFastPath.ItemsDict([("a", cycle), ("z", set())])
+        wins_type_error = TestProtocolNativeFastPath.ItemsDict([("a", set()), ("z", cycle)])
+        for obj in (wins_circular, wins_type_error):
+            try:
+                expected: Any = _oracle(obj)
+                assert content_hash(obj) == expected
+            except (ValueError, TypeError) as oracle_exc:
+                with pytest.raises(type(oracle_exc)):
+                    content_hash(obj)
+
+    def test_hook_yielded_exotic_mix_at_100_001_keeps_the_delegated_cap(self) -> None:
+        """H5: 100_001 hook-yielded pairs with one exotic (float) key --
+        the mixed-shape gate delegates and the per-dict delegated-sort
+        bound fires BEFORE the interpreter sort, with the generic
+        message. The all-exact-str snapshot at the same size is exactly
+        the pinned fast path above (no bound applies)."""
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(float(i) + 0.5, i) for i in range(100_000)] + [("k", 1)]
+        )
+        with pytest.raises(ValueError, match="too many items to sort"):
+            content_hash(obj)
+
+    def test_hook_edge_shapes_take_the_native_path_with_parity(self) -> None:
+        """The eligibility scan's boundary shapes: an EMPTY snapshot
+        (non-empty concrete storage, items() yields nothing) hashes {};
+        items() returning a TUPLE of pairs materializes the same
+        snapshot; big-int keys beyond i64 delegate (json's own numeric
+        tuple sort, which compares them exactly)."""
+        obj = TestProtocolNativeFastPath.ItemsDict([])
+        _assert_bytes(obj, b"{}")
+        obj = TestProtocolNativeFastPath.ItemsDict((("b", 1), ("a", 2)))
+        _assert_parity(obj)
+        obj = TestProtocolNativeFastPath.ItemsDict(
+            [(2**63, "a"), (2**63 - 1, "b"), (-(2**63), "c")]
+        )
+        _assert_parity(obj)
+
+    def test_hook_generator_items_mutating_the_mapping_mid_pull(self) -> None:
+        """H3: a generator .items() that mutates the mapping DURING
+        materialization -- both engines pull the same snapshot (the
+        mutation lands in storage, never in the pulled stream) and hash
+        identically."""
+
+        class GenMutatingDict(dict):
+            def __init__(self) -> None:
+                super().__init__(x=1)
+
+            def items(self):  # type: ignore[override]
+                yield ("a", 1)
+                self["mid"] = 99
+                yield ("b", 2)
+
+        obj = GenMutatingDict()
+        assert list(json.loads(_canonical(obj)).items()) == [("a", 1), ("b", 2)]
+        _assert_parity(obj)
+
+    def test_two_distinct_nan_keys_hash_by_insertion_order(self) -> None:
+        """Two distinct NaN keys legally coexist (NaN != NaN); the
+        delegated timsort runs over an inconsistent comparator, so the
+        output order -- hence the hash -- follows the insertion order,
+        identically with the json oracle."""
+        nan1, nan2 = float("nan"), float("nan")
+        first: dict[Any, int] = {nan1: 1, nan2: 2}
+        second: dict[Any, int] = {nan2: 2, nan1: 1}
+        assert content_hash(first) == _oracle(first)
+        assert content_hash(second) == _oracle(second)
+        assert content_hash(first) != content_hash(second)
 
 
 class TestHostileReprAndNanSharing:
