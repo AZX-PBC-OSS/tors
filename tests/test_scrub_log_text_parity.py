@@ -696,7 +696,18 @@ def _load_taskq_module() -> object | None:
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # The checkout is the live ORACLE (foreign tree, own dependency
+        # set): its module may grow imports the local venv does not carry
+        # (measured: an `opentelemetry` import appearing upstream broke
+        # THIS suite's collection from a repo that is not ours to pin).
+        # A found-but-unimportable checkout is materially the "cannot run
+        # the lane" case the caller's skipif exists for — degrade to the
+        # same None (the quoted-pattern differential above still runs),
+        # never break collection.
+        try:
+            spec.loader.exec_module(module)
+        except ImportError:
+            continue
         return module
     return None
 
