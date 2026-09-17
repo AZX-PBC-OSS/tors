@@ -2896,7 +2896,13 @@ every level except the raw cut, the separator itself is dropped between
 chunks: the chunk ends where the separator starts, the next chunk begins
 where it ends, the same convention `chunk_by_paragraphs` already applies
 to blank-line runs. A caller splitting on a marker wants it gone, not
-duplicated.
+duplicated. Since #103 that holds at the end of the document too: the
+final-chunk shortcut (the whole remainder fits the budget, so the chunk
+runs to the end untrimmed) answers the separator-skip question first, so
+a window that OPENS on a separator match is never emitted — not even as
+the untrimmed final chunk. A trailing separator run therefore survives
+only as a suffix of a content-bearing chunk, and an all-separator
+document chunks to zero chunks.
 
 `overlap` snaps the next chunk's start backward to the nearest GRAPHEME
 boundary at or before the target, not necessarily a semantic
@@ -2922,7 +2928,14 @@ it: the default hierarchy's paragraph/sentence/word walks, or one literal
 search per distinct custom separator), so levels no window descends to are
 never scanned at all: a custom hierarchy that never matches under a
 whole-document budget is one codepoint count and nothing else, so not even
-the literal's own scan runs. The one other whole-text structure is the grapheme
+the literal's own scan runs. Since #103 the final-chunk exit answers one
+extra question — could a separator match open at the exit's start — and a
+cheap necessary-condition pre-test over the unrealized level specs keeps
+that answer free whenever no separator could possibly open there (a text
+that does not begin with one of the literal separators, under the default
+hierarchy always: a paragraph-gap cut cannot begin at codepoint 0), so the
+whole-document cells below keep their zero-build exit. The one other
+whole-text structure is the grapheme
 boundary index, a one-bit-per-codepoint bitmap built lazily, only when a
 realized level has cuts to filter, a window needs the raw-cut fallback, or
 `overlap` snaps; on pure-ASCII text the index is two SIMD byte scans instead

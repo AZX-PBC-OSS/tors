@@ -9,8 +9,15 @@ machine): paragraph ``windows(2)`` cuts, sentence/word cuts from
 matches with the literal dropped, the grapheme-cut filter, the
 first-level-with-a-verdict window walk (a separator match at the
 window's own start is a skip verdict: no chunk for the separator, the
-window resumes at its end), the grapheme-safe hard cut, and the
-overlap snap.
+window resumes at its end -- and since #103 the skip also preempts the
+final-chunk exit, so an all-separator document chunks to zero chunks;
+production answers that exit's skip question through an output-invisible
+necessary-condition pre-test that this bare-search reference deliberately
+does not have, and the sweep holds the two spellings equal), the
+grapheme-safe hard cut, and the overlap snap (both ``overlap_boundary``
+modes since #47: the reference's word model is the same UAX #29
+word-bounds list production reads, with the decline-the-snap lookahead
+running after the word snap).
 
 Restricted to ASCII corpora the reference's grapheme model is exact:
 below the extended-grapheme additions the only joining rule is GB3 (a
@@ -173,9 +180,7 @@ def _ref_chunk_hierarchical(
     start = 0
     while start < total:
         remaining = total - start
-        if remaining <= max_chars:
-            chunks.append((start, total))
-            break
+        final_window = remaining <= max_chars
         limit = start + max_chars
         # The window's verdict, mirroring production's fused per-slot
         # search: per level, the separator-at-the-window-start skip beats
@@ -185,7 +190,12 @@ def _ref_chunk_hierarchical(
         # a window that opens on a separator match has no genuine cut,
         # and the raw cut would slice the separator out as a chunk of its
         # own; the separator is dropped between chunks, so the window
-        # resumes at its end, no chunk emitted.
+        # resumes at its end, no chunk emitted. Since #103 this includes
+        # the final window: the whole-remainder exit below runs only when
+        # the search did not answer Skip. (Production wraps this search
+        # in an output-invisible necessary-condition pre-test so a
+        # whole-document budget still builds no levels; this reference
+        # runs the bare search, and the sweep holds the two equal.)
         cut = None
         skip_to = None
         for cut_list, end_list, skip_map in zip(levels, ends, skips, strict=True):
@@ -199,11 +209,21 @@ def _ref_chunk_hierarchical(
         if skip_to is not None:
             start = skip_to
             continue
+        if cut is None and final_window:
+            chunks.append((start, total))
+            break
         if cut is None:
             end = last_at_or_before(limit)
             if end <= start:
                 end = first_after(start)
             cut = (end, end)
+        if final_window:
+            # The final-chunk exit (#103): the search above answered the
+            # skip question (a Skip verdict preempted this exit); the
+            # cut is discarded — the final chunk runs to the end
+            # untrimmed.
+            chunks.append((start, total))
+            break
         chunks.append((start, cut[0]))
         if overlap == 0:
             start = cut[1]

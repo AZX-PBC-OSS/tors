@@ -403,27 +403,52 @@ fuzz_target!(|input: Input| {
         // The whole-document-budget oracle, folded in at every budget
         // that can only ever emit the single first window: `max_chars
         // >= total` makes the loop's first `remaining <= max_chars`
-        // exit fire, so the answer is exactly [(0, total)] (or [] on
-        // empty text) regardless of separators and overlap. That
-        // trivial answer is the one output the codepoint total
-        // (`char_count`, pub(crate) and unreachable from this crate)
-        // directly feeds: a byte-count regression (astral text, 4
-        // UTF-8 bytes per emoji) would emit (0, byte_total) here and
-        // fail this exact equality while every structure check above
-        // still passes, which is why the row exists as equality and
-        // not as another invariant.
+        // exit fire, so the answer is [(0, total)] (or [] on empty
+        // text) regardless of separators and overlap — with the #103
+        // narrowing: a window that OPENS on a separator match is
+        // skipped even at that exit, so an all-separator document (or
+        // one whose every window before content opens on a match)
+        // comes back [] (or a single (start, total) window past the
+        // leading matches). What stays exactly pinned — and what the
+        // codepoint total (`char_count`, pub(crate) and unreachable
+        // from this crate) directly feeds, the reason this row exists
+        // as near-equality and not another invariant — is the shape: at
+        // most one chunk, ending exactly at `total` (a byte-count
+        // regression would emit (0, byte_total) and fail the end
+        // check), never a chunk that IS a separator match (the #103
+        // symptom, exact-equality-checked against every literal in the
+        // hierarchy), never more than one chunk from a budget that
+        // swallows the document.
         if budget >= total {
-            let expected: Vec<(usize, usize)> = if total == 0 {
-                Vec::new()
-            } else {
-                vec![(0, total)]
-            };
-            assert_eq!(
-                chunks, expected,
-                "whole-document budget {budget} must emit the single (0, total) window: \
-                 text={:?} separators={separators:?} overlap={overlap}",
+            assert!(
+                chunks.len() <= 1,
+                "whole-document budget {budget} must emit at most one chunk: \
+                 text={:?} separators={separators:?} overlap={overlap} chunks={chunks:?}",
                 input.text
             );
+            if let Some(&(start, end)) = chunks.first() {
+                assert_eq!(
+                    end, total,
+                    "whole-document chunk must run to the codepoint total: \
+                     text={:?} separators={separators:?} chunks={chunks:?}",
+                    input.text
+                );
+                if let Some(list) = separators {
+                    for entry in list {
+                        let Some(sep) = *entry else { continue };
+                        if sep.is_empty() {
+                            continue; // the no-op literal production drops at slot construction
+                        }
+                        assert_ne!(
+                            &input.text[start..end],
+                            sep,
+                            "whole-document budget emitted a chunk that IS the separator \
+                             {sep:?} (#103): text={:?} chunks={chunks:?}",
+                            input.text
+                        );
+                    }
+                }
+            }
         }
     };
 

@@ -1019,9 +1019,13 @@ def chunk_by_lines_iter(
 # ". "/" " literal guesses an all-literal list pins it to; [None] is
 # identical to separators=None. Not a lossless partition (unlike
 # chunk_text): the separator itself is dropped between chunks, the same
-# chunk_by_paragraphs convention. overlap snaps to the nearest grapheme
-# boundary (not necessarily a semantic one, a documented simplification of
-# chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
+# chunk_by_paragraphs convention. Since #103 that includes the final
+# window: a window that opens on a separator match is skipped even at the
+# final-chunk exit, so a trailing separator run survives only as a suffix
+# of a content-bearing chunk and an all-separator document chunks to zero
+# chunks. overlap snaps to the nearest grapheme boundary (not necessarily
+# a semantic one, a documented simplification of chunk_text_overlapping's
+# single-level snap). max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
 # returns []; an empty separators sequence is legal and skips straight to the
 # raw-cut fallback.
