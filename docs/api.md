@@ -2278,8 +2278,18 @@ divergence rows (`tests/test_similarity.py`): `"ppp"` vs `"pwpp"`, difflib `4/7`
 (its anchored `"pp"` splits the insert, `M = 2`) vs tors `6/7` (`M = 3 = LCS`);
 and `"qpqpq"` vs `"qpwqpq"`, difflib `6/11` (the anchored rotated equal block
 `"qpq"`, a non-minimal insert+delete split, `M = 3`) vs tors `10/11` (`M = 5 =
-LCS`). tors's `M` is always maximal: `M == LCS(a,
-b)` exactly, the minimal-edit-script consequence of the Myers engine, so the two
+LCS`). tors's `M` is always valid — the equal ops spell a common subsequence,
+so `M <= LCS(a, b)` — and it is maximal (`M == LCS(a,
+b)` exactly, the minimal-edit-script consequence of the Myers engine)
+whenever the bounded search completes; on hard inputs past the heuristic's
+limits (large slices with few anchorable unique records — random text over a
+small alphabet in the thousands of chars is the measured shape) the bounded
+middle-snake search can accept a good non-minimal split and score slightly
+UNDER the true LCS ratio (measured: 0.7043 vs the true 0.7107 on 3000-char
+random strings, a ~1% undercount; see `src/diff_impl.rs`'s module docs for
+exactly what the engine does and does not guarantee, and the size-ladder
+property test in `tests/test_similarity.py` for the pinned bounded
+property). So the two
 ratios agree exactly wherever the alignment is forced (identical operands, empty
 pairs, disjoint alphabets, pure insert/delete with differing flanks) and are both
 valid but may diverge on repeated-flank contexts. difflib's anchored `M` is also

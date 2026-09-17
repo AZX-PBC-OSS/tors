@@ -547,11 +547,16 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     ``test_grounded.py``), the boundary between the two sitting exactly at
     ``len(source) == len(claim)`` where both formulas agree.
     ``M`` here is the LCS length from the independent DP above, not
-    difflib's anchored matching blocks: tors's ``M`` is the maximal one
-    (``M == LCS`` exactly, the minimal-edit-script consequence of the
+    difflib's anchored matching blocks: tors's ``M`` is the maximal one on
+    the small-input regime (``M == LCS`` there, the minimal-edit-script
+    consequence of the
     Myers engine), so this oracle is exact on the repeated-character
     inputs where difflib's own recursion can pick a smaller-but-valid ``M``
-    (the pinned ``"010"``/``"120"`` divergence class in the grounded tests)."""
+    (the pinned ``"010"``/``"120"`` divergence class in the grounded tests).
+    Past the bounded search's limits — large hard inputs — tors's ``M`` can
+    undercount the true LCS (issue #116, the documented bounded property;
+    the size ladder in tests/test_similarity.py), so this oracle's exactness
+    is a small-input claim, not a universal one."""
     if not claim:
         return True
     if claim in source:
