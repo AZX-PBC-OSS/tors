@@ -58,6 +58,7 @@ What this gate pins, oracle-derived literal by literal:
 
 from __future__ import annotations
 
+import collections.abc
 import re
 
 import pytest
@@ -459,7 +460,128 @@ class TestRulesParameter:
             scrub_log_text("postgres://u:pw@h", rules)  # type: ignore[arg-type]
 
     def test_rules_accepts_keyword_form(self) -> None:
-        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == ("postgres://u:***@h")
+        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == (
+            "postgres://u:***@h"
+        )
+
+
+class LyingHugeLen(collections.abc.Sequence):
+    """The #112 bomb: a Sequence whose ``__len__`` reports 2**62. pyo3's
+    ``Option<Vec<String>>`` extraction sized the Vec from that and died in
+    ``Vec::with_capacity`` as an UNCAATCHABLE
+    ``pyo3_runtime.PanicException: capacity overflow`` (PanicException
+    derives from BaseException, so ``except Exception`` never sees it).
+    The bounded walk (``src/py/_borrow.rs``'s ``bounded_str_list``) never
+    reads ``__len__``."""
+
+    def __len__(self) -> int:
+        return 2**62
+
+    def __getitem__(self, i: int) -> str:
+        if i >= 2:
+            raise IndexError
+        return ("uri_userinfo", "pg_detail_lines")[i]
+
+
+class EndlessSequence(collections.abc.Sequence):
+    """A Sequence that never runs out: the walk must abort at the cap, not
+    loop forever (and never trust the lying-huge ``__len__``)."""
+
+    def __len__(self) -> int:
+        return 2**62
+
+    def __getitem__(self, i: int) -> str:
+        return "uri_userinfo"
+
+
+class LyingLowLen(collections.abc.Sequence):
+    """A Sequence whose ``__len__`` lies LOW (1) but yields two items: the
+    walk iterates, it never reserves, so every item is taken."""
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, i: int) -> str:
+        if i >= 2:
+            raise IndexError
+        return ("uri_userinfo", "pg_detail_lines")[i]
+
+
+class MidIterationBoom(collections.abc.Sequence):
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, i: int) -> str:
+        if i == 1:
+            raise RuntimeError("boom mid-iteration")
+        return "uri_userinfo"
+
+
+class TestRulesExtractionBoundedWalk:
+    """The ``rules=`` extraction's DoS cap and its byte-preservation pins
+    (issue #112's residue). The parameter extracts through a bounded
+    manual walk (``src/py/_borrow.rs``'s ``bounded_str_list``, the twin of
+    ``scrub_pii``'s in ``src/py/pii.rs``) instead of pyo3's
+    ``Option<Vec<String>>``: same accepted surface, same refusal bytes,
+    and the lying-``__len__`` bomb dies as a catchable ``ValueError``
+    instead of the uncatchable PanicException."""
+
+    def test_the_len_bomb_walks_and_never_panics(self) -> None:
+        # The #112 repro argument: pyo3's extraction panicked (uncatchable
+        # PanicException) on this exact object; the walk ignores __len__,
+        # takes the two honest items, and the scrub succeeds. A PanicException
+        # derives from BaseException, so this returning normally IS the
+        # never-panics pin; the catchable-ValueError refusal path is pinned
+        # by the endless and 100_001 rows below.
+        assert (
+            scrub_log_text("postgres://u:pw@h", rules=LyingHugeLen())
+            == scrub_log_text("postgres://u:pw@h", ["uri_userinfo", "pg_detail_lines"])
+        )
+
+    def test_an_endless_sequence_refuses_at_the_cap(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=EndlessSequence())
+        assert "yielded too many items" in str(excinfo.value)
+
+    def test_an_honest_100k_list_succeeds(self) -> None:
+        text = "postgres://u:pw@h"
+        expected = scrub_log_text(text, ["uri_userinfo"])
+        assert scrub_log_text(text, ["uri_userinfo"] * 100_000) == expected
+
+    def test_a_100001_item_list_refuses(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"] * 100_001)
+        assert str(excinfo.value) == (
+            "scrub_log_text() rules sequence yielded too many items: "
+            "refusing an unbounded batch"
+        )
+
+    def test_a_len_that_lies_low_takes_every_item(self) -> None:
+        # Both names apply (the scrubbed value proves pg_detail_lines ran
+        # even though __len__ said 1): the walk never consulted it.
+        assert (
+            scrub_log_text("pg://u:p\\nDETAIL:x@h", rules=LyingLowLen())
+            == scrub_log_text("pg://u:p\\nDETAIL:x@h", ["uri_userinfo", "pg_detail_lines"])
+        )
+
+    def test_a_bare_str_keeps_pyo3s_own_refusal_bytes(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules="uri_userinfo")  # type: ignore[arg-type]
+        assert str(excinfo.value) == "Can't extract `str` to `Vec`"
+
+    def test_a_non_sequence_keeps_pyo3s_refusal_bytes(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules={"uri_userinfo"})  # type: ignore[arg-type]
+        assert str(excinfo.value) == "'set' object is not an instance of 'Sequence'"
+
+    def test_bytes_are_refused_on_the_first_int_item(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=b"uri_userinfo")  # type: ignore[arg-type]
+        assert str(excinfo.value) == "'int' object is not an instance of 'str'"
+
+    def test_a_mid_iteration_error_propagates_unchanged(self) -> None:
+        with pytest.raises(RuntimeError, match="boom mid-iteration"):
+            scrub_log_text("postgres://u:pw@h", rules=MidIterationBoom())  # type: ignore[arg-type]
 
 
 class TestIdentityReturn:

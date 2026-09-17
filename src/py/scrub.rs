@@ -4,6 +4,7 @@ use pyo3::types::PyString;
 use pyo3::{Py, PyAny};
 
 use crate::detached_transform;
+use crate::py::_borrow::bounded_str_list;
 use crate::scrub_impl::{self, RuleSet};
 
 /// The `rules=` parameter's accepted spellings, the same
@@ -63,8 +64,16 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
 pub fn scrub_log_text(
     py: Python<'_>,
     text: Bound<'_, PyString>,
-    rules: Option<Vec<String>>,
+    rules: Option<Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // The list param extracts through the bounded manual walk
+    // ([`bounded_str_list`]): pyo3's `Option<Vec<String>>` sizing from a
+    // lying `__len__` was the uncatchable capacity-overflow class (#112's
+    // residue — `scrub_log_text("x", rules=LyingLenSequence())`).
+    let rules = match rules {
+        None => None,
+        Some(any) => Some(bounded_str_list("scrub_log_text", "rules", &any)?),
+    };
     let rules = parse_rules(rules)?;
     detached_transform(py, text, move |s| scrub_impl::scrub_log_text(s, rules))
 }
