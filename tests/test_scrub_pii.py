@@ -83,6 +83,9 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
 from __future__ import annotations
 
 import hashlib
+import subprocess
+import sys
+from collections.abc import Sequence
 
 import pytest
 from hypothesis import given, settings
@@ -2260,3 +2263,137 @@ class TestNdExhaustive:
             if unicodedata.category(c) in ("No", "Nl"):
                 text = "+12" + c + "45678"
                 assert scrub_pii(text, ["contact_phone"], salt="") == text, f"U+{i:04X}"
+
+
+class TestBoundedSequenceExtraction:
+    """`rules=`/`families=` never size their argument from `__len__` (issue
+    #112): pyo3's `Option<Vec<String>>` extraction reserved
+    `Vec::with_capacity(__len__())` before iterating, so a `Sequence`
+    whose `__len__` lied (2**62) died as a `PanicException` (capacity
+    overflow) — `except Exception` cannot catch it. The parameters now
+    extract through a bounded manual walk (`bounded_str_list`, the
+    `borrow_str_sequence` pattern), and every pre-existing boundary
+    behavior is preserved byte-identically: the accepted surface (list,
+    tuple, any honest `Sequence`), the refusals (bare `str`, non-
+    sequences, non-`str` items), mid-iteration error propagation, and a
+    `__len__` that lies LOW (the walk iterates; it never reserves). The
+    one behavior change is the bomb's: a sequence yielding past the cap
+    (100_000 items) dies as a catchable `ValueError`. The hostile cases
+    run in a subprocess: a regression to `PanicException` would otherwise
+    kill this runner (it is not an `Exception` subclass) instead of
+    failing the cell."""
+
+    @staticmethod
+    def _probe(expr: str) -> str:
+        done = subprocess.run(
+            [sys.executable, "-c", f"import tors\n{expr}"],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        return f"rc={done.returncode}\n{done.stdout}\n{done.stderr}"
+
+    _LYING_HUGE = (
+        "from collections.abc import Sequence\n"
+        "class LyingHuge(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i): raise IndexError\n"
+    )
+
+    _FLOOD = (
+        "from collections.abc import Sequence\n"
+        "class Flood(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i):\n"
+        "        if i >= 150_000: raise IndexError\n"
+        "        return 'api_keys'\n"
+    )
+
+    def test_a_len_that_lies_huge_is_never_a_panic(self) -> None:
+        # The reported repro, exact: pyo3_runtime.PanicException
+        # (capacity overflow), not an Exception subclass. The walk never
+        # reads __len__, so the empty yield is just an empty selection.
+        done = self._probe(
+            self._LYING_HUGE
+            + "try:\n"
+            "    out = tors.scrub_pii('a@b.co', rules=LyingHuge())\n"
+            "    print('OK', out == 'a@b.co')\n"
+            "except PanicException as e:\n"
+            "    print('PANIC', e)\n"
+        )
+        assert "PANIC" not in done, f"the bomb is back:\n{done}"
+        assert "OK True" in done, f"the honest empty yield broke:\n{done}"
+
+    def test_a_sequence_yielding_past_the_cap_is_a_value_error(self) -> None:
+        # The cap (src/py/pii.rs MAX_LIST_ITEMS): past 100_000 yielded
+        # items the walk refuses with a catchable ValueError — the
+        # content_hash walk cap's discipline — never a PanicException.
+        for spelling in (
+            "scrub_pii('x', rules=Flood())",
+            "scrub_pii('AAAA-BBBB', rules=['api_keys'], families=Flood())",
+            "scrub_pii_report('x', rules=Flood())",
+            "scrub_pii_report('AAAA-BBBB', rules=['api_keys'], families=Flood())",
+        ):
+            done = self._probe(
+                self._FLOOD
+                + "try:\n"
+                f"    tors.{spelling}\n"
+                "    print('NO RAISE')\n"
+                "except ValueError as e:\n"
+                "    print('VALUEERROR', 'too many items' in str(e))\n"
+            )
+            assert "VALUEERROR True" in done, f"{spelling} is not a catchable ValueError:\n{done}"
+
+    def test_a_len_that_lies_low_takes_every_yielded_item(self) -> None:
+        # __len__ = 2 while __iter__ yields 5: the walk iterates and never
+        # reserves, so all five arrive (the pre-fix extraction's own
+        # behavior, pinned so a "trust the prefix length" regression shows
+        # here). The yielded names are valid rules; a real key scrubs.
+        class LowLen(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, i: int) -> str:
+                if i >= 5:
+                    raise IndexError
+                return "api_keys"
+
+        assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in scrub_pii(
+            f"key {_JWT}", LowLen(), salt=""
+        )
+
+    def test_a_getitem_raising_mid_iteration_propagates(self) -> None:
+        # The pre-fix extraction propagated the Sequence's own error; the
+        # walk iterates the same way, so it still does.
+        class ExplodesMid(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, i: int) -> str:
+                if i == 1:
+                    raise RuntimeError("boom mid-iteration")
+                if i > 1:
+                    raise IndexError
+                return "api_keys"
+
+        with pytest.raises(RuntimeError, match="boom mid-iteration"):
+            scrub_pii("x", ExplodesMid())  # type: ignore[arg-type]
+
+    def test_the_error_is_never_a_panic_exception_class(self) -> None:
+        # The catchable-error-class assertion: every refusal on this
+        # boundary is an Exception (ValueError/TypeError), the class
+        # `except Exception` catches — PanicException derives straight
+        # from BaseException and was the defect's whole point.
+        class LyingHuge(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2**62
+
+            def __getitem__(self, i: int) -> str:
+                if i >= 150_000:
+                    raise IndexError
+                return "api_keys"
+
+        with pytest.raises(ValueError) as exc:
+            scrub_pii("x", LyingHuge())  # type: ignore[arg-type]
+        assert isinstance(exc.value, Exception)
+        assert "too many items" in str(exc.value)
