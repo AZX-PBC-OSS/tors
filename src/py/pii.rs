@@ -24,11 +24,7 @@ use crate::py::_borrow::bounded_str_list;
 /// four `rules=`/`families=` call sites extract through this one-liner so
 /// the closure-style shared walk (`src/py/_borrow.rs`) stays the only
 /// walk, and the refusal bytes stay the scrub boundary's.
-fn bounded_str_vec(
-    function: &str,
-    param: &str,
-    items: &Bound<'_, PyAny>,
-) -> PyResult<Vec<String>> {
+fn bounded_str_vec(function: &str, param: &str, items: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     bounded_str_list(function, param, items, |handle| {
         out.push(handle.extract::<&str>()?.to_owned());
