@@ -290,10 +290,11 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
 # the family's own charset (the shared [A-Za-z0-9_-] for most, [0-9A-Z]
 # for the AWS pair, [A-Za-z0-9+/=] for the Azure marker), the
 # prefix-boundary rule (a prefix glued to a preceding key-charset char is
-# mid-token, the `xak-` cut — the PEM carve-out aside: a `-----BEGIN ` head
-# directly after a dash run IS a clean boundary, the previous block's
-# `-----END …-----` close being armor, not a word), the JWT marker
-# scoping, and the PEM span (both markers, same words) —
+# mid-token, the `xak-` cut — the escape arms (%XX, \uXXXX, \xHH, \NNN
+# octal, \X) and the PEM carve-out aside: a complete escape sequence or a
+# `-----BEGIN ` head after a dash run or shared close IS a clean
+# boundary, the formatting material being armor, not a word), the JWT
+# marker scoping, and the PEM span (both markers, same words) —
 # used only to route inputs between the lanes, the same posture as
 # `has_domestic_shape`. The scanner's first-byte dispatch is a pure
 # optimization and is deliberately NOT mirrored: every family prefix is
@@ -319,6 +320,10 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("glrt-", 20),
     ("ya29.", 20),
     ("ghp_", 36),
+    ("gho_", 36),
+    ("ghu_", 36),
+    ("ghs_", 36),
+    ("ghr_", 36),
     ("AIza", 35),
     ("xai-", 20),
     ("AKIA", 16),
@@ -347,6 +352,8 @@ _KEY_TAIL_AZURE = frozenset(
 _PEM_WORD_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
+_ASCII_HEX = frozenset("0123456789abcdefABCDEF")
+_ASCII_OCTAL = frozenset("01234567")
 _BEARER_MARKER = "Bearer eyJ"
 
 
@@ -434,17 +441,78 @@ def _pem_head_carve(text: str, i: int) -> bool:
     return True
 
 
+def _backslash_run_before(text: str, at: int) -> int:
+    """The run of backslashes ending just before `at` (never crossing
+    the string start) — the mirror of backslash_run_before, the
+    odd-backslash discipline's counter."""
+    run = 0
+    while run < at and text[at - 1 - run] == "\\":
+        run += 1
+    return run
+
+
+def _escape_ends_before(text: str, pos: int) -> bool:
+    """Whether the key-charset char at `pos - 1` ends a complete escape
+    sequence — the str-space mirror of `escape_ends_before`, the same
+    grammar one arm per row: `%XX` (`%` + two hex digits), `\\uXXXX`
+    (`\\` `u` + four hex digits, no odd-backslash recount — the
+    documented released over-trigger), `\\xHH` (`\\` `x` + two hex
+    digits, the backslash run before the `x` ODD), `\\NNN` (`\\` + 1-3
+    octal digits, maximal munch, the run ending exactly here and the
+    backslash run before it ODD), and `\\X` (any char after an ODD
+    backslash run). The impl is bytes and this is str — the escape
+    grammar is ASCII-only, so every arm's offsets agree between byte
+    and char indices, the way the file's other transcriptions treat
+    the units (each grammar answers in its own space; only the ASCII
+    literals the two share are compared). A complete escape directly
+    before a head is a CLEAN boundary; a partial escape is not."""
+    if (
+        pos >= 3
+        and text[pos - 3] == "%"
+        and text[pos - 2] in _ASCII_HEX
+        and text[pos - 1] in _ASCII_HEX
+    ):
+        return True
+    if (
+        pos >= 6
+        and text[pos - 6] == "\\"
+        and text[pos - 5] == "u"
+        and all(ch in _ASCII_HEX for ch in text[pos - 4 : pos])
+    ):
+        return True
+    if (
+        pos >= 4
+        and text[pos - 4] == "\\"
+        and text[pos - 3] == "x"
+        and text[pos - 2] in _ASCII_HEX
+        and text[pos - 1] in _ASCII_HEX
+        and _backslash_run_before(text, pos - 3) % 2 == 1
+    ):
+        return True
+    digits = 0
+    while digits < pos and text[pos - 1 - digits] in _ASCII_OCTAL:
+        digits += 1
+    if (
+        digits in (1, 2, 3)
+        and digits < pos
+        and text[pos - 1 - digits] == "\\"
+        and _backslash_run_before(text, pos - digits) % 2 == 1
+    ):
+        return True
+    return _backslash_run_before(text, pos - 1) % 2 == 1
+
+
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
         if i > 0 and text[i - 1] in _KEY_TAIL and not (
+            # a complete escape sequence ending directly before the head
+            # is a clean boundary (the mirror of escape_ends_before), and
             # a `-----BEGIN ` head directly after a dash run or a shared
-            # close is a clean boundary: the previous block's
-            # `-----END …-----` close is armor, not a word (the twin of
-            # pem_head_after_dash_run — dash directly before the head, or
-            # the head's dash run entirely the close's, a PEM word byte
-            # before it)
-            _pem_head_carve(text, i)
+            # close is another: the previous block's `-----END …-----`
+            # close is armor, not a word (the twin of
+            # pem_head_after_dash_run)
+            _escape_ends_before(text, i) or _pem_head_carve(text, i)
         ):
             continue  # a mid-token prefix: the boundary rule
         for prefix, min_tail in _KEY_FAMILIES:
@@ -1248,6 +1316,29 @@ _KEYS_CASES: list[tuple[str, str, str]] = [
     # dashes double as the head's), the block redacts whole, the glue
     # word stays verbatim — so the span is still exactly the block.
     ("abc" + _PEM_EC, _PEM_EC, "PEM"),
+    # Escape-spelled keys (the boundary rule's escape arms): keys behind
+    # a complete escape route through the guard's escape grammar — the
+    # span is still exactly the key, the escape spelling verbatim.
+    (
+        "err:%3D" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\u0027" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\x1f" + f"gho_{_key_tail(36)}",
+        f"gho_{_key_tail(36)}",
+        "gho_",
+    ),
+    (
+        "err:\\n" + f"glpat-{_key_tail(20)}",
+        f"glpat-{_key_tail(20)}",
+        "glpat-",
+    ),
 ]
 
 _KEYS_NON_MATCHES: list[str] = [
@@ -1292,6 +1383,15 @@ _KEYS_NON_MATCHES: list[str] = [
     "AccountKey=" + _key_azure_tail(39),
     "Accountkey=" + _key_azure_tail(44),
     "xAccountKey=" + _key_azure_tail(40),
+    # The escape cuts (the guard's escape grammar must reject partials
+    # and self-escaped backslashes the same way the scanner does): a
+    # doubled backslash escapes itself (the neighbor a literal letter,
+    # the head mid-token), a percent sign without two hex digits is
+    # prose, and octal munch is maximal (a fourth digit is a literal
+    # continuation).
+    "x\\\\x41sk-" + _key_tail(48),
+    "x%3sk-" + _key_tail(48),
+    "x\\1234sk-" + _key_tail(48),
 ]
 
 
