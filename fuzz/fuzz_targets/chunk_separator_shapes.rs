@@ -236,21 +236,31 @@ fuzz_target!(|input: Input| {
     for separators in lists.iter().chain(singletons.iter()) {
         for budget in [raw_budget, pressure_budget, total.max(1)] {
             let overlap = input.overlap_raw as usize % budget.max(1);
-            let chunks = tors::chunk_hierarchical_impl::chunk_hierarchical(
-                &text,
-                budget,
-                Some(separators),
-                overlap,
-            );
-            assert_contract(
-                &chunks,
-                &text,
-                total,
-                budget,
-                overlap,
-                separators,
-                "chunk_hierarchical",
-            );
+            // Both overlap-boundary modes run the same contract (#47's
+            // keyword joined the signature; the contract — forward
+            // progress, budget and cluster conformance, no separator
+            // chunk — is mode-independent, so each mode asserts in full).
+            for boundary in [
+                tors::chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                tors::chunk_hierarchical_impl::OverlapBoundary::Word,
+            ] {
+                let chunks = tors::chunk_hierarchical_impl::chunk_hierarchical(
+                    &text,
+                    budget,
+                    Some(separators),
+                    overlap,
+                    boundary,
+                );
+                assert_contract(
+                    &chunks,
+                    &text,
+                    total,
+                    budget,
+                    overlap,
+                    separators,
+                    "chunk_hierarchical",
+                );
+            }
         }
     }
 });

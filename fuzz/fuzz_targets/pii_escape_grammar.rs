@@ -1,8 +1,8 @@
 //! `scrub_pii`'s keys pass agrees with its escape-grammar twin on
 //! ESCAPE-DENSE inputs: raw fuzzer strings essentially never spell the
 //! escape shapes the boundary rule has to answer (`%XX`, `\uXXXX`,
-//! backslash runs of every parity and length 0-6, and the NOT-recognized
-//! spellings `\xHH` and octal), so the existing `pii` target's byte-drain
+//! backslash runs of every parity and length 0-6, and every accepted
+//! spellings `\xHH` and octal among them), so the existing `pii` target's byte-drain
 //! generator starves exactly the region where the boundary rule lives.
 //! This target assembles inputs from a grammar: escape spellings glued
 //! directly to key-shaped tokens (`sk-` + a key-charset tail whose
@@ -19,17 +19,15 @@
 //! const-hex, spelled independently). The keys-only lane isolates the
 //! stage: no email/phone interaction is possible in either machine.
 //!
-//! KNOWN-UNFIXED GRAMMAR HOLES, deliberately transcribed AS THE IMPL
-//! SPELLS THEM (not as a security wish): the boundary rule recognizes
-//! `%XX`, `\uXXXX`, and odd-count backslash runs only. A literal
-//! `\xHH` hex escape or an octal escape glued to a key is treated as
-//! mid-token and the key SURVIVES — the twin predicts that leak and the
-//! differential still passes, because the oracle pins impl == twin, not
-//! impl == security. Those spellings (ANSI log escapes are the
-//! realistic shape) are tracked as the residual of the escape-grammar
-//! fix (issue #100's class): when the impl learns them, this twin must
-//! learn them in the same change or the differential goes red here —
-//! which is the point.
+//! The escape grammar is the impl's own contract table, transcribed arm
+//! for arm (`%XX`, `\uXXXX`, `\UHHHHHHH`, `\xHH`, octal `\NNN` maximal
+//! munch, the odd-count backslash run, and the ANSI CSI spelling) — the
+//! former KNOWN-UNFIXED holes (`\xHH`, octal, ANSI: the impl pinned them
+//! as leaks while #100's fix carried only the first three arms) closed
+//! when the impl learned those arms, and this twin learned them in the
+//! same sweep, exactly the header's sync condition. The differential
+//! pins impl == twin on every arm, including the escaped-backslash
+//! negatives (`\\x41` stays mid-token in both machines).
 //!
 //! Beyond the differential: the keys-only pass is strictly idempotent
 //! (a second pass is a borrowed fixed point) at every salt lane, and
@@ -50,11 +48,26 @@ fn is_key_tail_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
 }
 
+/// The odd-backslash discipline's counter: the run of backslashes
+/// ending just before `at` (the `pii` target's twin, ported).
+fn backslash_run_before_at(chars: &[char], at: usize) -> usize {
+    let mut run = 0usize;
+    while run < at && chars[at - 1 - run] == '\\' {
+        run += 1;
+    }
+    run
+}
+
 /// Whether the key-charset char at `i - 1` ends a complete escape
-/// sequence (`%XX`, `\uXXXX`, or `\X`; odd-backslash counted, so an
-/// escaped backslash stays a literal): the boundary rule's escape
-/// recognition, transcribed exactly. `\xHH` and octal are deliberately
-/// NOT recognized here — see the module header.
+/// sequence, the boundary rule's escape recognition transcribed exactly
+/// from the impl's grammar (one spelling per arm): `%XX`, `\uXXXX`
+/// (position-pinned; the documented released over-trigger on an escaped
+/// backslash directly before the spelling), `\UHHHHHHH`, `\xHH` and
+/// maximal-munch octal `\NNN` (both pinned backslashes unescaped — an
+/// odd backslash run before the spelling's first letter/digit), and the
+/// odd-count backslash run `\X`. The former KNOWN-UNFIXED hole (`\xHH`,
+/// octal, ANSI) closed when the impl learned those arms — the module
+/// header's own condition for syncing this twin.
 fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
     if i >= 3
         && chars[i - 3] == '%'
@@ -73,11 +86,52 @@ fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
     {
         return true;
     }
+    if i >= 10
+        && chars[i - 10] == '\\'
+        && chars[i - 9] == 'U'
+        && chars[i - 8..i].iter().all(|&c| c.is_ascii_hexdigit())
+    {
+        return true;
+    }
+    if i >= 4
+        && chars[i - 4] == '\\'
+        && chars[i - 3] == 'x'
+        && chars[i - 2].is_ascii_hexdigit()
+        && chars[i - 1].is_ascii_hexdigit()
+        && backslash_run_before_at(chars, i - 3) % 2 == 1
+    {
+        return true;
+    }
+    let mut digits = 0usize;
+    while digits < i && matches!(chars[i - 1 - digits], '0'..='7') {
+        digits += 1;
+    }
+    if (1..=3).contains(&digits)
+        && digits < i
+        && chars[i - 1 - digits] == '\\'
+        && backslash_run_before_at(chars, i - digits) % 2 == 1
+    {
+        return true;
+    }
     let mut slashes = 0usize;
     while slashes + 2 <= i && chars[i - 2 - slashes] == '\\' {
         slashes += 1;
     }
     slashes % 2 == 1
+}
+
+/// The ANSI CSI spelling (`ESC [`, parameter bytes `0x20..=0x3F`, final
+/// byte `0x40..=0x7E`): a colored-log quote before a key head is a clean
+/// boundary. A `[31m` without the ESC is literal, mid-token.
+fn ansi_csi_ends_before_at(chars: &[char], i: usize) -> bool {
+    if !('\u{40}'..='\u{7e}').contains(&chars[i - 1]) {
+        return false;
+    }
+    let mut j = i - 1;
+    while j > 0 && ('\u{20}'..='\u{3f}').contains(&chars[j - 1]) {
+        j -= 1;
+    }
+    j >= 2 && chars[j - 1] == '[' && chars[j - 2] == '\u{1b}'
 }
 
 const FAM_OPENAI: usize = 0;
@@ -119,6 +173,7 @@ fn tail_run_end(chars: &[char], at: usize, class: TailClass) -> usize {
 }
 
 const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
+    ("_gitlab_session=", 40, FAM_GITLAB, TailClass::Azure),
     ("github_pat_", 22, FAM_GITHUB, TailClass::Key),
     ("sk-svcacct-", 20, FAM_OPENAI, TailClass::Key),
     ("AccountKey=", 40, FAM_AZURE, TailClass::Azure),
@@ -126,6 +181,18 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("sk-ant-", 20, FAM_ANTHROPIC, TailClass::Key),
     ("azxdev_", 20, FAM_MINTED, TailClass::Key),
     ("glpat-", 20, FAM_GITLAB, TailClass::Key),
+    ("glagent-", 20, FAM_GITLAB, TailClass::Key),
+    ("glsoat-", 20, FAM_GITLAB, TailClass::Key),
+    ("glrtr-", 20, FAM_GITLAB, TailClass::Key),
+    ("glcbt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glptt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glimt-", 20, FAM_GITLAB, TailClass::Key),
+    ("gloas-", 20, FAM_GITLAB, TailClass::Key),
+    ("glft-", 20, FAM_GITLAB, TailClass::Key),
+    ("gldt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glrt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glwt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glffct-", 20, FAM_GITLAB, TailClass::Key),
     ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
     ("ghp_", 36, FAM_GITHUB, TailClass::Key),
     ("gho_", 36, FAM_GITHUB, TailClass::Key),
@@ -135,6 +202,13 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("AIza", 35, FAM_GOOGLE, TailClass::Key),
     ("AKIA", 16, FAM_AWS, TailClass::Aws),
     ("ASIA", 16, FAM_AWS, TailClass::Aws),
+    ("A3T", 17, FAM_AWS, TailClass::Aws),
+    ("AGPA", 16, FAM_AWS, TailClass::Aws),
+    ("AIDA", 16, FAM_AWS, TailClass::Aws),
+    ("AIPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANVA", 16, FAM_AWS, TailClass::Aws),
+    ("AROA", 16, FAM_AWS, TailClass::Aws),
     ("xai-", 20, FAM_XAI, TailClass::Key),
     ("fw-", 20, FAM_FIREWORKS, TailClass::Key),
     ("fw_", 20, FAM_FIREWORKS, TailClass::Key),
@@ -235,12 +309,37 @@ struct KeyHit {
     selected: bool,
 }
 
+/// The PEM BEGIN head after a dash run (the carve's twin): a head
+/// opening after a dash of its own, or after a PEM word run (the
+/// shared-close spelling), is a clean boundary.
+fn pem_head_after_dash_run_at(chars: &[char], i: usize) -> bool {
+    if !starts_with_at(chars, i, "-----BEGIN ") {
+        return false;
+    }
+    if chars[i - 1] == '-' {
+        return true;
+    }
+    if !chars[i - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut w = i - 1;
+    while w > 0 && chars[w - 1].is_ascii_alphanumeric() {
+        w -= 1;
+    }
+    true
+}
+
 fn key_matches_of(s: &str, mask: u16) -> Vec<KeyHit> {
     let chars: Vec<char> = s.chars().collect();
     let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if i > 0 && is_key_tail_char(chars[i - 1]) && !escape_ends_before_at(&chars, i) {
+        if i > 0
+            && is_key_tail_char(chars[i - 1])
+            && !escape_ends_before_at(&chars, i)
+            && !ansi_csi_ends_before_at(&chars, i)
+            && !pem_head_after_dash_run_at(&chars, i)
+        {
             i += 1;
             continue;
         }
