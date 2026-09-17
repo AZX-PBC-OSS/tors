@@ -9,7 +9,7 @@ and checked against the sync stub by ``tests/test_aio.py``.
 """
 
 from collections.abc import Sequence
-from typing import Literal
+from typing import Any, Literal
 
 from tors import CompiledLemmaDict, _StemmerLanguage
 
@@ -52,7 +52,67 @@ async def diff_opcodes(
 async def diff_opcodes_lines(
     a: str, b: str, *, deadline_ms: float | None = None
 ) -> list[tuple[str, int, int, int, int]]: ...
+async def repair_json(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    ensure_ascii: bool = True,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
+) -> str: ...
+async def repair_json_loads(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
+) -> dict[str, Any] | list[Any] | str | int | float | bool | None: ...
+async def repair_json_diagnostics(
+    s: str,
+    *,
+    skip_json_loads: bool = False,
+    strict: bool = False,
+    # a pydantic v2 model (class or instance) is also accepted
+    schema: dict[str, Any] | bool | type[Any] | None = None,
+    salvage: bool = False,
+    locale: str | dict[str, str] | None = None,
+    deadline_ms: float | None = None,
+) -> tuple[
+    dict[str, Any] | list[Any] | str | int | float | bool | None,
+    list[dict[str, Any]],
+]: ...
+async def truncate_to_bounds(
+    text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"
+) -> str: ...
 async def truncate_ellipsis(text: str, max_chars: int) -> str: ...
+async def is_grounded(
+    claim: str,
+    source: str,
+    *,
+    fuzzy: bool = False,
+    threshold: float = 0.85,
+    deadline_ms: float | None = None,
+) -> bool: ...
+async def similarity_ratio(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
+async def get_close_matches(
+    word: str,
+    possibilities: list[str],
+    n: int = 3,
+    cutoff: float = 0.6,
+    *,
+    deadline_ms: float | None = None,
+) -> list[str]: ...
+async def levenshtein(a: str, b: str, *, deadline_ms: float | None = None) -> int: ...
+async def jaro(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
+async def jaro_winkler(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
 async def chunk_cdc(
     data: bytes, *, min_size: int = 4096, avg_size: int = 16384, max_size: int = 65534
 ) -> list[tuple[int, int]]: ...

@@ -63,7 +63,11 @@ except tors.documents.NeedsOcrError as exc:
 `pages=` selects a PDF page subset on the pdf_oxide lane only (one 0-based
 page, a list, or a half-open `(start, stop)` range); the selection is deduped
 into document order and a full range is byte-identical to the whole-document
-conversion. Any other format, or `backend="anydoc"` on a PDF, refuses `pages=`
+conversion. A range endpoint no PDF can carry (past the 8,388,607-object
+cross-reference ceiling) is refused with `ValueError` under the GIL, before
+anything is built on it: the measured pre-fix failure asked the allocator
+for 800 PB at `pages=(0, 10**17)` and died by SIGABRT. Any other format, or
+`backend="anydoc"` on a PDF, refuses `pages=`
 with `ValueError` instead of silently converting the whole document.
 
 ## The API
@@ -134,7 +138,16 @@ The rules in brief:
   ~23x input, measured) only. On the PDF-only family `None` has no lane-specific
   32 MiB policy: those calls never run a metered lane, but they still
   read bounded by the 512 MiB backstop, a memory-safety floor rather than a
-  lane policy, not unbounded.
+  lane policy, not unbounded. What the ceiling bounds is the bytes handed
+  in, never the bytes they inflate to; the inflated side is bounded one
+  lane deep. anydoc caps decompression engine-side (128 MiB per entry,
+  512 MiB total across entries). The oxide lane runs a decompression audit
+  at the seam before its engine parses anything: a container whose parts
+  inflate past 512 MiB in total (declared sizes summed, then the parts
+  themselves re-inflated under a hard per-part bound, so a lying header
+  cannot get past it) is refused with `ValueError` naming the ceiling, and
+  office_oxide's own 512 MiB per-part cap stands underneath it. No lane
+  has an output-size cap beyond those.
 - Errors: `OSError` for a missing/unreadable file (the matched subclass, e.g.
   `IsADirectoryError` on a directory, `FileNotFoundError` for a missing path);
   `ValueError` for an unknown format name, an undetectable file, an unusable
@@ -148,14 +161,25 @@ The rules in brief:
   lane; the default pdf_oxide lane returns empty output for scanned pages and
   leaves the OCR decision to `pdf_classify`/`pdf_extract`.
 
-**Warning: a malformed PDF can crash the process, and Python cannot catch it.**
-The `ValueError` for a malformed document above is the ordinary path, but
-pdf_oxide 0.3.78's parser recursion has no depth cap, so a crafted PDF (measured:
-a ~60 KB file whose trailer nests `[` arrays ~30k deep, surviving to at least
-depth 10k) exhausts the native stack and every entry point dies with SIGSEGV
-(exit -11): not a Python exception, invisible to `except BaseException`. The fix
-belongs upstream (see SECURITY.md); if you process untrusted files, run the PDF
-lanes in a subprocess or another sandbox.
+**A malformed PDF's crash class is refused at the seam, not passed to the
+parser.** The `ValueError` for a malformed document above is the ordinary
+path, and the one crash class found on it, pdf_oxide 0.3.78's object parser
+recurses with no depth cap (its `ParserConfig::max_nesting` is dead code; a
+trailer nesting `[` arrays 10,659 deep SIGSEGV'd every entry point, exit -11
+in ~170 ms, uncatchable from Python), is defended at the binding's own seam
+in three layers that run before pdf_oxide parses anything
+(`src/pdf_impl.rs`'s module docs carry the full measured record): a linear
+raw-byte nesting scan (refusal past 100 levels, pdf_oxide's own intended
+cap), the same scan re-run over FlateDecode object-stream and xref-stream
+payloads after inflating them under a hard 256 MiB ceiling (the compressed
+shape the raw scan cannot see, measured still SIGSEGV-ing pre-fix at
+N=12,000), and the whole native pass on a 256 MiB-stack thread whose panic
+maps to the same catchable error. Over-depth and over-ceiling documents
+raise the malformed-document `ValueError` on every entry point; all shapes
+pinned red-first in `tests/test_documents_pdf_crashes.py`. The real cap
+belongs upstream (issue yfedoseev/pdf_oxide#1474, fix commit 68da2cf8,
+0.3.79+); the in-repo layers stay as defense-in-depth after it ships, and
+see SECURITY.md for the coordination status.
 
 ## The engine matrix
 
@@ -205,7 +229,12 @@ that office_oxide drops entirely, and covers rtf/odt/epub/csv office_oxide
 cannot read at all. `backend="oxide"` exists so a pipeline can diff the two
 engines' output on its own corpus; office_oxide's one measured win is exact
 entity text (no `&`-escaping, which anydoc does and the plain-text strip
-normalizes back).
+normalizes back). The opt-in lane carries its own bounds: the 32 MiB input
+ceiling (or the caller's `max_bytes=`), office_oxide's 512 MiB per-part
+cap, and the seam's decompression audit refusing any container whose parts
+inflate past 512 MiB in total (declared sizes summed first, then the parts
+re-inflated under a hard per-part bound: a lying header cannot get past
+it), the multi-part shape every per-part cap alone slips under.
 
 Every probe-able cell above was verified against the committed fixtures in
 `tests/engines_corpus/`, the OOXML alias containers included (`docm`/`xlsm`/

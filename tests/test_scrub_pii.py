@@ -1,5 +1,5 @@
 """Contract gate for ``tors.scrub_pii``: replace contact material (email
-addresses, ``+``-led phone numbers) and credential material (the
+addresses, phone numbers) and credential material (the
 evidence-backed api-key families) inside free text with correlation
 tokens, the scrub an error excerpt or rejection message needs before it
 reaches telemetry — the one store a data purge cannot reach.
@@ -20,8 +20,10 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
   so a long spelling matches on seven digits while ``+1234567`` never
   does — with the digit class in the Python-regex sense (every Unicode
   Nd decimal digit, not ASCII-only) and the token prefix being the
-  match's first three CODE POINTS (``"+1 "`` for a domestic spelling,
-  ``"+47"`` for a compact one); and DOMESTIC (the extension past the
+  ``+``-led match's first three CODE POINTS (``"+1 "`` for the
+  international spelling of a NANP number, ``"+47"`` for a compact one;
+  a domestic match's token is the digest alone (its head digits are
+  the area code); and DOMESTIC (the extension past the
   source), un-plussed NANP shapes — a full run of exactly ten digits,
   or eleven with an ASCII leading ``1``, in any ``[-. ()]`` spelling,
   carrying at least one separator (a bare digit run is an id even at
@@ -30,7 +32,8 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
   match inside a longer run, and never firing behind a ``+``
   (international territory: match or the source's non-match).
 - token shapes: ``@domain~<12 hex>`` for email, ``prefix~<12 hex>`` for
-  phone, ``<family prefix>~<12 hex>`` for a key (the prefix verbatim —
+  phone (the prefix only on a ``+``-led match; a domestic token is
+  the digest alone), ``<family prefix>~<12 hex>`` for a key (the prefix verbatim —
   the non-secret half that tells the operator WHICH credential to
   rotate); every digest is ``sha256(salt + match)`` truncated to 12 hex
   chars, so ``salt=""`` is the source chain's unsalted digest exactly —
@@ -40,13 +43,17 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
 - the api_keys rule's grammar: the evidence-backed closed family set —
   OpenAI ``sk-``/``sk-proj-``/``sk-svcacct-``, Anthropic ``sk-ant-``,
   Google ``AIza``, Fireworks ``fw-``/``fw_``, Modal ``ak-``/``wk-``,
-  GitHub ``ghp_``/``github_pat_``, the minted ``azxdev_``/``wd-``/``w-``/
+  GitHub ``ghp_``/``gho_``/``ghu_``/``ghs_``/``ghr_``/``github_pat_``,
+  GitLab ``glpat-``, the minted ``azxdev_``/``wd-``/``w-``/
   ``cn-`` shapes, and marker-scoped ``Bearer`` JWTs (a bare ``eyJ`` never
   matches: one consumer's API legitimately carries eyJ-shaped non-secret
   cursors) — each a literal prefix plus a minimal ``[A-Za-z0-9_-]`` tail
   consumed maximally, tried longest-prefix-first with fall-through, and
   never firing mid-token (a prefix glued to a preceding key-charset char
-  is that token's fragment, the ``xak-...`` cut).
+  is that token's fragment, the ``xak-...`` cut), UNLESS that char ends
+  a complete escape sequence (``%XX``, ``\\uXXXX``, ``\\X``): logs carry
+  keys inside JSON strings, .NET spellings, and URL encodings, and the
+  escape's tail byte is formatting material, not a word.
 - the rules contract: ``None`` = every rule in the canonical order
   (api_keys FIRST — a key's tail can spell a dash-separated domestic
   phone run and its local part an email, so the key pass must eat the
@@ -100,8 +107,14 @@ def _email_token(match: str) -> str:
     return f"@{domain}~{_hex12(match)}"
 
 
-def _phone_token(match: str) -> str:
-    return f"{match[:3]}~{_hex12(match)}"
+def _phone_token(match: str, salt: str = "") -> str:
+    # The oracle's own token rule (reference._scrub_phone_token): the
+    # prefix is the first three CODE POINTS of a `+`-led match only; a
+    # domestic match's head digits are the area code, so its token is
+    # the digest alone.
+    if match.startswith("+"):
+        return f"{match[:3]}~{_hex12(salt + match)}"
+    return f"~{_hex12(salt + match)}"
 
 
 # Non-ASCII zoo pieces built from codepoints (pure-ASCII source, the
@@ -160,12 +173,16 @@ _PEM_BODY = (
 )
 
 
-def _pem_block(words: str, body: tuple[str, ...] = _PEM_BODY) -> str:
-    lines = [f"-----BEGIN {words} PRIVATE KEY-----", *body, f"-----END {words} PRIVATE KEY-----"]
+def _pem_block(words: str, body: tuple[str, ...] = _PEM_BODY, close: str = " PRIVATE KEY") -> str:
+    lines = [f"-----BEGIN {words}{close}-----", *body, f"-----END {words}{close}-----"]
     return "\n".join(lines)
 
 
 _RSA_PEM = _pem_block("RSA")
+# The PGP label's own close: `PGP PRIVATE KEY BLOCK` before the dashes.
+_PGP_PEM = _pem_block("PGP", close=" PRIVATE KEY BLOCK")
+# A public key is not the family: the label grammar names PRIVATE KEY.
+_PGP_PUBLIC = _pem_block("PGP", close=" PUBLIC KEY BLOCK")
 
 # The token-prefix-to-family map for the battery vectors (one prefix
 # per vector; the multi-prefix families list each of theirs).
@@ -180,6 +197,11 @@ _PREFIX_FAMILY = {
     "ak-": "modal",
     "wk-": "modal",
     "ghp_": "github",
+    "gho_": "github",
+    "ghu_": "github",
+    "ghs_": "github",
+    "ghr_": "github",
+    "glpat-": "gitlab",
     "github_pat_": "github",
     "azxdev_": "minted",
     "wd-": "minted",
@@ -221,6 +243,11 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     ("ak-" + _key_tail(48), "ak-"),
     ("wk-" + _key_tail(48), "wk-"),
     ("ghp_" + _key_tail(36), "ghp_"),
+    ("gho_" + _key_tail(36), "gho_"),
+    ("ghu_" + _key_tail(36), "ghu_"),
+    ("ghs_" + _key_tail(36), "ghs_"),
+    ("ghr_" + _key_tail(36), "ghr_"),
+    ("glpat-" + _key_tail(20), "glpat-"),
     ("github_pat_" + _key_tail(22), "github_pat_"),
     ("azxdev_" + _key_tail(20), "azxdev_"),
     ("wd-" + _key_tail(43), "wd-"),
@@ -232,6 +259,7 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     ("xai-" + _key_tail(20), "xai-"),
     ("ya29." + _key_tail(20), "ya29."),
     (_RSA_PEM, "PEM"),
+    (_PGP_PEM, "PEM"),
     ("AccountKey=" + _azure_tail(44), "AccountKey="),
 )
 
@@ -244,6 +272,11 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
     ("ski-uppercase", "SKI-" + _key_tail(48)),
     ("aiza-one-under", "AIza" + _key_tail(34)),
     ("ghp-one-under", "ghp_" + _key_tail(35)),
+    ("gho-one-under", "gho_" + _key_tail(35)),
+    ("ghu-one-under", "ghu_" + _key_tail(35)),
+    ("ghs-one-under", "ghs_" + _key_tail(35)),
+    ("ghr-one-under", "ghr_" + _key_tail(35)),
+    ("glpat-one-under", "glpat-" + _key_tail(19)),
     ("github-pat-one-under", "github_pat_" + _key_tail(21)),
     ("azxdev-one-under", "azxdev_" + _key_tail(19)),
     ("wd-one-under", "wd-" + _key_tail(42)),
@@ -270,6 +303,7 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
         "pem-empty-words",
         "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_BODY) + "\n-----END PRIVATE KEY-----",
     ),
+    ("pgp-public-key-block", _PGP_PUBLIC),
     (
         "pem-lowercase",
         "-----begin rsa private key-----\n"
@@ -894,7 +928,9 @@ class TestDomesticPhoneZoo:
         # separator that makes it matchable). Safe direction; converges.
         matched = "user@555.1234567.co"
         once = scrub_pii(matched, salt="")
-        assert once == (f"@555~{_hex12('555.1234567')}.co~{_hex12(matched)}")
+        # The re-tokenized digit half keeps no prefix either: the digest
+        # alone (its head digits are the area code).
+        assert once == (f"@~{_hex12('555.1234567')}.co~{_hex12(matched)}")
         twice = scrub_pii(once, salt="")
         assert scrub_pii(twice, salt="") == twice
 
@@ -1180,7 +1216,12 @@ class TestApiKeyZoo:
         assert out == f"leaked {_key_token('sk-proj-', key)} in an error"
         assert "415~" not in out
         phone_only = scrub_pii(text, ["contact_phone"], salt="")
-        assert "-41~" in phone_only  # the domestic matcher ate the run
+        # The domestic matcher ate the run (the leading `-` absorbed
+        # into the match) and its token keeps no digits: the digest
+        # alone, byte-exact.
+        assert phone_only == (
+            "leaked sk-proj" + _phone_token("-415-555-2671") + _key_tail(20) + " in an error"
+        )
 
     def test_a_number_after_a_key_token_keeps_its_clean_run(self) -> None:
         # A key token's digest (`~` + 12 hex) is a token span for the
@@ -1203,6 +1244,122 @@ class TestApiKeyZoo:
         once = scrub_pii(text, salt="")
         assert once == _key_token(prefix, text)
         assert scrub_pii(once, salt="") is once
+
+
+class TestKeysAfterEscapeSequences:
+    """The boundary rule's escape exception: a family head directly
+    after a COMPLETE escape sequence (``%XX``, ``\\uXXXX``, ``\\X``)
+    is a clean boundary and scrubs, because the escape's tail
+    letter/digit is key-charset material but formatting, not the word a
+    key head would be glued to. That is the shape logs actually arrive
+    in: JSON strings escape the newline (``\\n``), .NET spellings escape
+    quotes (``\\u0027``), URLs percent-encode the ``=`` (``%3D``), and a
+    head classified mid-token there is a silent under-redaction: the
+    failure mode this scrubber exists to prevent. The exception is
+    exactly as narrow as its cause: the sequence must be complete and
+    directly before the head, an escaped backslash stays a literal
+    (odd-backslash count), and token digests (hex, no ``\\`` or
+    ``%``) keep their mid-token cut."""
+
+    @pytest.mark.parametrize(
+        ("escape", "key", "prefix"),
+        [
+            ("\\n", "sk-proj-" + _key_tail(24), "sk-proj-"),
+            ("\\u0027", "sk-ant-api03-" + _key_tail(40), "sk-ant-"),
+            ("%3D", "AIza" + _key_tail(35), "AIza"),
+            ("\\n", "gho_" + _key_tail(36), "gho_"),
+            ("\\n", "ghu_" + _key_tail(36), "ghu_"),
+            ("\\n", "ghs_" + _key_tail(36), "ghs_"),
+            ("\\n", "ghr_" + _key_tail(36), "ghr_"),
+            ("%2F", "glpat-" + _key_tail(20), "glpat-"),
+        ],
+        ids=["json-newline", "dotnet-quote", "url-equals", "gho", "ghu", "ghs", "ghr", "glpat"],
+    )
+    def test_a_key_after_a_complete_escape_still_scrubs(
+        self, escape: str, key: str, prefix: str
+    ) -> None:
+        # The head fires and tokens exactly as it would after a real
+        # newline or space: the escape rides through verbatim before the
+        # token, the digest is of the FULL key (prefix + tail) alone.
+        assert scrub_pii(f"err:{escape}{key}", ["api_keys"], salt="") == (
+            f"err:{escape}{_key_token(prefix, key)}"
+        )
+        # The default-rules call composes identically.
+        assert scrub_pii(f"err:{escape}{key}", salt="") == (
+            f"err:{escape}{_key_token(prefix, key)}"
+        )
+
+    def test_a_jwt_and_a_pem_after_an_escape_still_scrub(self) -> None:
+        # The boundary rule gates the marker/span grammars too: the JWT
+        # marker and both PEM markers fire behind escapes the same way.
+        assert scrub_pii("x\\u0027" + _JWT, ["api_keys"], salt="") == (
+            f"x\\u0027{_key_token('Bearer', _JWT)}"
+        )
+        assert scrub_pii("x\\n" + _PGP_PEM, ["api_keys"], salt="") == (
+            f"x\\n{_key_token('PEM', _PGP_PEM)}"
+        )
+        # The PGP label itself (` PRIVATE KEY BLOCK-----`) is the span
+        # family's accepted close: the whole block is the match.
+        assert scrub_pii(_PGP_PEM, salt="") == _key_token("PEM", _PGP_PEM)
+
+    def test_an_escaped_backslash_stays_mid_token(self) -> None:
+        # `\\n` is an escaped backslash followed by a LITERAL n: the
+        # escape exception counts backslashes, the neighbor stays a
+        # word's tail letter, and the head after it is mid-token (the
+        # `xak-...` cut), preserved whole, identity object.
+        key = "sk-proj-" + _key_tail(24)
+        text = f"err:\\\\n{key}"
+        assert scrub_pii(text, salt="") is text
+
+    def test_a_partial_or_distant_escape_stays_mid_token(self) -> None:
+        # The exception opens on a COMPLETE escape DIRECTLY before the
+        # head: one hex digit is prose, and a complete escape with word
+        # letters after it leaves those letters as the head's neighbor.
+        key = "sk-" + _key_tail(48)
+        for text in (f"x%3s{key}", f"x%41abcs{key[1:]}"):
+            assert scrub_pii(text, ["api_keys"], salt="") is text
+
+    def test_a_key_after_a_real_newline_still_scrubs_the_same_way(self) -> None:
+        # The control the exception was measured against: the real
+        # newline fired before, and its token equals the escaped
+        # spelling's; the escape exception changes WHERE a key is
+        # recognized, never WHAT token it gets.
+        key = "sk-proj-" + _key_tail(24)
+        real = scrub_pii("err:\n" + key, salt="")
+        assert real == f"err:\n{_key_token('sk-proj-', key)}"
+        assert scrub_pii("err:\\n" + key, salt="") == f"err:\\n{_key_token('sk-proj-', key)}"
+
+    def test_benign_escapes_without_keys_are_the_identity(self) -> None:
+        # The over-masking control: escaped and percent-encoded prose
+        # with no family head passes through untouched, original object.
+        for text in (
+            "err: 100%3D and \\u0027 and \\n and %2F",
+            "C:\\Users\\n%41profiles",
+        ):
+            assert scrub_pii(text, salt="") is text
+
+    def test_a_token_digest_keeps_its_mid_token_cut(self) -> None:
+        # The regression guard for the exception itself: a key glued to
+        # a token's digest hex stays mid-token (the digest is hex, no
+        # `\` or `%`, so the exception can never alias it), conservative
+        # and documented; the word-separated key still scrubs.
+        first = scrub_pii("sk-" + _key_tail(48), ["api_keys"], salt="")
+        second = "glpat-" + _key_tail(20)
+        glued = first + second
+        assert scrub_pii(glued, ["api_keys"], salt="") == glued
+        assert scrub_pii(first + " " + second, ["api_keys"], salt="") == (
+            first + " " + _key_token("glpat-", second)
+        )
+
+    def test_the_report_span_starts_at_the_head_not_the_escape(self) -> None:
+        # The report's span coordinates: the keys pass replaces the key
+        # alone (the escape rides through), so the span starts at the
+        # head byte, in input codepoint indices.
+        key = "sk-proj-" + _key_tail(24)
+        rep = scrub_pii_report(f"err:\\n{key}", salt="")
+        assert rep["spans"] == [
+            {"type": "api_keys:openai", "start": 6, "end": 6 + len(key)}
+        ]
 
 
 class TestKeyFamiliesContract:
@@ -1235,6 +1392,7 @@ class TestKeyFamiliesContract:
             "gcp_oauth",
             "pem",
             "azure",
+            "gitlab",
         )
         assert isinstance(KEY_FAMILIES, tuple)
 
@@ -1289,7 +1447,7 @@ class TestKeyFamiliesContract:
         # The exact parse_errors_mode shape: the closed set as a tuple,
         # the offender in Rust's Debug quoting. The set is derived from
         # the tuple (not re-spelled) so only the tuple pin reddens when
-        # the 14th family lands.
+        # the 15th family lands.
         with pytest.raises(ValueError) as exc:
             scrub_pii("a@b.co", families=["ssn"])
         assert str(exc.value) == (
@@ -1299,7 +1457,7 @@ class TestKeyFamiliesContract:
         assert str(exc.value) == (
             "families must be one of ('openai', 'anthropic', 'google', "
             "'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', "
-            "'xai', 'gcp_oauth', 'pem', 'azure'), not \"ssn\""
+            "'xai', 'gcp_oauth', 'pem', 'azure', 'gitlab'), not \"ssn\""
         )
 
     def test_a_valid_name_plus_an_unknown_one_still_raises(self) -> None:
@@ -1457,7 +1615,8 @@ def _family_token_prefix(family: str, matched: str) -> str:
         "google": ("AIza",),
         "fireworks": ("fw-", "fw_"),
         "modal": ("ak-", "wk-"),
-        "github": ("github_pat_", "ghp_"),
+        "github": ("github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+        "gitlab": ("glpat-",),
         "minted": ("azxdev_", "wd-", "w-", "cn-"),
         "jwt": ("Bearer",),
         "aws": (),
@@ -1606,7 +1765,7 @@ def _reconstruct(
             assert at < start
             off = start - at
             matched = text[start:end]
-            token = f"{matched[:3]}~{_hex12(contact_salt + matched)}"
+            token = _phone_token(matched, contact_salt)
             assert stoken[off + shift : off + shift + (end - start)] == matched
             pieces[-1][4] = stoken[: off + shift] + token + stoken[off + shift + (end - start) :]
             pieces[-1][5] = shift + len(token) - (end - start)
@@ -1614,7 +1773,7 @@ def _reconstruct(
             continue
         elif typ == "contact_phone":
             matched = text[start:end]
-            token = f"{matched[:3]}~{_hex12(contact_salt + matched)}"
+            token = _phone_token(matched, contact_salt)
         else:
             assert typ.startswith("api_keys:")
             family = typ[len("api_keys:") :]

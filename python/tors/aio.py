@@ -16,10 +16,15 @@ document, real overhead next to a microsecond-scale call over a short
 string. So this module covers only the functions whose realistic inputs
 are large enough that the thread-hop cost is reliably negligible: the
 chunking family, the retrieval/scoring primitives, the diff engine, the
-batch pipeline, and the input-scaling text/byte pipeline codecs
+batch pipeline, the fuzzy-matching and JSON-repair families
+(``levenshtein``/``jaro``/``jaro_winkler``,
+``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
+``repair_json*`` trio: quadratic and linear native passes whose
+documented measurements reach seconds and minutes on large inputs), and
+the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
-``truncate_ellipsis``, ``strip_controls``, ``scrub_log_text``,
+both truncate spellings, ``strip_controls``, ``scrub_log_text``,
 ``scrub_pii``); each a single native pass
 whose cost scales with its input (``scrub_log_text``: four linear scans +
 splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
@@ -77,10 +82,13 @@ __all__: list[str] = []
 # The curated large-input subset, named explicitly rather than inferred
 # from tors.__all__ by exclusion (see the module docstring for why the
 # rest of tors intentionally has no async twin): the chunking family, the
-# retrieval/scoring primitives, the diff engine, the batch pipeline, and
-# the input-scaling text/byte pipeline codecs (normalize/finalize,
+# retrieval/scoring primitives, the diff engine, the batch pipeline, the
+# fuzzy-matching and JSON-repair families (quadratic/linear native passes
+# whose docs measure seconds-to-minutes on large inputs), and the
+# input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
-# truncate_ellipsis, strip_controls, scrub_log_text, scrub_pii: each a single native pass
+# both truncate spellings, strip_controls, scrub_log_text, scrub_pii: each a
+# single native pass
 # whose cost scales with its input (scrub_log_text: four linear scans + splice under
 # one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
@@ -107,14 +115,24 @@ _WRAPPED = (
     "diff_opcodes_lines",
     "finalize",
     "finalize_utf8",
+    "get_close_matches",
+    "is_grounded",
+    "jaro",
+    "jaro_winkler",
+    "levenshtein",
     "minhash_signature",
     "normalize",
+    "repair_json",
+    "repair_json_diagnostics",
+    "repair_json_loads",
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",
+    "similarity_ratio",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",
+    "truncate_to_bounds",
 )
 
 

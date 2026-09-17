@@ -267,6 +267,17 @@ office_oxide = { version = "0.1.10", optional = true }
 # schemars/serde/image — an HTTP-serving + MCP + image stack) are pure
 # weight for this lane. The caret bounds to <4.
 html-to-markdown-rs = { version = "3.12", default-features = false, optional = true }
+# Inflate for the PDF depth pre-scan's compressed-object layer
+# (`src/pdf_impl.rs` `scan_stream_object`): a /Type /ObjStm or /Type /XRef
+# payload is a FlateDecode stream whose CONTENTS pdf_oxide parses with the
+# same uncapped recursive object parser as raw bytes (its objstm.rs:168
+# `parse_object`), so the raw-byte nesting walk cannot see a bomb hidden
+# there without inflating first. NOT weight and NOT new: flate2 is already
+# in the lock as pdf_oxide's own decoder (its Cargo.toml [dependencies.flate2],
+# the same zlib-rs backend, default-features off): this is a direct API edge
+# to code already compiled in (the aho-corasick precedent, see office_oxide
+# above). Optional behind `documents` for the same reason pdf_oxide is.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 
 [features]
 default = ["extension-module"]
@@ -287,7 +298,7 @@ extension-module = ["pyo3/extension-module"]
 # base wheel builds with the feature off: it carries none of the engine
 # weight, and the split is what keeps both downstream pipelines (one
 # documents-heavy, one not) on one dependency line each.
-documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-markdown-rs"]
+documents = ["dep:pdf_oxide", "dep:anydoc", "dep:office_oxide", "dep:html-to-markdown-rs", "dep:flate2"]
 
 [dev-dependencies]
 criterion = "0.8"

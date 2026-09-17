@@ -24,8 +24,11 @@ use crate::truncate_impl;
 /// exceeds `max_chars` codepoints either way, though it can fall short of
 /// the budget when respecting a cluster boundary requires backing off
 /// further. The cut point is then trimmed of trailing whitespace
-/// (`str::trim_end`), since cutting right after a word/sentence boundary can
-/// otherwise leave a dangling separator space.
+/// (whole whitespace grapheme clusters only; the stdlib `str::trim_end`'s
+/// codepoint strip can split a whitespace-carrying cluster like a Prepend
+/// plus a no-break space; this trim never ends the result mid-cluster),
+/// since cutting right after a word/sentence boundary can otherwise leave
+/// a dangling separator space.
 ///
 /// Identity-return contract: `tors.truncate_to_bounds(s, n) is s` exactly
 /// when `s` already has `<= n` codepoints (no truncation happens at all).

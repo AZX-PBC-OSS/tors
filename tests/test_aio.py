@@ -71,6 +71,30 @@ class TestCoverage:
         assert "asyncio.to_thread" in wrapper_body
         assert "if " not in wrapper_body
 
+    def test_the_input_scaling_fuzzy_and_repair_family_has_twins(self) -> None:
+        """The heavy tail the facade exists for must not be left on the
+        sync spelling alone: the fuzzy metrics and the JSON-repair family
+        are quadratic/linear native passes whose documented measurements
+        reach seconds and minutes on large inputs (``levenshtein`` alone
+        is the n² shape), and ``truncate_to_bounds`` is the same
+        input-scaling single native pass its ``truncate_ellipsis`` sibling
+        already is. Each must be an awaitable twin here, not a documented
+        exclusion."""
+        heavy = (
+            "get_close_matches",
+            "is_grounded",
+            "jaro",
+            "jaro_winkler",
+            "levenshtein",
+            "repair_json",
+            "repair_json_diagnostics",
+            "repair_json_loads",
+            "similarity_ratio",
+            "truncate_to_bounds",
+        )
+        missing = [name for name in heavy if name not in tors.aio.__all__]
+        assert not missing, f"no async twin for a documented-minutes-scale function: {missing}"
+
 
 class TestSignatureParity:
     def test_each_wrapper_accepts_exactly_what_the_sync_spelling_accepts(self) -> None:
@@ -164,6 +188,20 @@ class TestAwaitCorrectness:
             ("b64_encode_bytes", (b"hello world",), {}),
             ("b64_decode", ("aGVsbG8gd29ybGQ=",), {}),
             ("truncate_ellipsis", ("hello world", 6), {}),
+            ("truncate_to_bounds", ("cats are cute", 9), {}),
+            ("levenshtein", ("kitten", "sitting"), {}),
+            ("jaro", ("dixon", "dicksonx"), {}),
+            ("jaro_winkler", ("martha", "marhta"), {}),
+            ("similarity_ratio", ("kitten", "sitting"), {}),
+            ("get_close_matches", ("appel", ["ape", "apple", "peach"]), {}),
+            (
+                "is_grounded",
+                ("the fox jumps", "the quick brown fox jumps over the lazy dog"),
+                {"fuzzy": True, "threshold": 0.6},
+            ),
+            ("repair_json", ('{"a": 1,}',), {}),
+            ("repair_json_loads", ('{"a": 1,}',), {}),
+            ("repair_json_diagnostics", ('{"a": 1,}',), {}),
             ("strip_controls", ("a\x00b\x7fc",), {}),
             ("scrub_pii", ("a@b.co +1 415 555 2671",), {}),
             (

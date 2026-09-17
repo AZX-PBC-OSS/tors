@@ -38,7 +38,7 @@ pub(crate) fn parse_pii_rules(rules: Option<Vec<String>>) -> PyResult<PiiRules> 
     Ok(parsed)
 }
 
-/// The `families=` parameter's closed set: the thirteen
+/// The `families=` parameter's closed set: the fourteen
 /// `tors.KEY_FAMILIES` names, spelled from the single
 /// `KEY_FAMILY_NAMES` source so the unknown-name error can never drift
 /// from the tuple. `None` is every family this version knows (the set
@@ -78,11 +78,14 @@ pub(crate) fn parse_key_families(families: Option<Vec<String>>) -> PyResult<u16>
     Ok(mask)
 }
 
-/// `tors.scrub_pii`: replace contact material (email addresses,
-/// `+`-led phone numbers) and credential material (the evidence-backed
+/// `tors.scrub_pii`: replace contact material (email addresses, phone
+/// numbers) and credential material (the evidence-backed
 /// api-key families) inside free text with correlation tokens —
-/// `@domain~digest` for an email, `prefix~digest` for a phone number,
-/// `<family prefix>~digest` for a key — in one GIL-released pass, the
+/// `@domain~digest` for an email, `prefix~digest` for a phone number (a
+/// `+`-led match keeps its dialling prefix, the first three code
+/// points; a domestic match keeps the digest alone (its head digits
+/// are the area code), `<family prefix>~digest` for a key, in one
+/// GIL-released pass, the
 /// scrub an error excerpt or rejection message needs before it reaches
 /// telemetry, the one store a data purge cannot reach. The contact rules
 /// are a port of a private consumer's telemetry-safety module, pinned

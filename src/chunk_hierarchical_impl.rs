@@ -134,6 +134,20 @@ struct Level {
     cuts: Vec<(usize, usize)>,
 }
 
+/// One window's outcome from the level search: a genuine cut (the chunk
+/// `(start, cut_end)` is emitted, the window resumes at `next_start`), or
+/// a separator match at the window's own start (no chunk; the window
+/// resumes at the separator's end; the skip, see the loop body). The
+/// explicit enum, not an encoded `(cut_end, next_start)` shape, because
+/// the skip's cut_end IS the window's own start: an empty chunk no
+/// genuine cut can ever produce (`best_cut` requires `cut_end > after`),
+/// so the encoding is unambiguous, but the variant name says what the
+/// branch means, and the match below is where the two verdicts diverge.
+enum Verdict {
+    Cut(usize, usize),
+    Skip(usize),
+}
+
 impl Level {
     /// The largest `(cut_end, next_start)` with `cut_end <= limit` and
     /// `cut_end > after` (genuine forward progress): `None` if this level
@@ -144,6 +158,23 @@ impl Level {
             Some(self.cuts[hi - 1])
         } else {
             None
+        }
+    }
+
+    /// A separator match beginning exactly at `at`: a cut
+    /// `(at, next_start)` with `next_start > at`, as the resume position
+    /// past it, `None` when this level has no such cut. Only
+    /// separator-dropping levels can answer (`next_start > cut_end` holds
+    /// strictly there); a contiguous level's cuts have
+    /// `next_start == cut_end`, and a segment end at `at` would be an
+    /// empty segment that no contiguous segmenter produces, so a `Some`
+    /// from here is exactly the "this window opens on a separator" case
+    /// the window loop skips before it ever searches for a cut.
+    fn skip_cut(&self, at: usize) -> Option<usize> {
+        let lo = self.cuts.partition_point(|&(end, _)| end < at);
+        match self.cuts.get(lo) {
+            Some(&(end, next)) if end == at && next > at => Some(next),
+            _ => None,
         }
     }
 }
@@ -435,7 +466,14 @@ fn grapheme_index<'g>(
 /// this never affects ordinary text (no cluster is more than a handful of
 /// codepoints). See the module docs for the default-vs-custom hierarchy,
 /// the `None`-entry splice, and the separator-dropped (not lossless)
-/// contract. `overlap` snaps the next
+/// contract, a contract that includes a separator whose match begins
+/// exactly where the previous window resumed (consecutive separator
+/// matches, e.g. `"\n\n"` over `"\n\n\n\n"`, or a declined overlap snap
+/// landing there): its "chunk" would be empty, so the window skips the
+/// match and resumes at its end BEFORE searching for a cut; no window
+/// ever opens on a separator, so the raw-cut fallback can never fill a
+/// window with the separator itself.
+/// `overlap` snaps the next
 /// chunk's start backward from the just-emitted chunk's end to the nearest
 /// grapheme boundary at or before the target (never mid-cluster): not
 /// necessarily a semantic word/sentence/paragraph boundary the way
@@ -513,23 +551,55 @@ pub fn chunk_hierarchical(
             break;
         }
         let limit = start + max_chars;
-        // The find_map short-circuit is preserved exactly: the first
-        // slot supplying a cut wins, and later slots stay unrealized for
-        // this window (a later window that reaches them reuses their
-        // memoized build). Realization is the closure's first act, so a
-        // consulted slot is built even when it supplies no cut for the
-        // window: consultation, not success, is what pays the walk.
-        let cut = levels
+        // The window's verdict, searched coarsest-first with the find_map
+        // short-circuit preserved exactly (the first slot with a verdict
+        // wins; later slots stay unrealized for this window; a later
+        // window that reaches them reuses their memoized build; a
+        // consulted slot is built even when it supplies no verdict:
+        // consultation, not success, is what pays the walk):
+        //
+        // * Skip: a separator match beginning exactly at `start`, the
+        //   window OPENS on a separator (consecutive matches make one
+        //   match's drop resume exactly at the next match's start, and a
+        //   declined overlap snap can land there). Its "chunk" would be
+        //   empty, and the raw-cut fallback would fill the window with
+        //   the separator itself; separators are dropped between chunks,
+        //   every one of them, so the window skips the match and
+        //   restarts at its end. The skip beats the slot's own genuine
+        //   cuts (a cut past the match would carry the separator as
+        //   content) and stops the search before finer slots are
+        //   consulted, so the laziness discipline is untouched: a level
+        //   is realized exactly when the window's search descends to it.
+        //   Forward progress is unconditional (`skip_cut` answers a
+        //   `next_start` strictly past `start`) and the loop-head
+        //   iteration counter still bounds the skips by `total + 1`. The
+        //   final-chunk exit above runs first, so a trailing separator
+        //   run stays in the last chunk (the same final-chunk-runs-
+        //   untrimmed exception `chunk_text` documents).
+        // * Cut: the slot's largest in-budget cut past `start`, exactly
+        //   as this search always ran.
+        let verdict = levels
             .iter_mut()
             .find_map(|slot| {
-                slot.realize(text, total, &mut graphemes)
-                    .best_cut(start, limit)
+                let level = slot.realize(text, total, &mut graphemes);
+                level.skip_cut(start).map(Verdict::Skip).or_else(|| {
+                    level
+                        .best_cut(start, limit)
+                        .map(|(end, next)| Verdict::Cut(end, next))
+                })
             })
             .unwrap_or_else(|| {
                 let g = grapheme_index(&mut graphemes, text, total);
                 let end = g.hard_cut(start, limit);
-                (end, end)
+                Verdict::Cut(end, end)
             });
+        let cut = match verdict {
+            Verdict::Skip(next) => {
+                start = next;
+                continue;
+            }
+            Verdict::Cut(cut_end, next_start) => (cut_end, next_start),
+        };
         chunks.push((start, cut.0));
         if overlap == 0 {
             start = cut.1;
@@ -540,7 +610,7 @@ pub fn chunk_hierarchical(
             // Decline-the-snap with lookahead (#83): accept the candidate
             // only when it starts past this chunk's own start, ends before
             // this chunk's end, and the chunk cut from there ends strictly
-            // past this chunk's end. `next_end` is the loop body's own
+            // past this chunk's end. `next_end` is the loop body's own cut
             // computation run from `snapped` (the levels are memoized, so
             // this costs one partition_point per level, and the raw-cut
             // fallback the same hard cut): a candidate whose own chunk
@@ -548,7 +618,14 @@ pub fn chunk_hierarchical(
             // contained in its predecessor (the same text re-embedded, no
             // new context for the overlap to buy), so the snap is declined
             // and the transition degrades to zero overlap (`start =
-            // cut.1`), the documented degradation.
+            // cut.1`), the documented degradation. The lookahead reads the
+            // levels' direct cuts only: a separator match beginning
+            // exactly at `snapped` is not consulted as a skip here: the
+            // snap is an acceptance heuristic, and the window that
+            // eventually runs from `snapped` applies the skip itself, so
+            // declining on the direct cut's answer can only forgo an
+            // overlap (the documented degradation), never emit a wrong or
+            // stalled chunk.
             let next_end = if total - snapped <= max_chars {
                 total
             } else {
@@ -643,11 +720,15 @@ mod tests {
     /// over every level, `grapheme_safe_hard_cut` over the usize grid, the
     /// `partition_point` overlap snap) runs against the new spelling over
     /// a corpus × budget × overlap × hierarchy sweep below. The rewrite
-    /// claims bit-identical output; this is the pin. One deliberate
-    /// post-verbatim edit, mirrored on both sides in lockstep: #83's
+    /// claims bit-identical output; this is the pin. Two deliberate
+    /// post-verbatim edits, mirrored on both sides in lockstep: the
     /// decline-the-snap lookahead in the overlap branch (the oracle's
     /// snap carried the same contained-chunk defect the production loop
-    /// did), so the pin compares fixed machine against fixed machine.
+    /// did), so the pin compares fixed machine against fixed machine; and
+    /// the separator-at-the-window-start skip in the window loop (the
+    /// oracle shared the raw-cut-fallback defect that let a separator
+    /// whose match begins exactly at a window start come back as a chunk
+    /// of its own), skipped identically on both sides.
     fn chunk_hierarchical_reference(
         text: &str,
         max_chars: usize,
@@ -717,13 +798,33 @@ mod tests {
                 break;
             }
             let limit = start + max_chars;
-            let cut = levels
+            // The window's verdict, mirrored from the production loop in
+            // lockstep (the second deliberate post-verbatim edit): per
+            // slot, the separator-at-the-window-start skip beats the
+            // slot's own genuine cuts, and the first slot with a verdict
+            // wins; a window that opens on a separator skips it before
+            // any cut is searched (the separator is dropped between
+            // chunks, never emitted as one).
+            let verdict = levels
                 .iter()
-                .find_map(|level| level.best_cut(start, limit))
+                .find_map(|level| {
+                    level.skip_cut(start).map(Verdict::Skip).or_else(|| {
+                        level
+                            .best_cut(start, limit)
+                            .map(|(end, next)| Verdict::Cut(end, next))
+                    })
+                })
                 .unwrap_or_else(|| {
                     let end = grapheme_safe_hard_cut(&grapheme_starts, start, limit);
-                    (end, end)
+                    Verdict::Cut(end, end)
                 });
+            let cut = match verdict {
+                Verdict::Skip(next) => {
+                    start = next;
+                    continue;
+                }
+                Verdict::Cut(cut_end, next_start) => (cut_end, next_start),
+            };
             chunks.push((start, cut.0));
             if overlap == 0 {
                 start = cut.1;
@@ -900,6 +1001,49 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_separator_at_the_window_start_is_skipped_not_emitted() {
+        // Two adjacent "\n\n" matches: the second begins exactly where
+        // the first's drop resumed, the separator level supplies no cut
+        // past it, and the raw cut used to slice the separator out as a
+        // chunk of its own (its own span, no content). The separator is
+        // dropped between chunks instead: the chunk sequence is the
+        // content only.
+        assert_eq!(
+            chunk_hierarchical("a\n\n\n\nb", 2, Some(&[Some("\n\n")]), 0),
+            vec![(0, 1), (5, 6)]
+        );
+        // A leading separator (the text opens on a match) is skipped the
+        // same way (twice in a row here), its would-be span dropped from
+        // the head: no window may open on a separator, whatever a genuine
+        // cut farther in could have consumed.
+        assert_eq!(
+            chunk_hierarchical("\n\n\n\nb", 2, Some(&[Some("\n\n")]), 0),
+            vec![(4, 5)]
+        );
+        // A run of three adjacent matches skips twice in a row.
+        assert_eq!(
+            chunk_hierarchical("x------y", 3, Some(&[Some("---")]), 0),
+            vec![(0, 1), (7, 8)]
+        );
+        // The skip composes with overlap: the skipped transition carries
+        // no snap, the next emitted chunk's overlap is computed from the
+        // chunk that actually follows the skipped separators.
+        let overlapped = chunk_hierarchical("a\n\n\n\nbbbbbb", 4, Some(&[Some("\n\n")]), 2);
+        for w in overlapped.windows(2) {
+            assert!(
+                w[1].1 > w[0].1,
+                "ends must advance under overlap: {overlapped:?}"
+            );
+        }
+        for &(s, e) in &overlapped {
+            assert!(
+                &"a\n\n\n\nbbbbbb"[s..e] != "\n\n",
+                "a separator came back as its own chunk: {overlapped:?}"
+            );
         }
     }
 

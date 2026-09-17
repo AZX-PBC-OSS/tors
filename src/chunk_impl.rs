@@ -90,21 +90,37 @@ pub(crate) fn grapheme_safe_hard_cut(
 }
 
 /// The grapheme-boundary grid the chunk loop cuts on, fused with the one
-/// per-cluster fact the trim needs: whether each cluster is entirely
-/// Unicode whitespace. One forward pass (the same grapheme walk
+/// per-cluster fact the trim needs, precomputed to O(1): for each cut
+/// index `i` (a count of clusters), `last_non_ws_end[i]` is one past the
+/// index of the last cluster that is not entirely Unicode whitespace at
+/// or before `i`, 0 when every cluster up to `i` is whitespace. One
+/// forward pass (the same grapheme walk
 /// `truncate_impl::grapheme_boundary_chars` drives, each codepoint
 /// decoded exactly once for both the grid's char count and the
-/// whitespace test) returning the ascending cluster starts plus a
-/// parallel all-whitespace flag per cluster. This replaces the former
-/// whole-text `Vec<char>` (a separate full decode pass and 4 bytes per
-/// codepoint): the codepoint budget's `total` is the grid's own final
-/// accumulated count (its last entry, the same total the bounds walk's
-/// last segment end carries), and the trim only ever asks whether the
-/// clusters just before a cut are whitespace, a question the flags
-/// answer by grid index with no text re-read at all.
-fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
+/// whitespace test) returning the ascending cluster starts plus that
+/// running prefix. This replaces the former whole-text `Vec<char>` (a
+/// separate full decode pass and 4 bytes per codepoint): the codepoint
+/// budget's `total` is the grid's own final accumulated count (its last
+/// entry, the same total the bounds walk's last segment end carries),
+/// and the trim only ever asks where the whitespace run before a cut
+/// ends, a question the prefix answers by grid index with no walk-back
+/// at all.
+///
+/// The prefix (one `usize` per cluster) replaces the former per-cluster
+/// all-whitespace flag (one byte): the same O(n) build and O(n) memory
+/// class, buying the trim's O(1) per cut (the quadratic the flag
+/// spelling carried is documented on [`trimmed_end`]); the prefix
+/// prices that walk once, at build time, the same one-pass-then-lookup
+/// trade the grid itself already applies to the boundary ends.
+fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<usize>) {
     let mut starts = Vec::new();
-    let mut whitespace = Vec::new();
+    // The running prefix: `last_non_ws_end[i]` is one past the last
+    // non-whitespace cluster at or before cut index `i`, 0 when there is
+    // none (the whole prefix up to `i` is whitespace; the caller's
+    // empty-chunk case). Entry `k + 1` is derived from cluster `k`:
+    // a whitespace cluster inherits the previous entry, a
+    // non-whitespace one sets the entry to its own end index.
+    let mut last_non_ws_end = vec![0usize];
     let mut char_idx = 0usize;
     for cluster in text.graphemes(true) {
         starts.push(char_idx);
@@ -114,21 +130,22 @@ fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
             cp_len += 1;
             all_ws &= c.is_whitespace();
         }
-        whitespace.push(all_ws);
+        let prev = *last_non_ws_end.last().unwrap();
+        last_non_ws_end.push(if all_ws { prev } else { starts.len() });
         char_idx += cp_len;
     }
     starts.push(char_idx);
-    (starts, whitespace)
+    (starts, last_non_ws_end)
 }
 
 /// The end of the codepoint span `[grid[from_idx], grid[to_idx])` after
-/// `str::trim_end`'s rule, as a cluster-grid index (`grid` the
-/// `grapheme_boundary_whitespace` starts, `to_idx` a cut the caller
-/// already knows is a cluster boundary, `from_idx` the current chunk
-/// start's own index): the largest end at or before the cut such that no
-/// cluster from `from_idx` up to it is entirely whitespace, `from_idx`
-/// itself when the whole span is whitespace (the caller's empty-chunk
-/// case). Backs the cut off over trailing all-whitespace clusters.
+/// `str::trim_end`'s rule, as a cluster-grid index (`to_idx` a cut the
+/// caller already knows is a cluster boundary, `from_idx` the current
+/// chunk start's own index): the largest end at or before the cut such
+/// that no cluster from `from_idx` up to it is entirely whitespace,
+/// `from_idx` itself when the whole span is whitespace (the caller's
+/// empty-chunk case). Backs the cut off over trailing all-whitespace
+/// clusters.
 ///
 /// Backing off whole clusters lands exactly where `str::trim_end` stops,
 /// whether trim_end is spelled over the byte slice between the two
@@ -142,15 +159,25 @@ fn grapheme_boundary_whitespace(text: &str) -> (Vec<usize>, Vec<bool>) {
 /// stops) or is the LF of a CRLF pair (whose CR is whitespace too, an
 /// all-whitespace cluster trim_end removes whole). So trim_end's
 /// stopping point is always a cluster boundary with only all-whitespace
-/// clusters between it and the cut, which is precisely what this
-/// walk-back computes; the mixed battery's "a\r\nb. c\r d\ne" row pins
-/// the CRLF case.
-fn trimmed_end(cluster_whitespace: &[bool], from_idx: usize, to_idx: usize) -> usize {
-    let mut idx = to_idx;
-    while idx > from_idx && cluster_whitespace[idx - 1] {
-        idx -= 1;
-    }
-    idx
+/// clusters between it and the cut, which is precisely what this lookup
+/// computes; the mixed battery's "a\r\nb. c\r d\ne" row pins the CRLF
+/// case.
+///
+/// O(1) by prefix, not a walk: the former spelling decremented `idx`
+/// from `to_idx` while the cluster at `idx - 1` was all-whitespace,
+/// O(the run's length) per cut, quadratic over a whitespace-heavy text
+/// whose overlap windows advance a cluster at a time (every window
+/// re-walked the whole run behind it; see
+/// [`grapheme_boundary_whitespace`] for the prefix's build). The walk
+/// stops at the largest `idx <= to_idx` with a non-whitespace cluster at
+/// `idx - 1`, exactly `last_non_ws_end[to_idx]`, one past the last
+/// non-whitespace cluster at or before `to_idx`, clamped below by
+/// `from_idx`, the walk's own floor, reached when every cluster in the
+/// span is whitespace; `max` is that clamp. The equivalence with the
+/// walk-back is pinned directly in the tests (the prefix against the
+/// naive walk over every span of the exhaustive small-alphabet corpus).
+fn trimmed_end(last_non_ws_end: &[usize], from_idx: usize, to_idx: usize) -> usize {
+    from_idx.max(last_non_ws_end[to_idx])
 }
 
 /// Boundary-aware chunking of `text`: consecutive `(start, end)` pairs in
@@ -179,9 +206,9 @@ fn trimmed_end(cluster_whitespace: &[bool], from_idx: usize, to_idx: usize) -> u
 /// boundary (`grapheme_safe_hard_cut`) rather than a raw codepoint offset.
 /// Like `truncate_to_bounds`, this is computed once up front (the
 /// whole-text grapheme boundary grid, `grapheme_boundary_whitespace`, one
-/// O(n) pass fused with the trim's per-cluster whitespace flags) and
-/// reused as an O(log n) lookup per chunk: no per-chunk
-/// re-scan. The one place this can still exceed `max_chars`: a single
+/// O(n) pass fused with the trim's per-cluster whitespace prefix) and
+/// reused as an O(log n) boundary lookup plus an O(1) trim per chunk: no
+/// per-chunk re-scan. The one place this can still exceed `max_chars`: a single
 /// grapheme cluster wider than the whole remaining budget (e.g. an
 /// oversized ZWJ emoji chain), where a covering chunker cannot drop content
 /// that doesn't fit, so that one chunk is allowed past the budget rather
@@ -241,15 +268,15 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
     // for the fallback's own cluster-safety. The grid walk replaces the
     // former `Vec<char>` whole-text collect with its own accumulated
     // codepoint count (the grid's final entry) plus the trim's
-    // per-cluster whitespace flags.
-    let (grapheme_starts, cluster_whitespace) = grapheme_boundary_whitespace(text);
+    // per-cluster whitespace prefix (see `grapheme_boundary_whitespace`).
+    let (grapheme_starts, last_non_ws_end) = grapheme_boundary_whitespace(text);
     let total = *grapheme_starts.last().unwrap();
     let ends = cluster_safe_ends(&bounds, &grapheme_starts);
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
     let mut start = 0usize;
     // The grid index of `start` (every chunk start is a cluster boundary
     // by construction: 0, or a previous cut or trimmed end), so the
-    // trim's walk-back is pure index arithmetic over the flags.
+    // trim's end is pure index arithmetic over the prefix.
     let mut start_idx = 0usize;
     while start < total {
         let remaining = total - start;
@@ -282,7 +309,7 @@ pub fn chunk_text(text: &str, max_chars: usize, boundary: Boundary) -> Vec<(usiz
         // cluster-safety merge, or the hard cut's own snapped boundary),
         // so its grid index is a binary search away.
         let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
-        let trimmed_idx = trimmed_end(&cluster_whitespace, start_idx, cut_idx);
+        let trimmed_idx = trimmed_end(&last_non_ws_end, start_idx, cut_idx);
         if trimmed_idx > start_idx {
             let trimmed = grapheme_starts[trimmed_idx];
             chunks.push((start, trimmed));
@@ -382,7 +409,7 @@ pub fn chunk_text_overlapping(
     // function's comments. The overlap snap below reuses this same
     // cluster-safe `ends` list, so a snapped start is never mid-cluster
     // either.
-    let (grapheme_starts, cluster_whitespace) = grapheme_boundary_whitespace(text);
+    let (grapheme_starts, last_non_ws_end) = grapheme_boundary_whitespace(text);
     let total = *grapheme_starts.last().unwrap();
     let ends = cluster_safe_ends(&bounds, &grapheme_starts);
     let mut chunks = Vec::new();
@@ -395,7 +422,7 @@ pub fn chunk_text_overlapping(
         let chunk_end = cut_end(
             &ends,
             &grapheme_starts,
-            &cluster_whitespace,
+            &last_non_ws_end,
             total,
             max_chars,
             start,
@@ -421,7 +448,7 @@ pub fn chunk_text_overlapping(
         let snapped_end = cut_end(
             &ends,
             &grapheme_starts,
-            &cluster_whitespace,
+            &last_non_ws_end,
             total,
             max_chars,
             snapped,
@@ -450,7 +477,7 @@ pub fn chunk_text_overlapping(
 fn cut_end(
     ends: &[usize],
     grapheme_starts: &[usize],
-    cluster_whitespace: &[bool],
+    last_non_ws_end: &[usize],
     total: usize,
     max_chars: usize,
     start: usize,
@@ -467,7 +494,7 @@ fn cut_end(
         grapheme_safe_hard_cut(grapheme_starts, start, limit)
     };
     let cut_idx = grapheme_starts.partition_point(|&g| g < cut);
-    let trimmed_idx = trimmed_end(cluster_whitespace, start_idx, cut_idx);
+    let trimmed_idx = trimmed_end(last_non_ws_end, start_idx, cut_idx);
     if trimmed_idx > start_idx {
         grapheme_starts[trimmed_idx]
     } else {
@@ -799,6 +826,56 @@ mod tests {
             for max_chars in 1..=4 {
                 for boundary in [Boundary::Word, Boundary::Sentence] {
                     assert_contract(text, max_chars, boundary);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_trim_prefix_answers_the_naive_walk_back_over_every_span() {
+        // The O(1) trim against the walk-back it replaced, exhaustively:
+        // every (from_idx, to_idx) span of every row over the trim's
+        // corners (whitespace runs, CRLF pairs, the mixed NBSP + combining
+        // cluster that is NOT all-whitespace). The per-cluster flags the
+        // naive walk needs are recomputed from the text here, independently
+        // of the production pass, so agreement is evidence about the
+        // prefix, not a shared bug.
+        let rows = [
+            "",
+            "a",
+            " ",
+            "a a  ",
+            "aaaa    bbbb",
+            "a\r\nb. c\r d\ne",
+            " \u{00A0}\u{0301}a ",
+            "\u{1F469}\u{200D}\u{1F52C}  x",
+        ];
+        for text in rows {
+            let (starts, last_non_ws_end) = grapheme_boundary_whitespace(text);
+            let n = starts.len() - 1; // the cluster count
+            let chars: Vec<char> = text.chars().collect();
+            let ws: Vec<bool> = (0..n)
+                .map(|k| {
+                    chars[starts[k]..starts[k + 1]]
+                        .iter()
+                        .all(|&c| c.is_whitespace())
+                })
+                .collect();
+            let naive = |from_idx: usize, to_idx: usize| {
+                let mut idx = to_idx;
+                while idx > from_idx && ws[idx - 1] {
+                    idx -= 1;
+                }
+                idx
+            };
+            for from_idx in 0..=n {
+                for to_idx in from_idx..=n {
+                    assert_eq!(
+                        trimmed_end(&last_non_ws_end, from_idx, to_idx),
+                        naive(from_idx, to_idx),
+                        "trim prefix diverged from the walk-back for {text:?} \
+                         span [{from_idx}, {to_idx}]"
+                    );
                 }
             }
         }

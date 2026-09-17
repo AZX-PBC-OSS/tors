@@ -40,11 +40,14 @@ def finalize(text: str) -> tuple[str, str]: ...
 # GIL note: detached_transform's shape, the same as normalize.
 def strip_controls(text: str) -> str: ...
 
-# Replace contact material (email addresses, `+`-led phone numbers) and
+# Replace contact material (email addresses, phone numbers) and
 # credential material (the evidence-backed api-key families) inside
 # free text with correlation tokens: `@domain~<12 hex>` for an email,
-# `<first three code points>~<12 hex>` for a phone number (the E.164
-# dialling prefix: "+47" compact, "+1 " for a domestic spelling), and
+# `prefix~<12 hex>` for a phone number: a `+`-led match keeps its
+# dialling prefix, the first three code points ("+47" compact, "+1 "
+# for the international spelling of a NANP number); a domestic match
+# keeps the digest alone, no digits of the number (its head digits are
+# the area code), and
 # `<family prefix>~<12 hex>` for an API key (the prefix verbatim --
 # sk-, sk-ant-, github_pat_, AIza, Bearer -- the non-secret half that
 # tells the operator WHICH credential to rotate). The contact rules are
@@ -66,9 +69,13 @@ def strip_controls(text: str) -> str: ...
 # care pass their own salt, and a consumer migrating from an unsalted
 # scrubber passes salt="" to keep its token values byte-identical for
 # every rule). The phone rule's digit class is Unicode Nd (every
-# decimal digit script), and bare digit runs never match (the "+"
-# anchoring is deliberate: order numbers and byte counts must
-# survive). families=None scrubs every key family this version knows
+# decimal digit script). Two grammars feed it: the `+`-led
+# international one and the domestic NANP shapes (an un-plussed run of
+# exactly ten digits, or eleven with an ASCII leading `1`, carrying a
+# separator): the domestic match's token keeps no digits, the digest
+# alone. Bare digit runs never match (the `+` anchoring is deliberate:
+# order numbers and byte counts must survive). families=None scrubs every key
+# family this version knows
 # (the set grows on new families -- callers needing stability list
 # names explicitly); a list selects exactly those families (order
 # irrelevant, duplicates deduped); unknown names and [] are
@@ -567,7 +574,10 @@ def repair_json_diagnostics(
 # (still cluster-safe, so it can land short of max_chars when the budget
 # would otherwise split a cluster); the result never exceeds max_chars
 # codepoints either way. The cut point is then trimmed of trailing
-# whitespace. max_chars < 0 and an unrecognized boundary both raise
+# whitespace, whole whitespace clusters only: the trim never ends the
+# result mid-cluster (a Prepend plus a no-break space is one cluster, and
+# its non-whitespace half keeps it whole). max_chars < 0 and an
+# unrecognized boundary both raise
 # ValueError. tors.truncate_to_bounds(s, n) is s exactly when s already has
 # <= n codepoints.
 #
@@ -1321,6 +1331,10 @@ def uuid7_bytes() -> bytes: ...
 # would offend); the scan short-circuits at the first offender,
 # but the argument walk validates the whole sequence up front (a bad
 # entry anywhere raises at the boundary, past a first offender or not).
+# The walk is bounded (content_hash's protocol-walk cap, the same DoS
+# backstop): a sequence that yields past the ceiling aborts with a
+# generic ValueError instead of holding the GIL for an unbounded
+# __iter__.
 # Batch-only by design: per-item validation is under a detach round trip,
 # so per-item calls would be slower than the regexes this replaces; the
 # batch form — one detach, one pass — is the only shape that wins.

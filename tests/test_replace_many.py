@@ -64,6 +64,7 @@ pinned in tests/test_gil_release.py.
 from __future__ import annotations
 
 import itertools
+from time import monotonic
 
 import pytest
 from hypothesis import given, settings
@@ -702,3 +703,71 @@ class TestReplaceManyMasked:
         content/encoding, both already covered) never had one."""
         with pytest.raises(TypeError):
             replace_many_masked("abc", {"a": "b"}, mask=not_str)  # type: ignore[arg-type]
+
+
+def _min_wall_ms(n: int, *, samples: int = 3) -> float:
+    """Min-of-N wall milliseconds for the masked-splice bomb at size n
+    (one warmup call first: allocator and Aho-Corasick automaton), the
+    text and the replacement map built before the clock starts so only
+    the splice itself is timed. The minimum of several draws is the
+    uncontended cost, so a scheduling hiccup in one draw cannot fail the
+    ratio gate below; the same discipline the repo's other ratio cells
+    apply (tests/test_chunk_text_overlap_scaling.py's min-of-5,
+    tests/test_grounded_performance.py's min-of-5)."""
+    text = "a" * n
+    replacements = {"a": "x" * n}
+    replace_many_masked(text, replacements, "*")
+    best = float("inf")
+    for _ in range(samples):
+        started = monotonic()
+        replace_many_masked(text, replacements, "*")
+        best = min(best, monotonic() - started)
+    return best * 1e3
+
+
+class TestReplaceManyMaskedScaling:
+    """The masked splice's cost model: each value's character count is a
+    per-value fact (computed once per call), and the per-match work reads
+    only the matched span plus what the splice writes (the mask rule
+    truncates or pads to the span's count). A short key matched many
+    times over a huge value therefore costs the input's order, never
+    matches x value length: the output per match is span-sized, so no
+    per-match pass over the value is licensed."""
+
+    def test_a_huge_value_truncates_to_each_span_exactly(self) -> None:
+        """Correctness anchor at a size where per-match counting is
+        invisible in the wall time: the truncation takes the span's
+        character count of the huge value, byte-exact, and the masked
+        length invariant holds."""
+        value = "x" * 10_000
+        result = replace_many_masked("a.b.a", {"a": value}, "*")
+        assert result == "x.b.x"
+        assert len(result) == len("a.b.a")
+
+    @pytest.mark.timing
+    def test_a_short_key_with_a_huge_value_stays_linear_in_the_input(self) -> None:
+        """The ratio gate (never an absolute time): 4x the input must not
+        cost 8x the wall. The pathological shape is a one-char key over
+        an all-key text with an n-char value: n matches, each truncated
+        to one output character, so the whole call is O(n) with the
+        count hoisted; pre-fix the count ran per match
+        (``value.chars().count()`` inside the match loop), n matches x an
+        n-char value, so 4x the input is 16x the counting work: past the
+        gate on arithmetic alone (a quadratic in exactly the two factors
+        the shape varies). Measured green, min of 3 after warmup, three
+        consecutive cell runs on this box, three builds of the tree:
+        3.8-4.1 ms at 100k, 15.2-16.4 ms at 400k, ratio 3.96-4.04x,
+        flat; the 8x gate sits ~2x above the linear 4x and 2x inside the
+        quadratic 16x, the log-midpoint between the two cost models."""
+        # The in-cell verdict, the shape the timer runs: every match
+        # splices exactly one character, so the whole text comes back
+        # masked (the anchor above pins the same rule on mixed text).
+        assert replace_many_masked("a" * 100_000, {"a": "x" * 100_000}, "*") == "x" * 100_000
+        small = _min_wall_ms(100_000)
+        big = _min_wall_ms(400_000)
+        ratio = big / max(small, 1e-9)
+        assert ratio < 8, (
+            f"4x the input cost {ratio:.1f}x the wall ({big:.1f}ms vs "
+            f"{small:.1f}ms, min of 3 each): the masked splice is paying "
+            "per-match work that scales with the value length"
+        )

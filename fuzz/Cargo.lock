@@ -2525,6 +2525,7 @@ dependencies = [
  "const-hex",
  "encoding_rs",
  "fastcdc",
+ "flate2",
  "hmac",
  "html-to-markdown-rs",
  "jiff",
