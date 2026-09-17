@@ -144,6 +144,7 @@ async def chunk_hierarchical(
     separators: Sequence[str | None] | None = None,
     *,
     overlap: int = 0,
+    overlap_boundary: Literal["grapheme", "word"] = "grapheme",
 ) -> list[tuple[int, int]]: ...
 async def minhash_signature(
     text: str,

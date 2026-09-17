@@ -1025,7 +1025,13 @@ def chunk_by_lines_iter(
 # of a content-bearing chunk and an all-separator document chunks to zero
 # chunks. overlap snaps to the nearest grapheme boundary (not necessarily
 # a semantic one, a documented simplification of chunk_text_overlapping's
-# single-level snap). max_chars < 1 or overlap < 0
+# single-level snap); overlap_boundary="word" additionally snaps that
+# candidate back to the nearest UAX #29 word boundary (the word-bounds
+# level, realized lazily and shared with the windows; falls back to the
+# grapheme candidate when the word level has no boundary in the
+# snap-back range, and is a no-op at overlap=0); the decline-the-snap
+# lookahead runs after the word snap, unchanged. Unknown overlap_boundary
+# values raise ValueError. max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
 # returns []; an empty separators sequence is legal and skips straight to the
 # raw-cut fallback.
@@ -1035,6 +1041,7 @@ def chunk_hierarchical(
     separators: Sequence[str | None] | None = None,
     *,
     overlap: int = 0,
+    overlap_boundary: Literal["grapheme", "word"] = "grapheme",
 ) -> list[tuple[int, int]]: ...
 
 # GIL note: the whole tokenize (UAX #29 words) + FNV-1a hash + 64-bit vote

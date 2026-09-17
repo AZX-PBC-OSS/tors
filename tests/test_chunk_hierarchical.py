@@ -327,6 +327,134 @@ class TestOverlap:
 
 
 # ---------------------------------------------------------------------------
+# overlap_boundary (#47): the opt-in word-aware overlap snap. The default
+# "grapheme" is the function's whole historical behavior; "word" moves the
+# grapheme candidate further back to the nearest UAX #29 word boundary,
+# falling back to the grapheme candidate when the word level has no
+# boundary in the snap-back range (one long token, dense-script runs).
+# ---------------------------------------------------------------------------
+
+
+class TestOverlapBoundary:
+    def test_unknown_value_raises_value_error_naming_the_closed_set(self) -> None:
+        # The families= discipline: the closed set is named in the message
+        # and the validation is unconditional at the argument boundary
+        # (an irrelevant knob never errors late — even overlap=0, where
+        # the value can do nothing).
+        for value in ("phrase", "WORD", "Grapheme", "", "graphemes"):
+            with pytest.raises(ValueError, match=r"overlap_boundary.*grapheme.*word"):
+                chunk_hierarchical("hello world", 5, overlap=1, overlap_boundary=value)  # type: ignore[arg-type]
+
+    def test_word_with_overlap_zero_is_accepted_and_a_noop(self) -> None:
+        # No snap site ever runs at overlap=0, so the mode is inert: the
+        # output is the zero-overlap answer exactly.
+        text = "one two three four five six seven eight nine ten eleven twelve"
+        for max_chars in (5, 12, 20):
+            assert chunk_hierarchical(text, max_chars, overlap=0) == chunk_hierarchical(
+                text, max_chars, overlap=0, overlap_boundary="word"
+            )
+
+    def test_grapheme_is_the_default_and_unchanged(self) -> None:
+        # The explicit "grapheme" spelling is the same function it always
+        # was, and omitting the keyword agrees.
+        text = "one two three four five six seven eight nine ten eleven twelve"
+        for max_chars in (7, 12, 20):
+            for overlap in (0, 2, max_chars - 1):
+                assert chunk_hierarchical(text, max_chars, overlap=overlap) == (
+                    chunk_hierarchical(
+                        text, max_chars, overlap=overlap, overlap_boundary="grapheme"
+                    )
+                ), f"m={max_chars} ov={overlap}"
+
+    def test_word_mode_starts_the_overlap_tail_at_a_word_edge(self) -> None:
+        # The issue's motivating shape: the grapheme snap starts the tail
+        # mid-word ("uter Interaction"); word mode moves it back to the
+        # word's first codepoint ("Computer Interaction"). Pinned exact,
+        # both budgets.
+        text = (
+            "...Bachelor of Arts in Human-Computer Interaction, Lakeside "
+            "College, 2018\n\nCapstone project: designing a better chunker "
+            "for embedding pipelines and retrieval."
+        )
+        seps = ["\n## ", "\n# ", None]
+        assert chunk_hierarchical(text, 150, separators=seps, overlap=40) == [
+            (0, 73),
+            (33, 158),
+        ]
+        assert chunk_hierarchical(
+            text, 150, separators=seps, overlap=40, overlap_boundary="word"
+        ) == [(0, 73), (29, 158)]
+        assert chunk_hierarchical(text, 60, separators=seps, overlap=20) == [
+            (0, 3),
+            (3, 60),
+            (40, 73),
+            (75, 134),
+            (114, 158),
+        ]
+        assert chunk_hierarchical(
+            text, 60, separators=seps, overlap=20, overlap_boundary="word"
+        ) == [(0, 3), (3, 60), (38, 73), (75, 134), (112, 158)]
+
+    def test_word_mode_falls_back_where_no_word_boundary_exists(self) -> None:
+        # One long token (no internal UAX #29 boundary), dense CJK (word
+        # and grapheme boundaries coincide), and Thai without a dictionary
+        # (one run, no internal boundary): the grapheme candidate is kept,
+        # byte-for-byte the grapheme mode's output.
+        token = "a" * 60 + " b b b b"
+        cjk = "中文数据段落。中文数据段落。" * 5
+        thai = "กาลครั้งหนึ่งนานาพรบ์มาแล้ว " * 6
+        for text in (token, cjk, thai):
+            for max_chars in (13, 20):
+                for overlap in (2, 5, max_chars - 1):
+                    assert chunk_hierarchical(
+                        text, max_chars, overlap=overlap, overlap_boundary="word"
+                    ) == chunk_hierarchical(text, max_chars, overlap=overlap), (
+                        f"word mode invented a boundary: m={max_chars} ov={overlap} "
+                        f"text={text[:24]!r}"
+                    )
+
+    def test_word_mode_never_lands_mid_cluster(self) -> None:
+        # The word level's cuts are the same grapheme-filtered list the
+        # windows cut on, so a ZWJ emoji family (one 5-codepoint cluster)
+        # never gains an interior boundary under word mode.
+        emoji = "\U0001F468‍\U0001F469‍\U0001F467 \U0001F468‍\U0001F469‍\U0001F467 end"
+        for max_chars in range(2, 9):
+            for overlap in (0, 2, max_chars - 1):
+                if overlap >= max_chars:
+                    continue  # outside the validated envelope
+                chunks = chunk_hierarchical(
+                    emoji, max_chars, overlap=overlap, overlap_boundary="word"
+                )
+                for s, e in chunks:
+                    for p in (s, e):
+                        if p >= len(emoji):
+                            continue  # the end-of-text boundary
+                        assert emoji[p] != "‍" and not (
+                            0 < p < len(emoji) and emoji[p - 1] == "‍"
+                        ), f"boundary {p} lands inside a ZWJ family: {chunks}"
+
+    def test_word_mode_keeps_the_103_skip_invariants_beside_separators(self) -> None:
+        # The #103/#47 interaction: a word snap landing on or inside a
+        # separator run — the skip preempts the final exit exactly as in
+        # grapheme mode, ends strictly advance, and the separator never
+        # comes back as a chunk.
+        text = "alpha\n\nbeta\n\ngamma\n\ndelta"
+        for max_chars in (6, 9, 12):
+            for overlap in range(1, max_chars):
+                chunks = chunk_hierarchical(
+                    text, max_chars, separators=["\n\n"], overlap=overlap,
+                    overlap_boundary="word",
+                )
+                for start, end in chunks:
+                    assert text[start:end] != "\n\n", (
+                        f"separator as chunk: m={max_chars} ov={overlap}: {chunks}"
+                    )
+                for (p_s, p_e), (n_s, n_e) in zip(chunks, chunks[1:], strict=False):
+                    assert n_e > p_e, f"ends not advancing: m={max_chars} ov={overlap}"
+                    assert n_s > p_s, f"starts not increasing: m={max_chars} ov={overlap}"
+
+
+# ---------------------------------------------------------------------------
 # Grapheme-cluster safety, the class of bug already fixed elsewhere in this
 # crate (Thai SARA AM combining with the preceding base character into one
 # cluster that UAX #29 word/sentence boundaries can still split).

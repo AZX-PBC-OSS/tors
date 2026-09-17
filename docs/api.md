@@ -2816,7 +2816,12 @@ list(tors.chunk_by_lines_iter(log, 2))
 
 ```python
 def chunk_hierarchical(
-    text: str, max_chars: int, separators: Sequence[str | None] | None = None, *, overlap: int = 0
+    text: str,
+    max_chars: int,
+    separators: Sequence[str | None] | None = None,
+    *,
+    overlap: int = 0,
+    overlap_boundary: Literal["grapheme", "word"] = "grapheme",
 ) -> list[tuple[int, int]]: ...
 ```
 
@@ -2915,6 +2920,29 @@ re-cut would land the next chunk strictly inside its predecessor (the same
 text twice, no new context): the transition falls back to the zero-overlap
 cut instead, so ends always strictly advance.
 
+`overlap_boundary="word"` opts the snap into word-aware tails (#47) for
+exactly the embedding-pipeline shape a mid-word tail start is a rough
+edge for. The composition order is: grapheme snap, then word snap, then
+the decline-the-snap lookahead. The grapheme candidate lands first (never
+mid-cluster), then the snap moves further back to the nearest UAX #29
+word boundary at or before it — the same word-bounds level the default
+hierarchy already builds: realized lazily at the first snap that consults
+it, shared with any window that descends to it (never a second walk), and
+for a hierarchy with no word level at all (an all-literal custom list)
+the same one-off word-bounds level is built at the first snap instead. A
+mid-word tail therefore starts at its word's first codepoint; when the
+word level has no boundary in the snap-back range (dense CJK runs, Thai
+without a dictionary, one long token) the plain grapheme candidate is
+kept, and at `overlap=0` the mode is accepted and is a no-op (no snap
+site ever runs). The word-snapped candidate then goes through the
+decline-the-snap lookahead unchanged — it may reach back to or past the
+previous chunk's start, in which case the transition degrades to zero
+overlap exactly as a grapheme candidate reaching that far would: no chunk
+is ever contained in (or duplicated across) its predecessor. Unknown
+values raise `ValueError` naming the closed set `('grapheme', 'word')`,
+unconditionally at the argument boundary (an irrelevant knob never errors
+late).
+
 `max_chars < 1` or `overlap < 0` raise `ValueError`; `overlap >= max_chars`
 raises `ValueError`. Empty `text` returns `[]`. An empty `separators` sequence
 is legal and skips straight to the raw-cut fallback for every chunk. Every
@@ -2934,8 +2962,10 @@ cheap necessary-condition pre-test over the unrealized level specs keeps
 that answer free whenever no separator could possibly open there (a text
 that does not begin with one of the literal separators, under the default
 hierarchy always: a paragraph-gap cut cannot begin at codepoint 0), so the
-whole-document cells below keep their zero-build exit. The one other
-whole-text structure is the grapheme
+whole-document cells below keep their zero-build exit; a text that DOES
+open with a separator match pays the hierarchy's first search there (the
+skip question needs the level), once, memoized. The one other whole-text
+structure is the grapheme
 boundary index, a one-bit-per-codepoint bitmap built lazily, only when a
 realized level has cuts to filter, a window needs the raw-cut fallback, or
 `overlap` snaps; on pure-ASCII text the index is two SIMD byte scans instead

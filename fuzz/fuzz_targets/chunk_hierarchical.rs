@@ -397,6 +397,7 @@ fuzz_target!(|input: Input| {
             budget,
             separators,
             overlap,
+            tors::chunk_hierarchical_impl::OverlapBoundary::Grapheme,
         );
         assert_basic_contract(&chunks, total, "chunk_hierarchical", overlap);
         assert_cluster_safe(&chunks, &input.text, budget, "chunk_hierarchical");

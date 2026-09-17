@@ -132,6 +132,7 @@ def _ref_chunk_hierarchical(
     max_chars: int,
     separators: list[str | None] | None = None,
     overlap: int = 0,
+    overlap_boundary: str = "grapheme",
 ) -> list[tuple[int, int]]:
     if text == "":
         return []
@@ -163,6 +164,14 @@ def _ref_chunk_hierarchical(
     # for separator-dropping levels (next strictly past the end; a
     # contiguous level's cuts have next == end and never skip).
     skips = [{e: nx for e, nx in cut_list if nx > e} for cut_list in levels]
+    # #47's word-boundary end array for the "word" snap mode: the word
+    # level's own filtered cut ends, whichever hierarchy slot carried
+    # them (the boundary set is the same UAX #29 word-bounds list either
+    # way). Empty (never a boundary to snap to) when the mode is off.
+    word_ends: list[int] = []
+    if overlap_boundary == "word":
+        word_level = _contig_level_cuts(tors.word_bounds(text))
+        word_ends = [e for e, nx in word_level if gb[e] and gb[nx]]
 
     def last_at_or_before(x: int) -> int:
         for i in range(min(x, total), -1, -1):
@@ -230,6 +239,16 @@ def _ref_chunk_hierarchical(
         else:
             target = max(cut[0] - overlap, 0)
             snapped = last_at_or_before(target)
+            # #47's word snap, second in the composition order: the
+            # grapheme candidate lands first, then the largest word-level
+            # cut end at or before it (or the grapheme candidate back
+            # when the word level has no boundary there); the
+            # decline-the-snap lookahead below runs on the word-snapped
+            # candidate unchanged.
+            if word_ends:
+                wi = bisect_right(word_ends, snapped) - 1
+                if wi >= 0:
+                    snapped = word_ends[wi]
             # Decline-the-snap with lookahead (#83), mirroring production:
             # the candidate is taken only when the chunk cut from it ends
             # strictly past this chunk's end; otherwise the transition
@@ -356,7 +375,13 @@ class TestAsciiDifferential:
         # cut, or the overlap snap fails with the full case in the
         # message. Budgets cover 1..~80 plus the whole-document budget
         # (the single-window path); overlaps cover 0, 1, 2, and max-1
-        # (the largest legal snap-back).
+        # (the largest legal snap-back). The sweep runs both
+        # overlap_boundary modes (#47): the reference's word model is the
+        # same UAX #29 word-bounds list production reads through the
+        # hierarchy's word slot (or its one-off fallback for hierarchies
+        # with no word level), so the word-mode cells pin the snap, the
+        # decline-after-word-snap composition order, and the #103
+        # final-exit skip against it exactly as the grapheme cells do.
         rng = random.Random(SEED)
         for _ in range(_RANDOM_CASES):
             text = rng.choice(_SHAPES)(rng)
@@ -368,13 +393,21 @@ class TestAsciiDifferential:
                 [o for o in (0, 1, 2, max_chars - 1) if 0 <= o < max_chars]
             )
             separators = rng.choice(_SEPARATOR_POOL)
+            overlap_boundary = rng.choice(["grapheme", "word"])
             chunks = tors.chunk_hierarchical(
-                text, max_chars, separators=separators, overlap=overlap
+                text,
+                max_chars,
+                separators=separators,
+                overlap=overlap,
+                overlap_boundary=overlap_boundary,
             )
-            want = _ref_chunk_hierarchical(text, max_chars, separators, overlap)
+            want = _ref_chunk_hierarchical(
+                text, max_chars, separators, overlap, overlap_boundary
+            )
             assert chunks == want, (
                 f"chunk_hierarchical diverged from the reference: text={text!r} "
-                f"max_chars={max_chars} overlap={overlap} separators={separators!r}\n"
+                f"max_chars={max_chars} overlap={overlap} "
+                f"overlap_boundary={overlap_boundary!r} separators={separators!r}\n"
                 f"  got : {chunks}\n  want: {want}"
             )
 
@@ -395,14 +428,22 @@ class TestAsciiDifferential:
         for text in texts:
             for max_chars in range(1, 13):
                 for separators in (None, ["\r\n"], ["\n", None]):
-                    chunks = tors.chunk_hierarchical(
-                        text, max_chars, separators=separators
-                    )
-                    want = _ref_chunk_hierarchical(text, max_chars, separators, 0)
-                    assert chunks == want, (
-                        f"divergence: text={text!r} max_chars={max_chars} "
-                        f"separators={separators!r}: {chunks} != {want}"
-                    )
+                    for overlap_boundary in ("grapheme", "word"):
+                        chunks = tors.chunk_hierarchical(
+                            text,
+                            max_chars,
+                            separators=separators,
+                            overlap_boundary=overlap_boundary,
+                        )
+                        want = _ref_chunk_hierarchical(
+                            text, max_chars, separators, 0, overlap_boundary
+                        )
+                        assert chunks == want, (
+                            f"divergence: text={text!r} max_chars={max_chars} "
+                            f"separators={separators!r} "
+                            f"overlap_boundary={overlap_boundary!r}: "
+                            f"{chunks} != {want}"
+                        )
 
 
 # ---------------------------------------------------------------------------

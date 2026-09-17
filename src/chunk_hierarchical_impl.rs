@@ -498,6 +498,89 @@ fn separator_may_open(slots: &[LevelSlot<'_>], text: &str, at: usize) -> bool {
     })
 }
 
+/// #47's word snap: the largest word-bounds cut at or before `snapped`
+/// (the grapheme candidate), or `snapped` itself when the word-bounds
+/// level has no boundary there (a dense-script run or one long token
+/// with no internal boundary — the documented fallback to the plain
+/// grapheme snap). The word-bounds level is the hierarchy's own when one
+/// exists (the default hierarchy's Word slot, or a `None` splice's
+/// copy): realized at the first snap that consults it, memoized, and
+/// SHARED with any window that descends to it — the word level is never
+/// built twice and never built for a call whose snaps (and windows) never
+/// reach it, the #30 laziness discipline. A hierarchy with no word level
+/// at all (an all-literal custom list) builds the one-off
+/// [`word_fallback`] level at the first snap instead, exactly the build a
+/// Word slot's realization produces (the UAX #29 word walk, the cuts
+/// filtered to grapheme-cluster boundaries — the snap target must never
+/// land mid-cluster, the same invariant the windows' cut filter
+/// enforces).
+///
+/// The boundary set is the word SEGMENTS' ends (a contiguous partition:
+/// the largest end at or before `snapped` is `snapped`'s own position
+/// when it already sits on a word boundary, and otherwise the start of
+/// the segment containing it — mid-word targets snap to their word's
+/// first codepoint; mid-space-run targets snap to the run's start, a
+/// UAX #29 word boundary like any other segment edge). The candidate
+/// returned here is NOT the final start: the caller's decline-the-snap
+/// lookahead (#83) runs on it unchanged, so a candidate reaching back to
+/// or past the previous chunk's start, or one whose own chunk would not
+/// advance past the just-emitted end, is declined exactly as a grapheme
+/// candidate would be.
+fn word_snap_back(
+    levels: &mut [LevelSlot<'_>],
+    word_fallback: &mut Option<Level>,
+    text: &str,
+    total: usize,
+    graphemes: &mut Option<GraphemeIndex>,
+    snapped: usize,
+) -> usize {
+    // At most one Word slot exists per call (the splice is once-per-call
+    // and deduped; the default hierarchy has exactly one), so the first
+    // match is the only one.
+    let word_slot = levels
+        .iter_mut()
+        .find(|slot| matches!(slot.spec, LevelSpec::Word));
+    let level = match word_slot {
+        Some(slot) => slot.realize(text, total, graphemes),
+        None => word_fallback.get_or_insert_with(|| {
+            let mut level = level_from_contiguous_bounds(segmentation_impl::word_bounds(text));
+            if !level.cuts.is_empty() {
+                let g = grapheme_index(graphemes, text, total);
+                level
+                    .cuts
+                    .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+            }
+            #[cfg(test)]
+            build_seam::bump_levels();
+            level
+        }),
+    };
+    let hi = level.cuts.partition_point(|&(end, _)| end <= snapped);
+    if hi > 0 {
+        level.cuts[hi - 1].0
+    } else {
+        snapped
+    }
+}
+
+/// Where the overlap snap may land the next chunk's start (#47). The
+/// default is the historical behavior, so every existing caller is
+/// unaffected; `Word` is the opt-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlapBoundary {
+    /// Snap backward to the nearest grapheme-cluster boundary (never
+    /// mid-cluster, possibly mid-word): the historical default.
+    Grapheme,
+    /// Snap backward to the nearest grapheme-cluster boundary first, then
+    /// further backward to the nearest UAX #29 word boundary at or before
+    /// that candidate: the overlap tail starts at a word edge when one
+    /// exists in the snap-back range. Falls back to the plain grapheme
+    /// candidate when the word-bounds level has no boundary there (a
+    /// dense-script run or one long token with no internal boundary), and
+    /// is a no-op at `overlap == 0` (no snap site ever runs).
+    Word,
+}
+
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
 /// pairs, each chunk at most `max_chars` codepoints, cut at the coarsest
 /// level (first in `levels`, excluding the always-appended grapheme-safe
@@ -530,7 +613,11 @@ fn separator_may_open(slots: &[LevelSlot<'_>], text: &str, at: usize) -> bool {
 /// necessarily a semantic word/sentence/paragraph boundary the way
 /// `chunk_text_overlapping`'s single-hierarchy overlap snap is; a
 /// documented simplification of the general multi-level case, not a
-/// silent gap. The snap is declined — zero overlap for just that one
+/// silent gap. `overlap_boundary` opts into the word-aware snap ([`OverlapBoundary::Word`]:
+/// the composition order is grapheme snap, then word snap, then the
+/// decline-the-snap lookahead — the lookahead's candidate semantics carry
+/// over unchanged, see the snap site below). The snap is declined — zero
+/// overlap for just that one
 /// transition, the next chunk starting at `cut.1` — when it would not buy
 /// new context: a target at or before the chunk's own start (a short
 /// trailing chunk, or a run of tight hard-cuts), or a snapped start whose
@@ -544,6 +631,7 @@ pub fn chunk_hierarchical(
     max_chars: usize,
     separators: Option<&[Option<&str>]>,
     overlap: usize,
+    overlap_boundary: OverlapBoundary,
 ) -> Vec<(usize, usize)> {
     if text.is_empty() {
         return Vec::new();
@@ -590,6 +678,15 @@ pub fn chunk_hierarchical(
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
     let mut start = 0usize;
     let mut iterations = 0usize;
+    // #47's word-bounds fallback for hierarchies with no word level at
+    // all (an all-literal custom list): built by the first word snap that
+    // needs it, at most once per call, exactly the build a Word slot's
+    // own realization produces (the same walk, the same grapheme cut
+    // filter). The hierarchy's own Word slot — the default hierarchy's,
+    // or a `None` splice's copy — is preferred at the snap site, so the
+    // snap shares the windows' memoized build instead of paying a second
+    // walk; this fallback exists only when no slot carries word bounds.
+    let mut word_fallback: Option<Level> = None;
     while start < total {
         iterations += 1;
         assert!(
@@ -695,6 +792,31 @@ pub fn chunk_hierarchical(
             let target = cut.0.saturating_sub(overlap);
             let g = grapheme_index(&mut graphemes, text, total);
             let snapped = g.last_at_or_before(target);
+            // #47's word snap, second in the composition order: the
+            // grapheme candidate above lands first (never mid-cluster),
+            // then the word snap moves it further back to the nearest
+            // word-bounds cut at or before it, and the decline-the-snap
+            // lookahead BELOW runs on the word-snapped candidate
+            // unchanged — the lookahead's candidate semantics carry over
+            // whole (it never sees the pre-word candidate). The word snap
+            // may land at or before this chunk's own start; that is not
+            // clamped away, it is declined by the lookahead's own
+            // `snapped > start` conjunct (zero overlap for the
+            // transition), the documented degradation for a candidate
+            // that buys no new context — the same rule that declines a
+            // grapheme candidate reaching back past the chunk start.
+            let snapped = if overlap_boundary == OverlapBoundary::Word {
+                word_snap_back(
+                    &mut levels,
+                    &mut word_fallback,
+                    text,
+                    total,
+                    &mut graphemes,
+                    snapped,
+                )
+            } else {
+                snapped
+            };
             // Decline-the-snap with lookahead (#83): accept the candidate
             // only when it starts past this chunk's own start, ends before
             // this chunk's end, and the chunk cut from there ends strictly
@@ -806,7 +928,13 @@ mod tests {
         separators: Option<&[Option<&str>]>,
         overlap: usize,
     ) -> Vec<(usize, usize)> {
-        super::chunk_hierarchical(text, max_chars, separators, overlap)
+        super::chunk_hierarchical(
+            text,
+            max_chars,
+            separators,
+            overlap,
+            OverlapBoundary::Grapheme,
+        )
     }
 
     fn text_of(chunks: &[(usize, usize)], text: &str) -> Vec<String> {
@@ -837,12 +965,18 @@ mod tests {
     /// opens on a separator match is skipped even at the whole-remainder
     /// exit, on both sides (the oracle runs the bare search there; the
     /// production loop's spec pre-test is an output-invisible laziness
-    /// guard, and the sweeps below hold the two spellings equal).
+    /// guard, and the sweeps below hold the two spellings equal). #47's
+    /// word snap is mirrored too: the oracle builds its word-bounds level
+    /// up front (eager) — the boundary set is the same list the
+    /// production snap reads through the hierarchy's Word slot or its
+    /// one-off fallback (the same UAX #29 walk, the same grapheme cut
+    /// filter), so the two need not track which slot carried it.
     fn chunk_hierarchical_reference(
         text: &str,
         max_chars: usize,
         separators: Option<&[Option<&str>]>,
         overlap: usize,
+        overlap_boundary: OverlapBoundary,
     ) -> Vec<(usize, usize)> {
         if text.is_empty() {
             return Vec::new();
@@ -891,6 +1025,19 @@ mod tests {
                 .cuts
                 .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
         }
+        // #47's word-bounds level for the "word" snap mode: built up front
+        // (eager, the oracle's idiom) with the same cut filter every level
+        // gets. Only built when the mode can consult it.
+        let word_level = if overlap_boundary == OverlapBoundary::Word {
+            let mut level = level_from_contiguous_bounds(segmentation_impl::word_bounds(text));
+            level
+                .cuts
+                .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+            Some(level)
+        } else {
+            None
+        };
+
         let mut chunks = Vec::with_capacity(total / max_chars + 1);
         let mut start = 0usize;
         let mut iterations = 0usize;
@@ -952,6 +1099,20 @@ mod tests {
                 let target = cut.0.saturating_sub(overlap);
                 let ghi = grapheme_starts.partition_point(|&g| g <= target);
                 let snapped = if ghi > 0 { grapheme_starts[ghi - 1] } else { 0 };
+                // #47's word snap, second in the composition order,
+                // mirrored from the production snap: the grapheme
+                // candidate lands first, then the largest word-bounds cut
+                // at or before it (or the grapheme candidate back when
+                // the word level has no boundary there), and the
+                // decline-the-snap lookahead below runs on the
+                // word-snapped candidate unchanged.
+                let snapped = match &word_level {
+                    Some(word) => {
+                        let hi = word.cuts.partition_point(|&(end, _)| end <= snapped);
+                        if hi > 0 { word.cuts[hi - 1].0 } else { snapped }
+                    }
+                    None => snapped,
+                };
                 // The production snap's decline-the-snap lookahead (#83),
                 // spelled against this oracle's own eager levels: kept in
                 // verbatim lockstep with chunk_hierarchical's, or the
@@ -1055,23 +1216,32 @@ mod tests {
                 {
                     for seps in &separator_cases {
                         let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
-                        let new = super::chunk_hierarchical(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        let old = chunk_hierarchical_reference(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        assert_eq!(
-                            new, old,
-                            "divergence: text={text:?} max_chars={max_chars} \
-                             overlap={overlap} separators={seps:?}"
-                        );
+                        // Both overlap-boundary modes: the word snap is a
+                        // pure grapheme-candidate refinement, so the sweep
+                        // pins the word machinery against the oracle's own
+                        // word level on every cell the grapheme sweep
+                        // already ran (#47).
+                        for boundary in [OverlapBoundary::Grapheme, OverlapBoundary::Word] {
+                            let new = super::chunk_hierarchical(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            let old = chunk_hierarchical_reference(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            assert_eq!(
+                                new, old,
+                                "divergence: text={text:?} max_chars={max_chars} overlap={overlap} \
+                                 boundary={boundary:?} separators={seps:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -1106,33 +1276,39 @@ mod tests {
                 for overlap in 0..max_chars {
                     for seps in &separator_cases {
                         let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
-                        let new = super::chunk_hierarchical(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        let old = chunk_hierarchical_reference(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        assert_eq!(
-                            new, old,
-                            "lookahead/production divergence: text={text:?} \
-                             max_chars={max_chars} overlap={overlap} separators={seps:?}"
-                        );
-                        if overlap > 0 {
-                            let mut prev_end = 0usize;
-                            for &(s, e) in &new {
-                                assert!(
-                                    e > prev_end,
-                                    "ends not strictly advancing under overlap={overlap}: \
-                                     text={text:?} max_chars={max_chars} separators={seps:?}"
-                                );
-                                let _ = s;
-                                prev_end = e;
+                        for boundary in [OverlapBoundary::Grapheme, OverlapBoundary::Word] {
+                            let new = super::chunk_hierarchical(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            let old = chunk_hierarchical_reference(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            assert_eq!(
+                                new, old,
+                                "lookahead/production divergence: text={text:?} \
+                                 max_chars={max_chars} overlap={overlap} boundary={boundary:?} \
+                                 separators={seps:?}"
+                            );
+                            if overlap > 0 {
+                                let mut prev_end = 0usize;
+                                for &(s, e) in &new {
+                                    assert!(
+                                        e > prev_end,
+                                        "ends not strictly advancing under overlap={overlap}: \
+                                         text={text:?} max_chars={max_chars} boundary={boundary:?} \
+                                         separators={seps:?}"
+                                    );
+                                    let _ = s;
+                                    prev_end = e;
+                                }
                             }
                         }
                     }
@@ -1199,12 +1375,24 @@ mod tests {
         // survives only as a suffix of a content-bearing chunk; an
         // all-separator document chunks to zero chunks.
         assert_eq!(
-            super::chunk_hierarchical("\n\n", 5, Some(&[Some("\n\n")]), 0),
+            super::chunk_hierarchical(
+                "\n\n",
+                5,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
             Vec::<(usize, usize)>::new(),
             "an all-separator document must chunk to zero chunks"
         );
         assert_eq!(
-            super::chunk_hierarchical("aa\n\n\n\n", 2, Some(&[Some("\n\n")]), 0),
+            super::chunk_hierarchical(
+                "aa\n\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
             vec![(0, 2)],
             "the trailing (4, 6) window opens on a match and must be skipped"
         );
@@ -1213,14 +1401,26 @@ mod tests {
         // counter stays an honest bound and the run ends in zero chunks,
         // not one chunk per match.
         assert_eq!(
-            super::chunk_hierarchical("\n\n\n\n\n\n\n\n", 2, Some(&[Some("\n\n")]), 0),
+            super::chunk_hierarchical(
+                "\n\n\n\n\n\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
             Vec::<(usize, usize)>::new()
         );
         // The run survives only as a suffix of content: the chunk before
         // it ends inside content... and the chunk AFTER the skips, when
         // content follows the run, is that content alone.
         assert_eq!(
-            super::chunk_hierarchical("aa\n\n\n\nbb", 2, Some(&[Some("\n\n")]), 0),
+            super::chunk_hierarchical(
+                "aa\n\n\n\nbb",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
             vec![(0, 2), (6, 8)]
         );
         // The one-residue case, pinned as documented behavior: a trailing
@@ -1230,7 +1430,13 @@ mod tests {
         // answers "a match begins at `start`"), and the residue is the
         // same lone-character ride-along any too-short remainder gets.
         assert_eq!(
-            super::chunk_hierarchical("aa\n\n\n", 2, Some(&[Some("\n\n")]), 0),
+            super::chunk_hierarchical(
+                "aa\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
             vec![(0, 2), (4, 5)]
         );
     }
@@ -1264,7 +1470,13 @@ mod tests {
         ];
         for (text, seps, max_chars) in cases {
             for overlap in [0usize, 1, max_chars.saturating_sub(1)] {
-                let chunks = super::chunk_hierarchical(text, max_chars, Some(seps), overlap);
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(seps),
+                    overlap,
+                    OverlapBoundary::Grapheme,
+                );
                 for sep in seps.iter().flatten() {
                     for &(s, e) in &chunks {
                         assert!(
@@ -1306,8 +1518,13 @@ mod tests {
         let text = "abcdefgh\n\nijklmnop\n\nqrstuvwx\n\nyz012345";
         for max_chars in 4..=16 {
             for overlap in 1..max_chars {
-                let chunks =
-                    super::chunk_hierarchical(text, max_chars, Some(&[Some("\n\n")]), overlap);
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(&[Some("\n\n")]),
+                    overlap,
+                    OverlapBoundary::Grapheme,
+                );
                 for &(s, e) in &chunks {
                     assert!(
                         &text[s..e] != "\n\n",
@@ -1331,11 +1548,11 @@ mod tests {
         // paragraph's start, never a second match), and must not start:
         // the whole-remainder exit is unchanged for it, gap runs included.
         assert_eq!(
-            super::chunk_hierarchical("ab\n\n\ncd", 2, None, 0),
+            super::chunk_hierarchical("ab\n\n\ncd", 2, None, 0, OverlapBoundary::Grapheme),
             vec![(0, 2), (5, 7)]
         );
         assert_eq!(
-            super::chunk_hierarchical("ab\n\n\ncd", 2, Some(&[None]), 0),
+            super::chunk_hierarchical("ab\n\n\ncd", 2, Some(&[None]), 0, OverlapBoundary::Grapheme),
             vec![(0, 2), (5, 7)]
         );
         // A paragraph gap CAN open a window — via an overlap snap into
@@ -1343,7 +1560,8 @@ mod tests {
         // next_start strictly past it): the final exit after such a snap
         // starts at the next paragraph, not inside the gap.
         let text = "ab\n\ncd";
-        let snapped_into_gap = super::chunk_hierarchical(text, 6, None, 1);
+        let snapped_into_gap =
+            super::chunk_hierarchical(text, 6, None, 1, OverlapBoundary::Grapheme);
         for &(s, e) in &snapped_into_gap {
             assert_ne!(
                 &text[s..e],
@@ -1351,6 +1569,292 @@ mod tests {
                 "a paragraph gap came back as its own chunk: {snapped_into_gap:?}"
             );
         }
+    }
+
+    // ---- #47: the word-aware overlap snap ----
+
+    #[test]
+    fn word_mode_snaps_the_overlap_tail_to_a_word_boundary() {
+        // The issue's own motivating shape: the grapheme snap starts the
+        // tail mid-word ("uter Interaction"); the word snap moves the
+        // candidate back to the word's first codepoint ("Computer ...").
+        let text = "...Bachelor of Arts in Human-Computer Interaction, Lakeside \
+                    College, 2018\n\nCapstone project: designing a better chunker \
+                    for embedding pipelines and retrieval.";
+        let seps: &[Option<&str>] = &[Some("\n## "), Some("\n# "), None];
+        assert_eq!(
+            super::chunk_hierarchical(text, 150, Some(seps), 40, OverlapBoundary::Grapheme),
+            vec![(0, 73), (33, 158)]
+        );
+        assert_eq!(
+            super::chunk_hierarchical(text, 150, Some(seps), 40, OverlapBoundary::Word),
+            vec![(0, 73), (29, 158)],
+            "the word snap must move the tail start from mid-word to the word edge"
+        );
+        // A smaller budget: both tails word-aligned where the grapheme
+        // ones were mid-word ("teraction", "unker").
+        assert_eq!(
+            super::chunk_hierarchical(text, 60, Some(seps), 20, OverlapBoundary::Grapheme),
+            vec![(0, 3), (3, 60), (40, 73), (75, 134), (114, 158)]
+        );
+        assert_eq!(
+            super::chunk_hierarchical(text, 60, Some(seps), 20, OverlapBoundary::Word),
+            vec![(0, 3), (3, 60), (38, 73), (75, 134), (112, 158)]
+        );
+    }
+
+    #[test]
+    fn word_mode_with_no_word_boundary_in_range_falls_back_to_the_grapheme_snap() {
+        // One long token: the word level is the single segment (0, 100)
+        // (its only cut at the text end, past every snap target), so no
+        // boundary exists in the snap-back range — the plain grapheme
+        // candidate is kept, byte-for-byte the grapheme mode's output.
+        let text = format!("{}{}", "a".repeat(60), " b b b b");
+        for max_chars in [10usize, 20, 37] {
+            for overlap in [1usize, 6, max_chars - 1] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "the word snap invented a boundary inside one long token: \
+                     m={max_chars} ov={overlap}"
+                );
+            }
+        }
+        // Dense CJK (every Han character its own UAX #29 word) and Thai
+        // (no dictionary: one run, no internal boundary) both agree with
+        // grapheme mode — the first because word and grapheme boundaries
+        // coincide, the second through the documented fallback.
+        let cjk = "中文数据段落。中文数据段落。".repeat(5);
+        for max_chars in [7usize, 11, 30] {
+            for overlap in [1usize, 2, max_chars - 1] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &cjk,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &cjk,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "CJK word mode diverged from grapheme mode: m={max_chars} ov={overlap}"
+                );
+            }
+        }
+        let thai = "กาลครั้งหนึ่งนานาพรบ์มาแล้ว ".repeat(6);
+        for max_chars in [13usize, 20] {
+            for overlap in [3usize, 5] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &thai,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &thai,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "Thai word mode diverged from grapheme mode: m={max_chars} ov={overlap}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_mode_never_snaps_before_the_previous_chunk_or_contained_in_it() {
+        // Constraint (a): the word snap may push the candidate back past
+        // the just-emitted chunk's own start; the decline-the-snap
+        // lookahead (#83) runs AFTER the word snap (the composition
+        // order) and declines exactly that — the transition degrades to
+        // zero overlap, no chunk is emitted from a candidate at or before
+        // its predecessor's start, and no chunk is ever strictly contained
+        // in (or identical to) its predecessor. Swept over every overlap
+        // of two budgets on word-run text.
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+        for max_chars in [8usize, 9, 10, 12] {
+            for overlap in 1..max_chars {
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    None,
+                    overlap,
+                    OverlapBoundary::Word,
+                );
+                for w in chunks.windows(2) {
+                    let (prev_start, prev_end) = (w[0].0, w[0].1);
+                    let (next_start, next_end) = (w[1].0, w[1].1);
+                    assert!(
+                        next_start > prev_start,
+                        "starts not strictly increasing: m={max_chars} ov={overlap}: {chunks:?}"
+                    );
+                    assert!(
+                        next_end > prev_end,
+                        "ends not strictly advancing: m={max_chars} ov={overlap}: {chunks:?}"
+                    );
+                    assert!(
+                        !(next_start >= prev_start && next_end <= prev_end),
+                        "a chunk contained in its predecessor: m={max_chars} \
+                         ov={overlap}: {chunks:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn word_mode_is_a_noop_at_overlap_zero_and_inert_at_the_default() {
+        // Constraint (b): "word" with overlap=0 is accepted and does
+        // nothing (no snap site ever runs, so the output is the
+        // zero-overlap answer); the grapheme default is the same function
+        // it always was.
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        for max_chars in [5usize, 12, 20] {
+            let zero =
+                super::chunk_hierarchical(text, max_chars, None, 0, OverlapBoundary::Grapheme);
+            assert_eq!(
+                super::chunk_hierarchical(text, max_chars, None, 0, OverlapBoundary::Word),
+                zero,
+                "word mode changed a zero-overlap answer: m={max_chars}"
+            );
+        }
+        // And the default-hierarchy word-mode output at overlap > 0 moves
+        // at least one tail on word-run text (the cheap drift canary; the
+        // exact values are pinned in word_mode_snaps_the_overlap_tail…):
+        // the sweep pins the full semantics against the oracle.
+        assert_ne!(
+            super::chunk_hierarchical(text, 9, None, 8, OverlapBoundary::Word),
+            super::chunk_hierarchical(text, 9, None, 8, OverlapBoundary::Grapheme),
+            "word mode never moved a tail on word-run text — the snap is inert?"
+        );
+    }
+
+    #[test]
+    fn word_mode_snap_at_a_separator_run_boundary_composes_with_the_103_skip() {
+        // The #103/#47 interaction: a word snap landing on (or inside) a
+        // separator run, under a budget whose final window then opens on
+        // a match — the skip must preempt the final exit exactly as it
+        // does in grapheme mode, and the word boundary the snap lands on
+        // must not resurrect the separator as a chunk. Swept: separator
+        // run texts × every legal overlap × both boundary modes, no
+        // chunk is the separator, ends always advance.
+        let text = "alpha\n\nbeta\n\ngamma\n\ndelta";
+        for max_chars in [6usize, 9, 12] {
+            for overlap in 1..max_chars {
+                let word = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(&[Some("\n\n")]),
+                    overlap,
+                    OverlapBoundary::Word,
+                );
+                for &(s, e) in &word {
+                    assert!(
+                        &text[s..e] != "\n\n",
+                        "word mode emitted the separator as a chunk: m={max_chars} \
+                         ov={overlap}: {word:?}"
+                    );
+                }
+                let mut prev_end = 0usize;
+                for &(_s, e) in &word {
+                    assert!(e > prev_end, "ends not advancing: {word:?}");
+                    prev_end = e;
+                }
+            }
+        }
+        // And the word snap never lands mid-cluster even beside a
+        // separator: every chunk start/end is a grapheme boundary (the
+        // word level's cuts are the same filtered list the windows cut
+        // on).
+        let word_starts: HashSet<usize> =
+            super::chunk_hierarchical(text, 9, Some(&[Some("\n\n")]), 5, OverlapBoundary::Word)
+                .iter()
+                .map(|&(s, _)| s)
+                .collect();
+        for s in word_starts {
+            let g = crate::truncate_impl::grapheme_boundary_chars(text);
+            assert!(
+                g.contains(&s),
+                "word-snapped start {s} is not a grapheme boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn word_mode_realizes_the_word_level_lazily_and_at_most_once() {
+        // The seam pins, #47's performance constraint: the word level is
+        // realized only when a snap consults it — never eagerly, never
+        // twice. (a) grapheme mode with overlap (snap sites galore)
+        // realizes no word level; (b) word mode with overlap realizes it
+        // exactly once, shared with any window that descends; (c) word
+        // mode at overlap=0 realizes none at all (no snap site runs).
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 7, None, 2, OverlapBoundary::Grapheme);
+        let grapheme_levels = build_seam::levels_built();
+        assert!(
+            grapheme_levels <= 3,
+            "grapheme mode built extra levels: {grapheme_levels}"
+        );
+
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 7, None, 2, OverlapBoundary::Word);
+        let word_levels = build_seam::levels_built();
+        assert!(
+            word_levels <= grapheme_levels + 1,
+            "word mode built the word level more than once (or something \
+             beyond it): grapheme={grapheme_levels} word={word_levels}"
+        );
+
+        build_seam::reset();
+        let zero_word = super::chunk_hierarchical(text, 7, None, 0, OverlapBoundary::Word);
+        let zero_word_levels = build_seam::levels_built();
+        build_seam::reset();
+        let zero_grapheme = super::chunk_hierarchical(text, 7, None, 0, OverlapBoundary::Grapheme);
+        assert_eq!(
+            build_seam::levels_built(),
+            zero_word_levels,
+            "word mode at overlap=0 must build exactly what grapheme mode \
+             builds (windows only, no snap sites run at overlap=0)"
+        );
+        assert_eq!(zero_word, zero_grapheme);
+
+        // The grapheme-mode cost is unchanged by the feature existing:
+        // the same call the pre-#47 pins ran builds the same levels —
+        // the word-bounds walk is behind the mode flag, not in the
+        // grapheme path (the whole-document-budget pin above continues
+        // to hold: zero builds).
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 70, None, 0, OverlapBoundary::Grapheme);
+        assert_eq!(build_seam::levels_built(), 0);
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 70, None, 0, OverlapBoundary::Word);
+        assert_eq!(
+            build_seam::levels_built(),
+            0,
+            "word mode realized a level for a single-chunk overlap=0 call"
+        );
     }
 
     // ---- The lazy levels (#30): seam-counted structural pins. The
