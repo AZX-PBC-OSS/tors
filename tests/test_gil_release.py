@@ -276,8 +276,10 @@ utf16_byte_len cell (the interop twin, #52; same corpus shapes and
 fresh-object-per-sample design): both legs ceiling-only for the twin's
 two reasons, with the one honest structural difference — this core's
 detach carries REAL work (the O(n) byte-class scan, ~30 GB/s, ~0.4ms
-at 12 MiB — an order under the ping floor) where the twin's is nominal
-around a field read. The ASCII leg's whole call is the zero-copy alias
+at 12 MiB — an order under the ping floor), which is why it keeps its
+detach where the utf8 twin's nominal one was removed (#108: a detach
+must bracket the real work). The ASCII leg's whole call is the
+zero-copy alias
 borrow plus the detached scan, sub-floor end to end; the non-ASCII
 first-call leg's worst gap is the same GIL-held materialization as the
 twin's (~5ms at 12 MiB, under the ping interval), with the scan
@@ -470,10 +472,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import difflib
 import hashlib
 import itertools
 import json
+import random
 import string
 import time
 import urllib.parse
@@ -1550,11 +1554,16 @@ def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     this cache and never fills it, so only a str-in call ends the cold
     lane; there is no way to fill an object's cache without holding the
     GIL; the ``finalize`` cells' first-call class) — while everything past
-    the borrow is O(1)
-    (the ``py.detach`` around the core is nominal, kept for the family
-    shape) and the return is a single int, so there is no marshalling
-    class and no error path past the borrow's own ``UnicodeEncodeError``
-    on lone surrogates.
+    the borrow is O(1) (a field read) and the return is a single int, so
+    there is no marshalling class and no error path past the borrow's own
+    ``UnicodeEncodeError`` on lone surrogates. The call is GIL-HELD end to
+    end, deliberately detached from nothing: #108 measured that the
+    pre-fix nominal ``py.detach`` around the O(1) core starved a
+    co-resident event loop completely — every nanosecond detach/re-attach
+    bumped ``switch_number`` inside a waiting thread's ``take_gil`` window,
+    so the loop never escalated its switch request (zero heartbeat ticks
+    in a 2 s window) — so the detach was removed; see the starvation pin
+    below and the wrapper's GIL-model docs.
 
     Two legs, both ceiling-only:
 
@@ -1597,6 +1606,74 @@ def test_utf8_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
         )
 
 
+# The #108 starvation probe's shape, pinned: a FRESH large non-ASCII str per
+# op (``s[1:]`` — never the cached object), looped in a worker thread, against
+# a 1ms heartbeat on the co-resident loop. Deterministic content (seeded rng,
+# no hypothesis): the probe is a timing shape, not a data-shape one — every
+# non-ASCII char class materializes the UTF-8 view the same way.
+_STARVE_PROBE_TEXT = "".join(
+    random.Random(7).choice("abc déf ü 日本語 🙂 ñ") for _ in range(65536)
+)
+_STARVE_PROBE_SECONDS = 2.0
+
+
+def test_utf8_byte_len_on_a_fresh_object_in_a_worker_thread_does_not_starve_the_loop_heartbeat() -> (
+    None
+):
+    """#108's signature, pinned with a huge margin for CI noise. PRE-fix,
+    this probe reproduced the issue's starvation 2/2 times: the worker's
+    GIL-held UTF-8-cache materialization followed by a nanosecond
+    ``py.detach``/re-attach bumped ``switch_number`` inside the loop
+    thread's ``take_gil`` window on every call, so the loop never escalated
+    its switch request and the 1ms heartbeat delivered ONE tick in a 2s
+    window (first tick at 2.001s, both repetitions). POST-fix (no detach:
+    the whole call was GIL-held anyway, so the detach bracketed no work and
+    was pure cost) the heartbeat ticks ~continuously — measured first tick
+    1-2ms, p99 gap ~1ms, the pure-GIL-held class exactly.
+
+    The assertion is the FIRST tick only, and generous: the starvation
+    signature is a multi-second first tick, so 500ms sits two-plus orders
+    of magnitude above the healthy band (~1-12ms, the pure-GIL reference
+    rows in the issue's table) while leaving a loaded CI runner every
+    advantage. The tick-count floor below is a belt against a partial
+    regression (first tick lucky, then starvation), not a throughput
+    pin: ~250 ticks is the pure-GIL-held worst shape (the ``encode``
+    reference row), so 10 is nowhere near any healthy regime's floor.
+    The sibling lanes are NOT pinned here — ``utf16_byte_len``/
+    ``utf8_is_valid``/``decode_utf8`` keep their detaches because theirs
+    bracket real work (the gap cells above already pin them healthy)."""
+    ticks: list[float] = []
+
+    async def probe() -> None:
+        loop = asyncio.get_running_loop()
+        deadline = time.perf_counter() + _STARVE_PROBE_SECONDS
+        start = time.perf_counter()
+
+        def worker() -> None:
+            while time.perf_counter() < deadline:
+                tors.utf8_byte_len(_STARVE_PROBE_TEXT[1:])
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(0.001)
+                ticks.append(time.perf_counter() - start)
+                if ticks[-1] >= _STARVE_PROBE_SECONDS:
+                    break
+
+        hb = asyncio.create_task(heartbeat())
+        with concurrent.futures.ThreadPoolExecutor(1) as ex:
+            fut = loop.run_in_executor(ex, worker)
+            await hb
+            await fut
+
+    asyncio.run(probe())
+    assert len(ticks) > 10, f"heartbeat starved: {len(ticks)} ticks in {_STARVE_PROBE_SECONDS}s"
+    assert ticks[0] < 0.5, (
+        f"heartbeat first tick at {ticks[0]:.3f}s (the #108 starvation "
+        f"signature is a multi-second first tick; {len(ticks)} ticks delivered)"
+    )
+
+
 @pytest.mark.parametrize(
     ("corpus_kind", "size_bytes", "ratio_budget"),
     [
@@ -1611,8 +1688,11 @@ def test_utf16_byte_len_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     """The interop twin's cell, and the one honest difference from the
     utf8 twin's: the detach around this core carries REAL work (the
     O(n) byte-class scan, ~30 GB/s — measured ~0.4ms at 12 MiB, an
-    order under the 10ms ping floor), where the twin's detach is
-    nominal around one field read. The GIL-held residue is the same
+    order under the 10ms ping floor), which is why it keeps its
+    ``py.detach`` — #108 removed the utf8 twin's only because ITS detach
+    bracketed no work (an O(1) field read behind the borrow), the
+    starvation mechanism the twin is structurally immune to. The
+    GIL-held residue is the same
     borrow class: the cold-cache first call's materialization of the
     UTF-8 view (there is no way to fill an object's cache without
     holding the GIL; a prior ``encode`` does not warm it), with the

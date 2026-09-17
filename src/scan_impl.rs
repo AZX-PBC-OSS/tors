@@ -242,8 +242,10 @@
 //! object's first call — the cold-cache case — materializes and caches
 //! the view under the GIL (encode-parity cost; `encode` reads that
 //! cache and never fills it); repeat calls borrow it zero-copy and pay
-//! only this scan, which runs detached (real O(n) work, unlike the
-//! utf8 twin's nominal one-field-read detach — see the wrapper's docs).
+//! only this scan, which runs detached (real O(n) work — which is why
+//! this twin keeps its `py.detach` where the utf8 twin dropped its
+//! nominal one (#108: a detach must bracket the real work or it
+//! starves the co-resident loop thread; see the wrapper's docs).
 //! Lone surrogates never reach this function either (the borrow raises
 //! first); the stdlib relation there is REFUSAL PARITY with the
 //! replaced expression, not the asymmetry a first draft assumed — the

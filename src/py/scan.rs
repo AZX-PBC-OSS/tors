@@ -152,15 +152,30 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 /// difference: the call's only O(n) work IS the borrow — the first
 /// non-ASCII call's materialization runs under the GIL (the standard
 /// str-in first-call class every str-argument tors function pays; there
-/// is no way to borrow the view without it), and the `py.detach` around
-/// the core is nominal (an O(1) field read), kept for the module's family
-/// shape. The heartbeat cell in tests/test_gil_release.py pins the band:
-/// the 12 MiB non-ASCII first call's materialization sits under the 10 ms
-/// ping floor, so the cell is ceiling-only like every sub-floor member.
-/// No aio twin: an O(1)-to-O(n)-borrow call needs no thread hop.
+/// is no way to borrow the view without it), and the core after the
+/// borrow is an O(1) field read. There is deliberately NO `py.detach`:
+/// #108 measured that a detach bracketing no work is pure cost and is
+/// what starves a co-resident event loop — the GIL-held materialization
+/// followed by a nanosecond detach/re-attach bumps `switch_number` from
+/// this thread on every call, inside the waiting thread's `take_gil`
+/// window, so a loop thread waiting for the GIL never escalates to a
+/// drop request and loses every re-acquire race (reproduced 2/2 as a
+/// ZERO-tick 2 s window on a 1 ms heartbeat; the table lives in the
+/// issue). The whole call is GIL-held either way, so the detach bought
+/// nothing and defeated the switch request; sibling lanes keep their
+/// detach because theirs brackets the real O(n) scan (`utf16_byte_len`)
+/// or a zero-copy bytes borrow + scan (`utf8_is_valid`, `decode_utf8`),
+/// neither of which is this shape. The heartbeat cell in
+/// tests/test_gil_release.py pins the band: the 12 MiB non-ASCII first
+/// call's materialization sits under the 10 ms ping floor, so the cell
+/// is ceiling-only like every sub-floor member. No aio twin: an
+/// O(1)-to-O(n)-borrow call needs no thread hop.
 #[pyfunction]
-pub fn utf8_byte_len(py: Python<'_>, s: &str) -> usize {
-    py.detach(|| scan_impl::utf8_byte_len(s))
+pub fn utf8_byte_len(_py: Python<'_>, s: &str) -> usize {
+    // No `py.detach` here — see the GIL model above (#108): the whole
+    // call is the GIL-held borrow plus an O(1) field read, and a detach
+    // around that is the starvation mechanism, not a release.
+    scan_impl::utf8_byte_len(s)
 }
 
 /// `tors.utf16_byte_len(s)`: the UTF-16 byte length of `s` — 2 bytes per
