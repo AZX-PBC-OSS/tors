@@ -207,21 +207,13 @@ class TestRepairJsonSchemaScaling:
         large = _min_wall_ms(lambda: tors.repair_json_loads("{}", schema=_deep_schema(80)))
         _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
 
-    @pytest.mark.xfail(
-        reason=(
-            "LIVE DEFECT (this harness's finding, #113's cost class): the schema-aware "
-            "repair is superlinear in the joint property x document-key count. Measured "
-            "on this tree, min-of-5: w=2500 -> 15.7ms, w=5000 -> 57.2ms (3.7x), "
-            "w=10000 -> 251.3ms (4.4x), w=20000 -> 686.6ms, w=40000 -> 3140ms — "
-            "~4-4.6x per doubling (quadratic) when document keys match schema "
-            "properties, and ~2.5-2.7x per doubling even with an empty document. "
-            "Flip to a green pin when the fix lands (expected: <3.0x per doubling; "
-            "the sizes here are deliberately small so the red cell costs ~70ms)."
-        ),
-        strict=False,
-    )
     @pytest.mark.timing
     def test_wide_schema_stays_linear_in_properties(self) -> None:
+        """GREEN since the F3 fix landed (the lazy schema-side property
+        index + the document-side EntryIndex in json_schema_impl.rs): the
+        per-key alignment scans became lookups. Pre-fix this cell measured
+        ~4-4.6x per doubling (quadratic) at 2500 -> 40000 properties;
+        post-fix ~2.1-2.3x per doubling, byte-identical output."""
         """The WIDE axis: a properties map scaling with the document's
         keys (the natural schema+doc shape) at 2500 -> 5000 properties
         (2x). Currently RED — see the xfail reason; this cell is the
@@ -281,24 +273,22 @@ class TestDocumentsDeepHtmlScaling:
         )
         _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
 
-    @pytest.mark.xfail(
-        reason=(
-            "LIVE DEFECT #111: the gfm code-span lifter (find_equal_run) rescans to "
-            "end-of-line per backtick opener, so backtick runs of increasing length "
-            "are quadratic — measured on this tree at 200 -> 400 -> 800 runs: "
-            "37.5ms -> 622.7ms (16.6x) -> 9664.9ms (15.5x) per doubling, reachable "
-            "from documents.to_text on any HTML/PDF/office payload that emits "
-            "backticks. Flip to a green pin when the fix lands (expected: <3.0x per "
-            "doubling; sizes kept small so the red cell costs ~0.7s)."
-        ),
-        strict=False,
-    )
     @pytest.mark.timing
     def test_backtick_runs_stay_linear(self) -> None:
         """#111's shape: backtick runs of increasing length, each followed
-        by a letter, through the documents Auto/HTML lane. Currently RED
-        — see the xfail reason; this cell is the pin that goes green the
-        day the code-span quadratic is fixed."""
+        by a letter, through the documents Auto/HTML lane. GREEN since the
+        near-linear closer index (`index_backtick_runs` + binary-search
+        `find_equal_run`, #111's fix): per INPUT BYTE the cost is flat
+        (~6 us/KB at every size — 0.25ms @ 40KB, 24.9ms @ 4MB).
+
+        ACCOUNTING NOTE (the reason this cell's sizes look odd): the
+        increasing-runs shape's input is THETA(runs^2) — the runs sum
+        1+2+...+n backtick characters — so doubling the run count
+        QUADRUPLES the input (two doublings, allowed 9x at the 3.0x/doubling
+        gate; the pre-fix quadratic measured 16.6x for 200 -> 400 runs =
+        4x input = 2 doublings, ~4.1x per input doubling). The sizes below
+        are 200 -> 400 runs = 40KB -> 160KB, passed to the assert as
+        factor=4 (two input doublings, allowed 9x at the gate)."""
         import tors.documents as documents
 
         def shape(runs: int) -> str:
@@ -312,7 +302,7 @@ class TestDocumentsDeepHtmlScaling:
         small, large = _min_wall_ms(lambda: shape(200), samples=3), _min_wall_ms(
             lambda: shape(400), samples=3
         )
-        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
 
 
 # --- the retrieval trio at their documented ceilings -------------------------------

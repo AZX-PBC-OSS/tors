@@ -143,7 +143,11 @@ class TestReplaceManyOutputPeakBounded:
             f"peak {peak_kib / 1024:.0f} MiB exceeds the input-tied ceiling "
             f"{ceiling_kib / 1024:.0f} MiB: the refusal arrived after the allocation"
         )
-        assert peak_kib < (9000 * input_bytes) // _MIB, (
+        # The amplification bound: ~9000x the input would be the
+        # unbounded output's size. Units: peak_kib is KiB, input_bytes is
+        # bytes — compare in bytes (the former spelling divided by _MIB
+        # and compared against KiB, off by 1024).
+        assert peak_kib * 1024 < 9000 * input_bytes, (
             "the peak scaled with the amplification factor, not the input"
         )
 

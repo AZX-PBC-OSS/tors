@@ -85,7 +85,7 @@ file = "issue-108-fresh-nonascii.txt"
 surface = "utf8_byte_len_starve"
 params = { seconds = 1.5, heartbeat_ms = 1.0, max_gap_ms = 500.0 }
 invariant = "a worker thread looping utf8_byte_len over FRESH (uncached) large non-ASCII slices leaves a co-resident heartbeat thread at heartbeat granularity (max gap < 500ms; the pre-fix starvation measures ~2000ms)"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-110-glued-pem"
@@ -94,7 +94,7 @@ file = "issue-110-glued-pem.txt"
 surface = "scrub_pii"
 params = { needles = ["-----BEGIN RSA PRIVATE KEY-----"] }
 invariant = "a PEM block glued to a preceding block's END marker (the dash-run boundary) is redacted, not read as mid-token"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-111-backtick-quadratic"
@@ -103,7 +103,7 @@ file = "issue-111-backticks.html"
 surface = "documents_to_text"
 params = { format = "html", wall_limit_s = 2.0 }
 invariant = "the code-span lifter stays near-linear in backtick-run count (wall < 2s at 800 runs; the pre-fix quadratic measures ~10s)"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-112-lying-len"
@@ -112,7 +112,7 @@ file = "issue-112-lying-len.txt"
 surface = "lying_len"
 params = { claimed_len = 4611686018427387904, surfaces = ["scrub_pii_rules", "chunk_hierarchical_separators"] }
 invariant = "a Sequence with a lying __len__ produces a CATCHABLE exception (an Exception subclass, e.g. ValueError) — never an uncatchable PanicException (capacity overflow)"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-113-shared-ref-schema"
@@ -121,7 +121,7 @@ file = "issue-113-shared-ref-schema.txt"
 surface = "shared_ref_schema"
 params = { doublings = 26, timeout_s = 20.0 }
 invariant = "a schema built from shared references (26 doublings; depth-tiny, walk-2^26) terminates within the walk caps and raises a catchable ValueError past the node ceiling"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-114-output-amplification"
@@ -130,7 +130,7 @@ file = "issue-114-amplification.txt"
 surface = "replace_many_amplify"
 params = { value_char = "y", value_repeat = 125000, peak_ceiling_x_input = 100 }
 invariant = "a short key matched 1000 times against a 1MB value (≈1GB of output from ~1MB of input) refuses with a catchable ValueError before allocating; peak RSS stays within 100x the input bytes"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "issue-115-deadline-escape"
@@ -139,7 +139,7 @@ file = "issue-115-deadline-escape.txt"
 surface = "deadline_enum"
 params = { member_count = 2000, member_len = 1500, deadline_ms = 5.0, overshoot_limit_x = 10.0 }
 invariant = "an enum-miss repair with an armed deadline_ms raises TimeoutError within a small multiple of the budget (the deadline is consulted in the enum-scoring loop; the live hole scores all 2000 members first, ~160x past the budget)"
-status = "live"
+status = "fixed-on-main"
 
 # --- the harness's own findings (not yet tracked issues) ---------------------------
 
@@ -150,7 +150,7 @@ file = "finding-1-xhh-octal-glued.txt"
 surface = "scrub_pii_multi"
 params = { files = ["finding-1-xhh-octal-glued.txt"], needles = ["sk-abcdefghijklmnopqrstuvwx"] }
 invariant = "a key glued after ANY escape spelling a log may carry (\\xHH hex, octal \\NNN — not just the recognized %XX/\\uXXXX/backslash run) is redacted; the boundary rule treats each escape's tail byte as formatting, not word material"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "finding-2-separator-remainder-chunk"
@@ -159,7 +159,7 @@ file = "finding-2-separator-remainder-chunk.txt"
 surface = "chunk_hierarchical"
 params = { max_chars = 2, separators = ["aa"], overlap = 0 }
 invariant = "no emitted chunk consists entirely of separator material — including through the remainder/hard-cut path (chunk_hierarchical('aaaa', 2, separators=['aa']) currently returns [(2, 4)], the separator itself; a residual of #103's class on a different path than the one its fix closed)"
-status = "live"
+status = "fixed-on-main"
 
 [[cases]]
 id = "finding-3-wide-schema-quadratic"
@@ -168,4 +168,4 @@ file = "finding-3-wide-schema.txt"
 surface = "wide_schema"
 params = { properties = 2500, doc_properties = 2500, wall_limit_s = 0.2 }
 invariant = "the schema-aware repair stays near-linear in the property count (wall < 0.2s at 2500 properties; the live quadratic measures 15.7ms at 2500 -> 3140ms at 40000, ~4.5x per doubling, with matching document keys — and stays mildly superlinear even with an empty document)"
-status = "live"
+status = "fixed-on-main"
