@@ -277,8 +277,9 @@
 //!
 //! Performance: one linear pass per rule — `memchr`-anchored for the
 //! `@` and phone-class scans, a first-byte-dispatched table walk for the
-//! key families (one `matches!` per byte on prose, at most twenty
-//! prefix compares on an anchor hit) plus the marker grammars on their
+//! key families (one `matches!` per byte on prose; an anchor hit walks
+//! only its own head-byte group of the family table, never the whole
+//! table) plus the marker grammars on their
 //! disjoint heads (PEM hoists one END sweep per pass, bucketed by
 //! parsed words: O(ENDs) to build, O(log ENDs) per BEGIN) —
 //! `Cow::Borrowed`
@@ -952,12 +953,63 @@ fn phone_pass_impl<'a>(text: &'a str, salt: &str, rec: Option<&mut PassRec>) -> 
 // --- The keys rule: the credential scanner (the extension past the
 // source's contact contract) -------------------------------------------
 
+/// The boundary check's per-byte facts, one table load each: bit 0 is
+/// the key-tail charset (`[A-Za-z0-9_-]`, [`is_key_tail_byte`]), bit 1
+/// the ASCII hex-digit class the escape grammar's `%XX`/`\uXXXX` tails
+/// need ([`is_hex_tail_byte`]). A table, not the two compare chains
+/// those predicates used to spell, because the boundary check runs on
+/// every anchor byte of every input and the chains compile to a
+/// five-instruction compare/setcc sequence apiece; the one-load lookup
+/// answers both facts at once (the escape gate reads bit 1 of the same
+/// load the boundary check read bit 0 of). The
+/// `tail_class_table_agrees_with_the_predicates` test pins the table
+/// against the spelled-out classes byte for byte.
+const TAIL_CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut c = b'0';
+    while c <= b'9' {
+        t[c as usize] = 0b11; // tail + hex digit
+        c += 1;
+    }
+    c = b'a';
+    while c <= b'f' {
+        t[c as usize] = 0b11; // tail + hex digit
+        c += 1;
+    }
+    c = b'g';
+    while c <= b'z' {
+        t[c as usize] = 0b01; // tail only
+        c += 1;
+    }
+    c = b'A';
+    while c <= b'F' {
+        t[c as usize] = 0b11; // tail + hex digit
+        c += 1;
+    }
+    c = b'G';
+    while c <= b'Z' {
+        t[c as usize] = 0b01; // tail only
+        c += 1;
+    }
+    t[b'_' as usize] = 0b01; // tail only
+    t[b'-' as usize] = 0b01; // tail only
+    t
+};
+
 /// The key-tail charset every family shares (and the JWT segments'
 /// base64url): `[A-Za-z0-9_-]`. ASCII only, so the scanner walks raw
 /// bytes.
 #[inline]
 fn is_key_tail_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')
+    TAIL_CLASS[b as usize] & 0b01 != 0
+}
+
+/// The ASCII hex-digit class, the tail every `%XX` and `\uXXXX` escape
+/// ends in (the escape gate's cheap division of the three shapes: only
+/// the lone-backslash shape can end in any other tail byte).
+#[inline]
+fn is_hex_tail_byte(b: u8) -> bool {
+    TAIL_CLASS[b as usize] & 0b10 != 0
 }
 
 /// Whether the key-charset byte at `pos - 1` is the LAST byte of a
@@ -974,28 +1026,44 @@ fn is_key_tail_byte(b: u8) -> bool {
 /// needs the complete sequence.
 #[inline]
 fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
+    // The tail byte's class gates the whole analysis before any
+    // backward walk: the percent and \u shapes END in a hex digit, so
+    // a tail outside the hex class can only complete the lone-backslash
+    // shape, whose run opens at `pos - 2`. Prose pays one load and one
+    // compare for the common non-hex, non-backslash tail; the hex-class
+    // tail (a-f and digits, common inside key material) alone walks
+    // further.
+    let tail = bytes[pos - 1];
+    if !is_hex_tail_byte(tail) {
+        return pos >= 2 && bytes[pos - 2] == b'\\' && odd_backslashes_before(bytes, pos);
+    }
     // %XX: the percent sign plus two hex digits, the second being the
-    // key-charset byte itself.
-    if pos >= 3
-        && bytes[pos - 3] == b'%'
-        && bytes[pos - 2].is_ascii_hexdigit()
-        && bytes[pos - 1].is_ascii_hexdigit()
-    {
+    // tail itself.
+    if pos >= 3 && bytes[pos - 3] == b'%' && bytes[pos - 2].is_ascii_hexdigit() {
         return true;
     }
-    // \uXXXX: the backslash, the `u`, and four hex digits.
+    // \uXXXX: the backslash, the `u`, and four hex digits (the tail is
+    // the fourth, already proven hex by the gate).
     if pos >= 6
         && bytes[pos - 6] == b'\\'
         && bytes[pos - 5] == b'u'
         && bytes[pos - 4].is_ascii_hexdigit()
         && bytes[pos - 3].is_ascii_hexdigit()
         && bytes[pos - 2].is_ascii_hexdigit()
-        && bytes[pos - 1].is_ascii_hexdigit()
     {
         return true;
     }
-    // \X: an ODD run of backslashes directly before the final byte (an
-    // even run escapes itself, leaving the neighbor a literal).
+    // \X: any tail class can follow a backslash, so the hex tail falls
+    // through to the run count here.
+    odd_backslashes_before(bytes, pos)
+}
+
+/// The \X shape's run count: an ODD run of backslashes directly before
+/// the final byte (an even run escapes itself, leaving the neighbor a
+/// literal). Reached only when a backslash actually sits at `pos - 2`,
+/// so the loop runs exactly once per real escape and never on prose.
+#[inline]
+fn odd_backslashes_before(bytes: &[u8], pos: usize) -> bool {
     let mut slashes = 0usize;
     while slashes + 2 <= pos && bytes[pos - 2 - slashes] == b'\\' {
         slashes += 1;
@@ -1007,7 +1075,7 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
 /// the key-tail charset; the marker families carry their own — the
 /// access-key ID alphabet (`[0-9A-Z]`, no lowercase anywhere in it) and
 /// the connection-string secret alphabet (`[A-Za-z0-9+/=]`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum KeyTailClass {
     Shared,
     Aws,
@@ -1035,53 +1103,138 @@ fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
 }
 
 /// The family table: (literal prefix, family, minimum tail length, tail
-/// class), ordered LONGEST-PREFIX-FIRST — at one scan position the
-/// entries are tried in this order and the first whose own grammar holds
-/// wins, so `sk-ant-` outranks bare `sk-`, and a too-short `sk-ant-`
-/// tail FALLS THROUGH to the `sk-` family, whose tail swallows the
-/// `ant-` spelling (still scrubbed, the generic prefix). Entries whose
-/// prefixes share no head (`github_pat_` vs `ghp_`) cannot tie at one
-/// position; the length-desc order is the table's one total order
-/// anyway. This is the evidence-backed closed set — the
-/// leaked-credential shapes the consumers evidenced; Slack `xox` and
-/// Stripe stay deliberately absent (zero evidence), and growing the set
-/// is a new-evidence decision, never a drive-by. The JWT and PEM
-/// families live outside this table (their grammars are marker/span
-/// shapes, not prefix-plus-tail), tried after it on their disjoint head
-/// bytes (`B`/`-`, which no table prefix starts with).
+/// class), ordered LONGEST-PREFIX-FIRST within each HEAD-BYTE GROUP (at
+/// one scan position only the prefixes that byte can begin are
+/// reachable, so the head is the only cross-entry order that can matter,
+/// and the table is grouped by it: the group is contiguous, and
+/// [`families_for_anchor`] slices it out). Within a group the entries
+/// are tried longest-first and the first whose own grammar holds wins,
+/// so `sk-ant-` outranks bare `sk-`, and a too-short `sk-ant-` tail
+/// FALLS THROUGH to the `sk-` family, whose tail swallows the `ant-`
+/// spelling (still scrubbed, the generic prefix); entries that do not
+/// prefix one another (`github_pat_` vs `ghp_`) can never both match at
+/// one position regardless, and the length-desc order inside the group
+/// settles the ones that do (the `sk-` chain). This is the
+/// evidence-backed closed set, the leaked-credential shapes the
+/// consumers evidenced; Slack `xox` and Stripe stay deliberately absent
+/// (zero evidence), and growing the set is a new-evidence decision,
+/// never a drive-by. The
+/// JWT and PEM families live outside this table (their grammars are
+/// marker/span shapes, not prefix-plus-tail), tried after it on their
+/// disjoint head bytes (`B`/`-`, which no table prefix starts with).
 const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
+    // `g`: the GitHub family, longest literal first (github_pat_ has no
+    // shorter prefix inside the group; gho_/ghu_/ghs_/ghr_ are
+    // mutually exclusive literals at the same length).
     (b"github_pat_", KeyFamily::GitHub, 22, KeyTailClass::Shared),
-    (b"sk-svcacct-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
-    (b"AccountKey=", KeyFamily::Azure, 40, KeyTailClass::Azure),
-    (b"sk-proj-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
-    (b"sk-ant-", KeyFamily::Anthropic, 20, KeyTailClass::Shared),
-    (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"glpat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
-    (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
     (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"gho_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghu_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghs_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghr_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
+    // `s`: the sk- chain, longest first, bare sk- last (its tail
+    // swallows a too-short longer prefix's spelling).
+    (b"sk-svcacct-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    (b"sk-proj-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    (b"sk-ant-", KeyFamily::Anthropic, 20, KeyTailClass::Shared),
+    (b"sk-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
+    // `A`: the uppercase heads, longest first.
+    (b"AccountKey=", KeyFamily::Azure, 40, KeyTailClass::Azure),
     (b"AIza", KeyFamily::Google, 35, KeyTailClass::Shared),
     (b"AKIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
     (b"ASIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
-    (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
+    // `a`, `f`, `w`, `c`, `x`, `y`: the single- and double-entry groups.
+    (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
+    (b"ak-", KeyFamily::Modal, 20, KeyTailClass::Shared),
     (b"fw-", KeyFamily::Fireworks, 20, KeyTailClass::Shared),
     (b"fw_", KeyFamily::Fireworks, 20, KeyTailClass::Shared),
-    (b"ak-", KeyFamily::Modal, 20, KeyTailClass::Shared),
     (b"wk-", KeyFamily::Modal, 20, KeyTailClass::Shared),
     (b"wd-", KeyFamily::Minted, 43, KeyTailClass::Shared),
-    (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
-    (b"sk-", KeyFamily::OpenAi, 20, KeyTailClass::Shared),
     (b"w-", KeyFamily::Minted, 43, KeyTailClass::Shared),
+    (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
+    (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
+    (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
 ];
+
+/// One head-byte group's `(start, len)` range in [`KEY_FAMILIES`],
+/// derived from the table at compile time (const evaluation walks it),
+/// so the ranges can never go stale against the rows they slice. The
+/// derivation assumes the group is CONTIGUOUS (first row with the
+/// head through the last), which is the table's stated layout and what
+/// the `anchor_buckets_slice_the_family_table` test pins; a
+/// non-contiguous spelling would slice wrong rows and fail it.
+const fn bucket_range(head: u8) -> (usize, usize) {
+    let mut start = usize::MAX;
+    let mut len = 0usize;
+    let mut i = 0usize;
+    while i < KEY_FAMILIES.len() {
+        if KEY_FAMILIES[i].0[0] == head {
+            if start == usize::MAX {
+                start = i;
+            }
+            len += 1;
+        }
+        i += 1;
+    }
+    if start == usize::MAX {
+        (0, 0)
+    } else {
+        (start, len)
+    }
+}
+
+/// The head-byte groups the anchor dispatch slices out, in the order
+/// [`is_key_anchor`] spells them. `B` and `-` carry no table rows (the
+/// JWT and PEM marker grammars own those heads) and every other byte's
+/// group is derived by [`bucket_range`]. A `match` on the byte, not a
+/// 256-entry range table: the table would put a load→load pair (range
+/// entry, then the row slice) on the walk's carried chain at every
+/// anchor, and the arm compares stay off it (the same reasoning
+/// [`chunk_by_segment_impl`]'s `ASCII_WS` comment carries for its own
+/// break check).
+const G_BUCKET: (usize, usize) = bucket_range(b'g');
+const S_BUCKET: (usize, usize) = bucket_range(b's');
+const A_BUCKET: (usize, usize) = bucket_range(b'A');
+const A_LOWER_BUCKET: (usize, usize) = bucket_range(b'a');
+const F_BUCKET: (usize, usize) = bucket_range(b'f');
+const W_BUCKET: (usize, usize) = bucket_range(b'w');
+const C_BUCKET: (usize, usize) = bucket_range(b'c');
+const X_BUCKET: (usize, usize) = bucket_range(b'x');
+const Y_BUCKET: (usize, usize) = bucket_range(b'y');
+
+/// The family rows one scan position can reach: exactly the table rows
+/// whose prefix starts with that byte (a prefix whose head differs from
+/// the position byte can never match there), in table order. This is
+/// the walk's per-anchor cost (one match arm plus the group's own
+/// `starts_with` compares, never a scan of the whole table), and it is
+/// what keeps a grown table from taxing every anchor byte: prose's
+/// letters walk one to seven rows, a `-` (the PEM head, and the common
+/// dash of ordinary hyphenated text) walks none.
+#[inline]
+fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, KeyTailClass)] {
+    let (start, len) = match b {
+        b'g' => G_BUCKET,
+        b's' => S_BUCKET,
+        b'A' => A_BUCKET,
+        b'a' => A_LOWER_BUCKET,
+        b'f' => F_BUCKET,
+        b'w' => W_BUCKET,
+        b'c' => C_BUCKET,
+        b'x' => X_BUCKET,
+        b'y' => Y_BUCKET,
+        // `B` (JWT) and `-` (PEM) own no table rows; any other byte is
+        // not an anchor at all (is_key_anchor filtered it already).
+        _ => (0, 0),
+    };
+    &KEY_FAMILIES[start..start + len]
+}
 
 /// The first bytes any family prefix (or the JWT/PEM marker) can start
 /// with: the per-byte dispatch that keeps the walk linear-cheap on
-/// prose (one `matches!` per byte; an anchor hit pays at most twenty
-/// prefix compares). Every table prefix and both markers begin with one
-/// of these, so nothing is missed by the filter.
+/// prose (one `matches!` per byte; an anchor hit walks only its own
+/// head-byte group in [`KEY_FAMILIES`]). Every table prefix and both
+/// markers begin with one of these, so nothing is missed by the filter.
 #[inline]
 fn is_key_anchor(b: u8) -> bool {
     matches!(
@@ -1141,12 +1294,22 @@ fn is_pem_word_byte(b: u8) -> bool {
 /// space, a non-word byte, or a missing tail fails the marker, and the
 /// PKCS#8 bare `BEGIN PRIVATE KEY` header with it: no algorithm words,
 /// a new-evidence decision like any other family shape). The `BLOCK`
-/// close is the PGP private-key label's own (`PGP PRIVATE KEY BLOCK`),
-/// tried before the bare close at each word end. Returns the words end
-/// and the marker end.
+/// close is the PGP private-key label's own (`PGP PRIVATE KEY BLOCK`);
+/// both closes share the head ` PRIVATE KEY`, and the byte after that
+/// head selects between them, so one fused check answers both at each
+/// word end. Returns the words end and the marker end.
 fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
-    const TAIL: &[u8] = b" PRIVATE KEY-----";
-    const BLOCK_TAIL: &[u8] = b" PRIVATE KEY BLOCK-----";
+    // Both closes share the head " PRIVATE KEY"; the byte after it
+    // selects which one can follow, so the two never compete at one
+    // word end (the bare close needs "-----" there, the PGP label's
+    // own " BLOCK-----"), and the fused check prices the common
+    // non-PEM word end where the bare close alone used to: a mismatch
+    // inside the shared head, one compare deep for prose-shaped text.
+    // A word end that fails the head (the "FOO BAR-----" shape) fails
+    // both closes exactly as the two separate starts_with checks did.
+    const HEAD: &[u8] = b" PRIVATE KEY";
+    const DASHES: &[u8] = b"-----";
+    const BLOCK: &[u8] = b" BLOCK-----";
     let mut p = words_start;
     loop {
         let w = p;
@@ -1156,11 +1319,14 @@ fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
         if w == p {
             return None; // an empty word: the label ran out or doubled its space
         }
-        if bytes[p..].starts_with(BLOCK_TAIL) {
-            return Some((p, p + BLOCK_TAIL.len()));
-        }
-        if bytes[p..].starts_with(TAIL) {
-            return Some((p, p + TAIL.len()));
+        if bytes[p..].starts_with(HEAD) {
+            let q = p + HEAD.len();
+            if bytes[q..].starts_with(DASHES) {
+                return Some((p, q + DASHES.len()));
+            }
+            if bytes[q..].starts_with(BLOCK) {
+                return Some((p, q + BLOCK.len()));
+            }
         }
         if p >= bytes.len() || bytes[p] != b' ' {
             return None;
@@ -1264,13 +1430,18 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 /// keeps a second key glued to a token's digest hex from firing),
 /// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
 /// `\X`; see `escape_ends_before`), whose tail byte is formatting
-/// material and the head after it a fresh start; then
-/// the table longest-first with fall-through (a too-short tail falls
-/// through to the shorter prefixes), then the JWT marker grammar (its
-/// `B` head shares no prefix with any table family), then the PEM span
-/// grammar (its `-` head likewise). The tail run is MAXIMAL: a key
-/// glued to further charset material is one long key, over-redaction in
-/// the safe direction. `Cow::Borrowed` when nothing matches.
+/// material and the head after it a fresh start. The check sits
+/// ahead of the grammar tries because it is the cheap arm (one table
+/// load, one more on a non-hex tail) while the tries are a handful of
+/// prefix compares: prose and dash runs are anchor-dense and
+/// candidate-poor, so the cheap gate keeps them linear; then
+/// the head-byte group of the family table longest-first with
+/// fall-through (a too-short tail falls through to the shorter
+/// prefixes), then the JWT marker grammar (its `B` head shares no
+/// prefix with any table family), then the PEM span grammar (its `-`
+/// head likewise). The tail run is MAXIMAL: a key glued to further
+/// charset material is one long key, over-redaction in the safe
+/// direction. `Cow::Borrowed` when nothing matches.
 /// The report's span kind: the contact rule that fired, or the key
 /// family that did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1338,6 +1509,20 @@ fn keys_pass_impl<'a>(
             pos += 1;
             continue;
         }
+        // The boundary rule, ahead of the grammar tries: a prefix glued
+        // to a preceding key-charset char is MID-TOKEN and never fires
+        // (`xak-…`: in real text a key glued to a word is that word's
+        // fragment, the same reasoning as the phone rule's
+        // clean-boundary cut, and it is what keeps a second key glued
+        // to a token's digest hex from firing), UNLESS that char ends
+        // a complete escape sequence (`%XX`, `\uXXXX`, `\X`; see
+        // `escape_ends_before`), whose tail byte is formatting
+        // material and the head after it a fresh start. Checked here,
+        // ahead of the family walk, because the walk is the expensive
+        // arm (a handful of prefix compares) and the boundary check is
+        // one table load plus, on a non-hex tail, one more: prose and
+        // dash runs are anchor-dense and candidate-poor, so gating the
+        // walk on the cheap check is the shape that keeps them linear.
         if pos > 0 && is_key_tail_byte(bytes[pos - 1]) && !escape_ends_before(bytes, pos) {
             pos += 1; // a mid-token prefix: the boundary rule (an escape
             // sequence's tail byte is formatting, not a word)
@@ -1348,8 +1533,8 @@ fn keys_pass_impl<'a>(
         // table/JWT families (the token keeps the head verbatim) and 0
         // for PEM (the token's `PEM` is a constant).
         let mut hit: Option<(KeyFamily, usize, usize)> = None;
-        for &(prefix, family, min_tail, class) in KEY_FAMILIES {
-            if prefix[0] != b || !bytes[pos..].starts_with(prefix) {
+        for &(prefix, family, min_tail, class) in families_for_anchor(b) {
+            if !bytes[pos..].starts_with(prefix) {
                 continue;
             }
             let tail_start = pos + prefix.len();
@@ -2854,6 +3039,61 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
                     "misordered nesting: {a:?} at {i} opens {b:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn anchor_buckets_slice_the_family_table() {
+        // The head-byte groups the scan dispatches through are exactly
+        // the table's rows for that head, in table order, contiguous
+        // (the layout `bucket_range`'s (start, len) derivation assumes).
+        // A row added outside its group, or a group spelled
+        // non-contiguously, fails here instead of silently skipping or
+        // reaching rows at the scan positions that byte gates.
+        let mut seen = 0usize;
+        for b in 0u8..=255 {
+            let bucket = families_for_anchor(b);
+            let expected: Vec<_> = KEY_FAMILIES
+                .iter()
+                .filter(|(prefix, _, _, _)| prefix[0] == b)
+                .copied()
+                .collect();
+            assert_eq!(
+                bucket,
+                expected.as_slice(),
+                "the bucket for head byte {b} is not the table's own rows for it"
+            );
+            seen += expected.len();
+        }
+        // Every row is reachable through exactly one bucket: the
+        // dispatch cannot skip a family.
+        assert_eq!(seen, KEY_FAMILIES.len());
+        // The marker heads own no rows (pinned above by the bucket
+        // assertion), so the post-walk JWT/PEM tries are the only
+        // grammars those heads ever reach; a future family row
+        // starting with either byte lands in its bucket and fails
+        // here only if the grouping is spelled wrong.
+        assert!(families_for_anchor(b'-').is_empty());
+        assert!(families_for_anchor(b'B').is_empty());
+    }
+
+    #[test]
+    fn tail_class_table_agrees_with_the_predicates() {
+        // The one-load table against the spelled-out classes, byte for
+        // byte: drift here would silently change which bytes the
+        // boundary rule treats as key-charset, or which tails the
+        // escape gate divides into its shapes.
+        for b in 0u8..=255 {
+            assert_eq!(
+                is_key_tail_byte(b),
+                b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'),
+                "tail class wrong for byte {b}"
+            );
+            assert_eq!(
+                is_hex_tail_byte(b),
+                b.is_ascii_hexdigit(),
+                "hex-tail class wrong for byte {b}"
+            );
         }
     }
 

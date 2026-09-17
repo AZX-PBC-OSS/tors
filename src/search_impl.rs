@@ -484,18 +484,51 @@ pub fn replace_many_masked<'a>(
 ) -> Result<Cow<'a, str>, BuildError> {
     let keys: Vec<&str> = replacements.iter().map(|(key, _)| *key).collect();
     let ac = build_leftmost(&keys)?;
-    let values = first_values(replacements);
-    Ok(scan_replace_masked(&ac, &values, text, mask))
+    let first_id = first_id_remap(&keys);
+    let values = masked_values_by_id(replacements, &first_id);
+    Ok(scan_replace_masked(&ac, &first_id, &values, text, mask))
+}
+
+/// The masked replace side's value table, indexed by the pattern list's
+/// FIRST-index space (the same space [`first_id_remap`] maps the
+/// automaton's ids into): slot `i` carries the first pair whose key
+/// first occurs at list index `i`, as the value AND its character
+/// count, everything the splice reads per match in one slot. First
+/// pair wins, the same rule [`first_values`] applies for the unmasked
+/// splice; the count is computed here, once per distinct value per
+/// call, never per match (a short key paired with a huge value costs
+/// the value once, not once per match: a one-char key over an all-key
+/// text would otherwise be quadratic in the value's length). A `Vec`,
+/// not a map: the splice reaches a match's entry through two slice
+/// indexes (the automaton id through `first_id`, then the slot), no
+/// hashing per match at all.
+fn masked_values_by_id<'a>(
+    replacements: &'a [(&'a str, &'a str)],
+    first_id: &[usize],
+) -> Vec<(&'a str, usize)> {
+    let mut values = vec![("", 0usize); first_id.len()];
+    for (idx, (_key, value)) in replacements.iter().enumerate() {
+        // `first_id[idx] == idx` is exactly "idx is this key's first
+        // occurrence": the remap maps every id to the first index of
+        // its pattern string, so a duplicate's own index never equals
+        // its remapped first.
+        if first_id[idx] == idx {
+            values[idx] = (*value, value.chars().count());
+        }
+    }
+    values
 }
 
 /// The shared masked splice: [`replace_many_masked`]'s scan over a built
-/// automaton and a validated `values` map, each matched span replaced by
-/// the masked value of exactly the span's character count (the mask rule
-/// documented on [`replace_many_masked`]), driven identically by the free
-/// and compiled spellings.
+/// automaton, its first-index remap, and the value table
+/// [`masked_values_by_id`] shapes, each matched span replaced by the
+/// masked value of exactly the span's character count (the mask rule
+/// documented on [`replace_many_masked`]), driven identically by the
+/// free and compiled spellings.
 fn scan_replace_masked<'a>(
     ac: &aho_corasick::AhoCorasick,
-    values: &HashMap<&str, &str>,
+    first_id: &[usize],
+    values: &[(&str, usize)],
     text: &'a str,
     mask: char,
 ) -> Cow<'a, str> {
@@ -507,24 +540,12 @@ fn scan_replace_masked<'a>(
     let mut out = String::with_capacity(text.len());
     let mut last = 0usize;
     let mut matched = false;
-    // Each value's character count is a per-value fact, computed once
-    // here rather than per match: the splice's per-match arithmetic
-    // reads only the matched span and what it writes (truncate to the
-    // span's count or pad to it), so a short key paired with a huge
-    // value must cost the value once, not once per match (a one-char
-    // key over an all-key text would otherwise be quadratic in the
-    // value's length).
-    let value_char_counts: HashMap<&str, usize> = values
-        .iter()
-        .map(|(key, value)| (*key, value.chars().count()))
-        .collect();
     for m in ac.find_iter(text) {
         matched = true;
         let span = &text[m.start()..m.end()];
         out.push_str(&text[last..m.start()]);
         let span_chars = span.chars().count();
-        let value = values[span];
-        let value_chars = value_char_counts[span];
+        let (value, value_chars) = values[first_id[m.pattern().as_usize()]];
         if value_chars >= span_chars {
             // Truncation: the value's first L characters; the mask is
             // never consulted on this branch.
@@ -692,14 +713,29 @@ impl CompiledPatterns {
     }
 
     /// The masked replace spelling: [`replace_many_masked`]'s scan over
-    /// the held automaton and the validated call-time values.
+    /// the held automaton and the validated call-time values, routed
+    /// into the first-index value table the splice reads
+    /// ([`masked_values_by_id`]' shape over the validated pairs; the
+    /// table is per-call like the values themselves, and the routing is
+    /// the same first-index arithmetic the free spelling pays at its
+    /// own seam).
     pub fn replace_many_masked<'a>(
         &self,
         text: &'a str,
         values: &HashMap<&str, &str>,
         mask: char,
     ) -> Cow<'a, str> {
-        scan_replace_masked(&self.ac, values, text, mask)
+        let mut by_id: Vec<(&str, usize)> = vec![("", 0); self.first_id.len()];
+        for (key, value) in values {
+            // Every dict key is a compiled pattern (replace_values
+            // enforced that before this runs), so the probe always
+            // lands; the entry's first index is the slot the splice
+            // reaches for any of that pattern's automaton ids.
+            if let Some(&idx) = self.first_index.get(*key) {
+                by_id[idx] = (value, value.chars().count());
+            }
+        }
+        scan_replace_masked(&self.ac, &self.first_id, &by_id, text, mask)
     }
 }
 

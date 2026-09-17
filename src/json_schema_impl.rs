@@ -63,12 +63,12 @@
 use regex::Regex;
 use serde_json::Map;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use crate::fuzzy_impl::jaro_winkler;
 use crate::json_repair::{
-    DEADLINE_TAG, Diagnostic, NumericLocale, RepairConfig, Value, deadline_exceeded_payload,
+    DEADLINE_TAG, Diagnostic, NumericLocale, RepairConfig, Value, deadline_exceeded_payload, dumps,
     exact_decimal_of_float, loads_strict, normalize_big_int_text, py_float_repr, repair,
 };
 
@@ -450,16 +450,34 @@ pub(crate) struct SchemaRepairer {
     /// never its address (a stack local's address is reused across loop
     /// iterations, so a pointer key aliases one branch's validator onto
     /// the next. Identical content is identical validation; a schema
-    /// whose content cannot be serialized (a non-finite float literal)
-    /// compiles fresh, uncached.
+    /// that cannot compile (a non-finite float literal) is never
+    /// inserted, and its rejections recompile exactly as before.
+    /// The key is `json_repair::dumps`' own serialization of the
+    /// internal `Value` (one walk, one string, no intermediate
+    /// `serde_json` tree), chosen over the prepared form it was keyed
+    /// by before because every consult pays the key's build, and the
+    /// raw serialization is a total, near-injective stand-in: the only
+    /// values that can share one text are the `Int`/`BigInt` pairs that
+    /// denote the same number (and `Missing`, which upstream
+    /// normalization never lets arrive, rendering as the empty string),
+    /// and `to_serde` maps every such pair to the same `serde_json`
+    /// form anyway, so a shared key always means identical validation;
+    /// object order is kept, so at worst two spellings of one schema
+    /// cache twice; and non-finite floats take spellings no other value
+    /// produces.
     transient_validators: RefCell<HashMap<String, Arc<jsonschema::Validator>>>,
-    /// Every object node's address inside `self.root`: the set of schema
-    /// pointers that are stable and unique for the repairer's lifetime
-    /// (the tree is owned, never mutated after construction). This is the
-    /// soundness gate for the address-keyed `sub_validators` map above;
-    /// an address outside the set belongs to a transient whose lifetime
-    /// the repairer does not control, and must not be cached by address.
-    root_addresses: HashSet<usize>,
+    /// Every object node's address inside `self.root`, SORTED: the set
+    /// of schema pointers that are stable and unique for the repairer's
+    /// lifetime (the tree is owned, never mutated after construction).
+    /// This is the soundness gate for the address-keyed `sub_validators`
+    /// map above; an address outside the set belongs to a transient
+    /// whose lifetime the repairer does not control, and must not be
+    /// cached by address. A sorted `Vec` probed by binary search, not a
+    /// `HashSet`: the build runs per repair call (SipHash per node, the
+    /// reallocation ladder) and the probe runs per subschema consult,
+    /// and both are integer work a sort and a handful of compares do
+    /// without hashing anything.
+    root_addresses: Vec<usize>,
     /// Whether the schema tree declares any normalizable `format`
     /// (date/date-time/time/uuid, computed once): only then does the fast
     /// path pay for the format pre-pass (formats are never asserted by
@@ -511,19 +529,21 @@ impl SchemaRepairer {
         // The root-tree address set (the sub_validators soundness gate):
         // every object node's address, collected iteratively (the tree
         // can be arbitrarily wide; only object nodes can resolve out of
-        // resolve_chain as a Schema, so only they need recording).
-        let mut root_addresses: HashSet<usize> = HashSet::new();
+        // resolve_chain as a Schema, so only they need recording), then
+        // sorted once; the consult probes it by binary search.
+        let mut root_addresses: Vec<usize> = Vec::new();
         let mut node_stack: Vec<&Value> = vec![&root];
         while let Some(node) = node_stack.pop() {
             match node {
                 Value::Object(entries) => {
-                    root_addresses.insert(std::ptr::from_ref::<Value>(node) as usize);
+                    root_addresses.push(std::ptr::from_ref::<Value>(node) as usize);
                     node_stack.extend(entries.iter().map(|(_, member)| member));
                 }
                 Value::Array(items) => node_stack.extend(items.iter()),
                 _ => {}
             }
         }
+        root_addresses.sort_unstable();
         SchemaRepairer {
             root,
             salvage,
@@ -2837,15 +2857,16 @@ impl SchemaRepairer {
     /// branch with the string branch's "not of type string". Transients
     /// are keyed by serialized CONTENT instead: identical content is
     /// identical validation, and the reused address can never alias. A
-    /// schema whose content cannot be serialized (a non-finite float
-    /// literal in a schema dict) compiles fresh, uncached, through the
-    /// same `compile_sub` every subschema used before the caches existed.
+    /// schema that cannot compile (a non-finite float literal in a
+    /// schema dict) is never inserted under its key, so its rejections
+    /// recompile through the same `compile_sub` every subschema used
+    /// before the caches existed.
     fn compiled_validator_for(
         &self,
         resolved: &Value,
     ) -> Result<Arc<jsonschema::Validator>, String> {
         let key = std::ptr::from_ref(resolved) as usize;
-        if self.root_addresses.contains(&key) {
+        if self.root_addresses.binary_search(&key).is_ok() {
             // The borrow is taken as a STATEMENT, not in the match
             // scrutinee: a scrutinee temporary lives for the whole match,
             // and the miss arm's `borrow_mut` below would panic
@@ -2862,15 +2883,15 @@ impl SchemaRepairer {
                 }
             });
         }
-        let content = match prepare_for_validation(resolved, 0)
-            .and_then(|prepared| serde_json::to_string(&prepared).map_err(|err| err.to_string()))
-        {
-            Ok(content) => content,
-            // Uncacheable content: compile fresh (compile_sub's own
-            // prepare surfaces the schema's real compile error, if the
-            // failure was the schema itself and not the serialization).
-            Err(_) => return Ok(Arc::new(self.compile_sub(resolved)?)),
-        };
+        // The transient lane's key: `dumps`' serialization of the raw
+        // schema (see `transient_validators` for why the raw form is a
+        // sound stand-in for the prepared one, and why it is built
+        // here: every consult pays it, and one walk with no
+        // intermediate tree is the cheap spelling). Total, unlike the
+        // prepared serialization: a non-finite float literal keys like
+        // any other schema, its `compile_sub` still fails, and nothing
+        // is ever inserted under a failed compile's key.
+        let content = dumps(resolved, true);
         // Statement-then-match: see the sub_validators arm above.
         let cached = self.transient_validators.borrow().get(&content).cloned();
         Ok(match cached {
