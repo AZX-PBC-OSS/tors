@@ -33,21 +33,45 @@ check: lint test
 # (tests/test_documents_engines.py) run against the tors.documents payload
 # (tors-documents/, the uv-workspace member), and a plain `uv sync --locked`
 # is exact: it would uninstall the payload and silently skip those gates.
+# Both workspace members are force-reinstalled: uv's wheel cache does not
+# key on Rust sources (the `dev` target's note), so without the flag a
+# re-run after a pull keeps BOTH wheels' native code stale — the same trap
+# `dev` exists to disarm, one level up.
 install:
-	uv sync --locked --extra documents
+	uv sync --locked --extra documents --reinstall-package tors \
+		--reinstall-package tors-documents
 
-# Rebuild the extension after Rust edits. uv's wheel cache does not key on Rust
-# sources, so a bare `uv sync` would leave pytest importing the stale .so.
+# Rebuild the extension after Rust edits. uv's wheel cache does not key on
+# Rust sources, so a bare `uv sync` would leave pytest importing the stale
+# .so — for BOTH workspace members (the same trap twice over: the
+# documents payload's editable install binds
+# tors-documents/python/tors_documents/_tors_documents.abi3.so straight
+# out of the source tree, and `--reinstall-package tors` alone never
+# touches it — verified 2026-09-17: a marker string changed in
+# tors-documents/src/lib.rs was still served stale after `make dev`, and
+# `uv cache clean tors` does not help either, it cleans the other wheel's
+# cache lane only).
+#
 # The find FIRST removes any non-abi3 extension shadows from python/tors/ (an
 # early non-abi3 `maturin develop` leaves _tors.cpython-*.so files there, and
 # CPython's extension-suffix order ranks a version-specific .so AHEAD of the
 # abi3 one, the dev-loop landmine tests/conftest.py fails loudly on): after
 # `make dev` exactly one fresh _tors.abi3.so remains, and plain `pytest`
-# (without the preload runner) binds it. --extra documents: same reason as
-# `install`: the payload must stay installed for the documents gates.
+# (without the preload runner) binds it. The SECOND find extends the same
+# hygiene to the payload tree: a stale _tors_documents.abi3.so (or a
+# non-abi3 shadow of it) must not survive into the sync — deleting it makes
+# the rebuild loud (the reinstall regenerates it, or the import fails, never
+# stale bytes served silently). --reinstall-package tors-documents forces
+# the payload wheel's rebuild for the same reason tors' is forced (the
+# version does not change when Rust sources do; cargo's own incremental
+# state in the target dir keeps the forced rebuild a no-op when nothing
+# changed). --extra documents: same reason as `install`: the payload must
+# stay installed for the documents gates.
 dev:
 	-find python/tors -maxdepth 1 -name '_tors*.so' ! -name '_tors.abi3.so' -delete
-	uv sync --locked --extra documents --reinstall-package tors
+	-find tors-documents/python -name '*.so' -delete
+	uv sync --locked --extra documents --reinstall-package tors \
+		--reinstall-package tors-documents
 
 # The ci.yml lint job, verbatim: fmt gate (root workspace AND the fuzz
 # crate (not a workspace member, so root cargo fmt never sees it); without
