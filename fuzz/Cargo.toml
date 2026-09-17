@@ -60,6 +60,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "json_is_valid"
+path = "fuzz_targets/json_is_valid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_utf16"
 path = "fuzz_targets/decode_utf16.rs"
 test = false

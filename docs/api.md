@@ -997,6 +997,87 @@ tors.utf16_is_valid(b"h\x00i\x00")  # True
 tors.utf16_is_valid(b"h\x00i")  # False
 ```
 
+## `tors.json_is_valid`
+
+```python
+def json_is_valid(data: bytes | str) -> bool: ...
+```
+
+The RFC 8259 validity gate: `True` exactly when `orjson.loads(data)` would
+succeed — one linear scan over the raw bytes, no object tree, GIL-released.
+Built for the validate-and-discard gate, bytes that are parsed once and
+thrown away: on a 64 KiB list-of-small-dicts document, ~95% of a full
+`orjson.loads` is constructing objects nobody reads, and the scan alone is
+a 4-5x cheaper pass at these sizes (64 KiB ~40 µs, 1 MiB ~0.7 ms; issue
+#61's measured prototype table). The scanner is hand-rolled and iterative —
+no recursion, no heap, an O(1) fixed stack — so pathological inputs cost
+the same linear pass.
+
+**The acceptance set is orjson 3.x's, not the stdlib's** (`json.loads`'s):
+where the two disagree, orjson's reading wins, because the gate stands in
+front of a consumer whose next step IS `orjson.loads`. The documented
+seams, each pinned in tests/test_json_is_valid.py:
+
+- **Float-overflow literals reject**: `1e400`, `-1e400`, `1e309`, `2e308`,
+  `1.7976931348623159e308` raise `JSONDecodeError` in orjson ("number is
+  infinity when parsed as double") where the stdlib hands back `inf`. The
+  scanner computes the literal's f64 value and rejects a non-finite result;
+  underflow (`1e-400` → `0.0`) is finite and accepts. Long-integer literals
+  (20+ digits) ride the same fallback — orjson parses them as doubles — so
+  309 `9`s (9.99e308) reject where 308 accept; ≤ 19 digits always accept.
+  *Caveat*: the decision trusts correctly-rounded parsing (Rust's `f64`
+  parser), so a literal within one rounding step of ±1.8e308 could in
+  principle disagree with orjson's own float parser; a 40,000-case
+  knife-edge sweep plus the 2,666-input differential corpus found zero such
+  disagreements.
+- **NaN / Infinity / -Infinity reject** (no such grammar in RFC 8259; the
+  stdlib accepts them as floats).
+- **A leading UTF-8 BOM rejects** (the stdlib strips it).
+- **Lone `\ud800`-class surrogate escapes reject** — a high surrogate
+  escape must be immediately followed by `\u` + a low surrogate — and so
+  does a UTF-8-*encoded* surrogate (`"\xed\xa0\x80"`); the stdlib builds
+  lone surrogates from both. This is the class that makes a looser
+  validator the unsafe direction for a gate (serde's `IgnoredAny`, #61's
+  rejected alternative, accepted both).
+- **Depth cap 1024** (orjson's): the 1025th open container rejects, objects
+  and arrays counting against one shared cap. It is an answer (`False`),
+  not an exception — a validity gate is a boolean question.
+- Invalid UTF-8 anywhere rejects; raw control characters in strings reject
+  (`\u0000` the escape accepts); trailing garbage, trailing commas, leading
+  zeros, and unterminated strings reject; duplicate keys accept (orjson
+  last-wins).
+
+Booleans only: no invalid input raises — nothing in the scanner has an
+error path. A wrong-TYPE argument (not `bytes`, not `str`) raises
+`TypeError` like the bytes-in surface; `bytearray`/`memoryview` are
+refused with it (a writable buffer mutated by another thread mid-scan
+under the released GIL is a data race, not a semantic difference).
+
+**GIL behavior**: `utf8_is_valid`'s class. A `bytes` argument is a zero-copy
+immutable borrow, the whole scan runs under one `py.detach`, and the `bool`
+return has no marshalling class at all — the borrow alone is the call's
+GIL-held residue, valid and invalid input alike. A `str` argument pays the
+standard str-in borrow first, under the GIL: a zero-copy alias when the
+string is pure ASCII or its UTF-8 view is already cached (repeat calls on
+the same object: O(1) borrow, then the detached scan), a one-time O(input)
+materialization+cache-fill on the first non-ASCII call (encode-parity;
+CPython caches the view on the object, and `encode` reads it but never
+fills it). No aio twin, matching `utf8_is_valid`/`utf16_is_valid`: a
+sub-millisecond scan needs no thread hop (see [Async use](async.md) for the
+size guidance).
+
+```python
+tors.json_is_valid(b'{"a": [1, 2.5, true, null]}')  # True
+tors.json_is_valid(b"1e400")  # False — orjson raises; the stdlib says inf
+tors.json_is_valid(b'"\\ud800"')  # False — lone surrogate escape
+tors.json_is_valid(b"\xef\xbb\xbf{}")  # False — BOM
+```
+
+A `str` argument holding a lone surrogate (a raw one — not the escape text)
+never reaches the scan at all: the str-in borrow cannot materialize its
+UTF-8 view and raises `UnicodeEncodeError`, the standard str-argument
+contract every tors str-in function shares.
+
 ## `tors.detect_encoding`
 
 ```python

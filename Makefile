@@ -162,6 +162,14 @@ gen-html-table:
 # contains_unescaped/find_unescaped core over backslash-dense folded
 # bytes, differential-pinned against a naive parity walk in the target.
 #
+# json_is_valid joined with the RFC 8259 validity scanner (issue #61):
+# raw arbitrary bytes into the hand-rolled iterative parser (no oracle in
+# this crate to differential against — the orjson-facing equality is the
+# Python suite's), pinning "never panics" over the SWAR plain-run skip,
+# the fixed container bitset, and the UTF-8/escape index arithmetic, plus
+# the structural whitespace invariant (trailing JSON whitespace never
+# changes the answer).
+#
 # documents_markdown stays deliberately ABSENT from the run lists: built
 # and committed (fuzz/Cargo.toml [[bin]], the `documents` feature is on
 # in the fuzz crate's tors dep so the surface compiles), but it
@@ -174,7 +182,7 @@ gen-html-table:
 # 2026-09-09: ASan stack-overflow, ~500-frame parse_object/parse_array
 # alternation). It stays committed as the repro harness, joining the run
 # lists when pdf_oxide ships a cap.
-FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph
+FUZZ_TARGETS := decode_utf8 decode_utf16 b64_decode canon html_unescape fence chunk_hierarchical normalize search segmentation diff grounded phonetic bm25 tfidf truncate_ellipsis controls scrub_log_text json_repair gfm_strip unescaped hash minhash random pii pii_escape_grammar chunk_separator_shapes json_schema_graph json_is_valid
 
 fuzz-quick:
 	@for t in $(FUZZ_TARGETS); do \

@@ -92,8 +92,9 @@ __all__: list[str] = []
 # whose cost scales with its input (scrub_log_text: four linear scans + splice under
 # one py.detach), the 12 MiB-document shape this module exists
 # for). Microsecond-scale calls over short strings (the normalization
-# forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans,
-# detect_encoding's guess, the random generators — a block-buffered
+# forms, html_unescape, quote/unquote, the utf8/utf16 validity booleans and
+# json_is_valid (whose 1 MiB ceiling scans sub-millisecond, the
+# utf8_is_valid class), detect_encoding's guess, the random generators — a block-buffered
 # syscall plus sampling/formatting at every realistic token/key size) stay
 # sync-only: the thread
 # hop would cost more than the call itself.

@@ -129,7 +129,7 @@ actually return.
 
 ## What's inside
 
-105 functions plus two small helper classes and six pinned constants (five
+106 functions plus two small helper classes and six pinned constants (five
 charset alphabets and the key-family tuple),
 grouped by what they do; the `documents` extra adds seven document-extraction
 functions and its own helper types. Full signatures, argument contracts, and
@@ -147,6 +147,7 @@ edge cases are in the [API reference](docs/api.md).
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |
 | Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text`, `CompiledPatterns` |
 | Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
+| JSON validity gate (parse-and-discard) | `json_is_valid` |
 | Byte lengths without the encode copy | `utf8_byte_len`, `utf16_byte_len` |
 | Batch charset validation | `first_invalid_charset`, `first_invalid_offender` (the same scan's offender detail — item index, codepoint position, character — for rejection messages), `CHARSET_B62`/`_B64URL`/`_HEX_LOWER`/`_HEX_UPPER`/`_HEX_MIXED` (pinned alphabets that pair with the validator as data) |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |

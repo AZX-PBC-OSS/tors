@@ -198,6 +198,24 @@ def utf16_is_valid(
     raw: bytes, *, byteorder: Literal["native", "little", "big"] = "native"
 ) -> bool: ...
 
+# The RFC 8259 validity gate: True exactly when orjson.loads(data) would
+# succeed -- the acceptance set is orjson 3.x's, not the stdlib's (three
+# classes differ from json.loads: float-overflow literals reject -- 1e400
+# and friends, where the stdlib hands back inf; NaN/Infinity/-Infinity
+# reject; a leading UTF-8 BOM rejects), because the gate stands in front
+# of a parse-and-discard consumer whose next step IS orjson.loads. Booleans
+# only: invalid input answers False (the 1024-container depth cap, orjson's,
+# included) -- nothing raises for invalid input; a wrong-TYPE argument
+# (not bytes, not str) raises TypeError like the bytes-in surface.
+#
+# GIL note: utf8_is_valid's class for a bytes argument (zero-copy borrow,
+# one detached scan, a bool return -- no marshalling class at all); a str
+# argument pays the standard str-in borrow first under the GIL (zero-copy
+# for ASCII or an already-cached UTF-8 view, a one-time O(input)
+# materialization on the first non-ASCII call, cached on the object), then
+# the scan detaches. No aio twin (see docs/async.md).
+def json_is_valid(data: bytes | str) -> bool: ...
+
 # A heuristic guess, not a validator: the intended pipeline is utf8_is_valid
 # first, and detect_encoding only on bytes that already failed that check.
 # Always returns some codec name (WHATWG Encoding Standard labels, e.g.

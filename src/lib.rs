@@ -18,8 +18,9 @@
 //! md5/sha1/sha256/sha512/hmac hashing surface), [`random_impl`]
 //! (the random-generation family: random
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
-//! and [`pii_impl`] (contact-material scrub, the
-//! telemetry-safety port); they are
+//! [`pii_impl`] (contact-material scrub, the
+//! telemetry-safety port), and [`json_valid_impl`] (the RFC 8259
+//! validity gate: orjson's acceptance set, no object tree, #61); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -421,6 +422,7 @@ pub mod html_impl;
 pub mod html_table;
 pub mod json_repair;
 pub mod json_schema_impl;
+pub mod json_valid_impl;
 pub mod merkle_impl;
 pub mod minhash_impl;
 pub mod normalize_impl;
@@ -506,6 +508,7 @@ use py::grounded::*;
 use py::hash::*;
 use py::html::*;
 use py::json_repair::*;
+use py::json_valid::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
 use py::minhash::*;
@@ -613,6 +616,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utf8_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(decode_utf16, m)?)?;
     m.add_function(wrap_pyfunction!(utf16_is_valid, m)?)?;
+    m.add_function(wrap_pyfunction!(json_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(utf8_byte_len, m)?)?;
