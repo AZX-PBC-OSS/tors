@@ -1012,18 +1012,58 @@ fn is_hex_tail_byte(b: u8) -> bool {
     TAIL_CLASS[b as usize] & 0b10 != 0
 }
 
+/// The run of backslashes ending just before `at` (never crossing the
+/// string start): `bytes[at - 1]`, `bytes[at - 2]`, ... while `\\`. The
+/// odd-backslash discipline reads this run: an ODD run leaves the last
+/// backslash unescaped (it escapes what follows), an EVEN run escapes
+/// itself and what follows is literal.
+#[inline]
+fn backslash_run_before(bytes: &[u8], at: usize) -> usize {
+    let mut run = 0usize;
+    while run < at && bytes[at - 1 - run] == b'\\' {
+        run += 1;
+    }
+    run
+}
+
 /// Whether the key-charset byte at `pos - 1` is the LAST byte of a
-/// complete escape sequence: `%XX`, `\uXXXX`, or `\X` (a
-/// backslash-escaped char, odd-backslash counted, so an escaped
-/// backslash stays a literal and keeps its neighbor mid-token). Escaped
-/// text is a CLEAN boundary for the family scan: logs carry keys inside
-/// JSON strings (`\n`), .NET spellings (`\u0027`), and URL encodings
-/// (`%3D`), and the escape's tail letter or digit is formatting
-/// material, not the word a key head would be glued to; the head after
-/// it starts fresh. Token digests can never alias this (hex carries no
-/// `\` or `%`), so the token-adjacency cut is untouched, and a partial
-/// escape (`%3` + a key head, or `%3g`) is not a boundary: the grammar
-/// needs the complete sequence.
+/// complete escape sequence. This is the scanner's whole escape grammar,
+/// one spelling per arm — the contract any new spelling joins as a row:
+///
+/// | spelling | shape | boundary when |
+/// |---|---|---|
+/// | `%XX` | `%` + two hex digits | always (the `%` cannot be escaped) |
+/// | `\uXXXX` | `\` `u` + four hex digits | the `u` is position-pinned; see the wart below |
+/// | `\xHH` | `\` `x` + two hex digits | the backslash run before the `x` is ODD |
+/// | `\NNN` | `\` + 1-3 OCTAL digits, maximal munch | the digit run ends exactly here and the backslash run before it is ODD |
+/// | `\X` | any byte after an ODD backslash run | the run directly before the final byte is ODD |
+///
+/// Escaped text is a CLEAN boundary for the family scan: logs carry keys
+/// inside JSON strings (`\n`), .NET spellings (`\u0027`), URL encodings
+/// (`%3D`), C byte-repr spellings (`\x1f`), octal spellings (git's
+/// quoted-path `\346…` output), and escaped one-off characters, and the
+/// escape's tail letter or digit is formatting material, not the word a
+/// key head would be glued to; the head after it starts fresh. Token
+/// digests can never alias this (hex carries no `\` or `%`), so the
+/// token-adjacency cut is untouched, and a PARTIAL escape (`%3` + a key
+/// head, `%3g`, `\x4` + a key head) is not a boundary: the grammar needs
+/// the complete sequence.
+///
+/// The odd-backslash discipline: a backslash that is itself escaped is
+/// a literal, so every backslash-led arm requires the pinned backslash
+/// unescaped — the run of backslashes immediately before the spelling's
+/// first letter/digit must be ODD (`\\x41` is an escaped backslash +
+/// the literal `x41`; its trailing digit is a literal mid-token byte,
+/// never a boundary, and the same holds for `\\101`). The `\uXXXX` arm
+/// is the one arm WITHOUT that recount: it pins the backslash at a fixed
+/// offset and does not check what precedes it, so an escaped backslash
+/// directly before a literal `\uXXXX` spelling (`\\u0027`) reads as an
+/// escape — an over-trigger, the safe direction (over-redaction only;
+/// the head it admits is behind literal text), pinned as the released
+/// behavior rather than silently "fixed" into a grammar change. Maximal
+/// munch for `\NNN`: the escape consumes up to three octal digits, so a
+/// fourth (`\1234`) leaves the last digit a literal continuation and
+/// mid-token.
 #[inline]
 fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // The tail byte's class gates the whole analysis before any
@@ -1035,7 +1075,7 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // further.
     let tail = bytes[pos - 1];
     if !is_hex_tail_byte(tail) {
-        return pos >= 2 && bytes[pos - 2] == b'\\' && odd_backslashes_before(bytes, pos);
+        return pos >= 2 && backslash_run_before(bytes, pos - 1) % 2 == 1;
     }
     // %XX: the percent sign plus two hex digits, the second being the
     // tail itself.
@@ -1043,7 +1083,8 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
         return true;
     }
     // \uXXXX: the backslash, the `u`, and four hex digits (the tail is
-    // the fourth, already proven hex by the gate).
+    // the fourth, already proven hex by the gate). No odd-backslash
+    // recount — the documented over-trigger above.
     if pos >= 6
         && bytes[pos - 6] == b'\\'
         && bytes[pos - 5] == b'u'
@@ -1053,22 +1094,42 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     {
         return true;
     }
-    // \X: any tail class can follow a backslash, so the hex tail falls
-    // through to the run count here.
-    odd_backslashes_before(bytes, pos)
-}
-
-/// The \X shape's run count: an ODD run of backslashes directly before
-/// the final byte (an even run escapes itself, leaving the neighbor a
-/// literal). Reached only when a backslash actually sits at `pos - 2`,
-/// so the loop runs exactly once per real escape and never on prose.
-#[inline]
-fn odd_backslashes_before(bytes: &[u8], pos: usize) -> bool {
-    let mut slashes = 0usize;
-    while slashes + 2 <= pos && bytes[pos - 2 - slashes] == b'\\' {
-        slashes += 1;
+    // \xHH: the backslash, the `x`, and two hex digits — the pinned
+    // backslash itself unescaped (an ODD run of backslashes directly
+    // before the `x`; `\\x41` is a literal `x41` after an escaped
+    // backslash).
+    if pos >= 4
+        && bytes[pos - 4] == b'\\'
+        && bytes[pos - 3] == b'x'
+        && bytes[pos - 2].is_ascii_hexdigit()
+        && bytes[pos - 1].is_ascii_hexdigit()
+        && backslash_run_before(bytes, pos - 3) % 2 == 1
+    {
+        return true;
     }
-    slashes % 2 == 1
+    // \NNN: the backslash plus one to three octal digits, maximal
+    // munch — the digit run ending at `pos` must be wholly inside the
+    // escape (a fourth digit is a literal continuation: `\1234` is
+    // escape `\123` + literal `4`, the `4` mid-token), and the pinned
+    // backslash itself unescaped (`\\101` is a literal `101`). The
+    // octal digits sit inside the hex tail class, so the gate lets the
+    // arm run.
+    let mut digits = 0usize;
+    while digits < pos && matches!(bytes[pos - 1 - digits], b'0'..=b'7') {
+        digits += 1;
+    }
+    if (1..=3).contains(&digits)
+        && digits < pos
+        && bytes[pos - 1 - digits] == b'\\'
+        && backslash_run_before(bytes, pos - digits) % 2 == 1
+    {
+        return true;
+    }
+    // \X: any tail class can follow a backslash, so the hex tail falls
+    // through to the run count here — an ODD run of backslashes
+    // directly before the final byte (an even run escapes itself,
+    // leaving the neighbor a literal).
+    backslash_run_before(bytes, pos - 1) % 2 == 1
 }
 
 /// The tail alphabet a family consumes maximally. Most families share
@@ -1118,7 +1179,11 @@ fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
 /// evidence-backed closed set, the leaked-credential shapes the
 /// consumers evidenced; Slack `xox` and Stripe stay deliberately absent
 /// (zero evidence), and growing the set is a new-evidence decision,
-/// never a drive-by. The
+/// never a drive-by. The GitLab rows are one such evidence pass, taken
+/// whole: the token-prefix set of GitLab's documented token overview
+/// (docs.gitlab.com/security/tokens), one row per prefix over the same
+/// conservative 20-char shared tail — a sibling prefix lands as a table
+/// row, never a reopened ticket. The
 /// JWT and PEM families live outside this table (their grammars are
 /// marker/span shapes, not prefix-plus-tail), tried after it on their
 /// disjoint head bytes (`B`/`-`, which no table prefix starts with).
@@ -1128,6 +1193,16 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     // mutually exclusive literals at the same length).
     (b"github_pat_", KeyFamily::GitHub, 22, KeyTailClass::Shared),
     (b"glpat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glagent-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glsoat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glrtr-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glcbt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glptt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glimt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"gloas-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glft-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"gldt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glrt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"gho_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghu_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
@@ -1417,6 +1492,31 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
     ends
 }
 
+/// Whether `pos` opens the PEM BEGIN marker head (`-----BEGIN `)
+/// directly after a dash run — the boundary-rule carve-out for PEM
+/// blocks glued to a preceding block's END marker: `-` is a key-tail
+/// byte, so every dash of a preceding block's `-----END …-----` close
+/// reads as mid-token material and the next block's head glued to that
+/// run never scans (`END CERTIFICATE----------BEGIN …`: the whole RSA
+/// key survives). The head's own dash run is armor, not a word's
+/// fragment — PEM is the only family anchoring on `-` — and the block
+/// grammar self-validates (both markers, same words), so a dash
+/// immediately before the head is a CLEAN boundary, the same
+/// formatting-material reasoning as `escape_ends_before`, one byte
+/// class over. The line this draws (pinned): the head must open after
+/// a dash of its own beyond any shared run — a BEGIN whose dash run is
+/// entirely the previous close's (`KEY-----BEGIN`, a letter directly
+/// before the head) stays mid-token, as does any run too short to
+/// spell the head at all. Only BEGIN is carved: the END half never
+/// anchors the walk (`pem_end_index` sweeps every dash
+/// boundary-rule-free), and a real key tail directly before
+/// `-----BEGIN` keeps its own maximal-run match (the tail charset
+/// includes `-`, so the key match swallows the glue and the head).
+#[inline]
+fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
+    bytes[pos - 1] == b'-' && bytes[pos..].starts_with(b"-----BEGIN ")
+}
+
 /// The keys pass: every leftmost match of a family grammar becomes
 /// `<family prefix>~<digest>` — the prefix VERBATIM (the non-secret half
 /// that tells the operator WHICH credential to rotate: `sk-` vs
@@ -1429,8 +1529,11 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 /// reasoning as the phone rule's clean-boundary cut, and it is what
 /// keeps a second key glued to a token's digest hex from firing),
 /// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-/// `\X`; see `escape_ends_before`), whose tail byte is formatting
-/// material and the head after it a fresh start. The check sits
+/// `\xHH`, `\NNN`, `\X`; see `escape_ends_before`), whose tail byte is
+/// formatting material and the head after it a fresh start, OR the
+/// position opens a PEM BEGIN head after a dash run (see
+/// `pem_head_after_dash_run`: the previous block's close armor is not
+/// a word). The check sits
 /// ahead of the grammar tries because it is the cheap arm (one table
 /// load, one more on a non-hex tail) while the tries are a handful of
 /// prefix compares: prose and dash runs are anchor-dense and
@@ -1515,17 +1618,25 @@ fn keys_pass_impl<'a>(
         // fragment, the same reasoning as the phone rule's
         // clean-boundary cut, and it is what keeps a second key glued
         // to a token's digest hex from firing), UNLESS that char ends
-        // a complete escape sequence (`%XX`, `\uXXXX`, `\X`; see
-        // `escape_ends_before`), whose tail byte is formatting
-        // material and the head after it a fresh start. Checked here,
+        // a complete escape sequence (`%XX`, `\uXXXX`, `\xHH`, `\NNN`,
+        // `\X`; see `escape_ends_before`), whose tail byte is formatting
+        // material and the head after it a fresh start, OR the position
+        // opens a PEM BEGIN head after a dash run (see
+        // `pem_head_after_dash_run`: the previous block's close armor is
+        // not a word). Checked here,
         // ahead of the family walk, because the walk is the expensive
         // arm (a handful of prefix compares) and the boundary check is
         // one table load plus, on a non-hex tail, one more: prose and
         // dash runs are anchor-dense and candidate-poor, so gating the
         // walk on the cheap check is the shape that keeps them linear.
-        if pos > 0 && is_key_tail_byte(bytes[pos - 1]) && !escape_ends_before(bytes, pos) {
+        if pos > 0
+            && is_key_tail_byte(bytes[pos - 1])
+            && !escape_ends_before(bytes, pos)
+            && !pem_head_after_dash_run(bytes, pos)
+        {
             pos += 1; // a mid-token prefix: the boundary rule (an escape
-            // sequence's tail byte is formatting, not a word)
+            // sequence's tail byte is formatting, not a word; a PEM head
+            // after a dash run is armor, not one either)
             continue;
         }
         // (family, verbatim prefix length in the token, match end). The

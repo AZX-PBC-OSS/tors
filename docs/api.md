@@ -249,7 +249,7 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
   | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
   | GitHub | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
-  | GitLab | `glpat-` + tail{20,} | verbatim |
+  | GitLab | `glpat-` / `glagent-` / `glsoat-` / `glrtr-` / `glcbt-` / `glptt-` / `glimt-` / `gloas-` / `glft-` / `gldt-` / `glrt-` + tail{20,} (the token-prefix set of GitLab's documented token overview) | verbatim |
   | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
   | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
@@ -283,13 +283,22 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   real text a key glued to a word is that word's fragment), and it is
   what keeps a second key glued to a token's digest hex from firing,
   UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-  `\X`): logs carry keys inside JSON strings (`\n`), .NET spellings
-  (`\u0027`), and URL encodings (`%3D`), and the escape's tail
-  letter/digit is formatting material, not the word a key head would be
-  glued to. The sequence must be COMPLETE and DIRECTLY before the head:
-  a doubled backslash escapes itself (the neighbor stays a literal, the
-  head stays mid-token), and a percent sign without two hex digits is
-  prose. (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
+  `\xHH`, `\NNN` octal, `\X`): logs carry keys inside JSON strings
+  (`\n`), .NET spellings (`\u0027`), URL encodings (`%3D`), C byte
+  reprs (`\x1f`), and octal spellings (git's quoted-path `\346…`
+  output), and the escape's tail letter/digit is formatting material,
+  not the word a key head would be glued to. The sequence must be
+  COMPLETE and DIRECTLY before the head: a doubled backslash escapes
+  itself (the neighbor stays a literal, the head stays mid-token —
+  `\xHH` and `\NNN` recount their backslash run; `\uXXXX` does not,
+  the one released over-trigger), a percent sign without two hex
+  digits is prose, a one-digit `\x4` is prose, and octal munch is
+  maximal (`\1234` is escape `\123` + a literal `4`). A `-----BEGIN `
+  head directly after a DASH RUN is likewise a clean boundary — a
+  preceding block's `-----END …-----` close is armor, not a word (the
+  head must open after a dash of its own: `KEY-----BEGIN`, the close's
+  dashes doing double duty, stays mid-token). (3) The tail run is
+  MAXIMAL, dots included nowhere: `sk-….x.co`
   scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
   inside its own marker-scoped shape; the `ya29.` dot is prefix, not
   tail — see the table). The digest is of the FULL match

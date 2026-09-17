@@ -44,16 +44,19 @@ telemetry-safety module, pinned byte-identical to it at ``salt=""``):
   OpenAI ``sk-``/``sk-proj-``/``sk-svcacct-``, Anthropic ``sk-ant-``,
   Google ``AIza``, Fireworks ``fw-``/``fw_``, Modal ``ak-``/``wk-``,
   GitHub ``ghp_``/``gho_``/``ghu_``/``ghs_``/``ghr_``/``github_pat_``,
-  GitLab ``glpat-``, the minted ``azxdev_``/``wd-``/``w-``/
+  GitLab's documented token-prefix set (``glpat-``/``glagent-``/
+  ``glsoat-``/``glrtr-``/``glcbt-``/``glptt-``/``glimt-``/``gloas-``/
+  ``glft-``/``gldt-``/``glrt-``), the minted ``azxdev_``/``wd-``/``w-``/
   ``cn-`` shapes, and marker-scoped ``Bearer`` JWTs (a bare ``eyJ`` never
   matches: one consumer's API legitimately carries eyJ-shaped non-secret
   cursors) — each a literal prefix plus a minimal ``[A-Za-z0-9_-]`` tail
   consumed maximally, tried longest-prefix-first with fall-through, and
   never firing mid-token (a prefix glued to a preceding key-charset char
   is that token's fragment, the ``xak-...`` cut), UNLESS that char ends
-  a complete escape sequence (``%XX``, ``\\uXXXX``, ``\\X``): logs carry
-  keys inside JSON strings, .NET spellings, and URL encodings, and the
-  escape's tail byte is formatting material, not a word.
+  a complete escape sequence (``%XX``, ``\\uXXXX``, ``\\xHH``, ``\\NNN``
+  octal, ``\\X``): logs carry keys inside JSON strings, .NET spellings,
+  URL encodings, C byte-repr and octal spellings, and the escape's tail
+  byte is formatting material, not a word.
 - the rules contract: ``None`` = every rule in the canonical order
   (api_keys FIRST — a key's tail can spell a dash-separated domestic
   phone run and its local part an email, so the key pass must eat the
@@ -205,6 +208,16 @@ _PREFIX_FAMILY = {
     "ghs_": "github",
     "ghr_": "github",
     "glpat-": "gitlab",
+    "glagent-": "gitlab",
+    "glsoat-": "gitlab",
+    "glrtr-": "gitlab",
+    "glcbt-": "gitlab",
+    "glptt-": "gitlab",
+    "glimt-": "gitlab",
+    "gloas-": "gitlab",
+    "glft-": "gitlab",
+    "gldt-": "gitlab",
+    "glrt-": "gitlab",
     "github_pat_": "github",
     "azxdev_": "minted",
     "wd-": "minted",
@@ -251,6 +264,16 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     ("ghs_" + _key_tail(36), "ghs_"),
     ("ghr_" + _key_tail(36), "ghr_"),
     ("glpat-" + _key_tail(20), "glpat-"),
+    ("glagent-" + _key_tail(20), "glagent-"),
+    ("glsoat-" + _key_tail(20), "glsoat-"),
+    ("glrtr-" + _key_tail(20), "glrtr-"),
+    ("glcbt-" + _key_tail(20), "glcbt-"),
+    ("glptt-" + _key_tail(20), "glptt-"),
+    ("glimt-" + _key_tail(20), "glimt-"),
+    ("gloas-" + _key_tail(20), "gloas-"),
+    ("glft-" + _key_tail(20), "glft-"),
+    ("gldt-" + _key_tail(20), "gldt-"),
+    ("glrt-" + _key_tail(20), "glrt-"),
     ("github_pat_" + _key_tail(22), "github_pat_"),
     ("azxdev_" + _key_tail(20), "azxdev_"),
     ("wd-" + _key_tail(43), "wd-"),
@@ -1251,18 +1274,21 @@ class TestApiKeyZoo:
 
 class TestKeysAfterEscapeSequences:
     """The boundary rule's escape exception: a family head directly
-    after a COMPLETE escape sequence (``%XX``, ``\\uXXXX``, ``\\X``)
-    is a clean boundary and scrubs, because the escape's tail
-    letter/digit is key-charset material but formatting, not the word a
-    key head would be glued to. That is the shape logs actually arrive
-    in: JSON strings escape the newline (``\\n``), .NET spellings escape
-    quotes (``\\u0027``), URLs percent-encode the ``=`` (``%3D``), and a
-    head classified mid-token there is a silent under-redaction: the
-    failure mode this scrubber exists to prevent. The exception is
-    exactly as narrow as its cause: the sequence must be complete and
-    directly before the head, an escaped backslash stays a literal
-    (odd-backslash count), and token digests (hex, no ``\\`` or
-    ``%``) keep their mid-token cut."""
+    after a COMPLETE escape sequence (``%XX``, ``\\uXXXX``, ``\\xHH``,
+    ``\\NNN`` octal, ``\\X``) is a clean boundary and scrubs, because
+    the escape's tail letter/digit is key-charset material but
+    formatting, not the word a key head would be glued to. That is the
+    shape logs actually arrive in: JSON strings escape the newline
+    (``\\n``), .NET spellings escape quotes (``\\u0027``), URLs
+    percent-encode the ``=`` (``%3D``), C byte reprs spell control
+    bytes (``\\x1f``), and git quotes non-ASCII paths in octal
+    (``\\346…``) — and a head classified mid-token there is a silent
+    under-redaction: the failure mode this scrubber exists to prevent.
+    The exception is exactly as narrow as its cause: the sequence must
+    be complete and directly before the head, an escaped backslash
+    stays a literal (odd-backslash count on every backslash-led arm
+    but ``\\uXXXX`` — see the pinned wart below), and token digests
+    (hex, no ``\\`` or ``%``) keep their mid-token cut."""
 
     @pytest.mark.parametrize(
         ("escape", "key", "prefix"),
@@ -1270,13 +1296,32 @@ class TestKeysAfterEscapeSequences:
             ("\\n", "sk-proj-" + _key_tail(24), "sk-proj-"),
             ("\\u0027", "sk-ant-api03-" + _key_tail(40), "sk-ant-"),
             ("%3D", "AIza" + _key_tail(35), "AIza"),
+            ("\\x1f", "sk-proj-" + _key_tail(24), "sk-proj-"),
+            ("\\x0a", "sk-ant-api03-" + _key_tail(40), "sk-ant-"),
+            ("\\x20", "glpat-" + _key_tail(20), "glpat-"),
+            ("\\101", "sk-proj-" + _key_tail(24), "sk-proj-"),
+            ("\\12", "sk-proj-" + _key_tail(24), "sk-proj-"),
             ("\\n", "gho_" + _key_tail(36), "gho_"),
             ("\\n", "ghu_" + _key_tail(36), "ghu_"),
             ("\\n", "ghs_" + _key_tail(36), "ghs_"),
             ("\\n", "ghr_" + _key_tail(36), "ghr_"),
             ("%2F", "glpat-" + _key_tail(20), "glpat-"),
         ],
-        ids=["json-newline", "dotnet-quote", "url-equals", "gho", "ghu", "ghs", "ghr", "glpat"],
+        ids=[
+            "json-newline",
+            "dotnet-quote",
+            "url-equals",
+            "c-byte-repr",
+            "c-byte-repr-newline",
+            "c-byte-repr-space",
+            "octal-three-digit",
+            "octal-two-digit",
+            "gho",
+            "ghu",
+            "ghs",
+            "ghr",
+            "glpat",
+        ],
     )
     def test_a_key_after_a_complete_escape_still_scrubs(
         self, escape: str, key: str, prefix: str
@@ -1313,6 +1358,57 @@ class TestKeysAfterEscapeSequences:
         key = "sk-proj-" + _key_tail(24)
         text = f"err:\\\\n{key}"
         assert scrub_pii(text, salt="") is text
+
+    def test_an_escaped_backslash_before_xHH_stays_mid_token(self) -> None:
+        # `\\x41` is an escaped backslash followed by the LITERAL x41:
+        # the `\xHH` arm recounts backslashes (the run before the `x`
+        # must be ODD), the trailing digit stays a literal mid-token
+        # byte, and the key glued after it is preserved whole. The
+        # negative the naive backslash+x+hex check fails.
+        key = "sk-proj-" + _key_tail(24)
+        text = f"err:\\\\x41{key}"
+        assert scrub_pii(text, salt="") is text
+
+    def test_an_escaped_backslash_before_octal_stays_mid_token(self) -> None:
+        # `\\101` is an escaped backslash followed by the LITERAL 101:
+        # the `\NNN` arm recounts backslashes the same way, the trailing
+        # digit stays mid-token, the key after it preserved whole.
+        key = "sk-proj-" + _key_tail(24)
+        text = f"err:\\\\101{key}"
+        assert scrub_pii(text, salt="") is text
+
+    def test_a_partial_xHH_escape_stays_mid_token(self) -> None:
+        # The exception opens on a COMPLETE sequence: `\x4` + a key head
+        # is one hex digit short of `\xHH`, the digit is a literal
+        # mid-token byte, the key preserved whole.
+        key = "sk-proj-" + _key_tail(24)
+        text = f"err:\\x4{key}"
+        assert scrub_pii(text, salt="") is text
+
+    def test_octal_maximal_munch_keeps_a_fourth_digit_mid_token(self) -> None:
+        # The octal arm's munch is maximal: `\1234` is escape `\123` +
+        # a LITERAL 4, the fourth digit a mid-token byte, the key glued
+        # after it preserved whole — while the same escape without the
+        # fourth digit is a boundary.
+        key = "sk-proj-" + _key_tail(24)
+        four = f"err:\\1234{key}"
+        assert scrub_pii(four, salt="") is four
+        assert scrub_pii(f"err:\\123{key}", salt="") == (
+            f"err:\\123{_key_token('sk-proj-', key)}"
+        )
+
+    def test_the_u_arm_position_pins_without_recounting(self) -> None:
+        # The documented wart, pinned as the released behavior: the
+        # `\uXXXX` arm pins its backslash at a fixed offset and does not
+        # recount what precedes it, so `\\u0027` (an escaped backslash +
+        # the LITERAL u0027) reads as a complete escape and the key
+        # after it redacts — an over-trigger, the safe direction
+        # (over-redaction only). The backslash-led arms added since
+        # (`\xHH`, `\NNN`) DO recount; this pin is the asymmetric
+        # spelling kept honest, not a license to widen.
+        key = "sk-proj-" + _key_tail(24)
+        glued = f"err:\\\\u0027{key}"
+        assert scrub_pii(glued, salt="") == f"err:\\\\u0027{_key_token('sk-proj-', key)}"
 
     def test_a_partial_or_distant_escape_stays_mid_token(self) -> None:
         # The exception opens on a COMPLETE escape DIRECTLY before the
@@ -1363,6 +1459,253 @@ class TestKeysAfterEscapeSequences:
         assert rep["spans"] == [
             {"type": "api_keys:openai", "start": 6, "end": 6 + len(key)}
         ]
+
+
+class TestGitlabDocumentedPrefixSet:
+    """The GitLab rows as one evidence pass: the token-prefix set of
+    GitLab's documented token overview (docs.gitlab.com/security/tokens)
+    — ``glpat-``, ``glagent-``, ``glsoat-``, ``glrtr-``, ``glcbt-``,
+    ``glptt-``, ``glimt-``, ``gloas-``, ``glft-``, ``gldt-``, ``glrt-``
+    — one row per prefix over the same conservative 20-char shared tail,
+    so a sibling prefix is a table row, never a reopened ticket. The
+    red-team matrix below embeds every prefix in the exact shapes that
+    hid the set: behind each escape spelling, and glued to ``-`` and
+    ``_`` runs on both the tail side (one maximal match) and the head
+    side (the documented mid-token cut)."""
+
+    def _key(self, prefix: str) -> str:
+        return prefix + _key_tail(20)
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "glpat-",
+            "glagent-",
+            "glsoat-",
+            "glrtr-",
+            "glcbt-",
+            "glptt-",
+            "glimt-",
+            "gloas-",
+            "glft-",
+            "gldt-",
+            "glrt-",
+        ],
+    )
+    def test_every_documented_gitlab_prefix_redacts(self, prefix: str) -> None:
+        # Bare in prose: the head fires after a space (and after
+        # punctuation — `=` is the log-assignment shape), token with the
+        # verbatim prefix, digest over the full key.
+        key = self._key(prefix)
+        assert scrub_pii(f"token {key}", salt="") == f"token {_key_token(prefix, key)}"
+        assert scrub_pii(f"token={key}", salt="") == f"token={_key_token(prefix, key)}"
+        # The gitlab-only selection scrubs the same way.
+        assert scrub_pii(key, ["api_keys"], families=["gitlab"], salt="") == (
+            _key_token(prefix, key)
+        )
+
+    @pytest.mark.parametrize(
+        "escape",
+        ["%2F", "\\u0027", "\\x1f", "\\n", "\\"],
+        ids=["pct", "dotnet", "c-byte-repr", "json-newline", "backslash-literal"],
+    )
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "glrt-",
+            "glrtr-",
+            "glcbt-",
+            "gldt-",
+            "glsoat-",
+            "glptt-",
+            "glft-",
+            "glimt-",
+            "glagent-",
+            "gloas-",
+        ],
+    )
+    def test_every_gitlab_prefix_after_every_escape_spelling(
+        self, prefix: str, escape: str
+    ) -> None:
+        # The shapes that hid the set: a runner/job/deploy token behind
+        # an escaped newline, a percent-encoded separator, a C byte
+        # repr, a .NET quote escape — each a complete sequence directly
+        # before the head, each a clean boundary.
+        key = self._key(prefix)
+        assert scrub_pii(f"err:{escape}{key}", salt="") == (
+            f"err:{escape}{_key_token(prefix, key)}"
+        )
+
+    @pytest.mark.parametrize("glue", ["---", "___", "-----"])
+    @pytest.mark.parametrize(
+        "prefix",
+        ["glrt-", "glrtr-", "glcbt-", "gldt-", "glsoat-", "glft-", "glagent-"],
+    )
+    def test_a_gitlab_tail_swallows_glued_dash_and_underscore_runs(
+        self, prefix: str, glue: str
+    ) -> None:
+        # Tail-side glue: `-` and `_` are tail-charset bytes, so a run
+        # glued to the tail is one maximal match, over-redaction in the
+        # safe direction.
+        key = self._key(prefix)
+        assert scrub_pii(key + glue, salt="") == _key_token(prefix, key + glue)
+
+    @pytest.mark.parametrize("glue", ["-", "__", "-------"])
+    @pytest.mark.parametrize(
+        "prefix",
+        ["glrt-", "glrtr-", "glcbt-", "gldt-", "glsoat-", "glft-", "glagent-"],
+    )
+    def test_a_gitlab_head_glued_to_a_run_is_mid_token(
+        self, prefix: str, glue: str
+    ) -> None:
+        # Head-side glue: a prefix glued to a preceding `-`/`_` run is
+        # that token's fragment (the `xak-` cut) — preserved whole,
+        # identity object. The cut is why the set hid: the same rule
+        # that keeps `xak-` quiet kept every `gl…` sibling quiet behind
+        # a dash it was glued to.
+        key = self._key(prefix)
+        text = glue + key
+        assert scrub_pii(text, salt="") is text
+
+
+class TestPemGluedToAPrecedingEndMarker:
+    """The PEM boundary carve-out: `-` is a key-tail byte, so a block's
+    `-----END …-----` close is a dash run of mid-token material, and a
+    second block's `-----BEGIN ` head glued to that run never scanned —
+    the cert-then-key bundle with the newline squeezed out is the
+    realistic shape, and the whole second key survived. A dash run
+    directly before the BEGIN head is now a CLEAN boundary (the head's
+    own dash run is armor, not a word's fragment, and the block grammar
+    self-validates: both markers, same words). The line the run logic
+    draws, pinned exactly below: the head must open after a dash of its
+    own beyond any shared run — a BEGIN whose dash run is entirely the
+    previous close's (`KEY-----BEGIN`, a letter directly before the
+    head) stays mid-token, as does any run too short to spell the head;
+    the END half never anchors the walk (the END index sweeps every
+    dash boundary-rule-free); and a real key tail directly before
+    `-----BEGIN` keeps its own maximal-run match."""
+
+    def _rsa_block(self, body: str = "MIIEowIBAAKCAQEA") -> str:
+        return (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            + body
+            + "\n-----END RSA PRIVATE KEY-----"
+        )
+
+    def test_the_reported_cert_then_key_bundle_redacts(self) -> None:
+        # The defect's exact repro: a certificate block's END marker
+        # with the newline squeezed out against the next BEGIN — the
+        # close's five dashes and the RSA block's own five opening
+        # dashes are the one ten-dash run the repro spells. The
+        # certificate is not itself a family match (the label grammar
+        # names PRIVATE KEY); the RSA block glued to that run now scans
+        # and redacts whole, its head opening after the run's sixth
+        # dash.
+        glued = "-----END CERTIFICATE" + "-" * 5 + self._rsa_block()
+        head = len("-----END CERTIFICATE-----")
+        assert scrub_pii(glued, salt="") == glued[:head] + _key_token("PEM", glued[head:])
+
+    @pytest.mark.parametrize("n", [1, 2, 5, 20], ids=["one", "two", "five", "twenty"])
+    def test_glued_dash_runs_of_varying_length_redact(self, n: int) -> None:
+        # The carve-out is on the dash directly before the head, not on
+        # a fixed run length: any run the head can open inside (the
+        # block's own five dashes plus one more) is armor.
+        glued = "-----END CERTIFICATE" + "-" * n + self._rsa_block()
+        head = len("-----END CERTIFICATE" + "-" * n)
+        assert scrub_pii(glued, salt="") == glued[:head] + _key_token("PEM", glued[head:])
+
+    def test_a_key_then_key_bundle_redacts_both_blocks(self) -> None:
+        # Two private keys glued close-to-open: the first block's close
+        # dashes are the second head's armor — both redact, each its
+        # own token.
+        second = self._rsa_block("qY4sLk2MnOpQrStUvW")
+        glued = _RSA_PEM + second
+        assert scrub_pii(glued, salt="") == (
+            _key_token("PEM", _RSA_PEM) + _key_token("PEM", second)
+        )
+
+    def test_a_begin_sharing_the_close_dash_run_stays_mid_token(self) -> None:
+        # The line, pinned: `…PRIVATE KEY-----BEGIN …` — the second
+        # BEGIN's dash run is entirely the previous close's (a letter
+        # directly before the head), so no dash run precedes the head
+        # and the carve-out does not open. The certificate's own END
+        # parse fails on the glued BEGIN the same way, so the input is
+        # the identity — the scanner does not backtrack a spent dash
+        # run. (Reported as the shared-close gap, deliberately unfixed
+        # beyond the carve-out.)
+        glued = (
+            "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----"
+            + "BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
+        assert scrub_pii(glued, salt="") is glued
+
+    def test_a_run_shorter_than_the_head_never_opens(self) -> None:
+        # Four dashes between the words: no `-----BEGIN ` head exists,
+        # so there is nothing to carve — the input is the identity.
+        glued = (
+            "-----END CERTIFICATE----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
+        assert scrub_pii(glued, salt="") is glued
+
+    def test_a_wordless_end_literal_still_carves_the_next_head(self) -> None:
+        # `-----END-----` + a block: the wordless END literal is no
+        # first block, but its close is still a dash run, and the next
+        # head opens after a dash of its own — the carve-out opens.
+        block = self._rsa_block()
+        glued = "-----END-----" + block
+        assert scrub_pii(glued, salt="") == (
+            "-----END-----" + _key_token("PEM", block)
+        )
+
+    def test_a_begin_head_directly_after_the_end_word_stays_mid_token(self) -> None:
+        # The line, one dash shorter: `-----END-----BEGIN …` — the head
+        # opens after the `D` (the head's five dashes are all the run
+        # there is), no dash precedes it, the carve-out does not open,
+        # and nothing redacts. The scanner does not backtrack a dash
+        # run to manufacture a head.
+        glued = (
+            "-----END-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
+        assert scrub_pii(glued, salt="") is glued
+
+    @pytest.mark.parametrize(
+        ("escape", "escape_id"),
+        [("%0A", "pct"), ("\\x0a", "c-byte-repr"), ("\\n", "json-newline")],
+    )
+    def test_a_pem_head_after_an_escape_then_a_dash_run_redacts(
+        self, escape: str, escape_id: str
+    ) -> None:
+        # Fix-on-fix interaction: the escape spellings and the dash-run
+        # carve-out compose — an escaped newline, then the glued close,
+        # then the head. The escape arms open the first dash; the
+        # carve-out opens the head.
+        glued = f"err:{escape}-----END CERTIFICATE" + "-" * 5 + self._rsa_block()
+        head = len(f"err:{escape}-----END CERTIFICATE-----")
+        assert scrub_pii(glued, salt="") == glued[:head] + _key_token("PEM", glued[head:])
+
+    def test_a_pem_head_directly_after_an_escape_redacts(self) -> None:
+        # The escape arm alone (no dash run): a block head directly
+        # behind a complete `\xHH` sequence is a clean boundary.
+        block = self._rsa_block()
+        text = f"err:\\x0a{block}"
+        assert scrub_pii(text, salt="") == f"err:\\x0a{_key_token('PEM', block)}"
+
+    def test_a_real_key_tail_before_the_begin_head_is_one_maximal_match(self) -> None:
+        # The negative: a real key tail directly before `-----BEGIN`.
+        # The tail charset includes `-`, so the key's maximal run
+        # swallows the glue (the close's five dashes and the block's
+        # own five) and the head word — the key redacts ITSELF (one
+        # match, over-redaction in the safe direction), and no PEM
+        # carve-out can resurrect a head the run already ate.
+        key = "sk-" + _key_tail(48)
+        glued = key + "-" * 5 + self._rsa_block()
+        match = key + "-" * 10 + "BEGIN"
+        assert scrub_pii(glued, salt="") == (
+            _key_token("sk-", match)
+            + " RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
 
 
 class TestKeyFamiliesContract:
@@ -1619,7 +1962,19 @@ def _family_token_prefix(family: str, matched: str) -> str:
         "fireworks": ("fw-", "fw_"),
         "modal": ("ak-", "wk-"),
         "github": ("github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
-        "gitlab": ("glpat-",),
+        "gitlab": (
+            "glpat-",
+            "glagent-",
+            "glsoat-",
+            "glrtr-",
+            "glcbt-",
+            "glptt-",
+            "glimt-",
+            "gloas-",
+            "glft-",
+            "gldt-",
+            "glrt-",
+        ),
         "minted": ("azxdev_", "wd-", "w-", "cn-"),
         "jwt": ("Bearer",),
         "aws": (),

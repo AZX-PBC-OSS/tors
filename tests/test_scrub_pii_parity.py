@@ -290,8 +290,10 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
 # the family's own charset (the shared [A-Za-z0-9_-] for most, [0-9A-Z]
 # for the AWS pair, [A-Za-z0-9+/=] for the Azure marker), the
 # prefix-boundary rule (a prefix glued to a preceding key-charset char is
-# mid-token, the `xak-` cut — the PEM block's leading `-` run included),
-# the JWT marker scoping, and the PEM span (both markers, same words) —
+# mid-token, the `xak-` cut — the PEM carve-out aside: a `-----BEGIN ` head
+# directly after a dash run IS a clean boundary, the previous block's
+# `-----END …-----` close being armor, not a word), the JWT marker
+# scoping, and the PEM span (both markers, same words) —
 # used only to route inputs between the lanes, the same posture as
 # `has_domestic_shape`. The scanner's first-byte dispatch is a pure
 # optimization and is deliberately NOT mirrored: every family prefix is
@@ -304,6 +306,17 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("sk-proj-", 20),
     ("sk-ant-", 20),
     ("azxdev_", 20),
+    ("glpat-", 20),
+    ("glagent-", 20),
+    ("glsoat-", 20),
+    ("glrtr-", 20),
+    ("glcbt-", 20),
+    ("glptt-", 20),
+    ("glimt-", 20),
+    ("gloas-", 20),
+    ("glft-", 20),
+    ("gldt-", 20),
+    ("glrt-", 20),
     ("ya29.", 20),
     ("ghp_", 36),
     ("AIza", 35),
@@ -403,7 +416,12 @@ def _pem_span_at(text: str, start: int) -> int | None:
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
-        if i > 0 and text[i - 1] in _KEY_TAIL:
+        if i > 0 and text[i - 1] in _KEY_TAIL and not (
+            # a `-----BEGIN ` head directly after a dash run is a clean
+            # boundary: the previous block's `-----END …-----` close is
+            # armor, not a word (the twin of pem_head_after_dash_run)
+            text[i - 1] == "-" and text.startswith("-----BEGIN ", i)
+        ):
             continue  # a mid-token prefix: the boundary rule
         for prefix, min_tail in _KEY_FAMILIES:
             if not text.startswith(prefix, i):
