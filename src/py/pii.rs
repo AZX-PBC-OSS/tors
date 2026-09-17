@@ -19,7 +19,7 @@ use crate::py::_borrow::bounded_str_list;
 /// `pages=` range bomb's class, the same fix shape: never trust a
 /// reported size, walk under the shared cap) — the walk aborts with a
 /// catchable `ValueError` at the cap instead.
-
+///
 /// The shared walk with this file's `String` element type folded in: the
 /// four `rules=`/`families=` call sites extract through this one-liner so
 /// the closure-style shared walk (`src/py/_borrow.rs`) stays the only
