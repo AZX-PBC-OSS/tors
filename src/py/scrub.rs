@@ -69,10 +69,20 @@ pub fn scrub_log_text(
     // The list param extracts through the bounded manual walk
     // ([`bounded_str_list`]): pyo3's `Option<Vec<String>>` sizing from a
     // lying `__len__` was the uncatchable capacity-overflow class (#112's
-    // residue — `scrub_log_text("x", rules=LyingLenSequence())`).
+    // residue — `scrub_log_text("x", rules=LyingLenSequence())`). The
+    // walk's per-item `push` closure carries the `String` element here
+    // (the same element type `src/py/pii.rs`'s call sites fold in — see
+    // that file's dedup note).
     let rules = match rules {
         None => None,
-        Some(any) => Some(bounded_str_list("scrub_log_text", "rules", &any)?),
+        Some(any) => {
+            let mut out: Vec<String> = Vec::new();
+            bounded_str_list("scrub_log_text", "rules", &any, |handle| {
+                out.push(handle.extract::<&str>()?.to_owned());
+                Ok(())
+            })?;
+            Some(out)
+        }
     };
     let rules = parse_rules(rules)?;
     detached_transform(py, text, move |s| scrub_impl::scrub_log_text(s, rules))

@@ -301,50 +301,6 @@ pub(crate) fn validate_count_overlap(count_name: &str, count: i64, overlap: i64)
 /// the bomb itself. The message is deliberately generic (no cap value):
 /// the bound is a DoS backstop, not a contract to advertise to sequence
 /// authors.
-const MAX_LIST_ITEMS: usize = 100_000;
-
-/// The bounded manual walk the closed-set-of-strings list parameters
-/// extract through, the `borrow_str_sequence` shape (`src/py/charset.rs`)
-/// with [`MAX_LIST_ITEMS`] as the cap: iterate the argument as a
-/// `PySequence` (the only spelling pyo3's `Vec<String>` extraction
-/// accepted, so the accepted surface is unchanged — lists, tuples, any
-/// `collections.abc.Sequence`), pushing each item's `&str` without ever
-/// consulting `__len__`. Every refusal is byte-identical to the pyo3
-/// extraction it replaced (pinned per call site): a bare `str` is refused
-/// up front (pyo3's own `Vec` special case, its message kept verbatim —
-/// `str` satisfies the Sequence protocol and would silently validate its
-/// own characters one by one); a non-`Sequence` object, a non-`str` item,
-/// and a `__getitem__` that raises all surface the same `TypeError`/
-/// propagated error pyo3's iteration raised; a `__len__` that lies LOW
-/// changes nothing (the walk iterates, it never reserves) and yields
-/// every item. The one behavior change is the bomb's: an unbounded (or
-/// lying-huge) sequence now dies as a catchable `ValueError` at the cap
-/// instead of an uncatchable `PanicException` inside `Vec::with_capacity`.
-pub(crate) fn bounded_str_list(
-    function: &str,
-    param: &str,
-    items: &Bound<'_, PyAny>,
-) -> PyResult<Vec<String>> {
-    if items.is_instance_of::<PyString>() {
-        // The refusal pyo3's own `Vec<String>` extraction made (its
-        // message, kept verbatim): a bare str is the char-split footgun.
-        return Err(PyTypeError::new_err("Can't extract `str` to `Vec`"));
-    }
-    let seq = items.cast::<PySequence>()?;
-    let mut out: Vec<String> = Vec::new();
-    for handle in seq.try_iter()? {
-        let handle = handle?;
-        out.push(handle.extract::<&str>()?.to_owned());
-        if out.len() > MAX_LIST_ITEMS {
-            return Err(PyValueError::new_err(format!(
-                "{function}() {param} sequence yielded too many items: \
-                 refusing an unbounded batch"
-            )));
-        }
-    }
-    Ok(out)
-}
-
 /// The `TimeoutError` construction shared by every `deadline_ms`-bearing
 /// binding (`diff_opcodes` and its line spelling, the three fuzzy
 /// metrics, `similarity_ratio`, `get_close_matches`, `is_grounded`): the
