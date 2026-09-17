@@ -1466,21 +1466,38 @@ class TestRepairDeadline:
         assert _time.perf_counter() - start < 1.5
 
     def test_union_branch_clones_cannot_stampede_past_the_budget(self) -> None:
-        # The forced union loop-head check bounds the loop to at most one
-        # clone+repair+validate unit past expiry. A heavy value makes the
-        # per-branch clone the O(n) unit and keeps the branch count under
-        # the 256-sample period (so the branch bodies' own sampled checks
-        # cannot substitute for the loop head): without the forced check
-        # all 120 clones run (~2.8s elapsed); with it the abort lands at
-        # the first branch past expiry (~0.3s elapsed, dominated by the
-        # fast-path parse). The elapsed number in the payload is the
-        # discriminator; the margins clear 5x both sides.
+        # The forced union loop-head check bounds the loop past expiry to
+        # a small slice of the clone+repair+validate work: measured on a
+        # quiet box the 1ms budget burns inside the strict fast path and
+        # the reported elapsed is a fraction of the plain parse (the
+        # schema-less repair of the same 5MB value under a generous
+        # deadline, ~7ms), where the unbounded failure mode (no forced
+        # check at all) runs all 120 branch clones over the 5MB value,
+        # ~2.8s, ~400x that parse unit. The gate is machine-scaled against
+        # the parse unit measured on THIS runner (min-of-3; the bounded
+        # call runs twice and the smaller reported elapsed wins, so a load
+        # spike between the measurements cannot flip the ratio): 4x the
+        # unit, measured behavior at ~0.4x and the unbounded mode ~400x.
         raw = '"' + "a" * 5_000_000 + '"'
         schema: dict[str, Any] = {"anyOf": [{"type": "integer"}] * 120}
-        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
-            repair_json_loads(raw, schema=schema, deadline_ms=1)
-        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
-        assert elapsed < 1500.0
+        import time as _time
+
+        def parse_unit_ms() -> float:
+            start = _time.perf_counter()
+            repair_json(raw, deadline_ms=60_000)
+            return (_time.perf_counter() - start) * 1000.0
+
+        def bounded_elapsed_ms() -> float:
+            with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+                repair_json_loads(raw, schema=schema, deadline_ms=1)
+            return float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+
+        unit = min(parse_unit_ms() for _ in range(3))
+        elapsed = min(bounded_elapsed_ms() for _ in range(2))
+        assert elapsed < 4 * unit, (
+            f"the union loop ran {elapsed:.0f}ms against a parse unit of "
+            f"{unit:.0f}ms: the forced loop-head check is not bounding the clones"
+        )
 
     def test_the_union_head_check_keeps_expired_branches_free(self) -> None:
         # Mutation pin for the union loop head's CHECK half (the force half
@@ -1526,24 +1543,47 @@ class TestRepairDeadline:
         assert elapsed < 100.0
 
     def test_the_ladder_sweep_cannot_stampede_past_the_budget(self) -> None:
-        # key_ladder's forced check bounds the loop to one O(properties)
-        # jaro sweep past expiry. Long property names make one sweep
-        # expensive (~1000 names x 2000 chars ~= 5-10ms), so without the
-        # check 500 unknown keys sweep for ~3s unbounded; with it the
-        # abort lands within one sweep of the budget.
+        # key_ladder's forced check bounds the loop past expiry to a
+        # sampled slice of the sweep, not the whole of it: measured on a
+        # quiet box the abort lands ~30 sweeps past the 1ms budget (each
+        # sweep ~15ms, one O(properties) jaro pass over 1000 names of
+        # 2000 chars), where the unbounded failure mode (no forced check
+        # at all) runs all 500 keys, ~500 sweeps. The gate is
+        # machine-scaled, never an absolute wall: one unknown key under a
+        # generous deadline measures the sweep's unit cost on THIS runner,
+        # the bounded abort must land under 100x that unit (measured ~30x,
+        # a 3x margin; the unbounded mode is 500x, 5x past the gate), and
+        # min-of-N on both sides keeps a load spike between the
+        # measurements from flipping the ratio.
         props = {f"property_{i:06}" + "x" * 2000: {"type": "integer"} for i in range(1000)}
         schema: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": props,
         }
+        one_key = '{"propertx_000000": 0}'
         raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(500)) + "}"
         import time as _time
 
-        start = _time.perf_counter()
-        with pytest.raises(TimeoutError):
-            repair_json_loads(raw, schema=schema, deadline_ms=1)
-        assert _time.perf_counter() - start < 1.0
+        def unit() -> float:
+            start = _time.perf_counter()
+            repair_json_loads(one_key, schema=schema, deadline_ms=60_000)
+            return _time.perf_counter() - start
+
+        def bounded() -> float:
+            start = _time.perf_counter()
+            with pytest.raises(TimeoutError):
+                repair_json_loads(raw, schema=schema, deadline_ms=1)
+            return _time.perf_counter() - start
+
+        unit_cost = min(unit() for _ in range(3))
+        elapsed = min(bounded() for _ in range(2))
+        assert elapsed < 100 * unit_cost, (
+            f"the ladder sweep ran {elapsed:.3f}s against a one-sweep unit of "
+            f"{unit_cost:.3f}s ({elapsed / unit_cost:.0f}x): the forced "
+            "loop-head check is not bounding the sweep"
+        )
+        assert elapsed < 60.0  # hang backstop, not a performance gate
 
     def test_the_key_walk_cannot_sweep_a_huge_object_past_the_budget(self) -> None:
         # The rename pass's per-key sample (the walker's top-of-function
@@ -1553,19 +1593,38 @@ class TestRepairDeadline:
         # scans; without the per-key sample the pass sweeps them all
         # (~0.6-2s) before any later check consults the clock, and the
         # wall blows the budget. With it the walk stops within ~256 keys
-        # of the expiry and the call aborts via the sticky error.
+        # of the expiry and the call aborts via the sticky error. The gate
+        # is machine-scaled against a 2000-key run of the same walk under
+        # a generous deadline (the per-scan unit cost on THIS runner): the
+        # bounded abort costs less than that run, the unbounded sweep is
+        # ~100x it, and the gate sits at 10x with min-of-N on both sides.
         schema: dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": {f"property_{i:06}": {"type": "integer"} for i in range(1000)},
         }
+        small = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(2_000)) + "}"
         raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(200_000)) + "}"
         import time as _time
 
-        start = _time.perf_counter()
-        with pytest.raises(TimeoutError):
-            repair_json_loads(raw, schema=schema, deadline_ms=1)
-        assert _time.perf_counter() - start < 1.0
+        def unit() -> float:
+            start = _time.perf_counter()
+            repair_json_loads(small, schema=schema, deadline_ms=60_000)
+            return _time.perf_counter() - start
+
+        def bounded() -> float:
+            start = _time.perf_counter()
+            with pytest.raises(TimeoutError):
+                repair_json_loads(raw, schema=schema, deadline_ms=1)
+            return _time.perf_counter() - start
+
+        unit_cost = min(unit() for _ in range(3))
+        elapsed = min(bounded() for _ in range(2))
+        assert elapsed < 10 * unit_cost, (
+            f"the key walk ran {elapsed:.3f}s against a 2000-key unit of "
+            f"{unit_cost:.3f}s: the per-key sample is not bounding the sweep"
+        )
+        assert elapsed < 60.0  # hang backstop, not a performance gate
 
     @pytest.mark.parametrize(
         "items_schema",
