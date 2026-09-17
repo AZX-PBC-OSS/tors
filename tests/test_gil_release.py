@@ -1617,9 +1617,7 @@ _STARVE_PROBE_TEXT = "".join(
 _STARVE_PROBE_SECONDS = 2.0
 
 
-def test_utf8_byte_len_on_a_fresh_object_in_a_worker_thread_does_not_starve_the_loop_heartbeat() -> (
-    None
-):
+def test_utf8_byte_len_fresh_object_worker_thread_does_not_starve_the_heartbeat() -> None:
     """#108's signature, pinned with a huge margin for CI noise. PRE-fix,
     this probe reproduced the issue's starvation 2/2 times: the worker's
     GIL-held UTF-8-cache materialization followed by a nanosecond

@@ -742,10 +742,7 @@ fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
             // past the run (when present) is the whole backtracking.
             if matches!(bytes.get(q), Some(b'\'') | Some(b'"')) {
                 let mut after_closers = q + 1;
-                while matches!(
-                    bytes.get(after_closers),
-                    Some(b')') | Some(b']')
-                ) {
+                while matches!(bytes.get(after_closers), Some(b')') | Some(b']')) {
                     after_closers += 1;
                 }
                 let ws_start =
@@ -1005,15 +1002,15 @@ fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) 
         for name in PARAM_NAMES {
             if eq >= name.len() {
                 let start = eq - name.len();
-                if start >= cursor
-                    && bytes[start..eq].eq_ignore_ascii_case(name.as_bytes())
-                {
+                if start >= cursor && bytes[start..eq].eq_ignore_ascii_case(name.as_bytes()) {
                     name_start = Some(start);
                     break;
                 }
             }
         }
-        let Some(name_start) = name_start else { continue };
+        let Some(name_start) = name_start else {
+            continue;
+        };
         // (b) The anchor immediately before the name, per selection.
         // `eq > name_start >= cursor` bounds the char decode: the anchor
         // position is at or after the last committed cursor, so the
@@ -1026,7 +1023,9 @@ fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) 
                 prev -= 1;
             }
             match text[prev..].chars().next() {
-                Some(c @ ('?' | '&')) => query_anchor || (lookbehind_anchor && !is_conninfo_word_byte(c)),
+                Some(c @ ('?' | '&')) => {
+                    query_anchor || (lookbehind_anchor && !is_conninfo_word_byte(c))
+                }
                 Some(c) => lookbehind_anchor && !is_conninfo_word_byte(c),
                 None => false,
             }
@@ -1111,11 +1110,7 @@ pub fn scrub_log_text(text: &str, rules: RuleSet) -> Cow<'_, str> {
     }
     if rules.uri_query_creds() || rules.libpq_conninfo_creds() {
         let src: &str = owned.as_deref().unwrap_or(text);
-        let out = mask_conninfo_creds(
-            src,
-            rules.uri_query_creds(),
-            rules.libpq_conninfo_creds(),
-        );
+        let out = mask_conninfo_creds(src, rules.uri_query_creds(), rules.libpq_conninfo_creds());
         if let Cow::Owned(out) = out {
             owned = Some(out);
         }
@@ -1294,7 +1289,10 @@ mod tests {
         assert_eq!(scrub("\t | \t + DETAIL: v", RuleSet::ALL), "");
         // A header line that is not a DETAIL line is untouched; an interior
         // gutter with no whitespace before it is not a prefix.
-        assert_eq!(scrub("  | ExceptionGroup: x\n", RuleSet::ALL), "  | ExceptionGroup: x\n");
+        assert_eq!(
+            scrub("  | ExceptionGroup: x\n", RuleSet::ALL),
+            "  | ExceptionGroup: x\n"
+        );
         assert_eq!(scrub("DETAIL: a|b", RuleSet::ALL), "");
         assert_eq!(scrub("x | DETAIL: v", RuleSet::ALL), "x | DETAIL: v");
     }
@@ -1427,13 +1425,19 @@ mod tests {
             scrub("?password='multi\nline real-nl'&x=1", RuleSet::ALL),
             "?password=***&x=1"
         );
-        assert_eq!(scrub("password='a\\'\\'' x", RuleSet::ALL), "password=*** x");
+        assert_eq!(
+            scrub("password='a\\'\\'' x", RuleSet::ALL),
+            "password=*** x"
+        );
         // Anchor-grammar selection: the keyword rule alone reaches
         // lookbehind-anchored names — and a `?` before a name is itself a
         // non-word char, so the lookbehind grammar masks that shape too;
         // the `[?&]` rule alone masks only its anchor grammar.
         assert_eq!(
-            scrub("host=h password=p ?password=q", RuleSet::LIBPQ_CONNINFO_CREDS),
+            scrub(
+                "host=h password=p ?password=q",
+                RuleSet::LIBPQ_CONNINFO_CREDS
+            ),
             "host=h password=*** ?password=***"
         );
         assert_eq!(
