@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.7.0...v0.7.1) (2026-09-17)
+
+
+### Performance Improvements
+
+* **pii, search, repair:** bucketed key families, id-indexed masked splice, integer address probes ([#109](https://github.com/AZX-PBC-OSS/tors/issues/109)) ([431eda8](https://github.com/AZX-PBC-OSS/tors/commit/431eda8b1633abaead121b1c257baa17262c49e7))
+
 ## [0.7.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.6.1...v0.7.0) (2026-09-17)
 
 
