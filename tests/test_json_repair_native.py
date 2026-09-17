@@ -1915,3 +1915,59 @@ class TestEnumSuggestionDeadline:
         }
         with pytest.raises(ValueError, match="does not match enum"):
             repair_json_loads('{"c": "x"}', schema=schema, deadline_ms=60_000)
+
+
+class TestEnumErrorMessageMemberCap:
+    """The enum miss's rendered member list is capped (the DoS-agent
+    finding: a top-level scalar enum miss rendering EVERY member into the
+    exception message — 2000 members x 1500 chars measured as a ~3MB
+    error string on the pre-cap build).
+
+    The cap lives in the jsonschema crate's own enum message formatter
+    (`MAX_DISPLAYED_ENUM_VARIANTS` = 3: the first two members rendered in
+    full, then "or N other candidates" — the dep-side spelling of "first
+    N members, then a count of the rest", a constant documented here
+    because the cap is the contract): the measured message for the
+    reported shape is ~3.0 KB, flat in the member COUNT. Both axes the
+    finding named are pinned: the count axis (the message cannot grow
+    with the member list) and the byte-identity of a normal small enum's
+    message (the cap never touches it — three or fewer members render
+    whole, in the crate's "a, b or c" shape)."""
+
+    _MEMBERS = [("m" + str(i)) + ("x" * 1500) for i in range(2000)]
+
+    def test_the_reported_wide_enum_message_stays_bounded(self) -> None:
+        # 2000 members x 1500 chars: the pre-cap projection is ~3MB; the
+        # measured message is ~3.0KB (two rendered members + the
+        # candidate-count tail). The 10KB gate sits >3x above the measured
+        # band and far under the uncapped shape.
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema={"enum": self._MEMBERS})
+        assert len(str(excinfo.value)) < 10_000
+
+    def test_the_message_length_is_flat_in_the_member_count(self) -> None:
+        # The count axis: doubling the members cannot double the message
+        # (only the two rendered members are full-length; the rest is the
+        # one candidate count).
+        wide = {"enum": self._MEMBERS}
+        wider = {"enum": self._MEMBERS * 2}
+        with pytest.raises(ValueError) as first:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema=wide)
+        with pytest.raises(ValueError) as second:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema=wider)
+        assert len(str(second.value)) < 2 * len(str(first.value))
+
+    def test_the_tail_names_the_undisplayed_count(self) -> None:
+        # The cap's spelling: the undisplayed members are counted, never
+        # rendered (1998 of 2000).
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema={"enum": self._MEMBERS})
+        assert "or 1998 other candidates" in str(excinfo.value)
+
+    def test_a_normal_small_enum_message_is_byte_identical(self) -> None:
+        # The cap's other side: three members render whole, in the crate's
+        # "a, b or c" shape, byte-for-byte what the uncapped formatter
+        # said (pinned exactly, so a formatter change is a reviewed event).
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz"), schema={"enum": ["alpha", "beta", "gamma"]})
+        assert str(excinfo.value) == '"" is not one of "alpha", "beta" or "gamma"'
