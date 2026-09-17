@@ -336,7 +336,9 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
         + "\n".join(_PEM_BODY)
         + "\n-----end rsa private key-----",
     ),
-    ("pem-glued", "abc" + _RSA_PEM),
+    # ("pem-glued", "abc" + _RSA_PEM) moved to the positive pins: the
+    # shared-close carve redacts a word-glued block (see
+    # TestPemGluedToAPrecedingEndMarker.test_a_prose_glued_block_redacts_whole).
     (
         "pem-doubled-space",
         "-----BEGIN RSA  PRIVATE KEY-----\nMIIE\n-----END RSA  PRIVATE KEY-----",
@@ -1576,14 +1578,18 @@ class TestPemGluedToAPrecedingEndMarker:
     realistic shape, and the whole second key survived. A dash run
     directly before the BEGIN head is now a CLEAN boundary (the head's
     own dash run is armor, not a word's fragment, and the block grammar
-    self-validates: both markers, same words). The line the run logic
-    draws, pinned exactly below: the head must open after a dash of its
-    own beyond any shared run — a BEGIN whose dash run is entirely the
-    previous close's (`KEY-----BEGIN`, a letter directly before the
-    head) stays mid-token, as does any run too short to spell the head;
-    the END half never anchors the walk (the END index sweeps every
-    dash boundary-rule-free); and a real key tail directly before
-    `-----BEGIN` keeps its own maximal-run match."""
+    self-validates: both markers, same words). The SHARED CLOSE — the
+    head's dash run entirely the previous close's, a word directly
+    before the head — is the carve's second armor spelling: the close's
+    five dashes double as the head's five, the lookback walks the
+    marker's own word class backward, and the block grammar
+    self-validates downstream, so every word-glued head over a complete
+    block redacts the block whole (the glue word stays verbatim). The
+    line the run logic draws, pinned exactly below: any run too short to
+    spell the head at all stays mid-token (no `-----BEGIN ` literal
+    exists to carve); the END half never anchors the walk (the END index
+    sweeps every dash boundary-rule-free); and a real key tail directly
+    before `-----BEGIN` keeps its own maximal-run match."""
 
     def _rsa_block(self, body: str = "MIIEowIBAAKCAQEA") -> str:
         return (
@@ -1624,20 +1630,58 @@ class TestPemGluedToAPrecedingEndMarker:
             _key_token("PEM", _RSA_PEM) + _key_token("PEM", second)
         )
 
-    def test_a_begin_sharing_the_close_dash_run_stays_mid_token(self) -> None:
-        # The line, pinned: `…PRIVATE KEY-----BEGIN …` — the second
-        # BEGIN's dash run is entirely the previous close's (a letter
-        # directly before the head), so no dash run precedes the head
-        # and the carve-out does not open. The certificate's own END
-        # parse fails on the glued BEGIN the same way, so the input is
-        # the identity — the scanner does not backtrack a spent dash
-        # run. (Reported as the shared-close gap, deliberately unfixed
-        # beyond the carve-out.)
+    def test_a_begin_sharing_the_close_dash_run_redacts(self) -> None:
+        # The shared close, redacted: `…CERTIFICATE-----BEGIN …` — the
+        # second BEGIN's dash run is entirely the previous close's (a
+        # letter directly before the head), and the close's five dashes
+        # double as the head's five. The carve's shared-close case opens
+        # the boundary (the word run before the head is the close's last
+        # label word), and the block grammar self-validates downstream
+        # (both markers, same words), so the RSA block redacts whole —
+        # the match STARTS at the shared dash run (the close's dashes
+        # are the head's own), and the certificate itself is no family
+        # match (the label grammar names PRIVATE KEY), staying verbatim.
         glued = (
             "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----"
             + "BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
         )
-        assert scrub_pii(glued, salt="") is glued
+        head = "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE"
+        assert scrub_pii(glued, salt="") == head + _key_token(
+            "PEM", glued[len(head) :]
+        )
+
+    def test_a_wordless_end_sharing_its_close_redacts(self) -> None:
+        # The shared close, wordless END variant: `-----END-----BEGIN …`
+        # — one dash shorter than any carve that needs a dash of the
+        # head's own, but the word run before the head (`END`) is the
+        # close's last label word, the shared-close carve opens, and the
+        # RSA block redacts whole.
+        glued = (
+            "-----END-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        )
+        assert scrub_pii(glued, salt="") == "-----END" + _key_token(
+            "PEM", glued[len("-----END") :]
+        )
+
+    def test_a_prose_glued_block_redacts_whole(self) -> None:
+        # The shared close, prose-glued variant: `zz-----BEGIN …` — the
+        # word run before the head is ordinary letters, and the carve
+        # opens all the same: the only input past the old behavior is a
+        # complete self-validating block, and that block is the secret
+        # the scanner exists to redact. The glue word stays verbatim.
+        block = self._rsa_block()
+        glued = "zz" + block
+        assert scrub_pii(glued, salt="") == "zz" + _key_token("PEM", block)
+
+    def test_a_short_key_head_glued_to_a_block_leaves_the_glue(self) -> None:
+        # The shared close behind a NON-firing key head: the too-short
+        # tail falls through (no match at the key's own head), the walk
+        # reaches the shared-close head, and the block redacts while the
+        # glue prefix stays verbatim.
+        block = self._rsa_block()
+        glued = "sk-shorttail" + block
+        assert scrub_pii(glued, salt="") == "sk-shorttail" + _key_token("PEM", block)
 
     def test_a_run_shorter_than_the_head_never_opens(self) -> None:
         # Four dashes between the words: no `-----BEGIN ` head exists,
@@ -1659,16 +1703,18 @@ class TestPemGluedToAPrecedingEndMarker:
         )
 
     def test_a_begin_head_directly_after_the_end_word_stays_mid_token(self) -> None:
-        # The line, one dash shorter: `-----END-----BEGIN …` — the head
-        # opens after the `D` (the head's five dashes are all the run
-        # there is), no dash precedes it, the carve-out does not open,
-        # and nothing redacts. The scanner does not backtrack a dash
-        # run to manufacture a head.
+        # Superseded: this shape was pinned as mid-token under the old
+        # carve (no dash of the head's own precedes it) — but it is the
+        # shared-close spelling (`END` is the word run before the head),
+        # and the shared close now redacts. See
+        # test_a_wordless_end_sharing_its_close_redacts above.
         glued = (
             "-----END-----BEGIN RSA PRIVATE KEY-----\n"
             "MIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
         )
-        assert scrub_pii(glued, salt="") is glued
+        assert scrub_pii(glued, salt="") == "-----END" + _key_token(
+            "PEM", glued[len("-----END") :]
+        )
 
     @pytest.mark.parametrize(
         ("escape", "escape_id"),

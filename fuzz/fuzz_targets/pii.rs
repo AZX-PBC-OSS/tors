@@ -530,16 +530,35 @@ struct KeyHit {
 }
 
 /// Whether `i` opens the PEM BEGIN marker head (`-----BEGIN `) directly
-/// after a dash run — the char-space twin of the scanner's
-/// `pem_head_after_dash_run`: a preceding block's `-----END …-----`
-/// close is a dash run of key-tail chars, and the next block's head
-/// glued to it is armor-glued, not word-glued, so it is a clean
-/// boundary (`END CERTIFICATE----------BEGIN …` must scan). The line
-/// drawn (pinned): a letter directly before the head
-/// (`KEY-----BEGIN`, the close's dashes doing double duty) stays
-/// mid-token.
+/// after a dash run or a shared close — the char-space twin of the
+/// scanner's `pem_head_after_dash_run`: a preceding block's
+/// `-----END …-----` close is a dash run of key-tail chars, and the
+/// next block's head glued to it is armor-glued, not word-glued, so it
+/// is a clean boundary (`END CERTIFICATE----------BEGIN …` must scan).
+/// Two armor spellings carve, both pinned: a DASH directly before the
+/// head (the close's run beyond the head's own five), and the SHARED
+/// CLOSE — the head's dash run entirely the previous close's, a PEM
+/// word byte directly before it (`…CERTIFICATE-----BEGIN …`): the
+/// lookback walks the marker's own word class backward from that byte
+/// (BEGIN heads never overlap, each ends in a space, so the walk never
+/// crosses a previous head), and the carve only opens the boundary —
+/// the PEM match downstream still requires both markers with the same
+/// words, so only a self-validating block can redact.
 fn pem_head_after_dash_run_at(chars: &[char], i: usize) -> bool {
-    chars[i - 1] == '-' && starts_with_at(chars, i, "-----BEGIN ")
+    if !starts_with_at(chars, i, "-----BEGIN ") {
+        return false;
+    }
+    if chars[i - 1] == '-' {
+        return true;
+    }
+    if !chars[i - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut w = i - 1;
+    while w > 0 && chars[w - 1].is_ascii_alphanumeric() {
+        w -= 1;
+    }
+    true
 }
 
 /// The key match set at one lane mask: every position whose grammar

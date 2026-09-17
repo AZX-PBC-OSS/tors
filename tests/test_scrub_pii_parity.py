@@ -413,14 +413,38 @@ def _pem_span_at(text: str, start: int) -> int | None:
     return end + len(marker)
 
 
+def _pem_head_carve(text: str, i: int) -> bool:
+    """Whether `i` opens a `-----BEGIN ` head after armor — the mirror
+    of pem_head_after_dash_run: a dash directly before the head (the
+    previous close's own run), or the SHARED CLOSE, the head's dash run
+    entirely the preceding close's — a PEM word byte directly before
+    the head (`…CERTIFICATE-----BEGIN `). The lookback walks the
+    marker's own word class backward from that byte; the carve only
+    opens the boundary, and the block grammar `_pem_span_at` checks
+    downstream still requires both markers with the same words."""
+    if not text.startswith(_PEM_BEGIN, i):
+        return False
+    if text[i - 1] == "-":
+        return True
+    if text[i - 1] not in _PEM_WORD_CHARS:
+        return False
+    w = i - 1
+    while w > 0 and text[w - 1] in _PEM_WORD_CHARS:
+        w -= 1
+    return True
+
+
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
         if i > 0 and text[i - 1] in _KEY_TAIL and not (
-            # a `-----BEGIN ` head directly after a dash run is a clean
-            # boundary: the previous block's `-----END …-----` close is
-            # armor, not a word (the twin of pem_head_after_dash_run)
-            text[i - 1] == "-" and text.startswith("-----BEGIN ", i)
+            # a `-----BEGIN ` head directly after a dash run or a shared
+            # close is a clean boundary: the previous block's
+            # `-----END …-----` close is armor, not a word (the twin of
+            # pem_head_after_dash_run — dash directly before the head, or
+            # the head's dash run entirely the close's, a PEM word byte
+            # before it)
+            _pem_head_carve(text, i)
         ):
             continue  # a mid-token prefix: the boundary rule
         for prefix, min_tail in _KEY_FAMILIES:
@@ -1220,6 +1244,10 @@ _KEYS_CASES: list[tuple[str, str, str]] = [
         "sk-proj-",
     ),
     (_PEM_EC, _PEM_EC, "PEM"),
+    # The shared close: a word-glued block head is armor (the close's
+    # dashes double as the head's), the block redacts whole, the glue
+    # word stays verbatim — so the span is still exactly the block.
+    ("abc" + _PEM_EC, _PEM_EC, "PEM"),
 ]
 
 _KEYS_NON_MATCHES: list[str] = [
@@ -1261,7 +1289,6 @@ _KEYS_NON_MATCHES: list[str] = [
     ),
     "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_BODY) + "\n-----END PRIVATE KEY-----",
     "-----begin ec private key-----\n" + "\n".join(_PEM_BODY) + "\n-----end ec private key-----",
-    "abc" + _PEM_EC,
     "AccountKey=" + _key_azure_tail(39),
     "Accountkey=" + _key_azure_tail(44),
     "xAccountKey=" + _key_azure_tail(40),

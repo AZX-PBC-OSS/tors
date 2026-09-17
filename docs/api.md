@@ -294,10 +294,16 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   the one released over-trigger), a percent sign without two hex
   digits is prose, a one-digit `\x4` is prose, and octal munch is
   maximal (`\1234` is escape `\123` + a literal `4`). A `-----BEGIN `
-  head directly after a DASH RUN is likewise a clean boundary — a
-  preceding block's `-----END …-----` close is armor, not a word (the
-  head must open after a dash of its own: `KEY-----BEGIN`, the close's
-  dashes doing double duty, stays mid-token). (3) The tail run is
+  head directly after a DASH RUN or a SHARED CLOSE is likewise a clean
+  boundary — a preceding block's `-----END …-----` close is armor, not
+  a word: either a dash run directly before the head (the close's own
+  run, `END CERTIFICATE----------BEGIN …`), or the shared close, the
+  head's five dashes doubling as the preceding close's five
+  (`…CERTIFICATE-----BEGIN …`, a word directly before the head). The
+  carve only opens the boundary; the PEM match downstream still
+  requires both markers with the same words, so only a complete,
+  self-validating private-key block redacts, its glue word verbatim.
+  (3) The tail run is
   MAXIMAL, dots included nowhere: `sk-….x.co`
   scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
   inside its own marker-scoped shape; the `ya29.` dot is prefix, not

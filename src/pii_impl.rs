@@ -1493,28 +1493,63 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 }
 
 /// Whether `pos` opens the PEM BEGIN marker head (`-----BEGIN `)
-/// directly after a dash run — the boundary-rule carve-out for PEM
-/// blocks glued to a preceding block's END marker: `-` is a key-tail
-/// byte, so every dash of a preceding block's `-----END …-----` close
-/// reads as mid-token material and the next block's head glued to that
-/// run never scans (`END CERTIFICATE----------BEGIN …`: the whole RSA
-/// key survives). The head's own dash run is armor, not a word's
-/// fragment — PEM is the only family anchoring on `-` — and the block
-/// grammar self-validates (both markers, same words), so a dash
-/// immediately before the head is a CLEAN boundary, the same
-/// formatting-material reasoning as `escape_ends_before`, one byte
-/// class over. The line this draws (pinned): the head must open after
-/// a dash of its own beyond any shared run — a BEGIN whose dash run is
-/// entirely the previous close's (`KEY-----BEGIN`, a letter directly
-/// before the head) stays mid-token, as does any run too short to
-/// spell the head at all. Only BEGIN is carved: the END half never
-/// anchors the walk (`pem_end_index` sweeps every dash
-/// boundary-rule-free), and a real key tail directly before
+/// directly after a dash run or a shared close — the boundary-rule
+/// carve-out for PEM blocks glued to a preceding block's END marker:
+/// `-` is a key-tail byte, so every dash of a preceding block's
+/// `-----END …-----` close reads as mid-token material and the next
+/// block's head glued to that run never scans (`END
+/// CERTIFICATE----------BEGIN …`: the whole RSA key survives). The
+/// head's own dash run is armor, not a word's fragment — PEM is the
+/// only family anchoring on `-` — and the block grammar self-validates
+/// (both markers, same words), so a dash immediately before the head is
+/// a CLEAN boundary, the same formatting-material reasoning as
+/// `escape_ends_before`, one byte class over.
+///
+/// Two armor spellings carve, both pinned:
+///
+/// * *dash run* — a dash directly before the head: the previous
+///   block's own close run serving as armor beyond the head's five
+///   (`END CERTIFICATE----------BEGIN …`).
+/// * *shared close* — the head's dash run IS the preceding close's, a
+///   PEM word byte directly before it (`…CERTIFICATE-----BEGIN …`,
+///   `-----END-----BEGIN …`, a word-glued head generally): the close's
+///   five dashes double as the head's five, so no dash of its own
+///   precedes it. The lookback walks the marker's OWN word class
+///   (`is_pem_word_byte`) backward from that byte — the same walk the
+///   marker parse itself pays — and carves on any word run: the carve
+///   only opens the boundary, and the PEM match it leads to still
+///   requires the full block grammar (both markers, same words), so
+///   the only input this redacts past the old behavior is a complete,
+///   self-validating private-key block whose head was word-glued.
+///   Linear-cheap by the same argument as the marker parse: BEGIN
+///   heads never overlap (each ends in a space), so a lookback can
+///   never cross a previous head and every byte is walked once.
+///
+/// Still mid-token (pinned): any run too short to spell the head at
+/// all — no `-----BEGIN ` literal exists to carve. Only BEGIN is
+/// carved: the END half never anchors the walk (`pem_end_index` sweeps
+/// every dash boundary-rule-free), and a real key tail directly before
 /// `-----BEGIN` keeps its own maximal-run match (the tail charset
 /// includes `-`, so the key match swallows the glue and the head).
 #[inline]
 fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
-    bytes[pos - 1] == b'-' && bytes[pos..].starts_with(b"-----BEGIN ")
+    if !bytes[pos..].starts_with(b"-----BEGIN ") {
+        return false;
+    }
+    if bytes[pos - 1] == b'-' {
+        return true; // dash run: the close's armor beyond the head's own five
+    }
+    if !is_pem_word_byte(bytes[pos - 1]) {
+        return false;
+    }
+    // Shared close: walk the word run ending at `pos` (the close's
+    // last label word) — bounded by the marker's own word class, and
+    // the block grammar downstream self-validates the match.
+    let mut w = pos - 1;
+    while w > 0 && is_pem_word_byte(bytes[w - 1]) {
+        w -= 1;
+    }
+    true
 }
 
 /// The keys pass: every leftmost match of a family grammar becomes
@@ -1531,9 +1566,9 @@ fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
 /// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
 /// `\xHH`, `\NNN`, `\X`; see `escape_ends_before`), whose tail byte is
 /// formatting material and the head after it a fresh start, OR the
-/// position opens a PEM BEGIN head after a dash run (see
-/// `pem_head_after_dash_run`: the previous block's close armor is not
-/// a word). The check sits
+/// position opens a PEM BEGIN head after a dash run or shared close
+/// (see `pem_head_after_dash_run`: the previous block's close armor is
+/// not a word). The check sits
 /// ahead of the grammar tries because it is the cheap arm (one table
 /// load, one more on a non-hex tail) while the tries are a handful of
 /// prefix compares: prose and dash runs are anchor-dense and
