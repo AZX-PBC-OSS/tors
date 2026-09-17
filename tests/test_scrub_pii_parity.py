@@ -301,6 +301,7 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
 # tried at every clean position, which is behaviorally identical and one
 # less thing to drift.
 _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
+    ("_gitlab_session=", 40),
     ("github_pat_", 22),
     ("sk-svcacct-", 20),
     ("AccountKey=", 40),
@@ -318,7 +319,10 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("glft-", 20),
     ("gldt-", 20),
     ("glrt-", 20),
+    ("glwt-", 20),
+    ("glffct-", 20),
     ("ya29.", 20),
+    ("1//", 20),
     ("ghp_", 36),
     ("gho_", 36),
     ("ghu_", 36),
@@ -328,6 +332,13 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("xai-", 20),
     ("AKIA", 16),
     ("ASIA", 16),
+    ("A3T", 17),
+    ("AGPA", 16),
+    ("AIDA", 16),
+    ("AIPA", 16),
+    ("ANPA", 16),
+    ("ANVA", 16),
+    ("AROA", 16),
     ("fw-", 20),
     ("fw_", 20),
     ("ak-", 20),
@@ -362,9 +373,19 @@ def _key_charset_for(prefix: str) -> frozenset[str]:
     their own markers, the shared charset for everything else — the one
     tail-class branch a 14th family with a new alphabet extends (a
     shared-charset family touches the table only)."""
-    if prefix in ("AKIA", "ASIA"):
+    if prefix in (
+        "AKIA",
+        "ASIA",
+        "A3T",
+        "AGPA",
+        "AIDA",
+        "AIPA",
+        "ANPA",
+        "ANVA",
+        "AROA",
+    ):
         return _KEY_TAIL_AWS
-    if prefix == "AccountKey=":
+    if prefix in ("AccountKey=", "_gitlab_session="):
         return _KEY_TAIL_AZURE
     return _KEY_TAIL
 
@@ -1319,6 +1340,12 @@ _KEYS_TABLE: tuple[tuple[str, str, int, str], ...] = (
     ("cn-", "cn-", 20, "std"),
     ("AKIA", "AKIA", 16, "aws"),
     ("ASIA", "ASIA", 16, "aws"),
+    ("A3T", "A3T", 17, "aws"),
+    ("AROA", "AROA", 16, "aws"),
+    ("glwt-", "glwt-", 20, "std"),
+    ("glffct-", "glffct-", 20, "std"),
+    ("1//", "1//", 20, "std"),
+    ("_gitlab_session=", "_gitlab_session=", 44, "azure"),
     ("xai-", "xai-", 20, "std"),
     ("ya29.", "ya29.", 20, "std"),
     ("AccountKey=", "AccountKey=", 40, "azure"),
@@ -1407,6 +1434,15 @@ _KEYS_NON_MATCHES: list[str] = [
     "AKIA" + _key_aws_tail(15),
     "akia" + _key_aws_tail(16),
     "ASIA" + _key_aws_tail(15),
+    "A3T" + _key_aws_tail(16),
+    "AROA" + _key_aws_tail(15),
+    "aroa" + _key_aws_tail(16),
+    "glwt-" + _key_tail(19),
+    "glffct-" + _key_tail(19),
+    "1//" + _key_tail(19),
+    "x1//" + _key_tail(20),
+    "_gitlab_session=" + _key_azure_tail(39),
+    "_GITLAB_SESSION=" + _key_azure_tail(44),
     "x" + "AKIA" + _key_aws_tail(16),
     "xai-" + _key_tail(19),
     "XAI-" + _key_tail(20),
@@ -1574,6 +1610,17 @@ _KEY_TOKEN_FAMILY: dict[str, str] = {
     "Bearer": "jwt",
     "AKIA": "aws",
     "ASIA": "aws",
+    "A3T": "aws",
+    "AGPA": "aws",
+    "AIDA": "aws",
+    "AIPA": "aws",
+    "ANPA": "aws",
+    "ANVA": "aws",
+    "AROA": "aws",
+    "glwt-": "gitlab",
+    "glffct-": "gitlab",
+    "_gitlab_session=": "gitlab",
+    "1//": "gcp_oauth",
     "xai-": "xai",
     "ya29.": "gcp_oauth",
     "PEM": "pem",

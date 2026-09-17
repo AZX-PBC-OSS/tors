@@ -249,12 +249,12 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
   | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
   | GitHub | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
-  | GitLab | `glpat-` / `glagent-` / `glsoat-` / `glrtr-` / `glcbt-` / `glptt-` / `glimt-` / `gloas-` / `glft-` / `gldt-` / `glrt-` + tail{20,} (the token-prefix set of GitLab's documented token overview) | verbatim |
+  | GitLab | `glpat-` / `glagent-` / `glsoat-` / `glrtr-` / `glcbt-` / `glptt-` / `glimt-` / `gloas-` / `glft-` / `gldt-` / `glrt-` / `glwt-` / `glffct-` + tail{20,} and `_gitlab_session=` + `[A-Za-z0-9+/=]{40,}` (the token-prefix set of GitLab's documented token overview, the session-cookie marker included) | verbatim |
   | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
-  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
+  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}`; `A3T` + `[0-9A-Z]{17,}`; `AGPA` / `AIDA` / `AIPA` / `ANPA` / `ANVA` / `AROA` + `[0-9A-Z]{16,}` (the access-key-ID regex's full prefix set — the legacy and resource-ID siblings the same regex carries, every row 20 chars total) | the matched head verbatim |
   | XAI | `xai-` + tail{20,} | `xai-` |
-  | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
+  | GCP OAuth | `ya29.` + tail{20,}; `1//` + tail{20,} (the OAuth refresh-token spelling; the shared alphabet has no `/`, so path-like `1//…` strings never reach the tail minimum) | verbatim |
   | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----` (the PGP label's ` PRIVATE KEY BLOCK-----` close accepted the same way, both markers required); an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
   | Azure | `AccountKey=` + `[A-Za-z0-9+/=]{40,}` | `AccountKey=` |
 

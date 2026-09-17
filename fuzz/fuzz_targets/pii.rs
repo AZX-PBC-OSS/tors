@@ -407,6 +407,7 @@ fn tail_run_end(chars: &[char], at: usize, class: TailClass) -> usize {
 /// provider's documented token-prefix enumeration (no row a prefix of
 /// another).
 const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
+    ("_gitlab_session=", 40, FAM_GITLAB, TailClass::Azure),
     ("github_pat_", 22, FAM_GITHUB, TailClass::Key),
     ("sk-svcacct-", 20, FAM_OPENAI, TailClass::Key),
     ("AccountKey=", 40, FAM_AZURE, TailClass::Azure),
@@ -424,7 +425,10 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("glft-", 20, FAM_GITLAB, TailClass::Key),
     ("gldt-", 20, FAM_GITLAB, TailClass::Key),
     ("glrt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glwt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glffct-", 20, FAM_GITLAB, TailClass::Key),
     ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
+    ("1//", 20, FAM_GCP_OAUTH, TailClass::Key),
     ("ghp_", 36, FAM_GITHUB, TailClass::Key),
     ("gho_", 36, FAM_GITHUB, TailClass::Key),
     ("ghu_", 36, FAM_GITHUB, TailClass::Key),
@@ -433,6 +437,13 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("AIza", 35, FAM_GOOGLE, TailClass::Key),
     ("AKIA", 16, FAM_AWS, TailClass::Aws),
     ("ASIA", 16, FAM_AWS, TailClass::Aws),
+    ("A3T", 17, FAM_AWS, TailClass::Aws),
+    ("AGPA", 16, FAM_AWS, TailClass::Aws),
+    ("AIDA", 16, FAM_AWS, TailClass::Aws),
+    ("AIPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANVA", 16, FAM_AWS, TailClass::Aws),
+    ("AROA", 16, FAM_AWS, TailClass::Aws),
     ("xai-", 20, FAM_XAI, TailClass::Key),
     ("fw-", 20, FAM_FIREWORKS, TailClass::Key),
     ("fw_", 20, FAM_FIREWORKS, TailClass::Key),

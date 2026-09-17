@@ -89,16 +89,22 @@
 //!   OpenAI `sk-`/`sk-proj-`/`sk-svcacct-` (20+), Anthropic `sk-ant-`
 //!   (20+), Google `AIza` (35+), Fireworks `fw-`/`fw_` (20+), Modal
 //!   `ak-`/`wk-` (20+), GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (36+)
-//!   and `github_pat_` (22+), GitLab `glpat-` (20+), the minted shapes
+//!   and `github_pat_` (22+), GitLab `glpat-` and every sibling prefix
+//!   of GitLab's documented token overview plus the `_gitlab_session=`
+//!   cookie marker (20+; the cookie on the Azure alphabet), the minted
+//!   shapes
 //!   `azxdev_` (20+), `wd-` (43+), `w-` (43+),
 //!   `cn-` (20+), MARKER-SCOPED JWTs — `Bearer eyJ` plus three maximal
 //!   base64url segments, single-dot separated (a bare `eyJ` never
 //!   matches: one consumer's API legitimately carries eyJ-shaped
 //!   non-secret cursors, and redacting those would destroy the
-//!   diagnostic this scrubber exists to preserve) — AWS `AKIA`/`ASIA` +
-//!   `[0-9A-Z]{16,}` (the access-key ID; AWS SECRET keys carry no
+//!   diagnostic this scrubber exists to preserve) — AWS `AKIA`/`ASIA`
+//!   and the access-key-ID regex's `A3T`/`AGPA`/`AIDA`/`AIPA`/`ANPA`/
+//!   `ANVA`/`AROA` siblings + `[0-9A-Z]{16,}` (the access-key ID; AWS
+//!   SECRET keys carry no
 //!   prefix and stay a documented exclusion), xAI `xai-` (20+), GCP
-//!   OAuth `ya29.` (20+), the PEM SPAN family (`-----BEGIN <words>
+//!   OAuth `ya29.` and the refresh-token spelling `1//` (20+), the PEM
+//!   SPAN family (`-----BEGIN <words>
 //!   PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both
 //!   markers required; the PGP label's ` PRIVATE KEY BLOCK-----` close
 //!   is accepted the same way, and the PKCS#8 bare header carries no
@@ -1225,18 +1231,29 @@ fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
 /// evidence-backed closed set, the leaked-credential shapes the
 /// consumers evidenced; Slack `xox` and Stripe stay deliberately absent
 /// (zero evidence), and growing the set is a new-evidence decision,
-/// never a drive-by. The GitLab rows are one such evidence pass, taken
-/// whole: the token-prefix set of GitLab's documented token overview
-/// (docs.gitlab.com/security/tokens), one row per prefix over the same
-/// conservative 20-char shared tail — a sibling prefix lands as a table
-/// row, never a reopened ticket. The
+/// never a drive-by. Three evidence passes
+/// are rows here, taken whole: the GitLab token-prefix set of GitLab's
+/// documented token overview (docs.gitlab.com/security/tokens) —
+/// `glpat-` plus every sibling prefix that page lists, the workspace
+/// and feature-flag-client rows included and the `_gitlab_session=`
+/// cookie marker on the Azure alphabet — one row per prefix over the
+/// same conservative 20-char shared tail; the AWS access-key-ID regex's
+/// prefix set (`AKIA` long-term, `ASIA` temporary, the `A3T` legacy and
+/// `AGPA`/`AIDA`/`AIPA`/`ANPA`/`ANVA`/`AROA` resource-ID siblings the
+/// same regex carries, `A3T` on the 17-char tail that keeps every row's
+/// total width 20); and Google's OAuth refresh-token spelling `1//`
+/// beside `ya29.` (the shared alphabet, so the two slashes end the
+/// prefix and path-like `1//…` strings never reach the tail minimum).
+/// A
+/// sibling prefix lands as a table row, never a reopened ticket. The
 /// JWT and PEM families live outside this table (their grammars are
 /// marker/span shapes, not prefix-plus-tail), tried after it on their
 /// disjoint head bytes (`B`/`-`, which no table prefix starts with).
 const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
-    // `g`: the GitHub family, longest literal first (github_pat_ has no
-    // shorter prefix inside the group; gho_/ghu_/ghs_/ghr_ are
-    // mutually exclusive literals at the same length).
+    // `g`: the GitHub and GitLab families, longest literal first
+    // (github_pat_ has no shorter prefix inside the group;
+    // gho_/ghu_/ghs_/ghr_ and the gl* rows are mutually exclusive
+    // literals at the same length).
     (b"github_pat_", KeyFamily::GitHub, 22, KeyTailClass::Shared),
     (b"glpat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"glagent-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
@@ -1249,6 +1266,8 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"glft-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"gldt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"glrt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glwt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glffct-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"gho_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghu_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
@@ -1265,6 +1284,13 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"AIza", KeyFamily::Google, 35, KeyTailClass::Shared),
     (b"AKIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
     (b"ASIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AGPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AIDA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AIPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"ANPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"ANVA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AROA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"A3T", KeyFamily::Aws, 17, KeyTailClass::Aws),
     // `a`, `f`, `w`, `c`, `x`, `y`: the single- and double-entry groups.
     (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"ak-", KeyFamily::Modal, 20, KeyTailClass::Shared),
@@ -1276,6 +1302,16 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
     (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
+    // `1` and `_`: the single-entry evidence-pass groups (the Google
+    // OAuth refresh-token spelling; the GitLab session-cookie marker on
+    // the Azure alphabet).
+    (b"1//", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
+    (
+        b"_gitlab_session=",
+        KeyFamily::GitLab,
+        40,
+        KeyTailClass::Azure,
+    ),
 ];
 
 /// One head-byte group's `(start, len)` range in [`KEY_FAMILIES`],
@@ -1323,6 +1359,8 @@ const W_BUCKET: (usize, usize) = bucket_range(b'w');
 const C_BUCKET: (usize, usize) = bucket_range(b'c');
 const X_BUCKET: (usize, usize) = bucket_range(b'x');
 const Y_BUCKET: (usize, usize) = bucket_range(b'y');
+const ONE_BUCKET: (usize, usize) = bucket_range(b'1');
+const UNDERSCORE_BUCKET: (usize, usize) = bucket_range(b'_');
 
 /// The family rows one scan position can reach: exactly the table rows
 /// whose prefix starts with that byte (a prefix whose head differs from
@@ -1344,6 +1382,8 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
         b'c' => C_BUCKET,
         b'x' => X_BUCKET,
         b'y' => Y_BUCKET,
+        b'1' => ONE_BUCKET,
+        b'_' => UNDERSCORE_BUCKET,
         // `B` (JWT) and `-` (PEM) own no table rows; any other byte is
         // not an anchor at all (is_key_anchor filtered it already).
         _ => (0, 0),
@@ -1360,7 +1400,7 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
 fn is_key_anchor(b: u8) -> bool {
     matches!(
         b,
-        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-'
+        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-' | b'1' | b'_'
     )
 }
 
@@ -2824,6 +2864,12 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("ghs_{}", key_tail(36)), "ghs_"),
             (format!("ghr_{}", key_tail(36)), "ghr_"),
             (format!("glpat-{}", key_tail(20)), "glpat-"),
+            (format!("glwt-{}", key_tail(20)), "glwt-"),
+            (format!("glffct-{}", key_tail(20)), "glffct-"),
+            (
+                format!("_gitlab_session={}", azure_tail(44)),
+                "_gitlab_session=",
+            ),
             (format!("github_pat_{}", key_tail(22)), "github_pat_"),
             (format!("azxdev_{}", key_tail(20)), "azxdev_"),
             (format!("wd-{}", key_tail(43)), "wd-"),
@@ -2832,6 +2878,10 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (JWT.to_string(), "Bearer"),
             ("AKIAIOSFODNN7EXAMPLE".to_string(), "AKIA"),
             (format!("ASIA{}", aws_tail(16)), "ASIA"),
+            (format!("A3T{}", aws_tail(17)), "A3T"),
+            (format!("AROA{}", aws_tail(16)), "AROA"),
+            (format!("AGPA{}", aws_tail(16)), "AGPA"),
+            (format!("1//{}", key_tail(20)), "1//"),
             (format!("xai-{}", key_tail(20)), "xai-"),
             (format!("ya29.{}", key_tail(20)), "ya29."),
             (pem_block("RSA"), "PEM"),
@@ -2882,6 +2932,15 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("AKIA{}", aws_tail(15)), // one under the access-key ID
             format!("akia{}", aws_tail(16)), // lowercase: not the prefix
             format!("ASIA{}", aws_tail(15)),
+            format!("A3T{}", aws_tail(16)), // one under (17): 19 total
+            format!("AROA{}", aws_tail(15)), // one under
+            format!("aroa{}", aws_tail(16)), // lowercase: not the prefix
+            format!("glwt-{}", key_tail(19)),
+            format!("glffct-{}", key_tail(19)),
+            format!("1//{}", key_tail(19)),                // one under
+            format!("x1//{}", key_tail(20)),               // mid-token prefix
+            format!("_gitlab_session={}", azure_tail(39)), // one under
+            format!("_GITLAB_SESSION={}", azure_tail(44)), // uppercase: not the prefix
             format!("xai-{}", key_tail(19)),
             "XAI-".to_string() + &key_tail(20),
             format!("ya29.{}", key_tail(19)),
