@@ -218,6 +218,9 @@ _PREFIX_FAMILY = {
     "glft-": "gitlab",
     "gldt-": "gitlab",
     "glrt-": "gitlab",
+    "glwt-": "gitlab",
+    "glffct-": "gitlab",
+    "_gitlab_session=": "gitlab",
     "github_pat_": "github",
     "azxdev_": "minted",
     "wd-": "minted",
@@ -226,6 +229,8 @@ _PREFIX_FAMILY = {
     "Bearer": "jwt",
     "AKIA": "aws",
     "ASIA": "aws",
+    "A3T": "aws",
+    "AROA": "aws",
     "xai-": "xai",
     "ya29.": "gcp_oauth",
     "PEM": "pem",
@@ -274,6 +279,9 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     ("glft-" + _key_tail(20), "glft-"),
     ("gldt-" + _key_tail(20), "gldt-"),
     ("glrt-" + _key_tail(20), "glrt-"),
+    ("glwt-" + _key_tail(20), "glwt-"),
+    ("glffct-" + _key_tail(20), "glffct-"),
+    ("_gitlab_session=" + _azure_tail(44), "_gitlab_session="),
     ("github_pat_" + _key_tail(22), "github_pat_"),
     ("azxdev_" + _key_tail(20), "azxdev_"),
     ("wd-" + _key_tail(43), "wd-"),
@@ -282,6 +290,8 @@ _KEY_VECTORS: tuple[tuple[str, str], ...] = (
     (_JWT, "Bearer"),
     (_AKIA, "AKIA"),
     ("ASIA" + _aws_tail(16), "ASIA"),
+    ("A3T" + _aws_tail(17), "A3T"),
+    ("AROA" + _aws_tail(16), "AROA"),
     ("xai-" + _key_tail(20), "xai-"),
     ("ya29." + _key_tail(20), "ya29."),
     (_RSA_PEM, "PEM"),
@@ -314,6 +324,19 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
     ("aws-one-under", "AKIA" + _aws_tail(15)),
     ("aws-lowercase", "akia" + _aws_tail(16)),
     ("asia-one-under", "ASIA" + _aws_tail(15)),
+    ("a3t-one-under", "A3T" + _aws_tail(16)),
+    ("aroa-one-under", "AROA" + _aws_tail(15)),
+    ("aroa-lowercase", "aroa" + _aws_tail(16)),
+    ("glwt-one-under", "glwt-" + _key_tail(19)),
+    ("glffct-one-under", "glffct-" + _key_tail(19)),
+    ("gcp-refresh-midtoken", "x1//" + _key_tail(20)),
+    ("gitlab-session-one-under", "_gitlab_session=" + _azure_tail(39)),
+    ("gitlab-session-uppercase", "_GITLAB_SESSION=" + _azure_tail(44)),
+    # The Google refresh-token spelling: documented exclusion — the one
+    # family head that would end in an Nd digit (a phone number and a
+    # refresh token in one space-bridged run would compose a phone match
+    # through the token's own head; see the impl table doc).
+    ("gcp-refresh-excluded", "1//" + _key_tail(20)),
     ("aws-midtoken", "x" + _AKIA),
     ("xai-one-under", "xai-" + _key_tail(19)),
     ("xai-uppercase", "XAI-" + _key_tail(20)),
@@ -2020,6 +2043,9 @@ def _family_token_prefix(family: str, matched: str) -> str:
             "glft-",
             "gldt-",
             "glrt-",
+            "glwt-",
+            "glffct-",
+            "_gitlab_session=",
         ),
         "minted": ("azxdev_", "wd-", "w-", "cn-"),
         "jwt": ("Bearer",),
@@ -2038,8 +2064,15 @@ def _family_token_prefix(family: str, matched: str) -> str:
         # Non-tautological: the head is asserted from the input, never
         # mirrored from the implementation (a wrong-head token must fail
         # here, not agree).
-        assert matched.startswith("AKIA") != matched.startswith("ASIA"), matched
-        return "AKIA" if matched.startswith("AKIA") else "ASIA"
+        assert matched.startswith(("AKIA", "ASIA", "A3T")) != matched.startswith(
+            ("AGPA", "AIDA", "AIPA", "ANPA", "ANVA", "AROA")
+        ), matched
+        if matched.startswith(("AKIA", "ASIA")):
+            return "AKIA" if matched.startswith("AKIA") else "ASIA"
+        for head in ("A3T", "AGPA", "AIDA", "AIPA", "ANPA", "ANVA", "AROA"):
+            if matched.startswith(head):
+                return head
+        raise AssertionError(f"no aws head in {matched!r}")
     if family == "pem":
         return "PEM"
     for prefix in table[family]:

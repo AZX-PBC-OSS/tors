@@ -322,7 +322,6 @@ _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
     ("glwt-", 20),
     ("glffct-", 20),
     ("ya29.", 20),
-    ("1//", 20),
     ("ghp_", 36),
     ("gho_", 36),
     ("ghu_", 36),
@@ -1344,7 +1343,6 @@ _KEYS_TABLE: tuple[tuple[str, str, int, str], ...] = (
     ("AROA", "AROA", 16, "aws"),
     ("glwt-", "glwt-", 20, "std"),
     ("glffct-", "glffct-", 20, "std"),
-    ("1//", "1//", 20, "std"),
     ("_gitlab_session=", "_gitlab_session=", 44, "azure"),
     ("xai-", "xai-", 20, "std"),
     ("ya29.", "ya29.", 20, "std"),
@@ -1439,7 +1437,11 @@ _KEYS_NON_MATCHES: list[str] = [
     "aroa" + _key_aws_tail(16),
     "glwt-" + _key_tail(19),
     "glffct-" + _key_tail(19),
-    "1//" + _key_tail(19),
+    # The Google refresh-token spelling: documented exclusion (the one
+    # family head that would end in an Nd digit — a phone number and a
+    # refresh token in one space-bridged run would compose a phone match
+    # through the token's own head; see the impl table doc).
+    "1//" + _key_tail(20),
     "x1//" + _key_tail(20),
     "_gitlab_session=" + _key_azure_tail(39),
     "_GITLAB_SESSION=" + _key_azure_tail(44),
@@ -1620,7 +1622,6 @@ _KEY_TOKEN_FAMILY: dict[str, str] = {
     "glwt-": "gitlab",
     "glffct-": "gitlab",
     "_gitlab_session=": "gitlab",
-    "1//": "gcp_oauth",
     "xai-": "xai",
     "ya29.": "gcp_oauth",
     "PEM": "pem",

@@ -103,7 +103,10 @@
 //!   `ANVA`/`AROA` siblings + `[0-9A-Z]{16,}` (the access-key ID; AWS
 //!   SECRET keys carry no
 //!   prefix and stay a documented exclusion), xAI `xai-` (20+), GCP
-//!   OAuth `ya29.` and the refresh-token spelling `1//` (20+), the PEM
+//!   OAuth `ya29.` (20+ — the refresh-token spelling `1//` excluded:
+//!   the one head that would end in an Nd digit, letting a phone number
+//!   and a refresh token in one space-bridged run compose a phone match
+//!   through the token's own head), the PEM
 //!   SPAN family (`-----BEGIN <words>
 //!   PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both
 //!   markers required; the PGP label's ` PRIVATE KEY BLOCK-----` close
@@ -1241,9 +1244,15 @@ fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
 /// prefix set (`AKIA` long-term, `ASIA` temporary, the `A3T` legacy and
 /// `AGPA`/`AIDA`/`AIPA`/`ANPA`/`ANVA`/`AROA` resource-ID siblings the
 /// same regex carries, `A3T` on the 17-char tail that keeps every row's
-/// total width 20); and Google's OAuth refresh-token spelling `1//`
-/// beside `ya29.` (the shared alphabet, so the two slashes end the
-/// prefix and path-like `1//…` strings never reach the tail minimum).
+/// total width 20). Google's OAuth refresh-token spelling `1//` stays a
+/// documented EXCLUSION, and not for evidence: its verbatim head would
+/// be the one family head ending in an Nd digit, and a phone number and
+/// a refresh token in one space-bridged class run (`+14155552671
+/// 1//…`) compose a longer international phone match that eats the
+/// token's own head digit — the phone pass runs after keys and cannot
+/// tell a token head from run material, so the report's overlap
+/// contract breaks. A head that ends outside the digit class is the
+/// condition for the row.
 /// A
 /// sibling prefix lands as a table row, never a reopened ticket. The
 /// JWT and PEM families live outside this table (their grammars are
@@ -1302,10 +1311,8 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
     (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
-    // `1` and `_`: the single-entry evidence-pass groups (the Google
-    // OAuth refresh-token spelling; the GitLab session-cookie marker on
-    // the Azure alphabet).
-    (b"1//", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
+    // `_`: the single-entry evidence-pass group (the GitLab
+    // session-cookie marker on the Azure alphabet).
     (
         b"_gitlab_session=",
         KeyFamily::GitLab,
@@ -1359,7 +1366,6 @@ const W_BUCKET: (usize, usize) = bucket_range(b'w');
 const C_BUCKET: (usize, usize) = bucket_range(b'c');
 const X_BUCKET: (usize, usize) = bucket_range(b'x');
 const Y_BUCKET: (usize, usize) = bucket_range(b'y');
-const ONE_BUCKET: (usize, usize) = bucket_range(b'1');
 const UNDERSCORE_BUCKET: (usize, usize) = bucket_range(b'_');
 
 /// The family rows one scan position can reach: exactly the table rows
@@ -1382,7 +1388,6 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
         b'c' => C_BUCKET,
         b'x' => X_BUCKET,
         b'y' => Y_BUCKET,
-        b'1' => ONE_BUCKET,
         b'_' => UNDERSCORE_BUCKET,
         // `B` (JWT) and `-` (PEM) own no table rows; any other byte is
         // not an anchor at all (is_key_anchor filtered it already).
@@ -1400,7 +1405,7 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
 fn is_key_anchor(b: u8) -> bool {
     matches!(
         b,
-        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-' | b'1' | b'_'
+        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-' | b'_'
     )
 }
 
@@ -2881,7 +2886,6 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("A3T{}", aws_tail(17)), "A3T"),
             (format!("AROA{}", aws_tail(16)), "AROA"),
             (format!("AGPA{}", aws_tail(16)), "AGPA"),
-            (format!("1//{}", key_tail(20)), "1//"),
             (format!("xai-{}", key_tail(20)), "xai-"),
             (format!("ya29.{}", key_tail(20)), "ya29."),
             (pem_block("RSA"), "PEM"),
@@ -2937,8 +2941,13 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("aroa{}", aws_tail(16)), // lowercase: not the prefix
             format!("glwt-{}", key_tail(19)),
             format!("glffct-{}", key_tail(19)),
-            format!("1//{}", key_tail(19)),                // one under
-            format!("x1//{}", key_tail(20)),               // mid-token prefix
+            // The Google refresh-token spelling: documented exclusion —
+            // the one family head that would end in an Nd digit (see the
+            // table doc): a phone number and a refresh token in one
+            // space-bridged run would compose a phone match through the
+            // token's own head.
+            format!("1//{}", key_tail(20)),
+            format!("x1//{}", key_tail(20)), // mid-token prefix
             format!("_gitlab_session={}", azure_tail(39)), // one under
             format!("_GITLAB_SESSION={}", azure_tail(44)), // uppercase: not the prefix
             format!("xai-{}", key_tail(19)),

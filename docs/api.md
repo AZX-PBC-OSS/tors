@@ -254,7 +254,7 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
   | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}`; `A3T` + `[0-9A-Z]{17,}`; `AGPA` / `AIDA` / `AIPA` / `ANPA` / `ANVA` / `AROA` + `[0-9A-Z]{16,}` (the access-key-ID regex's full prefix set — the legacy and resource-ID siblings the same regex carries, every row 20 chars total) | the matched head verbatim |
   | XAI | `xai-` + tail{20,} | `xai-` |
-  | GCP OAuth | `ya29.` + tail{20,}; `1//` + tail{20,} (the OAuth refresh-token spelling; the shared alphabet has no `/`, so path-like `1//…` strings never reach the tail minimum) | verbatim |
+  | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
   | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----` (the PGP label's ` PRIVATE KEY BLOCK-----` close accepted the same way, both markers required); an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
   | Azure | `AccountKey=` + `[A-Za-z0-9+/=]{40,}` | `AccountKey=` |
 
@@ -265,7 +265,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   the AWS secret key (the 40-char secret carries no public prefix —
   undetectable without false-positive shape matching), Azure client
   secrets (no distinctive public prefix), and Mistral keys (no
-  distinctive public prefix). The set is closed on evidence —
+  distinctive public prefix). One exclusion is evidence WITH a shape
+  cut: Google's OAuth refresh-token spelling `1//…` — the prefix is
+  documented, but its verbatim token head would be the one family head
+  ending in an Nd digit, and a phone number and a refresh token in one
+  space-bridged run (`+14155552671 1//…`) compose a longer international
+  phone match through the token's own head (the phone pass runs after
+  keys and cannot tell a token head from run material), breaking the
+  report's overlap contract. The row waits for a head that ends outside
+  the digit class. The set is closed on evidence —
   the families five private consumers' leaked-credential shapes
   backed — and growing it is a new-evidence decision, never a
   drive-by; an unlisted provider's key shape passes through whole.

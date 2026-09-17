@@ -428,7 +428,6 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("glwt-", 20, FAM_GITLAB, TailClass::Key),
     ("glffct-", 20, FAM_GITLAB, TailClass::Key),
     ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
-    ("1//", 20, FAM_GCP_OAUTH, TailClass::Key),
     ("ghp_", 36, FAM_GITHUB, TailClass::Key),
     ("gho_", 36, FAM_GITHUB, TailClass::Key),
     ("ghu_", 36, FAM_GITHUB, TailClass::Key),
