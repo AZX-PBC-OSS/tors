@@ -283,17 +283,25 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   real text a key glued to a word is that word's fragment), and it is
   what keeps a second key glued to a token's digest hex from firing,
   UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-  `\xHH`, `\NNN` octal, `\X`): logs carry keys inside JSON strings
+  `\UHHHHHHHH`, `\xHH`, `\NNN` octal, `\X`, or an ANSI CSI sequence
+  `ESC [ params final`): logs carry keys inside JSON strings
   (`\n`), .NET spellings (`\u0027`), URL encodings (`%3D`), C byte
-  reprs (`\x1f`), and octal spellings (git's quoted-path `\346…`
-  output), and the escape's tail letter/digit is formatting material,
+  reprs (`\x1f`), octal spellings (git's quoted-path `\346…`
+  output), Python's `ascii()`/`backslashreplace` non-BMP spelling
+  (`\U0001F600`), and ANSI-colored terminal output (`\x1b[31m…`),
+  and the escape's tail letter/digit is formatting material,
   not the word a key head would be glued to. The sequence must be
   COMPLETE and DIRECTLY before the head: a doubled backslash escapes
   itself (the neighbor stays a literal, the head stays mid-token —
-  `\xHH` and `\NNN` recount their backslash run; `\uXXXX` does not,
+  `\xHH` and `\NNN` recount their backslash run; `\uXXXX`/`\UHHHHHHHH`
+  do not,
   the one released over-trigger), a percent sign without two hex
-  digits is prose, a one-digit `\x4` is prose, and octal munch is
-  maximal (`\1234` is escape `\123` + a literal `4`). A `-----BEGIN `
+  digits is prose, a one-digit `\x4` is prose, octal munch is
+  maximal (`\1234` is escape `\123` + a literal `4`), a `[` without
+  the ESC byte is prose (`[31msk-…` stays mid-token), and the
+  control-char spelling `\cX` (shell/Perl) stays a documented
+  non-match — the escape grammar is closed on evidence like the
+  family set. A `-----BEGIN `
   head directly after a DASH RUN or a SHARED CLOSE is likewise a clean
   boundary — a preceding block's `-----END …-----` close is armor, not
   a word: either a dash run directly before the head (the close's own
@@ -389,7 +397,14 @@ timestamps:
   fragments — the same attacker-formatting trade-off as the contact
   grammars (the shared tail charset is deliberately narrow — the Azure
   row names its own wider alphabet — and widening it would eat
-  identifiers that merely look key-shaped).
+  identifiers that merely look key-shaped). Invisible characters
+  inside a key or a PEM marker behave the same way: a zero-width
+  space (U+200B), RTL override (U+202E), or combining mark inserted
+  into the tail run or the `-----BEGIN ` literal breaks the grammar
+  and leaks. Directly BEFORE a key head the same characters are the
+  safe direction — they are not key-charset bytes, so the head fires
+  clean (pinned). Canonicalize (strip Cf, map combining marks away)
+  before scrubbing if invisible-character insertion is in threat.
 - An unlisted provider's key shape leaks WHOLE: the family table is the
   evidence-backed closed set above — Slack `xox…` and Stripe are
   excluded on zero evidence (AWS `AKIA`/`ASIA` moved to the table on

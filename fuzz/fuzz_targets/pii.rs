@@ -258,13 +258,14 @@ fn backslash_run_before_at(chars: &[char], at: usize) -> usize {
 /// the same grammar, one spelling per arm — `%XX` (`%` + two hex
 /// digits), `\uXXXX` (`\` `u` + four hex digits, no odd-backslash
 /// recount: the documented released over-trigger on an escaped
-/// backslash directly before the spelling), `\xHH` (`\` `x` + two hex
-/// digits, the backslash run before the `x` ODD), `\NNN` (`\` + 1-3
-/// octal digits, maximal munch, the run ending exactly here and the
-/// backslash run before it ODD), and `\X` (any byte after an ODD
-/// backslash run). Escaped text is a CLEAN boundary, the escape's tail
-/// byte being formatting material, not a word; a partial escape is not
-/// a boundary, and an escaped backslash is a literal keeping its
+/// backslash directly before the spelling), `\UHHHHHHHH` (`\` `U` +
+/// eight hex digits, the same position-pinned discipline), `\xHH`
+/// (`\` `x` + two hex digits, the backslash run before the `x` ODD),
+/// `\NNN` (`\` + 1-3 octal digits, maximal munch, the run ending exactly
+/// here and the backslash run before it ODD), and `\X` (any byte after
+/// an ODD backslash run). Escaped text is a CLEAN boundary, the escape's
+/// tail byte being formatting material, not a word; a partial escape is
+/// not a boundary, and an escaped backslash is a literal keeping its
 /// neighbor mid-token.
 fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
     if i >= 3
@@ -281,6 +282,13 @@ fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
         && chars[i - 3].is_ascii_hexdigit()
         && chars[i - 2].is_ascii_hexdigit()
         && chars[i - 1].is_ascii_hexdigit()
+    {
+        return true;
+    }
+    if i >= 10
+        && chars[i - 10] == '\\'
+        && chars[i - 9] == 'U'
+        && chars[i - 8..i].iter().all(|&c| c.is_ascii_hexdigit())
     {
         return true;
     }
@@ -305,6 +313,24 @@ fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
         return true;
     }
     backslash_run_before_at(chars, i - 1) % 2 == 1
+}
+
+/// Whether the key-charset char at `i - 1` ends an ANSI CSI escape
+/// sequence (`ESC [ params final`) — the raw-ESC arm of the escape
+/// grammar, the char-space twin of the scanner's `ansi_csi_ends_before`:
+/// the final byte `U+0040..=U+007E`, the walk back over the
+/// parameter/intermediate class (`U+0020..=U+003F`), and the `ESC [`
+/// head directly before the walked run (a `[` in prose without the ESC
+/// byte never carves).
+fn ansi_csi_ends_before_at(chars: &[char], i: usize) -> bool {
+    if !('\u{40}'..='\u{7e}').contains(&chars[i - 1]) {
+        return false;
+    }
+    let mut j = i - 1;
+    while j > 0 && ('\u{20}'..='\u{3f}').contains(&chars[j - 1]) {
+        j -= 1;
+    }
+    j >= 2 && chars[j - 1] == '[' && chars[j - 2] == '\u{1b}'
 }
 
 /// The family indices into `KeyFamily::ALL` — the spec's name order
@@ -582,6 +608,7 @@ fn key_matches_of(s: &str, mask: u16) -> Vec<KeyHit> {
         if i > 0
             && is_key_tail_char(chars[i - 1])
             && !escape_ends_before_at(&chars, i)
+            && !ansi_csi_ends_before_at(&chars, i)
             && !pem_head_after_dash_run_at(&chars, i)
         {
             i += 1; // a mid-token prefix: the boundary rule (an escape

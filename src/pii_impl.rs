@@ -125,12 +125,15 @@
 //!   is MID-TOKEN and never fires (`xak-…` — the same reasoning as the
 //!   phone rule's clean-boundary cut, and what keeps a second key glued
 //!   to a token's digest hex from firing) UNLESS that byte ends a
-//!   complete escape sequence: `%XX`, `\uXXXX`, or `\X` (odd-backslash
-//!   counted): logs carry keys inside JSON strings, .NET spellings, and
-//!   URL encodings, and the escape's tail letter or digit is formatting
-//!   material, not the word a key head would be glued to; and the tail
-//!   run is MAXIMAL, so a key glued to further charset material is one
-//!   long key, over-redaction in the safe direction.
+//!   complete escape sequence: `%XX`, `\uXXXX`, `\UHHHHHHHH`, `\xHH`,
+//!   `\NNN` octal, `\X` (odd-backslash counted), or an ANSI CSI
+//!   sequence (`ESC [ params final`): logs carry keys inside JSON
+//!   strings, .NET spellings, URL encodings, C byte-repr and octal
+//!   spellings, Python's `backslashreplace` output, and ANSI-colored
+//!   terminal output, and the escape's tail letter or digit is
+//!   formatting material, not the word a key head would be glued to;
+//!   and the tail run is MAXIMAL, so a key glued to further charset
+//!   material is one long key, over-redaction in the safe direction.
 //! * **Pass order** — the keys substitution over the whole string FIRST,
 //!   then the email substitution over its result, then the phone
 //!   substitution over that, each exactly once, no cascade. The keys
@@ -1034,16 +1037,23 @@ fn backslash_run_before(bytes: &[u8], at: usize) -> usize {
 /// |---|---|---|
 /// | `%XX` | `%` + two hex digits | always (the `%` cannot be escaped) |
 /// | `\uXXXX` | `\` `u` + four hex digits | the `u` is position-pinned; see the wart below |
+/// | `\UHHHHHHHH` | `\` `U` + eight hex digits | the `U` is position-pinned, same discipline as `\uXXXX` |
 /// | `\xHH` | `\` `x` + two hex digits | the backslash run before the `x` is ODD |
 /// | `\NNN` | `\` + 1-3 OCTAL digits, maximal munch | the digit run ends exactly here and the backslash run before it is ODD |
 /// | `\X` | any byte after an ODD backslash run | the run directly before the final byte is ODD |
+/// | ANSI CSI | `ESC` `[` params final | see `ansi_csi_ends_before` — the raw-ESC arm |
 ///
 /// Escaped text is a CLEAN boundary for the family scan: logs carry keys
 /// inside JSON strings (`\n`), .NET spellings (`\u0027`), URL encodings
 /// (`%3D`), C byte-repr spellings (`\x1f`), octal spellings (git's
-/// quoted-path `\346…` output), and escaped one-off characters, and the
-/// escape's tail letter or digit is formatting material, not the word a
-/// key head would be glued to; the head after it starts fresh. Token
+/// quoted-path `\346…` output), Python's `ascii()`/`backslashreplace`
+/// non-BMP spelling (`\U0001F600`), ANSI-colored terminal output
+/// (`\x1b[31m…`), and escaped one-off characters, and the escape's tail
+/// letter or digit is formatting material, not the word a key head would
+/// be glued to; the head after it starts fresh. Control-char spellings
+/// without log-tooling evidence (`\cX`, the shell/Perl control form)
+/// stay a documented non-match — the grammar is closed on evidence like
+/// the family set. Token
 /// digests can never alias this (hex carries no `\` or `%`), so the
 /// token-adjacency cut is untouched, and a PARTIAL escape (`%3` + a key
 /// head, `%3g`, `\x4` + a key head) is not a boundary: the grammar needs
@@ -1094,6 +1104,17 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     {
         return true;
     }
+    // \UHHHHHHHH: the \u arm's eight-hex-digit sibling — Python's
+    // ascii()/repr and backslashreplace spelling of a non-BMP char, the
+    // same log-tooling class (ASCII-only sinks escape astral chars this
+    // way). The same position-pinned no-recount discipline as \uXXXX.
+    if pos >= 10
+        && bytes[pos - 10] == b'\\'
+        && bytes[pos - 9] == b'U'
+        && bytes[pos - 8..pos].iter().all(|&b| b.is_ascii_hexdigit())
+    {
+        return true;
+    }
     // \xHH: the backslash, the `x`, and two hex digits — the pinned
     // backslash itself unescaped (an ODD run of backslashes directly
     // before the `x`; `\\x41` is a literal `x41` after an escaped
@@ -1130,6 +1151,31 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // directly before the final byte (an even run escapes itself,
     // leaving the neighbor a literal).
     backslash_run_before(bytes, pos - 1) % 2 == 1
+}
+
+/// Whether the key-charset byte at `pos - 1` ends an ANSI CSI escape
+/// sequence (`ESC [ params final`) — the raw-ESC arm of the boundary
+/// rule's escape grammar, one row past the backslash/percent spellings:
+/// colored terminal output carries keys the same way JSON strings do
+/// (`\x1b[31msk-…`), and the sequence's final byte is a LETTER —
+/// mid-token material by the plain rule, formatting material in fact.
+/// The lookback: the final byte is `0x40..=0x7E`, the walk runs back
+/// over the parameter/intermediate class (`0x20..=0x3F`), and the
+/// `ESC [` head must sit directly before the walked run (a `[` in prose
+/// without the ESC byte — `[31msk-…` — never carves; the sequence needs
+/// its anchor). Linear-cheap like every lookback here: the walk is
+/// charged to the param run, and a param run can precede at most one
+/// final byte before a non-param byte breaks the pair.
+#[inline]
+fn ansi_csi_ends_before(bytes: &[u8], pos: usize) -> bool {
+    if !(0x40..=0x7e).contains(&bytes[pos - 1]) {
+        return false;
+    }
+    let mut j = pos - 1;
+    while j > 0 && (0x20..=0x3f).contains(&bytes[j - 1]) {
+        j -= 1;
+    }
+    j >= 2 && bytes[j - 1] == b'[' && bytes[j - 2] == 0x1b
 }
 
 /// The tail alphabet a family consumes maximally. Most families share
@@ -1564,7 +1610,8 @@ fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
 /// reasoning as the phone rule's clean-boundary cut, and it is what
 /// keeps a second key glued to a token's digest hex from firing),
 /// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-/// `\xHH`, `\NNN`, `\X`; see `escape_ends_before`), whose tail byte is
+/// `\xHH`, `\NNN`, `\X`; see `escape_ends_before`) or an ANSI CSI
+/// sequence (see `ansi_csi_ends_before`), whose tail byte is
 /// formatting material and the head after it a fresh start, OR the
 /// position opens a PEM BEGIN head after a dash run or shared close
 /// (see `pem_head_after_dash_run`: the previous block's close armor is
@@ -1667,6 +1714,7 @@ fn keys_pass_impl<'a>(
         if pos > 0
             && is_key_tail_byte(bytes[pos - 1])
             && !escape_ends_before(bytes, pos)
+            && !ansi_csi_ends_before(bytes, pos)
             && !pem_head_after_dash_run(bytes, pos)
         {
             pos += 1; // a mid-token prefix: the boundary rule (an escape
@@ -2970,6 +3018,38 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             scrub(&format!("x\\u0027{JWT}"), keys_only(), ""),
             format!("x\\u0027Bearer~{}", digest("", JWT))
         );
+        // The ANSI CSI arm (the raw-ESC spelling): colored terminal
+        // output carries keys the same way JSON strings do — the
+        // sequence's final byte is a letter (mid-token by the plain
+        // rule, formatting material in fact), and the head after it
+        // fires. The no-ESC spelling (`[31m` prose) stays mid-token:
+        // the sequence needs its anchor byte.
+        let sk = format!("sk-{tail}");
+        let sk_token = format!("sk-~{}", digest("", &sk));
+        for pre in ["\x1b[31m", "\x1b[1;31m"] {
+            assert_eq!(
+                scrub(&format!("err:{pre}{sk}"), keys_only(), ""),
+                format!("err:{pre}{sk_token}"),
+                "{pre:?}"
+            );
+        }
+        assert!(matches!(
+            scrub_pii(&format!("[31m{sk}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+        // The JWT marker grammar behind a CSI sequence fires too (the
+        // `B` head is mid-token material the same way).
+        assert_eq!(
+            scrub(&format!("\x1b[31m{JWT}"), keys_only(), ""),
+            format!("\x1b[31mBearer~{}", digest("", JWT))
+        );
+        // The \UHHHHHHHH arm: Python's ascii()/backslashreplace spelling
+        // of a non-BMP char — the \u arm's sibling, and the head after
+        // it fires.
+        assert_eq!(
+            scrub(&format!("x\\U0001F600{sk}"), keys_only(), ""),
+            format!("x\\U0001F600{sk_token}")
+        );
     }
 
     #[test]
@@ -3000,6 +3080,31 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             scrub(&format!("x%3Dsk-{tail}"), keys_only(), ""),
             format!("x%3Dsk-~{}", digest("", &format!("sk-{tail}")))
         );
+    }
+
+    #[test]
+    fn invisible_boundary_chars_are_safe_direction_fires() {
+        // Red-team pin, safe direction: zero-width, RTL-override, and
+        // combining characters directly before a key head are NOT
+        // key-charset bytes — the head fires clean (over-redaction-safe,
+        // never a leak). Their INSIDE-a-key use is the documented
+        // adversarial bypass (canonicalize before scrub).
+        let sk = format!("sk-{}", key_tail(48));
+        let token = format!("sk-~{}", digest("", &sk));
+        for glue in ["\u{200b}", "\u{202e}", "a\u{0301}"] {
+            assert_eq!(
+                scrub(&format!("x{glue}{sk}"), keys_only(), ""),
+                format!("x{glue}{token}"),
+                "{glue:?}"
+            );
+        }
+        // The \cX control spelling (shell/Perl) has no log-tooling
+        // evidence: a documented non-match, the grammar closed on
+        // evidence like the family set.
+        assert!(matches!(
+            scrub_pii(&format!("\\cA{sk}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

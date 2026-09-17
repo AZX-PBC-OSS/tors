@@ -456,11 +456,12 @@ def _escape_ends_before(text: str, pos: int) -> bool:
     sequence — the str-space mirror of `escape_ends_before`, the same
     grammar one arm per row: `%XX` (`%` + two hex digits), `\\uXXXX`
     (`\\` `u` + four hex digits, no odd-backslash recount — the
-    documented released over-trigger), `\\xHH` (`\\` `x` + two hex
-    digits, the backslash run before the `x` ODD), `\\NNN` (`\\` + 1-3
-    octal digits, maximal munch, the run ending exactly here and the
-    backslash run before it ODD), and `\\X` (any char after an ODD
-    backslash run). The impl is bytes and this is str — the escape
+    documented released over-trigger), `\\UHHHHHHHH` (`\\` `U` + eight
+    hex digits, the same position-pinned discipline), `\\xHH` (`\\` `x`
+    + two hex digits, the backslash run before the `x` ODD), `\\NNN`
+    (`\\` + 1-3 octal digits, maximal munch, the run ending exactly here
+    and the backslash run before it ODD), and `\\X` (any char after an
+    ODD backslash run). The impl is bytes and this is str — the escape
     grammar is ASCII-only, so every arm's offsets agree between byte
     and char indices, the way the file's other transcriptions treat
     the units (each grammar answers in its own space; only the ASCII
@@ -478,6 +479,13 @@ def _escape_ends_before(text: str, pos: int) -> bool:
         and text[pos - 6] == "\\"
         and text[pos - 5] == "u"
         and all(ch in _ASCII_HEX for ch in text[pos - 4 : pos])
+    ):
+        return True
+    if (
+        pos >= 10
+        and text[pos - 10] == "\\"
+        and text[pos - 9] == "U"
+        and all(ch in _ASCII_HEX for ch in text[pos - 8 : pos])
     ):
         return True
     if (
@@ -502,17 +510,35 @@ def _escape_ends_before(text: str, pos: int) -> bool:
     return _backslash_run_before(text, pos - 1) % 2 == 1
 
 
+def _ansi_csi_ends_before(text: str, pos: int) -> bool:
+    """Whether the key-charset char at `pos - 1` ends an ANSI CSI escape
+    sequence (`ESC [ params final`) — the raw-ESC arm, the mirror of
+    `ansi_csi_ends_before`: the final char U+0040..U+007E, the walk back
+    over the parameter/intermediate class U+0020..U+003F, and the `ESC [`
+    head directly before the walked run (a `[` in prose without the ESC
+    byte never carves)."""
+    if not ("\u0040" <= text[pos - 1] <= "\u007e"):
+        return False
+    j = pos - 1
+    while j > 0 and "\u0020" <= text[j - 1] <= "\u003f":
+        j -= 1
+    return j >= 2 and text[j - 1] == "[" and text[j - 2] == "\u001b"
+
+
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
         if i > 0 and text[i - 1] in _KEY_TAIL and not (
             # a complete escape sequence ending directly before the head
-            # is a clean boundary (the mirror of escape_ends_before), and
-            # a `-----BEGIN ` head directly after a dash run or a shared
-            # close is another: the previous block's `-----END …-----`
-            # close is armor, not a word (the twin of
+            # is a clean boundary (the mirror of escape_ends_before; the
+            # ANSI CSI arm rides _escape_ends_before's lane separately),
+            # and a `-----BEGIN ` head directly after a dash run or a
+            # shared close is another: the previous block's
+            # `-----END …-----` close is armor, not a word (the twin of
             # pem_head_after_dash_run)
-            _escape_ends_before(text, i) or _pem_head_carve(text, i)
+            _escape_ends_before(text, i)
+            or _ansi_csi_ends_before(text, i)
+            or _pem_head_carve(text, i)
         ):
             continue  # a mid-token prefix: the boundary rule
         for prefix, min_tail in _KEY_FAMILIES:
@@ -1339,6 +1365,19 @@ _KEYS_CASES: list[tuple[str, str, str]] = [
         f"glpat-{_key_tail(20)}",
         "glpat-",
     ),
+    # The ANSI CSI arm and the \UHHHHHHHH arm: the raw-ESC spelling of
+    # colored terminal output, and Python's ascii()/backslashreplace
+    # non-BMP spelling — the head after either fires.
+    (
+        "err:\x1b[31m" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\U0001F600" + f"gho_{_key_tail(36)}",
+        f"gho_{_key_tail(36)}",
+        "gho_",
+    ),
 ]
 
 _KEYS_NON_MATCHES: list[str] = [
@@ -1392,6 +1431,7 @@ _KEYS_NON_MATCHES: list[str] = [
     "x\\\\x41sk-" + _key_tail(48),
     "x%3sk-" + _key_tail(48),
     "x\\1234sk-" + _key_tail(48),
+    "x[31msk-" + _key_tail(48),
 ]
 
 
