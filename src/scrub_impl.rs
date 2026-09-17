@@ -4,39 +4,93 @@
 //! applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of it
 //! reaches a log line, a span, or an exported attribute.
 //!
-//! Three rules, one name each, pinned to the consumer's exact semantics
+//! Four rules, one name each, pinned to the consumer's exact semantics
 //! (the four compiled regexes this module ports are quoted in
 //! `tests/reference.py` and re-synced against the live TaskQ source by
-//! `tests/test_scrub_log_text_parity.py`):
+//! `tests/test_scrub_log_text_parity.py`; the pin is the wave2-integration
+//! grammar, TaskQ commit 926e13e / PR #222 — issue #107's re-sync):
 //!
 //! * `pg_detail_lines`: PostgreSQL `DETAIL:` lines quote caller-supplied
 //!   row values, so the whole line is dropped. Two segmenters under one
-//!   name — real-newline lines (`^[ \t]*DETAIL:.*$` under MULTILINE: line
-//!   content deleted, the newline kept, so a blank line is left behind,
-//!   and a CRLF line's `\r` is consumed with the content), and the
-//!   `repr()`-flattened runs a traceback's final line carries
-//!   (`\n[ \t]*DETAIL:...` with the literal two-character `\n`/`\r\n`
-//!   separators, consumed up to the next escaped separator or the closing
-//!   quote, which is preserved). Two behaviors the source chain treats as
-//!   non-matches are pinned as specified behavior, not quietly fixed: a
-//!   run with no closing quote and no trailing escaped newline is left
-//!   alone, and one terminated by a real newline with no quote before it
-//!   is left alone (both unreachable from `repr()` output, pinned by the
-//!   differential suite so a future change that silently alters redaction
-//!   behavior is a test failure).
+//!   name — real-newline lines (`^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$`
+//!   under MULTILINE: line content deleted, the newline kept, so a blank
+//!   line is left behind, a CRLF line's `\r` is consumed with the content,
+//!   and the `(?:[ \t]*[|+][ \t]*)*` gutter group absorbs the `| `/`+ `
+//!   indentation `traceback.format_exception` renders for every line of an
+//!   `ExceptionGroup`/`except*` sub-exception, one layer per nesting
+//!   level), and the `repr()`-flattened runs a traceback's final line
+//!   carries (`\n[ \t]*DETAIL:...` with the literal two-character
+//!   `\n`/`\r\n` separators, consumed up to the first position where the
+//!   chain's lookahead succeeds: another escaped separator, or the repr
+//!   tail — a quote followed by the run of `)`/`]` closers `repr()` ends
+//!   with (`')` plain, `')])` once the exception sits in an
+//!   ExceptionGroup's list, one more `])` per nesting level) with only
+//!   whitespace to the end of the line, which is what preserves a repr's
+//!   trailing `')"`.
+//!
+//!   > [!WARNING]
+//!   > SECURITY-POLICY CHANGE (issue #107), inverting the pinned 0.7.0
+//!   > behavior: the lookahead's final bare `$` leg is FAIL-CLOSED. An
+//!   > escaped DETAIL run whose tail matches NEITHER safe delimiter — an
+//!   > unterminated repr (no closing quote), or one embedded mid-line with
+//!   > more text after the quote — is scrubbed THROUGH END OF LINE rather
+//!   > than left alone. 0.7.0 pinned the old chain's two non-matches
+//!   > ("an unterminated run is left alone; one terminated by a real
+//!   > newline with no quote before it is left alone") as specified
+//!   > behavior; both are subsumed by the fail-closed leg and both now
+//!   > scrub to end of line. The consumer chain made the delimiter-miss
+//!   > policy explicit: a lookahead miss must delete MORE text, never
+//!   > less of the secret — the 0.7.0 shape let a repr that
+//!   > `traceback`/`repr` never actually renders (or hand-built text)
+//!   > ship its DETAIL payload verbatim, which is the under-redaction
+//!   > direction a scrubber may not take. Both old non-matches were
+//!   > unreachable from real `repr()` output; nothing that 0.7.0 scrubbed
+//!   > differently survives in the new chain's output.
+//!
 //! * `uri_userinfo`: `scheme://user:password@host` →
 //!   `scheme://user:***@host`. Scheme and username preserved verbatim,
 //!   empty username handled (the `*`-quantified username class), password
 //!   ending at the first `@`, and the `\b` word boundary before the scheme
 //!   honored exactly (see `WORD_DEMOTE_RANGES` for the Unicode seam that
 //!   makes a naive `is_alphanumeric` check under-redact).
-//! * `uri_query_creds`: `[?&](password|passphrase|passwd|pwd)=value` →
-//!   `[?&]name=***`. Name preserved, exact lowercase, value running to
-//!   whitespace, `&`, or `@`.
+//! * `uri_query_creds`: the URI-query anchor of the conninfo credential
+//!   pass — `[?&]name=value` → `[?&]name=***` — over the shared grammar
+//!   documented under `libpq_conninfo_creds` below.
+//! * `libpq_conninfo_creds`: the keyword/value anchor of the SAME pass —
+//!   `name=value` where the name is not the tail of a longer word (the
+//!   live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
+//!   (`host=db password='hun ter2'` — no `://`, no `?`) masks too, and
+//!   `cpwd=` is not mistaken for `pwd=`. The two names select the two
+//!   anchor grammars of ONE conninfo pass, exactly the live chain's single
+//!   combined regex (anchor alternation `[?&]|(?<![A-Za-z0-9_])`); the
+//!   default chain (both selected) is that combined leftmost-first pass,
+//!   never two sequential substitutions — a value's `***` splice must not
+//!   become a new anchor for a second pass. Selection is per anchor
+//!   grammar, so `["uri_query_creds"]` alone masks only `?`/`&`-anchored
+//!   params and `["libpq_conninfo_creds"]` alone only keyword-anchored
+//!   ones.
+//!
+//!   The shared value grammar, both anchors: the five credential parameter
+//!   names (`password`, `passphrase`, `passwd`, `pwd`, `sslpassword` —
+//!   `sslpassword` is the client-TLS key's passphrase, a credential in its
+//!   own right) matched CASE-INSENSITIVELY (libpq names are
+//!   case-insensitive and operators' DSNs echo back whatever casing was
+//!   written; the one classification seam: CPython `re.IGNORECASE` also
+//!   folds exotic Unicode variants of ASCII letters — `ſ` U+017F folds to
+//!   `s`, `K` U+212A to `k` — where the scanner folds ASCII only; the
+//!   same accepted-seam class as `WORD_DEMOTE_RANGES`, hyp-lane policed),
+//!   and the value is either a libpq single-quoted string — which may
+//!   carry spaces and honors the `\'` and `\\` escapes, so the quote run
+//!   must be consumed whole or the tail of the secret rides along after
+//!   the `***` — or an unquoted token running to whitespace or `&`. The
+//!   token deliberately does NOT stop at `@` (issue #107's tail-leak row:
+//!   a password may legally contain an unencoded `@`, and the 0.7.0
+//!   class stopped there, leaving the tail riding after the `***`).
 //!
 //! Canonical order (the chain's own application order, not a caller
 //! choice): `pg_detail_lines` (real pass, then escaped pass), then
-//! `uri_userinfo`, then `uri_query_creds`, each rule a whole pass over the
+//! `uri_userinfo`, then the conninfo credential pass (both anchor
+//! grammars under their two names), each rule a whole pass over the
 //! current text before the next begins. The order is a contract because
 //! the rules interact: a DETAIL deletion can eat the `@` a userinfo mask
 //! anchors on, and the userinfo password class claims text a param value
@@ -95,7 +149,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use memchr::{memchr, memchr2_iter, memmem, memrchr};
+use memchr::{memchr, memchr_iter, memmem, memrchr};
 
 /// Chars Rust's std classifies as alphanumeric but CPython's `re` `\w`
 /// (`L* ∪ N* ∪ _`) does not: the Other_Alphabetic codepoints that are
@@ -414,10 +468,14 @@ impl RuleSet {
     pub const PG_DETAIL_LINES: Self = Self(1);
     /// Mask `scheme://user:password@host` userinfo passwords.
     pub const URI_USERINFO: Self = Self(2);
-    /// Mask password-family query parameters.
+    /// Mask password-family query parameters (`[?&]`-anchored).
     pub const URI_QUERY_CREDS: Self = Self(4);
+    /// Mask password-family conninfo keywords (libpq lookbehind-anchored;
+    /// see the module docs — the two conninfo names select the two anchor
+    /// grammars of ONE pass).
+    pub const LIBPQ_CONNINFO_CREDS: Self = Self(8);
     /// `rules=None`: the full chain, in canonical order.
-    pub const ALL: Self = Self(7);
+    pub const ALL: Self = Self(15);
 
     fn pg_detail_lines(self) -> bool {
         self.0 & Self::PG_DETAIL_LINES.0 != 0
@@ -429,6 +487,10 @@ impl RuleSet {
 
     fn uri_query_creds(self) -> bool {
         self.0 & Self::URI_QUERY_CREDS.0 != 0
+    }
+
+    fn libpq_conninfo_creds(self) -> bool {
+        self.0 & Self::LIBPQ_CONNINFO_CREDS.0 != 0
     }
 }
 
@@ -474,11 +536,26 @@ fn is_scheme_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')
 }
 
-/// Drop every real-newline line whose content starts with optional
-/// spaces/tabs and the literal `DETAIL:` — the whole line to (not
-/// including) its newline, so a blank line is left behind; a CRLF line's
-/// `\r` is part of the deleted content (`.` consumes it). Byte-identical
-/// to `re.compile(r"^[ \t]*DETAIL:.*$", re.MULTILINE).sub("", text)`.
+/// Drop every real-newline line whose content starts with the ExceptionGroup
+/// gutter run — repetitions of (spaces/tabs, one `|` or `+`, spaces/tabs) —
+/// then optional spaces/tabs and the literal `DETAIL:` — the whole line to
+/// (not including) its newline, so a blank line is left behind; a CRLF line's
+/// `\r` is part of the deleted content (`.` consumes it). Byte-identical to
+/// `re.compile(r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$", re.MULTILINE)
+/// .sub("", text)`.
+///
+/// The gutter group (`#107`): `traceback.format_exception` indents every
+/// line of an `ExceptionGroup`/`except*` sub-exception with repeated `| `
+/// markers (and `+` on the group's own header/separator lines), one layer
+/// per nesting level, so a DETAIL line inside a grouped exception reads
+/// `"    +   | DETAIL: row-848"` and the bare `^[ \t]*` anchor never
+/// reached past the marker. The walk is the group grammar directly: skip
+/// whitespace, take a gutter char, repeat — a gutter char may only follow
+/// whitespace, so `DETAIL: a|b`'s interior `|` (no whitespace before it,
+/// inside the line's payload) can never be part of a prefix, and the
+/// prefix is consumed only when the walk lands on `DETAIL:` — a header
+/// line such as `  | ExceptionGroup: ...` does not start with `DETAIL:`
+/// and is not touched.
 fn drop_detail_lines(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
@@ -489,6 +566,16 @@ fn drop_detail_lines(text: &str) -> Cow<'_, str> {
     loop {
         let line_end = memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |i| line_start + i);
         let mut prefix = line_start;
+        loop {
+            while prefix < line_end && matches!(bytes[prefix], b' ' | b'\t') {
+                prefix += 1;
+            }
+            if prefix < line_end && matches!(bytes[prefix], b'|' | b'+') {
+                prefix += 1;
+            } else {
+                break;
+            }
+        }
         while prefix < line_end && matches!(bytes[prefix], b' ' | b'\t') {
             prefix += 1;
         }
@@ -531,14 +618,26 @@ fn trailing_ws_start(text: &str, line_start: usize, line_end: usize) -> usize {
 /// Drop the `repr()`-flattened DETAIL runs: from a literal `\n` (or
 /// `\r\n`) separator, through optional spaces/tabs and the literal
 /// `DETAIL:`, up to — not including — the first position where the chain's
-/// lookahead succeeds: another escaped separator, or a quote whose
-/// optional `)` is followed by only whitespace to the end of the line
-/// (which is what preserves a repr's closing `')"`). The run cannot cross
-/// a real newline (`.` does not match one), so a run with no terminator
-/// before its line's end is left alone — one of the two pinned
-/// non-matches. Byte-identical to
-/// `re.compile(r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)",
+/// lookahead succeeds: another escaped separator, or the repr tail (a
+/// quote, then the run of `)`/`]` closers `repr()` ends with — `')` plain,
+/// `')])` inside an ExceptionGroup's list — with only whitespace to the
+/// end of the line), or — the FAIL-CLOSED leg (#107's security-policy
+/// change, inverting 0.7.0's pinned "unterminated run is left alone") —
+/// the end of the line itself. The run cannot cross a real newline (`.`
+/// does not match one), so a run with no delimiter at all scrubs through
+/// end of line: a delimiter miss must delete more text, never less of the
+/// secret (the consumer chain's own stated policy). Byte-identical to
+/// `re.compile(r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"][)\]]*\s*$|$)",
 /// re.MULTILINE).sub("", text)`.
+///
+/// The lazy run stops at the FIRST lookahead hit; it cannot cross the
+/// line's real newline. `$` in MULTILINE matches before a real newline
+/// and at end of text, and `\s*` inside the closing alternative cannot
+/// cross a real newline either without landing on another `$` position —
+/// both reduce to "everything between the closer run and the line's real
+/// newline is whitespace", the form the scan checks. Alternatives are
+/// tried at every position in the chain's order (escaped separator, then
+/// closer run, then line end), which is the lazy-quantifier contract.
 ///
 /// Linear in the input — the contract this pass's needle loop owes the
 /// scrub API, and the war story behind the line-state memo below. The
@@ -632,24 +731,44 @@ fn drop_detail_escaped(text: &str) -> Cow<'_, str> {
                 terminator = Some(q);
                 break;
             }
-            // Alternative 2: a quote, an optional `)`, then whitespace
-            // only up to the end of the line. When the `)` is there the
-            // without-`)` path would need the `)` itself to be `\s`, so
-            // testing past it (when present) is the whole backtracking.
+            // Alternative 2: a quote, then the `)`/`]` closer run a repr's
+            // tail is made of (`')` plain, `')])` inside an ExceptionGroup's
+            // list, one more `])` per nesting level), then whitespace only
+            // up to the end of the line. The run is maximal: a shorter run
+            // would put a `)`/`]` (not `\s`, not a `$` position) where the
+            // alternative needs `\s*$` to start or hold, so backtracking
+            // can never prefer one. When the run is there the without-run
+            // path would need a closer char itself to be `\s`, so testing
+            // past the run (when present) is the whole backtracking.
             if matches!(bytes.get(q), Some(b'\'') | Some(b'"')) {
-                let mut after_quote = q + 1;
-                if bytes.get(after_quote) == Some(&b')') {
-                    after_quote += 1;
+                let mut after_closers = q + 1;
+                while matches!(
+                    bytes.get(after_closers),
+                    Some(b')') | Some(b']')
+                ) {
+                    after_closers += 1;
                 }
                 let ws_start =
                     *ws_memo.get_or_insert_with(|| trailing_ws_start(text, line_start, line_end));
-                if after_quote >= ws_start {
+                if after_closers >= ws_start {
                     terminator = Some(q);
                     break;
                 }
             }
+            // Alternative 3, the fail-closed leg: the end of the line
+            // itself (`$`: before the real newline, or end of text — the
+            // positions `q` reaches exactly, `.` not matching a newline
+            // and `line_end` being a char boundary). A delimiter miss
+            // scrubs through end of line; see the doc above.
+            if q == line_end {
+                terminator = Some(q);
+                break;
+            }
             q += text[q..].chars().next().map_or(1, char::len_utf8);
         }
+        // The fail-closed leg makes the line end itself a terminator, so
+        // the walk above cannot fall out empty (q advances by whole chars
+        // and lands exactly on line_end); the `else` is kept loud anyway.
         let Some(q) = terminator else { continue };
         out.get_or_insert_with(|| String::with_capacity(text.len()))
             .push_str(&text[cursor..start]);
@@ -794,51 +913,168 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
     }
 }
 
-/// The password-family parameter names, exact lowercase. No name is a
-/// prefix of another and they diverge by the 6th char at the latest
-/// (`pwd` diverges at the 2nd, `passphrase` at the 5th, `password` vs
-/// `passwd` at the 6th), so at most one can match at any one position and
-/// the scan order among them is free.
-const PARAM_NAMES: [&str; 4] = ["password", "passphrase", "passwd", "pwd"];
+/// The password-family parameter names, lowercased. Matching is
+/// CASE-INSENSITIVE (libpq parameter names are case-insensitive, and
+/// psql, ORMs and operator-typed DSNs echo back whatever casing was
+/// written — `#107`'s IGNORECASE change; the 0.7.0 port matched exact
+/// lowercase and shipped every other casing's value verbatim). Suffix
+/// overlap: `password` is a trailing substring of `sslpassword` — the
+/// scanner resolves a candidate `=` by the longest name first, which is
+/// the live chain's leftmost-match preference (the longer name's match
+/// starts earlier; the shorter suffix can never fire when the longer
+/// one's anchor fails, the char between them being a word char by
+/// construction). No name is a PREFIX of another and they diverge by the
+/// 6th char at the latest (`pwd` diverges at the 2nd, `passphrase` at
+/// the 5th, `password` vs `passwd` at the 6th), so at most one name can
+/// match at any one position and the order among equals is free.
+///
+/// The one accepted case-folding seam: CPython `re.IGNORECASE` also folds
+/// exotic Unicode variants of ASCII letters (`ſ` U+017F → `s`,
+/// `K` U+212A → `k`); the scanner folds ASCII only (`eq_ignore_ascii_case`)
+/// — the same accepted-seam class as `WORD_DEMOTE_RANGES`, policed by the
+/// hypothesis lanes.
+const PARAM_NAMES: [&str; 5] = ["sslpassword", "passphrase", "password", "passwd", "pwd"];
 
-/// Mask the values of `[?&](password|passphrase|passwd|pwd)=` parameters:
-/// name and delimiter kept verbatim, value (`[^\s&@]+`, greedy — an inner
-/// `?`/`=` rides along, an empty value is not a mask) replaced with `***`.
-/// Byte-identical to
-/// `re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)")
-/// .sub(r"\1***", text)`.
-fn mask_uri_query_creds(text: &str) -> Cow<'_, str> {
+/// Is `c` in the lookbehind class `[A-Za-z0-9_]` — explicitly ASCII (the
+/// live chain spells the class; a Unicode letter such as `é` is NOT in
+/// it, so `épassword=x` masks, where the `\b`-style Unicode word check
+/// the userinfo rule needs would disagree).
+fn is_conninfo_word_byte(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Mask the values of the password-family connection parameters, the
+/// `#107` re-sync of the 0.7.0 `uri_query_creds` rule: one pass over the
+/// two anchor grammars the live chain's single combined regex
+/// (`((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)('(?:[^'\\]|\\.)*'|[^\s&]+)`,
+/// IGNORECASE) scans with — `query_anchor` selects the URI query `[?&]`
+/// anchor (the `uri_query_creds` rule), `lookbehind_anchor` the libpq
+/// keyword anchor (the `libpq_conninfo_creds` rule); the default chain
+/// selects both, which is the combined leftmost-first pass, never two
+/// sequential substitutions (a value's `***` splice must not become a
+/// new anchor for a second pass).
+///
+/// Name and delimiter are kept verbatim — the masked form still names
+/// which setting carried the credential — and the value is replaced with
+/// `***`. The value is either a libpq single-quoted string, which may
+/// carry spaces and honors the `\'` and `\\` escapes (so the quote run
+/// must be consumed whole or the tail of the secret rides along after
+/// the `***`), or an unquoted token running to whitespace or `&` —
+/// deliberately NOT stopping at `@` (`#107`'s tail-leak fix: a password
+/// may legally contain an unencoded `@`, and the 0.7.0 class stopped
+/// there, leaving the tail riding after the `***`). An empty value is
+/// not a mask (`+`/the quoted alternatives all need at least one char).
+///
+/// The quoted walk is greedy without backtracking, which is exact for
+/// this grammar: inside the quotes every `\` pairs with the following
+/// char (`\'`, `\\`; a `\` whose follower is a real newline cannot pair —
+/// `.` in the chain's `\\.` does not match a newline — and the
+/// alternative fails, falling back to the unquoted token, which stops at
+/// that same newline), a `'` closes, and no decomposition other than the
+/// greedy one exists (a `\` can never start a shorter unit).
+///
+/// Anchoring is `=`-driven, not delimiter-driven: every match contains
+/// exactly one `name=`, so the scan iterates `=` positions (memchr) and
+/// reads the parameter name off the chars before it — this covers both
+/// anchor grammars in one left-to-right pass, the live regex's own scan
+/// order. A candidate fires when (a) the chars before the `=` equal one
+/// of the names case-insensitively (longest first, the leftmost-start
+/// preference the suffix overlap `password`/`sslpassword` needs), (b) the
+/// anchor immediately before the name is selected: `?`/`&` under
+/// `query_anchor`, a non-`[A-Za-z0-9_]` char (or start of text) under
+/// `lookbehind_anchor`, and (c) a value follows. Matches never overlap:
+/// the cursor jumps past each consumed value, and a later name's anchor
+/// cannot reach back into a consumed value (a value ends only at
+/// whitespace, `&`, or a closing quote — every one of which is a valid,
+/// non-word anchor position for a FOLLOWING name, never a straddling
+/// one). Linear in the input, the contract every pass here owes the
+/// scrub API: each `=` costs O(longest name) plus its own value walk.
+fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) -> Cow<'_, str> {
+    debug_assert!(query_anchor || lookbehind_anchor);
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
     let mut cursor = 0usize;
-    for d in memchr2_iter(b'?', b'&', bytes) {
-        if d < cursor {
-            continue; // inside a previous value (values may hold ? and &)
+    for eq in memchr_iter(b'=', bytes) {
+        if eq < cursor {
+            continue; // inside a previous value (values may hold =)
         }
-        let mut value_start = None;
+        // (a) The parameter name ending at the `=`, longest first (the
+        // `eq >= name.len()` guard: the text can open with `pwd=` before
+        // any longer name could fit).
+        let mut name_start = None;
         for name in PARAM_NAMES {
-            let after_name = d + 1 + name.len();
-            if text[d + 1..].starts_with(name) && bytes.get(after_name) == Some(&b'=') {
-                value_start = Some(after_name + 1);
-                break;
+            if eq >= name.len() {
+                let start = eq - name.len();
+                if start >= cursor
+                    && bytes[start..eq].eq_ignore_ascii_case(name.as_bytes())
+                {
+                    name_start = Some(start);
+                    break;
+                }
             }
         }
-        let Some(v0) = value_start else { continue };
-        let mut end = v0;
-        let mut nonempty = false;
-        while let Some(c) = text[end..].chars().next() {
-            if is_python_space(c) || c == '&' || c == '@' {
-                break;
+        let Some(name_start) = name_start else { continue };
+        // (b) The anchor immediately before the name, per selection.
+        // `eq > name_start >= cursor` bounds the char decode: the anchor
+        // position is at or after the last committed cursor, so the
+        // backward char walk cannot cross into a consumed value.
+        let anchored = if name_start == 0 {
+            lookbehind_anchor // no preceding char: the lookbehind succeeds
+        } else {
+            let mut prev = name_start - 1;
+            while !text.is_char_boundary(prev) {
+                prev -= 1;
             }
-            nonempty = true;
-            end += c.len_utf8();
-        }
-        if !nonempty {
+            match text[prev..].chars().next() {
+                Some(c @ ('?' | '&')) => query_anchor || (lookbehind_anchor && !is_conninfo_word_byte(c)),
+                Some(c) => lookbehind_anchor && !is_conninfo_word_byte(c),
+                None => false,
+            }
+        };
+        if !anchored {
             continue;
         }
+        // (c) The value: a libpq single-quoted run (escapes honored) or
+        // an unquoted token to whitespace/`&`.
+        let mut end = eq + 1;
+        let quoted_end = if bytes.get(end) == Some(&b'\'') {
+            let mut i = end + 1;
+            loop {
+                match bytes.get(i) {
+                    Some(b'\'') => break Some(i + 1),
+                    Some(b'\\') if i + 1 < bytes.len() && bytes[i + 1] != b'\n' => i += 2,
+                    // Unpairable escape (`\` at end or before a real
+                    // newline, the chain's `\\.` needing a non-newline
+                    // follower) or the closing quote never comes (end of
+                    // text): the quoted leg fails and the unquoted-token
+                    // leg takes the same start.
+                    Some(b'\\') | None => break None,
+                    Some(_) => i += 1,
+                }
+            }
+        } else {
+            None
+        };
+        match quoted_end {
+            Some(vend) => end = vend,
+            None => {
+                // Unquoted token (also the quoted leg's fallback): one or
+                // more chars that are neither Python-whitespace nor `&`.
+                end = eq + 1;
+                while let Some(c) = text[end..].chars().next() {
+                    if is_python_space(c) || c == '&' {
+                        break;
+                    }
+                    end += c.len_utf8();
+                }
+                if end == eq + 1 {
+                    continue; // empty value: not a mask
+                }
+            }
+        }
         let out = out.get_or_insert_with(|| String::with_capacity(text.len()));
-        out.push_str(&text[cursor..d]);
-        out.push_str(&text[d..v0]);
+        out.push_str(&text[cursor..name_start]);
+        out.push_str(&text[name_start..=eq]);
         out.push_str("***");
         cursor = end;
     }
@@ -852,23 +1088,35 @@ fn mask_uri_query_creds(text: &str) -> Cow<'_, str> {
 }
 
 /// The full chain, in canonical order: the DETAIL rule's two passes, then
-/// the userinfo mask, then the query-param mask, each pass over the
+/// the userinfo mask, then the conninfo credential pass (both anchor
+/// grammars under their two names — one pass, the combined leftmost-first
+/// scan the live chain's single regex performs), each pass over the
 /// current text, no pass rescanning another's output. A pass that fires
 /// moves the chain onto its owned output; a pass that does not fire
 /// returns the borrow, and the chain stays where it was. The result is
 /// borrowed — the identity lane — exactly when no rule fired.
 pub fn scrub_log_text(text: &str, rules: RuleSet) -> Cow<'_, str> {
     type Pass = fn(&str) -> Cow<'_, str>;
-    let passes: [Option<Pass>; 4] = [
+    let passes: [Option<Pass>; 3] = [
         rules.pg_detail_lines().then_some(drop_detail_lines as Pass),
         rules.pg_detail_lines().then_some(drop_detail_escaped),
         rules.uri_userinfo().then_some(mask_uri_userinfo),
-        rules.uri_query_creds().then_some(mask_uri_query_creds),
     ];
     let mut owned: Option<String> = None;
     for pass in passes.into_iter().flatten() {
         let src: &str = owned.as_deref().unwrap_or(text);
         if let Cow::Owned(out) = pass(src) {
+            owned = Some(out);
+        }
+    }
+    if rules.uri_query_creds() || rules.libpq_conninfo_creds() {
+        let src: &str = owned.as_deref().unwrap_or(text);
+        let out = mask_conninfo_creds(
+            src,
+            rules.uri_query_creds(),
+            rules.libpq_conninfo_creds(),
+        );
+        if let Cow::Owned(out) = out {
             owned = Some(out);
         }
     }
@@ -994,19 +1242,30 @@ mod tests {
             scrub("E('a\\nDETAIL: Key (x)=('val') exists.')", RuleSet::ALL),
             "E('a')"
         );
-        // The pinned non-matches.
-        assert_eq!(
-            scrub("E('a\\nDETAIL: leaks", RuleSet::ALL),
-            "E('a\\nDETAIL: leaks"
-        );
+        // The fail-closed leg (#107's policy change, inverting 0.7.0's
+        // pinned "unterminated run is left alone"): a delimiter miss
+        // scrubs THROUGH END OF LINE — both of the two non-matches 0.7.0
+        // pinned (no closing quote; real-newline termination without a
+        // quote) are subsumed by the bare `$` lookahead leg.
+        assert_eq!(scrub("E('a\\nDETAIL: leaks", RuleSet::ALL), "E('a");
         assert_eq!(
             scrub("E('a\\nDETAIL: leaks\nnext", RuleSet::ALL),
-            "E('a\\nDETAIL: leaks\nnext"
+            "E('a\nnext"
         );
-        assert_eq!(
-            scrub("E('a\\nDETAIL: v')  tail", RuleSet::ALL),
-            "E('a\\nDETAIL: v')  tail"
-        );
+        // A quote not at end of line is not a terminator either — the run
+        // continues past it and the fail-closed leg takes the line end.
+        assert_eq!(scrub("E('a\\nDETAIL: v')  tail", RuleSet::ALL), "E('a");
+        // The `)`/`]` closer RUN a nested repr ends with (`')` plain,
+        // `')])` inside an ExceptionGroup's list, one more `])` per
+        // nesting level); a `]` before the quote is payload, consumed.
+        assert_eq!(scrub("E('m\\nDETAIL: v')])", RuleSet::ALL), "E('m')])");
+        assert_eq!(scrub("E('m\\nDETAIL: v]')", RuleSet::ALL), "E('m')");
+        assert_eq!(scrub("E('m\\nDETAIL: v)]')", RuleSet::ALL), "E('m')");
+        assert_eq!(scrub("E('m\\nDETAIL: v')])')", RuleSet::ALL), "E('m')");
+        // Trailing gutter text inside the payload does not terminate it,
+        // and with no quote-closer at EOL the fail-closed leg takes the
+        // line end.
+        assert_eq!(scrub("E('m\\nDETAIL: v|x", RuleSet::ALL), "E('m");
         // Real tab prefix consumed; literal `\t` is not a prefix.
         assert_eq!(scrub("E('a\\n\tDETAIL: v')", RuleSet::ALL), "E('a')");
         assert_eq!(
@@ -1022,6 +1281,22 @@ mod tests {
             scrub("E('a\\nDETAIL: v')\nnext", RuleSet::ALL),
             "E('a')\nnext"
         );
+    }
+
+    #[test]
+    fn detail_lines_absorb_the_exception_group_gutters() {
+        // #107: the `(?:[ \t]*[|+][ \t]*)*` gutter group — one `| `/`+ `
+        // layer per ExceptionGroup nesting level.
+        assert_eq!(scrub("    +   | DETAIL: row-848", RuleSet::ALL), "");
+        assert_eq!(scrub("  | DETAIL: v\nnext", RuleSet::ALL), "\nnext");
+        assert_eq!(scrub("+\t+ DETAIL: v", RuleSet::ALL), "");
+        assert_eq!(scrub("||DETAIL: v", RuleSet::ALL), "");
+        assert_eq!(scrub("\t | \t + DETAIL: v", RuleSet::ALL), "");
+        // A header line that is not a DETAIL line is untouched; an interior
+        // gutter with no whitespace before it is not a prefix.
+        assert_eq!(scrub("  | ExceptionGroup: x\n", RuleSet::ALL), "  | ExceptionGroup: x\n");
+        assert_eq!(scrub("DETAIL: a|b", RuleSet::ALL), "");
+        assert_eq!(scrub("x | DETAIL: v", RuleSet::ALL), "x | DETAIL: v");
     }
 
     #[test]
@@ -1071,9 +1346,29 @@ mod tests {
             scrub("?password=x&passphrase=y&passwd=z&pwd=w", RuleSet::ALL),
             "?password=***&passphrase=***&passwd=***&pwd=***"
         );
+        // #107: the value class no longer stops at `@` (the tail-leak fix:
+        // a password may legally contain an unencoded `@`), names are
+        // CASE-INSENSITIVE, and `sslpassword` joined the name set.
         assert_eq!(
             scrub("?password=a b?pwd=c@d&passwd=e", RuleSet::ALL),
-            "?password=*** b?pwd=***@d&passwd=***"
+            "?password=*** b?pwd=***&passwd=***"
+        );
+        assert_eq!(scrub("?password=a@b", RuleSet::ALL), "?password=***");
+        assert_eq!(
+            scrub("?password=a@b@c&x=1", RuleSet::ALL),
+            "?password=***&x=1"
+        );
+        assert_eq!(
+            scrub("?Password=x&PASSWORD=y&passwords=z", RuleSet::ALL),
+            "?Password=***&PASSWORD=***&passwords=z"
+        );
+        assert_eq!(
+            scrub("postgresql://h/db?sslpassword=p", RuleSet::ALL),
+            "postgresql://h/db?sslpassword=***"
+        );
+        assert_eq!(
+            scrub("?SSLPassword=s&key=k", RuleSet::ALL),
+            "?SSLPassword=***&key=k"
         );
         assert_eq!(scrub("?password=a=b?c", RuleSet::ALL), "?password=***");
         assert_eq!(scrub("a?password=1?pwd=2", RuleSet::ALL), "a?password=***");
@@ -1081,7 +1376,71 @@ mod tests {
             scrub("?password=a\x1cb", RuleSet::ALL),
             "?password=***\x1cb"
         );
-        for text in ["?Password=x&passwords=y&pwd=", "?password=&x=1"] {
+        // The libpq conninfo keyword anchor (the fourth named rule's
+        // grammar): no `?`/`&` needed, a non-`[A-Za-z0-9_]` char (or text
+        // start) before the name, single-quoted values carrying spaces,
+        // `cpwd=` not mistaken for `pwd=` (a longer-word tail is not an
+        // anchor).
+        assert_eq!(
+            scrub("host=h password=p", RuleSet::ALL),
+            "host=h password=***"
+        );
+        assert_eq!(
+            scrub("host=db PASSWORD='hun ter2'", RuleSet::ALL),
+            "host=db PASSWORD=***"
+        );
+        assert_eq!(
+            scrub("host='db host' password='p w' user=u", RuleSet::ALL),
+            "host='db host' password=*** user=u"
+        );
+        assert_eq!(scrub("cpwd=x pwd=y", RuleSet::ALL), "cpwd=x pwd=***");
+        assert_eq!(scrub("apassword=x", RuleSet::ALL), "apassword=x");
+        assert_eq!(scrub("_password=x", RuleSet::ALL), "_password=x");
+        // The lookbehind class is explicitly ASCII: a Unicode letter before
+        // the name does NOT block the anchor.
+        assert_eq!(scrub("épassword=x", RuleSet::ALL), "épassword=***");
+        // Quoted values: escaped quotes and backslashes consumed whole, an
+        // unterminated quote falls back to the unquoted token (which keeps
+        // the leading quote in the mask), a real newline inside the quotes
+        // rides along.
+        assert_eq!(
+            scrub("?password='a b'&x=1", RuleSet::ALL),
+            "?password=***&x=1"
+        );
+        assert_eq!(
+            scrub("?password='a\\'b'&x=1", RuleSet::ALL),
+            "?password=***&x=1"
+        );
+        assert_eq!(
+            scrub("?password='a\\\\'&x=1", RuleSet::ALL),
+            "?password=***&x=1"
+        );
+        assert_eq!(
+            scrub("?password='unterminated", RuleSet::ALL),
+            "?password=***"
+        );
+        assert_eq!(
+            scrub("?password='unterminated &password=x", RuleSet::ALL),
+            "?password=*** &password=***"
+        );
+        assert_eq!(
+            scrub("?password='multi\nline real-nl'&x=1", RuleSet::ALL),
+            "?password=***&x=1"
+        );
+        assert_eq!(scrub("password='a\\'\\'' x", RuleSet::ALL), "password=*** x");
+        // Anchor-grammar selection: the keyword rule alone reaches
+        // lookbehind-anchored names — and a `?` before a name is itself a
+        // non-word char, so the lookbehind grammar masks that shape too;
+        // the `[?&]` rule alone masks only its anchor grammar.
+        assert_eq!(
+            scrub("host=h password=p ?password=q", RuleSet::LIBPQ_CONNINFO_CREDS),
+            "host=h password=*** ?password=***"
+        );
+        assert_eq!(
+            scrub("host=h password=p ?password=q", RuleSet::URI_QUERY_CREDS),
+            "host=h password=p ?password=***"
+        );
+        for text in ["?password=&x=1", "?pwd="] {
             assert_eq!(scrub(text, RuleSet::ALL), text, "{text:?}");
         }
     }
@@ -1122,6 +1481,7 @@ mod tests {
             RuleSet::PG_DETAIL_LINES,
             RuleSet::URI_USERINFO,
             RuleSet::URI_QUERY_CREDS,
+            RuleSet::LIBPQ_CONNINFO_CREDS,
         ] {
             assert!(matches!(
                 scrub_log_text("plain text", rules),

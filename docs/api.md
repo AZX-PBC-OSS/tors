@@ -571,7 +571,10 @@ Unicode/dependency bump (owner: the scrub_pii maintainer).
 ```python
 def scrub_log_text(
     text: str,
-    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+    rules: Sequence[
+        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+    ]
+    | None = None,
 ) -> str: ...
 ```
 
@@ -584,32 +587,57 @@ four compiled regexes — pinned by a differential harness that races tors
 against the exact chain (see [Design and scope](design.md) for why this is
 a *named-rule* surface rather than a pattern parameter).
 
-Three rules, one closed set:
+Four rules, one closed set:
 
 - `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
   values, so the whole line is dropped. Both separator spellings: real
   newlines (line content deleted, the newline kept — a blank line is left
-  behind; a CRLF line's `\r` is consumed with the content), and the
-  `repr()`-flattened `\nDETAIL:` runs a traceback's final line carries
-  (consumed up to the next escaped separator or the closing quote, which is
-  preserved — `PostgresError('msg\nDETAIL: … exists.')` comes back as
-  `PostgresError('msg')`). Two shapes the source chain treats as
-  non-matches are pinned as specified behavior, not quietly fixed: an
-  escaped run with no closing quote and no trailing escaped newline is
-  left alone, and one terminated by a real newline with no quote before it
-  is left alone (both unreachable from `repr()` output).
+  behind; a CRLF line's `\r` is consumed with the content; the
+  `traceback.format_exception` gutter run of an `ExceptionGroup`/`except*`
+  sub-exception — repeated `| `/`+ ` markers, one layer per nesting level —
+  absorbed before the anchor), and the `repr()`-flattened `\nDETAIL:` runs
+  a traceback's final line carries (consumed up to the next escaped
+  separator or the repr tail — a quote followed by the run of `)`/`]`
+  closers `repr()` ends with, `')` plain and `')])` inside an
+  ExceptionGroup's list — which is preserved:
+  `PostgresError('msg\nDETAIL: … exists.')` comes back as
+  `PostgresError('msg')`).
+
+  > [!WARNING]
+  > SECURITY POLICY, changed in this release (issue #107), inverting the
+  > 0.7.0 behavior: the repr-flattened run's lookahead is FAIL-CLOSED. A
+  > run whose tail matches neither safe delimiter — an unterminated repr
+  > (no closing quote), or one with more text behind the quote — scrubs
+  > THROUGH END OF LINE. 0.7.0 left such runs alone (a pinned non-match);
+  > the consumer chain's stated policy is that a delimiter miss must
+  > delete MORE text, never less of the secret, and tors follows it. The
+  > deletion can now also eat text a userinfo mask would have needed
+  > (`scrub("a://u:p\\nDETAIL:x@h")` is `"a://u:p"` — the DETAIL deletion
+  > takes the whole tail); run `uri_userinfo` separately when credential
+  > removal must outrank DETAIL parity.
 - `uri_userinfo` — `scheme://user:password@host` becomes
   `scheme://user:***@host`: scheme and username preserved verbatim, empty
   username handled, password ending at the first `@`.
-- `uri_query_creds` — `[?&](password|passphrase|passwd|pwd)=value` becomes
-  `[?&]name=***`: name preserved, exact lowercase, value running to
-  whitespace, `&`, or `@`.
+- `uri_query_creds` / `libpq_conninfo_creds` — the password-family
+  connection parameters, ONE pass under two names (the two anchor grammars
+  of the live chain's single combined regex): `[?&]name=value` (URI query)
+  and the libpq keyword form `name=value` (a non-`[A-Za-z0-9_]` char — or
+  text start — before the name, so `host=h password=p` masks and `cpwd=`
+  does not). Names are the five credential parameters
+  (`password`, `passphrase`, `passwd`, `pwd`, `sslpassword`) matched
+  case-insensitively; the value is a libpq single-quoted string (spaces
+  allowed, `\'`/`\\` escapes honored) or an unquoted token running to
+  whitespace or `&` — deliberately NOT stopping at `@`: a password may
+  legally carry an unencoded `@`, and a mask that stops there leaves the
+  tail riding after the `***` (0.7.0 did exactly that). Name and delimiter
+  are preserved: `?password=a@b` → `?password=***`.
 
 `rules=None` (the default) runs the full chain in canonical order:
-`pg_detail_lines` → `uri_userinfo` → `uri_query_creds`, each rule a whole
-pass over the current text before the next begins (a DETAIL deletion can
-eat the `@` a userinfo mask anchors on — rule interaction is why the order
-is a contract, not a caller choice).
+`pg_detail_lines` → `uri_userinfo` → the conninfo credential pass, each
+rule a whole pass over the current text before the next begins (a DETAIL
+deletion can eat the `@` a userinfo mask anchors on — rule interaction is
+why the order is a contract, not a caller choice). Selecting both conninfo
+names runs the combined pass once, never two sequential substitutions.
 
 > [!WARNING]
 > The default chain can leave a credential fragment by design:

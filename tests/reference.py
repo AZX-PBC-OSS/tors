@@ -699,31 +699,72 @@ def reference_first_invalid_offender(
 # ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
 # chain (src/taskq/obs/_redact_exc.py, the consumer it exists for), pinned
 # byte-identical to it: the four compiled regexes below are QUOTED VERBATIM
-# from that module, and the canonical rule order (pg_detail_lines' two
-# segmenters first, then uri_userinfo, then uri_query_creds) is _scrub_text's
-# own application order with the redaction flag on. The differential harness
-# (tests/test_scrub_log_text_parity.py) runs tors against this chain and,
-# when the TaskQ checkout is present, re-syncs these patterns against the live
-# module source — a TaskQ change to any of them is a visible re-sync request,
-# not a silent tors behavior change.
-_PG_DETAIL_RE = re.compile(r"^[ \t]*DETAIL:.*$", re.MULTILINE)
+# from that module (the wave2-integration grammar, TaskQ commit 926e13e /
+# PR #222 — issue #107's re-sync), and the canonical rule order (pg_detail_lines'
+# two segmenters first, then uri_userinfo, then the conninfo credential pass)
+# is _scrub_text's own application order with the redaction flag on. The
+# differential harness (tests/test_scrub_log_text_parity.py) runs tors against
+# this chain and, when the TaskQ checkout is present, re-syncs these patterns
+# against the live module source — a TaskQ change to any of them is a visible
+# re-sync request, not a silent tors behavior change.
+_PG_DETAIL_RE = re.compile(r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$", re.MULTILINE)
 _PG_DETAIL_ESCAPED_RE = re.compile(
-    r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)",
+    r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"][)\]]*\s*$|$)",
     re.MULTILINE,
 )
 _URI_CRED_RE = re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@")
-_URI_PARAM_CRED_RE = re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)")
+
+#: The password-family parameter names, from the live module's
+#: ``_CRED_PARAM_NAMES`` (``sslpassword`` is the client-TLS key's
+#: passphrase). Spelled once here too and interpolated into the three
+#: compiled patterns below, the same derivation the live module does.
+_CRED_PARAM_NAMES = ("password", "passphrase", "passwd", "pwd", "sslpassword")
+
+#: The conninfo credential pass, the live chain's single combined regex:
+#: the value is either a libpq single-quoted string (spaces allowed,
+#: ``\'``/``\\`` escapes honored) or an unquoted token to whitespace/``&``
+#: (deliberately NOT stopping at ``@`` — a password may legally contain an
+#: unencoded ``@``), names are IGNORECASE.
+_URI_PARAM_CRED_RE = re.compile(
+    r"((?:[?&]|(?<![A-Za-z0-9_]))(?:"
+    + "|".join(_CRED_PARAM_NAMES)
+    + r")=)('(?:[^'\\]|\\.)*'|[^\s&]+)",
+    re.IGNORECASE,
+)
+
+#: The two anchor grammars of the SAME pass, split for rule selection: the
+#: ``uri_query_creds`` name selects the URI-query ``[?&]`` anchor, the
+#: ``libpq_conninfo_creds`` name the libpq keyword lookbehind — the live
+#: chain has no rule granularity, so this split is the named-rule surface's
+#: own contract (documented in src/scrub_impl.rs). Both selected (``rules
+#: =None`` included) runs the COMBINED pattern above ONCE, never the two
+#: splits sequentially — the combined leftmost-first scan is the live
+#: chain's semantics, and a split pass's ``***`` splice must not become a
+#: new anchor for the next.
+_URI_QUERY_ANCHOR_CRED_RE = re.compile(
+    r"([?&](?:" + "|".join(_CRED_PARAM_NAMES) + r")=)('(?:[^'\\]|\\.)*'|[^\s&]+)",
+    re.IGNORECASE,
+)
+_LIBPQ_KEYWORD_ANCHOR_CRED_RE = re.compile(
+    r"((?<![A-Za-z0-9_])(?:" + "|".join(_CRED_PARAM_NAMES) + r")=)('(?:[^'\\]|\\.)*'|[^\s&]+)",
+    re.IGNORECASE,
+)
 
 #: The accepted rule names, in canonical application order.
-SCRUB_RULES: tuple[str, ...] = ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+SCRUB_RULES: tuple[str, ...] = (
+    "pg_detail_lines",
+    "uri_userinfo",
+    "uri_query_creds",
+    "libpq_conninfo_creds",
+)
 
 #: Each rule's passes, in order: the DETAIL rule is one name over two
 #: segmenters (real-newline lines, then repr()-flattened escaped runs); the
-#: two URI rules are one pass each.
+#: two URI rules are one pass each; the two conninfo names share ONE pass
+#: (see the anchor split above), so neither appears in this table.
 _SCRUB_RULE_PASSES: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
     "pg_detail_lines": ((_PG_DETAIL_RE, ""), (_PG_DETAIL_ESCAPED_RE, "")),
     "uri_userinfo": ((_URI_CRED_RE, r"\1:***@"),),
-    "uri_query_creds": ((_URI_PARAM_CRED_RE, r"\1***"),),
 }
 
 
@@ -731,10 +772,31 @@ def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> s
     """The scrub oracle: the TaskQ chain applied per rule selection. ``rules
     is None`` runs the full chain in canonical order; a list/tuple selects a
     sub-chain (deduped, canonical order — the same contract tors spells);
-    ``[]`` is the identity."""
+    ``[]`` is the identity. The conninfo credential pass runs ONCE even when
+    both of its names are selected: the combined pattern then (the live
+    chain's semantics), the one selected anchor's split pattern otherwise."""
     selected = frozenset(rules) if rules is not None else None
     names = SCRUB_RULES if selected is None else [n for n in SCRUB_RULES if n in selected]
+    ran_conninfo = False
     for name in names:
+        if name in ("uri_query_creds", "libpq_conninfo_creds"):
+            if ran_conninfo:
+                continue  # the two names share one pass; already ran
+            ran_conninfo = True
+            both = selected is None or (
+                "uri_query_creds" in selected and "libpq_conninfo_creds" in selected
+            )
+            pattern = (
+                _URI_PARAM_CRED_RE
+                if both
+                else (
+                    _URI_QUERY_ANCHOR_CRED_RE
+                    if name == "uri_query_creds"
+                    else _LIBPQ_KEYWORD_ANCHOR_CRED_RE
+                )
+            )
+            text = pattern.sub(r"\1***", text)
+            continue
         for pattern, repl in _SCRUB_RULE_PASSES[name]:
             text = pattern.sub(repl, text)
     return text

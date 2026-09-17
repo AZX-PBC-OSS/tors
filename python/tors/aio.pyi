@@ -32,7 +32,10 @@ async def scrub_pii_report(
 ) -> dict[str, object]: ...
 async def scrub_log_text(
     text: str,
-    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+    rules: Sequence[
+        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+    ]
+    | None = None,
 ) -> str: ...
 async def decode_utf8(raw: bytes, *, errors: Literal["strict", "replace"] = "strict") -> str: ...
 async def finalize_utf8(

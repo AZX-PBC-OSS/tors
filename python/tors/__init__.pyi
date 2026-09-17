@@ -121,10 +121,16 @@ def scrub_pii_report(
 # Named-rule log and exception-text scrubbing, byte-identical to the
 # TaskQ exception-text chain (the four compiled regexes this ports are
 # quoted in tests/reference.py and re-synced against the live source by
-# tests/test_scrub_log_text_parity.py). rules=None runs the full chain in
-# canonical order (pg_detail_lines -> uri_userinfo -> uri_query_creds);
-# [] is the identity; duplicates dedupe and caller order is irrelevant.
-# An unknown name raises ValueError naming the accepted set.
+# tests/test_scrub_log_text_parity.py; the pin is the current
+# wave2-integration grammar, TaskQ commit 926e13e / PR #222). rules=None
+# runs the full chain in canonical order (pg_detail_lines -> uri_userinfo
+# -> the conninfo pass, whose uri_query_creds / libpq_conninfo_creds names
+# select the two anchor grammars of ONE pass); [] is the identity;
+# duplicates dedupe and caller order is irrelevant. An unknown name raises
+# ValueError naming the accepted set. SECURITY POLICY (issue #107,
+# inverting 0.7.0): the repr-flattened DETAIL run is FAIL-CLOSED — a
+# delimiter miss (an unterminated repr, or one with text after the quote)
+# scrubs through end of line, never left alone.
 # tors.scrub_log_text(s, rules) is s exactly when no rule fires (the ***
 # fixed points fire and return a fresh, equal string).
 #
@@ -132,7 +138,10 @@ def scrub_pii_report(
 # GIL, the whole multi-rule pass under one detach).
 def scrub_log_text(
     text: str,
-    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+    rules: Sequence[
+        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+    ]
+    | None = None,
 ) -> str: ...
 def nfc(text: str) -> str: ...
 def nfd(text: str) -> str: ...

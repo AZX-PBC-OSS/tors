@@ -4,30 +4,53 @@ exception-text scrub chain.
 Provenance, the pin this file exists to enforce: the behavior oracle is the
 consumer's own chain, ``src/taskq/obs/_redact_exc.py`` in the TaskQ repo
 (pinned to the sibling checkout this suite runs against on the dev box; the
-locator below also honors ``TORS_TASKQ_REPO``). The four compiled regexes,
-quoted verbatim from that source, are:
+locator below also honors ``TORS_TASKQ_REPO``). The pin is the CURRENT chain
+— the wave2-integration grammar (TaskQ commit 926e13e, PR #222; issue #107's
+re-sync) — so while that PR is unmerged on the TaskQ side, the locator
+prefers the wave2 worktree of the sibling checkout over its main branch and
+falls back to the main checkout (whose stale chain then fails the quoted-pin
+test loudly: a re-sync request, never a silent drift). The four compiled
+regexes, quoted verbatim from that source, are:
 
 .. code-block:: python
 
-    _PG_DETAIL_RE = re.compile(r"^[ \\t]*DETAIL:.*$", re.MULTILINE)
+    _PG_DETAIL_RE = re.compile(r"^(?:[ \\t]*[|+][ \\t]*)*[ \\t]*DETAIL:.*$", re.MULTILINE)
     _PG_DETAIL_ESCAPED_RE = re.compile(
-        r"(?:\\\\r)?\\\\n[ \\t]*DETAIL:.*?(?=(?:\\\\r)?\\\\n|['\\"]\\)?\\s*$)",
+        r"(?:\\\\r)?\\\\n[ \\t]*DETAIL:.*?(?=(?:\\\\r)?\\\\n|['\\"][)\\]]*\\s*$|$)",
         re.MULTILINE,
     )
     _URI_CRED_RE = re.compile(r"(\\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s:/@]*):([^\\s@]+)@")
-    _URI_PARAM_CRED_RE = re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\\s&@]+)")
+    _URI_PARAM_CRED_RE = re.compile(
+        r"((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)"
+        r"('(?:[^'\\\\]|\\\\.)*'|[^\\s&]+)",
+        re.IGNORECASE,
+    )
 
 (the ``\\``-doubling is this docstring's; ``tests/reference.py`` carries the
 machine-checked single-escaped spellings, and ``TestQuotedPin`` below fails
 if they ever differ from what this header means). The chain order is
 ``_scrub_text``'s own with the redaction flag on: DETAIL lines (real
-newlines), then DETAIL runs (repr-flattened ``\\n`` separators), then the
-userinfo mask, then the password-family query-param mask — each a whole pass
-over the current text, which is exactly the canonical order
-``tors.scrub_log_text`` applies per rule selection. A TaskQ change to any
+newlines, ExceptionGroup gutters included), then DETAIL runs (repr-flattened
+``\\n`` separators, fail-closed at end of line), then the userinfo mask, then
+the password-family connection-parameter mask (URI-query and libpq keyword
+anchors, IGNORECASE) — each a whole pass over the current text, which is
+exactly the canonical order ``tors.scrub_log_text`` applies per rule
+selection. The conninfo pass is ONE pass under TWO names
+(``uri_query_creds`` selects the ``[?&]`` anchor grammar,
+``libpq_conninfo_creds`` the libpq keyword lookbehind; both — ``rules=None``
+included — run the combined pattern, never two sequential substitutions).
+A TaskQ change to any
 pattern or to the order is a visible re-sync request (the live-oracle class
 below fails loudly when the checkout is present), never a silent tors
 behavior change.
+
+Two behavior changes rode in with the #107 re-sync, both deliberate
+security-policy calls documented where the old contract was stated
+(src/scrub_impl.rs's header, docs/api.md): the escaped-DETAIL lookahead's
+final bare ``$`` leg is FAIL-CLOSED — an unterminated repr scrubs through
+end of line, inverting 0.7.0's pinned "unterminated run is left alone" —
+and the conninfo value class no longer stops at ``@`` (a password may
+legally carry one; 0.7.0 left the tail riding after the ``***``).
 
 Why the failure mode needs this file: silent under-redaction. A port bug
 that leaves a row value or a password in the output crashes nothing and
@@ -70,6 +93,7 @@ from hypothesis import strategies as st
 
 import tors
 from reference import (
+    _CRED_PARAM_NAMES,
     _PG_DETAIL_ESCAPED_RE,
     _PG_DETAIL_RE,
     _URI_CRED_RE,
@@ -81,13 +105,28 @@ from reference import (
 
 # The quoted pin, mechanically enforced against reference.py's compiled
 # patterns (TestQuotedPin): these are the TaskQ source's exact pattern
-# strings, byte for byte, and both copies must stay that way.
+# strings, byte for byte (the wave2-integration grammar, #107's re-sync),
+# and both copies must stay that way. The conninfo name list is quoted
+# separately (the live module spells it as a tuple the pattern is built
+# from; the assembled patterns must equal these strings exactly).
 QUOTED_PATTERNS: dict[str, str] = {
-    "_PG_DETAIL_RE": r"^[ \t]*DETAIL:.*$",
-    "_PG_DETAIL_ESCAPED_RE": (r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)"),
+    "_PG_DETAIL_RE": r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$",
+    "_PG_DETAIL_ESCAPED_RE": (
+        r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"][)\]]*\s*$|$)"
+    ),
     "_URI_CRED_RE": r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@",
-    "_URI_PARAM_CRED_RE": r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)",
+    "_URI_PARAM_CRED_RE": (
+        r"((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)"
+        r"('(?:[^'\\]|\\.)*'|[^\s&]+)"
+    ),
 }
+QUOTED_CRED_PARAM_NAMES: tuple[str, ...] = (
+    "password",
+    "passphrase",
+    "passwd",
+    "pwd",
+    "sslpassword",
+)
 _COMPILED_PATTERNS: dict[str, re.Pattern[str]] = {
     "_PG_DETAIL_RE": _PG_DETAIL_RE,
     "_PG_DETAIL_ESCAPED_RE": _PG_DETAIL_ESCAPED_RE,
@@ -96,14 +135,17 @@ _COMPILED_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 # The rule lanes every corpus case runs under: the full chain, each rule
-# alone, and the pg+userinfo composition (the pair whose interaction is the
-# canonical-order contract — a DETAIL deletion can eat the `@` the userinfo
-# mask anchors on).
+# alone, and the interaction pairs (pg+userinfo, the pair whose interaction
+# is the canonical-order contract — a DETAIL deletion can eat the `@` the
+# userinfo mask anchors on; and the two conninfo names together, the pair
+# that must run as ONE combined pass).
 RULE_LANES: list[tuple[str, list[str] | None]] = [
     ("full", None),
     ("pg_detail_lines", ["pg_detail_lines"]),
     ("uri_userinfo", ["uri_userinfo"]),
     ("uri_query_creds", ["uri_query_creds"]),
+    ("libpq_conninfo_creds", ["libpq_conninfo_creds"]),
+    ("conninfo-both", ["uri_query_creds", "libpq_conninfo_creds"]),
     ("pg+userinfo", ["pg_detail_lines", "uri_userinfo"]),
 ]
 
@@ -117,11 +159,23 @@ class TestQuotedPin:
             "or a bug; either way the two spellings must not diverge silently"
         )
 
+    def test_the_cred_param_names_are_the_quoted_pin(self) -> None:
+        # The live module derives its pattern from this tuple; reference.py
+        # derives its own patterns from the same tuple, so the pin is on
+        # the tuple, not the interpolation.
+        assert _CRED_PARAM_NAMES == QUOTED_CRED_PARAM_NAMES
+
     def test_the_canonical_rule_order_is_pinned(self) -> None:
         # The chain order _scrub_text applies with the flag on: DETAIL's two
-        # segmenters, userinfo, then query params. reference.py must carry
-        # the same tuple tors spells.
-        assert SCRUB_RULES == ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+        # segmenters, userinfo, then the conninfo pass (its two anchor
+        # grammars under the two names). reference.py must carry the same
+        # tuple tors spells.
+        assert SCRUB_RULES == (
+            "pg_detail_lines",
+            "uri_userinfo",
+            "uri_query_creds",
+            "libpq_conninfo_creds",
+        )
 
 
 # --- classification pins: the two CPython-re-vs-Rust-std seams ----------------------
@@ -247,6 +301,25 @@ _CORPUS: list[str] = [
     "Traceback (most recent call last):\nJobError('dup\\nDETAIL: K=(v)')\nafter",
     "x\\nDETAIL: y\\nDETAIL: z') tail\\nDETAIL: w')",
     "a\\nDETAIL: b\\r\\nDETAIL: c')",
+    # ExceptionGroup gutters (#107): one `| `/`+ ` layer per nesting level
+    # in traceback.format_exception's group rendering; a non-DETAIL header
+    # line through the same gutters stays.
+    "    +   | DETAIL: row-848",
+    "  | DETAIL: v\nnext",
+    "+\\t+ DETAIL: v",
+    "||DETAIL: v",
+    "\\t | \\t + DETAIL: v",
+    "  | ExceptionGroup: sub-exc (1 sub-exception)\n  | DETAIL: row-8",
+    "x | DETAIL: v",
+    "E('m\\nDETAIL: v')])",
+    "E('m\\nDETAIL: v]')",
+    "E('m\\nDETAIL: v)]')",
+    "E('m\\nDETAIL: v')])')",
+    "E('m\\nDETAIL: v|x",
+    # The fail-closed leg (#107's policy change): delimiter misses scrub
+    # through end of line — the two shapes 0.7.0 pinned as left-alone.
+    "E('m\\nDETAIL: v",
+    "E('a\\nDETAIL: v')  tail",
     # userinfo: the mask itself.
     "postgresql://worker:hunter2@db/prod",
     "postgresql://:SECRET@host/db",
@@ -296,6 +369,34 @@ _CORPUS: list[str] = [
     "a?password=1?pwd=2",
     "&password=1&pwd=2&password=3",
     "x?passphrase=a?b&passwd=",
+    # conninfo credentials (#107): the libpq keyword anchor, IGNORECASE
+    # names, `sslpassword`, `@` allowed inside values, single-quoted
+    # values (spaces, escaped quotes/backslashes, unterminated),
+    # end-of-line `=`-adjacent edges.
+    "host=h password=p",
+    "host=db PASSWORD='hun ter2'",
+    "host='db host' password='p w' user=u",
+    "password=p",
+    "épassword=x",
+    "_password=x",
+    "1password=x",
+    "apassword=x",
+    "cpwd=x pwd=y",
+    "?x=password=y",
+    "postgresql://h/db?sslpassword=p",
+    "?SSLPassword=s&key=k",
+    "?password=a@b",
+    "?password=a@b@c&x=1",
+    "?password='a b'&x=1",
+    "?password='a\\'b'&x=1",
+    "?password='a\\\\'&x=1",
+    "?password='unterminated",
+    "?password='unterminated &password=x",
+    "?password='multi\nline real-nl'&x=1",
+    "password='a\\'\\'' x",
+    "?pwd=a?password=b",
+    " password=a&password=b",
+    "?password=a=password",
     # chain shapes: both credential shapes on one DSN, embedded param inside
     # a userinfo password, the DETAIL-eats-the-@ order interaction, an
     # escaped DETAIL inside a would-be password, mixed real text.
@@ -347,6 +448,11 @@ _ESCAPED_GRID_TERMINATOR = [
     "\n",
     "\\n\\n",
     "x'",
+    # The `)`/`]` closer runs a nested repr's tail is made of (#107).
+    "')])",
+    "']])",
+    "']) ')",
+    "' x])",
 ]
 
 
@@ -369,14 +475,38 @@ _PARAM_GRID_NAME = [
     "passphrase",
     "passwd",
     "pwd",
+    "sslpassword",
+    # Case permutations (the #107 IGNORECASE grammar) and near misses.
     "Password",
+    "PASSWORD",
+    "PaSsWd",
+    "SSLPASSWORD",
+    "sslpassword",
     "passwords",
     "passwo",
     "pwdx",
     "pass",
     "p",
 ]
-_PARAM_GRID_VALUE = ["x", "", " ", "a b", "a&b", "a@b", "a=b", "***", "a\\nb", "x://y:z"]
+_PARAM_GRID_VALUE = [
+    "x",
+    "",
+    " ",
+    "a b",
+    "a&b",
+    "a@b",
+    "a=b",
+    "***",
+    "a\\nb",
+    "x://y:z",
+    # Quoted values (the #107 libpq grammar): spaces, escaped quote and
+    # backslash, unterminated, empty quotes.
+    "'a b'",
+    "'a\\'b'",
+    "'a\\\\'",
+    "'unterminated",
+    "''",
+]
 _PARAM_GRID_TAIL = ["", "&n=1", " x", "@h", "\n", "?password=2"]
 
 
@@ -666,10 +796,18 @@ def test_scrub_userinfo_fail_chain_scales_linearly() -> None:
 def _load_taskq_module() -> object | None:
     """File-load the live ``_redact_exc.py`` if a TaskQ checkout is findable.
 
-    Locator: ``TORS_TASKQ_REPO`` wins if set; otherwise the sibling of this
-    repo's MAIN checkout (derived via ``git rev-parse --git-common-dir``, so
-    the route works from any worktree). Returns ``None`` (the caller skips,
-    importorskip semantics) when neither holds a checkout.
+    Locator, in order: ``TORS_TASKQ_REPO`` wins if set; then the wave2
+    worktree of the sibling of this repo's MAIN checkout (derived via
+    ``git rev-parse --git-common-dir``, so the route works from any
+    worktree) — the wave2-integration branch is where the CURRENT chain
+    (TaskQ commit 926e13e, PR #222, the grammar this pin carries since
+    issue #107's re-sync) lives until that PR merges to the TaskQ main
+    branch; then the sibling checkout itself, whose stale (pre-#222) chain
+    fails the quoted-pin test loudly once the pin is the current grammar —
+    the visible re-sync request this lane exists to deliver. When #222
+    merges, both candidates carry the same chain and the wave2 entry can
+    be dropped. Returns ``None`` (the caller skips, importorskip
+    semantics) when none holds a checkout.
     """
     candidates: list[Path] = []
     env_repo = os.environ.get("TORS_TASKQ_REPO")
@@ -685,6 +823,7 @@ def _load_taskq_module() -> object | None:
             cwd=Path(__file__).resolve().parent.parent,
         ).stdout.strip()
         main_checkout = (Path(__file__).resolve().parent.parent / common_dir).resolve().parent
+        candidates.append(main_checkout.parent / "TaskQ" / ".worktrees" / "wave2")
         candidates.append(main_checkout.parent / "TaskQ")
     except (OSError, subprocess.SubprocessError):
         pass
