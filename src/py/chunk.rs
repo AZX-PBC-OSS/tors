@@ -7,7 +7,7 @@ use crate::chunk_by_segment_impl;
 use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
 use crate::parse_boundary;
-use crate::py::_borrow::{convert_str_arg, validate_count_overlap};
+use crate::py::_borrow::{bounded_str_list, convert_str_arg, validate_count_overlap};
 use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
@@ -477,7 +477,7 @@ pub fn chunk_hierarchical(
     py: Python<'_>,
     text: &str,
     max_chars: i64,
-    separators: Option<Vec<Option<String>>>,
+    separators: Option<Bound<'_, PyAny>>,
     overlap: i64,
     overlap_boundary: &str,
 ) -> PyResult<Vec<(usize, usize)>> {
@@ -497,6 +497,25 @@ pub fn chunk_hierarchical(
     };
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
+    // The list param extracts through the bounded manual walk
+    // (`bounded_str_list`, src/py/_borrow.rs): pyo3's
+    // `Option<Vec<Option<String>>>` sizing the Vec from a lying
+    // `__len__` was the uncatchable capacity-overflow class (#112's
+    // residual on this binding — the `scrub_pii` rules=/families= fix's
+    // twin, same cap, same refusal bytes). None stays None: an empty
+    // `separators` list is a DISTINCT selection (raw cut only) from the
+    // `None` default hierarchy.
+    let separators: Option<Vec<Option<String>>> = match separators {
+        None => None,
+        Some(any) => {
+            let mut list: Vec<Option<String>> = Vec::new();
+            bounded_str_list("chunk_hierarchical", "separators", &any, |handle| {
+                list.push(handle.extract::<Option<String>>()?);
+                Ok(())
+            })?;
+            Some(list)
+        }
+    };
     // The one intermediate materialization pyo3's borrowed-Vec
     // limitation forces (`Option<Vec<Option<&str>>>` cannot be extracted
     // directly: FromPyObject is not general enough over the borrowed

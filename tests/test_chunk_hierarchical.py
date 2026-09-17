@@ -25,6 +25,10 @@ stalled/looping start fails fast rather than hanging the suite.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from collections.abc import Sequence
+
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -82,6 +86,153 @@ class TestArgumentContract:
 
     def test_text_within_budget_is_one_chunk(self) -> None:
         assert chunk_hierarchical("hello world", 100) == [(0, 11)]
+
+
+class TestBoundedSeparatorsExtraction:
+    """``separators=`` never sizes its argument from ``__len__`` (issue
+    #112's residual on this binding): pyo3's ``Option<Vec<Option<String>>>``
+    extraction reserved ``Vec::with_capacity(__len__())`` before
+    iterating, so a ``Sequence`` whose ``__len__`` lied (2**62) died as a
+    ``PanicException`` (capacity overflow) -- ``except Exception`` cannot
+    catch it. The parameter now extracts through a bounded manual walk
+    (``bounded_str_list``, src/py/_borrow.rs -- the twin of
+    ``scrub_pii``'s ``rules=``/``families=`` walk in src/py/pii.rs, same
+    cap, same refusal bytes), and every pre-existing boundary behavior is
+    preserved byte-identically: the accepted surface (list, tuple, any
+    honest ``Sequence``), the refusals (bare ``str``, non-sequences,
+    non-``str`` items), mid-iteration error propagation, and a
+    ``__len__`` that lies LOW (the walk iterates; it never reserves).
+    The one behavior change is the bomb's: a sequence yielding past the
+    cap (100_000 items) dies as a catchable ``ValueError``. The hostile
+    cases run in a subprocess: a regression to ``PanicException`` would
+    otherwise kill this runner (it is not an ``Exception`` subclass)
+    instead of failing the cell."""
+
+    @staticmethod
+    def _probe(expr: str) -> str:
+        done = subprocess.run(
+            [sys.executable, "-c", f"import tors\n{expr}"],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        return f"rc={done.returncode}\n{done.stdout}\n{done.stderr}"
+
+    _LYING_HUGE = (
+        "from collections.abc import Sequence\n"
+        "class LyingHuge(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i): raise IndexError\n"
+    )
+
+    _FLOOD = (
+        "from collections.abc import Sequence\n"
+        "class Flood(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i):\n"
+        "        if i >= 150_000: raise IndexError\n"
+        "        return ' '\n"
+    )
+
+    def test_a_len_that_lies_huge_is_never_a_panic(self) -> None:
+        # The reported repro, exact: pyo3_runtime.PanicException
+        # (capacity overflow), not an Exception subclass. The walk never
+        # reads __len__, so the empty yield is just an empty selection
+        # (raw cut only, the empty-list semantics).
+        done = self._probe(
+            self._LYING_HUGE
+            + "try:\n"
+            "    out = tors.chunk_hierarchical('x', 1, separators=LyingHuge())\n"
+            "    print('OK', out)\n"
+            "except PanicException as e:\n"
+            "    print('PANIC', e)\n"
+        )
+        assert "PANIC" not in done, f"the bomb is back:\n{done}"
+        assert "OK" in done, f"the honest empty yield broke:\n{done}"
+
+    def test_a_sequence_yielding_past_the_cap_is_a_value_error(self) -> None:
+        # The cap (src/py/_borrow.rs MAX_LIST_ITEMS): past 100_000
+        # yielded items the walk refuses with a catchable ValueError --
+        # never a PanicException.
+        done = self._probe(
+            self._FLOOD
+            + "try:\n"
+            "    tors.chunk_hierarchical('a b c', 3, separators=Flood())\n"
+            "    print('NO RAISE')\n"
+            "except ValueError as e:\n"
+            "    print('VALUEERROR', 'too many items' in str(e))\n"
+            "except PanicException as e:\n"
+            "    print('PANIC', e)\n"
+        )
+        assert "PANIC" not in done, f"the bomb is back:\n{done}"
+        assert "VALUEERROR True" in done, f"not a catchable ValueError:\n{done}"
+
+    def test_an_honest_100k_item_list_succeeds_and_100001_refuses(self) -> None:
+        # The cap's edge: exactly 100_000 entries is a legitimate call
+        # (deduped to nothing real), 100_001 is over the line and
+        # refused -- as a catchable Exception subclass either way.
+        chunks = chunk_hierarchical("a b c", 3, separators=[" "] * 100_000)
+        assert chunks == [(0, 3), (4, 5)]
+        with pytest.raises(ValueError) as exc:
+            chunk_hierarchical("a b c", 3, separators=[" "] * 100_001)  # type: ignore[arg-type]
+        assert isinstance(exc.value, Exception)
+        assert "too many items" in str(exc.value)
+
+    def test_a_len_that_lies_low_takes_every_yielded_item(self) -> None:
+        # __len__ = 2 while __getitem__ yields 5: the walk iterates and
+        # never reserves, so all five arrive (the pre-fix extraction's
+        # own behavior, pinned so a "trust the prefix length" regression
+        # shows here).
+        class LowLen(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, i: int) -> str | None:
+                if i >= 5:
+                    raise IndexError
+                return "\n" if i % 2 == 0 else " "
+
+        assert chunk_hierarchical("a b\nc d\ne", 3, LowLen()) == [  # type: ignore[arg-type]
+            (0, 3),
+            (4, 7),
+            (8, 9),
+        ]
+
+    def test_a_getitem_raising_mid_iteration_propagates(self) -> None:
+        # The pre-fix extraction propagated the Sequence's own error; the
+        # walk iterates the same way, so it still does.
+        class ExplodesMid(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, i: int) -> str:
+                if i == 1:
+                    raise RuntimeError("boom mid-iteration")
+                if i > 1:
+                    raise IndexError
+                return " "
+
+        with pytest.raises(RuntimeError, match="boom mid-iteration"):
+            chunk_hierarchical("a b c", 3, ExplodesMid())  # type: ignore[arg-type]
+
+    def test_the_error_is_never_a_panic_exception_class(self) -> None:
+        # The catchable-error-class assertion: every refusal on this
+        # boundary is an Exception (ValueError/TypeError), the class
+        # `except Exception` catches -- PanicException derives straight
+        # from BaseException and was the defect's whole point.
+        class LyingHuge(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2**62
+
+            def __getitem__(self, i: int) -> str:
+                if i >= 150_000:
+                    raise IndexError
+                return " "
+
+        with pytest.raises(ValueError) as exc:
+            chunk_hierarchical("a b c", 3, LyingHuge())  # type: ignore[arg-type]
+        assert isinstance(exc.value, Exception)
+        assert "too many items" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
