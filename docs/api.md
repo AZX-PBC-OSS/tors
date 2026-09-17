@@ -1077,6 +1077,21 @@ standard str-in boundary. No list-shape marshalling class: the return is one
 string; the GIL-held residue is the argument walk plus the O(output) marshalling,
 measured at the ping floor even on a 1.28M-replacement dense map.
 
+**Output ceiling.** The spliced output's byte size is computed before anything is
+allocated (saturating arithmetic over the match spans) and refused past **32 MiB**
+with a catchable `ValueError` naming the refused size and the ceiling — the
+documents layer's own byte contract (`DEFAULT_ANYDOC_INPUT_LIMIT`), one
+convention for how many bytes is one tors object. The unit is UTF-8 bytes, and no
+replacement value is ever truncated mid-character: values are spliced whole or
+the call is refused. A sub-ceiling allocation refusal surfaces as the same
+catchable `ValueError` (the reservation is attempted with `try_reserve`, never an
+uncatchable allocator abort). The ceiling applies before the identity contract's
+borrowed return, so a replace whose output would exceed it raises even when the
+net effect would be the identity — a >32 MiB "identity" replace is the
+amplification shape wearing a disguise. The masked spelling below is
+length-preserving and has no ceiling (a short key cannot amplify into a long
+output there).
+
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
 # "the dog sat in the library"
@@ -1781,9 +1796,16 @@ byte-identical whether or not a deadline is set, and a benign large document
 does not trip a generous budget (the deadline discriminates pathological
 *shape*, not *size*). When a schema is passed, the budget bounds the schema
 alignment layer too: the key-remap ladder, the union and type-union branch
-retries, scalar coercion, missing-key fill, and validation all sample the
-same clock, with the same soft bound (at most one key-ladder sweep or one
-union branch past expiry). It applies to all three spellings and is checked with
+retries, scalar coercion, missing-key fill, enum suggestion scoring, and
+validation all sample the same clock, with the same soft bound (at most one
+key-ladder sweep or one union branch past expiry). The enum suggestion loop
+reads the clock before every member's comparison and hands the clock's
+remaining budget to each jaro-winkler score, so both the many-members axis
+and the one-very-long-member axis are bounded: a wide enum of long members
+raises `TimeoutError` within a small multiple of the budget instead of
+running the loop to completion, and an expired clock raises — a `None`
+suggestion on an expired clock would mask the timeout as a plain data
+miss. It applies to all three spellings and is checked with
 the GIL released, so `TimeoutError` is raised after reacquiring it, the
 same shape as `diff_opcodes`, including the message:
 `"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
@@ -1857,6 +1879,14 @@ differential suite pins everything else to json-repair==0.63.4:
   recursion depth.")` at 200 nested containers, where upstream raises an
   uncaught `RecursionError` at roughly its own recursion limit: the same
   failure normalized into the error catalog at a lower, pinned threshold.
+- **Shared-reference schemas**: the schema walk visits every path, so a
+  schema built from shared references (48 nested shared lists, depth 48)
+  would expand exponentially; the walk caps container visits at the canon
+  walk's 2,000,000-node ceiling and refuses past it with a catchable
+  `ValueError` ("Input schema visits too many objects"). A legitimately
+  large FLAT schema of the same node count is unaffected — the cap counts
+  container visits, and a flat schema's cost is linear in the caller's own
+  input.
 - **On by default, tors-native**: key-typo remap, enum "Did you mean ..."
   suffixes,   date/uuid normalization, numeric extraction tiers, and the
   diagnostics output are extensions upstream does not have; see

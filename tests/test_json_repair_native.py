@@ -1823,3 +1823,95 @@ class TestRepairDeadline:
         assert repair_json_loads(
             '{"y": "7"}', schema=all_of_schema, deadline_ms=60_000
         ) == repair_json_loads('{"y": "7"}', schema=all_of_schema)
+
+
+class TestEnumSuggestionDeadline:
+    """The enum suggestion loop is ON the clock (issue #115): the pre-fix
+    walk scored every member with an unbounded per-comparison budget and
+    never read the clock, so a wide enum of long members answered in 1.3s
+    against a 5ms ``deadline_ms`` (the TimeoutError arriving only from a
+    later phase's check). Both axes are bounded now — a forced clock read
+    per member, and the clock's remaining budget handed to each
+    jaro-winkler comparison — and an expired clock RAISES, never falls out
+    of the loop as a silent ``None`` suggestion that would mask the
+    timeout as a plain data error. The wall pins below carry generous
+    room (50ms at a 5ms budget, measured ~8ms) for CI load."""
+
+    _WIDE_ENUM = [("a" * 1500) + str(i) for i in range(2000)]
+
+    def test_the_reported_wide_enum_raises_within_the_budget(self) -> None:
+        import time
+
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads(
+                json.dumps("b" * 1500),
+                schema={"enum": self._WIDE_ENUM},
+                deadline_ms=5,
+            )
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        assert elapsed_ms < 50.0, f"the enum walk ran {elapsed_ms:.1f}ms past a 5ms budget"
+
+    def test_a_budget_expired_before_the_enum_still_raises(self) -> None:
+        # The ordering red-team: expiry before the loop and expiry inside
+        # it must BOTH raise (a pre-loop-expired clock that returned None
+        # would surface the miss as "does not match enum" — the timeout,
+        # masked). The 1ms budget is blown in the parse phases; the enum
+        # loop's forced check raises anyway.
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads(
+                json.dumps("b" * 1500),
+                schema={"enum": self._WIDE_ENUM},
+                deadline_ms=1,
+            )
+
+    def test_a_single_million_char_member_is_bounded_by_the_comparison_budget(self) -> None:
+        # The one-very-long-comparison axis: the remaining-budget handoff
+        # into jaro_winkler bounds the member's materialization and scan.
+        # The member is sized so its own materialization must overrun a
+        # 5ms budget (measured: TimeoutError at ~6-8ms; a 10^6-char member
+        # sometimes fits the budget and answers the plain miss, which is
+        # the bound working, not failing). The miss sits where the
+        # suggestion loop runs — an object property's enum, the path that
+        # scores members.
+        import time
+
+        schema = {
+            "type": "object",
+            "properties": {"c": {"enum": ["a" * 10**7]}},
+            "required": ["c"],
+        }
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads('{"c": "b"}', schema=schema, deadline_ms=5)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        assert elapsed_ms < 100.0, f"one 10^7-char member ran {elapsed_ms:.1f}ms"
+
+    def test_an_affordable_enum_suggests_identically_armed_or_not(self) -> None:
+        # The suggestion-hint path is byte-identical with the clock armed
+        # and unarmed: the remaining-budget handoff only ever cuts work at
+        # real expiry, so a healthy enum cannot tell the difference (the
+        # exact suggestion string is pinned both spellings).
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"color": {"type": "string", "enum": ["blue", "green"]}},
+            "required": ["color"],
+        }
+        expected = "Did you mean 'blue'?"
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            repair_json_loads('{"color": "blu"}', schema=schema)
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            repair_json_loads('{"color": "blu"}', schema=schema, deadline_ms=60_000)
+
+    def test_an_empty_enum_misses_plainly(self) -> None:
+        # No members, nothing to score, and no deadline interaction: the
+        # loop body never runs, so the miss is the plain refusal (the
+        # top-level scalar shape answers from the crate's own enum
+        # validation; the object-property shape is the suggestion loop's).
+        schema = {
+            "type": "object",
+            "properties": {"c": {"enum": []}},
+            "required": ["c"],
+        }
+        with pytest.raises(ValueError, match="does not match enum"):
+            repair_json_loads('{"c": "x"}', schema=schema, deadline_ms=60_000)

@@ -2734,7 +2734,8 @@ impl SchemaRepairer {
             if members.iter().any(|member| value.py_eq(member)) {
                 return Ok(value);
             }
-            if let Some(hint) = closest_enum_member(&value, members) {
+            let hint = self.closest_enum_member(&value, members)?;
+            if let Some(hint) = hint {
                 self.record(
                     "suggest",
                     path,
@@ -2939,23 +2940,98 @@ fn validation_message(err: &jsonschema::ValidationError<'_>) -> String {
     }
 }
 
-/// Closest string enum member by jaro-winkler at the report-only bar, or
-/// nothing (never auto-remap: an enum miss is the caller's data to fix,
-/// the suggestion is the help).
-fn closest_enum_member(value: &Value, members: &[Value]) -> Option<String> {
-    let Value::Str(text) = value else { return None };
-    let mut best: Option<(&str, f64)> = None;
-    for member in members {
-        if let Value::Str(candidate) = member {
-            let score = jaro_winkler(text, candidate, None).unwrap_or(0.0);
+impl SchemaRepairer {
+    /// Closest string enum member by jaro-winkler at the report-only bar, or
+    /// nothing (never auto-remap: an enum miss is the caller's data to fix,
+    /// the suggestion is the help). A `SchemaRepairer` method rather than a
+    /// free function because the suggestion loop is ON the clock now (issue
+    /// #115): it scores every member, so a wide enum of long members ran the
+    /// whole loop past an armed `deadline_ms` (measured: 2000 members x 1500
+    /// chars answered in 1.3s against a 5ms budget, the TimeoutError arriving
+    /// only from a later phase's check). Both axes are bounded here, the same
+    /// two the repair paths' own fuzzy scans bound:
+    ///
+    /// * per member, a FORCED clock read (`check_deadline`): the sampled
+    ///   check would read only every 256th member, and falling out of the
+    ///   loop on expiry would return `Ok(None)` — a silent None suggestion
+    ///   on an expired clock MASKS the timeout (the caller sees "does not
+    ///   match enum" and blames the data, not the budget). An expired clock
+    ///   raises the sticky `DEADLINE_TAG` payload instead, the same
+    ///   `TimeoutError` translation every other phase's abort uses, whether
+    ///   the budget expired before the enum or mid-enum (the pre-loop
+    ///   membership scan above is short, but the forced check makes the
+    ///   ordering irrelevant: both orderings raise).
+    /// * per comparison, the clock's REMAINING budget passed into
+    ///   `jaro_winkler` (replacing the `None`): bounds the one very long
+    ///   member too — a single 10^6-char member materializes its chars and
+    ///   scans them only while its slice of the budget lasts. The budget
+    ///   never fires short of real expiry (it is the shared clock's own
+    ///   remaining time, so a healthy enum is byte-for-byte the suggestion
+    ///   the unbounded walk gave), and a comparison that trips it means the
+    ///   shared clock expired mid-member: the sticky payload is raised, and
+    ///   the score is never silently read as 0.0.
+    fn closest_enum_member(
+        &self,
+        value: &Value,
+        members: &[Value],
+    ) -> Result<Option<String>, String> {
+        let Value::Str(text) = value else {
+            return Ok(None);
+        };
+        let mut best: Option<(&str, f64)> = None;
+        for member in members {
+            // The forced per-member read: an expired budget raises, never
+            // falls through to a silent None (see the doc comment).
+            self.force_deadline_check();
+            self.check_deadline()?;
+            let Value::Str(candidate) = member else {
+                continue;
+            };
+            let remaining_ms = self.remaining_budget_ms();
+            let score = match jaro_winkler(text, candidate, remaining_ms) {
+                Ok(score) => score,
+                Err(_) => {
+                    // The per-comparison budget only trips on real expiry of
+                    // the shared clock (it IS the clock's remaining time), so
+                    // this is a deadline abort: raise the sticky payload the
+                    // boundary translates to TimeoutError. The fallback arm
+                    // is unreachable (a budget expiry implies the shared
+                    // clock expired; `check_deadline` latches before
+                    // returning).
+                    self.force_deadline_check();
+                    return Err(self.check_deadline().expect_err(
+                        "a per-comparison budget expiry implies the shared clock expired",
+                    ));
+                }
+            };
             if best.is_none_or(|(_, top)| score > top) {
                 best = Some((candidate, score));
             }
         }
+        // The post-loop check: a budget that expired during the LAST
+        // member's comparison must still raise. Without it, a final
+        // comparison that consumed the budget mid-scan answered as a
+        // silent miss — measured: one 10^6-char member whose window scan
+        // finished 0.1ms past a 5ms budget came back as the plain "does
+        // not match enum" (the timeout, masked — the same masking the
+        // per-member check prevents between members; this prevents it
+        // after the last one).
+        self.force_deadline_check();
+        self.check_deadline()?;
+        Ok(best
+            .and_then(|(candidate, score)| (score >= SUGGEST_MIN).then(|| candidate.to_string())))
     }
-    match best {
-        Some((candidate, score)) if score >= SUGGEST_MIN => Some(candidate.to_string()),
-        _ => None,
+
+    /// The armed clock's remaining budget, the per-comparison ceiling
+    /// [`Self::closest_enum_member`] hands `jaro_winkler`: the deadline's
+    /// total budget minus the elapsed wall, in the same milliseconds the
+    /// budget was armed with. `None` when the clock is unarmed (the
+    /// unbounded walk, the pre-fix behavior exactly); the value can be
+    /// negative only microseconds before a forced check raises, and a
+    /// negative budget expires on the comparison's first internal check.
+    fn remaining_budget_ms(&self) -> Option<f64> {
+        self.deadline
+            .map(|(started, ms)| ms - started.elapsed().as_secs_f64() * 1000.0)
     }
 }
 

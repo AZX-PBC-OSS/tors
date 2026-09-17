@@ -795,7 +795,7 @@ fn lift_code_spans(line: &str, spans: &mut Vec<String>) -> String {
     // backtick (the common prose case) skips even the index pass, the
     // matcher's delimiter-free shortcut.
     let mut run_starts_by_len: Vec<(usize, Vec<usize>)> = Vec::new();
-    if bytes.iter().any(|&c| c == '`') {
+    if bytes.contains(&'`') {
         run_starts_by_len = index_backtick_runs(&bytes);
     }
     let mut i = 0;
