@@ -780,6 +780,24 @@ fn unescape_marker_escapes(line: &str) -> String {
 fn lift_code_spans(line: &str, spans: &mut Vec<String>) -> String {
     let mut out = String::with_capacity(line.len());
     let bytes: Vec<char> = line.chars().collect();
+    // The closer index: every maximal backtick run's (length → sorted start
+    // positions), built in ONE pass before the main loop. This is the
+    // code-span twin of `match_delimiters_into` (the unmatched-bracket
+    // O(n²) fix): a line of N backtick runs used to make every opener
+    // rescan to end-of-line in `find_equal_run` — the clean N²/2, measured
+    // ~13 s at 700 increasing runs through `documents.to_text` (~40 s at
+    // 800k chars), 4x per doubling. The index answers each opener's closer
+    // question with a binary search instead: near-linear, and the answer
+    // is the SAME position the rescan found (the first exact run of the
+    // opener's length at or after the search start — the index holds
+    // exactly the positions the rescan's predicate accepted, in ascending
+    // order), so the output is byte-identical. A line without a single
+    // backtick (the common prose case) skips even the index pass, the
+    // matcher's delimiter-free shortcut.
+    let mut run_starts_by_len: Vec<(usize, Vec<usize>)> = Vec::new();
+    if bytes.iter().any(|&c| c == '`') {
+        run_starts_by_len = index_backtick_runs(&bytes);
+    }
     let mut i = 0;
     // Backslash-escape state: a `\`` is a literal backtick (the engines
     // escape exactly this shape: anydoc emits `\`` for a backtick in
@@ -808,7 +826,7 @@ fn lift_code_spans(line: &str, spans: &mut Vec<String>) -> String {
             }
             '`' => {
                 let run_len = run_length(&bytes, i, '`');
-                if let Some(close) = find_equal_run(&bytes, i + run_len, run_len) {
+                if let Some(close) = find_equal_run(&run_starts_by_len, i + run_len, run_len) {
                     let mut content: String = bytes[i + run_len..close].iter().collect();
                     // CommonMark's padding: one space dropped from each
                     // end when both are spaces and the content is not all
@@ -842,21 +860,69 @@ fn lift_code_spans(line: &str, spans: &mut Vec<String>) -> String {
     out
 }
 
+/// The closer index, built in one pass: every MAXIMAL backtick run in the
+/// line, bucketed by length, start positions ascending (the walk scans
+/// left to right, so each bucket comes out sorted for free). Only runs the
+/// closing predicate accepts are indexed — the same "exact run" shape
+/// `find_equal_run`'s rescan tested position by position: bounded by a
+/// non-backtick (or the line's ends) on both sides. An unbounded line of
+/// backtick runs is therefore walked exactly twice (index + splice), never
+/// once per opener.
+///
+/// A `Vec` of `(len, positions)` pairs rather than a `HashMap`: a line
+/// carries a handful of distinct run lengths (CommonMark pairs equal runs;
+/// the engines emit 1-3), so the binary search over the pair list is a
+/// handful of integer compares — below any hash plumbing's constant,
+/// on the hot path of every line the strip processes.
+///
+/// The `(len, starts)` pairs are sorted by length (once, at the end of the
+/// build) so [`find_equal_run`]'s binary search over the pair list plus
+/// the in-bucket position search answers each closer question in
+/// O(log runs).
+fn index_backtick_runs(chars: &[char]) -> Vec<(usize, Vec<usize>)> {
+    let mut buckets: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            let len = run_length(chars, i, '`');
+            // The exactness predicate, both sides of the run: a run
+            // touching another backtick on either side is part of a LONGER
+            // run, never a closer candidate. (The left side is automatic
+            // for maximal runs found by a run-hopping walk — the previous
+            // run was already skipped past — but the predicate is stated
+            // in full so the index cannot drift from the rescan's
+            // definition it replaced.)
+            let exact = (i == 0 || chars[i - 1] != '`')
+                && (i + len == chars.len() || chars[i + len] != '`');
+            if exact {
+                match buckets.iter_mut().find(|(l, _)| *l == len) {
+                    Some((_, starts)) => starts.push(i),
+                    None => buckets.push((len, vec![i])),
+                }
+            }
+            i += len;
+        } else {
+            i += 1;
+        }
+    }
+    // Binary-searchable by length: sort the — tiny — bucket list (the
+    // engines emit run lengths 1-3; even a pathological line carries
+    // dozens, not thousands, of distinct lengths).
+    buckets.sort_by_key(|(len, _)| *len);
+    buckets
+}
+
 /// The position of the backtick run of exactly `len` starting at or after
 /// `from` (a run of any other length, shorter or longer, is not a
-/// closing candidate).
-fn find_equal_run(chars: &[char], from: usize, len: usize) -> Option<usize> {
-    let mut i = from;
-    while i + len <= chars.len() {
-        let exact_run = (0..len).all(|k| chars[i + k] == '`')
-            && (i == 0 || chars[i - 1] != '`')
-            && (i + len == chars.len() || chars[i + len] != '`');
-        if exact_run {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+/// closing candidate) — the binary-search form over
+/// [`index_backtick_runs`]'s one-pass index, replacing the
+/// scan-to-end-of-line rescan per opener (the measured O(n²): ~13 s at
+/// 700 increasing runs, near-linear after the fix, output unchanged).
+fn find_equal_run(runs: &[(usize, Vec<usize>)], from: usize, len: usize) -> Option<usize> {
+    let bucket = runs.binary_search_by(|(l, _)| l.cmp(&len)).ok()?;
+    let starts = &runs[bucket].1;
+    let idx = starts.partition_point(|&p| p < from);
+    starts.get(idx).copied()
 }
 
 /// The recursion-depth cap for [`strip_emphasis_and_links`]: the inline
@@ -1745,6 +1811,124 @@ mod tests {
         // A run whose only later partner is a different length does not
         // pair with it.
         assert_eq!(strip("a `b`` c\n"), "a `b`` c\n");
+    }
+
+    #[test]
+    fn tmp_pass_isolation() {
+        use std::time::Instant;
+        for n in [500usize, 1000, 2000] {
+            let line: String = (1..=n).map(|k| "`".repeat(k) + "x").collect();
+            let chars: Vec<char> = line.chars().collect();
+            let mut storage: Vec<Option<usize>> = Vec::new();
+            let t0 = Instant::now();
+            let _ = super::match_delimiters_into(&chars, &vec![false; chars.len()], &mut storage);
+            println!("MATCHER n={n} {:?}", t0.elapsed());
+            let t0 = Instant::now();
+            let mut spans = Vec::new();
+            let _ = super::lift_code_spans(&line, &mut spans);
+            println!("LIFT n={n} {:?}", t0.elapsed());
+            let t0 = Instant::now();
+            let _ = super::unescape_marker_escapes(&line);
+            println!("UNESC n={n} {:?}", t0.elapsed());
+            let t0 = Instant::now();
+            let _ = super::strip_emphasis_and_links(&line);
+            println!("EMPH n={n} {:?}", t0.elapsed());
+            let t0 = Instant::now();
+            let _ = super::restore_code_spans(&line, &[]);
+            println!("RESTORE n={n} {:?}", t0.elapsed());
+            let t0 = Instant::now();
+            let mut sink = 0usize;
+            for (k, &c) in chars.iter().enumerate() {
+                if c == '`' {
+                    sink += k;
+                }
+            }
+            println!("BASELINE n={n} {:?} ({sink})", t0.elapsed());
+        }
+    }
+
+    #[test]
+    fn the_closer_index_answers_exactly_what_the_rescan_answered() {
+        // The differential over the old algorithm: the rescan
+        // find_equal_run replaced (`first exact run of `len` at or after
+        // `from``), kept here as the oracle, position-for-position against
+        // the one-pass index, over every (from, len) pair of a battery of
+        // backtick-heavy lines — paired, unpaired, escaped, adjacent,
+        // line-edge runs. The index holds exactly the positions the rescan's
+        // predicate accepted, so the outputs are byte-identical by
+        // construction; this pins that the two cannot drift.
+        fn rescan(chars: &[char], from: usize, len: usize) -> Option<usize> {
+            let mut i = from;
+            while i + len <= chars.len() {
+                let exact_run = (0..len).all(|k| chars[i + k] == '`')
+                    && (i == 0 || chars[i - 1] != '`')
+                    && (i + len == chars.len() || chars[i + len] != '`');
+                if exact_run {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            None
+        }
+        let lines = [
+            "`a` `b` `c`".to_string(),
+            "backticks \\`inline` shaped text` tail".to_string(),
+            "``a`b`` tail".to_string(),
+            "`unpaired`` ``triple x` tail".to_string(),
+            "a ` ` ` b".to_string(),
+            "```code with ` tick``` tail".to_string(),
+            "`` `tick `` tail".to_string(),
+            String::new(),
+            "`".to_string(),
+            "``".to_string(),
+            "`a`b`".to_string(),
+            "`a``b`".to_string(),
+            (1..=30).map(|k| "`".repeat(k) + "x").collect::<String>(),
+        ];
+        for line in &lines {
+            let chars: Vec<char> = line.chars().collect();
+            let index = super::index_backtick_runs(&chars);
+            for from in 0..=chars.len() {
+                // len starts at 1: the lifter only ever queries the run
+                // length of an opener it just counted, which is at least
+                // one backtick (a zero-length "run" is a rescan artifact
+                // the index never needs to answer).
+                for len in 1..=chars.len() {
+                    assert_eq!(
+                        super::find_equal_run(&index, from, len),
+                        rescan(&chars, from, len),
+                        "index diverged from the rescan on {line:?} at from={from} len={len}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_of_increasing_backtick_runs_strips_byte_identically_and_linearly() {
+        // The reported O(n²) shape (issue #111), end to end: backtick runs
+        // of length 1..=12, each followed by a letter — every run an exact
+        // closer candidate for every earlier opener of the same length, so
+        // the pre-index lifter rescanned to end-of-line per opener. The
+        // bytes are pinned to the pre-fix engine output (the line passes
+        // through verbatim: no run finds a later partner at the same
+        // length) so the linearization cannot quietly change them, and the
+        // strip of 4,000 runs (~8 MB of line) sits under a generous wall
+        // budget the old code cannot meet (measured pre-fix: 4x per
+        // doubling, ~0.6 s at 400 runs in the full documents pipeline —
+        // the rescan alone is ~16 G steps here, quadratic from there; the
+        // budget only has to separate those curves).
+        let line: String = (1..=12).map(|k| "`".repeat(k) + "x").collect();
+        assert_eq!(strip(&line), format!("{line}\n"));
+        let big: String = (1..=4_000).map(|k| "`".repeat(k) + "x").collect();
+        let started = std::time::Instant::now();
+        let out = super::strip(&big, false);
+        let elapsed = started.elapsed();
+        assert_eq!(out, format!("{big}\n"));
+        assert!(
+            elapsed.as_secs() < 5,
+            "the code-span lift went superlinear again: 4k runs took {elapsed:?}"
+        );
     }
 
     #[test]
