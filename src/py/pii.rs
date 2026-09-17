@@ -1,71 +1,39 @@
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySequence, PyString};
+use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::{Py, PyAny};
 
 use crate::detached_transform;
 use crate::pii_impl::{self, KeyFamily, PiiRules, SpanKind};
+use crate::py::_borrow::bounded_str_list;
 
-/// The `rules=`/`families=` extraction cap: the two list parameters are
-/// walked BY HAND (see [`bounded_str_list`]) precisely because the
+/// The `rules=`/`families=` extraction: the two list parameters are
+/// walked BY HAND through the py layer's shared bounded walk
+/// ([`bounded_str_list`], this module's fold-in of the local twin the
+/// dedup obligation in `src/py/_borrow.rs` names) precisely because the
 /// `Option<Vec<String>>` spelling they replaced let pyo3 size the Vec
 /// from the argument's `__len__` before iterating it — a `Sequence`
 /// whose `__len__` lies (2**62) blew up `Vec::with_capacity` as a
 /// `PanicException` (capacity overflow), which `except Exception` cannot
 /// catch: the one uncatchable crash class on the pyo3 boundary (the
 /// `pages=` range bomb's class, the same fix shape: never trust a
-/// reported size, walk under a cap). The manual walk never reads
-/// `__len__`, so the cap is the only bound it needs: past this many
-/// yielded items the walk aborts with a catchable `ValueError` — the
-/// `borrow_str_sequence` discipline (`src/py/charset.rs`
-/// MAX_BATCH_ITEMS, the content_hash walk cap's spirit), one order of
-/// magnitude tighter because the honest population here is tiny (the
-/// rules are a closed set of 3, the families a closed set of 14): a
-/// legitimate call carries a handful of strings, and anything past
-/// 100_000 is not a miscounted batch, it is the bomb itself. The
-/// message is deliberately generic (no cap value): the bound is a DoS
-/// backstop, not a contract to advertise to sequence authors.
-const MAX_LIST_ITEMS: usize = 100_000;
+/// reported size, walk under the shared cap) — the walk aborts with a
+/// catchable `ValueError` at the cap instead.
 
-/// The bounded manual walk `rules=`/`families=` extract through, the
-/// `borrow_str_sequence` shape (`src/py/charset.rs`) with this file's own
-/// cap ([`MAX_LIST_ITEMS`]): iterate the argument as a `PySequence` (the
-/// only spelling pyo3's `Vec<String>` extraction accepted, so the
-/// accepted surface is unchanged — lists, tuples, any
-/// `collections.abc.Sequence`), pushing each item's `&str` without ever
-/// consulting `__len__`. Every refusal is byte-identical to the
-/// extraction it replaced, pinned in tests/test_scrub_pii.py: a bare
-/// `str` is refused up front (pyo3's own `Vec` special case — `str`
-/// satisfies the Sequence protocol and would silently validate its own
-/// characters one by one); a non-`Sequence` object, a non-`str` item,
-/// and a `__getitem__` that raises all surface the same `TypeError`/
-/// propagated error pyo3's iteration raised; a `__len__` that lies LOW
-/// changes nothing (the walk iterates, it never reserves) and yields
-/// every item. The one behavior change is the bomb's: an unbounded
-/// (or lying-huge) sequence now dies as a catchable `ValueError` at the
-/// cap instead of an uncatchable `PanicException` inside
-/// `Vec::with_capacity`.
-fn bounded_str_list(
+/// The shared walk with this file's `String` element type folded in: the
+/// four `rules=`/`families=` call sites extract through this one-liner so
+/// the closure-style shared walk (`src/py/_borrow.rs`) stays the only
+/// walk, and the refusal bytes stay the scrub boundary's.
+fn bounded_str_vec(
     function: &str,
     param: &str,
     items: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<String>> {
-    if items.is_instance_of::<PyString>() {
-        // The refusal pyo3's own `Vec<String>` extraction made (its
-        // message, kept verbatim): a bare str is the char-split footgun.
-        return Err(PyTypeError::new_err("Can't extract `str` to `Vec`"));
-    }
-    let seq = items.cast::<PySequence>()?;
     let mut out: Vec<String> = Vec::new();
-    for handle in seq.try_iter()? {
-        let handle = handle?;
+    bounded_str_list(function, param, items, |handle| {
         out.push(handle.extract::<&str>()?.to_owned());
-        if out.len() > MAX_LIST_ITEMS {
-            return Err(PyValueError::new_err(format!(
-                "{function}() {param} sequence yielded too many items: refusing an unbounded batch"
-            )));
-        }
-    }
+        Ok(())
+    })?;
     Ok(out)
 }
 
@@ -205,11 +173,11 @@ pub fn scrub_pii(
     // lying `__len__` was the uncatchable capacity-overflow class.
     let rules = match rules {
         None => None,
-        Some(any) => Some(bounded_str_list("scrub_pii", "rules", &any)?),
+        Some(any) => Some(bounded_str_vec("scrub_pii", "rules", &any)?),
     };
     let families = match families {
         None => None,
-        Some(any) => Some(bounded_str_list("scrub_pii", "families", &any)?),
+        Some(any) => Some(bounded_str_vec("scrub_pii", "families", &any)?),
     };
     let mut rules = parse_pii_rules(rules)?;
     rules.key_families = parse_key_families(families)?;
@@ -268,11 +236,11 @@ pub fn scrub_pii_report(
     // accounting, and its boundary must be the scrub's boundary.
     let rules = match rules {
         None => None,
-        Some(any) => Some(bounded_str_list("scrub_pii_report", "rules", &any)?),
+        Some(any) => Some(bounded_str_vec("scrub_pii_report", "rules", &any)?),
     };
     let families = match families {
         None => None,
-        Some(any) => Some(bounded_str_list("scrub_pii_report", "families", &any)?),
+        Some(any) => Some(bounded_str_vec("scrub_pii_report", "families", &any)?),
     };
     let mut rules = parse_pii_rules(rules)?;
     rules.key_families = parse_key_families(families)?;
