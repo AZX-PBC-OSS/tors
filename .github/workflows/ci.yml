@@ -156,29 +156,6 @@ jobs:
         # Same choice as the lint job's cache step (rationale there).
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Cargo test
-        # extension-module doesn't link libpython, so plain `cargo test` needs it off.
-        # Rust-only; the crate isn't Python-version-specific, so this runs once per job
-        # rather than once per matrix entry.
-        if: matrix.python-version == '3.12'
-        run: cargo test --no-default-features
-
-      - name: Cargo test (documents feature)
-        # The documents lane's crate-side tests (routing table, separator pins,
-        # classify semantics) in the configuration the payload wheel builds:
-        # the engine surface's unit tests are cfg-gated code the base config
-        # above never compiles.
-        if: matrix.python-version == '3.12'
-        run: cargo test --no-default-features --features documents
-
-      - name: Compile benches
-        # Compile-guard only: the bench docstring (benches/normalize.rs) and the design
-        # spec both promise that CI compiles the criterion benches; `--no-run` keeps that
-        # promise without spending runner time executing them. `--no-default-features`:
-        # same libpython-linking reason as `Cargo test` above; a bench binary links the rlib.
-        if: matrix.python-version == '3.12'
-        run: cargo bench --no-run --no-default-features
-
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -196,7 +173,7 @@ jobs:
 
       - name: Pytest
         # -m "not timing and not sweep": two lanes are deselected here and
-        # run ONCE on the 3.12 leg (steps below) instead of on all five
+        # run ONCE in the `test-heavy` job below instead of on all five
         # matrix legs:
         #   - timing: the load-sensitive measurement cells
         #     (tests/test_gil_release.py, tests/test_performance.py).
@@ -214,23 +191,74 @@ jobs:
         # timing lane, which keeps its own -rP.
         run: uv run --no-sync pytest -q -m "not timing and not sweep"
 
+  test-heavy:
+    # The version-independent heavy lanes, split out of the 3.12 matrix leg
+    # into their own parallel job: the sweep + timing lanes, the Rust unit
+    # tests (both feature configs — the Makefile's documented discipline:
+    # the base config compiles the non-documents cfg gates the documents
+    # config never sees), and the compile-guard bench build. Measured on
+    # PR #118's run 35377811676: these steps total ~11.5 min of
+    # version-independent work, which made the 3.12 leg (22m26s) the
+    # critical path at 2x its siblings (~11m), the shared fast lane
+    # verified version-invariant (319.99s on 3.12 vs 311.98s on 3.13 —
+    # noise). In their own job the matrix legs run the Python surface
+    # (~11m) while this job pays the heavy half next to them, and a
+    # timing-lane failure surfaces in its own red cell instead of the
+    # 3.12 leg's.
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # The heavy lanes are Python-version-independent (the sweep is
+          # extension parity, the timing cells measure the native pass);
+          # 3.12 keeps continuity with the leg that used to pay them.
+          python-version: "3.12"
+
+      - name: Sync dependencies and build the extension
+        run: uv sync --locked --extra documents
+
+      - name: Cargo test
+        # extension-module doesn't link libpython, so plain `cargo test` needs it off.
+        run: cargo test --no-default-features
+
+      - name: Cargo test (documents feature)
+        # The documents lane's crate-side tests (routing table, separator pins,
+        # classify semantics) in the configuration the payload wheel builds:
+        # the engine surface's unit tests are cfg-gated code the base config
+        # above never compiles.
+        run: cargo test --no-default-features --features documents
+
+      - name: Compile benches
+        # Compile-guard only: the bench docstring (benches/normalize.rs) and the design
+        # spec both promise that CI compiles the criterion benches; `--no-run` keeps that
+        # promise without spending runner time executing them. `--no-default-features`:
+        # same libpython-linking reason as `Cargo test` above; a bench binary links the rlib.
+        run: cargo bench --no-run --no-default-features
+
       - name: Pytest (sweep lane)
         # The exhaustive structural parity battery the matrix legs above
-        # deselect: 67k parametrized cells, Python-version-independent, so
-        # one leg pays for it. Plain -q, no -rP; nothing in this lane
-        # prints for the record, and -rP on a lane this size is the
-        # captured-output blowup documented on the fast-lane step above.
-        if: matrix.python-version == '3.12'
+        # deselect: 67k parametrized cells. Plain -q, no -rP; nothing in
+        # this lane prints for the record, and -rP on a lane this size is
+        # the captured-output blowup documented on the fast-lane step.
         run: uv run --no-sync pytest -q -m sweep
 
       - name: Pytest (timing lane)
-        # The lane the matrix legs above deselect, run ONCE (the 3.12 leg,
-        # after the main pytest step): the GIL-release and wall-time
+        # The lane the matrix legs deselect: the GIL-release and wall-time
         # measurement cells. -rP so the print-only recorded bands (and the
-        # b64 battery's recorded gh-145264 divergences, should this leg's
-        # stdlib predate the fix) surface in the log. Runs last on the leg so
-        # a timing failure never masks the fast lane's results.
-        if: matrix.python-version == '3.12'
+        # b64 battery's recorded gh-145264 divergences, should this stdlib
+        # predate the fix) surface in the log.
         run: uv run --no-sync pytest -q -rP -m timing
 
   fuzz-smoke:
