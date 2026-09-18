@@ -434,15 +434,22 @@ def test_repeat_calls_on_the_same_str_object() -> None:
     assert tors.json_is_valid(invalid) is False  # cached view
 
 
-def test_str_holding_a_raw_lone_surrogate_raises_the_borrows_error() -> None:
-    # A str with a raw lone surrogate cannot materialize a UTF-8 view: the
-    # str-in borrow raises CPython's own UnicodeEncodeError before any scan
-    # runs — the standard str-argument contract (utf8_byte_len's pinned
-    # behavior), not a validity answer. The escape TEXT is ordinary string
-    # content and answers False through the normal gate.
+def test_str_holding_a_raw_lone_surrogate_answers_false_not_a_raise() -> None:
+    # A str with a raw lone surrogate cannot materialize a UTF-8 view —
+    # but this function is a VALIDITY GATE, not a str-in utility: its
+    # contract (the docstring) is "nothing raises for invalid input; the
+    # only error path is the wrong-type refusal", and its acceptance-set
+    # reference (orjson) RAISES on any surrogate-bearing str, so the
+    # gate's "would loads raise" answer is False. (The red-team pass
+    # flipped this from the str-in borrow family's UnicodeEncodeError: a
+    # raise here was the one lane where invalid input escaped the boolean
+    # contract — safe direction, but a contract breach all the same.)
+    # The escape TEXT stays ordinary string content and answers False
+    # through the normal gate.
     lone = "\ud800"
-    with pytest.raises(UnicodeEncodeError):
-        tors.json_is_valid(lone)
+    assert tors.json_is_valid(lone) is False
+    assert tors.json_is_valid('{"a": 1}' + lone) is False
+    assert tors.json_is_valid(lone * 3) is False
     assert tors.json_is_valid('"\\ud800"') is False
 
 

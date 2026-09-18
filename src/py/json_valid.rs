@@ -36,7 +36,11 @@ use crate::json_valid_impl;
 /// `utf8_is_valid`/`utf16_is_valid` validity predicates.
 ///
 /// Argument contract: `bytes` (zero-copy borrowed) or `str` (borrowed
-/// through its UTF-8 view — see the GIL model below). `bytearray`,
+/// through its UTF-8 view — see the GIL model below). A `str` whose UTF-8
+/// view cannot materialize (a lone surrogate is a legal Python `str`)
+/// answers `False` — no consumer's parser accepts one, so the gate's
+/// "would `orjson.loads` raise" answer is `False`, keeping this lane
+/// raise-free like every other invalid input. `bytearray`,
 /// `memoryview`, and everything else raise `TypeError` naming the two
 /// accepted types: the bytes-in surface's immutable-borrow contract
 /// (a `bytearray` could be mutated mid-scan from another thread under
@@ -75,7 +79,21 @@ pub fn json_is_valid(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<bool> 
         return Ok(py.detach(|| json_valid_impl::is_valid(raw)));
     }
     if let Ok(text) = data.cast::<PyString>() {
-        let view = text.to_str()?;
+        // A str that does not round-trip through UTF-8 (a lone surrogate
+        // is a legal Python str) has no UTF-8 view to scan. Every real
+        // consumer's parser raises on such an input — orjson's answer,
+        // the documented acceptance-set's reference — so the gate
+        // answers `False` ("would raise"): the contract above ("nothing
+        // raises for invalid input"; the only error path is the
+        // wrong-type refusal) holds on this lane too, and the failure
+        // direction is the safe one (never a false `True`). `to_str`'s
+        // error here is never a type signal (the `PyString` cast already
+        // settled the type), so swallowing it is not a converted
+        // `TypeError`.
+        let view = match text.to_str() {
+            Ok(view) => view,
+            Err(_) => return Ok(false),
+        };
         return Ok(py.detach(|| json_valid_impl::is_valid(view.as_bytes())));
     }
     Err(PyTypeError::new_err(format!(
