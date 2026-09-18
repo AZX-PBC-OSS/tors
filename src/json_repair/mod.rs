@@ -502,9 +502,19 @@ pub fn repair(s: &str, cfg: &RepairConfig) -> Result<(Value, Vec<Diagnostic>), S
     // is_valid/repair_value/validate, the role upstream's shared schema_obj
     // dict plays.
     let schema_value = cfg.schema.clone();
-    let mut repairer = schema_value
+    // The constructor is fallible: the fail-closed schema-constraint gate
+    // (issue #119) refuses the schema outright, and the refusal fails the
+    // whole call (a catchable ValueError at the py boundary) — the sharp
+    // direction it guards (silent wrong-accept) is exactly what laziness
+    // would leave in place.
+    let mut repairer = match schema_value
         .clone()
-        .map(|root| SchemaRepairer::new(root, cfg.salvage, cfg.diagnostics, cfg.locale));
+        .map(|root| SchemaRepairer::new(root, cfg.salvage, cfg.diagnostics, cfg.locale))
+    {
+        Some(Ok(repairer)) => Some(repairer),
+        Some(Err(message)) => return Err(message),
+        None => None,
+    };
     // Arm the repairer's copy of the same clock (the parser arms its own
     // below): the schema alignment phases the repairer owns — key ladder,
     // union retries, coercion, fill-missing, validation, on the fast path
