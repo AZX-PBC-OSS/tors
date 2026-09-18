@@ -1962,11 +1962,47 @@ impl SchemaRepairer {
             // Incompatible value: fall through to the fuzzy tier, which
             // only suggests on permissive schemas.
         }
+        // The fuzzy tier's per-comparison budget: the enum-suggestion
+        // scorer's own design ([`Self::closest_enum_member`], the same
+        // armed clock) — schema width is the enum's trust level. TWO
+        // mechanisms, copied whole: the FORCED per-property read (a
+        // jaro-winkler on short, window-disjoint strings runs no window
+        // scan and so never consults a clock internally — the forced
+        // read is what keeps a sweep of tiny comparisons from running
+        // arbitrarily far past expiry; measured: without it, 100k
+        // properties past a 5ms budget answered at ~129x) and the clock's
+        // remainder handed to each comparison (long comparisons abort
+        // mid-scan). A mid-sweep expiry aborts the ladder instead of
+        // paying O(properties) comparisons past it.
         let mut scored: Vec<(&String, f64)> = config
             .properties
             .iter()
-            .map(|(prop, _)| (prop, jaro_winkler(key, prop, None).unwrap_or(0.0)))
-            .collect();
+            .map(|(prop, _)| {
+                self.force_deadline_check();
+                self.check_deadline()?;
+                let remaining_ms = self.remaining_budget_ms();
+                let score = match jaro_winkler(key, prop, remaining_ms) {
+                    Ok(score) => score,
+                    Err(_) => {
+                        // A per-comparison budget expiry IS the shared
+                        // clock's expiry (the budget is the clock's
+                        // remainder): raise the sticky payload the boundary
+                        // translates to TimeoutError, never a silent miss.
+                        self.force_deadline_check();
+                        return Err(self.check_deadline().expect_err(
+                            "a per-comparison budget expiry implies the shared clock expired",
+                        ));
+                    }
+                };
+                Ok((prop, score))
+            })
+            .collect::<Result<Vec<(&String, f64)>, String>>()?;
+        // The post-loop forced read: a budget that expired during the
+        // LAST property's comparison must still raise, not answer as a
+        // scored sweep (the same last-member masking hole
+        // [`Self::closest_enum_member`]'s post-loop check closes).
+        self.force_deadline_check();
+        self.check_deadline()?;
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let winner = match scored.as_slice() {
             [(best, top), (_, second), ..]

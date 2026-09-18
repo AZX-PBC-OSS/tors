@@ -1370,6 +1370,45 @@ class TestRepairDeadline:
             repair_json_loads(raw, schema=self._LADDER_SCHEMA, deadline_ms=1)
         assert _time.perf_counter() - start < 1.0
 
+    def test_one_unknown_key_over_a_wide_schema_is_bounded_by_the_deadline(self) -> None:
+        # The PER-PROPERTY axis (the #115 sibling the red-team pass
+        # found): a single unknown key sweeps O(properties) jaro
+        # comparisons, and the per-key entry check cannot bound a sweep
+        # from inside — a 100k-property sweep past a 5ms budget answered
+        # with the clock read only once, at the sweep's end. The ladder
+        # now samples the clock per property (the enum scorer's design:
+        # the forced read, because short window-disjoint comparisons
+        # never consult a clock internally, plus the remainder handed to
+        # each long one), so the abort lands within the sweep.
+        #
+        # The observable floor for ANY budget is the schema's own
+        # pre-repair phase (resolve + the root validator's compile, both
+        # eager in the repairer constructor and linear in properties —
+        # ~0.5s at 100k): the deadline's granularity there is the phase,
+        # not the property (see docs/api.md's deadline section). So the
+        # pin asserts the ABORT (never a masked return) and a wall under
+        # the unbounded ladder's band, not wall-clock precision.
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {f"prop_{i:06d}": {"type": "string"} for i in range(100_000)},
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(
+                '{"totally_unknown_key_xyz": "v"}', schema=schema, deadline_ms=5
+            )
+        assert _time.perf_counter() - start < 1.0
+        # The masking shape: a budget the base phases outrun must STILL
+        # abort (the ladder's first consult reads a long-expired clock),
+        # never return a repair that ignored the budget.
+        with pytest.raises(TimeoutError):
+            repair_json_loads(
+                '{"totally_unknown_key_xyz": "v"}', schema=schema, deadline_ms=1
+            )
+
     def test_the_schema_union_branch_loop_is_bounded_by_the_deadline(self) -> None:
         # A union whose winning branch sits at the end of a long anyOf:
         # the losing branches burn the budget branch by branch, and the
