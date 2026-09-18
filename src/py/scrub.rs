@@ -37,7 +37,7 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
     Ok(set)
 }
 
-/// `tors.scrub_log_text`: the TaskQ exception-text scrub chain as four
+/// `tors.scrub_log_text`: the exception-text scrub grammar as four
 /// linear scans + splice under one `py.detach` — drop PostgreSQL DETAIL
 /// lines (real-newline, ExceptionGroup gutters included, and
 /// repr()-flattened, fail-closed), mask `scheme://user:password@host`

@@ -3092,8 +3092,8 @@ def test_uuid_helpers_batch_loop_keeps_the_event_loop_at_heartbeat_granularity(
     )
 
 
-# The identifier rule's two halves (TaskQ's _IDENT_RE shape: letters and
-# underscore at position 0, digits joining after), the rule this module's
+# The identifier rule's two halves (the letters-and-underscore-at-0,
+# digits-join-after shape): the rule this module's
 # cell, the wall race in tests/test_performance.py, and the bench group in
 # benches/search.rs all drive.
 _IDENT_FIRST = string.ascii_letters + "_"

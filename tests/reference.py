@@ -699,19 +699,16 @@ def reference_first_invalid_offender(
     return None
 
 
-# --- the scrub_log_text oracle (the TaskQ exception-text chain) --------------------
+# --- the scrub_log_text oracle (the log-scrub grammar) --------------------
 #
-# ``tors.scrub_log_text`` is a named-rule port of TaskQ's exception-text scrub
-# chain (src/taskq/obs/_redact_exc.py, the consumer it exists for), pinned
-# byte-identical to it: the four compiled regexes below are QUOTED VERBATIM
-# from that module (the wave2-integration grammar, TaskQ commit 926e13e /
-# PR #222 — issue #107's re-sync), and the canonical rule order (pg_detail_lines'
-# two segmenters first, then uri_userinfo, then the conninfo credential pass)
-# is _scrub_text's own application order with the redaction flag on. The
-# differential harness (tests/test_scrub_log_text_parity.py) runs tors against
-# this chain and, when the TaskQ checkout is present, re-syncs these patterns
-# against the live module source — a TaskQ change to any of them is a visible
-# re-sync request, not a silent tors behavior change.
+# ``tors.scrub_log_text`` is a named-rule scrubber, pinned byte-identical
+# to the four compiled regexes below (the grammar's definition, quoted in
+# this file), and the canonical rule order (pg_detail_lines' two segmenters
+# first, then uri_userinfo, then the conninfo credential pass) is the
+# documented application order. The differential harness
+# (tests/test_scrub_log_text_parity.py) runs tors against this reference —
+# a change to any pattern or to the order is a deliberate grammar change
+# landed in both files together, never a silent tors behavior change.
 _PG_DETAIL_RE = re.compile(r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$", re.MULTILINE)
 _PG_DETAIL_ESCAPED_RE = re.compile(
     r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"][)\]]*\s*$|$)",
@@ -774,7 +771,7 @@ _SCRUB_RULE_PASSES: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
 
 
 def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> str:
-    """The scrub oracle: the TaskQ chain applied per rule selection. ``rules
+    """The scrub oracle: the grammar applied per rule selection. ``rules
     is None`` runs the full chain in canonical order; a list/tuple selects a
     sub-chain (deduped, canonical order — the same contract tors spells);
     ``[]`` is the identity. The conninfo credential pass runs ONCE even when
@@ -823,8 +820,8 @@ def reference_find_unescaped(haystack: bytes, needle: bytes) -> int:
 
     This is also the manual parity loop the wall cells race: the hand-rolled
     expression a consumer writes today (find the needle in the raw bytes,
-    count the backslash run before each hit), the exact algorithm TaskQ
-    verified against a re-parse walk before lifting it here."""
+    count the backslash run before each hit), the exact algorithm this
+    crate verified against a re-parse walk before lifting it here."""
     pos = 0
     while True:
         hit = haystack.find(needle, pos)
@@ -847,26 +844,17 @@ _OPCODE_TAGS = frozenset({"equal", "replace", "delete", "insert"})
 #
 # The quoted-pin oracle for ``tors.scrub_pii``: a private consumer's
 # telemetry-safety module, transcribed here as pure Python with the digest
-# salt parameterized. Provenance (H1: the CI oracle is a transcription, and
-# the live lane never runs in CI, so the transcription carries its own
-# freshness pin):
-# source revision: scrub-pii-oracle-r1 (private telemetry-safety module,
-# grammar + token shape as transcribed; no source spelling lives in this
-# repo — the live locator stays env-gated in test_scrub_pii_parity.py).
-# transcription date: 2026-09-13 (bump on every re-sync; CI fails after
-# SCRUB_PII_ORACLE_FRESH_DAYS). UCD: 16.0.0 (the UCD CPython's `re` digit
-# class matches on; the Rust Nd tables pin the same UCD — a bump on either
-# side re-opens the re-sync). The source chain itself digests UNSALTED, so
-# ``salt=""`` reproduces its token values byte-for-byte (the migration lane:
-# a consumer swapping the source call for tors keeps every stored token by
-# passing ``salt=""``); tors's own default (``SCRUB_PII_DEFAULT_SALT`` below)
-# is a different, documented constant, so default-salt tokens differ from
-# the source's by design. The two pattern shapes and both token fields are
-# quoted as literals, never paraphrased: this file is the contract
-# ``tests/test_scrub_pii.py`` and ``tests/test_scrub_pii_parity.py``
-# differentially pin tors against, and the parity harness never imports the
-# source module (the optional live lane in test_scrub_pii_parity.py is the
-# only code that does, env-gated, never in CI).
+# salt parameterized. The transcription is the contract: the two pattern
+# shapes and both token fields are quoted as literals, never paraphrased —
+# this file is the contract ``tests/test_scrub_pii.py`` and
+# ``tests/test_scrub_pii_parity.py`` differentially pin tors against. The
+# UCD note: 16.0.0 is the UCD CPython's `re` digit class matches on; the
+# Rust Nd tables pin the same UCD (see TestOracleUcd in the parity file —
+# a Unicode bump on either side invalidates the parity lanes' shared
+# premise). The token digests are UNSALTED at ``salt=""``, so a consumer
+# migrating from a salt-free spelling keeps every stored token by passing
+# ``salt=""``; tors's own default (``SCRUB_PII_DEFAULT_SALT`` below) is a
+# different, documented constant, so default-salt tokens differ by design.
 
 SCRUB_PII_DEFAULT_SALT = "tors/scrub_pii/v1"
 """tors's documented default digest salt (mirrors ``pii_impl::DEFAULT_SALT``;
@@ -874,14 +862,9 @@ the salt=None differential lane pins the two literals equal). A fixed,
 non-secret domain-separation tag, frozen: changing it would silently change
 every deployment's token values."""
 
-# H1 provenance pin: the transcription's own freshness clock. The CI oracle
-# is a transcription and the live lane never runs in CI, so CI fails when
-# this goes stale (N-day freshness) or when the interpreter's UCD moves
-# past the pinned tables (see TestOracleFreshness).
-SCRUB_PII_ORACLE_REVISION = "scrub-pii-oracle-r1"
-SCRUB_PII_ORACLE_DATE = "2026-09-13"
+# The UCD pin: the transcription's regex digit classes and the Rust Nd
+# tables must read the same Unicode release (see TestOracleUcd).
 SCRUB_PII_ORACLE_UCD = "16.0.0"
-SCRUB_PII_ORACLE_FRESH_DAYS = 90
 
 _SCRUB_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _SCRUB_PHONE_RE = re.compile(r"\+\d[\d\-. ()]{6,}\d")

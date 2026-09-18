@@ -1,6 +1,6 @@
 //! Batch codepoint-set validation, the pure-Rust core of
-//! `tors.first_invalid_charset`: the identifier-style rules a caller like
-//! TaskQ spells with anchored regexes (`\A[A-Za-z_][A-Za-z0-9_]*\Z` for
+//! `tors.first_invalid_charset`: the identifier-style rules a server
+//! spells with anchored regexes (`\A[A-Za-z_][A-Za-z0-9_]*\Z` for
 //! schema identifiers, `\A[A-Za-z0-9_][A-Za-z0-9_.-]*\Z` for queue names,
 //! `\A[A-Za-z0-9_\-:.]+\Z` for keyed-ref names), expressed as plain
 //! caller-supplied codepoint sets and checked for a whole batch in one
@@ -238,11 +238,11 @@ mod tests {
         let first = "abcdefghijklmnopqrstuvwxyz_";
         let rest = "abcdefghijklmnopqrstuvwxyz0123456789_";
         assert_eq!(
-            check(&["taskq", "worker_id", "job_42"], Some(first), rest),
+            check(&["jobs", "worker_id", "job_42"], Some(first), rest),
             -1
         );
         assert!(matches!(
-            detail(&["taskq", "worker_id", "job_42"], Some(first), rest),
+            detail(&["jobs", "worker_id", "job_42"], Some(first), rest),
             FirstInvalid::Clean
         ));
     }
@@ -419,7 +419,7 @@ mod tests {
         // the detail's item field, -1 exactly when the detail is Clean.
         for (items, first, rest) in [
             (
-                &["taskq", "job_42"][..],
+                &["jobs", "job_42"][..],
                 Some("abcdefghijklmnopqrstuvwxyz_"),
                 "abcdefghijklmnopqrstuvwxyz0123456789_",
             ),

@@ -119,10 +119,9 @@ def scrub_pii_report(
 
 
 # Named-rule log and exception-text scrubbing, byte-identical to the
-# TaskQ exception-text chain (the four compiled regexes this ports are
-# quoted in tests/reference.py and re-synced against the live source by
-# tests/test_scrub_log_text_parity.py; the pin is the current
-# wave2-integration grammar, TaskQ commit 926e13e / PR #222). rules=None
+# grammar definition it ships with (the four compiled regexes are quoted
+# in tests/reference.py and differentially enforced by
+# tests/test_scrub_log_text_parity.py). rules=None
 # runs the full chain in canonical order (pg_detail_lines -> uri_userinfo
 # -> the conninfo pass, whose uri_query_creds / libpq_conninfo_creds names
 # select the two anchor grammars of ONE pass); [] is the identity;
@@ -332,8 +331,8 @@ def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
 
 # The scan surface's pinned companion (#52): the UTF-8 byte length of a
 # str — len(s.encode("utf-8")) with the copy taken out. The count a
-# caller wants when a size cap sits in front of a store (TaskQ's
-# idempotency-key/scope byte caps per enqueue, the terminal's re-encode
+# caller wants when a size cap sits in front of a store (an enqueue
+# path's idempotency-key/scope byte caps per enqueue, the terminal's re-encode
 # of a serialized result of up to 64 KiB per success — a double pass:
 # the byte count existed inside the serializer's output and was
 # discarded by the .decode()). Companion, not standalone: it ships in

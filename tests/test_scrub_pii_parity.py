@@ -1,59 +1,41 @@
 """Differential parity for the tors scrub_pii port: tors against the
-quoted-pin oracle, and (opt-in) against the live source module.
-
-Provenance: the behavior oracle is a private consumer's telemetry-safety
-module, transcribed into ``tests/reference.py`` as
+quoted-pin oracle transcribed into ``tests/reference.py`` as
 ``reference_scrub_pii`` — its two pattern shapes and both token fields
-quoted as literals, with the digest salt parameterized (the source chain
-digests unsalted, so ``salt=""`` is its byte-exact token spelling). The
-pin is deliberate: a change to the source module's grammar is a parity
-re-sync request, not a drive-by fix. Mapping:
+quoted as literals, with the digest salt parameterized (``salt=""`` is
+the minimal byte-exact token spelling). The pin is the grammar's
+definition: a change to either side is a deliberate grammar change,
+landed here and in ``tests/reference.py`` together. Mapping:
 ``tors.scrub_pii(text, rules, salt=salt) ==
 reference_scrub_pii(text, rules, salt=salt)`` for every ``rules``/``salt``
-lane below, and, on the live lane,
-``tors.scrub_pii(text, salt="") == <the source module's free-text scrub
-entry point>(text)``.
+lane below.
 
-tors's phone rule carries one deliberate extension past that contract:
-the domestic NANP matcher (un-plussed shapes the source leaves
-untouched), and the api_keys rule carries a second (the credential
-families). The lanes are split accordingly: every QUOTED-PIN lane below
-routes on the domestic guard — the input guard for single-rule lanes,
-the email-pass-output guard for BOTH-rules lanes (the matcher runs on
-the email pass's result, and the email local removal can trim a
-too-long digit run into a phone shape) — and on the keys guard for
-every lane where api_keys is active (the input guard suffices there:
-the keys pass runs BEFORE the email pass, so a key-free input leaves it
-the identity and the email-pass output the domestic guard needs is the
-same both engines produce) — parity is asserted exactly
-where the source's own semantics apply — and ``TestDomesticExtension``
-/ ``TestApiKeyExtension``
-pin the other side in both directions (the oracle must leave the shape, tors must
-scrub exactly the span), so a regression on either side of an extension
-fails loudly instead of surfacing as a parity mystery.
-
-The live re-sync lane is env-gated and NEVER runs in CI:
-``TORS_SCRUB_PII_ORACLE`` carries the full locator —
-``path/to/module.py:entry_point``, a module file path and the scrub
-callable's name, split on the last colon — so nothing about the
-source's spelling lives in this repo. Unset, every live-lane test
-skips and the quoted pin above remains the CI oracle. The one pinned
-divergence is
-deliberate and documented in both directions: a str holding lone
-surrogates is refused by tors with ``UnicodeEncodeError`` (the crate-wide
-str contract) while the source chain — none of whose classes can match a
-surrogate — returns it unchanged; the live lane asserts that divergence
-instead of skipping it, so a re-sync can never mistake it for a port bug.
+tors's phone rule carries one deliberate extension past the quoted
+grammar: the domestic NANP matcher (un-plussed shapes the quoted grammar
+leaves untouched), and the api_keys rule carries a second (the
+credential families). The lanes are split accordingly: every
+QUOTED-PIN lane below routes on the domestic guard — the input guard
+for single-rule lanes, the email-pass-output guard for BOTH-rules lanes
+(the matcher runs on the email pass's result, and the email local
+removal can trim a too-long digit run into a phone shape) — and on the
+keys guard for every lane where api_keys is active (the keys pass runs
+BEFORE the email pass, so a key-free input leaves it the identity and
+the email-pass output the domestic guard needs is the same both engines
+produce) — parity is asserted exactly where the quoted grammar's own
+semantics apply — and ``TestDomesticExtension`` / ``TestApiKeyExtension``
+pin the other side in both directions (the reference must leave the
+shape, tors must scrub exactly the span), so a regression on either
+side of an extension fails loudly instead of surfacing as a parity
+mystery. tors's argument-boundary contract (a str holding lone
+surrogates raises ``UnicodeEncodeError``) is pinned in
+``tests/test_scrub_pii.py`` and is tors's own, not a divergence from
+anything external.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib.util
-import os
 import unicodedata
 from functools import cache
-from typing import Any
 
 import pytest
 from hypothesis import assume, given, settings
@@ -1000,119 +982,15 @@ class TestDomesticSeededConvergence:
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
 #
-# Re-sync cadence / owner: the quoted pin in tests/reference.py is the CI
-# oracle; the live module is re-checked manually on a machine that holds
-# it (a) whenever the source telemetry-safety module changes grammar or
-# token shape, and (b) at least once per Unicode/dependency bump that
-# could move the Nd table (the UCD CPython's `re` matches on). Owner: the
-# scrub_pii maintainer for this repo. A grammar change upstream is a
-# parity re-sync request (update reference.py + the parity corpus), never
-# a drive-by grammar widening here — the `salt=""` byte-identical
-# contract forbids silent widening.
-#
-# TORS_SCRUB_PII_ORACLE carries the full locator —
-# "path/to/module.py:entry_point" (a private machine's path and the
-# callable's name, never committed): the telemetry-safety module whose
-# free-text scrub entry point the port pinned. Unset, every test below
-# skips — the quoted pin above is the CI oracle, so no CI lane ever
-# references the source, and no spelling of the source's names lives in
-# this repo.
-
-
-def _live_oracle() -> Any:
-    locator = os.environ.get("TORS_SCRUB_PII_ORACLE")
-    if not locator:
-        pytest.skip(
-            "TORS_SCRUB_PII_ORACLE unset: the live re-sync lane is opt-in "
-            "(set it to 'path/to/module.py:entry_point' on a machine that "
-            "has the telemetry-safety module); the quoted pin in "
-            "tests/reference.py is the CI oracle"
-        )
-    path, sep, name = locator.rpartition(":")
-    if not sep or not path or not name.isidentifier():
-        pytest.fail(
-            "TORS_SCRUB_PII_ORACLE must be 'path/to/module.py:entry_point' "
-            "(a module file path, one colon, the callable's name): got "
-            f"{locator!r}"
-        )
-    spec = importlib.util.spec_from_file_location("tors_scrub_pii_live_oracle", path)
-    if spec is None or spec.loader is None:
-        pytest.fail(f"TORS_SCRUB_PII_ORACLE names an unloadable module file: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    entry = getattr(module, name, None)
-    if not callable(entry):
-        pytest.fail(f"{path} exposes no callable {name}(text) entry point")
-    return entry
-
-
-class TestLiveResyncLane:
-    def test_the_corpus_matches_the_live_module(self) -> None:
-        live = _live_oracle()
-        for text in CORPUS:
-            if _both_lane_diverges(text, ""):
-                continue  # the extension lanes' territory; the live module has neither grammar
-            assert tors.scrub_pii(text, salt="") == live(text), text
-
-    @given(text=_composed_text)
-    @settings(max_examples=300, deadline=None)
-    def test_compositions_match_the_live_module(self, text: str) -> None:
-        assume(not _both_lane_diverges(text, ""))
-        live = _live_oracle()
-        assert tors.scrub_pii(text, salt="") == live(text)
-
-    def test_the_surrogate_divergence_is_pinned_not_skipped(self) -> None:
-        """The one documented divergence, asserted on both sides: tors
-        refuses a surrogate-bearing str at the argument boundary
-        (UnicodeEncodeError, the crate-wide str contract) while the source
-        chain keeps going — none of its classes can match a surrogate, so
-        no digest ever sees one, but the NON-surrogate matches around it
-        still scrub. A re-sync that changes either side shows up here
-        instead of masquerading as parity."""
-        live = _live_oracle()
-        text = "a\ud800b@x.co"
-        with pytest.raises(UnicodeEncodeError):
-            tors.scrub_pii(text, salt="")
-        # The live side: the surrogate survives (no class contains it),
-        # the "b@x.co" around it still scrubs, unsalted digest and all.
-        unsalted = hashlib.sha256(b"b@x.co").hexdigest()[:12]
-        assert live(text) == f"a\ud800@x.co~{unsalted}"
-
-
-class TestOracleFreshness:
-    """H1: the CI oracle is a transcription, and the live lane never runs
-    in CI — so the transcription carries its provenance and CI fails when
-    it goes stale. Two independent trip-wires: (a) the transcription date
-    is at most _ORACLE_FRESH_DAYS old (a re-sync clock, not a grammar
-    check), and (b) the running interpreter's UCD still equals the UCD
-    the Rust Nd tables pin (a Unicode/dependency bump that could move
-    the `re` digit class re-opens the re-sync). The UCD pin is strict
-    only where it can fire: interpreters at or past the pinned UCD must
-    match it exactly (a newer UCD is a re-sync request), while older legs
-    skip explicitly (their UCD predates the tables by construction, and
-    the behavioral lanes — the Nd-exhaustive and parity suites — run
-    unskipped everywhere)."""
-
-    def test_provenance_constants_exist(self) -> None:
-        import reference
-
-        assert isinstance(reference.SCRUB_PII_ORACLE_REVISION, str)
-        assert reference.SCRUB_PII_ORACLE_REVISION
-        assert isinstance(reference.SCRUB_PII_ORACLE_DATE, str)
-        assert isinstance(reference.SCRUB_PII_ORACLE_UCD, str)
-
-    def test_transcription_is_fresh(self) -> None:
-        from datetime import date
-
-        import reference
-
-        today = date.today()
-        age = today - date.fromisoformat(reference.SCRUB_PII_ORACLE_DATE)
-        assert age.days <= reference.SCRUB_PII_ORACLE_FRESH_DAYS, (
-            f"scrub_pii oracle transcription is {age.days} days old "
-            f"(limit {reference.SCRUB_PII_ORACLE_FRESH_DAYS}): re-sync against "
-            "the live telemetry-safety module and bump SCRUB_PII_ORACLE_DATE"
-        )
+class TestOracleUcd:
+    """The CI oracle is a transcription, and the interpreter's UCD must
+    still equal the UCD the Rust Nd tables pin: a Unicode/dependency bump
+    that could move the `re` digit class invalidates the parity lanes'
+    shared premise. The pin is strict only where it can fire:
+    interpreters at or past the pinned UCD must match it exactly, while
+    older legs skip explicitly (their UCD predates the tables by
+    construction, and the behavioral lanes — the Nd-exhaustive and parity
+    suites — run unskipped everywhere)."""
 
     def test_interpreter_ucd_matches_pinned_tables(self) -> None:
         import reference

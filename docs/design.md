@@ -53,8 +53,8 @@ The cuts below are decisions, not oversights:
   are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
   `uri_query_creds`, `libpq_conninfo_creds`), not patterns: each rule is a
   call-site regex the
-  scrub exists to port (TaskQ's exception-text chain), hand-rolled in Rust
-  and pinned byte-identical to it — a caller-supplied pattern language
+  scrub exists to implement, hand-rolled in Rust and pinned byte-identical
+  to the quoted grammar — a caller-supplied pattern language
   would reopen the regex-semantics question this cut closes. New scrubs
   arrive as new named rules with their own pinned contracts
   (`strip_controls` is the family's first member), never as parameters.

@@ -88,7 +88,7 @@ pub fn find_unescaped(py: Python<'_>, haystack: &[u8], needle: &[u8]) -> PyResul
 /// `tors.utf8_byte_len(s)`: the UTF-8 byte length of `s` — the answer
 /// `len(s.encode("utf-8"))` computes by allocating and copying the whole
 /// `bytes` object first, taken here without the copy. The count a caller
-/// wants when a size cap sits in front of a store: TaskQ's
+/// wants when a size cap sits in front of a store: an
 /// idempotency-key and scope byte caps on every enqueue, and the
 /// terminal's re-encode of a serialized result of up to 64 KiB
 /// (`MAX_RESULT_BYTES`) on every success — a genuine double pass, the

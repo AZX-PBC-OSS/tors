@@ -1,14 +1,13 @@
 //! Named-rule log and exception-text scrubbing, the pure-Rust core of
-//! `tors.scrub_log_text`: a hand-rolled, byte-identical port of the TaskQ
-//! exception-text chain (`src/taskq/obs/_redact_exc.py`), the scrub a worker
-//! applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of it
-//! reaches a log line, a span, or an exported attribute.
+//! `tors.scrub_log_text`: a hand-rolled scanner over a documented
+//! four-rule grammar, for scrubbing `str(exc)`/`repr(exc)`/rendered
+//! tracebacks before any of it reaches a log line, a span, or an
+//! exported attribute.
 //!
-//! Four rules, one name each, pinned to the consumer's exact semantics
-//! (the four compiled regexes this module ports are quoted in
-//! `tests/reference.py` and re-synced against the live TaskQ source by
-//! `tests/test_scrub_log_text_parity.py`; the pin is the wave2-integration
-//! grammar, TaskQ commit 926e13e / PR #222 — issue #107's re-sync):
+//! Four rules, one name each, pinned to the documented grammar (the four
+//! compiled regexes this module implements are quoted in
+//! `tests/reference.py` and differentially enforced by
+//! `tests/test_scrub_log_text_parity.py`):
 //!
 //! * `pg_detail_lines`: PostgreSQL `DETAIL:` lines quote caller-supplied
 //!   row values, so the whole line is dropped. Two segmenters under one
@@ -101,12 +100,11 @@
 //! > [!WARNING]
 //! > The default chain can leave a credential fragment by design:
 //! > `pg://u:p\nDETAIL:x@h')` scrubs to `pg://u:p')` (the DETAIL deletion
-//! > eats the `@`, the userinfo mask then has nothing to anchor on). Kept
-//! > for byte-identity with the consumer chain
-//! > (`src/taskq/obs/_redact_exc.py::_scrub_text`); do NOT reorder to
+//! > eats the `@`, the userinfo mask then has nothing to anchor on). The
+//! > order is the documented contract; do NOT reorder to
 //! > "fix" it. Safe pattern when credential removal outranks DETAIL
-//! > parity: run `uri_userinfo` separately (it gives `pg://u:***@h')`
-//! > here), trading the chain's parity for the mask, visibly at the call
+//! > handling: run `uri_userinfo` separately (it gives `pg://u:***@h')`
+//! > here), trading the DETAIL deletion for the mask, visibly at the call
 //! > site.
 //!
 //! The passes never rescan their own output (`re.sub`'s no-cascade
@@ -177,7 +175,7 @@ use memchr::{memchr, memchr_iter, memmem, memrchr};
 ///
 /// A rustc that adopts a newer UCD can classify newly-assigned
 /// Other_Alphabetic codepoints this table does not list; the crate-side
-/// spot-check pins below and the TaskQ-gated differential lane are the
+/// spot-check pins below are the
 /// tripwires.
 const WORD_DEMOTE_RANGES: &[(u32, u32)] = &[
     (0x0345, 0x0345),

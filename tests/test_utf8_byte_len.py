@@ -12,9 +12,9 @@ front of UTF-8 stores); ``utf16_byte_len`` is the interop twin below.
 The expression both replace is pure waste whenever only the COUNT is
 wanted: ``len(s.encode(...))`` allocates a full ``bytes`` object,
 measures it, and throws it away. The motivating pattern is a size cap in
-front of a store or a wire (the issue's own framing): TaskQ spells it
-twice — ``client/_args.py`` checks idempotency-key and scope byte caps
-on every enqueue, and ``backend/_terminal.py`` re-encodes a serialized
+front of a store or a wire (the issue's own framing): a write path spells
+it twice — argument validation checks idempotency-key and scope byte caps
+on every enqueue, and a terminal handler re-encodes a serialized
 result of up to 64 KiB (``MAX_RESULT_BYTES``) on every success, a
 genuine double pass (the byte count existed inside the serializer's
 output and was discarded by the ``.decode()`` that produced the
@@ -139,7 +139,7 @@ the 1 MiB scale); the surrogate error parity; the argument contract
 ``int`` -> ``TypeError``); the cache-behavior pin (identical result on
 repeat calls — a semantic pin; the TIMING of the cache is CPython's
 internal business, measured in the wall cells, not asserted here); and
-the motivating TaskQ byte-cap gate spelled with ``utf8_byte_len``. The
+the motivating byte-cap gate spelled with ``utf8_byte_len``. The
 ``utf16_byte_len`` pins mirror every one: the
 ``len(s.encode("utf-16-le"))`` oracle over the same strategy shapes plus
 an exhaustive boundary-alphabet sweep and every reference corpus; the
@@ -454,7 +454,7 @@ def test_a_fresh_equal_object_answers_the_same_as_a_cached_one() -> None:
     assert utf8_byte_len(fresh) == utf8_byte_len(cached)
 
 
-# --- The motivating TaskQ pattern, as an invariant ------------------------------------
+# --- The motivating byte-cap pattern, as an invariant ------------------------------------
 
 
 # The terminal's result cap from the issue (backend/_terminal.py's
@@ -467,7 +467,7 @@ _MAX_RESULT_BYTES = 64 * 1024
     [-1, 0, 1],
     ids=["one-under-the-cap", "exactly-the-cap", "one-over-the-cap"],
 )
-def test_the_taskq_byte_cap_gate_trips_where_the_encode_gate_trips(
+def test_the_byte_cap_gate_trips_where_the_encode_gate_trips(
     bytes_over_cap: int,
 ) -> None:
     """The motivating invariant: a byte-cap gate spelled with
@@ -504,7 +504,7 @@ def test_the_scope_and_idempotency_key_pattern_counts_not_copies() -> None:
     allocating. A regression that answered codepoints (or chars) instead of
     bytes fails the scope leg's divergence pin, not the ASCII leg's
     accidental equality."""
-    idempotency_key = f"taskq:v1:{'k' * 200}"
+    idempotency_key = f"job:v1:{'k' * 200}"
     scope = f"tenant=caf\u00e9;region=\u6771\u4eac;tag=\U0001f600;{'s' * 200}"
     for payload in (idempotency_key, scope):
         assert utf8_byte_len(payload) == len(payload.encode("utf-8"))

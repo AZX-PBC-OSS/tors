@@ -1,10 +1,7 @@
 """Contract gate for ``tors.scrub_log_text``: named-rule, GIL-free log and
-exception-text scrubbing, pinned to the TaskQ exception-text chain it ports
-(``src/taskq/obs/_redact_exc.py``; the four regexes are quoted in
-``tests/reference.py`` and re-synced against the live module by
-``tests/test_scrub_log_text_parity.py`` — the pin is the current
-wave2-integration grammar, TaskQ commit 926e13e / PR #222, issue #107's
-re-sync).
+exception-text scrubbing, pinned to the grammar definition it ships with
+(``tests/reference.py``; the four regexes are quoted there and differentially
+enforced by ``tests/test_scrub_log_text_parity.py``).
 
 What this gate pins, oracle-derived literal by literal:
 

@@ -31,7 +31,7 @@
 * **scan:** escape-parity byte scan core + contains_unescaped/find_unescaped binding (issue [#50](https://github.com/AZX-PBC-OSS/tors/issues/50)) ([fae7ee8](https://github.com/AZX-PBC-OSS/tors/commit/fae7ee8f5e98e7101ed91f9b1ed1334efd1733b8))
 * **scan:** utf16_byte_len core + binding + export (issue [#52](https://github.com/AZX-PBC-OSS/tors/issues/52)) ([b969455](https://github.com/AZX-PBC-OSS/tors/commit/b9694559ffaae303c173c5f95b8604f259574cf5))
 * **scan:** utf8_byte_len core + binding + export (issue [#52](https://github.com/AZX-PBC-OSS/tors/issues/52)) ([2f01930](https://github.com/AZX-PBC-OSS/tors/commit/2f01930ae90eff92a398c2006b4858088ad1a026))
-* scrub_log_text, the named-rule log-scrub port of TaskQ's chain ([6257031](https://github.com/AZX-PBC-OSS/tors/commit/62570310f80576fe2d519e4281f504a37062fbae))
+* scrub_log_text, the named-rule log-scrub grammar ([6257031](https://github.com/AZX-PBC-OSS/tors/commit/62570310f80576fe2d519e4281f504a37062fbae))
 * the api_keys rule for scrub_pii, format-anchored credential scrubbing ([e44c994](https://github.com/AZX-PBC-OSS/tors/commit/e44c994b92b37b48a2a132fa16df2e43f3914993))
 
 

@@ -123,7 +123,7 @@
 //!
 //! `tors.utf8_byte_len(s)` answers `len(s.encode("utf-8"))` without
 //! building the bytes object: the count a caller wants when a size cap
-//! sits in front of a store (TaskQ's idempotency-key/scope byte caps on
+//! sits in front of a store (an enqueue path's idempotency-key/scope byte caps on
 //! every enqueue, and the terminal's re-encode of a serialized result of
 //! up to 64 KiB on every success — a genuine double pass, the byte count
 //! having existed inside the serializer's output and been discarded by

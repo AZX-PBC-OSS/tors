@@ -566,7 +566,7 @@ def test_scrub_log_text_beats_the_regex_chain_on_exception_text(size_bytes: int)
     the corpus that fires every rule once per unit (the DETAIL line, both
     credential shapes on the DSN, the repr()-flattened run).
 
-    The comparator is the pinned regex chain itself (the four TaskQ
+    The comparator is the pinned regex chain itself (the four grammar
     patterns as compiled in ``tests/reference.py``, the same spellings the
     differential suite races tors against), so the wall race and the parity
     harness cross-reference on one oracle. Measured on the dev box (min-of-7
@@ -632,7 +632,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 # lane table (ambient load ~10-18 on the calibration box, macOS, 16 cores,
 # min-of-7 after warmup unless noted):
 #
-#     ASCII (prose), the TaskQ serialized-JSON case (ensure_ascii=True
+#     ASCII (prose), the serialized-JSON case (ensure_ascii=True
 #     output is pure ASCII): tors is FLAT ~0.1µs at every size (the
 #     zero-copy alias: compact ASCII data is its own UTF-8, nothing to
 #     build), while the expression pays alloc+memcpy every call:
@@ -641,7 +641,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #         1 KiB   0.08-0.13µs 0.13µs     0.7-1.0  (a dead heat: both sides are
 #                                                   pure call overhead; recorded,
 #                                                   not asserted)
-#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.9µs
+#         64 KiB  0.13µs      0.9µs      0.14   (the terminal-write size: ~0.9µs
 #                                                 of pure alloc+memcpy per
 #                                                 success — the figure every
 #                                                 doc site cites for the
@@ -710,7 +710,7 @@ def test_utf8_byte_len_beats_the_encode_expression_on_both_winnable_lanes(
     corpus_kind: str, size_bytes: int
 ) -> None:
     """The race, asserted only where it is honestly winnable. Two lanes:
-    ``ascii`` (prose, the TaskQ serialized case — compact ASCII is its own
+    ``ascii`` (prose, the serialized-JSON case — compact ASCII is its own
     UTF-8, so the borrow is a zero-copy alias and the call is O(1) with no
     allocation, while the expression pays alloc+memcpy every call) and
     ``nonascii-cached`` (decomposed, the methodology's warmup having primed
@@ -1630,7 +1630,7 @@ def test_content_hash_wall_time_vs_the_stdlib_is_measured_not_asserted(
 #
 # The batch-only design's premise, raced against the expression it replaces:
 # the per-item anchored-regex loop an enqueue path spells around identifier
-# validators (TaskQ's _IDENT_RE shape).
+# validators (the anchored identifier shape).
 
 # The identifier rule's two halves (letters and underscore at position 0,
 # digits joining after) and the equivalent anchored regex, rebuilt from the

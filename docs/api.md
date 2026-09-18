@@ -622,13 +622,13 @@ def scrub_log_text(
 ```
 
 Named-rule log and exception-text scrubbing, four linear scans + splice
-under one `py.detach`: the
-TaskQ exception-text chain as a primitive (the scrub a worker applies to
+under one `py.detach`: the scrub a worker applies to
 `str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
-line, a span, or an exported attribute), byte-identical to the consumer's
-four compiled regexes — pinned by a differential harness that races tors
-against the exact chain (see [Design and scope](design.md) for why this is
-a *named-rule* surface rather than a pattern parameter).
+line, a span, or an exported attribute, byte-identical to the four
+compiled regexes that define its grammar — pinned by a differential
+harness that races tors against that reference (see
+[Design and scope](design.md) for why this is a *named-rule* surface
+rather than a pattern parameter).
 
 Four rules, one closed set:
 
@@ -686,26 +686,25 @@ names runs the combined pass once, never two sequential substitutions.
 > The default chain can leave a credential fragment by design:
 > `scrub("pg://u:p\\nDETAIL:x@h')")` is `"pg://u:p')"` (the DETAIL deletion
 > eats the `@`, the userinfo mask then has nothing to anchor on, the
-> password `p` survives). The order is kept for byte-identity with the
-> consumer chain (`src/taskq/obs/_redact_exc.py::_scrub_text`, the scrub a
-> worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of
-> it reaches a log line, a span, or an exported attribute — up to four
-> passes per text, ~24 per failed job across its message/traceback/span
-> texts); do NOT reorder to "fix" the fragment. Safe pattern when
-> credential removal outranks DETAIL parity: run `uri_userinfo` separately
-> (e.g. `scrub_log_text(text, ["uri_userinfo"])`, which gives
-> `"pg://u:***@h')"` here) — trading the chain's DETAIL parity for the
-> mask, deliberately and visibly at the call site.
+> password `p` survives). The order is the documented contract (the
+> scrub a worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks
+> before any of it reaches a log line, a span, or an exported attribute —
+> up to four passes per text, ~24 per failed job across its
+> message/traceback/span texts); do NOT reorder to "fix" the fragment.
+> Safe pattern when credential removal outranks DETAIL handling: run
+> `uri_userinfo` separately (e.g.
+> `scrub_log_text(text, ["uri_userinfo"])`, which gives
+> `"pg://u:***@h')"` here) — trading the DETAIL deletion for the mask,
+> deliberately and visibly at the call site.
 >
-> A second chain-inherited seam: a digit-leading scheme defeats the
+> A second documented seam: a digit-leading scheme defeats the
 > userinfo anchor everywhere in the family — `scrub_log_text`,
 > `scrub_log_text(text, ["uri_userinfo"])`, and `scrub_pii` all leave
 > `1postgres://user:pass@host` whole (the shared scheme anchor is
 > `\b[a-zA-Z]`, so `1postgres` is not a scheme to it; verified against
-> all three spellings). Chain-identical by construction, so it is pinned
-> parity, not a tors defect; there is currently no tors surface that
-> redacts a digit-prefixed scheme URI — a caller seeing that shape needs
-> its own pre-pass.
+> all three spellings). This is the grammar's pinned shape, not a defect;
+> there is currently no tors surface that redacts a digit-prefixed scheme
+> URI — a caller seeing that shape needs its own pre-pass.
 
 `rules=[]` is the identity; duplicates
 dedupe and caller order is irrelevant; an unknown name raises `ValueError`
@@ -1499,10 +1498,11 @@ def utf8_byte_len(s: str) -> int: ...
 The UTF-8 byte length of a `str`: `len(s.encode("utf-8"))` with the copy taken
 out. That expression allocates a full `bytes` object, measures it, and throws
 it away — pure waste whenever only the count is wanted, which is the shape of
-every size cap in front of a store. The motivating sites are TaskQ's:
-`client/_args.py` checks idempotency-key and scope byte caps on every enqueue,
-and `backend/_terminal.py` re-encodes a serialized result of up to
-64 KiB (`MAX_RESULT_BYTES`) on every success just to take its length — a
+every size cap in front of a store. The motivating sites are a write
+path's: argument validation checks idempotency-key and scope byte caps on
+every enqueue, and a terminal handler re-encodes a serialized result of
+up to 64 KiB (`MAX_RESULT_BYTES`) on every success just to take its
+length — a
 genuine double pass, the byte count having existed inside the serializer's
 output and been discarded by the `.decode()` that produced the `str`.
 
@@ -1567,7 +1567,7 @@ lane table is in `tests/test_performance.py`):
 ```python
 tors.utf8_byte_len("café")  # 5: three ASCII bytes + one two-byte é
 tors.utf8_byte_len("\U0001f600")  # 4: one astral codepoint, four bytes
-# the byte-cap gate the TaskQ terminal spells on every success:
+# the byte-cap gate a terminal handler spells on every success:
 if tors.utf8_byte_len(serialized_result) > 64 * 1024:
     reject()  # over MAX_RESULT_BYTES — no bytes object built to find out
 ```

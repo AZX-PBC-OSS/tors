@@ -1,16 +1,9 @@
-"""Differential parity for the ``tors.scrub_log_text`` port of TaskQ's
-exception-text scrub chain.
+"""Behavioral differentials for ``tors.scrub_log_text``.
 
-Provenance, the pin this file exists to enforce: the behavior oracle is the
-consumer's own chain, ``src/taskq/obs/_redact_exc.py`` in the TaskQ repo
-(pinned to the sibling checkout this suite runs against on the dev box; the
-locator below also honors ``TORS_TASKQ_REPO``). The pin is the CURRENT chain
-— the wave2-integration grammar (TaskQ commit 926e13e, PR #222; issue #107's
-re-sync) — so while that PR is unmerged on the TaskQ side, the locator
-prefers the wave2 worktree of the sibling checkout over its main branch and
-falls back to the main checkout (whose stale chain then fails the quoted-pin
-test loudly: a re-sync request, never a silent drift). The four compiled
-regexes, quoted verbatim from that source, are:
+The oracle is this repo's own pure-Python reference
+(``tests/reference.py::reference_scrub_log_text``), and the grammar's
+definition is the four compiled regexes quoted below, in this file — the
+extension is pinned against them exactly (
 
 .. code-block:: python
 
@@ -39,12 +32,12 @@ selection. The conninfo pass is ONE pass under TWO names
 (``uri_query_creds`` selects the ``[?&]`` anchor grammar,
 ``libpq_conninfo_creds`` the libpq keyword lookbehind; both — ``rules=None``
 included — run the combined pattern, never two sequential substitutions).
-A TaskQ change to any
-pattern or to the order is a visible re-sync request (the live-oracle class
-below fails loudly when the checkout is present), never a silent tors
+A change to any
+pattern or to the order is a deliberate grammar change: it lands here and
+in ``tests/reference.py`` together, visibly, never as a silent tors
 behavior change.
 
-Two behavior changes rode in with the #107 re-sync, both deliberate
+Two deliberate behavior changes are part of this grammar
 security-policy calls documented where the old contract was stated
 (src/scrub_impl.rs's header, docs/api.md): the escaped-DETAIL lookahead's
 final bare ``$`` leg is FAIL-CLOSED — an unterminated repr scrubs through
@@ -64,28 +57,14 @@ json_repair's precedent — and the ``timing`` wall/scaling cells). Lane
 counts are reported per lane, never as one combined headline presented as
 the per-PR gate: per-PR is the default selection (``-m "not timing and not
 sweep"``); sweep + timing run once on the 3.12 leg.
-
-The live-oracle lane is the ``test_json_repair_parity.py`` importorskip
-pattern adapted for a LOCAL repo rather than a pip package: TaskQ is not
-installable into this suite's environment (its package ``__init__`` pulls
-the worker's dependency tree — opentelemetry, structlog, asyncpg — none of
-which tors's dev environment carries), so ``import taskq`` cannot succeed
-here and a sys.path route would importorskip-skip even on the box where the
-oracle exists. The scrub module itself is stdlib-only (``re``/``sys``/
-``traceback``), so the lane file-loads ``_redact_exc.py`` directly via
-``importlib`` — the live source, not a copy — and skips (the importorskip
-semantics) when no checkout is found.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
-import os
 import re
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -104,11 +83,11 @@ from reference import (
 )
 
 # The quoted pin, mechanically enforced against reference.py's compiled
-# patterns (TestQuotedPin): these are the TaskQ source's exact pattern
-# strings, byte for byte (the wave2-integration grammar, #107's re-sync),
-# and both copies must stay that way. The conninfo name list is quoted
-# separately (the live module spells it as a tuple the pattern is built
-# from; the assembled patterns must equal these strings exactly).
+# patterns (TestQuotedPin): these are the grammar's exact pattern
+# strings, byte for byte, and both copies must stay that way. The conninfo
+# name list is quoted separately (the reference spells it as a tuple the
+# pattern is built from; the assembled patterns must equal these strings
+# exactly).
 QUOTED_PATTERNS: dict[str, str] = {
     "_PG_DETAIL_RE": r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$",
     "_PG_DETAIL_ESCAPED_RE": (
@@ -154,7 +133,7 @@ class TestQuotedPin:
     @pytest.mark.parametrize("name", sorted(QUOTED_PATTERNS))
     def test_reference_patterns_are_the_quoted_pin(self, name: str) -> None:
         assert _COMPILED_PATTERNS[name].pattern == QUOTED_PATTERNS[name], (
-            f"reference.py's {name} drifted from the TaskQ-quoted pin in this "
+            f"reference.py's {name} drifted from the quoted pin in this "
             "file's header: a re-sync (deliberate, against the live module) "
             "or a bug; either way the two spellings must not diverge silently"
         )
@@ -788,124 +767,3 @@ def test_scrub_userinfo_fail_chain_scales_linearly() -> None:
         f"212KB {t_large:.2f}ms (ratio {t_large / max(t_small, 1e-9):.2f}x, "
         "linear must stay <3x)"
     )
-
-
-# --- the live-oracle re-sync lane (TaskQ checkout gated) ------------------------------
-
-
-def _load_taskq_module() -> object | None:
-    """File-load the live ``_redact_exc.py`` if a TaskQ checkout is findable.
-
-    Locator, in order: ``TORS_TASKQ_REPO`` wins if set; then the wave2
-    worktree of the sibling of this repo's MAIN checkout (derived via
-    ``git rev-parse --git-common-dir``, so the route works from any
-    worktree) — the wave2-integration branch is where the CURRENT chain
-    (TaskQ commit 926e13e, PR #222, the grammar this pin carries since
-    issue #107's re-sync) lives until that PR merges to the TaskQ main
-    branch; then the sibling checkout itself, whose stale (pre-#222) chain
-    fails the quoted-pin test loudly once the pin is the current grammar —
-    the visible re-sync request this lane exists to deliver. When #222
-    merges, both candidates carry the same chain and the wave2 entry can
-    be dropped. Returns ``None`` (the caller skips, importorskip
-    semantics) when none holds a checkout.
-    """
-    candidates: list[Path] = []
-    env_repo = os.environ.get("TORS_TASKQ_REPO")
-    if env_repo:
-        candidates.append(Path(env_repo))
-    try:
-        common_dir = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-            cwd=Path(__file__).resolve().parent.parent,
-        ).stdout.strip()
-        main_checkout = (Path(__file__).resolve().parent.parent / common_dir).resolve().parent
-        candidates.append(main_checkout.parent / "TaskQ" / ".worktrees" / "wave2")
-        candidates.append(main_checkout.parent / "TaskQ")
-    except (OSError, subprocess.SubprocessError):
-        pass
-    for candidate in candidates:
-        module_path = candidate / "src" / "taskq" / "obs" / "_redact_exc.py"
-        if not module_path.is_file():
-            continue
-        spec = importlib.util.spec_from_file_location("taskq_obs_redact_exc", module_path)
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        # The checkout is the live ORACLE (foreign tree, own dependency
-        # set): its module may grow imports the local venv does not carry
-        # (measured: an `opentelemetry` import appearing upstream broke
-        # THIS suite's collection from a repo that is not ours to pin).
-        # A found-but-unimportable checkout is materially the "cannot run
-        # the lane" case the caller's skipif exists for — degrade to the
-        # same None (the quoted-pattern differential above still runs),
-        # never break collection.
-        try:
-            spec.loader.exec_module(module)
-        except ImportError:
-            continue
-        return module
-    return None
-
-
-_TASKQ = _load_taskq_module()
-_requires_taskq = pytest.mark.skipif(
-    _TASKQ is None,
-    reason=(
-        "no TaskQ checkout found (sibling of the main checkout, or "
-        "$TORS_TASKQ_REPO): the live-oracle re-sync lane is skipped; the "
-        "quoted-pattern differential above still runs"
-    ),
-)
-
-
-@_requires_taskq
-class TestLiveOracleResync:
-    def test_the_live_patterns_are_the_quoted_pin(self) -> None:
-        for name, quoted in QUOTED_PATTERNS.items():
-            live = getattr(_TASKQ, name)
-            assert isinstance(live, re.Pattern)
-            assert live.pattern == quoted, (
-                f"TaskQ's {name} changed (or this pin is stale): {live.pattern!r} "
-                f"vs the quoted {quoted!r} — re-sync the pin in tests/reference.py "
-                "and this header TOGETHER, as one deliberate change"
-            )
-
-    def test_the_live_chain_is_the_local_chain_over_the_corpus(self) -> None:
-        module = _TASKQ
-        assert module is not None
-        flag_before = module._redaction_enabled  # noqa: SLF001
-        try:
-            module._redaction_enabled = True  # noqa: SLF001
-            for text in (
-                _CORPUS
-                + _needle_chain_cases()
-                + [
-                    scrub_corpus(1024),
-                    scrub_corpus(100 * 1024),
-                ]
-            ):
-                assert module._scrub_text(text) == reference_scrub_log_text(text)  # noqa: SLF001
-        finally:
-            module._redaction_enabled = flag_before  # noqa: SLF001
-
-    def test_tors_matches_the_live_chain_over_the_corpus(self) -> None:
-        module = _TASKQ
-        assert module is not None
-        flag_before = module._redaction_enabled  # noqa: SLF001
-        try:
-            module._redaction_enabled = True  # noqa: SLF001
-            for text in (
-                _CORPUS
-                + _needle_chain_cases()
-                + [
-                    scrub_corpus(1024),
-                    scrub_corpus(100 * 1024),
-                ]
-            ):
-                assert tors.scrub_log_text(text) == module._scrub_text(text)  # noqa: SLF001
-        finally:
-            module._redaction_enabled = flag_before  # noqa: SLF001

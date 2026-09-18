@@ -87,7 +87,7 @@ fn borrow_str_sequence<R>(
 /// is `None`, the uniform spelling) — or `-1` when every item passes
 /// (an empty batch answers `-1` even under spellings where every item
 /// would offend: vacuously valid). The
-/// identifier-style rules a caller like TaskQ spells with anchored
+/// identifier-style rules a caller spells with anchored
 /// regexes (`\A[A-Za-z_][A-Za-z0-9_]*\Z` and kin), expressed as plain
 /// caller-supplied data and checked for a whole batch in one pass. The
 /// sets are data, not patterns: plain strings of permitted codepoints,

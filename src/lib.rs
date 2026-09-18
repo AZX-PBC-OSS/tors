@@ -13,8 +13,8 @@
 //! [`truncate_impl`] (boundary-safe and
 //! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
 //! scrub), [`charset_impl`] (batch codepoint-set validation for
-//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
-//! the TaskQ exception-text chain), [`hash_impl`] (the one-shot
+//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing),
+//! [`hash_impl`] (the one-shot
 //! md5/sha1/sha256/sha512/hmac hashing surface), [`random_impl`]
 //! (the random-generation family: random
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
@@ -350,8 +350,7 @@
 //! tests/test_gil_release.py.
 //!
 //! The scrub surface (`scrub_impl::scrub_log_text`, the `tors.scrub_log_text`
-//! named-rule port of the consumer chain
-//! `src/taskq/obs/_redact_exc.py::_scrub_text`) adds no residue class: it is
+//! named-rule scrubber) adds no residue class: it is
 //! `detached_transform`'s shape over a multi-pass core. The argument
 //! borrow plus the O(rules) name walk (the standard str-in borrow class,
 //! three handles at most) and the ValueError construction on a bad name

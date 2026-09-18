@@ -6,7 +6,7 @@
 //! file:
 //!
 //! - `list_of_dicts`: 64 KiB and 1 MiB lists of small dicts — the
-//!   consumer's shape (TaskQ's terminal write, 64 KiB default / 1 MiB
+//!   consumer's shape (a terminal write, 64 KiB default / 1 MiB
 //!   ceiling), where the object-tree cost the scan skips is largest.
 //!   Issue reference points: orjson 160 µs / 3.4 ms, scanner 42 µs /
 //!   0.66 ms.
