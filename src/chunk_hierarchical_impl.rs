@@ -471,6 +471,14 @@ fn grapheme_index<'g>(
 ///   the arm answers "maybe" — the caller descends to the search, which
 ///   realizes the level once (memoized) and answers exactly from then
 ///   on. Over-approximating is output-invisible: the search decides.
+///   (A prior spelling answered `at == 0 && text.starts_with(sep)` —
+///   "provably no" at every `at > 0` — which is UNSOUND: a literal
+///   separator can begin at any codepoint, and a final window opening on
+///   an unrealized fine level's match was pushed whole, emitting
+///   pure-separator chunks and breaking the all-separator-zero-chunks
+///   contract. The `separator_pretest_literal_at_gt_zero_may_open`
+///   pins pin the soundness; the differential's separator pool covers
+///   the unrealized-fine-level shape.)
 /// * an unrealized PARAGRAPH level can carry a cut at `at` only if a
 ///   paragraph-gap cut begins there — its cut is
 ///   `(paragraph[i].end, paragraph[i+1].start)`, the gap a newline-run —
@@ -491,7 +499,12 @@ fn separator_may_open(slots: &[LevelSlot<'_>], text: &str, at: usize) -> bool {
     slots.iter().any(|slot| match &slot.level {
         Some(level) => level.skip_cut(at).is_some(),
         None => match slot.spec {
-            LevelSpec::Literal(sep) => at == 0 && text.starts_with(sep),
+            // `at > 0` is "maybe" for BOTH unrealized match-carrying specs
+            // (a literal can begin at any codepoint, a paragraph gap at
+            // any non-zero one); only `at == 0` admits an exact O(1)
+            // answer (the codepoint-0 = byte-0 `starts_with`, and the
+            // paragraph arm's leading-blank-run discard).
+            LevelSpec::Literal(sep) => at > 0 || text.starts_with(sep),
             LevelSpec::Paragraph => at > 0,
             LevelSpec::Sentence | LevelSpec::Word => false,
         },
@@ -1438,6 +1451,89 @@ mod tests {
                 OverlapBoundary::Grapheme
             ),
             vec![(0, 2), (4, 5)]
+        );
+    }
+
+    #[test]
+    fn separator_pretest_literal_at_gt_zero_may_open() {
+        // The final-exit PRE-TEST's own soundness, beyond the
+        // single-level shapes above: the unrealized-LITERAL arm used to
+        // answer `at == 0 && text.starts_with(sep)` — "provably no" at
+        // every `at > 0` — but a literal separator can begin at ANY
+        // codepoint. A hierarchy with a fine level left unrealized by
+        // the `find_map` short-circuit (here: the `"\n"` level under the
+        // `"\n\n"` verdicts) then pushed final windows that OPEN on a
+        // match: `"\n"*5` chunked to `[(4, 5)]` (a pure-separator chunk,
+        // the #103 relapse) and `"XaX\nbb"` lost the `"\n"` skip at the
+        // final exit. The arm answers "maybe" at `at > 0` (the caller
+        // descends to the exact, memoized search — the same
+        // over-approximate discipline the PARAGRAPH arm has always
+        // used), so every shape below matches the bare-search oracle.
+        //
+        // The unit-level pin on the pre-test itself: an unrealized
+        // literal at `at > 0` can never answer "provably no".
+        let slots: Vec<LevelSlot<'_>> = ["\n\n", "\n"]
+            .into_iter()
+            .map(|sep| LevelSlot {
+                spec: LevelSpec::Literal(sep),
+                level: None,
+            })
+            .collect();
+        assert!(separator_may_open(&slots, "\n\n\n\n\n", 3));
+        assert!(separator_may_open(&slots, "XaX\nbb", 3));
+        // `at == 0` keeps its exact O(1) answer (the zero-build
+        // contract's headline is a whole-document window at `at == 0`).
+        assert!(!separator_may_open(&slots, "abc", 0));
+        assert!(separator_may_open(&slots, "\nabc", 0));
+        // End-to-end: the red-team repros, each previously diverging
+        // from the bare-search reference oracle.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "\n\n\n\n\n",
+                5000,
+                Some(&[Some("\n\n"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            Vec::<(usize, usize)>::new(),
+            "an all-separator document chunks to zero chunks even when a fine literal level is unrealized"
+        );
+        assert_eq!(
+            super::chunk_hierarchical(
+                "XaX\nbb",
+                3,
+                Some(&[Some("X"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(1, 2), (4, 6)],
+            "the final window opening on an unrealized level's match is skipped, not emitted"
+        );
+        assert_eq!(
+            super::chunk_hierarchical(
+                "XaX\n\n\n",
+                3,
+                Some(&[Some("X"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(1, 2)],
+            "a trailing separator run survives only as a suffix of a content-bearing chunk"
+        );
+        // Overlap composition: the trailing pure-separator chunk the
+        // pre-test used to emit at the overlap snap's landing.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "babaaababaaababaaababaaababaaababaaabaa",
+                3,
+                Some(&[Some("ab"), Some("ba"), Some("a"), Some("b")]),
+                2,
+                OverlapBoundary::Grapheme
+            )
+            .last()
+            .copied(),
+            Some((33, 35)),
+            "the last chunk ends on content, not on a separator match"
         );
     }
 

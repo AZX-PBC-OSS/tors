@@ -227,10 +227,19 @@ fuzz_target!(|input: Input| {
     ];
     // The single-entry lists are the shape-minimal cases (one repeat, one
     // overlap); the empty list is the documented raw-cut-only spelling.
-    let singletons: [Vec<Option<&str>>; 3] = [
+    // The last three are the unrealized-fine-level shapes: a coarse
+    // literal supplies the verdicts and a finer or mutually overlapping
+    // literal stays unrealized at the final window — the pre-test's
+    // literal arm answered "provably no" at `at > 0` there and pushed
+    // pure-separator chunks (see the production pin
+    // `separator_pretest_literal_at_gt_zero_may_open`).
+    let singletons: [Vec<Option<&str>>; 6] = [
         vec![Some("ab")],
         vec![Some("ab"), Some("ba"), Some("abab")],
         vec![],
+        vec![Some("\n\n"), Some("\n")],
+        vec![Some("aa"), Some("a")],
+        vec![Some("X"), Some("\n")],
     ];
 
     for separators in lists.iter().chain(singletons.iter()) {

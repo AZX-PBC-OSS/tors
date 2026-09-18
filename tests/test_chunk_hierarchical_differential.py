@@ -361,6 +361,17 @@ _SEPARATOR_POOL: list[list[str | None] | None] = [
     ["\n", ". ", " "],
     ["\n## ", "\n\n", ". ", " "],
     ["\r\n", None, " "],
+    # The unrealized-fine-level shapes: hierarchies where a COARSER
+    # literal supplies the verdicts and a finer (or mutually overlapping)
+    # literal stays unrealized at the final window — the pre-test's
+    # literal arm answered "provably no" at `at > 0` there and pushed
+    # pure-separator chunks (the `separator_pretest_literal_at_gt_zero_
+    # may_open` pins; these pool entries keep the randomized sweep on
+    # the shape).
+    ["\n\n", "\n"],
+    ["aa", "a"],
+    ["X", "\n"],
+    ["ab", "ba", "a", "b"],
 ]
 
 _RANDOM_CASES = 3_000
