@@ -32,8 +32,13 @@
 //!   package's); instances containing non-finite numbers are rejected under
 //!   schema mode (the Python side tolerates `NaN`, but JSON and serde_json
 //!   cannot represent it); `BigInt` beyond `u64` validates through `f64`
-//!   (lossy at the boundary only); `format` is never asserted (upstream
-//!   passes no `format_checker` either: parity).
+//!   at the document boundary (lossy there only: a constrained SCHEMA
+//!   position — `enum`/`const`/`minimum`/`maximum`/`exclusiveMinimum`/
+//!   `exclusiveMaximum`/`multipleOf` — carrying such an integer refuses
+//!   the schema outright with the position's JSON pointer, the fail-closed
+//!   gate in `schema_bigint_refusal`, since the lossy compile of a
+//!   constraint silently accepts neighboring values); `format` is never
+//!   asserted (upstream passes no `format_checker` either: parity).
 //! - **tors-native repairs** (all recorded as diagnostics, all opt-out by
 //!   simply not using schema mode): the key-normalization ladder
 //!   (case/`snake`/`kebab`/`spaces` folding to an exact property) ahead of
@@ -77,6 +82,17 @@ use crate::json_repair::{
 /// folds and the validation-preparation walks. The 550-deep `allOf` and
 /// 550-deep `properties` corpus payloads raise exactly this message.
 const MAX_SCHEMA_DEPTH: usize = 200;
+
+/// The schema-walk node budget (the canon walk's `MAX_WALK_NODES`
+/// convention, same 2,000,000 value: the 12 MiB records corpus walks ~1M
+/// nodes, the cap sits at 2x): the schema-constraint refusal walk below
+/// is a plain tree pass, so it inherits the same DoS backstop — a schema
+/// past the budget refuses outright instead of scanning unbounded. A
+/// legitimate schema sits orders of magnitude below it (a 10k-property
+/// schema is ~50k nodes); `$ref` sharing never multiplies the walk (the
+/// walk is syntactic over the raw tree, it never dereferences a ref, so
+/// shared structure is visited once).
+const MAX_SCHEMA_WALK_NODES: usize = 2_000_000;
 
 /// jaro-winkler score for the fuzzy key ladder (unique-best, target absent,
 /// loss-or-failure gating: see the repair_object docs), and the lower
@@ -506,18 +522,37 @@ impl SchemaRepairer {
     /// only when asked, and the draft-normalized root validator compiles
     /// once up front (compile failures surface as validation errors with
     /// the compile message: the upstream "evolve lazily, surface late"
-    /// shape, without the lazy machinery).
+    /// shape, without the lazy machinery). The one HARD gate is the
+    /// fail-closed schema-constraint refusal ([`schema_bigint_refusal`],
+    /// issue #119): a constrained position carrying an integer beyond the
+    /// exact-integer range refuses the whole schema up front — laziness
+    /// there would mean silent wrong-accepts, the sharp direction — so
+    /// every repair call with such a schema raises the pointer-naming
+    /// error before any work runs.
     pub(crate) fn new(
         root: Value,
         salvage: bool,
         diagnostics: bool,
         locale: NumericLocale,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        // The fail-closed constraint gate, before anything compiles: it
+        // walks the raw root tree once (O(nodes), the same traversal the
+        // nesting gate and the address set below each pay), so the refusal
+        // is total — not per-compile-site — and every later validator
+        // compile (root, subschema, transient) is covered by construction.
+        // It runs only on trees inside the nesting cap (deeper ones carry
+        // the lazy depth error below, exactly as before: the refusal walk
+        // must not move that pinned boundary), which also bounds the
+        // walk's own pointer-building to the capped depth.
+        let too_deep = schema_nesting(&root, 0) > MAX_SCHEMA_DEPTH;
+        if !too_deep {
+            schema_bigint_refusal(&root)?;
+        }
         // Upstream's deep-schema failures surface from validation recursion
         // (a 550-deep schema raises RecursionError inside is_valid/validate,
         // never inside repair): gate the schema's own nesting here so the
         // validator carries the normalized error from the start.
-        let root_validator = if schema_nesting(&root, 0) > MAX_SCHEMA_DEPTH {
+        let root_validator = if too_deep {
             Err("Input schema nesting exceeds the supported schema recursion depth.".into())
         } else {
             match prepare_for_validation(&root, 0) {
@@ -544,7 +579,7 @@ impl SchemaRepairer {
             }
         }
         root_addresses.sort_unstable();
-        SchemaRepairer {
+        Ok(SchemaRepairer {
             root,
             salvage,
             locale,
@@ -557,7 +592,7 @@ impl SchemaRepairer {
             deadline: None,
             deadline_counter: std::cell::Cell::new(0),
             deadline_error: RefCell::new(None),
-        }
+        })
     }
 
     pub(crate) fn root(&self) -> &Value {
@@ -3630,13 +3665,230 @@ fn as_number(value: &Value) -> Option<f64> {
     }
 }
 
+/// The fail-closed schema gate for the lossy-`to_serde` corner (issue
+/// #119): a CONSTRAINED position — `enum` member values, `const`,
+/// `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`,
+/// `multipleOf` — carrying an integer beyond the exact-integer range
+/// (`i64::MIN..=u64::MAX`, the lanes `to_serde` maps exactly) refuses the
+/// schema outright. The reason is the sharp direction of the loss: the
+/// constraint reaches the validator as `f64`, and f64-space neighbors
+/// alias, so `enum: [10**25, 10**25 + 10**10]` accepts `10**25 + 5` and
+/// `minimum: 10**25` accepts `10**25 - 1` — silent validation of data the
+/// schema rejects. Nothing is guessed silently (the locale ladder's own
+/// idiom: a mis-fixed value silently corrupts by 1000x), so the whole
+/// schema refuses with the offending position's JSON pointer; the caller
+/// fixes the schema. The walk is syntactic over the root tree and runs
+/// ONCE, in [`SchemaRepairer::new`], where the schema enters — every
+/// later compile site (the root validator, the per-subschema lanes, the
+/// synthesized transient union branches) compiles nodes of that tree, so
+/// one pass covers them all, `$ref`/`allOf`-reachable positions included
+/// (`$defs` targets and `allOf` members are tree nodes like any other).
+///
+/// Deliberately NOT refused (checked against the `Value` enum's variants):
+/// `Int` values (i64, exact through the validator); `Float` values (the
+/// documented lossy-float schema spelling, unchanged); integers beyond the
+/// range at UNCONSTRAINED positions (`default`, `examples`, `description`
+/// prose, a non-constrained keyword's own value like `propertyNames` —
+/// they constrain nothing, and the document's own huge ints flow as
+/// before); and document values (this walk only ever sees the schema).
+fn schema_bigint_refusal(schema: &Value) -> Result<(), String> {
+    // Two passes: the first is the allocation-free scan an honest schema
+    // pays (frames carry no pointer — string building per frame would tax
+    // the hot path for a report the happy path never reads); only a
+    // REFUSING schema pays the second, pointer-building pass.
+    match bigint_offense_scan(schema) {
+        Scan::Clean => Ok(()),
+        Scan::OverBudget => Err(
+            "Input schema exceeds the supported schema node budget; refusing the walk past 2,000,000 nodes rather than scan unbounded."
+                .into(),
+        ),
+        Scan::Offense => {
+            let pointer = offense_pointer(schema)
+                .unwrap_or_else(|| "/".into()); // unreachable: the scan found one
+            Err(format!(
+                "Schema constraint at {pointer} carries an integer outside the exact-integer range (i64::MIN..=u64::MAX): the validator can only compile it as f64, whose neighboring integers alias, so the constraint would silently accept values the schema rejects; the schema is refused."
+            ))
+        }
+    }
+}
+
+/// The scan's verdict.
+enum Scan {
+    Clean,
+    /// A lossy BigInt sits at a constrained position (which one: the
+    /// pointer pass tells).
+    Offense,
+    /// Past [`MAX_SCHEMA_WALK_NODES`]: refuse rather than scan unbounded.
+    OverBudget,
+}
+
+/// One JSON-pointer segment (RFC 6901, the `~0`/`~1` escapes in the same
+/// order `resolve_chain` unescapes them).
+fn pointer_segment(key: &str) -> String {
+    key.replace('~', "~0").replace('/', "~1")
+}
+
+/// The lossy-integer test, exactly `to_serde`'s fallback lane: a `BigInt`
+/// spelling that fits neither `u64` nor `i64` (those two lanes cross the
+/// boundary exactly; only the fallback goes through `f64`, where
+/// neighboring integers alias — including negatives below `i64::MIN`, the
+/// `i64::MIN` edge's mirror).
+fn bigint_lossy(text: &str) -> bool {
+    text.parse::<u64>().is_err() && text.parse::<i64>().is_err()
+}
+
+/// Walk mode: `Schema` frames are schema positions (a constrained
+/// keyword's value flips into `Data`); `Data` frames are constraint DATA —
+/// the value of `enum`/`const` — scanned only for lossy integer leaves,
+/// never for keywords (an object inside an `enum` is a value to compare,
+/// not a schema; its `minimum` key means nothing).
+#[derive(Clone, Copy)]
+enum WalkMode {
+    Schema,
+    Data,
+}
+
+/// Is a frame's child a constrained position? (The seven keywords whose
+/// integer values compile into validators.)
+fn is_constrained_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        "enum"
+            | "const"
+            | "minimum"
+            | "maximum"
+            | "exclusiveMinimum"
+            | "exclusiveMaximum"
+            | "multipleOf"
+    )
+}
+
+/// The allocation-free verdict scan: same traversal as
+/// [`offense_pointer`] (reverse-pushed children, so any enumeration order
+/// either pass fixes is the same), no pointer building, the node budget
+/// enforced here. Depth carries no check: the only caller
+/// ([`SchemaRepairer::new`]) refuses trees past [`MAX_SCHEMA_DEPTH`]
+/// before this runs, so the walk (and the pointer pass it feeds) is
+/// depth-bounded by construction.
+fn bigint_offense_scan(schema: &Value) -> Scan {
+    let mut visited: usize = 0;
+    let mut stack: Vec<(&Value, WalkMode)> = vec![(schema, WalkMode::Schema)];
+    while let Some((node, mode)) = stack.pop() {
+        visited += 1;
+        if visited > MAX_SCHEMA_WALK_NODES {
+            return Scan::OverBudget;
+        }
+        match (mode, node) {
+            (WalkMode::Schema, Value::Object(entries)) => {
+                for (key, value) in entries.iter().rev() {
+                    let mode = if is_constrained_keyword(key) {
+                        WalkMode::Data
+                    } else {
+                        WalkMode::Schema
+                    };
+                    stack.push((value, mode));
+                }
+            }
+            (_, Value::Array(items)) => {
+                for item in items.iter().rev() {
+                    stack.push((item, mode));
+                }
+            }
+            (WalkMode::Schema, _) => {}
+            (WalkMode::Data, Value::BigInt(text)) => {
+                if bigint_lossy(text) {
+                    return Scan::Offense;
+                }
+            }
+            (WalkMode::Data, Value::Object(entries)) => {
+                for (_, value) in entries.iter().rev() {
+                    stack.push((value, WalkMode::Data));
+                }
+            }
+            (WalkMode::Data, _) => {}
+        }
+    }
+    Scan::Clean
+}
+
+/// The refusing position's JSON pointer: the same traversal,
+/// pointer-building only on the failing path (which [`Scan::Offense`]
+/// proved bounded by the node budget, and depth-bounded by the caller's
+/// nesting gate). `None` cannot happen after an `Offense` scan (same
+/// deterministic walk), but a `None`-tolerant return keeps the two passes
+/// honest about their coupling.
+fn offense_pointer(schema: &Value) -> Option<String> {
+    let mut stack: Vec<(&Value, String, WalkMode)> =
+        vec![(schema, String::new(), WalkMode::Schema)];
+    while let Some((node, pointer, mode)) = stack.pop() {
+        match (mode, node) {
+            // A schema object: constrained keywords' values become Data
+            // (checked to the leaf below), every other member is a schema
+            // position (properties, items, allOf, $defs, the works).
+            // Children push in REVERSE so the pops run in document order:
+            // the reported pointer is the FIRST offending position.
+            (WalkMode::Schema, Value::Object(entries)) => {
+                for (key, value) in entries.iter().rev() {
+                    let child = format!("{pointer}/{}", pointer_segment(key));
+                    let mode = if is_constrained_keyword(key) {
+                        WalkMode::Data
+                    } else {
+                        WalkMode::Schema
+                    };
+                    stack.push((value, child, mode));
+                }
+            }
+            // A schema array (allOf/anyOf/oneOf members, items tuples,
+            // enum-position containers reached through Data fallthrough):
+            // members stay in the frame's mode (reverse-pushed, same
+            // document-order pops).
+            (_, Value::Array(items)) => {
+                for (index, item) in items.iter().enumerate().rev() {
+                    stack.push((item, format!("{pointer}/{index}"), mode));
+                }
+            }
+            // A schema-position non-object (a scalar schema,
+            // `true`/`false`): nothing constrained can hide in it.
+            (WalkMode::Schema, _) => {}
+            // Data mode: the whole point. A lossy BigInt leaf at a
+            // constrained position names its pointer.
+            (WalkMode::Data, Value::BigInt(text)) => {
+                if bigint_lossy(text) {
+                    return Some(pointer);
+                }
+            }
+            // Constraint data containers descend as data (a nested
+            // `{"a": 10**25}` enum member aliases exactly like a flat
+            // one: the comparison is the compiled f64 tree), reverse-
+            // pushed like the schema arms.
+            (WalkMode::Data, Value::Object(entries)) => {
+                for (key, value) in entries.iter().rev() {
+                    stack.push((
+                        value,
+                        format!("{pointer}/{}", pointer_segment(key)),
+                        WalkMode::Data,
+                    ));
+                }
+            }
+            // Everything else in constraint data (bools, strings, nulls,
+            // floats, exact ints) is representable or deliberately out of
+            // contract.
+            (WalkMode::Data, _) => {}
+        }
+    }
+    None
+}
+
 /// The `Value` -> `serde_json::Value` boundary for the validator. Notes on
 /// the lossy corners (module docs): objects cross through the sorted
 /// `serde_json::Map` (keyword lookup is name-based, so validation is
-/// unaffected); `BigInt` beyond `u64` falls back to `f64`; non-finite
-/// floats reject the whole conversion (schema mode cannot represent them,
-/// same as JSON itself); `Missing` cannot arrive (normalized upstream),
-/// and renders as `""` defensively.
+/// unaffected); `BigInt` beyond `u64` falls back to `f64` — for SCHEMA
+/// values this lane is only reachable at unconstrained positions now, the
+/// constrained ones refusing upstream in [`schema_bigint_refusal`]
+/// (issue #119), while DOCUMENT values keep flowing through it lossily;
+/// non-finite floats reject the whole conversion (schema mode cannot
+/// represent them, same as JSON itself); `Missing` cannot arrive
+/// (normalized upstream), and renders as `""` defensively.
 fn to_serde(value: &Value, depth: usize) -> Result<serde_json::Value, String> {
     if depth > MAX_SCHEMA_DEPTH {
         return Err("Input schema nesting exceeds the supported schema recursion depth.".into());
@@ -3738,11 +3990,11 @@ mod tests {
     use super::*;
 
     fn no_log() -> SchemaRepairer {
-        SchemaRepairer::new(Value::Bool(true), false, false, NumericLocale::Auto)
+        SchemaRepairer::new(Value::Bool(true), false, false, NumericLocale::Auto).unwrap()
     }
 
     fn repairer() -> SchemaRepairer {
-        SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Auto)
+        SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Auto).unwrap()
     }
 
     fn obj(entries: Vec<(&str, Value)>) -> Value {
@@ -3940,7 +4192,8 @@ mod tests {
         // ...and "1,234" (both readings coherent) takes the disclosed
         // en-US assumption, with the suggestion naming the discarded
         // reading's locale (suggesting the winner's own is a no-op).
-        let r_fresh = SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Auto);
+        let r_fresh =
+            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Auto).unwrap();
         let value = r_fresh
             .repair_value(Value::Str("1,234".into()), &schema, "$")
             .unwrap();
@@ -3959,13 +4212,15 @@ mod tests {
         let de = locale_spec_from_tag("de-DE").expect("listed");
         let fr = locale_spec_from_tag("fr-FR").expect("listed");
         // Auto refuses "1,234"; a locale reads it by its own convention.
-        let r_en = SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(en));
+        let r_en =
+            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(en)).unwrap();
         assert_eq!(
             r_en.repair_value(Value::Str("1,234".into()), &int, "$")
                 .unwrap(),
             Value::Int(1234)
         );
-        let r_de = SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(de));
+        let r_de =
+            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(de)).unwrap();
         assert_eq!(
             r_de.repair_value(Value::Str("1,234".into()), &num, "$")
                 .unwrap(),
@@ -3982,7 +4237,8 @@ mod tests {
             Value::Float(0.5)
         );
         // French: space grouping, comma decimal.
-        let r_fr = SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(fr));
+        let r_fr =
+            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(fr)).unwrap();
         assert_eq!(
             r_fr.repair_value(Value::Str("1 234,56".into()), &num, "$")
                 .unwrap(),
@@ -3991,7 +4247,8 @@ mod tests {
         // A custom dict carries separators the table does not.
         let custom = LocaleSpec::custom(',', '.');
         let r_custom =
-            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(custom));
+            SchemaRepairer::new(Value::Bool(true), false, true, NumericLocale::Known(custom))
+                .unwrap();
         assert_eq!(
             r_custom
                 .repair_value(Value::Str("1,234".into()), &num, "$")
@@ -4204,7 +4461,7 @@ mod tests {
             ("verdict", Value::Str("malicious".into())),
             ("confidence", Value::Str("high".into())),
         ]);
-        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         assert_eq!(
             std.repair_value(
                 Value::Object(vec![("summary".into(), raw.clone())]),
@@ -4224,7 +4481,7 @@ mod tests {
             )
             .is_err()
         );
-        let salv = SchemaRepairer::new(schema.clone(), true, false, NumericLocale::Auto);
+        let salv = SchemaRepairer::new(schema.clone(), true, false, NumericLocale::Auto).unwrap();
         assert_eq!(
             salv.repair_value(
                 Value::Object(vec![("summary".into(), malformed)]),
@@ -4284,7 +4541,7 @@ mod tests {
                 Value::Array(vec![Value::Str("value".into())]),
             ),
         ]);
-        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         let good = obj(vec![(
             "value",
             Value::Array(vec![obj(vec![("name", Value::Str("example".into()))])]),
@@ -4315,25 +4572,26 @@ mod tests {
                 )]),
             ),
         ]);
-        let r = SchemaRepairer::new(circular.clone(), false, false, NumericLocale::Auto);
+        let r = SchemaRepairer::new(circular.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(
             r.repair_value(Value::Object(vec![]), &circular, "$")
                 .is_err_and(|e| e.contains("Circular $ref"))
         );
         let non_string = obj(vec![("$ref", Value::Int(123))]);
-        let r2 = SchemaRepairer::new(non_string.clone(), false, false, NumericLocale::Auto);
+        let r2 =
+            SchemaRepairer::new(non_string.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(
             r2.repair_value(Value::Object(vec![]), &non_string, "$")
                 .is_err_and(|e| e == "$ref must be a string.")
         );
         let foreign = obj(vec![("$ref", Value::Str("http://x/y.json".into()))]);
-        let r3 = SchemaRepairer::new(foreign.clone(), false, false, NumericLocale::Auto);
+        let r3 = SchemaRepairer::new(foreign.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(
             r3.repair_value(Value::Object(vec![]), &foreign, "$")
                 .is_err_and(|e| e.contains("Unsupported $ref"))
         );
         let missing = obj(vec![("$ref", Value::Str("#/definitions/nope".into()))]);
-        let r4 = SchemaRepairer::new(missing.clone(), false, false, NumericLocale::Auto);
+        let r4 = SchemaRepairer::new(missing.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(
             r4.repair_value(Value::Object(vec![]), &missing, "$")
                 .is_err_and(|e| e.contains("Unresolvable $ref"))
@@ -4354,7 +4612,7 @@ mod tests {
         for _ in 0..550 {
             schema = obj(vec![("allOf", Value::Array(vec![schema]))]);
         }
-        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(
             r.repair_value(Value::Str("ok".into()), &schema, "$")
                 .is_err_and(|e| e.contains("schema recursion depth"))
@@ -4369,7 +4627,7 @@ mod tests {
                 ),
             ]);
         }
-        let r2 = SchemaRepairer::new(nested.clone(), false, false, NumericLocale::Auto);
+        let r2 = SchemaRepairer::new(nested.clone(), false, false, NumericLocale::Auto).unwrap();
         // The properties-depth raise surfaces through the full repair flow
         // (validation-side, like upstream): the repair alone returns the
         // empty object, the final validation raises.
@@ -4390,6 +4648,181 @@ mod tests {
         );
     }
 
+    /// The beyond-u64 integer spelling the tests share (10**25: far past
+    /// u64::MAX, and lossy in f64 — 1e25's neighbors step by 2**20).
+    fn big() -> Value {
+        Value::BigInt("10000000000000000000000000".into())
+    }
+
+    /// The gate's refusal message for one schema (panic, not `unwrap_err`:
+    /// the repairer deliberately carries no `Debug`).
+    fn refusal(schema: Value) -> String {
+        match SchemaRepairer::new(schema, false, false, NumericLocale::Auto) {
+            Err(message) => message,
+            Ok(_) => panic!("schema must refuse"),
+        }
+    }
+
+    #[test]
+    fn constrained_bigint_positions_refuse_with_pointer() {
+        // Each constrained keyword, one beyond-u64 integer: the schema
+        // refuses and the error names the offending position's JSON
+        // pointer (issue #119's fail-closed contract; before the gate,
+        // every one of these compiled lossily and wrong-accepted).
+        let cases: Vec<(&str, Value, &str)> = vec![
+            ("enum", Value::Array(vec![big(), Value::Int(3)]), "/enum/0"),
+            ("const", big(), "/const"),
+            ("minimum", big(), "/minimum"),
+            ("maximum", big(), "/maximum"),
+            ("exclusiveMinimum", big(), "/exclusiveMinimum"),
+            ("exclusiveMaximum", big(), "/exclusiveMaximum"),
+            ("multipleOf", big(), "/multipleOf"),
+        ];
+        for (key, value, pointer) in cases {
+            let schema = obj(vec![(key, value)]);
+            let message = refusal(schema);
+            assert!(
+                message.contains(pointer),
+                "{key}: message {message:?} lacks pointer {pointer}"
+            );
+            assert!(
+                message.contains("outside the exact-integer range"),
+                "{key}: {message}"
+            );
+        }
+        // The negative mirror: below i64::MIN is the same lossy lane
+        // (to_serde's fallback), the same refusal.
+        let negative = obj(vec![(
+            "minimum",
+            Value::BigInt("-10000000000000000000000000".into()),
+        )]);
+        let message = refusal(negative);
+        assert!(message.contains("/minimum"), "{message}");
+    }
+
+    #[test]
+    fn constrained_bigint_honest_values_stay_exact() {
+        // In-range integers never refuse, at any of the constrained
+        // positions (10**18 is past f64's exact-integer grid but inside
+        // u64: exactly what the gate must keep admitting), and the
+        // u64-lane constraint still rejects honestly.
+        for schema in [
+            obj(vec![(
+                "enum",
+                Value::Array(vec![Value::BigInt("1000000000000000000".into())]),
+            )]),
+            obj(vec![(
+                "minimum",
+                Value::BigInt("9223372036854775808".into()),
+            )]),
+            obj(vec![("const", Value::Int(i64::MIN))]),
+            obj(vec![("multipleOf", Value::Float(0.5))]),
+        ] {
+            SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto)
+                .unwrap_or_else(|e| panic!("{schema:?}: {e}"));
+        }
+        // The 2**63 minimum (u64 lane, exact at the boundary) really
+        // rejects 2**63 - 1: honesty of the lane the gate protects.
+        let schema = obj(vec![(
+            "minimum",
+            Value::BigInt("9223372036854775808".into()),
+        )]);
+        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
+        assert!(!r.is_valid(&Value::BigInt("9223372036854775807".into()), &schema));
+        assert!(r.is_valid(&Value::BigInt("9223372036854775808".into()), &schema));
+        // The float spelling stays the documented lossy-float contract
+        // (a schema-author's f64 is a deliberate lossy spelling; only
+        // INTEGER values past u64 refuse).
+        let float = obj(vec![("minimum", Value::Float(1e25))]);
+        SchemaRepairer::new(float, false, false, NumericLocale::Auto).unwrap();
+    }
+
+    #[test]
+    fn nested_allof_and_ref_reachable_positions_refuse() {
+        // properties-nested: the pointer is the full path.
+        let nested = obj(vec![
+            ("type", Value::Str("object".into())),
+            (
+                "properties",
+                obj(vec![("x", obj(vec![("minimum", big())]))]),
+            ),
+        ]);
+        let message = refusal(nested);
+        assert!(message.contains("/properties/x/minimum"), "{message}");
+        // allOf-reachable: the fold's members are tree nodes, the walk
+        // sees the position without dereferencing anything.
+        let folded = obj(vec![(
+            "allOf",
+            Value::Array(vec![obj(vec![("maximum", big())])]),
+        )]);
+        let message = refusal(folded);
+        assert!(message.contains("/allOf/0/maximum"), "{message}");
+        // $ref-reachable: $defs targets live in the root tree, so the
+        // syntactic walk finds what the ref resolves to; the pointer
+        // names the def position.
+        let referenced = obj(vec![
+            (
+                "$defs",
+                obj(vec![(
+                    "big",
+                    obj(vec![("enum", Value::Array(vec![big()]))]),
+                )]),
+            ),
+            (
+                "oneOf",
+                Value::Array(vec![obj(vec![("$ref", Value::Str("#/$defs/big".into()))])]),
+            ),
+        ]);
+        let message = refusal(referenced);
+        assert!(message.contains("/$defs/big/enum/0"), "{message}");
+    }
+
+    #[test]
+    fn unconstrained_bigints_never_refuse() {
+        // The gate is keyword-scoped: huge integers at positions that
+        // constrain nothing (default, examples, description prose, the
+        // value of a non-constrained keyword like propertyNames, and
+        // nested unconstrained keywords) pass, and the document's own
+        // huge ints flow as before (to_serde's document lane unchanged).
+        for schema in [
+            obj(vec![("default", big())]),
+            obj(vec![("examples", Value::Array(vec![big()]))]),
+            obj(vec![(
+                "description",
+                Value::Str("values near 10**25 exist".into()),
+            )]),
+            obj(vec![("propertyNames", big())]),
+            obj(vec![("required", Value::Array(vec![big()]))]),
+        ] {
+            SchemaRepairer::new(schema, false, false, NumericLocale::Auto)
+                .unwrap_or_else(|e| panic!("unconstrained position must not refuse: {e}"));
+        }
+        // A schema whose ONLY huge integer is a member VALUE nested inside
+        // an honest enum member object still refuses (the equality
+        // constraint aliases exactly like a flat one), naming the data
+        // pointer through the member.
+        let data_nested = obj(vec![(
+            "enum",
+            Value::Array(vec![obj(vec![("a", Value::Array(vec![big()]))])]),
+        )]);
+        let message = refusal(data_nested);
+        assert!(message.contains("/enum/0/a/0"), "{message}");
+    }
+
+    #[test]
+    fn the_walk_refuses_at_the_node_cap() {
+        // A schema past the walk budget refuses outright rather than scan
+        // unbounded (the canon MAX_WALK_NODES convention): a flat 2M-leaf
+        // array is the cheapest shape past the cap.
+        let huge = Value::Array(vec![Value::Int(0); MAX_SCHEMA_WALK_NODES + 1]);
+        let message = schema_bigint_refusal(&huge).unwrap_err();
+        assert!(message.contains("node budget"), "{message}");
+        // Just inside the cap (the root visit counts too): no refusal (an
+        // honest huge schema walks).
+        let inside = Value::Array(vec![Value::Int(0); MAX_SCHEMA_WALK_NODES - 1]);
+        assert!(schema_bigint_refusal(&inside).is_ok());
+    }
+
     #[test]
     fn validation_gate_accepts_and_rejects() {
         let schema = obj(vec![
@@ -4403,7 +4836,7 @@ mod tests {
             ),
             ("required", Value::Array(vec![Value::Str("value".into())])),
         ]);
-        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(r.is_valid(&obj(vec![("value", Value::Int(1))]), &schema));
         assert!(!r.is_valid(&obj(vec![("value", Value::Str("x".into()))]), &schema));
         assert!(
@@ -4430,7 +4863,7 @@ mod tests {
             ),
             ("minItems", Value::Int(2)),
         ]);
-        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let r = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         // Positional tuple validation: "1" coerces to 1, 7 coerces to "7".
         assert_eq!(
             r.repair_value(
@@ -4487,9 +4920,9 @@ mod tests {
                 ]),
             ]),
         )]);
-        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         assert!(std.repair_value(raw.clone(), &schema, "$").is_err());
-        let salv = SchemaRepairer::new(schema.clone(), true, false, NumericLocale::Auto);
+        let salv = SchemaRepairer::new(schema.clone(), true, false, NumericLocale::Auto).unwrap();
         assert_eq!(
             salv.repair_value(raw, &schema, "$").unwrap(),
             obj(vec![(
@@ -4520,7 +4953,8 @@ mod tests {
                 Value::Array(vec![Value::Str("name".into()), Value::Str("tags".into())]),
             ),
         ]);
-        let salv_map = SchemaRepairer::new(map_schema.clone(), true, false, NumericLocale::Auto);
+        let salv_map =
+            SchemaRepairer::new(map_schema.clone(), true, false, NumericLocale::Auto).unwrap();
         let list = Value::Array(vec![
             Value::Str("hello".into()),
             Value::Array(vec![Value::Str("a".into()), Value::Str("b".into())]),
@@ -4560,7 +4994,8 @@ mod tests {
             ),
             ("additionalProperties", Value::Bool(false)),
         ]);
-        let salvage = SchemaRepairer::new(schema.clone(), false, true, NumericLocale::Auto);
+        let salvage =
+            SchemaRepairer::new(schema.clone(), false, true, NumericLocale::Auto).unwrap();
         // Kebab, case, and space variants fold to the same property.
         for variant in ["First Name", "first-name", "FIRST_NAME", "firstname"] {
             let input = obj(vec![
@@ -4763,7 +5198,7 @@ mod tests {
             ),
             ("required", Value::Array(vec![Value::Str("items".into())])),
         ]);
-        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto);
+        let std = SchemaRepairer::new(schema.clone(), false, false, NumericLocale::Auto).unwrap();
         // Upstream's wrap fails the items schema; the split wins.
         assert_eq!(
             std.repair_value(

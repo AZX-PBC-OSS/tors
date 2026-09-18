@@ -20,7 +20,11 @@ from typing import Any
 
 import pytest
 
-from tors import repair_json, repair_json_loads
+from tors import repair_json, repair_json_diagnostics, repair_json_loads
+
+# The beyond-u64 integer spelling the refusal tests share (10**25: far
+# past u64::MAX, and lossy in f64 — 1e25's neighbors step by 2**20).
+_BIG = 10**25
 
 
 class TestSchemaStandard:
@@ -610,3 +614,114 @@ class TestRefEscapesAndUnions:
         ]
         with pytest.raises(ValueError):
             repair_json_loads('["no", "x"]', schema=schema, skip_json_loads=True)
+
+
+class TestConstrainedBigintRefusal:
+    """Issue #119: a constrained schema position carrying an integer beyond
+    u64 used to compile into the validator as f64, whose neighbors alias —
+    ``enum: [10**25, 10**25 + 10**10]`` accepted ``10**25 + 5`` and
+    ``minimum: 10**25`` accepted ``10**25 - 1`` (silent wrong-accept, the
+    sharp direction). The fail-closed contract now: the schema refuses with
+    a catchable ``ValueError`` naming the position's JSON pointer, at any
+    depth, ``allOf``/``$ref``-reachable positions included. Honest integers
+    (the exact i64/u64 span), floats, and the document's own huge integers
+    are untouched.
+    """
+
+    POINTER_CASES = [
+        ("enum", {"enum": [_BIG, 3]}, "/enum/0"),
+        ("const", {"const": _BIG}, "/const"),
+        ("minimum", {"minimum": _BIG}, "/minimum"),
+        ("maximum", {"maximum": _BIG}, "/maximum"),
+        ("exclusiveMinimum", {"exclusiveMinimum": _BIG}, "/exclusiveMinimum"),
+        ("exclusiveMaximum", {"exclusiveMaximum": _BIG}, "/exclusiveMaximum"),
+        ("multipleOf", {"multipleOf": _BIG}, "/multipleOf"),
+    ]
+
+    def test_every_constrained_position_refuses_naming_the_pointer(self) -> None:
+        for _keyword, schema, pointer in self.POINTER_CASES:
+            with pytest.raises(ValueError, match=f"Schema constraint at {pointer}\\b"):
+                repair_json_loads("5", schema=schema)
+
+    def test_nested_all_of_and_ref_reachable_positions_refuse(self) -> None:
+        # properties-nested: the pointer is the full path.
+        schema = {
+            "type": "object",
+            "properties": {"x": {"minimum": _BIG}},
+        }
+        with pytest.raises(ValueError, match=r"Schema constraint at /properties/x/minimum\b"):
+            repair_json_loads('{"x": 5}', schema=schema)
+        # allOf-reachable: the fold's members are tree nodes.
+        schema = {"allOf": [{"maximum": _BIG}]}
+        with pytest.raises(ValueError, match=r"Schema constraint at /allOf/0/maximum\b"):
+            repair_json_loads("5", schema=schema)
+        # $ref-reachable: $defs targets live in the root tree, so the walk
+        # finds what the ref resolves to; the pointer names the def
+        # position.
+        schema = {
+            "$defs": {"big": {"enum": [_BIG]}},
+            "oneOf": [{"$ref": "#/$defs/big"}],
+        }
+        with pytest.raises(ValueError, match=r"Schema constraint at /\$defs/big/enum/0\b"):
+            repair_json_loads(str(_BIG), schema=schema)
+
+    def test_the_refusal_fires_before_any_repair_or_salvage(self) -> None:
+        # The gate runs where the schema enters, so the refusal is total:
+        # every spelling raises, valid input or not, salvage mode or not.
+        schema = {"minimum": _BIG}
+        for call in (
+            lambda: repair_json("5", schema=schema),
+            lambda: repair_json_loads("5", schema=schema),
+            lambda: repair_json_diagnostics("5", schema=schema),
+            lambda: repair_json_loads("5", schema=schema, salvage=True),
+            lambda: repair_json_loads(str(_BIG), schema=schema),  # even a matching value
+        ):
+            with pytest.raises(ValueError, match=r"/minimum\b"):
+                call()
+
+    def test_honest_in_range_values_never_refuse(self) -> None:
+        # 10**18 is past f64's exact-integer grid but inside u64: exactly
+        # what the gate must keep admitting, exactly.
+        assert repair_json_loads(str(10**18), schema={"enum": [10**18]}) == 10**18
+        # The u64 lane is exact: 2**63 (past i64, inside u64) as a minimum
+        # rejects 2**63 - 1 — the honesty the gate protects (the repair
+        # lane answers the nothing-recoverable sentinel, never a wrong
+        # accept).
+        schema = {"minimum": 2**63}
+        assert repair_json_loads(str(2**63), schema=schema) == 2**63
+        assert repair_json_loads(str(2**63 - 1), schema=schema) == ""
+        # i64::MIN and schema floats keep their exact / documented-lossy
+        # contracts (the float spelling never refuses; a document above it
+        # validates through).
+        assert repair_json_loads(str(-(2**63)), schema={"minimum": -(2**63)}) == -(2**63)
+        assert repair_json_loads(str(10**26), schema={"minimum": 1e25}) == 10**26
+
+    def test_unconstrained_bigints_never_refuse(self) -> None:
+        # Positions that constrain nothing pass, and the document's own
+        # huge integers flow as before (the gate is schema-side only).
+        assert repair_json_loads("5", schema={"default": _BIG}) == 5
+        assert repair_json_loads("5", schema={"examples": [_BIG]}) == 5
+        assert (
+            repair_json_loads("5", schema={"description": f"values near {_BIG} exist"}) == 5
+        )
+        # A huge integer nested INSIDE the propertyNames subschema, at its
+        # own unconstrained `default` position: not refused.
+        assert repair_json_loads("5", schema={"propertyNames": {"default": _BIG}}) == 5
+        assert repair_json_loads(str(_BIG + 5), schema={"type": "integer"}) == _BIG + 5
+
+    def test_property_names_big_int_value_is_not_the_gates_refusal(self) -> None:
+        # The red-team shape: a huge integer AS the propertyNames value.
+        # It is not a constrained position, so the gate stays silent — the
+        # call may still fail later for the pre-existing reason (a scalar
+        # subschema does not compile), but never with the constraint
+        # refusal.
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads("5", schema={"propertyNames": _BIG})
+        assert "Schema constraint at" not in str(excinfo.value)
+
+    def test_pointer_escapes_in_reached_keys(self) -> None:
+        # A property key with pointer metacharacters escapes ~0/~1 in the
+        # reported pointer (the same order resolve_chain unescapes).
+        schema = {"properties": {"a/b": {"enum": [_BIG]}}}
+        with pytest.raises(ValueError, match=r"Schema constraint at /properties/a~1b/enum/0\b"):
+            repair_json_loads("5", schema=schema)
