@@ -114,6 +114,12 @@ enum SepEntry {
     /// is what makes the cut-filter region reachable with a literal
     /// that actually fires there.
     SaraAm,
+    /// "heading": the #63 sentinel — the heading LEVEL (bounding ATX
+    /// heading-line cuts), not a literal split on the word. The
+    /// gate-closed texts (no '#' byte) pin its inertness; the
+    /// heading-bearing texts the raw `text` field occasionally
+    /// derives exercise the gate-open side.
+    Heading,
 }
 
 impl SepEntry {
@@ -134,6 +140,7 @@ impl SepEntry {
             SepEntry::Never => Some("ZZZ_NEVER_MATCHES"),
             SepEntry::Empty => Some(""),
             SepEntry::SaraAm => Some("\u{0E33}"),
+            SepEntry::Heading => Some("heading"),
         }
     }
 }
@@ -172,7 +179,93 @@ fn assert_cluster_safe(chunks: &[(usize, usize)], text: &str, budget: usize, wha
     }
 }
 
-fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str, overlap: usize) {
+/// The #63 heading-cut oracle, inlined (the same whole-text-`Vec<char>`
+/// spelling the Rust unit tests keep as `heading_cuts_reference`; tors-core
+/// is a path dep, so this copy is inlined like the line/paragraph oracles
+/// above): one cut `(gap_start, heading_start)` per ATX heading line —
+/// 1-3 leading spaces, 1-6 `#`, then space/tab/EOL — with the pre-heading
+/// newline run dropped, the fence state tracked, and a heading at offset 0
+/// not recorded. The line-ending set is LF, CRLF, lone CR.
+fn heading_cuts_reference(text: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut cuts = Vec::new();
+    let mut open_fence: Option<(char, usize)> = None;
+    let mut line_start = 0usize;
+    let mut last_content_end = 0usize;
+    while line_start < n {
+        let mut line_end = n;
+        let mut next_start = n;
+        let mut j = line_start;
+        while j < n {
+            if chars[j] == '\n' {
+                line_end = j;
+                next_start = j + 1;
+                break;
+            }
+            if chars[j] == '\r' {
+                line_end = j;
+                next_start = if j + 1 < n && chars[j + 1] == '\n' {
+                    j + 2
+                } else {
+                    j + 1
+                };
+                break;
+            }
+            j += 1;
+        }
+        let line: String = chars[line_start..line_end].iter().collect();
+        match open_fence {
+            Some((fence_char, fence_len)) => {
+                let indent = line.chars().take_while(|&c| c == ' ').count().min(3);
+                let rest: Vec<char> = line.chars().skip(indent).collect();
+                let run = rest.iter().take_while(|&&c| c == fence_char).count();
+                let trailing_ok = rest[run..]
+                    .iter()
+                    .all(|&c| c == ' ' || c == '\t' || c == '\r');
+                if run >= fence_len && trailing_ok {
+                    open_fence = None;
+                }
+            }
+            None => {
+                let indent = line.chars().take_while(|&c| c == ' ').count().min(3);
+                let rest: Vec<char> = line.chars().skip(indent).collect();
+                let fence_char = rest.first().copied();
+                if fence_char == Some('`') || fence_char == Some('~') {
+                    let fence_len = rest
+                        .iter()
+                        .take_while(|&&c| c == fence_char.unwrap())
+                        .count();
+                    if fence_len >= 3 {
+                        let info: String = rest[fence_len..].iter().collect();
+                        if !(fence_char == Some('`') && info.trim().contains('`')) {
+                            open_fence = Some((fence_char.unwrap(), fence_len));
+                        }
+                    }
+                } else if line_start > 0 {
+                    let hashes = rest.iter().take_while(|&&c| c == '#').count();
+                    let after = rest.get(hashes).copied();
+                    if (1..=6).contains(&hashes) && matches!(after, None | Some(' ') | Some('\t')) {
+                        cuts.push((last_content_end, line_start));
+                    }
+                }
+            }
+        }
+        if line_end > line_start {
+            last_content_end = line_end;
+        }
+        line_start = next_start;
+    }
+    cuts
+}
+
+fn assert_basic_contract(
+    chunks: &[(usize, usize)],
+    total: usize,
+    what: &str,
+    overlap: usize,
+    text: &str,
+) {
     let mut prev_start = None;
     let mut prev_end = None;
     for &(start, end) in chunks {
@@ -206,7 +299,8 @@ fn assert_basic_contract(chunks: &[(usize, usize)], total: usize, what: &str, ov
         if let Some(prev) = prev_end {
             assert!(
                 if overlap > 0 { end > prev } else { end >= prev },
-                "{what}: ends not advancing under overlap={overlap} at {end} after {prev}"
+                "{what}: ends not advancing under overlap={overlap} at {end} after {prev} \
+                 text={text:?} chunks={chunks:?}"
             );
         }
         prev_start = Some(start);
@@ -390,6 +484,7 @@ fuzz_target!(|input: Input| {
     // oracle's list rides the same one-compute discipline.
     let reference_lines = line_bounds_reference(&input.text);
     let reference_paragraphs = paragraph_bounds_reference(&input.text);
+    let reference_heading_cuts = heading_cuts_reference(&input.text);
 
     // The hierarchical body, parameterized on (separators, budget): the
     // functions' own precondition is `overlap < max_chars`, clamped
@@ -406,7 +501,7 @@ fuzz_target!(|input: Input| {
             overlap,
             tors::chunk_hierarchical_impl::OverlapBoundary::Grapheme,
         );
-        assert_basic_contract(&chunks, total, "chunk_hierarchical", overlap);
+        assert_basic_contract(&chunks, total, "chunk_hierarchical", overlap, &input.text);
         assert_cluster_safe(&chunks, &input.text, budget, "chunk_hierarchical");
         // The whole-document-budget oracle, folded in at every budget
         // that can only ever emit the single first window: `max_chars
@@ -426,8 +521,21 @@ fuzz_target!(|input: Input| {
         // check), never a chunk that IS a separator match (the #103
         // symptom, exact-equality-checked against every literal in the
         // hierarchy), never more than one chunk from a budget that
-        // swallows the document.
-        if budget >= total {
+        // swallows the document. The #63 narrowing: a hierarchy that
+        // SPELLS the heading level (the `None` default, or a list with
+        // the `"heading"` sentinel) demotes the whole-remainder exit at
+        // every heading cut in range — the sections come back separate
+        // — so the at-most-one pin applies only to hierarchies without
+        // the level (the pinned property is the pre-#63 machine's, and
+        // the exact section-split answer for the heading-active
+        // default hierarchy is the dedicated overlap-0 row below).
+        let heading_active = match separators {
+            None => true,
+            Some(list) => list
+                .iter()
+                .any(|entry| entry.is_none() || entry.as_deref() == Some("heading")),
+        };
+        if budget >= total && !(heading_active && !reference_heading_cuts.is_empty()) {
             assert!(
                 chunks.len() <= 1,
                 "whole-document budget {budget} must emit at most one chunk: \
@@ -442,37 +550,68 @@ fuzz_target!(|input: Input| {
                     input.text
                 );
                 if let Some(list) = separators {
-                    // The no-separator-chunk assert is a theorem only for
-                    // SINGLE-literal lists: there the one separator level's
-                    // skip_cut is consulted first at every window, so a
-                    // window opening on the match always skips and the
-                    // whole-document exit never runs (the #103 contract,
-                    // including the all-separator-zero-chunks shape). With
-                    // TWO OR MORE literals the coarsest-first verdict order
-                    // lets an earlier literal's CUT preempt a later one's
-                    // skip, and the final exit pushes the remainder
-                    // untrimmed — which can equal the later separator's
-                    // whole match: production and the reference oracle
-                    // agree (["\n\u{1a}]\0", "\t\n\u{1a}]\0"] over the
-                    // 5-char text chunks (0, 5) on BOTH sides — the
-                    // differential's pinned semantics), so the assert is
-                    // not enforceable there. A `None` splice is the same
-                    // story one level coarser: the paragraph level owns
-                    // blank-run cuts, and "\n" beside the default triple
-                    // chunks [(0, 1)] on both sides.
-                    let spliced = list.contains(&None) || list.len() > 1;
-                    for entry in list {
-                        let Some(sep) = *entry else { continue };
-                        if sep.is_empty() || spliced {
-                            continue; // the no-op literal production drops at slot construction
+                    // The no-separator-chunk assert is enforceable only for
+                    // SINGLE-LITERAL, no-splice, no-heading-sentinel lists:
+                    // there the one separator level's skip_cut is consulted
+                    // first at every window, so a window opening on the
+                    // match always skips and the whole-document exit never
+                    // runs (the #103 contract, including the
+                    // all-separator-zero-chunks shape). Three exceptions
+                    // break the theorem, each fuzz-discovered and each
+                    // pinned oracle-equal (production and the reference
+                    // agree — the machine's documented coarsest-first
+                    // precedence, not a regression):
+                    // * a `None` SPLICE: the default hierarchy's paragraph
+                    //   level owns blank-run cuts, and "\n" beside the
+                    //   default triple chunks [(0, 1)] on both sides;
+                    // * the "heading" SENTINEL: the heading level's cut is
+                    //   coarser by design (text "#", [None, "#"] ->
+                    //   [(0, 1)], the sentence cut);
+                    // * TWO OR MORE literals: an earlier literal's CUT
+                    //   preempts a later one's skip, and the final exit
+                    //   pushes the remainder untrimmed — which can equal
+                    //   the later separator's whole match
+                    //   (["\n\u{1a}]\0", "\t\n\u{1a}]\0"] over the 5-char
+                    //   text chunks (0, 5) on BOTH sides).
+                    // For the enforceable case the pin compares against the
+                    // separator's own non-overlapping MATCH SPANS, in the
+                    // codepoint space the chunks are spanned in — not the
+                    // literal: the untrimmed push of a window that opens on
+                    // NO match can emit a remainder that merely SLICES a
+                    // separator shape at a position the level never matched
+                    // (the same remainder class the
+                    // chunk_separator_shapes target's header documents as
+                    // deliberately unasserted).
+                    let spliced_or_heading_or_multi = list.len() > 1
+                        || list
+                            .iter()
+                            .any(|entry| entry.is_none() || entry.as_deref() == Some("heading"));
+                    if !spliced_or_heading_or_multi {
+                        for entry in list {
+                            let Some(sep) = *entry else { continue };
+                            if sep.is_empty() {
+                                continue; // the no-op literal production drops at slot construction
+                            }
+                            let sep_chars: Vec<char> = sep.chars().collect();
+                            let mut matches_at = Vec::new();
+                            let mut pos = 0usize;
+                            while pos + sep_chars.len() <= total {
+                                if codepoints[pos..pos + sep_chars.len()] == sep_chars[..] {
+                                    matches_at.push(pos);
+                                    pos += sep_chars.len();
+                                } else {
+                                    pos += 1;
+                                }
+                            }
+                            assert!(
+                                !matches_at
+                                    .iter()
+                                    .any(|&m| start == m && end == m + sep_chars.len()),
+                                "whole-document budget emitted a chunk that IS the separator \
+                                 {sep:?}'s own match (#103): text={:?} chunks={chunks:?}",
+                                input.text
+                            );
                         }
-                        assert_ne!(
-                            &codepoints[start..end],
-                            sep.chars().collect::<Vec<char>>().as_slice(),
-                            "whole-document budget emitted a chunk that IS the separator \
-                             {sep:?} (#103): text={:?} chunks={chunks:?}",
-                            input.text
-                        );
                     }
                 }
             }
@@ -506,6 +645,45 @@ fuzz_target!(|input: Input| {
         run_hierarchical(raw.as_deref(), budget);
     }
 
+    // The #63 row, exact: the DEFAULT hierarchy (the heading level
+    // spelled) at a whole-document budget and overlap 0 — the demotion
+    // cuts at every heading cut in range (progress is unconditional
+    // here: overlap 0 opens windows only at heading starts, and the
+    // cut ends ascend), so the answer IS the section split, the
+    // reference heading cuts' own chunking. The differential pins
+    // production's byte-level fence/ATX scan against the inlined
+    // char-grid oracle line for line — the fence state machine, the
+    // shape clauses, the gap dropping, and the offset-0 discard all
+    // have to agree exactly, on arbitrary text.
+    if total > 0 {
+        let mut expected: Vec<(usize, usize)> = Vec::new();
+        let mut resume = 0usize;
+        for &(gap_start, heading_start) in &reference_heading_cuts {
+            // A cut whose gap start has no room before it (the text opens
+            // on the dropped run: gap_start == resume == 0) contributes
+            // no chunk — the window at the run's start is skipped to the
+            // heading (#103's skip machinery), never an empty span.
+            if gap_start > resume {
+                expected.push((resume, gap_start));
+            }
+            resume = heading_start;
+        }
+        expected.push((resume, total));
+        let chunks = tors::chunk_hierarchical_impl::chunk_hierarchical(
+            &input.text,
+            total,
+            None,
+            0,
+            tors::chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+        );
+        assert_eq!(
+            chunks, expected,
+            "whole-document default hierarchy diverged from the section split: \
+             text={:?} heading_cuts={reference_heading_cuts:?}",
+            input.text
+        );
+    }
+
     // The unit-count chunkers over the same arbitrary text: same
     // per-chunk/overlap envelope (per_chunk in 1..=u16, overlap
     // clamped), cluster safety for the two merge-based spellings, and
@@ -529,17 +707,29 @@ fuzz_target!(|input: Input| {
     for per_chunk in [1usize, 2, 3, 7, raw_budget] {
         let overlap = overlap % per_chunk;
         let words = tors::chunk_by_segment_impl::chunk_by_words(&input.text, per_chunk, overlap);
-        assert_basic_contract(&words, total, "chunk_by_words", overlap);
+        assert_basic_contract(&words, total, "chunk_by_words", overlap, &input.text);
         assert_cluster_safe(&words, &input.text, usize::MAX, "chunk_by_words");
 
         let sentences =
             tors::chunk_by_segment_impl::chunk_by_sentences(&input.text, per_chunk, overlap);
-        assert_basic_contract(&sentences, total, "chunk_by_sentences", overlap);
+        assert_basic_contract(
+            &sentences,
+            total,
+            "chunk_by_sentences",
+            overlap,
+            &input.text,
+        );
         assert_cluster_safe(&sentences, &input.text, usize::MAX, "chunk_by_sentences");
 
         let paragraphs =
             tors::chunk_by_segment_impl::chunk_by_paragraphs(&input.text, per_chunk, overlap);
-        assert_basic_contract(&paragraphs, total, "chunk_by_paragraphs", overlap);
+        assert_basic_contract(
+            &paragraphs,
+            total,
+            "chunk_by_paragraphs",
+            overlap,
+            &input.text,
+        );
         assert_eq!(
             paragraphs,
             reference_window(&reference_paragraphs, per_chunk, overlap),
@@ -549,7 +739,7 @@ fuzz_target!(|input: Input| {
         );
 
         let lines = tors::chunk_by_segment_impl::chunk_by_lines(&input.text, per_chunk, overlap);
-        assert_basic_contract(&lines, total, "chunk_by_lines", overlap);
+        assert_basic_contract(&lines, total, "chunk_by_lines", overlap, &input.text);
         assert_eq!(
             lines,
             reference_window(&reference_lines, per_chunk, overlap),

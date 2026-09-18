@@ -1021,20 +1021,34 @@ def chunk_by_lines_iter(
 # Priority-ordered fallback chunking (LangChain's RecursiveCharacterTextSplitter
 # pattern): cut at the coarsest level that fits max_chars, falling back to
 # finer levels only when a coarser one has no in-budget cut. separators=None
-# uses tors's own accurate hierarchy (paragraph -> sentence -> word -> a
-# grapheme-safe raw cut, always the final unconditional fallback).
+# uses tors's own accurate hierarchy (heading -> paragraph -> sentence ->
+# word -> a grapheme-safe raw cut, always the final unconditional fallback).
+# The heading level (#63) bounds chunks at ATX markdown heading lines: a
+# section's content never merges across a heading of higher rank, each cut
+# lands before the heading (the heading rides with the section that follows
+# it, the pre-heading newline run dropped), and a whole-document budget over
+# a heading-bearing document comes back as its sections, not one giant chunk.
+# The level is ATX-only (verified against the documents engines' emitters,
+# which all emit ATX: setext underlines are excluded), tracks fenced code
+# blocks (a '# comment' inside a fence is code, not a heading), and is
+# gated: text with no '#' byte never realizes it, so heading-free input
+# chunks exactly as the pre-#63 hierarchy did. Precedence: budget > heading
+# > paragraph > sentence > word (a section wider than max_chars still
+# splits at finer levels).
 # separators=[...] is a caller-supplied sequence of literal strings (not
 # regex), any Sequence (list or tuple) of literals and None entries; str,
 # dict, set, and generators raise TypeError at extraction, coarsest first,
 # e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
 # appended. A None entry in an otherwise-literal sequence splices the default
-# hierarchy's three accurate levels in at that position: ["\n", None] is
-# line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
-# shape (a chat thread, one message per line, never split mid-line) whose
-# oversized-line fallback is the real UAX #29 segmenter rather than the
-# ". "/" " literal guesses an all-literal list pins it to; [None] is
-# identical to separators=None. Not a lossless partition (unlike
+# hierarchy's accurate levels in at that position: ["\n", None] is
+# line -> heading -> paragraph -> sentence -> word -> raw cut, the
+# line-oriented-text shape (a chat thread, one message per line, never split
+# mid-line) whose oversized-line fallback is the real UAX #29 segmenter
+# rather than the ". "/" " literal guesses an all-literal list pins it to;
+# [None] is identical to separators=None. The reserved literal "heading" is
+# the heading level itself (the explicit opt-in for custom hierarchies), not
+# a split on the word. Not a lossless partition (unlike
 # chunk_text): the separator itself is dropped between chunks, the same
 # chunk_by_paragraphs convention. Since #103 that includes the final
 # window: a window that opens on a separator match is skipped even at the
