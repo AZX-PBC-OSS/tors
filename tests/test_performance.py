@@ -566,7 +566,7 @@ def test_scrub_log_text_beats_the_regex_chain_on_exception_text(size_bytes: int)
     the corpus that fires every rule once per unit (the DETAIL line, both
     credential shapes on the DSN, the repr()-flattened run).
 
-    The comparator is the pinned regex chain itself (the four TaskQ
+    The comparator is the pinned regex chain itself (the four grammar
     patterns as compiled in ``tests/reference.py``, the same spellings the
     differential suite races tors against), so the wall race and the parity
     harness cross-reference on one oracle. Measured on the dev box (min-of-7
@@ -632,7 +632,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 # lane table (ambient load ~10-18 on the calibration box, macOS, 16 cores,
 # min-of-7 after warmup unless noted):
 #
-#     ASCII (prose), the TaskQ serialized-JSON case (ensure_ascii=True
+#     ASCII (prose), the serialized-JSON case (ensure_ascii=True
 #     output is pure ASCII): tors is FLAT ~0.1µs at every size (the
 #     zero-copy alias: compact ASCII data is its own UTF-8, nothing to
 #     build), while the expression pays alloc+memcpy every call:
@@ -641,7 +641,7 @@ def test_grapheme_count_absolute_band_holds(corpus_kind: str, size_bytes: int) -
 #         1 KiB   0.08-0.13µs 0.13µs     0.7-1.0  (a dead heat: both sides are
 #                                                   pure call overhead; recorded,
 #                                                   not asserted)
-#         64 KiB  0.13µs      0.9µs      0.14   (the TaskQ terminal size: ~0.9µs
+#         64 KiB  0.13µs      0.9µs      0.14   (the terminal-write size: ~0.9µs
 #                                                 of pure alloc+memcpy per
 #                                                 success — the figure every
 #                                                 doc site cites for the
@@ -710,7 +710,7 @@ def test_utf8_byte_len_beats_the_encode_expression_on_both_winnable_lanes(
     corpus_kind: str, size_bytes: int
 ) -> None:
     """The race, asserted only where it is honestly winnable. Two lanes:
-    ``ascii`` (prose, the TaskQ serialized case — compact ASCII is its own
+    ``ascii`` (prose, the serialized-JSON case — compact ASCII is its own
     UTF-8, so the borrow is a zero-copy alias and the call is O(1) with no
     allocation, while the expression pays alloc+memcpy every call) and
     ``nonascii-cached`` (decomposed, the methodology's warmup having primed
@@ -1072,15 +1072,28 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
     spelling measured ~340ms here (~170x, and ~176ms at 6 MiB) -- the
     three default walks paid for levels that supplied zero cuts.
 
+    The corpus is deliberately HEADING-FREE (#63's scope line): the
+    default hierarchy now carries the heading level, whose whole-document
+    demotion would split a heading-bearing document into its sections --
+    that cell lives in the heading-dense test below. On heading-free
+    input the ``'#' in text`` gate closes before any realization (no `#`
+    byte, provably no ATX heading line), so the level is never scanned,
+    never allocated; the gate's own one-pass ``memchr`` probe is the one
+    cost the default hierarchy adds here (~0.12ms at 12 MiB, measured:
+    the default cell ~0.26ms vs the custom ~0.14ms, min-of-5), and no
+    level builds.
+
     The absolute ceiling (0.8ms) is the char_count ASCII fast path's pin
     on this lane, the no-match cell's twin rationale: the 8x scan race
     cannot see the fast path's loss (a predicate-only count ~2.5ms at
     12 MiB still passes 8x an ~8ms scan), while 0.8ms sits ~2.4-5x above
     the measured band (0.16-0.33ms, min-of-3 after warmup on the box
-    this ceiling was calibrated on) and ~3x below the predicate-only
-    spelling (red-proofed: that revert fails this cell), so the
-    ``is_ascii`` gate's loss fails this cell."""
+    this ceiling was calibrated on; ~0.26ms with the #63 gate pass
+    included) and ~3x below the predicate-only spelling (red-proofed:
+    that revert fails this cell), so the ``is_ascii`` gate's loss fails
+    this cell."""
     corpus = prose(12 * _MIB)
+    assert "#" not in corpus, "the heading-free scope line requires a '#' byte-free corpus"
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s)), corpus)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, corpus)
     assert tors_ms < 8.0 * scan_ms, (
@@ -1091,10 +1104,56 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
     assert tors_ms < 0.8, (
         f"chunk_hierarchical whole-document default 12MiB took {tors_ms:.2f}ms, "
         "over the whole-budget absolute ceiling (measured ~0.16-0.33ms with the "
-        "char_count ASCII fast path, ceiling 0.8ms; the predicate-only spelling "
-        "measures ~2.5ms and must fail this cell); the char_count ASCII fast "
-        "path regressed"
+        "char_count ASCII fast path, ~0.26ms with the #63 gate pass, ceiling "
+        "0.8ms; the predicate-only spelling measures ~2.5ms and must fail this "
+        "cell); the char_count ASCII fast path regressed"
     )
+
+
+def test_chunk_hierarchical_heading_dense_is_linear_and_sections_never_merge() -> None:
+    """The #63 heading level's document-scale contract, both halves:
+
+    * LINEAR: a heading-dense document (one heading line per ~90
+      codepoints, one paragraph per section) chunks at ~2x per input
+      doubling -- the level's build is one linear byte walk (memoized),
+      every window's cut is one binary search over its cut list, the
+      same shape the paragraph level pins. Measured (whole-document
+      budgets, min-of-3): 1 MiB ~2.3ms, 2 MiB ~4.9ms (2.1x), 4 MiB
+      ~11.1ms (2.3x), 8 MiB ~19.4ms (1.75x -- the last doubling rides
+      cache effects; the ceiling is 3.0x per doubling).
+    * SECTION INTEGRITY: under a whole-document budget the sections come
+      back separate -- one chunk per section, each starting at its own
+      heading line -- the demotion cell the zero-build pin above excludes
+      from heading-free input. A regression to one giant chunk (the
+      pre-#63 whole-remainder exit) fails the count; a chunk that starts
+      anywhere but its heading fails the starts check."""
+    section = (
+        "## Section heading here\n\n"
+        "Body paragraph with a few words of content follows the heading.\n\n"
+    )
+    prev_ms = None
+    for size in (2 * _MIB, 4 * _MIB, 8 * _MIB):
+        corpus = (section * (size // len(section) + 1))[:size]
+        ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s)), corpus)
+        if prev_ms is not None:
+            assert ms < 3.0 * prev_ms, (
+                f"chunk_hierarchical heading-dense {size // _MIB}MiB took {ms:.1f}ms, "
+                f"{ms / prev_ms:.1f}x the half-size input's {prev_ms:.1f}ms; "
+                "the heading level's cost went superlinear"
+            )
+        prev_ms = ms
+    # The integrity half, on the 1 MiB shape (11,651 sections measured):
+    # one chunk per section, every chunk starting at its heading.
+    corpus = (section * (_MIB // len(section) + 1))[:_MIB]
+    chunks = chunk_hierarchical(corpus, len(corpus))
+    assert len(chunks) == corpus.count("## "), (
+        f"heading-dense whole-document budget returned {len(chunks)} chunks for "
+        f"{corpus.count('## ')} sections; sections merged or split awry"
+    )
+    for s, _e in chunks:
+        assert corpus[s : s + 3] == "## ", (
+            f"chunk at {s} does not start at its heading"
+        )
 
 
 def test_chunk_hierarchical_default_hierarchy_is_its_own_segmentation_walks() -> None:
@@ -1630,7 +1689,7 @@ def test_content_hash_wall_time_vs_the_stdlib_is_measured_not_asserted(
 #
 # The batch-only design's premise, raced against the expression it replaces:
 # the per-item anchored-regex loop an enqueue path spells around identifier
-# validators (TaskQ's _IDENT_RE shape).
+# validators (the anchored identifier shape).
 
 # The identifier rule's two halves (letters and underscore at position 0,
 # digits joining after) and the equivalent anchored regex, rebuilt from the

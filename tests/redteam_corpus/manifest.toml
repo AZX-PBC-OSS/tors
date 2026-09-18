@@ -1,0 +1,171 @@
+# The red-team regression canary: one entry per reopened/verified defect
+# (#91 #92 #99 #100 #101 #102 #103 #108 #110 #111 #112 #113 #114 #115)
+# plus the harness's own new findings, each a minimal repro payload in
+# this directory plus the invariant that must hold.
+#
+# status vocabulary:
+#   "fixed-on-main" — the invariant holds on main today and MUST KEEP
+#     HOLDING: a failure here is a regression, hard red (the canary).
+#   "live"          — the invariant is violated on main (the defect is
+#     open or its fix is on another branch): the runner turns the
+#     violation into a documented xfail naming the issue. When the fix
+#     lands, the entry starts passing; flip it to "fixed-on-main" then.
+#
+# Every entry's payload is the minimal shape that reproduces the defect
+# class (issue repros are the issues' own minimal repros, trimmed).
+# Runner: tests/test_redteam_corpus.py.
+
+[[cases]]
+id = "issue-91-minhash-shingle-budget"
+issue = 91
+file = "issue-91-shingle-flood.txt"
+surface = "minhash_signature"
+params = { shingle_size = 10000, num_perm = 8, under_ceiling_shingle_size = 1000 }
+invariant = "a shingle_size that fills the window past the documented 2^26 token-hash budget refuses with a catchable ValueError (the #91 fix's own contract); a size under the ceiling completes with bounded wall (<5s)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-92-pem-flood"
+issue = 92
+file = "issue-92-pem-flood.txt"
+surface = "scrub_pii"
+params = { wall_limit_s = 2.0 }
+invariant = "the all-different-words PEM flood (no verifying END) scrubs in bounded wall — the cubic memo-miss (#92) stays dead"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-99-credential-shapes"
+issue = 99
+file = "issue-99-credentials.txt"
+surface = "scrub_pii"
+params = { needles = ["gho_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghu_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghs_16C7e42F292c6912E7710c838347Ae178B4a1", "ghr_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "glpat-abcdefghij0123456789", "lQdGBGX"] }
+invariant = "none of the five credential shapes nor the PGP block survives the scrub verbatim"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-100-escape-glued-keys"
+issue = 100
+file = "issue-100-escaped-newline.txt"
+surface = "scrub_pii_multi"
+params = { files = ["issue-100-escaped-newline.txt", "issue-100-uXXXX.txt", "issue-100-pctXX.txt"], needles = ["sk-proj-abcdefghijklmnopqrstuvwx", "sk-proj-abcdefghijklmnopqrstuvwx", "AIzaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }
+invariant = "a key glued after each RECOGNIZED escape spelling (backslash-n, \\uXXXX, %XX) is redacted, not skipped as mid-token"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-101-masked-dense"
+issue = 101
+file = "issue-101-masked-dense.txt"
+surface = "replace_many_masked"
+params = { key = "a", value_char = "x", value_repeat = 400000, mask = "*", wall_limit_s = 2.0 }
+invariant = "the masked variant stays length-preserving on a match-dense input and its per-match cost does not rescan the value (wall < 2s at 400k matches x a 400k-char value; the pre-fix O(matches x value_len) measured ~5s here)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-102-whitespace-run-overlap"
+issue = 102
+file = "issue-102-whitespace-run.txt"
+surface = "chunk_text_overlap"
+params = { wall_limit_s = 5.0 }
+invariant = "the high-overlap whitespace run chunks into exactly n - m + 1 windows in bounded wall — the trimmed_end rewalk quadratic (#102) stays dead"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-103-separator-as-chunk"
+issue = 103
+file = "issue-103-separator-chunk.txt"
+surface = "chunk_hierarchical"
+params = { max_chars = 2, separators = ["\n\n"], overlap = 0 }
+invariant = "no emitted chunk consists entirely of separator material (the separator is dropped between chunks)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-108-fresh-string-gil-starve"
+issue = 108
+file = "issue-108-fresh-nonascii.txt"
+surface = "utf8_byte_len_starve"
+params = { seconds = 1.5, heartbeat_ms = 1.0, max_gap_ms = 500.0 }
+invariant = "a worker thread looping utf8_byte_len over FRESH (uncached) large non-ASCII slices leaves a co-resident heartbeat thread at heartbeat granularity (max gap < 500ms; the pre-fix starvation measures ~2000ms)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-110-glued-pem"
+issue = 110
+file = "issue-110-glued-pem.txt"
+surface = "scrub_pii"
+params = { needles = ["-----BEGIN RSA PRIVATE KEY-----"] }
+invariant = "a PEM block glued to a preceding block's END marker (the dash-run boundary) is redacted, not read as mid-token"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-111-backtick-quadratic"
+issue = 111
+file = "issue-111-backticks.html"
+surface = "documents_to_text"
+params = { format = "html", wall_limit_s = 2.0 }
+invariant = "the code-span lifter stays near-linear in backtick-run count (wall < 2s at 800 runs; the pre-fix quadratic measures ~10s)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-112-lying-len"
+issue = 112
+file = "issue-112-lying-len.txt"
+surface = "lying_len"
+params = { claimed_len = 4611686018427387904, surfaces = ["scrub_pii_rules", "chunk_hierarchical_separators"] }
+invariant = "a Sequence with a lying __len__ produces a CATCHABLE exception (an Exception subclass, e.g. ValueError) — never an uncatchable PanicException (capacity overflow)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-113-shared-ref-schema"
+issue = 113
+file = "issue-113-shared-ref-schema.txt"
+surface = "shared_ref_schema"
+params = { doublings = 26, timeout_s = 20.0 }
+invariant = "a schema built from shared references (26 doublings; depth-tiny, walk-2^26) terminates within the walk caps and raises a catchable ValueError past the node ceiling"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-114-output-amplification"
+issue = 114
+file = "issue-114-amplification.txt"
+surface = "replace_many_amplify"
+params = { value_char = "y", value_repeat = 125000, peak_ceiling_x_input = 100 }
+invariant = "a short key matched 1000 times against a 1MB value (≈1GB of output from ~1MB of input) refuses with a catchable ValueError before allocating; peak RSS stays within 100x the input bytes"
+status = "fixed-on-main"
+
+[[cases]]
+id = "issue-115-deadline-escape"
+issue = 115
+file = "issue-115-deadline-escape.txt"
+surface = "deadline_enum"
+params = { member_count = 2000, member_len = 1500, deadline_ms = 5.0, overshoot_limit_x = 10.0 }
+invariant = "an enum-miss repair with an armed deadline_ms raises TimeoutError within a small multiple of the budget (the deadline is consulted in the enum-scoring loop; the live hole scores all 2000 members first, ~160x past the budget)"
+status = "fixed-on-main"
+
+# --- the harness's own findings (not yet tracked issues) ---------------------------
+
+[[cases]]
+id = "finding-1-unrecognized-escape-glued-keys"
+issue = 0
+file = "finding-1-xhh-octal-glued.txt"
+surface = "scrub_pii_multi"
+params = { files = ["finding-1-xhh-octal-glued.txt"], needles = ["sk-abcdefghijklmnopqrstuvwx"] }
+invariant = "a key glued after ANY escape spelling a log may carry (\\xHH hex, octal \\NNN — not just the recognized %XX/\\uXXXX/backslash run) is redacted; the boundary rule treats each escape's tail byte as formatting, not word material"
+status = "fixed-on-main"
+
+[[cases]]
+id = "finding-2-separator-remainder-chunk"
+issue = 0
+file = "finding-2-separator-remainder-chunk.txt"
+surface = "chunk_hierarchical"
+params = { max_chars = 2, separators = ["aa"], overlap = 0 }
+invariant = "no emitted chunk consists entirely of separator material — including through the remainder/hard-cut path (chunk_hierarchical('aaaa', 2, separators=['aa']) currently returns [(2, 4)], the separator itself; a residual of #103's class on a different path than the one its fix closed)"
+status = "fixed-on-main"
+
+[[cases]]
+id = "finding-3-wide-schema-quadratic"
+issue = 0
+file = "finding-3-wide-schema.txt"
+surface = "wide_schema"
+params = { properties = 2500, doc_properties = 2500, wall_limit_s = 0.2 }
+invariant = "the schema-aware repair stays near-linear in the property count (wall < 0.2s at 2500 properties; the live quadratic measures 15.7ms at 2500 -> 3140ms at 40000, ~4.5x per doubling, with matching document keys — and stays mildly superlinear even with an empty document)"
+status = "fixed-on-main"

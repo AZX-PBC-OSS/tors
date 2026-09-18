@@ -2,7 +2,12 @@
 
 Every function releases the GIL for its whole native pass (`py.detach`); the
 GIL-held residue of a call is only pyo3's argument borrow and the return
-marshalling. Signatures below are the typed surface of
+marshalling. The one deliberate exception is `utf8_byte_len`'s no-detach
+spelling — its whole body is the argument borrow plus an O(1) read, so a
+detach would bracket no work and starve a co-resident event loop's
+heartbeat instead of feeding it (the inverted static pin in
+`tests/test_utf8_byte_len.py` holds this both ways: utf8 must NOT detach,
+utf16's twin must). Signatures below are the typed surface of
 `python/tors/__init__.pyi`, pinned to the live functions by
 `tests/test_pyi_drift.py`.
 
@@ -249,10 +254,10 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   | Fireworks | `fw-` / `fw_` + tail{20,} | verbatim |
   | Modal | `ak-` / `wk-` + tail{20,} | verbatim |
   | GitHub | `ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_` + tail{36,}; `github_pat_` + tail{22,} | verbatim |
-  | GitLab | `glpat-` + tail{20,} | verbatim |
+  | GitLab | `glpat-` / `glagent-` / `glsoat-` / `glrtr-` / `glcbt-` / `glptt-` / `glimt-` / `gloas-` / `glft-` / `gldt-` / `glrt-` / `glwt-` / `glffct-` + tail{20,} and `_gitlab_session=` + `[A-Za-z0-9+/=]{40,}` (the token-prefix set of GitLab's documented token overview, the session-cookie marker included) | verbatim |
   | Minted | `azxdev_` + tail{20,}; `wd-` / `w-` + tail{43,}; `cn-` + tail{20,} | verbatim |
   | JWT | `Bearer eyJ` + three base64url segments, single-dot separated | `Bearer` |
-  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}` | the matched 4-char head verbatim |
+  | AWS | `AKIA` / `ASIA` + `[0-9A-Z]{16,}`; `A3T` + `[0-9A-Z]{17,}`; `AGPA` / `AIDA` / `AIPA` / `ANPA` / `ANVA` / `AROA` + `[0-9A-Z]{16,}` (the access-key-ID regex's full prefix set — the legacy and resource-ID siblings the same regex carries, every row 20 chars total) | the matched head verbatim |
   | XAI | `xai-` + tail{20,} | `xai-` |
   | GCP OAuth | `ya29.` + tail{20,} | `ya29.` |
   | PEM | `-----BEGIN <words> PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----` (the PGP label's ` PRIVATE KEY BLOCK-----` close accepted the same way, both markers required); an unterminated BEGIN is a non-match and the whole block is the match (the PKCS#8 bare `BEGIN PRIVATE KEY` header carries no algorithm words and is excluded) | `PEM` |
@@ -265,7 +270,15 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   the AWS secret key (the 40-char secret carries no public prefix —
   undetectable without false-positive shape matching), Azure client
   secrets (no distinctive public prefix), and Mistral keys (no
-  distinctive public prefix). The set is closed on evidence —
+  distinctive public prefix). One exclusion is evidence WITH a shape
+  cut: Google's OAuth refresh-token spelling `1//…` — the prefix is
+  documented, but its verbatim token head would be the one family head
+  ending in an Nd digit, and a phone number and a refresh token in one
+  space-bridged run (`+14155552671 1//…`) compose a longer international
+  phone match through the token's own head (the phone pass runs after
+  keys and cannot tell a token head from run material), breaking the
+  report's overlap contract. The row waits for a head that ends outside
+  the digit class. The set is closed on evidence —
   the families five private consumers' leaked-credential shapes
   backed — and growing it is a new-evidence decision, never a
   drive-by; an unlisted provider's key shape passes through whole.
@@ -283,13 +296,36 @@ The three rules, a closed set (anything else is a `ValueError` naming it):
   real text a key glued to a word is that word's fragment), and it is
   what keeps a second key glued to a token's digest hex from firing,
   UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-  `\X`): logs carry keys inside JSON strings (`\n`), .NET spellings
-  (`\u0027`), and URL encodings (`%3D`), and the escape's tail
-  letter/digit is formatting material, not the word a key head would be
-  glued to. The sequence must be COMPLETE and DIRECTLY before the head:
-  a doubled backslash escapes itself (the neighbor stays a literal, the
-  head stays mid-token), and a percent sign without two hex digits is
-  prose. (3) The tail run is MAXIMAL, dots included nowhere: `sk-….x.co`
+  `\UHHHHHHHH`, `\xHH`, `\NNN` octal, `\X`, or an ANSI CSI sequence
+  `ESC [ params final`): logs carry keys inside JSON strings
+  (`\n`), .NET spellings (`\u0027`), URL encodings (`%3D`), C byte
+  reprs (`\x1f`), octal spellings (git's quoted-path `\346…`
+  output), Python's `ascii()`/`backslashreplace` non-BMP spelling
+  (`\U0001F600`), and ANSI-colored terminal output (`\x1b[31m…`),
+  and the escape's tail letter/digit is formatting material,
+  not the word a key head would be glued to. The sequence must be
+  COMPLETE and DIRECTLY before the head: a doubled backslash escapes
+  itself (the neighbor stays a literal, the head stays mid-token —
+  `\xHH` and `\NNN` recount their backslash run; `\uXXXX`/`\UHHHHHHHH`
+  do not,
+  the one released over-trigger), a percent sign without two hex
+  digits is prose, a one-digit `\x4` is prose, octal munch is
+  maximal (`\1234` is escape `\123` + a literal `4`), a `[` without
+  the ESC byte is prose (`[31msk-…` stays mid-token), and the
+  control-char spelling `\cX` (shell/Perl) stays a documented
+  non-match — the escape grammar is closed on evidence like the
+  family set. A `-----BEGIN `
+  head directly after a DASH RUN or a SHARED CLOSE is likewise a clean
+  boundary — a preceding block's `-----END …-----` close is armor, not
+  a word: either a dash run directly before the head (the close's own
+  run, `END CERTIFICATE----------BEGIN …`), or the shared close, the
+  head's five dashes doubling as the preceding close's five
+  (`…CERTIFICATE-----BEGIN …`, a word directly before the head). The
+  carve only opens the boundary; the PEM match downstream still
+  requires both markers with the same words, so only a complete,
+  self-validating private-key block redacts, its glue word verbatim.
+  (3) The tail run is
+  MAXIMAL, dots included nowhere: `sk-….x.co`
   scrubs the key and leaves `.x.co` (only the JWT grammar carries dots,
   inside its own marker-scoped shape; the `ya29.` dot is prefix, not
   tail — see the table). The digest is of the FULL match
@@ -374,7 +410,14 @@ timestamps:
   fragments — the same attacker-formatting trade-off as the contact
   grammars (the shared tail charset is deliberately narrow — the Azure
   row names its own wider alphabet — and widening it would eat
-  identifiers that merely look key-shaped).
+  identifiers that merely look key-shaped). Invisible characters
+  inside a key or a PEM marker behave the same way: a zero-width
+  space (U+200B), RTL override (U+202E), or combining mark inserted
+  into the tail run or the `-----BEGIN ` literal breaks the grammar
+  and leaks. Directly BEFORE a key head the same characters are the
+  safe direction — they are not key-charset bytes, so the head fires
+  clean (pinned). Canonicalize (strip Cf, map combining marks away)
+  before scrubbing if invisible-character insertion is in threat.
 - An unlisted provider's key shape leaks WHOLE: the family table is the
   evidence-backed closed set above — Slack `xox…` and Stripe are
   excluded on zero evidence (AWS `AKIA`/`ASIA` moved to the table on
@@ -571,60 +614,97 @@ Unicode/dependency bump (owner: the scrub_pii maintainer).
 ```python
 def scrub_log_text(
     text: str,
-    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+    rules: Sequence[
+        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+    ]
+    | None = None,
 ) -> str: ...
 ```
 
 Named-rule log and exception-text scrubbing, four linear scans + splice
-under one `py.detach`: the
-TaskQ exception-text chain as a primitive (the scrub a worker applies to
+under one `py.detach`: the scrub a worker applies to
 `str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
-line, a span, or an exported attribute), byte-identical to the consumer's
-four compiled regexes — pinned by a differential harness that races tors
-against the exact chain (see [Design and scope](design.md) for why this is
-a *named-rule* surface rather than a pattern parameter).
+line, a span, or an exported attribute, byte-identical to the four
+compiled regexes that define its grammar — pinned by a differential
+harness that races tors against that reference (see
+[Design and scope](design.md) for why this is a *named-rule* surface
+rather than a pattern parameter).
 
-Three rules, one closed set:
+Four rules, one closed set:
 
 - `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
   values, so the whole line is dropped. Both separator spellings: real
   newlines (line content deleted, the newline kept — a blank line is left
-  behind; a CRLF line's `\r` is consumed with the content), and the
-  `repr()`-flattened `\nDETAIL:` runs a traceback's final line carries
-  (consumed up to the next escaped separator or the closing quote, which is
-  preserved — `PostgresError('msg\nDETAIL: … exists.')` comes back as
-  `PostgresError('msg')`). Two shapes the source chain treats as
-  non-matches are pinned as specified behavior, not quietly fixed: an
-  escaped run with no closing quote and no trailing escaped newline is
-  left alone, and one terminated by a real newline with no quote before it
-  is left alone (both unreachable from `repr()` output).
+  behind; a CRLF line's `\r` is consumed with the content; the
+  `traceback.format_exception` gutter run of an `ExceptionGroup`/`except*`
+  sub-exception — repeated `| `/`+ ` markers, one layer per nesting level —
+  absorbed before the anchor), and the `repr()`-flattened `\nDETAIL:` runs
+  a traceback's final line carries (consumed up to the next escaped
+  separator or the repr tail — a quote followed by the run of `)`/`]`
+  closers `repr()` ends with, `')` plain and `')])` inside an
+  ExceptionGroup's list — which is preserved:
+  `PostgresError('msg\nDETAIL: … exists.')` comes back as
+  `PostgresError('msg')`).
+
+  > [!WARNING]
+  > SECURITY POLICY, changed in this release (issue #107), inverting the
+  > 0.7.0 behavior: the repr-flattened run's lookahead is FAIL-CLOSED. A
+  > run whose tail matches neither safe delimiter — an unterminated repr
+  > (no closing quote), or one with more text behind the quote — scrubs
+  > THROUGH END OF LINE. 0.7.0 left such runs alone (a pinned non-match);
+  > the consumer chain's stated policy is that a delimiter miss must
+  > delete MORE text, never less of the secret, and tors follows it. The
+  > deletion can now also eat text a userinfo mask would have needed
+  > (`scrub("a://u:p\\nDETAIL:x@h")` is `"a://u:p"` — the DETAIL deletion
+  > takes the whole tail); run `uri_userinfo` separately when credential
+  > removal must outrank DETAIL parity.
 - `uri_userinfo` — `scheme://user:password@host` becomes
   `scheme://user:***@host`: scheme and username preserved verbatim, empty
   username handled, password ending at the first `@`.
-- `uri_query_creds` — `[?&](password|passphrase|passwd|pwd)=value` becomes
-  `[?&]name=***`: name preserved, exact lowercase, value running to
-  whitespace, `&`, or `@`.
+- `uri_query_creds` / `libpq_conninfo_creds` — the password-family
+  connection parameters, ONE pass under two names (the two anchor grammars
+  of the live chain's single combined regex): `[?&]name=value` (URI query)
+  and the libpq keyword form `name=value` (a non-`[A-Za-z0-9_]` char — or
+  text start — before the name, so `host=h password=p` masks and `cpwd=`
+  does not). Names are the five credential parameters
+  (`password`, `passphrase`, `passwd`, `pwd`, `sslpassword`) matched
+  case-insensitively; the value is a libpq single-quoted string (spaces
+  allowed, `\'`/`\\` escapes honored) or an unquoted token running to
+  whitespace or `&` — deliberately NOT stopping at `@`: a password may
+  legally carry an unencoded `@`, and a mask that stops there leaves the
+  tail riding after the `***` (0.7.0 did exactly that). Name and delimiter
+  are preserved: `?password=a@b` → `?password=***`.
 
 `rules=None` (the default) runs the full chain in canonical order:
-`pg_detail_lines` → `uri_userinfo` → `uri_query_creds`, each rule a whole
-pass over the current text before the next begins (a DETAIL deletion can
-eat the `@` a userinfo mask anchors on — rule interaction is why the order
-is a contract, not a caller choice).
+`pg_detail_lines` → `uri_userinfo` → the conninfo credential pass, each
+rule a whole pass over the current text before the next begins (a DETAIL
+deletion can eat the `@` a userinfo mask anchors on — rule interaction is
+why the order is a contract, not a caller choice). Selecting both conninfo
+names runs the combined pass once, never two sequential substitutions.
 
 > [!WARNING]
 > The default chain can leave a credential fragment by design:
 > `scrub("pg://u:p\\nDETAIL:x@h')")` is `"pg://u:p')"` (the DETAIL deletion
 > eats the `@`, the userinfo mask then has nothing to anchor on, the
-> password `p` survives). The order is kept for byte-identity with the
-> consumer chain (`src/taskq/obs/_redact_exc.py::_scrub_text`, the scrub a
-> worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks before any of
-> it reaches a log line, a span, or an exported attribute — up to four
-> passes per text, ~24 per failed job across its message/traceback/span
-> texts); do NOT reorder to "fix" the fragment. Safe pattern when
-> credential removal outranks DETAIL parity: run `uri_userinfo` separately
-> (e.g. `scrub_log_text(text, ["uri_userinfo"])`, which gives
-> `"pg://u:***@h')"` here) — trading the chain's DETAIL parity for the
-> mask, deliberately and visibly at the call site.
+> password `p` survives). The order is the documented contract (the
+> scrub a worker applies to `str(exc)`/`repr(exc)`/rendered tracebacks
+> before any of it reaches a log line, a span, or an exported attribute —
+> up to four passes per text, ~24 per failed job across its
+> message/traceback/span texts); do NOT reorder to "fix" the fragment.
+> Safe pattern when credential removal outranks DETAIL handling: run
+> `uri_userinfo` separately (e.g.
+> `scrub_log_text(text, ["uri_userinfo"])`, which gives
+> `"pg://u:***@h')"` here) — trading the DETAIL deletion for the mask,
+> deliberately and visibly at the call site.
+>
+> A second documented seam: a digit-leading scheme defeats the
+> userinfo anchor everywhere in the family — `scrub_log_text`,
+> `scrub_log_text(text, ["uri_userinfo"])`, and `scrub_pii` all leave
+> `1postgres://user:pass@host` whole (the shared scheme anchor is
+> `\b[a-zA-Z]`, so `1postgres` is not a scheme to it; verified against
+> all three spellings). This is the grammar's pinned shape, not a defect;
+> there is currently no tors surface that redacts a digit-prefixed scheme
+> URI — a caller seeing that shape needs its own pre-pass.
 
 `rules=[]` is the identity; duplicates
 dedupe and caller order is irrelevant; an unknown name raises `ValueError`
@@ -931,6 +1011,96 @@ tors.utf16_is_valid(b"h\x00i\x00")  # True
 tors.utf16_is_valid(b"h\x00i")  # False
 ```
 
+## `tors.json_is_valid`
+
+```python
+def json_is_valid(data: bytes | str) -> bool: ...
+```
+
+The RFC 8259 validity gate: `True` exactly when `orjson.loads(data)` would
+succeed — one linear scan over the raw bytes, no object tree, GIL-released.
+Built for the validate-and-discard gate, bytes that are parsed once and
+thrown away: on a 64 KiB list-of-small-dicts document, ~95% of a full
+`orjson.loads` is constructing objects nobody reads, and the scan alone is
+a 4-5x cheaper pass at these sizes (64 KiB ~40 µs, 1 MiB ~0.7 ms; issue
+#61's measured prototype table). The scanner is hand-rolled and iterative —
+no recursion, no heap, an O(1) fixed stack — so pathological inputs cost
+the same linear pass.
+
+**The acceptance set is orjson 3.x's, not the stdlib's** (`json.loads`'s):
+where the two disagree, orjson's reading wins, because the gate stands in
+front of a consumer whose next step IS `orjson.loads`. The documented
+seams, each pinned in tests/test_json_is_valid.py:
+
+- **Float-overflow literals reject**: `1e400`, `-1e400`, `1e309`, `2e308`,
+  `1.7976931348623159e308` raise `JSONDecodeError` in orjson ("number is
+  infinity when parsed as double") where the stdlib hands back `inf`. The
+  scanner computes the literal's f64 value and rejects a non-finite result;
+  underflow (`1e-400` → `0.0`) is finite and accepts. Long-integer literals
+  (20+ digits) ride the same fallback — orjson parses them as doubles — so
+  309 `9`s (9.99e308) reject where 308 accept; ≤ 19 digits always accept.
+  *Caveat*: the decision trusts correctly-rounded parsing (Rust's `f64`
+  parser), so a literal within one rounding step of ±1.8e308 could in
+  principle disagree with orjson's own float parser; a 40,000-case
+  knife-edge sweep plus the 2,666-input differential corpus found zero such
+  disagreements.
+- **NaN / Infinity / -Infinity reject** (no such grammar in RFC 8259; the
+  stdlib accepts them as floats).
+- **A leading UTF-8 BOM rejects** (the stdlib strips it).
+- **Lone `\ud800`-class surrogate escapes reject** — a high surrogate
+  escape must be immediately followed by `\u` + a low surrogate — and so
+  does a UTF-8-*encoded* surrogate (`"\xed\xa0\x80"`); the stdlib builds
+  lone surrogates from both. This is the class that makes a looser
+  validator the unsafe direction for a gate (serde's `IgnoredAny`, #61's
+  rejected alternative, accepted both).
+- **Depth cap 1024** (orjson's): the 1025th open container rejects, objects
+  and arrays counting against one shared cap. It is an answer (`False`),
+  not an exception — a validity gate is a boolean question.
+- Invalid UTF-8 anywhere rejects; raw control characters in strings reject
+  (`\u0000` the escape accepts); trailing garbage, trailing commas, leading
+  zeros, and unterminated strings reject; duplicate keys accept (orjson
+  last-wins).
+- **A `str` holding a raw lone surrogate answers `False`, not a raise**:
+  such a str has no UTF-8 view to scan, and every consumer's parser
+  (orjson's `loads` included) raises on one, so the gate's
+  "would-loads-raise" answer is `False` — the raise-free contract holds
+  on this lane too (the stdlib would accept some of these; orjson's
+  reading wins, as everywhere in this surface). The escape TEXT
+  (`"\ud800"` spelled out) is ordinary content and rejects through the
+  normal grammar.
+
+Booleans only: no invalid input raises — nothing in the scanner has an
+error path. A wrong-TYPE argument (not `bytes`, not `str`) raises
+`TypeError` like the bytes-in surface; `bytearray`/`memoryview` are
+refused with it (a writable buffer mutated by another thread mid-scan
+under the released GIL is a data race, not a semantic difference).
+
+**GIL behavior**: `utf8_is_valid`'s class. A `bytes` argument is a zero-copy
+immutable borrow, the whole scan runs under one `py.detach`, and the `bool`
+return has no marshalling class at all — the borrow alone is the call's
+GIL-held residue, valid and invalid input alike. A `str` argument pays the
+standard str-in borrow first, under the GIL: a zero-copy alias when the
+string is pure ASCII or its UTF-8 view is already cached (repeat calls on
+the same object: O(1) borrow, then the detached scan), a one-time O(input)
+materialization+cache-fill on the first non-ASCII call (encode-parity;
+CPython caches the view on the object, and `encode` reads it but never
+fills it). No aio twin, matching `utf8_is_valid`/`utf16_is_valid`: a
+sub-millisecond scan needs no thread hop (see [Async use](async.md) for the
+size guidance).
+
+```python
+tors.json_is_valid(b'{"a": [1, 2.5, true, null]}')  # True
+tors.json_is_valid(b"1e400")  # False — orjson raises; the stdlib says inf
+tors.json_is_valid(b'"\\ud800"')  # False — lone surrogate escape
+tors.json_is_valid(b"\xef\xbb\xbf{}")  # False — BOM
+tors.json_is_valid('{"a": 1}\ud800')  # False — raw surrogate in the str, no raise
+```
+
+A `str` argument holding a lone surrogate (a raw one — not the escape text)
+never reaches the scan at all: the str-in borrow cannot materialize its
+UTF-8 view and raises `UnicodeEncodeError`, the standard str-argument
+contract every tors str-in function shares.
+
 ## `tors.detect_encoding`
 
 ```python
@@ -1076,6 +1246,21 @@ raises `TypeError`; dict order cannot matter: pinned); an empty key raises
 standard str-in boundary. No list-shape marshalling class: the return is one
 string; the GIL-held residue is the argument walk plus the O(output) marshalling,
 measured at the ping floor even on a 1.28M-replacement dense map.
+
+**Output ceiling.** The spliced output's byte size is computed before anything is
+allocated (saturating arithmetic over the match spans) and refused past **32 MiB**
+with a catchable `ValueError` naming the refused size and the ceiling — the
+documents layer's own byte contract (`DEFAULT_ANYDOC_INPUT_LIMIT`), one
+convention for how many bytes is one tors object. The unit is UTF-8 bytes, and no
+replacement value is ever truncated mid-character: values are spliced whole or
+the call is refused. A sub-ceiling allocation refusal surfaces as the same
+catchable `ValueError` (the reservation is attempted with `try_reserve`, never an
+uncatchable allocator abort). The ceiling applies before the identity contract's
+borrowed return, so a replace whose output would exceed it raises even when the
+net effect would be the identity — a >32 MiB "identity" replace is the
+amplification shape wearing a disguise. The masked spelling below is
+length-preserving and has no ceiling (a short key cannot amplify into a long
+output there).
 
 ```python
 tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "library"})
@@ -1313,10 +1498,11 @@ def utf8_byte_len(s: str) -> int: ...
 The UTF-8 byte length of a `str`: `len(s.encode("utf-8"))` with the copy taken
 out. That expression allocates a full `bytes` object, measures it, and throws
 it away — pure waste whenever only the count is wanted, which is the shape of
-every size cap in front of a store. The motivating sites are TaskQ's:
-`client/_args.py` checks idempotency-key and scope byte caps on every enqueue,
-and `backend/_terminal.py` re-encodes a serialized result of up to
-64 KiB (`MAX_RESULT_BYTES`) on every success just to take its length — a
+every size cap in front of a store. The motivating sites are a write
+path's: argument validation checks idempotency-key and scope byte caps on
+every enqueue, and a terminal handler re-encodes a serialized result of
+up to 64 KiB (`MAX_RESULT_BYTES`) on every success just to take its
+length — a
 genuine double pass, the byte count having existed inside the serializer's
 output and been discarded by the `.decode()` that produced the `str`.
 
@@ -1381,7 +1567,7 @@ lane table is in `tests/test_performance.py`):
 ```python
 tors.utf8_byte_len("café")  # 5: three ASCII bytes + one two-byte é
 tors.utf8_byte_len("\U0001f600")  # 4: one astral codepoint, four bytes
-# the byte-cap gate the TaskQ terminal spells on every success:
+# the byte-cap gate a terminal handler spells on every success:
 if tors.utf8_byte_len(serialized_result) > 64 * 1024:
     reject()  # over MAX_RESULT_BYTES — no bytes object built to find out
 ```
@@ -1781,9 +1967,20 @@ byte-identical whether or not a deadline is set, and a benign large document
 does not trip a generous budget (the deadline discriminates pathological
 *shape*, not *size*). When a schema is passed, the budget bounds the schema
 alignment layer too: the key-remap ladder, the union and type-union branch
-retries, scalar coercion, missing-key fill, and validation all sample the
-same clock, with the same soft bound (at most one key-ladder sweep or one
-union branch past expiry). It applies to all three spellings and is checked with
+retries, scalar coercion, missing-key fill, enum suggestion scoring, and
+validation all sample the same clock, with the same soft bound (at most one
+property or one union branch past expiry). The enum suggestion loop
+reads the clock before every member's comparison and hands the clock's
+remaining budget to each jaro-winkler score, so both the many-members axis
+and the one-very-long-member axis are bounded: a wide enum of long members
+raises `TimeoutError` within a small multiple of the budget instead of
+running the loop to completion, and an expired clock raises — a `None`
+suggestion on an expired clock would mask the timeout as a plain data
+miss. The key-remap ladder's fuzzy tier samples the same way — a forced
+clock read per property (short window-disjoint key comparisons never
+consult a clock internally) plus the remaining budget handed to each
+comparison — so the one-unknown-key-over-a-wide-schema axis is bounded
+like the enum's, by the same design. It applies to all three spellings and is checked with
 the GIL released, so `TimeoutError` is raised after reacquiring it, the
 same shape as `diff_opcodes`, including the message:
 `"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
@@ -1794,7 +1991,19 @@ build, one validation pass — the validator crate's error-carrying
 `validate` is the most expensive opaque unit, so the validity gate rides
 its boolean API and `validate()` always reads the clock before it) forces
 the very next check to read it, so at most one such unit
-runs past an expired budget (measured worst overshoot ~8% at n=1M). The
+runs past an expired budget (measured worst overshoot ~8% at n=1M). And
+when a schema is passed, the schema's own PRE-alignment phase — the
+repairer's construction: the resolve walk, the root validator's
+`validator_for` compile, the address-set walk, all eager and linear in
+the schema's size — runs BEFORE the clock is armed (the budget attaches
+to the constructed repairer, `mod.rs` arms it right after `new`), so a
+wide schema's fixed phase is not deadlineable: ~0.5s at 100,000
+properties, whatever the budget. The alignment layer that follows samples
+the clock per property, so the phase is the overshoot's whole body for a
+wide-schema call (a 5ms budget over a 100k-property schema raises at the
+first ladder consult, ~0.5s in); making that phase interruptible is a
+design change (the compile is the validator crate's one opaque call), not
+a sampling one. The
 schema alignment layer shares the same clock throughout, including the
 salvage unwrap's nested repair: a `salvage=True` call inherits the
 caller's budget inside the unwrap instead of restarting unbounded. And
@@ -1857,6 +2066,14 @@ differential suite pins everything else to json-repair==0.63.4:
   recursion depth.")` at 200 nested containers, where upstream raises an
   uncaught `RecursionError` at roughly its own recursion limit: the same
   failure normalized into the error catalog at a lower, pinned threshold.
+- **Shared-reference schemas**: the schema walk visits every path, so a
+  schema built from shared references (48 nested shared lists, depth 48)
+  would expand exponentially; the walk caps container visits at the canon
+  walk's 2,000,000-node ceiling and refuses past it with a catchable
+  `ValueError` ("Input schema visits too many objects"). A legitimately
+  large FLAT schema of the same node count is unaffected — the cap counts
+  container visits, and a flat schema's cost is linear in the caller's own
+  input.
 - **On by default, tors-native**: key-typo remap, enum "Did you mean ..."
   suffixes,   date/uuid normalization, numeric extraction tiers, and the
   diagnostics output are extensions upstream does not have; see
@@ -2220,8 +2437,22 @@ divergence rows (`tests/test_similarity.py`): `"ppp"` vs `"pwpp"`, difflib `4/7`
 (its anchored `"pp"` splits the insert, `M = 2`) vs tors `6/7` (`M = 3 = LCS`);
 and `"qpqpq"` vs `"qpwqpq"`, difflib `6/11` (the anchored rotated equal block
 `"qpq"`, a non-minimal insert+delete split, `M = 3`) vs tors `10/11` (`M = 5 =
-LCS`). tors's `M` is always maximal: `M == LCS(a,
-b)` exactly, the minimal-edit-script consequence of the Myers engine, so the two
+LCS`). tors's `M` is always valid — the equal ops spell a common subsequence,
+so `M <= LCS(a, b)` (structural, pinned as a size ladder in
+`tests/test_similarity.py`) — and it is maximal on the forced-alignment
+classes (identical, empty, pure insert/delete with differing flanks) and
+measured exactly maximal through the ladder's 512-char octave, but it is
+BOUNDED-maximal, not guaranteed maximal: from the 1024-char octave upward the
+bounded middle-snake search can accept a good non-minimal split and score
+slightly UNDER the true LCS ratio (measured: 0.7043 vs the true 0.7107 on
+3000-char random strings, a ~1% undercount; in the pinned ladder the
+undercounts start at 1024, worst observed ratio 0.972 at n=1024 over a
+26-symbol alphabet, held above an empirical 0.9 drift-guard floor that is
+NOT a contract). There is no lower bound on `M` past the search's limits;
+see `src/diff_impl.rs`'s module docs for
+exactly what the engine does and does not guarantee, and the size-ladder
+property test in `tests/test_similarity.py` for the pinned bounded
+property. So the two
 ratios agree exactly wherever the alignment is forced (identical operands, empty
 pairs, disjoint alphabets, pure insert/delete with differing flanks) and are both
 valid but may diverge on repeated-flank contexts. difflib's anchored `M` is also
@@ -2748,7 +2979,12 @@ list(tors.chunk_by_lines_iter(log, 2))
 
 ```python
 def chunk_hierarchical(
-    text: str, max_chars: int, separators: Sequence[str | None] | None = None, *, overlap: int = 0
+    text: str,
+    max_chars: int,
+    separators: Sequence[str | None] | None = None,
+    *,
+    overlap: int = 0,
+    overlap_boundary: Literal["grapheme", "word"] = "grapheme",
 ) -> list[tuple[int, int]]: ...
 ```
 
@@ -2761,10 +2997,45 @@ each chunk, falling back to the next level only when the coarser one has no
 in-budget cut over the current window.
 
 `separators=None` (the default) uses tors's own accurate hierarchy:
-paragraph → sentence → word → a grapheme-safe raw cut, always the final,
-unconditional fallback (this never fails to produce a chunk); it reuses the
-same UAX #29 segmenters `chunk_by_sentences`/`chunk_by_words` do, rather
-than LangChain's own naive literal guesses (`"\n\n"`, `". "`, `" "`).
+heading → paragraph → sentence → word → a grapheme-safe raw cut, always
+the final, unconditional fallback (this never fails to produce a chunk);
+it reuses the same UAX #29 segmenters `chunk_by_sentences`/
+`chunk_by_words` do, rather than LangChain's own naive literal guesses
+(`"\n\n"`, `". "`, `" "`).
+
+The heading level (#63) is what makes this structure-aware for markdown:
+its cuts sit at ATX heading lines, so **a section's content never merges
+across a heading of higher rank**. Each cut lands *before* the heading —
+the heading itself rides with the section that follows it (the chunk that
+starts at a heading includes the heading text), and the newline run
+between a section's content and the next heading is dropped between
+chunks, the same convention the paragraph level applies to blank-line
+runs (and when a heading follows a blank-line run, its cut *is* that
+paragraph gap's cut: the two levels agree exactly where both can cut;
+the heading level's addition is the single-newline case the paragraph
+level cannot see). A heading-bearing document under a whole-document
+budget comes back as its sections, not one giant chunk: the
+final-chunk-runs-untrimmed exception is a size concession, and the
+heading level's structural contract outranks it. The level's scope is
+deliberately ATX-only for v1, verified against the markdown the
+`tors.documents` engines actually emit — pdf_oxide's
+`StructType::markdown_prefix` writes `"# "`…`"###### "`, anydoc's
+markdown renderer writes `"#".repeat(level) + " "`, and
+html-to-markdown-rs's `HeadingStyle::default()` is `Atx` — so setext
+underlines (`===`/`---` runs under a paragraph line) are excluded, as are
+every line that is not shaped `1-3 spaces, 1-6 '#', space/tab/EOL`:
+`#no-space`, a 7-hash run, an escaped `\#`, a blockquote's `> # x`, a
+list item's `- # x`, 4-space indented code, and any mid-line hash are
+ordinary content, and a heading-shaped line inside a fenced code block
+(``` fences, CommonMark §4.5's own state machine, shared with
+`extract_code_blocks`) is code. The level is gated: text with no `#` byte
+anywhere never realizes it (a one-pass `memchr` probe is the only cost
+heading-free input adds), so heading-free text chunks exactly as the
+pre-#63 hierarchy did. Precedence is budget > heading > paragraph >
+sentence > word: the heading level bounds sections, the budget still
+bounds oversized sections (split at the finer levels), and the
+grapheme-safe raw cut stays the unconditional last fallback.
+
 `separators=[...]` is a caller-supplied sequence (a list or a tuple) of
 literal strings, not regex
 (a documented scope line: literals are LangChain's own default
@@ -2781,16 +3052,22 @@ no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
 
 An entry in that sequence may also be `None`: it splices the default
-hierarchy's three accurate levels in at that position, the mix an
+hierarchy's accurate levels in at that position, the mix an
 all-literal list could not express before. `["\n", None]` is
-line → paragraph → sentence → word → raw cut, the line-oriented-text
-shape (a chat thread, one message per line, never split mid-line) whose
-oversized-line fallback is the real UAX #29 sentence/word segmenter
-rather than the `". "`/`" "` literal guesses an all-literal
+line → heading → paragraph → sentence → word → raw cut, the
+line-oriented-text shape (a chat thread, one message per line, never split
+mid-line) whose oversized-line fallback is the real UAX #29 sentence/word
+segmenter rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost: every level (each of the three default walks, each distinct custom
+The reserved literal `"heading"` is the heading level itself — the
+explicit opt-in for custom hierarchies: `["heading", None]` is heading →
+paragraph → sentence → word → raw cut, the markdown-RAG shape (sections
+bounded by headings, oversized sections split at accurate sentence/word
+boundaries); the word is reserved, so a literal split on `"heading"` is
+not expressible (spell it in different case if you truly need the word).
+Cost: every level (each of the default walks, each distinct custom
 literal) pays its one whole-text walk at most once per call, and only when a
 window consults it: levels are built at their first consultation (the window
 loop walks the list strictly through `find_map`, in priority order), so a
@@ -2828,7 +3105,13 @@ every level except the raw cut, the separator itself is dropped between
 chunks: the chunk ends where the separator starts, the next chunk begins
 where it ends, the same convention `chunk_by_paragraphs` already applies
 to blank-line runs. A caller splitting on a marker wants it gone, not
-duplicated.
+duplicated. Since #103 that holds at the end of the document too: the
+final-chunk shortcut (the whole remainder fits the budget, so the chunk
+runs to the end untrimmed) answers the separator-skip question first, so
+a window that OPENS on a separator match is never emitted — not even as
+the untrimmed final chunk. A trailing separator run therefore survives
+only as a suffix of a content-bearing chunk, and an all-separator
+document chunks to zero chunks.
 
 `overlap` snaps the next chunk's start backward to the nearest GRAPHEME
 boundary at or before the target, not necessarily a semantic
@@ -2840,6 +3123,29 @@ snap-collapse `chunk_text` already applies — and so does an overlap whose
 re-cut would land the next chunk strictly inside its predecessor (the same
 text twice, no new context): the transition falls back to the zero-overlap
 cut instead, so ends always strictly advance.
+
+`overlap_boundary="word"` opts the snap into word-aware tails (#47) for
+exactly the embedding-pipeline shape a mid-word tail start is a rough
+edge for. The composition order is: grapheme snap, then word snap, then
+the decline-the-snap lookahead. The grapheme candidate lands first (never
+mid-cluster), then the snap moves further back to the nearest UAX #29
+word boundary at or before it — the same word-bounds level the default
+hierarchy already builds: realized lazily at the first snap that consults
+it, shared with any window that descends to it (never a second walk), and
+for a hierarchy with no word level at all (an all-literal custom list)
+the same one-off word-bounds level is built at the first snap instead. A
+mid-word tail therefore starts at its word's first codepoint; when the
+word level has no boundary in the snap-back range (dense CJK runs, Thai
+without a dictionary, one long token) the plain grapheme candidate is
+kept, and at `overlap=0` the mode is accepted and is a no-op (no snap
+site ever runs). The word-snapped candidate then goes through the
+decline-the-snap lookahead unchanged — it may reach back to or past the
+previous chunk's start, in which case the transition degrades to zero
+overlap exactly as a grapheme candidate reaching that far would: no chunk
+is ever contained in (or duplicated across) its predecessor. Unknown
+values raise `ValueError` naming the closed set `('grapheme', 'word')`,
+unconditionally at the argument boundary (an irrelevant knob never errors
+late).
 
 `max_chars < 1` or `overlap < 0` raise `ValueError`; `overlap >= max_chars`
 raises `ValueError`. Empty `text` returns `[]`. An empty `separators` sequence
@@ -2854,7 +3160,21 @@ it: the default hierarchy's paragraph/sentence/word walks, or one literal
 search per distinct custom separator), so levels no window descends to are
 never scanned at all: a custom hierarchy that never matches under a
 whole-document budget is one codepoint count and nothing else, so not even
-the literal's own scan runs. The one other whole-text structure is the grapheme
+the literal's own scan runs. Since #103 the final-chunk exit answers one
+extra question — could a separator match open at the exit's start — and a
+cheap necessary-condition pre-test over the unrealized level specs keeps
+that answer free whenever no separator could possibly open there (a text
+that does not begin with one of the literal separators, under the default
+hierarchy always: a paragraph-gap cut cannot begin at codepoint 0), so the
+whole-document cells below keep their zero-build exit; a text that DOES
+open with a separator match pays the hierarchy's first search there (the
+skip question needs the level), once, memoized. Since #63 the default
+hierarchy adds one more lazily-paid pass: the heading level's `#`-byte
+gate probe (~0.12 ms at 12 MiB, `memchr`, once per call at the first
+heading-site consultation — a level realization, the scan itself, or a
+demotion check), which heading-free text answers "no heading can exist"
+without ever building the level. The one other whole-text
+structure is the grapheme
 boundary index, a one-bit-per-codepoint bitmap built lazily, only when a
 realized level has cuts to filter, a window needs the raw-cut fallback, or
 `overlap` snaps; on pure-ASCII text the index is two SIMD byte scans instead
@@ -2908,6 +3228,20 @@ tors.chunk_hierarchical(thread, 40, ["\n", None])[1]
 
 tors.chunk_hierarchical(thread, 24, [None]) == tors.chunk_hierarchical(thread, 24)
 # True: [None] is separators=None
+
+md = (
+    "# Guide\n\nIntro paragraph for the guide.\n\n"
+    "## Setup\n\nBody of the setup section, long enough to matter.\n\n"
+    "## Usage\n\nTail section."
+)
+tors.chunk_hierarchical(md, 10_000)
+# [(0, 39), (41, 100), (102, 125)]
+#  -> the sections come back separate even under a whole-document budget:
+#     each chunk starts at its own heading ("# Guide...", "## Setup...",
+#     "## Usage..."); a section wider than max_chars would still split at
+#     paragraph/sentence/word levels (budget > heading > paragraph > ...).
+tors.chunk_hierarchical(md, 10_000, ["heading", None]) == tors.chunk_hierarchical(md, 10_000)
+# True: the "heading" sentinel + splice is the default hierarchy spelled out.
 ```
 
 ## `tors.chunk_cdc`

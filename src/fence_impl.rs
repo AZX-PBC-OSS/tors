@@ -108,7 +108,12 @@ fn lines(text: &str) -> Vec<Line<'_>> {
 /// A recognized opening fence: `fence_char` (`` ` `` or `~`), `fence_len`
 /// (3+), `indent` (0-3 leading ASCII spaces, stripped from content lines),
 /// and `language`.
-struct OpenFence {
+///
+/// `pub(crate)` since #63: `chunk_hierarchical_impl`'s heading-level scan
+/// reuses this exact CommonMark §4.5 state machine to keep heading-shaped
+/// lines inside fenced code blocks from cutting (`# comment` inside a
+/// fence is code, not a heading).
+pub(crate) struct OpenFence {
     fence_char: char,
     fence_len: usize,
     indent: usize,
@@ -120,7 +125,10 @@ struct OpenFence {
 /// info string must not itself contain a backtick (a tilde fence's may
 /// contain anything): a line that looks like a fence but violates this is
 /// ordinary content, not an opener.
-fn match_open_fence(line: &str) -> Option<OpenFence> {
+///
+/// `pub(crate)` since #63: `chunk_hierarchical_impl`'s heading-level scan
+/// reuses this exact CommonMark §4.5 predicate (see [`OpenFence`]).
+pub(crate) fn match_open_fence(line: &str) -> Option<OpenFence> {
     let indent = line.chars().take_while(|&c| c == ' ').count().min(3);
     if line.chars().take(indent).any(|c| c != ' ') {
         return None;
@@ -159,7 +167,10 @@ fn match_open_fence(line: &str) -> Option<OpenFence> {
 /// content: see the module docs), so a CRLF-terminated closing fence line
 /// like `` "```\r" `` needs `\r` treated as trailing blank here or every
 /// CRLF document would fail to close its fences at all.
-fn is_closing_fence(line: &str, open: &OpenFence) -> bool {
+///
+/// `pub(crate)` since #63: the heading-level scan's twin (see
+/// [`match_open_fence`]).
+pub(crate) fn is_closing_fence(line: &str, open: &OpenFence) -> bool {
     let indent = line.chars().take_while(|&c| c == ' ').count().min(3);
     if line.chars().take(indent).any(|c| c != ' ') {
         return false;

@@ -123,7 +123,7 @@
 //!
 //! `tors.utf8_byte_len(s)` answers `len(s.encode("utf-8"))` without
 //! building the bytes object: the count a caller wants when a size cap
-//! sits in front of a store (TaskQ's idempotency-key/scope byte caps on
+//! sits in front of a store (an enqueue path's idempotency-key/scope byte caps on
 //! every enqueue, and the terminal's re-encode of a serialized result of
 //! up to 64 KiB on every success — a genuine double pass, the byte count
 //! having existed inside the serializer's output and been discarded by
@@ -242,8 +242,10 @@
 //! object's first call — the cold-cache case — materializes and caches
 //! the view under the GIL (encode-parity cost; `encode` reads that
 //! cache and never fills it); repeat calls borrow it zero-copy and pay
-//! only this scan, which runs detached (real O(n) work, unlike the
-//! utf8 twin's nominal one-field-read detach — see the wrapper's docs).
+//! only this scan, which runs detached (real O(n) work — which is why
+//! this twin keeps its `py.detach` where the utf8 twin dropped its
+//! nominal one (#108: a detach must bracket the real work or it
+//! starves the co-resident loop thread; see the wrapper's docs).
 //! Lone surrogates never reach this function either (the borrow raises
 //! first); the stdlib relation there is REFUSAL PARITY with the
 //! replaced expression, not the asymmetry a first draft assumed — the

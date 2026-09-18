@@ -9,8 +9,15 @@ machine): paragraph ``windows(2)`` cuts, sentence/word cuts from
 matches with the literal dropped, the grapheme-cut filter, the
 first-level-with-a-verdict window walk (a separator match at the
 window's own start is a skip verdict: no chunk for the separator, the
-window resumes at its end), the grapheme-safe hard cut, and the
-overlap snap.
+window resumes at its end -- and since #103 the skip also preempts the
+final-chunk exit, so an all-separator document chunks to zero chunks;
+production answers that exit's skip question through an output-invisible
+necessary-condition pre-test that this bare-search reference deliberately
+does not have, and the sweep holds the two spellings equal), the
+grapheme-safe hard cut, and the overlap snap (both ``overlap_boundary``
+modes since #47: the reference's word model is the same UAX #29
+word-bounds list production reads, with the decline-the-snap lookahead
+running after the word snap).
 
 Restricted to ASCII corpora the reference's grapheme model is exact:
 below the extended-grapheme additions the only joining rule is GB3 (a
@@ -27,6 +34,18 @@ original, so the first-match level walk answers identically, and the
 reference thereby simultaneously pins the dedup inertness the Rust side
 relies on (a wrong dedup that dropped a level it should not, or kept one
 that changed the answer, breaks this equality).
+
+Since #63 the reference carries the heading level too: bounding ATX
+heading-line cuts (one cut ``(gap_start, heading_start)`` per heading
+line, the pre-heading newline run dropped, the first in-range cut wins —
+no chunk spans a heading), the ``'#' in text`` gate (a gate-closed text
+carries no heading level at all), the ``"heading"`` sentinel spelling, the
+whole-document demotion (progress-gated: a demotion whose cut cannot end
+past the previous chunk's end demotes nothing), and the lookahead mirror
+that keeps the snap acceptance honest. The heading shape generators below
+sweep heading-dense markdown, the exclusion shapes (fences, blockquotes,
+escapes, the 7-hash run, no-space markers, indented code), and CRLF and
+lone-CR heading line endings.
 
 This is the pyo3/marshalling-layer pin the Rust-side differential cannot
 see: the Rust unit tests diff core against core, and the fuzz target
@@ -120,42 +139,218 @@ def _literal_level_cuts(text: str, sep: str) -> list[tuple[int, int]]:
         pos = i + len(sep)
 
 
+# ---------------------------------------------------------------------------
+# The #63 heading level's oracle scan: one cut (gap_start, heading_start)
+# per ATX heading line, independently spelled on the char grid (the
+# production scan is a byte walk with fence_impl's §4.5 machine; this one
+# re-derives the same clauses on chars so the pin is a differential):
+#   * ATX shape only (verified from the engines' emitters: pdf_oxide's
+#     markdown_prefix, anydoc's renderer, html-to-markdown-rs's default
+#     HeadingStyle all emit ATX): 1-3 leading spaces, 1-6 '#', then a
+#     space, a tab, or end of line. Setext underlines are excluded by
+#     design (documented in src/chunk_hierarchical_impl.rs).
+#   * the CommonMark §4.5 fence state machine tracks fenced code blocks:
+#     a heading-shaped line inside a fence is code, never a cut.
+#   * line endings are LF, CRLF, and lone CR (CommonMark's set).
+#   * the cut's gap start is the end of the last non-empty content line
+#     before the heading (the newline run is dropped between chunks, the
+#     paragraph gap's own convention), and a heading at offset 0 records
+#     no cut (nothing precedes it to bound).
+# ---------------------------------------------------------------------------
+def _is_fence_opener_ref(line: str) -> tuple[str, int] | None:
+    indent = 0
+    for c in line:
+        if c == " " and indent < 3:
+            indent += 1
+        else:
+            break
+    rest = line[indent:]
+    if not rest or rest[0] not in "`~":
+        return None
+    fence_char = rest[0]
+    fence_len = len(rest) - len(rest.lstrip(fence_char))
+    if fence_len < 3:
+        return None
+    info = rest[fence_len:].strip()
+    if fence_char == "`" and "`" in info:
+        return None
+    return (fence_char, fence_len)
+
+
+def _is_fence_closer_ref(line: str, fence_char: str, fence_len: int) -> bool:
+    indent = 0
+    for c in line:
+        if c == " " and indent < 3:
+            indent += 1
+        else:
+            break
+    rest = line[indent:]
+    run = 0
+    for c in rest:
+        if c == fence_char:
+            run += 1
+        else:
+            break
+    return run >= fence_len and all(c in " \t\r" for c in rest[run:])
+
+
+def _is_atx_heading_line_ref(line: str) -> bool:
+    i = 0
+    while i < 3 and i < len(line) and line[i] == " ":
+        i += 1
+    if i >= len(line) or line[i] != "#":
+        return False
+    hashes = 0
+    while i < len(line) and line[i] == "#" and hashes < 7:
+        i += 1
+        hashes += 1
+    if hashes > 6:
+        return False
+    return i >= len(line) or line[i] in " \t"
+
+
+def _heading_level_cuts(text: str) -> list[tuple[int, int]]:
+    n = len(text)
+    cuts: list[tuple[int, int]] = []
+    open_fence: tuple[str, int] | None = None
+    line_start = 0
+    last_content_end = 0
+    while line_start < n:
+        line_end = n
+        next_start = n
+        j = line_start
+        while j < n:
+            if text[j] == "\n":
+                line_end, next_start = j, j + 1
+                break
+            if text[j] == "\r":
+                line_end = j
+                next_start = j + 2 if (j + 1 < n and text[j + 1] == "\n") else j + 1
+                break
+            j += 1
+        line = text[line_start:line_end]
+        if open_fence is not None:
+            if _is_fence_closer_ref(line, *open_fence):
+                open_fence = None
+        else:
+            opened = _is_fence_opener_ref(line)
+            if opened is not None:
+                open_fence = opened
+            elif line_start > 0 and _is_atx_heading_line_ref(line):
+                cuts.append((last_content_end, line_start))
+        if line_end > line_start:
+            last_content_end = line_end
+        line_start = next_start
+    return cuts
+
+
+def _first_cut_in(cuts: list[tuple[int, int]], after: int, limit: int) -> tuple[int, int] | None:
+    """A bounding level's answer (#63): the FIRST cut with end in
+    ``(after, limit]`` — a chunk may not span a heading cut — or None."""
+    idx = 0
+    while idx < len(cuts) and cuts[idx][0] <= after:
+        idx += 1
+    if idx < len(cuts) and cuts[idx][0] <= limit:
+        return cuts[idx]
+    return None
+
+
 def _ref_chunk_hierarchical(
     text: str,
     max_chars: int,
     separators: list[str | None] | None = None,
     overlap: int = 0,
+    overlap_boundary: str = "grapheme",
 ) -> list[tuple[int, int]]:
     if text == "":
         return []
     total = len(text)
     gb = _ascii_grapheme_boundaries(text)
+    # The #63 heading level: built (eagerly, the reference's idiom)
+    # exactly when the hierarchy SPELLS it (separators=None, a None
+    # splice, or the "heading" sentinel) and the production gate would
+    # ever realize it ('#' in text — the memchr probe's oracle spelling).
+    # The held-out copy feeds the demotion check; duplicates are inert,
+    # so every spelling after the first re-appends the same list.
+    gate_open = "#" in text
+    heading_cuts_maybe = _heading_level_cuts(text) if gate_open else None
+    spelled = False
+    # The FIRST heading level's index in ``levels`` (duplicates are
+    # inert; the prediction below walks the slots up to and including
+    # this one), and per-level bounding flags (#63): the heading level
+    # cuts at its FIRST in-budget candidate (a chunk may not span a
+    # heading cut); every other level groups (the largest in-budget cut
+    # wins).
+    heading_idx: int | None = None
+    bounding: list[bool] = []
     if separators is None:
-        levels = [
-            _para_level_cuts(text),
-            _contig_level_cuts(tors.sentence_bounds(text)),
-            _contig_level_cuts(tors.word_bounds(text)),
-        ]
+        spelled = True
+        if heading_cuts_maybe is not None:
+            heading_idx = 0
+            bounding.append(True)
+        levels = (
+            ([list(heading_cuts_maybe)] if heading_cuts_maybe is not None else [])
+            + [
+                _para_level_cuts(text),
+                _contig_level_cuts(tors.sentence_bounds(text)),
+                _contig_level_cuts(tors.word_bounds(text)),
+            ]
+        )
+        bounding += [False, False, False]
     else:
         levels = []
         for entry in separators:
             if entry is None:
+                if heading_cuts_maybe is not None:
+                    spelled = True
+                    if heading_idx is None:
+                        heading_idx = len(levels)
+                    levels.append(list(heading_cuts_maybe))
+                    bounding.append(True)
                 levels.append(_para_level_cuts(text))
+                bounding.append(False)
                 levels.append(_contig_level_cuts(tors.sentence_bounds(text)))
+                bounding.append(False)
                 levels.append(_contig_level_cuts(tors.word_bounds(text)))
+                bounding.append(False)
             elif entry == "":
                 continue
+            elif entry == "heading":
+                if heading_cuts_maybe is not None:
+                    spelled = True
+                    if heading_idx is None:
+                        heading_idx = len(levels)
+                    levels.append(list(heading_cuts_maybe))
+                    bounding.append(True)
             else:
                 levels.append(_literal_level_cuts(text, entry))
+                bounding.append(False)
     # The grapheme-cut filter: a level's cut is usable only when both its
     # end and its next-start are cluster boundaries.
     levels = [[(e, nx) for e, nx in cuts if gb[e] and gb[nx]] for cuts in levels]
+    # The demotion check's input (#63): the spelled heading level's
+    # post-filter cuts (the same list production's memoized slot
+    # carries — the sentinel's level may sit mid-list, so the held-out
+    # copy is filtered separately), or None when the hierarchy spells
+    # no heading level: the pre-#63 behavior, whatever the text looks
+    # like.
+    demotion_cuts: list[tuple[int, int]] | None = None
+    if spelled and heading_cuts_maybe is not None:
+        demotion_cuts = [(e, nx) for e, nx in heading_cuts_maybe if gb[e] and gb[nx]]
     # Parallel strictly-increasing end arrays for the bisect below.
     ends = [[e for e, _ in cuts] for cuts in levels]
     # The skip maps: per level, separator matches by their cut end, only
     # for separator-dropping levels (next strictly past the end; a
     # contiguous level's cuts have next == end and never skip).
     skips = [{e: nx for e, nx in cut_list if nx > e} for cut_list in levels]
+    # #47's word-boundary end array for the "word" snap mode: the word
+    # level's own filtered cut ends, whichever hierarchy slot carried
+    # them (the boundary set is the same UAX #29 word-bounds list either
+    # way). Empty (never a boundary to snap to) when the mode is off.
+    word_ends: list[int] = []
+    if overlap_boundary == "word":
+        word_level = _contig_level_cuts(tors.word_bounds(text))
+        word_ends = [e for e, nx in word_level if gb[e] and gb[nx]]
 
     def last_at_or_before(x: int) -> int:
         for i in range(min(x, total), -1, -1):
@@ -169,13 +364,61 @@ def _ref_chunk_hierarchical(
                 return i
         return total
 
+    def _demotion_predicted_cut(after: int, limit: int) -> tuple[int, int] | None:
+        # The two-step prediction, mirrored from production's
+        # demotion_predicted_cut: (a) the STRUCTURAL TRIGGER — the
+        # heading level's own in-range cut (a closed gate or an
+        # unspelled hierarchy carries no heading level at all:
+        # demotion_cuts stays None, and heading-free text keeps the
+        # pre-#63 exit byte-for-byte; an earlier slot's cut must never
+        # demote on its own); (b) the PREDICTED VERDICT — the first
+        # verdict among the slots up to and including the heading's, in
+        # slot order: a slot COARSER than the heading (an earlier
+        # literal) legitimately preempts the heading's cut (the
+        # first-slot-with-any-verdict walk), and predicting from the
+        # heading alone would mispredict the chunk the window actually
+        # emits. A Skip verdict predicts "no push at all" — the
+        # demotion question is moot, None.
+        if demotion_cuts is None or heading_idx is None:
+            return None
+        if _first_cut_in(demotion_cuts, after, limit) is None:
+            return None
+        for lvl in range(heading_idx + 1):
+            cut_list, end_list, skip_map, is_bounding = (
+                levels[lvl],
+                ends[lvl],
+                skips[lvl],
+                bounding[lvl],
+            )
+            if after in skip_map:
+                return None
+            if is_bounding:
+                got = _first_cut_in(cut_list, after, limit)
+                if got is not None:
+                    return got
+            else:
+                idx = bisect_right(end_list, limit) - 1
+                if idx >= 0 and cut_list[idx][0] > after:
+                    return cut_list[idx]
+        return None
+
     chunks = []
     start = 0
     while start < total:
         remaining = total - start
-        if remaining <= max_chars:
-            chunks.append((start, total))
-            break
+        # #63's final-window demotion, mirrored from production in
+        # lockstep: a heading cut in range bounds the final chunk (the
+        # whole-remainder exit is a SIZE concession; the heading level's
+        # structural contract wins), gated on strict progress past the
+        # previous chunk's end (a demotion whose predicted cut cannot
+        # advance would emit a chunk contained in its predecessor — the
+        # #83 violation; the untrimmed exit keeps the ends advancing).
+        final_window = remaining <= max_chars
+        if final_window:
+            prev_end = chunks[-1][1] if chunks else 0
+            got = _demotion_predicted_cut(start, start + max_chars)
+            if got is not None and got[0] > prev_end:
+                final_window = False
         limit = start + max_chars
         # The window's verdict, mirroring production's fused per-slot
         # search: per level, the separator-at-the-window-start skip beats
@@ -185,45 +428,98 @@ def _ref_chunk_hierarchical(
         # a window that opens on a separator match has no genuine cut,
         # and the raw cut would slice the separator out as a chunk of its
         # own; the separator is dropped between chunks, so the window
-        # resumes at its end, no chunk emitted.
+        # resumes at its end, no chunk emitted. Since #103 this includes
+        # the final window: the whole-remainder exit below runs only when
+        # the search did not answer Skip. (Production wraps this search
+        # in an output-invisible necessary-condition pre-test so a
+        # whole-document budget still builds no levels; this reference
+        # runs the bare search, and the sweep holds the two equal.)
         cut = None
         skip_to = None
-        for cut_list, end_list, skip_map in zip(levels, ends, skips, strict=True):
+        for cut_list, end_list, skip_map, is_bounding in zip(
+            levels, ends, skips, bounding, strict=True
+        ):
             if start in skip_map:
                 skip_to = skip_map[start]
                 break
-            idx = bisect_right(end_list, limit) - 1
-            if idx >= 0 and cut_list[idx][0] > start:
-                cut = cut_list[idx]
-                break
+            if is_bounding:
+                # The #63 heading level's bounding answer: the FIRST
+                # in-budget cut past the window's start (a chunk may not
+                # span a heading cut), not the largest.
+                got = _first_cut_in(cut_list, start, limit)
+                if got is not None:
+                    cut = got
+                    break
+            else:
+                idx = bisect_right(end_list, limit) - 1
+                if idx >= 0 and cut_list[idx][0] > start:
+                    cut = cut_list[idx]
+                    break
         if skip_to is not None:
             start = skip_to
             continue
+        if cut is None and final_window:
+            chunks.append((start, total))
+            break
         if cut is None:
             end = last_at_or_before(limit)
             if end <= start:
                 end = first_after(start)
             cut = (end, end)
+        if final_window:
+            # The final-chunk exit (#103): the search above answered the
+            # skip question (a Skip verdict preempted this exit); the
+            # cut is discarded — the final chunk runs to the end
+            # untrimmed.
+            chunks.append((start, total))
+            break
         chunks.append((start, cut[0]))
         if overlap == 0:
             start = cut[1]
         else:
             target = max(cut[0] - overlap, 0)
             snapped = last_at_or_before(target)
+            # #47's word snap, second in the composition order: the
+            # grapheme candidate lands first, then the largest word-level
+            # cut end at or before it (or the grapheme candidate back
+            # when the word level has no boundary there); the
+            # decline-the-snap lookahead below runs on the word-snapped
+            # candidate unchanged.
+            if word_ends:
+                wi = bisect_right(word_ends, snapped) - 1
+                if wi >= 0:
+                    snapped = word_ends[wi]
             # Decline-the-snap with lookahead (#83), mirroring production:
             # the candidate is taken only when the chunk cut from it ends
             # strictly past this chunk's end; otherwise the transition
             # degrades to the zero-overlap cut.
             if total - snapped <= max_chars:
+                # The next window would be final — mirrored from the
+                # production lookahead: the #63 demotion may cut it at a
+                # heading first, and the acceptance condition needs the
+                # end the window would actually take (the same
+                # two-step prediction the loop head runs, so the two
+                # never disagree).
                 next_end = total
+                got = _demotion_predicted_cut(snapped, total)
+                if got is not None and got[0] > cut[0]:
+                    next_end = got[0]
             else:
                 next_limit = snapped + max_chars
                 next_cut = None
-                for cut_list, end_list in zip(levels, ends, strict=True):
-                    idx = bisect_right(end_list, next_limit) - 1
-                    if idx >= 0 and cut_list[idx][0] > snapped:
-                        next_cut = cut_list[idx]
-                        break
+                for cut_list, end_list, is_bounding in zip(
+                    levels, ends, bounding, strict=True
+                ):
+                    if is_bounding:
+                        got = _first_cut_in(cut_list, snapped, next_limit)
+                        if got is not None:
+                            next_cut = got
+                            break
+                    else:
+                        idx = bisect_right(end_list, next_limit) - 1
+                        if idx >= 0 and cut_list[idx][0] > snapped:
+                            next_cut = cut_list[idx]
+                            break
                 if next_cut is None:
                     end = last_at_or_before(next_limit)
                     if end <= snapped:
@@ -266,6 +562,65 @@ def _markdown(rng: random.Random) -> str:
     return "\n\n".join(parts)
 
 
+def _heading_doc(rng: random.Random) -> str:
+    """Heading-dense markdown (#63): an ATX heading line every couple of
+    paragraphs, headings directly followed by headings (empty sections),
+    trailing-hash closings, and a trailing heading (no section after
+    it) — the bounding cut, the pre-heading gap drop, and the
+    whole-document demotion all have live inputs on every cell."""
+    parts = []
+    for _ in range(rng.randint(2, 6)):
+        parts.append("#" * rng.randint(1, 6) + " " + _words(rng, rng.randint(1, 3)))
+        if rng.random() < 0.3:
+            parts.append("#" * rng.randint(1, 3) + " " + _words(rng, 1))
+        if rng.random() < 0.6:
+            parts.append(_sentences(rng, rng.randint(1, 3)))
+    if rng.random() < 0.3:
+        parts.append("## trailing heading")
+    return "\n".join(parts)
+
+
+def _markdown_redteam(rng: random.Random) -> str:
+    """The heading scan's exclusion shapes, interleaved with real
+    headings: fenced code blocks (heading-shaped comment lines inside),
+    `#no-space`, the 7-hash run, an escaped marker, a blockquote's and a
+    list item's heading, 4-space indented code, a tab-indented line, and
+    mid-line hashes. None of the excluded shapes may cut; the real
+    headings must."""
+    parts = [
+        "# Title",
+        "```python",
+        "# not a heading",
+        "## nor this",
+        "```",
+        "#no-space",
+        "####### seven hashes",
+        "\\# escaped",
+        "> # quoted",
+        "- # item",
+        "    # indented code",
+        "\t# tabbed",
+        "hash # mid-line",
+        "## closed ##",
+        _sentences(rng, rng.randint(1, 2)),
+        "## real one",
+    ]
+    order = parts[:]
+    rng.shuffle(order)
+    return "\n".join(order)
+
+
+def _markdown_crlf_headings(rng: random.Random) -> str:
+    """CRLF (and lone-CR) line endings around heading lines: the full
+    line-ending set must cut, and the dropped CRLF pair must go whole."""
+    lines = []
+    for _ in range(rng.randint(2, 5)):
+        lines.append("## " + _words(rng, rng.randint(1, 3)))
+        lines.append(_sentences(rng, rng.randint(1, 2)))
+    sep = rng.choice(["\r\n", "\r", "\n"])
+    return sep.join(lines)
+
+
 def _chat_log(rng: random.Random) -> str:
     lines = []
     for _ in range(rng.randint(3, 8)):
@@ -294,7 +649,17 @@ def _ascii_soup(rng: random.Random) -> str:
     return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 220)))
 
 
-_SHAPES = [_markdown, _chat_log, _crlf_prose, _repeated_literal, _degenerate, _ascii_soup]
+_SHAPES = [
+    _markdown,
+    _heading_doc,
+    _markdown_redteam,
+    _markdown_crlf_headings,
+    _chat_log,
+    _crlf_prose,
+    _repeated_literal,
+    _degenerate,
+    _ascii_soup,
+]
 
 # The separator pool: the default spelling, the empty hierarchy, plain
 # literals (matching and never-matching), None splices at every
@@ -322,6 +687,27 @@ _SEPARATOR_POOL: list[list[str | None] | None] = [
     ["\n", ". ", " "],
     ["\n## ", "\n\n", ". ", " "],
     ["\r\n", None, " "],
+    # The unrealized-fine-level shapes: hierarchies where a COARSER
+    # literal supplies the verdicts and a finer (or mutually overlapping)
+    # literal stays unrealized at the final window — the pre-test's
+    # literal arm answered "provably no" at `at > 0` there and pushed
+    # pure-separator chunks (the `separator_pretest_literal_at_gt_zero_
+    # may_open` pins; these pool entries keep the randomized sweep on
+    # the shape).
+    ["\n\n", "\n"],
+    ["aa", "a"],
+    ["X", "\n"],
+    ["ab", "ba", "a", "b"],
+    # The #63 heading level: the sentinel alone (heading → raw cut),
+    # sentinel + splice (== the default hierarchy), the sentinel in
+    # either position around a splice (dedup inertness), a heading
+    # level under a line literal, and the sentinel with a never-match
+    # above it.
+    ["heading"],
+    ["heading", None],
+    [None, "heading"],
+    ["\n", "heading", None],
+    ["ZZZ_NEVER_MATCHES", "heading"],
 ]
 
 _RANDOM_CASES = 3_000
@@ -336,7 +722,13 @@ class TestAsciiDifferential:
         # cut, or the overlap snap fails with the full case in the
         # message. Budgets cover 1..~80 plus the whole-document budget
         # (the single-window path); overlaps cover 0, 1, 2, and max-1
-        # (the largest legal snap-back).
+        # (the largest legal snap-back). The sweep runs both
+        # overlap_boundary modes (#47): the reference's word model is the
+        # same UAX #29 word-bounds list production reads through the
+        # hierarchy's word slot (or its one-off fallback for hierarchies
+        # with no word level), so the word-mode cells pin the snap, the
+        # decline-after-word-snap composition order, and the #103
+        # final-exit skip against it exactly as the grapheme cells do.
         rng = random.Random(SEED)
         for _ in range(_RANDOM_CASES):
             text = rng.choice(_SHAPES)(rng)
@@ -348,13 +740,21 @@ class TestAsciiDifferential:
                 [o for o in (0, 1, 2, max_chars - 1) if 0 <= o < max_chars]
             )
             separators = rng.choice(_SEPARATOR_POOL)
+            overlap_boundary = rng.choice(["grapheme", "word"])
             chunks = tors.chunk_hierarchical(
-                text, max_chars, separators=separators, overlap=overlap
+                text,
+                max_chars,
+                separators=separators,
+                overlap=overlap,
+                overlap_boundary=overlap_boundary,
             )
-            want = _ref_chunk_hierarchical(text, max_chars, separators, overlap)
+            want = _ref_chunk_hierarchical(
+                text, max_chars, separators, overlap, overlap_boundary
+            )
             assert chunks == want, (
                 f"chunk_hierarchical diverged from the reference: text={text!r} "
-                f"max_chars={max_chars} overlap={overlap} separators={separators!r}\n"
+                f"max_chars={max_chars} overlap={overlap} "
+                f"overlap_boundary={overlap_boundary!r} separators={separators!r}\n"
                 f"  got : {chunks}\n  want: {want}"
             )
 
@@ -375,14 +775,22 @@ class TestAsciiDifferential:
         for text in texts:
             for max_chars in range(1, 13):
                 for separators in (None, ["\r\n"], ["\n", None]):
-                    chunks = tors.chunk_hierarchical(
-                        text, max_chars, separators=separators
-                    )
-                    want = _ref_chunk_hierarchical(text, max_chars, separators, 0)
-                    assert chunks == want, (
-                        f"divergence: text={text!r} max_chars={max_chars} "
-                        f"separators={separators!r}: {chunks} != {want}"
-                    )
+                    for overlap_boundary in ("grapheme", "word"):
+                        chunks = tors.chunk_hierarchical(
+                            text,
+                            max_chars,
+                            separators=separators,
+                            overlap_boundary=overlap_boundary,
+                        )
+                        want = _ref_chunk_hierarchical(
+                            text, max_chars, separators, 0, overlap_boundary
+                        )
+                        assert chunks == want, (
+                            f"divergence: text={text!r} max_chars={max_chars} "
+                            f"separators={separators!r} "
+                            f"overlap_boundary={overlap_boundary!r}: "
+                            f"{chunks} != {want}"
+                        )
 
 
 # ---------------------------------------------------------------------------

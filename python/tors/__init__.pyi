@@ -119,12 +119,17 @@ def scrub_pii_report(
 
 
 # Named-rule log and exception-text scrubbing, byte-identical to the
-# TaskQ exception-text chain (the four compiled regexes this ports are
-# quoted in tests/reference.py and re-synced against the live source by
-# tests/test_scrub_log_text_parity.py). rules=None runs the full chain in
-# canonical order (pg_detail_lines -> uri_userinfo -> uri_query_creds);
-# [] is the identity; duplicates dedupe and caller order is irrelevant.
-# An unknown name raises ValueError naming the accepted set.
+# grammar definition it ships with (the four compiled regexes are quoted
+# in tests/reference.py and differentially enforced by
+# tests/test_scrub_log_text_parity.py). rules=None
+# runs the full chain in canonical order (pg_detail_lines -> uri_userinfo
+# -> the conninfo pass, whose uri_query_creds / libpq_conninfo_creds names
+# select the two anchor grammars of ONE pass); [] is the identity;
+# duplicates dedupe and caller order is irrelevant. An unknown name raises
+# ValueError naming the accepted set. SECURITY POLICY (issue #107,
+# inverting 0.7.0): the repr-flattened DETAIL run is FAIL-CLOSED — a
+# delimiter miss (an unterminated repr, or one with text after the quote)
+# scrubs through end of line, never left alone.
 # tors.scrub_log_text(s, rules) is s exactly when no rule fires (the ***
 # fixed points fire and return a fresh, equal string).
 #
@@ -132,7 +137,10 @@ def scrub_pii_report(
 # GIL, the whole multi-rule pass under one detach).
 def scrub_log_text(
     text: str,
-    rules: Sequence[Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds"]] | None = None,
+    rules: Sequence[
+        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+    ]
+    | None = None,
 ) -> str: ...
 def nfc(text: str) -> str: ...
 def nfd(text: str) -> str: ...
@@ -188,6 +196,24 @@ def decode_utf16(
 def utf16_is_valid(
     raw: bytes, *, byteorder: Literal["native", "little", "big"] = "native"
 ) -> bool: ...
+
+# The RFC 8259 validity gate: True exactly when orjson.loads(data) would
+# succeed -- the acceptance set is orjson 3.x's, not the stdlib's (three
+# classes differ from json.loads: float-overflow literals reject -- 1e400
+# and friends, where the stdlib hands back inf; NaN/Infinity/-Infinity
+# reject; a leading UTF-8 BOM rejects), because the gate stands in front
+# of a parse-and-discard consumer whose next step IS orjson.loads. Booleans
+# only: invalid input answers False (the 1024-container depth cap, orjson's,
+# included) -- nothing raises for invalid input; a wrong-TYPE argument
+# (not bytes, not str) raises TypeError like the bytes-in surface.
+#
+# GIL note: utf8_is_valid's class for a bytes argument (zero-copy borrow,
+# one detached scan, a bool return -- no marshalling class at all); a str
+# argument pays the standard str-in borrow first under the GIL (zero-copy
+# for ASCII or an already-cached UTF-8 view, a one-time O(input)
+# materialization on the first non-ASCII call, cached on the object), then
+# the scan detaches. No aio twin (see docs/async.md).
+def json_is_valid(data: bytes | str) -> bool: ...
 
 # A heuristic guess, not a validator: the intended pipeline is utf8_is_valid
 # first, and detect_encoding only on bytes that already failed that check.
@@ -305,8 +331,8 @@ def find_unescaped(haystack: bytes, needle: bytes) -> int: ...
 
 # The scan surface's pinned companion (#52): the UTF-8 byte length of a
 # str — len(s.encode("utf-8")) with the copy taken out. The count a
-# caller wants when a size cap sits in front of a store (TaskQ's
-# idempotency-key/scope byte caps per enqueue, the terminal's re-encode
+# caller wants when a size cap sits in front of a store (an enqueue
+# path's idempotency-key/scope byte caps per enqueue, the terminal's re-encode
 # of a serialized result of up to 64 KiB per success — a double pass:
 # the byte count existed inside the serializer's output and was
 # discarded by the .decode()). Companion, not standalone: it ships in
@@ -995,24 +1021,48 @@ def chunk_by_lines_iter(
 # Priority-ordered fallback chunking (LangChain's RecursiveCharacterTextSplitter
 # pattern): cut at the coarsest level that fits max_chars, falling back to
 # finer levels only when a coarser one has no in-budget cut. separators=None
-# uses tors's own accurate hierarchy (paragraph -> sentence -> word -> a
-# grapheme-safe raw cut, always the final unconditional fallback).
+# uses tors's own accurate hierarchy (heading -> paragraph -> sentence ->
+# word -> a grapheme-safe raw cut, always the final unconditional fallback).
+# The heading level (#63) bounds chunks at ATX markdown heading lines: a
+# section's content never merges across a heading of higher rank, each cut
+# lands before the heading (the heading rides with the section that follows
+# it, the pre-heading newline run dropped), and a whole-document budget over
+# a heading-bearing document comes back as its sections, not one giant chunk.
+# The level is ATX-only (verified against the documents engines' emitters,
+# which all emit ATX: setext underlines are excluded), tracks fenced code
+# blocks (a '# comment' inside a fence is code, not a heading), and is
+# gated: text with no '#' byte never realizes it, so heading-free input
+# chunks exactly as the pre-#63 hierarchy did. Precedence: budget > heading
+# > paragraph > sentence > word (a section wider than max_chars still
+# splits at finer levels).
 # separators=[...] is a caller-supplied sequence of literal strings (not
 # regex), any Sequence (list or tuple) of literals and None entries; str,
 # dict, set, and generators raise TypeError at extraction, coarsest first,
 # e.g. ["\n## ", "\n\n", ". ", " "] for markdown-header-aware
 # chunking: replaces the default hierarchy, but the raw cut is still always
 # appended. A None entry in an otherwise-literal sequence splices the default
-# hierarchy's three accurate levels in at that position: ["\n", None] is
-# line -> paragraph -> sentence -> word -> raw cut, the line-oriented-text
-# shape (a chat thread, one message per line, never split mid-line) whose
-# oversized-line fallback is the real UAX #29 segmenter rather than the
-# ". "/" " literal guesses an all-literal list pins it to; [None] is
-# identical to separators=None. Not a lossless partition (unlike
+# hierarchy's accurate levels in at that position: ["\n", None] is
+# line -> heading -> paragraph -> sentence -> word -> raw cut, the
+# line-oriented-text shape (a chat thread, one message per line, never split
+# mid-line) whose oversized-line fallback is the real UAX #29 segmenter
+# rather than the ". "/" " literal guesses an all-literal list pins it to;
+# [None] is identical to separators=None. The reserved literal "heading" is
+# the heading level itself (the explicit opt-in for custom hierarchies), not
+# a split on the word. Not a lossless partition (unlike
 # chunk_text): the separator itself is dropped between chunks, the same
-# chunk_by_paragraphs convention. overlap snaps to the nearest grapheme
-# boundary (not necessarily a semantic one, a documented simplification of
-# chunk_text_overlapping's single-level snap). max_chars < 1 or overlap < 0
+# chunk_by_paragraphs convention. Since #103 that includes the final
+# window: a window that opens on a separator match is skipped even at the
+# final-chunk exit, so a trailing separator run survives only as a suffix
+# of a content-bearing chunk and an all-separator document chunks to zero
+# chunks. overlap snaps to the nearest grapheme boundary (not necessarily
+# a semantic one, a documented simplification of chunk_text_overlapping's
+# single-level snap); overlap_boundary="word" additionally snaps that
+# candidate back to the nearest UAX #29 word boundary (the word-bounds
+# level, realized lazily and shared with the windows; falls back to the
+# grapheme candidate when the word level has no boundary in the
+# snap-back range, and is a no-op at overlap=0); the decline-the-snap
+# lookahead runs after the word snap, unchanged. Unknown overlap_boundary
+# values raise ValueError. max_chars < 1 or overlap < 0
 # raise ValueError; overlap >= max_chars raises ValueError. Empty text
 # returns []; an empty separators sequence is legal and skips straight to the
 # raw-cut fallback.
@@ -1022,6 +1072,7 @@ def chunk_hierarchical(
     separators: Sequence[str | None] | None = None,
     *,
     overlap: int = 0,
+    overlap_boundary: Literal["grapheme", "word"] = "grapheme",
 ) -> list[tuple[int, int]]: ...
 
 # GIL note: the whole tokenize (UAX #29 words) + FNV-1a hash + 64-bit vote

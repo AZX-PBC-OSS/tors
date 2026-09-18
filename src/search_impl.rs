@@ -331,12 +331,91 @@ pub fn count_matches(patterns: &[&str], text: &str) -> Result<usize, BuildError>
 pub fn replace_many<'a>(
     text: &'a str,
     replacements: &[(&str, &str)],
-) -> Result<Cow<'a, str>, BuildError> {
+) -> Result<Cow<'a, str>, ReplaceError> {
     let keys: Vec<&str> = replacements.iter().map(|(key, _)| *key).collect();
     let ac = build_leftmost(&keys)?;
     let values = first_values(replacements);
-    Ok(scan_replace(&ac, &values, text))
+    scan_replace(&ac, &values, text)
 }
+
+/// The replace family's failure set, mapped by the pyo3 wrappers to a
+/// catchable `ValueError` (each variant's `Display` is the message):
+///
+/// * [`ReplaceError::Build`]: the automaton build hit an engine limit
+///   (the pre-ceiling failure, unchanged).
+/// * [`ReplaceError::OutputOverCeiling`]: the spliced output's byte size,
+///   computed BEFORE anything is allocated (saturating arithmetic over
+///   the match spans), over [`MAX_OUTPUT_BYTES`]. This is the #114 fix:
+///   the pre-fix splice built whatever the match count times the values
+///   asked for — `"a"*1000` with `{"a": "y"*40_000_000}` asked for ~40GB,
+///   a 40GB string on a roomy host, an uncatchable allocator ABORT on a
+///   constrained one.
+/// * [`ReplaceError::ReservationRefused`]: the allocator refused a
+///   SUB-ceiling reservation (`try_reserve`, not `with_capacity`, so the
+///   refusal is this catchable error, never an abort).
+#[derive(Debug)]
+pub enum ReplaceError {
+    /// The automaton build failed on an engine limit.
+    Build(BuildError),
+    /// The computed output size is over [`MAX_OUTPUT_BYTES`].
+    OutputOverCeiling { requested: usize },
+    /// The allocator refused the output reservation (under the ceiling).
+    ReservationRefused { requested: usize },
+}
+
+impl std::fmt::Display for ReplaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReplaceError::Build(err) => write!(f, "{err}"),
+            ReplaceError::OutputOverCeiling { requested } => write!(
+                f,
+                "replace_many output would be {requested} bytes: refusing an output \
+                 above the {}-byte ceiling (docs/api.md); split the call or shorten \
+                 the replacement values",
+                MAX_OUTPUT_BYTES
+            ),
+            ReplaceError::ReservationRefused { requested } => write!(
+                f,
+                "replace_many could not reserve {requested} bytes for the output \
+                 (the allocator refused a reservation under the ceiling)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReplaceError {}
+
+impl From<BuildError> for ReplaceError {
+    fn from(err: BuildError) -> Self {
+        ReplaceError::Build(err)
+    }
+}
+
+/// The replace output's byte ceiling: [`scan_replace`] computes the
+/// spliced output's size first and refuses over this with a catchable
+/// `ValueError` ([`ReplaceError::OutputOverCeiling`]) — the #114 fix, the
+/// short-key-huge-value amplification (`"a"*1000` with a 40MB value asked
+/// for ~40GB in one allocation: a 40GB string on a roomy host, an
+/// uncatchable allocator abort on a constrained one). The value is the
+/// documents layer's own byte contract (`DEFAULT_ANYDOC_INPUT_LIMIT`,
+/// 32 MiB, src/documents_impl.rs): the largest input this crate
+/// documentarily handles, adopted here for the largest output it will
+/// build — one convention for "how many bytes is one tors object", not a
+/// new number to reason about. The unit is UTF-8 BYTES (the scan and the
+/// splice run on the text's UTF-8 buffer; the documented ceiling in
+/// docs/api.md is the same unit). Deliberately a hard, documented
+/// constant rather than configurable: the honest contract a caller can
+/// plan around (the issue's own framing — a hard ceiling rejects a
+/// legitimately huge-but-wanted replace, so it is named, documented, and
+/// surfaced with the refused size in the error).
+///
+/// The masked spelling needs NO ceiling and has none: it is
+/// length-preserving (`replace_many_masked`'s length proof — the output's
+/// byte and character size are the input's plus at most the mask's
+/// per-match delta, every span replaced by exactly its own length), so a
+/// short key cannot amplify into a long output; the per-match TIME bound
+/// is the only resource the masked splice consumes (issue #101's lane).
+pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 
 /// The shared splice of the replace side: [`replace_many`]'s scan over a
 /// built automaton and a validated `values` map (key string to the first
@@ -345,38 +424,68 @@ pub fn replace_many<'a>(
 /// automaton only matches keys the map carries). Driven identically by
 /// the free spelling and the compiled one, with the identity-return
 /// contract (the `Cow` convention) intact on both lanes.
+///
+/// Bounded (the #114 fix): the output's byte size is computed FIRST — one
+/// pass over the matches with saturating adds, gap bytes plus value
+/// bytes plus the tail — and refused past [`MAX_OUTPUT_BYTES`] with
+/// [`ReplaceError::OutputOverCeiling`] BEFORE anything is allocated; the
+/// allocation itself is `try_reserve` (exact size, no doubling
+/// overshoot), and an allocator refusal under the ceiling surfaces as
+/// [`ReplaceError::ReservationRefused`], a catchable error, never an
+/// abort. A no-match call returns the input borrowed before any of that
+/// arithmetic (an empty map or a quiet text cannot overflow anything).
+/// The net-identity lane is unchanged for outputs under the ceiling (the
+/// `out == text` comparison); an output OVER the ceiling raises where
+/// the pre-fix code would have built it and returned the input — the
+/// documented price of the ceiling (docs/api.md), and the honest one: an
+/// identity replace over the ceiling is the amplification shape wearing a
+/// disguise.
 fn scan_replace<'a>(
     ac: &aho_corasick::AhoCorasick,
     values: &HashMap<&str, &str>,
     text: &'a str,
-) -> Cow<'a, str> {
-    // text.len() is a good starting capacity for most workloads (replacement
-    // values are typically comparable in length to the keys they replace);
-    // a bigger swing still amortizes via the normal growth doubling, but this
-    // avoids the small-capacity reallocations that plain `String::new()`
-    // pays on every splice-heavy call, the same reservation the crate's
-    // other splice-building functions make (url_impl, html_impl,
-    // normalize_impl, pipeline_impl).
-    let mut out = String::with_capacity(text.len());
+) -> Result<Cow<'a, str>, ReplaceError> {
+    // Pass 1: the output size, saturating — a match count times a value
+    // length cannot be allowed to wrap (the wrap is the bug this fixes).
+    let mut out_len: usize = 0;
     let mut last = 0usize;
     let mut matched = false;
+    for m in ac.find_iter(text) {
+        matched = true;
+        out_len = out_len.saturating_add(m.start() - last);
+        out_len = out_len.saturating_add(values[&text[m.start()..m.end()]].len());
+        last = m.end();
+    }
+    if !matched {
+        return Ok(Cow::Borrowed(text));
+    }
+    out_len = out_len.saturating_add(text.len() - last);
+    if out_len > MAX_OUTPUT_BYTES {
+        return Err(ReplaceError::OutputOverCeiling { requested: out_len });
+    }
+    // Pass 2: the splice into an exactly-reserved buffer. try_reserve, not
+    // with_capacity: an allocator refusal under the ceiling is a catchable
+    // error, never an abort (the issue's own framing).
+    let mut out = String::new();
+    out.try_reserve(out_len)
+        .map_err(|_| ReplaceError::ReservationRefused { requested: out_len })?;
+    let mut matched = false;
+    let mut last = 0usize;
     for m in ac.find_iter(text) {
         matched = true;
         out.push_str(&text[last..m.start()]);
         out.push_str(values[&text[m.start()..m.end()]]);
         last = m.end();
     }
-    if !matched {
-        return Cow::Borrowed(text);
-    }
+    let _ = matched;
     out.push_str(&text[last..]);
     // The identity contract's second lane: a replacement whose net effect is
     // the identity (value == key, or mutually-cancelling splices) hands back
     // the input itself rather than a byte-identical copy of it.
     if out == text {
-        return Cow::Borrowed(text);
+        return Ok(Cow::Borrowed(text));
     }
-    Cow::Owned(out)
+    Ok(Cow::Owned(out))
 }
 
 /// The length-preserving redaction spelling of [`replace_many`]: the same
@@ -707,8 +816,16 @@ impl CompiledPatterns {
     }
 
     /// The replace spelling: [`replace_many`]'s scan over the held
-    /// automaton and the validated call-time values.
-    pub fn replace_many<'a>(&self, text: &'a str, values: &HashMap<&str, &str>) -> Cow<'a, str> {
+    /// automaton and the validated call-time values. Fallible for the
+    /// splice bounds only (the build already happened): the computed
+    /// output over [`MAX_OUTPUT_BYTES`], or the allocator refusing the
+    /// reservation — [`ReplaceError`], the free spelling's error type, so
+    /// both wrappers map one set of messages to `ValueError`.
+    pub fn replace_many<'a>(
+        &self,
+        text: &'a str,
+        values: &HashMap<&str, &str>,
+    ) -> Result<Cow<'a, str>, ReplaceError> {
         scan_replace(&self.ac, values, text)
     }
 
@@ -1753,7 +1870,9 @@ mod tests {
                 .replace_values(set)
                 .unwrap_or_else(|err| panic!("validation failed on {set:?}: {}", err.message()));
             for text in &texts {
-                let got = cp.replace_many(text, &values_map);
+                let got = cp
+                    .replace_many(text, &values_map)
+                    .unwrap_or_else(|err| panic!("splice refused on {text:?}: {err}"));
                 let want = replace(set, text);
                 assert_eq!(&*got, &*want, "pairs {set:?} over {text:?}");
                 assert_eq!(
@@ -1850,10 +1969,133 @@ mod tests {
             );
             assert_eq!(cp.count(&text), count(&patterns, &text), "case {case}");
             assert_eq!(
-                &*cp.replace_many(&text, &values),
-                &*replace(&pairs, &text),
+                cp.replace_many(&text, &values)
+                    .unwrap_or_else(|err| panic!("splice refused on {text:?}: {err}")),
+                replace(&pairs, &text),
                 "case {case}: {text:?}"
             );
         }
+    }
+
+    // --- the output ceiling (issue #114) --------------------------------
+    //
+    // The splice's size is computed before anything is allocated and
+    // refused past MAX_OUTPUT_BYTES; a sub-ceiling allocator refusal is a
+    // catchable error via try_reserve. The boundary pins below build
+    // 32 MiB outputs (the ceiling's exact width) — a few hundred ms of
+    // scan, one 32 MiB buffer, no more.
+
+    #[test]
+    fn the_output_ceiling_is_exact_at_the_boundary() {
+        // output == ceiling: succeeds. text.len() == MAX_OUTPUT_BYTES with
+        // a 1-byte value keeps the splice's arithmetic exactly on the
+        // boundary.
+        let text = "a".repeat(MAX_OUTPUT_BYTES);
+        let got = replace_many(&text, &[("a", "b")]).expect("the exact ceiling must succeed");
+        assert_eq!(got.len(), MAX_OUTPUT_BYTES);
+        // ceiling + 1: refused, nothing built.
+        let text = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let err = replace_many(&text, &[("a", "b")]).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { requested } if requested == MAX_OUTPUT_BYTES + 1),
+            "ceiling+1 must name the refused size: {err}"
+        );
+    }
+
+    #[test]
+    fn the_reported_short_key_huge_value_bomb_is_refused() {
+        // The reported repro, exact: 1000 matches x a 40MB value asked for
+        // ~40GB. The size pass refuses it before any allocation; the error
+        // names the ceiling so the caller can plan around it.
+        let text = "a".repeat(1000);
+        let err = replace_many(&text, &[("a", &"y".repeat(40_000_000))]).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("ceiling"), "{err}");
+    }
+
+    #[test]
+    fn many_short_matches_cannot_amplify_past_the_ceiling() {
+        // The amplification axis the boundary pin does not cover: MANY
+        // matches, each adding a few bytes. 1M matches x 40 bytes = 40MB
+        // (over), refused with the computed size; the same shape under the
+        // ceiling still works.
+        let text = "a".repeat(1_000_000);
+        let err = replace_many(&text, &[("a", &"y".repeat(40))]).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { .. }),
+            "{err}"
+        );
+        let ok = replace_many(&text, &[("a", &"y".repeat(8))]).expect("under the ceiling");
+        assert_eq!(ok.len(), 8_000_000);
+    }
+
+    #[test]
+    fn multibyte_values_land_whole_at_the_ceiling() {
+        // The Unicode red-team: the ceiling is in BYTES (the scan's unit),
+        // and no value is ever truncated mid-character — values are
+        // written whole or the call is refused. A multibyte-value map
+        // whose computed size lands exactly on the ceiling splices
+        // byte-exactly and the output stays valid UTF-8.
+        let pairs = 16_777_216usize; // 32MiB / 2
+        let text = "é".repeat(pairs); // 2 bytes per key
+        // A 2-byte value that differs from its key: the splice lands
+        // byte-exactly on the ceiling, multibyte values whole.
+        let got = replace_many(&text, &[("é", "ß")])
+            .expect("the exact ceiling must succeed with multibyte values");
+        assert_eq!(got.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(got, "ß".repeat(pairs));
+        let err = replace_many(&text, &[("é", "béé")]).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_identity_output_over_the_ceiling_is_refused_too() {
+        // The documented price: the ceiling applies to the computed size,
+        // before the identity comparison can return the input borrowed —
+        // a >ceiling "identity" replace is the amplification shape
+        // wearing a disguise (value == key over 33M matches).
+        let text = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let err = replace_many(&text, &[("a", "a")]).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_masked_spelling_has_no_ceiling_because_it_cannot_amplify() {
+        // Length-preserving: the output's byte size is the input's, so a
+        // short key cannot amplify and the masked splice runs uncapped
+        // (the ceiling lives in scan_replace only). 33 MiB in, 33 MiB out.
+        let text = "a".repeat(MAX_OUTPUT_BYTES + 1);
+        let masked = replace_many_masked(&text, &[("a", "x")], '*')
+            .unwrap_or_else(|err| panic!("masked splice refused: {err}"));
+        assert_eq!(masked.len(), text.len());
+    }
+
+    #[test]
+    fn the_compiled_spelling_shares_the_ceiling() {
+        // One splice, one bound: the compiled lane refuses identically
+        // (the identity contract with the free spelling extends to the
+        // refusal).
+        let cp = CompiledPatterns::build(&["a"]).expect("build");
+        let value = "y".repeat(40);
+        let values_map = cp
+            .replace_values(&[("a", &value)])
+            .unwrap_or_else(|err| panic!("validation failed: {}", err.message()));
+        let text = "a".repeat(1_000_000);
+        let err = cp.replace_many(&text, &values_map).unwrap_err();
+        assert!(
+            matches!(err, ReplaceError::OutputOverCeiling { .. }),
+            "{err}"
+        );
+        let free_err = replace_many(&text, &[("a", &value)]).unwrap_err();
+        assert_eq!(err.to_string(), free_err.to_string());
     }
 }

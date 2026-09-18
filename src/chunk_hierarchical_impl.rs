@@ -12,14 +12,19 @@
 //! single boundary list, and it earns its own "one concern per file" home
 //! the same separation unit-count chunking already has.
 //!
-//! Default hierarchy (`separators = None`): paragraph → sentence → word →
-//! grapheme-safe raw cut, reusing tors's own accurate segmenters
-//! ([`crate::chunk_by_segment_impl::paragraph_bounds`],
+//! Default hierarchy (`separators = None`): heading → paragraph →
+//! sentence → word → grapheme-safe raw cut, reusing tors's own accurate
+//! segmenters ([`crate::chunk_by_segment_impl::paragraph_bounds`],
 //! [`crate::segmentation_impl::sentence_bounds`],
 //! [`crate::segmentation_impl::word_bounds`]) rather than the naive literal
 //! guesses (`"\n\n"`, `". "`, `" "`) LangChain's own default falls back to:
 //! tors already has real UAX #29 segmentation, so the default hierarchy
-//! uses it.
+//! uses it. The heading level (#63) sits above the paragraph level: a
+//! document's heading structure bounds chunks so a section's content never
+//! merges across a heading of higher rank. It is gated (see the
+//! `LevelSpec::Heading` docs): its spec is always in the list, but a
+//! provably heading-free text never realizes it and never pays its scan,
+//! so heading-free input chunks exactly as the pre-#63 hierarchy did.
 //!
 //! Custom hierarchy (`separators = Some(list)`): a caller-supplied list of
 //! literal strings (not regex, a documented scope line: literals are
@@ -72,6 +77,70 @@
 //! ~176 ms and ~45 MiB on levels that supplied zero cuts); the lazy
 //! realization removes the paid-for-nothing cost.
 //!
+//! The heading level (#63), precisely: one cut per ATX heading line, the
+//! cut pair `(gap_start, heading_start)` — the chunk before the heading
+//! ends where the newline run between it and the heading begins (dropped
+//! between chunks, the paragraph gap's own convention; when the heading
+//! follows a blank-line run its cut IS that paragraph gap's cut), the
+//! next chunk resumes AT the heading line's first codepoint (the heading
+//! rides with the section that follows it: a heading is content at this
+//! level, not a dropped separator). The level is BOUNDING: each window's
+//! cut is the FIRST heading in range, never a later one — no chunk spans
+//! a heading cut, so a section's content never merges across a heading
+//! of higher rank even when the budget could hold several sections (the
+//! budget bounds oversized sections; the heading bounds ordinary ones).
+//! The level is ATX-only for v1, verified against the markdown the
+//! documents engines actually emit: pdf_oxide's `StructType::markdown_prefix`
+//! writes `"# "`..`"###### "`, anydoc's markdown renderer writes
+//! `"#".repeat(level) + " "`, and html-to-markdown-rs's
+//! `HeadingStyle::default()` is `Atx` (its `Underlined` style is an
+//! opt-in option, not an output any tors pipeline requests), so
+//! setext underlines (`===`/`---` runs under a paragraph line) are
+//! excluded: they are ambiguous with thematic breaks and the
+//! front-matter/list shapes a naive scan would misread, and no
+//! engine this crate ships emits them. A heading line is 1-3 leading
+//! ASCII spaces, then 1-6 `#`, then a space, a tab, or end of line
+//! (CommonMark's ATX shape: `#heading` without the space, a 7-hash
+//! run, an escaped `\#`, a blockquote's `> # x`, a list item's
+//! `- # x`, and 4-space indented code are all ordinary content, and
+//! lines inside fenced code blocks never count — the fence state
+//! machine is `fence_impl`'s own `match_open_fence`/`is_closing_fence`,
+//! the exact CommonMark §4.5 logic `extract_code_blocks` ships). Line
+//! endings are LF, CRLF, and lone CR (CommonMark's line-ending set);
+//! the scan is one linear byte walk, byte offset and codepoint offset
+//! tracked together (`char_count`'s continuation-byte predicate;
+//! pure-ASCII text answers byte offsets directly). The level is
+//! gated on a cheap necessary condition, memoized per call: no `#`
+//! byte anywhere in the text (`memchr`, one pass) means no ATX
+//! heading line can exist, so the heading slot is provably inert and
+//! is never realized — heading-free text keeps the pre-#63 zero-build
+//! contract exactly. A heading cut blocks the whole-document
+//! chunk too: the final-chunk-runs-untrimmed exception is a SIZE
+//! concession (don't chop a fitting remainder for budget reasons),
+//! while a heading cut is the level's structural contract, so a
+//! window whose range contains a heading cut is demoted from the
+//! final exit and splits at the heading — a heading-bearing document
+//! under a whole-document budget comes back as its sections, not one
+//! giant chunk (heading-free text demotes nothing: the gate answers
+//! no before any scan beyond the `#` probe). Precedence is budget >
+//! heading > paragraph > sentence > word: the heading level is only
+//! the coarsest candidate source, a window too small for the section
+//! still splits at finer levels or the raw cut (`max_chars` wins over
+//! section integrity), and the grapheme-safe raw cut stays the
+//! unconditional last fallback. Overlap snaps may pull a chunk's
+//! start back before a heading cut (the overlap tail duplicates the
+//! previous section's tail by design); the cuts themselves always
+//! land on heading starts. The explicit opt-in for custom hierarchies
+//! is the reserved literal `"heading"`: a `separators` entry spelled
+//! exactly `Some("heading")` is the heading level, not a literal
+//! split on the word — the one piece of string-sentinel API surface
+//! the level adds, documented here and in `docs/api.md` (the word
+//! "heading" is reserved; a caller who truly needs to split on it can
+//! spell the literal in different case). A duplicate heading spec
+//! (the sentinel above a `None` splice, the splice above the
+//! sentinel, a repeated sentinel) dedups exactly like a duplicate
+//! literal or `None`.
+//!
 //! Unlike [`crate::chunk_impl::chunk_text`] (a lossless covering
 //! partition), this is not lossless: at every level except the raw-cut
 //! fallback, the separator itself is dropped between chunks (the chunk
@@ -122,6 +191,7 @@ use std::collections::HashSet;
 use memchr::memmem;
 
 use crate::chunk_by_segment_impl::paragraph_bounds;
+use crate::fence_impl::{OpenFence, is_closing_fence, match_open_fence};
 use crate::segmentation_impl;
 use crate::truncate_impl::{GraphemeIndex, char_count};
 
@@ -129,9 +199,37 @@ use crate::truncate_impl::{GraphemeIndex, char_count};
 /// cut_end` always: equal for contiguous segmenters (word/sentence bounds,
 /// where there is no gap to drop), strictly greater when a separator's own
 /// content is dropped between chunks (paragraph gaps, custom literal
-/// separators).
+/// separators, the heading level's pre-heading newline run).
+///
+/// `bounding` is #63's heading-level semantics: a BOUNDING level cuts at
+/// its FIRST candidate past `after` (in budget), where the candidate
+/// levels cut at their LARGEST in-budget one. The distinction is the
+/// level's contract: a heading bounds the chunk — a section's content
+/// never merges across a heading of higher rank, so no chunk may span a
+/// heading cut, and the first heading in range ends the chunk even when
+/// the budget could hold several sections (the budget bounds oversized
+/// sections, the heading bounds ordinary ones). The candidate levels
+/// group instead: paragraph gaps, sentence ends, word ends, and literal
+/// matches are preferences, and the largest in-budget one is the
+/// best-filling cut the level's semantics allow (merging across a
+/// paragraph gap is what the paragraph level is FOR).
 struct Level {
     cuts: Vec<(usize, usize)>,
+    /// The skip question's extra rows (literal levels only, empty
+    /// elsewhere): every match's `(start, end)` INCLUDING the overlapping
+    /// ones. A start inside another match's span is never a CUT candidate
+    /// ([`Self::best_cut`] never sees it — a chunk boundary there leaks
+    /// the earlier match's material into the chunk), but a snap-landed
+    /// window start can sit on one, and the #103 skip must fire wherever
+    /// a match begins. Same `(end, next)` shape and the same grapheme
+    /// filter as `cuts`.
+    skip_starts: Vec<(usize, usize)>,
+    /// The heading level's own flag: the FIRST in-range cut wins (a chunk
+    /// never spans a heading cut even when the budget could hold several
+    /// sections), where the other levels take the LARGEST in-range cut
+    /// (merging across a paragraph gap is what the paragraph level is
+    /// for).
+    bounding: bool,
 }
 
 /// One window's outcome from the level search: a genuine cut (the chunk
@@ -149,10 +247,21 @@ enum Verdict {
 }
 
 impl Level {
-    /// The largest `(cut_end, next_start)` with `cut_end <= limit` and
-    /// `cut_end > after` (genuine forward progress): `None` if this level
-    /// has no such candidate for the current window.
+    /// The level's `(cut_end, next_start)` for the window `(after,
+    /// limit)`: a candidate level answers its LARGEST cut with
+    /// `cut_end <= limit` and `cut_end > after` (genuine forward
+    /// progress); a bounding level (#63's heading level) its FIRST cut
+    /// in `(after, limit]` (a chunk may not span a heading cut — see
+    /// [`Level`]'s `bounding` doc). `None` if the level has no such
+    /// candidate for the window.
     fn best_cut(&self, after: usize, limit: usize) -> Option<(usize, usize)> {
+        if self.bounding {
+            let lo = self.cuts.partition_point(|&(end, _)| end <= after);
+            return match self.cuts.get(lo) {
+                Some(&(end, next)) if end <= limit => Some((end, next)),
+                _ => None,
+            };
+        }
         let hi = self.cuts.partition_point(|&(end, _)| end <= limit);
         if hi > 0 && self.cuts[hi - 1].0 > after {
             Some(self.cuts[hi - 1])
@@ -172,7 +281,21 @@ impl Level {
     /// the window loop skips before it ever searches for a cut.
     fn skip_cut(&self, at: usize) -> Option<usize> {
         let lo = self.cuts.partition_point(|&(end, _)| end < at);
-        match self.cuts.get(lo) {
+        if let Some(&(end, next)) = self.cuts.get(lo)
+            && end == at
+            && next > at
+        {
+            return Some(next);
+        }
+        // The overlapping-match rows: a start inside another match's span
+        // never reached `cuts` (the selection path's own correctness), so
+        // the skip question answers from the second list — the smoke
+        // fuzzer's crash: sep "%%" over "%%%%%", matches at 0 and 2 in
+        // `cuts`, the snap-landed start 3 (the overlapping match 3-5)
+        // found no cut and the final exit pushed (3, 5), a chunk that IS
+        // the separator.
+        let lo = self.skip_starts.partition_point(|&(end, _)| end < at);
+        match self.skip_starts.get(lo) {
             Some(&(end, next)) if end == at && next > at => Some(next),
             _ => None,
         }
@@ -186,6 +309,10 @@ impl Level {
 fn level_from_contiguous_bounds(bounds: Vec<(usize, usize)>) -> Level {
     Level {
         cuts: bounds.into_iter().map(|(_, end)| (end, end)).collect(),
+        // Contiguous segmenters have no dropped spans: every cut is both
+        // a boundary and a resume point, and no match shape exists.
+        skip_starts: Vec::new(),
+        bounding: false,
     }
 }
 
@@ -201,18 +328,37 @@ fn level_from_paragraph_bounds(bounds: Vec<(usize, usize)>) -> Level {
         .windows(2)
         .map(|w| (w[0].1, w[1].0))
         .collect::<Vec<_>>();
-    Level { cuts }
+    Level {
+        cuts,
+        skip_starts: Vec::new(),
+        bounding: false,
+    }
 }
 
-/// A literal separator into a [`Level`]: every non-overlapping match's
-/// `(start, end)` in codepoint units: the chunk ends at the match start
-/// (the separator is not part of either chunk), the next chunk resumes at
-/// the match end (the separator is dropped, the same convention
-/// [`level_from_paragraph_bounds`] already applies to blank-line runs).
-/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way:
-/// std's `match_indices` runs the same algorithm without the SIMD skip
-/// and crawls on degenerate repeated-byte documents), converted from byte
-/// to codepoint offsets in the same forward walk (no second pass).
+/// A literal separator into a [`Level`]: every match's `(start, end)` in
+/// codepoint units — OVERLAPPING matches included (see below) — the chunk
+/// ends at the match start (the separator is not part of either chunk),
+/// the next chunk resumes at the match end (the separator is dropped, the
+/// same convention [`level_from_paragraph_bounds`] already applies to
+/// blank-line runs). One `memchr::memmem` pass over the whole text
+/// (SIMD-skipped two-way: std's `match_indices` runs the same algorithm
+/// without the SIMD skip and crawls on degenerate repeated-byte
+/// documents), converted from byte to codepoint offsets in the same
+/// forward walk (no second pass).
+///
+/// The enumeration is OVERLAPPING, one char boundary per recorded match —
+/// `memmem::find_iter`'s non-overlapping resume is the #103 relapse the
+/// smoke fuzzer found: with separator `"%%"` over `"%%%%%"`, `find_iter`
+/// sees matches at 0 and 2 and misses the one at 3 (chars 3-4); an
+/// overlap-snap-landed window start at 3 then consulted the cut list,
+/// found no match, and the final exit pushed `(3, 5)` — a chunk that IS
+/// the separator. The skip question ("could a match begin at `at`?") is
+/// answered from these cuts, so the cuts must carry every match a
+/// snap-landed start can open on; the window walk itself reaches the
+/// overlapping rows only through that skip (a walk that lands past a
+/// match's first char is always past the match's start, so the extra
+/// rows are pure skip candidates — the walk's `next_start` stays
+/// strictly monotone, its chunk spans stay disjoint).
 fn level_from_literal(text: &str, separator: &str) -> Level {
     if separator.is_empty() {
         // An empty literal matches everywhere and cuts nothing meaningful
@@ -220,23 +366,212 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
         // fallback," which this crate provides unconditionally via the
         // grapheme-safe hard cut instead); an explicit no-op level rather
         // than a pathological infinite-candidate one.
-        return Level { cuts: Vec::new() };
+        return Level {
+            cuts: Vec::new(),
+            skip_starts: Vec::new(),
+            bounding: false,
+        };
     }
     // Every match of a literal needle is the needle: its char length is a
     // loop-invariant, counted once.
     let sep_chars = separator.chars().count();
+    // The SELECTION rows first: the NON-overlapping matches, exactly
+    // `memmem::find_iter`'s enumeration — a chunk boundary may land only
+    // on a match start that is past the previous match's end (a boundary
+    // inside another match's span leaks that match's material into the
+    // chunk before it: `"a\n\n\n\nb"`, sep "\n\n", max_chars 2 chunked
+    // (0, 2) = "a\n" on the combined-list spelling).
     let mut cuts = Vec::new();
     let mut char_idx = 0usize;
     let mut byte_idx = 0usize;
     for byte_start in memmem::find_iter(text.as_bytes(), separator.as_bytes()) {
         char_idx += text[byte_idx..byte_start].chars().count();
-        let start_char = char_idx;
-        let end_char = start_char + sep_chars;
-        cuts.push((start_char, end_char));
-        char_idx = end_char;
+        cuts.push((char_idx, char_idx + sep_chars));
+        char_idx += sep_chars;
         byte_idx = byte_start + separator.len();
     }
-    Level { cuts }
+    // The SKIP rows: every match start, overlapping enumeration — one
+    // char boundary per step. UTF-8 self-synchronization (a valid-UTF-8
+    // needle's byte matches only at char boundaries; a continuation byte
+    // never begins a match) keeps both slices in this walk boundary-safe.
+    let bytes = text.as_bytes();
+    let needle = separator.as_bytes();
+    let mut skip_starts = Vec::new();
+    let mut char_idx = 0usize;
+    let mut byte_idx = 0usize;
+    let mut pos = 0usize;
+    while let Some(found) = memmem::find(&bytes[pos..], needle) {
+        let byte_start = pos + found;
+        char_idx += text[byte_idx..byte_start].chars().count();
+        skip_starts.push((char_idx, char_idx + sep_chars));
+        char_idx += 1;
+        let first_char_len = text[byte_start..].chars().next().unwrap().len_utf8();
+        byte_idx = byte_start + first_char_len;
+        pos = byte_idx;
+    }
+    Level {
+        cuts,
+        skip_starts,
+        bounding: false,
+    }
+}
+
+/// The #63 heading level's scan: one cut per ATX heading line, the cut
+/// `(gap_start, heading_start)` — the chunk before the heading ends where
+/// the newline run between it and the heading begins, the next chunk
+/// resumes AT the heading line's first codepoint (the heading rides with
+/// the section that follows it; the pre-heading newline run is dropped
+/// between chunks, the same gap-dropping convention
+/// [`level_from_paragraph_bounds`] applies to blank-line runs — and when
+/// the heading follows a blank-line run, its cut IS that paragraph gap's
+/// cut, so the two levels agree exactly where both can cut). Bounding
+/// ([`Level`]'s `bounding`): each window's cut is the FIRST heading in
+/// range, never a later one — no chunk spans a heading cut. The cut pair
+/// is strictly gap-dropping (`next > cut_end`: at least the previous
+/// line's terminator lies between them), so the #103 skip machinery
+/// treats a window opening on the dropped run like a paragraph gap's
+/// (the run is skipped, the window resumes at the heading) — the skip
+/// never eats the heading itself: `skip_cut` at the heading's own
+/// codepoint finds no cut whose end equals it (the cut's end is the gap
+/// start, always strictly before the heading).
+///
+/// One linear byte walk ([`memchr::memchr2`] hops between line
+/// terminators, the same memchr-family discipline every scanner in the
+/// crate follows): LF, CRLF, and lone CR are line endings (CommonMark's
+/// line-ending set), byte and codepoint cursors advance together
+/// (pure-ASCII text answers byte offsets directly — the `is_ascii` gate
+/// `char_count`'s own fast path applies; other text pays the
+/// continuation-byte predicate per byte, no decode), and each line's
+/// content is shape-checked and fence-tracked:
+///
+/// * an open fenced code block (CommonMark §4.5, via
+///   [`match_open_fence`]/[`is_closing_fence`]) swallows every line until
+///   its closing fence: a `# comment` inside a fence is code, not a
+///   heading. A document whose fence never closes stays in fence mode to
+///   the end (the unterminated-fence convention `extract_code_blocks`
+///   applies);
+/// * otherwise the line is a heading exactly when it matches the ATX
+///   shape: 1-3 leading ASCII spaces, 1-6 `#`, then a space, a tab, or
+///   end of line (see the module docs for the ATX-only scope and every
+///   exclusion's CommonMark clause: blockquotes, list items, escapes,
+///   indented code, the 7-hash run, the missing space).
+///
+/// A heading at codepoint 0 produces no cut (nothing precedes the
+/// document's first line to bound: the first chunk starts there anyway).
+/// Both endpoints of every cut are grapheme-cluster boundaries (the
+/// heading start follows a control codepoint — GB4/GB5 — or is offset 0;
+/// the gap start is the last content line's end, before a control
+/// codepoint by the same rules), so the realization-time cut filter
+/// retains every heading cut; the filter still runs (uniform semantics,
+/// and the differential oracles mirror it eagerly), which is where a
+/// heading level's realization may build the grapheme index.
+fn level_from_heading_starts(text: &str) -> Level {
+    let bytes = text.as_bytes();
+    let ascii = text.is_ascii();
+    let mut cuts = Vec::new();
+    let mut open_fence: Option<OpenFence> = None;
+    let mut byte = 0usize;
+    let mut cp = 0usize;
+    // The codepoint just past the last non-empty line's content: the gap
+    // start a heading cut drops the terminator run from (an empty line
+    // contributes nothing; a whitespace-only line is content, the same
+    // newline-run-only gap rule `paragraph_bounds` applies).
+    let mut last_content_end_cp = 0usize;
+    while byte < bytes.len() {
+        let line_start_byte = byte;
+        let line_start_cp = cp;
+        // The line's extent: up to the next terminator (LF, CR, or the CR
+        // of a CRLF pair), then past the terminator for the next line.
+        let line_end_byte = match memchr::memchr2(b'\r', b'\n', &bytes[byte..]) {
+            Some(rel) => byte + rel,
+            None => bytes.len(),
+        };
+        let next_start_byte = if bytes.get(line_end_byte) == Some(&b'\r')
+            && bytes.get(line_end_byte + 1) == Some(&b'\n')
+        {
+            line_end_byte + 2
+        } else {
+            // Past the terminator — or, for a final line with no
+            // terminator at all (`line_end_byte == bytes.len()`), clamped
+            // to the end: the walk exits on `byte < bytes.len()`.
+            (line_end_byte + 1).min(bytes.len())
+        };
+        // The shape checks run on the line's content, terminators
+        // stripped (a CRLF document's `\r` would otherwise ride into
+        // `is_closing_fence`'s trailing-whitespace check — harmless there
+        // — and into `match_open_fence`'s info string, which `trim`
+        // already absorbs; stripping here is the honest "line" both
+        // predicates are specified over).
+        let line = &text[line_start_byte..line_end_byte];
+        if let Some(open) = open_fence.as_ref() {
+            if is_closing_fence(line, open) {
+                open_fence = None;
+            }
+        } else if let Some(opened) = match_open_fence(line) {
+            open_fence = Some(opened);
+        } else if line_start_cp > 0 && is_atx_heading_line(line) {
+            cuts.push((last_content_end_cp, line_start_cp));
+        }
+        // The codepoint where this line's content ends (the line itself
+        // is content when non-empty, whitespace included — only the
+        // terminator run is the gap).
+        if !line.is_empty() {
+            last_content_end_cp = if ascii {
+                line_end_byte
+            } else {
+                line_start_cp
+                    + bytes[line_start_byte..line_end_byte]
+                        .iter()
+                        .filter(|&&b| b & 0xC0 != 0x80)
+                        .count()
+            };
+        }
+        // Advance both cursors together (the scan's one codepoint-count
+        // discipline: ASCII text pays nothing per byte, other text the
+        // branchless-shaped continuation-byte predicate, no decode).
+        byte = next_start_byte;
+        if ascii {
+            cp = byte;
+        } else {
+            for &b in &bytes[line_start_byte..byte] {
+                cp += usize::from(b & 0xC0 != 0x80);
+            }
+        }
+    }
+    Level {
+        cuts,
+        skip_starts: Vec::new(),
+        bounding: true,
+    }
+}
+
+/// The ATX heading-line shape test: 1-3 leading ASCII spaces, 1-6 `#`,
+/// then a space, a tab, or end of line. Byte-level on purpose: every
+/// byte the shape cares about is ASCII, and a multi-byte UTF-8 head
+/// (whose bytes are all >= 0x80) can never match `b'#'` or `b' '`, so
+/// the slice indexes below are the line-shape question's own, not a
+/// decode (`level_from_heading_starts` carries the codepoint accounting).
+fn is_atx_heading_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < 3 && i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'#' {
+        return false;
+    }
+    let mut hashes = 0;
+    while i < bytes.len() && bytes[i] == b'#' && hashes < 7 {
+        i += 1;
+        hashes += 1;
+    }
+    if hashes > 6 {
+        // A 7-hash run: past CommonMark's 1-6 depth, ordinary content.
+        return false;
+    }
+    // End of line, or the required space/tab after the run: `#heading`
+    // (no space) is a paragraph, not a heading.
+    i >= bytes.len() || bytes[i] == b' ' || bytes[i] == b'\t'
 }
 
 /// A not-yet-built level: which walk or scan realizes it, not the walk
@@ -249,6 +584,12 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
 /// never here; building a spec list walks no text at all.
 #[derive(Clone, Copy)]
 enum LevelSpec<'a> {
+    /// The ATX heading-line walk (#63), cuts at heading starts, nothing
+    /// dropped between chunks. Gated: realized only when the text carries
+    /// a `#` byte at all (the cheap necessary condition, memoized per
+    /// call — see [`chunk_hierarchical`]'s gate), so heading-free text
+    /// never pays the scan.
+    Heading,
     /// The blank-line paragraph walk, gaps dropped between chunks.
     Paragraph,
     /// The UAX #29 sentence walk, contiguous.
@@ -293,6 +634,7 @@ impl LevelSlot<'_> {
     ) -> &Level {
         self.level.get_or_insert_with(|| {
             let mut level = match self.spec {
+                LevelSpec::Heading => level_from_heading_starts(text),
                 LevelSpec::Paragraph => level_from_paragraph_bounds(paragraph_bounds(text)),
                 LevelSpec::Sentence => {
                     level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text))
@@ -314,13 +656,19 @@ impl LevelSlot<'_> {
             // rules join them to the preceding base character into one
             // cluster (`truncate_impl`'s module docs document the same
             // divergence), so their cuts need this filter exactly like a
-            // custom literal's do. A level with no cuts filters nothing
+            // custom literal's do. A level with no rows filters nothing
             // and builds nothing (a never-matching separator costs one
-            // scan, no structure).
-            if !level.cuts.is_empty() {
+            // scan, no structure). The skip rows take the SAME filter:
+            // a match whose drop would straddle a cluster is not a skip
+            // (the pinned content-not-separator semantics), so the skip
+            // question must not fire on it either.
+            if !level.cuts.is_empty() || !level.skip_starts.is_empty() {
                 let g = grapheme_index(graphemes, text, total);
                 level
                     .cuts
+                    .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+                level
+                    .skip_starts
                     .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
             }
             #[cfg(test)]
@@ -330,14 +678,27 @@ impl LevelSlot<'_> {
     }
 }
 
-/// The default hierarchy's three specs, in coarsest-first order: the
-/// splice a `None` entry in a custom `separators` list inserts at its
-/// position, and the whole hierarchy when `separators` is `None`.
-/// Specs, not levels: no text is walked here, which is the point; the
-/// walks happen in [`LevelSlot::realize`], only for slots a window
-/// actually consults, at most once per call each.
-fn default_level_specs<'a>() -> Vec<LevelSlot<'a>> {
-    vec![
+/// The default hierarchy's specs, in coarsest-first order: the splice a
+/// `None` entry in a custom `separators` list inserts at its position,
+/// and the whole hierarchy when `separators` is `None`. `with_heading`
+/// gates the #63 heading level in or out: `separators = None` always
+/// includes it (its own per-call `#`-byte gate decides whether the
+/// level is ever realized — a heading-free text keeps the pre-#63
+/// zero-build contract), while a `None` splice omits it when the list
+/// already spelled the `"heading"` sentinel earlier, the same
+/// once-per-call dedup every other level's duplicate gets. Specs, not
+/// levels: no text is walked here, which is the point; the walks happen
+/// in [`LevelSlot::realize`], only for slots a window actually
+/// consults, at most once per call each.
+fn default_level_specs<'a>(with_heading: bool) -> Vec<LevelSlot<'a>> {
+    let mut slots = Vec::with_capacity(4);
+    if with_heading {
+        slots.push(LevelSlot {
+            spec: LevelSpec::Heading,
+            level: None,
+        });
+    }
+    slots.extend([
         LevelSlot {
             spec: LevelSpec::Paragraph,
             level: None,
@@ -350,7 +711,8 @@ fn default_level_specs<'a>() -> Vec<LevelSlot<'a>> {
             spec: LevelSpec::Word,
             level: None,
         },
-    ]
+    ]);
+    slots
 }
 
 /// The caller-supplied hierarchy as a spec list: a literal `Some(s)` is
@@ -378,12 +740,19 @@ fn default_level_specs<'a>() -> Vec<LevelSlot<'a>> {
 fn custom_level_specs<'a>(seps: &[Option<&'a str>]) -> Vec<LevelSlot<'a>> {
     let mut slots = Vec::new();
     let mut spliced = false;
+    let mut seen_heading = false;
     let mut seen_literals: HashSet<&str> = HashSet::new();
     for entry in seps {
         match entry {
             None => {
                 if !spliced {
-                    slots.extend(default_level_specs());
+                    slots.extend(default_level_specs(!seen_heading));
+                    // Whether or not the splice carried the heading
+                    // spec, the default hierarchy has now been spelled
+                    // once this call: a later sentinel (or a later
+                    // splice) must not add a second heading slot, the
+                    // same once-per-call dedup the splice itself gets.
+                    seen_heading = true;
                     spliced = true;
                 }
                 // A duplicate splice is skipped, not re-spliced: the
@@ -410,6 +779,23 @@ fn custom_level_specs<'a>(seps: &[Option<&'a str>]) -> Vec<LevelSlot<'a>> {
             // either (a later non-empty literal is still first-seen,
             // and any number of empty literals stays a no-op).
             Some("") => {}
+            // The #63 sentinel: the reserved literal "heading" is the
+            // heading level (an ATX-heading cut list), not a literal
+            // split on the word — the documented opt-in for custom
+            // hierarchies (see the module docs; `docs/api.md` carries
+            // the same line). Deduped like every other spec: a second
+            // sentinel, or the `None` splice after one (the splice's
+            // `!seen_heading` arm above), is provably inert by the
+            // find_map dominance argument.
+            Some("heading") => {
+                if !seen_heading {
+                    seen_heading = true;
+                    slots.push(LevelSlot {
+                        spec: LevelSpec::Heading,
+                        level: None,
+                    });
+                }
+            }
             Some(s) => {
                 // A duplicate literal is skipped for the same
                 // dominance reason as a duplicate splice: the find_map
@@ -452,6 +838,245 @@ fn grapheme_index<'g>(
     })
 }
 
+/// The #63 heading gate, read (and computed, once per call) at every
+/// heading-slot consultation site: the window-verdict search, the overlap
+/// lookahead, and the final-window demotion check all funnel through
+/// here. `false` — no `#` byte anywhere in the text — is the provable
+/// no-heading answer (every ATX heading line contains one), so a closed
+/// gate skips the heading slot without realizing it: no scan, no
+/// allocation, the zero-build contract intact for heading-free text. The
+/// probe is the one whole-text pass a default-hierarchy call adds (#63's
+/// own cost: ~0.24 ms at 12 MiB, measured; inside the whole-document
+/// budget cells' 0.8 ms ceilings, which are pinned on heading-FREE
+/// corpora and say so).
+fn heading_gate_open(text: &str, gate: &mut Option<bool>) -> bool {
+    *gate.get_or_insert_with(|| memchr::memchr(b'#', text.as_bytes()).is_some())
+}
+
+/// The #103 final-exit pre-test: could a separator match OPEN at
+/// codepoint index `at`, i.e. could any level's [`Level::skip_cut`]
+/// fire there? A necessary-condition scan over the level SPECS — no
+/// level is realized here, which is the whole point: the final-chunk
+/// exit must answer the skip question (#103) without costing the #30
+/// zero-build contract its headline (a whole-document budget over 12 MiB
+/// is pinned at < 0.8 ms by tests/test_performance.py; a paragraph walk
+/// or one literal scan blows it). Soundness per arm:
+///
+/// * a REALIZED level answers exactly (its memoized, grapheme-filtered
+///   cut list is what the search itself consults — free, O(log cuts));
+/// * an unrealized LITERAL can carry a cut at `at` only if an occurrence
+///   of the literal begins there. At `at == 0` that is byte-checkable
+///   exactly (codepoint 0 IS byte 0) and cheap: `starts_with`. At
+///   `at > 0` there is no O(1) byte mapping for a codepoint index (the
+///   whole-text structure this module refuses to build, the #22 sin), so
+///   the arm answers "maybe" — the caller descends to the search, which
+///   realizes the level once (memoized) and answers exactly from then
+///   on. Over-approximating is output-invisible: the search decides.
+///   (A prior spelling answered `at == 0 && text.starts_with(sep)` —
+///   "provably no" at every `at > 0` — which is UNSOUND: a literal
+///   separator can begin at any codepoint, and a final window opening on
+///   an unrealized fine level's match was pushed whole, emitting
+///   pure-separator chunks and breaking the all-separator-zero-chunks
+///   contract. The `separator_pretest_literal_at_gt_zero_may_open`
+///   pins pin the soundness; the differential's separator pool covers
+///   the unrealized-fine-level shape.)
+/// * an unrealized PARAGRAPH level can carry a cut at `at` only if a
+///   paragraph-gap cut begins there — its cut is
+///   `(paragraph[i].end, paragraph[i+1].start)`, the gap a newline-run —
+///   and `paragraph_bounds` discards empty leading spans (a text opening
+///   on a blank run has its first segment start past the run), so at
+///   `at == 0` no paragraph cut can ever begin (the default hierarchy's
+///   whole-document budget keeps its zero-build exit); at `at > 0` the
+///   arm answers "maybe", the same descend-and-memoize story.
+/// * the contiguous levels (sentence, word) are structurally incapable:
+///   their cuts have `next == cut_end`, and `skip_cut` requires
+///   `next > cut_end` — no realization, no maybe, ever.
+/// * the heading level (#63) is contiguous too (its cuts are heading
+///   starts, `next == cut_end`: a heading is content, it rides with the
+///   section that follows it), so it is structurally incapable in the
+///   same way — a heading never "opens" a window the way a dropped
+///   separator match does. The heading level's own final-window question
+///   (could a heading cut in range demote the final chunk?) is the
+///   demotion check's, run ahead of this pre-test, not the skip
+///   question's; this arm never realizes the level to answer no.
+///
+/// Every `false` is therefore provably no-skip (the final-chunk exit
+/// pushes the whole remainder and the differential sweeps — the reference
+/// oracle runs the bare search — hold the outputs equal), every `true`
+/// merely costs the search a final window would pay anyway.
+fn separator_may_open(slots: &[LevelSlot<'_>], text: &str, at: usize) -> bool {
+    slots.iter().any(|slot| match &slot.level {
+        Some(level) => level.skip_cut(at).is_some(),
+        None => match slot.spec {
+            // `at > 0` is "maybe" for BOTH unrealized match-carrying specs
+            // (a literal can begin at any codepoint, a paragraph gap at
+            // any non-zero one); only `at == 0` admits an exact O(1)
+            // answer (the codepoint-0 = byte-0 `starts_with`, and the
+            // paragraph arm's leading-blank-run discard).
+            LevelSpec::Literal(sep) => at > 0 || text.starts_with(sep),
+            LevelSpec::Paragraph => at > 0,
+            LevelSpec::Heading | LevelSpec::Sentence | LevelSpec::Word => false,
+        },
+    })
+}
+
+/// The #63 demotion's predicted cut for a final window at `after` under
+/// budget `limit`, in two gated steps:
+///
+/// * (a) the STRUCTURAL TRIGGER: the heading level's own in-range cut
+///   ([`Level::best_cut`]'s bounding answer, gate-gated). No heading
+///   slot, a closed `#`-byte gate (provably no heading line), or no
+///   heading cut in range — `None`, the pre-#63 untrimmed exit: the
+///   demotion exists for the heading contract, and heading-free text
+///   keeps it byte-for-byte (an earlier slot's cut must never demote on
+///   its own — that would split heading-free whole-document budgets at
+///   the literal's matches, a behavior change nothing asked for).
+/// * (b) the PROGRESS PREDICTION, only past (a): the first verdict
+///   among the hierarchy's slots UP TO AND INCLUDING the heading slot,
+///   in slot order — the verdict the demoted window's search itself
+///   answers. A slot COARSER than the heading (an earlier custom
+///   literal) legitimately preempts the heading's cut (the find_map
+///   priority order: the first slot with ANY verdict wins), so
+///   predicting from the heading alone would mispredict the chunk the
+///   window actually emits — the fuzz-discovered case: `[Some(" "),
+///   None]` over `"_. \u{c}._\n#"`, whose `" "` cut outranked the
+///   heading cut and, fed to the snap acceptance as the next window's
+///   end, accepted a snap whose chunk was contained in its predecessor
+///   (the #83 violation). A Skip verdict predicts "no push at all"
+///   (the search skips the window; the demotion question is moot) —
+///   `None`.
+///
+/// The PROGRESS gate itself is the callers' — both sites (the loop
+/// head's demotion and the overlap lookahead's mirror) know the
+/// previous chunk's end in their own scope, and each applies the same
+/// rule: a demotion whose predicted cut cannot end strictly past the
+/// previous chunk's end demotes nothing (it would emit a chunk
+/// contained in its predecessor; the untrimmed exit keeps the ends
+/// advancing, and the heading cut it spans is the same by-design
+/// duplication every accepted overlap tail carries).
+fn demotion_predicted_cut(
+    levels: &mut [LevelSlot<'_>],
+    text: &str,
+    total: usize,
+    graphemes: &mut Option<GraphemeIndex>,
+    gate: &mut Option<bool>,
+    after: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    let heading_pos = levels
+        .iter()
+        .position(|slot| matches!(slot.spec, LevelSpec::Heading))?;
+    // (a): the heading slot's own in-range cut, gate-gated (a closed
+    // gate's slot is provably inert — no `#` byte, no heading line —
+    // and is never realized).
+    let heading_slot = &mut levels[heading_pos];
+    debug_assert!(matches!(heading_slot.spec, LevelSpec::Heading));
+    if !heading_gate_open(text, gate) {
+        return None;
+    }
+    heading_slot
+        .realize(text, total, graphemes)
+        .best_cut(after, limit)?;
+    // (b): the demoted window's own verdict, predicted over the slots
+    // the find_map reaches before (and including) the heading's.
+    for slot in &mut levels[..=heading_pos] {
+        let level = slot.realize(text, total, graphemes);
+        if level.skip_cut(after).is_some() {
+            // The window OPENS on this level's separator match: the
+            // search answers Skip, the window never pushes, and the
+            // demotion question is moot.
+            return None;
+        }
+        if let cut @ Some(_) = level.best_cut(after, limit) {
+            return cut;
+        }
+    }
+    None
+}
+
+/// #47's word snap: the largest word-bounds cut at or before `snapped`
+/// (the grapheme candidate), or `snapped` itself when the word-bounds
+/// level has no boundary there (a dense-script run or one long token
+/// with no internal boundary — the documented fallback to the plain
+/// grapheme snap). The word-bounds level is the hierarchy's own when one
+/// exists (the default hierarchy's Word slot, or a `None` splice's
+/// copy): realized at the first snap that consults it, memoized, and
+/// SHARED with any window that descends to it — the word level is never
+/// built twice and never built for a call whose snaps (and windows) never
+/// reach it, the #30 laziness discipline. A hierarchy with no word level
+/// at all (an all-literal custom list) builds the one-off
+/// [`word_fallback`] level at the first snap instead, exactly the build a
+/// Word slot's realization produces (the UAX #29 word walk, the cuts
+/// filtered to grapheme-cluster boundaries — the snap target must never
+/// land mid-cluster, the same invariant the windows' cut filter
+/// enforces).
+///
+/// The boundary set is the word SEGMENTS' ends (a contiguous partition:
+/// the largest end at or before `snapped` is `snapped`'s own position
+/// when it already sits on a word boundary, and otherwise the start of
+/// the segment containing it — mid-word targets snap to their word's
+/// first codepoint; mid-space-run targets snap to the run's start, a
+/// UAX #29 word boundary like any other segment edge). The candidate
+/// returned here is NOT the final start: the caller's decline-the-snap
+/// lookahead (#83) runs on it unchanged, so a candidate reaching back to
+/// or past the previous chunk's start, or one whose own chunk would not
+/// advance past the just-emitted end, is declined exactly as a grapheme
+/// candidate would be.
+fn word_snap_back(
+    levels: &mut [LevelSlot<'_>],
+    word_fallback: &mut Option<Level>,
+    text: &str,
+    total: usize,
+    graphemes: &mut Option<GraphemeIndex>,
+    snapped: usize,
+) -> usize {
+    // At most one Word slot exists per call (the splice is once-per-call
+    // and deduped; the default hierarchy has exactly one), so the first
+    // match is the only one.
+    let word_slot = levels
+        .iter_mut()
+        .find(|slot| matches!(slot.spec, LevelSpec::Word));
+    let level = match word_slot {
+        Some(slot) => slot.realize(text, total, graphemes),
+        None => word_fallback.get_or_insert_with(|| {
+            let mut level = level_from_contiguous_bounds(segmentation_impl::word_bounds(text));
+            if !level.cuts.is_empty() {
+                let g = grapheme_index(graphemes, text, total);
+                level
+                    .cuts
+                    .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+            }
+            #[cfg(test)]
+            build_seam::bump_levels();
+            level
+        }),
+    };
+    let hi = level.cuts.partition_point(|&(end, _)| end <= snapped);
+    if hi > 0 {
+        level.cuts[hi - 1].0
+    } else {
+        snapped
+    }
+}
+
+/// Where the overlap snap may land the next chunk's start (#47). The
+/// default is the historical behavior, so every existing caller is
+/// unaffected; `Word` is the opt-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlapBoundary {
+    /// Snap backward to the nearest grapheme-cluster boundary (never
+    /// mid-cluster, possibly mid-word): the historical default.
+    Grapheme,
+    /// Snap backward to the nearest grapheme-cluster boundary first, then
+    /// further backward to the nearest UAX #29 word boundary at or before
+    /// that candidate: the overlap tail starts at a word edge when one
+    /// exists in the snap-back range. Falls back to the plain grapheme
+    /// candidate when the word-bounds level has no boundary there (a
+    /// dense-script run or one long token with no internal boundary), and
+    /// is a no-op at `overlap == 0` (no snap site ever runs).
+    Word,
+}
+
 /// Hierarchical fallback chunking of `text`: `(start, end)` codepoint-unit
 /// pairs, each chunk at most `max_chars` codepoints, cut at the coarsest
 /// level (first in `levels`, excluding the always-appended grapheme-safe
@@ -472,14 +1097,23 @@ fn grapheme_index<'g>(
 /// landing there): its "chunk" would be empty, so the window skips the
 /// match and resumes at its end BEFORE searching for a cut; no window
 /// ever opens on a separator, so the raw-cut fallback can never fill a
-/// window with the separator itself.
+/// window with the separator itself. Since #103 that includes the
+/// final-chunk exit: the skip question is answered before the whole
+/// remainder is emitted whole, so a window that opens on a separator
+/// match never comes back as a chunk even there — a trailing separator
+/// run survives only as a suffix of a content-bearing chunk (or not at
+/// all: an all-separator document chunks to zero chunks).
 /// `overlap` snaps the next
 /// chunk's start backward from the just-emitted chunk's end to the nearest
 /// grapheme boundary at or before the target (never mid-cluster): not
 /// necessarily a semantic word/sentence/paragraph boundary the way
 /// `chunk_text_overlapping`'s single-hierarchy overlap snap is; a
 /// documented simplification of the general multi-level case, not a
-/// silent gap. The snap is declined — zero overlap for just that one
+/// silent gap. `overlap_boundary` opts into the word-aware snap ([`OverlapBoundary::Word`]:
+/// the composition order is grapheme snap, then word snap, then the
+/// decline-the-snap lookahead — the lookahead's candidate semantics carry
+/// over unchanged, see the snap site below). The snap is declined — zero
+/// overlap for just that one
 /// transition, the next chunk starting at `cut.1` — when it would not buy
 /// new context: a target at or before the chunk's own start (a short
 /// trailing chunk, or a run of tight hard-cuts), or a snapped start whose
@@ -493,6 +1127,7 @@ pub fn chunk_hierarchical(
     max_chars: usize,
     separators: Option<&[Option<&str>]>,
     overlap: usize,
+    overlap_boundary: OverlapBoundary,
 ) -> Vec<(usize, usize)> {
     if text.is_empty() {
         return Vec::new();
@@ -526,8 +1161,18 @@ pub fn chunk_hierarchical(
     // a 6 MiB document, for levels that supplied zero cuts.
     let mut levels: Vec<LevelSlot> = match separators {
         Some(seps) => custom_level_specs(seps),
-        None => default_level_specs(),
+        None => default_level_specs(true),
     };
+    // The heading gate, memoized per call: does the text carry a `#` byte
+    // AT ALL (`memchr`, one pass)? Every ATX heading line contains one
+    // (after at most 3 leading spaces), so a `#`-free text has a provably
+    // empty heading level — the slot is skipped without realizing it,
+    // never scanned, never allocated, and heading-free text keeps the
+    // pre-#63 zero-build contract exactly (the gate's own pass is the one
+    // cost a default-hierarchy call adds, at its first heading-site
+    // consultation). Computed lazily at the first site that needs it, the
+    // same get_or_insert_with idiom the levels and the grapheme index use.
+    let mut heading_gate: Option<bool> = None;
     // The grapheme boundary index: built lazily, at most once per call,
     // at the first site that actually needs it (a realized level's cut
     // filter, the raw-cut fallback, or the overlap snap, every site one
@@ -539,6 +1184,15 @@ pub fn chunk_hierarchical(
     let mut chunks = Vec::with_capacity(total / max_chars + 1);
     let mut start = 0usize;
     let mut iterations = 0usize;
+    // #47's word-bounds fallback for hierarchies with no word level at
+    // all (an all-literal custom list): built by the first word snap that
+    // needs it, at most once per call, exactly the build a Word slot's
+    // own realization produces (the same walk, the same grapheme cut
+    // filter). The hierarchy's own Word slot — the default hierarchy's,
+    // or a `None` splice's copy — is preferred at the snap site, so the
+    // snap shares the windows' memoized build instead of paying a second
+    // walk; this fallback exists only when no slot carries word bounds.
+    let mut word_fallback: Option<Level> = None;
     while start < total {
         iterations += 1;
         assert!(
@@ -546,11 +1200,64 @@ pub fn chunk_hierarchical(
             "chunk_hierarchical: forward-progress invariant violated"
         );
         let remaining = total - start;
-        if remaining <= max_chars {
+        let limit = start.saturating_add(max_chars);
+        // #63's final-window demotion: a heading cut in range bounds the
+        // final chunk. The `remaining <= max_chars` exit runs the chunk
+        // to the end untrimmed — the right answer for a SIZE question
+        // (don't chop a fitting remainder) and the wrong one for the
+        // heading level's structural contract (a section's content never
+        // merges across a heading of higher rank; a whole-document
+        // budget over a heading-bearing document must come back as its
+        // sections, not one giant chunk). So a final window that
+        // contains a heading cut is demoted from final-before-the-search:
+        // the search then runs, the heading slot supplies the cut (it is
+        // the coarsest level; the chunk ends at the heading's dropped
+        // gap start, the heading rides with the section that follows),
+        // and the loop continues from the heading. The check is
+        // progress-gated ([`demotion_predicted_cut`]): a cut that cannot
+        // end past the previous chunk's end demotes nothing (the
+        // untrimmed exit keeps the ends advancing), and heading-free
+        // text answers no without ever building the level — the gate
+        // closes before any realization, so the pre-#63 exit is intact.
+        let mut final_window = remaining <= max_chars;
+        if final_window {
+            let prev_end = chunks.last().map(|&(_, end)| end).unwrap_or(0);
+            // The progress gate: demote only when the cut can end
+            // strictly past the previous chunk's end (see
+            // [`demotion_predicted_cut`]).
+            if demotion_predicted_cut(
+                &mut levels,
+                text,
+                total,
+                &mut graphemes,
+                &mut heading_gate,
+                start,
+                limit,
+            )
+            .is_some_and(|(end, _)| end > prev_end)
+            {
+                final_window = false;
+            }
+        }
+        // The final-chunk exit — but #103's skip question is answered
+        // first: a window that OPENS on a separator match is skipped even
+        // here (a trailing separator run survives only as a suffix of a
+        // content-bearing chunk; an all-separator document chunks to zero
+        // chunks). Answering it must not cost the #30 zero-build contract
+        // its headline (a whole-document budget over 12 MiB is pinned at
+        // < 0.8 ms by tests/test_performance.py — a paragraph walk or one
+        // literal scan blows it), so the cheap pre-test below answers
+        // "could the skip possibly fire here" over the UNREALIZED SPECS,
+        // and only a `true` descends to the real search (whose verdict
+        // decides the skip question exactly). The pre-test is a
+        // necessary-condition scan, over-approximating on purpose: every
+        // `false` is provably no-skip (output-invisible — the reference
+        // oracle below runs the bare search and the differential sweeps
+        // hold the two equal), every `true` is merely "maybe".
+        if final_window && !separator_may_open(&levels, text, start) {
             chunks.push((start, total));
             break;
         }
-        let limit = start + max_chars;
         // The window's verdict, searched coarsest-first with the find_map
         // short-circuit preserved exactly (the first slot with a verdict
         // wins; later slots stay unrealized for this window; a later
@@ -572,34 +1279,67 @@ pub fn chunk_hierarchical(
         //   is realized exactly when the window's search descends to it.
         //   Forward progress is unconditional (`skip_cut` answers a
         //   `next_start` strictly past `start`) and the loop-head
-        //   iteration counter still bounds the skips by `total + 1`. The
-        //   final-chunk exit above runs first, so a trailing separator
-        //   run stays in the last chunk (the same final-chunk-runs-
-        //   untrimmed exception `chunk_text` documents).
+        //   iteration counter still bounds the skips by `total + 1`.
+        //   Since #103 the skip also preempts the final-chunk exit: the
+        //   exit runs only after this search (when the pre-test above
+        //   could not rule the skip out), so the whole-remainder push
+        //   below happens only for a window that does not open on a
+        //   separator match.
         // * Cut: the slot's largest in-budget cut past `start`, exactly
         //   as this search always ran.
-        let verdict = levels
-            .iter_mut()
-            .find_map(|slot| {
-                let level = slot.realize(text, total, &mut graphemes);
-                level.skip_cut(start).map(Verdict::Skip).or_else(|| {
-                    level
-                        .best_cut(start, limit)
-                        .map(|(end, next)| Verdict::Cut(end, next))
-                })
+        let verdict = levels.iter_mut().find_map(|slot| {
+            // The heading gate (#63): a closed gate's slot is provably
+            // inert — no `#` byte, no heading line, no cut — so it is
+            // skipped unrealized, exactly as if the spec were absent
+            // (heading-free text chunks as the pre-#63 hierarchy did,
+            // including every seam count). An open gate realizes the
+            // slot like any other: consultation, not success, pays the
+            // scan, once per call.
+            if matches!(slot.spec, LevelSpec::Heading)
+                && !heading_gate_open(text, &mut heading_gate)
+            {
+                return None;
+            }
+            let level = slot.realize(text, total, &mut graphemes);
+            level.skip_cut(start).map(Verdict::Skip).or_else(|| {
+                level
+                    .best_cut(start, limit)
+                    .map(|(end, next)| Verdict::Cut(end, next))
             })
-            .unwrap_or_else(|| {
-                let g = grapheme_index(&mut graphemes, text, total);
-                let end = g.hard_cut(start, limit);
-                Verdict::Cut(end, end)
-            });
+        });
         let cut = match verdict {
-            Verdict::Skip(next) => {
+            Some(Verdict::Skip(next)) => {
                 start = next;
                 continue;
             }
-            Verdict::Cut(cut_end, next_start) => (cut_end, next_start),
+            Some(Verdict::Cut(cut_end, next_start)) => (cut_end, next_start),
+            None if final_window => {
+                // No level supplied any verdict and the whole remainder
+                // fits the budget: the final chunk runs to the end
+                // untrimmed, before the raw-cut fallback — building the
+                // grapheme index for a hard cut this exit would discard
+                // (the pre-test said a separator might open here, the
+                // search answered no).
+                chunks.push((start, total));
+                break;
+            }
+            None => {
+                let g = grapheme_index(&mut graphemes, text, total);
+                let end = g.hard_cut(start, limit);
+                (end, end)
+            }
         };
+        if final_window {
+            // The final-chunk exit: the whole remainder fits the budget,
+            // and the window does not open on a separator match (the
+            // pre-test plus this search would have skipped it — #103), so
+            // the chunk runs to the end untrimmed, the same
+            // final-chunk-runs-untrimmed exception `chunk_text`
+            // documents. The search's own cut is discarded here: the
+            // final chunk is not re-cut.
+            chunks.push((start, total));
+            break;
+        }
         chunks.push((start, cut.0));
         if overlap == 0 {
             start = cut.1;
@@ -607,6 +1347,31 @@ pub fn chunk_hierarchical(
             let target = cut.0.saturating_sub(overlap);
             let g = grapheme_index(&mut graphemes, text, total);
             let snapped = g.last_at_or_before(target);
+            // #47's word snap, second in the composition order: the
+            // grapheme candidate above lands first (never mid-cluster),
+            // then the word snap moves it further back to the nearest
+            // word-bounds cut at or before it, and the decline-the-snap
+            // lookahead BELOW runs on the word-snapped candidate
+            // unchanged — the lookahead's candidate semantics carry over
+            // whole (it never sees the pre-word candidate). The word snap
+            // may land at or before this chunk's own start; that is not
+            // clamped away, it is declined by the lookahead's own
+            // `snapped > start` conjunct (zero overlap for the
+            // transition), the documented degradation for a candidate
+            // that buys no new context — the same rule that declines a
+            // grapheme candidate reaching back past the chunk start.
+            let snapped = if overlap_boundary == OverlapBoundary::Word {
+                word_snap_back(
+                    &mut levels,
+                    &mut word_fallback,
+                    text,
+                    total,
+                    &mut graphemes,
+                    snapped,
+                )
+            } else {
+                snapped
+            };
             // Decline-the-snap with lookahead (#83): accept the candidate
             // only when it starts past this chunk's own start, ends before
             // this chunk's end, and the chunk cut from there ends strictly
@@ -627,12 +1392,42 @@ pub fn chunk_hierarchical(
             // overlap (the documented degradation), never emit a wrong or
             // stalled chunk.
             let next_end = if total - snapped <= max_chars {
-                total
+                // The next window would be final — but #63's demotion may
+                // cut it at a heading before the untrimmed exit, and the
+                // acceptance condition below needs the end the window
+                // would ACTUALLY take: a lookahead that answered `total`
+                // while the window demoted to a heading cut would accept
+                // a snap whose own chunk ends at the heading cut the
+                // predecessor already honored — a chunk contained in its
+                // predecessor, the exact #83 violation (the heading
+                // corpus reproduces it). The mirror is the same
+                // progress-gated query the loop head runs, so the two
+                // can never disagree.
+                demotion_predicted_cut(
+                    &mut levels,
+                    text,
+                    total,
+                    &mut graphemes,
+                    &mut heading_gate,
+                    snapped,
+                    total,
+                )
+                .map(|(end, _)| end)
+                .filter(|&end| end > cut.0)
+                .unwrap_or(total)
             } else {
                 let next_limit = snapped + max_chars;
                 levels
                     .iter_mut()
                     .find_map(|slot| {
+                        // The heading gate, same as the window verdict's
+                        // site: a closed gate's heading slot is provably
+                        // inert, skipped unrealized.
+                        if matches!(slot.spec, LevelSpec::Heading)
+                            && !heading_gate_open(text, &mut heading_gate)
+                        {
+                            return None;
+                        }
                         slot.realize(text, total, &mut graphemes)
                             .best_cut(snapped, next_limit)
                     })
@@ -705,12 +1500,164 @@ mod tests {
     use crate::chunk_impl::grapheme_safe_hard_cut;
     use crate::truncate_impl::grapheme_boundary_chars;
 
+    /// The tests module's grapheme-default spelling: the historical
+    /// four-argument shape with `overlap_boundary = Grapheme`, the mode
+    /// every pre-#47 pin means (the shadowing definition beats the glob
+    /// import, so this module's existing call sites read unchanged).
+    /// Word-mode tests call the five-argument production function through
+    /// `super::chunk_hierarchical`.
+    #[allow(unused)]
+    fn chunk_hierarchical(
+        text: &str,
+        max_chars: usize,
+        separators: Option<&[Option<&str>]>,
+        overlap: usize,
+    ) -> Vec<(usize, usize)> {
+        super::chunk_hierarchical(
+            text,
+            max_chars,
+            separators,
+            overlap,
+            OverlapBoundary::Grapheme,
+        )
+    }
+
     fn text_of(chunks: &[(usize, usize)], text: &str) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();
         chunks
             .iter()
             .map(|&(s, e)| chars[s..e].iter().collect())
             .collect()
+    }
+
+    /// #63's heading-cut oracle scan, the reference spelling the
+    /// differential pin compares production's byte-level
+    /// [`level_from_heading_starts`] against: a whole-text `Vec<char>`
+    /// collect (the oracle's own idiom — the pre-#22 spelling this
+    /// module keeps), a plain char walk with the same line-ending set
+    /// (LF, CRLF, lone CR), an independently spelled ATX shape test
+    /// (1-3 leading spaces, 1-6 `#`, then space/tab/EOL), and an
+    /// independently spelled CommonMark §4.5 fence state machine (a
+    /// line inside an open fence is code, never a heading; the fence
+    /// matcher's own clauses — 3+ of the same fence char after at most
+    /// 3 spaces, a backtick fence's info string may not contain a
+    /// backtick — re-derived here so the pin is a differential, not a
+    /// restatement). The cuts are the same `(gap_start, heading_start)`
+    /// pairs production emits (the pre-heading newline run dropped, the
+    /// last non-empty content line's end as the gap start), computed on
+    /// the char grid where codepoint offsets fall out directly. A
+    /// heading at offset 0 is not recorded (nothing precedes it to
+    /// bound), the same rule production applies.
+    fn heading_cuts_reference(text: &str) -> Vec<(usize, usize)> {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        let mut cuts = Vec::new();
+        let mut open_fence: Option<(char, usize)> = None;
+        let mut line_start = 0usize;
+        let mut last_content_end = 0usize;
+        while line_start < n {
+            // The line's extent: up to the next LF, CR, or the CR of a
+            // CRLF pair; the next line starts past the terminator.
+            let mut line_end = n;
+            let mut next_start = n;
+            let mut j = line_start;
+            while j < n {
+                if chars[j] == '\n' {
+                    line_end = j;
+                    next_start = j + 1;
+                    break;
+                }
+                if chars[j] == '\r' {
+                    line_end = j;
+                    next_start = if j + 1 < n && chars[j + 1] == '\n' {
+                        j + 2
+                    } else {
+                        j + 1
+                    };
+                    break;
+                }
+                j += 1;
+            }
+            let line: String = chars[line_start..line_end].iter().collect();
+            match open_fence {
+                Some((fence_char, fence_len)) => {
+                    if is_closing_fence_reference(&line, fence_char, fence_len) {
+                        open_fence = None;
+                    }
+                }
+                None => {
+                    if let Some(opened) = match_open_fence_reference(&line) {
+                        open_fence = Some(opened);
+                    } else if line_start > 0 && is_atx_heading_line_reference(&line) {
+                        cuts.push((last_content_end, line_start));
+                    }
+                }
+            }
+            if line_end > line_start {
+                last_content_end = line_end;
+            }
+            line_start = next_start;
+        }
+        cuts
+    }
+
+    /// The oracle's fence-opener shape, independently spelled against
+    /// CommonMark §4.5 (the same clauses `fence_impl::match_open_fence`
+    /// implements, on the char grid).
+    fn match_open_fence_reference(line: &str) -> Option<(char, usize)> {
+        let chars: Vec<char> = line.chars().collect();
+        let indent = chars.iter().take_while(|&&c| c == ' ').count().min(3);
+        let fence_char = *chars.get(indent)?;
+        if fence_char != '`' && fence_char != '~' {
+            return None;
+        }
+        let fence_len = chars[indent..]
+            .iter()
+            .take_while(|&&c| c == fence_char)
+            .count();
+        if fence_len < 3 {
+            return None;
+        }
+        let info: String = chars[indent + fence_len..].iter().collect();
+        let info = info.trim();
+        if fence_char == '`' && info.contains('`') {
+            return None;
+        }
+        Some((fence_char, fence_len))
+    }
+
+    /// The oracle's fence-closer shape (see
+    /// [`match_open_fence_reference`]): a run of the opener's fence char
+    /// at least as long as its, then only spaces/tabs.
+    fn is_closing_fence_reference(line: &str, fence_char: char, fence_len: usize) -> bool {
+        let chars: Vec<char> = line.chars().collect();
+        let indent = chars.iter().take_while(|&&c| c == ' ').count().min(3);
+        let run = chars[indent..]
+            .iter()
+            .take_while(|&&c| c == fence_char)
+            .count();
+        run >= fence_len
+            && chars[indent + run..]
+                .iter()
+                .all(|&c| c == ' ' || c == '\t' || c == '\r')
+    }
+
+    /// The oracle's ATX shape (see [`heading_starts_reference`]).
+    fn is_atx_heading_line_reference(line: &str) -> bool {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < 3 && i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        if i >= chars.len() || chars[i] != '#' {
+            return false;
+        }
+        let mut hashes = 0;
+        while i < chars.len() && chars[i] == '#' && hashes < 7 {
+            i += 1;
+            hashes += 1;
+        }
+        hashes <= 6 && (i >= chars.len() || chars[i] == ' ' || chars[i] == '\t')
     }
 
     /// The pre-#22 implementation, kept verbatim as the differential
@@ -720,20 +1667,31 @@ mod tests {
     /// over every level, `grapheme_safe_hard_cut` over the usize grid, the
     /// `partition_point` overlap snap) runs against the new spelling over
     /// a corpus × budget × overlap × hierarchy sweep below. The rewrite
-    /// claims bit-identical output; this is the pin. Two deliberate
+    /// claims bit-identical output; this is the pin. Three deliberate
     /// post-verbatim edits, mirrored on both sides in lockstep: the
     /// decline-the-snap lookahead in the overlap branch (the oracle's
     /// snap carried the same contained-chunk defect the production loop
-    /// did), so the pin compares fixed machine against fixed machine; and
-    /// the separator-at-the-window-start skip in the window loop (the
+    /// did), so the pin compares fixed machine against fixed machine; the
+    /// separator-at-the-window-start skip in the window loop (the
     /// oracle shared the raw-cut-fallback defect that let a separator
     /// whose match begins exactly at a window start come back as a chunk
-    /// of its own), skipped identically on both sides.
+    /// of its own), skipped identically on both sides; and since #103 the
+    /// final-chunk shortcut moved AFTER the skip question — a window that
+    /// opens on a separator match is skipped even at the whole-remainder
+    /// exit, on both sides (the oracle runs the bare search there; the
+    /// production loop's spec pre-test is an output-invisible laziness
+    /// guard, and the sweeps below hold the two spellings equal). #47's
+    /// word snap is mirrored too: the oracle builds its word-bounds level
+    /// up front (eager) — the boundary set is the same list the
+    /// production snap reads through the hierarchy's Word slot or its
+    /// one-off fallback (the same UAX #29 walk, the same grapheme cut
+    /// filter), so the two need not track which slot carried it.
     fn chunk_hierarchical_reference(
         text: &str,
         max_chars: usize,
         separators: Option<&[Option<&str>]>,
         overlap: usize,
+        overlap_boundary: OverlapBoundary,
     ) -> Vec<(usize, usize)> {
         if text.is_empty() {
             return Vec::new();
@@ -748,13 +1706,45 @@ mod tests {
         // spelling's output against this eager one, the exact pin that
         // lazy == eager, the same way it pins the bitmap machinery:
         // extended for the `None` entry in the former code's own inline
-        // style.
+        // style. #63's heading level rides the same construction: built
+        // eagerly exactly when the hierarchy SPELLS the level
+        // (`separators = None`, a `None` splice, or the `"heading"`
+        // sentinel — tracked by `spelled` below) AND the production's
+        // `#`-byte gate would ever realize the slot
+        // (`text.contains('#')`, the memchr probe's oracle spelling — a
+        // gate-closed call never realizes the heading slot, so the
+        // oracle must not carry the level either). Duplicates are
+        // inert, so every spelling after the first re-pushes an
+        // identical level, and the demotion check below reads the one
+        // held-out copy. A hierarchy that spells no heading level (an
+        // all-literal list without the sentinel) carries none whatever
+        // the text looks like: `demotion_cuts` stays None there, the
+        // pre-#63 behavior.
+        let heading_cuts = if text.contains('#') {
+            Some(heading_cuts_reference(text))
+        } else {
+            None
+        };
+        let heading_level = || Level {
+            cuts: heading_cuts.clone().unwrap(),
+            skip_starts: Vec::new(),
+            bounding: true,
+        };
+        let mut spelled = false;
+        let mut heading_idx: Option<usize> = None;
         let mut levels: Vec<Level> = match separators {
             Some(seps) => {
                 let mut built = Vec::new();
                 for entry in seps {
                     match entry {
                         None => {
+                            if heading_cuts.is_some() {
+                                spelled = true;
+                                if heading_idx.is_none() {
+                                    heading_idx = Some(built.len());
+                                }
+                                built.push(heading_level());
+                            }
                             built.push(level_from_paragraph_bounds(paragraph_bounds(text)));
                             built.push(level_from_contiguous_bounds(
                                 segmentation_impl::sentence_bounds(text),
@@ -764,16 +1754,36 @@ mod tests {
                             ));
                         }
                         Some("") => {}
+                        Some("heading") => {
+                            if heading_cuts.is_some() {
+                                spelled = true;
+                                if heading_idx.is_none() {
+                                    heading_idx = Some(built.len());
+                                }
+                                built.push(heading_level());
+                            }
+                        }
                         Some(s) => built.push(level_from_literal(text, s)),
                     }
                 }
                 built
             }
-            None => vec![
-                level_from_paragraph_bounds(paragraph_bounds(text)),
-                level_from_contiguous_bounds(segmentation_impl::sentence_bounds(text)),
-                level_from_contiguous_bounds(segmentation_impl::word_bounds(text)),
-            ],
+            None => {
+                let mut built = Vec::new();
+                if heading_cuts.is_some() {
+                    spelled = true;
+                    heading_idx = Some(0);
+                    built.push(heading_level());
+                }
+                built.push(level_from_paragraph_bounds(paragraph_bounds(text)));
+                built.push(level_from_contiguous_bounds(
+                    segmentation_impl::sentence_bounds(text),
+                ));
+                built.push(level_from_contiguous_bounds(
+                    segmentation_impl::word_bounds(text),
+                ));
+                built
+            }
         };
         let grapheme_starts = grapheme_boundary_chars(text);
         let grapheme_set: HashSet<usize> = grapheme_starts.iter().copied().collect();
@@ -781,7 +1791,40 @@ mod tests {
             level
                 .cuts
                 .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+            // The skip rows take the same filter, in lockstep with the
+            // production realize filter: a match whose drop would
+            // straddle a cluster is content, never a skip ("ำำ" with
+            // separator "ำ" — one cluster — chunks (0, 2), it does not
+            // vanish).
+            level
+                .skip_starts
+                .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
         }
+        // The demotion check's input: the heading cuts, post-filter (the
+        // same filtered list production's memoized slot carries), and
+        // only when the hierarchy spelled the level at all.
+        let demotion_cuts: Option<Vec<(usize, usize)>> = if spelled {
+            heading_cuts.as_ref().map(|cuts| {
+                cuts.iter()
+                    .filter(|(e, nx)| grapheme_set.contains(e) && grapheme_set.contains(nx))
+                    .copied()
+                    .collect()
+            })
+        } else {
+            None
+        };
+        // #47's word-bounds level for the "word" snap mode: built up front
+        // (eager, the oracle's idiom) with the same cut filter every level
+        // gets. Only built when the mode can consult it.
+        let word_level = if overlap_boundary == OverlapBoundary::Word {
+            let mut level = level_from_contiguous_bounds(segmentation_impl::word_bounds(text));
+            level
+                .cuts
+                .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+            Some(level)
+        } else {
+            None
+        };
 
         let mut chunks = Vec::with_capacity(total / max_chars + 1);
         let mut start = 0usize;
@@ -793,38 +1836,93 @@ mod tests {
                 "chunk_hierarchical: forward-progress invariant violated"
             );
             let remaining = total - start;
-            if remaining <= max_chars {
-                chunks.push((start, total));
-                break;
+            // #63's final-window demotion, mirrored from the production
+            // loop in lockstep (the same structural-contract-beats-
+            // untrimmed-exit rule, and the same progress gate): a
+            // heading cut in range demotes the final window ONLY when
+            // the cut can end strictly past the previous chunk's end
+            // (a demotion that cannot advance would emit a chunk
+            // contained in its predecessor — the #83 violation; the
+            // untrimmed exit keeps the ends advancing). A gate-closed
+            // oracle carries no heading level, so the check is inert
+            // for heading-free text — the pre-#63 exit.
+            let mut final_window = remaining <= max_chars;
+            if final_window {
+                let prev_end = chunks.last().map(|&(_, end)| end).unwrap_or(0);
+                let predicted = || {
+                    // (a) the structural trigger: the heading level's own
+                    // in-range cut (demotion_cuts is the heading cuts;
+                    // None when the gate is closed or the hierarchy
+                    // spelled no heading level).
+                    let hc = demotion_cuts.as_ref()?;
+                    let hidx = heading_idx?;
+                    let idx = hc.partition_point(|&(e, _)| e <= start);
+                    let &(e, _) = hc.get(idx)?;
+                    if e > start + max_chars {
+                        return None;
+                    }
+                    // (b) the predicted verdict: the first verdict among
+                    // the levels up to and including the heading's, in
+                    // slot order — the demoted window's search answers
+                    // the same (an earlier literal's cut or skip
+                    // preempts the heading's).
+                    for level in levels.iter().take(hidx + 1) {
+                        if level.skip_cut(start).is_some() {
+                            return None;
+                        }
+                        if let Some(cut) = level.best_cut(start, start + max_chars) {
+                            return Some(cut);
+                        }
+                    }
+                    None
+                };
+                if predicted().is_some_and(|(end, _)| end > prev_end) {
+                    final_window = false;
+                }
             }
-            let limit = start + max_chars;
+            let limit = start.saturating_add(max_chars);
             // The window's verdict, mirrored from the production loop in
             // lockstep (the second deliberate post-verbatim edit): per
             // slot, the separator-at-the-window-start skip beats the
             // slot's own genuine cuts, and the first slot with a verdict
             // wins; a window that opens on a separator skips it before
             // any cut is searched (the separator is dropped between
-            // chunks, never emitted as one).
-            let verdict = levels
-                .iter()
-                .find_map(|level| {
-                    level.skip_cut(start).map(Verdict::Skip).or_else(|| {
-                        level
-                            .best_cut(start, limit)
-                            .map(|(end, next)| Verdict::Cut(end, next))
-                    })
+            // chunks, never emitted as one). Since #103 this includes the
+            // final window: the whole-remainder exit below runs only when
+            // the search did not answer Skip.
+            let verdict = levels.iter().find_map(|level| {
+                level.skip_cut(start).map(Verdict::Skip).or_else(|| {
+                    level
+                        .best_cut(start, limit)
+                        .map(|(end, next)| Verdict::Cut(end, next))
                 })
-                .unwrap_or_else(|| {
-                    let end = grapheme_safe_hard_cut(&grapheme_starts, start, limit);
-                    Verdict::Cut(end, end)
-                });
+            });
             let cut = match verdict {
-                Verdict::Skip(next) => {
+                Some(Verdict::Skip(next)) => {
                     start = next;
                     continue;
                 }
-                Verdict::Cut(cut_end, next_start) => (cut_end, next_start),
+                Some(Verdict::Cut(cut_end, next_start)) => (cut_end, next_start),
+                None if final_window => {
+                    // The final-chunk exit ahead of the raw-cut fallback:
+                    // the oracle never builds a hard cut the exit would
+                    // discard.
+                    chunks.push((start, total));
+                    break;
+                }
+                None => {
+                    let end = grapheme_safe_hard_cut(&grapheme_starts, start, limit);
+                    (end, end)
+                }
             };
+            if final_window {
+                // The final-chunk exit (#103): the search above has
+                // already answered the skip question — a Skip verdict
+                // preempted this exit — and its cut is discarded: the
+                // final chunk runs to the end untrimmed.
+                chunks.push((start, total));
+                break;
+            }
             chunks.push((start, cut.0));
             if overlap == 0 {
                 start = cut.1;
@@ -832,6 +1930,20 @@ mod tests {
                 let target = cut.0.saturating_sub(overlap);
                 let ghi = grapheme_starts.partition_point(|&g| g <= target);
                 let snapped = if ghi > 0 { grapheme_starts[ghi - 1] } else { 0 };
+                // #47's word snap, second in the composition order,
+                // mirrored from the production snap: the grapheme
+                // candidate lands first, then the largest word-bounds cut
+                // at or before it (or the grapheme candidate back when
+                // the word level has no boundary there), and the
+                // decline-the-snap lookahead below runs on the
+                // word-snapped candidate unchanged.
+                let snapped = match &word_level {
+                    Some(word) => {
+                        let hi = word.cuts.partition_point(|&(end, _)| end <= snapped);
+                        if hi > 0 { word.cuts[hi - 1].0 } else { snapped }
+                    }
+                    None => snapped,
+                };
                 // The production snap's decline-the-snap lookahead (#83),
                 // spelled against this oracle's own eager levels: kept in
                 // verbatim lockstep with chunk_hierarchical's, or the
@@ -839,7 +1951,44 @@ mod tests {
                 // declines a snap and the other accepts it. `next_end` is
                 // the oracle loop's own computation run from `snapped`.
                 let next_end = if total - snapped <= max_chars {
-                    total
+                    // The next window would be final — mirrored from the
+                    // production lookahead: the #63 demotion may cut it
+                    // at a heading first, and the acceptance condition
+                    // needs the end the window would actually take (the
+                    // same two-step prediction the oracle's loop head
+                    // runs — the heading trigger plus the first verdict
+                    // among the levels up to the heading's — so the two
+                    // never disagree).
+                    let mut next_end = total;
+                    if let Some(hc) = &demotion_cuts
+                        && heading_idx.is_some()
+                    {
+                        let idx = hc.partition_point(|&(e, _)| e <= snapped);
+                        if let Some(&(e, _)) = hc.get(idx)
+                            && e <= total
+                        {
+                            // (b): the first verdict among the levels up
+                            // to and including the heading's.
+                            let hidx = heading_idx.unwrap();
+                            let mut predicted = None;
+                            for level in levels.iter().take(hidx + 1) {
+                                if level.skip_cut(snapped).is_some() {
+                                    predicted = None;
+                                    break;
+                                }
+                                if let Some(c) = level.best_cut(snapped, total) {
+                                    predicted = Some(c);
+                                    break;
+                                }
+                            }
+                            if let Some((pe, _)) = predicted
+                                && pe > cut.0
+                            {
+                                next_end = pe;
+                            }
+                        }
+                    }
+                    next_end
                 } else {
                     let next_limit = snapped + max_chars;
                     levels
@@ -889,6 +2038,32 @@ mod tests {
             "abcdefghijklmnopqrstuvwxyz".repeat(8),
             "\u{4E2D}\u{6587}\u{6587}\u{672C}\u{FF0C}\u{6D4B}\u{8BD5}".to_string(),
             "mixed 0\u{0E33} ascii \u{1F600} \u{4E2D}\u{6587} tail".to_string(),
+            // The #103 shapes: trailing and leading separator runs — the
+            // final-chunk exit's skip question is exactly what these
+            // stress (a trailing window opening on a match, a document
+            // that is all matches, a run spanning several skips).
+            "aa\n\n\n\n".to_string(),
+            "\n\n".to_string(),
+            "\n\n\n\n".to_string(),
+            "a\n\n\n\n".to_string(),
+            "ab\n\n\ncd".to_string(),
+            // The #63 shapes: heading-dense documents in both gate
+            // states — the '#' byte present with real ATX structure
+            // (cuts exist; the bounding first-cut semantics, the
+            // demotion check, and the fence state machine all have
+            // live inputs here) and present with only non-heading
+            // hashes (the gate opens, the scan finds nothing). The
+            // heading-free texts above keep the gate closed; every
+            // gate state is swept because the gate is per-call state
+            // the production find_maps consult.
+            "# Title\n\nintro text\n\n## Section\n\nmore text\n\n### Sub\n\ntail".to_string(),
+            "# a\n## b\n### c\n#### d".to_string(),
+            "```fence\n# not a heading\n## nor this\n```\n\n## real\n\nbody".to_string(),
+            "```\nunclosed fence\n# not a heading\n".to_string(),
+            "para one\n#heading no space\n####### seven\n\\# escaped\n> # quoted\n## real one\ntail".to_string(),
+            "## closed ##\nbody #hash\n\t# tabbed\n    # indented\nend".to_string(),
+            "a # b".to_string(),
+            "# a\r\n## b\r\n\r\nbody\r\n## c\r\n".to_string(),
         ]
     }
 
@@ -910,6 +2085,13 @@ mod tests {
             Some(vec![Some("\n"), None]),
             Some(vec![Some("\n## "), None, Some("\n")]),
             Some(vec![Some(""), None]),
+            // The #63 heading level: the sentinel alone (heading → raw
+            // cut), sentinel + splice (== default with heading), the
+            // sentinel mid-list, and the sentinel under a line literal.
+            Some(vec![Some("heading")]),
+            Some(vec![Some("heading"), None]),
+            Some(vec![Some("heading"), None, Some("heading")]),
+            Some(vec![Some("\n"), Some("heading"), None]),
         ];
         for text in differential_corpus() {
             let total = text.chars().count();
@@ -926,19 +2108,32 @@ mod tests {
                 {
                     for seps in &separator_cases {
                         let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
-                        let new =
-                            chunk_hierarchical(&text, max_chars, sep_refs.as_deref(), overlap);
-                        let old = chunk_hierarchical_reference(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        assert_eq!(
-                            new, old,
-                            "divergence: text={text:?} max_chars={max_chars} \
-                             overlap={overlap} separators={seps:?}"
-                        );
+                        // Both overlap-boundary modes: the word snap is a
+                        // pure grapheme-candidate refinement, so the sweep
+                        // pins the word machinery against the oracle's own
+                        // word level on every cell the grapheme sweep
+                        // already ran (#47).
+                        for boundary in [OverlapBoundary::Grapheme, OverlapBoundary::Word] {
+                            let new = super::chunk_hierarchical(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            let old = chunk_hierarchical_reference(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            assert_eq!(
+                                new, old,
+                                "divergence: text={text:?} max_chars={max_chars} overlap={overlap} \
+                                 boundary={boundary:?} separators={seps:?}"
+                            );
+                        }
                     }
                 }
             }
@@ -973,34 +2168,452 @@ mod tests {
                 for overlap in 0..max_chars {
                     for seps in &separator_cases {
                         let sep_refs: Option<Vec<Option<&str>>> = seps.as_ref().map(|v| v.to_vec());
-                        let new =
-                            chunk_hierarchical(&text, max_chars, sep_refs.as_deref(), overlap);
-                        let old = chunk_hierarchical_reference(
-                            &text,
-                            max_chars,
-                            sep_refs.as_deref(),
-                            overlap,
-                        );
-                        assert_eq!(
-                            new, old,
-                            "lookahead/production divergence: text={text:?} \
-                             max_chars={max_chars} overlap={overlap} separators={seps:?}"
-                        );
-                        if overlap > 0 {
-                            let mut prev_end = 0usize;
-                            for &(s, e) in &new {
-                                assert!(
-                                    e > prev_end,
-                                    "ends not strictly advancing under overlap={overlap}: \
-                                     text={text:?} max_chars={max_chars} separators={seps:?}"
-                                );
-                                let _ = s;
-                                prev_end = e;
+                        for boundary in [OverlapBoundary::Grapheme, OverlapBoundary::Word] {
+                            let new = super::chunk_hierarchical(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            let old = chunk_hierarchical_reference(
+                                &text,
+                                max_chars,
+                                sep_refs.as_deref(),
+                                overlap,
+                                boundary,
+                            );
+                            assert_eq!(
+                                new, old,
+                                "lookahead/production divergence: text={text:?} \
+                                 max_chars={max_chars} overlap={overlap} boundary={boundary:?} \
+                                 separators={seps:?}"
+                            );
+                            if overlap > 0 {
+                                let mut prev_end = 0usize;
+                                for &(s, e) in &new {
+                                    assert!(
+                                        e > prev_end,
+                                        "ends not strictly advancing under overlap={overlap}: \
+                                         text={text:?} max_chars={max_chars} boundary={boundary:?} \
+                                         separators={seps:?}"
+                                    );
+                                    let _ = s;
+                                    prev_end = e;
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    // ---- #63: the heading level ----
+
+    #[test]
+    fn a_heading_bearing_document_under_a_whole_document_budget_comes_back_as_its_sections() {
+        // The demotion check's headline: the pre-#63 machine answered a
+        // whole-document budget with one untrimmed chunk (the
+        // final-chunk exit), which merges every section — exactly what
+        // the heading level exists to prevent. Each heading cut now
+        // demotes its final window, so the sections come back separate,
+        // every chunk starting at a heading line's first codepoint (the
+        // heading rides with the section that follows it; the blank run
+        // before a heading stays a suffix of the previous section's
+        // chunk — the cut is before the heading, not after it).
+        let text = "# Title\n\nintro text\n\n## Section\n\nmore text\n\n### Sub\n\ntail";
+        let total = text.chars().count();
+        let chunks = chunk_hierarchical(text, total, None, 0);
+        let texts = text_of(&chunks, text);
+        assert_eq!(
+            texts,
+            vec![
+                "# Title\n\nintro text",
+                "## Section\n\nmore text",
+                "### Sub\n\ntail"
+            ],
+            "each section starts at its own heading; the newline run before \
+             a heading is dropped between chunks (the paragraph gap's own \
+             convention)"
+        );
+        // The custom sentinel spelling answers the same.
+        assert_eq!(
+            chunk_hierarchical(text, total, Some(&[Some("heading")]), 0),
+            chunks
+        );
+    }
+
+    #[test]
+    fn heading_free_text_keeps_the_whole_document_exit_exactly() {
+        // The demotion must be provably inert where no heading can
+        // exist: the `#`-byte gate answers no without realizing the
+        // level, and the whole-remainder exit is byte-for-byte the
+        // pre-#63 one — including the paragraph-gap run the final exit
+        // keeps (the default hierarchy's own `the_default_hierarchys_
+        // final_exit_is_unchanged` pin, restated here so the heading
+        // machinery's presence is visibly not what changed it).
+        assert_eq!(chunk_hierarchical("ab\n\n\ncd", 100, None, 0), vec![(0, 7)]);
+        // A '#' in ordinary prose content (not a heading line) opens the
+        // gate — the scan runs, finds no heading line, and the exit is
+        // still the untrimmed one.
+        assert_eq!(
+            chunk_hierarchical("ab #hash cd\n\n\nef", 100, None, 0),
+            vec![(0, 16)]
+        );
+    }
+
+    #[test]
+    fn the_heading_gate_is_the_only_cost_a_heading_free_text_pays() {
+        // The seam pin, #63's side of the #30 contract: heading-FREE
+        // text under a whole-document budget builds NO levels and NO
+        // grapheme index (the gate closes before any realization), and
+        // a text whose only '#' shapes are non-headings builds exactly
+        // the heading level (empty cuts — no bitmap: nothing to
+        // filter) once, memoized across the call's later windows.
+        let heading_free = "Para one.\n\nPara two.\n\nPara three.";
+        build_seam::reset();
+        let total = heading_free.chars().count();
+        assert_eq!(
+            chunk_hierarchical(heading_free, total, None, 0),
+            [(0, total)]
+        );
+        assert_eq!(build_seam::levels_built(), 0);
+        assert_eq!(build_seam::grapheme_index_built(), 0);
+
+        // '#' present, no heading line: the gate opens, the scan finds
+        // nothing, the level (empty cuts) builds once.
+        let hash_content = "a #b\n\nc #d";
+        build_seam::reset();
+        let total = hash_content.chars().count();
+        assert_eq!(
+            chunk_hierarchical(hash_content, total, None, 0),
+            [(0, total)]
+        );
+        assert_eq!(build_seam::levels_built(), 1);
+        assert_eq!(build_seam::grapheme_index_built(), 0);
+    }
+
+    #[test]
+    fn a_whole_document_budget_over_headings_builds_the_heading_level_once() {
+        // The demotion's seam shape: the heading level realizes once
+        // (at the first window's demotion check, shared with the
+        // search), the bitmap builds once (the filter), and the
+        // paragraph walk never runs (the heading slot supplies every
+        // cut: the find_map short-circuit stops there).
+        let text = "# a\ncontent one\n\n## b\ncontent two\n\n## c\ncontent three";
+        let total = text.chars().count();
+        build_seam::reset();
+        let chunks = chunk_hierarchical(text, total, None, 0);
+        assert!(chunks.len() >= 3);
+        // Three levels build, each exactly once: the heading level at
+        // the first window's demotion check (shared with the search),
+        // then paragraph and sentence at the LAST window — the final
+        // exit's skip pre-test answers "maybe" for the paragraph arm at
+        // `at > 0` (the pre-#63 behavior, unchanged), so the final
+        // window's search realizes them; the word level is never
+        // consulted (the find_map short-circuit stops at sentence's
+        // cut). The bitmap builds once (the heading level's filter).
+        assert_eq!(build_seam::levels_built(), 3);
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+        // And a small budget over the same text still builds each level
+        // at most once (the demotion check reuses the memoized
+        // realization; the windows descend only past exhausted levels).
+        build_seam::reset();
+        let _ = chunk_hierarchical(text, 8, None, 0);
+        assert!(build_seam::levels_built() <= 4);
+        assert_eq!(build_seam::grapheme_index_built(), 1);
+    }
+
+    #[test]
+    fn heading_lines_inside_fenced_code_blocks_are_not_headings() {
+        // The red-team battery's anchor: `# comment` inside a fence is
+        // code. The fence state machine tracks the block across the
+        // whole document (an unclosed fence runs to the end), so neither
+        // the whole-document demotion nor any window's cut fires on it.
+        let text = "# Title\n\n```python\n# not a heading\nx = 1\n```\n\n## Real\n\nbody";
+        let total = text.chars().count();
+        let chunks = chunk_hierarchical(text, total, None, 0);
+        let texts = text_of(&chunks, text);
+        // The fence's `# not a heading` line never started a chunk; the
+        // only cuts are at "## Real".
+        assert_eq!(texts.len(), 2);
+        assert!(texts[1].starts_with("## Real"));
+        assert!(
+            texts.iter().all(|t| !t.starts_with("# not a heading")),
+            "a fenced heading-shaped line cut a chunk: {texts:?}"
+        );
+        // An unclosed fence swallows the rest of the document: the
+        // heading-shaped lines after it never cut, and the chunk after
+        // the real heading is the fence content whole.
+        let unclosed = "# Title\n\n```\n# not a heading\n## nor this\n";
+        let total = unclosed.chars().count();
+        assert_eq!(
+            chunk_hierarchical(unclosed, total, None, 0),
+            vec![(0, total)]
+        );
+    }
+
+    #[test]
+    fn non_heading_hash_shapes_are_ordinary_content() {
+        // Each CommonMark clause the ATX shape test encodes, pinned
+        // individually: none of these lines may cut. A whole-document
+        // budget answers each with the single untrimmed chunk (no
+        // demotion: no heading cut exists), the sharpest possible pin —
+        // any stray cut would emit two.
+        let cases = [
+            // No space after the run (`#heading` is a paragraph).
+            "#heading\nbody",
+            // A 7-hash run is past the 1-6 depth.
+            "####### seven\nbody",
+            // An escaped heading marker is content.
+            "\\# escaped\nbody",
+            // A blockquote's heading rides the quote line (the v1 level
+            // is a top-level line-shape scan; documented exclusion).
+            "> # quoted\nbody",
+            // A list item's heading marker likewise.
+            "- # item\nbody",
+            // 4-space indent is indented code.
+            "    # indented\nbody",
+            // A tab-indented line is not the 0-3 space indent either.
+            "\t# tabbed\nbody",
+            // The '#' as ordinary prose mid-line.
+            "hash # mid\nbody",
+        ];
+        for case in cases {
+            let total = case.chars().count();
+            assert_eq!(
+                chunk_hierarchical(case, total, None, 0),
+                vec![(0, total)],
+                "a non-heading hash shape cut the document: {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn atx_heading_shape_edges_cut_where_they_should() {
+        // The positive edges of the same shape: 1-6 hashes (a single
+        // hash, the CommonMark minimum), the 1-3 space indent, the
+        // trailing-hash closing run (still a heading line: the cut is
+        // at the line either way), a tab after the run, an empty
+        // heading (run + space + EOL), and headings at CRLF/CR line
+        // starts (the full line-ending set). A heading on the
+        // document's FIRST line produces no cut (nothing precedes it:
+        // the first chunk starts there), so the splitting cases put the
+        // heading on a later line; a whole-document budget over each
+        // document emits exactly the section chunks.
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            // A lone first-line heading: no cut, one chunk.
+            ("# one\nbody", vec!["# one\nbody"]),
+            ("   ## two\nbody", vec!["   ## two\nbody"]),
+            ("## closed ##\nbody", vec!["## closed ##\nbody"]),
+            ("#\nbody", vec!["#\nbody"]),
+            ("# \nbody", vec!["# \nbody"]),
+            ("## tabbed\t\nbody", vec!["## tabbed\t\nbody"]),
+            // The same shapes as section headers: the heading line rides
+            // with the section that follows it, the newline run before
+            // it is dropped.
+            ("intro\n# one\nbody", vec!["intro", "# one\nbody"]),
+            ("intro\n   ## two\nbody", vec!["intro", "   ## two\nbody"]),
+            (
+                "intro\n## closed ##\nbody",
+                vec!["intro", "## closed ##\nbody"],
+            ),
+            ("intro\n#\nbody", vec!["intro", "#\nbody"]),
+            // CRLF is one line-ending unit (and one grapheme cluster —
+            // the filter would refuse a cut between the pair), so the
+            // dropped run is the whole CRLF.
+            ("# a\r\n## b\r\nbody", vec!["# a", "## b\r\nbody"]),
+            ("# a\r## b\rbody", vec!["# a", "## b\rbody"]),
+        ];
+        for (text, want) in cases {
+            let total = text.chars().count();
+            let texts = text_of(&chunk_hierarchical(text, total, None, 0), text);
+            assert_eq!(texts, want, "heading shape edge cut wrong: {text:?}");
+        }
+    }
+
+    #[test]
+    fn unicode_heading_lines_cut_at_their_codepoint_starts() {
+        // The scan's codepoint accounting on multi-byte content: the
+        // heading's own text is Unicode, the cut is the line's first
+        // CODEPOINT, and the byte walk's cp cursor (continuation-byte
+        // predicate, the is_ascii gate off) lands the cut exactly.
+        let text = "précis\n\n## Ünïcodé heading ✓\n\nbodytext";
+        let total = text.chars().count();
+        let chunks = chunk_hierarchical(text, total, None, 0);
+        let texts = text_of(&chunks, text);
+        assert_eq!(texts, vec!["précis", "## Ünïcodé heading ✓\n\nbodytext"]);
+        // And every cut is still a grapheme boundary (the filter's
+        // invariant, swept below too).
+        let starts: HashSet<usize> = chunks.iter().map(|&(s, _)| s).collect();
+        let boundaries: HashSet<usize> = grapheme_boundary_chars(text).into_iter().collect();
+        assert!(starts.is_subset(&boundaries));
+    }
+
+    #[test]
+    fn all_headings_and_consecutive_headings_chunk_without_empty_spans() {
+        // A document that is ALL headings (no section content at all),
+        // consecutive headings (an empty section between them), and a
+        // LAST line that is a heading (no section after it — the
+        // trailing cut at total): every chunk non-empty, every chunk
+        // exactly one heading line, ends running to total.
+        for text in ["# a\n## b\n### c", "# a\n## b\n## b2"] {
+            let total = text.chars().count();
+            let chunks = chunk_hierarchical(text, total, None, 0);
+            assert!(!chunks.is_empty());
+            for &(s, e) in &chunks {
+                assert!(s < e, "empty chunk in all-headings doc: {chunks:?}");
+                assert!(e <= total);
+            }
+            assert_eq!(chunks.last().unwrap().1, total);
+            let texts = text_of(&chunks, text);
+            assert!(
+                texts.iter().all(|t| t.starts_with('#')),
+                "a chunk does not start at its heading: {texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_chars_smaller_than_one_section_splits_at_finer_levels() {
+        // The precedence line's own pin: budget > heading > paragraph >
+        // sentence > word. A section wider than max_chars splits at the
+        // finer levels inside it — the heading level bounds the
+        // section, it does not protect it from the budget.
+        let text = "# Title\nalpha beta gamma delta epsilon zeta eta theta iota.";
+        let chunks = chunk_hierarchical(text, 10, None, 0);
+        assert!(
+            chunks.len() > 2,
+            "expected the section to split: {chunks:?}"
+        );
+        for &(s, e) in &chunks {
+            assert!(e - s <= 10, "chunk ({s}, {e}) broke the budget");
+        }
+        // The first chunk still ends at the FIRST in-budget heading cut
+        // or finer — the heading level was consulted first.
+        let first = &text[chunks[0].0..chunks[0].1];
+        assert!(
+            !first.contains("\n\n"),
+            "unexpected paragraph cut: {first:?}"
+        );
+    }
+
+    #[test]
+    fn heading_cuts_compose_with_overlap_snaps() {
+        // Overlap over heading-bearing text: ends strictly advance (the
+        // #83 invariant), no chunk is exactly a heading line's would-be
+        // separator shape (headings are content — they appear at chunk
+        // STARTS), and the swept cells never stall.
+        let text = "# a\nalpha beta gamma delta epsilon\n\n## b\nzeta eta theta iota kappa\n\n## c\nmore words here now";
+        for max_chars in [8usize, 12, 20] {
+            for overlap in 1..max_chars {
+                let chunks = chunk_hierarchical(text, max_chars, None, overlap);
+                assert!(!chunks.is_empty());
+                let mut prev_end = 0usize;
+                for &(s, e) in &chunks {
+                    assert!(
+                        e > prev_end,
+                        "ends not advancing: m={max_chars} ov={overlap}"
+                    );
+                    let _ = s;
+                    prev_end = e;
+                }
+            }
+        }
+        // A snap landing exactly on a heading cut: the next chunk STARTS
+        // there (a heading cut is content-bearing; unlike a separator
+        // match there is nothing to skip).
+        let text = "# a\nxxxxxx\n## b\nyyyyyy";
+        let chunks = chunk_hierarchical(text, 6, None, 2);
+        assert!(
+            chunks
+                .iter()
+                .any(|&(s, _)| &text[s..text.len().min(s + 2)] == "##")
+        );
+    }
+
+    #[test]
+    fn the_heading_sentinel_is_reserved_and_deduped() {
+        // The opt-in spelling's contract: "heading" is the level (not a
+        // literal split on the word); `["heading", None]` is the default
+        // hierarchy spelled explicitly (sentinel + splice, equal to
+        // `separators = None`); the sentinel dedups against itself and
+        // against the splice's own heading spec in either order; a
+        // never-matching literal above changes nothing. The sentinel
+        // ALONE is its own hierarchy (heading → raw cut, no paragraph
+        // level below it) and is pinned separately.
+        let text = "# a\nalpha\n\n## b\nbeta";
+        let with_splice = chunk_hierarchical(text, 10, Some(&[Some("heading"), None]), 0);
+        assert_eq!(with_splice, chunk_hierarchical(text, 10, None, 0));
+        assert_eq!(
+            chunk_hierarchical(text, 10, Some(&[None, Some("heading")]), 0),
+            with_splice
+        );
+        assert_eq!(
+            chunk_hierarchical(text, 10, Some(&[Some("heading"); 8]), 0),
+            chunk_hierarchical(text, 10, Some(&[Some("heading")]), 0)
+        );
+        assert_eq!(
+            chunk_hierarchical(
+                text,
+                10,
+                Some(&[Some("ZZZ_NEVER_MATCHES"), Some("heading")]),
+                0
+            ),
+            chunk_hierarchical(text, 10, Some(&[Some("heading")]), 0)
+        );
+        // The sentinel alone: the heading level bounds every section,
+        // and with no finer level below it the oversized remainder falls
+        // to the raw cut. Both chunks start at their headings.
+        let alone = chunk_hierarchical(text, 10, Some(&[Some("heading")]), 0);
+        let texts = text_of(&alone, text);
+        assert!(texts[0].starts_with("# a"));
+        assert!(texts.iter().any(|t| t.starts_with("## b")));
+        // The bounding semantics: no chunk spans a heading cut.
+        for w in alone.windows(2) {
+            assert!(
+                !text[w[0].0..w[0].1].contains("## b") || w[0].1 <= 9,
+                "a chunk spanned the '## b' heading cut: {alone:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seven_hundred_section_document_chunks_per_section() {
+        // Scale shape: 700 sections, every window's heading cut
+        // supplied by the one memoized heading level (the scan is one
+        // linear pass; the per-window cost is the usual partition_point
+        // binary search). The structural pin: every section boundary is
+        // a chunk boundary — section content never merges across its
+        // heading — and the final chunk ends at total.
+        let mut text = String::new();
+        for i in 0..700 {
+            text.push_str(&format!(
+                "## Section {i}\n\nBody paragraph for section {i}.\n\n"
+            ));
+        }
+        let total = text.chars().count();
+        let chunks = chunk_hierarchical(&text, total, None, 0);
+        assert_eq!(chunks.len(), 700, "one chunk per section");
+        for &(s, _e) in &chunks {
+            let head = &text[s..s + 3];
+            assert!(
+                head.starts_with("## "),
+                "chunk at {s} does not start at a heading"
+            );
+        }
+        assert_eq!(chunks.last().unwrap().1, total);
+        // A budget that fits ~10 sections still never merges across a
+        // section's heading: every chunk starts at a heading (the
+        // coarsest in-budget cut is always the next section's heading
+        // once the heading level carries cuts in range).
+        let chunks = chunk_hierarchical(&text, 2200, None, 0);
+        for &(s, _e) in &chunks {
+            assert!(
+                text[s..].starts_with("## "),
+                "chunk at {s} merges into a section past its heading"
+            );
         }
     }
 
@@ -1045,6 +2658,586 @@ mod tests {
                 "a separator came back as its own chunk: {overlapped:?}"
             );
         }
+    }
+
+    // ---- #103, reopened: the final-chunk exit answers the skip question ----
+
+    #[test]
+    fn a_trailing_window_opening_on_a_separator_is_skipped_even_at_the_final_exit() {
+        // The reopened ticket's two repros: the `remaining <= max_chars`
+        // shortcut used to run BEFORE the separator-at-the-window-start
+        // skip, so a trailing window that opens on a match was emitted
+        // whole — `'\n\n'` came back as `[(0, 2)]` (the whole chunk the
+        // separator), `'aa\n\n\n\n'` as `[(0, 2), (4, 6)]` with `(4, 6)`
+        // pure separator. The contract the fix pins: a window that OPENS
+        // on a separator match is skipped wherever the skip applies,
+        // INCLUDING the final-chunk exit; a trailing separator run
+        // survives only as a suffix of a content-bearing chunk; an
+        // all-separator document chunks to zero chunks.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "\n\n",
+                5,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            Vec::<(usize, usize)>::new(),
+            "an all-separator document must chunk to zero chunks"
+        );
+        assert_eq!(
+            super::chunk_hierarchical(
+                "aa\n\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(0, 2)],
+            "the trailing (4, 6) window opens on a match and must be skipped"
+        );
+        // A trailing run longer than one match skips repeatedly — each
+        // skip advances `start` strictly, so the loop-head iteration
+        // counter stays an honest bound and the run ends in zero chunks,
+        // not one chunk per match.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "\n\n\n\n\n\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            Vec::<(usize, usize)>::new()
+        );
+        // The run survives only as a suffix of content: the chunk before
+        // it ends inside content... and the chunk AFTER the skips, when
+        // content follows the run, is that content alone.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "aa\n\n\n\nbb",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(0, 2), (6, 8)]
+        );
+        // The one-residue case, pinned as documented behavior: a trailing
+        // '\n' that is NOT a "\n\n" match (the matcher consumed the pair
+        // before it) opens no window on a match, so the raw-cut final
+        // exit emits it. The contract is match-shaped (`skip_cut`
+        // answers "a match begins at `start`"), and the residue is the
+        // same lone-character ride-along any too-short remainder gets.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "aa\n\n\n",
+                2,
+                Some(&[Some("\n\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(0, 2), (4, 5)]
+        );
+    }
+
+    #[test]
+    fn separator_pretest_literal_at_gt_zero_may_open() {
+        // The final-exit PRE-TEST's own soundness, beyond the
+        // single-level shapes above: the unrealized-LITERAL arm used to
+        // answer `at == 0 && text.starts_with(sep)` — "provably no" at
+        // every `at > 0` — but a literal separator can begin at ANY
+        // codepoint. A hierarchy with a fine level left unrealized by
+        // the `find_map` short-circuit (here: the `"\n"` level under the
+        // `"\n\n"` verdicts) then pushed final windows that OPEN on a
+        // match: `"\n"*5` chunked to `[(4, 5)]` (a pure-separator chunk,
+        // the #103 relapse) and `"XaX\nbb"` lost the `"\n"` skip at the
+        // final exit. The arm answers "maybe" at `at > 0` (the caller
+        // descends to the exact, memoized search — the same
+        // over-approximate discipline the PARAGRAPH arm has always
+        // used), so every shape below matches the bare-search oracle.
+        //
+        // The unit-level pin on the pre-test itself: an unrealized
+        // literal at `at > 0` can never answer "provably no".
+        let slots: Vec<LevelSlot<'_>> = ["\n\n", "\n"]
+            .into_iter()
+            .map(|sep| LevelSlot {
+                spec: LevelSpec::Literal(sep),
+                level: None,
+            })
+            .collect();
+        assert!(separator_may_open(&slots, "\n\n\n\n\n", 3));
+        assert!(separator_may_open(&slots, "XaX\nbb", 3));
+        // `at == 0` keeps its exact O(1) answer (the zero-build
+        // contract's headline is a whole-document window at `at == 0`).
+        assert!(!separator_may_open(&slots, "abc", 0));
+        assert!(separator_may_open(&slots, "\nabc", 0));
+        // End-to-end: the red-team repros, each previously diverging
+        // from the bare-search reference oracle.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "\n\n\n\n\n",
+                5000,
+                Some(&[Some("\n\n"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            Vec::<(usize, usize)>::new(),
+            "an all-separator document chunks to zero chunks even when a fine literal level is unrealized"
+        );
+        assert_eq!(
+            super::chunk_hierarchical(
+                "XaX\nbb",
+                3,
+                Some(&[Some("X"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(1, 2), (4, 6)],
+            "the final window opening on an unrealized level's match is skipped, not emitted"
+        );
+        assert_eq!(
+            super::chunk_hierarchical(
+                "XaX\n\n\n",
+                3,
+                Some(&[Some("X"), Some("\n")]),
+                0,
+                OverlapBoundary::Grapheme
+            ),
+            vec![(1, 2)],
+            "a trailing separator run survives only as a suffix of a content-bearing chunk"
+        );
+        // Overlap composition: the trailing pure-separator chunk the
+        // pre-test used to emit at the overlap snap's landing.
+        assert_eq!(
+            super::chunk_hierarchical(
+                "babaaababaaababaaababaaababaaababaaabaa",
+                3,
+                Some(&[Some("ab"), Some("ba"), Some("a"), Some("b")]),
+                2,
+                OverlapBoundary::Grapheme
+            )
+            .last()
+            .copied(),
+            Some((33, 35)),
+            "the last chunk ends on content, not on a separator match"
+        );
+    }
+
+    #[test]
+    fn the_final_exit_skip_holds_under_every_separator_shape() {
+        // The red-team matrix over the final-exit skip, as a battery:
+        // length-1 separators (a match at every separator codepoint),
+        // separators wider than the window, runs spanning several
+        // windows, custom empty-string separators (a no-op level that
+        // must not resurrect the shortcut), and overlap > 0 with
+        // separator-final documents (a declined snap landing on a match
+        // must not hand the NEXT iteration's final exit a separator
+        // chunk — the skip preempts it, #103's lookahead corner). The
+        // contract, per cell: no chunk's slice is exactly a separator
+        // the caller asked to split on, and under overlap the ends
+        // strictly advance.
+        let cases: Vec<(&str, &[Option<&str>], usize)> = vec![
+            ("a\n\nb", &[Some("\n")], 2),
+            ("a\n\n\n\nb", &[Some("\n")], 2),
+            ("a\nb\nc\nd", &[Some("\n")], 1),
+            ("-----cd", &[Some("-----")], 2),
+            ("ab-----cd-----ef", &[Some("-----")], 4),
+            ("x------y", &[Some("---")], 3),
+            ("\n\n\n--\n\n\n", &[Some("\n\n")], 3),
+            ("aa\n\n\n\n", &[Some("\n\n")], 2),
+            ("aa\n\n\n\n", &[Some("\n\n")], 3),
+            ("a\n\n\n\nb", &[Some("")], 2),
+            ("a\n\n\n\nb", &[Some(""), Some("\n\n")], 2),
+            ("a\n\n\n\nbbbbbb", &[Some("\n\n")], 4),
+        ];
+        for (text, seps, max_chars) in cases {
+            for overlap in [0usize, 1, max_chars.saturating_sub(1)] {
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(seps),
+                    overlap,
+                    OverlapBoundary::Grapheme,
+                );
+                for sep in seps.iter().flatten() {
+                    for &(s, e) in &chunks {
+                        assert!(
+                            &text[s..e] != *sep,
+                            "separator {sep:?} came back as chunk ({s}, {e}): \
+                             text={text:?} m={max_chars} ov={overlap}: {chunks:?}"
+                        );
+                    }
+                }
+                let mut prev_end = 0usize;
+                for &(s, e) in &chunks {
+                    if overlap > 0 {
+                        assert!(
+                            e > prev_end,
+                            "ends not strictly advancing: {chunks:?} \
+                             text={text:?} m={max_chars} ov={overlap}"
+                        );
+                    } else {
+                        assert!(e >= prev_end, "ends moved backward: {chunks:?}");
+                    }
+                    let _ = s;
+                    prev_end = e;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_snap_landing_on_a_separator_is_skipped_by_the_next_window_not_emitted() {
+        // The #103 corner the overlap lookahead leaves open BY DESIGN
+        // (the lookahead reads the levels' direct cuts only — a separator
+        // match at `snapped` is not consulted there): with the fix at the
+        // loop head, the window that eventually runs from an accepted
+        // `snapped` applies the skip itself, so an overlap transition
+        // whose snap lands exactly on a separator match can never emit
+        // the match as a chunk. The battery walks every legal overlap
+        // over separator-run texts where snaps land on and beside
+        // matches; the output never carries the separator alone.
+        let text = "abcdefgh\n\nijklmnop\n\nqrstuvwx\n\nyz012345";
+        for max_chars in 4..=16 {
+            for overlap in 1..max_chars {
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(&[Some("\n\n")]),
+                    overlap,
+                    OverlapBoundary::Grapheme,
+                );
+                for &(s, e) in &chunks {
+                    assert!(
+                        &text[s..e] != "\n\n",
+                        "a snapped window emitted the separator as chunk ({s}, {e}): \
+                         m={max_chars} ov={overlap}: {chunks:?}"
+                    );
+                }
+                let mut prev_end = 0usize;
+                for &(_s, e) in &chunks {
+                    assert!(e > prev_end, "ends not advancing: {chunks:?}");
+                    prev_end = e;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_hierarchys_final_exit_is_unchanged() {
+        // The default hierarchy never skipped at a final exit before
+        // #103 (a paragraph gap is a cut whose resume is the next
+        // paragraph's start, never a second match), and must not start:
+        // the whole-remainder exit is unchanged for it, gap runs included.
+        assert_eq!(
+            super::chunk_hierarchical("ab\n\n\ncd", 2, None, 0, OverlapBoundary::Grapheme),
+            vec![(0, 2), (5, 7)]
+        );
+        assert_eq!(
+            super::chunk_hierarchical("ab\n\n\ncd", 2, Some(&[None]), 0, OverlapBoundary::Grapheme),
+            vec![(0, 2), (5, 7)]
+        );
+        // A paragraph gap CAN open a window — via an overlap snap into
+        // it — and then the skip applies (the gap is a cut with
+        // next_start strictly past it): the final exit after such a snap
+        // starts at the next paragraph, not inside the gap.
+        let text = "ab\n\ncd";
+        let snapped_into_gap =
+            super::chunk_hierarchical(text, 6, None, 1, OverlapBoundary::Grapheme);
+        for &(s, e) in &snapped_into_gap {
+            assert_ne!(
+                &text[s..e],
+                "\n\n",
+                "a paragraph gap came back as its own chunk: {snapped_into_gap:?}"
+            );
+        }
+    }
+
+    // ---- #47: the word-aware overlap snap ----
+
+    #[test]
+    fn word_mode_snaps_the_overlap_tail_to_a_word_boundary() {
+        // The issue's own motivating shape: the grapheme snap starts the
+        // tail mid-word ("uter Interaction"); the word snap moves the
+        // candidate back to the word's first codepoint ("Computer ...").
+        let text = "...Bachelor of Arts in Human-Computer Interaction, Lakeside \
+                    College, 2018\n\nCapstone project: designing a better chunker \
+                    for embedding pipelines and retrieval.";
+        let seps: &[Option<&str>] = &[Some("\n## "), Some("\n# "), None];
+        assert_eq!(
+            super::chunk_hierarchical(text, 150, Some(seps), 40, OverlapBoundary::Grapheme),
+            vec![(0, 73), (33, 158)]
+        );
+        assert_eq!(
+            super::chunk_hierarchical(text, 150, Some(seps), 40, OverlapBoundary::Word),
+            vec![(0, 73), (29, 158)],
+            "the word snap must move the tail start from mid-word to the word edge"
+        );
+        // A smaller budget: both tails word-aligned where the grapheme
+        // ones were mid-word ("teraction", "unker").
+        assert_eq!(
+            super::chunk_hierarchical(text, 60, Some(seps), 20, OverlapBoundary::Grapheme),
+            vec![(0, 3), (3, 60), (40, 73), (75, 134), (114, 158)]
+        );
+        assert_eq!(
+            super::chunk_hierarchical(text, 60, Some(seps), 20, OverlapBoundary::Word),
+            vec![(0, 3), (3, 60), (38, 73), (75, 134), (112, 158)]
+        );
+    }
+
+    #[test]
+    fn word_mode_with_no_word_boundary_in_range_falls_back_to_the_grapheme_snap() {
+        // One long token: the word level is the single segment (0, 100)
+        // (its only cut at the text end, past every snap target), so no
+        // boundary exists in the snap-back range — the plain grapheme
+        // candidate is kept, byte-for-byte the grapheme mode's output.
+        let text = format!("{}{}", "a".repeat(60), " b b b b");
+        for max_chars in [10usize, 20, 37] {
+            for overlap in [1usize, 6, max_chars - 1] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &text,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "the word snap invented a boundary inside one long token: \
+                     m={max_chars} ov={overlap}"
+                );
+            }
+        }
+        // Dense CJK (every Han character its own UAX #29 word) and Thai
+        // (no dictionary: one run, no internal boundary) both agree with
+        // grapheme mode — the first because word and grapheme boundaries
+        // coincide, the second through the documented fallback.
+        let cjk = "中文数据段落。中文数据段落。".repeat(5);
+        for max_chars in [7usize, 11, 30] {
+            for overlap in [1usize, 2, max_chars - 1] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &cjk,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &cjk,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "CJK word mode diverged from grapheme mode: m={max_chars} ov={overlap}"
+                );
+            }
+        }
+        let thai = "กาลครั้งหนึ่งนานาพรบ์มาแล้ว ".repeat(6);
+        for max_chars in [13usize, 20] {
+            for overlap in [3usize, 5] {
+                assert_eq!(
+                    super::chunk_hierarchical(
+                        &thai,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Word
+                    ),
+                    super::chunk_hierarchical(
+                        &thai,
+                        max_chars,
+                        None,
+                        overlap,
+                        OverlapBoundary::Grapheme
+                    ),
+                    "Thai word mode diverged from grapheme mode: m={max_chars} ov={overlap}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_mode_never_snaps_before_the_previous_chunk_or_contained_in_it() {
+        // Constraint (a): the word snap may push the candidate back past
+        // the just-emitted chunk's own start; the decline-the-snap
+        // lookahead (#83) runs AFTER the word snap (the composition
+        // order) and declines exactly that — the transition degrades to
+        // zero overlap, no chunk is emitted from a candidate at or before
+        // its predecessor's start, and no chunk is ever strictly contained
+        // in (or identical to) its predecessor. Swept over every overlap
+        // of two budgets on word-run text.
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+        for max_chars in [8usize, 9, 10, 12] {
+            for overlap in 1..max_chars {
+                let chunks = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    None,
+                    overlap,
+                    OverlapBoundary::Word,
+                );
+                for w in chunks.windows(2) {
+                    let (prev_start, prev_end) = (w[0].0, w[0].1);
+                    let (next_start, next_end) = (w[1].0, w[1].1);
+                    assert!(
+                        next_start > prev_start,
+                        "starts not strictly increasing: m={max_chars} ov={overlap}: {chunks:?}"
+                    );
+                    assert!(
+                        next_end > prev_end,
+                        "ends not strictly advancing: m={max_chars} ov={overlap}: {chunks:?}"
+                    );
+                    assert!(
+                        !(next_start >= prev_start && next_end <= prev_end),
+                        "a chunk contained in its predecessor: m={max_chars} \
+                         ov={overlap}: {chunks:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn word_mode_is_a_noop_at_overlap_zero_and_inert_at_the_default() {
+        // Constraint (b): "word" with overlap=0 is accepted and does
+        // nothing (no snap site ever runs, so the output is the
+        // zero-overlap answer); the grapheme default is the same function
+        // it always was.
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        for max_chars in [5usize, 12, 20] {
+            let zero =
+                super::chunk_hierarchical(text, max_chars, None, 0, OverlapBoundary::Grapheme);
+            assert_eq!(
+                super::chunk_hierarchical(text, max_chars, None, 0, OverlapBoundary::Word),
+                zero,
+                "word mode changed a zero-overlap answer: m={max_chars}"
+            );
+        }
+        // And the default-hierarchy word-mode output at overlap > 0 moves
+        // at least one tail on word-run text (the cheap drift canary; the
+        // exact values are pinned in word_mode_snaps_the_overlap_tail…):
+        // the sweep pins the full semantics against the oracle.
+        assert_ne!(
+            super::chunk_hierarchical(text, 9, None, 8, OverlapBoundary::Word),
+            super::chunk_hierarchical(text, 9, None, 8, OverlapBoundary::Grapheme),
+            "word mode never moved a tail on word-run text — the snap is inert?"
+        );
+    }
+
+    #[test]
+    fn word_mode_snap_at_a_separator_run_boundary_composes_with_the_103_skip() {
+        // The #103/#47 interaction: a word snap landing on (or inside) a
+        // separator run, under a budget whose final window then opens on
+        // a match — the skip must preempt the final exit exactly as it
+        // does in grapheme mode, and the word boundary the snap lands on
+        // must not resurrect the separator as a chunk. Swept: separator
+        // run texts × every legal overlap × both boundary modes, no
+        // chunk is the separator, ends always advance.
+        let text = "alpha\n\nbeta\n\ngamma\n\ndelta";
+        for max_chars in [6usize, 9, 12] {
+            for overlap in 1..max_chars {
+                let word = super::chunk_hierarchical(
+                    text,
+                    max_chars,
+                    Some(&[Some("\n\n")]),
+                    overlap,
+                    OverlapBoundary::Word,
+                );
+                for &(s, e) in &word {
+                    assert!(
+                        &text[s..e] != "\n\n",
+                        "word mode emitted the separator as a chunk: m={max_chars} \
+                         ov={overlap}: {word:?}"
+                    );
+                }
+                let mut prev_end = 0usize;
+                for &(_s, e) in &word {
+                    assert!(e > prev_end, "ends not advancing: {word:?}");
+                    prev_end = e;
+                }
+            }
+        }
+        // And the word snap never lands mid-cluster even beside a
+        // separator: every chunk start/end is a grapheme boundary (the
+        // word level's cuts are the same filtered list the windows cut
+        // on).
+        let word_starts: HashSet<usize> =
+            super::chunk_hierarchical(text, 9, Some(&[Some("\n\n")]), 5, OverlapBoundary::Word)
+                .iter()
+                .map(|&(s, _)| s)
+                .collect();
+        for s in word_starts {
+            let g = crate::truncate_impl::grapheme_boundary_chars(text);
+            assert!(
+                g.contains(&s),
+                "word-snapped start {s} is not a grapheme boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn word_mode_realizes_the_word_level_lazily_and_at_most_once() {
+        // The seam pins, #47's performance constraint: the word level is
+        // realized only when a snap consults it — never eagerly, never
+        // twice. (a) grapheme mode with overlap (snap sites galore)
+        // realizes no word level; (b) word mode with overlap realizes it
+        // exactly once, shared with any window that descends; (c) word
+        // mode at overlap=0 realizes none at all (no snap site runs).
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 7, None, 2, OverlapBoundary::Grapheme);
+        let grapheme_levels = build_seam::levels_built();
+        assert!(
+            grapheme_levels <= 3,
+            "grapheme mode built extra levels: {grapheme_levels}"
+        );
+
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 7, None, 2, OverlapBoundary::Word);
+        let word_levels = build_seam::levels_built();
+        assert!(
+            word_levels <= grapheme_levels + 1,
+            "word mode built the word level more than once (or something \
+             beyond it): grapheme={grapheme_levels} word={word_levels}"
+        );
+
+        build_seam::reset();
+        let zero_word = super::chunk_hierarchical(text, 7, None, 0, OverlapBoundary::Word);
+        let zero_word_levels = build_seam::levels_built();
+        build_seam::reset();
+        let zero_grapheme = super::chunk_hierarchical(text, 7, None, 0, OverlapBoundary::Grapheme);
+        assert_eq!(
+            build_seam::levels_built(),
+            zero_word_levels,
+            "word mode at overlap=0 must build exactly what grapheme mode \
+             builds (windows only, no snap sites run at overlap=0)"
+        );
+        assert_eq!(zero_word, zero_grapheme);
+
+        // The grapheme-mode cost is unchanged by the feature existing:
+        // the same call the pre-#47 pins ran builds the same levels —
+        // the word-bounds walk is behind the mode flag, not in the
+        // grapheme path (the whole-document-budget pin above continues
+        // to hold: zero builds).
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 70, None, 0, OverlapBoundary::Grapheme);
+        assert_eq!(build_seam::levels_built(), 0);
+        build_seam::reset();
+        let _ = super::chunk_hierarchical(text, 70, None, 0, OverlapBoundary::Word);
+        assert_eq!(
+            build_seam::levels_built(),
+            0,
+            "word mode realized a level for a single-chunk overlap=0 call"
+        );
     }
 
     // ---- The lazy levels (#30): seam-counted structural pins. The
@@ -1646,6 +3839,34 @@ mod tests {
                 );
                 assert!(grapheme_set.contains(&e), "chunk end {e} splits a cluster");
             }
+        }
+    }
+
+    #[test]
+    fn fuzz_738a_the_bare_search_oracle_agrees() {
+        // The fuzzer's cross-level case: the spliced SENTENCE level's
+        // cut preempts the finer '#' literal's skip (the find_map's
+        // priority order: the first slot with ANY verdict wins), and
+        // the untrimmed final push emits the chunk. The oracle runs the
+        // bare search and must agree — the residual is the machine's
+        // own precedence, not a #63 regression.
+        let seps: &[Option<&str>] = &[None, Some("#")];
+        for overlap in [0usize, 850] {
+            let new = super::chunk_hierarchical(
+                "#",
+                1790,
+                Some(seps),
+                overlap,
+                OverlapBoundary::Grapheme,
+            );
+            let old = chunk_hierarchical_reference(
+                "#",
+                1790,
+                Some(seps),
+                overlap,
+                OverlapBoundary::Grapheme,
+            );
+            assert_eq!(new, old, "cross-level skip preemption diverged");
         }
     }
 

@@ -164,7 +164,13 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
             &text,
             |bench, text| {
                 bench.iter(|| {
-                    chunk_hierarchical_impl::chunk_hierarchical(black_box(text), 2000, None, 0)
+                    chunk_hierarchical_impl::chunk_hierarchical(
+                        black_box(text),
+                        2000,
+                        None,
+                        0,
+                        chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                    )
                 })
             },
         );
@@ -178,7 +184,46 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
             &text,
             |bench, text| {
                 bench.iter(|| {
-                    chunk_hierarchical_impl::chunk_hierarchical(black_box(text), 2000, None, 200)
+                    chunk_hierarchical_impl::chunk_hierarchical(
+                        black_box(text),
+                        2000,
+                        None,
+                        200,
+                        chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                    )
+                })
+            },
+        );
+    }
+    // The #63 heading lane: a heading-dense corpus (one ATX heading line
+    // per ~90 codepoints, one paragraph per section), whole-document
+    // budget — the gate probe, the heading scan, the bounding cuts, and
+    // the demotion all run; the cell is the linearity anchor the
+    // Python-side heading-dense pin mirrors (the 1 MiB / 12 MiB sizes
+    // match the group's other lanes so the criterion numbers stay
+    // comparable). Its heading-free twin is the prose `default_2000`
+    // cells above: heading-free input pays the gate probe and nothing
+    // else, so any cost leaking into those cells is the gate's, visible
+    // by ratio.
+    let section = "## Section heading here\n\nBody paragraph with a few words of content follows the heading.\n\n";
+    for target_bytes in [1024 * 1024, 12 * 1024 * 1024] {
+        let text = section.repeat(target_bytes / section.len() + 1);
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        if target_bytes == 12 * 1024 * 1024 {
+            group.sample_size(10);
+        }
+        group.bench_with_input(
+            BenchmarkId::new("heading_dense_whole_document", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    chunk_hierarchical_impl::chunk_hierarchical(
+                        black_box(text),
+                        text.len(),
+                        None,
+                        0,
+                        chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                    )
                 })
             },
         );
@@ -199,6 +244,7 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
                     budget,
                     Some(&[Some("xyz")]),
                     0,
+                    chunk_hierarchical_impl::OverlapBoundary::Grapheme,
                 )
             })
         },

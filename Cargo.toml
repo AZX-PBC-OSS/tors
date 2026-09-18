@@ -374,6 +374,10 @@ name = "json_repair"
 harness = false
 
 [[bench]]
+name = "json_valid"
+harness = false
+
+[[bench]]
 name = "random"
 harness = false
 

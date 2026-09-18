@@ -209,7 +209,7 @@ impl CompiledPatterns {
         let core = self.core.clone();
         let out = borrow_dict_pairs(&replacements, |pairs| {
             py.detach(|| match core.replace_values(pairs) {
-                Ok(values) => Ok(core.replace_many(s, &values)),
+                Ok(values) => core.replace_many(s, &values).map_err(|err| err.to_string()),
                 Err(mismatch) => Err(mismatch.message()),
             })
             .map_err(PyValueError::new_err)

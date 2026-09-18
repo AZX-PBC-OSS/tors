@@ -771,3 +771,66 @@ class TestReplaceManyMaskedScaling:
             f"{small:.1f}ms, min of 3 each): the masked splice is paying "
             "per-match work that scales with the value length"
         )
+
+
+class TestOutputCeiling:
+    """The output size is computed (saturating, in UTF-8 bytes) BEFORE
+    anything is allocated and refused past the documented 32 MiB ceiling
+    with a catchable ``ValueError`` (issue #114: ``"a"*1000`` with
+    ``{"a": "y"*40_000_000}`` asked for ~40GB — a 40GB string on a roomy
+    host, an uncatchable allocator abort on a constrained one). The
+    allocation itself is ``try_reserve``, so an allocator refusal under
+    the ceiling is also the catchable error, never an abort. The ceiling
+    is the documents layer's own 32 MiB byte contract
+    (``DEFAULT_ANYDOC_INPUT_LIMIT``): one convention for "how many bytes
+    is one tors object". The masked spelling is length-preserving and has
+    no ceiling — a short key cannot amplify into a long output there —
+    pinned below at an over-ceiling length."""
+
+    def test_the_reported_bomb_is_a_value_error_naming_the_ceiling(self) -> None:
+        with pytest.raises(ValueError, match="ceiling") as excinfo:
+            replace_many("a" * 1000, {"a": "y" * 40_000_000})
+        assert isinstance(excinfo.value, Exception)  # the catchable class
+
+    def test_output_exactly_at_the_ceiling_succeeds(self) -> None:
+        ceiling = 32 * 1024 * 1024
+        out = replace_many("a" * ceiling, {"a": "b"})
+        assert len(out) == ceiling
+        assert out == "b" * ceiling
+
+    def test_output_one_past_the_ceiling_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="ceiling"):
+            replace_many("a" * (32 * 1024 * 1024 + 1), {"a": "b"})
+
+    def test_many_short_matches_cannot_amplify_past_the_ceiling(self) -> None:
+        # 1M matches x a 40-byte value = 40MB (over, refused with the
+        # computed size); the same shape at 8 bytes/match works.
+        with pytest.raises(ValueError, match="ceiling"):
+            replace_many("a" * 1_000_000, {"a": "y" * 40})
+        out = replace_many("a" * 1_000_000, {"a": "y" * 8})
+        assert len(out) == 8_000_000
+
+    def test_multibyte_values_land_whole_at_the_ceiling(self) -> None:
+        # The ceiling is in bytes and no value is ever truncated
+        # mid-character: a multibyte-value map landing exactly on the
+        # ceiling splices whole values and the output stays valid UTF-8.
+        pairs = 32 * 1024 * 1024 // 2
+        out = replace_many("é" * pairs, {"é": "ß"})
+        assert len(out) == pairs  # characters; each is 2 bytes in UTF-8
+        assert len(out.encode()) == 32 * 1024 * 1024  # the byte ceiling, exact
+        assert out == "ß" * pairs
+
+    def test_the_compiled_spelling_shares_the_ceiling(self) -> None:
+        from tors import CompiledPatterns
+
+        cp = CompiledPatterns(["a"])
+        with pytest.raises(ValueError, match="ceiling"):
+            cp.replace_many("a" * 1_000_000, {"a": "y" * 40})
+
+    def test_the_masked_spelling_has_no_ceiling(self) -> None:
+        # Length-preserving: the output's size is the input's, over the
+        # replace ceiling's own width, and it still works.
+        text = "a" * (32 * 1024 * 1024 + 1)
+        masked = replace_many_masked(text, {"a": "x"})
+        assert len(masked) == len(text)
+        assert masked == "x" * len(text)

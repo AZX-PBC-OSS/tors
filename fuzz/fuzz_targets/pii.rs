@@ -242,11 +242,31 @@ fn is_key_tail_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
 }
 
+/// The run of backslashes ending just before `at` (never crossing the
+/// string start) — the char-space twin of the scanner's
+/// `backslash_run_before`, the odd-backslash discipline's counter.
+fn backslash_run_before_at(chars: &[char], at: usize) -> usize {
+    let mut run = 0usize;
+    while run < at && chars[at - 1 - run] == '\\' {
+        run += 1;
+    }
+    run
+}
+
 /// Whether the key-charset char at `i - 1` ends a complete escape
-/// sequence (`%XX`, `\uXXXX`, or `\X`; odd-backslash counted, so an
-/// escaped backslash stays a literal), the char-space twin of the
-/// scanner's `escape_ends_before`: escaped text is a CLEAN boundary,
-/// the escape's tail byte being formatting material, not a word.
+/// sequence, the char-space twin of the scanner's `escape_ends_before`:
+/// the same grammar, one spelling per arm — `%XX` (`%` + two hex
+/// digits), `\uXXXX` (`\` `u` + four hex digits, no odd-backslash
+/// recount: the documented released over-trigger on an escaped
+/// backslash directly before the spelling), `\UHHHHHHHH` (`\` `U` +
+/// eight hex digits, the same position-pinned discipline), `\xHH`
+/// (`\` `x` + two hex digits, the backslash run before the `x` ODD),
+/// `\NNN` (`\` + 1-3 octal digits, maximal munch, the run ending exactly
+/// here and the backslash run before it ODD), and `\X` (any byte after
+/// an ODD backslash run). Escaped text is a CLEAN boundary, the escape's
+/// tail byte being formatting material, not a word; a partial escape is
+/// not a boundary, and an escaped backslash is a literal keeping its
+/// neighbor mid-token.
 fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
     if i >= 3
         && chars[i - 3] == '%'
@@ -265,11 +285,52 @@ fn escape_ends_before_at(chars: &[char], i: usize) -> bool {
     {
         return true;
     }
-    let mut slashes = 0usize;
-    while slashes + 2 <= i && chars[i - 2 - slashes] == '\\' {
-        slashes += 1;
+    if i >= 10
+        && chars[i - 10] == '\\'
+        && chars[i - 9] == 'U'
+        && chars[i - 8..i].iter().all(|&c| c.is_ascii_hexdigit())
+    {
+        return true;
     }
-    slashes % 2 == 1
+    if i >= 4
+        && chars[i - 4] == '\\'
+        && chars[i - 3] == 'x'
+        && chars[i - 2].is_ascii_hexdigit()
+        && chars[i - 1].is_ascii_hexdigit()
+        && backslash_run_before_at(chars, i - 3) % 2 == 1
+    {
+        return true;
+    }
+    let mut digits = 0usize;
+    while digits < i && matches!(chars[i - 1 - digits], '0'..='7') {
+        digits += 1;
+    }
+    if (1..=3).contains(&digits)
+        && digits < i
+        && chars[i - 1 - digits] == '\\'
+        && backslash_run_before_at(chars, i - digits) % 2 == 1
+    {
+        return true;
+    }
+    backslash_run_before_at(chars, i - 1) % 2 == 1
+}
+
+/// Whether the key-charset char at `i - 1` ends an ANSI CSI escape
+/// sequence (`ESC [ params final`) — the raw-ESC arm of the escape
+/// grammar, the char-space twin of the scanner's `ansi_csi_ends_before`:
+/// the final byte `U+0040..=U+007E`, the walk back over the
+/// parameter/intermediate class (`U+0020..=U+003F`), and the `ESC [`
+/// head directly before the walked run (a `[` in prose without the ESC
+/// byte never carves).
+fn ansi_csi_ends_before_at(chars: &[char], i: usize) -> bool {
+    if !('\u{40}'..='\u{7e}').contains(&chars[i - 1]) {
+        return false;
+    }
+    let mut j = i - 1;
+    while j > 0 && ('\u{20}'..='\u{3f}').contains(&chars[j - 1]) {
+        j -= 1;
+    }
+    j >= 2 && chars[j - 1] == '[' && chars[j - 2] == '\u{1b}'
 }
 
 /// The family indices into `KeyFamily::ALL` — the spec's name order
@@ -342,8 +403,11 @@ fn tail_run_end(chars: &[char], at: usize, class: TailClass) -> usize {
 /// the Nd table above. Rows whose prefixes share no head byte can never
 /// tie at one position, so the order among them is immaterial; only the
 /// `sk-` prefix chain (`sk-svcacct-`/`sk-proj-`/`sk-ant-` over bare
-/// `sk-`) exercises the fall-through.
+/// `sk-`) exercises the fall-through, and the `gl…` rows are one
+/// provider's documented token-prefix enumeration (no row a prefix of
+/// another).
 const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
+    ("_gitlab_session=", 40, FAM_GITLAB, TailClass::Azure),
     ("github_pat_", 22, FAM_GITHUB, TailClass::Key),
     ("sk-svcacct-", 20, FAM_OPENAI, TailClass::Key),
     ("AccountKey=", 40, FAM_AZURE, TailClass::Azure),
@@ -351,6 +415,18 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("sk-ant-", 20, FAM_ANTHROPIC, TailClass::Key),
     ("azxdev_", 20, FAM_MINTED, TailClass::Key),
     ("glpat-", 20, FAM_GITLAB, TailClass::Key),
+    ("glagent-", 20, FAM_GITLAB, TailClass::Key),
+    ("glsoat-", 20, FAM_GITLAB, TailClass::Key),
+    ("glrtr-", 20, FAM_GITLAB, TailClass::Key),
+    ("glcbt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glptt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glimt-", 20, FAM_GITLAB, TailClass::Key),
+    ("gloas-", 20, FAM_GITLAB, TailClass::Key),
+    ("glft-", 20, FAM_GITLAB, TailClass::Key),
+    ("gldt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glrt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glwt-", 20, FAM_GITLAB, TailClass::Key),
+    ("glffct-", 20, FAM_GITLAB, TailClass::Key),
     ("ya29.", 20, FAM_GCP_OAUTH, TailClass::Key),
     ("ghp_", 36, FAM_GITHUB, TailClass::Key),
     ("gho_", 36, FAM_GITHUB, TailClass::Key),
@@ -360,6 +436,13 @@ const KEY_FAMILIES: &[(&str, usize, usize, TailClass)] = &[
     ("AIza", 35, FAM_GOOGLE, TailClass::Key),
     ("AKIA", 16, FAM_AWS, TailClass::Aws),
     ("ASIA", 16, FAM_AWS, TailClass::Aws),
+    ("A3T", 17, FAM_AWS, TailClass::Aws),
+    ("AGPA", 16, FAM_AWS, TailClass::Aws),
+    ("AIDA", 16, FAM_AWS, TailClass::Aws),
+    ("AIPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANPA", 16, FAM_AWS, TailClass::Aws),
+    ("ANVA", 16, FAM_AWS, TailClass::Aws),
+    ("AROA", 16, FAM_AWS, TailClass::Aws),
     ("xai-", 20, FAM_XAI, TailClass::Key),
     ("fw-", 20, FAM_FIREWORKS, TailClass::Key),
     ("fw_", 20, FAM_FIREWORKS, TailClass::Key),
@@ -482,11 +565,45 @@ struct KeyHit {
     selected: bool,
 }
 
+/// Whether `i` opens the PEM BEGIN marker head (`-----BEGIN `) directly
+/// after a dash run or a shared close — the char-space twin of the
+/// scanner's `pem_head_after_dash_run`: a preceding block's
+/// `-----END …-----` close is a dash run of key-tail chars, and the
+/// next block's head glued to it is armor-glued, not word-glued, so it
+/// is a clean boundary (`END CERTIFICATE----------BEGIN …` must scan).
+/// Two armor spellings carve, both pinned: a DASH directly before the
+/// head (the close's run beyond the head's own five), and the SHARED
+/// CLOSE — the head's dash run entirely the previous close's, a PEM
+/// word byte directly before it (`…CERTIFICATE-----BEGIN …`): the
+/// lookback walks the marker's own word class backward from that byte
+/// (BEGIN heads never overlap, each ends in a space, so the walk never
+/// crosses a previous head), and the carve only opens the boundary —
+/// the PEM match downstream still requires both markers with the same
+/// words, so only a self-validating block can redact.
+fn pem_head_after_dash_run_at(chars: &[char], i: usize) -> bool {
+    if !starts_with_at(chars, i, "-----BEGIN ") {
+        return false;
+    }
+    if chars[i - 1] == '-' {
+        return true;
+    }
+    if !chars[i - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut w = i - 1;
+    while w > 0 && chars[w - 1].is_ascii_alphanumeric() {
+        w -= 1;
+    }
+    true
+}
+
 /// The key match set at one lane mask: every position whose grammar
 /// HOLDS, in the scanner's leftmost walk. Transcribes the scanner
 /// exactly — the prefix-boundary rule first (a prefix glued to a
 /// preceding key-charset char is mid-token and never fires, before any
-/// family), then the family table longest-first with fall-through, then
+/// family; a PEM BEGIN head after a dash run is the carved-out clean
+/// boundary, the twin of `pem_head_after_dash_run`), then the family
+/// table longest-first with fall-through, then
 /// the span families (their `-`/`B` heads share no byte with any table
 /// prefix, so trying them after the table IS longest-first). The FIRST
 /// holding grammar wins its span even when its family is unselected —
@@ -498,9 +615,15 @@ fn key_matches_of(s: &str, mask: u16) -> Vec<KeyHit> {
     let mut found = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if i > 0 && is_key_tail_char(chars[i - 1]) && !escape_ends_before_at(&chars, i) {
+        if i > 0
+            && is_key_tail_char(chars[i - 1])
+            && !escape_ends_before_at(&chars, i)
+            && !ansi_csi_ends_before_at(&chars, i)
+            && !pem_head_after_dash_run_at(&chars, i)
+        {
             i += 1; // a mid-token prefix: the boundary rule (an escape
-            // sequence's tail char is formatting, not a word)
+            // sequence's tail char is formatting, not a word; a PEM head
+            // after a dash run is armor, not one either)
             continue;
         }
         let mut hit = None;

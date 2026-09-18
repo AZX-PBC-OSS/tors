@@ -25,6 +25,10 @@ stalled/looping start fails fast rather than hanging the suite.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from collections.abc import Sequence
+
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
@@ -82,6 +86,153 @@ class TestArgumentContract:
 
     def test_text_within_budget_is_one_chunk(self) -> None:
         assert chunk_hierarchical("hello world", 100) == [(0, 11)]
+
+
+class TestBoundedSeparatorsExtraction:
+    """``separators=`` never sizes its argument from ``__len__`` (issue
+    #112's residual on this binding): pyo3's ``Option<Vec<Option<String>>>``
+    extraction reserved ``Vec::with_capacity(__len__())`` before
+    iterating, so a ``Sequence`` whose ``__len__`` lied (2**62) died as a
+    ``PanicException`` (capacity overflow) -- ``except Exception`` cannot
+    catch it. The parameter now extracts through a bounded manual walk
+    (``bounded_str_list``, src/py/_borrow.rs -- the twin of
+    ``scrub_pii``'s ``rules=``/``families=`` walk in src/py/pii.rs, same
+    cap, same refusal bytes), and every pre-existing boundary behavior is
+    preserved byte-identically: the accepted surface (list, tuple, any
+    honest ``Sequence``), the refusals (bare ``str``, non-sequences,
+    non-``str`` items), mid-iteration error propagation, and a
+    ``__len__`` that lies LOW (the walk iterates; it never reserves).
+    The one behavior change is the bomb's: a sequence yielding past the
+    cap (100_000 items) dies as a catchable ``ValueError``. The hostile
+    cases run in a subprocess: a regression to ``PanicException`` would
+    otherwise kill this runner (it is not an ``Exception`` subclass)
+    instead of failing the cell."""
+
+    @staticmethod
+    def _probe(expr: str) -> str:
+        done = subprocess.run(
+            [sys.executable, "-c", f"import tors\n{expr}"],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        return f"rc={done.returncode}\n{done.stdout}\n{done.stderr}"
+
+    _LYING_HUGE = (
+        "from collections.abc import Sequence\n"
+        "class LyingHuge(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i): raise IndexError\n"
+    )
+
+    _FLOOD = (
+        "from collections.abc import Sequence\n"
+        "class Flood(Sequence):\n"
+        "    def __len__(self): return 2**62\n"
+        "    def __getitem__(self, i):\n"
+        "        if i >= 150_000: raise IndexError\n"
+        "        return ' '\n"
+    )
+
+    def test_a_len_that_lies_huge_is_never_a_panic(self) -> None:
+        # The reported repro, exact: pyo3_runtime.PanicException
+        # (capacity overflow), not an Exception subclass. The walk never
+        # reads __len__, so the empty yield is just an empty selection
+        # (raw cut only, the empty-list semantics).
+        done = self._probe(
+            self._LYING_HUGE
+            + "try:\n"
+            "    out = tors.chunk_hierarchical('x', 1, separators=LyingHuge())\n"
+            "    print('OK', out)\n"
+            "except PanicException as e:\n"
+            "    print('PANIC', e)\n"
+        )
+        assert "PANIC" not in done, f"the bomb is back:\n{done}"
+        assert "OK" in done, f"the honest empty yield broke:\n{done}"
+
+    def test_a_sequence_yielding_past_the_cap_is_a_value_error(self) -> None:
+        # The cap (src/py/_borrow.rs MAX_LIST_ITEMS): past 100_000
+        # yielded items the walk refuses with a catchable ValueError --
+        # never a PanicException.
+        done = self._probe(
+            self._FLOOD
+            + "try:\n"
+            "    tors.chunk_hierarchical('a b c', 3, separators=Flood())\n"
+            "    print('NO RAISE')\n"
+            "except ValueError as e:\n"
+            "    print('VALUEERROR', 'too many items' in str(e))\n"
+            "except PanicException as e:\n"
+            "    print('PANIC', e)\n"
+        )
+        assert "PANIC" not in done, f"the bomb is back:\n{done}"
+        assert "VALUEERROR True" in done, f"not a catchable ValueError:\n{done}"
+
+    def test_an_honest_100k_item_list_succeeds_and_100001_refuses(self) -> None:
+        # The cap's edge: exactly 100_000 entries is a legitimate call
+        # (deduped to nothing real), 100_001 is over the line and
+        # refused -- as a catchable Exception subclass either way.
+        chunks = chunk_hierarchical("a b c", 3, separators=[" "] * 100_000)
+        assert chunks == [(0, 3), (4, 5)]
+        with pytest.raises(ValueError) as exc:
+            chunk_hierarchical("a b c", 3, separators=[" "] * 100_001)  # type: ignore[arg-type]
+        assert isinstance(exc.value, Exception)
+        assert "too many items" in str(exc.value)
+
+    def test_a_len_that_lies_low_takes_every_yielded_item(self) -> None:
+        # __len__ = 2 while __getitem__ yields 5: the walk iterates and
+        # never reserves, so all five arrive (the pre-fix extraction's
+        # own behavior, pinned so a "trust the prefix length" regression
+        # shows here).
+        class LowLen(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2
+
+            def __getitem__(self, i: int) -> str | None:
+                if i >= 5:
+                    raise IndexError
+                return "\n" if i % 2 == 0 else " "
+
+        assert chunk_hierarchical("a b\nc d\ne", 3, LowLen()) == [  # type: ignore[arg-type]
+            (0, 3),
+            (4, 7),
+            (8, 9),
+        ]
+
+    def test_a_getitem_raising_mid_iteration_propagates(self) -> None:
+        # The pre-fix extraction propagated the Sequence's own error; the
+        # walk iterates the same way, so it still does.
+        class ExplodesMid(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 3
+
+            def __getitem__(self, i: int) -> str:
+                if i == 1:
+                    raise RuntimeError("boom mid-iteration")
+                if i > 1:
+                    raise IndexError
+                return " "
+
+        with pytest.raises(RuntimeError, match="boom mid-iteration"):
+            chunk_hierarchical("a b c", 3, ExplodesMid())  # type: ignore[arg-type]
+
+    def test_the_error_is_never_a_panic_exception_class(self) -> None:
+        # The catchable-error-class assertion: every refusal on this
+        # boundary is an Exception (ValueError/TypeError), the class
+        # `except Exception` catches -- PanicException derives straight
+        # from BaseException and was the defect's whole point.
+        class LyingHuge(Sequence):  # type: ignore[type-arg]
+            def __len__(self) -> int:
+                return 2**62
+
+            def __getitem__(self, i: int) -> str:
+                if i >= 150_000:
+                    raise IndexError
+                return " "
+
+        with pytest.raises(ValueError) as exc:
+            chunk_hierarchical("a b c", 3, LyingHuge())  # type: ignore[arg-type]
+        assert isinstance(exc.value, Exception)
+        assert "too many items" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +478,134 @@ class TestOverlap:
 
 
 # ---------------------------------------------------------------------------
+# overlap_boundary (#47): the opt-in word-aware overlap snap. The default
+# "grapheme" is the function's whole historical behavior; "word" moves the
+# grapheme candidate further back to the nearest UAX #29 word boundary,
+# falling back to the grapheme candidate when the word level has no
+# boundary in the snap-back range (one long token, dense-script runs).
+# ---------------------------------------------------------------------------
+
+
+class TestOverlapBoundary:
+    def test_unknown_value_raises_value_error_naming_the_closed_set(self) -> None:
+        # The families= discipline: the closed set is named in the message
+        # and the validation is unconditional at the argument boundary
+        # (an irrelevant knob never errors late — even overlap=0, where
+        # the value can do nothing).
+        for value in ("phrase", "WORD", "Grapheme", "", "graphemes"):
+            with pytest.raises(ValueError, match=r"overlap_boundary.*grapheme.*word"):
+                chunk_hierarchical("hello world", 5, overlap=1, overlap_boundary=value)  # type: ignore[arg-type]
+
+    def test_word_with_overlap_zero_is_accepted_and_a_noop(self) -> None:
+        # No snap site ever runs at overlap=0, so the mode is inert: the
+        # output is the zero-overlap answer exactly.
+        text = "one two three four five six seven eight nine ten eleven twelve"
+        for max_chars in (5, 12, 20):
+            assert chunk_hierarchical(text, max_chars, overlap=0) == chunk_hierarchical(
+                text, max_chars, overlap=0, overlap_boundary="word"
+            )
+
+    def test_grapheme_is_the_default_and_unchanged(self) -> None:
+        # The explicit "grapheme" spelling is the same function it always
+        # was, and omitting the keyword agrees.
+        text = "one two three four five six seven eight nine ten eleven twelve"
+        for max_chars in (7, 12, 20):
+            for overlap in (0, 2, max_chars - 1):
+                assert chunk_hierarchical(text, max_chars, overlap=overlap) == (
+                    chunk_hierarchical(
+                        text, max_chars, overlap=overlap, overlap_boundary="grapheme"
+                    )
+                ), f"m={max_chars} ov={overlap}"
+
+    def test_word_mode_starts_the_overlap_tail_at_a_word_edge(self) -> None:
+        # The issue's motivating shape: the grapheme snap starts the tail
+        # mid-word ("uter Interaction"); word mode moves it back to the
+        # word's first codepoint ("Computer Interaction"). Pinned exact,
+        # both budgets.
+        text = (
+            "...Bachelor of Arts in Human-Computer Interaction, Lakeside "
+            "College, 2018\n\nCapstone project: designing a better chunker "
+            "for embedding pipelines and retrieval."
+        )
+        seps = ["\n## ", "\n# ", None]
+        assert chunk_hierarchical(text, 150, separators=seps, overlap=40) == [
+            (0, 73),
+            (33, 158),
+        ]
+        assert chunk_hierarchical(
+            text, 150, separators=seps, overlap=40, overlap_boundary="word"
+        ) == [(0, 73), (29, 158)]
+        assert chunk_hierarchical(text, 60, separators=seps, overlap=20) == [
+            (0, 3),
+            (3, 60),
+            (40, 73),
+            (75, 134),
+            (114, 158),
+        ]
+        assert chunk_hierarchical(
+            text, 60, separators=seps, overlap=20, overlap_boundary="word"
+        ) == [(0, 3), (3, 60), (38, 73), (75, 134), (112, 158)]
+
+    def test_word_mode_falls_back_where_no_word_boundary_exists(self) -> None:
+        # One long token (no internal UAX #29 boundary), dense CJK (word
+        # and grapheme boundaries coincide), and Thai without a dictionary
+        # (one run, no internal boundary): the grapheme candidate is kept,
+        # byte-for-byte the grapheme mode's output.
+        token = "a" * 60 + " b b b b"
+        cjk = "中文数据段落。中文数据段落。" * 5
+        thai = "กาลครั้งหนึ่งนานาพรบ์มาแล้ว " * 6
+        for text in (token, cjk, thai):
+            for max_chars in (13, 20):
+                for overlap in (2, 5, max_chars - 1):
+                    assert chunk_hierarchical(
+                        text, max_chars, overlap=overlap, overlap_boundary="word"
+                    ) == chunk_hierarchical(text, max_chars, overlap=overlap), (
+                        f"word mode invented a boundary: m={max_chars} ov={overlap} "
+                        f"text={text[:24]!r}"
+                    )
+
+    def test_word_mode_never_lands_mid_cluster(self) -> None:
+        # The word level's cuts are the same grapheme-filtered list the
+        # windows cut on, so a ZWJ emoji family (one 5-codepoint cluster)
+        # never gains an interior boundary under word mode.
+        emoji = "\U0001F468‍\U0001F469‍\U0001F467 \U0001F468‍\U0001F469‍\U0001F467 end"
+        for max_chars in range(2, 9):
+            for overlap in (0, 2, max_chars - 1):
+                if overlap >= max_chars:
+                    continue  # outside the validated envelope
+                chunks = chunk_hierarchical(
+                    emoji, max_chars, overlap=overlap, overlap_boundary="word"
+                )
+                for s, e in chunks:
+                    for p in (s, e):
+                        if p >= len(emoji):
+                            continue  # the end-of-text boundary
+                        assert emoji[p] != "‍" and not (
+                            0 < p < len(emoji) and emoji[p - 1] == "‍"
+                        ), f"boundary {p} lands inside a ZWJ family: {chunks}"
+
+    def test_word_mode_keeps_the_103_skip_invariants_beside_separators(self) -> None:
+        # The #103/#47 interaction: a word snap landing on or inside a
+        # separator run — the skip preempts the final exit exactly as in
+        # grapheme mode, ends strictly advance, and the separator never
+        # comes back as a chunk.
+        text = "alpha\n\nbeta\n\ngamma\n\ndelta"
+        for max_chars in (6, 9, 12):
+            for overlap in range(1, max_chars):
+                chunks = chunk_hierarchical(
+                    text, max_chars, separators=["\n\n"], overlap=overlap,
+                    overlap_boundary="word",
+                )
+                for start, end in chunks:
+                    assert text[start:end] != "\n\n", (
+                        f"separator as chunk: m={max_chars} ov={overlap}: {chunks}"
+                    )
+                for (p_s, p_e), (n_s, n_e) in zip(chunks, chunks[1:], strict=False):
+                    assert n_e > p_e, f"ends not advancing: m={max_chars} ov={overlap}"
+                    assert n_s > p_s, f"starts not increasing: m={max_chars} ov={overlap}"
+
+
+# ---------------------------------------------------------------------------
 # Grapheme-cluster safety, the class of bug already fixed elsewhere in this
 # crate (Thai SARA AM combining with the preceding base character into one
 # cluster that UAX #29 word/sentence boundaries can still split).
@@ -545,3 +824,134 @@ def test_zwj_and_combining_edges_survive_the_overlap_lookahead(
         assert s > prev_start, f"start stalled on {text!r}"
         assert e > prev_end, f"end regressed on {text!r}"
         prev_start, prev_end = s, e
+
+
+# ---------------------------------------------------------------------------
+# The #63 heading level: bounding ATX heading-line cuts on the default
+# hierarchy (heading → paragraph → sentence → word → raw cut), the
+# "heading" sentinel opt-in for custom hierarchies, and the whole-document
+# demotion (a heading-bearing document under a whole-document budget comes
+# back as its sections, not one giant chunk — the zero-build pin in
+# tests/test_performance.py is on heading-FREE input and says so).
+# ---------------------------------------------------------------------------
+
+
+class TestHeadingLevel:
+    def test_whole_document_budget_over_sections_returns_the_sections(self) -> None:
+        text = "# Title\n\nintro text\n\n## Section\n\nmore text\n\n### Sub\n\ntail"
+        chunks = chunk_hierarchical(text, len(text))
+        pieces = [text[s:e] for s, e in chunks]
+        assert pieces == [
+            "# Title\n\nintro text",
+            "## Section\n\nmore text",
+            "### Sub\n\ntail",
+        ]
+        # The cut is before the heading, never after it: each chunk after
+        # the first starts exactly at its heading line's first codepoint.
+        assert text[chunks[1][0] : chunks[1][0] + 2] == "##"
+        assert text[chunks[2][0] : chunks[2][0] + 3] == "###"
+
+    def test_heading_free_text_keeps_the_single_chunk_exit(self) -> None:
+        # The '#' in text gate: without the byte, no ATX heading line can
+        # exist, the level is never realized, and the whole-document exit
+        # is byte-for-byte the pre-#63 one.
+        text = "Para one.\n\nPara two.\n\nPara three."
+        assert chunk_hierarchical(text, len(text)) == [(0, len(text))]
+
+    def test_hash_without_heading_line_still_one_chunk(self) -> None:
+        # The gate opens (a '#' byte exists) but the scan finds no heading
+        # line: the exit is still the untrimmed one.
+        text = "a #b c\n\nd #e f"
+        assert chunk_hierarchical(text, len(text)) == [(0, len(text))]
+
+    def test_no_chunk_spans_a_heading_cut_at_any_budget(self) -> None:
+        # The bounding semantics: every chunk's interior is free of heading
+        # cuts (the budget bounds oversized sections; the heading bounds
+        # ordinary ones). Swept over budgets 1..len on a sectioned doc.
+        text = "# a\nalpha beta gamma\n\n## b\ndelta epsilon zeta\n\n## c\neta iota theta"
+        starts = [i for i in range(1, len(text)) if text[i:].startswith("## ")]
+        for max_chars in range(1, len(text) + 1):
+            for s, e in chunk_hierarchical(text, max_chars):
+                for h in starts:
+                    assert not (s < h < e), (
+                        f"chunk ({s}, {e}) spans the heading cut at {h} "
+                        f"(budget {max_chars})"
+                    )
+
+    def test_atx_only_scope_exclusions(self) -> None:
+        # The documented v1 scope (verified against the engines' emitters:
+        # all three emit ATX only): none of these lines is a heading — a
+        # whole-document budget over each doc must come back as one chunk
+        # (any stray cut would emit two).
+        cases = [
+            "#no-space\nbody",
+            "####### seven\nbody",
+            "\\# escaped\nbody",
+            "> # quoted\nbody",
+            "- # item\nbody",
+            "    # indented code\nbody",
+            "\t# tabbed\nbody",
+            "mid # line\nbody",
+        ]
+        for case in cases:
+            assert chunk_hierarchical(case, len(case)) == [(0, len(case))], case
+
+    def test_atx_scope_inclusions_and_fence_tracking(self) -> None:
+        # The positive edges (1-6 hashes, the 1-3 space indent, trailing
+        # closing hashes, tab after the run, CRLF and lone-CR line
+        # endings), and the fence state machine: heading-shaped lines
+        # inside a fence never cut, an unclosed fence runs to the end.
+        text = "intro\n# one\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "intro",
+            "# one\nbody",
+        ]
+        text = "intro\n## closed ##\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "intro",
+            "## closed ##\nbody",
+        ]
+        text = "# a\r\n## b\r\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "# a",
+            "## b\r\nbody",
+        ]
+        fenced = "# Title\n\n```python\n# not a heading\nx = 1\n```\n\n## Real\n\nbody"
+        pieces = [fenced[s:e] for s, e in chunk_hierarchical(fenced, len(fenced))]
+        assert len(pieces) == 2 and pieces[1].startswith("## Real")
+        unclosed = "# Title\n\n```\n# not a heading\n## nor this\n"
+        assert chunk_hierarchical(unclosed, len(unclosed)) == [(0, len(unclosed))]
+
+    def test_heading_sentinel_is_the_level_not_a_literal(self) -> None:
+        text = "# a\nalpha\n\n## b\nbeta"
+        # The sentinel + splice is the default hierarchy spelled out.
+        assert chunk_hierarchical(text, 10, separators=["heading", None]) == (
+            chunk_hierarchical(text, 10)
+        )
+        # Either order around the splice (dedup inertness), and repeats.
+        assert chunk_hierarchical(text, 10, separators=[None, "heading"]) == (
+            chunk_hierarchical(text, 10)
+        )
+        assert chunk_hierarchical(text, 10, separators=["heading"] * 8) == (
+            chunk_hierarchical(text, 10, separators=["heading"])
+        )
+        # The sentinel alone: heading cuts bound the sections, and the
+        # oversized remainder falls to the raw cut (no paragraph level
+        # below it).
+        alone = chunk_hierarchical(text, 10, separators=["heading"])
+        assert text[alone[0][0] : alone[0][0] + 2] == "# "
+
+    def test_unicode_headings_cut_at_codepoint_starts(self) -> None:
+        text = "précis\n\n## Ünïcodé heading ✓\n\nbodytext"
+        pieces = [text[s:e] for s, e in chunk_hierarchical(text, len(text))]
+        assert pieces == ["précis", "## Ünïcodé heading ✓\n\nbodytext"]
+
+    def test_seven_hundred_sections_never_merge(self) -> None:
+        # Scale shape: 700 sections, one chunk each under a whole-document
+        # budget (the heading level's scan is one linear pass; the
+        # per-window cost is the usual binary search over its cuts).
+        text = "".join(f"## Section {i}\n\nBody paragraph {i}.\n\n" for i in range(700))
+        chunks = chunk_hierarchical(text, len(text))
+        assert len(chunks) == 700
+        for s, _e in chunks:
+            assert text[s : s + 3] == "## "

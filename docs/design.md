@@ -51,9 +51,10 @@ The cuts below are decisions, not oversights:
   is about per-language datasets, not about naming a 16-codepoint hex
   alphabet. The same cut is why `scrub_log_text`'s rules
   are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
-  `uri_query_creds`), not patterns: each rule is a call-site regex the
-  scrub exists to port (TaskQ's exception-text chain), hand-rolled in Rust
-  and pinned byte-identical to it — a caller-supplied pattern language
+  `uri_query_creds`, `libpq_conninfo_creds`), not patterns: each rule is a
+  call-site regex the
+  scrub exists to implement, hand-rolled in Rust and pinned byte-identical
+  to the quoted grammar — a caller-supplied pattern language
   would reopen the regex-semantics question this cut closes. New scrubs
   arrive as new named rules with their own pinned contracts
   (`strip_controls` is the family's first member), never as parameters.

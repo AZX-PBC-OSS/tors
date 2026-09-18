@@ -212,6 +212,16 @@ pub fn find_patterns_iter(
 /// than the engine's u32 offset budget, 4 GiB); that maps to a
 /// `ValueError` carrying the engine's message.
 ///
+/// Output ceiling (`search_impl::MAX_OUTPUT_BYTES`, docs/api.md): the
+/// spliced output's byte size is computed before anything is allocated
+/// and refused past the documented 32 MiB ceiling with a catchable
+/// `ValueError` naming the size (the short-key-huge-value amplification,
+/// issue #114); a sub-ceiling allocator refusal is the same catchable
+/// error (`try_reserve`, never an abort). The ceiling precedes the
+/// identity contract's borrowed return, so an over-ceiling identity
+/// replace raises too (documented price); the masked spelling is
+/// length-preserving and uncapped.
+///
 /// GIL model: the `find_patterns` argument shape over a dict: one
 /// GIL-held walk borrowing each key and value (the standard str-in borrow
 /// class, O(entries) handles; the one-time O(input) UTF-8 materialization

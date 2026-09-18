@@ -1,8 +1,8 @@
 """Contract gate for the UUIDv7 helper trio: ``tors.uuid7_timestamp_ms``,
 ``tors.uuid_version``, ``tors.uuid_parse`` (issue #54).
 
-The consumer shape these exist for: a store keyed by UUIDv7 IDs (TaskQ's
-enqueue path and its admin keyset cursors are the measured instance) ends up
+The consumer shape these exist for: a store keyed by UUIDv7 IDs (an
+enqueue path and admin keyset cursors are the measured instance) ends up
 reimplementing the same three bit operations everywhere -- pull the 48-bit
 unix-millisecond timestamp out of the leading six bytes for time-bucketed
 queries and keyset pagination, check the version nibble before trusting that

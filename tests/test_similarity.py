@@ -11,10 +11,12 @@ algorithms are different and both are right):
 
 1. **Both engines' values are valid**: every ``M`` is realizable as a
    common subsequence of the two operands (``M <= LCS(a, b)``), and
-   tors's is maximal: ``M == LCS(a, b)`` exactly, pinned as a
-   hypothesis differential against a pure-Python LCS oracle below (the
-   minimal-edit-script consequence of the Myers engine: minimal edits
-   ⟺ maximal matches).
+   tors's is maximal (``M == LCS(a, b)`` exactly) on the small-input
+   regime the differential below covers — pinned against a pure-Python
+   LCS oracle (the minimal-edit-script consequence of the Myers engine:
+   minimal edits ⟺ maximal matches — WHERE THE BOUNDED SEARCH COMPLETES;
+   on large hard inputs the bounded search can undercount, the bounded
+   property the size-ladder test below pins).
 2. **Exact agreement where the alignment is forced**: identical operands,
    empty pairs, disjoint alphabets, and the pure insert/delete classes
    with differing flanks (verified, not assumed, by gating on difflib's
@@ -80,6 +82,7 @@ from __future__ import annotations
 import difflib
 import heapq
 import keyword
+import random
 import re
 import time
 
@@ -319,19 +322,75 @@ def test_identical_pairs_agree_with_difflib(text: str) -> None:
 @given(st.text(max_size=24), st.text(max_size=24))
 @settings(max_examples=300)
 def test_ratio_is_two_lcs_over_total_over_arbitrary_pairs(a: str, b: str) -> None:
-    """The maximality differential, the strongest form of validity-first:
-    over arbitrary pairs (any alphabets, shared or disjoint), tors's
-    matched total is exactly the LCS length (the minimal-edit-script
-    consequence: minimal edits ⟺ maximal matches), so the scalar is
-    ``2.0 * LCS(a, b) / (len(a) + len(b))`` with the empty pair's
-    ``1.0`` convention. An anchoring-dependent ``M`` (difflib's) breaks
-    this on the first repeated-flank pair it draws; a validity bug of
-    any kind breaks it on the first draw at all."""
+    """The maximality differential on the small-input regime, the strongest
+    form of validity-first: over arbitrary pairs (any alphabets, shared or
+    disjoint), tors's matched total is exactly the LCS length (the
+    minimal-edit-script consequence: minimal edits ⟺ maximal matches), so
+    the scalar is ``2.0 * LCS(a, b) / (len(a) + len(b))`` with the empty
+    pair's ``1.0`` convention. An anchoring-dependent ``M`` (difflib's)
+    breaks this on the first repeated-flank pair it draws; a validity bug
+    of any kind breaks it on the first draw at all.
+
+    The regime boundary is real and documented (issue #116): past the
+    bounded search's limits the engine can undercount — the size ladder
+    below pins what IS guaranteed there."""
     if not a and not b:
         assert similarity_ratio(a, b) == 1.0
         return
     expected = 2.0 * _lcs_length(a, b) / (len(a) + len(b))
     assert similarity_ratio(a, b) == expected
+
+
+# --- The size ladder: the documented BOUNDED property past the small-input regime ----
+#
+# The M == LCS differential above is pinned at <= 24 chars, below where the
+# bounded Myers search starts trimming (issue #116: at 8000 chars over a
+# 3-char alphabet tors scores 0.7120 where the true LCS ratio is 0.7151 —
+# a ~1% undercount, the engine accepting a good non-minimal split).
+# diff_impl.rs's module docs pin the bounded property (M <= LCS valid, no
+# lower bound past the search's limits); the ladder below is that pin's
+# teeth. The ladder pins validity (M <= LCS) plus a DRIFT GUARD on the
+# undercount:
+# a round floor (90% of the true LCS) sitting well below every ratio the
+# fixed-seed ladder measures (maximality holds outright through 512; the
+# undercounts start at 1024, min observed ratio 0.972 at n=1024/alpha=26,
+# seed 42) so a gross regression — an engine swap, a heuristic change —
+# fails loudly, while honest bounded-search wobble passes. THE FLOOR IS
+# NOT A CONTRACT: it is an empirical drift guard over one deterministic
+# ladder, and the doc gap it works around (no documented lower bound) is
+# tracked in the docs' bounded-property wording.
+_LADDER_SIZES = (32, 64, 128, 256, 512, 1024)
+_LADDER_ALPHABETS = (2, 3, 5, 26)
+_LADDER_SEED = 42
+_LCS_DRIFT_GUARD_FLOOR = 0.9
+
+
+@pytest.mark.parametrize("n", _LADDER_SIZES)
+@pytest.mark.parametrize("alpha", _LADDER_ALPHABETS)
+def test_size_ladder_m_stays_valid_and_near_maximal(n: int, alpha: int) -> None:
+    """The ladder (issue #116's teeth): over seeded random pairs at sizes
+    32..1024 and alphabet sizes 2/3/5/26, M is VALID (<= the true LCS,
+    diff_impl.rs's documented guarantee) and — the drift guard, not a
+    contract — at least 90% of the true LCS. The measured ladder sits far
+    above the floor (maximality holds outright through 512; the observed
+    undercounts start at 1024, worst ratio 0.972), so only a gross
+    regression can trip it; the small-input regime above keeps the exact
+    M == LCS differential."""
+    alphabet = "abcdefghijklmnopqrstuvwxyz"[:alpha]
+    rng = random.Random(_LADDER_SEED * 1_000_003 + n * 97 + alpha)
+    a = "".join(rng.choice(alphabet) for _ in range(n))
+    b = "".join(rng.choice(alphabet) for _ in range(n))
+    ratio = similarity_ratio(a, b)
+    m = round(ratio * (len(a) + len(b)) / 2)
+    lcs = _lcs_length(a, b)
+    assert m <= lcs, f"M {m} exceeds the true LCS {lcs} (validity broken)"
+    assert m >= _LCS_DRIFT_GUARD_FLOOR * lcs, (
+        f"M {m} fell below {_LCS_DRIFT_GUARD_FLOOR:.0%} of the true LCS {lcs} "
+        f"at n={n}/alpha={alpha} (ratio {m / lcs:.4f}): the "
+        "bounded search's undercount moved past the drift guard — re-measure "
+        "the ladder and re-pin the floor deliberately if this is an intended "
+        "engine change (the floor is a drift guard, not a contract)"
+    )
 
 
 def test_past_difflibs_autojunk_threshold_the_oracle_is_autojunk_false() -> None:
