@@ -7,7 +7,7 @@ use crate::chunk_by_segment_impl;
 use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
 use crate::parse_boundary;
-use crate::py::_borrow::{convert_str_arg, validate_count_overlap};
+use crate::py::_borrow::{bounded_str_list, convert_str_arg, validate_count_overlap};
 use crate::py::eager_iter_class;
 
 /// `tors.chunk_cdc(data: bytes, *, min_size=4096, avg_size=16384,
@@ -392,7 +392,8 @@ pub fn chunk_by_paragraphs_iter(
 }
 
 /// `tors.chunk_hierarchical(text, max_chars, separators=None, *,
-/// overlap=0)`: priority-ordered fallback chunking. Produces `(start, end)`
+/// overlap=0, overlap_boundary="grapheme")`: priority-ordered fallback
+/// chunking. Produces `(start, end)`
 /// codepoint pairs, each chunk at most `max_chars` codepoints, cut at the
 /// coarsest separator level that fits within budget, falling back to
 /// progressively finer levels only when a coarser one has no in-budget
@@ -435,6 +436,28 @@ pub fn chunk_by_paragraphs_iter(
 /// transition silently degrades to zero overlap rather than stall or
 /// violate the invariants.
 ///
+/// `overlap_boundary="word"` opts the snap into word-aware tails (#47):
+/// the composition order is grapheme snap, then word snap, then the
+/// decline-the-snap lookahead. The grapheme candidate lands first (never
+/// mid-cluster), then the snap moves further back to the nearest UAX #29
+/// word boundary at or before it — the same word-bounds level the default
+/// hierarchy already builds, realized lazily at the first snap that
+/// consults it and shared with any window that descends to it (a
+/// hierarchy with no word level at all — an all-literal custom list —
+/// builds the same one-off word-bounds level at the first snap). A
+/// mid-word overlap tail therefore starts at its word's first codepoint
+/// instead; when the word level has no boundary in the snap-back range
+/// (dense CJK/Thai runs, one long token) the plain grapheme candidate is
+/// kept, and at `overlap=0` the mode is accepted and is a no-op (no snap
+/// site ever runs). The word-snapped candidate then goes through the
+/// decline-the-snap lookahead unchanged — it may land at or before the
+/// previous chunk's start, in which case the transition degrades to zero
+/// overlap exactly as a grapheme candidate reaching that far would; no
+/// chunk is ever contained in (or duplicated across) its predecessor.
+/// Unknown values raise `ValueError` naming the closed set
+/// `('grapheme', 'word')`, unconditionally at the argument boundary (an
+/// irrelevant knob never errors late).
+///
 /// `max_chars < 1` or `overlap < 0` raise `ValueError`. Empty `text`
 /// returns `[]`. An empty `separators` list is legal and skips straight to
 /// the raw-cut fallback for every chunk.
@@ -449,17 +472,50 @@ pub fn chunk_by_paragraphs_iter(
 /// GIL model: identical to `chunk_by_words`. The whole multi-level scan
 /// runs under one `py.detach`; the return marshalling is O(chunks)
 /// 2-tuples of ints.
-#[pyfunction(signature = (text, max_chars, separators = None, *, overlap = 0))]
+#[pyfunction(signature = (text, max_chars, separators = None, *, overlap = 0, overlap_boundary = "grapheme"))]
 pub fn chunk_hierarchical(
     py: Python<'_>,
     text: &str,
     max_chars: i64,
-    separators: Option<Vec<Option<String>>>,
+    separators: Option<Bound<'_, PyAny>>,
     overlap: i64,
+    overlap_boundary: &str,
 ) -> PyResult<Vec<(usize, usize)>> {
     validate_count_overlap("max_chars", max_chars, overlap)?;
+    // The closed-set knob, validated unconditionally at the argument
+    // boundary (an irrelevant knob never errors late — the same discipline
+    // scrub_pii's `families=` applies), with the accepted set named in the
+    // message so the error is its own documentation.
+    let boundary = match overlap_boundary {
+        "grapheme" => chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+        "word" => chunk_hierarchical_impl::OverlapBoundary::Word,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "overlap_boundary must be one of ('grapheme', 'word'), not {other:?}"
+            )));
+        }
+    };
     let max_chars = max_chars as usize;
     let overlap = overlap as usize;
+    // The list param extracts through the bounded manual walk
+    // (`bounded_str_list`, src/py/_borrow.rs): pyo3's
+    // `Option<Vec<Option<String>>>` sizing the Vec from a lying
+    // `__len__` was the uncatchable capacity-overflow class (#112's
+    // residual on this binding — the `scrub_pii` rules=/families= fix's
+    // twin, same cap, same refusal bytes). None stays None: an empty
+    // `separators` list is a DISTINCT selection (raw cut only) from the
+    // `None` default hierarchy.
+    let separators: Option<Vec<Option<String>>> = match separators {
+        None => None,
+        Some(any) => {
+            let mut list: Vec<Option<String>> = Vec::new();
+            bounded_str_list("chunk_hierarchical", "separators", &any, |handle| {
+                list.push(handle.extract::<Option<String>>()?);
+                Ok(())
+            })?;
+            Some(list)
+        }
+    };
     // The one intermediate materialization pyo3's borrowed-Vec
     // limitation forces (`Option<Vec<Option<&str>>>` cannot be extracted
     // directly: FromPyObject is not general enough over the borrowed
@@ -471,7 +527,13 @@ pub fn chunk_hierarchical(
         .as_ref()
         .map(|v| v.iter().map(|entry| entry.as_deref()).collect());
     Ok(py.detach(|| {
-        chunk_hierarchical_impl::chunk_hierarchical(text, max_chars, seps.as_deref(), overlap)
+        chunk_hierarchical_impl::chunk_hierarchical(
+            text,
+            max_chars,
+            seps.as_deref(),
+            overlap,
+            boundary,
+        )
     }))
 }
 

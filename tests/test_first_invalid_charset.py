@@ -5,7 +5,7 @@ validation of identifier-style rules, one GIL-released pass per batch.
 into ``items`` of the first item that is not built entirely from the
 caller's two sets — ``first`` the set of codepoints allowed at position 0,
 ``rest`` the set allowed at every position after it — or ``-1`` when every
-item passes. The motivating consumer (TaskQ's enqueue path) validates
+item passes. The motivating shape is a server's enqueue path validating
 identifier-shaped strings with anchored regexes (schema identifiers, queue
 names, keyed-ref names, tags), each check measured at 84-950 ns and the
 whole per-enqueue cluster under a single ``py.detach`` round trip: per-item
@@ -44,7 +44,7 @@ Semantics, pinned precisely:
 The offender-detail spelling — ``tors.first_invalid_offender(items, *,
 first=None, rest) -> tuple[int, int, str] | None`` — is the SAME scan
 answering the question a rejection UX asks (the integration survey's
-finding: TaskQ's per-character rejection messages name the losing
+finding: per-character rejection messages name the losing
 character and its position, which an item index alone cannot): it returns
 ``(item_index, char_position, offending_char)`` for the first offending
 item's FIRST offending position, ``None`` when every item passes.
@@ -84,7 +84,7 @@ the module decision's prescribed three ways: (a) a pure-Python membership
 loop (the shared oracle, ``reference.reference_first_invalid_charset`` in
 tests/reference.py) over hypothesis-driven alphabets including multi-byte
 and astral codepoints, (b) the equivalent anchored regexes rebuilt from the
-same set halves over the three real TaskQ rule shapes (a second, independent
+same set halves over the three real rule shapes (a second, independent
 oracle: the ``re`` engine itself), and (c) golden cases with exact expected
 indices. The GIL-release claim (one ``py.detach`` around the whole batch
 pass; the GIL-held residue is the O(items) argument walk plus a single int
@@ -121,16 +121,15 @@ import tors
 from reference import reference_first_invalid_charset, reference_first_invalid_offender
 from tors import first_invalid_charset, first_invalid_offender
 
-# --- The three real TaskQ rule shapes ----------------------------------------
+# --- The three real rule shapes ----------------------------------------
 #
-# TaskQ validates identifier-shaped strings with three anchored regexes:
-# _IDENT_RE (taskq.constants: schema/table/column names, ~100 call sites),
-# _QUEUE_NAME_RE (backend/_protocol: per enqueue), and _KEYED_KEY_RE
-# (taskq.constants: per rate-limit acquire). Their character classes,
-# re-expressed as the two halves this API takes — spelled from string's own
-# classes rather than importing TaskQ, since tors's tests stay
-# self-contained; the regexes below are rebuilt from the same halves, so the
-# differentials pin the equivalence itself, not a transcription.
+# Three real identifier-shaped validation rules, expressed as anchored
+# regexes: _IDENT_RE (schema/table/column names), _QUEUE_NAME_RE (per
+# enqueue), and _KEYED_KEY_RE (per rate-limit acquire). Their character
+# classes, re-expressed as the two halves this API takes — spelled from
+# string's own classes so tors's tests stay self-contained; the regexes
+# below are rebuilt from the same halves, so the differentials pin the
+# equivalence itself, not a transcription.
 
 IDENT_FIRST = string.ascii_letters + "_"
 IDENT_REST = string.ascii_letters + string.digits + "_"
@@ -158,8 +157,8 @@ def _class(chars: str) -> str:
 def _anchored(first: str | None, rest: str) -> re.Pattern[str]:
     """The regex equivalent of one rule, rebuilt from the same halves: one
     first-class codepoint then zero-plus rest-class codepoints, ``\\A``/``\\Z``
-    anchored (TaskQ's own anchoring: ``$`` also matches immediately before a
-    trailing newline, which is why its regexes spell ``\\A``/``\\Z``)."""
+    anchored (the anchoring rule: ``$`` also matches immediately before a
+    trailing newline, which is why the spellings here use ``\\A``/``\\Z``)."""
     head = _class(rest if first is None else first)
     return re.compile(rf"\A{head}{_class(rest)}*\Z")
 
@@ -175,9 +174,8 @@ def _regex_first_invalid(pattern: re.Pattern[str], items: Sequence[str]) -> int:
 # The shared rule battery: valid shapes for each rule, the shapes that split
 # them (a leading digit splits identifier from queue-name; ":" and "-"
 # split queue-name from keyed-key; "." splits identifier from queue-name),
-# the TaskQ trap item (a trailing newline), non-ASCII, and an empty item.
+# the trap item (a trailing newline), non-ASCII, and an empty item.
 _RULE_ITEMS: list[str] = [
-    "taskq",
     "jobs",
     "worker_id",
     "queue_eu",
@@ -191,7 +189,7 @@ _RULE_ITEMS: list[str] = [
     "1st_floor",
     "café",
     "bad name",
-    "taskq\n",
+    "alpha\n",
     "DROP;TABLE",
     "",
     "a" * 40,
@@ -199,7 +197,7 @@ _RULE_ITEMS: list[str] = [
 ]
 
 
-class TestTaskQRuleShapes:
+class TestRuleShapes:
     """The motivating claim: the three real rules express directly through
     the API, each pinned against the anchored regex rebuilt from the same
     halves (a second, independent oracle — the ``re`` engine — beyond the
@@ -210,19 +208,20 @@ class TestTaskQRuleShapes:
         # Hand-derived first offender over _RULE_ITEMS under the identifier
         # rule: everything through "default" is a plain identifier, and
         # "events.v2" is the first item with a codepoint (".") outside the
-        # identifier sets.
+        # identifier sets (the list dropped its first item, so the
+        # hand-derived index is 6).
         got = first_invalid_charset(_RULE_ITEMS, first=IDENT_FIRST, rest=IDENT_REST)
-        assert got == 7
+        assert got == 6
         assert got == _regex_first_invalid(_anchored(IDENT_FIRST, IDENT_REST), _RULE_ITEMS)
         assert got == reference_first_invalid_charset(_RULE_ITEMS, IDENT_FIRST, IDENT_REST)
 
     def test_queue_name_rule_equals_the_anchored_regex(self) -> None:
         # Under the queue-name rule the dot and hyphen items pass; the first
         # offender is "base_name:key" — ":" is the load-bearing exclusion
-        # (TaskQ: a queue named "foo:eu" would collide with the flat
-        # "taskq:global:queue:foo:eu" concurrency-cap namespace).
+        # (a flat namespace where ":" separates scopes: a queue named
+        # "foo:eu" would collide with the scoped spelling).
         got = first_invalid_charset(_RULE_ITEMS, first=QUEUE_FIRST, rest=QUEUE_REST)
-        assert got == 9
+        assert got == 8
         assert got == _regex_first_invalid(_anchored(QUEUE_FIRST, QUEUE_REST), _RULE_ITEMS)
         assert got == reference_first_invalid_charset(_RULE_ITEMS, QUEUE_FIRST, QUEUE_REST)
 
@@ -231,7 +230,7 @@ class TestTaskQRuleShapes:
         # is the first=None spelling; ":" and a leading digit are legal, so
         # the first offender is "café" (non-ASCII, outside the ASCII sets).
         got = first_invalid_charset(_RULE_ITEMS, rest=KEYED_REST)
-        assert got == 12
+        assert got == 11
         assert got == _regex_first_invalid(_anchored(None, KEYED_REST), _RULE_ITEMS)
         assert got == reference_first_invalid_charset(_RULE_ITEMS, None, KEYED_REST)
 
@@ -251,17 +250,18 @@ class TestTaskQRuleShapes:
             )
 
     def test_a_trailing_newline_is_an_offender_under_every_rule(self) -> None:
-        # TaskQ's trap: "^...$" also matches immediately before a trailing
-        # newline, so "taskq\n" once passed a queue-name check; its regexes
-        # moved to \A/\Z. The charset rule has no anchoring question at all
-        # — "\n" is simply not in any of the three sets — so the trap item
-        # is an offender here by construction, and the \A/\Z regex agrees.
+        # The anchoring trap: "^...$" also matches immediately before a
+        # trailing newline, so "alpha\n" once passed a queue-name check;
+        # the regexes moved to \A/\Z. The charset rule has no anchoring
+        # question at all — "\n" is simply not in any of the three sets —
+        # so the trap item is an offender here by construction, and the
+        # \A/\Z regex agrees.
         for first, rest in _RULES:
-            assert first_invalid_charset(["taskq\n"], first=first, rest=rest) == 0
-            assert _anchored(first, rest).match("taskq\n") is None
+            assert first_invalid_charset(["alpha\n"], first=first, rest=rest) == 0
+            assert _anchored(first, rest).match("alpha\n") is None
 
     def test_the_unicode_category_boundary_is_real(self) -> None:
-        # TaskQ's _TAG_RE is \w-based — a Unicode-category class — which is
+        # The tag rule is \w-based — a Unicode-category class — which is
         # exactly the expressiveness this API declines (property tables are
         # outside the charter, docs/design.md's lexical-data boundary). The
         # demonstration: "café" is a valid tag under \w but an offender
@@ -746,8 +746,7 @@ def test_every_small_items_list_and_set_spelling_matches_the_reference() -> None
 # --- The offender detail spelling: tors.first_invalid_offender -------------------
 #
 # The integration survey's finding, and the reason this spelling exists:
-# TaskQ's rejection UX names the losing CHARACTER and POSITION
-# (backend/_protocol.py's _queue_name_offender builds per-character
+# a rejection UX names the losing CHARACTER and POSITION (per-character
 # messages), and the index-only return blocks that migration — an item
 # index says WHICH item lost, never where inside it or on what codepoint.
 # The offender spelling is the same engine answering that question:
@@ -1111,9 +1110,9 @@ class TestOffenderArgumentContract:
         )
 
 
-def test_building_a_taskq_style_rejection_message_from_the_tuple() -> None:
-    """The use-case pin: the tuple carries exactly what TaskQ's
-    per-character rejection messages are built from (the losing character
+def test_building_a_rejection_message_from_the_tuple() -> None:
+    """The use-case pin: the tuple carries exactly what per-character
+    rejection messages are built from (the losing character
     and its position, plus the item index to name the item), so the
     message is one f-string off the tuple — the shape the docs' "Building
     rejection messages" example shows, pinned here with all three

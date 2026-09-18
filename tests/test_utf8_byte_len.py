@@ -12,9 +12,9 @@ front of UTF-8 stores); ``utf16_byte_len`` is the interop twin below.
 The expression both replace is pure waste whenever only the COUNT is
 wanted: ``len(s.encode(...))`` allocates a full ``bytes`` object,
 measures it, and throws it away. The motivating pattern is a size cap in
-front of a store or a wire (the issue's own framing): TaskQ spells it
-twice — ``client/_args.py`` checks idempotency-key and scope byte caps
-on every enqueue, and ``backend/_terminal.py`` re-encodes a serialized
+front of a store or a wire (the issue's own framing): a write path spells
+it twice — argument validation checks idempotency-key and scope byte caps
+on every enqueue, and a terminal handler re-encodes a serialized
 result of up to 64 KiB (``MAX_RESULT_BYTES``) on every success, a
 genuine double pass (the byte count existed inside the serializer's
 output and was discarded by the ``.decode()`` that produced the
@@ -139,7 +139,7 @@ the 1 MiB scale); the surrogate error parity; the argument contract
 ``int`` -> ``TypeError``); the cache-behavior pin (identical result on
 repeat calls — a semantic pin; the TIMING of the cache is CPython's
 internal business, measured in the wall cells, not asserted here); and
-the motivating TaskQ byte-cap gate spelled with ``utf8_byte_len``. The
+the motivating byte-cap gate spelled with ``utf8_byte_len``. The
 ``utf16_byte_len`` pins mirror every one: the
 ``len(s.encode("utf-16-le"))`` oracle over the same strategy shapes plus
 an exhaustive boundary-alphabet sweep and every reference corpus; the
@@ -454,7 +454,7 @@ def test_a_fresh_equal_object_answers_the_same_as_a_cached_one() -> None:
     assert utf8_byte_len(fresh) == utf8_byte_len(cached)
 
 
-# --- The motivating TaskQ pattern, as an invariant ------------------------------------
+# --- The motivating byte-cap pattern, as an invariant ------------------------------------
 
 
 # The terminal's result cap from the issue (backend/_terminal.py's
@@ -467,7 +467,7 @@ _MAX_RESULT_BYTES = 64 * 1024
     [-1, 0, 1],
     ids=["one-under-the-cap", "exactly-the-cap", "one-over-the-cap"],
 )
-def test_the_taskq_byte_cap_gate_trips_where_the_encode_gate_trips(
+def test_the_byte_cap_gate_trips_where_the_encode_gate_trips(
     bytes_over_cap: int,
 ) -> None:
     """The motivating invariant: a byte-cap gate spelled with
@@ -504,7 +504,7 @@ def test_the_scope_and_idempotency_key_pattern_counts_not_copies() -> None:
     allocating. A regression that answered codepoints (or chars) instead of
     bytes fails the scope leg's divergence pin, not the ASCII leg's
     accidental equality."""
-    idempotency_key = f"taskq:v1:{'k' * 200}"
+    idempotency_key = f"job:v1:{'k' * 200}"
     scope = f"tenant=caf\u00e9;region=\u6771\u4eac;tag=\U0001f600;{'s' * 200}"
     for payload in (idempotency_key, scope):
         assert utf8_byte_len(payload) == len(payload.encode("utf-8"))
@@ -1111,26 +1111,41 @@ def test_interpreter_matrix_note_gil_and_pypy() -> None:
     assert utf8_byte_len(text) == len(text.encode("utf-8"))
 
 
-def test_detach_is_statically_present_in_both_wrappers() -> None:
-    """Static detach-presence pin: the heartbeat cells admit they cannot
-    catch a detach removal (a removed detach still passes the 100 ms
-    ceiling at these sizes — the wall just moves under the GIL), so this
-    cell pins the mechanism statically instead: both `utf8_byte_len`
-    and `utf16_byte_len` bodies in `src/py/scan.rs` must route the core
-    through `py.detach`. The 1.0 ms scan-band ceiling in
-    `tests/test_performance.py` stays as the dynamic backstop (a
-    scalar-loop regression blows it by 3x); this is the static one.
+def test_detach_routing_is_static_in_both_wrappers() -> None:
+    """Static detach-routing pin, one direction per wrapper (the #108
+    pair): the heartbeat cells' blind spots run OPPOSITE ways here, so
+    the mechanism is pinned statically for both.
 
-    Airtight spelling (MEDIUM-3): each function body is parsed from its
-    `pub fn {name}` to the next `pub fn` (or EOF — the function's full
-    extent, not a fixed window), and must contain the exact call string
-    `py.detach(|| scan_impl::{name}` — detach presence AND core routing
-    together, so neither a removed detach nor a detach around other
-    work passes."""
+    - ``utf16_byte_len`` MUST route its core through ``py.detach``: its
+      detach carries the real O(n) byte-class scan, and the heartbeat
+      cells cannot catch a detach REMOVAL at these sizes (a held scan
+      still passes the 100 ms ceiling — the wall just moves under the
+      GIL; the 1.0 ms scan-band ceiling in tests/test_performance.py is
+      the dynamic backstop, this is the static one).
+    - ``utf8_byte_len`` must NOT contain a ``py.detach``: its core is an
+      O(1) field read behind the GIL-held borrow, so a (re-)added
+      nominal detach brackets no work and is the #108 starvation
+      mechanism itself — every detach/re-attach bumps ``switch_number``
+      inside a waiting thread's ``take_gil`` window and defeats the
+      loop's switch escalation. The heartbeat pin
+      (test_gil_release.py's starvation cell) is the dynamic backstop;
+      this is the static one, and it is the rare pin that asserts an
+      absence.
+
+    Airtight spelling (MEDIUM-3, kept): each function body is parsed
+    from its `pub fn {name}` to the next `pub fn` (or EOF — the
+    function's full extent, not a fixed window), with `//` line
+    comments stripped (a comment naming the mechanism must not trip
+    the check). For ``utf16_byte_len`` the body must contain the exact
+    call string ``py.detach(|| scan_impl::utf16_byte_len`` — detach
+    presence AND core routing together, so neither a removed detach nor
+    a detach around other work passes. For ``utf8_byte_len`` the body
+    must contain no ``py.detach`` at all."""
     import pathlib
 
     src = pathlib.Path(__file__).parent.parent.joinpath("src", "py", "scan.rs").read_text()
-    for name in ("utf8_byte_len", "utf16_byte_len"):
+
+    def body_of(name: str) -> str:
         start = src.index(f"pub fn {name}")
         next_fn = src.find("\npub fn ", start + 1)
         body = src[start:] if next_fn == -1 else src[start:next_fn]
@@ -1138,9 +1153,21 @@ def test_detach_is_statically_present_in_both_wrappers() -> None:
         # (guards against the slice running past the function when the
         # next-pub-fn search misses).
         assert "\n}" in body, f"{name} body has no closing brace"
-        assert (
-            f"py.detach(|| scan_impl::{name}" in body
-        ), f"{name} lost its py.detach-routed core call"
+        return "\n".join(
+            line.split("//")[0] for line in body.splitlines()
+        )
+
+    utf16_body = body_of("utf16_byte_len")
+    assert (
+        "py.detach(|| scan_impl::utf16_byte_len" in utf16_body
+    ), "utf16_byte_len lost its py.detach-routed core call"
+    utf8_body = body_of("utf8_byte_len")
+    assert "py.detach" not in utf8_body, (
+        "utf8_byte_len re-gained a py.detach: with the whole call "
+        "GIL-held (the borrow's UTF-8-cache materialization plus an "
+        "O(1) field read) a detach brackets no work and is the #108 "
+        "starvation mechanism — see the wrapper's GIL-model docs"
+    )
 
 
 def test_cheap_utf16_differential_against_encode_utf16_count() -> None:

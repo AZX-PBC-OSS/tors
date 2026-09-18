@@ -154,9 +154,17 @@ pub fn is_grounded_exact(claim: &str, source: &str) -> bool {
 /// `M`: the total matched-char length across every `Equal` op of a diff of
 /// two char slices, `similar`'s Myers engine under `deadline` (an absolute
 /// instant, `None` = unbounded for this window: the caller still enforces
-/// the overall budget between windows). The minimal-edit-script consequence
-/// of the Myers search is `M == LCS(a, b)` exactly, the invariant the
-/// Python oracle's independent DP checks.
+/// the overall budget between windows). `M` is always VALID — the equal ops
+/// spell a common subsequence, so `M <= LCS(a, b)` — and it is MAXIMAL
+/// (`M == LCS(a, b)` exactly, the minimal-edit-script consequence) whenever
+/// the bounded search completes; on hard inputs past the heuristic's limits
+/// (large, low-anchor-density slices) the bounded middle-snake search can
+/// accept a good non-minimal split and undercount, so `M` can come out
+/// below the true LCS. See `src/diff_impl.rs`'s module docs for exactly
+/// what the engine does and does not guarantee — every consumer of this
+/// number (the `similarity_ratio` scalar, the fuzzy ground verdict) is
+/// documented and tested against that bounded contract, not against
+/// exact-LCS maximality.
 fn matched_len(a: &[char], b: &[char], deadline: Option<Instant>) -> usize {
     capture_diff_slices_deadline(Algorithm::Myers, a, b, deadline)
         .into_iter()

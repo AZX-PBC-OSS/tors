@@ -1,33 +1,49 @@
-"""Differential parity for the ``tors.scrub_log_text`` port of TaskQ's
-exception-text scrub chain.
+"""Behavioral differentials for ``tors.scrub_log_text``.
 
-Provenance, the pin this file exists to enforce: the behavior oracle is the
-consumer's own chain, ``src/taskq/obs/_redact_exc.py`` in the TaskQ repo
-(pinned to the sibling checkout this suite runs against on the dev box; the
-locator below also honors ``TORS_TASKQ_REPO``). The four compiled regexes,
-quoted verbatim from that source, are:
+The oracle is this repo's own pure-Python reference
+(``tests/reference.py::reference_scrub_log_text``), and the grammar's
+definition is the four compiled regexes quoted below, in this file — the
+extension is pinned against them exactly (
 
 .. code-block:: python
 
-    _PG_DETAIL_RE = re.compile(r"^[ \\t]*DETAIL:.*$", re.MULTILINE)
+    _PG_DETAIL_RE = re.compile(r"^(?:[ \\t]*[|+][ \\t]*)*[ \\t]*DETAIL:.*$", re.MULTILINE)
     _PG_DETAIL_ESCAPED_RE = re.compile(
-        r"(?:\\\\r)?\\\\n[ \\t]*DETAIL:.*?(?=(?:\\\\r)?\\\\n|['\\"]\\)?\\s*$)",
+        r"(?:\\\\r)?\\\\n[ \\t]*DETAIL:.*?(?=(?:\\\\r)?\\\\n|['\\"][)\\]]*\\s*$|$)",
         re.MULTILINE,
     )
     _URI_CRED_RE = re.compile(r"(\\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s:/@]*):([^\\s@]+)@")
-    _URI_PARAM_CRED_RE = re.compile(r"([?&](?:password|passphrase|passwd|pwd)=)([^\\s&@]+)")
+    _URI_PARAM_CRED_RE = re.compile(
+        r"((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)"
+        r"('(?:[^'\\\\]|\\\\.)*'|[^\\s&]+)",
+        re.IGNORECASE,
+    )
 
 (the ``\\``-doubling is this docstring's; ``tests/reference.py`` carries the
 machine-checked single-escaped spellings, and ``TestQuotedPin`` below fails
 if they ever differ from what this header means). The chain order is
 ``_scrub_text``'s own with the redaction flag on: DETAIL lines (real
-newlines), then DETAIL runs (repr-flattened ``\\n`` separators), then the
-userinfo mask, then the password-family query-param mask — each a whole pass
-over the current text, which is exactly the canonical order
-``tors.scrub_log_text`` applies per rule selection. A TaskQ change to any
-pattern or to the order is a visible re-sync request (the live-oracle class
-below fails loudly when the checkout is present), never a silent tors
+newlines, ExceptionGroup gutters included), then DETAIL runs (repr-flattened
+``\\n`` separators, fail-closed at end of line), then the userinfo mask, then
+the password-family connection-parameter mask (URI-query and libpq keyword
+anchors, IGNORECASE) — each a whole pass over the current text, which is
+exactly the canonical order ``tors.scrub_log_text`` applies per rule
+selection. The conninfo pass is ONE pass under TWO names
+(``uri_query_creds`` selects the ``[?&]`` anchor grammar,
+``libpq_conninfo_creds`` the libpq keyword lookbehind; both — ``rules=None``
+included — run the combined pattern, never two sequential substitutions).
+A change to any
+pattern or to the order is a deliberate grammar change: it lands here and
+in ``tests/reference.py`` together, visibly, never as a silent tors
 behavior change.
+
+Two deliberate behavior changes are part of this grammar
+security-policy calls documented where the old contract was stated
+(src/scrub_impl.rs's header, docs/api.md): the escaped-DETAIL lookahead's
+final bare ``$`` leg is FAIL-CLOSED — an unterminated repr scrubs through
+end of line, inverting 0.7.0's pinned "unterminated run is left alone" —
+and the conninfo value class no longer stops at ``@`` (a password may
+legally carry one; 0.7.0 left the tail riding after the ``***``).
 
 Why the failure mode needs this file: silent under-redaction. A port bug
 that leaves a row value or a password in the output crashes nothing and
@@ -41,28 +57,14 @@ json_repair's precedent — and the ``timing`` wall/scaling cells). Lane
 counts are reported per lane, never as one combined headline presented as
 the per-PR gate: per-PR is the default selection (``-m "not timing and not
 sweep"``); sweep + timing run once on the 3.12 leg.
-
-The live-oracle lane is the ``test_json_repair_parity.py`` importorskip
-pattern adapted for a LOCAL repo rather than a pip package: TaskQ is not
-installable into this suite's environment (its package ``__init__`` pulls
-the worker's dependency tree — opentelemetry, structlog, asyncpg — none of
-which tors's dev environment carries), so ``import taskq`` cannot succeed
-here and a sys.path route would importorskip-skip even on the box where the
-oracle exists. The scrub module itself is stdlib-only (``re``/``sys``/
-``traceback``), so the lane file-loads ``_redact_exc.py`` directly via
-``importlib`` — the live source, not a copy — and skips (the importorskip
-semantics) when no checkout is found.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
-import os
 import re
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
@@ -70,6 +72,7 @@ from hypothesis import strategies as st
 
 import tors
 from reference import (
+    _CRED_PARAM_NAMES,
     _PG_DETAIL_ESCAPED_RE,
     _PG_DETAIL_RE,
     _URI_CRED_RE,
@@ -80,14 +83,29 @@ from reference import (
 )
 
 # The quoted pin, mechanically enforced against reference.py's compiled
-# patterns (TestQuotedPin): these are the TaskQ source's exact pattern
-# strings, byte for byte, and both copies must stay that way.
+# patterns (TestQuotedPin): these are the grammar's exact pattern
+# strings, byte for byte, and both copies must stay that way. The conninfo
+# name list is quoted separately (the reference spells it as a tuple the
+# pattern is built from; the assembled patterns must equal these strings
+# exactly).
 QUOTED_PATTERNS: dict[str, str] = {
-    "_PG_DETAIL_RE": r"^[ \t]*DETAIL:.*$",
-    "_PG_DETAIL_ESCAPED_RE": (r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"]\)?\s*$)"),
+    "_PG_DETAIL_RE": r"^(?:[ \t]*[|+][ \t]*)*[ \t]*DETAIL:.*$",
+    "_PG_DETAIL_ESCAPED_RE": (
+        r"(?:\\r)?\\n[ \t]*DETAIL:.*?(?=(?:\\r)?\\n|['\"][)\]]*\s*$|$)"
+    ),
     "_URI_CRED_RE": r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@",
-    "_URI_PARAM_CRED_RE": r"([?&](?:password|passphrase|passwd|pwd)=)([^\s&@]+)",
+    "_URI_PARAM_CRED_RE": (
+        r"((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)"
+        r"('(?:[^'\\]|\\.)*'|[^\s&]+)"
+    ),
 }
+QUOTED_CRED_PARAM_NAMES: tuple[str, ...] = (
+    "password",
+    "passphrase",
+    "passwd",
+    "pwd",
+    "sslpassword",
+)
 _COMPILED_PATTERNS: dict[str, re.Pattern[str]] = {
     "_PG_DETAIL_RE": _PG_DETAIL_RE,
     "_PG_DETAIL_ESCAPED_RE": _PG_DETAIL_ESCAPED_RE,
@@ -96,14 +114,17 @@ _COMPILED_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 # The rule lanes every corpus case runs under: the full chain, each rule
-# alone, and the pg+userinfo composition (the pair whose interaction is the
-# canonical-order contract — a DETAIL deletion can eat the `@` the userinfo
-# mask anchors on).
+# alone, and the interaction pairs (pg+userinfo, the pair whose interaction
+# is the canonical-order contract — a DETAIL deletion can eat the `@` the
+# userinfo mask anchors on; and the two conninfo names together, the pair
+# that must run as ONE combined pass).
 RULE_LANES: list[tuple[str, list[str] | None]] = [
     ("full", None),
     ("pg_detail_lines", ["pg_detail_lines"]),
     ("uri_userinfo", ["uri_userinfo"]),
     ("uri_query_creds", ["uri_query_creds"]),
+    ("libpq_conninfo_creds", ["libpq_conninfo_creds"]),
+    ("conninfo-both", ["uri_query_creds", "libpq_conninfo_creds"]),
     ("pg+userinfo", ["pg_detail_lines", "uri_userinfo"]),
 ]
 
@@ -112,16 +133,28 @@ class TestQuotedPin:
     @pytest.mark.parametrize("name", sorted(QUOTED_PATTERNS))
     def test_reference_patterns_are_the_quoted_pin(self, name: str) -> None:
         assert _COMPILED_PATTERNS[name].pattern == QUOTED_PATTERNS[name], (
-            f"reference.py's {name} drifted from the TaskQ-quoted pin in this "
+            f"reference.py's {name} drifted from the quoted pin in this "
             "file's header: a re-sync (deliberate, against the live module) "
             "or a bug; either way the two spellings must not diverge silently"
         )
 
+    def test_the_cred_param_names_are_the_quoted_pin(self) -> None:
+        # The live module derives its pattern from this tuple; reference.py
+        # derives its own patterns from the same tuple, so the pin is on
+        # the tuple, not the interpolation.
+        assert _CRED_PARAM_NAMES == QUOTED_CRED_PARAM_NAMES
+
     def test_the_canonical_rule_order_is_pinned(self) -> None:
         # The chain order _scrub_text applies with the flag on: DETAIL's two
-        # segmenters, userinfo, then query params. reference.py must carry
-        # the same tuple tors spells.
-        assert SCRUB_RULES == ("pg_detail_lines", "uri_userinfo", "uri_query_creds")
+        # segmenters, userinfo, then the conninfo pass (its two anchor
+        # grammars under the two names). reference.py must carry the same
+        # tuple tors spells.
+        assert SCRUB_RULES == (
+            "pg_detail_lines",
+            "uri_userinfo",
+            "uri_query_creds",
+            "libpq_conninfo_creds",
+        )
 
 
 # --- classification pins: the two CPython-re-vs-Rust-std seams ----------------------
@@ -247,6 +280,25 @@ _CORPUS: list[str] = [
     "Traceback (most recent call last):\nJobError('dup\\nDETAIL: K=(v)')\nafter",
     "x\\nDETAIL: y\\nDETAIL: z') tail\\nDETAIL: w')",
     "a\\nDETAIL: b\\r\\nDETAIL: c')",
+    # ExceptionGroup gutters (#107): one `| `/`+ ` layer per nesting level
+    # in traceback.format_exception's group rendering; a non-DETAIL header
+    # line through the same gutters stays.
+    "    +   | DETAIL: row-848",
+    "  | DETAIL: v\nnext",
+    "+\\t+ DETAIL: v",
+    "||DETAIL: v",
+    "\\t | \\t + DETAIL: v",
+    "  | ExceptionGroup: sub-exc (1 sub-exception)\n  | DETAIL: row-8",
+    "x | DETAIL: v",
+    "E('m\\nDETAIL: v')])",
+    "E('m\\nDETAIL: v]')",
+    "E('m\\nDETAIL: v)]')",
+    "E('m\\nDETAIL: v')])')",
+    "E('m\\nDETAIL: v|x",
+    # The fail-closed leg (#107's policy change): delimiter misses scrub
+    # through end of line — the two shapes 0.7.0 pinned as left-alone.
+    "E('m\\nDETAIL: v",
+    "E('a\\nDETAIL: v')  tail",
     # userinfo: the mask itself.
     "postgresql://worker:hunter2@db/prod",
     "postgresql://:SECRET@host/db",
@@ -296,6 +348,34 @@ _CORPUS: list[str] = [
     "a?password=1?pwd=2",
     "&password=1&pwd=2&password=3",
     "x?passphrase=a?b&passwd=",
+    # conninfo credentials (#107): the libpq keyword anchor, IGNORECASE
+    # names, `sslpassword`, `@` allowed inside values, single-quoted
+    # values (spaces, escaped quotes/backslashes, unterminated),
+    # end-of-line `=`-adjacent edges.
+    "host=h password=p",
+    "host=db PASSWORD='hun ter2'",
+    "host='db host' password='p w' user=u",
+    "password=p",
+    "épassword=x",
+    "_password=x",
+    "1password=x",
+    "apassword=x",
+    "cpwd=x pwd=y",
+    "?x=password=y",
+    "postgresql://h/db?sslpassword=p",
+    "?SSLPassword=s&key=k",
+    "?password=a@b",
+    "?password=a@b@c&x=1",
+    "?password='a b'&x=1",
+    "?password='a\\'b'&x=1",
+    "?password='a\\\\'&x=1",
+    "?password='unterminated",
+    "?password='unterminated &password=x",
+    "?password='multi\nline real-nl'&x=1",
+    "password='a\\'\\'' x",
+    "?pwd=a?password=b",
+    " password=a&password=b",
+    "?password=a=password",
     # chain shapes: both credential shapes on one DSN, embedded param inside
     # a userinfo password, the DETAIL-eats-the-@ order interaction, an
     # escaped DETAIL inside a would-be password, mixed real text.
@@ -347,6 +427,11 @@ _ESCAPED_GRID_TERMINATOR = [
     "\n",
     "\\n\\n",
     "x'",
+    # The `)`/`]` closer runs a nested repr's tail is made of (#107).
+    "')])",
+    "']])",
+    "']) ')",
+    "' x])",
 ]
 
 
@@ -369,14 +454,38 @@ _PARAM_GRID_NAME = [
     "passphrase",
     "passwd",
     "pwd",
+    "sslpassword",
+    # Case permutations (the #107 IGNORECASE grammar) and near misses.
     "Password",
+    "PASSWORD",
+    "PaSsWd",
+    "SSLPASSWORD",
+    "sslpassword",
     "passwords",
     "passwo",
     "pwdx",
     "pass",
     "p",
 ]
-_PARAM_GRID_VALUE = ["x", "", " ", "a b", "a&b", "a@b", "a=b", "***", "a\\nb", "x://y:z"]
+_PARAM_GRID_VALUE = [
+    "x",
+    "",
+    " ",
+    "a b",
+    "a&b",
+    "a@b",
+    "a=b",
+    "***",
+    "a\\nb",
+    "x://y:z",
+    # Quoted values (the #107 libpq grammar): spaces, escaped quote and
+    # backslash, unterminated, empty quotes.
+    "'a b'",
+    "'a\\'b'",
+    "'a\\\\'",
+    "'unterminated",
+    "''",
+]
 _PARAM_GRID_TAIL = ["", "&n=1", " x", "@h", "\n", "?password=2"]
 
 
@@ -658,104 +767,3 @@ def test_scrub_userinfo_fail_chain_scales_linearly() -> None:
         f"212KB {t_large:.2f}ms (ratio {t_large / max(t_small, 1e-9):.2f}x, "
         "linear must stay <3x)"
     )
-
-
-# --- the live-oracle re-sync lane (TaskQ checkout gated) ------------------------------
-
-
-def _load_taskq_module() -> object | None:
-    """File-load the live ``_redact_exc.py`` if a TaskQ checkout is findable.
-
-    Locator: ``TORS_TASKQ_REPO`` wins if set; otherwise the sibling of this
-    repo's MAIN checkout (derived via ``git rev-parse --git-common-dir``, so
-    the route works from any worktree). Returns ``None`` (the caller skips,
-    importorskip semantics) when neither holds a checkout.
-    """
-    candidates: list[Path] = []
-    env_repo = os.environ.get("TORS_TASKQ_REPO")
-    if env_repo:
-        candidates.append(Path(env_repo))
-    try:
-        common_dir = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-            cwd=Path(__file__).resolve().parent.parent,
-        ).stdout.strip()
-        main_checkout = (Path(__file__).resolve().parent.parent / common_dir).resolve().parent
-        candidates.append(main_checkout.parent / "TaskQ")
-    except (OSError, subprocess.SubprocessError):
-        pass
-    for candidate in candidates:
-        module_path = candidate / "src" / "taskq" / "obs" / "_redact_exc.py"
-        if not module_path.is_file():
-            continue
-        spec = importlib.util.spec_from_file_location("taskq_obs_redact_exc", module_path)
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    return None
-
-
-_TASKQ = _load_taskq_module()
-_requires_taskq = pytest.mark.skipif(
-    _TASKQ is None,
-    reason=(
-        "no TaskQ checkout found (sibling of the main checkout, or "
-        "$TORS_TASKQ_REPO): the live-oracle re-sync lane is skipped; the "
-        "quoted-pattern differential above still runs"
-    ),
-)
-
-
-@_requires_taskq
-class TestLiveOracleResync:
-    def test_the_live_patterns_are_the_quoted_pin(self) -> None:
-        for name, quoted in QUOTED_PATTERNS.items():
-            live = getattr(_TASKQ, name)
-            assert isinstance(live, re.Pattern)
-            assert live.pattern == quoted, (
-                f"TaskQ's {name} changed (or this pin is stale): {live.pattern!r} "
-                f"vs the quoted {quoted!r} — re-sync the pin in tests/reference.py "
-                "and this header TOGETHER, as one deliberate change"
-            )
-
-    def test_the_live_chain_is_the_local_chain_over_the_corpus(self) -> None:
-        module = _TASKQ
-        assert module is not None
-        flag_before = module._redaction_enabled  # noqa: SLF001
-        try:
-            module._redaction_enabled = True  # noqa: SLF001
-            for text in (
-                _CORPUS
-                + _needle_chain_cases()
-                + [
-                    scrub_corpus(1024),
-                    scrub_corpus(100 * 1024),
-                ]
-            ):
-                assert module._scrub_text(text) == reference_scrub_log_text(text)  # noqa: SLF001
-        finally:
-            module._redaction_enabled = flag_before  # noqa: SLF001
-
-    def test_tors_matches_the_live_chain_over_the_corpus(self) -> None:
-        module = _TASKQ
-        assert module is not None
-        flag_before = module._redaction_enabled  # noqa: SLF001
-        try:
-            module._redaction_enabled = True  # noqa: SLF001
-            for text in (
-                _CORPUS
-                + _needle_chain_cases()
-                + [
-                    scrub_corpus(1024),
-                    scrub_corpus(100 * 1024),
-                ]
-            ):
-                assert tors.scrub_log_text(text) == module._scrub_text(text)  # noqa: SLF001
-        finally:
-            module._redaction_enabled = flag_before  # noqa: SLF001

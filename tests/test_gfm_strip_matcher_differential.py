@@ -495,3 +495,60 @@ class TestTheLongLineContract:
             f"the 1 MiB {kind} line took {elapsed:.3f}s (the pre-matcher scans were "
             f"quadratic: ~12s/~21s at 200k, 4x per doubling):\n{report}"
         )
+
+
+# The code-span twin of the long-line probe (issue #111): backtick runs of
+# increasing length, every run a closer candidate for every earlier opener
+# of the same length. The pre-index lifter rescanned to end-of-line per
+# opener (the clean N²/2: measured 0.63 s at n=400 through to_text, 4x per
+# doubling, ~13 s at 700); the closer index (one pass, binary search per
+# opener) answers the same positions in near-linear time (measured 0.001 s
+# at n=400, ~2x per doubling). The bytes must not change either: the line
+# has no run of any length repeated later, so it passes through verbatim.
+_BACKTICK_RUNS_CHILD = r"""
+import sys, time
+from tors_documents import to_text
+
+n = int(sys.argv[1])
+line = "".join(("`" * k + "x") for k in range(1, n))
+expected = line + "\n"
+html = b"<html><body><p>" + line.encode() + b"</p></body></html>"
+t0 = time.perf_counter()
+_fmt, text = to_text(data=html, format="html")
+elapsed = time.perf_counter() - t0
+assert text == expected, f"the strip changed bytes: got {text[:60]!r}"
+print(f"n={n} elapsed={elapsed:.4f}s outlen={len(text)}")
+"""
+
+
+class TestTheBacktickRunContract:
+    """The code-span lifter is near-linear on backtick-run lines (issue
+    #111), with its bytes exactly the verbatim pass-through, in a
+    subprocess under a deadline so a regression dies as a child timeout
+    instead of eating the runner. Both axes pinned: the absolute wall at
+    800 runs (the pre-fix shape was ~13 s at 700) and the growth ratio
+    across 100/200/400 (the quadratic past doubles per step; the indexed
+    present measured ~1.25-3.2x with 3.5x the generous ceiling)."""
+
+    def test_backtick_runs_stay_linear_and_byte_identical(self) -> None:
+        times: dict[int, float] = {}
+        for n in (100, 200, 400, 800):
+            done = subprocess.run(
+                [sys.executable, "-c", _BACKTICK_RUNS_CHILD, str(n)],
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+            )
+            report = f"rc={done.returncode}\n{done.stdout}\n{done.stderr}"
+            assert "elapsed=" in done.stdout, f"the probe did not report:\n{report}"
+            times[n] = float(done.stdout.split("elapsed=")[1].split("s")[0])
+        assert times[800] < 5.0, (
+            f"800 backtick runs took {times[800]:.3f}s (the pre-index lifter "
+            f"was quadratic: 0.63s at 400, ~13s at 700):\n{times}"
+        )
+        for small, big in ((100, 200), (200, 400)):
+            ratio = times[big] / max(times[small], 1e-6)
+            assert ratio < 8.0, (
+                f"the lift looks superlinear again: {small}→{big} runs grew "
+                f"{ratio:.1f}x for a 2x run count:\n{times}"
+            )

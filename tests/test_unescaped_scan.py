@@ -130,7 +130,7 @@ def _assert_find_is_valid(haystack: bytes, needle: bytes, got: int) -> None:
 # Every row: (haystack, needle, expected find_unescaped). Rows are built from
 # code (backslash runs by repetition, JSON renderings by concatenation) so
 # the source stays ASCII and unambiguous. The runs 0-7 ladder is generated,
-# the class of shapes the TaskQ adversarial matrix verified the algorithm
+# the class of shapes the adversarial matrix verified the algorithm
 # against (backslash runs 0 through 7, mixed literal/real, adjacency).
 
 _RUN_LADDER: list[tuple[bytes, bytes, int]] = [

@@ -164,7 +164,13 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
             &text,
             |bench, text| {
                 bench.iter(|| {
-                    chunk_hierarchical_impl::chunk_hierarchical(black_box(text), 2000, None, 0)
+                    chunk_hierarchical_impl::chunk_hierarchical(
+                        black_box(text),
+                        2000,
+                        None,
+                        0,
+                        chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                    )
                 })
             },
         );
@@ -178,7 +184,13 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
             &text,
             |bench, text| {
                 bench.iter(|| {
-                    chunk_hierarchical_impl::chunk_hierarchical(black_box(text), 2000, None, 200)
+                    chunk_hierarchical_impl::chunk_hierarchical(
+                        black_box(text),
+                        2000,
+                        None,
+                        200,
+                        chunk_hierarchical_impl::OverlapBoundary::Grapheme,
+                    )
                 })
             },
         );
@@ -199,6 +211,7 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
                     budget,
                     Some(&[Some("xyz")]),
                     0,
+                    chunk_hierarchical_impl::OverlapBoundary::Grapheme,
                 )
             })
         },

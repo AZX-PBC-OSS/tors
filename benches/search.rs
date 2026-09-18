@@ -59,7 +59,7 @@
 //!
 //! The `first_invalid_charset` group benches the batch codepoint-set
 //! validator's core (`charset_impl::first_invalid_charset`, the scan
-//! surface's batch-only companion) over the identifier rule (TaskQ's
+//! surface's batch-only companion) over the identifier rule (the
 //! `_IDENT_RE` shape: letters and underscore at position 0, digits
 //! joining after) on 1 / 10 / 100-item batches of identifier-shaped
 //! strings — the sizes bracketing the motivating consumer's batches
@@ -119,7 +119,7 @@
 //!   `utf8_byte_len` cells in tests/test_performance.py; a Rust bench
 //!   cannot see the pyo3 borrow where those lanes live.
 //!
-//! Ladder: 64 KiB / 1 MiB / 12 MiB — the TaskQ result cap
+//! Ladder: 64 KiB / 1 MiB / 12 MiB — the 64 KiB result cap
 //! (`MAX_RESULT_BYTES`, the size the function's motivating double pass
 //! pays), the wall cells' mid leg, and the suite's canonical size. No
 //! 100 MiB leg (the sibling groups' 100 MiB exists to show a linear
@@ -342,7 +342,7 @@ fn bench_replace_many_masked(c: &mut Criterion) {
 
 fn bench_first_invalid_charset(c: &mut Criterion) {
     // The identifier rule's two halves (the dense-patterns set's own
-    // provenance: mirrored from the TaskQ _IDENT_RE shape the Python-side
+    // provenance: the shape the Python-side
     // race in tests/test_performance.py drives) and a deterministic
     // 100-item identifier batch (the job/queue/worker/tag spellings an
     // enqueue path validates; the _ident_items builders on the Python

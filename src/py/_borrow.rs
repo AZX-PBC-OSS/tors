@@ -20,9 +20,9 @@
 //! everything `run` does, any `py.detach` included, by construction
 //! rather than by call-site discipline.
 
-use pyo3::exceptions::{PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyTimeoutError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PyString};
+use pyo3::types::{PyAny, PyDict, PyList, PySequence, PyString};
 
 /// The empty-entry contract of a `&str` list walk: a pattern list refuses
 /// an empty entry (`ValueError("empty pattern")`: an empty pattern would
@@ -125,6 +125,84 @@ pub(crate) fn borrow_dict_pairs<R>(
     run(&pairs)
 }
 
+/// The bounded list-parameter walk's cap: past this many yielded items
+/// the walk aborts with a catchable `ValueError` (the
+/// `borrow_str_sequence` discipline, `src/py/charset.rs`
+/// MAX_BATCH_ITEMS — never trust a reported size, walk under a cap).
+/// One order of magnitude looser than the honest population any current
+/// caller's parameter carries (`scrub_pii`'s closed rule/family sets,
+/// `chunk_hierarchical`'s separator hierarchy), so a legitimate call is
+/// never near it: anything past 100_000 is not a miscounted batch, it
+/// is the bomb itself. The message is deliberately generic (no cap
+/// value): the bound is a DoS backstop, not a contract to advertise to
+/// sequence authors.
+pub(crate) const MAX_LIST_ITEMS: usize = 100_000;
+
+/// The bounded manual list walk for `list`-taking bindings whose
+/// parameters pyo3 extracts as `Vec<...>` (currently `chunk_hierarchical`'s
+/// `separators=`, whose elements are `Option<String>`). It replaces the
+/// `Vec<...>` parameter spelling precisely because that spelling let pyo3
+/// size the Vec from the argument's `__len__` before iterating it — a
+/// `Sequence` whose `__len__` lies (2**62) blew up `Vec::with_capacity`
+/// as a `PanicException` (capacity overflow), which `except Exception`
+/// cannot catch: the one uncatchable crash class on the pyo3 boundary
+/// (the `pages=` range bomb's class, the same fix shape). The manual walk
+/// never reads `__len__`, so the cap is the only bound it needs.
+///
+/// The per-item extraction is the caller's `push` closure (the module's
+/// run-closure convention, the same reason [`borrow_str_list`] takes
+/// `run`: the element types differ per call site, and pyo3 0.29's
+/// `FromPyObject` lifetimes do not generalize over them here), called
+/// once per yielded item BEFORE the cap check so extraction errors
+/// propagate in the same per-item order pyo3's own iteration raised
+/// them. Every refusal is byte-identical to the `Vec<...>` extraction
+/// the walk replaced, pinned at each call site's test file: a bare
+/// `str` is refused up front (pyo3's own `Vec` special case — `str`
+/// satisfies the Sequence protocol and would silently validate its own
+/// characters one by one); a non-`Sequence` object, a non-`str` item,
+/// and a `__getitem__` that raises all surface the same `TypeError`/
+/// propagated error pyo3's iteration raised; a `__len__` that lies LOW
+/// changes nothing (the walk iterates, it never reserves) and yields
+/// every item. The one behavior change is the bomb's: an unbounded (or
+/// lying-huge) sequence now dies as a catchable `ValueError` at
+/// [`MAX_LIST_ITEMS`] instead of an uncatchable `PanicException` inside
+/// `Vec::with_capacity`.
+///
+/// DEDUP AT MERGE: `fix/bounded-dos-111-115` lands a private twin of
+/// this walk as `bounded_str_list` in `src/py/pii.rs` (for `scrub_pii`/
+/// `scrub_pii_report`'s `rules=`/`families=`, element type `String`) —
+/// the two branches were built against the same issue (#112 class)
+/// without seeing each other. When that branch merges, its copy moves
+/// into this module (this function IS the shared home; its cap const is
+/// this file's [`MAX_LIST_ITEMS`], its message bytes are identical) and
+/// `pii.rs`'s call sites switch to it, so exactly one walk and one cap
+/// survive.
+pub(crate) fn bounded_str_list(
+    function: &str,
+    param: &str,
+    items: &Bound<'_, PyAny>,
+    mut push: impl FnMut(&Bound<'_, PyAny>) -> PyResult<()>,
+) -> PyResult<()> {
+    if items.is_instance_of::<PyString>() {
+        // The refusal pyo3's own `Vec<...>` extraction made (its
+        // message, kept verbatim): a bare str is the char-split footgun.
+        return Err(PyTypeError::new_err("Can't extract `str` to `Vec`"));
+    }
+    let seq = items.cast::<PySequence>()?;
+    let mut count = 0usize;
+    for handle in seq.try_iter()? {
+        let handle = handle?;
+        push(&handle)?;
+        count += 1;
+        if count > MAX_LIST_ITEMS {
+            return Err(PyValueError::new_err(format!(
+                "{function}() {param} sequence yielded too many items: refusing an unbounded batch"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The closed `[0.0, 1.0]` interval check shared by `is_grounded`'s
 /// `threshold` and `get_close_matches`' `cutoff`. The two call sites'
 /// refusal messages differ on purpose, and `echo_value` selects the
@@ -201,6 +279,28 @@ pub(crate) fn validate_count_overlap(count_name: &str, count: i64, overlap: i64)
     Ok(())
 }
 
+/// The bounded manual walk behind every `rules=`-style `Option<Vec<String>>`
+/// list parameter (`scrub_log_text`'s `rules=` today; `scrub_pii`'s
+/// `rules=`/`families=` carry the same walk locally in `src/py/pii.rs` on
+/// the `fix/bounded-dos-111-115` branch — the merge-time dedup obligation
+/// is to fold that copy into this one, this file being the py layer's
+/// shared-walk home): precisely because the `Option<Vec<String>>` spelling
+/// let pyo3 size the Vec from the argument's `__len__` before iterating it
+/// — a `Sequence` whose `__len__` lies (2**62) blew up `Vec::with_capacity`
+/// as a `PanicException` (capacity overflow), which `except Exception`
+/// cannot catch: the one uncatchable crash class on the pyo3 boundary
+/// (the `pages=` range bomb's class, the same fix shape: never trust a
+/// reported size, walk under a cap). The manual walk never reads
+/// `__len__`, so the cap is the only bound it needs: past this many
+/// yielded items the walk aborts with a catchable `ValueError` — the
+/// `borrow_str_sequence` discipline (`src/py/charset.rs`
+/// MAX_BATCH_ITEMS, the content_hash walk cap's spirit), one order of
+/// magnitude tighter because the honest population here is tiny (the
+/// rules are closed sets of names): a legitimate call carries a handful
+/// of strings, and anything past 100_000 is not a miscounted batch, it is
+/// the bomb itself. The message is deliberately generic (no cap value):
+/// the bound is a DoS backstop, not a contract to advertise to sequence
+/// authors.
 /// The `TimeoutError` construction shared by every `deadline_ms`-bearing
 /// binding (`diff_opcodes` and its line spelling, the three fuzzy
 /// metrics, `similarity_ratio`, `get_close_matches`, `is_grounded`): the

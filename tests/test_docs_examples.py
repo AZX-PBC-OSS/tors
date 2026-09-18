@@ -176,7 +176,7 @@ class TestApiReferenceExamples:
     def test_utf8_byte_len_examples(self) -> None:
         # docs/api.md's utf8_byte_len section, pinned directly (the
         # literals the doc shows): the mixed-content example rows and the
-        # TaskQ byte-cap gate the section is motivated by, spelled at its
+        # byte-cap gate the section is motivated by, spelled at its
         # 64 KiB MAX_RESULT_BYTES boundary.
         assert tors.utf8_byte_len("caf\u00e9") == 5
         assert tors.utf8_byte_len("\U0001f600") == 4

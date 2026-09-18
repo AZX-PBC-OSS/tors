@@ -1370,6 +1370,45 @@ class TestRepairDeadline:
             repair_json_loads(raw, schema=self._LADDER_SCHEMA, deadline_ms=1)
         assert _time.perf_counter() - start < 1.0
 
+    def test_one_unknown_key_over_a_wide_schema_is_bounded_by_the_deadline(self) -> None:
+        # The PER-PROPERTY axis (the #115 sibling the red-team pass
+        # found): a single unknown key sweeps O(properties) jaro
+        # comparisons, and the per-key entry check cannot bound a sweep
+        # from inside — a 100k-property sweep past a 5ms budget answered
+        # with the clock read only once, at the sweep's end. The ladder
+        # now samples the clock per property (the enum scorer's design:
+        # the forced read, because short window-disjoint comparisons
+        # never consult a clock internally, plus the remainder handed to
+        # each long one), so the abort lands within the sweep.
+        #
+        # The observable floor for ANY budget is the schema's own
+        # pre-repair phase (resolve + the root validator's compile, both
+        # eager in the repairer constructor and linear in properties —
+        # ~0.5s at 100k): the deadline's granularity there is the phase,
+        # not the property (see docs/api.md's deadline section). So the
+        # pin asserts the ABORT (never a masked return) and a wall under
+        # the unbounded ladder's band, not wall-clock precision.
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {f"prop_{i:06d}": {"type": "string"} for i in range(100_000)},
+        }
+        import time as _time
+
+        start = _time.perf_counter()
+        with pytest.raises(TimeoutError):
+            repair_json_loads(
+                '{"totally_unknown_key_xyz": "v"}', schema=schema, deadline_ms=5
+            )
+        assert _time.perf_counter() - start < 1.0
+        # The masking shape: a budget the base phases outrun must STILL
+        # abort (the ladder's first consult reads a long-expired clock),
+        # never return a repair that ignored the budget.
+        with pytest.raises(TimeoutError):
+            repair_json_loads(
+                '{"totally_unknown_key_xyz": "v"}', schema=schema, deadline_ms=1
+            )
+
     def test_the_schema_union_branch_loop_is_bounded_by_the_deadline(self) -> None:
         # A union whose winning branch sits at the end of a long anyOf:
         # the losing branches burn the budget branch by branch, and the
@@ -1823,3 +1862,151 @@ class TestRepairDeadline:
         assert repair_json_loads(
             '{"y": "7"}', schema=all_of_schema, deadline_ms=60_000
         ) == repair_json_loads('{"y": "7"}', schema=all_of_schema)
+
+
+class TestEnumSuggestionDeadline:
+    """The enum suggestion loop is ON the clock (issue #115): the pre-fix
+    walk scored every member with an unbounded per-comparison budget and
+    never read the clock, so a wide enum of long members answered in 1.3s
+    against a 5ms ``deadline_ms`` (the TimeoutError arriving only from a
+    later phase's check). Both axes are bounded now — a forced clock read
+    per member, and the clock's remaining budget handed to each
+    jaro-winkler comparison — and an expired clock RAISES, never falls out
+    of the loop as a silent ``None`` suggestion that would mask the
+    timeout as a plain data error. The wall pins below carry generous
+    room (50ms at a 5ms budget, measured ~8ms) for CI load."""
+
+    _WIDE_ENUM = [("a" * 1500) + str(i) for i in range(2000)]
+
+    def test_the_reported_wide_enum_raises_within_the_budget(self) -> None:
+        import time
+
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads(
+                json.dumps("b" * 1500),
+                schema={"enum": self._WIDE_ENUM},
+                deadline_ms=5,
+            )
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        assert elapsed_ms < 50.0, f"the enum walk ran {elapsed_ms:.1f}ms past a 5ms budget"
+
+    def test_a_budget_expired_before_the_enum_still_raises(self) -> None:
+        # The ordering red-team: expiry before the loop and expiry inside
+        # it must BOTH raise (a pre-loop-expired clock that returned None
+        # would surface the miss as "does not match enum" — the timeout,
+        # masked). The 1ms budget is blown in the parse phases; the enum
+        # loop's forced check raises anyway.
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads(
+                json.dumps("b" * 1500),
+                schema={"enum": self._WIDE_ENUM},
+                deadline_ms=1,
+            )
+
+    def test_a_single_million_char_member_is_bounded_by_the_comparison_budget(self) -> None:
+        # The one-very-long-comparison axis: the remaining-budget handoff
+        # into jaro_winkler bounds the member's materialization and scan.
+        # The member is sized so its own materialization must overrun a
+        # 5ms budget (measured: TimeoutError at ~6-8ms; a 10^6-char member
+        # sometimes fits the budget and answers the plain miss, which is
+        # the bound working, not failing). The miss sits where the
+        # suggestion loop runs — an object property's enum, the path that
+        # scores members.
+        import time
+
+        schema = {
+            "type": "object",
+            "properties": {"c": {"enum": ["a" * 10**7]}},
+            "required": ["c"],
+        }
+        started = time.perf_counter()
+        with pytest.raises(TimeoutError, match="deadline"):
+            repair_json_loads('{"c": "b"}', schema=schema, deadline_ms=5)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        assert elapsed_ms < 100.0, f"one 10^7-char member ran {elapsed_ms:.1f}ms"
+
+    def test_an_affordable_enum_suggests_identically_armed_or_not(self) -> None:
+        # The suggestion-hint path is byte-identical with the clock armed
+        # and unarmed: the remaining-budget handoff only ever cuts work at
+        # real expiry, so a healthy enum cannot tell the difference (the
+        # exact suggestion string is pinned both spellings).
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"color": {"type": "string", "enum": ["blue", "green"]}},
+            "required": ["color"],
+        }
+        expected = "Did you mean 'blue'?"
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            repair_json_loads('{"color": "blu"}', schema=schema)
+        with pytest.raises(ValueError, match=re.escape(expected)):
+            repair_json_loads('{"color": "blu"}', schema=schema, deadline_ms=60_000)
+
+    def test_an_empty_enum_misses_plainly(self) -> None:
+        # No members, nothing to score, and no deadline interaction: the
+        # loop body never runs, so the miss is the plain refusal (the
+        # top-level scalar shape answers from the crate's own enum
+        # validation; the object-property shape is the suggestion loop's).
+        schema = {
+            "type": "object",
+            "properties": {"c": {"enum": []}},
+            "required": ["c"],
+        }
+        with pytest.raises(ValueError, match="does not match enum"):
+            repair_json_loads('{"c": "x"}', schema=schema, deadline_ms=60_000)
+
+
+class TestEnumErrorMessageMemberCap:
+    """The enum miss's rendered member list is capped (the DoS-agent
+    finding: a top-level scalar enum miss rendering EVERY member into the
+    exception message — 2000 members x 1500 chars measured as a ~3MB
+    error string on the pre-cap build).
+
+    The cap lives in the jsonschema crate's own enum message formatter
+    (`MAX_DISPLAYED_ENUM_VARIANTS` = 3: the first two members rendered in
+    full, then "or N other candidates" — the dep-side spelling of "first
+    N members, then a count of the rest", a constant documented here
+    because the cap is the contract): the measured message for the
+    reported shape is ~3.0 KB, flat in the member COUNT. Both axes the
+    finding named are pinned: the count axis (the message cannot grow
+    with the member list) and the byte-identity of a normal small enum's
+    message (the cap never touches it — three or fewer members render
+    whole, in the crate's "a, b or c" shape)."""
+
+    _MEMBERS = [("m" + str(i)) + ("x" * 1500) for i in range(2000)]
+
+    def test_the_reported_wide_enum_message_stays_bounded(self) -> None:
+        # 2000 members x 1500 chars: the pre-cap projection is ~3MB; the
+        # measured message is ~3.0KB (two rendered members + the
+        # candidate-count tail). The 10KB gate sits >3x above the measured
+        # band and far under the uncapped shape.
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema={"enum": self._MEMBERS})
+        assert len(str(excinfo.value)) < 10_000
+
+    def test_the_message_length_is_flat_in_the_member_count(self) -> None:
+        # The count axis: doubling the members cannot double the message
+        # (only the two rendered members are full-length; the rest is the
+        # one candidate count).
+        wide = {"enum": self._MEMBERS}
+        wider = {"enum": self._MEMBERS * 2}
+        with pytest.raises(ValueError) as first:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema=wide)
+        with pytest.raises(ValueError) as second:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema=wider)
+        assert len(str(second.value)) < 2 * len(str(first.value))
+
+    def test_the_tail_names_the_undisplayed_count(self) -> None:
+        # The cap's spelling: the undisplayed members are counted, never
+        # rendered (1998 of 2000).
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz-not-a-member"), schema={"enum": self._MEMBERS})
+        assert "or 1998 other candidates" in str(excinfo.value)
+
+    def test_a_normal_small_enum_message_is_byte_identical(self) -> None:
+        # The cap's other side: three members render whole, in the crate's
+        # "a, b or c" shape, byte-for-byte what the uncapped formatter
+        # said (pinned exactly, so a formatter change is a reviewed event).
+        with pytest.raises(ValueError) as excinfo:
+            repair_json_loads(json.dumps("zzz"), schema={"enum": ["alpha", "beta", "gamma"]})
+        assert str(excinfo.value) == '"" is not one of "alpha", "beta" or "gamma"'

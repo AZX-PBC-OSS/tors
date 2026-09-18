@@ -60,6 +60,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "json_is_valid"
+path = "fuzz_targets/json_is_valid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "decode_utf16"
 path = "fuzz_targets/decode_utf16.rs"
 test = false
@@ -230,6 +237,27 @@ bench = false
 [[bin]]
 name = "pii"
 path = "fuzz_targets/pii.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pii_escape_grammar"
+path = "fuzz_targets/pii_escape_grammar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_separator_shapes"
+path = "fuzz_targets/chunk_separator_shapes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_schema_graph"
+path = "fuzz_targets/json_schema_graph.rs"
 test = false
 doc = false
 bench = false

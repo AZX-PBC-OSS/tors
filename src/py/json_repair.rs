@@ -40,6 +40,31 @@ fn map_repair_err(message: String, name: &str) -> PyErr {
 /// normalized message.
 const MAX_SCHEMA_WALK_DEPTH: usize = 200;
 
+/// The schema-side node cap, [`py_to_value`]'s threaded visit counter's
+/// ceiling: the same value as the canon walk's `MAX_WALK_NODES`
+/// (`src/py/canon.rs`, 2_000_000) — this is that guard for the schema
+/// argument, and the same ceiling is the consistency choice the
+/// shared-envelope convention asks for. The cap counts CONTAINER visits
+/// (dicts, lists, tuples), not leaves, and the unit is the visit, not the
+/// distinct object: the walk follows every path, so shared references are
+/// re-entered per path. That is the whole defect (issue #113): 48 nested
+/// shared lists — depth 48, not a leaf in them — expand to ~2^48
+/// container visits while staying far under the depth cap, and the walk
+/// hung (measured: >30 s, no completion) building the expansion. A
+/// shared-dict shape is the same bomb (the snapshot fix upstream of this
+/// walk was mutation-safety, not a bound), and the counter threads
+/// through the dict branch too. Leaves are deliberately uncounted: a
+/// leaf's visit is linear in the caller's OWN input (each leaf is a
+/// Python object the caller already holds; converting 2M of them is the
+/// linear cost of the 2M-entry schema they built), so a legitimate FLAT
+/// schema of 2M nodes — the shape the exponential cannot fake — keeps
+/// working, and the pins assert exactly that pair: the flat schema of
+/// the same node count converts, the shared-ref schema refuses, both in
+/// milliseconds. The error is the schema-authoring class (`ValueError`),
+/// deliberately generic (no cap value): the bound is a DoS backstop,
+/// not a contract to advertise to schema authors.
+const MAX_SCHEMA_WALK_NODES: usize = 2_000_000;
+
 /// A Python object -> [`Value`] walk for the `schema=` argument (and only
 /// it: the JSON under repair arrives as `str`). Accepts exactly the JSON
 /// types a schema is made of (`dict` (insertion order preserved), `list`
@@ -51,7 +76,16 @@ const MAX_SCHEMA_WALK_DEPTH: usize = 200;
 /// types name the JSON types instead. A `str` holding lone surrogates
 /// fails the UTF-8 borrow (the standard str-in class: such strings cannot
 /// reach any tors function).
-fn py_to_value(_py: Python<'_>, obj: &Bound<'_, PyAny>, depth: usize) -> PyResult<Value> {
+///
+/// `nodes` is the threaded visit counter (see [`MAX_SCHEMA_WALK_NODES`]):
+/// one accumulator across the whole walk, incremented per container
+/// visit, checked against the ceiling before the branch recurses.
+fn py_to_value(
+    _py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    depth: usize,
+    nodes: &mut usize,
+) -> PyResult<Value> {
     if depth > MAX_SCHEMA_WALK_DEPTH {
         return Err(PyValueError::new_err(
             "Input schema nesting exceeds the supported schema recursion depth.",
@@ -94,6 +128,12 @@ fn py_to_value(_py: Python<'_>, obj: &Bound<'_, PyAny>, depth: usize) -> PyResul
         // semantics the content_hash walk documents for its protocol
         // lane).
         let snapshot: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = dict.iter().collect();
+        *nodes += 1;
+        if *nodes > MAX_SCHEMA_WALK_NODES {
+            return Err(PyValueError::new_err(
+                "Input schema visits too many objects: refusing an unbounded tree.",
+            ));
+        }
         let mut entries = Vec::with_capacity(snapshot.len());
         for (key, value) in &snapshot {
             let key = key
@@ -101,22 +141,34 @@ fn py_to_value(_py: Python<'_>, obj: &Bound<'_, PyAny>, depth: usize) -> PyResul
                 .map_err(|_| PyValueError::new_err("Object keys must be strings."))?;
             entries.push((
                 key.to_str()?.to_owned(),
-                py_to_value(_py, value, depth + 1)?,
+                py_to_value(_py, value, depth + 1, nodes)?,
             ));
         }
         return Ok(Value::Object(entries));
     }
     if let Ok(list) = obj.cast::<PyList>() {
+        *nodes += 1;
+        if *nodes > MAX_SCHEMA_WALK_NODES {
+            return Err(PyValueError::new_err(
+                "Input schema visits too many objects: refusing an unbounded tree.",
+            ));
+        }
         let mut items = Vec::with_capacity(list.len());
         for item in list.iter() {
-            items.push(py_to_value(_py, &item, depth + 1)?);
+            items.push(py_to_value(_py, &item, depth + 1, nodes)?);
         }
         return Ok(Value::Array(items));
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
+        *nodes += 1;
+        if *nodes > MAX_SCHEMA_WALK_NODES {
+            return Err(PyValueError::new_err(
+                "Input schema visits too many objects: refusing an unbounded tree.",
+            ));
+        }
         let mut items = Vec::with_capacity(tuple.len());
         for item in tuple.iter() {
-            items.push(py_to_value(_py, &item, depth + 1)?);
+            items.push(py_to_value(_py, &item, depth + 1, nodes)?);
         }
         return Ok(Value::Array(items));
     }
@@ -412,7 +464,7 @@ fn build_config(
                     "schema must be a JSON Schema dict, boolean schema, or pydantic v2 model.",
                 ));
             }
-            Some(py_to_value(py, &resolved, 0)?)
+            Some(py_to_value(py, &resolved, 0, &mut 0)?)
         }
     };
     let locale = match locale {

@@ -89,16 +89,25 @@
 //!   OpenAI `sk-`/`sk-proj-`/`sk-svcacct-` (20+), Anthropic `sk-ant-`
 //!   (20+), Google `AIza` (35+), Fireworks `fw-`/`fw_` (20+), Modal
 //!   `ak-`/`wk-` (20+), GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (36+)
-//!   and `github_pat_` (22+), GitLab `glpat-` (20+), the minted shapes
+//!   and `github_pat_` (22+), GitLab `glpat-` and every sibling prefix
+//!   of GitLab's documented token overview plus the `_gitlab_session=`
+//!   cookie marker (20+; the cookie on the Azure alphabet), the minted
+//!   shapes
 //!   `azxdev_` (20+), `wd-` (43+), `w-` (43+),
 //!   `cn-` (20+), MARKER-SCOPED JWTs — `Bearer eyJ` plus three maximal
 //!   base64url segments, single-dot separated (a bare `eyJ` never
 //!   matches: one consumer's API legitimately carries eyJ-shaped
 //!   non-secret cursors, and redacting those would destroy the
-//!   diagnostic this scrubber exists to preserve) — AWS `AKIA`/`ASIA` +
-//!   `[0-9A-Z]{16,}` (the access-key ID; AWS SECRET keys carry no
+//!   diagnostic this scrubber exists to preserve) — AWS `AKIA`/`ASIA`
+//!   and the access-key-ID regex's `A3T`/`AGPA`/`AIDA`/`AIPA`/`ANPA`/
+//!   `ANVA`/`AROA` siblings + `[0-9A-Z]{16,}` (the access-key ID; AWS
+//!   SECRET keys carry no
 //!   prefix and stay a documented exclusion), xAI `xai-` (20+), GCP
-//!   OAuth `ya29.` (20+), the PEM SPAN family (`-----BEGIN <words>
+//!   OAuth `ya29.` (20+ — the refresh-token spelling `1//` excluded:
+//!   the one head that would end in an Nd digit, letting a phone number
+//!   and a refresh token in one space-bridged run compose a phone match
+//!   through the token's own head), the PEM
+//!   SPAN family (`-----BEGIN <words>
 //!   PRIVATE KEY-----` … `-----END <same words> PRIVATE KEY-----`, both
 //!   markers required; the PGP label's ` PRIVATE KEY BLOCK-----` close
 //!   is accepted the same way, and the PKCS#8 bare header carries no
@@ -125,12 +134,15 @@
 //!   is MID-TOKEN and never fires (`xak-…` — the same reasoning as the
 //!   phone rule's clean-boundary cut, and what keeps a second key glued
 //!   to a token's digest hex from firing) UNLESS that byte ends a
-//!   complete escape sequence: `%XX`, `\uXXXX`, or `\X` (odd-backslash
-//!   counted): logs carry keys inside JSON strings, .NET spellings, and
-//!   URL encodings, and the escape's tail letter or digit is formatting
-//!   material, not the word a key head would be glued to; and the tail
-//!   run is MAXIMAL, so a key glued to further charset material is one
-//!   long key, over-redaction in the safe direction.
+//!   complete escape sequence: `%XX`, `\uXXXX`, `\UHHHHHHHH`, `\xHH`,
+//!   `\NNN` octal, `\X` (odd-backslash counted), or an ANSI CSI
+//!   sequence (`ESC [ params final`): logs carry keys inside JSON
+//!   strings, .NET spellings, URL encodings, C byte-repr and octal
+//!   spellings, Python's `backslashreplace` output, and ANSI-colored
+//!   terminal output, and the escape's tail letter or digit is
+//!   formatting material, not the word a key head would be glued to;
+//!   and the tail run is MAXIMAL, so a key glued to further charset
+//!   material is one long key, over-redaction in the safe direction.
 //! * **Pass order** — the keys substitution over the whole string FIRST,
 //!   then the email substitution over its result, then the phone
 //!   substitution over that, each exactly once, no cascade. The keys
@@ -1012,18 +1024,65 @@ fn is_hex_tail_byte(b: u8) -> bool {
     TAIL_CLASS[b as usize] & 0b10 != 0
 }
 
+/// The run of backslashes ending just before `at` (never crossing the
+/// string start): `bytes[at - 1]`, `bytes[at - 2]`, ... while `\\`. The
+/// odd-backslash discipline reads this run: an ODD run leaves the last
+/// backslash unescaped (it escapes what follows), an EVEN run escapes
+/// itself and what follows is literal.
+#[inline]
+fn backslash_run_before(bytes: &[u8], at: usize) -> usize {
+    let mut run = 0usize;
+    while run < at && bytes[at - 1 - run] == b'\\' {
+        run += 1;
+    }
+    run
+}
+
 /// Whether the key-charset byte at `pos - 1` is the LAST byte of a
-/// complete escape sequence: `%XX`, `\uXXXX`, or `\X` (a
-/// backslash-escaped char, odd-backslash counted, so an escaped
-/// backslash stays a literal and keeps its neighbor mid-token). Escaped
-/// text is a CLEAN boundary for the family scan: logs carry keys inside
-/// JSON strings (`\n`), .NET spellings (`\u0027`), and URL encodings
-/// (`%3D`), and the escape's tail letter or digit is formatting
-/// material, not the word a key head would be glued to; the head after
-/// it starts fresh. Token digests can never alias this (hex carries no
-/// `\` or `%`), so the token-adjacency cut is untouched, and a partial
-/// escape (`%3` + a key head, or `%3g`) is not a boundary: the grammar
-/// needs the complete sequence.
+/// complete escape sequence. This is the scanner's whole escape grammar,
+/// one spelling per arm — the contract any new spelling joins as a row:
+///
+/// | spelling | shape | boundary when |
+/// |---|---|---|
+/// | `%XX` | `%` + two hex digits | always (the `%` cannot be escaped) |
+/// | `\uXXXX` | `\` `u` + four hex digits | the `u` is position-pinned; see the wart below |
+/// | `\UHHHHHHHH` | `\` `U` + eight hex digits | the `U` is position-pinned, same discipline as `\uXXXX` |
+/// | `\xHH` | `\` `x` + two hex digits | the backslash run before the `x` is ODD |
+/// | `\NNN` | `\` + 1-3 OCTAL digits, maximal munch | the digit run ends exactly here and the backslash run before it is ODD |
+/// | `\X` | any byte after an ODD backslash run | the run directly before the final byte is ODD |
+/// | ANSI CSI | `ESC` `[` params final | see `ansi_csi_ends_before` — the raw-ESC arm |
+///
+/// Escaped text is a CLEAN boundary for the family scan: logs carry keys
+/// inside JSON strings (`\n`), .NET spellings (`\u0027`), URL encodings
+/// (`%3D`), C byte-repr spellings (`\x1f`), octal spellings (git's
+/// quoted-path `\346…` output), Python's `ascii()`/`backslashreplace`
+/// non-BMP spelling (`\U0001F600`), ANSI-colored terminal output
+/// (`\x1b[31m…`), and escaped one-off characters, and the escape's tail
+/// letter or digit is formatting material, not the word a key head would
+/// be glued to; the head after it starts fresh. Control-char spellings
+/// without log-tooling evidence (`\cX`, the shell/Perl control form)
+/// stay a documented non-match — the grammar is closed on evidence like
+/// the family set. Token
+/// digests can never alias this (hex carries no `\` or `%`), so the
+/// token-adjacency cut is untouched, and a PARTIAL escape (`%3` + a key
+/// head, `%3g`, `\x4` + a key head) is not a boundary: the grammar needs
+/// the complete sequence.
+///
+/// The odd-backslash discipline: a backslash that is itself escaped is
+/// a literal, so every backslash-led arm requires the pinned backslash
+/// unescaped — the run of backslashes immediately before the spelling's
+/// first letter/digit must be ODD (`\\x41` is an escaped backslash +
+/// the literal `x41`; its trailing digit is a literal mid-token byte,
+/// never a boundary, and the same holds for `\\101`). The `\uXXXX` arm
+/// is the one arm WITHOUT that recount: it pins the backslash at a fixed
+/// offset and does not check what precedes it, so an escaped backslash
+/// directly before a literal `\uXXXX` spelling (`\\u0027`) reads as an
+/// escape — an over-trigger, the safe direction (over-redaction only;
+/// the head it admits is behind literal text), pinned as the released
+/// behavior rather than silently "fixed" into a grammar change. Maximal
+/// munch for `\NNN`: the escape consumes up to three octal digits, so a
+/// fourth (`\1234`) leaves the last digit a literal continuation and
+/// mid-token.
 #[inline]
 fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // The tail byte's class gates the whole analysis before any
@@ -1035,7 +1094,7 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // further.
     let tail = bytes[pos - 1];
     if !is_hex_tail_byte(tail) {
-        return pos >= 2 && bytes[pos - 2] == b'\\' && odd_backslashes_before(bytes, pos);
+        return pos >= 2 && backslash_run_before(bytes, pos - 1) % 2 == 1;
     }
     // %XX: the percent sign plus two hex digits, the second being the
     // tail itself.
@@ -1043,7 +1102,8 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
         return true;
     }
     // \uXXXX: the backslash, the `u`, and four hex digits (the tail is
-    // the fourth, already proven hex by the gate).
+    // the fourth, already proven hex by the gate). No odd-backslash
+    // recount — the documented over-trigger above.
     if pos >= 6
         && bytes[pos - 6] == b'\\'
         && bytes[pos - 5] == b'u'
@@ -1053,22 +1113,78 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     {
         return true;
     }
+    // \UHHHHHHHH: the \u arm's eight-hex-digit sibling — Python's
+    // ascii()/repr and backslashreplace spelling of a non-BMP char, the
+    // same log-tooling class (ASCII-only sinks escape astral chars this
+    // way). The same position-pinned no-recount discipline as \uXXXX.
+    if pos >= 10
+        && bytes[pos - 10] == b'\\'
+        && bytes[pos - 9] == b'U'
+        && bytes[pos - 8..pos].iter().all(|&b| b.is_ascii_hexdigit())
+    {
+        return true;
+    }
+    // \xHH: the backslash, the `x`, and two hex digits — the pinned
+    // backslash itself unescaped (an ODD run of backslashes directly
+    // before the `x`; `\\x41` is a literal `x41` after an escaped
+    // backslash).
+    if pos >= 4
+        && bytes[pos - 4] == b'\\'
+        && bytes[pos - 3] == b'x'
+        && bytes[pos - 2].is_ascii_hexdigit()
+        && bytes[pos - 1].is_ascii_hexdigit()
+        && backslash_run_before(bytes, pos - 3) % 2 == 1
+    {
+        return true;
+    }
+    // \NNN: the backslash plus one to three octal digits, maximal
+    // munch — the digit run ending at `pos` must be wholly inside the
+    // escape (a fourth digit is a literal continuation: `\1234` is
+    // escape `\123` + literal `4`, the `4` mid-token), and the pinned
+    // backslash itself unescaped (`\\101` is a literal `101`). The
+    // octal digits sit inside the hex tail class, so the gate lets the
+    // arm run.
+    let mut digits = 0usize;
+    while digits < pos && matches!(bytes[pos - 1 - digits], b'0'..=b'7') {
+        digits += 1;
+    }
+    if (1..=3).contains(&digits)
+        && digits < pos
+        && bytes[pos - 1 - digits] == b'\\'
+        && backslash_run_before(bytes, pos - digits) % 2 == 1
+    {
+        return true;
+    }
     // \X: any tail class can follow a backslash, so the hex tail falls
-    // through to the run count here.
-    odd_backslashes_before(bytes, pos)
+    // through to the run count here — an ODD run of backslashes
+    // directly before the final byte (an even run escapes itself,
+    // leaving the neighbor a literal).
+    backslash_run_before(bytes, pos - 1) % 2 == 1
 }
 
-/// The \X shape's run count: an ODD run of backslashes directly before
-/// the final byte (an even run escapes itself, leaving the neighbor a
-/// literal). Reached only when a backslash actually sits at `pos - 2`,
-/// so the loop runs exactly once per real escape and never on prose.
+/// Whether the key-charset byte at `pos - 1` ends an ANSI CSI escape
+/// sequence (`ESC [ params final`) — the raw-ESC arm of the boundary
+/// rule's escape grammar, one row past the backslash/percent spellings:
+/// colored terminal output carries keys the same way JSON strings do
+/// (`\x1b[31msk-…`), and the sequence's final byte is a LETTER —
+/// mid-token material by the plain rule, formatting material in fact.
+/// The lookback: the final byte is `0x40..=0x7E`, the walk runs back
+/// over the parameter/intermediate class (`0x20..=0x3F`), and the
+/// `ESC [` head must sit directly before the walked run (a `[` in prose
+/// without the ESC byte — `[31msk-…` — never carves; the sequence needs
+/// its anchor). Linear-cheap like every lookback here: the walk is
+/// charged to the param run, and a param run can precede at most one
+/// final byte before a non-param byte breaks the pair.
 #[inline]
-fn odd_backslashes_before(bytes: &[u8], pos: usize) -> bool {
-    let mut slashes = 0usize;
-    while slashes + 2 <= pos && bytes[pos - 2 - slashes] == b'\\' {
-        slashes += 1;
+fn ansi_csi_ends_before(bytes: &[u8], pos: usize) -> bool {
+    if !(0x40..=0x7e).contains(&bytes[pos - 1]) {
+        return false;
     }
-    slashes % 2 == 1
+    let mut j = pos - 1;
+    while j > 0 && (0x20..=0x3f).contains(&bytes[j - 1]) {
+        j -= 1;
+    }
+    j >= 2 && bytes[j - 1] == b'[' && bytes[j - 2] == 0x1b
 }
 
 /// The tail alphabet a family consumes maximally. Most families share
@@ -1118,16 +1234,49 @@ fn tail_predicate(class: KeyTailClass) -> fn(u8) -> bool {
 /// evidence-backed closed set, the leaked-credential shapes the
 /// consumers evidenced; Slack `xox` and Stripe stay deliberately absent
 /// (zero evidence), and growing the set is a new-evidence decision,
-/// never a drive-by. The
+/// never a drive-by. Three evidence passes
+/// are rows here, taken whole: the GitLab token-prefix set of GitLab's
+/// documented token overview (docs.gitlab.com/security/tokens) —
+/// `glpat-` plus every sibling prefix that page lists, the workspace
+/// and feature-flag-client rows included and the `_gitlab_session=`
+/// cookie marker on the Azure alphabet — one row per prefix over the
+/// same conservative 20-char shared tail; the AWS access-key-ID regex's
+/// prefix set (`AKIA` long-term, `ASIA` temporary, the `A3T` legacy and
+/// `AGPA`/`AIDA`/`AIPA`/`ANPA`/`ANVA`/`AROA` resource-ID siblings the
+/// same regex carries, `A3T` on the 17-char tail that keeps every row's
+/// total width 20). Google's OAuth refresh-token spelling `1//` stays a
+/// documented EXCLUSION, and not for evidence: its verbatim head would
+/// be the one family head ending in an Nd digit, and a phone number and
+/// a refresh token in one space-bridged class run (`+14155552671
+/// 1//…`) compose a longer international phone match that eats the
+/// token's own head digit — the phone pass runs after keys and cannot
+/// tell a token head from run material, so the report's overlap
+/// contract breaks. A head that ends outside the digit class is the
+/// condition for the row.
+/// A
+/// sibling prefix lands as a table row, never a reopened ticket. The
 /// JWT and PEM families live outside this table (their grammars are
 /// marker/span shapes, not prefix-plus-tail), tried after it on their
 /// disjoint head bytes (`B`/`-`, which no table prefix starts with).
 const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
-    // `g`: the GitHub family, longest literal first (github_pat_ has no
-    // shorter prefix inside the group; gho_/ghu_/ghs_/ghr_ are
-    // mutually exclusive literals at the same length).
+    // `g`: the GitHub and GitLab families, longest literal first
+    // (github_pat_ has no shorter prefix inside the group;
+    // gho_/ghu_/ghs_/ghr_ and the gl* rows are mutually exclusive
+    // literals at the same length).
     (b"github_pat_", KeyFamily::GitHub, 22, KeyTailClass::Shared),
     (b"glpat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glagent-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glsoat-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glrtr-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glcbt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glptt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glimt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"gloas-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glft-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"gldt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glrt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glwt-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
+    (b"glffct-", KeyFamily::GitLab, 20, KeyTailClass::Shared),
     (b"ghp_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"gho_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
     (b"ghu_", KeyFamily::GitHub, 36, KeyTailClass::Shared),
@@ -1144,6 +1293,13 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"AIza", KeyFamily::Google, 35, KeyTailClass::Shared),
     (b"AKIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
     (b"ASIA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AGPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AIDA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AIPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"ANPA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"ANVA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"AROA", KeyFamily::Aws, 16, KeyTailClass::Aws),
+    (b"A3T", KeyFamily::Aws, 17, KeyTailClass::Aws),
     // `a`, `f`, `w`, `c`, `x`, `y`: the single- and double-entry groups.
     (b"azxdev_", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"ak-", KeyFamily::Modal, 20, KeyTailClass::Shared),
@@ -1155,6 +1311,14 @@ const KEY_FAMILIES: &[(&[u8], KeyFamily, usize, KeyTailClass)] = &[
     (b"cn-", KeyFamily::Minted, 20, KeyTailClass::Shared),
     (b"xai-", KeyFamily::Xai, 20, KeyTailClass::Shared),
     (b"ya29.", KeyFamily::GcpOauth, 20, KeyTailClass::Shared),
+    // `_`: the single-entry evidence-pass group (the GitLab
+    // session-cookie marker on the Azure alphabet).
+    (
+        b"_gitlab_session=",
+        KeyFamily::GitLab,
+        40,
+        KeyTailClass::Azure,
+    ),
 ];
 
 /// One head-byte group's `(start, len)` range in [`KEY_FAMILIES`],
@@ -1202,6 +1366,7 @@ const W_BUCKET: (usize, usize) = bucket_range(b'w');
 const C_BUCKET: (usize, usize) = bucket_range(b'c');
 const X_BUCKET: (usize, usize) = bucket_range(b'x');
 const Y_BUCKET: (usize, usize) = bucket_range(b'y');
+const UNDERSCORE_BUCKET: (usize, usize) = bucket_range(b'_');
 
 /// The family rows one scan position can reach: exactly the table rows
 /// whose prefix starts with that byte (a prefix whose head differs from
@@ -1223,6 +1388,7 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
         b'c' => C_BUCKET,
         b'x' => X_BUCKET,
         b'y' => Y_BUCKET,
+        b'_' => UNDERSCORE_BUCKET,
         // `B` (JWT) and `-` (PEM) own no table rows; any other byte is
         // not an anchor at all (is_key_anchor filtered it already).
         _ => (0, 0),
@@ -1239,7 +1405,7 @@ fn families_for_anchor(b: u8) -> &'static [(&'static [u8], KeyFamily, usize, Key
 fn is_key_anchor(b: u8) -> bool {
     matches!(
         b,
-        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-'
+        b'g' | b's' | b'a' | b'A' | b'f' | b'w' | b'c' | b'B' | b'x' | b'y' | b'-' | b'_'
     )
 }
 
@@ -1417,6 +1583,66 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
     ends
 }
 
+/// Whether `pos` opens the PEM BEGIN marker head (`-----BEGIN `)
+/// directly after a dash run or a shared close — the boundary-rule
+/// carve-out for PEM blocks glued to a preceding block's END marker:
+/// `-` is a key-tail byte, so every dash of a preceding block's
+/// `-----END …-----` close reads as mid-token material and the next
+/// block's head glued to that run never scans (`END
+/// CERTIFICATE----------BEGIN …`: the whole RSA key survives). The
+/// head's own dash run is armor, not a word's fragment — PEM is the
+/// only family anchoring on `-` — and the block grammar self-validates
+/// (both markers, same words), so a dash immediately before the head is
+/// a CLEAN boundary, the same formatting-material reasoning as
+/// `escape_ends_before`, one byte class over.
+///
+/// Two armor spellings carve, both pinned:
+///
+/// * *dash run* — a dash directly before the head: the previous
+///   block's own close run serving as armor beyond the head's five
+///   (`END CERTIFICATE----------BEGIN …`).
+/// * *shared close* — the head's dash run IS the preceding close's, a
+///   PEM word byte directly before it (`…CERTIFICATE-----BEGIN …`,
+///   `-----END-----BEGIN …`, a word-glued head generally): the close's
+///   five dashes double as the head's five, so no dash of its own
+///   precedes it. The lookback walks the marker's OWN word class
+///   (`is_pem_word_byte`) backward from that byte — the same walk the
+///   marker parse itself pays — and carves on any word run: the carve
+///   only opens the boundary, and the PEM match it leads to still
+///   requires the full block grammar (both markers, same words), so
+///   the only input this redacts past the old behavior is a complete,
+///   self-validating private-key block whose head was word-glued.
+///   Linear-cheap by the same argument as the marker parse: BEGIN
+///   heads never overlap (each ends in a space), so a lookback can
+///   never cross a previous head and every byte is walked once.
+///
+/// Still mid-token (pinned): any run too short to spell the head at
+/// all — no `-----BEGIN ` literal exists to carve. Only BEGIN is
+/// carved: the END half never anchors the walk (`pem_end_index` sweeps
+/// every dash boundary-rule-free), and a real key tail directly before
+/// `-----BEGIN` keeps its own maximal-run match (the tail charset
+/// includes `-`, so the key match swallows the glue and the head).
+#[inline]
+fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
+    if !bytes[pos..].starts_with(b"-----BEGIN ") {
+        return false;
+    }
+    if bytes[pos - 1] == b'-' {
+        return true; // dash run: the close's armor beyond the head's own five
+    }
+    if !is_pem_word_byte(bytes[pos - 1]) {
+        return false;
+    }
+    // Shared close: walk the word run ending at `pos` (the close's
+    // last label word) — bounded by the marker's own word class, and
+    // the block grammar downstream self-validates the match.
+    let mut w = pos - 1;
+    while w > 0 && is_pem_word_byte(bytes[w - 1]) {
+        w -= 1;
+    }
+    true
+}
+
 /// The keys pass: every leftmost match of a family grammar becomes
 /// `<family prefix>~<digest>` — the prefix VERBATIM (the non-secret half
 /// that tells the operator WHICH credential to rotate: `sk-` vs
@@ -1429,8 +1655,12 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 /// reasoning as the phone rule's clean-boundary cut, and it is what
 /// keeps a second key glued to a token's digest hex from firing),
 /// UNLESS that char ends a complete escape sequence (`%XX`, `\uXXXX`,
-/// `\X`; see `escape_ends_before`), whose tail byte is formatting
-/// material and the head after it a fresh start. The check sits
+/// `\xHH`, `\NNN`, `\X`; see `escape_ends_before`) or an ANSI CSI
+/// sequence (see `ansi_csi_ends_before`), whose tail byte is
+/// formatting material and the head after it a fresh start, OR the
+/// position opens a PEM BEGIN head after a dash run or shared close
+/// (see `pem_head_after_dash_run`: the previous block's close armor is
+/// not a word). The check sits
 /// ahead of the grammar tries because it is the cheap arm (one table
 /// load, one more on a non-hex tail) while the tries are a handful of
 /// prefix compares: prose and dash runs are anchor-dense and
@@ -1515,17 +1745,26 @@ fn keys_pass_impl<'a>(
         // fragment, the same reasoning as the phone rule's
         // clean-boundary cut, and it is what keeps a second key glued
         // to a token's digest hex from firing), UNLESS that char ends
-        // a complete escape sequence (`%XX`, `\uXXXX`, `\X`; see
-        // `escape_ends_before`), whose tail byte is formatting
-        // material and the head after it a fresh start. Checked here,
+        // a complete escape sequence (`%XX`, `\uXXXX`, `\xHH`, `\NNN`,
+        // `\X`; see `escape_ends_before`), whose tail byte is formatting
+        // material and the head after it a fresh start, OR the position
+        // opens a PEM BEGIN head after a dash run (see
+        // `pem_head_after_dash_run`: the previous block's close armor is
+        // not a word). Checked here,
         // ahead of the family walk, because the walk is the expensive
         // arm (a handful of prefix compares) and the boundary check is
         // one table load plus, on a non-hex tail, one more: prose and
         // dash runs are anchor-dense and candidate-poor, so gating the
         // walk on the cheap check is the shape that keeps them linear.
-        if pos > 0 && is_key_tail_byte(bytes[pos - 1]) && !escape_ends_before(bytes, pos) {
+        if pos > 0
+            && is_key_tail_byte(bytes[pos - 1])
+            && !escape_ends_before(bytes, pos)
+            && !ansi_csi_ends_before(bytes, pos)
+            && !pem_head_after_dash_run(bytes, pos)
+        {
             pos += 1; // a mid-token prefix: the boundary rule (an escape
-            // sequence's tail byte is formatting, not a word)
+            // sequence's tail byte is formatting, not a word; a PEM head
+            // after a dash run is armor, not one either)
             continue;
         }
         // (family, verbatim prefix length in the token, match end). The
@@ -2630,6 +2869,12 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("ghs_{}", key_tail(36)), "ghs_"),
             (format!("ghr_{}", key_tail(36)), "ghr_"),
             (format!("glpat-{}", key_tail(20)), "glpat-"),
+            (format!("glwt-{}", key_tail(20)), "glwt-"),
+            (format!("glffct-{}", key_tail(20)), "glffct-"),
+            (
+                format!("_gitlab_session={}", azure_tail(44)),
+                "_gitlab_session=",
+            ),
             (format!("github_pat_{}", key_tail(22)), "github_pat_"),
             (format!("azxdev_{}", key_tail(20)), "azxdev_"),
             (format!("wd-{}", key_tail(43)), "wd-"),
@@ -2638,6 +2883,9 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (JWT.to_string(), "Bearer"),
             ("AKIAIOSFODNN7EXAMPLE".to_string(), "AKIA"),
             (format!("ASIA{}", aws_tail(16)), "ASIA"),
+            (format!("A3T{}", aws_tail(17)), "A3T"),
+            (format!("AROA{}", aws_tail(16)), "AROA"),
+            (format!("AGPA{}", aws_tail(16)), "AGPA"),
             (format!("xai-{}", key_tail(20)), "xai-"),
             (format!("ya29.{}", key_tail(20)), "ya29."),
             (pem_block("RSA"), "PEM"),
@@ -2688,6 +2936,20 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             format!("AKIA{}", aws_tail(15)), // one under the access-key ID
             format!("akia{}", aws_tail(16)), // lowercase: not the prefix
             format!("ASIA{}", aws_tail(15)),
+            format!("A3T{}", aws_tail(16)), // one under (17): 19 total
+            format!("AROA{}", aws_tail(15)), // one under
+            format!("aroa{}", aws_tail(16)), // lowercase: not the prefix
+            format!("glwt-{}", key_tail(19)),
+            format!("glffct-{}", key_tail(19)),
+            // The Google refresh-token spelling: documented exclusion —
+            // the one family head that would end in an Nd digit (see the
+            // table doc): a phone number and a refresh token in one
+            // space-bridged run would compose a phone match through the
+            // token's own head.
+            format!("1//{}", key_tail(20)),
+            format!("x1//{}", key_tail(20)), // mid-token prefix
+            format!("_gitlab_session={}", azure_tail(39)), // one under
+            format!("_GITLAB_SESSION={}", azure_tail(44)), // uppercase: not the prefix
             format!("xai-{}", key_tail(19)),
             "XAI-".to_string() + &key_tail(20),
             format!("ya29.{}", key_tail(19)),
@@ -2824,6 +3086,38 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             scrub(&format!("x\\u0027{JWT}"), keys_only(), ""),
             format!("x\\u0027Bearer~{}", digest("", JWT))
         );
+        // The ANSI CSI arm (the raw-ESC spelling): colored terminal
+        // output carries keys the same way JSON strings do — the
+        // sequence's final byte is a letter (mid-token by the plain
+        // rule, formatting material in fact), and the head after it
+        // fires. The no-ESC spelling (`[31m` prose) stays mid-token:
+        // the sequence needs its anchor byte.
+        let sk = format!("sk-{tail}");
+        let sk_token = format!("sk-~{}", digest("", &sk));
+        for pre in ["\x1b[31m", "\x1b[1;31m"] {
+            assert_eq!(
+                scrub(&format!("err:{pre}{sk}"), keys_only(), ""),
+                format!("err:{pre}{sk_token}"),
+                "{pre:?}"
+            );
+        }
+        assert!(matches!(
+            scrub_pii(&format!("[31m{sk}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
+        // The JWT marker grammar behind a CSI sequence fires too (the
+        // `B` head is mid-token material the same way).
+        assert_eq!(
+            scrub(&format!("\x1b[31m{JWT}"), keys_only(), ""),
+            format!("\x1b[31mBearer~{}", digest("", JWT))
+        );
+        // The \UHHHHHHHH arm: Python's ascii()/backslashreplace spelling
+        // of a non-BMP char — the \u arm's sibling, and the head after
+        // it fires.
+        assert_eq!(
+            scrub(&format!("x\\U0001F600{sk}"), keys_only(), ""),
+            format!("x\\U0001F600{sk_token}")
+        );
     }
 
     #[test]
@@ -2854,6 +3148,31 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             scrub(&format!("x%3Dsk-{tail}"), keys_only(), ""),
             format!("x%3Dsk-~{}", digest("", &format!("sk-{tail}")))
         );
+    }
+
+    #[test]
+    fn invisible_boundary_chars_are_safe_direction_fires() {
+        // Red-team pin, safe direction: zero-width, RTL-override, and
+        // combining characters directly before a key head are NOT
+        // key-charset bytes — the head fires clean (over-redaction-safe,
+        // never a leak). Their INSIDE-a-key use is the documented
+        // adversarial bypass (canonicalize before scrub).
+        let sk = format!("sk-{}", key_tail(48));
+        let token = format!("sk-~{}", digest("", &sk));
+        for glue in ["\u{200b}", "\u{202e}", "a\u{0301}"] {
+            assert_eq!(
+                scrub(&format!("x{glue}{sk}"), keys_only(), ""),
+                format!("x{glue}{token}"),
+                "{glue:?}"
+            );
+        }
+        // The \cX control spelling (shell/Perl) has no log-tooling
+        // evidence: a documented non-match, the grammar closed on
+        // evidence like the family set.
+        assert!(matches!(
+            scrub_pii(&format!("\\cA{sk}"), keys_only(), "", ""),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
