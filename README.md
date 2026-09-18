@@ -37,6 +37,13 @@ near-duplicate detection; Merkle tree integrity; encoding detection), `tors`
 supplies it over maintained Rust crates, GIL-released the same way, so async
 services and threaded pipelines don't pay a blocking tax for text work.
 
+GIL-release is not the same as free-threaded-build support: `tors` wheels
+target the standard CPython ABI (`cp310-abi3`), which a free-threaded
+3.13t interpreter cannot load — free-threaded support starts at 3.14t
+(source build; PyO3's floor), and GIL-release is what makes that floor
+irrelevant for the standard build: the GIL is already free for the rest
+of your program on every CPython `tors` installs into.
+
 ## Install
 
 ```sh
