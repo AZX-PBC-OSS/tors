@@ -696,7 +696,20 @@ def _load_taskq_module() -> object | None:
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except ImportError:
+            # The checkout exists but cannot import HERE: the live module's
+            # own dependencies (opentelemetry, since TaskQ's 2026-09-18
+            # teardown/trace split) are not this venv's, and tors'
+            # deliberately does not carry them (taskq is an optional
+            # sibling, not a locked dependency). That is the same
+            # "no usable TaskQ" case the docstring's None means: the live
+            # lane skips, the quoted-pattern differential above still
+            # runs. An ImportError escaping this loader was a COLLECTION
+            # error that took the whole file (both halves) down with it —
+            # observed 2026-09-18 when the sibling tree grew the import.
+            return None
         return module
     return None
 
