@@ -824,3 +824,134 @@ def test_zwj_and_combining_edges_survive_the_overlap_lookahead(
         assert s > prev_start, f"start stalled on {text!r}"
         assert e > prev_end, f"end regressed on {text!r}"
         prev_start, prev_end = s, e
+
+
+# ---------------------------------------------------------------------------
+# The #63 heading level: bounding ATX heading-line cuts on the default
+# hierarchy (heading → paragraph → sentence → word → raw cut), the
+# "heading" sentinel opt-in for custom hierarchies, and the whole-document
+# demotion (a heading-bearing document under a whole-document budget comes
+# back as its sections, not one giant chunk — the zero-build pin in
+# tests/test_performance.py is on heading-FREE input and says so).
+# ---------------------------------------------------------------------------
+
+
+class TestHeadingLevel:
+    def test_whole_document_budget_over_sections_returns_the_sections(self) -> None:
+        text = "# Title\n\nintro text\n\n## Section\n\nmore text\n\n### Sub\n\ntail"
+        chunks = chunk_hierarchical(text, len(text))
+        pieces = [text[s:e] for s, e in chunks]
+        assert pieces == [
+            "# Title\n\nintro text",
+            "## Section\n\nmore text",
+            "### Sub\n\ntail",
+        ]
+        # The cut is before the heading, never after it: each chunk after
+        # the first starts exactly at its heading line's first codepoint.
+        assert text[chunks[1][0] : chunks[1][0] + 2] == "##"
+        assert text[chunks[2][0] : chunks[2][0] + 3] == "###"
+
+    def test_heading_free_text_keeps_the_single_chunk_exit(self) -> None:
+        # The '#' in text gate: without the byte, no ATX heading line can
+        # exist, the level is never realized, and the whole-document exit
+        # is byte-for-byte the pre-#63 one.
+        text = "Para one.\n\nPara two.\n\nPara three."
+        assert chunk_hierarchical(text, len(text)) == [(0, len(text))]
+
+    def test_hash_without_heading_line_still_one_chunk(self) -> None:
+        # The gate opens (a '#' byte exists) but the scan finds no heading
+        # line: the exit is still the untrimmed one.
+        text = "a #b c\n\nd #e f"
+        assert chunk_hierarchical(text, len(text)) == [(0, len(text))]
+
+    def test_no_chunk_spans_a_heading_cut_at_any_budget(self) -> None:
+        # The bounding semantics: every chunk's interior is free of heading
+        # cuts (the budget bounds oversized sections; the heading bounds
+        # ordinary ones). Swept over budgets 1..len on a sectioned doc.
+        text = "# a\nalpha beta gamma\n\n## b\ndelta epsilon zeta\n\n## c\neta iota theta"
+        starts = [i for i in range(1, len(text)) if text[i:].startswith("## ")]
+        for max_chars in range(1, len(text) + 1):
+            for s, e in chunk_hierarchical(text, max_chars):
+                for h in starts:
+                    assert not (s < h < e), (
+                        f"chunk ({s}, {e}) spans the heading cut at {h} "
+                        f"(budget {max_chars})"
+                    )
+
+    def test_atx_only_scope_exclusions(self) -> None:
+        # The documented v1 scope (verified against the engines' emitters:
+        # all three emit ATX only): none of these lines is a heading — a
+        # whole-document budget over each doc must come back as one chunk
+        # (any stray cut would emit two).
+        cases = [
+            "#no-space\nbody",
+            "####### seven\nbody",
+            "\\# escaped\nbody",
+            "> # quoted\nbody",
+            "- # item\nbody",
+            "    # indented code\nbody",
+            "\t# tabbed\nbody",
+            "mid # line\nbody",
+        ]
+        for case in cases:
+            assert chunk_hierarchical(case, len(case)) == [(0, len(case))], case
+
+    def test_atx_scope_inclusions_and_fence_tracking(self) -> None:
+        # The positive edges (1-6 hashes, the 1-3 space indent, trailing
+        # closing hashes, tab after the run, CRLF and lone-CR line
+        # endings), and the fence state machine: heading-shaped lines
+        # inside a fence never cut, an unclosed fence runs to the end.
+        text = "intro\n# one\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "intro",
+            "# one\nbody",
+        ]
+        text = "intro\n## closed ##\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "intro",
+            "## closed ##\nbody",
+        ]
+        text = "# a\r\n## b\r\nbody"
+        assert [text[s:e] for s, e in chunk_hierarchical(text, len(text))] == [
+            "# a",
+            "## b\r\nbody",
+        ]
+        fenced = "# Title\n\n```python\n# not a heading\nx = 1\n```\n\n## Real\n\nbody"
+        pieces = [fenced[s:e] for s, e in chunk_hierarchical(fenced, len(fenced))]
+        assert len(pieces) == 2 and pieces[1].startswith("## Real")
+        unclosed = "# Title\n\n```\n# not a heading\n## nor this\n"
+        assert chunk_hierarchical(unclosed, len(unclosed)) == [(0, len(unclosed))]
+
+    def test_heading_sentinel_is_the_level_not_a_literal(self) -> None:
+        text = "# a\nalpha\n\n## b\nbeta"
+        # The sentinel + splice is the default hierarchy spelled out.
+        assert chunk_hierarchical(text, 10, separators=["heading", None]) == (
+            chunk_hierarchical(text, 10)
+        )
+        # Either order around the splice (dedup inertness), and repeats.
+        assert chunk_hierarchical(text, 10, separators=[None, "heading"]) == (
+            chunk_hierarchical(text, 10)
+        )
+        assert chunk_hierarchical(text, 10, separators=["heading"] * 8) == (
+            chunk_hierarchical(text, 10, separators=["heading"])
+        )
+        # The sentinel alone: heading cuts bound the sections, and the
+        # oversized remainder falls to the raw cut (no paragraph level
+        # below it).
+        alone = chunk_hierarchical(text, 10, separators=["heading"])
+        assert text[alone[0][0] : alone[0][0] + 2] == "# "
+
+    def test_unicode_headings_cut_at_codepoint_starts(self) -> None:
+        text = "précis\n\n## Ünïcodé heading ✓\n\nbodytext"
+        pieces = [text[s:e] for s, e in chunk_hierarchical(text, len(text))]
+        assert pieces == ["précis", "## Ünïcodé heading ✓\n\nbodytext"]
+
+    def test_seven_hundred_sections_never_merge(self) -> None:
+        # Scale shape: 700 sections, one chunk each under a whole-document
+        # budget (the heading level's scan is one linear pass; the
+        # per-window cost is the usual binary search over its cuts).
+        text = "".join(f"## Section {i}\n\nBody paragraph {i}.\n\n" for i in range(700))
+        chunks = chunk_hierarchical(text, len(text))
+        assert len(chunks) == 700
+        for s, _e in chunks:
+            assert text[s : s + 3] == "## "

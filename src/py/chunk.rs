@@ -402,18 +402,37 @@ pub fn chunk_by_paragraphs_iter(
 /// `["\n\n", "\n", " ", ""]`), except tors's default hierarchy uses its
 /// own accurate UAX #29 segmenters instead of literal guesses.
 ///
-/// `separators=None` (the default): paragraph → sentence → word → a
-/// grapheme-safe raw cut, always the final, unconditional fallback that
-/// never fails to produce a chunk. `separators=[...]`: a caller-supplied
+/// `separators=None` (the default): heading → paragraph → sentence →
+/// word → a grapheme-safe raw cut, always the final, unconditional
+/// fallback that never fails to produce a chunk. The heading level
+/// (#63) bounds chunks at ATX markdown heading lines: a section's
+/// content never merges across a heading of higher rank, each cut lands
+/// BEFORE the heading (the heading rides with the section that follows
+/// it; the newline run before it is dropped, the paragraph gap's own
+/// convention), and a whole-document budget over a heading-bearing
+/// document comes back as its sections, not one giant chunk. The level
+/// is ATX-only — verified against the documents engines' emitters
+/// (pdf_oxide, anydoc, html-to-markdown-rs all emit ATX; setext
+/// underlines are excluded) — tracks fenced code blocks (`# comment`
+/// inside a fence is code, not a heading), and is gated: text with no
+/// `#` byte never realizes it, so heading-free input chunks exactly as
+/// the pre-#63 hierarchy did. Precedence: budget > heading > paragraph
+/// > sentence > word (a section wider than `max_chars` still splits at
+/// finer levels).
+///
+/// `separators=[...]`: a caller-supplied
 /// list of literal strings (not regex; a documented scope line, see
 /// `src/chunk_hierarchical_impl.rs`), coarsest first, e.g.
 /// `["\n## ", "\n\n", ". ", " "]` for markdown-header-aware chunking.
 /// This replaces the default hierarchy for the levels it specifies, but the
 /// grapheme-safe raw cut is still always appended as the final fallback
 /// regardless (unlike LangChain, no trailing `""` sentinel is required).
+/// The reserved literal `"heading"` is the heading level itself (the
+/// explicit opt-in for custom hierarchies), not a split on the word.
 /// A `None` entry in an otherwise-literal list splices the default
-/// hierarchy's three accurate levels in at that position:
-/// `["\n", None]` is line → paragraph → sentence → word → raw cut: the
+/// hierarchy's accurate levels in at that position:
+/// `["\n", None]` is line → heading → paragraph → sentence → word → raw
+/// cut: the
 /// line-oriented-text shape (a chat thread, one message per line, never
 /// split mid-line) whose oversized-line fallback is the real UAX #29
 /// segmenter rather than the `". "`/`" "` literal guesses an all-literal

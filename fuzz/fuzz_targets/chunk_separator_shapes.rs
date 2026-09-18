@@ -62,6 +62,11 @@ enum SepShape {
     Abab,
     Aa,
     Bb,
+    /// "heading": the #63 sentinel — the heading LEVEL (bounding ATX
+    /// heading-line cuts, the pre-heading newline run dropped), not a
+    /// literal split on the word. The text generator's `HeadingLine`
+    /// piece makes it fire at useful rates.
+    Heading,
 }
 
 impl SepShape {
@@ -76,6 +81,7 @@ impl SepShape {
             SepShape::Abab => Some("abab"),
             SepShape::Aa => Some("aa"),
             SepShape::Bb => Some("bb"),
+            SepShape::Heading => Some("heading"),
         }
     }
 }
@@ -92,6 +98,11 @@ enum TextPiece {
     Newline,
     Space,
     X, // a non-alphabet letter: never separator material, always content
+    /// An ATX heading line ("## h\n"): the #63 heading level's firing
+    /// shape — a heading on a non-first line cuts, with the newline run
+    /// before it dropped; on the first line (or inside a fence the
+    /// generator never opens) it is inert, both worth fuzzing.
+    HeadingLine,
 }
 
 impl TextPiece {
@@ -105,6 +116,7 @@ impl TextPiece {
             TextPiece::Newline => out.push('\n'),
             TextPiece::Space => out.push(' '),
             TextPiece::X => out.push('X'),
+            TextPiece::HeadingLine => out.push_str("## h\n"),
         }
     }
 }
