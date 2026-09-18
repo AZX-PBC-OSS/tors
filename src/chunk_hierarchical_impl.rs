@@ -1727,6 +1727,7 @@ mod tests {
         };
         let heading_level = || Level {
             cuts: heading_cuts.clone().unwrap(),
+            skip_starts: Vec::new(),
             bounding: true,
         };
         let mut spelled = false;
