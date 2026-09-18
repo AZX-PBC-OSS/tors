@@ -2,7 +2,12 @@
 
 Every function releases the GIL for its whole native pass (`py.detach`); the
 GIL-held residue of a call is only pyo3's argument borrow and the return
-marshalling. Signatures below are the typed surface of
+marshalling. The one deliberate exception is `utf8_byte_len`'s no-detach
+spelling — its whole body is the argument borrow plus an O(1) read, so a
+detach would bracket no work and starve a co-resident event loop's
+heartbeat instead of feeding it (the inverted static pin in
+`tests/test_utf8_byte_len.py` holds this both ways: utf8 must NOT detach,
+utf16's twin must). Signatures below are the typed surface of
 `python/tors/__init__.pyi`, pinned to the live functions by
 `tests/test_pyi_drift.py`.
 
@@ -691,6 +696,16 @@ names runs the combined pass once, never two sequential substitutions.
 > (e.g. `scrub_log_text(text, ["uri_userinfo"])`, which gives
 > `"pg://u:***@h')"` here) — trading the chain's DETAIL parity for the
 > mask, deliberately and visibly at the call site.
+>
+> A second chain-inherited seam: a digit-leading scheme defeats the
+> userinfo anchor everywhere in the family — `scrub_log_text`,
+> `scrub_log_text(text, ["uri_userinfo"])`, and `scrub_pii` all leave
+> `1postgres://user:pass@host` whole (the shared scheme anchor is
+> `\b[a-zA-Z]`, so `1postgres` is not a scheme to it; verified against
+> all three spellings). Chain-identical by construction, so it is pinned
+> parity, not a tors defect; there is currently no tors surface that
+> redacts a digit-prefixed scheme URI — a caller seeing that shape needs
+> its own pre-pass.
 
 `rules=[]` is the identity; duplicates
 dedupe and caller order is irrelevant; an unknown name raises `ValueError`
@@ -1046,6 +1061,14 @@ seams, each pinned in tests/test_json_is_valid.py:
   (`\u0000` the escape accepts); trailing garbage, trailing commas, leading
   zeros, and unterminated strings reject; duplicate keys accept (orjson
   last-wins).
+- **A `str` holding a raw lone surrogate answers `False`, not a raise**:
+  such a str has no UTF-8 view to scan, and every consumer's parser
+  (orjson's `loads` included) raises on one, so the gate's
+  "would-loads-raise" answer is `False` — the raise-free contract holds
+  on this lane too (the stdlib would accept some of these; orjson's
+  reading wins, as everywhere in this surface). The escape TEXT
+  (`"\ud800"` spelled out) is ordinary content and rejects through the
+  normal grammar.
 
 Booleans only: no invalid input raises — nothing in the scanner has an
 error path. A wrong-TYPE argument (not `bytes`, not `str`) raises
@@ -1071,6 +1094,7 @@ tors.json_is_valid(b'{"a": [1, 2.5, true, null]}')  # True
 tors.json_is_valid(b"1e400")  # False — orjson raises; the stdlib says inf
 tors.json_is_valid(b'"\\ud800"')  # False — lone surrogate escape
 tors.json_is_valid(b"\xef\xbb\xbf{}")  # False — BOM
+tors.json_is_valid('{"a": 1}\ud800')  # False — raw surrogate in the str, no raise
 ```
 
 A `str` argument holding a lone surrogate (a raw one — not the escape text)
@@ -1945,14 +1969,18 @@ does not trip a generous budget (the deadline discriminates pathological
 alignment layer too: the key-remap ladder, the union and type-union branch
 retries, scalar coercion, missing-key fill, enum suggestion scoring, and
 validation all sample the same clock, with the same soft bound (at most one
-key-ladder sweep or one union branch past expiry). The enum suggestion loop
+property or one union branch past expiry). The enum suggestion loop
 reads the clock before every member's comparison and hands the clock's
 remaining budget to each jaro-winkler score, so both the many-members axis
 and the one-very-long-member axis are bounded: a wide enum of long members
 raises `TimeoutError` within a small multiple of the budget instead of
 running the loop to completion, and an expired clock raises — a `None`
 suggestion on an expired clock would mask the timeout as a plain data
-miss. It applies to all three spellings and is checked with
+miss. The key-remap ladder's fuzzy tier samples the same way — a forced
+clock read per property (short window-disjoint key comparisons never
+consult a clock internally) plus the remaining budget handed to each
+comparison — so the one-unknown-key-over-a-wide-schema axis is bounded
+like the enum's, by the same design. It applies to all three spellings and is checked with
 the GIL released, so `TimeoutError` is raised after reacquiring it, the
 same shape as `diff_opcodes`, including the message:
 `"<spelling> deadline exceeded: elapsed 101.2ms > deadline_ms 100.0ms"`.
@@ -1963,7 +1991,19 @@ build, one validation pass — the validator crate's error-carrying
 `validate` is the most expensive opaque unit, so the validity gate rides
 its boolean API and `validate()` always reads the clock before it) forces
 the very next check to read it, so at most one such unit
-runs past an expired budget (measured worst overshoot ~8% at n=1M). The
+runs past an expired budget (measured worst overshoot ~8% at n=1M). And
+when a schema is passed, the schema's own PRE-alignment phase — the
+repairer's construction: the resolve walk, the root validator's
+`validator_for` compile, the address-set walk, all eager and linear in
+the schema's size — runs BEFORE the clock is armed (the budget attaches
+to the constructed repairer, `mod.rs` arms it right after `new`), so a
+wide schema's fixed phase is not deadlineable: ~0.5s at 100,000
+properties, whatever the budget. The alignment layer that follows samples
+the clock per property, so the phase is the overshoot's whole body for a
+wide-schema call (a 5ms budget over a 100k-property schema raises at the
+first ladder consult, ~0.5s in); making that phase interruptible is a
+design change (the compile is the validator crate's one opaque call), not
+a sampling one. The
 schema alignment layer shares the same clock throughout, including the
 salvage unwrap's nested repair: a `salvage=True` call inherits the
 caller's budget inside the unwrap instead of restarting unbounded. And
@@ -2398,17 +2438,21 @@ divergence rows (`tests/test_similarity.py`): `"ppp"` vs `"pwpp"`, difflib `4/7`
 and `"qpqpq"` vs `"qpwqpq"`, difflib `6/11` (the anchored rotated equal block
 `"qpq"`, a non-minimal insert+delete split, `M = 3`) vs tors `10/11` (`M = 5 =
 LCS`). tors's `M` is always valid — the equal ops spell a common subsequence,
-so `M <= LCS(a, b)` — and it is maximal (`M == LCS(a,
-b)` exactly, the minimal-edit-script consequence of the Myers engine)
-whenever the bounded search completes; on hard inputs past the heuristic's
-limits (large slices with few anchorable unique records — random text over a
-small alphabet in the thousands of chars is the measured shape) the bounded
-middle-snake search can accept a good non-minimal split and score slightly
-UNDER the true LCS ratio (measured: 0.7043 vs the true 0.7107 on 3000-char
-random strings, a ~1% undercount; see `src/diff_impl.rs`'s module docs for
+so `M <= LCS(a, b)` (structural, pinned as a size ladder in
+`tests/test_similarity.py`) — and it is maximal on the forced-alignment
+classes (identical, empty, pure insert/delete with differing flanks) and
+measured exactly maximal through the ladder's 512-char octave, but it is
+BOUNDED-maximal, not guaranteed maximal: from the 1024-char octave upward the
+bounded middle-snake search can accept a good non-minimal split and score
+slightly UNDER the true LCS ratio (measured: 0.7043 vs the true 0.7107 on
+3000-char random strings, a ~1% undercount; in the pinned ladder the
+undercounts start at 1024, worst observed ratio 0.972 at n=1024 over a
+26-symbol alphabet, held above an empirical 0.9 drift-guard floor that is
+NOT a contract). There is no lower bound on `M` past the search's limits;
+see `src/diff_impl.rs`'s module docs for
 exactly what the engine does and does not guarantee, and the size-ladder
 property test in `tests/test_similarity.py` for the pinned bounded
-property). So the two
+property. So the two
 ratios agree exactly wherever the alignment is forced (identical operands, empty
 pairs, disjoint alphabets, pure insert/delete with differing flanks) and are both
 valid but may diverge on repeated-flank contexts. difflib's anchored `M` is also

@@ -347,9 +347,10 @@ def test_ratio_is_two_lcs_over_total_over_arbitrary_pairs(a: str, b: str) -> Non
 # bounded Myers search starts trimming (issue #116: at 8000 chars over a
 # 3-char alphabet tors scores 0.7120 where the true LCS ratio is 0.7151 —
 # a ~1% undercount, the engine accepting a good non-minimal split).
-# diff_impl.rs's module docs guarantee validity ("always valid"), NOT any
-# lower bound on M — no documented floor exists to pin. The ladder
-# therefore pins validity (M <= LCS) plus a DRIFT GUARD on the undercount:
+# diff_impl.rs's module docs pin the bounded property (M <= LCS valid, no
+# lower bound past the search's limits); the ladder below is that pin's
+# teeth. The ladder pins validity (M <= LCS) plus a DRIFT GUARD on the
+# undercount:
 # a round floor (90% of the true LCS) sitting well below every ratio the
 # fixed-seed ladder measures (maximality holds outright through 512; the
 # undercounts start at 1024, min observed ratio 0.972 at n=1024/alpha=26,

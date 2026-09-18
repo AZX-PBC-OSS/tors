@@ -164,7 +164,10 @@ edge cases are in the [API reference](docs/api.md).
 
 - **GIL release on every call.** 12 MiB of prose through `tors.finalize` in a
   background thread holds the event loop's worst heartbeat gap to 10-14 ms;
-  the pure-Python equivalent holds it for 92-108 ms. Full measured tables:
+  the pure-Python equivalent holds it for 92-108 ms. (The one exception:
+  `utf8_byte_len` deliberately does not detach — its whole body is the
+  borrow, and a detach bracketing no work starves a co-resident loop's
+  heartbeat; see [API reference](docs/api.md).) Full measured tables:
   [Performance](docs/performance.md).
 - **Async where it matters.** `tors.aio` wraps exactly the large-input
   functions in `asyncio.to_thread`, unconditionally, with no size-based
