@@ -1847,12 +1847,22 @@ differential suite pins everything else to json-repair==0.63.4:
   (the fence pre-pass above).
 - **The validation boundary**: schema validation runs on the Rust
   `jsonschema` crate, so failure-message wording is that crate's, not
-  Python `jsonschema`'s; integers beyond u64 validate lossily as f64;
-  non-finite numbers under a schema raise `ValueError` where Python
-  tolerates `NaN`; union branches are validated wrapped so `#/...` refs
-  keep root scope (a pathological subschema-local `$defs` shadowing root
-  `$defs` diverges). `format` is unasserted on both sides: upstream passes
-  no `format_checker`, and tors matches it.
+  Python `jsonschema`'s; a constrained schema position — an `enum` member
+  value, `const`, `minimum`, `maximum`, `exclusiveMinimum`,
+  `exclusiveMaximum`, or `multipleOf` — carrying an integer outside the
+  exact-integer range (`i64::MIN`..=`u64::MAX`) refuses the schema
+  outright with a `ValueError` naming the position's JSON pointer
+  (e.g. `/properties/count/minimum`): compiled as `f64`, such a
+  constraint cannot distinguish neighboring integers, so it would
+  silently accept values the schema rejects, and tors refuses to guess
+  rather than validate lossily (in-range integers — the whole
+  `i64`/`u64` span — are exact and never refuse; schema floats keep the
+  historical lossy-float reading, and the document's own huge integers
+  are untouched); non-finite numbers under a schema raise `ValueError`
+  where Python tolerates `NaN`; union branches are validated wrapped so
+  `#/...` refs keep root scope (a pathological subschema-local `$defs`
+  shadowing root `$defs` diverges). `format` is unasserted on both sides:
+  upstream passes no `format_checker`, and tors matches it.
 - **Deep nesting**: `ValueError("Input nesting exceeds the supported parser
   recursion depth.")` at 200 nested containers, where upstream raises an
   uncaught `RecursionError` at roughly its own recursion limit: the same
