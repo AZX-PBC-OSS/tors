@@ -532,12 +532,16 @@ _B64_RATIO_BUDGET = 0.80
 # word_bounds's marshalling-band regression ceiling: not the suite's 100ms
 # ceiling, which the list-returning API shape cannot meet at whole-file sizes
 # (measured: 428-497ms worst gaps at 12 MiB, 3.67M segments; see the cell's
-# docstring and docs/async.md). 1.0s is ~2x above
+# docstring and docs/async.md). 2.0s is ~4x above
 # the measured band, so it catches marshalling blowouts without pretending
 # the 100ms budget is attainable here. The streaming sibling
 # (word_bounds_iter, cell below) does meet the shared budgets; this cell
-# keeps the list shape's band pinned.
-_WORD_BOUNDS_CEILING_S = 1.0
+# keeps the list shape's band pinned. (Recalibrated from 1.0s: a
+# sustained-2x-load probe of the CI-runner class drove the op wall to
+# 958ms — inside the old ceiling's 1.04x — while the gap/wall ratio
+# stayed in band; the ceiling, not the ratio, was the flake. The ratio
+# budget below remains the detach-regression discriminator.)
+_WORD_BOUNDS_CEILING_S = 2.0
 
 # word_bounds's detach-regression discriminator: the measured marshalling
 # band sits at ratio 0.72-0.74 (gap/wall), while
