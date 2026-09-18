@@ -353,6 +353,13 @@ fn reference_window(
 
 fuzz_target!(|input: Input| {
     let total = input.text.chars().count();
+    // The chunk spans are CODEPOINT indices; this target's whole-document
+    // oracle compares a span's text against the separator literals, which
+    // needs the codepoint space, not a byte slice (a byte slice of a
+    // codepoint index is mid-char for any multi-byte head — the smoke
+    // crash: text "\u{5a5}", chunk (0, 1), `&text[..1]` not a char
+    // boundary). One collect, shared by every oracle below.
+    let codepoints: Vec<char> = input.text.chars().collect();
     // The raw byte-drain budget: struct fields drain the stream in
     // order and `text` eats most of it, so the leftover bytes behind
     // `max_chars` are few and it lands at or above the text length
@@ -441,8 +448,8 @@ fuzz_target!(|input: Input| {
                             continue; // the no-op literal production drops at slot construction
                         }
                         assert_ne!(
-                            &input.text[start..end],
-                            sep,
+                            &codepoints[start..end],
+                            sep.chars().collect::<Vec<char>>().as_slice(),
                             "whole-document budget emitted a chunk that IS the separator \
                              {sep:?} (#103): text={:?} chunks={chunks:?}",
                             input.text
