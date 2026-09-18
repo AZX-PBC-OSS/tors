@@ -442,9 +442,28 @@ fuzz_target!(|input: Input| {
                     input.text
                 );
                 if let Some(list) = separators {
+                    // The no-separator-chunk assert is a theorem only for
+                    // SINGLE-literal lists: there the one separator level's
+                    // skip_cut is consulted first at every window, so a
+                    // window opening on the match always skips and the
+                    // whole-document exit never runs (the #103 contract,
+                    // including the all-separator-zero-chunks shape). With
+                    // TWO OR MORE literals the coarsest-first verdict order
+                    // lets an earlier literal's CUT preempt a later one's
+                    // skip, and the final exit pushes the remainder
+                    // untrimmed — which can equal the later separator's
+                    // whole match: production and the reference oracle
+                    // agree (["\n\u{1a}]\0", "\t\n\u{1a}]\0"] over the
+                    // 5-char text chunks (0, 5) on BOTH sides — the
+                    // differential's pinned semantics), so the assert is
+                    // not enforceable there. A `None` splice is the same
+                    // story one level coarser: the paragraph level owns
+                    // blank-run cuts, and "\n" beside the default triple
+                    // chunks [(0, 1)] on both sides.
+                    let spliced = list.contains(&None) || list.len() > 1;
                     for entry in list {
                         let Some(sep) = *entry else { continue };
-                        if sep.is_empty() {
+                        if sep.is_empty() || spliced {
                             continue; // the no-op literal production drops at slot construction
                         }
                         assert_ne!(

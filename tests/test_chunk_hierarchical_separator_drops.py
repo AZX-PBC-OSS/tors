@@ -203,10 +203,18 @@ def test_a_trailing_run_survives_only_as_a_content_chunk_suffix() -> None:
     # next window exactly on the (4, 6) match and its final-chunk exit
     # emitted it whole — `[(0, 2), (4, 6)]` with `(4, 6)` pure separator;
     # the skip now preempts that exit and the transition degrades.
+    # Recalibrated by the overlapping-skip-rows fix (the smoke fuzzer's
+    # find): the separator "\n\n" also matches at codepoints 3 and 4
+    # (inside the earlier matches' spans), those rows now ride
+    # skip_starts, and the old (3, 6) chunk — pure separator material,
+    # three newlines — is skipped whole where the old machine emitted it
+    # as "the transition degrades". The remainder (5, 6) is the
+    # match-shaped ride-along (no match BEGINS at 5), the same residual
+    # rule as the non-overlap rows above.
     assert chunk_hierarchical("aa\n\n\n\n", 3, separators=SEPS, overlap=1) == [
         (0, 2),
         (1, 4),
-        (3, 6),
+        (5, 6),
     ]
     assert chunk_hierarchical("aa\n\n\n\n", 3, separators=SEPS, overlap=2) == [(0, 2)]
 

@@ -197,10 +197,26 @@ fn assert_contract(
         separators.len()
     );
     if ASSERT_NO_SEPARATOR_MATERIAL_CHUNKS {
+        // Splice-aware, like chunk_hierarchical.rs's whole-document oracle:
+        // with a `None` splice the default hierarchy's PARAGRAPH level owns
+        // blank-run cuts, and a gap cut's chunk can coincide with a
+        // co-listed finer literal's text — production and the reference
+        // oracle agree (the coarsest-first verdict order is the pinned
+        // semantics), so the assert is enforceable only against the
+        // literal levels' own matches: pure-literal lists, or skip `None`
+        // rows. The slice reads the CODEPOINT space (collect, not byte
+        // indexing — a multi-byte head's chunk end is not a char
+        // boundary; the class chunk_hierarchical.rs crashed on).
+        let codepoints: Vec<char> = text.chars().collect();
+        let spliced = separators.contains(&None);
         for &(start, end) in chunks {
             assert!(
                 !separators.iter().any(|sep| sep
-                    .map(|s| !s.is_empty() && text[start..end] == *s)
+                    .map(|s| {
+                        !s.is_empty()
+                            && !spliced
+                            && codepoints[start..end] == s.chars().collect::<Vec<char>>()
+                    })
                     .unwrap_or(false)),
                 "{what}: chunk ({start}, {end}) consists entirely of separator material"
             );

@@ -132,6 +132,15 @@ use crate::truncate_impl::{GraphemeIndex, char_count};
 /// separators).
 struct Level {
     cuts: Vec<(usize, usize)>,
+    /// The skip question's extra rows (literal levels only, empty
+    /// elsewhere): every match's `(start, end)` INCLUDING the overlapping
+    /// ones. A start inside another match's span is never a CUT candidate
+    /// ([`Self::best_cut`] never sees it — a chunk boundary there leaks
+    /// the earlier match's material into the chunk), but a snap-landed
+    /// window start can sit on one, and the #103 skip must fire wherever
+    /// a match begins. Same `(end, next)` shape and the same grapheme
+    /// filter as `cuts`.
+    skip_starts: Vec<(usize, usize)>,
 }
 
 /// One window's outcome from the level search: a genuine cut (the chunk
@@ -172,7 +181,21 @@ impl Level {
     /// the window loop skips before it ever searches for a cut.
     fn skip_cut(&self, at: usize) -> Option<usize> {
         let lo = self.cuts.partition_point(|&(end, _)| end < at);
-        match self.cuts.get(lo) {
+        if let Some(&(end, next)) = self.cuts.get(lo)
+            && end == at
+            && next > at
+        {
+            return Some(next);
+        }
+        // The overlapping-match rows: a start inside another match's span
+        // never reached `cuts` (the selection path's own correctness), so
+        // the skip question answers from the second list — the smoke
+        // fuzzer's crash: sep "%%" over "%%%%%", matches at 0 and 2 in
+        // `cuts`, the snap-landed start 3 (the overlapping match 3-5)
+        // found no cut and the final exit pushed (3, 5), a chunk that IS
+        // the separator.
+        let lo = self.skip_starts.partition_point(|&(end, _)| end < at);
+        match self.skip_starts.get(lo) {
             Some(&(end, next)) if end == at && next > at => Some(next),
             _ => None,
         }
@@ -186,6 +209,9 @@ impl Level {
 fn level_from_contiguous_bounds(bounds: Vec<(usize, usize)>) -> Level {
     Level {
         cuts: bounds.into_iter().map(|(_, end)| (end, end)).collect(),
+        // Contiguous segmenters have no dropped spans: every cut is both
+        // a boundary and a resume point, and no match shape exists.
+        skip_starts: Vec::new(),
     }
 }
 
@@ -201,18 +227,36 @@ fn level_from_paragraph_bounds(bounds: Vec<(usize, usize)>) -> Level {
         .windows(2)
         .map(|w| (w[0].1, w[1].0))
         .collect::<Vec<_>>();
-    Level { cuts }
+    Level {
+        cuts,
+        skip_starts: Vec::new(),
+    }
 }
 
-/// A literal separator into a [`Level`]: every non-overlapping match's
-/// `(start, end)` in codepoint units: the chunk ends at the match start
-/// (the separator is not part of either chunk), the next chunk resumes at
-/// the match end (the separator is dropped, the same convention
-/// [`level_from_paragraph_bounds`] already applies to blank-line runs).
-/// One `memchr::memmem` pass over the whole text (SIMD-skipped two-way:
-/// std's `match_indices` runs the same algorithm without the SIMD skip
-/// and crawls on degenerate repeated-byte documents), converted from byte
-/// to codepoint offsets in the same forward walk (no second pass).
+/// A literal separator into a [`Level`]: every match's `(start, end)` in
+/// codepoint units — OVERLAPPING matches included (see below) — the chunk
+/// ends at the match start (the separator is not part of either chunk),
+/// the next chunk resumes at the match end (the separator is dropped, the
+/// same convention [`level_from_paragraph_bounds`] already applies to
+/// blank-line runs). One `memchr::memmem` pass over the whole text
+/// (SIMD-skipped two-way: std's `match_indices` runs the same algorithm
+/// without the SIMD skip and crawls on degenerate repeated-byte
+/// documents), converted from byte to codepoint offsets in the same
+/// forward walk (no second pass).
+///
+/// The enumeration is OVERLAPPING, one char boundary per recorded match —
+/// `memmem::find_iter`'s non-overlapping resume is the #103 relapse the
+/// smoke fuzzer found: with separator `"%%"` over `"%%%%%"`, `find_iter`
+/// sees matches at 0 and 2 and misses the one at 3 (chars 3-4); an
+/// overlap-snap-landed window start at 3 then consulted the cut list,
+/// found no match, and the final exit pushed `(3, 5)` — a chunk that IS
+/// the separator. The skip question ("could a match begin at `at`?") is
+/// answered from these cuts, so the cuts must carry every match a
+/// snap-landed start can open on; the window walk itself reaches the
+/// overlapping rows only through that skip (a walk that lands past a
+/// match's first char is always past the match's start, so the extra
+/// rows are pure skip candidates — the walk's `next_start` stays
+/// strictly monotone, its chunk spans stay disjoint).
 fn level_from_literal(text: &str, separator: &str) -> Level {
     if separator.is_empty() {
         // An empty literal matches everywhere and cuts nothing meaningful
@@ -220,23 +264,49 @@ fn level_from_literal(text: &str, separator: &str) -> Level {
         // fallback," which this crate provides unconditionally via the
         // grapheme-safe hard cut instead); an explicit no-op level rather
         // than a pathological infinite-candidate one.
-        return Level { cuts: Vec::new() };
+        return Level {
+            cuts: Vec::new(),
+            skip_starts: Vec::new(),
+        };
     }
     // Every match of a literal needle is the needle: its char length is a
     // loop-invariant, counted once.
     let sep_chars = separator.chars().count();
+    // The SELECTION rows first: the NON-overlapping matches, exactly
+    // `memmem::find_iter`'s enumeration — a chunk boundary may land only
+    // on a match start that is past the previous match's end (a boundary
+    // inside another match's span leaks that match's material into the
+    // chunk before it: `"a\n\n\n\nb"`, sep "\n\n", max_chars 2 chunked
+    // (0, 2) = "a\n" on the combined-list spelling).
     let mut cuts = Vec::new();
     let mut char_idx = 0usize;
     let mut byte_idx = 0usize;
     for byte_start in memmem::find_iter(text.as_bytes(), separator.as_bytes()) {
         char_idx += text[byte_idx..byte_start].chars().count();
-        let start_char = char_idx;
-        let end_char = start_char + sep_chars;
-        cuts.push((start_char, end_char));
-        char_idx = end_char;
+        cuts.push((char_idx, char_idx + sep_chars));
+        char_idx += sep_chars;
         byte_idx = byte_start + separator.len();
     }
-    Level { cuts }
+    // The SKIP rows: every match start, overlapping enumeration — one
+    // char boundary per step. UTF-8 self-synchronization (a valid-UTF-8
+    // needle's byte matches only at char boundaries; a continuation byte
+    // never begins a match) keeps both slices in this walk boundary-safe.
+    let bytes = text.as_bytes();
+    let needle = separator.as_bytes();
+    let mut skip_starts = Vec::new();
+    let mut char_idx = 0usize;
+    let mut byte_idx = 0usize;
+    let mut pos = 0usize;
+    while let Some(found) = memmem::find(&bytes[pos..], needle) {
+        let byte_start = pos + found;
+        char_idx += text[byte_idx..byte_start].chars().count();
+        skip_starts.push((char_idx, char_idx + sep_chars));
+        char_idx += 1;
+        let first_char_len = text[byte_start..].chars().next().unwrap().len_utf8();
+        byte_idx = byte_start + first_char_len;
+        pos = byte_idx;
+    }
+    Level { cuts, skip_starts }
 }
 
 /// A not-yet-built level: which walk or scan realizes it, not the walk
@@ -314,13 +384,19 @@ impl LevelSlot<'_> {
             // rules join them to the preceding base character into one
             // cluster (`truncate_impl`'s module docs document the same
             // divergence), so their cuts need this filter exactly like a
-            // custom literal's do. A level with no cuts filters nothing
+            // custom literal's do. A level with no rows filters nothing
             // and builds nothing (a never-matching separator costs one
-            // scan, no structure).
-            if !level.cuts.is_empty() {
+            // scan, no structure). The skip rows take the SAME filter:
+            // a match whose drop would straddle a cluster is not a skip
+            // (the pinned content-not-separator semantics), so the skip
+            // question must not fire on it either.
+            if !level.cuts.is_empty() || !level.skip_starts.is_empty() {
                 let g = grapheme_index(graphemes, text, total);
                 level
                     .cuts
+                    .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
+                level
+                    .skip_starts
                     .retain(|&(end, next)| g.is_boundary(end) && g.is_boundary(next));
             }
             #[cfg(test)]
@@ -1036,6 +1112,14 @@ mod tests {
         for level in &mut levels {
             level
                 .cuts
+                .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
+            // The skip rows take the same filter, in lockstep with the
+            // production realize filter: a match whose drop would
+            // straddle a cluster is content, never a skip ("ำำ" with
+            // separator "ำ" — one cluster — chunks (0, 2), it does not
+            // vanish).
+            level
+                .skip_starts
                 .retain(|&(end, next)| grapheme_set.contains(&end) && grapheme_set.contains(&next));
         }
         // #47's word-bounds level for the "word" snap mode: built up front
