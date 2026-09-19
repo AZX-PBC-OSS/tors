@@ -1227,6 +1227,8 @@ tors.diff_opcodes_lines("l1\nl2\nl3\n", "l1\nX\nl3\nl4\n")
 def replace_many(text: str, replacements: dict[str, str]) -> str: ...
 ```
 
+**Async**: `await tors.aio.replace_many(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 Simultaneous multi-pattern replace in one GIL-released native pass, a primitive
 CPython does not have: every occurrence of every key is replaced by its value with
 `find_patterns`'s exact search semantics.
@@ -1274,6 +1276,8 @@ tors.replace_many("the cat sat in the catalogue", {"cat": "dog", "catalogue": "l
 ```python
 def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*") -> str: ...
 ```
+
+**Async**: `await tors.aio.replace_many_masked(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 The length-preserving redaction spelling of `replace_many`: same one-automaton
 leftmost-longest, non-overlapping, never-rescanned scan, but each matched span's
@@ -1365,6 +1369,8 @@ tors.sentence_count("One. Two. U.S. stocks fell.")
 def find_patterns(patterns: list[str], text: str) -> list[tuple[int, int, int]]: ...
 ```
 
+**Async**: `await tors.aio.find_patterns(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 Leftmost-longest, non-overlapping multi-pattern substring search in one GIL-released
 native pass: every occurrence of every pattern, reported as `(start, end,
 pattern_index)` with `end` exclusive, offsets in Python `str` (codepoint) units:
@@ -1412,6 +1418,8 @@ list(tors.find_patterns_iter(["cat", "catalogue"], "the cat sat in the catalogue
 ```python
 def count_matches(patterns: list[str], text: str) -> int: ...
 ```
+
+**Async**: `await tors.aio.count_matches(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 The count spelling of `find_patterns`: the same leftmost-longest, non-overlapping
 search answering just the number, with no match vector materialized (the list
@@ -1764,6 +1772,8 @@ def extract_code_blocks(
 ) -> list[tuple[str | None, str, int, int]]: ...
 ```
 
+**Async**: `await tors.aio.extract_code_blocks(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
 Extracts every fenced code block in `text` per CommonMark §4.5's fenced-code-block
 grammar, one GIL-released native pass: `(language, code, start, end)` per block, `end`
 exclusive, offsets in Python `str` (codepoint) units. The grammar is hand-rolled
@@ -1788,6 +1798,8 @@ tors.extract_code_blocks("hi\n```py\nprint(1)\n```\n")
 ```python
 def strip_code_fences(text: str) -> str: ...
 ```
+
+**Async**: `await tors.aio.strip_code_fences(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
 
 Unwraps the single most common case on its own: a whole response wrapped in one
 fence. If `text`, trimmed of leading/trailing whitespace, is *exactly* one fenced
