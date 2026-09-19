@@ -144,7 +144,7 @@ rand = { version = "0.9", default-features = false, features = ["os_rng"] }
 # own distributions). MIT OR Apache-2.0; also already in the lock (the dev
 # tree's transitive), so no new package; pulls ppv-lite86 for the SSE2
 # backend in addition to rand_core.
-rand_chacha = { version = "0.9", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
 # rand_core's traits directly (SeedableRng::seed_from_u64, RngCore/TryRngCore
 # for the two fill spellings): the engine code speaks rand_core's vocabulary,
 # not a re-export chain through rand or rand_chacha. No features (the trait
