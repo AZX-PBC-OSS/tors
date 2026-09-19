@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.7.0...v0.8.0) (2026-09-19)
+
+
+### Features
+
+* **chunk:** the structure-aware markdown chunking — the heading level, bounding, fence-inert, zero-build preserved ([#124](https://github.com/AZX-PBC-OSS/tors/issues/124)) ([718b941](https://github.com/AZX-PBC-OSS/tors/commit/718b9412735565ad788c349de4f0b99412e92d09))
+* **aio:** word_bounds/sentence_bounds async twins, and the docs' truth corrections ([#133](https://github.com/AZX-PBC-OSS/tors/issues/133)) ([cc26514](https://github.com/AZX-PBC-OSS/tors/commit/cc265148ad73058d79b4f07a138fbd55b5688d9f))
+
+
+### Bug Fixes
+
+* the tracker sweep, red-teamed, self-contained, and smoke-clean ([#118](https://github.com/AZX-PBC-OSS/tors/issues/118)) ([2312172](https://github.com/AZX-PBC-OSS/tors/commit/23121729b177edbba84690108b3fb1d1d404b2b8))
+* **schema:** the constrained bigint gate refuses the schema instead of validating lossily ([#122](https://github.com/AZX-PBC-OSS/tors/issues/122)) ([a6ca0dc](https://github.com/AZX-PBC-OSS/tors/commit/a6ca0dc6e73ad58f698426737975d18d2bf9f5c1))
+* **py:** the adoption seams — the free-threading keyword drops, __version__ ships on the runtime and typed surfaces ([#121](https://github.com/AZX-PBC-OSS/tors/issues/121)) ([4d3df23](https://github.com/AZX-PBC-OSS/tors/commit/4d3df234a5c2671efe959a2a87cb79cbb1f0c6d5))
+
+
+### Performance Improvements
+
+* **pii, search, repair:** bucketed key families, id-indexed masked splice, integer address probes ([#109](https://github.com/AZX-PBC-OSS/tors/issues/109)) ([431eda8](https://github.com/AZX-PBC-OSS/tors/commit/431eda8b1633abaead121b1c257baa17262c49e7))
+
 ## [0.7.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.6.1...v0.7.0) (2026-09-17)
 
 
