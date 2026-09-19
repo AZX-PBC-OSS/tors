@@ -84,7 +84,14 @@ fuzz_target!(|s: &str| {
     // model; THIS lane asserts what needs no model: a plain credential
     // value never survives, under every template spelling, whatever the
     // passes do to the surrounding text.
-    let secret = format!("{}{}", "s3cret", &s.chars().filter(char::is_ascii_alphanumeric).take(24).collect::<String>());
+    let secret = format!(
+        "{}{}",
+        "s3cret",
+        &s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(24)
+            .collect::<String>()
+    );
     // (alnum-only secret: no rule's own grammar can interact with it —
     // every rule's value/token class accepts it whole, so a surviving
     // secret is unambiguously a miss, and no pass can eat an anchor that
