@@ -1,59 +1,41 @@
 """Differential parity for the tors scrub_pii port: tors against the
-quoted-pin oracle, and (opt-in) against the live source module.
-
-Provenance: the behavior oracle is a private consumer's telemetry-safety
-module, transcribed into ``tests/reference.py`` as
+quoted-pin oracle transcribed into ``tests/reference.py`` as
 ``reference_scrub_pii`` — its two pattern shapes and both token fields
-quoted as literals, with the digest salt parameterized (the source chain
-digests unsalted, so ``salt=""`` is its byte-exact token spelling). The
-pin is deliberate: a change to the source module's grammar is a parity
-re-sync request, not a drive-by fix. Mapping:
+quoted as literals, with the digest salt parameterized (``salt=""`` is
+the minimal byte-exact token spelling). The pin is the grammar's
+definition: a change to either side is a deliberate grammar change,
+landed here and in ``tests/reference.py`` together. Mapping:
 ``tors.scrub_pii(text, rules, salt=salt) ==
 reference_scrub_pii(text, rules, salt=salt)`` for every ``rules``/``salt``
-lane below, and, on the live lane,
-``tors.scrub_pii(text, salt="") == <the source module's free-text scrub
-entry point>(text)``.
+lane below.
 
-tors's phone rule carries one deliberate extension past that contract:
-the domestic NANP matcher (un-plussed shapes the source leaves
-untouched), and the api_keys rule carries a second (the credential
-families). The lanes are split accordingly: every QUOTED-PIN lane below
-routes on the domestic guard — the input guard for single-rule lanes,
-the email-pass-output guard for BOTH-rules lanes (the matcher runs on
-the email pass's result, and the email local removal can trim a
-too-long digit run into a phone shape) — and on the keys guard for
-every lane where api_keys is active (the input guard suffices there:
-the keys pass runs BEFORE the email pass, so a key-free input leaves it
-the identity and the email-pass output the domestic guard needs is the
-same both engines produce) — parity is asserted exactly
-where the source's own semantics apply — and ``TestDomesticExtension``
-/ ``TestApiKeyExtension``
-pin the other side in both directions (the oracle must leave the shape, tors must
-scrub exactly the span), so a regression on either side of an extension
-fails loudly instead of surfacing as a parity mystery.
-
-The live re-sync lane is env-gated and NEVER runs in CI:
-``TORS_SCRUB_PII_ORACLE`` carries the full locator —
-``path/to/module.py:entry_point``, a module file path and the scrub
-callable's name, split on the last colon — so nothing about the
-source's spelling lives in this repo. Unset, every live-lane test
-skips and the quoted pin above remains the CI oracle. The one pinned
-divergence is
-deliberate and documented in both directions: a str holding lone
-surrogates is refused by tors with ``UnicodeEncodeError`` (the crate-wide
-str contract) while the source chain — none of whose classes can match a
-surrogate — returns it unchanged; the live lane asserts that divergence
-instead of skipping it, so a re-sync can never mistake it for a port bug.
+tors's phone rule carries one deliberate extension past the quoted
+grammar: the domestic NANP matcher (un-plussed shapes the quoted grammar
+leaves untouched), and the api_keys rule carries a second (the
+credential families). The lanes are split accordingly: every
+QUOTED-PIN lane below routes on the domestic guard — the input guard
+for single-rule lanes, the email-pass-output guard for BOTH-rules lanes
+(the matcher runs on the email pass's result, and the email local
+removal can trim a too-long digit run into a phone shape) — and on the
+keys guard for every lane where api_keys is active (the keys pass runs
+BEFORE the email pass, so a key-free input leaves it the identity and
+the email-pass output the domestic guard needs is the same both engines
+produce) — parity is asserted exactly where the quoted grammar's own
+semantics apply — and ``TestDomesticExtension`` / ``TestApiKeyExtension``
+pin the other side in both directions (the reference must leave the
+shape, tors must scrub exactly the span), so a regression on either
+side of an extension fails loudly instead of surfacing as a parity
+mystery. tors's argument-boundary contract (a str holding lone
+surrogates raises ``UnicodeEncodeError``) is pinned in
+``tests/test_scrub_pii.py`` and is tors's own, not a divergence from
+anything external.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib.util
-import os
 import unicodedata
 from functools import cache
-from typing import Any
 
 import pytest
 from hypothesis import assume, given, settings
@@ -290,26 +272,54 @@ def _both_lane_has_domestic_shape(text: str, salt: str | None) -> bool:
 # the family's own charset (the shared [A-Za-z0-9_-] for most, [0-9A-Z]
 # for the AWS pair, [A-Za-z0-9+/=] for the Azure marker), the
 # prefix-boundary rule (a prefix glued to a preceding key-charset char is
-# mid-token, the `xak-` cut — the PEM block's leading `-` run included),
-# the JWT marker scoping, and the PEM span (both markers, same words) —
+# mid-token, the `xak-` cut — the escape arms (%XX, \uXXXX, \xHH, \NNN
+# octal, \X) and the PEM carve-out aside: a complete escape sequence or a
+# `-----BEGIN ` head after a dash run or shared close IS a clean
+# boundary, the formatting material being armor, not a word), the JWT
+# marker scoping, and the PEM span (both markers, same words) —
 # used only to route inputs between the lanes, the same posture as
 # `has_domestic_shape`. The scanner's first-byte dispatch is a pure
 # optimization and is deliberately NOT mirrored: every family prefix is
 # tried at every clean position, which is behaviorally identical and one
 # less thing to drift.
 _KEY_FAMILIES: tuple[tuple[str, int], ...] = (
+    ("_gitlab_session=", 40),
     ("github_pat_", 22),
     ("sk-svcacct-", 20),
     ("AccountKey=", 40),
     ("sk-proj-", 20),
     ("sk-ant-", 20),
     ("azxdev_", 20),
+    ("glpat-", 20),
+    ("glagent-", 20),
+    ("glsoat-", 20),
+    ("glrtr-", 20),
+    ("glcbt-", 20),
+    ("glptt-", 20),
+    ("glimt-", 20),
+    ("gloas-", 20),
+    ("glft-", 20),
+    ("gldt-", 20),
+    ("glrt-", 20),
+    ("glwt-", 20),
+    ("glffct-", 20),
     ("ya29.", 20),
     ("ghp_", 36),
+    ("gho_", 36),
+    ("ghu_", 36),
+    ("ghs_", 36),
+    ("ghr_", 36),
     ("AIza", 35),
     ("xai-", 20),
     ("AKIA", 16),
     ("ASIA", 16),
+    ("A3T", 17),
+    ("AGPA", 16),
+    ("AIDA", 16),
+    ("AIPA", 16),
+    ("ANPA", 16),
+    ("ANVA", 16),
+    ("AROA", 16),
     ("fw-", 20),
     ("fw_", 20),
     ("ak-", 20),
@@ -334,6 +344,8 @@ _KEY_TAIL_AZURE = frozenset(
 _PEM_WORD_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 )
+_ASCII_HEX = frozenset("0123456789abcdefABCDEF")
+_ASCII_OCTAL = frozenset("01234567")
 _BEARER_MARKER = "Bearer eyJ"
 
 
@@ -342,9 +354,19 @@ def _key_charset_for(prefix: str) -> frozenset[str]:
     their own markers, the shared charset for everything else — the one
     tail-class branch a 14th family with a new alphabet extends (a
     shared-charset family touches the table only)."""
-    if prefix in ("AKIA", "ASIA"):
+    if prefix in (
+        "AKIA",
+        "ASIA",
+        "A3T",
+        "AGPA",
+        "AIDA",
+        "AIPA",
+        "ANPA",
+        "ANVA",
+        "AROA",
+    ):
         return _KEY_TAIL_AWS
-    if prefix == "AccountKey=":
+    if prefix in ("AccountKey=", "_gitlab_session="):
         return _KEY_TAIL_AZURE
     return _KEY_TAIL
 
@@ -400,10 +422,126 @@ def _pem_span_at(text: str, start: int) -> int | None:
     return end + len(marker)
 
 
+def _pem_head_carve(text: str, i: int) -> bool:
+    """Whether `i` opens a `-----BEGIN ` head after armor — the mirror
+    of pem_head_after_dash_run: a dash directly before the head (the
+    previous close's own run), or the SHARED CLOSE, the head's dash run
+    entirely the preceding close's — a PEM word byte directly before
+    the head (`…CERTIFICATE-----BEGIN `). The lookback walks the
+    marker's own word class backward from that byte; the carve only
+    opens the boundary, and the block grammar `_pem_span_at` checks
+    downstream still requires both markers with the same words."""
+    if not text.startswith(_PEM_BEGIN, i):
+        return False
+    if text[i - 1] == "-":
+        return True
+    if text[i - 1] not in _PEM_WORD_CHARS:
+        return False
+    w = i - 1
+    while w > 0 and text[w - 1] in _PEM_WORD_CHARS:
+        w -= 1
+    return True
+
+
+def _backslash_run_before(text: str, at: int) -> int:
+    """The run of backslashes ending just before `at` (never crossing
+    the string start) — the mirror of backslash_run_before, the
+    odd-backslash discipline's counter."""
+    run = 0
+    while run < at and text[at - 1 - run] == "\\":
+        run += 1
+    return run
+
+
+def _escape_ends_before(text: str, pos: int) -> bool:
+    """Whether the key-charset char at `pos - 1` ends a complete escape
+    sequence — the str-space mirror of `escape_ends_before`, the same
+    grammar one arm per row: `%XX` (`%` + two hex digits), `\\uXXXX`
+    (`\\` `u` + four hex digits, no odd-backslash recount — the
+    documented released over-trigger), `\\UHHHHHHHH` (`\\` `U` + eight
+    hex digits, the same position-pinned discipline), `\\xHH` (`\\` `x`
+    + two hex digits, the backslash run before the `x` ODD), `\\NNN`
+    (`\\` + 1-3 octal digits, maximal munch, the run ending exactly here
+    and the backslash run before it ODD), and `\\X` (any char after an
+    ODD backslash run). The impl is bytes and this is str — the escape
+    grammar is ASCII-only, so every arm's offsets agree between byte
+    and char indices, the way the file's other transcriptions treat
+    the units (each grammar answers in its own space; only the ASCII
+    literals the two share are compared). A complete escape directly
+    before a head is a CLEAN boundary; a partial escape is not."""
+    if (
+        pos >= 3
+        and text[pos - 3] == "%"
+        and text[pos - 2] in _ASCII_HEX
+        and text[pos - 1] in _ASCII_HEX
+    ):
+        return True
+    if (
+        pos >= 6
+        and text[pos - 6] == "\\"
+        and text[pos - 5] == "u"
+        and all(ch in _ASCII_HEX for ch in text[pos - 4 : pos])
+    ):
+        return True
+    if (
+        pos >= 10
+        and text[pos - 10] == "\\"
+        and text[pos - 9] == "U"
+        and all(ch in _ASCII_HEX for ch in text[pos - 8 : pos])
+    ):
+        return True
+    if (
+        pos >= 4
+        and text[pos - 4] == "\\"
+        and text[pos - 3] == "x"
+        and text[pos - 2] in _ASCII_HEX
+        and text[pos - 1] in _ASCII_HEX
+        and _backslash_run_before(text, pos - 3) % 2 == 1
+    ):
+        return True
+    digits = 0
+    while digits < pos and text[pos - 1 - digits] in _ASCII_OCTAL:
+        digits += 1
+    if (
+        digits in (1, 2, 3)
+        and digits < pos
+        and text[pos - 1 - digits] == "\\"
+        and _backslash_run_before(text, pos - digits) % 2 == 1
+    ):
+        return True
+    return _backslash_run_before(text, pos - 1) % 2 == 1
+
+
+def _ansi_csi_ends_before(text: str, pos: int) -> bool:
+    """Whether the key-charset char at `pos - 1` ends an ANSI CSI escape
+    sequence (`ESC [ params final`) — the raw-ESC arm, the mirror of
+    `ansi_csi_ends_before`: the final char U+0040..U+007E, the walk back
+    over the parameter/intermediate class U+0020..U+003F, and the `ESC [`
+    head directly before the walked run (a `[` in prose without the ESC
+    byte never carves)."""
+    if not ("\u0040" <= text[pos - 1] <= "\u007e"):
+        return False
+    j = pos - 1
+    while j > 0 and "\u0020" <= text[j - 1] <= "\u003f":
+        j -= 1
+    return j >= 2 and text[j - 1] == "[" and text[j - 2] == "\u001b"
+
+
 def has_api_key_shape(text: str) -> bool:
     n = len(text)
     for i in range(n):
-        if i > 0 and text[i - 1] in _KEY_TAIL:
+        if i > 0 and text[i - 1] in _KEY_TAIL and not (
+            # a complete escape sequence ending directly before the head
+            # is a clean boundary (the mirror of escape_ends_before; the
+            # ANSI CSI arm rides _escape_ends_before's lane separately),
+            # and a `-----BEGIN ` head directly after a dash run or a
+            # shared close is another: the previous block's
+            # `-----END …-----` close is armor, not a word (the twin of
+            # pem_head_after_dash_run)
+            _escape_ends_before(text, i)
+            or _ansi_csi_ends_before(text, i)
+            or _pem_head_carve(text, i)
+        ):
             continue  # a mid-token prefix: the boundary rule
         for prefix, min_tail in _KEY_FAMILIES:
             if not text.startswith(prefix, i):
@@ -844,119 +982,15 @@ class TestDomesticSeededConvergence:
 
 # --- The opt-in live re-sync lane ---------------------------------------------------
 #
-# Re-sync cadence / owner: the quoted pin in tests/reference.py is the CI
-# oracle; the live module is re-checked manually on a machine that holds
-# it (a) whenever the source telemetry-safety module changes grammar or
-# token shape, and (b) at least once per Unicode/dependency bump that
-# could move the Nd table (the UCD CPython's `re` matches on). Owner: the
-# scrub_pii maintainer for this repo. A grammar change upstream is a
-# parity re-sync request (update reference.py + the parity corpus), never
-# a drive-by grammar widening here — the `salt=""` byte-identical
-# contract forbids silent widening.
-#
-# TORS_SCRUB_PII_ORACLE carries the full locator —
-# "path/to/module.py:entry_point" (a private machine's path and the
-# callable's name, never committed): the telemetry-safety module whose
-# free-text scrub entry point the port pinned. Unset, every test below
-# skips — the quoted pin above is the CI oracle, so no CI lane ever
-# references the source, and no spelling of the source's names lives in
-# this repo.
-
-
-def _live_oracle() -> Any:
-    locator = os.environ.get("TORS_SCRUB_PII_ORACLE")
-    if not locator:
-        pytest.skip(
-            "TORS_SCRUB_PII_ORACLE unset: the live re-sync lane is opt-in "
-            "(set it to 'path/to/module.py:entry_point' on a machine that "
-            "has the telemetry-safety module); the quoted pin in "
-            "tests/reference.py is the CI oracle"
-        )
-    path, sep, name = locator.rpartition(":")
-    if not sep or not path or not name.isidentifier():
-        pytest.fail(
-            "TORS_SCRUB_PII_ORACLE must be 'path/to/module.py:entry_point' "
-            "(a module file path, one colon, the callable's name): got "
-            f"{locator!r}"
-        )
-    spec = importlib.util.spec_from_file_location("tors_scrub_pii_live_oracle", path)
-    if spec is None or spec.loader is None:
-        pytest.fail(f"TORS_SCRUB_PII_ORACLE names an unloadable module file: {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    entry = getattr(module, name, None)
-    if not callable(entry):
-        pytest.fail(f"{path} exposes no callable {name}(text) entry point")
-    return entry
-
-
-class TestLiveResyncLane:
-    def test_the_corpus_matches_the_live_module(self) -> None:
-        live = _live_oracle()
-        for text in CORPUS:
-            if _both_lane_diverges(text, ""):
-                continue  # the extension lanes' territory; the live module has neither grammar
-            assert tors.scrub_pii(text, salt="") == live(text), text
-
-    @given(text=_composed_text)
-    @settings(max_examples=300, deadline=None)
-    def test_compositions_match_the_live_module(self, text: str) -> None:
-        assume(not _both_lane_diverges(text, ""))
-        live = _live_oracle()
-        assert tors.scrub_pii(text, salt="") == live(text)
-
-    def test_the_surrogate_divergence_is_pinned_not_skipped(self) -> None:
-        """The one documented divergence, asserted on both sides: tors
-        refuses a surrogate-bearing str at the argument boundary
-        (UnicodeEncodeError, the crate-wide str contract) while the source
-        chain keeps going — none of its classes can match a surrogate, so
-        no digest ever sees one, but the NON-surrogate matches around it
-        still scrub. A re-sync that changes either side shows up here
-        instead of masquerading as parity."""
-        live = _live_oracle()
-        text = "a\ud800b@x.co"
-        with pytest.raises(UnicodeEncodeError):
-            tors.scrub_pii(text, salt="")
-        # The live side: the surrogate survives (no class contains it),
-        # the "b@x.co" around it still scrubs, unsalted digest and all.
-        unsalted = hashlib.sha256(b"b@x.co").hexdigest()[:12]
-        assert live(text) == f"a\ud800@x.co~{unsalted}"
-
-
-class TestOracleFreshness:
-    """H1: the CI oracle is a transcription, and the live lane never runs
-    in CI — so the transcription carries its provenance and CI fails when
-    it goes stale. Two independent trip-wires: (a) the transcription date
-    is at most _ORACLE_FRESH_DAYS old (a re-sync clock, not a grammar
-    check), and (b) the running interpreter's UCD still equals the UCD
-    the Rust Nd tables pin (a Unicode/dependency bump that could move
-    the `re` digit class re-opens the re-sync). The UCD pin is strict
-    only where it can fire: interpreters at or past the pinned UCD must
-    match it exactly (a newer UCD is a re-sync request), while older legs
-    skip explicitly (their UCD predates the tables by construction, and
-    the behavioral lanes — the Nd-exhaustive and parity suites — run
-    unskipped everywhere)."""
-
-    def test_provenance_constants_exist(self) -> None:
-        import reference
-
-        assert isinstance(reference.SCRUB_PII_ORACLE_REVISION, str)
-        assert reference.SCRUB_PII_ORACLE_REVISION
-        assert isinstance(reference.SCRUB_PII_ORACLE_DATE, str)
-        assert isinstance(reference.SCRUB_PII_ORACLE_UCD, str)
-
-    def test_transcription_is_fresh(self) -> None:
-        from datetime import date
-
-        import reference
-
-        today = date.today()
-        age = today - date.fromisoformat(reference.SCRUB_PII_ORACLE_DATE)
-        assert age.days <= reference.SCRUB_PII_ORACLE_FRESH_DAYS, (
-            f"scrub_pii oracle transcription is {age.days} days old "
-            f"(limit {reference.SCRUB_PII_ORACLE_FRESH_DAYS}): re-sync against "
-            "the live telemetry-safety module and bump SCRUB_PII_ORACLE_DATE"
-        )
+class TestOracleUcd:
+    """The CI oracle is a transcription, and the interpreter's UCD must
+    still equal the UCD the Rust Nd tables pin: a Unicode/dependency bump
+    that could move the `re` digit class invalidates the parity lanes'
+    shared premise. The pin is strict only where it can fire:
+    interpreters at or past the pinned UCD must match it exactly, while
+    older legs skip explicitly (their UCD predates the tables by
+    construction, and the behavioral lanes — the Nd-exhaustive and parity
+    suites — run unskipped everywhere)."""
 
     def test_interpreter_ucd_matches_pinned_tables(self) -> None:
         import reference
@@ -1183,6 +1217,11 @@ _KEYS_TABLE: tuple[tuple[str, str, int, str], ...] = (
     ("cn-", "cn-", 20, "std"),
     ("AKIA", "AKIA", 16, "aws"),
     ("ASIA", "ASIA", 16, "aws"),
+    ("A3T", "A3T", 17, "aws"),
+    ("AROA", "AROA", 16, "aws"),
+    ("glwt-", "glwt-", 20, "std"),
+    ("glffct-", "glffct-", 20, "std"),
+    ("_gitlab_session=", "_gitlab_session=", 44, "azure"),
     ("xai-", "xai-", 20, "std"),
     ("ya29.", "ya29.", 20, "std"),
     ("AccountKey=", "AccountKey=", 40, "azure"),
@@ -1202,6 +1241,46 @@ _KEYS_CASES: list[tuple[str, str, str]] = [
         "sk-proj-",
     ),
     (_PEM_EC, _PEM_EC, "PEM"),
+    # The shared close: a word-glued block head is armor (the close's
+    # dashes double as the head's), the block redacts whole, the glue
+    # word stays verbatim — so the span is still exactly the block.
+    ("abc" + _PEM_EC, _PEM_EC, "PEM"),
+    # Escape-spelled keys (the boundary rule's escape arms): keys behind
+    # a complete escape route through the guard's escape grammar — the
+    # span is still exactly the key, the escape spelling verbatim.
+    (
+        "err:%3D" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\u0027" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\x1f" + f"gho_{_key_tail(36)}",
+        f"gho_{_key_tail(36)}",
+        "gho_",
+    ),
+    (
+        "err:\\n" + f"glpat-{_key_tail(20)}",
+        f"glpat-{_key_tail(20)}",
+        "glpat-",
+    ),
+    # The ANSI CSI arm and the \UHHHHHHHH arm: the raw-ESC spelling of
+    # colored terminal output, and Python's ascii()/backslashreplace
+    # non-BMP spelling — the head after either fires.
+    (
+        "err:\x1b[31m" + f"sk-proj-{_key_tail(48)}",
+        f"sk-proj-{_key_tail(48)}",
+        "sk-proj-",
+    ),
+    (
+        "err:\\U0001F600" + f"gho_{_key_tail(36)}",
+        f"gho_{_key_tail(36)}",
+        "gho_",
+    ),
 ]
 
 _KEYS_NON_MATCHES: list[str] = [
@@ -1231,6 +1310,19 @@ _KEYS_NON_MATCHES: list[str] = [
     "AKIA" + _key_aws_tail(15),
     "akia" + _key_aws_tail(16),
     "ASIA" + _key_aws_tail(15),
+    "A3T" + _key_aws_tail(16),
+    "AROA" + _key_aws_tail(15),
+    "aroa" + _key_aws_tail(16),
+    "glwt-" + _key_tail(19),
+    "glffct-" + _key_tail(19),
+    # The Google refresh-token spelling: documented exclusion (the one
+    # family head that would end in an Nd digit — a phone number and a
+    # refresh token in one space-bridged run would compose a phone match
+    # through the token's own head; see the impl table doc).
+    "1//" + _key_tail(20),
+    "x1//" + _key_tail(20),
+    "_gitlab_session=" + _key_azure_tail(39),
+    "_GITLAB_SESSION=" + _key_azure_tail(44),
     "x" + "AKIA" + _key_aws_tail(16),
     "xai-" + _key_tail(19),
     "XAI-" + _key_tail(20),
@@ -1243,10 +1335,19 @@ _KEYS_NON_MATCHES: list[str] = [
     ),
     "-----BEGIN PRIVATE KEY-----\n" + "\n".join(_PEM_BODY) + "\n-----END PRIVATE KEY-----",
     "-----begin ec private key-----\n" + "\n".join(_PEM_BODY) + "\n-----end ec private key-----",
-    "abc" + _PEM_EC,
     "AccountKey=" + _key_azure_tail(39),
     "Accountkey=" + _key_azure_tail(44),
     "xAccountKey=" + _key_azure_tail(40),
+    # The escape cuts (the guard's escape grammar must reject partials
+    # and self-escaped backslashes the same way the scanner does): a
+    # doubled backslash escapes itself (the neighbor a literal letter,
+    # the head mid-token), a percent sign without two hex digits is
+    # prose, and octal munch is maximal (a fourth digit is a literal
+    # continuation).
+    "x\\\\x41sk-" + _key_tail(48),
+    "x%3sk-" + _key_tail(48),
+    "x\\1234sk-" + _key_tail(48),
+    "x[31msk-" + _key_tail(48),
 ]
 
 
@@ -1389,6 +1490,16 @@ _KEY_TOKEN_FAMILY: dict[str, str] = {
     "Bearer": "jwt",
     "AKIA": "aws",
     "ASIA": "aws",
+    "A3T": "aws",
+    "AGPA": "aws",
+    "AIDA": "aws",
+    "AIPA": "aws",
+    "ANPA": "aws",
+    "ANVA": "aws",
+    "AROA": "aws",
+    "glwt-": "gitlab",
+    "glffct-": "gitlab",
+    "_gitlab_session=": "gitlab",
     "xai-": "xai",
     "ya29.": "gcp_oauth",
     "PEM": "pem",

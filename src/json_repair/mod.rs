@@ -143,7 +143,7 @@ pub(crate) struct ObjectBuilder {
 /// Below this member count the linear duplicate scan beats a HashMap's
 /// constants; above it the map wins (measured crossover, small-object
 /// LLM documents).
-const LINEAR_OBJECT_MAX: usize = 32;
+pub(crate) const LINEAR_OBJECT_MAX: usize = 32;
 
 impl ObjectBuilder {
     pub(crate) fn new() -> Self {

@@ -5,6 +5,33 @@ use pyo3::{Py, PyAny};
 
 use crate::detached_transform;
 use crate::pii_impl::{self, KeyFamily, PiiRules, SpanKind};
+use crate::py::_borrow::bounded_str_list;
+
+/// The `rules=`/`families=` extraction: the two list parameters are
+/// walked BY HAND through the py layer's shared bounded walk
+/// ([`bounded_str_list`], this module's fold-in of the local twin the
+/// dedup obligation in `src/py/_borrow.rs` names) precisely because the
+/// `Option<Vec<String>>` spelling they replaced let pyo3 size the Vec
+/// from the argument's `__len__` before iterating it — a `Sequence`
+/// whose `__len__` lies (2**62) blew up `Vec::with_capacity` as a
+/// `PanicException` (capacity overflow), which `except Exception` cannot
+/// catch: the one uncatchable crash class on the pyo3 boundary (the
+/// `pages=` range bomb's class, the same fix shape: never trust a
+/// reported size, walk under the shared cap) — the walk aborts with a
+/// catchable `ValueError` at the cap instead.
+///
+/// The shared walk with this file's `String` element type folded in: the
+/// four `rules=`/`families=` call sites extract through this one-liner so
+/// the closure-style shared walk (`src/py/_borrow.rs`) stays the only
+/// walk, and the refusal bytes stay the scrub boundary's.
+fn bounded_str_vec(function: &str, param: &str, items: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    bounded_str_list(function, param, items, |handle| {
+        out.push(handle.extract::<&str>()?.to_owned());
+        Ok(())
+    })?;
+    Ok(out)
+}
 
 /// The `rules=` parameter's three accepted spellings, the same
 /// closed-set-of-strings convention as `errors=`/`boundary=` (anything
@@ -133,10 +160,21 @@ pub(crate) fn parse_key_families(families: Option<Vec<String>>) -> PyResult<u16>
 pub fn scrub_pii(
     py: Python<'_>,
     text: Bound<'_, PyString>,
-    rules: Option<Vec<String>>,
+    rules: Option<Bound<'_, PyAny>>,
     salt: Option<&str>,
-    families: Option<Vec<String>>,
+    families: Option<Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // The list params extract through the bounded manual walk
+    // ([`bounded_str_list`]): pyo3's `Option<Vec<String>>` sizing from a
+    // lying `__len__` was the uncatchable capacity-overflow class.
+    let rules = match rules {
+        None => None,
+        Some(any) => Some(bounded_str_vec("scrub_pii", "rules", &any)?),
+    };
+    let families = match families {
+        None => None,
+        Some(any) => Some(bounded_str_vec("scrub_pii", "families", &any)?),
+    };
     let mut rules = parse_pii_rules(rules)?;
     rules.key_families = parse_key_families(families)?;
     // salt=None resolves per rule — the contact tag and the keys tag —
@@ -185,10 +223,21 @@ pub fn scrub_pii(
 pub fn scrub_pii_report(
     py: Python<'_>,
     text: Bound<'_, PyString>,
-    rules: Option<Vec<String>>,
+    rules: Option<Bound<'_, PyAny>>,
     salt: Option<&str>,
-    families: Option<Vec<String>>,
+    families: Option<Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // The same bounded extraction as `scrub_pii` (same walk, same cap, the
+    // same refusal bytes): the report spelling is the scrub plus
+    // accounting, and its boundary must be the scrub's boundary.
+    let rules = match rules {
+        None => None,
+        Some(any) => Some(bounded_str_vec("scrub_pii_report", "rules", &any)?),
+    };
+    let families = match families {
+        None => None,
+        Some(any) => Some(bounded_str_vec("scrub_pii_report", "families", &any)?),
+    };
     let mut rules = parse_pii_rules(rules)?;
     rules.key_families = parse_key_families(families)?;
     let (contact_salt, keys_salt) = match salt {

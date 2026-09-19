@@ -29,6 +29,22 @@
 //!   repeated-flank insertion point): exact agreement is only promised, and
 //!   pinned, on the unambiguous classes (pure insert/delete with differing
 //!   flanks, all-equal, single-run replace, empty operands).
+//! * the MATCH COUNT is bounded-maximal, not exactly maximal: the matched
+//!   length M never exceeds the LCS (each op's equal run is a common
+//!   subsequence, and the runs are disjoint and order-preserving — M ≤ LCS
+//!   is structural, pinned as a property ladder over six octave-doubling
+//!   sizes plus a drift-guard floor in tests/test_similarity.py), but hard
+//!   inputs can UNDERCOUNT: the bounded search's non-minimal split and
+//!   run-maximization can both leave common material unmatched (the
+//!   measured undercounts: 0.7043 vs the true 0.7107 on 3000-char random
+//!   strings over a small alphabet; in the pinned ladder the undercounts
+//!   start at 1024, worst observed ratio 0.972 at n=1024 over a
+//!   26-symbol alphabet; periodic and Fibonacci-shaped inputs measure
+//!   exactly maximal). There is NO documented lower bound on M past the
+//!   bounded search's limits: the ladder's 90% floor is an empirical
+//!   drift guard, not a contract — similarity_ratio's denominator treats
+//!   M as "matched by THIS engine", not "the longest common
+//!   subsequence".
 //!
 //! The superlinear worst case (the `deadline_ms` parameter): on inputs with
 //! few anchorable unique records (a character-level permutation of prose is

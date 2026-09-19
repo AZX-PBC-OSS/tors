@@ -28,6 +28,7 @@ pub mod grounded;
 pub mod hash;
 pub mod html;
 pub mod json_repair;
+pub mod json_valid;
 pub mod lemma_dict;
 pub mod merkle;
 pub mod minhash;

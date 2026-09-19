@@ -1,29 +1,44 @@
 """Contract gate for ``tors.scrub_log_text``: named-rule, GIL-free log and
-exception-text scrubbing, pinned to the TaskQ exception-text chain it ports
-(``src/taskq/obs/_redact_exc.py``; the four regexes are quoted in
-``tests/reference.py`` and re-synced against the live module by
-``tests/test_scrub_log_text_parity.py``).
+exception-text scrubbing, pinned to the grammar definition it ships with
+(``tests/reference.py``; the four regexes are quoted there and differentially
+enforced by ``tests/test_scrub_log_text_parity.py``).
 
 What this gate pins, oracle-derived literal by literal:
 
 - pg_detail_lines: real-newline DETAIL lines are deleted line-wise (the
   newline itself stays: a blank line is left behind, matching the source
-  chain; CRLF's ``\\r`` is consumed with the line), and repr()-flattened
-  ``\\nDETAIL:`` runs are consumed up to (not including) the escaped
-  separator or the closing quote, preserving the repr's trailing ``')"``.
-  The two non-matches the source chain treats as unreachable-but-real are
-  pinned as SPECIFIED behavior, not quietly fixed: an escaped DETAIL with
-  no closing quote and no trailing escaped newline is left alone, and one
-  terminated by a real newline with no quote before it is left alone.
+  chain; CRLF's ``\\r`` is consumed with the line), ExceptionGroup gutters
+  absorbed (``traceback.format_exception``'s ``| ``/``+ `` indentation, one
+  layer per nesting level), and repr()-flattened ``\\nDETAIL:`` runs are
+  consumed up to (not including) the escaped separator or the repr tail —
+  a quote followed by the run of ``)``/``]`` closers ``repr()`` ends with
+  (``')`` plain, ``')])`` inside an ExceptionGroup's list), preserving it.
+  The lookahead's final bare ``$`` leg is FAIL-CLOSED (#107's security-policy
+  change, inverting 0.7.0's pinned "unterminated run is left alone"): an
+  escaped DETAIL with no delimiter after it — no closing quote, or a quote
+  with more text behind it — scrubs THROUGH END OF LINE. The consumer
+  chain's own stated policy: a delimiter miss must delete more text, never
+  less of the secret. The two shapes 0.7.0 pinned as left-alone non-matches
+  are subsumed by that leg and are pinned here scrubbing.
 - uri_userinfo: ``scheme://user:password@host`` -> ``scheme://user:***@host``
   (empty username handled, password ends at the first ``@``, ``\\b`` word
   boundary before the scheme — including the Unicode cases where CPython's
   ``\\w`` and a naive Rust alphanumeric check disagree).
-- uri_query_creds: ``[?&](password|passphrase|passwd|pwd)=value`` ->
-  ``[?&]name=***`` (exact lowercase names, value runs to whitespace, ``&``
-  or ``@``).
+- uri_query_creds / libpq_conninfo_creds: the password-family connection
+  parameters, ONE pass under two names (the two anchor grammars of the live
+  chain's single combined regex): ``[?&]name=value`` and the libpq keyword
+  form ``name=value`` (a non-``[A-Za-z0-9_]`` char — or text start — before
+  the name). Names are the five credential parameters
+  (``password``/``passphrase``/``passwd``/``pwd``/``sslpassword``) matched
+  CASE-INSENSITIVELY (0.7.0 matched exact lowercase and shipped every other
+  casing's value verbatim); the value is a libpq single-quoted string
+  (spaces, ``\\'``/``\\\\`` escapes) or an unquoted token to whitespace/``&``
+  — deliberately NOT stopping at ``@`` (0.7.0 did, leaving the tail of a
+  password that legally carries one riding after the ``***``). Selecting
+  both names (``rules=None`` included) runs the combined pass once, never
+  two sequential substitutions.
 - canonical order: the rules apply pg_detail_lines -> uri_userinfo ->
-  uri_query_creds, each rule a whole pass before the next; the order is a
+  the conninfo pass, each rule a whole pass before the next; the order is a
   contract (a DETAIL deletion can eat the ``@`` a userinfo mask would have
   needed — pinned), duplicates dedupe, caller order is irrelevant.
 - identity return: ``scrub_log_text(s, rules) is s`` exactly when no rule
@@ -40,6 +55,7 @@ What this gate pins, oracle-derived literal by literal:
 
 from __future__ import annotations
 
+import collections.abc
 import re
 
 import pytest
@@ -52,6 +68,7 @@ from tors import scrub_log_text
 PG = ["pg_detail_lines"]
 URI_USER = ["uri_userinfo"]
 URI_QUERY = ["uri_query_creds"]
+LIBPQ = ["libpq_conninfo_creds"]
 
 
 class TestPgDetailLines:
@@ -113,22 +130,40 @@ class TestPgDetailEscaped:
         text = "E('a\\n\\tDETAIL: v')"
         assert scrub_log_text(text) is text
 
-    def test_no_terminator_means_no_scrub_the_pinned_non_match(self) -> None:
-        # Unreachable from repr() output, pinned so a future change that
-        # silently alters redaction behavior is a test failure, not a
-        # behavior change: no closing quote and no trailing escaped newline.
-        text = "E('a\\nDETAIL: leaks"
-        assert scrub_log_text(text) is text
+    def test_the_exception_group_gutters_are_absorbed(self) -> None:
+        # #107: one `| `/`+ ` layer per ExceptionGroup nesting level in
+        # traceback.format_exception's rendering; a non-DETAIL header line
+        # through the same gutters stays.
+        assert scrub_log_text("    +   | DETAIL: row-848") == ""
+        assert scrub_log_text("  | DETAIL: v\nnext") == "\nnext"
+        assert scrub_log_text("||DETAIL: v") == ""
+        assert scrub_log_text("  | ExceptionGroup: x\n") == "  | ExceptionGroup: x\n"
 
-    def test_real_newline_termination_without_a_quote_is_the_other_non_match(self) -> None:
-        # Also unreachable from repr() output (the run cannot cross a real
-        # newline, and no quote sits before it): left alone.
-        text = "E('a\\nDETAIL: leaks\nnext line"
-        assert scrub_log_text(text) is text
+    def test_no_terminator_is_fail_closed_through_end_of_line(self) -> None:
+        # #107's fail-closed leg, inverting 0.7.0's pinned non-match: a
+        # delimiter miss (no closing quote, no trailing escaped newline)
+        # scrubs THROUGH END OF LINE — a lookahead miss must delete more
+        # text, never less of the secret.
+        assert scrub_log_text("E('a\\nDETAIL: leaks") == "E('a"
+
+    def test_real_newline_termination_is_fail_closed_too(self) -> None:
+        # The other 0.7.0-pinned non-match, subsumed by the same leg: the
+        # run scrubs to the line's end, the newline itself stays.
+        assert scrub_log_text("E('a\\nDETAIL: leaks\nnext line") == "E('a\nnext line"
 
     def test_a_quote_not_at_end_of_line_is_not_a_terminator(self) -> None:
-        text = "E('a\\nDETAIL: v')  tail"
-        assert scrub_log_text(text) is text
+        # The run continues past a mid-line quote; with no closer-run at
+        # EOL the fail-closed leg takes the line end.
+        assert scrub_log_text("E('a\\nDETAIL: v')  tail") == "E('a"
+
+    def test_the_nested_repr_closer_run_is_preserved(self) -> None:
+        # `')])`: a quote plus the run of `)`/`]` closers an
+        # ExceptionGroup's list rendering ends with — the run is kept, one
+        # more `])` per nesting level.
+        assert scrub_log_text("E('m\\nDETAIL: v')])") == "E('m')])"
+        assert scrub_log_text("E('m\\nDETAIL: v')])')") == "E('m')"
+        # A `]` before the quote is payload, consumed.
+        assert scrub_log_text("E('m\\nDETAIL: v]')") == "E('m')"
 
     def test_trailing_whitespace_after_the_quote_still_terminates(self) -> None:
         assert scrub_log_text("E('a\\nDETAIL: v')  \nnext") == "E('a')  \nnext"
@@ -221,14 +256,28 @@ class TestUriQueryCreds:
             "?password=***&passphrase=***&passwd=***&pwd=***"
         )
 
-    def test_names_are_exact_lowercase(self) -> None:
-        text = "?Password=x&PASSWORD=y&passwords=z&passw=w"
-        assert scrub_log_text(text) is text
-
-    def test_value_runs_to_whitespace_ampersand_or_at(self) -> None:
-        assert scrub_log_text("?password=a b?pwd=c@d&passwd=e") == (
-            "?password=*** b?pwd=***@d&passwd=***"
+    def test_names_are_case_insensitive(self) -> None:
+        # #107: libpq parameter names are case-insensitive and operators'
+        # DSNs echo back whatever casing was written; 0.7.0 matched exact
+        # lowercase and shipped every other casing's value verbatim.
+        assert scrub_log_text("?Password=x&PASSWORD=y&passwords=z&passw=w") == (
+            "?Password=***&PASSWORD=***&passwords=z&passw=w"
         )
+
+    def test_sslpassword_is_a_credential_name(self) -> None:
+        # #107: the client-TLS key's passphrase joined the name set.
+        assert scrub_log_text("postgresql://h/db?sslpassword=p") == (
+            "postgresql://h/db?sslpassword=***"
+        )
+
+    def test_value_runs_to_whitespace_or_ampersand_at_rides_along(self) -> None:
+        # #107: the value class no longer stops at `@` — a password may
+        # legally carry one, and 0.7.0 left the tail riding after the mask.
+        assert scrub_log_text("?password=a b?pwd=c@d&passwd=e") == (
+            "?password=*** b?pwd=***&passwd=***"
+        )
+        assert scrub_log_text("?password=a@b") == "?password=***"
+        assert scrub_log_text("?password=a@b@c&x=1") == "?password=***&x=1"
 
     def test_value_may_contain_equals_and_question_marks(self) -> None:
         assert scrub_log_text("?password=a=b?c") == "?password=***"
@@ -252,6 +301,68 @@ class TestUriQueryCreds:
         assert scrub_log_text("a?password=1?pwd=2") == "a?password=***"
 
 
+class TestLibpqConninfoCreds:
+    """The fourth named rule (#107): the libpq keyword/value conninfo
+    anchor grammar of the shared conninfo pass."""
+
+    def test_the_keyword_form_needs_neither_scheme_nor_query_delimiter(self) -> None:
+        assert scrub_log_text("host=h password=p") == "host=h password=***"
+        assert scrub_log_text("password=p") == "password=***"
+
+    def test_a_longer_word_tail_is_not_an_anchor(self) -> None:
+        # The lookbehind: `cpwd=` is not `pwd=`, `apassword=` not
+        # `password=`, `_password=` not `password=`.
+        for text in ("cpwd=x pwd=y", "apassword=x", "_password=x", "1password=x"):
+            if text == "cpwd=x pwd=y":
+                assert scrub_log_text(text) == "cpwd=x pwd=***"
+            else:
+                assert scrub_log_text(text) is text, text
+
+    def test_the_lookbehind_class_is_ascii_so_a_unicode_letter_anchors(self) -> None:
+        # The live chain spells the class `[A-Za-z0-9_]` explicitly — a
+        # Unicode letter is not in it, so `épassword=x` masks (where the
+        # userinfo rule's Unicode `\w` boundary check would disagree).
+        assert scrub_log_text("épassword=x") == "épassword=***"
+
+    def test_single_quoted_values_carry_spaces_and_escapes(self) -> None:
+        assert scrub_log_text("host=db PASSWORD='hun ter2'") == "host=db PASSWORD=***"
+        assert scrub_log_text("host='db host' password='p w' user=u") == (
+            "host='db host' password=*** user=u"
+        )
+        assert scrub_log_text("?password='a\\'b'&x=1") == "?password=***&x=1"
+        assert scrub_log_text("?password='a\\\\'&x=1") == "?password=***&x=1"
+        assert scrub_log_text("password='a\\'\\'' x") == "password=*** x"
+
+    def test_an_unterminated_quote_falls_back_to_the_token_leg(self) -> None:
+        # The quoted leg fails (no closing quote); the unquoted token —
+        # which keeps the leading quote — takes the same start.
+        assert scrub_log_text("?password='unterminated") == "?password=***"
+        assert scrub_log_text("?password='unterminated &password=x") == (
+            "?password=*** &password=***"
+        )
+
+    def test_a_real_newline_inside_the_quotes_rides_along(self) -> None:
+        # The chain's quoted class `[^'\\]` accepts a real newline; only a
+        # backslash's follower may not be one.
+        assert scrub_log_text("?password='multi\nline real-nl'&x=1") == "?password=***&x=1"
+
+    def test_a_question_mark_before_a_name_is_also_a_keyword_anchor(self) -> None:
+        # `?` is a non-`[A-Za-z0-9_]` char: the libpq-only grammar masks
+        # it too, which is why the two names must share ONE pass — the
+        # combined leftmost scan, never two sequential substitutions.
+        assert scrub_log_text("host=h password=p ?password=q", LIBPQ) == (
+            "host=h password=*** ?password=***"
+        )
+        assert scrub_log_text("host=h password=p ?password=q", URI_QUERY) == (
+            "host=h password=p ?password=***"
+        )
+
+    def test_the_two_names_run_one_combined_pass(self) -> None:
+        text = "host=h password=p ?password=q"
+        both = scrub_log_text(text, ["uri_query_creds", "libpq_conninfo_creds"])
+        assert both == scrub_log_text(text) == "host=h password=*** ?password=***"
+
+
 class TestCanonicalOrder:
     def test_a_dsn_with_both_credential_shapes_masks_both(self) -> None:
         assert scrub_log_text("postgresql://worker:S3cr3t@db/prod?password=fallback") == (
@@ -265,9 +376,11 @@ class TestCanonicalOrder:
         assert scrub_log_text("scheme://user:pa?password=zz@host") == "scheme://user:***@host"
 
     def test_param_only_leaves_the_embedded_param_visible_masked(self) -> None:
+        # #107: the value runs through the `@` now (a password may legally
+        # carry one), so the mask claims `zz@host` whole.
         assert (
             scrub_log_text("scheme://user:pa?password=zz@host", URI_QUERY)
-            == "scheme://user:pa?password=***@host"
+            == "scheme://user:pa?password=***"
         )
 
     def test_detail_deletion_can_eat_the_at_a_userinfo_mask_needs(self) -> None:
@@ -281,10 +394,17 @@ class TestCanonicalOrder:
         assert scrub_log_text(text, URI_USER) == "pg://u:***@h')"
         assert scrub_log_text(text, PG) == "pg://u:p')"
 
-    def test_escaped_detail_without_a_terminator_leaves_userinfo_to_mask_it(self) -> None:
-        # No quote/escaped-newline terminator: the DETAIL pass cannot fire,
-        # so the userinfo password (escaped DETAIL text included) is masked.
-        assert scrub_log_text("a://u:p\\nDETAIL:x@h") == "a://u:***@h"
+    def test_escaped_detail_fail_closed_eats_the_password_before_userinfo_sees_it(self) -> None:
+        # Order interaction, post-#107: the fail-closed DETAIL deletion
+        # scrubs the unterminated run through end of line — the tail (the
+        # userinfo password included) is already gone when the userinfo
+        # rule runs, so nothing is left for it to mask. (0.7.0 left the run
+        # alone here and the userinfo mask claimed the password instead;
+        # the current chain deletes more, the fail-closed direction.)
+        text = "a://u:p\\nDETAIL:x@h"
+        assert scrub_log_text(text) == "a://u:p"
+        assert scrub_log_text(text, URI_USER) == "a://u:***@h"
+        assert scrub_log_text(text, PG) == "a://u:p"
 
 
 class TestRulesParameter:
@@ -317,7 +437,7 @@ class TestRulesParameter:
             scrub_log_text("x", ["pg_detail_lines", "uri_creds"])
         assert str(excinfo.value) == (
             "rules must be one of ('pg_detail_lines', 'uri_userinfo', "
-            "'uri_query_creds'), not \"uri_creds\""
+            "'uri_query_creds', 'libpq_conninfo_creds'), not \"uri_creds\""
         )
 
     @pytest.mark.parametrize(
@@ -337,7 +457,128 @@ class TestRulesParameter:
             scrub_log_text("postgres://u:pw@h", rules)  # type: ignore[arg-type]
 
     def test_rules_accepts_keyword_form(self) -> None:
-        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == ("postgres://u:***@h")
+        assert scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"]) == (
+            "postgres://u:***@h"
+        )
+
+
+class LyingHugeLen(collections.abc.Sequence):
+    """The #112 bomb: a Sequence whose ``__len__`` reports 2**62. pyo3's
+    ``Option<Vec<String>>`` extraction sized the Vec from that and died in
+    ``Vec::with_capacity`` as an UNCAATCHABLE
+    ``pyo3_runtime.PanicException: capacity overflow`` (PanicException
+    derives from BaseException, so ``except Exception`` never sees it).
+    The bounded walk (``src/py/_borrow.rs``'s ``bounded_str_list``) never
+    reads ``__len__``."""
+
+    def __len__(self) -> int:
+        return 2**62
+
+    def __getitem__(self, i: int) -> str:
+        if i >= 2:
+            raise IndexError
+        return ("uri_userinfo", "pg_detail_lines")[i]
+
+
+class EndlessSequence(collections.abc.Sequence):
+    """A Sequence that never runs out: the walk must abort at the cap, not
+    loop forever (and never trust the lying-huge ``__len__``)."""
+
+    def __len__(self) -> int:
+        return 2**62
+
+    def __getitem__(self, i: int) -> str:
+        return "uri_userinfo"
+
+
+class LyingLowLen(collections.abc.Sequence):
+    """A Sequence whose ``__len__`` lies LOW (1) but yields two items: the
+    walk iterates, it never reserves, so every item is taken."""
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, i: int) -> str:
+        if i >= 2:
+            raise IndexError
+        return ("uri_userinfo", "pg_detail_lines")[i]
+
+
+class MidIterationBoom(collections.abc.Sequence):
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, i: int) -> str:
+        if i == 1:
+            raise RuntimeError("boom mid-iteration")
+        return "uri_userinfo"
+
+
+class TestRulesExtractionBoundedWalk:
+    """The ``rules=`` extraction's DoS cap and its byte-preservation pins
+    (issue #112's residue). The parameter extracts through a bounded
+    manual walk (``src/py/_borrow.rs``'s ``bounded_str_list``, the twin of
+    ``scrub_pii``'s in ``src/py/pii.rs``) instead of pyo3's
+    ``Option<Vec<String>>``: same accepted surface, same refusal bytes,
+    and the lying-``__len__`` bomb dies as a catchable ``ValueError``
+    instead of the uncatchable PanicException."""
+
+    def test_the_len_bomb_walks_and_never_panics(self) -> None:
+        # The #112 repro argument: pyo3's extraction panicked (uncatchable
+        # PanicException) on this exact object; the walk ignores __len__,
+        # takes the two honest items, and the scrub succeeds. A PanicException
+        # derives from BaseException, so this returning normally IS the
+        # never-panics pin; the catchable-ValueError refusal path is pinned
+        # by the endless and 100_001 rows below.
+        assert (
+            scrub_log_text("postgres://u:pw@h", rules=LyingHugeLen())
+            == scrub_log_text("postgres://u:pw@h", ["uri_userinfo", "pg_detail_lines"])
+        )
+
+    def test_an_endless_sequence_refuses_at_the_cap(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=EndlessSequence())
+        assert "yielded too many items" in str(excinfo.value)
+
+    def test_an_honest_100k_list_succeeds(self) -> None:
+        text = "postgres://u:pw@h"
+        expected = scrub_log_text(text, ["uri_userinfo"])
+        assert scrub_log_text(text, ["uri_userinfo"] * 100_000) == expected
+
+    def test_a_100001_item_list_refuses(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=["uri_userinfo"] * 100_001)
+        assert str(excinfo.value) == (
+            "scrub_log_text() rules sequence yielded too many items: "
+            "refusing an unbounded batch"
+        )
+
+    def test_a_len_that_lies_low_takes_every_item(self) -> None:
+        # Both names apply (the scrubbed value proves pg_detail_lines ran
+        # even though __len__ said 1): the walk never consulted it.
+        assert (
+            scrub_log_text("pg://u:p\\nDETAIL:x@h", rules=LyingLowLen())
+            == scrub_log_text("pg://u:p\\nDETAIL:x@h", ["uri_userinfo", "pg_detail_lines"])
+        )
+
+    def test_a_bare_str_keeps_pyo3s_own_refusal_bytes(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules="uri_userinfo")  # type: ignore[arg-type]
+        assert str(excinfo.value) == "Can't extract `str` to `Vec`"
+
+    def test_a_non_sequence_keeps_pyo3s_refusal_bytes(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules={"uri_userinfo"})  # type: ignore[arg-type]
+        assert str(excinfo.value) == "'set' object is not an instance of 'Sequence'"
+
+    def test_bytes_are_refused_on_the_first_int_item(self) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            scrub_log_text("postgres://u:pw@h", rules=b"uri_userinfo")  # type: ignore[arg-type]
+        assert str(excinfo.value) == "'int' object is not an instance of 'str'"
+
+    def test_a_mid_iteration_error_propagates_unchanged(self) -> None:
+        with pytest.raises(RuntimeError, match="boom mid-iteration"):
+            scrub_log_text("postgres://u:pw@h", rules=MidIterationBoom())  # type: ignore[arg-type]
 
 
 class TestIdentityReturn:
@@ -346,7 +587,7 @@ class TestIdentityReturn:
         assert scrub_log_text(text) is text
 
     def test_each_rule_alone_returns_identity_when_it_does_not_fire(self) -> None:
-        for rules in (PG, URI_USER, URI_QUERY):
+        for rules in (PG, URI_USER, URI_QUERY, LIBPQ):
             text = "plain text\nmore of it"
             assert scrub_log_text(text, rules) is text, rules
 
@@ -406,12 +647,27 @@ _ANY_TEXT = st.text(
 
 
 def _legal_credential_payload(s: str) -> str:
-    """A char run the password/value classes accept: no Python whitespace
+    """A char run the USERINFO password class accepts: no Python whitespace
     (``str.isspace`` is exactly ``re.``'s ``\\s`` set — pinned by
     ``TestCredentialPayloadEquivalence`` below and exhaustively by
     ``test_space_table_exhaustive`` in test_scrub_log_text_parity.py),
-    no ``&``, no ``@``."""
-    return "".join(ch for ch in s if not ch.isspace() and ch not in "&@")
+    no ``@`` (the class stops there), and no backslash — a payload
+    carrying ``\\n``-shaped text belongs to the escaped-DETAIL interaction
+    (the fail-closed deletion eats it, differentially pinned), excluded
+    here so the template properties below pin the VALUE classes in
+    isolation."""
+    return "".join(ch for ch in s if not ch.isspace() and ch not in "@\\")
+
+
+def _legal_conninfo_value(s: str) -> str:
+    """A char run the conninfo value's UNQUOTED token class accepts: no
+    Python whitespace, no ``&`` (the class stops there — ``@`` rides along
+    since #107), no backslash (the escaped-DETAIL interaction, as above),
+    and no quote (a leading ``'`` would route the value through the
+    libpq quoted leg, whose whole-run consumption is pinned literally in
+    ``TestLibpqConninfoCreds`` and differentially everywhere — the token
+    property below pins the token leg in isolation)."""
+    return "".join(ch for ch in s if not ch.isspace() and ch not in "&\\'")
 
 
 class TestCredentialPayloadEquivalence:
@@ -420,28 +676,34 @@ class TestCredentialPayloadEquivalence:
         exhaustive loop (that lives in the parity file): over ASCII
         whitespace, the U+001C..U+001F seam, NBSP/U+2028/ZWSP, and the
         credential delimiters, ``ch.isspace()`` agrees with ``re \\s`` and
-        the helper keeps a char exactly when ``re``'s password/value
-        classes would accept it."""
+        the helpers keep a char exactly when the class they model would
+        accept it (userinfo: ``[^\\s@]``; conninfo token: ``[^\\s&]``)."""
         pat = re.compile(r"\s")
         edge = [
             chr(cp)
             for cp in list(range(0x00, 0x30))
             + [0x7F, 0xA0, 0x1C, 0x1D, 0x1E, 0x1F, 0x2028, 0x2029, 0x200B, 0x3000, 0x093E, 0x24B6]
         ]
-        edge += ["&", "@", "a", ":", "/", "?", "=", "*", "p"]
+        edge += ["&", "@", "a", ":", "/", "?", "=", "*", "p", "\\", "'"]
         for ch in edge:
             assert ch.isspace() == (pat.match(ch) is not None), repr(ch)
-            assert (ch in _legal_credential_payload(ch)) == (not ch.isspace() and ch not in "&@"), (
-                repr(ch)
-            )
+            assert (ch in _legal_credential_payload(ch)) == (
+                not ch.isspace() and ch not in "@\\"
+            ), repr(ch)
+            assert (ch in _legal_conninfo_value(ch)) == (
+                not ch.isspace() and ch not in "&\\'"
+            ), repr(ch)
 
     @given(_ANY_TEXT)
     @settings(max_examples=200)
-    def test_helper_matches_re_classes_char_by_char(self, text: str) -> None:
+    def test_helpers_match_re_classes_char_by_char(self, text: str) -> None:
         pat = re.compile(r"\s")
         for ch in text:
             assert (ch in _legal_credential_payload(ch)) == (
-                pat.match(ch) is None and ch not in "&@"
+                pat.match(ch) is None and ch not in "@\\"
+            ), repr(ch)
+            assert (ch in _legal_conninfo_value(ch)) == (
+                pat.match(ch) is None and ch not in "&\\'"
             ), repr(ch)
 
 
@@ -497,10 +759,13 @@ class TestHypothesisInvariants:
     @settings(max_examples=300)
     def test_the_param_mask_always_claims_the_whole_value(self, text: str) -> None:
         # Same reasoning: the template carries no `@` at all, so the
-        # userinfo pass can never fire inside it, and the param value —
-        # whatever an escaped-DETAIL deletion leaves of it — is always
-        # masked whole.
-        payload = _legal_credential_payload(text)
+        # userinfo pass can never fire inside it, and the conninfo value's
+        # token leg — whatever an escaped-DETAIL deletion leaves of it,
+        # though the payload class excludes backslashes so none fires
+        # here — is always masked whole (the quoted leg's shapes are
+        # pinned literally in TestLibpqConninfoCreds and differentially
+        # everywhere).
+        payload = _legal_conninfo_value(text)
         if payload:
             assert scrub_log_text(f"?password={payload}&x=1") == "?password=***&x=1"
         else:

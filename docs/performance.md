@@ -91,7 +91,7 @@ otherwise use:
   object just to count it; `tors` reads the count off the borrowed UTF-8
   view — flat ~0.1 µs from 1 KiB to 12 MiB on ASCII (compact ASCII is its
   own UTF-8, a zero-copy alias; the expression pays ~0.9 µs at 64 KiB, the
-  TaskQ result-cap size, and ~180 µs at 12 MiB) and ~0.1 µs on repeat calls
+  the 64 KiB result-cap size, and ~180 µs at 12 MiB) and ~0.1 µs on repeat calls
   over a cached non-ASCII object, where even the warm expression pays a full
   copy out of the same cache (~196 µs at 12 MiB). The honest lanes,
   recorded: a fresh non-ASCII object's first call — the cold-cache case — is

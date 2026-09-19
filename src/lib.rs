@@ -13,13 +13,14 @@
 //! [`truncate_impl`] (boundary-safe and
 //! ellipsis-marked truncation), [`controls_impl`] (C0/DEL control-run
 //! scrub), [`charset_impl`] (batch codepoint-set validation for
-//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing:
-//! the TaskQ exception-text chain), [`hash_impl`] (the one-shot
+//! identifier-style rules), [`scrub_impl`] (named-rule log scrubbing),
+//! [`hash_impl`] (the one-shot
 //! md5/sha1/sha256/sha512/hmac hashing surface), [`random_impl`]
 //! (the random-generation family: random
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
-//! and [`pii_impl`] (contact-material scrub, the
-//! telemetry-safety port); they are
+//! [`pii_impl`] (contact-material scrub, the
+//! telemetry-safety port), and [`json_valid_impl`] (the RFC 8259
+//! validity gate: orjson's acceptance set, no object tree, #61); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
 //! drive them directly:
@@ -349,8 +350,7 @@
 //! tests/test_gil_release.py.
 //!
 //! The scrub surface (`scrub_impl::scrub_log_text`, the `tors.scrub_log_text`
-//! named-rule port of the consumer chain
-//! `src/taskq/obs/_redact_exc.py::_scrub_text`) adds no residue class: it is
+//! named-rule scrubber) adds no residue class: it is
 //! `detached_transform`'s shape over a multi-pass core. The argument
 //! borrow plus the O(rules) name walk (the standard str-in borrow class,
 //! three handles at most) and the ValueError construction on a bad name
@@ -421,6 +421,7 @@ pub mod html_impl;
 pub mod html_table;
 pub mod json_repair;
 pub mod json_schema_impl;
+pub mod json_valid_impl;
 pub mod merkle_impl;
 pub mod minhash_impl;
 pub mod normalize_impl;
@@ -506,6 +507,7 @@ use py::grounded::*;
 use py::hash::*;
 use py::html::*;
 use py::json_repair::*;
+use py::json_valid::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
 use py::minhash::*;
@@ -613,6 +615,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(utf8_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(decode_utf16, m)?)?;
     m.add_function(wrap_pyfunction!(utf16_is_valid, m)?)?;
+    m.add_function(wrap_pyfunction!(json_is_valid, m)?)?;
     m.add_function(wrap_pyfunction!(contains_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(find_unescaped, m)?)?;
     m.add_function(wrap_pyfunction!(utf8_byte_len, m)?)?;

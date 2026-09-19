@@ -63,13 +63,14 @@
 use regex::Regex;
 use serde_json::Map;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use crate::fuzzy_impl::jaro_winkler;
 use crate::json_repair::{
-    DEADLINE_TAG, Diagnostic, NumericLocale, RepairConfig, Value, deadline_exceeded_payload, dumps,
-    exact_decimal_of_float, loads_strict, normalize_big_int_text, py_float_repr, repair,
+    DEADLINE_TAG, Diagnostic, LINEAR_OBJECT_MAX, NumericLocale, RepairConfig, Value,
+    deadline_exceeded_payload, dumps, exact_decimal_of_float, loads_strict, normalize_big_int_text,
+    py_float_repr, repair,
 };
 
 /// The schema-nesting cap, matching the parser side's `MAX_NESTING` shape:
@@ -377,20 +378,98 @@ enum Ladder {
 /// parser_schema.py's object config: the per-parse guidance for one
 /// object, with property schemas owned (one compact clone per container
 /// parse keeps the repairer borrows out of the parser's `&mut`).
+///
+/// The two index maps are the schema side of the wide-object shape
+/// ([`crate::json_repair::ObjectBuilder`]'s lazy index, same threshold):
+/// every document key consults `properties` by name (the extras loops in
+/// `repair_object`/`normalize_keys`/`suggest_scan`/`prenormalize_dates`)
+/// and every unknown key consults the fold tier, so a wide schema turned
+/// each into an O(properties) scan per document key — the 40k-property
+/// repro measured ~200x at 16x the input. Past the threshold the lookups
+/// go through the maps (built once per config, O(properties), LAZILY on
+/// the first query: an empty or small document never pays for a wide
+/// schema's index); under it the linear scan stays (the small-schema
+/// common case keeps its cheaper constants). Both maps preserve the
+/// scan's exact semantics: the properties Vec keeps schema order (the
+/// emission pass's output order), the key index keeps first occurrence,
+/// the fold index collects every match in schema order. The RefCell is
+/// the build-once latch, not shared state: a config is per container
+/// parse.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ObjectSchemaConfig {
     pub properties: Vec<(String, Value)>,
     pub pattern_properties: Option<Value>,
     pub additional_properties: Option<Value>,
     pub required: Vec<String>,
+    /// Property-name -> slot in `properties` (first occurrence), built
+    /// lazily past [`LINEAR_OBJECT_MAX`].
+    index: RefCell<Option<HashMap<String, usize>>>,
+    /// fold_key(property) -> property slots (schema order), built lazily
+    /// past [`LINEAR_OBJECT_MAX`]: the fold tier's per-unknown-key sweep.
+    fold_index: RefCell<Option<HashMap<String, Vec<usize>>>>,
 }
 
 impl ObjectSchemaConfig {
     fn property(&self, key: &str) -> Option<&Value> {
-        self.properties
-            .iter()
-            .find(|(k, _)| k == key)
+        if self.properties.len() <= LINEAR_OBJECT_MAX {
+            return self
+                .properties
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v);
+        }
+        {
+            let mut cache = self.index.borrow_mut();
+            if cache.is_none() {
+                let mut map: HashMap<String, usize> = HashMap::with_capacity(self.properties.len());
+                for (slot, (name, _)) in self.properties.iter().enumerate() {
+                    map.entry(name.clone()).or_insert(slot);
+                }
+                *cache = Some(map);
+            }
+        }
+        let index = self.index.borrow();
+        index
+            .as_ref()
+            .and_then(|map| map.get(key))
+            .and_then(|&slot| self.properties.get(slot))
             .map(|(_, v)| v)
+    }
+
+    /// The fold tier's hits, in schema order (the linear scan's exact
+    /// result): every property whose fold equals `folded`.
+    fn fold_hits(&self, folded: &str) -> Vec<&String> {
+        if self.properties.len() <= LINEAR_OBJECT_MAX {
+            return self
+                .properties
+                .iter()
+                .filter(|(prop, _)| fold_key(prop) == folded)
+                .map(|(prop, _)| prop)
+                .collect();
+        }
+        {
+            let mut cache = self.fold_index.borrow_mut();
+            if cache.is_none() {
+                let mut map: HashMap<String, Vec<usize>> =
+                    HashMap::with_capacity(self.properties.len());
+                for (slot, (name, _)) in self.properties.iter().enumerate() {
+                    map.entry(fold_key(name)).or_default().push(slot);
+                }
+                *cache = Some(map);
+            }
+        }
+        let index = self.fold_index.borrow();
+        index
+            .as_ref()
+            .and_then(|map| map.get(folded))
+            .map(|slots| {
+                slots
+                    .iter()
+                    .filter_map(|&slot| self.properties.get(slot))
+                    .map(|(k, _)| k)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -743,11 +822,20 @@ impl SchemaRepairer {
             Value::Object(entries) => {
                 let config = object_schema_config(resolved);
                 // Properties first (present keys only: absent keys have no
-                // value to normalize).
-                for (key, prop) in &config.properties {
-                    if let Some(slot) = entries.iter_mut().find(|(k, _)| k == key) {
+                // value to normalize). The document side goes through the
+                // wide-object index (see EntryIndex): one name lookup per
+                // schema property, not one scan per property. The slots are
+                // collected so the index borrow ends before the mutation.
+                let doc_index = EntryIndex::new(entries);
+                let prop_slots: Vec<Option<usize>> = config
+                    .properties
+                    .iter()
+                    .map(|(key, _)| doc_index.slot(entries, key))
+                    .collect();
+                for ((key, prop), slot) in config.properties.iter().zip(prop_slots) {
+                    if let Some(slot) = slot {
                         let key_path = format!("{path}.{key}");
-                        self.prenormalize_dates(&mut slot.1, prop, &key_path, depth + 1);
+                        self.prenormalize_dates(&mut entries[slot].1, prop, &key_path, depth + 1);
                     }
                 }
                 // Extras through their pattern/additional schemas.
@@ -1550,11 +1638,16 @@ impl SchemaRepairer {
             ));
         };
         let config = object_schema_config(schema);
+        // The wide-object document index (see EntryIndex): the salvage
+        // fills consult it once per required name. A fill appends (the key
+        // is absent by the gate just above), so the index tracks it by
+        // hand, `object_insert`'s exact append slot.
+        let mut doc_index = EntryIndex::new(object_entries(&value));
         // Salvage required-fills for safe sources only (upstream's
         // _fill_missing_required_for_salvage).
         if self.salvage {
             for key in &config.required {
-                if value.object_get(key).is_some() {
+                if doc_index.slot(object_entries(&value), key).is_some() {
                     continue;
                 }
                 let Some(prop) = config.property(key) else {
@@ -1570,7 +1663,11 @@ impl SchemaRepairer {
                         Some(filled.clone()),
                         None,
                     );
-                    value.object_insert(key.clone(), filled);
+                    if let Value::Object(entries) = &mut value {
+                        let slot = entries.len();
+                        entries.push((key.clone(), filled));
+                        doc_index.insert(key, slot);
+                    }
                 }
             }
         }
@@ -1636,11 +1733,16 @@ impl SchemaRepairer {
             }
         }
 
-        // The required gate, on the renamed set.
+        // The required gate, on the renamed set. The renames above changed
+        // the key set, so this is a FRESH index (the salvage one predates
+        // the rename surgery); the names lookup rides the wide-object
+        // index instead of one scan per required name.
+        doc_index = EntryIndex::new(object_entries(&value));
+        let value_entries = object_entries(&value);
         let missing: Vec<&String> = config
             .required
             .iter()
-            .filter(|key| value.object_get(key).is_none())
+            .filter(|key| doc_index.slot(value_entries, key).is_none())
             .collect();
         if !missing.is_empty() {
             let names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
@@ -1649,14 +1751,23 @@ impl SchemaRepairer {
                 names.join(", ")
             ));
         }
-        // The properties pass + pattern-folding + the kept extras.
+        // The properties pass + pattern-folding + the kept extras. The
+        // lookups ride the same fresh index (one name lookup per schema
+        // property, not one scan per property); the slots are collected so
+        // the lookups end before the (value-independent) repair recursion.
+        let prop_slots: Vec<Option<usize>> = config
+            .properties
+            .iter()
+            .map(|(key, _)| doc_index.slot(value_entries, key))
+            .collect();
         let mut repaired: Vec<(String, Value)> = Vec::new();
-        for (key, prop) in &config.properties {
+        for ((key, prop), slot) in config.properties.iter().zip(prop_slots) {
             let key_path = format!("{path}.{key}");
-            if let Some(raw) = value.object_get(key) {
+            if let Some(slot) = slot {
+                let raw = value_entries[slot].1.clone();
                 repaired.push((
                     key.clone(),
-                    self.repair_value_d(raw.clone(), prop, &key_path, depth + 1)?,
+                    self.repair_value_d(raw, prop, &key_path, depth + 1)?,
                 ));
             } else if let Some(default) = prop_default(prop)
                 && !config.required.iter().any(|r| r == key)
@@ -1836,12 +1947,7 @@ impl SchemaRepairer {
         self.force_deadline_check();
         self.check_deadline()?;
         let folded = fold_key(key);
-        let mut fold_hits: Vec<&String> = Vec::new();
-        for (prop, _) in &config.properties {
-            if fold_key(prop) == folded {
-                fold_hits.push(prop);
-            }
-        }
+        let fold_hits: Vec<&String> = config.fold_hits(&folded);
         if fold_hits.len() == 1 && value.object_get(fold_hits[0]).is_none() {
             let target = fold_hits[0];
             let compatible = config.property(target).is_some_and(|prop| {
@@ -1856,11 +1962,47 @@ impl SchemaRepairer {
             // Incompatible value: fall through to the fuzzy tier, which
             // only suggests on permissive schemas.
         }
+        // The fuzzy tier's per-comparison budget: the enum-suggestion
+        // scorer's own design ([`Self::closest_enum_member`], the same
+        // armed clock) — schema width is the enum's trust level. TWO
+        // mechanisms, copied whole: the FORCED per-property read (a
+        // jaro-winkler on short, window-disjoint strings runs no window
+        // scan and so never consults a clock internally — the forced
+        // read is what keeps a sweep of tiny comparisons from running
+        // arbitrarily far past expiry; measured: without it, 100k
+        // properties past a 5ms budget answered at ~129x) and the clock's
+        // remainder handed to each comparison (long comparisons abort
+        // mid-scan). A mid-sweep expiry aborts the ladder instead of
+        // paying O(properties) comparisons past it.
         let mut scored: Vec<(&String, f64)> = config
             .properties
             .iter()
-            .map(|(prop, _)| (prop, jaro_winkler(key, prop, None).unwrap_or(0.0)))
-            .collect();
+            .map(|(prop, _)| {
+                self.force_deadline_check();
+                self.check_deadline()?;
+                let remaining_ms = self.remaining_budget_ms();
+                let score = match jaro_winkler(key, prop, remaining_ms) {
+                    Ok(score) => score,
+                    Err(_) => {
+                        // A per-comparison budget expiry IS the shared
+                        // clock's expiry (the budget is the clock's
+                        // remainder): raise the sticky payload the boundary
+                        // translates to TimeoutError, never a silent miss.
+                        self.force_deadline_check();
+                        return Err(self.check_deadline().expect_err(
+                            "a per-comparison budget expiry implies the shared clock expired",
+                        ));
+                    }
+                };
+                Ok((prop, score))
+            })
+            .collect::<Result<Vec<(&String, f64)>, String>>()?;
+        // The post-loop forced read: a budget that expired during the
+        // LAST property's comparison must still raise, not answer as a
+        // scored sweep (the same last-member masking hole
+        // [`Self::closest_enum_member`]'s post-loop check closes).
+        self.force_deadline_check();
+        self.check_deadline()?;
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let winner = match scored.as_slice() {
             [(best, top), (_, second), ..]
@@ -1955,6 +2097,10 @@ impl SchemaRepairer {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
+                // The `taken` gate consults the document's ORIGINAL key set
+                // per unknown key: the wide-object index (see EntryIndex),
+                // dropped before the rename application below mutates.
+                let taken_index = EntryIndex::new(entries);
                 for (key, raw) in &slots {
                     // The fold scan below is O(properties) per unknown key
                     // (and so is the property/pattern lookup ahead of it):
@@ -1976,17 +2122,12 @@ impl SchemaRepairer {
                         continue;
                     }
                     let folded = fold_key(key);
-                    let hits: Vec<&String> = config
-                        .properties
-                        .iter()
-                        .map(|(prop, _)| prop)
-                        .filter(|prop| fold_key(prop) == folded)
-                        .collect();
+                    let hits: Vec<&String> = config.fold_hits(&folded);
                     if hits.len() != 1 {
                         continue;
                     }
                     let target = hits[0];
-                    let taken = entries.iter().any(|(k, _)| *k == *target)
+                    let taken = taken_index.slot(entries, target).is_some()
                         || renames.iter().any(|(_, to)| to == target);
                     let compatible = config
                         .property(target)
@@ -1995,7 +2136,15 @@ impl SchemaRepairer {
                         renames.push((key.clone(), target.clone()));
                     }
                 }
-                for (from, to) in renames {
+                // The rename application consults the same original key
+                // set: first occurrence, the linear scan's exact answer.
+                // Collected first so the index borrow ends before the
+                // mutation.
+                let rename_slots: Vec<Option<usize>> = renames
+                    .iter()
+                    .map(|(from, _)| taken_index.slot(entries, from))
+                    .collect();
+                for ((from, to), slot) in renames.iter().zip(rename_slots) {
                     let key_path = format!("{path}.{from}");
                     self.record(
                         "remap_key",
@@ -2005,16 +2154,24 @@ impl SchemaRepairer {
                         Some(Value::Str(to.clone())),
                         None,
                     );
-                    if let Some(slot) = entries.iter_mut().find(|(k, _)| *k == from) {
-                        slot.0 = to;
+                    if let Some(slot) = slot {
+                        entries[slot].0 = to.clone();
                     }
                 }
                 // Recurse through every guided member (properties first,
-                // then pattern/additional for the extras that remain).
-                for (key, prop) in &config.properties {
-                    if let Some(slot) = entries.iter_mut().find(|(k, _)| k == key) {
+                // then pattern/additional for the extras that remain). The
+                // renames above changed the key set, so this is a FRESH
+                // index (a renamed slot answers to its new name now).
+                let recursion_index = EntryIndex::new(entries);
+                let prop_slots: Vec<Option<usize>> = config
+                    .properties
+                    .iter()
+                    .map(|(key, _)| recursion_index.slot(entries, key))
+                    .collect();
+                for ((key, prop), slot) in config.properties.iter().zip(prop_slots) {
+                    if let Some(slot) = slot {
                         let key_path = format!("{path}.{key}");
-                        self.normalize_keys(&mut slot.1, prop, &key_path, depth + 1);
+                        self.normalize_keys(&mut entries[slot].1, prop, &key_path, depth + 1);
                     }
                 }
                 for slot in entries.iter_mut() {
@@ -2734,7 +2891,8 @@ impl SchemaRepairer {
             if members.iter().any(|member| value.py_eq(member)) {
                 return Ok(value);
             }
-            if let Some(hint) = closest_enum_member(&value, members) {
+            let hint = self.closest_enum_member(&value, members)?;
+            if let Some(hint) = hint {
                 self.record(
                     "suggest",
                     path,
@@ -2939,23 +3097,98 @@ fn validation_message(err: &jsonschema::ValidationError<'_>) -> String {
     }
 }
 
-/// Closest string enum member by jaro-winkler at the report-only bar, or
-/// nothing (never auto-remap: an enum miss is the caller's data to fix,
-/// the suggestion is the help).
-fn closest_enum_member(value: &Value, members: &[Value]) -> Option<String> {
-    let Value::Str(text) = value else { return None };
-    let mut best: Option<(&str, f64)> = None;
-    for member in members {
-        if let Value::Str(candidate) = member {
-            let score = jaro_winkler(text, candidate, None).unwrap_or(0.0);
+impl SchemaRepairer {
+    /// Closest string enum member by jaro-winkler at the report-only bar, or
+    /// nothing (never auto-remap: an enum miss is the caller's data to fix,
+    /// the suggestion is the help). A `SchemaRepairer` method rather than a
+    /// free function because the suggestion loop is ON the clock now (issue
+    /// #115): it scores every member, so a wide enum of long members ran the
+    /// whole loop past an armed `deadline_ms` (measured: 2000 members x 1500
+    /// chars answered in 1.3s against a 5ms budget, the TimeoutError arriving
+    /// only from a later phase's check). Both axes are bounded here, the same
+    /// two the repair paths' own fuzzy scans bound:
+    ///
+    /// * per member, a FORCED clock read (`check_deadline`): the sampled
+    ///   check would read only every 256th member, and falling out of the
+    ///   loop on expiry would return `Ok(None)` — a silent None suggestion
+    ///   on an expired clock MASKS the timeout (the caller sees "does not
+    ///   match enum" and blames the data, not the budget). An expired clock
+    ///   raises the sticky `DEADLINE_TAG` payload instead, the same
+    ///   `TimeoutError` translation every other phase's abort uses, whether
+    ///   the budget expired before the enum or mid-enum (the pre-loop
+    ///   membership scan above is short, but the forced check makes the
+    ///   ordering irrelevant: both orderings raise).
+    /// * per comparison, the clock's REMAINING budget passed into
+    ///   `jaro_winkler` (replacing the `None`): bounds the one very long
+    ///   member too — a single 10^6-char member materializes its chars and
+    ///   scans them only while its slice of the budget lasts. The budget
+    ///   never fires short of real expiry (it is the shared clock's own
+    ///   remaining time, so a healthy enum is byte-for-byte the suggestion
+    ///   the unbounded walk gave), and a comparison that trips it means the
+    ///   shared clock expired mid-member: the sticky payload is raised, and
+    ///   the score is never silently read as 0.0.
+    fn closest_enum_member(
+        &self,
+        value: &Value,
+        members: &[Value],
+    ) -> Result<Option<String>, String> {
+        let Value::Str(text) = value else {
+            return Ok(None);
+        };
+        let mut best: Option<(&str, f64)> = None;
+        for member in members {
+            // The forced per-member read: an expired budget raises, never
+            // falls through to a silent None (see the doc comment).
+            self.force_deadline_check();
+            self.check_deadline()?;
+            let Value::Str(candidate) = member else {
+                continue;
+            };
+            let remaining_ms = self.remaining_budget_ms();
+            let score = match jaro_winkler(text, candidate, remaining_ms) {
+                Ok(score) => score,
+                Err(_) => {
+                    // The per-comparison budget only trips on real expiry of
+                    // the shared clock (it IS the clock's remaining time), so
+                    // this is a deadline abort: raise the sticky payload the
+                    // boundary translates to TimeoutError. The fallback arm
+                    // is unreachable (a budget expiry implies the shared
+                    // clock expired; `check_deadline` latches before
+                    // returning).
+                    self.force_deadline_check();
+                    return Err(self.check_deadline().expect_err(
+                        "a per-comparison budget expiry implies the shared clock expired",
+                    ));
+                }
+            };
             if best.is_none_or(|(_, top)| score > top) {
                 best = Some((candidate, score));
             }
         }
+        // The post-loop check: a budget that expired during the LAST
+        // member's comparison must still raise. Without it, a final
+        // comparison that consumed the budget mid-scan answered as a
+        // silent miss — measured: one 10^6-char member whose window scan
+        // finished 0.1ms past a 5ms budget came back as the plain "does
+        // not match enum" (the timeout, masked — the same masking the
+        // per-member check prevents between members; this prevents it
+        // after the last one).
+        self.force_deadline_check();
+        self.check_deadline()?;
+        Ok(best
+            .and_then(|(candidate, score)| (score >= SUGGEST_MIN).then(|| candidate.to_string())))
     }
-    match best {
-        Some((candidate, score)) if score >= SUGGEST_MIN => Some(candidate.to_string()),
-        _ => None,
+
+    /// The armed clock's remaining budget, the per-comparison ceiling
+    /// [`Self::closest_enum_member`] hands `jaro_winkler`: the deadline's
+    /// total budget minus the elapsed wall, in the same milliseconds the
+    /// budget was armed with. `None` when the clock is unarmed (the
+    /// unbounded walk, the pre-fix behavior exactly); the value can be
+    /// negative only microseconds before a forced check raises, and a
+    /// negative budget expires on the comparison's first internal check.
+    fn remaining_budget_ms(&self) -> Option<f64> {
+        self.deadline
+            .map(|(started, ms)| ms - started.elapsed().as_secs_f64() * 1000.0)
     }
 }
 
@@ -3009,13 +3242,16 @@ pub(crate) fn object_schema_config(schema: &Value) -> ObjectSchemaConfig {
     let additional_properties = get(entries, "additionalProperties").cloned();
     // Upstream stores required as a Python set: duplicates collapse.
     // The Vec keeps first-occurrence order (stable error messages) with
-    // the same collapse.
+    // the same collapse. The `seen` set is the same wide-shape guard as
+    // the property indexes: the Vec `any` scan is O(required^2) — a
+    // 40k-name required list spent ~2s right here.
     let required = match get(entries, "required") {
         Some(Value::Array(names)) => {
+            let mut seen_set: HashSet<&str> = HashSet::with_capacity(names.len());
             let mut seen: Vec<String> = Vec::new();
             for name in names {
                 if let Value::Str(name) = name
-                    && !seen.iter().any(|s| s == name)
+                    && seen_set.insert(name.as_str())
                 {
                     seen.push(name.clone());
                 }
@@ -3029,6 +3265,8 @@ pub(crate) fn object_schema_config(schema: &Value) -> ObjectSchemaConfig {
         pattern_properties,
         additional_properties,
         required,
+        index: RefCell::new(None),
+        fold_index: RefCell::new(None),
     }
 }
 
@@ -3313,12 +3551,67 @@ fn array_is_guided(schema: &Value) -> bool {
     }
 }
 
+/// The object's entries, borrowed (the read side of `entries_of`'s clone).
+fn object_entries(value: &Value) -> &[(String, Value)] {
+    match value {
+        Value::Object(entries) => entries,
+        _ => &[],
+    }
+}
+
 /// Rename one entry in place (the remap's key surgery).
 fn rename_entry(value: &mut Value, from: &str, to: &str) {
     if let Value::Object(entries) = value
         && let Some(slot) = entries.iter_mut().find(|(k, _)| k == from)
     {
         slot.0 = to.to_string();
+    }
+}
+
+/// The document side of the wide-object shape ([`EntryIndex`]: the
+/// companion of `ObjectSchemaConfig`'s schema-side indexes and
+/// `ObjectBuilder`'s parse-side index, same [`LINEAR_OBJECT_MAX`]
+/// threshold): the schema walkers consult the document's entries by name
+/// once per schema property/required name, so a wide schema turned each
+/// pass into an O(properties x document) scan. Past the threshold the
+/// index maps every key to its first-occurrence slot (the linear scan's
+/// exact answer, `find`'s semantics); under it the linear scan stays.
+///
+/// The map owns its keys so the index never pins a borrow on the
+/// document: the walkers mutate between lookups (salvage fills, rename
+/// surgery), and the slot reads take the entries slice afresh. The
+/// key-clone cost is one O(document) pass per container — the same order
+/// as the `entries_of` clone the repair pass already pays.
+struct EntryIndex {
+    map: Option<HashMap<String, usize>>,
+}
+
+impl EntryIndex {
+    fn new(entries: &[(String, Value)]) -> Self {
+        let map = (entries.len() > LINEAR_OBJECT_MAX).then(|| {
+            let mut map: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+            for (slot, (key, _)) in entries.iter().enumerate() {
+                map.entry(key.clone()).or_insert(slot);
+            }
+            map
+        });
+        EntryIndex { map }
+    }
+
+    /// The first occurrence of `key`, as a slot (`find`'s exact answer).
+    fn slot(&self, entries: &[(String, Value)], key: &str) -> Option<usize> {
+        match &self.map {
+            Some(map) => map.get(key).copied(),
+            None => entries.iter().position(|(k, _)| k == key),
+        }
+    }
+
+    /// Track an appended entry (the salvage fill's exact append slot; a
+    /// no-op under the threshold, where the scan reads the live entries).
+    fn insert(&mut self, key: &str, slot: usize) {
+        if let Some(map) = &mut self.map {
+            map.insert(key.to_string(), slot);
+        }
     }
 }
 

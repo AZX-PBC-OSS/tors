@@ -1,7 +1,7 @@
 //! UUIDv7 helper cores: the pure-Rust hearts of `tors.uuid7_timestamp_ms`,
 //! `tors.uuid_version`, and `tors.uuid_parse` (issue #54).
 //!
-//! The consumer shape (TaskQ is the measured instance): a store keyed by
+//! The consumer shape (a keyed store is the measured instance): a store keyed by
 //! UUIDv7 IDs reimplements the same three bit operations at every site --
 //! the 48-bit unix-millisecond timestamp for keyset pagination and
 //! time-bucketed queries, the version nibble before trusting that

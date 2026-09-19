@@ -353,6 +353,13 @@ fn reference_window(
 
 fuzz_target!(|input: Input| {
     let total = input.text.chars().count();
+    // The chunk spans are CODEPOINT indices; this target's whole-document
+    // oracle compares a span's text against the separator literals, which
+    // needs the codepoint space, not a byte slice (a byte slice of a
+    // codepoint index is mid-char for any multi-byte head — the smoke
+    // crash: text "\u{5a5}", chunk (0, 1), `&text[..1]` not a char
+    // boundary). One collect, shared by every oracle below.
+    let codepoints: Vec<char> = input.text.chars().collect();
     // The raw byte-drain budget: struct fields drain the stream in
     // order and `text` eats most of it, so the leftover bytes behind
     // `max_chars` are few and it lands at or above the text length
@@ -397,33 +404,78 @@ fuzz_target!(|input: Input| {
             budget,
             separators,
             overlap,
+            tors::chunk_hierarchical_impl::OverlapBoundary::Grapheme,
         );
         assert_basic_contract(&chunks, total, "chunk_hierarchical", overlap);
         assert_cluster_safe(&chunks, &input.text, budget, "chunk_hierarchical");
         // The whole-document-budget oracle, folded in at every budget
         // that can only ever emit the single first window: `max_chars
         // >= total` makes the loop's first `remaining <= max_chars`
-        // exit fire, so the answer is exactly [(0, total)] (or [] on
-        // empty text) regardless of separators and overlap. That
-        // trivial answer is the one output the codepoint total
-        // (`char_count`, pub(crate) and unreachable from this crate)
-        // directly feeds: a byte-count regression (astral text, 4
-        // UTF-8 bytes per emoji) would emit (0, byte_total) here and
-        // fail this exact equality while every structure check above
-        // still passes, which is why the row exists as equality and
-        // not as another invariant.
+        // exit fire, so the answer is [(0, total)] (or [] on empty
+        // text) regardless of separators and overlap — with the #103
+        // narrowing: a window that OPENS on a separator match is
+        // skipped even at that exit, so an all-separator document (or
+        // one whose every window before content opens on a match)
+        // comes back [] (or a single (start, total) window past the
+        // leading matches). What stays exactly pinned — and what the
+        // codepoint total (`char_count`, pub(crate) and unreachable
+        // from this crate) directly feeds, the reason this row exists
+        // as near-equality and not another invariant — is the shape: at
+        // most one chunk, ending exactly at `total` (a byte-count
+        // regression would emit (0, byte_total) and fail the end
+        // check), never a chunk that IS a separator match (the #103
+        // symptom, exact-equality-checked against every literal in the
+        // hierarchy), never more than one chunk from a budget that
+        // swallows the document.
         if budget >= total {
-            let expected: Vec<(usize, usize)> = if total == 0 {
-                Vec::new()
-            } else {
-                vec![(0, total)]
-            };
-            assert_eq!(
-                chunks, expected,
-                "whole-document budget {budget} must emit the single (0, total) window: \
-                 text={:?} separators={separators:?} overlap={overlap}",
+            assert!(
+                chunks.len() <= 1,
+                "whole-document budget {budget} must emit at most one chunk: \
+                 text={:?} separators={separators:?} overlap={overlap} chunks={chunks:?}",
                 input.text
             );
+            if let Some(&(start, end)) = chunks.first() {
+                assert_eq!(
+                    end, total,
+                    "whole-document chunk must run to the codepoint total: \
+                     text={:?} separators={separators:?} chunks={chunks:?}",
+                    input.text
+                );
+                if let Some(list) = separators {
+                    // The no-separator-chunk assert is a theorem only for
+                    // SINGLE-literal lists: there the one separator level's
+                    // skip_cut is consulted first at every window, so a
+                    // window opening on the match always skips and the
+                    // whole-document exit never runs (the #103 contract,
+                    // including the all-separator-zero-chunks shape). With
+                    // TWO OR MORE literals the coarsest-first verdict order
+                    // lets an earlier literal's CUT preempt a later one's
+                    // skip, and the final exit pushes the remainder
+                    // untrimmed — which can equal the later separator's
+                    // whole match: production and the reference oracle
+                    // agree (["\n\u{1a}]\0", "\t\n\u{1a}]\0"] over the
+                    // 5-char text chunks (0, 5) on BOTH sides — the
+                    // differential's pinned semantics), so the assert is
+                    // not enforceable there. A `None` splice is the same
+                    // story one level coarser: the paragraph level owns
+                    // blank-run cuts, and "\n" beside the default triple
+                    // chunks [(0, 1)] on both sides.
+                    let spliced = list.contains(&None) || list.len() > 1;
+                    for entry in list {
+                        let Some(sep) = *entry else { continue };
+                        if sep.is_empty() || spliced {
+                            continue; // the no-op literal production drops at slot construction
+                        }
+                        assert_ne!(
+                            &codepoints[start..end],
+                            sep.chars().collect::<Vec<char>>().as_slice(),
+                            "whole-document budget emitted a chunk that IS the separator \
+                             {sep:?} (#103): text={:?} chunks={chunks:?}",
+                            input.text
+                        );
+                    }
+                }
+            }
         }
     };
 
