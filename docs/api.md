@@ -3007,10 +3007,45 @@ each chunk, falling back to the next level only when the coarser one has no
 in-budget cut over the current window.
 
 `separators=None` (the default) uses tors's own accurate hierarchy:
-paragraph → sentence → word → a grapheme-safe raw cut, always the final,
-unconditional fallback (this never fails to produce a chunk); it reuses the
-same UAX #29 segmenters `chunk_by_sentences`/`chunk_by_words` do, rather
-than LangChain's own naive literal guesses (`"\n\n"`, `". "`, `" "`).
+heading → paragraph → sentence → word → a grapheme-safe raw cut, always
+the final, unconditional fallback (this never fails to produce a chunk);
+it reuses the same UAX #29 segmenters `chunk_by_sentences`/
+`chunk_by_words` do, rather than LangChain's own naive literal guesses
+(`"\n\n"`, `". "`, `" "`).
+
+The heading level (#63) is what makes this structure-aware for markdown:
+its cuts sit at ATX heading lines, so **a section's content never merges
+across a heading of higher rank**. Each cut lands *before* the heading —
+the heading itself rides with the section that follows it (the chunk that
+starts at a heading includes the heading text), and the newline run
+between a section's content and the next heading is dropped between
+chunks, the same convention the paragraph level applies to blank-line
+runs (and when a heading follows a blank-line run, its cut *is* that
+paragraph gap's cut: the two levels agree exactly where both can cut;
+the heading level's addition is the single-newline case the paragraph
+level cannot see). A heading-bearing document under a whole-document
+budget comes back as its sections, not one giant chunk: the
+final-chunk-runs-untrimmed exception is a size concession, and the
+heading level's structural contract outranks it. The level's scope is
+deliberately ATX-only for v1, verified against the markdown the
+`tors.documents` engines actually emit — pdf_oxide's
+`StructType::markdown_prefix` writes `"# "`…`"###### "`, anydoc's
+markdown renderer writes `"#".repeat(level) + " "`, and
+html-to-markdown-rs's `HeadingStyle::default()` is `Atx` — so setext
+underlines (`===`/`---` runs under a paragraph line) are excluded, as are
+every line that is not shaped `1-3 spaces, 1-6 '#', space/tab/EOL`:
+`#no-space`, a 7-hash run, an escaped `\#`, a blockquote's `> # x`, a
+list item's `- # x`, 4-space indented code, and any mid-line hash are
+ordinary content, and a heading-shaped line inside a fenced code block
+(``` fences, CommonMark §4.5's own state machine, shared with
+`extract_code_blocks`) is code. The level is gated: text with no `#` byte
+anywhere never realizes it (a one-pass `memchr` probe is the only cost
+heading-free input adds), so heading-free text chunks exactly as the
+pre-#63 hierarchy did. Precedence is budget > heading > paragraph >
+sentence > word: the heading level bounds sections, the budget still
+bounds oversized sections (split at the finer levels), and the
+grapheme-safe raw cut stays the unconditional last fallback.
+
 `separators=[...]` is a caller-supplied sequence (a list or a tuple) of
 literal strings, not regex
 (a documented scope line: literals are LangChain's own default
@@ -3027,16 +3062,22 @@ no trailing `""` sentinel is required (one is accepted and ignored if
 supplied).
 
 An entry in that sequence may also be `None`: it splices the default
-hierarchy's three accurate levels in at that position, the mix an
+hierarchy's accurate levels in at that position, the mix an
 all-literal list could not express before. `["\n", None]` is
-line → paragraph → sentence → word → raw cut, the line-oriented-text
-shape (a chat thread, one message per line, never split mid-line) whose
-oversized-line fallback is the real UAX #29 sentence/word segmenter
-rather than the `". "`/`" "` literal guesses an all-literal
+line → heading → paragraph → sentence → word → raw cut, the
+line-oriented-text shape (a chat thread, one message per line, never split
+mid-line) whose oversized-line fallback is the real UAX #29 sentence/word
+segmenter rather than the `". "`/`" "` literal guesses an all-literal
 `["\n", ". ", " "]` pins it to: a `". "` match after `"U.S."` is not a
 sentence boundary, and the naive list severs `"U.S. team"` where the
 spliced hierarchy does not. `[None]` is identical to `separators=None`.
-Cost: every level (each of the three default walks, each distinct custom
+The reserved literal `"heading"` is the heading level itself — the
+explicit opt-in for custom hierarchies: `["heading", None]` is heading →
+paragraph → sentence → word → raw cut, the markdown-RAG shape (sections
+bounded by headings, oversized sections split at accurate sentence/word
+boundaries); the word is reserved, so a literal split on `"heading"` is
+not expressible (spell it in different case if you truly need the word).
+Cost: every level (each of the default walks, each distinct custom
 literal) pays its one whole-text walk at most once per call, and only when a
 window consults it: levels are built at their first consultation (the window
 loop walks the list strictly through `find_map`, in priority order), so a
@@ -3137,7 +3178,12 @@ that does not begin with one of the literal separators, under the default
 hierarchy always: a paragraph-gap cut cannot begin at codepoint 0), so the
 whole-document cells below keep their zero-build exit; a text that DOES
 open with a separator match pays the hierarchy's first search there (the
-skip question needs the level), once, memoized. The one other whole-text
+skip question needs the level), once, memoized. Since #63 the default
+hierarchy adds one more lazily-paid pass: the heading level's `#`-byte
+gate probe (~0.12 ms at 12 MiB, `memchr`, once per call at the first
+heading-site consultation — a level realization, the scan itself, or a
+demotion check), which heading-free text answers "no heading can exist"
+without ever building the level. The one other whole-text
 structure is the grapheme
 boundary index, a one-bit-per-codepoint bitmap built lazily, only when a
 realized level has cuts to filter, a window needs the raw-cut fallback, or
@@ -3192,6 +3238,20 @@ tors.chunk_hierarchical(thread, 40, ["\n", None])[1]
 
 tors.chunk_hierarchical(thread, 24, [None]) == tors.chunk_hierarchical(thread, 24)
 # True: [None] is separators=None
+
+md = (
+    "# Guide\n\nIntro paragraph for the guide.\n\n"
+    "## Setup\n\nBody of the setup section, long enough to matter.\n\n"
+    "## Usage\n\nTail section."
+)
+tors.chunk_hierarchical(md, 10_000)
+# [(0, 39), (41, 100), (102, 125)]
+#  -> the sections come back separate even under a whole-document budget:
+#     each chunk starts at its own heading ("# Guide...", "## Setup...",
+#     "## Usage..."); a section wider than max_chars would still split at
+#     paragraph/sentence/word levels (budget > heading > paragraph > ...).
+tors.chunk_hierarchical(md, 10_000, ["heading", None]) == tors.chunk_hierarchical(md, 10_000)
+# True: the "heading" sentinel + splice is the default hierarchy spelled out.
 ```
 
 ## `tors.chunk_cdc`
