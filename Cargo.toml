@@ -149,7 +149,7 @@ rand_chacha = { version = "0.9", default-features = false }
 # for the two fill spellings): the engine code speaks rand_core's vocabulary,
 # not a re-export chain through rand or rand_chacha. No features (the trait
 # surface is core), no new package (already in the tree via both).
-rand_core = { version = "0.9", default-features = false }
+rand_core = { version = "0.10", default-features = false }
 # The single-number extraction grammar behind schema-mode numeric coercion
 # ("$50.0", "USD 50", "1,234.789" — one token, maximal munch, percent
 # suffix). Already in the tree as the jsonschema crate's pattern-validation
