@@ -115,6 +115,10 @@ from tors._tors import (
 )
 
 __all__ = [
+    # The dunder sorts first by ASCII ('_' < 'a'..): the package version,
+    # a published attribute (metadata-read, see its declaration below),
+    # not an internal.
+    "__version__",
     "apply_pipeline",
     "b64_decode",
     "b64_encode_bytes",
