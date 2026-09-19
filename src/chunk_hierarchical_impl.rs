@@ -891,14 +891,20 @@ fn heading_gate_open(text: &str, gate: &mut Option<bool>) -> bool {
 /// * the contiguous levels (sentence, word) are structurally incapable:
 ///   their cuts have `next == cut_end`, and `skip_cut` requires
 ///   `next > cut_end` — no realization, no maybe, ever.
-/// * the heading level (#63) is contiguous too (its cuts are heading
-///   starts, `next == cut_end`: a heading is content, it rides with the
-///   section that follows it), so it is structurally incapable in the
-///   same way — a heading never "opens" a window the way a dropped
-///   separator match does. The heading level's own final-window question
-///   (could a heading cut in range demote the final chunk?) is the
-///   demotion check's, run ahead of this pre-test, not the skip
-///   question's; this arm never realizes the level to answer no.
+/// * the heading level (#63) is NOT structurally incapable, and this
+///   comment is the tripwire that says so: its cut is
+///   `(gap_start, heading_start)` with a newline run strictly between
+///   them whenever content precedes the heading, so `skip_cut` answers
+///   YES at a pre-heading gap start — that is the intended skip (the
+///   dropped run between sections rides the same rule the literal
+///   levels use). An UNREALIZED heading slot answers no here on a
+///   different ground entirely: every final window runs the demotion
+///   check first, which realizes the heading level whenever the gate
+///   is open, so this arm answers from the memoized level, never the
+///   bare `false`. Reordering that check behind this pre-test, or
+///   calling this pre-test from a non-demotion path, would unsound the
+///   #103 final-exit contract through this arm — the differential
+///   sweeps (the reference oracle runs the bare search) are the net.
 ///
 /// Every `false` is therefore provably no-skip (the final-chunk exit
 /// pushes the whole remainder and the differential sweeps — the reference

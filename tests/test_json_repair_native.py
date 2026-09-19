@@ -1207,13 +1207,26 @@ class TestRepairDeadline:
     def test_the_timeout_message_names_the_called_spelling(self, name: str, call) -> None:
         # The same wording as diff_opcodes' TimeoutError, fronted with the
         # called spelling's own name (a small input under a 1ms budget
-        # aborts on the first dispatch-loop check).
+        # aborts on the first dispatch-loop check). The contract is the
+        # message's SEMANTICS — the called name, both numbers in ms, the
+        # elapsed genuinely past the budget — not the numbers' decimal
+        # format.
         raw = "[{" + '"a":1 "a":1 ' * 5_000 + "}]"
         with pytest.raises(
-            TimeoutError,
-            match=rf"^{name} deadline exceeded: elapsed \d+\.\dms > deadline_ms 1\.0ms$",
-        ):
+            TimeoutError, match=rf"^{name} deadline exceeded:"
+        ) as excinfo:
             call(raw, deadline_ms=1)
+        numbers = re.search(
+            r"elapsed ([\d.]+)ms > deadline_ms ([\d.]+)ms", str(excinfo.value)
+        )
+        assert numbers is not None, str(excinfo.value)
+        elapsed_ms, deadline_ms = (float(group) for group in numbers.groups())
+        assert deadline_ms == 1.0
+        # The rounded elapsed can only ever EQUAL the rounded deadline
+        # (rounding moves each side at most 0.0005), never dip below it:
+        # the check's strict fact is proven by the abort itself (the
+        # TimeoutError) and the budget-bounding cells below.
+        assert elapsed_ms >= deadline_ms
 
     def test_the_budget_includes_the_strict_fast_path(self) -> None:
         # The clock starts at the top of repair(), so the strict fast path
@@ -1221,10 +1234,10 @@ class TestRepairDeadline:
         # whose fast path fails at the truncated tail must report the whole
         # attempt as elapsed, not start a fresh clock at the repair parser.
         raw = "[" + ",".join(f'{{"k{i}": {i}}}' for i in range(400_000))[:-1]
-        pattern = r"elapsed (\d+\.\d)ms > deadline_ms 1\.0ms"
+        pattern = r"elapsed ([\d.]+)ms > deadline_ms ([\d.]+)ms"
         with pytest.raises(TimeoutError, match=pattern) as excinfo:
             repair_json(raw, deadline_ms=1)
-        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        elapsed = float(re.search(r"elapsed ([\d.]+)ms", str(excinfo.value)).group(1))
         # The fast-path scan of ~4MB is tens of ms; a parser-only clock
         # would report ~1ms. 30ms sits far from both.
         assert elapsed >= 30.0
@@ -1527,9 +1540,9 @@ class TestRepairDeadline:
             return (_time.perf_counter() - start) * 1000.0
 
         def bounded_elapsed_ms() -> float:
-            with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+            with pytest.raises(TimeoutError, match=r"elapsed ([\d.]+)ms") as excinfo:
                 repair_json_loads(raw, schema=schema, deadline_ms=1)
-            return float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+            return float(re.search(r"elapsed ([\d.]+)ms", str(excinfo.value)).group(1))
 
         unit = min(parse_unit_ms() for _ in range(3))
         elapsed = min(bounded_elapsed_ms() for _ in range(2))
@@ -1549,9 +1562,9 @@ class TestRepairDeadline:
         # abort lands at the first head check (~the parse time).
         raw = '"' + "a" * 2_000_000 + '"'
         schema: dict[str, Any] = {"anyOf": [{"type": "integer"}] * 5_000}
-        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+        with pytest.raises(TimeoutError, match=r"elapsed ([\d.]+)ms") as excinfo:
             repair_json_loads(raw, schema=schema, deadline_ms=1)
-        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        elapsed = float(re.search(r"elapsed ([\d.]+)ms", str(excinfo.value)).group(1))
         assert elapsed < 300.0
 
     def test_the_type_union_head_check_keeps_expired_branches_free(self) -> None:
@@ -1563,9 +1576,9 @@ class TestRepairDeadline:
         # the check, the abort lands at the first head check (~the parse).
         raw = '"' + "a" * 2_000_000 + '"'
         schema: dict[str, Any] = {"type": ["integer"] * 40_000}
-        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+        with pytest.raises(TimeoutError, match=r"elapsed ([\d.]+)ms") as excinfo:
             repair_json_loads(raw, schema=schema, deadline_ms=1)
-        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        elapsed = float(re.search(r"elapsed ([\d.]+)ms", str(excinfo.value)).group(1))
         assert elapsed < 300.0
 
     def test_the_type_union_branch_loop_is_bounded_by_the_deadline(self) -> None:
@@ -1576,9 +1589,9 @@ class TestRepairDeadline:
         # with it the abort lands at the first kind past expiry (~3ms).
         raw = '"' + "a" * 5_000_000 + '"'
         schema: dict[str, Any] = {"type": ["integer"] * 150}
-        with pytest.raises(TimeoutError, match=r"elapsed (\d+\.\d)ms") as excinfo:
+        with pytest.raises(TimeoutError, match=r"elapsed ([\d.]+)ms") as excinfo:
             repair_json_loads(raw, schema=schema, deadline_ms=1)
-        elapsed = float(re.search(r"elapsed (\d+\.\d)ms", str(excinfo.value)).group(1))
+        elapsed = float(re.search(r"elapsed ([\d.]+)ms", str(excinfo.value)).group(1))
         assert elapsed < 100.0
 
     def test_the_ladder_sweep_cannot_stampede_past_the_budget(self) -> None:
@@ -1809,7 +1822,7 @@ class TestRepairDeadline:
         raw = "{" + ",".join(f'"propertx_{i:06}": {i}' for i in range(20_000)) + "}"
         with pytest.raises(
             TimeoutError,
-            match=rf"^{name} deadline exceeded: elapsed \d+\.\dms > deadline_ms 1\.0ms$",
+            match=rf"^{name} deadline exceeded: elapsed \d+\.\d\d\dms > deadline_ms 1\.000ms$",
         ):
             call(raw, schema=schema, deadline_ms=1)
 

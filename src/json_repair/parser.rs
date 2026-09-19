@@ -182,7 +182,7 @@ pub(crate) const DEADLINE_FORCE_SCAN_CHARS: usize = 1024;
 /// `diff_opcodes`' TimeoutError, so the py layer only has to front it
 /// with the spelling's name.
 pub(crate) fn deadline_exceeded_payload(deadline_ms: f64, elapsed_ms: f64) -> String {
-    format!("{DEADLINE_TAG} elapsed {elapsed_ms:.1}ms > deadline_ms {deadline_ms:.1}ms")
+    format!("{DEADLINE_TAG} elapsed {elapsed_ms:.3}ms > deadline_ms {deadline_ms:.3}ms")
 }
 
 /// The lookahead-cache key: the target chars in call order, '\0'-padded
