@@ -2689,7 +2689,7 @@ dependencies = [
  "pyo3",
  "rand 0.9.5",
  "rand_chacha",
- "rand_core 0.9.5",
+ "rand_core 0.10.1",
  "regex",
  "rphonetic",
  "rs_merkle",
