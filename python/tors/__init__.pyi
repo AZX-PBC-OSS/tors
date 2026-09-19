@@ -1,6 +1,12 @@
 from collections.abc import Iterator, Sequence
 from typing import Any, Literal, SupportsIndex
 
+__version__: str
+"""The installed distribution's version, read from its metadata
+(``importlib.metadata.version("tors")``) at import; ``"unknown"`` where
+the distribution metadata is absent (a source tree imported off-path) —
+never a second literal to drift against the wheel."""
+
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
 # STEMMER_LANGUAGES (this is that same list, spelled as a type). Shared by
 # tf_idf's and bm25_rank's stemmer= parameter rather than duplicated.

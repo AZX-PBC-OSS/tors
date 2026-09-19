@@ -115,6 +115,10 @@ from tors._tors import (
 )
 
 __all__ = [
+    # The dunder sorts first by ASCII ('_' < 'a'..): the package version,
+    # a published attribute (metadata-read, see its declaration below),
+    # not an internal.
+    "__version__",
     "apply_pipeline",
     "b64_decode",
     "b64_encode_bytes",
@@ -249,6 +253,21 @@ CHARSET_HEX_LOWER = "0123456789abcdef"
 CHARSET_HEX_UPPER = "0123456789ABCDEF"
 # The 22-char union of the two hex spellings: case-insensitive hex digests.
 CHARSET_HEX_MIXED = "0123456789abcdefABCDEF"
+
+__version__: str
+
+try:
+    # The installed distribution's version (the wheel's own 0.7.*), not a
+    # second literal to drift against it: importlib.metadata is the stdlib's
+    # answer, and the fallback keeps `import tors` alive anywhere the
+    # distribution metadata is absent (a source tree imported off-path), at
+    # the cost of __version__ reporting the unknown rather than lying.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _metadata_version
+
+    __version__ = _metadata_version("tors")
+except PackageNotFoundError:  # pragma: no cover - metadata-off environments
+    __version__ = "unknown"
 
 
 def __getattr__(name: str) -> ModuleType:
