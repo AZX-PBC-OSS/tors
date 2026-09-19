@@ -241,6 +241,9 @@ class TestIndependenceFromSimhash64:
 
 
 class TestPerformanceSanity:
+    # Single-sample tripwire, huge measured margin (~9,000x): the timing
+    # lane's discipline, the fast lane never reds on a slow runner.
+    @pytest.mark.timing
     def test_large_input_completes_quickly(self) -> None:
         big = "the quick brown fox jumps over the lazy dog. " * 300_000  # ~13.5MB
         start = time.perf_counter()

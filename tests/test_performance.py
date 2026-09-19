@@ -1010,15 +1010,20 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
     after #22, when the scan still ran on top). The pre-#22 spelling
     measured ~700x.
 
-    The absolute ceiling (0.8ms) is the fast path's own pin, which the
+    The absolute ceiling (2.0ms) is the fast path's own pin, which the
     8x scan race above cannot provide: a char_count reverted to the
     predicate-only spelling (no ``is_ascii`` gate) measures ~2.5ms on
     this corpus (red-proofed: that revert fails this cell), which still
     passes 8x an ~8ms scan, so the race is blind to exactly the
-    fast-path loss. 0.8ms sits ~3-5x above the measured band
+    fast-path loss. 2.0ms sits ~8-13x above the measured band
     (0.15-0.25ms, min-of-3 after warmup on the box this ceiling was
-    calibrated on) and ~3x below the predicate-only spelling, so the
-    gate's loss fails this cell while CI load does not."""
+    calibrated on) and below the predicate-only spelling, so the gate's
+    loss fails this cell while CI load does not. (Recalibrated from
+    0.8ms: a sustained-load runner drove even the min-of-N wall past
+    0.8ms — the exact flake shape the word_bounds ceiling's
+    recalibration documented; the sibling cell below carries the same
+    ceiling for the same reason.)
+    """
     q = "q" * (12 * _MIB)
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 12 * _MIB, ["xyz"]), q)
     scan_ms = _min_wall_ms(lambda s: "xyz" in s, q)
@@ -1027,10 +1032,10 @@ def test_chunk_hierarchical_custom_no_match_is_scan_cost_not_per_char_structures
         f"{scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); the lazily-built "
         "grapheme machinery regressed to an unconditional structure"
     )
-    assert tors_ms < 0.8, (
+    assert tors_ms < 2.0, (
         f"chunk_hierarchical no-match 12MiB took {tors_ms:.2f}ms, over the "
         "whole-budget absolute ceiling (measured ~0.15-0.25ms with the char_count "
-        "ASCII fast path, ceiling 0.8ms; the predicate-only spelling measures "
+        "ASCII fast path, ceiling 2.0ms; the predicate-only spelling measures "
         "~2.5ms and must fail this cell); the char_count ASCII fast path regressed"
     )
 
@@ -1083,15 +1088,21 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
     the default cell ~0.26ms vs the custom ~0.14ms, min-of-5), and no
     level builds.
 
-    The absolute ceiling (0.8ms) is the char_count ASCII fast path's pin
+    The absolute ceiling (2.0ms) is the char_count ASCII fast path's pin
     on this lane, the no-match cell's twin rationale: the 8x scan race
     cannot see the fast path's loss (a predicate-only count ~2.5ms at
-    12 MiB still passes 8x an ~8ms scan), while 0.8ms sits ~2.4-5x above
-    the measured band (0.16-0.33ms, min-of-3 after warmup on the box
-    this ceiling was calibrated on; ~0.26ms with the #63 gate pass
-    included) and ~3x below the predicate-only spelling (red-proofed:
-    that revert fails this cell), so the ``is_ascii`` gate's loss fails
-    this cell."""
+    12 MiB still fails 2.0ms), while 2.0ms sits ~6-12x above the
+    measured band (0.16-0.33ms, min-of-3 after warmup on the box this
+    ceiling was calibrated on; ~0.26ms with the #63 gate pass included)
+    and below the predicate-only spelling (~2.5ms; red-proofed: that
+    revert fails this cell), so the ``is_ascii`` gate's loss fails this
+    cell. (Recalibrated from 0.8ms: a sustained-load runner drove even
+    the min-of-N wall to 0.85ms — 1.06x the old ceiling — the exact
+    flake shape the word_bounds ceiling's recalibration documented; the
+    ceiling, not the ratio, was the flake. The headroom keeps the
+    red-proof: the predicate-only spelling's own band scales with the
+    same load, so it stays above the ceiling.)
+    """
     corpus = prose(12 * _MIB)
     assert "#" not in corpus, "the heading-free scope line requires a '#' byte-free corpus"
     tors_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, len(s)), corpus)
@@ -1101,11 +1112,11 @@ def test_chunk_hierarchical_whole_document_budget_pays_no_level_walks() -> None:
         f"against an {scan_ms:.1f}ms bare scan ({tors_ms / scan_ms:.0f}x); "
         "levels are being built on a call that consults none of them"
     )
-    assert tors_ms < 0.8, (
+    assert tors_ms < 2.0, (
         f"chunk_hierarchical whole-document default 12MiB took {tors_ms:.2f}ms, "
         "over the whole-budget absolute ceiling (measured ~0.16-0.33ms with the "
         "char_count ASCII fast path, ~0.26ms with the #63 gate pass, ceiling "
-        "0.8ms; the predicate-only spelling measures ~2.5ms and must fail this "
+        "2.0ms; the predicate-only spelling measures ~2.5ms and must fail this "
         "cell); the char_count ASCII fast path regressed"
     )
 

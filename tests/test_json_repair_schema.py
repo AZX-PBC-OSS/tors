@@ -712,12 +712,15 @@ class TestConstrainedBigintRefusal:
     def test_property_names_big_int_value_is_not_the_gates_refusal(self) -> None:
         # The red-team shape: a huge integer AS the propertyNames value.
         # It is not a constrained position, so the gate stays silent — the
-        # call may still fail later for the pre-existing reason (a scalar
-        # subschema does not compile), but never with the constraint
-        # refusal.
-        with pytest.raises(ValueError) as excinfo:
+        # call may still fail later for a pre-existing reason (a scalar
+        # subschema does not compile today; if that behavior changed to
+        # acceptance, this test must NOT break — the assertion is only
+        # about which refusal fires, so any error is caught and only the
+        # gate's message is forbidden).
+        try:
             repair_json_loads("5", schema={"propertyNames": _BIG})
-        assert "Schema constraint at" not in str(excinfo.value)
+        except ValueError as excinfo_value:
+            assert "Schema constraint at" not in str(excinfo_value)
 
     def test_pointer_escapes_in_reached_keys(self) -> None:
         # A property key with pointer metacharacters escapes ~0/~1 in the

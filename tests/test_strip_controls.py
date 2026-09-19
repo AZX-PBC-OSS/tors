@@ -98,6 +98,12 @@ class TestEdges:
 
 
 class TestArgumentBoundary:
+    def test_non_str_argument_is_refused(self) -> None:
+        """The boundary every sibling surface pins: a non-``str`` is the
+        TypeError (pyo3's own message), never a silent coercion."""
+        with pytest.raises(TypeError):
+            strip_controls(123)  # type: ignore[arg-type]
+
     def test_lone_surrogate_is_refused(self) -> None:
         with pytest.raises(UnicodeEncodeError):
             strip_controls("\ud800abc")
