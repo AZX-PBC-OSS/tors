@@ -25,7 +25,8 @@ the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
 both truncate spellings, ``strip_controls``, ``scrub_log_text``,
-``scrub_pii``); each a single native pass
+``scrub_pii``/``scrub_pii_report``, and the bounds reporters
+``word_bounds``/``sentence_bounds``); each a single native pass
 whose cost scales with its input (``scrub_log_text``: four linear scans +
 splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
 document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
@@ -87,7 +88,8 @@ __all__: list[str] = []
 # whose docs measure seconds-to-minutes on large inputs), and the
 # input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
-# both truncate spellings, strip_controls, scrub_log_text, scrub_pii: each a
+# both truncate spellings, strip_controls, scrub_log_text, scrub_pii (and
+# its report twin), word_bounds/sentence_bounds: each a
 # single native pass
 # whose cost scales with its input (scrub_log_text: four linear scans + splice under
 # one py.detach), the 12 MiB-document shape this module exists
@@ -129,11 +131,13 @@ _WRAPPED = (
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",
+    "sentence_bounds",
     "similarity_ratio",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",
     "truncate_to_bounds",
+    "word_bounds",
 )
 
 
