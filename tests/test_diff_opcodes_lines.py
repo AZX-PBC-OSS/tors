@@ -236,7 +236,7 @@ class TestDeadline:
         wall = time.perf_counter() - started
         message = str(excinfo.value)
         assert type(excinfo.value) is TimeoutError
-        assert re.search(rf"\b{_DEADLINE_MS:g}(\.0)?\s*ms\b", message), message
+        assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
         assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
         assert wall < 1.0, f"deadline-bounded call took {wall:.2f}s"
 

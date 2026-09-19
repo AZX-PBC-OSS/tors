@@ -26,6 +26,7 @@ nav:
   - API reference: api.md
   - Documents: documents.md
   - Performance: performance.md
+  - Cache proof: cache-proof.md
   - Async use: async.md
   - Design and scope: design.md
   - Dependencies and licensing: dependencies.md

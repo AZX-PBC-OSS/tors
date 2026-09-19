@@ -765,6 +765,11 @@ def content_hash(
 # Domain-separated SHA-256 (RFC 6962-style: leaves hash 0x00‖chunk, internal
 # nodes hash 0x01‖left‖right): not the crate's undifferentiated default,
 # which is forgeable (CVE-2012-2459-class leaf/internal-node confusion).
+# An EMPTY chunk list refuses (`ValueError` "root of no chunks"): the
+# RFC 6962 empty-tree hash exists but is a statement about an ABSENT
+# structure — a caller hashing nothing almost certainly means an upstream
+# bug, so the error is the contract (the empty case is pinned in the
+# battery).
 def merkle_root(chunks: list[bytes]) -> str: ...
 def merkle_diff(chunks_a: list[bytes], chunks_b: list[bytes]) -> list[int]: ...
 

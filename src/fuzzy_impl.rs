@@ -67,7 +67,7 @@ impl DeadlineExceeded {
     /// The `str()` of the `TimeoutError` the pyo3 layer raises.
     pub fn message(&self) -> String {
         format!(
-            "fuzzy metric deadline exceeded: elapsed {:.1}ms > deadline_ms {:.1}ms",
+            "fuzzy metric deadline exceeded: elapsed {:.3}ms > deadline_ms {:.3}ms",
             self.elapsed_ms, self.deadline_ms
         )
     }
@@ -727,8 +727,22 @@ mod tests {
         assert_eq!(err.deadline_ms, 5.0);
         assert!(err.elapsed_ms > 5.0, "elapsed must exceed the budget");
         let message = err.message();
-        assert!(message.contains("deadline_ms 5.0ms"), "{message}");
-        assert!(message.contains("elapsed "), "{message}"); // And the deadline actually bounded the work: the call returned
+        // The message names both numbers — the semantics the str() the
+        // TimeoutError carries: exactly two ms-suffixed numbers, the
+        // deadline's own value and a strictly greater elapsed. The decimal
+        // format is not the contract.
+        let numbers: Vec<f64> = message
+            .split_whitespace()
+            .filter_map(|word| word.strip_suffix("ms").and_then(|n| n.parse().ok()))
+            .collect();
+        assert_eq!(numbers.len(), 2, "{message}");
+        assert_eq!(numbers[1], 5.0, "{message}");
+        // Rounded-to-3-decimals reports: the rounded elapsed can only ever
+        // EQUAL the rounded deadline (rounding moves each side at most
+        // 0.0005), never dip below it — the strict fact is the field
+        // assert above, on the unrounded f64.
+        assert!(numbers[0] >= numbers[1], "{message}");
+        // And the deadline actually bounded the work: the call returned
         // in well under the unbounded cost (loose bound for a loaded
         // runner).
         let started = Instant::now();

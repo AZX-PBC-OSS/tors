@@ -137,7 +137,7 @@ pub struct DeadlineExceeded {
 impl DeadlineExceeded {
     pub fn message(&self) -> String {
         format!(
-            "is_grounded fuzzy scan deadline exceeded: elapsed {:.1}ms > deadline_ms {:.1}ms",
+            "is_grounded fuzzy scan deadline exceeded: elapsed {:.3}ms > deadline_ms {:.3}ms",
             self.elapsed_ms, self.deadline_ms
         )
     }

@@ -3499,7 +3499,20 @@ fn synthesize_branch(schema: &Value, kind: &str) -> Value {
 /// deep-schema failures come from validation-side recursion, so the
 /// constructor gates the tree itself: a schema deeper than the cap can
 /// never validate, and carries the normalized error from the start.
+///
+/// Self-capped like its siblings ([`schema_has_formats`] below, the
+/// iterative node-budget scans): the recursion is the MEASURING
+/// instrument for the depth gate, so an internal cap is the gate's own
+/// correctness — the raw `Value` tree is Rust-constructible to
+/// stack-overflow depths (the Python boundary caps its own decode at
+/// [`MAX_SCHEMA_WALK_DEPTH`], but the Rust `repair` API accepts any
+/// tree), and a self-uncapped walk would overflow the stack computing
+/// the very number the gate refuses on. The cap returns a depth past
+/// the cap, short-circuiting the max to the gate's refusal immediately.
 fn schema_nesting(value: &Value, depth: usize) -> usize {
+    if depth > MAX_SCHEMA_DEPTH {
+        return depth;
+    }
     match value {
         Value::Object(entries) => entries
             .iter()
@@ -3992,7 +4005,7 @@ fn schema_bigint_refusal(schema: &Value) -> Result<(), String> {
     match bigint_offense_scan(schema) {
         Scan::Clean => Ok(()),
         Scan::OverBudget => Err(
-            "Input schema exceeds the supported schema node budget; refusing the walk past 2,000,000 nodes rather than scan unbounded."
+            "Input schema exceeds the supported schema node budget; refusing the walk rather than scan unbounded."
                 .into(),
         ),
         Scan::Offense => {

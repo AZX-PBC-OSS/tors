@@ -605,7 +605,7 @@ class TestDeadline:
         message = str(excinfo.value)
         assert type(excinfo.value) is TimeoutError
         # The message names the deadline and the elapsed cost, both in ms.
-        assert re.search(rf"\b{_DEADLINE_MS:g}(\.0)?\s*ms\b", message), message
+        assert re.search(rf"\b{_DEADLINE_MS:g}(\.\d+)?\s*ms\b", message), message
         assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
         # The deadline bounded the call (the unbounded diff is ~30x the
         # budget; generous upper bound for a loaded runner's dispatch).
