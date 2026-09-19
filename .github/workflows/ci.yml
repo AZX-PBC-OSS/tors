@@ -116,7 +116,7 @@ jobs:
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile, not this workflow, owns its version.
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
 
       - name: Ruff
         # The Python-side lint gate (config in pyproject.toml [tool.ruff];
@@ -180,7 +180,7 @@ jobs:
         run: cargo bench --no-run --no-default-features
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
