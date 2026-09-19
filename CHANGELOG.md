@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.7.0...v0.8.0) (2026-09-19)
+
+
+### Features
+
+* **aio:** word_bounds/sentence_bounds async twins, and the docs' truth corrections ([cc26514](https://github.com/AZX-PBC-OSS/tors/commit/cc265148ad73058d79b4f07a138fbd55b5688d9f))
+
+
+### Performance Improvements
+
+* **pii, search, repair:** bucketed key families, id-indexed masked splice, integer address probes ([#109](https://github.com/AZX-PBC-OSS/tors/issues/109)) ([431eda8](https://github.com/AZX-PBC-OSS/tors/commit/431eda8b1633abaead121b1c257baa17262c49e7))
+
 ## [0.7.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.6.1...v0.7.0) (2026-09-17)
 
 
