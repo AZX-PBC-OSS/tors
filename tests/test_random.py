@@ -1222,15 +1222,22 @@ class TestNoRngStateGuard:
                 assert feat not in ("fast-rng",), f"dev uuid feature: {feat}"
 
     def test_os_failures_map_to_runtime_error_in_the_binding(self) -> None:
-        # The Os-error half of the mapping contract, pinned as text for
-        # the same un-triggerability reason: a real getrandom failure
-        # is effectively impossible post-boot, so no test can raise it
-        # on demand — but the mapping arm must survive refactors.
+        # The Os-error half of the mapping contract, pinned as a
+        # co-occurrence (not exact arm text) for the same
+        # un-triggerability reason: a real getrandom failure is
+        # effectively impossible post-boot, so no test can raise it on
+        # demand — but the mapping arm must survive refactors. The pin
+        # holds whenever a RandomError::Os match arm maps to
+        # PyRuntimeError, whatever the arm's exact spelling or the
+        # arms' order.
         import pathlib
+        import re
 
         binding = pathlib.Path(__file__).parent.parent / "src" / "py" / "random.rs"
         source = binding.read_text(encoding="utf-8")
-        assert "RandomError::Os(_) | RandomError::Clock(_) => PyRuntimeError" in source
+        assert re.search(
+            r"RandomError::Os\(_\)[^#\n]*=>\s*PyRuntimeError", source
+        ), "the RandomError::Os arm must map to PyRuntimeError"
 
 
 class TestRfc8439Anchors:

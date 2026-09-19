@@ -188,6 +188,11 @@ class TestUnicode:
 
 
 class TestPerformanceSanity:
+    # The wall asserts below are single-sample tripwires with huge measured
+    # margins (~23,000x on this box), not the suite's min-of-N discipline:
+    # they ride the timing lane so a slow runner never reds the fast lane
+    # on them.
+    @pytest.mark.timing
     def test_large_input_completes_quickly(self) -> None:
         big = "the quick brown fox jumps over the lazy dog. " * 300_000  # ~13.5MB
         start = time.perf_counter()

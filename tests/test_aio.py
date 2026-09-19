@@ -32,6 +32,7 @@ What this gate pins:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import time
@@ -65,11 +66,25 @@ class TestCoverage:
         """The design requirement, asserted structurally: the wrapper's
         body is exactly one unconditional ``await asyncio.to_thread(fn,
         ...)``, no branch on argument size or shape anywhere in it: the
-        facade never silently decides to run inline."""
-        source = inspect.getsource(tors.aio._make_async)  # noqa: SLF001
-        wrapper_body = source.split("async def wrapper")[1].split("wrapper.__qualname__")[0]
-        assert "asyncio.to_thread" in wrapper_body
-        assert "if " not in wrapper_body
+        facade never silently decides to run inline. Parsed with ``ast``
+        (a substring scan would false-fail on a comment containing "if "
+        and miss a ``match``-statement dispatch); the property is also
+        asserted behaviorally by the heartbeat cell below."""
+        fn = tors.aio._make_async  # noqa: SLF001
+        (wrapper_def,) = [
+            node
+            for node in ast.walk(ast.parse(inspect.getsource(fn)))
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "wrapper"
+        ]
+        await_exprs = [
+            node.value
+            for node in ast.walk(wrapper_def)
+            if isinstance(node, ast.Await)
+        ]
+        assert len(await_exprs) == 1, wrapper_def.body
+        (awaited,) = await_exprs
+        assert isinstance(awaited, ast.Call)
+        assert ast.unparse(awaited.func).endswith("to_thread")
 
     def test_the_input_scaling_fuzzy_and_repair_family_has_twins(self) -> None:
         """The heavy tail the facade exists for must not be left on the

@@ -500,9 +500,13 @@ class TestBoundsContract:
             _FOX, num_perm=1024, seed=7
         )
 
+    @pytest.mark.timing
     def test_huge_shingle_size_is_sentinel_without_work(self) -> None:
         # A shingle wider than the token stream is the empty set, however
         # huge the width: the sentinel answer with no window blowup.
+        # The BEHAVIOR is the sentinel equality; the wall assert rides
+        # along as a tripwire (huge measured margin), so the cell takes
+        # the timing lane's discipline rather than the fast lane's.
         started = time.perf_counter()
         sig = minhash_signature(_FOX, shingle_size=10**9)
         elapsed = time.perf_counter() - started
