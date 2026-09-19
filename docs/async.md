@@ -3,9 +3,17 @@
 Releasing the GIL is not the same as not blocking. A native pass called
 directly from a coroutine still occupies that coroutine's own turn on the
 event loop for the call's full wall-clock duration. `tors.aio` is the
-pre-wired fix for the functions where that matters: `await
-tors.aio.tf_idf(corpus)` runs the native pass in a worker thread via
-`asyncio.to_thread`, and the event loop stays responsive for the whole call.
+pre-wired fix for the functions where that matters:
+
+```python
+import tors.aio  # the facade is its own module, imported explicitly
+
+await tors.aio.tf_idf(corpus)
+```
+
+The `await tors.aio.tf_idf(corpus)` call runs the native pass in a worker
+thread via `asyncio.to_thread`, and the event loop stays responsive for
+the whole call.
 
 It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
@@ -17,8 +25,10 @@ fuzzy-matching and JSON-repair families
 `get_close_matches`, `is_grounded`, and the `repair_json*` trio:
 quadratic and linear native passes whose documented measurements reach
 seconds and minutes on large inputs, exactly the calls that starve a loop
-un-wrapped), both truncate spellings, and
-`strip_controls`/`scrub_log_text`/`scrub_pii`. Thread dispatch costs on the order of
+un-wrapped), both truncate spellings,
+`strip_controls`/`scrub_log_text`/`scrub_pii`/`scrub_pii_report`, and the
+bounds reporters `word_bounds`/`sentence_bounds` (their marshalling band
+at whole-file sizes is the list shape's own; see performance.md). Thread dispatch costs on the order of
 tens of microseconds: noise next to a millisecond-or-slower native pass over a
 real corpus or document, real overhead next to a microsecond-scale call over a
 short string. Exception-size guidance: `scrub_log_text`'s error-path inputs
@@ -40,10 +50,17 @@ runtime guess. `tests/test_aio.py` pins this structurally (no branch in the
 wrapper body) as well as behaviorally (a heartbeat coroutine keeps ticking
 with worst gaps well under the call's own wall during a large `diff_opcodes`
 await), and pins the covered set against `tors.aio._WRAPPED`: the curated
-list is the contract, and every input-scaling function belongs in it,
-including the fuzzy/repair family, whose unwrapped twins would leave the
-minutes-scale calls (the ones that most need the thread hop) on the sync
-spelling alone.
+list is the contract, and the families it names are the input-scaling set
+it covers — including the fuzzy/repair family, whose unwrapped twins would
+leave the minutes-scale calls (the ones that most need the thread hop) on
+the sync spelling alone. The covered boundary is spelled exactly: the
+list-returning bounds reporters (`word_bounds`, `sentence_bounds`) are
+wrapped like their chunking cousins; the input-scaling APIs still
+unwrapped are the search/replace family (`find_patterns`, `count_matches`,
+`replace_many`, `replace_many_masked`) and the code-block family
+(`extract_code_blocks`, `strip_code_fences`) — both are
+`asyncio.to_thread(tors.fn, ...)` one-liners on the consumer side until
+they earn a twin.
 
 The streaming iterator constructors (`word_bounds_iter` and siblings,
 including the chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/

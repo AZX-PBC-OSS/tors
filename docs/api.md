@@ -64,7 +64,7 @@ tors.normalize("line one  \n\n\n\nline two\r\n")
 # "line one\n\nline two"
 ```
 
-**Async**: `await tors.aio.normalize(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+**Async**: `await tors.aio.normalize(...)` runs this under `asyncio.to_thread` (see [Async use](async.md); the facade is a submodule — `import tors.aio` once, not an attribute of `import tors`).
 
 ## `tors.finalize`
 
@@ -363,8 +363,6 @@ timestamps:
   leaves them.
 - Fullwidth `＋` (U+FF0B) is not the literal `+`, and fullwidth/odd
   spaces are not the ASCII space class: `＋12345678` stays untouched.
-- IDN / non-ASCII domains leak whole: the email classes are ASCII-only,
-  so `a@exämple.com` never matches (the documented non-match).
 - RFC local characters outside `[A-Za-z0-9._%+-]` fragment-leak: `!`,
   `#`, `$`, `&`, `'`, `*`, `/`, `=`, `?`, `^`, `` ` ``, `{`, `|`, `}`,
   `~` split the local part, so `a!b@x.co` scrubs `b@x.co` and the `a!`
@@ -829,6 +827,10 @@ below.
 tors.word_bounds("Hello, world!")
 # [(0, 5), (5, 6), (6, 7), (7, 12), (12, 13)]
 ```
+
+**Async**: `await tors.aio.word_bounds(...)` runs this under `asyncio.to_thread`
+(see [Async use](async.md)) — the marshalling hold above is exactly what the hop
+removes from the event loop.
 
 ## `tors.word_bounds_iter`
 
@@ -1339,6 +1341,9 @@ heavyweight alternative if you need those.
 tors.sentence_bounds("One. Two. U.S. stocks fell.")
 # [(0, 5), (5, 10), (10, 27)]
 ```
+
+**Async**: `await tors.aio.sentence_bounds(...)` runs this under
+`asyncio.to_thread` (see [Async use](async.md)).
 
 ## `tors.sentence_count`
 
@@ -3107,8 +3112,8 @@ are unaffected: an all-literal list behaves identically under either
 spelling. The merge that introduced it (#28) landed as a plain `feat:`
 with no `BREAKING CHANGE:` footer, which release-please would not have
 surfaced on its own, so the footer is restated on the follow-up fix
-commit (#31), which release-please will carry into the 0.6.0 changelog
-when that release lands; this note is the docs-side record.
+commit (#31), which release-please carried into the 0.6.0 changelog
+(released 2026-09-10); this note is the docs-side record.
 
 **Unlike `chunk_text`, this is not a lossless covering partition**: at
 every level except the raw cut, the separator itself is dropped between
