@@ -10,7 +10,7 @@
 //! Two spellings, one per caller intent, never interchangeable:
 //!
 //! * **Unseeded (the default)**: fresh bytes from the operating system's
-//!   CSPRNG on every call — `OsRng` (rand_core's zero-sized handle over the
+//!   CSPRNG on every call — `SysRng` (rand_core's zero-sized handle over the
 //!   getrandom crate's syscall), drawn through `try_fill_bytes` per call.
 //!   There is no process or thread RNG state anywhere in this module, so a
 //!   `fork()` child cannot inherit and replay a parent's stream — the
@@ -66,7 +66,7 @@
 //!   order (the same word order rand_core's own `BlockRng::next_u64`
 //!   produces, "least significant first") — buffered one 1024-byte block
 //!   per `fill_bytes` so the unseeded spelling costs one OS syscall per
-//!   128 words instead of one per word (`OsRng`'s `try_next_u64` is a
+//!   128 words instead of one per word (`SysRng`'s `try_next_u64` is a
 //!   syscall per call). Buffering changes no output: the u64 sequence is
 //!   the stream's u64 sequence either way.
 //! * Consequently `random_hex(n, seed=s)` IS
@@ -121,7 +121,7 @@
 //! # Dependencies
 //!
 //! Per the crate's dependency policy the hard parts are all maintained
-//! crates: rand (OsRng), rand_chacha (the stream), uuid (field layout and
+//! crates: rand (SysRng), rand_chacha (the stream), uuid (field layout and
 //! formatting) — and after the length-first refactor that is the whole
 //! list: const-hex and base64 served the old byte-fill+encode hex/b64url
 //! spellings and dropped out of this module (both crates stay in
@@ -133,9 +133,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
 use rand_chacha::ChaCha20Rng;
-use rand_core::{RngCore, SeedableRng, TryRngCore};
+use rand_core::{Rng, SeedableRng, TryRng};
 use uuid::{Builder as UuidBuilder, Uuid};
 
 /// The hex alphabet `random_hex` samples over: `[0-9a-f]`, lowercase —
@@ -216,7 +216,7 @@ impl RandomError {
 /// (fresh OS bytes per call — see the module docs for the fork-safety
 /// argument) and the seeded deterministic ChaCha20 stream.
 enum Source {
-    Os(OsRng),
+    Os(SysRng),
     // Boxed per clippy's large_enum_variant: ChaCha20Rng carries a
     // quarter-KiB results buffer, and the boxed spelling keeps `Source`
     // (and the `Words` struct embedding it) off the fat-enum path. The one
@@ -230,7 +230,7 @@ impl Source {
     /// seed.
     fn new(seed: Option<u64>) -> Self {
         match seed {
-            None => Source::Os(OsRng),
+            None => Source::Os(SysRng),
             Some(seed) => Source::Seeded(Box::new(ChaCha20Rng::seed_from_u64(seed))),
         }
     }
