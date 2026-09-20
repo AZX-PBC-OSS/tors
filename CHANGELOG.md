@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.8.0...v0.9.0) (2026-09-20)
+
+
+### Features
+
+* **aio:** the search/replace and code-block families' async twins ([e9c8ff5](https://github.com/AZX-PBC-OSS/tors/commit/e9c8ff504399f514d1286aa3979d75ab436f71ba))
+
+
+### Bug Fixes
+
+* **hardening:** the red-team round's findings, closed at their roots ([83c650b](https://github.com/AZX-PBC-OSS/tors/commit/83c650bcc15b7c62a60aadc294e1dfc995eddb24))
+
 ## [0.8.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.7.0...v0.8.0) (2026-09-19)
 
 
