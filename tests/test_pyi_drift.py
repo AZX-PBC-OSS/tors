@@ -52,31 +52,26 @@ _PYI = Path(__file__).resolve().parent.parent / "python" / "tors" / "__init__.py
 _NO_DEFAULT = object()
 
 
-def _stub_defs() -> dict[str, ast.FunctionDef]:
+def _stub_defs(source: str | None = None) -> dict[str, ast.FunctionDef]:
     """The pyi's top-level ``def`` nodes, by name, plus every top-level
     ``class``'s ``__init__``, keyed by the class's name (not
     ``"__init__"``); ``inspect.signature`` on a class already resolves to
     its constructor signature with ``self`` stripped, so a class is
     compared the exact same way a function is: this just has to find the
-    right ast node and strip ``self`` to match that shape."""
-    tree = ast.parse(_PYI.read_text(encoding="utf-8"))
+    right ast node and strip ``self`` to match that shape. ``source``
+    defaults to the shipped pyi; the guard test passes mutated copies of
+    the same text."""
+    tree = ast.parse(source if source is not None else _PYI.read_text(encoding="utf-8"))
     defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    typed_dicts = _typed_dict_names(tree)
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
-        # A TypedDict class is a TYPE-only declaration (the stub's
-        # structural vocabulary: JSONValue's companions — the scrub
-        # report's Span/ScrubPiiReport), not a member of the runtime's
-        # value surface: `import tors` exposes no such class. It skips
-        # the value-surface set (and the __init__ requirement below,
-        # which is about runtime-constructible classes) — the guard's
-        # business is that no VALUE name ships untyped or stale, and a
-        # TypedDict is neither.
-        def _is_typed_dict(base: ast.expr) -> bool:
-            name = getattr(base, "id", getattr(base, "attr", ""))
-            return name == "TypedDict"
-
-        if any(_is_typed_dict(base) for base in node.bases):
+        # TypedDict classes are type-only declarations (Span, ScrubPiiReport,
+        # and anything inheriting one): `import tors` exposes no such class,
+        # so the __init__ requirement — about runtime-constructible classes
+        # — does not apply to them.
+        if node.name in typed_dicts:
             continue
         inits = [n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"]
         assert len(inits) == 1, f"{node.name}: stub class needs exactly one __init__"
@@ -99,6 +94,30 @@ def _stub_defs() -> dict[str, ast.FunctionDef]:
         defs[node.name] = stripped
     assert defs, "no top-level defs parsed from the pyi: the guard is broken"
     return defs
+
+
+def _typed_dict_names(tree: ast.Module) -> set[str]:
+    """The tree's TypedDict class names: every class with a base spelling
+    ``TypedDict`` (name or attribute form), plus their transitive
+    subclasses, whatever the declaration order. A class with no TypedDict
+    base — direct or inherited — is never in the set."""
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+
+    def _base_name(base: ast.expr) -> str:
+        return getattr(base, "id", getattr(base, "attr", ""))
+
+    names: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in classes:
+            if node.name in names:
+                continue
+            bases = {_base_name(base) for base in node.bases}
+            if "TypedDict" in bases or bases & names:
+                names.add(node.name)
+                changed = True
+    return names
 
 
 def _stub_constants() -> dict[str, ast.AnnAssign]:
@@ -419,3 +438,28 @@ def test_the_guard_itself_catches_each_drift_axis() -> None:
         raise AssertionError(
             "the mistyped tuple constant did not fail the pin: the guard is decoration"
         )
+
+
+def test_inherited_typeddict_is_exempt_from_the_init_requirement() -> None:
+    """The guard's TypedDict exemption, by behavior on the real pyi text:
+    appending a TypedDict that INHERITS another TypedDict must parse
+    without the ``__init__`` demand (it is a type-only declaration like
+    its base, and the class name is never in the runtime's value surface
+    the defs dict feeds), while appending a plain value class without
+    ``__init__`` must still fail."""
+    base = _PYI.read_text(encoding="utf-8")
+
+    inherited = base + (
+        "\nclass ScrubPiiReportExtended(ScrubPiiReport):\n    extra: int\n"
+    )
+    defs = _stub_defs(inherited)
+    assert "ScrubPiiReportExtended" not in defs
+    assert "ScrubPiiReport" not in defs
+
+    value_class = base + "\nclass NotATypedDict:\n    pass\n"
+    try:
+        _stub_defs(value_class)
+    except AssertionError as e:
+        assert "NotATypedDict" in str(e)
+    else:
+        raise AssertionError("a plain value class without __init__ was accepted")

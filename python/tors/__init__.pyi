@@ -1,12 +1,14 @@
 from collections.abc import Iterator, Sequence
 from typing import Any, Literal, SupportsIndex, TypedDict
 
-# The recursive JSON value: exactly what `content_hash` accepts (the same
-# set the JSON grammar produces, plus tuple — the codepoint-stable
-# sequence spelling the runtime validates leaf-by-leaf — and the key set
-# the runtime enforces on dicts: str/int/float/bool/None, everything else
-# a TypeError; non-str keys hash as their string form). Recursive aliases
-# need forward references on every level below the top.
+# The recursive JSON value: what `content_hash` accepts — the JSON
+# grammar's set plus tuple, with dict keys restricted to
+# str/int/float/bool/None (anything else is a TypeError). Non-str keys
+# hash as their JSON spelling ("1", "1.0", "true", "null"), so dicts
+# that compare equal under Python's key aliasing ({True: x} == {1: x} ==
+# {1.0: x}) hash differently; canonicalize numeric-key dicts before
+# using content_hash as a cache or dedup key. Recursive aliases need
+# forward references on every level below the top.
 JSONValue = (
     str
     | int
