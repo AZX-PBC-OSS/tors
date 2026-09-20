@@ -154,7 +154,7 @@ line-length = 100
 # `noqa: BLE001` comments in test_b64_decode.py cite it): the codes the
 # existing noqa comments cite are all enforced, so those suppressions stay
 # meaningful.
-select = ["E", "W", "F", "I", "B", "UP", "BLE"]
+select = ["E", "W", "F", "I", "B", "UP", "BLE", "RUF022"]
 
 [tool.ruff.lint.isort]
 # tors (the package under test) and reference (the tests' shared oracle

@@ -64,6 +64,20 @@ def _stub_defs() -> dict[str, ast.FunctionDef]:
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
+        # A TypedDict class is a TYPE-only declaration (the stub's
+        # structural vocabulary: JSONValue's companions — the scrub
+        # report's Span/ScrubPiiReport), not a member of the runtime's
+        # value surface: `import tors` exposes no such class. It skips
+        # the value-surface set (and the __init__ requirement below,
+        # which is about runtime-constructible classes) — the guard's
+        # business is that no VALUE name ships untyped or stale, and a
+        # TypedDict is neither.
+        def _is_typed_dict(base: ast.expr) -> bool:
+            name = getattr(base, "id", getattr(base, "attr", ""))
+            return name == "TypedDict"
+
+        if any(_is_typed_dict(base) for base in node.bases):
+            continue
         inits = [n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"]
         assert len(inits) == 1, f"{node.name}: stub class needs exactly one __init__"
         init = inits[0]

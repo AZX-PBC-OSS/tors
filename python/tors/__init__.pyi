@@ -1,5 +1,59 @@
 from collections.abc import Iterator, Sequence
-from typing import Any, Literal, SupportsIndex
+from typing import Any, Literal, SupportsIndex, TypedDict
+
+# The recursive JSON value: exactly what `content_hash` accepts (the same
+# set the JSON grammar produces, plus tuple — the codepoint-stable
+# sequence spelling the runtime validates leaf-by-leaf — and the key set
+# the runtime enforces on dicts: str/int/float/bool/None, everything else
+# a TypeError; non-str keys hash as their string form). Recursive aliases
+# need forward references on every level below the top.
+JSONValue = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | list["JSONValue"]
+    | tuple["JSONValue", ...]
+    | dict[str | int | float | bool | None, "JSONValue"]
+)
+
+# The scrub report's one redaction span, ordered by start, codepoint
+# indices into the INPUT text.
+class Span(TypedDict):
+    type: str
+    start: int
+    end: int
+
+# `scrub_pii_report`'s shape, all four keys present every time:
+# `text` is the scrubbed output (== scrub_pii(...) byte-exact),
+# `redacted` the per-rule + per-family counts (lowercase family names,
+# absent types omitted), `skipped` the detected-but-preserved families
+# (always {} when families=None), `spans` the redaction spans.
+class ScrubPiiReport(TypedDict):
+    text: str
+    redacted: dict[str, int]
+    skipped: dict[str, int]
+    spans: list[Span]
+
+# One `repair_json_diagnostics` entry, all six keys present every time
+# (`from`/`to`/`suggestion` are None when the action did not move a value
+# or offer a hint — a stable shape consumers can index blindly). The
+# action vocabulary is the docstring's closed list (coerce/... /
+# unwrap_root_array) but the runtime spell is a plain str: the stub does
+# not over-claim a Literal the Rust does not enforce. Functional spelling:
+# `from` is a keyword.
+RepairAction = TypedDict(
+    "RepairAction",
+    {
+        "action": str,
+        "path": str,
+        "detail": str,
+        "from": "JSONValue | None",
+        "to": "JSONValue | None",
+        "suggestion": str | None,
+    },
+)
 
 __version__: str
 """The installed distribution's version, read from its metadata
@@ -121,7 +175,7 @@ def scrub_pii_report(
     *,
     salt: str | None = None,
     families: Sequence[str] | None = None,
-) -> dict[str, object]: ...
+) -> ScrubPiiReport: ...
 
 
 # Named-rule log and exception-text scrubbing, byte-identical to the
@@ -591,7 +645,7 @@ def repair_json_diagnostics(
     deadline_ms: float | None = None,
 ) -> tuple[
     dict[str, Any] | list[Any] | str | int | float | bool | None,
-    list[dict[str, Any]],
+    list[RepairAction],
 ]: ...
 
 # Truncate to at most max_chars codepoints, cutting at the last word (or,
@@ -759,7 +813,7 @@ def replace_many_masked(text: str, replacements: dict[str, str], mask: str = "*"
 # trusted-input-only for subclass hooks, for depth beyond ~10-20k frames,
 # and for breadth beyond ~200-500k visited objects.
 def content_hash(
-    obj: str | int | float | bool | None | list | tuple | dict,
+    obj: JSONValue,
 ) -> str: ...
 
 # Domain-separated SHA-256 (RFC 6962-style: leaves hash 0x00‖chunk, internal
