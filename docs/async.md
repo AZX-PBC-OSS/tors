@@ -51,16 +51,13 @@ wrapper body) as well as behaviorally (a heartbeat coroutine keeps ticking
 with worst gaps well under the call's own wall during a large `diff_opcodes`
 await), and pins the covered set against `tors.aio._WRAPPED`: the curated
 list is the contract, and the families it names are the input-scaling set
-it covers — including the fuzzy/repair family, whose unwrapped twins would
-leave the minutes-scale calls (the ones that most need the thread hop) on
-the sync spelling alone. The covered boundary is spelled exactly: the
-list-returning bounds reporters (`word_bounds`, `sentence_bounds`) are
-wrapped like their chunking cousins; the input-scaling APIs still
-unwrapped are the search/replace family (`find_patterns`, `count_matches`,
-`replace_many`, `replace_many_masked`) and the code-block family
-(`extract_code_blocks`, `strip_code_fences`) — both are
-`asyncio.to_thread(tors.fn, ...)` one-liners on the consumer side until
-they earn a twin.
+it covers — the chunking, fuzzy-matching, and JSON-repair families
+(minutes-scale calls most need the thread hop), the search/replace family
+(`find_patterns`, `count_matches`, `replace_many`,
+`replace_many_masked`), the code-block family (`extract_code_blocks`,
+`strip_code_fences`), and the bounds reporters (`word_bounds`,
+`sentence_bounds`) — the whole surface is wrapped now, so a consumer
+never hand-rolls the `asyncio.to_thread` spelling for a batch call.
 
 The streaming iterator constructors (`word_bounds_iter` and siblings,
 including the chunking family's own `chunk_text_iter`/`chunk_by_words_iter`/

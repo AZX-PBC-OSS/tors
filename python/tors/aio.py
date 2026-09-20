@@ -25,8 +25,11 @@ the input-scaling text/byte pipeline codecs
 (``normalize``/``finalize``, ``decode_utf8``/``finalize_utf8``/
 ``decode_utf16``, ``b64_encode_bytes``/``b64_decode``,
 both truncate spellings, ``strip_controls``, ``scrub_log_text``,
-``scrub_pii``/``scrub_pii_report``, and the bounds reporters
-``word_bounds``/``sentence_bounds``); each a single native pass
+``scrub_pii``/``scrub_pii_report``, the bounds reporters
+``word_bounds``/``sentence_bounds``, the search/replace family
+``find_patterns``/``count_matches``/``replace_many``/
+``replace_many_masked``, and the code-block family
+``extract_code_blocks``/``strip_code_fences``); each a single native pass
 whose cost scales with its input (``scrub_log_text``: four linear scans +
 splice under one ``py.detach``), e.g. ``finalize`` over a 12 MiB
 document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
@@ -89,7 +92,9 @@ __all__: list[str] = []
 # input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
 # both truncate spellings, strip_controls, scrub_log_text, scrub_pii (and
-# its report twin), word_bounds/sentence_bounds: each a
+# its report twin), word_bounds/sentence_bounds, the search/replace family
+# (find_patterns, count_matches, replace_many, replace_many_masked), and
+# the code-block family (extract_code_blocks, strip_code_fences): each a
 # single native pass
 # whose cost scales with its input (scrub_log_text: four linear scans + splice under
 # one py.detach), the 12 MiB-document shape this module exists
@@ -112,12 +117,15 @@ _WRAPPED = (
     "chunk_cdc",
     "chunk_hierarchical",
     "chunk_text",
+    "count_matches",
     "decode_utf16",
     "decode_utf8",
     "diff_opcodes",
     "diff_opcodes_lines",
+    "extract_code_blocks",
     "finalize",
     "finalize_utf8",
+    "find_patterns",
     "get_close_matches",
     "is_grounded",
     "jaro",
@@ -128,11 +136,14 @@ _WRAPPED = (
     "repair_json",
     "repair_json_diagnostics",
     "repair_json_loads",
+    "replace_many",
+    "replace_many_masked",
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",
     "sentence_bounds",
     "similarity_ratio",
+    "strip_code_fences",
     "strip_controls",
     "tf_idf",
     "truncate_ellipsis",
