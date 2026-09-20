@@ -1399,8 +1399,11 @@ class TestRepairDeadline:
         # eager in the repairer constructor and linear in properties —
         # ~0.5s at 100k): the deadline's granularity there is the phase,
         # not the property (see docs/api.md's deadline section). So the
-        # pin asserts the ABORT (never a masked return) and a wall under
-        # the unbounded ladder's band, not wall-clock precision.
+        # pin asserts the ABORT (never a masked return) and a wall well
+        # under the unbounded ladder's ~5.5s band, not wall-clock
+        # precision: 3.0s sits 6x above the floor's runner noise (a
+        # shared runner measured 1.03s once) and still fails the
+        # unbounded shape.
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -1413,7 +1416,7 @@ class TestRepairDeadline:
             repair_json_loads(
                 '{"totally_unknown_key_xyz": "v"}', schema=schema, deadline_ms=5
             )
-        assert _time.perf_counter() - start < 1.0
+        assert _time.perf_counter() - start < 3.0
         # The masking shape: a budget the base phases outrun must STILL
         # abort (the ladder's first consult reads a long-expired clock),
         # never return a repair that ignored the budget.
