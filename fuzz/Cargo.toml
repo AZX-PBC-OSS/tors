@@ -123,6 +123,34 @@ doc = false
 bench = false
 
 [[bin]]
+name = "detect-encoding"
+path = "fuzz_targets/detect_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk-text"
+path = "fuzz_targets/chunk_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uuid-text"
+path = "fuzz_targets/uuid_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "first-invalid-charset"
+path = "fuzz_targets/first_invalid_charset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "segmentation"
 path = "fuzz_targets/segmentation.rs"
 test = false
