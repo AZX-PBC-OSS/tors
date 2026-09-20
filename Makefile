@@ -90,6 +90,10 @@ lint:
 	cargo clippy --all-targets --no-default-features --features documents -- -D warnings
 	cargo clippy --all-targets --manifest-path tors-documents/Cargo.toml -- -D warnings
 	uv run --no-sync ruff check .
+	# The typed-surface gate: strict pyright over the stubs and the
+	# consumer scratch (pyrightconfig.json); uvx pins the version the
+	# config is verified against, so the gate is deterministic.
+	uvx pyright@1.1.414
 
 # Rust unit tests (extension-module off: it doesn't link libpython) in BOTH
 # feature configs; the documents lane is the engine surface's crate-side
