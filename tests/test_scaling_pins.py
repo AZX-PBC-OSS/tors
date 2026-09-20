@@ -197,12 +197,15 @@ def _deep_schema(levels: int) -> dict:
 
 
 class TestRepairJsonSchemaScaling:
+    @pytest.mark.timing
     def test_deep_schema_walk_stays_linear_in_depth(self) -> None:
         """40 -> 80 nested levels (2x, both under the documented 200-unit
         walk cap; past it the walk raises ValueError — that contract is
         pinned corpus-side): measured 0.15ms -> 0.32ms, ratio 2.1
         (linear), gate 3.0x per doubling. A per-level rescan of the
-        accumulated schema path (the quadratic shape) measures 4x."""
+        accumulated schema path (the quadratic shape) measures 4x. Load-
+        sensitive sub-millisecond ratios: the timing lane, the same
+        discipline as the wide-schema sibling below."""
         small = _min_wall_ms(lambda: tors.repair_json_loads("{}", schema=_deep_schema(40)))
         large = _min_wall_ms(lambda: tors.repair_json_loads("{}", schema=_deep_schema(80)))
         _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)

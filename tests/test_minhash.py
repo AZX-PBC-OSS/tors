@@ -1048,6 +1048,10 @@ class TestPerformanceSanity:
         assert len(sig) == 8
         assert elapsed < 5.0, f"widest allowed shape took {elapsed:.2f}s"
 
+    @pytest.mark.timing
+    # Single-sample absolute ceilings (15s/60s) on a load-sensitive
+    # 1 MiB x 1024-perm pass: the timing lane's discipline, the fast
+    # lane never reds on a slow runner.
     def test_distinct_rich_worst_case_completes_within_budget(self) -> None:
         # HIGH3 worst-case pin: 1 MiB of distinct-rich text at k=1024 is
         # ~100M affine ops with no deadline_ms on this call, so the lever

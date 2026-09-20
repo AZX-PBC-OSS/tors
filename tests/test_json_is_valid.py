@@ -415,7 +415,7 @@ def test_bytes_and_str_agree() -> None:
 
 
 def test_repeat_calls_are_stable() -> None:
-    doc = b'{"a": [1, 2.5, true, null, "\u00e9"]}'
+    doc = rb'{"a": [1, 2.5, true, null, "\u00e9"]}'
     answers = {tors.json_is_valid(doc) for _ in range(5)}
     assert answers == {True}
     for name, data in CORPUS.items():
