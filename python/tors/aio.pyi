@@ -11,7 +11,7 @@ and checked against the sync stub by ``tests/test_aio.py``.
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from tors import CompiledLemmaDict, _StemmerLanguage
+from tors import CompiledLemmaDict, RepairAction, ScrubPiiReport, _StemmerLanguage
 
 async def normalize(text: str) -> str: ...
 async def finalize(text: str) -> tuple[str, str]: ...
@@ -29,7 +29,7 @@ async def scrub_pii_report(
     *,
     salt: str | None = None,
     families: Sequence[str] | None = None,
-) -> dict[str, object]: ...
+) -> ScrubPiiReport: ...
 async def scrub_log_text(
     text: str,
     rules: Sequence[
@@ -99,7 +99,7 @@ async def repair_json_diagnostics(
     deadline_ms: float | None = None,
 ) -> tuple[
     dict[str, Any] | list[Any] | str | int | float | bool | None,
-    list[dict[str, Any]],
+    list[RepairAction],
 ]: ...
 async def truncate_to_bounds(
     text: str, max_chars: int, boundary: Literal["word", "sentence"] = "word"

@@ -50,12 +50,12 @@ from tors_documents._tors_documents import to_markdown as _native_to_markdown
 from tors_documents._tors_documents import to_text as _native_to_text
 
 __all__ = [
-    "__version__",
     "Backend",
     "Format",
     "NeedsOcrError",
     "PageKind",
     "PdfClassification",
+    "__version__",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",

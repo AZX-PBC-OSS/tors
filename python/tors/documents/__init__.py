@@ -13,12 +13,12 @@ Install: ``pip install tors[documents]``, or the payload directly,
 from __future__ import annotations
 
 __all__ = [
-    "__version__",
     "Backend",
     "Format",
     "NeedsOcrError",
     "PageKind",
     "PdfClassification",
+    "__version__",
     "pdf_classify",
     "pdf_extract",
     "pdf_link_uris",

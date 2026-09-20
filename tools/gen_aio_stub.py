@@ -48,7 +48,11 @@ def _ruff_format(text: str) -> str:
     unformatted stub if ruff is missing or refuses the input: a stale or
     malformed artifact must never be written silently.
     """
-    # Fixed argv, no shell, the repo's own formatter.
+    # Fixed argv, no shell, the repo's own formatter — then the repo's
+    # own check --fix (the import-sort fixer merges the multi-line
+    # `from tors import` header the type-layer import emits): the
+    # emitted artifact must be CHECK-clean, not merely format-clean —
+    # the freshness pin compares against exactly this pipeline.
     proc = subprocess.run(
         [sys.executable, "-m", "ruff", "format", "--stdin-filename", str(ASYNC_STUB), "-"],
         input=text,
@@ -61,7 +65,28 @@ def _ruff_format(text: str) -> str:
             f"ruff format failed (rc={proc.returncode}) while generating {ASYNC_STUB}: "
             f"{proc.stderr.strip()}"
         )
-    return proc.stdout
+    fixed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--fix",
+            "--stdin-filename",
+            str(ASYNC_STUB),
+            "-",
+        ],
+        input=proc.stdout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if fixed.returncode != 0:
+        raise RuntimeError(
+            f"ruff check --fix failed (rc={fixed.returncode}) while generating "
+            f"{ASYNC_STUB}: {fixed.stderr.strip()}"
+        )
+    return fixed.stdout
 
 
 def _spells_any(node: ast.FunctionDef) -> bool:
@@ -101,6 +126,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
     body: list[str] = []
     translated = 0
     needs_any = False
+    used_type_names: set[str] = set()
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name not in wrapped:
             continue
@@ -111,6 +137,17 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         body.append("")
         translated += 1
         needs_any = needs_any or _spells_any(node)
+        # The sync stub's type-layer names (the structural TypedDicts and
+        # the recursive alias, all module-level assigns in
+        # ``__init__.pyi``): a translated signature that spells one must
+        # import it — the generated stub is a standalone module, and
+        # ruff's F821 gate reads it. Word-boundary match: a name must
+        # appear as ITSELF, not as a substring of another identifier.
+        import re
+
+        for type_name in ("JSONValue", "Span", "ScrubPiiReport", "RepairAction"):
+            if re.search(rf"\b{type_name}\b", chunk):
+                used_type_names.add(type_name)
     header = [
         '"""The awaitable spellings of tors\'s large-input functions (see',
         "``tors/aio.py`` for which functions and why only these). Signatures",
@@ -126,8 +163,15 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
         "from tors import CompiledLemmaDict, _StemmerLanguage",
-        "",
     ]
+    if used_type_names:
+        # Sorted after the two always-imported names: the import is
+        # emitted only when a translated signature spells one, so the
+        # stub carries no unused type import (F401's gate reads it).
+        header.append(
+            f"from tors import {', '.join(sorted(used_type_names))}"
+        )
+    header.append("")
     out: list[str] = header
     out.extend(body)
     raw = "\n".join(out).rstrip("\n") + "\n"
