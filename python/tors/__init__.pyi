@@ -66,7 +66,7 @@ never a second literal to drift against the wheel."""
 # The Snowball languages `rust-stemmers` ships: see tokenize_impl.rs's
 # STEMMER_LANGUAGES (this is that same list, spelled as a type). Shared by
 # tf_idf's and bm25_rank's stemmer= parameter rather than duplicated.
-_StemmerLanguage = Literal[
+StemmerLanguage = Literal[
     "arabic",
     "danish",
     "dutch",
@@ -1242,7 +1242,7 @@ def tf_idf(
     corpus: list[str],
     *,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[list[tuple[str, float]]]: ...
 
@@ -1274,7 +1274,7 @@ def bm25_rank(
     k1: float = 1.5,
     b: float = 0.75,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
 
@@ -1313,7 +1313,7 @@ def apply_pipeline(
     nfd: bool = False,
     lowercase: bool = False,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
     collapse_whitespace: bool = False,
 ) -> list[str]: ...

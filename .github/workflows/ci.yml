@@ -128,6 +128,16 @@ jobs:
           uv sync --locked --no-install-project
           uv run --no-sync ruff check .
 
+      - name: Pyright
+        # The typed-surface gate: strict checking over the stubs and the
+        # consumer scratch (pyrightconfig.json owns the scope). uvx pins
+        # the version the config is verified against (1.1.414), so the
+        # gate is deterministic; --no-install-project means `import tors`
+        # resolves through the stubs via pyrightconfig's extraPaths (the
+        # checker never executes the wheel, so the maturin build stays
+        # the test job's business).
+        run: uvx pyright@1.1.414
+
   test:
     # Cheap signals first: a fmt or clippy
     # failure surfaces from `lint` in one fast job instead of after five matrix legs have
