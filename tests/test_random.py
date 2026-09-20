@@ -1060,6 +1060,15 @@ class TestDocstringSecurityContract:
 
 
 class TestForkSafety:
+    # The fork itself emits Python 3.12's DeprecationWarning (forking a
+    # process whose thread pool has run) — the warning is the POINT: the
+    # cell proves the post-fork child draws independent bytes anyway.
+    # Silenced HERE, not globally: the suite's only warning, owned by the
+    # one test that forks.
+    pytestmark = pytest.mark.filterwarnings(
+        "ignore::DeprecationWarning:.*os\\.fork.*",
+    )
+
     """HIGH-1's positive control: the unseeded spelling must not replay
     across ``os.fork()`` — the failure a cached userspace RNG would show.
 

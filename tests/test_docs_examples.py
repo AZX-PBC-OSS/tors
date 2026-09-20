@@ -444,3 +444,151 @@ class TestRandomGenerationExamples:
         after = time.time() * 1000
         assert len(prefix) == 12
         assert before - 5_000 <= int(prefix, 16) <= after + 5_000
+
+
+class TestRecipeIngestExamples:
+    """docs/recipe-ingest.md's examples: the decode-or-detect gate, the
+    normalize cleanup, the code-block tooling, and the custom-hierarchy
+    chunking, exactly as the recipe shows them."""
+
+    def test_decode_or_detect_gate(self) -> None:
+        raw = "Café société — déjà vu".encode("windows-1252")
+        assert not tors.utf8_is_valid(raw)
+        if tors.utf8_is_valid(raw):
+            text = tors.decode_utf8(raw)
+        else:
+            codec = tors.detect_encoding(raw)
+            text = raw.decode(codec)
+        assert text == "Café société — déjà vu"
+
+    def test_normalize_messy_markdown_spacing(self) -> None:
+        messy = "Line one   \n\n\n\nLine two\r\nLine three  "
+        assert tors.normalize(messy) == "Line one\n\nLine two\nLine three"
+
+    def test_extract_code_blocks_and_strip_fences(self) -> None:
+        md = "Some notes.\n\n```python\nprint('hi')\n```\n\nMore prose after."
+        assert tors.extract_code_blocks(md) == [
+            ("python", "print('hi')\n", 13, 39)
+        ]
+        only_fence = "```python\nprint('hi')\n```"
+        assert tors.strip_code_fences(only_fence) == "print('hi')\n"
+        assert tors.strip_code_fences(md) == md
+
+    def test_chunk_hierarchical_custom_literal_hierarchy(self) -> None:
+        doc = (
+            "# Title\nIntro paragraph here with some words.\n\n"
+            "## Section One\nContent for section one goes here and continues a bit further.\n\n"
+            "## Section Two\nMore content for section two, also fairly short."
+        )
+        chunks = tors.chunk_hierarchical(doc, 80, ["\n## ", "\n\n", ". ", " "])
+        assert chunks == [(0, 46), (50, 125), (129, 189)]
+        assert [doc[s:e] for s, e in chunks] == [
+            "# Title\nIntro paragraph here with some words.\n",
+            "Section One\nContent for section one goes here and continues a bit further.\n",
+            "Section Two\nMore content for section two, also fairly short.",
+        ]
+
+
+class TestRecipeRetrievalExamples:
+    """docs/recipe-retrieval.md's examples: the chunk/simhash/merkle/
+    tf-idf pipeline, exactly as the recipe shows it."""
+
+    def test_chunk_by_words_windowing(self) -> None:
+        doc = " ".join(f"word{i}" for i in range(40))
+        chunks = tors.chunk_by_words(doc, 10)
+        # 10 words per window (the doc's contract: the budget is in
+        # words through the word-boundary segmenter, so the byte widths
+        # vary — word0..word9 is ~59, word10..word19 ~70).
+        assert len(chunks) == 4
+        assert [doc[s:e].count(" ") + 1 for s, e in chunks] == [10, 10, 10, 10]
+
+    def test_simhash_near_dup_gate(self) -> None:
+        corpus = [
+            "The quick brown fox jumps over the lazy dog.",
+            "The quick brown fox jumps over the lazy dog!",  # one-character edit
+            "A lazy cat sleeps all day in the warm sun.",
+            "Rust is a systems programming language focused on safety and speed.",
+        ]
+        fingerprints = [tors.simhash64(c) for c in corpus]
+
+        def hamming(a: int, b: int) -> int:
+            return (a ^ b).bit_count()
+
+        near, unrelated = hamming(fingerprints[0], fingerprints[1]), hamming(
+            fingerprints[0], fingerprints[3]
+        )
+        assert near <= 3, f"the one-character edit must be near-duplicate: {near}"
+        assert unrelated > 15, f"an unrelated pair must sit far away: {unrelated}"
+
+    def test_merkle_diff_positional(self) -> None:
+        a = "The quick brown fox jumps over the lazy dog.".split()
+        b = "The quick brown fox jumps over the lazy dog!".split()
+        assert tors.merkle_diff([w.encode() for w in a], [w.encode() for w in b]) == [8]
+
+    def test_tf_idf_top_terms(self) -> None:
+        corpus = [
+            "The quick brown fox jumps over the lazy dog.",
+            "The quick brown fox jumps over the lazy dog!",
+            "A lazy cat sleeps all day in the warm sun.",
+            "Rust is a systems programming language focused on safety and speed.",
+        ]
+        tfidf = tors.tf_idf(corpus)
+        top = sorted(tfidf[0], key=lambda term_score: -term_score[1])[:3]
+        assert top == [
+            ("the", 2.4462871026284194),
+            ("brown", 1.5108256237659907),
+            ("dog", 1.5108256237659907),
+        ]
+
+
+class TestIndexExamples:
+    """docs/index.md's quick-start literals."""
+
+    def test_quick_start_text_ops(self) -> None:
+        assert tors.normalize("line one  \n\n\n\nline two\r\n") == "line one\n\nline two"
+        assert tors.chunk_text("cats are cute and cats are fun", 12) == [
+            (0, 8),
+            (8, 17),
+            (17, 26),
+            (26, 30),
+        ]
+        assert tors.find_patterns(
+            ["cat", "catalogue"], "the cat sat in the catalogue"
+        ) == [(4, 7, 0), (19, 28, 1)]
+
+    def test_quick_start_documents_routing(self) -> None:
+        """The classify-routing shape on a generated single-page PDF: the
+        classifier's verdict (image_only/pages_needing_ocr) drives the
+        recipe's route-to-OCR branches; the extract leg is pinned by the
+        documents battery."""
+        import pathlib
+        import tempfile
+
+        content = b"BT /F1 18 Tf 50 700 Td (Quarterly Review Q3 2026) Tj ET"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> "
+            b"/MediaBox [0 0 612 792] /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = [0]
+        for idx, obj in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{idx} 0 obj\n".encode() + obj + b"\nendobj\n"
+        xref = len(out)
+        n = len(objects) + 1
+        out += f"xref\n0 {n}\n".encode() + b"0000000000 65535 f \n"
+        for off in offsets[1:]:
+            out += f"{off:010d} 00000 n \n".encode()
+        out += f"trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+        path = pathlib.Path(tempfile.mkdtemp()) / "incoming.pdf"
+        path.write_bytes(bytes(out))
+
+        import tors.documents
+
+        cls = tors.documents.pdf_classify(str(path))
+        assert not cls.image_only, "a born-digital page is not a scan"
+        assert cls.pages_needing_ocr == []
