@@ -58,6 +58,7 @@ import secrets
 import struct
 import time
 import uuid as stdlib_uuid
+import warnings
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -1079,7 +1080,17 @@ class TestForkSafety:
         parent_tokens = {random_hex(32) for _ in range(n)}
         assert len(parent_tokens) == n
         read_fd, write_fd = os.pipe()
-        pid = os.fork()
+        # os.fork warns when it runs in a process with live threads
+        # (DeprecationWarning, 3.12+). Whether any are alive depends on
+        # what ran before this test, not on tors, so the warning says
+        # nothing about the code under test; suppress it around the fork
+        # and nowhere else. The suppression has no module component
+        # because the warning is raised from C with no Python frame of
+        # its own: its filter-module resolves empty, and a module regex
+        # (e.g. ".*os\\.fork.*") can never match it.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            pid = os.fork()
         if pid == 0:  # child: draw, report over the pipe, exit cleanly.
             try:
                 os.close(read_fd)

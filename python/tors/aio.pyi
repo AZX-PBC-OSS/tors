@@ -11,7 +11,7 @@ and checked against the sync stub by ``tests/test_aio.py``.
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from tors import CompiledLemmaDict, RepairAction, ScrubPiiReport, _StemmerLanguage
+from tors import CompiledLemmaDict, RepairAction, ScrubPiiReport, StemmerLanguage
 
 async def normalize(text: str) -> str: ...
 async def finalize(text: str) -> tuple[str, str]: ...
@@ -167,7 +167,7 @@ async def tf_idf(
     corpus: list[str],
     *,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[list[tuple[str, float]]]: ...
 async def bm25_rank(
@@ -177,7 +177,7 @@ async def bm25_rank(
     k1: float = 1.5,
     b: float = 0.75,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
 async def apply_pipeline(
@@ -186,7 +186,7 @@ async def apply_pipeline(
     nfd: bool = False,
     lowercase: bool = False,
     strip_accents: bool = False,
-    stemmer: _StemmerLanguage | None = None,
+    stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
     collapse_whitespace: bool = False,
 ) -> list[str]: ...
