@@ -1,5 +1,4 @@
 {
-  "//": "The typed-surface gate: strict checking over the stubs (what every consumer's type checker reads) plus the consumer scratch (tools/typing_consumer.py) that exercises the surface the way a caller would. Source trees are NOT in scope: the Rust binding's .py companions are pyo3-macros' business (clippy's), and the test suite speaks pytest, not the type checker.",
   "typeCheckingMode": "strict",
   "include": ["python/tors/*.pyi", "tools/typing_consumer.py"],
   "extraPaths": ["python"],

@@ -130,7 +130,10 @@ jobs:
 
       - name: Pyright
         # The typed-surface gate: strict checking over the stubs and the
-        # consumer scratch (pyrightconfig.json owns the scope). uvx pins
+        # consumer scratch (pyrightconfig.json owns the scope — the stubs
+        # plus tools/typing_consumer.py; source trees are NOT in scope:
+        # the Rust binding's .py companions are pyo3-macros' business,
+        # clippy's lane, and the test suite speaks pytest). uvx pins
         # the version the config is verified against (1.1.414), so the
         # gate is deterministic; --no-install-project means `import tors`
         # resolves through the stubs via pyrightconfig's extraPaths (the
