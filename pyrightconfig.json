@@ -1,0 +1,7 @@
+{
+  "typeCheckingMode": "strict",
+  "include": ["python/tors/*.pyi", "tools/typing_consumer.py"],
+  "extraPaths": ["python"],
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false
+}

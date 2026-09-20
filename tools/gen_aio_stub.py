@@ -162,7 +162,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         "from collections.abc import Sequence",
         f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
-        "from tors import CompiledLemmaDict, _StemmerLanguage",
+        "from tors import CompiledLemmaDict, StemmerLanguage",
     ]
     if used_type_names:
         # Sorted after the two always-imported names: the import is
