@@ -791,19 +791,22 @@ mod tests {
         // Equal operands: the fast path is one O(n) equality scan, so a
         // budget the DP could never meet (a 200k-row DP is ~4e10 cells,
         // minutes) still returns Ok(0) instantly: the pin that the DP
-        // was never entered.
+        // was never entered. The 200ms budget keeps that property (the
+        // DP is ~minutes) with headroom for a shared runner's stalls —
+        // a 20ms ceiling measured 20.26ms once under parallel-test
+        // contention.
         let a = "ab".repeat(100_000);
-        assert_eq!(levenshtein(&a, &a, Some(20.0)), Ok(0));
+        assert_eq!(levenshtein(&a, &a, Some(200.0)), Ok(0));
         // The empty degenerates are char counts, not DP results.
         let b = "xyz🦀".repeat(50_000);
-        assert_eq!(levenshtein("", &b, Some(20.0)), Ok(200_000));
-        assert_eq!(levenshtein(&b, "", Some(20.0)), Ok(200_000));
+        assert_eq!(levenshtein("", &b, Some(200.0)), Ok(200_000));
+        assert_eq!(levenshtein(&b, "", Some(200.0)), Ok(200_000));
         // Jaro degenerates: both empty 1.0, one empty 0.0; no passes.
-        assert_eq!(jaro("", "", Some(20.0)), Ok(1.0));
-        assert_eq!(jaro(&b, "", Some(20.0)), Ok(0.0));
-        assert_eq!(jaro("", &b, Some(20.0)), Ok(0.0));
-        assert_eq!(jaro_winkler("", "", Some(20.0)), Ok(1.0));
-        assert_eq!(jaro_winkler(&b, "", Some(20.0)), Ok(0.0));
+        assert_eq!(jaro("", "", Some(200.0)), Ok(1.0));
+        assert_eq!(jaro(&b, "", Some(200.0)), Ok(0.0));
+        assert_eq!(jaro("", &b, Some(200.0)), Ok(0.0));
+        assert_eq!(jaro_winkler("", "", Some(200.0)), Ok(1.0));
+        assert_eq!(jaro_winkler(&b, "", Some(200.0)), Ok(0.0));
     }
 
     #[test]

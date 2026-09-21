@@ -49,11 +49,23 @@ pytestmark = pytest.mark.timing
 
 _CLAIM = "the bushing torque specifications changed"  # 41 chars, stride 20
 _REAL_NEAR = "the bushing torqxe specifications changed"  # 1 typo, r = 0.976
-_DECOY = "".join(
-    "Z" if i in (2, 8, 14, 20, 26, 32, 38) else c for i, c in enumerate(_CLAIM)
-)  # 7 typos, r = 0.829: in the candidate band, below the 0.85 break
+_SUB_CHARS = ("Z", "Y", "X")
 _SAMPLES = 5
 _KIB = 1024
+
+
+def _decoy(i: int) -> str:
+    """One band-flood decoy region: seven substitutions (r = 0.829, in the
+    candidate band, below the 0.85 break), pairwise DISTINCT across `i` —
+    rotated typo positions plus a rotating substitution char. Distinctness
+    is load-bearing: windows with identical content dedup at admission
+    (one region), so only distinct decoys fill the 64-candidate cap and
+    exercise the refinement's full budget this cell measures."""
+    sub = _SUB_CHARS[i % 3]
+    return "".join(
+        sub if any((i + 7 * k) % 41 == j for k in range(7)) else c
+        for j, c in enumerate(_CLAIM)
+    )
 
 
 def _min_wall_us(fn: Callable[..., object], *args: object) -> float:
@@ -76,13 +88,13 @@ def _contains(claim: str, source: str) -> bool:
 
 def _flood(n_decoys: int) -> str:
     """The band-flood source: the real one-typo region first (straddled,
-    coarse ~0.73), then `n_decoys` grid-aligned decoys at 60-char spacing
-    (every decoy start a multiple of the stride, 20)."""
+    coarse ~0.73), then `n_decoys` grid-aligned DISTINCT decoys at 60-char
+    spacing (every decoy start a multiple of the stride, 20)."""
     parts = [("q" * 10) + _REAL_NEAR]
     at = 60
-    for _ in range(n_decoys):
+    for i in range(n_decoys):
         have = sum(len(p) for p in parts)
-        parts.append(("q" * (at - have)) + _DECOY)
+        parts.append(("q" * (at - have)) + _decoy(i))
         at += 60
     parts.append("q" * 60)
     return "".join(parts)

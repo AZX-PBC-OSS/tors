@@ -66,7 +66,10 @@
 //! for an aligned ratio `r`: one typo in a 41-char claim straddled to
 //! ~0.73 and fell below the 0.85 default). The coarse scan tracks its
 //! best-scoring windows (the top [`REFINE_CANDIDATES`] windows scoring at
-//! least [`CANDIDATE_MIN_SCORE`], the truncated tail window competing like
+//! least [`CANDIDATE_MIN_SCORE`], content-deduped at admission — identical
+//! windows refine identically, so repetitive filler cannot flood the cap
+//! and starve a distinct near-match region — and the truncated tail window
+//! competing like
 //! any other at its region score: for a region flush with the source's
 //! end, the tail window or the last full grid window between them always
 //! clear the entry bound, and every candidate's fine range is clamped to
@@ -210,10 +213,30 @@ fn region_ratio(claim: &[char], window: &[char], deadline: Option<Instant>) -> f
 /// (for the fine-range arithmetic) and byte start (the reposition anchor).
 /// The truncated tail window competes like any other (score-gated, top-K),
 /// with its range clamped to the last possible region start `n - L`.
+/// `content_hash` dedups identical window contents at admission: a
+/// repetitive source (the same short window content repeated hundreds of
+/// times) would otherwise flood the bounded top-K with equal-score
+/// duplicates and evict the distinct near-match region's own windows,
+/// whose straddle scores sit below the flood. Content-equal windows
+/// refine identically (the fine re-scan reads the same chars), so one
+/// representative carries their coverage.
 struct Candidate {
     score: f64,
     start: usize,
     byte: usize,
+    content_hash: u64,
+}
+
+/// FNV-1a over the window's chars: a cheap pre-filter for content dedup,
+/// always confirmed by an exact char comparison before a candidate is
+/// dropped (no hash-collision losses).
+fn window_hash(chars: &[char]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for c in chars {
+        h ^= *c as u32 as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// Insert into the bounded candidate set: the top `REFINE_CANDIDATES`
@@ -428,6 +451,7 @@ pub fn is_grounded_fuzzy(
                         score,
                         start: 0,
                         byte: first_byte,
+                        content_hash: window_hash(first_window),
                     },
                 );
             }
@@ -447,7 +471,9 @@ pub fn is_grounded_fuzzy(
                 if let Some(exceeded) = exceeded_after(started, deadline_ms) {
                     return Err(exceeded);
                 }
-                if score >= CANDIDATE_MIN_SCORE {
+                if score >= CANDIDATE_MIN_SCORE
+                    && !is_duplicate_window(source, &candidates, window, l)
+                {
                     // Full windows and the truncated final window alike:
                     // the tail competes as an ordinary candidate (its
                     // range clamps to `n - L` in the refinement below).
@@ -457,6 +483,7 @@ pub fn is_grounded_fuzzy(
                             score,
                             start,
                             byte: byte_start,
+                            content_hash: window_hash(window),
                         },
                     );
                 }
@@ -577,6 +604,26 @@ fn exceeded_after(started: Instant, deadline_ms: Option<f64>) -> Option<Deadline
     })
 }
 
+/// Whether `window`'s content equals an already-kept candidate's window:
+/// hash-equal candidates are compared char-for-char (re-reading the kept
+/// window from `source` at its char start), so a hash collision never
+/// drops a distinct window. Content-equal windows refine identically, so
+/// the duplicate adds no coverage and its admission would only spend one
+/// of the `REFINE_CANDIDATES` seats on a region the set already holds.
+fn is_duplicate_window(source: &str, candidates: &[Candidate], window: &[char], l: usize) -> bool {
+    let hash = window_hash(window);
+    candidates
+        .iter()
+        .filter(|c| c.content_hash == hash)
+        .any(|c| {
+            source
+                .chars()
+                .skip(c.start)
+                .take(l)
+                .eq(window.iter().copied())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +635,34 @@ mod tests {
         assert!(is_grounded_exact("", "anything"));
         assert!(is_grounded_exact("", ""));
         assert!(!is_grounded_exact("x", ""));
+    }
+
+    #[test]
+    fn a_repetitive_source_cannot_starve_the_refinement_of_a_near_match() {
+        // The nightly fuzz run's crash (fuzz target `grounded`,
+        // NearSpliced): a near-uniform claim ("qqqqqqpq+qqqq", one '+' and
+        // one 'p' among q's) spliced into a sea of q's. The pure-q coarse
+        // windows all score 11/13, above the claim region's straddle
+        // windows (0.62/0.69), and the bounded top-64 filled with padding
+        // before any window whose fine re-scan reaches the splice; the
+        // aligned window scores 12/13 but was never consulted. Content
+        // dedup on admission collapses the identical pad windows to one
+        // candidate, so the splice region survives the cut and the fine
+        // pass finds it. lead 369 / tail 113 are the crash's exact values.
+        let claim = "qqqqqqpq+qqqq";
+        let near = "qqqqqqpq+zqqq"; // one substitution: the q at index 9 -> 'z'
+        let source = format!("{}{}{}", "q".repeat(369), near, "q".repeat(113));
+        assert_eq!(is_grounded_fuzzy(claim, &source, 0.85, None), Ok(true));
+        assert_eq!(is_grounded_fuzzy(claim, &source, 0.5, None), Ok(true));
+        // The near string is not a verbatim containment: threshold 1.0
+        // stays exactly containment.
+        assert_eq!(is_grounded_fuzzy(claim, &source, 1.0, None), Ok(false));
+        // The flood must not return with longer padding either (the pad
+        // length was lead % 1024: any multiple of the stride repeats it).
+        for lead in [369, 512, 1023] {
+            let source = format!("{}{}{}", "q".repeat(lead), near, "q".repeat(113));
+            assert_eq!(is_grounded_fuzzy(claim, &source, 0.85, None), Ok(true));
+        }
     }
 
     #[test]
@@ -1041,35 +1116,40 @@ mod tests {
     #[test]
     fn fuzzy_candidate_eviction_at_the_64th_band_window_is_the_pinned_flood_limit() {
         // The 64-candidate cap is the documented adversarial limit: the
-        // top (score, start) band windows are all the refinement will ever
-        // see, so a real near-match whose straddled coarse score (~0.73
-        // here) ranks below 64 decoys scoring above it (~0.829, seven-typo
-        // variants placed at grid-aligned offsets) is evicted and the
-        // verdict is false despite r = 40/41 >= the guarantee: the regime
-        // `deadline_ms` exists for. The boundary is exact: 63 decoys (64
-        // band windows counting the real one's) still find it.
+        // top (score, start) band windows are all the refinement will
+        // ever see, so a real near-match whose straddled coarse score
+        // (~0.73 here) ranks below 64 decoy REGIONS scoring above it
+        // (~0.829, seven-typo variants at grid-aligned offsets) is
+        // evicted and the verdict is false despite r = 40/41 >= the
+        // guarantee: the regime `deadline_ms` exists for. The boundary is
+        // exact: 63 decoys (64 band windows counting the real one's)
+        // still find it. The decoys are pairwise DISTINCT contents —
+        // content-identical windows are one region (deduped at admission,
+        // see is_duplicate_window) and do not exercise this limit; each
+        // decoy rotates the seven typo positions and the substitution
+        // char, so all 64 are distinct.
         let claim = "the bushing torque specifications changed";
         let real = "the bushing torqxe specifications changed"; // 1 typo
-        // The measured decoy: seven substitutions at 2/8/14/20/26/32/38,
-        // r = 34/41 = 0.829: in the candidate band, above the real
-        // region's straddled ~0.73, below the 0.85 coarse break.
-        let decoy: String = claim
-            .chars()
-            .enumerate()
-            .map(|(i, c)| {
-                if matches!(i, 2 | 8 | 14 | 20 | 26 | 32 | 38) {
-                    'Z'
-                } else {
-                    c
-                }
-            })
-            .collect();
+        let decoy = |i: usize| -> String {
+            let sub_char = ['Z', 'Y', 'X'][i % 3];
+            claim
+                .chars()
+                .enumerate()
+                .map(|(j, c)| {
+                    if (0..7).any(|k| (i + 7 * k) % 41 == j) {
+                        sub_char
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        };
         let build = |n: usize| {
             let mut parts = vec![format!("{}{}", "q".repeat(10), real)];
             let mut at = 60usize; // every decoy starts at a multiple of 20
-            for _ in 0..n {
+            for i in 0..n {
                 let have: usize = parts.iter().map(|p| p.chars().count()).sum();
-                parts.push(format!("{}{}", "q".repeat(at - have), decoy));
+                parts.push(format!("{}{}", "q".repeat(at - have), decoy(i)));
                 at += 60;
             }
             parts.push("q".repeat(60));

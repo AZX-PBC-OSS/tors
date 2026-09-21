@@ -2406,8 +2406,11 @@ a bounded refinement pass re-scans the best coarse windows at a fine stride, a
 constant budget on top of the linear scan. One substitution in a 9+ character claim
 clears the `0.85` default wherever it sits. Below `r = 0.75` detection is
 best-effort (the recall floor of the DoS windowing), and a genuine region can be
-evicted from the 64 refinement candidates by adversarial decoy text scoring higher,
-the regime `deadline_ms` exists for (both limits are pinned in `tests/test_grounded.py`).
+evicted from the 64 refinement candidates by adversarial decoy text scoring higher —
+64 DISTINCT decoy regions: windows with identical content dedup at admission (they
+refine identically), so repetitive filler cannot starve a near match. That eviction
+is the regime `deadline_ms` exists for (both limits are pinned in
+`tests/test_grounded.py`).
 
 Windowing, rather than one whole-string diff of `claim` against all of `source`, is
 DoS discipline: the realistic RAG-grounding shape is a short claim against a
