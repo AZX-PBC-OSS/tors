@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.9.0...v0.10.0) (2026-09-20)
+
+
+### Features
+
+* **py:** the typed surface stops lying about shapes ([#138](https://github.com/AZX-PBC-OSS/tors/issues/138)) ([95a8c32](https://github.com/AZX-PBC-OSS/tors/commit/95a8c32f8f17632f4b6448529c457b46302b2f44))
+
 ## [0.9.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.8.0...v0.9.0) (2026-09-20)
 
 
