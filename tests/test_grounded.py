@@ -341,21 +341,33 @@ class TestFuzzy:
         """The 64-candidate cap is the documented adversarial limit: the
         top (score, start) band windows are all the refinement will ever
         see, so a real near-match whose straddled coarse score (~0.73)
-        ranks below 64 decoys scoring above it (seven-typo variants,
-        r = 0.829, at grid-aligned offsets) is evicted and the verdict is
-        false despite r = 40/41 >= the guarantee: the regime deadline_ms
-        exists for. The boundary is exact (63 decoys still find it), and
-        the oracle mirrors the eviction identically on both sides."""
+        ranks below 64 decoy REGIONS scoring above it (seven-typo
+        variants, r = 0.829, at grid-aligned offsets) is evicted and the
+        verdict is false despite r = 40/41 >= the guarantee: the regime
+        deadline_ms exists for. The boundary is exact (63 decoys still
+        find it), and the oracle mirrors the eviction identically on both
+        sides. The decoys are pairwise DISTINCT contents: windows with
+        identical content dedup at admission (one region), so only
+        distinct decoy text exercises this limit — repetitive filler
+        cannot starve a near match (pinned separately, the nightly fuzz
+        run's crash shape)."""
         claim = "the bushing torque specifications changed"
         real = "the bushing torqxe specifications changed"
-        decoy = "".join("Z" if i in (2, 8, 14, 20, 26, 32, 38) else c for i, c in enumerate(claim))
+        sub_chars = ("Z", "Y", "X")
+
+        def decoy(i: int) -> str:
+            sub = sub_chars[i % 3]
+            return "".join(
+                sub if any((i + 7 * k) % 41 == j for k in range(7)) else c
+                for j, c in enumerate(claim)
+            )
 
         def build(n_decoys: int) -> str:
             parts = [("q" * 10) + real]
             at = 60  # every decoy starts at a multiple of the stride, 20
-            for _ in range(n_decoys):
+            for i in range(n_decoys):
                 have = sum(len(p) for p in parts)
-                parts.append(("q" * (at - have)) + decoy)
+                parts.append(("q" * (at - have)) + decoy(i))
                 at += 60
             parts.append("q" * 60)
             return "".join(parts)
@@ -365,6 +377,32 @@ class TestFuzzy:
             got = is_grounded(claim, source, fuzzy=True)
             assert got is expected, n
             assert got == reference_is_grounded_fuzzy(claim, source, 0.85), n
+
+    def test_repetitive_filler_cannot_starve_a_near_match(self) -> None:
+        """The nightly fuzz run's crash, pinned: a near-uniform claim
+        ("qqqqqqpq+qqqq", one 'p' and one '+' among q's) with a single
+        substitution, spliced after 369 q's (+113 tail). Every pure-q
+        coarse window scores 11/13 = 0.846, above the splice region's
+        straddle windows (0.62/0.69), and the content-deduped candidate
+        set must keep the splice region's own windows: the aligned window
+        scores 12/13 = 0.923 and grounds the claim at the 0.85 default.
+        The oracle agrees (it dedups identically), and the old behavior —
+        the raw top-64 flooding with identical pad windows — returned
+        false here."""
+        claim = "qqqqqqpq+qqqq"
+        near = "qqqqqqpq+zqqq"  # one substitution: the q at index 9 -> 'z'
+        source = ("q" * 369) + near + ("q" * 113)
+        assert is_grounded(claim, source, fuzzy=True) is True
+        assert is_grounded(claim, source, fuzzy=True, threshold=0.5) is True
+        # The near string is not a verbatim containment: threshold 1.0
+        # stays exactly containment.
+        assert is_grounded(claim, source, fuzzy=True, threshold=1.0) is False
+        assert reference_is_grounded_fuzzy(claim, source, 0.85) is True
+        # Any multiple of the coarse stride repeats the flood; the dedup
+        # holds regardless of the pad length.
+        for lead in (512, 1023):
+            long_source = ("q" * lead) + near + ("q" * 113)
+            assert is_grounded(claim, long_source, fuzzy=True) is True, lead
 
     def test_partial_evidence_at_the_end_scores_like_the_same_evidence_mid_source(self) -> None:
         """Issue #40's repro, pinned. The same 31-of-41 chars of evidence

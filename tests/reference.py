@@ -525,7 +525,10 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     ``(score, start)``, the streaming keep-K-largest set; the truncated tail
     competes like any other), each re-scanned at fine stride
     ``max(1, L // 16)`` across ``[w - L//2, min(w + L//2, n - L)]``, the grid
-    always extended to the range's upper end. Every coarse window is scored:
+    always extended to the range's upper end. Windows with identical content
+    dedup at admission (the first occurrence takes the seat): content-equal
+    windows refine identically, so repetitive filler cannot flood the cap
+    and starve a distinct near-match region. Every coarse window is scored:
     the implementation's early break at ``best >= threshold`` is
     verdict-equivalent, since ``best`` only ever rises and the comparison is
     the same at the end; likewise the refinement's best-first order and
@@ -568,15 +571,18 @@ def reference_is_grounded_fuzzy(claim: str, source: str, threshold: float) -> bo
     stride = max(m // 2, 1)
     best = 0.0
     band: list[tuple[float, int]] = []  # (score, char start), full + tail
+    kept_windows: list[str] = []  # the band's contents, in scan order: dedup
     start = 0
     while True:
         end = min(start + m, n)
+        window = source[start:end]
         # 2*M/(2*m): identical for full windows (end - start == m) and the
         # truncated tail (missing chars are mismatches).
-        score = _lcs_len(claim, source[start:end]) / m
+        score = _lcs_len(claim, window) / m
         best = max(best, score)
-        if score >= 0.5:
+        if score >= 0.5 and window not in kept_windows:
             band.append((score, start))
+            kept_windows.append(window)
         if end == n:
             break
         start += stride
