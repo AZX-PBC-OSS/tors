@@ -49,10 +49,13 @@ jobs:
         # the target platform (query it; don't hard-code it here, so a
         # pyodide-build upgrade re-pins both in lockstep). The `pyodide` CLI
         # entry point ships as a dependency of pyodide-build itself.
+        # Pinned: this tool dictates the Rust and Emscripten toolchains, so a
+        # floating resolution could silently change the cross-compilation
+        # pair mid-release — bump it deliberately, like pyright below.
         id: pyodide
         run: |
-          echo "rust-toolchain=$(uvx --from pyodide-build pyodide config get rust_toolchain)" >> "$GITHUB_OUTPUT"
-          echo "emscripten-version=$(uvx --from pyodide-build pyodide config get emscripten_version)" >> "$GITHUB_OUTPUT"
+          echo "rust-toolchain=$(uvx --from pyodide-build==0.39.0 pyodide config get rust_toolchain)" >> "$GITHUB_OUTPUT"
+          echo "emscripten-version=$(uvx --from pyodide-build==0.39.0 pyodide config get emscripten_version)" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         # Same action SHA as ci.yml; the version itself comes from the
@@ -88,7 +91,7 @@ jobs:
         # the version pyodide-build expects regardless of the runner default.
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.pyodide.outputs.rust-toolchain }}
-        run: uvx --from pyodide-build pyodide build . -o dist
+        run: uvx --from pyodide-build==0.39.0 pyodide build . -o dist
 
       - name: Upload the wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
