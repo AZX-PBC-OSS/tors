@@ -1,10 +1,12 @@
 """Second-wave red-team suite for the rank-fusion / IR-metric family.
 
 A fresh adversarial pass that deliberately does NOT re-run the first
-wave's angles (tests/redteam_rank_fusion.py: paper vectors, the sklearn
-differential, the overflow NaN hunt, TypeError discipline, re-entrancy,
-GIL bands, perf cliffs). Wave 2 attacks the FIXES and consequences the
-first wave left standing, plus the classes it skipped:
+wave's angles (the wave-1 suite's eight classes: paper vectors, the
+sklearn differential, the overflow NaN hunt, TypeError discipline,
+re-entrancy, GIL bands, perf cliffs; the implementer has since folded
+those pins into tests/test_rank_fusion.py). Wave 2 attacks the FIXES
+and consequences the first wave left standing, plus the classes it
+skipped:
 
 1. The saturating-ratio policy's CONSEQUENCES: weak monotonicity under
    saturation (a higher gain moved UP must never lower the score, even
@@ -36,8 +38,9 @@ first wave left standing, plus the classes it skipped:
    claims ("three gains of 1e308, or two of 1.7e308, are enough")
    checked at BOTH scales on a same-shaped imperfect ranking.
 
-Every test below passed on the audited tree (head 9b409d8): failed
-attacks, pinned as robustness. No xfail.
+Every test below passed on the audited tree (the feature branch at
+9b409d8, plus the implementer's wave-1 fold 325b68f): failed attacks,
+pinned as robustness. No xfail.
 """
 
 from __future__ import annotations
