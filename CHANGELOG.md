@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.10.1...v0.11.0) (2026-09-24)
+
+
+### Features
+
+* **grounding:** rouge-w snippet highlighting with uax [#29](https://github.com/AZX-PBC-OSS/tors/issues/29) tokenization ([#146](https://github.com/AZX-PBC-OSS/tors/issues/146)) ([99c70a0](https://github.com/AZX-PBC-OSS/tors/commit/99c70a0be8baf25d188cf009c9a5ae5e02d8d98c))
+
+
+### Bug Fixes
+
+* **ci:** pin pyodide-build in the wasm lane ([#145](https://github.com/AZX-PBC-OSS/tors/issues/145)) ([c414c15](https://github.com/AZX-PBC-OSS/tors/commit/c414c1528aca848c89722f9f8b9cd17919d3b05e))
+
 ## [0.10.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.10.0...v0.10.1) (2026-09-21)
 
 
