@@ -434,8 +434,7 @@ mod tests {
 
     #[test]
     fn two_huge_gains_saturate_at_one_not_nan() {
-        // 2 × 1.7e308 overflows each sum the same way (the red team's
-        // second repro shape).
+        // 2 × 1.7e308 overflows each sum the same way.
         assert_eq!(ndcg_at_k(&[1.7e308, 1.7e308], vec![1.7e308; 2], 2), 1.0);
     }
 

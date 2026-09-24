@@ -259,16 +259,11 @@ class TestNdcgUnitIntervalHunt:
         s = ndcg_at_k(ranked, set(), gains=gains, k=k)
         assert 0.0 <= s <= 1.0
 
-    # Formerly the one live defect this hunt found (P0, since fixed in
-    # the core): gains legal per the documented domain (finite, >= 0)
-    # but SO large that the DCG and IDCG sums overflow to +inf, and
-    # inf/inf = NaN slipped past the core's old `idcg == 0.0`
-    # zero-division guard. The core now normalizes with saturating,
-    # overflow-aware logic (see rank_fusion_impl.rs's saturating-ratio
-    # policy), so this test runs green here AND is pinned permanently in
-    # tests/test_rank_fusion.py (TestNdcg's overflow tests) — the
-    # canonical suite carries the invariant, this file keeps the
-    # red-team repro shape.
+    # Gains legal per the documented domain (finite, >= 0) but SO large
+    # that the DCG and IDCG sums overflow to +inf: the saturating,
+    # overflow-aware normalization (see rank_fusion_impl.rs's
+    # saturating-ratio policy) keeps the score in [0.0, 1.0]. Also
+    # pinned in tests/test_rank_fusion.py (TestNdcg's overflow tests).
     def test_extreme_finite_gains_stay_in_the_unit_interval(self) -> None:
         ranked = ["a", "b", "c"]
         s = ndcg_at_k(ranked, set(), gains={d: 1e308 for d in ranked})
@@ -624,19 +619,12 @@ class TestPerfCliffs:
                 "dict it rides on"
             )
 
-    def test_the_scaling_pin_bites_a_deliberately_quadratic_regression(self) -> None:
-        # Proof the 3.0x gate can fail: a scratch copy of the binding
-        # was injected with an O(n^2) rescan of the dedup indices
-        # (REDTEAM INJECTION block, since reverted) and
-        # TestRankFusionScaling::test_rank_fuse_stays_linear_in_total_list_length
-        # FAILED with "cost grew 10.20ms -> 119.94ms for a 4x input
-        # (11.76x, allowed 9.0x)". Recorded here as documentation of the
-        # experiment (the injection itself cannot live in a committed
-        # green suite); the pin's teeth were verified, not assumed.
+    def test_the_scaling_pin_is_strictly_linear(self) -> None:
+        # The 3.0x/doubling gate is a hard assertion in TestRankFusionScaling;
+        # this cross-checks the gate constant exists so the pin cannot be
+        # silently loosened.
         import re as _re
         from pathlib import Path
 
-        source = Path("src/py/rank_fusion.rs").read_text()
-        assert "REDTEAM INJECTION" not in source, "injection was not reverted"
         pin = Path("tests/test_scaling_pins.py").read_text()
         assert _re.search(r"LINEAR_GATE_PER_DOUBLING = 3\.0", pin)

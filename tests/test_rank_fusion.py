@@ -354,10 +354,9 @@ class TestNdcg:
         with pytest.raises(TypeError, match="unhashable"):
             ndcg_at_k([{"d": 1}], {"a"})  # type: ignore[list-item]
 
-    # The saturating-ratio policy (the red-team overflow find, fixed in
-    # the core): legal finite gains can overflow the DCG/IDCG sums to
-    # +inf, where IEEE inf/inf is NaN — the pinned [0.0, 1.0] contract
-    # holds instead, permanently pinned here.
+    # The saturating-ratio policy: legal finite gains can overflow the
+    # DCG/IDCG sums to +inf, where IEEE inf/inf is NaN — the pinned
+    # [0.0, 1.0] contract holds instead.
 
     def test_three_huge_gains_saturate_at_one_not_nan(self) -> None:
         # 3 × 1e308 overflows both sums; the ranked gains equal the

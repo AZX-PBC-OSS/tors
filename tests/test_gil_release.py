@@ -3228,9 +3228,9 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     this cell builds (short ``str`` ids). With hash-expensive ids
     (10-int tuples are the measured pathological shape) each dict
     operation in the dedup walk costs its hash, the GIL-held share
-    approaches the call's full wall (the ratio measures 0.98-1.00) and
-    the 0.80 budget no longer describes the call — the budget pins the
-    str-id shape, not a detach guarantee for every hashable id type."""
+    approaches the call's full wall (the ratio measures 0.98-1.00) —
+    the budget pins the str-id shape, not a detach guarantee for every
+    hashable id type."""
     lists = _ranked_lists(200_000)
     asyncio.run(
         _assert_loop_stays_responsive(
