@@ -14,6 +14,11 @@ in ``src/grounded_impl.rs``; this file pins what a consumer can rely on.
 from __future__ import annotations
 
 import pytest
+from grounding_reference import (
+    _cov,
+    _score_sentence,
+    _word_seqs,
+)
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -173,3 +178,81 @@ class TestHostileInput:
             assert 0.0 <= grounding_coverage(weird, weird) <= 1.0
             assert 0.0 <= grounding_coverage("abc def", weird) <= 1.0
             assert 0.0 <= grounding_coverage(weird, "abc def") <= 1.0
+
+
+class TestScoreInvariantTorture:
+    """identical -> 1.0 (within 1e-9), token-free -> EXACTLY 0.0, unit
+    interval, monotone sane self-minus-one-token values."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "word " * 16_383 + "word",  # at the 16384-token cap, all one token
+            ("ab " * 8_192 + "cd ") * 2,  # alternating at the cap
+            "café " * 4_000,  # case/accents
+            "日本語 の テキスト " * 2_000,  # CJK
+        ],
+    )
+    def test_identical_operands_score_within_1e9_of_one(self, text):
+        text = text[: text.rfind("word") + 4] if "word" in text else text.rstrip()
+        text = text.strip()
+        got = _cov(text, text)
+        assert abs(got - 1.0) < 1e-9, got
+
+    @pytest.mark.parametrize(
+        "text",
+        ["", "   ", "\t\n\r", "。、！", "。！？", "  ...  ", "🎉 🎉🎉", "👨‍👩‍👧‍👦", " ​﻿"],
+    )
+    def test_token_free_operands_score_exactly_zero(self, text):
+        assert _cov(text, text) == 0.0, repr(text)
+        assert _cov(text, "real words here") == 0.0
+        assert _cov("real words here", text) == 0.0
+
+    @pytest.mark.parametrize("text", ["・", "・。", "\u3099", "・ ・."])
+    def test_cjk_range_punctuation_is_token_free(self, text):
+        # Green pin: the non-CJK branch's no-alphanumeric drop rule applies
+        # to the CJK sub-split branch too, so CJK-range punctuation is
+        # token-free on both branches.
+        assert not any(ch.isalnum() for ch in text), "precondition: token-free"
+        assert _cov(text, text) == 0.0, repr(text)
+
+    @settings(max_examples=300, deadline=None)
+    @given(q=_word_seqs(), c=_word_seqs())
+    def test_scores_stay_in_the_unit_interval(self, q, c):
+        a = _cov(" ".join(q), " ".join(c))
+        b = _score_sentence(" ".join(c) + ".", " ".join(q))
+        for got in (a, b):
+            assert 0.0 <= got <= 1.0, (q, c, got)
+
+    def test_source_minus_one_token_is_monotone_sane(self):
+        words = [f"w{i}" for i in range(10)]  # all distinct: one contiguous run
+        source = " ".join(words)
+        text = " ".join(words[:-1])
+        got = _cov(source, text)
+        # Contiguous k-of-n coverage is exactly k/n through Equation 15.
+        want = 9 / 10
+        assert got == pytest.approx(want, abs=1e-9), (got, want)
+
+    def test_contiguous_prefix_coverage_is_exactly_k_over_n(self):
+        words = [f"w{i}" for i in range(50)]
+        source = " ".join(words)
+        for k in (1, 7, 25, 49):
+            got = _cov(source, " ".join(words[:k]))
+            assert got == pytest.approx(k / len(words), abs=1e-9), k
+
+    def test_query_longer_than_text_and_vice_versa(self):
+        long_source = " ".join(f"s{i}" for i in range(500))
+        short_text = "s1 s2"
+        got = _cov(long_source, short_text)
+        assert 0.0 < got <= 1.0
+        got2 = _cov(short_text, long_source)
+        assert 0.0 < got2 <= 1.0
+
+    def test_determinism_across_calls_and_argument_reuse(self):
+        a = _cov("alpha bravo charlie", "bravo charlie delta")
+        b = _cov("alpha bravo charlie", "bravo charlie delta")
+        c = _cov("bravo charlie delta", "alpha bravo charlie")
+        assert a == b
+        assert c == pytest.approx(a, abs=1e-9)  # WLCS symmetric, denominator differs
+
+
