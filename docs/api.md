@@ -3401,15 +3401,22 @@ Two spellings, two measurement shapes:
   per-chunk budget invariant hold for every counter. The counter must return
   an `int` >= 1 for every sentence (`0`, a negative count, or an
   unreasonably large value raise `ValueError`: a sentence measuring no
-  tokens makes the budget contract meaningless, whitespace-only text under a
-  word-count tokenizer included; a non-int return raises
-  `TypeError`); a counter that raises propagates its exception
+  tokens makes the budget contract meaningless. A word-count tokenizer
+  (`len(text.split())`) measures zero any sentence that is a whitespace
+  run, not only whitespace-only text: UAX #29 makes a blank line a
+  sentence of its own (the second `\n` of `\n\n` is one), so
+  multi-paragraph text with blank lines raises the same error:
+  `"Paragraph one.\n\nParagraph two."`, any markdown blank-line document,
+  even a trailing blank line; whitespace-only text is the instance where
+  every sentence is blank. A non-int return raises
+  `TypeError`; a counter that raises propagates its exception
   unchanged. This is the `CompiledLemmaDict`-style measured exception to the
   stateless doctrine: a caller-supplied callable inside the packing.
 - **`chunk_to_offsets`** takes the token spans PRE-COMPUTED: a sequence of
   `(start, end)` codepoint pairs, one per token, sorted and
-  non-overlapping (HuggingFace tokenizers' `Encoding.offsets` is exactly
-  this shape; gaps are allowed, and untokenized text such as inter-token
+  non-overlapping (HuggingFace tokenizers' `Encoding.offsets` is this
+  shape after filtering zero-width spans (HF special tokens emit
+  `(0, 0)`); gaps are allowed, and untokenized text such as inter-token
   whitespace measures 0 tokens). A span's token count is the number of
   token pairs fully contained in it, so the packing is additive and exact
   with no callback anywhere.
@@ -3419,7 +3426,10 @@ in `[0, max_tokens)` or a float ratio in `[0, 1)` (resolved as
 `floor(ratio * max_tokens)` tokens). The next chunk starts at the trailing
 segment boundary whose span back to the closed chunk's end measures at least
 the requested overlap: the RAG-retrieval shape where a fact split across a
-cut is still whole in the next chunk. The overlap is declined for a
+cut is still whole in the next chunk. The shared content is counter-relative:
+the overlap is certified by the same measurement the packing used, so a
+counter that certifies a whitespace run as a token can make the overlap a
+whitespace run. The overlap is declined for a
 transition when it cannot buy new context (a chunk shorter than the
 requested overlap, or a re-cut that would land a span strictly inside its
 predecessor): that one transition degrades to zero overlap rather than

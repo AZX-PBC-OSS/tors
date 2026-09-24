@@ -1194,9 +1194,19 @@ def chunk_hierarchical(
 # chunk's text per packing decision (O(segments) calls, never one per
 # boundary) and must return an int >= 1 for every sentence (0/negative/
 # unreasonably large -> ValueError; non-int -> TypeError; it may raise,
-# propagating its exception). overlap repeats trailing context into the
+# propagating its exception). The ValueError triggers on any sentence
+# measuring no tokens: a word-count tokenizer (`len(text.split())`)
+# measures zero any sentence that is a whitespace run, not only
+# whitespace-only text -- UAX #29 makes a blank line a sentence of its
+# own (the second `\n` of `\n\n` is one), so multi-paragraph text with
+# blank lines ("Paragraph one.\n\nParagraph two.", any markdown
+# blank-line document, even a trailing blank line) raises the same
+# error; whitespace-only text is the instance where every sentence is
+# blank. overlap repeats trailing context into the
 # next chunk: an int token count in [0, max_tokens) or a float ratio in
-# [0, 1) (floor(ratio * max_tokens) tokens); declined for a transition
+# [0, 1) (floor(ratio * max_tokens) tokens); the shared content is
+# counter-relative (a counter that certifies a whitespace run as a token
+# can make the overlap a whitespace run); declined for a transition
 # that cannot buy new context (degrades to zero overlap rather than stall
 # or emit a chunk contained in its predecessor). Chunks are non-empty,
 # strictly increasing in start and end, cover to the end, each fits the
@@ -1227,8 +1237,9 @@ def chunk_to_budget(
 # chunk_to_budget's GIL-free twin: the same packing over PRE-COMPUTED
 # token spans. token_offsets is a sequence of (start, end) pairs in
 # Python str index (codepoint) units, one per token, sorted and
-# non-overlapping (HuggingFace tokenizers' Encoding.offsets is exactly
-# this shape; gaps are allowed -- untokenized text such as inter-token
+# non-overlapping (HuggingFace tokenizers' Encoding.offsets is this
+# shape after filtering zero-width spans (HF special tokens emit
+# (0, 0)); gaps are allowed -- untokenized text such as inter-token
 # whitespace measures 0 tokens). A span's token count is the number of
 # token pairs fully contained in it, so the packing is additive and
 # exact, with no callback anywhere. Same contract, same validation, same

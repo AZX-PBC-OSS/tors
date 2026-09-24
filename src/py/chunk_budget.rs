@@ -29,8 +29,9 @@
 //! super-interval callbacks and states the caveat where it cannot.
 //!
 //! `chunk_to_offsets` takes the token spans PRE-COMPUTED (the caller's
-//! tokenizer has already run; HuggingFace `Encoding.offsets` is exactly
-//! this shape) and never calls back: the O(tokens) argument walk runs
+//! tokenizer has already run; HuggingFace `Encoding.offsets` is this
+//! shape after filtering zero-width spans (HF special tokens emit
+//! `(0, 0)`)) and never calls back: the O(tokens) argument walk runs
 //! under the GIL (the standard extraction class), then the whole pack
 //! (segmentation, greedy budget cuts, overlap walk-backs) is one
 //! end-to-end `py.detach`, and the return marshalling is the family's
@@ -143,11 +144,18 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// packing decision (O(segments) calls total, each counting at most one
 /// chunk's worth of text), so counters that merge tokens across spaces
 /// or boundaries are measured exactly as the emitted chunk will be. The
-/// counter must return an int >= 1 for every sentence (0 or a negative
-/// count raises `ValueError`: a sentence measuring no tokens makes the
-/// budget contract meaningless, whitespace-only text under a word-count
-/// tokenizer included), and an int at all
-/// (anything else raises `TypeError`). A counter that raises propagates
+/// counter must return an int >= 1 for every sentence, and an int at
+/// all (anything else raises `TypeError`). `0` or a negative count
+/// raises `ValueError`: a sentence measuring no tokens makes the
+/// budget contract meaningless. A word-count tokenizer
+/// (`len(text.split())`) measures zero any sentence that is a
+/// whitespace run, not only whitespace-only text: UAX #29 makes a
+/// blank line a sentence of its own (the second `\n` of `\n\n` is
+/// one), so multi-paragraph text with blank lines
+/// (`"Paragraph one.\n\nParagraph two."`, any markdown blank-line
+/// document, even a trailing blank line) raises the same error;
+/// whitespace-only text is the instance where every sentence is
+/// blank. A counter that raises propagates
 /// its exception unchanged.
 ///
 /// `overlap` repeats trailing context into the next chunk: an int token
@@ -155,7 +163,9 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// (`floor(ratio * max_tokens)` tokens). The next chunk starts at the
 /// trailing boundary whose span back to the closed chunk's end measures
 /// at least the requested overlap: genuine shared content between
-/// consecutive chunks, the RAG-retrieval shape. The overlap is declined
+/// consecutive chunks, the RAG-retrieval shape. The shared content is
+/// counter-relative: a counter that certifies a whitespace run as a
+/// token can make the overlap a whitespace run. The overlap is declined
 /// for a transition when it cannot buy new context (a chunk shorter than
 /// the requested overlap, or a re-cut that would land a span strictly
 /// inside its predecessor): that one transition degrades to zero overlap
@@ -271,7 +281,8 @@ pub fn chunk_to_budget<'py>(
 /// PRE-COMPUTED token spans. `token_offsets` is a sequence of
 /// `(start, end)` pairs in Python str index (codepoint) units, one per
 /// token, sorted and non-overlapping (HuggingFace tokenizers'
-/// `Encoding.offsets` is exactly this shape; gaps are allowed, and
+/// `Encoding.offsets` is this shape after filtering zero-width spans
+/// (HF special tokens emit `(0, 0)`); gaps are allowed, and
 /// untokenized text such as inter-token whitespace measures 0 tokens).
 /// A span's token count is the number of token pairs fully contained in
 /// it, so the packing is additive and exact, with no callback anywhere:
