@@ -3377,7 +3377,7 @@ def chunk_to_offsets(
 `await tors.aio.chunk_to_offsets(...)` run these under `asyncio.to_thread`
 (see [Async use](async.md)).
 
-Token-budget chunking measured in the caller's own tokens — the packing
+Token-budget chunking measured in the caller's own tokens: the packing
 primitive for LLM context windows, where the budget is a model's real token
 limit and a character proxy (`chunk_text`) is not good enough. The design is
 the segment-then-pack shape semchunk popularized
@@ -3385,7 +3385,7 @@ the segment-then-pack shape semchunk popularized
 LangChain/LlamaIndex token splitters ship, over tors's own UAX #29
 segmenters: cut `text` at sentence boundaries (a sentence whose own measured
 count exceeds `max_tokens` is re-cut at word boundaries; a single word still
-wider than the whole budget goes out whole — a covering chunker cannot split
+wider than the whole budget goes out whole (a covering chunker cannot split
 below its finest boundary), then greedily pack consecutive segments into
 chunks whose measured token count fits `max_tokens`. Returns `(start, end)`
 pairs in Python `str` index (codepoint) units: `text[start:end]` is the
@@ -3394,13 +3394,13 @@ chunk. Empty text returns `[]`; text that fits whole returns one chunk.
 Two spellings, two measurement shapes:
 
 - **`chunk_to_budget`** takes the counter as a Python callable. It is called
-  with one CANDIDATE CHUNK's text per packing decision — never once per
+  with one CANDIDATE CHUNK's text per packing decision, never once per
   boundary (O(segments) calls total, each counting at most one chunk's worth
-  of text) — so counters that merge tokens across spaces or boundaries are
+  of text), so counters that merge tokens across spaces or boundaries are
   measured exactly as the emitted chunk will be, which is what makes the
   per-chunk budget invariant hold for every counter. The counter must return
   an `int` >= 1 for every sentence (`0`, a negative count, or an
-  unreasonably large value raise `ValueError` — a sentence measuring no
+  unreasonably large value raise `ValueError`: a sentence measuring no
   tokens makes the budget contract meaningless, whitespace-only text under a
   word-count tokenizer included; a non-int return raises
   `TypeError`); a counter that raises propagates its exception
@@ -3409,7 +3409,7 @@ Two spellings, two measurement shapes:
 - **`chunk_to_offsets`** takes the token spans PRE-COMPUTED: a sequence of
   `(start, end)` codepoint pairs, one per token, sorted and
   non-overlapping (HuggingFace tokenizers' `Encoding.offsets` is exactly
-  this shape; gaps are allowed — untokenized text such as inter-token
+  this shape; gaps are allowed, and untokenized text such as inter-token
   whitespace measures 0 tokens). A span's token count is the number of
   token pairs fully contained in it, so the packing is additive and exact
   with no callback anywhere.
@@ -3418,12 +3418,12 @@ Two spellings, two measurement shapes:
 in `[0, max_tokens)` or a float ratio in `[0, 1)` (resolved as
 `floor(ratio * max_tokens)` tokens). The next chunk starts at the trailing
 segment boundary whose span back to the closed chunk's end measures at least
-the requested overlap — the RAG-retrieval shape where a fact split across a
+the requested overlap: the RAG-retrieval shape where a fact split across a
 cut is still whole in the next chunk. The overlap is declined for a
 transition when it cannot buy new context (a chunk shorter than the
 requested overlap, or a re-cut that would land a span strictly inside its
 predecessor): that one transition degrades to zero overlap rather than
-stall, loop, or emit the same text twice — the same forward-progress
+stall, loop, or emit the same text twice: the same forward-progress
 discipline `chunk_text`'s overlap applies. Chunks are non-empty, strictly
 increasing in both start and end, cover to the end of the text, and each
 fits the budget per the same measurement the packing used; with
@@ -3433,21 +3433,21 @@ fits the budget per the same measurement the packing used; with
 mis-shaped `token_offsets` sequence raise `ValueError` before any packing
 runs; a non-callable `token_counter` raises `TypeError`. An int beyond the
 i64 range the binding extracts (`max_tokens=10**30`) raises pyo3's own
-`OverflowError` at extraction instead — the `truncate_to_bounds`-identical
+`OverflowError` at extraction instead, the `truncate_to_bounds`-identical
 pattern for every i64-typed size argument here, a clean Python error, never
-a panic. Text beyond `u32::MAX` bytes (4 GiB — the codepoint→byte offset
+a panic. Text beyond `u32::MAX` bytes (4 GiB, the codepoint→byte offset
 grid the packing resolves spans through) also raises `ValueError` before
 any work runs, rather than silently truncating offsets.
 
 GIL model, stated honestly because the two spellings differ: **`chunk_to_budget` is NOT
-GIL-free** — its counter is Python and can only run under the GIL. The
+GIL-free**: its counter is Python and can only run under the GIL. The
 packing core runs under one `py.detach` and re-attaches the GIL per counter
 call, so the GIL is held only while the counter runs (plus O(chunk)
 argument construction), released for all native work between measurements.
 One measured caveat, because the doctrine forbids false GIL claims: the
 loop is schedulable between callbacks when each callback holds the GIL
 longer than `sys.getswitchinterval()` (5ms by default) or the native
-windows between them are substantial — a callback that straddles the
+windows between them are substantial: a callback that straddles the
 switch interval forces CPython's fair GIL handoff (`gil_drop_request`). A
 GIL-held callback SHORTER than the switch interval on a small text
 (microsecond detach windows) can starve the loop for the whole call: the
@@ -3458,7 +3458,7 @@ packing on a thread you control or use the GIL-free spelling below.
 **`chunk_to_offsets` is the GIL-free choice for
 hot paths**: the O(tokens) argument walk under the GIL, then the whole pack
 detached end to end, with the family's usual O(chunks) 2-tuple marshalling
-after. Like every chunker here, neither makes a retrieval-quality promise —
+after. Like every chunker here, neither makes a retrieval-quality promise:
 the cost/benefit study at [arXiv:2410.13070](https://arxiv.org/abs/2410.13070)
 ("Is Semantic Chunking Worth the Computational Cost?") found expensive
 splitting strategies not consistently worth their cost over simpler ones;

@@ -54,7 +54,7 @@ class TestApiReferenceExamples:
         # docs/api.md's token-budget section: the simple split-based
         # counter keeps the example runnable with no third-party
         # tokenizer, and every output literal is pinned byte-exact
-        # (including each chunk's trailing space — this packer does not
+        # (including each chunk's trailing space, since this packer does not
         # trim; the budget measured the text as it is).
         def word_counter(text: str) -> int:
             return len(text.split())

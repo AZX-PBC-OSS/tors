@@ -38,22 +38,21 @@ def _is_cjk_char(ch: str) -> bool:
 
 def _proxy_terms(query: str) -> list[str]:
     """The tokenizer's own notion of a query term, mirrored from
-    ``grounding_impl::tokens`` (which this property's prose always
-    claimed): UAX #29 word segments kept when they contain an
+    ``grounding_impl::tokens`` (which this property's prose claims):
+    UAX #29 word segments kept when they contain an
     alphanumeric character (whitespace, punctuation, and control
     segments are dropped on both sides), CJK runs sub-split per
     character (the tokenizer's per-character CJK refinement; finer than
-    the grapheme-cluster walk is safe here — every sub-piece is a
+    the grapheme-cluster walk is safe here: every sub-piece is a
     substring of whatever the tokenizer matched).
 
-    This replaces an earlier ``re.findall(r"\\w+", ...)`` proxy that
-    diverged from the tokenizer exactly where UAX #29 splits what ``\\w``
+    The proxy must NOT be ``re.findall(r"\\w+", ...)``, which diverges
+    from the tokenizer exactly where UAX #29 splits what ``\\w``
     merges: ``'0¹'`` is one ``\\w+`` "term" but segments ``'0'|'¹'``
     (Nd does not join No), so a CORRECT snippet ``'0'`` for query
-    ``'0¹'`` failed the property — the test proxy was the divergence,
-    not the implementation (hypothesis found it on the committed tree,
-    2026-09: the same divergence class as the dropped-control case the
-    old comment already knew about)."""
+    ``'0¹'`` would fail the property: the test proxy would be the
+    divergence, not the implementation (the same divergence class as
+    the dropped-control case the caller's comment covers)."""
     terms: list[str] = []
     for start, end in tors.word_bounds(query):
         segment = query[start:end]
@@ -148,7 +147,7 @@ class TestScoring:
         # words, case-folded NFC), not whitespace splitting: a query like
         # "0\x1b" is the token "0" plus a dropped control segment. See
         # _proxy_terms for the segmentation it mirrors and the \w+
-        # divergence that forced it.
+        # divergence it avoids.
         terms = _proxy_terms(query)
         for snippet in result["snippets"]:
             body = unicodedata.normalize("NFC", snippet["text"]).lower()

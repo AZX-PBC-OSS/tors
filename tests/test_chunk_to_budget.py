@@ -1,13 +1,13 @@
 """Contract gate for ``tors.chunk_to_budget`` and ``tors.chunk_to_offsets``:
 token-budget chunking measured by the caller's own token counter (the
-``CompiledLemmaDict``-style measured exception — a Python callable inside the
+``CompiledLemmaDict``-style measured exception: a Python callable inside the
 packing), and its GIL-free twin over pre-computed token spans.
 
 The properties pinned here:
 
 - the budget invariant: every chunk individually fits ``max_tokens`` as
   measured by the SAME counter the packing used (the one documented
-  exception: a single word wider than the whole budget goes out whole —
+  exception: a single word wider than the whole budget goes out whole;
   a covering chunker cannot split below its finest boundary);
 - the coverage invariant: chunks are non-empty, start and end strictly
   advance, the first chunk starts at 0 and the last ends at
@@ -20,12 +20,12 @@ The properties pinned here:
   content between consecutive chunks, and the decline-the-snap rule
   (a transition that cannot buy new context degrades to zero overlap)
   keeps chunks out of their predecessors;
-- validation: exhaustive, at the argument boundary — ``max_tokens < 1``,
+- validation: exhaustive, at the argument boundary: ``max_tokens < 1``,
   an int ``overlap`` outside ``[0, max_tokens)``, a float ratio outside
   ``[0, 1)``, a non-callable counter, and counters returning 0/negative/
   huge/non-int all raise before any packing runs;
 - liveness: pathological counters (non-monotone, all-max, all-min-but-
-  positive) terminate — chunk counts stay bounded by the codepoint
+  positive) terminate; chunk counts stay bounded by the codepoint
   count, pinned with Hypothesis;
 - determinism: the same (text, counter, arguments) always yields the
   same chunks;
@@ -36,7 +36,7 @@ The properties pinned here:
 - GIL honesty: ``chunk_to_offsets`` passes the heartbeat budgets (its
   whole native pass is one ``py.detach``); ``chunk_to_budget`` is
   honestly NOT GIL-free (its counter is Python) and the cell here pins
-  what IS true — that the per-callback GIL handoffs keep the loop
+  what IS true: the per-callback GIL handoffs keep the loop
   schedulable between callbacks when hopped to a thread. Both cells live
   in ``tests/test_gil_release.py`` with the family's harness.
 """
@@ -55,7 +55,7 @@ import tors
 
 
 def word_counter(text: str) -> int:
-    """The docs' counter: ``len(text.split())`` — no third-party tokenizer."""
+    """The docs' counter: ``len(text.split())``, no third-party tokenizer."""
     return len(text.split())
 
 
@@ -344,7 +344,7 @@ class TestOverlap:
 
 def _flare_counter(high: int, low: int):
     """A deterministic NON-MONOTONE counter: its answer depends only on
-    the span's first codepoint's parity, not its length — the shape that
+    the span's first codepoint's parity, not its length: the shape that
     breaks sum-based or binary-search packers. Positive always (a 0
     return is a documented ValueError, not an adversarial shape)."""
 
@@ -470,8 +470,8 @@ class TestAdversarialCounters:
 
     def test_whitespace_only_text_under_the_word_counter_is_a_value_error(self) -> None:
         # The documented zero-sentence contract: a whitespace-only text
-        # measures 0 tokens under a word counter — a sentence with no
-        # tokens makes the budget contract meaningless.
+        # measures 0 tokens under a word counter (a sentence with no
+        # tokens makes the budget contract meaningless).
         with pytest.raises(ValueError, match="returned 0"):
             tors.chunk_to_budget("   ", word_counter, max_tokens=5)
 

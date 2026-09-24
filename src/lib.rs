@@ -409,7 +409,7 @@
 //! call (`Python::attach` from inside the detach), so the GIL is held
 //! only while the caller's counter runs plus O(chunk) argument-string
 //! construction, released for every byte of native work between
-//! measurements — honestly documented as NOT GIL-free (a slow counter
+//! measurements, honestly documented as NOT GIL-free (a slow counter
 //! dominates the call and holds the GIL for its duration, exactly as it
 //! would in pure Python). `chunk_to_offsets` is the GIL-free twin: the
 //! O(tokens) argument walk under the GIL, then the whole pack

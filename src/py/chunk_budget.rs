@@ -9,7 +9,7 @@
 //! run while the calling thread holds the GIL. The packing core
 //! ([`crate::chunk_budget_impl::chunk_to_budget`]) runs under ONE
 //! `py.detach`, and the counter is invoked from inside it via
-//! `Python::attach` — so the GIL is released for every byte of native
+//! `Python::attach`, so the GIL is released for every byte of native
 //! work between measurements (segmentation, offset arithmetic, slicing)
 //! and held only while the counter itself runs, plus the O(chunk) argument
 //! `PyString` construction per call. This is NOT a GIL-free function: a
@@ -23,7 +23,7 @@
 //! CPython's fair handoff). The measured caveat, stated because the
 //! doctrine forbids false GIL claims: a GIL-held callback SHORTER than
 //! the switch interval on a small text (microsecond detach windows) can
-//! starve the loop for the whole call — the worker drops and re-acquires
+//! starve the loop for the whole call: the worker drops and re-acquires
 //! the GIL faster than the woken loop thread can take it.
 //! tests/test_gil_release.py pins the schedulable band for
 //! super-interval callbacks and states the caveat where it cannot.
@@ -31,8 +31,8 @@
 //! `chunk_to_offsets` takes the token spans PRE-COMPUTED (the caller's
 //! tokenizer has already run; HuggingFace `Encoding.offsets` is exactly
 //! this shape) and never calls back: the O(tokens) argument walk runs
-//! under the GIL (the standard extraction class), then the whole pack —
-//! segmentation, greedy budget cuts, overlap walk-backs — is one
+//! under the GIL (the standard extraction class), then the whole pack
+//! (segmentation, greedy budget cuts, overlap walk-backs) is one
 //! end-to-end `py.detach`, and the return marshalling is the family's
 //! usual O(chunks) 2-tuples. The GIL-free choice for hot paths.
 
@@ -47,10 +47,10 @@ use crate::truncate_impl::char_count;
 
 /// The `overlap=` argument's two accepted spellings, validated: an int
 /// token count in `[0, max_tokens)` or a float ratio in `[0, 1)`
-/// (resolved as `floor(ratio * max_tokens)` tokens). Anything else — a
-/// negative count, an overlap at least as large as the budget (no
-/// forward progress), a ratio of 1.0 or more, NaN, or a non-numeric
-/// type — is refused before any packing runs.
+/// (resolved as `floor(ratio * max_tokens)` tokens). Anything else is
+/// refused before any packing runs: a negative count, an overlap at
+/// least as large as the budget (no forward progress), a ratio of 1.0
+/// or more, NaN, or a non-numeric type.
 fn resolve_overlap(overlap: &Bound<'_, PyAny>, max_tokens: i64) -> PyResult<u64> {
     if overlap.is_instance_of::<PyInt>() {
         // bool is an int subclass in Python: True == 1 token, a legal
@@ -138,13 +138,13 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// Empty text returns `[]`; text that fits the budget whole returns one
 /// chunk.
 ///
-/// `token_counter` is called with one candidate chunk's text at a time —
+/// `token_counter` is called with one candidate chunk's text at a time,
 /// NOT once per boundary: a chunk's whole candidate span is measured per
 /// packing decision (O(segments) calls total, each counting at most one
 /// chunk's worth of text), so counters that merge tokens across spaces
 /// or boundaries are measured exactly as the emitted chunk will be. The
 /// counter must return an int >= 1 for every sentence (0 or a negative
-/// count raises `ValueError` — a sentence measuring no tokens makes the
+/// count raises `ValueError`: a sentence measuring no tokens makes the
 /// budget contract meaningless, whitespace-only text under a word-count
 /// tokenizer included), and an int at all
 /// (anything else raises `TypeError`). A counter that raises propagates
@@ -154,7 +154,7 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// count in `[0, max_tokens)` or a float ratio in `[0, 1)`
 /// (`floor(ratio * max_tokens)` tokens). The next chunk starts at the
 /// trailing boundary whose span back to the closed chunk's end measures
-/// at least the requested overlap — genuine shared content between
+/// at least the requested overlap: genuine shared content between
 /// consecutive chunks, the RAG-retrieval shape. The overlap is declined
 /// for a transition when it cannot buy new context (a chunk shorter than
 /// the requested overlap, or a re-cut that would land a span strictly
@@ -171,13 +171,13 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// `ValueError`; a non-callable `token_counter` raises `TypeError`.
 /// An int beyond the i64 range the binding extracts
 /// (`max_tokens=10**30`) raises pyo3's own `OverflowError` at
-/// extraction instead — the `truncate_to_bounds`-identical pattern for
+/// extraction instead, the `truncate_to_bounds`-identical pattern for
 /// every i64-typed size argument; text beyond `u32::MAX` bytes (the
 /// codepoint→byte offset grid's width, see
 /// [`crate::chunk_budget_impl::grid_overflow`]) raises `ValueError`
 /// rather than silently truncating offsets.
 ///
-/// GIL model: NOT GIL-free, and not documented as one — the counter is
+/// GIL model: NOT GIL-free, and not documented as one; the counter is
 /// Python. The packing core runs under one `py.detach` and re-attaches
 /// the GIL per counter call, so the GIL is held only while the counter
 /// runs (plus O(chunk) argument construction per call) and released for
@@ -186,7 +186,7 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// `sys.getswitchinterval()` (5ms default) or the native windows
 /// between them are substantial; a sub-switch-interval callback on a
 /// small text can starve the loop for the whole call (the drop and
-/// re-acquire outruns the woken loop thread — `gil_drop_request`'s fair
+/// re-acquire outruns the woken loop thread; `gil_drop_request`'s fair
 /// handoff fires only for callbacks that straddle the interval).
 /// `tors.aio.chunk_to_budget` hops to a thread, which interleaves the
 /// per-callback GIL handoffs with the event loop within that boundary.
@@ -195,7 +195,7 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 // override below; the drift guard reads it) while the runtime spelling
 // is `Option` + None: pyo3's default machinery needs the default
 // expression to construct the parameter's Rust type, and a Python-object
-// type has no GIL-free literal — so the runtime default is `None`
+// type has no GIL-free literal, so the runtime default is `None`
 // (resolved as zero tokens) and the introspected default is pinned to
 // the honest `0` by tests/test_pyi_drift.py against this string.
 #[pyfunction(signature = (text, token_counter, *, max_tokens, overlap = None))]
@@ -267,11 +267,11 @@ pub fn chunk_to_budget<'py>(
 }
 
 /// `tors.chunk_to_offsets(text, token_offsets, *, max_tokens, overlap=0)`:
-/// [`chunk_to_budget`]'s GIL-free twin — the same packing over
+/// [`chunk_to_budget`]'s GIL-free twin, the same packing over
 /// PRE-COMPUTED token spans. `token_offsets` is a sequence of
 /// `(start, end)` pairs in Python str index (codepoint) units, one per
 /// token, sorted and non-overlapping (HuggingFace tokenizers'
-/// `Encoding.offsets` is exactly this shape; gaps are allowed —
+/// `Encoding.offsets` is exactly this shape; gaps are allowed, and
 /// untokenized text such as inter-token whitespace measures 0 tokens).
 /// A span's token count is the number of token pairs fully contained in
 /// it, so the packing is additive and exact, with no callback anywhere:
@@ -284,7 +284,7 @@ pub fn chunk_to_budget<'py>(
 /// `overlap`, empty text, the budget/coverage invariants); no counter
 /// validation exists because there is no counter. `token_offsets`
 /// entries must be `(start, end)` int pairs with
-/// `0 <= start < end <= len(text)`, sorted and non-overlapping —
+/// `0 <= start < end <= len(text)`, sorted and non-overlapping;
 /// anything else raises `ValueError` before any packing runs.
 // The same Option + text_signature-override shape as chunk_to_budget's
 // `overlap` (see that function's comment).
@@ -315,8 +315,8 @@ pub fn chunk_to_offsets(
         )));
     }
     let total = char_count(text);
-    // The bounded manual walk (the #112 discipline: never size a Vec
-    // from a lying `__len__`, never loop an unbounded iterator):
+    // The bounded manual walk (never size a Vec from a lying
+    // `__len__`, never loop an unbounded iterator):
     // entries are pushed one at a time, so memory tracks the real
     // sequence, and a runaway iterable aborts at the cap instead of
     // hanging.

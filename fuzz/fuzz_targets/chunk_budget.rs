@@ -2,14 +2,14 @@
 //! contract holds over every fuzzer string and every (budget, overlap,
 //! token-spans) shape: chunks are non-empty and in bounds, starts and
 //! ends strictly advance, the last chunk ends at the codepoint length,
-//! and every chunk fits the budget by the measurement the packing used —
+//! and every chunk fits the budget by the measurement the packing used,
 //! except the documented single-oversized-segment exception (a chunk
 //! with no interior word boundary to cut at). The offsets spelling's
 //! additive measurement is expressible purely in Rust (contained token
 //! pairs), so both spellings drive the real core here: the callback
 //! variant through a Rust closure counter (the same shape the pyo3
 //! binding wraps a Python callable into), including a non-monotone
-//! counter keyed to the span's first byte — the adversarial shape that
+//! counter keyed to the span's first byte: the adversarial shape that
 //! breaks sum-based or binary-search packers.
 
 #![no_main]
@@ -28,7 +28,7 @@ fn shape(bytes: &[u8]) -> (u64, u64) {
 
 /// Token spans synthesized from the fuzzer bytes: a token covers 1-4
 /// codepoints, decided per codepoint from the byte stream (roughly one
-/// bit), with whitespace untokenized (gaps — the realistic
+/// bit), with whitespace untokenized (gaps: the realistic
 /// tokenizer-offsets shape). Sorted and non-overlapping by construction.
 fn token_spans(text: &str, bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
@@ -125,7 +125,7 @@ fuzz_target!(|data: &[u8]| {
 /// The packing contract, over one chunking: non-empty in-bounds chunks,
 /// first start 0, last end the codepoint length, starts and ends
 /// strictly advancing, and every chunk fits `budget` by the same
-/// measurement the packing used — except the single-oversized-segment
+/// measurement the packing used, except the single-oversized-segment
 /// exception (a chunk with no interior word boundary to cut at).
 fn assert_invariants(
     text: &str,

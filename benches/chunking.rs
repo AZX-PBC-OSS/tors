@@ -333,8 +333,8 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
 }
 
 /// The token-budget chunking group: `chunk_to_budget` (the callback
-/// spelling's packing core, driven here by a Rust-side counter closure —
-/// the same span-per-measurement shape the pyo3 binding drives with a
+/// spelling's packing core, driven here by a Rust-side counter closure
+/// (the same span-per-measurement shape the pyo3 binding drives with a
 /// Python callable, minus the interpreter hop the Python side
 /// contributes) against `chunk_to_offsets` (the GIL-free spelling over
 /// pre-computed token spans), at the small/medium/large corpus sizes the

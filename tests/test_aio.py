@@ -185,8 +185,8 @@ class TestAwaitCorrectness:
             ("chunk_cdc", (b"x" * 20_000,), {}),
             ("chunk_hierarchical", ("One. Two. Three. Four.", 8), {}),
             # the token-budget twins' keyword-only max_tokens/overlap
-            # marshalling through to_thread's kwargs path (they were the
-            # only chunkers missing from this sweep — red-team P2)
+            # marshalling through to_thread's kwargs path (the aio
+            # twins are in this sweep like every other chunker)
             (
                 "chunk_to_budget",
                 ("One. Two. Three. Four.", lambda s: len(s.split())),

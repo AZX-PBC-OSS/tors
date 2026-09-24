@@ -1,9 +1,8 @@
-"""RED-TEAM suite for ``tors.chunk_to_budget`` / ``tors.chunk_to_offsets``.
+"""Adversarial attack suite for ``tors.chunk_to_budget`` /
+``tors.chunk_to_offsets``.
 
-Written by an adversarial reviewer who did not write the feature (the
-red-team contract's method: every attack is a test; passing tests are
-FAILED attacks and document robustness). FIX NOTHING — anything that
-breaks lands here as an xfail with the finding reference.
+Every attack is a test; passing tests are regression pins that document
+robustness.
 
 Attack classes covered (on top of the contract's seven):
 
@@ -23,7 +22,7 @@ Attack classes covered (on top of the contract's seven):
   float ratios near 1.0 vs the equivalent int (the floor(ratio*budget)
   int/float path equivalence), chunks strictly increasing and pairwise
   distinct.
-- GIL CLAIM AUDIT: hostile heartbeat cells — a counter that releases the
+- GIL CLAIM AUDIT: hostile heartbeat cells: a counter that releases the
   GIL itself, a re-entrant counter (tors call inside the callback), and
   the extraction band under 1-span-per-codepoint offsets.
 - OFFSET/ROUND-TRIP torture: CJK, emoji ZWJ, combining marks, RTL with
@@ -91,7 +90,7 @@ def assert_full_contract(text, chunks, budget, counter, spans=None):
 
 COUNTER_BATTERY = {
     # BPE-style merging: a merged span measures LESS than its parts would
-    # sum to — sum-based packers would under-fill; this packer must still
+    # sum to; sum-based packers would under-fill; this packer must still
     # never emit a chunk that over-measures.
     "bpe_merge_less": lambda s: max(1, len(s.split()) // 2) if " " in s else len(s),
     # counter(whole) > counter(a) + counter(b): +2 for any span with a space.
@@ -138,8 +137,8 @@ def test_oversized_word_at_exactly_max_tokens_smuggles_no_second_word() -> None:
     """ATTACK: a counter that returns max_tokens EXACTLY for the oversized
     single word (and for anything bigger). The documented exception lets
     ONE segment out whole; the packer must not extend past it (extension
-    requires first_count <= max_tokens, and the candidate measurement —
-    not a sum — gates every accepted append)."""
+    requires first_count <= max_tokens, and the candidate measurement,
+    not a sum, gates every accepted append)."""
     text = "aaaaa bbbbb ccccc"
 
     def exact(s: str) -> int:
@@ -174,7 +173,7 @@ def test_oversized_word_at_exactly_max_tokens_smuggles_no_second_word() -> None:
 
 def test_zero_or_one_counter_at_overlap_max_minus_one_terminates() -> None:
     """ATTACK: a counter that measures everything 0-or-1 with
-    overlap == max_tokens-1 — the walk-back can never certify the
+    overlap == max_tokens-1; the walk-back can never certify the
     requested overlap, so every transition must decline to zero overlap
     and still make unconditional progress."""
     text = "aa. bb. cc. dd. ee. ff. gg. hh."
@@ -194,7 +193,7 @@ def test_zero_or_one_counter_at_overlap_max_minus_one_terminates() -> None:
 
 
 def test_overlap_larger_than_a_whole_chunk_never_duplicates() -> None:
-    """ATTACK: overlap requests bigger than any single chunk can satisfy —
+    """ATTACK: overlap requests bigger than any single chunk can satisfy;
     the next chunk must never be empty, never equal its predecessor."""
     text = "a. b. c."
     for budget in (1, 2):
@@ -209,7 +208,7 @@ def test_overlap_larger_than_a_whole_chunk_never_duplicates() -> None:
 
 def test_float_ratio_near_one_matches_the_equivalent_int_overlap() -> None:
     """ATTACK: ratios whose floor(ratio*max_tokens) sits at the int/float
-    path boundary — the two spellings must resolve identically."""
+    path boundary; the two spellings must resolve identically."""
     import math
 
     text = "the cat sat on the mat today and the dog ran far away"
@@ -228,7 +227,7 @@ def test_float_ratio_near_one_matches_the_equivalent_int_overlap() -> None:
 
 def test_counter_raising_on_the_third_call_surfaces_intact() -> None:
     """ATTACK: an exception raised mid-pack (3rd counter call) must
-    propagate with its original type, message, and traceback frame — no
+    propagate with its original type, message, and traceback frame: no
     Rust panic, no 'original exception was lost' substitute, no poisoned
     state (a follow-up call still works)."""
     calls = {"n": 0}
@@ -289,7 +288,7 @@ def test_counter_return_shapes_are_gated() -> None:
 
 def test_counter_may_call_tors_functions_reentrantly() -> None:
     """ATTACK (GIL stress): a counter that calls tors.chunk_to_offsets /
-    tors.chunk_to_budget INSIDE the callback — detach-within-attach. No
+    tors.chunk_to_budget INSIDE the callback (detach-within-attach). No
     deadlock, no panic, and the outer packing still satisfies its contract."""
     text = "One. Two. Three. Four. Five. Six. Seven. Eight."
 
@@ -320,7 +319,7 @@ def test_counter_may_release_the_gil_itself() -> None:
 
 def test_call_count_is_per_candidate_span_not_per_boundary() -> None:
     """ATTACK on the docs claim ('one candidate chunk's text per packing
-    decision — never once per boundary'): instrument the counter and pin
+    decision, never once per boundary'): instrument the counter and pin
     the call count to O(segments). A per-boundary counter on this text
     would see ~2 calls per word; the candidate-span shape is a small
     multiple of the chunk count. Also: every measured span is at most one
@@ -342,7 +341,7 @@ def test_call_count_is_per_candidate_span_not_per_boundary() -> None:
         assert span
         assert span in text
     # and no measured span exceeds one chunk's worth plus one segment (a
-    # REJECTED extension candidate is the chunk-to-be plus one segment —
+    # REJECTED extension candidate is the chunk-to-be plus one segment;
     # the doc's "at most one chunk's worth" is honored to that tolerance)
     longest_chunk = max(e - s for s, e in chunks)
     longest_sentence = max(e - s for s, e in tors.sentence_bounds(text))
@@ -366,7 +365,7 @@ def test_call_count_is_per_candidate_span_not_per_boundary() -> None:
 )
 def test_round_trip_through_hostile_scripts(text: str) -> None:
     """text[start:end] must be exactly the codepoints between the offsets
-    through CJK, RTL + bidi marks, ZWJ emoji, and combining marks — for
+    through CJK, RTL + bidi marks, ZWJ emoji, and combining marks, for
     both spellings, over budgets and overlaps."""
     for budget in (1, 2, 3, 5):
         for overlap in range(budget):
@@ -388,15 +387,15 @@ def test_text_of_exactly_max_tokens_is_one_chunk() -> None:
 
 
 def test_empty_offsets_on_non_empty_text_is_covering_chunks() -> None:
-    """Pinned either way (the red-team contract demands it): empty offsets
-    on non-empty text measure 0 everywhere — tolerated (gaps allowed) and
+    """Pinned either way: empty offsets
+    on non-empty text measure 0 everywhere (tolerated, gaps allowed), and
     the result is a covering chunk set anchored to offsets, not counts.
     Empty text with empty offsets is []."""
     assert tors.chunk_to_offsets("hello world", [], max_tokens=5) == [(0, 11)]
     assert tors.chunk_to_offsets("   ", [], max_tokens=5) == [(0, 3)]
     assert tors.chunk_to_offsets("", [], max_tokens=5) == []
     # the callback spelling's twin shape (a counter measuring 0 for the
-    # whole first sentence) is the documented ValueError — the two
+    # whole first sentence) is the documented ValueError; the two
     # spellings' zero-measure contracts differ, and both are pinned:
     with pytest.raises(ValueError, match="returned 0"):
         tors.chunk_to_budget("   ", word_counter, max_tokens=5)
@@ -465,7 +464,7 @@ def test_flare_counter_never_breaks_the_contract(text: str, budget: int, flare: 
     budget=st.integers(1, 8),
 )
 def test_space_penalty_counter_never_over_emits(text: str, budget: int) -> None:
-    """counter(whole) > counter(a) + counter(b) — the superadditive shape.
+    """counter(whole) > counter(a) + counter(b): the superadditive shape.
     Emitted chunks must still fit the budget per the same counter (or be
     the single-segment exception)."""
     counter = COUNTER_BATTERY["space_penalty"]
@@ -484,7 +483,7 @@ def test_generated_offsets_never_break_the_offsets_contract(
 ) -> None:
     """ GENERATED token offsets (not just text): random sorted
     non-overlapping spans with gaps, driving the offsets packing through
-    the same contract — the fuzz target's shape, at the Python layer."""
+    the same contract: the fuzz target's shape, at the Python layer."""
     spans: list[tuple[int, int]] = []
     i = 0
     while i < len(text):
@@ -545,7 +544,7 @@ async def _gap_and_wall(op):
 
 def test_gil_heartbeat_survives_a_counter_that_releases_the_gil() -> None:
     """A counter that itself releases the GIL (time.sleep per call): the
-    worker's handoffs must still interleave — the worst heartbeat gap
+    worker's handoffs must still interleave; the worst heartbeat gap
     stays a small fraction of the wall, never the whole call."""
 
     def sleepy(s: str) -> int:
@@ -584,8 +583,8 @@ def test_gil_heartbeat_survives_reentrant_tors_calls_in_the_counter() -> None:
 
 def test_gil_offsets_extraction_band_at_one_span_per_codepoint() -> None:
     """The extraction-band attack: one span per codepoint (~1.5M spans on
-    a 2MB corpus) — the O(tokens) GIL-held argument walk. The documented
-    bespoke budget (0.60 ratio, the finalize-QC recalibration shape) plus
+    a 2MB corpus): the O(tokens) GIL-held argument walk. The documented
+    bespoke budget (0.60 ratio, the measured-band ratio-budget shape) plus
     the 100ms ceiling must hold."""
     unit = "speaker: message with a few words and a number 42.\n"
     corpus = unit * (2 * 1024 * 1024 // len(unit))
@@ -606,8 +605,8 @@ def test_gil_offsets_extraction_band_at_one_span_per_codepoint() -> None:
 
 def test_aio_twins_match_their_sync_spellings() -> None:
     """The aio twins exist and return exactly what the sync spellings
-    return (the await-correctness sweep in test_aio.py does not cover
-    them — pinned here)."""
+    return (test_aio.py's await-correctness sweep covers them too; this
+    cell pins the values directly)."""
     import tors.aio
 
     async def run():
@@ -626,53 +625,44 @@ def test_aio_twins_match_their_sync_spellings() -> None:
     )
 
 
-# ---- 9. the slow-counter heartbeat claim (finding R1, fixed) --------------------
+# ---- 9. the slow-counter heartbeat claim ---------------------------------------
 #
-# The committed cell test_gil_release.py::test_chunk_to_budget_slow_counter_
-# blocks_only_for_its_callbacks originally pinned "the worst gap tracks the
-# callbacks themselves, never the whole call" using a busy counter calibrated
-# at ~5ms per call on CPython 3.12. On CPython 3.14 (supported: requires-python
-# >=3.10) the same counter ran ~2-4ms — BELOW the GIL switch interval
-# (0.005s) — and the cell failed 4/4 (gap ~= wall, 100% blocked). The
-# mechanism, measured: with a callback-dominated wall on a small text
+# test_gil_release.py::test_chunk_to_budget_slow_counter_blocks_only_for_
+# its_callbacks pins "the worst gap tracks the callbacks themselves, never
+# the whole call" with a busy counter time-budgeted at ~3x the GIL switch
+# interval per call, so every callback stays above sys.getswitchinterval()
+# (0.005s) on any interpreter (3.10-3.14). The mechanism, measured: with a
+# callback-dominated wall on a small text
 # (microsecond detach windows), a callback shorter than the switch interval
-# starves the event loop for the WHOLE call — the worker drops and
+# starves the event loop for the WHOLE call: the worker drops and
 # re-acquires the GIL faster than the woken loop thread can take it, and
 # gil_drop_request (which forces the fair handoff) only fires for
 # callbacks that straddle the interval. Measured here: ~1ms callbacks ->
 # 100% blocked, ~4ms -> 79-100%, ~8ms+ -> 3-6% (clean). The Rust code's
 # GIL claim itself holds (detach-between-callbacks is real; the 8/16ms
-# cells and the fast-counter cell all pass) — what did NOT hold was the
-# empirical docs/test claim that the loop is schedulable BETWEEN callbacks
-# for callback-dominated calls: for sub-switch-interval callbacks it is
-# starved for the whole call.
-#
-# Resolution (the fix pass): the docs claim was QUALIFIED on every surface
-# (docs/api.md, the .pyi, tors/aio.py, the binding docstrings) — the loop
-# is schedulable between callbacks when each callback exceeds the switch
-# interval or the native windows between them are substantial, with the
-# sub-switch-interval starvation stated as the honest boundary — and the
-# committed slow-counter cell was recalibrated time-budgeted (3x the
-# switch interval per call). This suite's red cell below is promoted to a
-# green regression witness for the corrected claim's own boundary:
+# cells and the fast-counter cell all pass): the loop is schedulable
+# BETWEEN callbacks for callback-dominated calls when each callback
+# exceeds the switch interval or the native windows between them are
+# substantial, and the sub-switch-interval starvation is the honest
+# boundary documented on every surface (docs/api.md, the .pyi,
+# tors/aio.py, the binding docstrings). The green cell below pins the
+# qualified claim's own boundary:
 # super-interval callbacks on a small text are schedulable between. The
 # sub-interval shape is NOT asserted in either direction (starvation is a
 # timing property of the interpreter, not a contract); it lives in the
-# docs. Zero xfail remains in this file.
+# docs. Zero xfail in this file.
 
 
 def test_loop_schedulable_between_callbacks_above_the_switch_interval() -> None:
-    """GREEN regression witness (finding R1, promoted from its xfail'd
-    red shape): the corrected claim's own boundary. A GIL-held callback
-    time-budgeted at ~3x ``sys.getswitchinterval()`` (so it stays above
-    the interval on every interpreter 3.10-3.14 — the original
-    fixed-iteration counter dropped under it on 3.14 and starved the
-    loop) straddles the interval and fires ``gil_drop_request``'s fair
+    """GREEN regression witness: the qualified claim's own boundary. A
+    GIL-held callback time-budgeted at ~3x ``sys.getswitchinterval()``
+    (so it stays above the interval on every interpreter 3.10-3.14)
+    straddles the interval and fires ``gil_drop_request``'s fair
     handoff, so the loop stays schedulable between callbacks on a SMALL
     text too: the worst gap tracks the callbacks, never the whole call.
     The sub-switch-interval caveat (a fast GIL-held callback on a small
     text CAN starve the loop for the whole call) is the documented
-    boundary — docs/api.md, the ``.pyi``, and the binding docstrings —
+    boundary (docs/api.md, the ``.pyi``, and the binding docstrings),
     deliberately not asserted here in either direction: it is a timing
     property of the interpreter, not a contract."""
 
@@ -694,7 +684,7 @@ def test_loop_schedulable_between_callbacks_above_the_switch_interval() -> None:
     )
     assert worst < 0.30 * wall or worst < 0.100, (
         f"loop starved: blocked {worst * 1000:.0f}ms of {wall * 1000:.0f}ms "
-        f"({worst / wall:.0%}) — callbacks held the GIL for ~3x the switch "
+        f"({worst / wall:.0%}); callbacks held the GIL for ~3x the switch "
         f"interval each, so gil_drop_request's fair handoff should have "
         f"scheduled the loop between them"
     )
@@ -704,11 +694,9 @@ def test_loop_schedulable_between_callbacks_above_the_switch_interval() -> None:
 
 
 def test_whitespace_only_text_under_word_counter_is_a_value_error() -> None:
-    """The zero-sentence contract. NOTE (P2 doc drift): the docstring's
-    claim that 'a word-count tokenizer never sees this because sentence
-    spans always contain words' is false for whitespace-only text — the
-    single sentence IS a whitespace run, and this raises. The behavior is
-    the documented ValueError; only that parenthetical is wrong."""
+    """The zero-sentence contract: whitespace-only text is one sentence
+    that IS a whitespace run, it measures 0 tokens under a word-count
+    tokenizer, and the call raises the documented ValueError."""
     with pytest.raises(ValueError, match="returned 0"):
         tors.chunk_to_budget("   ", word_counter, max_tokens=5)
 
@@ -716,7 +704,7 @@ def test_whitespace_only_text_under_word_counter_is_a_value_error() -> None:
 def test_whitespace_run_can_go_out_whole_as_the_oversized_exception() -> None:
     """ATTACK: a counter that measures whitespace runs as huge turns
     inter-word whitespace into its own word-level segment, which can go
-    out WHOLE as an 'oversized chunk' — a whitespace-only chunk. Within
+    out WHOLE as an 'oversized chunk' (a whitespace-only chunk). Within
     the letter of the documented exception (a single UAX #29 word-bound
     unit), but surprising: pinned here so the behavior is a decision, not
     an accident."""

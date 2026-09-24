@@ -4,7 +4,7 @@
 //! (a token proxy), this family budgets in the caller's own tokens: a
 //! `max_tokens` measured by a caller-provided counter (`chunk_to_budget`)
 //! or by pre-computed token offsets (`chunk_to_offsets`), the two shapes
-//! an LLM context-window packer needs — the counter callable is the
+//! an LLM context-window packer needs. The counter callable is the
 //! measured exception to the stateless doctrine (the
 //! `CompiledLemmaDict`-style caller-supplied-function lane: the packing
 //! itself is native, the token measurement is whatever the caller's
@@ -14,7 +14,7 @@
 //! Prior art, and what is borrowed from each: semchunk
 //! (https://github.com/isaacus-dev/semchunk) packs whole semantic units
 //! (sentences, falling back to words) greedily under a token budget
-//! measured by a tokenizer callable — the same segment-then-pack shape
+//! measured by a tokenizer callable, the same segment-then-pack shape
 //! implemented here, with tors's own UAX #29 segmenters in place of
 //! semchunk's regex split. LangChain's text splitters and LlamaIndex's
 //! `SentenceSplitter` popularized the token-budget-with-overlap shape
@@ -22,7 +22,7 @@
 //! chunk). The study at https://arxiv.org/abs/2410.13070 ("Is Semantic
 //! Chunking Worth the Computational Cost?", Qu/Tu/Bao 2024) found the
 //! expensive semantic-chunking variants not consistently worth their
-//! cost over simpler splitters — the reason this surface ships the
+//! cost over simpler splitters: the reason this surface ships the
 //! cheap mechanical contract (boundary-safe packing under an exact
 //! token budget) and, like every chunker here, makes no
 //! retrieval-quality promise (docs/design.md's own limitation).
@@ -33,7 +33,7 @@
 //! a sentence whose own measured count exceeds `max_tokens` is re-cut
 //! at UAX #29 word boundaries (each word segment packed the same way),
 //! and a single word segment still wider than the whole budget goes out
-//! whole as an oversized chunk — a covering chunker cannot drop or
+//! whole as an oversized chunk: a covering chunker cannot drop or
 //! split below its own finest boundary, the same
 //! correctness-over-the-budget stance [`crate::chunk_impl::chunk_text`]
 //! takes for an oversized grapheme cluster. Segments tile
@@ -48,16 +48,16 @@
 //! emitted chunk measures `<= max_tokens` by the same measurement the
 //! packing used. The cost is one counter call per packing decision
 //! (O(segments) calls total: one per sentence up front plus one per
-//! greedy extension, each measuring up to one chunk's worth of text) —
-//! the "batch several boundaries per callback" shape: a single call
+//! greedy extension, each measuring up to one chunk's worth of text).
+//! It is the "batch several boundaries per callback" shape: a single call
 //! measures a whole candidate span, never one boundary apiece.
 //!
 //! Sentence counts are measured once up front and cached (reused for
 //! the chunk's forced-first measurement and the overlap walk-back's
 //! last-segment step); sentence-level counts of 0 are rejected
-//! (`BudgetError::Invalid`) — a sentence measuring zero tokens makes
-//! the budget contract meaningless (sub-sentence spans — the
-//! whitespace runs between words — may measure 0 and are tolerated:
+//! (`BudgetError::Invalid`): a sentence measuring zero tokens makes
+//! the budget contract meaningless (sub-sentence spans, the
+//! whitespace runs between words, may measure 0 and are tolerated:
 //! word-count tokenizers legitimately return 0 there).
 //!
 //! # Overlap
@@ -67,12 +67,12 @@
 //! least `overlap_tokens` tokens (the walk goes back from the last
 //! segment; the first boundary that reaches the requested overlap wins,
 //! so the repeated context is the shortest the counter certifies). The
-//! overlap is declined for a transition — the next chunk starts at the
-//! closed chunk's end, zero overlap — when it cannot buy new context,
+//! overlap is declined for a transition (the next chunk starts at the
+//! closed chunk's end, zero overlap) when it cannot buy new context,
 //! never stall or emit a contained chunk: the walk only accepts
 //! positions strictly inside the chunk (never before its own start),
 //! and a chosen position whose own re-cut re-embeds the predecessor's
-//! tail (ends at or before its end — possible with non-monotone or
+//! tail (ends at or before its end, possible with non-monotone or
 //! tightly-budgeted counters) is discarded and re-cut from the
 //! zero-overlap position. Forward progress is unconditional: every
 //! accepted chunk starts strictly after its predecessor's start and
@@ -84,13 +84,13 @@
 //!
 //! [`chunk_to_budget`] takes the measurement as a closure over a
 //! `&str` span (the Python binding's callback shape: the closure
-//! re-attaches the GIL per call — see `src/py/chunk_budget.rs` — while
+//! re-attaches the GIL per call (see `src/py/chunk_budget.rs`) while
 //! the packing between calls stays detached native work).
 //! [`chunk_to_offsets`] takes pre-computed token spans
 //! `(start, end)` codepoint pairs (sorted, non-overlapping; gaps
 //! allowed: untokenized text such as whitespace between tokens simply
 //! measures 0) and measures a span's token count as the number of
-//! spans fully contained in it — additive, exact, allocation-free, and
+//! spans fully contained in it: additive, exact, allocation-free, and
 //! callable with no Python at all, which is what makes the
 //! `chunk_to_offsets` binding a single end-to-end `py.detach`.
 
@@ -122,7 +122,7 @@ impl BudgetError {
 /// The codepoint→byte grid's offset width: `pack`'s grid (below) stores
 /// byte offsets as `u32`, so text beyond `u32::MAX` bytes would silently
 /// truncate them. The Python bindings refuse such text with a clear
-/// `ValueError` via [`grid_overflow`] — factored out so the unit test
+/// `ValueError` via [`grid_overflow`], factored out so the unit test
 /// below can pin the boundary with a synthetic value, no 4 GiB
 /// allocation.
 pub(crate) fn grid_overflow(text_bytes: u64) -> bool {
@@ -131,12 +131,12 @@ pub(crate) fn grid_overflow(text_bytes: u64) -> bool {
 
 /// One packing segment: a UAX #29 sentence that fits the budget
 /// individually (`cached` holds its phase-A count, reused for the forced
-/// first measurement of a chunk and the overlap walk-back's last step —
+/// first measurement of a chunk and the overlap walk-back's last step;
 /// both measure exactly this segment's span, the same measurement phase
 /// A already paid), or one of the word-boundary segments an oversized
 /// sentence was re-cut into (`cached: None`; word segments may
-/// individually exceed the budget and go out whole as oversized chunks —
-/// sentence-level ones can't, phase A replaced every one of those).
+/// individually exceed the budget and go out whole as oversized chunks;
+/// sentence-level ones can't, phase A replaces every one of those).
 struct Seg {
     start: usize,
     end: usize,
@@ -147,7 +147,7 @@ struct Seg {
 /// `measure` answers "how many tokens in this candidate span?" for one
 /// candidate span, given both its codepoint bounds `(start, end)` and
 /// the text it covers (`span`, resolved through the codepoint→byte grid
-/// below — offsets are codepoint indices, Rust slices are bytes).
+/// below; offsets are codepoint indices, Rust slices are bytes).
 /// `reject_zero_sentences` is the callback spelling's contract (a
 /// sentence measuring 0 tokens is a broken counter,
 /// `BudgetError::Invalid`); the offsets spelling passes `false`
@@ -165,7 +165,7 @@ fn pack(
     // The codepoint→byte grid: `grid[i]` is the byte offset of codepoint
     // `i`, with the total byte length as the final entry, so a span's
     // bytes are `grid[s]..grid[e]`. Pure-ASCII text (the common case)
-    // skips the grid entirely — bytes are codepoints there, the same
+    // skips the grid entirely: bytes are codepoints there, the same
     // fast path `truncate_impl::char_count` takes. Every slice the
     // packing performs (measure spans, the word-boundary fallback's
     // re-segmentation) resolves through this one grid, so a codepoint
@@ -254,14 +254,14 @@ fn pack(
             }
         }
         // `first_count > max_tokens` falls through with last == si: a
-        // single segment (word-level — sentence-level can't get here)
+        // single segment (word-level; sentence-level can't get here)
         // wider than the whole budget goes out whole, the oversized-
         // chunk exception documented on the module.
         if !chunks.is_empty() && end <= prev_end {
             // The overlap walk-back chose a start whose own chunk
             // re-embeds this predecessor's tail without advancing past
-            // it (the same-text-twice shape #83 fixed on
-            // chunk_text_overlapping): decline the overlap for this
+            // it (the same-text-twice shape `chunk_text_overlapping`
+            // rejects): decline the overlap for this
             // transition and re-cut from the zero-overlap position,
             // which always ends strictly past `prev_end` (it starts
             // there). Progress unconditional; at most one re-cut per
@@ -331,7 +331,7 @@ pub fn chunk_to_budget(
 /// `(start, end)` codepoint spans in `text`, sorted and non-overlapping
 /// (gaps allowed); a span's token count is the number of token spans
 /// fully contained in it (two binary searches, no allocation, no
-/// callback — the GIL-free spelling's whole point). Infallible for
+/// callback, the GIL-free spelling's whole point). Infallible for
 /// sorted input; the binding validates sortedness before detaching.
 pub fn chunk_to_offsets(
     text: &str,
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn sentence_cuts_pack_greedily_under_the_budget() {
         // sentence_bounds("One. Two. Three.") ends: 5, 10, 16 (each
-        // sentence's trailing space rides it). Counts: 1, 2, 2 words —
+        // sentence's trailing space rides it). Counts: 1, 2, 2 words;
         // budget 2 packs [One.] with [Two.] (2), then [Three.].
         let text = "One. Two. Three.";
         let chunks = chunk_to_budget(text, 2, 0, words).unwrap();
@@ -478,7 +478,7 @@ mod tests {
     fn offsets_variant_counts_contained_spans() {
         // Token spans for "ab cd ef" (whitespace untokenized: gaps):
         // (0,2), (3,5), (6,8). Budget 2 tokens packs all of it (3
-        // tokens? No: 3 > 2) — [ab cd] (2 tokens) then [ef].
+        // tokens? No: 3 > 2): [ab cd] (2 tokens) then [ef].
         let text = "ab cd ef";
         let spans = [(0, 2), (3, 5), (6, 8)];
         let chunks = chunk_to_offsets(text, &spans, 2, 0).unwrap();
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn overlap_never_produces_a_chunk_contained_in_its_predecessor() {
-        // The #83 shape for the budget packer: a chunk shorter than the
+        // The same-text-twice shape for the budget packer: a chunk shorter than the
         // requested overlap (or a re-cut that lands inside the
         // predecessor) degrades to zero overlap for that transition
         // rather than emit the same span twice.
@@ -645,7 +645,7 @@ mod tests {
             if count(slice_cp(start, end)) > budget {
                 // A single segment: word-level granularity means the
                 // chunk contains no boundary to cut at that the packer
-                // didn't already try — assert it is one unsplittable
+                // didn't already try; assert it is one unsplittable
                 // unit (no interior word boundary).
                 let interior_words = slice_cp(start, end).split_word_bound_indices().count();
                 assert_eq!(
