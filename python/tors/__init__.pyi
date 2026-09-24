@@ -1304,7 +1304,10 @@ def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
 #   the 64-bit fingerprints of the folded texts is at most
 #   floor((1 - threshold) * 64) (threshold 0.9 -> 6 bits);
 # - "shingle": duplicates when the EXACT Jaccard index of the 3-token
-#   word-shingle sets is at least threshold;
+#   word-shingle sets is at least threshold (the threshold comparison
+#   is float: a pair whose exact Jaccard rounds up to exactly the
+#   threshold merges; the error is at most one ulp in the merge
+#   direction, never the data-loss direction);
 # - "minhash": duplicates when the agreement fraction of the two
 #   128-permutation minhash_signature signatures (shingle_size 3,
 #   seed 0) is at least threshold -- the estimated Jaccard (standard
@@ -1312,8 +1315,13 @@ def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
 # threshold must be in [0.0, 1.0] (NaN refused), else ValueError; an
 # unknown method raises ValueError naming every choice; a non-str
 # element raises TypeError. Empty list -> the empty result;
-# all-identical input keeps exactly the first text; deterministic
-# (input order is the tie-break).
+# all-identical input keeps exactly the first text; two token-free
+# texts (empty, whitespace-only) are duplicates of each other (the
+# empty-set convention), whose 0.0 side (exactly one token-free text)
+# is a shingle/minhash special case: under the simhash method
+# token-free text fingerprints to 0, and at a low enough threshold it
+# can merge with a real text. Deterministic (input order is the
+# tie-break).
 def dedup_near_dup(
     texts: list[str],
     *,

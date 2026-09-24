@@ -235,7 +235,10 @@ pub fn parse_dedup_method(name: &str) -> Result<DedupMethod, String> {
 ///   pair to be duplicates (threshold 0.9 -> 6 bits; the measured
 ///   near-dup band in `simhash_impl`'s tests is the calibration context).
 /// - `Shingle`: the EXACT Jaccard index of the folded texts' 3-token
-///   word-shingle sets, at least `threshold` for a duplicate pair.
+///   word-shingle sets, at least `threshold` for a duplicate pair. The
+///   comparison is f64 (the score is an f64 division): a pair whose
+///   exact Jaccard rounds up to exactly the threshold merges, at most
+///   one ulp of over-merge and never an under-merge.
 /// - `MinHash`: the agreement fraction of the two 128-permutation
 ///   signatures (the `minhash_signature` defaults: `num_perm=128`,
 ///   `shingle_size=3`, `seed=0`), at least `threshold` — the estimated

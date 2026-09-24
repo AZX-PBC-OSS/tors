@@ -68,9 +68,12 @@ fn extract_fingerprint(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<u128> {
 /// width metadata: the check classifies each argument by magnitude (only
 /// a 128-bit fingerprint can be >= 2**64) and refuses a pair split
 /// across the line, which catches the real caller bug (passing one
-/// `simhash64` value and one `simhash128` value) with probability
-/// 1 - 2**-64; a pair both of whose values fit in 64 bits compares
-/// correctly either way, because the distance arithmetic itself is
+/// `simhash64` value and one `simhash128` value); the catch misses only
+/// a genuine 128-bit fingerprint that happens to fit in 64 bits,
+/// probability 2**-64 assuming fingerprint uniformity (the uniformity
+/// `simhash64`'s limitations note caveats; the empty fingerprint's 0 is
+/// the deterministic miss). A pair both of whose values fit in 64 bits
+/// compares correctly either way, because the distance arithmetic itself is
 /// width-blind `(a ^ b).bit_count()`.
 ///
 /// Bounds: a non-int argument (including `bool`) raises `TypeError`, a
@@ -193,7 +196,10 @@ pub fn shingle_dice(
 /// distance between the two 64-bit fingerprints of the
 /// normalization-folded texts is at most `floor((1 - threshold) * 64)`
 /// (threshold 0.9 -> 6 bits); `"shingle"` — when the EXACT Jaccard
-/// index of the 3-token word-shingle sets is at least `threshold`;
+/// index of the 3-token word-shingle sets is at least `threshold`
+/// (the threshold comparison is float: a pair whose exact Jaccard
+/// rounds up to exactly the threshold merges; the error is at most
+/// one ulp in the merge direction, never the data-loss direction);
 /// `"minhash"` — when the agreement fraction of the two
 /// 128-permutation `minhash_signature` signatures (its defaults:
 /// shingle_size 3, seed 0) is at least `threshold`, the estimated
@@ -216,7 +222,12 @@ pub fn shingle_dice(
 ///
 /// The empty list gives the empty result (`{"kept": [], "dropped": [],
 /// "groups": []}`); all-identical input keeps exactly the first text;
-/// threshold must be in [0.0, 1.0] (NaN included in the refusal) and a
+/// two token-free texts (empty, whitespace-only) are duplicates of each
+/// other (the empty-set convention), whose 0.0 side (exactly one
+/// token-free text) is a shingle/minhash special case: under the
+/// simhash method token-free text fingerprints to 0, and at a low
+/// enough threshold it can merge with a real text. Threshold must be in
+/// [0.0, 1.0] (NaN included in the refusal) and a
 /// non-str element raises `TypeError` (the list walk's standard
 /// extraction class).
 ///

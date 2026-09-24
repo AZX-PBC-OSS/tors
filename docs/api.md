@@ -4512,7 +4512,11 @@ text" means:
 - `"shingle"`: duplicates when the EXACT Jaccard index of the
   3-token word-shingle sets is at least `threshold` (the
   `shingle_jaccard` semantics, fixed width 3). The precise, slower
-  reading; order-sensitive where simhash is not.
+  reading; order-sensitive where simhash is not. The threshold
+  comparison is float: a pair whose exact Jaccard rounds up to exactly
+  the threshold merges (its exact value sits a hair below the
+  threshold's rational value); the error is at most one ulp in the
+  merge direction, never the data-loss direction.
 - `"minhash"`: duplicates when the agreement fraction of the two
   128-permutation `minhash_signature` signatures (its defaults:
   shingle_size 3, seed 0) is at least `threshold` — the estimated
@@ -4535,7 +4539,10 @@ candidates, band `minhash_signature` output yourself.
 non-str element raises `TypeError`. The empty list gives the empty
 result; all-identical input keeps exactly the first text; two token-free
 texts (empty, whitespace-only) are duplicates of each other (the empty-
-set convention above).
+set convention above). The convention's 0.0 side (exactly one token-free
+text) is a shingle/minhash special case: under the simhash method
+token-free text fingerprints to 0, and at a low enough threshold it can
+merge with a real text.
 
 GIL: the list extraction (one str copy per element, the standard
 O(total input) class) and the threshold/method validation under the GIL,

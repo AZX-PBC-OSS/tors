@@ -22,6 +22,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tors
 from tors import highlight
 
 # Arbitrary Unicode for the offset round-trip property: the property must
@@ -105,13 +106,25 @@ class TestScoring:
         result = highlight(query, text, max_snippets=3, max_chars=400)
         # Term extraction mirrors the tokenizer's notion of a term (UAX #29
         # words, case-folded NFC), not whitespace splitting: a query like
-        # "0\x1b" is the token "0" plus a dropped control segment.
-        terms = re.findall(r"\w+", query, re.UNICODE)
+        # "0\x1b" is the token "0" plus a dropped control segment. The
+        # regex mirror rides CPython's Unicode tables, which lag the
+        # crate's: a code point the crate's newer tables assign (recent
+        # CJK extensions) is a real token the regex cannot see, so where
+        # the regex finds nothing the word_bounds segmentation, the
+        # surface the scorer itself rides, supplies the terms.
+        terms = [
+            unicodedata.normalize("NFC", term).lower()
+            for term in re.findall(r"\w+", query, re.UNICODE)
+        ]
+        if not terms:
+            terms = [
+                unicodedata.normalize("NFC", query[s:e]).lower()
+                for s, e in tors.word_bounds(query)
+                if not query[s:e].isspace()
+            ]
         for snippet in result["snippets"]:
             body = unicodedata.normalize("NFC", snippet["text"]).lower()
-            assert any(unicodedata.normalize("NFC", term).lower() in body for term in terms), (
-                snippet
-            )
+            assert any(term in body for term in terms), snippet
 
     def test_the_exact_match_scores_about_one(self) -> None:
         result = highlight(
