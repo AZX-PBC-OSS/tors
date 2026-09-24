@@ -2519,6 +2519,131 @@ tors.highlight("torque spec", "The pump failed. The bushing torque spec was 42 N
 space to the preceding sentence — the offsets are the sentence's, exactly
 as documented above.)
 
+## `tors.ground_sentences`
+
+```python
+def ground_sentences(
+    text: str,
+    query: str,
+    *,
+    max_chars: int | None = None,
+) -> SentenceGrounding: ...
+```
+
+Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
+against `query`, in position order — the bridge primitive a downstream NLI
+verifier (MiniCheck/SummaC style) consumes. Returns a `SentenceGrounding`
+(a `TypedDict`): `sentences` — one `GroundingSnippet`-shaped entry per
+sentence (`text`, `start`, `end`, `score`), whose offsets are the
+sentence's exact bounds (the tuples `tors.sentence_bounds(text)` returns)
+as Python str (codepoint) indices into the ORIGINAL `text`, so
+`text[start:end]` is exactly `sentence["text"]` for every sentence,
+token-free sentences included — and `score`, the aggregate.
+
+The per-sentence score is the same ROUGE-W F1 the snippet surface ranks
+spans with (see `tors.highlight` above): one tokenization (UAX #29 words,
+CJK per character, case-fold + NFC), one shaping. The citation unit is the
+sentence — the unit the attribution literature converged on (ALCE's
+snippet-mode baselines measure citation quality per sentence: Gao et al.
+2023, "Enabling Large Language Models to Generate Text with Citations") —
+and the score is a RANKING signal, not an answerability verdict (Joren et
+al. 2024, "Sufficient Context": whether a context suffices to answer is a
+semantic judgment no lexical overlap score can make). Consumers needing
+the verdict run their NLI model over the top-scored sentences.
+
+The aggregate `score` is the best sentence's F1 — the MAX, not the mean —
+for three reasons: it is the retrieval signal the bridge needs ("does SOME
+sentence carry this query's evidence" — the argmax over units is exactly
+how ALCE-style citation selection picks the evidence sentence); it mirrors
+`highlight`'s own aggregate (the best snippet's score), keeping the
+grounding family coherent; and it is stable under irrelevant additions — a
+long document with one relevant sentence must not read as ungrounded
+because the document is long, which a mean rewards forgetting. The mean is
+deliberately not offered: "how much of this document is about the query"
+is a different question, and `sentence_bounds` + a fold in Python
+composes it trivially from the per-sentence scores.
+
+An empty or token-free `query` scores every sentence `0.0` (the
+segmentation is the answer's shape; the query only drives scores); an
+empty text returns the empty result — degenerate input is a valid answer,
+never an error. `max_chars` bounds each sentence's SCORED window: a
+sentence longer than the budget is scored over its leading
+token-boundary window (at least one token — `highlight`'s documented
+floor), while its reported `start`/`end`/`text` still cover the WHOLE
+sentence; `None` (the default) scores whole sentences, and `max_chars=0`
+is a `ValueError`. Pathological chunks are bounded: at most the first
+16384 text tokens and 128 query terms are scanned (sentences past the cap
+score `0.0`, their offsets and text still exact) — the DP is two reusable
+rows per sentence, never an n·m matrix, and the total work is linear in
+the text at a bounded query width.
+
+```python
+tors.ground_sentences(
+    "The pump failed. The bushing torque spec was 42 Nm. Replaced.", "torque spec"
+)
+# {'sentences': [{'text': 'The pump failed. ', 'start': 0, 'end': 17,
+#                 'score': 0.0},
+#                {'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
+#                 'end': 52, 'score': 0.44444444444444436},
+#                {'text': 'Replaced.', 'start': 52, 'end': 61, 'score': 0.0}],
+#  'score': 0.44444444444444436}
+# (the middle sentence's score is exactly 4/9 — the same Equation 15 F1
+# highlight's example computes; the aggregate is the max of the three)
+```
+
+## `tors.grounding_coverage`
+
+```python
+def grounding_coverage(source: str, text: str) -> float: ...
+```
+
+Grounding recall / source utilization: what fraction of `source`'s tokens
+does `text` actually utilize — the recall twin of `tors.is_grounded`
+(the precision side: every claim supported). One float in `[0.0, 1.0]`,
+the model-free operationalization of TRACe's uTilization metric (Friel,
+Belyi & Sanyal 2024, "RAGBench: Explainable Benchmark for
+Retrieval-Augmented Generation Systems", §3.2: document utilization =
+`Len(U_i) / Len(d_i)`, the length of the utilized context spans over the
+context's length; Adherence — `is_grounded`'s lane — is the framework's
+precision metric). Where TRACe's U comes from an annotator's span
+labels, this is the lexical approximation: U is the token overlap of
+`text` with `source`.
+
+The measure is ROUGE-W recall — Lin 2004's Equation 15 recall component
+(`f^-1(WLCS / f(|source|))`) over the grounding family's own UAX #29
+tokenization — and not a difflib-style character coverage, for the same
+reasons the snippet surface scores ROUGE-W: one tokenization and one
+shaping shared with `highlight`/`ground_sentences`, so the precision and
+recall surfaces never disagree about what a token is (a case-fold or
+NFC/NFD difference matches; a character-level diff would count it
+lost); and the weighted-LCS shaping rewards CONTIGUITY — a text quoting a
+contiguous passage of the source outscores one scattering the same
+tokens through filler, which is exactly the "actually utilized" signal
+utilization annotates.
+
+This is a lexical overlap signal, not a semantic one: it measures token
+coverage, not whether the information was genuinely used. Identical
+`text` and `source` are `1.0` (up to f64 rounding of the DP's
+accumulation — within `1e-9`, pinned); disjoint, token-free, or empty
+operands are exactly `0.0` (TRACe's ratio is undefined there — `0/0` —
+and `0.0` is the conservative reading; pinned in
+`tests/test_grounding_coverage.py`). Cost: the classic weighted-LCS DP,
+`O(|S|·|T|)` time with `O(min(|S|, |T|))` memory (two reused rows,
+never a materialized n·m matrix); at most the first 16384 tokens of each
+operand are scanned, the denominator being the source tokens actually
+scanned.
+
+```python
+tors.grounding_coverage("the quick brown fox jumps over the lazy dog", "the lazy dog jumps")
+# 0.33333333333333337
+tors.grounding_coverage("same words both sides", "same words both sides")
+# 1.0
+tors.grounding_coverage("alpha bravo charlie", "xray yankee zulu")
+# 0.0
+tors.grounding_coverage("", "text")  # either side empty: exactly 0.0
+# 0.0
+```
+
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
 ```python

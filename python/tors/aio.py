@@ -19,6 +19,7 @@ chunking family, the retrieval/scoring primitives, the diff engine, the
 batch pipeline, the fuzzy-matching and JSON-repair families
 (``levenshtein``/``jaro``/``jaro_winkler``,
 ``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
+grounding pair ``ground_sentences``/``grounding_coverage``, the
 ``repair_json*`` trio: quadratic and linear native passes whose
 documented measurements reach seconds and minutes on large inputs), and
 the input-scaling text/byte pipeline codecs
@@ -87,7 +88,7 @@ __all__: list[str] = []
 # from tors.__all__ by exclusion (see the module docstring for why the
 # rest of tors intentionally has no async twin): the chunking family, the
 # retrieval/scoring primitives, the diff engine, the batch pipeline, the
-# fuzzy-matching and JSON-repair families (quadratic/linear native passes
+# fuzzy-matching, grounding, and JSON-repair families (quadratic/linear native passes
 # whose docs measure seconds-to-minutes on large inputs), and the
 # input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
@@ -127,6 +128,8 @@ _WRAPPED = (
     "finalize_utf8",
     "find_patterns",
     "get_close_matches",
+    "ground_sentences",
+    "grounding_coverage",
     "highlight",
     "is_grounded",
     "jaro",

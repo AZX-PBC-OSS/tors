@@ -64,3 +64,26 @@ pub fn is_grounded(
     py.detach(|| grounded_impl::is_grounded_fuzzy(claim, source, threshold, deadline_ms))
         .map_err(|err| timeout_err(err.message()))
 }
+
+/// `tors.grounding_coverage(source, text)`: what fraction of `source`'s
+/// tokens does `text` actually utilize — the recall twin of
+/// `is_grounded` (the precision side), the model-free operationalization
+/// of TRACe's uTilization (Friel, Belyi & Sanyal 2024, RAGBench §3.2).
+/// See `src/grounded_impl.rs`'s module docs for the metric's choice
+/// (ROUGE-W recall — Lin 2004's Equation 15 R factor — over the grounding
+/// family's UAX #29 tokenization) and why not a difflib coverage.
+///
+/// One float in `[0.0, 1.0]`: identical text and source are `1.0` (up to
+/// f64 rounding in the DP's accumulation, within `1e-9`); disjoint,
+/// token-free, or empty operands are exactly `0.0` (pinned). A lexical
+/// overlap signal, not a semantic one: it measures token coverage, not
+/// whether the information was genuinely used.
+///
+/// GIL model: the two argument borrows under the GIL, the whole
+/// tokenize/intern/score pass (O(|S|·|T|) time, O(min(|S|, |T|)) memory —
+/// two rows, never an n·m matrix; each operand capped at its first 16384
+/// tokens) under one `py.detach`; the residue is a single float.
+#[pyfunction(signature = (source, text))]
+pub fn grounding_coverage(py: Python<'_>, source: &str, text: &str) -> f64 {
+    py.detach(|| grounded_impl::grounding_coverage(source, text))
+}

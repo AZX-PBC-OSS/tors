@@ -560,6 +560,44 @@ class TestRecipeRetrievalExamples:
         }
 
 
+class TestGroundingBatchExamples:
+    """docs/api.md's ground_sentences / grounding_coverage sections, pinned
+    byte-exact the way every other docs example here is: the literals the
+    doc shows are re-derived against the built extension."""
+
+    def test_ground_sentences_example(self) -> None:
+        result = tors.ground_sentences(
+            "The pump failed. The bushing torque spec was 42 Nm. Replaced.", "torque spec"
+        )
+        assert result == {
+            "sentences": [
+                {"text": "The pump failed. ", "start": 0, "end": 17, "score": 0.0},
+                {
+                    "text": "The bushing torque spec was 42 Nm. ",
+                    "start": 17,
+                    "end": 52,
+                    # exactly 4/9 — the same Equation 15 F1 highlight's
+                    # example computes
+                    "score": 0.44444444444444436,
+                },
+                {"text": "Replaced.", "start": 52, "end": 61, "score": 0.0},
+            ],
+            # the aggregate is the max per-sentence score
+            "score": 0.44444444444444436,
+        }
+
+    def test_grounding_coverage_examples(self) -> None:
+        assert (
+            tors.grounding_coverage(
+                "the quick brown fox jumps over the lazy dog", "the lazy dog jumps"
+            )
+            == 0.33333333333333337
+        )
+        assert tors.grounding_coverage("same words both sides", "same words both sides") == 1.0
+        assert tors.grounding_coverage("alpha bravo charlie", "xray yankee zulu") == 0.0
+        assert tors.grounding_coverage("", "text") == 0.0
+
+
 class TestIndexExamples:
     """docs/index.md's quick-start literals."""
 

@@ -120,6 +120,83 @@ fn bench_grounding(c: &mut Criterion) {
         b.iter(|| grounding_impl::highlight(black_box("relevant term"), black_box(text), 3, 400))
     });
     group.finish();
+
+    // --- ground_sentences: the per-sentence batch (the NLI bridge's own
+    // input shape). Same chunks as the highlight group (the batch scores
+    // EVERY sentence, so the per-chunk cells are the cost shape); the
+    // no-overlap cell (zero anchors anywhere — every sentence scores 0.0,
+    // the tokenization+segmentation floor) and a max_chars-clamped cell
+    // (the scored-window budget at its most aggressive) complete the
+    // family's coverage.
+    let mut group = c.benchmark_group("ground_sentences");
+    for tokens in [500usize, 2_000, 10_000] {
+        let latin = latin_chunk(tokens);
+        group.throughput(criterion::Throughput::Bytes(latin.len() as u64));
+        group.bench_with_input(BenchmarkId::new("latin", tokens), &latin, |b, text| {
+            b.iter(|| {
+                grounding_impl::ground_sentences(black_box(LATIN_QUERY), black_box(text), None)
+            })
+        });
+    }
+    let latin = latin_chunk(2_000);
+    group.bench_with_input(
+        BenchmarkId::new("latin_no_overlap", 2_000),
+        &latin,
+        |b, text| {
+            b.iter(|| {
+                grounding_impl::ground_sentences(
+                    black_box("zebra quantum xylophone"),
+                    black_box(text),
+                    None,
+                )
+            })
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("latin_max_chars_10", 2_000),
+        &latin,
+        |b, text| {
+            b.iter(|| {
+                grounding_impl::ground_sentences(black_box(LATIN_QUERY), black_box(text), Some(10))
+            })
+        },
+    );
+    group.finish();
+
+    // --- grounding_coverage: the recall twin. Its DP is the PRODUCT of
+    // the two operands' token streams (documented O(|S|·|T|) time,
+    // O(min) memory), so the cells are symmetric pairs: 500x500 /
+    // 2000x2000 / 8000x8000 (the product's 16x ladder), an identical-
+    // operands cell (the 1.0 fast lane through the same fill), and a
+    // realistic-RAG cell (4k-token context vs a 300-word response).
+    let mut group = c.benchmark_group("grounding_coverage");
+    for tokens in [500usize, 2_000, 8_000] {
+        let source = latin_chunk(tokens);
+        let text = latin_chunk(tokens / 4); // a quarter of the source: the RAG shape
+        group.throughput(criterion::Throughput::Bytes(
+            (source.len() + text.len()) as u64,
+        ));
+        group.bench_with_input(
+            BenchmarkId::new("latin", tokens),
+            &(&source, &text),
+            |b, (source, text)| {
+                b.iter(|| {
+                    tors::grounded_impl::grounding_coverage(black_box(source), black_box(text))
+                })
+            },
+        );
+        group.throughput(criterion::Throughput::Bytes(source.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("identical", tokens),
+            &source,
+            |b, source| {
+                b.iter(|| {
+                    tors::grounded_impl::grounding_coverage(black_box(source), black_box(source))
+                })
+            },
+        );
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench_grounding);

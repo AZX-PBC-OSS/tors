@@ -54,6 +54,16 @@ class GroundingSnippet(TypedDict):
 class GroundingResult(TypedDict):
     snippets: list[GroundingSnippet]
     score: float
+
+# `ground_sentences`' shape: one GroundingSnippet-shaped entry per UAX #29
+# sentence of the text, in position order (its start/end are the sentence's
+# bounds — the exact tuples `tors.sentence_bounds(text)` returns — so
+# text[start:end] is exactly `text`, token-free sentences included), and
+# `score` the best sentence's score — the aggregate is the MAX, not the
+# mean (0.0 when `sentences` is empty).
+class SentenceGrounding(TypedDict):
+    sentences: list[GroundingSnippet]
+    score: float
 # One `repair_json_diagnostics` entry, all six keys present every time
 # (`from`/`to`/`suggestion` are None when the action did not move a value
 # or offer a hint — a stable shape consumers can index blindly). The
@@ -744,6 +754,31 @@ def is_grounded(
     deadline_ms: float | None = None,
 ) -> bool: ...
 
+# The recall twin of is_grounded (the precision side): what fraction of the
+# SOURCE's tokens does `text` actually utilize — the model-free
+# operationalization of TRACe's uTilization metric (Friel, Belyi & Sanyal
+# 2024, RAGBench §3.2: utilization = the length of the utilized context
+# spans over the context's length). Measured as ROUGE-W recall (Lin 2004's
+# Equation 15 R factor) over the grounding family's own UAX #29
+# tokenization (case-fold + NFC, CJK per character) — one tokenization and
+# one shaping shared with `highlight`/`ground_sentences`, so the precision
+# and recall surfaces never disagree about what a token is; a text quoting
+# a CONTIGUOUS passage of the source outscores one scattering the same
+# tokens through filler (the weighted-LCS shaping). A lexical overlap
+# signal, not a semantic one: it measures token coverage, not whether the
+# information was genuinely used. Identical text and source are 1.0 (up to
+# f64 rounding of the DP's accumulation, within 1e-9); disjoint, token-free,
+# or empty operands are exactly 0.0 (TRACe's ratio is 0/0 there; 0.0 is the
+# conservative reading). Cost: the classic
+# weighted-LCS DP, O(|S|*|T|) time with O(min(|S|, |T|)) memory (two rows,
+# never an n*m matrix); at most the first 16384 tokens of each operand are
+# scanned, the denominator being the source tokens actually scanned.
+#
+# GIL note: the two argument borrows under the GIL, the whole
+# tokenize/intern/score pass under one py.detach; the residue is a single
+# float.
+def grounding_coverage(source: str, text: str) -> float: ...
+
 # Snippet-provenance grounding: WHERE the query's evidence sits in a chunk.
 # ROUGE-W F1 (recall-oriented length-weighted LCS, Lin 2004) over
 # UAX #29-tokenized anchor runs, expanded to sentence bounds when they fit
@@ -767,6 +802,39 @@ def highlight(
     max_snippets: int = 3,
     max_chars: int = 400,
 ) -> GroundingResult: ...
+
+# Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
+# against `query` with the same ROUGE-W F1 the snippet surface ranks spans
+# with, in position order — the bridge primitive a downstream NLI verifier
+# (MiniCheck/SummaC style) consumes. The citation unit is the sentence (the
+# ALCE baselines' unit: Gao et al. 2023); the score is a RANKING signal, not
+# an answerability verdict (Joren et al. 2024, "Sufficient Context": a
+# lexical overlap cannot judge sufficiency — run a model over the
+# top-scored sentences for that). The aggregate `score` is the best
+# sentence's F1 (the MAX, not the mean: the retrieval signal the bridge
+# needs, `highlight`'s own aggregate shape, and stable under irrelevant
+# additions — one evidence sentence in a long document must not read as
+# ungrounded because the document is long). An empty/token-free query
+# scores every sentence 0.0 (the segmentation is the answer's shape; the
+# query only drives scores); an empty text returns the empty result —
+# degenerate input is a valid answer, never an error. `max_chars` bounds
+# each sentence's SCORED window (a longer sentence is scored over its
+# leading token-boundary window, at least one token; its reported span
+# still covers the whole sentence); `None` scores whole sentences, 0 is a
+# ValueError. Pathological chunks are bounded: at most the first 16384
+# text tokens and 128 query terms are scanned (sentences past the cap score
+# 0.0, their offsets and text still exact).
+#
+# GIL note: the argument borrows under the GIL, the whole segment/tokenize/
+# score pass (linear in the text at a bounded query width) under one
+# py.detach (the highlight shape): the GIL-held residue is only the
+# O(sentences) dict marshalling.
+def ground_sentences(
+    text: str,
+    query: str,
+    *,
+    max_chars: int | None = None,
+) -> SentenceGrounding: ...
 
 # GIL note: urllib.parse.quote/unquote are pure Python: a GIL-held
 # whole-text pass for the most-used encoding operation in web/ingestion
