@@ -57,17 +57,16 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import math
 import re
 import subprocess
 import sys
-import time
 from time import monotonic
 
 import pytest
-import tors
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+
+import tors
 
 # ---------------------------------------------------------------------------
 # Pure-Python reference implementations (independent of the Rust code)
@@ -356,7 +355,9 @@ class TestScoreInvariantTorture:
     @settings(max_examples=300, deadline=None)
     @given(q=_word_seqs(), c=_word_seqs())
     def test_scores_stay_in_the_unit_interval(self, q, c):
-        for got in (_cov(" ".join(q), " ".join(c)), _score_sentence(" ".join(c) + ".", " ".join(q))):
+        a = _cov(" ".join(q), " ".join(c))
+        b = _score_sentence(" ".join(c) + ".", " ".join(q))
+        for got in (a, b):
             assert 0.0 <= got <= 1.0, (q, c, got)
 
     def test_source_minus_one_token_is_monotone_sane(self):
@@ -488,11 +489,11 @@ class TestApiAbuse:
             res = tors.ground_sentences(text, "word", max_chars=huge)
             assert len(res["sentences"]) == 2
         for wrong in (b"word", None, ["word"], 3.5, object()):
-            with pytest.raises(Exception):
+            with pytest.raises(TypeError):
                 tors.ground_sentences(wrong, "word")  # type: ignore[arg-type]
-            with pytest.raises(Exception):
+            with pytest.raises(TypeError):
                 tors.ground_sentences(text, wrong)  # type: ignore[arg-type]
-            with pytest.raises(Exception):
+            with pytest.raises(TypeError):
                 tors.grounding_coverage(wrong, text)  # type: ignore[arg-type]
 
     def test_keyword_only_arguments_are_enforced(self):
@@ -623,7 +624,9 @@ class TestGilClaimAudit:
     def test_tiny_text_huge_query_heartbeat(self):
         huge_query = "torque spec " * 900_000  # ~10 MiB query, tiny text
         worst, wall = asyncio.run(
-            _gap_and_wall(lambda: asyncio.to_thread(tors.ground_sentences, "tiny text here.", huge_query))
+            _gap_and_wall(
+                lambda: asyncio.to_thread(tors.ground_sentences, "tiny text here.", huge_query)
+            )
         )
         assert worst < 0.25 and worst < 0.5 * wall, (worst, wall)
 
@@ -646,13 +649,15 @@ with open("/proc/self/status") as status:
             hwm = int(line.split()[1])
 print(f"RESULT|{{hwm}}")
 """
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=timeout
+    )
     assert done.returncode == 0, done.stderr[-300:]
     return int(done.stdout.strip().split("|")[1])
 
 
 class TestPerformanceCliffs:
-    def test_100k_single_token_sentences_complete_quickly(self):
+    def test_100k_single_token_sentences_complete_quickly(self):  # noqa: E501
         soup = "Word. " * 100_000
         started = monotonic()
         res = tors.ground_sentences(soup, "word")
@@ -682,9 +687,16 @@ class TestPerformanceCliffs:
         def shape(tokens: int):
             tors.ground_sentences(("Word. " * (tokens // 2))[:-1], "word")
 
+        _now = monotonic
+
         def min_wall(fn, samples=3):
             fn()
-            return min(min((lambda t0=monotonic(): (fn(), monotonic() - t0)[1])() for _ in range(samples)), 1e9)
+            runs = []
+            for _ in range(samples):
+                t0 = _now()
+                fn()
+                runs.append(_now() - t0)
+            return min(runs, default=1e9)
 
         small = min_wall(lambda: shape(4_000))
         large = min_wall(lambda: shape(16_000))
