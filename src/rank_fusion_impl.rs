@@ -9,7 +9,7 @@
 //! materializes from the caller's Python objects: `rank_fuse` on
 //! per-list vectors of dedup indices (the py layer assigns one index per
 //! distinct id, in first-appearance order, using Python's own dict
-//! equality — the ids themselves never cross into this module), the
+//! equality; the ids themselves never cross into this module), the
 //! metrics on per-position relevance flags (or gains). That split is the
 //! same one `bm25_impl` draws: Python-object hashing/equality is
 //! interpreter work and stays under the GIL in the binding layer, while
@@ -28,20 +28,20 @@
 //! score(d) = sum over lists of 1 / (k + r(d))
 //! ```
 //!
-//! RRF consumes RANKS ONLY, never raw similarity scores — the paper's
+//! RRF consumes RANKS ONLY, never raw similarity scores: the paper's
 //! whole point is that raw scores from different retrieval systems are
 //! not comparable, while ranks are; the single constant `k` (default 60,
 //! the paper's own, used unchanged across its experiments) dampens the
 //! weight of top ranks so a list's #1 does not swamp every other list's
 //! votes. tors follows the paper exactly: ranks 1-based, one shared `k`
-//! over all lists, and — a point the paper leaves open, pinned here as
-//! contract — ties broken by EARLIEST FIRST APPEARANCE across the lists
+//! over all lists, and (a point the paper leaves open, pinned here as
+//! contract) ties broken by EARLIEST FIRST APPEARANCE across the lists
 //! in caller order (the natural deterministic reading: earlier evidence
 //! outranks later), not by id value or sort-stable accident.
 //!
 //! A document absent from a list simply contributes no vote from it
 //! (there is no "rank N+1 penalty" in RRF); a document appearing twice
-//! in ONE list is a malformed ranking — the dedup-first binding pass
+//! in ONE list is a malformed ranking: the dedup-first binding pass
 //! folds duplicates to their first occurrence, so a duplicate can never
 //! vote twice.
 //!
@@ -49,15 +49,15 @@
 //!
 //! - **nDCG**: Järvelin & Kekäläinen, "Cumulated gain-based evaluation of
 //!   IR techniques", ACM TOIS 20(4), 2002: the discounted gain at rank
-//!   `i` (1-based) is `gain / log2(i + 1)` — the paper's log2 discount,
-//!   which keeps rank 1 undiscounted — and the score is
+//!   `i` (1-based) is `gain / log2(i + 1)` (the paper's log2 discount,
+//!   which keeps rank 1 undiscounted) and the score is
 //!   `DCG@k / IDCG@k`, the ideal DCG computed by sorting the judged
 //!   relevance values descending and discounting the same way. tors uses
 //!   the paper's linear gain function (for binary relevance the paper's
 //!   exponential `2^rel - 1` variant is identical: `2^1 - 1 = 1`).
 //! - **MRR**: the reciprocal rank of the first relevant result (0.0 when
 //!   no ranked result is relevant).
-//! - **recall@k / precision@k**: the standard definitions —
+//! - **recall@k / precision@k**: the standard definitions,
 //!   `|relevant ∩ ranked[:k]| / |relevant|` and `|relevant ∩ ranked[:k]| / min(k,
 //!   |ranked|)` (trec_eval's convention: a run shorter than `k` is not
 //!   punished for positions it never filled). Both formulas assume
@@ -68,7 +68,7 @@
 //! Empty DATA is a well-defined zero: an empty `ranked` list, an empty
 //! relevant set (no relevant document exists, so no hit is possible),
 //! and the zero-ideal-DCG case (nDCG of a ranking with nothing relevant)
-//! all answer `0.0`. Empty STRUCTURE — fusing zero lists — is a caller
+//! all answer `0.0`. Empty STRUCTURE (fusing zero lists) is a caller
 //! bug and raises (the binding layer's `ValueError`, the `merkle_root`
 //! "root of no chunks" precedent: the paper's formula is defined over
 //! one-or-more lists, and a zero-list call almost certainly means an
@@ -81,14 +81,14 @@
 //! The binding layer validates every gain finite and non-negative, but
 //! legal finite gains can still be so large the DCG and IDCG sums
 //! overflow to `+inf` (three gains of 1e308, or two of 1.7e308, are
-//! enough) — and IEEE `inf / inf` is NaN, which would break the pinned
+//! enough), and IEEE `inf / inf` is NaN, which would break the pinned
 //! `[0, 1]` contract on a legal input. The core therefore normalizes
 //! with overflow-aware, saturating logic instead of a bare division:
 //! when either sum is non-finite the score is `1.0` if `dcg >= idcg`
 //! else `0.0`, and a finite ratio is clamped to `[0, 1]`. The policy is
 //! the monotone-total one: both sums are sums of non-negative terms
 //! under one discount schedule, with the ideal pool a superset of the
-//! ranked gains, so an overflowed DCG can at most match — never beat —
+//! ranked gains, so an overflowed DCG can at most match, never beat,
 //! an overflowed ideal, and `1.0` is the only in-interval answer
 //! consistent with the ordering the finite arithmetic reports. The
 //! saturation can over-report a ranking whose exact ratio sits below 1
@@ -105,7 +105,7 @@
 /// table); `n_docs` is the number of distinct ids. Returns one
 /// `(index, score)` pair per distinct id, sorted by score descending,
 /// ties broken by earliest first appearance across the lists in caller
-/// order — tracked here in the same walk that scores, so the tie-break
+/// order (tracked here in the same walk that scores), so the tie-break
 /// is the paper-shape contract no matter how the caller numbered its
 /// indices. `k` is trusted here as already-validated (`k >= 1`): the
 /// pyo3 layer's job, matching this crate's usual split of caller-facing
@@ -114,7 +114,7 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
     // The sweep needs one slot per index that can receive a vote: the
     // data's own max index bounds that, so a caller-supplied n_docs
     // looser than the data (the fuzz target's first find: a sparse
-    // numbering with a huge table) costs no allocation — every index
+    // numbering with a huge table) costs no allocation: every index
     // above the max is unvoted and filtered below anyway.
     let max_index = lists
         .iter()
@@ -146,7 +146,7 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
         .enumerate()
         // A zero score means zero votes: an index the caller's dedup
         // table sized but no list ever ranked (unreachable from the
-        // binding, which only assigns indices on first sight) — not a
+        // binding, which only assigns indices on first sight), not a
         // document to emit. Every voted score is positive.
         .filter(|(_, score)| *score > 0.0)
         .map(|(i, score)| (i as u32, score))
@@ -164,7 +164,7 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
 /// `ranked_gains[i]` is the gain of the i-th ranked result; `ideal_pool`
 /// is the complete multiset of judged relevance values (binary: one 1.0
 /// per relevant id; graded: every judged gain), from which the ideal
-/// ranking — the pool sorted descending, top-`k` — is derived here.
+/// ranking (the pool sorted descending, top-`k`) is derived here.
 /// `k` is trusted as already-validated (`k >= 1`), and the caller may
 /// have clamped it to `ranked_gains.len()`; the discount is
 /// `1/log2(i + 2)` over 0-based positions (the paper's `log2(i + 1)`
@@ -175,7 +175,7 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
 /// The ratio is computed with overflow-aware, saturating logic (see the
 /// module docs' "saturating-ratio policy"): legal finite gains can
 /// overflow both sums to `+inf`, where a bare `inf / inf` division
-/// would answer NaN and break the pinned interval — a non-finite sum
+/// would answer NaN and break the pinned interval; a non-finite sum
 /// saturates instead (`1.0` when `dcg >= idcg`, else `0.0`), and a
 /// finite ratio clamps to `[0, 1]`.
 pub fn ndcg_at_k(ranked_gains: &[f64], mut ideal_pool: Vec<f64>, k: usize) -> f64 {
@@ -218,7 +218,7 @@ pub fn mrr(ranked_relevant: &[bool]) -> f64 {
 
 /// recall@k: the fraction of the relevant set found in the top `k`
 /// positions. The empty-relevant-set case (n_relevant == 0) is the
-/// documented `0.0` answer, guarded HERE — no relevant document exists
+/// documented `0.0` answer, guarded HERE: no relevant document exists
 /// to find, and the 0/0 spelling of that answer is not one a caller
 /// should ever see. A `k` past the ranking's length simply uses every
 /// available position.
@@ -231,7 +231,7 @@ pub fn recall_at_k(ranked_relevant: &[bool], n_relevant: usize, k: usize) -> f64
 }
 
 /// precision@k: the fraction of the top `k` positions that are relevant,
-/// with the denominator `min(k, ranking length)` — trec_eval's own
+/// with the denominator `min(k, ranking length)`, trec_eval's own
 /// convention for a run shorter than `k` (a system that returned fewer
 /// results is not punished for positions it never filled). `k` is
 /// trusted as already-validated (`k >= 1`); an empty ranking answers
@@ -303,7 +303,7 @@ mod tests {
         // scores, are consumed either way.
         let lists = [vec![0u32, 1u32], vec![1u32]];
         let fused_k1 = rank_fuse(&lists, 1, 2);
-        // d0: 1/2; d1: 1/3 + 1/2 = 0.8333... — d1 wins (two votes beat one).
+        // d0: 1/2; d1: 1/3 + 1/2 = 0.8333...; d1 wins (two votes beat one).
         assert_eq!(fused_k1[0].0, 1);
         assert!(close(fused_k1[0].1, 1.0 / 3.0 + 1.0 / 2.0));
         assert!(close(fused_k1[1].1, 1.0 / 2.0));
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn graded_gains_order_the_ideal() {
         // ranked gains [2, 3]: DCG = 2/log2(2) + 3/log2(3).
-        // ideal [3, 2]: IDCG = 3/log2(2) + 2/log2(3) — the higher grade
+        // ideal [3, 2]: IDCG = 3/log2(2) + 2/log2(3); the higher grade
         // discounted at the better rank, so score < 1.
         let score = ndcg_at_k(&[2.0, 3.0], vec![2.0, 3.0], 2);
         let dcg = 2.0 / 1.0 + 3.0 / 3.0_f64.log2();
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn three_huge_gains_saturate_at_one_not_nan() {
         // 3 × 1e308: DCG and IDCG each sum past f64's ceiling to +inf;
-        // inf/inf is NaN in IEEE — the core saturates instead, and the
+        // inf/inf is NaN in IEEE; the core saturates instead, and the
         // perfect ranking (ranked gains == ideal pool, same discounts)
         // pins the equality → 1.0 exactly.
         assert_eq!(ndcg_at_k(&[1e308, 1e308, 1e308], vec![1e308; 3], 3), 1.0);
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn finite_dcg_under_an_infinite_ideal_saturates_at_zero() {
         // A ranked DCG that stays finite under an ideal that overflows:
-        // the true ratio is ~1e-308-scale — the saturating answer is 0.0,
+        // the true ratio is ~1e-308-scale; the saturating answer is 0.0,
         // inside the pinned interval either way.
         assert_eq!(ndcg_at_k(&[1e308], vec![1e308; 3], 3), 0.0);
     }
@@ -451,7 +451,7 @@ mod tests {
         // Huge and small gains together, both sums overflowing: the
         // equality shape (ranked gains == ideal pool) still pins 1.0
         // exactly, and the documented saturation can over-report the
-        // imperfect overflowed shape at exactly 1.0 — inside the pinned
+        // imperfect overflowed shape at exactly 1.0, inside the pinned
         // interval either way.
         assert_eq!(
             ndcg_at_k(
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn hand_computed_three_list_rrf_with_k_five() {
-        // k=5, three lists over four documents — a fully hand-computed
+        // k=5, three lists over four documents: a fully hand-computed
         // vector (the py-side oracle repeats it with different ids):
         // d0: 1/6 + 1/8 = 0.291666...  (L0 rank 1, L1 rank 3)
         // d1: 1/7 + 1/6 = 0.309523...  (L0 rank 2, L2 rank 1)

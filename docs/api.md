@@ -4677,7 +4677,7 @@ def precision_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[H
 `asyncio.to_thread` (see [Async use](async.md)).
 
 The retrieval-family companions to `bm25_rank`: rank-space arithmetic over
-doc ids — no scores, no tokenization, no index, nothing stateful.
+doc ids. No scores, no tokenization, no index, nothing stateful.
 
 **`rank_fuse` is Reciprocal Rank Fusion** (Cormack, Clarke & Buüttcher,
 "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
@@ -4688,17 +4688,17 @@ given multiple ranked lists of hashable doc ids,
 score(d) = sum over lists of 1 / (k + rank(d))     -- ranks 1-based
 ```
 
-it consumes RANKS ONLY, never raw scores — the paper's whole point is that
+it consumes RANKS ONLY, never raw scores; the paper's whole point is that
 raw scores from different retrieval systems (a BM25 score, a cosine
-similarity, a click count) are not comparable while ranks are — with one
+similarity, a click count) are not comparable while ranks are. With one
 shared constant `k` (default 60, the paper's own, unchanged across its
-experiments) damping the top ranks so no single list's #1 swamps the
+experiments) damping the top ranks, no single list's #1 swamps the
 others' votes. A document absent from a list contributes no vote from it;
 a document ranked twice in ONE list votes once, at its first occurrence
 (the later entries advance one rank). Returns `(id, score)` for every
 distinct id across all lists, sorted by fused score descending, ties
-broken by earliest first appearance across the lists in caller order — a
-point the paper leaves open, pinned here as contract. Returned ids are
+broken by earliest first appearance across the lists in caller order
+(a point the paper leaves open, pinned here as contract). Returned ids are
 the original objects; dedup and equality follow Python's own dict/set
 semantics (`1`, `True`, and `1.0` are the same id).
 
@@ -4713,21 +4713,21 @@ wrong-type-entry contract `bm25_rank`'s corpus walk keeps).
 
 **The metrics** are the standard IR definitions over one ranking:
 
-- `ndcg_at_k` — normalized discounted cumulative gain (Järvelin &
+- `ndcg_at_k`: normalized discounted cumulative gain (Järvelin &
   Kekäläinen, "Cumulated gain-based evaluation of IR techniques", ACM
   TOIS 20(4), 2002), in `[0.0, 1.0]`. `relevant` is a set of relevant ids
-  (binary relevance 1.0); `gains` is an optional graded override — the
+  (binary relevance 1.0); `gains` is an optional graded override; the
   gain of id `d` is `gains[d]` when the dict contains it, else `1.0` when
   `d` is in `relevant`, else `0.0`. The DCG uses the paper's log2
   discount, rank 1 undiscounted: `DCG@k = Σ_{i=1..k} gain_i / log2(i + 1)`
   over the linear gain function (for binary relevance the paper's
   exponential `2^rel − 1` variant is identical). The ideal DCG sorts the
-  complete judged pool — every id in `relevant` (at its gain) plus every
-  `gains` key — descending and discounts the same way.
-- `mrr` — the reciprocal rank of the first relevant result (`1/rank`,
+  complete judged pool, every id in `relevant` (at its gain) plus every
+  `gains` key, descending and discounts the same way.
+- `mrr`: the reciprocal rank of the first relevant result (`1/rank`,
   ranks 1-based; `0.0` when no ranked result is relevant).
-- `recall_at_k` — `|relevant ∩ ranked[:k]| / |relevant|`.
-- `precision_at_k` — `|relevant ∩ ranked[:k]| / min(k, len(ranked))`:
+- `recall_at_k`: `|relevant ∩ ranked[:k]| / |relevant|`.
+- `precision_at_k`: `|relevant ∩ ranked[:k]| / min(k, len(ranked))`,
   trec_eval's own convention for a run shorter than `k` (a system that
   returned fewer results is not punished for positions it never filled).
 
@@ -4742,35 +4742,35 @@ ranking, and counting it twice would inflate precision and push nDCG past
 (nDCG clamps `k` the same way).
 
 **Edge-input policy** (the family's one contract): empty DATA answers a
-well-defined `0.0` — an empty `ranked`, an empty `relevant` set (no
+well-defined `0.0`: an empty `ranked`, an empty `relevant` set (no
 relevant document exists, so no hit is possible), and the
 zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
 NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative
 or non-finite `gains` value). Wrong TYPES raise `TypeError`
-(a non-list `ranked`/`ranked_lists`, a non-set `relevant` — exactly `set`
-or `frozenset` — a non-dict `gains`, a non-numeric `gains` value (the
+(a non-list `ranked`/`ranked_lists`, a non-set `relevant` (exactly `set`
+or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), an unhashable id, whose error is
 Python's own). For nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
 DCG faces an infinite ideal, and a finite ratio clamps to
-`[0.0, 1.0]` — the monotone-total policy, since the ideal pool contains
+`[0.0, 1.0]` (the monotone-total policy, since the ideal pool contains
 every ranked gain under the same discount schedule, so an overflowed DCG
-can at most match the overflowed ideal.
+can at most match the overflowed ideal).
 
 **GIL model**: the fusion/dedup walk and the metrics' membership walks
 are interpreter-side hashing (Python-object hashing cannot leave the
 GIL), and the O(distinct-ids) tuple marshalling rides with them; the
 score sweep, sort, and metric arithmetic run under one `py.detach`. The
 GIL-held share is structurally the majority of a fusion call at large
-sizes — the content_hash arg-walk class — so inputs past ~10^6 total
+sizes (the content_hash arg-walk class), so inputs past ~10^6 total
 entries hold the GIL for 100ms+ in the walk alone: this family is a
 reranking-scale primitive (hundreds to thousands of entries per list),
 not a whole-corpus one. Measured bands: `tests/test_gil_release.py`.
 Id-shape caveat, honestly stated: those bands were measured on
 cheap-to-hash ids (short `str` ids); hash-expensive ids (10-int tuples
 are the measured pathological shape) make each dedup/membership dict
-operation slower until the walk is effectively interpreter-bound — the
+operation slower until the walk is effectively interpreter-bound: the
 GIL-held share approaches the call's full wall (measured ratios
 0.98-1.00 there) and no thread placement buys it back, the same
 id-shape caveat `docs/async.md` carries for the `aio` spelling.
@@ -4784,7 +4784,7 @@ rank_fuse([
 # [('cat-a', 0.03252247488101534), ('dog-b', 0.03252247488101534),
 #  ('bird-c', 0.032266458495966696)]
 # cat-a and dog-b tie (two votes each); cat-a appeared first and wins
-# the tie — earliest first appearance across the lists.
+# the tie: earliest first appearance across the lists.
 
 ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
 relevant = {"cat-a", "bird-c", "whale-e"}

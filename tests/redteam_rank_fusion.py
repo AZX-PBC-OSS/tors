@@ -7,7 +7,7 @@ the published contract (docs/api.md, the module docstrings) and the
 source papers (Cormack SIGIR 2009 for RRF; Järvelin & Kekäläinen TOIS
 2002 for nDCG). Passing tests = failed attacks. The suite's one
 confirmed live defect (the DCG/IDCG overflow NaN, attack class 3) has
-been FIXED in the core — its test runs green here, and the invariant is
+been FIXED in the core; its test runs green here, and the invariant is
 pinned permanently in tests/test_rank_fusion.py (TestNdcg's overflow
 tests).
 
@@ -21,7 +21,7 @@ Attack classes exercised here, on top of the shared seven-class contract:
    all-zero ideal), plus a >1.0 hunt over duplicates, dict-equality
    cross-type ids (1/True/1.0), and gains/relevant conflicts.
 3. Overflow hunt: huge-but-FINITE gains (legal per the documented
-   domain) that overflow the DCG/IDCG sums to ±inf — the one confirmed
+   domain) that overflow the DCG/IDCG sums to ±inf; the one confirmed
    defect (NaN past the core's `idcg == 0.0` guard), now fixed by the
    core's saturating-ratio policy and green here.
 4. TypeError discipline: unhashable ids and non-set `relevant` spelled
@@ -33,11 +33,11 @@ Attack classes exercised here, on top of the shared seven-class contract:
 7. GIL/aio: the aio twins' parity with the sync twins, and the
    pinned-shape GIL-residue claim re-measured under a heartbeat with
    hostile id shapes (heavy-hash tuple ids push the GIL-held share to
-   ~1.0 — recorded as a finding, asserted only against a no-worse-than-
+   ~1.0 (recorded as a finding, asserted only against a no-worse-than-
    the-interpreter bound).
 8. Perf cliffs: 10k-lists×1-doc vs 1-list×10k-docs scaling, and a
    constant-hash hostile id class (the interpreter's own dict quadratic,
-   which the pure-Python control reproduces — pinned no-worse-than-dict).
+   which the pure-Python control reproduces, pinned no-worse-than-dict).
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class TestRRFVsPaper:
     def test_huge_k_keeps_vote_counts_dominant(self) -> None:
         # As k -> inf every vote -> ~1/k (past 2^53 the rank offsets
         # round away entirely), so the fused order becomes the vote
-        # count, ties by first appearance — no float blowup, no
+        # count, ties by first appearance: no float blowup, no
         # overflow, and the two-vote doc still beats the one-vote doc.
         fused = rank_fuse([["solo"], ["cons"], ["cons"]], k=10**18)
         assert [i for i, _ in fused] == ["cons", "solo"]
@@ -159,7 +159,7 @@ def _tors_equivalent_of_sklearn_case(
 ) -> float:
     """Build the tors spelling of a sklearn (y_true, y_score) sample:
     ids ordered by score descending, every judged doc carrying its gain
-    in `gains` (relevant empty — gains is the complete judged pool)."""
+    in `gains` (relevant empty; gains is the complete judged pool)."""
     ids = [f"d{i}" for i in range(len(y_score))]
     order = sorted(range(len(y_score)), key=lambda i: -y_score[i])
     ranked = [ids[i] for i in order]
@@ -197,7 +197,7 @@ class TestNdcgAgainstSklearn:
     ) -> None:
         # tors-only pool shape (sklearn's y_true/y_score are always
         # co-extensive): a gains entry for an id the ranking never
-        # surfaces joins the IDEAL pool, never the DCG — so it can only
+        # surfaces joins the IDEAL pool, never the DCG, so it can only
         # lower the score, and only when its gain exceeds the ranked
         # ones'. (With k=None, k clamps to the ranked length, so the
         # ghost displaces a ranked gain's discount, never adds a term.)
@@ -271,7 +271,7 @@ class TestNdcgUnitIntervalHunt:
 
     def test_zero_ideal_via_gains_is_zero_not_nan(self) -> None:
         # The contract's named second NaN path: gains summing to zero
-        # make the ideal DCG zero — answered 0.0, not 0/0.
+        # make the ideal DCG zero: answered 0.0, not 0/0.
         assert ndcg_at_k(["a", "b"], set(), gains={"a": 0.0, "b": 0.0}) == 0.0
 
 
@@ -279,7 +279,7 @@ class TestNdcgArgumentDiscipline:
     def test_non_numeric_gain_raises_type_error(self) -> None:
         # The IMPL's answer is TypeError (pyo3's extract failure). NOTE:
         # docs/api.md and the docstring claim ValueError for a
-        # "non-numeric gains value" — a doc/impl drift, reported as P2.
+        # "non-numeric gains value"; a doc/impl drift, reported as P2.
         with pytest.raises(TypeError):
             ndcg_at_k(["a"], set(), gains={"a": "high"})  # type: ignore[dict-item]
 
@@ -317,7 +317,7 @@ class TestNdcgArgumentDiscipline:
 
 class TestMetricDedupSemantics:
     """The dedup-first contract deliberately diverges from the textbook
-    `ranked[:k]` formulas when `ranked` contains repeats — pinned here
+    `ranked[:k]` formulas when `ranked` contains repeats, pinned here
     as the DOCUMENTED behavior (docs/api.md: a repeat is a malformed
     ranking, counted once at its first occurrence), with the divergence
     reported in the findings as a P2 surprise."""
@@ -370,7 +370,7 @@ class TestZeroDivisionHunt:
         # The fuzz-found NaN shape (empty relevant + any flags), pinned
         # at the binding AND (per the crate's own unit tests + fuzz
         # target, which run without pyo3) guarded in the Rust core
-        # itself — src/rank_fusion_impl.rs returns 0.0 before dividing.
+        # itself: src/rank_fusion_impl.rs returns 0.0 before dividing.
         for flags_relevant in (set(), {"a"}):
             assert recall_at_k(["a", "b"], flags_relevant, 5) == recall_at_k(
                 ["a", "b"], flags_relevant, 5
@@ -380,7 +380,7 @@ class TestZeroDivisionHunt:
 
 class TestUnhashableIdConsistency:
     """An unhashable id must be Python's own unhashable TypeError in ALL
-    FIVE functions — the wrong-type-entry contract, not just rank_fuse's."""
+    FIVE functions (the wrong-type-entry contract, not just rank_fuse's)."""
 
     @pytest.mark.parametrize("bad_id", [{"d": 1}, ["l"], {1, 2}, [1, [2]]])
     def test_unhashable_ids_raise_type_error_in_all_five_functions(self, bad_id: object) -> None:
@@ -419,7 +419,7 @@ class TestHostileObjects:
 
     def test_eq_that_mutates_the_input_list_during_the_walk_is_contained(self) -> None:
         # A hostile __eq__ clearing the list mid-dedup: the walk must not
-        # panic (a Rust panic would abort the process) — a clean Python
+        # panic (a Rust panic would abort the process); a clean Python
         # outcome (result or TypeError) is the contract.
         class Evil:
             def __init__(self, target: list) -> None:
@@ -533,7 +533,7 @@ class TestAioTwins:
     ) -> None:
         # FINDING (recorded, bounded): ids that are expensive to hash
         # (10-int tuples, ~0.5us/hash against ~0.05us for cached strs)
-        # push the GIL-held share of a large fusion to ~0.98-1.00 —
+        # push the GIL-held share of a large fusion to ~0.98-1.00;
         # the pinned 0.80 budget is a STRING-ID shape claim, and the
         # docs' "the walk is structurally the majority" wording already
         # owns it. Asserted here only as no-worse-than-fully-blocking
@@ -590,7 +590,7 @@ class TestPerfCliffs:
         self,
     ) -> None:
         # ids that all hash to 0 (but compare unequal) degrade CPython's
-        # own dict to linear-probe scans — the interpreter's quadratic,
+        # own dict to linear-probe scans; the interpreter's quadratic,
         # not tors's (pure-Python dict.fromkeys reproduces it). The pin:
         # tors's walk must not be MULTIPLECTIVELY worse than the
         # interpreter's own dict on the same hostile ids.

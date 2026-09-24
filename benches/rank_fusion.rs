@@ -6,7 +6,7 @@
 //! detached pass of the pyo3 wrapper) actually pays for.
 //!
 //! `rank_fuse` is benched at small/medium/large totals over a shared
-//! id space (every list draws references into one pool — the realistic
+//! id space (every list draws references into one pool, the realistic
 //! fusion shape, where the same documents recur across lists, unlike a
 //! corpus of disjoint strings), with throughput reported in total
 //! entries. The metrics are benched over a relevance-flag vector of the
@@ -25,7 +25,7 @@ use std::hint::black_box;
 use tors::rank_fusion_impl::{mrr, ndcg_at_k, precision_at_k, rank_fuse, recall_at_k};
 
 /// The fusion workload: `n_lists` ranked lists of dedup indices over a
-/// shared id space of `id_space` documents — every list ranks entries
+/// shared id space of `id_space` documents; every list ranks entries
 /// drawn from the same pool (stride-sampled so the votes genuinely
 /// overlap), the shape fusion exists for.
 fn fusion_lists(total_entries: usize, n_lists: usize, id_space: usize) -> Vec<Vec<u32>> {

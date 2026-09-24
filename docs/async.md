@@ -17,7 +17,7 @@ the whole call.
 
 It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, the rank-fusion family (`rank_fuse`, `ndcg_at_k`, `mrr`,
-`recall_at_k`, `precision_at_k` — the fusion/membership walks over large
+`recall_at_k`, `precision_at_k`; the fusion/membership walks over large
 rankings are interpreter-side hashing, so the worker thread buys their
 detached arithmetic plus the caller's concurrency shape, and the measured
 GIL bands in test_gil_release.py carry the honest residue),

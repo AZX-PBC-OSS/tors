@@ -3179,7 +3179,7 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
 # --- The rank-fusion / IR-metric family -------------------------------------------
 #
 # rank_fuse is the content_hash residue class over a list argument: the
-# dedup walk (one Python dict lookup per entry — interpreter hashing, the
+# dedup walk (one Python dict lookup per entry, interpreter hashing, the
 # same irreducible-without-an-interpreter-free-id-format price) plus the
 # O(distinct-ids) tuple marshalling are GIL-held, and the score
 # accumulation + sort run detached. The metrics (ndcg_at_k/mrr/
@@ -3189,7 +3189,7 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
 def _ranked_lists(total_entries: int, n_lists: int = 5) -> list[list[str]]:
     """A deterministic fusion workload: ``n_lists`` ranked lists over a
     shared id space (half the entries distinct, so every id collects
-    votes from roughly half the lists — the consensus shape fusion
+    votes from roughly half the lists, the consensus shape fusion
     exists for), the _ident_items no-RNG idiom."""
     per_list = total_entries // n_lists
     id_space = total_entries // 2
@@ -3204,7 +3204,7 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     over dedup indices) run under one ``py.detach``; the GIL-held residue
     is the dedup walk (one dict lookup per entry, Python-object hashing
     IS interpreter work) plus the O(distinct-ids) ``(id, score)`` tuple
-    marshalling — the content_hash arg-walk class, structurally the
+    marshalling: the content_hash arg-walk class, structurally the
     majority of the wall, hence the bespoke 0.80 budget
     (``_RANK_FUSE_RATIO_BUDGET``) instead of the shared 0.30.
 
@@ -3213,14 +3213,14 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     the walk is irreducible (every step is a CPython dict operation on
     caller objects). Caller guidance mirrors the content_hash cell's:
     inputs past ~10^6 total entries hold the GIL for 100ms+ in the walk
-    alone — fusion is a reranking-scale primitive (hundreds to thousands
+    alone; fusion is a reranking-scale primitive (hundreds to thousands
     of entries per list), not a whole-corpus one.
 
     Measured on the dev box (ambient load ~2-4, 4 samples per cell):
-    200k total entries across 5 lists — worst gaps 17.1-28.4ms of
+    200k total entries across 5 lists: worst gaps 17.1-28.4ms of
     30.2-45.7ms walls, ratios 0.56-0.62, every sample inside both
     budgets (~1.3x ratio margin, ~3x ceiling margin); at 400k the band
-    is 0.69-0.75 (measured, unasserted — the walk share grows with
+    is 0.69-0.75 (measured, unasserted; the walk share grows with
     size, which is why the pin is the 200k cell).
 
     Id-shape caveat (the aio caveat in docs/async.md, honestly recorded
@@ -3228,7 +3228,7 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     this cell builds (short ``str`` ids). With hash-expensive ids
     (10-int tuples are the measured pathological shape) each dict
     operation in the dedup walk costs its hash, the GIL-held share
-    approaches the call's full wall (the ratio measures 0.98-1.00) —
+    approaches the call's full wall (the ratio measures 0.98-1.00);
     the budget pins the str-id shape, not a detach guarantee for every
     hashable id type."""
     lists = _ranked_lists(200_000)
@@ -3243,17 +3243,17 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
 def test_ndcg_at_k_on_a_large_ranking_keeps_the_loop_under_the_ceiling() -> None:
     """The metrics' claim, ceiling-only (the first_invalid_charset
     precedent, honestly so): the per-position membership walk (one
-    ``__contains__``/seen-set op per ranked id — interpreter hashing)
+    ``__contains__``/seen-set op per ranked id, interpreter hashing)
     is GIL-held BY DESIGN and the detached arithmetic tail is trivial,
     so the ratio is meaningless at every size; the 100ms ceiling is the
     assertion. At the pinned 100k-id ranking the walk's contiguous hold
     sits in the tens-of-ms band; a ranking two orders of magnitude past
-    reranking scale would outgrow the ceiling — the caller guidance is
+    reranking scale would outgrow the ceiling; the caller guidance is
     the rank_fuse cell's (metrics are reranking-scale primitives).
 
     Measured on the dev box (ambient load ~2-20, 5 samples per cell):
     100k ids worst gaps 17.6-21.8ms of 19.7-23.9ms walls (ratios
-    0.85-0.91 — the walk's contiguous hold IS the call, the detached
+    0.85-0.91; the walk's contiguous hold IS the call, the detached
     tail is invisible; hence ceiling-only, and the pinned size keeps the
     hold well inside the 100ms ceiling with ~4x margin)."""
     ranked = [f"id_{i}" for i in range(100_000)]

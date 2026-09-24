@@ -14,7 +14,7 @@ use std::collections::HashMap;
 struct Input {
     /// The ranked lists, as RAW label values the target first remaps to
     /// the dense dedup-index space the py layer materializes (one index
-    /// per distinct id, assigned on first sight) — the core's contract
+    /// per distinct id, assigned on first sight), the core's contract
     /// is a dense id table, so the hostile shapes a caller can actually
     /// reach are duplicates within a list, overlaps across lists, and
     /// empty lists, all of which the remap preserves.
@@ -53,7 +53,7 @@ fuzz_target!(|input: Input| {
     // The padded count: up to 255 never-voted indices past the real
     // table (the fuzz-hostile version of a caller's loose dedup table;
     // past this the padding is unbounded input amplification, which the
-    // binding cannot produce — its ids.len() IS the distinct count).
+    // binding cannot produce; its ids.len() IS the distinct count).
     let n_docs = remap.len() + input.doc_count_bias as usize;
 
     let fused = tors::rank_fusion_impl::rank_fuse(&lists, k, n_docs);
@@ -87,7 +87,7 @@ fuzz_target!(|input: Input| {
         );
     }
 
-    // The metrics: any flag vector, any k >= 1 — a float in [0, 1]
+    // The metrics: any flag vector, any k >= 1, a float in [0, 1]
     // every time, well-defined (never NaN) on empty inputs.
     let metric_k = (input.metric_k % 128) as usize + 1;
     let flags = input.flags;

@@ -2,7 +2,7 @@
 ``tors.rank_fuse``, ``tors.ndcg_at_k``, ``tors.mrr``, ``tors.recall_at_k``,
 and ``tors.precision_at_k``.
 
-rank_fuse is Reciprocal Rank Fusion exactly as the source paper defines it —
+rank_fuse is Reciprocal Rank Fusion exactly as the source paper defines it:
 Cormack, Clarke & Buüttcher, "Reciprocal Rank Fusion outperforms Condorcet
 and individual Rank Learning Methods", SIGIR 2009
 (https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf): ranks only, never raw
@@ -127,7 +127,7 @@ class TestRankFuseTies:
         assert [i for i, _ in fused] == ["zebra", "alpaca"]
 
     def test_first_appearance_across_lists_beats_within_list_rank(self) -> None:
-        # "early" first appears in list 0; "late" in list 1 — equal
+        # "early" first appears in list 0; "late" in list 1; equal
         # scores, "early" wins the tie despite nothing else.
         fused = rank_fuse([["early"], ["late"]])
         assert [i for i, _ in fused] == ["early", "late"]
@@ -355,7 +355,7 @@ class TestNdcg:
             ndcg_at_k([{"d": 1}], {"a"})  # type: ignore[list-item]
 
     # The saturating-ratio policy: legal finite gains can overflow the
-    # DCG/IDCG sums to +inf, where IEEE inf/inf is NaN — the pinned
+    # DCG/IDCG sums to +inf, where IEEE inf/inf is NaN; the pinned
     # [0.0, 1.0] contract holds instead.
 
     def test_three_huge_gains_saturate_at_one_not_nan(self) -> None:

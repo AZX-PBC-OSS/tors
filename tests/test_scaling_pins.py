@@ -384,7 +384,7 @@ class TestRetrievalCeilingScaling:
 def _fusion_lists(total_entries: int, n_lists: int = 5) -> list[list[str]]:
     """The GIL-release cell's deterministic workload (one shared
     definition, the same no-RNG idiom): n_lists ranked lists whose
-    entries are REFERENCES into one shared pool of half the entries —
+    entries are REFERENCES into one shared pool of half the entries;
     distinct string objects built once and reused across lists, the
     realistic fusion shape (the same document retrieved by several
     systems) and the shape whose per-object str hashes are cached, so
@@ -405,11 +405,11 @@ class TestRankFusionScaling:
         dedup walk is one dict op per entry and the detached pass is the
         score sweep plus an O(distinct log distinct) sort, so the whole
         call is linear (up to the sort's log factor) in TOTAL list
-        length — the sum across lists, not the longest one, is the cost
+        length, the sum across lists, not the longest one, is the cost
         driver, because every entry is walked and voted. Measured
         1.26ms -> 5.72ms, ratio 4.6 (~2.15x per doubling, ambient load
         ~5-20; the box's large-dict cache-miss band sits ~2.2-2.4x per
-        doubling — a pure-Python dict walk over the same shapes measures
+        doubling; a pure-Python dict walk over the same shapes measures
         the same), gate 3.0x per doubling. A per-list rescan of the
         accumulated id table (the quadratic shape) would measure ~4x per
         doubling here."""

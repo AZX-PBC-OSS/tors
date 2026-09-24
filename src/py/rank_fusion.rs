@@ -6,7 +6,7 @@ use crate::rank_fusion_impl;
 
 /// The `relevant` argument's accepted spellings, checked once up front:
 /// exactly a `set` or `frozenset` of ids (the same exactly-list
-/// discipline `bm25_rank`'s `corpus` keeps — a `list`/`tuple`/generator
+/// discipline `bm25_rank`'s `corpus` keeps: a `list`/`tuple`/generator
 /// is a `TypeError` naming the accepted set, not a silent copy into a
 /// fresh set; a caller with a list has `set(...)`). Membership tests
 /// then ride the set's own `__contains__` through
@@ -25,7 +25,7 @@ fn check_relevant(relevant: &Bound<'_, PyAny>) -> PyResult<()> {
 /// `k`'s shared validation: at least 1 (the fusion/metric contract),
 /// extracted as i64 so an out-of-range int is pyo3's own OverflowError
 /// (the `truncate_to_bounds`-identical pattern) and a non-int is a
-/// `TypeError` — a negative or zero `k` is a range error, `ValueError`
+/// `TypeError`; a negative or zero `k` is a range error, `ValueError`
 /// naming the bound.
 fn check_k(k: i64) -> PyResult<usize> {
     if k < 1 {
@@ -35,7 +35,7 @@ fn check_k(k: i64) -> PyResult<usize> {
 }
 
 /// One graded-relevance value's validation: finite and non-negative
-/// (the standard nDCG gain domain — a negative or non-finite gain would
+/// (the standard nDCG gain domain; a negative or non-finite gain would
 /// corrupt the ideal ranking the score normalizes against).
 fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
     if !gain.is_finite() || gain < 0.0 {
@@ -52,9 +52,9 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 /// ranked lists of hashable doc ids into one ranking,
 /// `score(d) = sum over lists of 1 / (k + rank(d))`, ranks 1-based,
 /// `k=60` (the paper's own default, unchanged across its experiments).
-/// Ranks only, never raw scores — the paper's whole point is that raw
+/// Ranks only, never raw scores: the paper's whole point is that raw
 /// scores from different retrieval systems are not comparable while
-/// ranks are — so a doc absent from a list contributes no vote from it,
+/// ranks are, so a doc absent from a list contributes no vote from it,
 /// and a doc ranked twice in one list votes once (at its FIRST
 /// occurrence: the dedup-first pass folds duplicates).
 ///
@@ -68,17 +68,17 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 ///
 /// `k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty
 /// list of non-empty-or-empty lists (fusing zero lists raises
-/// `ValueError` — the `merkle_root` "root of no chunks" precedent: the
+/// `ValueError`; the `merkle_root` "root of no chunks" precedent: the
 /// formula is defined over one-or-more lists, and a zero-list call is
-/// almost certainly an upstream bug — while an individual empty list is
+/// almost certainly an upstream bug, while an individual empty list is
 /// legal and contributes no votes, the "this retriever returned nothing"
 /// shape). An unhashable id raises `TypeError` (Python's own hash error:
 /// a dict cannot key it, the same wrong-type-entry contract
 /// `bm25_rank`'s corpus walk keeps).
 ///
 /// GIL model: one GIL-held walk of every list (Python-object hashing IS
-/// interpreter work: each occurrence is one dict lookup — an existing
-/// entry folds a within-list duplicate, a fresh one joins the id table —
+/// interpreter work: each occurrence is one dict lookup (an existing
+/// entry folds a within-list duplicate, a fresh one joins the id table);
 /// the same arg-walk class `content_hash`'s object walk is), then the
 /// score accumulation + sort (plain arithmetic over dedup indices) under
 /// one `py.detach`, then the O(distinct-ids) `(id, score)` tuple
@@ -97,9 +97,9 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
     // TypeError on an unhashable id; equality semantics are the dict's.
     let mut ids: Vec<Py<PyAny>> = Vec::new();
     let table = PyDict::new(py);
-    // Per-id last-seen list index: the dedup is WITHIN one list only —
+    // Per-id last-seen list index: the dedup is WITHIN one list only;
     // the same id in a different list is a legitimate second vote (that
-    // is the whole point of fusion) — so a repeat is skipped exactly
+    // is the whole point of fusion), so a repeat is skipped exactly
     // when its previous occurrence was in THIS list.
     let mut last_list: Vec<u32> = Vec::new();
     let mut lists_idx: Vec<Vec<u32>> = Vec::with_capacity(ranked_lists.len());
@@ -145,8 +145,8 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
 /// `tors.ndcg_at_k(ranked, relevant, *, k=None, gains=None) -> float`:
 /// normalized discounted cumulative gain at `k` (Järvelin & Kekäläinen,
 /// ACM TOIS 20(4), 2002), in `[0.0, 1.0]`. `ranked` is a list of ids
-/// (best first); `relevant` is a set of relevant ids — binary relevance
-/// 1.0 — or, with `gains`, the baseline set whose members a graded
+/// (best first); `relevant` is a set of relevant ids (binary relevance
+/// 1.0) or, with `gains`, the baseline set whose members a graded
 /// `gains` dict overrides: the gain of id `d` is `gains[d]` when the
 /// dict contains it, else `1.0` when `d` is in `relevant`, else `0.0`.
 /// A duplicated id inside `ranked` counts once, at its first occurrence
@@ -158,8 +158,8 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
 /// `DCG@k = sum over i in 1..k of gain_i / log2(i + 1)` over the linear
 /// gain function (for binary relevance the paper's exponential
 /// `2^rel - 1` variant is identical). The ideal DCG sorts the complete
-/// judged pool — every id in `relevant` (at its gain) plus every
-/// `gains` key — descending and discounts the same way, so the score is
+/// judged pool, every id in `relevant` (at its gain) plus every
+/// `gains` key, descending and discounts the same way, so the score is
 /// exactly the paper's normalization.
 ///
 /// `k=None` (the default) scores the whole ranking; `k` is clamped to
@@ -170,7 +170,7 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
 /// `+inf` (three gains of 1e308, or two of 1.7e308); the normalization
 /// saturates instead of dividing `inf/inf` (NaN): when either sum is
 /// non-finite the score is `1.0` if `DCG >= IDCG` else `0.0`, and a
-/// finite ratio clamps to `[0.0, 1.0]` — the monotone-total policy, since
+/// finite ratio clamps to `[0.0, 1.0]` (the monotone-total policy, since
 /// the ideal pool contains every ranked gain under the same discount
 /// schedule, so an overflowed DCG can at most match the overflowed ideal.
 /// `k < 1` and a negative or non-finite `gains` value raise `ValueError`;
@@ -180,7 +180,7 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
 /// `TypeError` (Python's own hash error).
 ///
 /// GIL model: the argument checks and the per-position gain walk (one
-/// `__contains__`/dict lookup per ranked id — interpreter hashing) under
+/// `__contains__`/dict lookup per ranked id, interpreter hashing) under
 /// the GIL, the DCG/IDCG arithmetic under one `py.detach`, a single
 /// float out (no marshalling class).
 #[pyfunction(signature = (ranked, relevant, *, k = None, gains = None))]
@@ -245,7 +245,7 @@ pub fn ndcg_at_k(
 }
 
 /// `tors.mrr(ranked, relevant) -> float`: mean reciprocal rank of a
-/// single ranking — the reciprocal rank of the first relevant result,
+/// single ranking: the reciprocal rank of the first relevant result,
 /// `1/rank` with ranks 1-based, `0.0` when no ranked result is relevant
 /// (and for an empty `ranked`: the same well-defined zero). A
 /// duplicated id counts once at its first occurrence (the family's
@@ -294,7 +294,7 @@ pub fn recall_at_k(
 
 /// `tors.precision_at_k(ranked, relevant, k) -> float`: the fraction of
 /// the top `k` positions that are relevant,
-/// `|relevant ∩ ranked[:k]| / min(k, len(ranked))` — trec_eval's own
+/// `|relevant ∩ ranked[:k]| / min(k, len(ranked))`, trec_eval's own
 /// convention for a run shorter than `k`: a system that returned fewer
 /// results is not punished for positions it never filled (the formula
 /// assumes deduped input: a duplicate counts once, at its first
@@ -325,7 +325,7 @@ pub fn precision_at_k(
 /// ranked id (Python's own hash/equality semantics), into the plain
 /// flags the detached metric arithmetic consumes. Dedup-first, the same
 /// contract `rank_fuse` keeps: a repeat inside `ranked` is skipped
-/// entirely — the same document cannot occupy two metric positions.
+/// entirely; the same document cannot occupy two metric positions.
 fn relevance_flags(ranked: &Bound<'_, PyList>, relevant: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
     let py = ranked.py();
     let seen = PySet::empty(py)?;
