@@ -115,6 +115,30 @@
 //! (`similar`) already backs `grounded_impl`'s verdict path where exactly
 //! that is needed.
 //!
+//! # Why the ROUGE-W DP is not the `similar` crate (span-scoring library
+//! check, 2026-09-24)
+//!
+//! `similar` is already a dependency (3.2, behind `grounded_impl`), so the
+//! fair question is whether ROUGE-W SPAN SCORING could ride it too. It
+//! cannot, for reasons specific to scoring rather than to the
+//! alignment-recovery argument above. `similar` computes an EDIT SCRIPT — an
+//! ordered sequence of Equal/Insert/Delete ops between two whole texts — and
+//! what span scoring needs is not in one: (1) the weighted-LCS RUN
+//! structure. ROUGE-W credits `f(k) - f(k-1)` per diagonal run of length k,
+//! and the run decomposition of the WEIGHTED optimum is in general different
+//! from every plain-LCS alignment `similar` can emit (the superlinear shaping
+//! prefers fewer longer runs at equal matched counts, so the weighted LCS is
+//! not a function of the plain LCS length) — recovering the run lengths from
+//! an edit script of a different, unweighted optimization would mean re-doing
+//! the DP to get numbers the DP already yields. (2) Lin's Equation 15
+//! normalization, which needs the scalar WLCS alongside `f(|Q|)` and `f(|C|)`
+//! to produce an F1 in `[0, 1]` — a summary no diff-script API exposes. (3)
+//! The calling shape: up to [`MAX_CANDIDATES`] candidate spans scored against
+//! ONE short query with a single reused two-row scratch
+//! ([`Scratch`]) — a fill per candidate, not one fill per document pair.
+//! The custom two-row fill stays.
+
+//!
 //! A candidate scoring 0 (no shared token) is never a snippet: no overlap,
 //! no provenance claim (RARR credits a span with attribution only when the
 //! evidence supports the claim; a zero-overlap span supports nothing). The

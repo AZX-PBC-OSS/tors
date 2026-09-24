@@ -2508,7 +2508,10 @@ valid answer, never an error; `max_chars=0` is a `ValueError`.
 ```python
 tors.highlight("torque spec", "The pump failed. The bushing torque spec was 42 Nm. Replaced.")
 # {'snippets': [{'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
-#                'end': 52, 'score': 0.429719627375509}], 'score': 0.429719627375509}
+#                'end': 52, 'score': 0.44444444444444436}], 'score': 0.44444444444444436}
+# (the score is exactly 4/9: 2 query terms, a 7-token sentence, one
+# contiguous matched run — Equation 15's F1 collapses to 2k/(n+m) under the
+# power-law shaping — printed through the DP's f64 arithmetic)
 ```
 
 (The snippet's trailing space is the UAX #29 sentence convention

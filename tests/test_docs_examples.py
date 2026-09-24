@@ -550,10 +550,13 @@ class TestRecipeRetrievalExamples:
                     "text": "The bushing torque spec was 42 Nm. ",
                     "start": 17,
                     "end": 52,
-                    "score": 0.429719627375509,
+                    # exactly 4/9 (2 query terms, 7-token sentence, one
+                    # contiguous run: Eq. 15's F1 is 2k/(n+m) under the
+                    # power-law shaping), through the DP's f64 arithmetic
+                    "score": 0.44444444444444436,
                 }
             ],
-            "score": 0.429719627375509,
+            "score": 0.44444444444444436,
         }
 
 
