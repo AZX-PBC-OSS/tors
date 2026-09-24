@@ -2474,6 +2474,26 @@ role: its precision-oriented, reference-anchored objective is gamed by a
 one-word window and its 4-gram statistics are too sparse against a short
 query.
 
+A qualification that matters when comparing numbers: the WLCS fill runs in
+a **max-on-match spelling** — Lin's Figure 3 forces a match cell to extend
+the diagonal run, and tors replaces that forced-diagonal branch with `max`
+against the skip options (Lin 2004, Eq. 15, with the forced-diagonal branch
+replaced by max to preserve candidate monotonicity). The deviation is
+deliberate: the forced diagonal is NOT monotone in the candidate — a match
+cell forced to extend the run can strand accumulated credit when a later
+token re-matches, so a text offered MORE source material could score LESS,
+which would break the recall twin's contract. The max-on-match spelling
+restores monotonicity (extending the text never lowers a coverage score,
+pinned under Hypothesis attack), at the cost of compatibility: these scores
+are **not bit-compatible with the official ROUGE package or the
+`rouge-score` PyPI library** (the fills disagree on ~12% of random token
+pairs). And because the DP keeps only two rows, it cannot represent
+Pareto (value, trailing-run) states: the score is the max-on-match
+recurrence — a greedy-run-weighted alignment score — not the literal
+weighted-LCS optimum over all monotone matchings (a brute-force oracle
+beats it on rare pairs; also pinned). Both deviations are documented
+semantics, verified in the test suite — not bugs.
+
 Tokens come from UAX #29 word boundaries (the same segmentation
 `word_bounds` exposes), with one refinement: every CJK character (Han,
 Hiragana, Katakana, Hangul) inside a word segment becomes its own token —
@@ -2542,7 +2562,11 @@ token-free sentences included — and `score`, the aggregate.
 
 The per-sentence score is the same ROUGE-W F1 the snippet surface ranks
 spans with (see `tors.highlight` above): one tokenization (UAX #29 words,
-CJK per character, case-fold + NFC), one shaping. The citation unit is the
+CJK per character, case-fold + NFC), one shaping — and the same
+qualification applies (the monotone max-on-match recurrence, not
+bit-compatible with the official ROUGE package or `rouge-score`). Note the
+argument order: `ground_sentences(text, query)` — the OPPOSITE of
+`highlight(query, text)`. The citation unit is the
 sentence — the unit the attribution literature converged on (ALCE's
 snippet-mode baselines measure citation quality per sentence: Gao et al.
 2023, "Enabling Large Language Models to Generate Text with Citations") —
@@ -2570,8 +2594,13 @@ never an error. `max_chars` bounds each sentence's SCORED window: a
 sentence longer than the budget is scored over its leading
 token-boundary window (at least one token — `highlight`'s documented
 floor), while its reported `start`/`end`/`text` still cover the WHOLE
-sentence; `None` (the default) scores whole sentences, and `max_chars=0`
-is a `ValueError`. Pathological chunks are bounded: at most the first
+sentence; the window's exact boundary (where the leading window cuts off)
+is an implementation detail and deliberately not exposed — consumers get
+the whole-sentence span and the window's score, which is the contract.
+`None` (the default) scores whole sentences, and `max_chars=0`
+is a `ValueError`. Like every integer parameter in the library,
+`max_chars` takes a plain int (a `bool` is its 0/1 int value — the
+family-wide convention). Pathological chunks are bounded: at most the first
 16384 text tokens and 128 query terms are scanned (sentences past the cap
 score `0.0`, their offsets and text still exact) — the DP is two reusable
 rows per sentence, never an n·m matrix, and the total work is linear in
@@ -2611,8 +2640,14 @@ labels, this is the lexical approximation: U is the token overlap of
 
 The measure is ROUGE-W recall — Lin 2004's Equation 15 recall component
 (`f^-1(WLCS / f(|source|))`) over the grounding family's own UAX #29
-tokenization — and not a difflib-style character coverage, for the same
-reasons the snippet surface scores ROUGE-W: one tokenization and one
+tokenization — with the same qualification `highlight`'s scorer carries:
+the WLCS fill is the monotone max-on-match spelling (Lin's forced-diagonal
+branch replaced by max, so adding text never lowers coverage), which is
+deliberately NOT bit-compatible with the official ROUGE package or
+`rouge-score`, and it is a greedy-run-weighted alignment score rather than
+the literal weighted-LCS optimum — see the full note under
+`tors.highlight`. It is not a difflib-style character coverage, for the
+same reasons the snippet surface scores ROUGE-W: one tokenization and one
 shaping shared with `highlight`/`ground_sentences`, so the precision and
 recall surfaces never disagree about what a token is (a case-fold or
 NFC/NFD difference matches; a character-level diff would count it

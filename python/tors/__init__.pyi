@@ -40,8 +40,9 @@ class ScrubPiiReport(TypedDict):
 
 # One `highlight` snippet: CHARACTER offsets (`start`/`end`, Python
 # codepoint indices) into the ORIGINAL text argument — `text[start:end]`
-# is exactly `text` — and the span's ROUGE-W F1 against the query
-# (`score`, in [0.0, 1.0]).
+# is exactly `text` — and the span's ROUGE-W-shaped F1 against the query
+# (`score`, in [0.0, 1.0]; the monotone max-on-match variant — see the
+# note on `highlight` below).
 class GroundingSnippet(TypedDict):
     text: str
     start: int
@@ -764,7 +765,13 @@ def is_grounded(
 # one shaping shared with `highlight`/`ground_sentences`, so the precision
 # and recall surfaces never disagree about what a token is; a text quoting
 # a CONTIGUOUS passage of the source outscores one scattering the same
-# tokens through filler (the weighted-LCS shaping). A lexical overlap
+# tokens through filler (the weighted-LCS shaping). Qualification: the WLCS
+# fill is a ROUGE-W-shaped monotone max-on-match recurrence (Lin 2004,
+# Eq. 15, with the forced-diagonal branch replaced by max to preserve
+# candidate monotonicity) — a greedy-run-weighted alignment score, not the
+# literal weighted-LCS optimum. NOT bit-compatible with the official ROUGE
+# package or rouge-score; the deviation is deliberate (monotonicity) and
+# verified in tests. A lexical overlap
 # signal, not a semantic one: it measures token coverage, not whether the
 # information was genuinely used. Identical text and source are 1.0 (up to
 # f64 rounding of the DP's accumulation, within 1e-9); disjoint, token-free,
@@ -780,12 +787,19 @@ def is_grounded(
 def grounding_coverage(source: str, text: str) -> float: ...
 
 # Snippet-provenance grounding: WHERE the query's evidence sits in a chunk.
-# ROUGE-W F1 (recall-oriented length-weighted LCS, Lin 2004) over
-# UAX #29-tokenized anchor runs, expanded to sentence bounds when they fit
-# the budget, returned as non-overlapping snippets in position order with
+# A ROUGE-W-shaped weighted-LCS F1 (recall-oriented length-weighted LCS,
+# Lin 2004) over UAX #29-tokenized anchor runs, expanded to sentence bounds
+# when they fit the budget, returned as non-overlapping snippets in position
+# order with
 # CHARACTER offsets into the original `text` (`text[start:end]` is exactly
 # the snippet's `text`, round-tripping through CJK/accents/emoji), plus the
-# best snippet's score. Empty/token-free query or text, and
+# best snippet's score. Qualification: the WLCS fill is a ROUGE-W-shaped
+# monotone max-on-match recurrence (Lin 2004, Eq. 15, with the
+# forced-diagonal branch replaced by max to preserve candidate
+# monotonicity) — a greedy-run-weighted alignment score, not the literal
+# weighted-LCS optimum. NOT bit-compatible with the official ROUGE package
+# or rouge-score; the deviation is deliberate (monotonicity) and verified
+# in tests. Empty/token-free query or text, and
 # `max_snippets=0`, return the empty result (never an error); `max_chars`
 # bounds every snippet's length at token boundaries (a snippet always holds
 # at least one token, even when the budget is smaller than that token; 0 is
@@ -805,8 +819,12 @@ def highlight(
 
 # Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
 # against `query` with the same ROUGE-W F1 the snippet surface ranks spans
-# with, in position order — the bridge primitive a downstream NLI verifier
-# (MiniCheck/SummaC style) consumes. The citation unit is the sentence (the
+# with (the same qualified monotone max-on-match variant — see `highlight`'s
+# note; not bit-compatible with the official ROUGE package), in position
+# order — the bridge primitive a downstream NLI verifier
+# (MiniCheck/SummaC style) consumes. Note the argument order:
+# `ground_sentences(text, query)` — the OPPOSITE of `highlight(query,
+# text)`. The citation unit is the sentence (the
 # ALCE baselines' unit: Gao et al. 2023); the score is a RANKING signal, not
 # an answerability verdict (Joren et al. 2024, "Sufficient Context": a
 # lexical overlap cannot judge sufficiency — run a model over the
@@ -820,8 +838,12 @@ def highlight(
 # degenerate input is a valid answer, never an error. `max_chars` bounds
 # each sentence's SCORED window (a longer sentence is scored over its
 # leading token-boundary window, at least one token; its reported span
-# still covers the whole sentence); `None` scores whole sentences, 0 is a
-# ValueError. Pathological chunks are bounded: at most the first 16384
+# still covers the whole sentence — the exact window boundary is an
+# implementation detail, deliberately not exposed); `None` scores whole
+# sentences, 0 is a
+# ValueError. Like every integer parameter in the library, `max_chars`
+# takes a plain int (a bool is its 0/1 int value — the family-wide
+# convention). Pathological chunks are bounded: at most the first 16384
 # text tokens and 128 query terms are scanned (sentences past the cap score
 # 0.0, their offsets and text still exact).
 #

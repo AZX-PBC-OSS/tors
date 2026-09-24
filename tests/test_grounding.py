@@ -15,14 +15,13 @@ on, not the algorithm's internals.
 
 from __future__ import annotations
 
-import re
 import unicodedata
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from tors import highlight
+from tors import highlight, word_bounds
 
 # Arbitrary Unicode for the offset round-trip property: the property must
 # hold for ANY text the pipeline can see, so no alphabet restrictions beyond
@@ -103,10 +102,12 @@ class TestScoring:
     @given(text=_ANY_TEXT, query=_ANY_QUERY)
     def test_a_returned_snippet_always_contains_a_query_term(self, text: str, query: str) -> None:
         result = highlight(query, text, max_snippets=3, max_chars=400)
-        # Term extraction mirrors the tokenizer's notion of a term (UAX #29
-        # words, case-folded NFC), not whitespace splitting: a query like
-        # "0\x1b" is the token "0" plus a dropped control segment.
-        terms = re.findall(r"\w+", query, re.UNICODE)
+        # The oracle is the tokenizer's OWN notion of a term — tors.word_bounds
+        # (UAX #29), the exact segmentation the scorer runs on — not a Python
+        # regex: `\w+` glues "0¼" into one term while UAX #29 splits 0|¼
+        # (U+00BC is WB=Other), and every such divergence is a false oracle
+        # failure.  Segments are case-folded NFC to mirror the matcher.
+        terms = [query[s:e] for s, e in word_bounds(query)]
         for snippet in result["snippets"]:
             body = unicodedata.normalize("NFC", snippet["text"]).lower()
             assert any(unicodedata.normalize("NFC", term).lower() in body for term in terms), (
@@ -125,6 +126,25 @@ class TestScoring:
     def test_no_overlap_means_no_snippets_and_a_zero_score(self) -> None:
         result = highlight("zebra", "the quick brown fox", max_snippets=3, max_chars=400)
         assert result == {"snippets": [], "score": 0.0}
+
+    def test_cjk_range_punctuation_is_token_free(self) -> None:
+        # Red-team P0, green pin: CJK-range punctuation (U+30FB middle dot,
+        # U+3099) is dropped by the tokenizer's no-alphanumeric rule like any
+        # other punctuation — token-free operands highlight nothing at 0.0.
+        for text in ["・", "\u3099", "・。", "。、", "「」", "〜"]:
+            assert not any(ch.isalnum() for ch in text), repr(text)
+            assert highlight(text, text) == {"snippets": [], "score": 0.0}, repr(text)
+            assert highlight("term", text) == {"snippets": [], "score": 0.0}, repr(text)
+            assert highlight(text, "some term here") == {
+                "snippets": [],
+                "score": 0.0,
+            }, repr(text)
+
+    def test_real_cjk_words_still_tokenize_through_the_punctuation_sweep(self) -> None:
+        # The punctuation drop must not over-correct: real CJK morphemes
+        # still anchor and score.
+        result = highlight("日本", "日本語のテキスト")
+        assert result["snippets"] and result["score"] > 0.0
 
     def test_case_folding_and_nfc_equivalence_do_not_block_matching(self) -> None:
         result = highlight(

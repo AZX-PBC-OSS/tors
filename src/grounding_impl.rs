@@ -304,7 +304,9 @@ fn fold(segment: &str) -> String {
 /// clusters. Case-folded and NFC-canonicalized for matching; character and
 /// byte spans recorded for slicing. Segments with no alphanumeric character
 /// (whitespace runs, punctuation, standalone emoji) are dropped — they
-/// cannot match a term, and the query side drops them identically. At most
+/// cannot match a term, and the query side drops them identically; the same
+/// rule applies to every run the CJK sub-split flushes, so CJK-range
+/// punctuation (U+30FB, U+3099) stays token-free too. At most
 /// [`MAX_TEXT_TOKENS`] tokens are emitted — the scan just stops there.
 fn tokens(text: &str) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::new();
@@ -324,16 +326,23 @@ fn tokens(text: &str) -> Vec<Token> {
                 let cluster_cps = cluster.chars().count();
                 let starts_cjk = cluster.chars().next().is_some_and(is_cjk);
                 if starts_cjk && !norm.is_empty() {
-                    push_token(
-                        &mut out,
-                        Token {
-                            start: tok_cp,
-                            end: cp,
-                            byte_start: tok_byte,
-                            byte_end: byte,
-                            norm: fold(&norm),
-                        },
-                    );
+                    // The SAME no-alphanumeric drop rule the non-CJK branch
+                    // applies to whole segments, applied per flushed run:
+                    // CJK-range punctuation (U+30FB katakana middle dot,
+                    // U+3099) lands in this branch and must stay token-free
+                    // like any other punctuation.
+                    if norm.chars().any(char::is_alphanumeric) {
+                        push_token(
+                            &mut out,
+                            Token {
+                                start: tok_cp,
+                                end: cp,
+                                byte_start: tok_byte,
+                                byte_end: byte,
+                                norm: fold(&norm),
+                            },
+                        );
+                    }
                     norm.clear();
                 }
                 if starts_cjk || norm.is_empty() {
@@ -344,7 +353,7 @@ fn tokens(text: &str) -> Vec<Token> {
                 cp += cluster_cps;
                 byte += cluster.len();
             }
-            if !norm.is_empty() {
+            if !norm.is_empty() && norm.chars().any(char::is_alphanumeric) {
                 push_token(
                     &mut out,
                     Token {
@@ -406,9 +415,12 @@ fn shape_inv(x: f64) -> f64 {
 /// text gained source material: `[o, o]` scored against `[o, o, uua, o]`
 /// read 2.0 off the last cell where the optimal alignment held 2.297).
 /// A scoring function offered MORE evidence cannot report LESS — the
-/// max-on-match spelling restores that (it computes the weighted-LCS
-/// optimum over alignments, the value the shaping and the Equation 15
-/// normalization presuppose), and it reduces to Figure 3's value on every
+/// max-on-match spelling restores that (it computes the max-on-match
+/// recurrence, a greedy-run-weighted alignment score, NOT the literal
+/// weighted-LCS optimum over alignments: the two-row DP cannot represent
+/// Pareto (value, trailing-run) states, so a brute-force oracle beats it on
+/// rare inputs — a documented, deliberate deviation, pinned in the test
+/// suite), and it reduces to Figure 3's value on every
 /// contiguous-run shape, which is what the shaping rewards. Only the
 /// score matters (never the alignment — see the module docs), so two
 /// rows suffice; no allocation is proportional to `q.len() * c.len()`.

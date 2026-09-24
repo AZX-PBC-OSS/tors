@@ -73,6 +73,13 @@ pub fn is_grounded(
 /// (ROUGE-W recall — Lin 2004's Equation 15 R factor — over the grounding
 /// family's UAX #29 tokenization) and why not a difflib coverage.
 ///
+/// Qualification: the WLCS fill is a monotone max-on-match recurrence
+/// (Lin 2004, Eq. 15, with the forced-diagonal branch replaced by max to
+/// preserve candidate monotonicity) — a greedy-run-weighted alignment
+/// score, not the literal weighted-LCS optimum. NOT bit-compatible with
+/// the official ROUGE package or rouge-score; the deviation is deliberate
+/// (monotonicity) and verified in tests.
+///
 /// One float in `[0.0, 1.0]`: identical text and source are `1.0` (up to
 /// f64 rounding in the DP's accumulation, within `1e-9`); disjoint,
 /// token-free, or empty operands are exactly `0.0` (pinned). A lexical

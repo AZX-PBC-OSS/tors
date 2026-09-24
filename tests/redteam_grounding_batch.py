@@ -1,9 +1,10 @@
 """Red-team attack suite for the grounding batch feature (`ground_sentences`,
 `grounding_coverage`) and the SHARED ROUGE-W fill change (max-on-match
 replacing Lin's forced diagonal) that `highlight` and the coverage core also
-run on.  Written by an adversarial reviewer; FIX NOTHING here — every green
-test is a failed attack, every red attack is xfail(strict) with the bug
-reference it demonstrates.
+run on.  Written by an adversarial reviewer.  Every green test is a failed
+attack; the three red attacks the first pass demonstrated (one P0, two P1s,
+then xfail(strict)) were fixed in the fix pass and are green pins now — the
+findings list below records which, and how.
 
 Reference implementations live IN THIS FILE, in pure Python, independently
 derived (three of them, deliberately disagreeing with each other where the
@@ -21,21 +22,28 @@ literature does):
 
 Findings pinned here (see the redteam report for the full write-up):
 
-- P0 (xfail): CJK-range PUNCTUATION (U+30FB katakana middle dot, U+3099)
-  is tokenized by the CJK sub-split branch despite the documented
-  "segments with no alphanumeric character are dropped" rule, so
-  token-free operands score 1.0 instead of exactly 0.0.  Caught by the
-  project's own fuzz target (fuzz_targets/grounding_coverage.rs, artifact
-  crash-094c9dae62d4a55cddba683a1444a2be910dc0f3); 120s on
-  ground_sentences found nothing.
-- P1 (xfail): the core's scores are NOT Lin 2004 ROUGE-W: the published
-  forced-diagonal fill disagrees with the core on ~12% of random token
-  pairs.  Anyone comparing tors scores to the official ROUGE package or
-  the rouge-score PyPI library sees different numbers.
-- P1 (xfail): the module-doc claim that the max-on-match spelling
-  "computes the weighted-LCS optimum over alignments" is false: the
-  brute-force oracle finds lower scores on ~0.6% of random small pairs
-  (Pareto-stranded runs the two-row DP cannot represent).
+- P0 (was xfail, GREEN since the fix pass): CJK-range PUNCTUATION (U+30FB
+  katakana middle dot, U+3099) was tokenized by the CJK sub-split branch
+  despite the documented "segments with no alphanumeric character are
+  dropped" rule, so token-free operands scored 1.0 instead of exactly 0.0.
+  Caught by the project's own fuzz target (fuzz_targets/grounding_coverage.rs,
+  artifact crash-094c9dae62d4a55cddba683a1444a2be910dc0f3); 120s on
+  ground_sentences found nothing.  FIXED: the no-alphanumeric drop rule now
+  applies to the CJK sub-split's flushed runs too; the cell is a green pin.
+- P1 (was xfail, GREEN since the fix pass): the core's scores are NOT Lin
+  2004 ROUGE-W: the published forced-diagonal fill disagrees with the
+  max-on-match spelling on ~12% of random token pairs, so tors scores are
+  not comparable with the official ROUGE package / rouge-score.  The
+  deviation is DELIBERATE (the forced diagonal is not candidate-monotone)
+  and now DISCLOSED on every user-facing surface; the cell pins the
+  documented max-on-match recurrence as a green test.
+- P1 (was xfail, GREEN since the fix pass): the module-doc claim that the
+  max-on-match spelling "computes the weighted-LCS optimum over alignments"
+  was false: the brute-force oracle finds lower scores on ~0.6% of random
+  small pairs (Pareto-stranded runs the two-row DP cannot represent).  The
+  docs now say "max-on-match recurrence (a greedy-run-weighted alignment
+  score), not the literal weighted-LCS optimum"; the cell pins that
+  documented semantics as a green test.
 - GREEN: candidate monotonicity (extending the text never lowers
   grounding_coverage) — the property the change was made to buy — holds
   under Hypothesis attack; the core matches an independent re-derivation
@@ -241,43 +249,37 @@ class TestDifferentialAgainstReferences:
         got = _cov(" ".join(q), " ".join(c))
         assert abs(got - want) <= 1e-9, (q, c, got, want)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P1 redteam: the core is NOT Lin 2004 ROUGE-W.  The paper's own "
-            "fill (forced diagonal) disagrees with the max-on-match spelling "
-            "on ~12% of random token pairs, so tors scores are not "
-            "comparable with the official ROUGE package / rouge-score."
-        ),
-    )
-    def test_core_matches_lin2004_published_algorithm(self):
-        # Deterministic divergence found by search: max-on-match reads
-        # 4.5948 where Lin's Figure-3 fill reads 4.7372 (then differs in F1).
+    def test_core_uses_the_monotone_max_on_match_recurrence(self):
+        # DOCUMENTED DEVIATION, not a bug: the core deliberately does NOT
+        # implement Lin 2004's published forced-diagonal fill — Lin's Figure 3
+        # spelling is not monotone in the candidate (extending the text can
+        # LOWER a score), and candidate monotonicity is the property the
+        # grounding family stands on.  Pinned with the red-team repro vector:
+        # the core reads the max-on-match value, which DIFFERS from Lin's
+        # (and from the official ROUGE package / rouge-score on ~12% of
+        # random pairs — disclosed on every user-facing surface, docs/api.md
+        # included).
         q = ["a", "a", "c", "a", "b", "b"]
         c = ["b", "b", "a", "a", "b", "b"]
         assert wlcs_max_on_match(q, c) != pytest.approx(wlcs_lin(q, c), abs=1e-9)
         got = _score_sentence(" ".join(c) + ".", " ".join(q))
-        want = rouge_w_f1_ref(q, c, wlcs=wlcs_lin)
+        want = rouge_w_f1_ref(q, c, wlcs=wlcs_max_on_match)
         assert got == pytest.approx(want, abs=1e-9), (got, want)
+        want_lin = rouge_w_f1_ref(q, c, wlcs=wlcs_lin)
+        assert got != pytest.approx(want_lin, abs=1e-9), (got, want_lin)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P1 redteam: the module docs claim the max-on-match spelling "
-            "'computes the weighted-LCS optimum over alignments'; the "
-            "brute-force oracle (literal max over monotone matchings) finds "
-            "HIGHER values on ~0.6% of random pairs — the two-row DP strands "
-            "Pareto-dominant (value, run) states.  The doc claim is false."
-        ),
-    )
-    def test_core_matches_the_literal_wlcs_optimum(self):
-        # Deterministic divergence found by search: the brute optimum is
-        # f(1) + f(3) = 4.7372; the core's fill reads 4.5948 = 2*f(2).
+    def test_two_row_dp_is_not_the_literal_wlcs_optimum_documented(self):
+        # DOCUMENTED DEVIATION, not a bug: the two-row DP cannot represent
+        # Pareto (value, trailing-run) states, so the literal max over all
+        # monotone matchings (the brute-force oracle) reads HIGHER on rare
+        # pairs.  What the core computes is the max-on-match recurrence — a
+        # greedy-run-weighted alignment score — which is exactly what the
+        # module docs now call it; pinned with the red-team repro vector.
         q = ["b", "c", "a", "a", "b", "a", "c"]
         c = ["c", "a", "b", "a"]
         assert wlcs_bruteforce(q, c) > wlcs_max_on_match(q, c) + 1e-9
         got = _score_sentence(" ".join(c) + ".", " ".join(q))
-        want = rouge_w_f1_ref(q, c, wlcs=wlcs_bruteforce)
+        want = rouge_w_f1_ref(q, c, wlcs=wlcs_max_on_match)
         assert got == pytest.approx(want, abs=1e-9), (got, want)
 
 
@@ -345,18 +347,11 @@ class TestScoreInvariantTorture:
         assert _cov(text, "real words here") == 0.0
         assert _cov("real words here", text) == 0.0
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "P0 redteam: CJK-range punctuation (U+30FB katakana middle dot) "
-            "is tokenized by the CJK sub-split despite the documented "
-            "no-alphanumeric-drop rule: token-free operands score 1.0, not "
-            "exactly 0.0.  Caught by the project's own fuzz target "
-            "(crash-094c9dae62d4a55cddba683a1444a2be910dc0f3)."
-        ),
-    )
     @pytest.mark.parametrize("text", ["・", "・。", "\u3099", "・ ・."])
     def test_cjk_range_punctuation_is_token_free(self, text):
+        # Was the P0 red cell (xfail strict); the fix pass applied the
+        # non-CJK branch's no-alphanumeric drop rule to the CJK sub-split
+        # branch, so this is now a green pin.
         assert not any(ch.isalnum() for ch in text), "precondition: token-free"
         assert _cov(text, text) == 0.0, repr(text)
 

@@ -134,7 +134,11 @@
 //! filler — plain LCS is indifferent to exactly the difference
 //! utilization is about. (3) A single global Myers alignment is
 //! order-anchored: one realigned region reshuffles every Equal op, while
-//! the weighted LCS is a stable optimum of the token sequences. (4) The
+//! the weighted-LCS fill is a stable, candidate-monotone function of the
+//! token sequences (the max-on-match recurrence — see `grounding_impl`'s
+//! fill docs: a greedy-run-weighted alignment score, deliberately not the
+//! literal weighted-LCS optimum and not bit-compatible with the official
+//! ROUGE package). (4) The
 //! difflib ratio is symmetric in its denominator (`2*M/(m+n)`), so
 //! "fraction of the source" is not what it measures — the recall
 //! normalization `f^-1(WLCS / f(|source|))` IS.

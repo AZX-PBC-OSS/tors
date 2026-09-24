@@ -47,6 +47,27 @@ class TestConventions:
     def test_disjoint_operands_are_exactly_zero(self) -> None:
         assert grounding_coverage("alpha bravo charlie", "xray yankee zulu") == 0.0
 
+    def test_cjk_range_punctuation_is_token_free(self) -> None:
+        # CJK-range punctuation is NOT a token: UAX #29 segments it, but the
+        # grounding tokenizer drops every run with no alphanumeric character
+        # — the same rule non-CJK punctuation answers to (red-team P0: the
+        # CJK sub-split branch once skipped the rule, so "・" scored 1.0).
+        # The sweep covers both branches: U+30FB/U+3099 sit in the CJK
+        # sub-split's range; 。、「」〜 are 3000-block, the non-CJK branch.
+        for text in ["・", "\u3099", "・。", "。", "、", "「」", "〜", "〽", "！？", "・ ・."]:
+            assert not any(ch.isalnum() for ch in text), repr(text)
+            assert grounding_coverage(text, text) == 0.0, repr(text)
+            assert grounding_coverage(text, "real words") == 0.0, repr(text)
+            assert grounding_coverage("real words", text) == 0.0, repr(text)
+
+    def test_real_cjk_words_still_tokenize(self) -> None:
+        # The punctuation sweep must not over-correct: real CJK morphemes
+        # still tokenize per character and score (identical 1.0; a partial
+        # per-character quote partially covers; unrelated CJK is 0.0).
+        assert grounding_coverage("重要な情報", "重要な情報") == pytest.approx(1.0)
+        assert grounding_coverage("日本語のテキスト", "日本") > 0.0
+        assert grounding_coverage("重要な情報", "全く無関係") == 0.0
+
 
 class TestScoring:
     def test_partial_coverage_is_between_zero_and_one(self) -> None:
