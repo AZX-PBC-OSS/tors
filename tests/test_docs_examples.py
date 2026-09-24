@@ -444,6 +444,37 @@ class TestRandomGenerationExamples:
         assert before - 5_000 <= int(prefix, 16) <= after + 5_000
 
 
+class TestRankFusionExamples:
+    """docs/api.md's rank-fusion / IR-metrics section, pinned the same
+    way: the fusion vector (with its tie and its cross-list votes) and
+    the metric literals the doc shows, re-derived against the built
+    extension."""
+
+    def test_rank_fuse_tie_and_cross_list_votes_example(self) -> None:
+        fused = tors.rank_fuse(
+            [
+                ["cat-a", "dog-b", "bird-c"],
+                ["dog-b", "cat-a"],
+                ["bird-c"],
+            ]
+        )
+        assert fused == [
+            ("cat-a", 0.03252247488101534),
+            ("dog-b", 0.03252247488101534),
+            ("bird-c", 0.032266458495966696),
+        ]
+
+    def test_metric_literals_example(self) -> None:
+        ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
+        relevant = {"cat-a", "bird-c", "whale-e"}
+        assert tors.ndcg_at_k(ranked, relevant) == 0.7039180890341347
+        assert tors.mrr(ranked, relevant) == 1.0
+        assert tors.recall_at_k(ranked, relevant, 2) == 0.3333333333333333
+        assert tors.recall_at_k(ranked, relevant, 4) == 0.6666666666666666
+        assert tors.precision_at_k(ranked, relevant, 2) == 0.5
+        assert tors.ndcg_at_k(ranked, relevant, k=2) == 0.6131471927654584
+
+
 class TestRecipeIngestExamples:
     """docs/recipe-ingest.md's examples: the decode-or-detect gate, the
     normalize cleanup, the code-block tooling, and the custom-hierarchy

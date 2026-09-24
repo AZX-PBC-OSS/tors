@@ -376,3 +376,61 @@ class TestRetrievalCeilingScaling:
 
         small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(200))
         _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+
+# --- rank_fuse: fusion at scale ------------------------------------------------------
+
+
+def _fusion_lists(total_entries: int, n_lists: int = 5) -> list[list[str]]:
+    """The GIL-release cell's deterministic workload (one shared
+    definition, the same no-RNG idiom): n_lists ranked lists whose
+    entries are REFERENCES into one shared pool of half the entries —
+    distinct string objects built once and reused across lists, the
+    realistic fusion shape (the same document retrieved by several
+    systems) and the shape whose per-object str hashes are cached, so
+    the pin measures the algorithm, not first-hash costs."""
+    pool = [f"id_{i}" for i in range(total_entries // 2)]
+    per_list = total_entries // n_lists
+    return [
+        [pool[(j * 7 + i * 3) % len(pool)] for i in range(per_list)]
+        for j in range(n_lists)
+    ]
+
+
+class TestRankFusionScaling:
+    @pytest.mark.timing
+    def test_rank_fuse_stays_linear_in_total_list_length(self) -> None:
+        """10k -> 40k total entries across 5 lists (4x; the output is
+        bounded by the distinct-id count, here half the entries): the
+        dedup walk is one dict op per entry and the detached pass is the
+        score sweep plus an O(distinct log distinct) sort, so the whole
+        call is linear (up to the sort's log factor) in TOTAL list
+        length — the sum across lists, not the longest one, is the cost
+        driver, because every entry is walked and voted. Measured
+        1.26ms -> 5.72ms, ratio 4.6 (~2.15x per doubling, ambient load
+        ~5-20; the box's large-dict cache-miss band sits ~2.2-2.4x per
+        doubling — a pure-Python dict walk over the same shapes measures
+        the same), gate 3.0x per doubling. A per-list rescan of the
+        accumulated id table (the quadratic shape) would measure ~4x per
+        doubling here."""
+        small, large = (
+            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(10_000))),
+            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(40_000))),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_ndcg_at_k_stays_linear_in_ranking_length(self) -> None:
+        """25k -> 100k ranked ids (4x; the relevant set scales with it):
+        the membership walk is a constant number of set ops per id, the
+        detached arithmetic tail is O(n). Measured 3.24ms -> 18.31ms,
+        ratio 5.6 (~2.4x per doubling, ambient load ~5-20; the same
+        large-set cache-miss band the rank_fuse cell records), gate 3.0x
+        per doubling."""
+        def shape(n: int) -> float:
+            ranked = [f"id_{i}" for i in range(n)]
+            relevant = {ranked[i] for i in range(0, n, 3)}
+            return tors.ndcg_at_k(ranked, relevant)
+
+        small, large = _min_wall_ms(lambda: shape(25_000)), _min_wall_ms(lambda: shape(100_000))
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)

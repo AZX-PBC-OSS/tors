@@ -4657,6 +4657,130 @@ tors.bm25_rank("cafe", ["café société", "totally unrelated text"], strip_acce
 # [(0, 0.7617001984175222), (1, 0.0)]
 ```
 
+## `tors.rank_fuse` / `tors.ndcg_at_k` / `tors.mrr` / `tors.recall_at_k` / `tors.precision_at_k`
+
+```python
+def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60) -> list[tuple[Hashable, float]]: ...
+def ndcg_at_k(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+    *,
+    k: int | None = None,
+    gains: dict[Hashable, float] | None = None,
+) -> float: ...
+def mrr(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable]) -> float: ...
+def recall_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable], k: int) -> float: ...
+def precision_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable], k: int) -> float: ...
+```
+
+**Async**: each of the five has an `await tors.aio.<name>(...)` twin under
+`asyncio.to_thread` (see [Async use](async.md)).
+
+The retrieval-family companions to `bm25_rank`: rank-space arithmetic over
+doc ids — no scores, no tokenization, no index, nothing stateful.
+
+**`rank_fuse` is Reciprocal Rank Fusion** (Cormack, Clarke & Buüttcher,
+"Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
+Methods", SIGIR 2009, <https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>):
+given multiple ranked lists of hashable doc ids,
+
+```text
+score(d) = sum over lists of 1 / (k + rank(d))     -- ranks 1-based
+```
+
+it consumes RANKS ONLY, never raw scores — the paper's whole point is that
+raw scores from different retrieval systems (a BM25 score, a cosine
+similarity, a click count) are not comparable while ranks are — with one
+shared constant `k` (default 60, the paper's own, unchanged across its
+experiments) damping the top ranks so no single list's #1 swamps the
+others' votes. A document absent from a list contributes no vote from it;
+a document ranked twice in ONE list votes once, at its first occurrence
+(the later entries advance one rank). Returns `(id, score)` for every
+distinct id across all lists, sorted by fused score descending, ties
+broken by earliest first appearance across the lists in caller order — a
+point the paper leaves open, pinned here as contract. Returned ids are
+the original objects; dedup and equality follow Python's own dict/set
+semantics (`1`, `True`, and `1.0` are the same id).
+
+`k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty list
+of lists (`TypeError` otherwise; fusing zero lists is a `ValueError`, the
+`merkle_root` "root of no chunks" precedent: the formula is defined over
+one-or-more lists and a zero-list call is almost certainly an upstream
+bug) while an individual empty list is legal and contributes no votes,
+the "this retriever returned nothing" shape. An unhashable id raises
+`TypeError` (Python's own hash error: a dict cannot key it, the same
+wrong-type-entry contract `bm25_rank`'s corpus walk keeps).
+
+**The metrics** are the standard IR definitions over one ranking:
+
+- `ndcg_at_k` — normalized discounted cumulative gain (Järvelin &
+  Kekäläinen, "Cumulated gain-based evaluation of IR techniques", ACM
+  TOIS 20(4), 2002), in `[0.0, 1.0]`. `relevant` is a set of relevant ids
+  (binary relevance 1.0); `gains` is an optional graded override — the
+  gain of id `d` is `gains[d]` when the dict contains it, else `1.0` when
+  `d` is in `relevant`, else `0.0`. The DCG uses the paper's log2
+  discount, rank 1 undiscounted: `DCG@k = Σ_{i=1..k} gain_i / log2(i + 1)`
+  over the linear gain function (for binary relevance the paper's
+  exponential `2^rel − 1` variant is identical). The ideal DCG sorts the
+  complete judged pool — every id in `relevant` (at its gain) plus every
+  `gains` key — descending and discounts the same way.
+- `mrr` — the reciprocal rank of the first relevant result (`1/rank`,
+  ranks 1-based; `0.0` when no ranked result is relevant).
+- `recall_at_k` — `|relevant ∩ ranked[:k]| / |relevant|`.
+- `precision_at_k` — `|relevant ∩ ranked[:k]| / min(k, len(ranked))`:
+  trec_eval's own convention for a run shorter than `k` (a system that
+  returned fewer results is not punished for positions it never filled).
+
+A duplicated id inside `ranked` counts once, at its first occurrence
+(the same dedup-first contract `rank_fuse` keeps: a repeat is a malformed
+ranking, and counting it twice would inflate precision and push nDCG past
+1). `k` past the ranking's length simply uses every available position
+(nDCG clamps `k` the same way).
+
+**Edge-input policy** (the family's one contract): empty DATA answers a
+well-defined `0.0` — an empty `ranked`, an empty `relevant` set (no
+relevant document exists, so no hit is possible), and the
+zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
+NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative,
+non-finite, or non-numeric `gains` value). Wrong TYPES raise `TypeError`
+(a non-list `ranked`/`ranked_lists`, a non-set `relevant` — exactly `set`
+or `frozenset` — a non-dict `gains`, an unhashable id, whose error is
+Python's own).
+
+**GIL model**: the fusion/dedup walk and the metrics' membership walks
+are interpreter-side hashing (Python-object hashing cannot leave the
+GIL), and the O(distinct-ids) tuple marshalling rides with them; the
+score sweep, sort, and metric arithmetic run under one `py.detach`. The
+GIL-held share is structurally the majority of a fusion call at large
+sizes — the content_hash arg-walk class — so inputs past ~10^6 total
+entries hold the GIL for 100ms+ in the walk alone: this family is a
+reranking-scale primitive (hundreds to thousands of entries per list),
+not a whole-corpus one. Measured bands: `tests/test_gil_release.py`.
+
+```python
+rank_fuse([
+    ["cat-a", "dog-b", "bird-c"],   # a BM25 reranker's top 3
+    ["dog-b", "cat-a"],             # a vector search's top 2
+    ["bird-c"],                     # a keyword filter's hit
+])
+# [('cat-a', 0.03252247488101534), ('dog-b', 0.03252247488101534),
+#  ('bird-c', 0.032266458495966696)]
+# cat-a and dog-b tie (two votes each); cat-a appeared first and wins
+# the tie — earliest first appearance across the lists.
+
+ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
+relevant = {"cat-a", "bird-c", "whale-e"}
+ndcg_at_k(ranked, relevant)          # 0.7039180890341347
+mrr(ranked, relevant)                # 1.0
+recall_at_k(ranked, relevant, 2)     # 0.3333333333333333
+recall_at_k(ranked, relevant, 4)     # 0.6666666666666666
+precision_at_k(ranked, relevant, 2)  # 0.5
+ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
+# (k=2's ideal packs two of the three relevant ids at ranks 1-2; one hit
+# at rank 1 scores 1/1.6309...)
+ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
+```
+
 ## `tors.apply_pipeline`
 
 ```python
