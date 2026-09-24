@@ -59,9 +59,7 @@ class TestApiReferenceExamples:
             "HINT: unchanged"
         )
         assert tors.scrub_log_text(detail) == "JobError: duplicate key\n\nHINT: unchanged"
-        dsn = (
-            "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback"
-        )
+        dsn = "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod?password=fallback"
         assert tors.scrub_log_text(dsn) == (
             "connect dsn=postgresql://worker:***@db.internal:5432/prod?password=***"
         )
@@ -71,10 +69,13 @@ class TestApiReferenceExamples:
             )
             == "JobError('duplicate key')"
         )
-        assert tors.scrub_log_text(
-            "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod",
-            ["uri_userinfo"],
-        ) == "connect dsn=postgresql://worker:***@db.internal:5432/prod"
+        assert (
+            tors.scrub_log_text(
+                "connect dsn=postgresql://worker:S3cr3t-x9@db.internal:5432/prod",
+                ["uri_userinfo"],
+            )
+            == "connect dsn=postgresql://worker:***@db.internal:5432/prod"
+        )
 
     def test_chunk_by_lines_log_windows(self) -> None:
         log = (
@@ -236,8 +237,7 @@ class TestHashingExamples:
         # the doc spells this as a str + .encode("utf-8"); the literal here
         # is the same bytes
         signed_content = (
-            b"msg_5fXn0.1731634200."
-            b'{"event":"invoice.paid","id":"evt_88213","amount":4200}'
+            b'msg_5fXn0.1731634200.{"event":"invoice.paid","id":"evt_88213","amount":4200}'
         )
         signature = base64.urlsafe_b64encode(tors.hmac_sha256_digest(secret, signed_content))
         assert signature == b"q8IyxOXFC_mgdZj-GSqtTl2vj3eTIgMM0HQQ-FfRQVw="
@@ -259,9 +259,7 @@ class TestHashingExamples:
         subkey = tors.hmac_sha256_digest(
             tors.hmac_sha256_digest(root, "tors/db-session-key"), "user:42"
         )
-        assert subkey.hex() == (
-            "cc3ccddeaa0718afe52e67b9011b49dfe29ae01571495a75e17eea1f59f6e7b6"
-        )
+        assert subkey.hex() == ("cc3ccddeaa0718afe52e67b9011b49dfe29ae01571495a75e17eea1f59f6e7b6")
 
 
 class TestContentHashExamples:
@@ -467,9 +465,7 @@ class TestRecipeIngestExamples:
 
     def test_extract_code_blocks_and_strip_fences(self) -> None:
         md = "Some notes.\n\n```python\nprint('hi')\n```\n\nMore prose after."
-        assert tors.extract_code_blocks(md) == [
-            ("python", "print('hi')\n", 13, 39)
-        ]
+        assert tors.extract_code_blocks(md) == [("python", "print('hi')\n", 13, 39)]
         only_fence = "```python\nprint('hi')\n```"
         assert tors.strip_code_fences(only_fence) == "print('hi')\n"
         assert tors.strip_code_fences(md) == md
@@ -514,8 +510,9 @@ class TestRecipeRetrievalExamples:
         def hamming(a: int, b: int) -> int:
             return (a ^ b).bit_count()
 
-        near, unrelated = hamming(fingerprints[0], fingerprints[1]), hamming(
-            fingerprints[0], fingerprints[3]
+        near, unrelated = (
+            hamming(fingerprints[0], fingerprints[1]),
+            hamming(fingerprints[0], fingerprints[3]),
         )
         assert near <= 3, f"the one-character edit must be near-duplicate: {near}"
         assert unrelated > 15, f"an unrelated pair must sit far away: {unrelated}"
@@ -540,6 +537,28 @@ class TestRecipeRetrievalExamples:
             ("dog", 1.5108256237659907),
         ]
 
+    def test_highlight_snippet_example(self) -> None:
+        # docs/api.md's highlight section, output literal pinned byte-exact
+        # (including the SB10/SB11 trailing space the sentence carries —
+        # the comment in the docs explains it).
+        result = tors.highlight(
+            "torque spec", "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+        )
+        assert result == {
+            "snippets": [
+                {
+                    "text": "The bushing torque spec was 42 Nm. ",
+                    "start": 17,
+                    "end": 52,
+                    # exactly 4/9 (2 query terms, 7-token sentence, one
+                    # contiguous run: Eq. 15's F1 is 2k/(n+m) under the
+                    # power-law shaping), through the DP's f64 arithmetic
+                    "score": 0.44444444444444436,
+                }
+            ],
+            "score": 0.44444444444444436,
+        }
+
 
 class TestIndexExamples:
     """docs/index.md's quick-start literals."""
@@ -552,9 +571,10 @@ class TestIndexExamples:
             (17, 26),
             (26, 30),
         ]
-        assert tors.find_patterns(
-            ["cat", "catalogue"], "the cat sat in the catalogue"
-        ) == [(4, 7, 0), (19, 28, 1)]
+        assert tors.find_patterns(["cat", "catalogue"], "the cat sat in the catalogue") == [
+            (4, 7, 0),
+            (19, 28, 1),
+        ]
 
     def test_quick_start_documents_routing(self) -> None:
         """The classify-routing shape on a generated single-page PDF: the

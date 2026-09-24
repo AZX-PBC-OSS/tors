@@ -145,7 +145,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         # appear as ITSELF, not as a substring of another identifier.
         import re
 
-        for type_name in ("JSONValue", "Span", "ScrubPiiReport", "RepairAction"):
+        for type_name in ("JSONValue", "Span", "ScrubPiiReport", "RepairAction", "GroundingResult"):
             if re.search(rf"\b{type_name}\b", chunk):
                 used_type_names.add(type_name)
     header = [

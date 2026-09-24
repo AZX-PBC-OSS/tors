@@ -17,7 +17,9 @@ the whole call.
 
 It covers only the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
-`minhash_signature`, the
+`minhash_signature`, `highlight` (the grounding pass is linear in the
+chunk with the DP capped, but a 2k-token chunk already measures ~1 ms —
+thread-hop territory), the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, the
 fuzzy-matching and JSON-repair families

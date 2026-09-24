@@ -38,6 +38,22 @@ class ScrubPiiReport(TypedDict):
     skipped: dict[str, int]
     spans: list[Span]
 
+# One `highlight` snippet: CHARACTER offsets (`start`/`end`, Python
+# codepoint indices) into the ORIGINAL text argument — `text[start:end]`
+# is exactly `text` — and the span's ROUGE-W F1 against the query
+# (`score`, in [0.0, 1.0]).
+class GroundingSnippet(TypedDict):
+    text: str
+    start: int
+    end: int
+    score: float
+
+# `highlight`'s shape, both keys present every time: `snippets` ordered by
+# position, non-overlapping (empty when there is no overlap at all), and
+# `score` the best snippet's score (0.0 when `snippets` is empty).
+class GroundingResult(TypedDict):
+    snippets: list[GroundingSnippet]
+    score: float
 # One `repair_json_diagnostics` entry, all six keys present every time
 # (`from`/`to`/`suggestion` are None when the action did not move a value
 # or offer a hint — a stable shape consumers can index blindly). The
@@ -727,6 +743,30 @@ def is_grounded(
     threshold: float = 0.85,
     deadline_ms: float | None = None,
 ) -> bool: ...
+
+# Snippet-provenance grounding: WHERE the query's evidence sits in a chunk.
+# ROUGE-W F1 (recall-oriented length-weighted LCS, Lin 2004) over
+# UAX #29-tokenized anchor runs, expanded to sentence bounds when they fit
+# the budget, returned as non-overlapping snippets in position order with
+# CHARACTER offsets into the original `text` (`text[start:end]` is exactly
+# the snippet's `text`, round-tripping through CJK/accents/emoji), plus the
+# best snippet's score. Empty/token-free query or text, and
+# `max_snippets=0`, return the empty result (never an error); `max_chars`
+# bounds every snippet's length at token boundaries (a snippet always holds
+# at least one token, even when the budget is smaller than that token; 0 is
+# a ValueError). Pathological chunks are bounded: at most the first 16384
+# text tokens and 128 query terms are scanned.
+#
+# GIL note: the argument borrows under the GIL, the whole tokenize/score/
+# select pass under one py.detach (the is_grounded shape): the GIL-held
+# residue is only the O(snippets) dict marshalling.
+def highlight(
+    query: str,
+    text: str,
+    *,
+    max_snippets: int = 3,
+    max_chars: int = 400,
+) -> GroundingResult: ...
 
 # GIL note: urllib.parse.quote/unquote are pure Python: a GIL-held
 # whole-text pass for the most-used encoding operation in web/ingestion

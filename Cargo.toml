@@ -351,6 +351,10 @@ name = "fence"
 harness = false
 
 [[bench]]
+name = "grounding"
+harness = false
+
+[[bench]]
 name = "chunking"
 harness = false
 
