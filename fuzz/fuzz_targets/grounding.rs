@@ -31,7 +31,8 @@ fuzz_target!(|input: Params| {
     }
     let max_snippets = (input.max_snippets % 8) as usize;
     let max_chars = (input.max_chars % 512) as usize;
-    let result = tors::grounding_impl::highlight(&input.query, &input.text, max_snippets, max_chars);
+    let result =
+        tors::grounding_impl::highlight(&input.query, &input.text, max_snippets, max_chars);
 
     let chars: Vec<char> = input.text.chars().collect();
     for (earlier, later) in result.snippets.iter().zip(result.snippets.iter().skip(1)) {
