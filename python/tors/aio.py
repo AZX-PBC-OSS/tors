@@ -119,12 +119,19 @@ _WRAPPED = (
     "chunk_text",
     # chunk_to_budget is the one wrapped function that is not a single
     # detached native pass: its token_counter is a Python callable that
-    # can only run under the GIL. The hop still helps — the packing core
-    # runs detached and re-attaches the GIL per counter call, so the
-    # worker's per-callback handoffs interleave with the event loop's
-    # thread (tests/test_gil_release.py pins the gap tracking the
-    # callbacks, never the call) — where the sync spelling run inline
-    # would hold the GIL for the whole packing.
+    # can only run under the GIL. The hop still helps when the loop can
+    # take the GIL between callbacks -- the packing core runs detached
+    # and re-attaches the GIL per counter call, so the worker's
+    # per-callback handoffs interleave with the event loop's thread
+    # (tests/test_gil_release.py pins the gap tracking the callbacks,
+    # never the call) -- where the sync spelling run inline would hold
+    # the GIL for the whole packing. Honest caveat, measured (finding
+    # R1): the interleave needs each callback to exceed
+    # sys.getswitchinterval() (5ms default) or substantial native
+    # windows between them; a sub-switch-interval callback on a small
+    # text can starve the loop for the whole call (the drop and
+    # re-acquire outruns the woken loop thread), for this hop exactly as
+    # for the sync spelling in a worker thread.
     "chunk_to_budget",
     "chunk_to_offsets",
     "count_matches",

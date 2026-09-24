@@ -3400,9 +3400,10 @@ Two spellings, two measurement shapes:
   measured exactly as the emitted chunk will be, which is what makes the
   per-chunk budget invariant hold for every counter. The counter must return
   an `int` >= 1 for every sentence (`0`, a negative count, or an
-  unreasonably large value raise `ValueError`; a non-int return raises
-  `TypeError` — a word-count tokenizer never trips this, because a sentence
-  always contains words); a counter that raises propagates its exception
+  unreasonably large value raise `ValueError` — a sentence measuring no
+  tokens makes the budget contract meaningless, whitespace-only text under a
+  word-count tokenizer included; a non-int return raises
+  `TypeError`); a counter that raises propagates its exception
   unchanged. This is the `CompiledLemmaDict`-style measured exception to the
   stateless doctrine: a caller-supplied callable inside the packing.
 - **`chunk_to_offsets`** takes the token spans PRE-COMPUTED: a sequence of
@@ -3430,15 +3431,31 @@ fits the budget per the same measurement the packing used; with
 
 `max_tokens < 1`, an out-of-range `overlap` (either spelling), or a
 mis-shaped `token_offsets` sequence raise `ValueError` before any packing
-runs; a non-callable `token_counter` raises `TypeError`.
+runs; a non-callable `token_counter` raises `TypeError`. An int beyond the
+i64 range the binding extracts (`max_tokens=10**30`) raises pyo3's own
+`OverflowError` at extraction instead — the `truncate_to_bounds`-identical
+pattern for every i64-typed size argument here, a clean Python error, never
+a panic. Text beyond `u32::MAX` bytes (4 GiB — the codepoint→byte offset
+grid the packing resolves spans through) also raises `ValueError` before
+any work runs, rather than silently truncating offsets.
 
 GIL model, stated honestly because the two spellings differ: **`chunk_to_budget` is NOT
 GIL-free** — its counter is Python and can only run under the GIL. The
 packing core runs under one `py.detach` and re-attaches the GIL per counter
 call, so the GIL is held only while the counter runs (plus O(chunk)
-argument construction), released for all native work between measurements;
-`tests/test_gil_release.py` pins that the worst heartbeat gap tracks the
-callbacks, never the call. **`chunk_to_offsets` is the GIL-free choice for
+argument construction), released for all native work between measurements.
+One measured caveat, because the doctrine forbids false GIL claims: the
+loop is schedulable between callbacks when each callback holds the GIL
+longer than `sys.getswitchinterval()` (5ms by default) or the native
+windows between them are substantial — a callback that straddles the
+switch interval forces CPython's fair GIL handoff (`gil_drop_request`). A
+GIL-held callback SHORTER than the switch interval on a small text
+(microsecond detach windows) can starve the loop for the whole call: the
+worker drops and re-acquires the GIL faster than the woken loop thread can
+take it. `tests/test_gil_release.py` pins the schedulable band for
+super-interval callbacks; for a fast counter on a small text, run the
+packing on a thread you control or use the GIL-free spelling below.
+**`chunk_to_offsets` is the GIL-free choice for
 hot paths**: the O(tokens) argument walk under the GIL, then the whole pack
 detached end to end, with the family's usual O(chunks) 2-tuple marshalling
 after. Like every chunker here, neither makes a retrieval-quality promise —

@@ -479,6 +479,7 @@ import itertools
 import json
 import random
 import string
+import sys
 import time
 import urllib.parse
 from collections.abc import Awaitable, Callable
@@ -3178,16 +3179,25 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
 #   is the architecture claim from src/py/chunk_budget.rs — the packing
 #   core runs detached and re-attaches the GIL per counter call, so the
 #   loop is schedulable BETWEEN callbacks and the worst gap tracks the
-#   callbacks themselves, never the whole call. Two cells pin the two
-#   directions: a fast counter (worst gap at the ping floor, ratio
-#   0.07-0.11 measured — the function behaves like any detached native
-#   pass) and a deliberately slow GIL-held counter (~5ms of CPU-bound
-#   work per call, the honest model of a real tokenizer's hot path): the
-#   worst gap is a few coalesced callbacks (23-38ms of 217-275ms walls,
-#   ratios 0.09-0.18, measured), where a regression that moved the whole
-#   pack under a held GIL shows gap ~= wall (~250ms) and fails both
-#   budgets. The cell cannot and does not claim the callbacks are free;
-#   it claims everything between them is.
+#   callbacks themselves, never the whole call — QUALIFIED (finding R1,
+#   the red-team's timing measurement): schedulability between callbacks
+#   holds when each callback exceeds sys.getswitchinterval() (5ms
+#   default) or the native windows between them are substantial (a
+#   straddling callback fires gil_drop_request, the fair handoff); a
+#   sub-switch-interval callback on a small text (microsecond detach
+#   windows) starves the loop for the whole call, so that boundary is
+#   documented on the surfaces, not claimed by a cell. Two cells pin the
+#   two directions the claim does make: a fast counter on a LARGE corpus
+#   (substantial native windows between callbacks: worst gap at the ping
+#   floor, ratio 0.07-0.11 measured — the function behaves like any
+#   detached native pass) and a deliberately slow GIL-held counter
+#   (time-budgeted at ~3x the switch interval per call, the R1
+#   recalibration of the original fixed-iteration ~5ms counter that
+#   dropped under the interval on 3.14): the worst gap is a few
+#   coalesced callbacks, where a regression that moved the whole pack
+#   under a held GIL shows gap ~= wall and fails both budgets. The cell
+#   cannot and does not claim the callbacks are free; it claims
+#   everything between them is.
 
 
 def _budget_token_spans(corpus: str) -> list[tuple[int, int]]:
@@ -3198,13 +3208,31 @@ def _budget_token_spans(corpus: str) -> list[tuple[int, int]]:
 
 
 def _busy_token_counter(text: str) -> int:
-    """A GIL-held CPU-bound counter (~5ms per call measured): the honest
-    slow-tokenizer model for the between-callbacks cell."""
+    """A GIL-held CPU-bound counter, time-budgeted at ~3x the GIL switch
+    interval per call: the honest slow-tokenizer model for the
+    between-callbacks cell.
+
+    The R1 recalibration (red-team finding): the original fixed
+    iteration count (150,000) was calibrated at ~5ms per call on
+    CPython 3.12.7 and dropped UNDER ``sys.getswitchinterval()`` (5ms)
+    on faster interpreters (~2-4ms on 3.14.7), where a sub-interval
+    callback starves the loop for the whole call — the worker drops and
+    re-acquires the GIL faster than the woken loop thread can take it,
+    and ``gil_drop_request``'s fair handoff only fires for callbacks
+    that straddle the interval. Busy-looping until 3x the switch
+    interval has ELAPSED keeps every callback comfortably above the
+    interval on any interpreter speed (3.10-3.14), so the handoff the
+    cell needs is the one the mechanism actually gives, in isolation
+    and under load."""
 
     def count(_text: str) -> int:
+        deadline = time.monotonic() + 3 * sys.getswitchinterval()
         n = 0
-        for i in range(150_000):
-            n += i * i
+        i = 0
+        while time.monotonic() < deadline:
+            for _ in range(1_000):
+                i += 1
+                n += i * i
         return max(len(_text.split()), 1)
 
     return count(text)
@@ -3246,12 +3274,20 @@ def test_chunk_to_budget_fast_counter_keeps_the_loop_at_heartbeat_granularity() 
 
 
 def test_chunk_to_budget_slow_counter_blocks_only_for_its_callbacks() -> None:
-    """The honesty cell: a counter that holds the GIL ~5ms per call
-    makes the worst gap a run of coalesced callbacks (measured 23-38ms),
-    never the whole call (217-275ms walls). The claim is exactly the
-    architecture's: the callbacks themselves hold the GIL — the function
-    is not GIL-free and says so — and everything between them is
-    released native packing."""
+    """The honesty cell: a counter that holds the GIL for ~3x the GIL
+    switch interval per call (time-budgeted — see ``_busy_token_counter``
+    for the R1 recalibration; a fixed iteration count dropped under the
+    interval on faster interpreters and starved the loop) makes the worst
+    gap a run of coalesced callbacks, never the whole call. The claim is
+    the architecture's QUALIFIED form (finding R1): a callback that
+    straddles the switch interval fires ``gil_drop_request``'s fair GIL
+    handoff, so the loop is schedulable between callbacks and everything
+    between them is released native packing. The sub-switch-interval
+    caveat — a fast GIL-held callback on a small text can starve the
+    loop for the whole call — is the documented boundary (docs/api.md,
+    the ``.pyi`` and binding docstrings), stated there because it is a
+    timing property of the interpreter, not a contract this cell can
+    pin in either direction."""
     text = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
     asyncio.run(
         _assert_loop_stays_responsive(

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import sys
 import time
 import traceback
 
@@ -625,14 +626,14 @@ def test_aio_twins_match_their_sync_spellings() -> None:
     )
 
 
-# ---- 9. RED: the slow-counter heartbeat claim (finding R1) --------------------
+# ---- 9. the slow-counter heartbeat claim (finding R1, fixed) --------------------
 #
 # The committed cell test_gil_release.py::test_chunk_to_budget_slow_counter_
-# blocks_only_for_its_callbacks pins "the worst gap tracks the callbacks
-# themselves, never the whole call" using a busy counter calibrated at ~5ms
-# per call on CPython 3.12. On CPython 3.14 (supported: requires-python
-# >=3.10) the same counter runs ~2-4ms — BELOW the GIL switch interval
-# (0.005s) — and the cell fails 4/4 (gap ~= wall, 100% blocked). The
+# blocks_only_for_its_callbacks originally pinned "the worst gap tracks the
+# callbacks themselves, never the whole call" using a busy counter calibrated
+# at ~5ms per call on CPython 3.12. On CPython 3.14 (supported: requires-python
+# >=3.10) the same counter ran ~2-4ms — BELOW the GIL switch interval
+# (0.005s) — and the cell failed 4/4 (gap ~= wall, 100% blocked). The
 # mechanism, measured: with a callback-dominated wall on a small text
 # (microsecond detach windows), a callback shorter than the switch interval
 # starves the event loop for the WHOLE call — the worker drops and
@@ -641,32 +642,48 @@ def test_aio_twins_match_their_sync_spellings() -> None:
 # callbacks that straddle the interval. Measured here: ~1ms callbacks ->
 # 100% blocked, ~4ms -> 79-100%, ~8ms+ -> 3-6% (clean). The Rust code's
 # GIL claim itself holds (detach-between-callbacks is real; the 8/16ms
-# cells and the fast-counter cell all pass) — what does NOT hold is the
+# cells and the fast-counter cell all pass) — what did NOT hold was the
 # empirical docs/test claim that the loop is schedulable BETWEEN callbacks
 # for callback-dominated calls: for sub-switch-interval callbacks it is
-# starved for the whole call, so tors.aio.chunk_to_budget's interleaving
-# benefit does not exist for fast counters on small texts.
+# starved for the whole call.
+#
+# Resolution (the fix pass): the docs claim was QUALIFIED on every surface
+# (docs/api.md, the .pyi, tors/aio.py, the binding docstrings) — the loop
+# is schedulable between callbacks when each callback exceeds the switch
+# interval or the native windows between them are substantial, with the
+# sub-switch-interval starvation stated as the honest boundary — and the
+# committed slow-counter cell was recalibrated time-budgeted (3x the
+# switch interval per call). This suite's red cell below is promoted to a
+# green regression witness for the corrected claim's own boundary:
+# super-interval callbacks on a small text are schedulable between. The
+# sub-interval shape is NOT asserted in either direction (starvation is a
+# timing property of the interpreter, not a contract); it lives in the
+# docs. Zero xfail remains in this file.
 
 
-@pytest.mark.xfail(
-    reason=(
-        "R1: sub-switch-interval callbacks starve the event loop for the "
-        "whole call despite py.detach between them (GIL convoy); the "
-        "committed slow-counter cell in test_gil_release.py fails 4/4 on "
-        "CPython 3.14 where its calibrated counter drops under the "
-        "0.005s switch interval"
-    ),
-    strict=False,
-)
-def test_red_loop_stays_schedulable_with_moderate_fast_callbacks() -> None:
-    """RED (finding R1): a ~2-4ms GIL-held callback on a small text — the
-    committed cell's own calibrated shape — must leave the loop
-    schedulable between callbacks. It starves instead: worst gap ~= wall."""
+def test_loop_schedulable_between_callbacks_above_the_switch_interval() -> None:
+    """GREEN regression witness (finding R1, promoted from its xfail'd
+    red shape): the corrected claim's own boundary. A GIL-held callback
+    time-budgeted at ~3x ``sys.getswitchinterval()`` (so it stays above
+    the interval on every interpreter 3.10-3.14 — the original
+    fixed-iteration counter dropped under it on 3.14 and starved the
+    loop) straddles the interval and fires ``gil_drop_request``'s fair
+    handoff, so the loop stays schedulable between callbacks on a SMALL
+    text too: the worst gap tracks the callbacks, never the whole call.
+    The sub-switch-interval caveat (a fast GIL-held callback on a small
+    text CAN starve the loop for the whole call) is the documented
+    boundary — docs/api.md, the ``.pyi``, and the binding docstrings —
+    deliberately not asserted here in either direction: it is a timing
+    property of the interpreter, not a contract."""
 
     def busy(s: str) -> int:
+        deadline = time.monotonic() + 3 * sys.getswitchinterval()
         n = 0
-        for i in range(150_000):  # ~2-4ms on 3.14: UNDER the switch interval
-            n += i * i
+        i = 0
+        while time.monotonic() < deadline:
+            for _ in range(1_000):
+                i += 1
+                n += i * i
         return max(len(s.split()), 1)
 
     text = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
@@ -677,8 +694,9 @@ def test_red_loop_stays_schedulable_with_moderate_fast_callbacks() -> None:
     )
     assert worst < 0.30 * wall or worst < 0.100, (
         f"loop starved: blocked {worst * 1000:.0f}ms of {wall * 1000:.0f}ms "
-        f"({worst / wall:.0%}) — callbacks ({len(text) // 6}+ calls) never "
-        f"handed the loop a turn"
+        f"({worst / wall:.0%}) — callbacks held the GIL for ~3x the switch "
+        f"interval each, so gil_drop_request's fair handoff should have "
+        f"scheduled the loop between them"
     )
 
 

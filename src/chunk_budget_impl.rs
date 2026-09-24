@@ -119,6 +119,16 @@ impl BudgetError {
     }
 }
 
+/// The codepoint→byte grid's offset width: `pack`'s grid (below) stores
+/// byte offsets as `u32`, so text beyond `u32::MAX` bytes would silently
+/// truncate them. The Python bindings refuse such text with a clear
+/// `ValueError` via [`grid_overflow`] — factored out so the unit test
+/// below can pin the boundary with a synthetic value, no 4 GiB
+/// allocation.
+pub(crate) fn grid_overflow(text_bytes: u64) -> bool {
+    text_bytes > u32::MAX as u64
+}
+
 /// One packing segment: a UAX #29 sentence that fits the budget
 /// individually (`cached` holds its phase-A count, reused for the forced
 /// first measurement of a chunk and the overlap walk-back's last step —
@@ -352,6 +362,15 @@ mod tests {
     /// tokenizer needed).
     fn words(span: &str) -> Result<u64, BudgetError> {
         Ok(span.split_whitespace().count() as u64)
+    }
+
+    #[test]
+    fn grid_overflow_boundary_is_u32_max_bytes() {
+        // The synthetic-bound test for the bindings' text guard: the
+        // codepoint→byte grid's u32 offset width, pinned at the boundary
+        // without allocating a 4 GiB string.
+        assert!(!grid_overflow(u32::MAX as u64));
+        assert!(grid_overflow(u32::MAX as u64 + 1));
     }
 
     #[test]

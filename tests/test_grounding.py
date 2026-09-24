@@ -15,14 +15,55 @@ on, not the algorithm's internals.
 
 from __future__ import annotations
 
-import re
 import unicodedata
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tors
 from tors import highlight
+
+
+def _is_cjk_char(ch: str) -> bool:
+    """The grounding tokenizer's CJK ranges (grounding_impl::is_cjk)."""
+    return (
+        "\u3040" <= ch <= "\u30FF"  # Hiragana + Katakana
+        or "\u3400" <= ch <= "\u4DBF"  # CJK Extension A
+        or "\u4E00" <= ch <= "\u9FFF"  # CJK Unified Ideographs
+        or "\uAC00" <= ch <= "\uD7AF"  # Hangul syllables
+        or "\uF900" <= ch <= "\uFAFF"  # CJK Compatibility Ideographs
+    )
+
+
+def _proxy_terms(query: str) -> list[str]:
+    """The tokenizer's own notion of a query term, mirrored from
+    ``grounding_impl::tokens`` (which this property's prose always
+    claimed): UAX #29 word segments kept when they contain an
+    alphanumeric character (whitespace, punctuation, and control
+    segments are dropped on both sides), CJK runs sub-split per
+    character (the tokenizer's per-character CJK refinement; finer than
+    the grapheme-cluster walk is safe here — every sub-piece is a
+    substring of whatever the tokenizer matched).
+
+    This replaces an earlier ``re.findall(r"\\w+", ...)`` proxy that
+    diverged from the tokenizer exactly where UAX #29 splits what ``\\w``
+    merges: ``'0¹'`` is one ``\\w+`` "term" but segments ``'0'|'¹'``
+    (Nd does not join No), so a CORRECT snippet ``'0'`` for query
+    ``'0¹'`` failed the property — the test proxy was the divergence,
+    not the implementation (hypothesis found it on the committed tree,
+    2026-09: the same divergence class as the dropped-control case the
+    old comment already knew about)."""
+    terms: list[str] = []
+    for start, end in tors.word_bounds(query):
+        segment = query[start:end]
+        if not any(ch.isalnum() for ch in segment):
+            continue
+        if any(_is_cjk_char(ch) for ch in segment):
+            terms.extend(segment)  # per-character CJK sub-split
+        else:
+            terms.append(segment)
+    return terms
 
 # Arbitrary Unicode for the offset round-trip property: the property must
 # hold for ANY text the pipeline can see, so no alphabet restrictions beyond
@@ -105,8 +146,10 @@ class TestScoring:
         result = highlight(query, text, max_snippets=3, max_chars=400)
         # Term extraction mirrors the tokenizer's notion of a term (UAX #29
         # words, case-folded NFC), not whitespace splitting: a query like
-        # "0\x1b" is the token "0" plus a dropped control segment.
-        terms = re.findall(r"\w+", query, re.UNICODE)
+        # "0\x1b" is the token "0" plus a dropped control segment. See
+        # _proxy_terms for the segmentation it mirrors and the \w+
+        # divergence that forced it.
+        terms = _proxy_terms(query)
         for snippet in result["snippets"]:
             body = unicodedata.normalize("NFC", snippet["text"]).lower()
             assert any(unicodedata.normalize("NFC", term).lower() in body for term in terms), (

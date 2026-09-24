@@ -1207,8 +1207,15 @@ def chunk_hierarchical(
 # Python. The packing core runs under one py.detach and re-attaches the
 # GIL per counter call (Python::attach from inside the detach), so the
 # GIL is held only while the counter runs plus O(chunk) argument-string
-# construction, released for all native work between measurements.
-# tors.aio.chunk_to_budget hops to a thread for the same reason.
+# construction, released for all native work between measurements. The
+# loop is schedulable between callbacks when each callback exceeds
+# sys.getswitchinterval() (5ms default) or the native windows between
+# them are substantial; a sub-switch-interval callback on a small text
+# can starve the loop for the whole call (the drop and re-acquire
+# outruns the woken loop thread -- gil_drop_request's fair handoff only
+# fires for callbacks that straddle the interval).
+# tors.aio.chunk_to_budget hops to a thread for the same reason, within
+# that boundary.
 def chunk_to_budget(
     text: str,
     token_counter: Callable[[str], int],

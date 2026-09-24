@@ -16,8 +16,17 @@
 //! slow counter dominates the call and holds the GIL for its duration,
 //! exactly as it would in pure Python. That is the honest statement the
 //! doctrine demands; `tors.aio.chunk_to_budget` (the to_thread hop)
-//! still helps, because the per-callback GIL acquire/release interleaves
-//! the worker with the event loop's thread.
+//! helps when the loop can actually take the GIL between callbacks,
+//! which holds when each callback exceeds `sys.getswitchinterval()`
+//! (5ms by default) or the native windows between them are substantial
+//! (a callback that straddles the interval fires `gil_drop_request`,
+//! CPython's fair handoff). The measured caveat, stated because the
+//! doctrine forbids false GIL claims: a GIL-held callback SHORTER than
+//! the switch interval on a small text (microsecond detach windows) can
+//! starve the loop for the whole call — the worker drops and re-acquires
+//! the GIL faster than the woken loop thread can take it.
+//! tests/test_gil_release.py pins the schedulable band for
+//! super-interval callbacks and states the caveat where it cannot.
 //!
 //! `chunk_to_offsets` takes the token spans PRE-COMPUTED (the caller's
 //! tokenizer has already run; HuggingFace `Encoding.offsets` is exactly
@@ -136,8 +145,8 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// or boundaries are measured exactly as the emitted chunk will be. The
 /// counter must return an int >= 1 for every sentence (0 or a negative
 /// count raises `ValueError` — a sentence measuring no tokens makes the
-/// budget contract meaningless; a word-count tokenizer never sees this
-/// because sentence spans always contain words), and an int at all
+/// budget contract meaningless, whitespace-only text under a word-count
+/// tokenizer included), and an int at all
 /// (anything else raises `TypeError`). A counter that raises propagates
 /// its exception unchanged.
 ///
@@ -160,15 +169,28 @@ fn validate_counter_return(result: &Bound<'_, PyAny>) -> Result<u64, BudgetError
 /// out-of-range float ratio, or a `token_counter` that returns 0/a
 /// negative/an unreasonably large value for a sentence raise
 /// `ValueError`; a non-callable `token_counter` raises `TypeError`.
+/// An int beyond the i64 range the binding extracts
+/// (`max_tokens=10**30`) raises pyo3's own `OverflowError` at
+/// extraction instead — the `truncate_to_bounds`-identical pattern for
+/// every i64-typed size argument; text beyond `u32::MAX` bytes (the
+/// codepoint→byte offset grid's width, see
+/// [`crate::chunk_budget_impl::grid_overflow`]) raises `ValueError`
+/// rather than silently truncating offsets.
 ///
 /// GIL model: NOT GIL-free, and not documented as one — the counter is
 /// Python. The packing core runs under one `py.detach` and re-attaches
 /// the GIL per counter call, so the GIL is held only while the counter
 /// runs (plus O(chunk) argument construction per call) and released for
-/// all native work between measurements. `tors.aio.chunk_to_budget`
-/// hops to a thread, which interleaves the per-callback GIL handoffs
-/// with the event loop. For fully GIL-free packing see
-/// [`chunk_to_offsets`].
+/// all native work between measurements. The loop is schedulable
+/// between the callbacks when each callback exceeds
+/// `sys.getswitchinterval()` (5ms default) or the native windows
+/// between them are substantial; a sub-switch-interval callback on a
+/// small text can starve the loop for the whole call (the drop and
+/// re-acquire outruns the woken loop thread — `gil_drop_request`'s fair
+/// handoff fires only for callbacks that straddle the interval).
+/// `tors.aio.chunk_to_budget` hops to a thread, which interleaves the
+/// per-callback GIL handoffs with the event loop within that boundary.
+/// For fully GIL-free packing see [`chunk_to_offsets`].
 // The `overlap=` default is spelled `0` to Python (the text_signature
 // override below; the drift guard reads it) while the runtime spelling
 // is `Option` + None: pyo3's default machinery needs the default
@@ -190,6 +212,19 @@ pub fn chunk_to_budget<'py>(
         None => 0,
         Some(any) => resolve_overlap(any, max_tokens as i64)?,
     };
+    // The codepoint→byte grid the packing resolves spans through stores
+    // its byte offsets as `u32` (see chunk_budget_impl::pack): text
+    // beyond `u32::MAX` bytes would silently truncate them. Refused
+    // loudly instead, before any work runs.
+    if chunk_budget_impl::grid_overflow(text.len() as u64) {
+        return Err(PyValueError::new_err(format!(
+            "text is {} bytes, beyond the {}-byte offset grid \
+             token-budget chunking resolves spans through; \
+             split the text and pack the pieces",
+            text.len(),
+            u32::MAX
+        )));
+    }
     if !token_counter.is_callable() {
         return Err(PyTypeError::new_err(
             "token_counter must be callable (it is called with one candidate chunk's text at a time)",
@@ -267,6 +302,18 @@ pub fn chunk_to_offsets(
         None => 0,
         Some(any) => resolve_overlap(any, max_tokens as i64)?,
     };
+    // The same u32 offset-grid bound as the callback spelling above
+    // (same grid, same silent-truncation hazard): refused loudly, and
+    // cheap enough to check before the O(tokens) walk pays for it.
+    if chunk_budget_impl::grid_overflow(text.len() as u64) {
+        return Err(PyValueError::new_err(format!(
+            "text is {} bytes, beyond the {}-byte offset grid \
+             token-budget chunking resolves spans through; \
+             split the text and pack the pieces",
+            text.len(),
+            u32::MAX
+        )));
+    }
     let total = char_count(text);
     // The bounded manual walk (the #112 discipline: never size a Vec
     // from a lying `__len__`, never loop an unbounded iterator):
