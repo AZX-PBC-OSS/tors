@@ -117,6 +117,16 @@ _WRAPPED = (
     "chunk_cdc",
     "chunk_hierarchical",
     "chunk_text",
+    # chunk_to_budget is the one wrapped function that is not a single
+    # detached native pass: its token_counter is a Python callable that
+    # can only run under the GIL. The hop still helps — the packing core
+    # runs detached and re-attaches the GIL per counter call, so the
+    # worker's per-callback handoffs interleave with the event loop's
+    # thread (tests/test_gil_release.py pins the gap tracking the
+    # callbacks, never the call) — where the sync spelling run inline
+    # would hold the GIL for the whole packing.
+    "chunk_to_budget",
+    "chunk_to_offsets",
     "count_matches",
     "decode_utf16",
     "decode_utf8",

@@ -137,6 +137,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "chunk-budget"
+path = "fuzz_targets/chunk_budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "uuid-text"
 path = "fuzz_targets/uuid_text.rs"
 test = false

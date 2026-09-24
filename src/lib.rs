@@ -402,10 +402,25 @@
 //! its own codec label where the borrow's says utf-8, and the stdlib's
 //! `surrogatepass` acceptance mode is the one path tors does not offer.
 
+//! The token-budget chunking surface (`chunk_to_budget`/`chunk_to_offsets`,
+//! `chunk_budget_impl`) adds a residue axis no other surface has: a
+//! Python callable inside the native pass. `chunk_to_budget`'s packing
+//! core runs under one `py.detach` and re-attaches the GIL per counter
+//! call (`Python::attach` from inside the detach), so the GIL is held
+//! only while the caller's counter runs plus O(chunk) argument-string
+//! construction, released for every byte of native work between
+//! measurements — honestly documented as NOT GIL-free (a slow counter
+//! dominates the call and holds the GIL for its duration, exactly as it
+//! would in pure Python). `chunk_to_offsets` is the GIL-free twin: the
+//! O(tokens) argument walk under the GIL, then the whole pack
+//! (segmentation, budget cuts, overlap walk-backs) detached end to end,
+//! with the family's usual O(chunks) marshalling after.
+
 pub mod b64_impl;
 pub mod bm25_impl;
 pub mod canon_impl;
 pub mod charset_impl;
+pub mod chunk_budget_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
@@ -499,6 +514,7 @@ use py::bm25::*;
 use py::canon::*;
 use py::charset::*;
 use py::chunk::*;
+use py::chunk_budget::*;
 use py::codec::*;
 use py::compiled_patterns::CompiledPatterns;
 use py::diff::*;
@@ -681,6 +697,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_by_lines, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_lines_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_to_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_to_offsets, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
     m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;

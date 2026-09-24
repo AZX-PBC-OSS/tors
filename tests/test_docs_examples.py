@@ -50,6 +50,44 @@ class TestApiReferenceExamples:
         assert tors.chunk_text(text, 12, overlap=3) == [(0, 8), (5, 17), (14, 26), (23, 30)]
         assert list(tors.chunk_text_iter(text, 12)) == [(0, 8), (8, 17), (17, 26), (26, 30)]
 
+    def test_chunk_to_budget_and_chunk_to_offsets_examples(self) -> None:
+        # docs/api.md's token-budget section: the simple split-based
+        # counter keeps the example runnable with no third-party
+        # tokenizer, and every output literal is pinned byte-exact
+        # (including each chunk's trailing space — this packer does not
+        # trim; the budget measured the text as it is).
+        def word_counter(text: str) -> int:
+            return len(text.split())
+
+        text = "One. Two. Three. Four."
+        assert tors.chunk_to_budget(text, word_counter, max_tokens=2) == [
+            (0, 10),
+            (10, 22),
+        ]
+        assert [text[s:e] for s, e in tors.chunk_to_budget(text, word_counter, max_tokens=2)] == [
+            "One. Two. ",
+            "Three. Four.",
+        ]
+        assert tors.chunk_to_budget(text, word_counter, max_tokens=2, overlap=1) == [
+            (0, 10),
+            (5, 17),
+            (10, 22),
+        ]
+        assert [
+            text[s:e] for s, e in tors.chunk_to_budget(text, word_counter, max_tokens=2, overlap=1)
+        ] == ["One. Two. ", "Two. Three. ", "Three. Four."]
+        assert tors.chunk_to_budget("a b c d e f g h", word_counter, max_tokens=3) == [
+            (0, 6),
+            (6, 12),
+            (12, 15),
+        ]
+        spans = [(s, e) for s, e in tors.word_bounds(text) if text[s:e].strip()]
+        assert tors.chunk_to_offsets(text, spans, max_tokens=4, overlap=2) == [
+            (0, 10),
+            (5, 17),
+            (10, 22),
+        ]
+
     def test_scrub_log_text_detail_dsn_and_repr_examples(self) -> None:
         # docs/api.md's scrub_log_text section, pinned the same way: the
         # literals the doc shows, every rules= spelling included.

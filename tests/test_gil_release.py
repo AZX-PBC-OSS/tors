@@ -3154,3 +3154,109 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
             ratio_budget=None,
         )
     )
+
+
+# ---- token-budget chunking (chunk_to_budget / chunk_to_offsets) -------------
+#
+# The two budget-chunking spellings sit at the family's two GIL extremes,
+# and the cells pin each at its honest pole:
+#
+# - chunk_to_offsets never calls back: the O(tokens) argument walk (the
+#   standard extraction class over a Python list of (start, end) tuples)
+#   is its only GIL-held residue before one end-to-end py.detach pack.
+#   That walk is the word_bounds list-marshalling class on the input side
+#   (O(n) tuple extraction under the GIL), so the cell carries a bespoke
+#   ratio budget derived from its measured band, the finalize-QC
+#   recalibration pattern: measured 0.25-0.29 at 2 MiB (493,440 token
+#   spans, extraction ~19ms of 65-73ms walls, ambient load 1-2), 0.60
+#   sits ~2x above the band and ~40% below the ~1.0 a detach regression
+#   shows (the whole pack held: gap ~= wall ~= 65ms at this size, caught
+#   by the ratio; the 100ms ceiling holds ~5x margin at the measured
+#   gaps).
+# - chunk_to_budget's counter is Python and can ONLY run under the GIL:
+#   the function is honestly NOT GIL-free, and the suite's claim for it
+#   is the architecture claim from src/py/chunk_budget.rs — the packing
+#   core runs detached and re-attaches the GIL per counter call, so the
+#   loop is schedulable BETWEEN callbacks and the worst gap tracks the
+#   callbacks themselves, never the whole call. Two cells pin the two
+#   directions: a fast counter (worst gap at the ping floor, ratio
+#   0.07-0.11 measured — the function behaves like any detached native
+#   pass) and a deliberately slow GIL-held counter (~5ms of CPU-bound
+#   work per call, the honest model of a real tokenizer's hot path): the
+#   worst gap is a few coalesced callbacks (23-38ms of 217-275ms walls,
+#   ratios 0.09-0.18, measured), where a regression that moved the whole
+#   pack under a held GIL shows gap ~= wall (~250ms) and fails both
+#   budgets. The cell cannot and does not claim the callbacks are free;
+#   it claims everything between them is.
+
+
+def _budget_token_spans(corpus: str) -> list[tuple[int, int]]:
+    """Word-aligned token spans (the HuggingFace ``Encoding.offsets``
+    shape: one (start, end) pair per token, whitespace untokenized) —
+    the realistic pre-computed input for ``chunk_to_offsets``."""
+    return [(s, e) for s, e in tors.word_bounds(corpus) if corpus[s:e].strip()]
+
+
+def _busy_token_counter(text: str) -> int:
+    """A GIL-held CPU-bound counter (~5ms per call measured): the honest
+    slow-tokenizer model for the between-callbacks cell."""
+
+    def count(_text: str) -> int:
+        n = 0
+        for i in range(150_000):
+            n += i * i
+        return max(len(_text.split()), 1)
+
+    return count(text)
+
+
+def test_chunk_to_offsets_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The GIL-free spelling's claim, at 2 MiB with 493,440 token spans:
+    the argument walk's contiguous GIL hold (the extraction class) and
+    the end-of-call marshalling stay inside the bespoke 0.60 ratio
+    budget and the 100ms ceiling; the pack itself is one py.detach. See
+    the section note above for the band and the recalibration."""
+    unit = "speaker: message with a few words and a number 42.\n"
+    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    spans = _budget_token_spans(corpus)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.chunk_to_offsets, corpus, spans, max_tokens=200),
+            ratio_budget=0.60,
+        )
+    )
+
+
+def test_chunk_to_budget_fast_counter_keeps_the_loop_at_heartbeat_granularity() -> None:
+    """The callback spelling with a cheap counter (``len(s.split())``):
+    the GIL is re-attached per counter call and released for the native
+    work between measurements, so the worst gap sits at the ping floor
+    (measured 10-11ms of 149-152ms walls, ratio 0.07-0.11). This is the
+    cell that would catch a regression moving the pack loop under one
+    held GIL: the whole ~150ms call would surface as one gap."""
+    unit = "speaker: message with a few words and a number 42.\n"
+    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.chunk_to_budget, corpus, lambda s: len(s.split()), max_tokens=200
+            ),
+        )
+    )
+
+
+def test_chunk_to_budget_slow_counter_blocks_only_for_its_callbacks() -> None:
+    """The honesty cell: a counter that holds the GIL ~5ms per call
+    makes the worst gap a run of coalesced callbacks (measured 23-38ms),
+    never the whole call (217-275ms walls). The claim is exactly the
+    architecture's: the callbacks themselves hold the GIL — the function
+    is not GIL-free and says so — and everything between them is
+    released native packing."""
+    text = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.chunk_to_budget, text, _busy_token_counter, max_tokens=2, overlap=1
+            ),
+        )
+    )

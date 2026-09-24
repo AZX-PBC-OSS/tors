@@ -17,6 +17,7 @@ pub mod bm25;
 pub mod canon;
 pub mod charset;
 pub mod chunk;
+pub mod chunk_budget;
 pub mod codec;
 pub mod compiled_patterns;
 pub mod diff;

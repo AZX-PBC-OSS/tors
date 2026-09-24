@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, Literal, SupportsIndex, TypedDict
 
 # The recursive JSON value: what `content_hash` accepts — the JSON
@@ -1180,6 +1180,67 @@ def chunk_hierarchical(
     *,
     overlap: int = 0,
     overlap_boundary: Literal["grapheme", "word"] = "grapheme",
+) -> list[tuple[int, int]]: ...
+
+# Token-budget chunking measured by the caller's own token counter (the
+# CompiledLemmaDict-style measured exception: a Python callable inside the
+# packing). Cuts text at UAX #29 sentence boundaries (a sentence whose own
+# measured count exceeds max_tokens is re-cut at word boundaries; a single
+# word still wider than the whole budget goes out whole), greedily packs
+# consecutive segments into chunks whose measured token count fits
+# max_tokens, and returns (start, end) pairs in Python str index
+# (codepoint) units: text[start:end] is the chunk. Empty text -> []; text
+# that fits whole -> one chunk. token_counter is called with one candidate
+# chunk's text per packing decision (O(segments) calls, never one per
+# boundary) and must return an int >= 1 for every sentence (0/negative/
+# unreasonably large -> ValueError; non-int -> TypeError; it may raise,
+# propagating its exception). overlap repeats trailing context into the
+# next chunk: an int token count in [0, max_tokens) or a float ratio in
+# [0, 1) (floor(ratio * max_tokens) tokens); declined for a transition
+# that cannot buy new context (degrades to zero overlap rather than stall
+# or emit a chunk contained in its predecessor). Chunks are non-empty,
+# strictly increasing in start and end, cover to the end, each fits the
+# budget per the same counter; overlap=0 is a contiguous lossless
+# covering partition.
+#
+# GIL note: NOT GIL-free, and not documented as one -- the counter is
+# Python. The packing core runs under one py.detach and re-attaches the
+# GIL per counter call (Python::attach from inside the detach), so the
+# GIL is held only while the counter runs plus O(chunk) argument-string
+# construction, released for all native work between measurements.
+# tors.aio.chunk_to_budget hops to a thread for the same reason.
+def chunk_to_budget(
+    text: str,
+    token_counter: Callable[[str], int],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
+) -> list[tuple[int, int]]: ...
+
+# chunk_to_budget's GIL-free twin: the same packing over PRE-COMPUTED
+# token spans. token_offsets is a sequence of (start, end) pairs in
+# Python str index (codepoint) units, one per token, sorted and
+# non-overlapping (HuggingFace tokenizers' Encoding.offsets is exactly
+# this shape; gaps are allowed -- untokenized text such as inter-token
+# whitespace measures 0 tokens). A span's token count is the number of
+# token pairs fully contained in it, so the packing is additive and
+# exact, with no callback anywhere. Same contract, same validation, same
+# return shape as chunk_to_budget for every shared argument (max_tokens,
+# overlap, empty text, the budget/coverage invariants); token_offsets
+# entries must be (start, end) int pairs with 0 <= start < end <=
+# len(text), sorted and non-overlapping (ValueError otherwise).
+#
+# GIL note: the O(tokens) argument walk runs under the GIL (the standard
+# extraction class), then the whole pack (segmentation, budget cuts,
+# overlap walk-backs) runs under one py.detach end to end, and the
+# return marshalling is the family's usual O(chunks) 2-tuples. The
+# GIL-free choice for hot paths.
+def chunk_to_offsets(
+    text: str,
+    token_offsets: Sequence[tuple[int, int]],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
 ) -> list[tuple[int, int]]: ...
 
 # GIL note: the whole tokenize (UAX #29 words) + FNV-1a hash + 64-bit vote
