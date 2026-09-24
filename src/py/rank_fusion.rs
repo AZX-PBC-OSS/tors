@@ -166,9 +166,17 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
 /// the deduplicated ranking's length. Edge inputs are well-defined zeros: an
 /// empty `ranked`, an empty `relevant` (with no `gains`), and the
 /// zero-ideal-DCG case (nothing judged relevant) all answer `0.0`.
-/// `k < 1` and a negative, non-finite, or non-numeric `gains` value
-/// raise `ValueError`; a non-list `ranked`, a non-set `relevant`, or a
-/// non-dict `gains` raise `TypeError`; an unhashable id raises
+/// Legal finite gains can be so large the DCG and IDCG sums overflow to
+/// `+inf` (three gains of 1e308, or two of 1.7e308); the normalization
+/// saturates instead of dividing `inf/inf` (NaN): when either sum is
+/// non-finite the score is `1.0` if `DCG >= IDCG` else `0.0`, and a
+/// finite ratio clamps to `[0.0, 1.0]` — the monotone-total policy, since
+/// the ideal pool contains every ranked gain under the same discount
+/// schedule, so an overflowed DCG can at most match the overflowed ideal.
+/// `k < 1` and a negative or non-finite `gains` value raise `ValueError`;
+/// a non-list `ranked`, a non-set `relevant`, a non-dict `gains`, or a
+/// non-numeric `gains` value raise `TypeError` (the extraction failure);
+/// an unhashable id raises
 /// `TypeError` (Python's own hash error).
 ///
 /// GIL model: the argument checks and the per-position gain walk (one
@@ -258,7 +266,9 @@ pub fn mrr(py: Python<'_>, ranked: Bound<'_, PyList>, relevant: Bound<'_, PyAny>
 
 /// `tors.recall_at_k(ranked, relevant, k) -> float`: the fraction of the
 /// relevant set found in the top `k` positions,
-/// `|relevant ∩ ranked[:k]| / |relevant|`. A `k` past the ranking's
+/// `|relevant ∩ ranked[:k]| / |relevant|` (the formula assumes deduped
+/// input: a duplicate counts once, at its first occurrence). A `k` past
+/// the ranking's
 /// length simply uses every available position; a duplicated id counts
 /// once at its first occurrence (the family's dedup-first contract).
 /// The empty-relevant case is the core's own documented `0.0` (pinned
@@ -286,7 +296,9 @@ pub fn recall_at_k(
 /// the top `k` positions that are relevant,
 /// `|relevant ∩ ranked[:k]| / min(k, len(ranked))` — trec_eval's own
 /// convention for a run shorter than `k`: a system that returned fewer
-/// results is not punished for positions it never filled. A duplicated
+/// results is not punished for positions it never filled (the formula
+/// assumes deduped input: a duplicate counts once, at its first
+/// occurrence). A duplicated
 /// id counts once at its first occurrence (the family's dedup-first
 /// contract), so the denominator is the DEDUPLICATED ranking's length
 /// clamped to `k`. Edge inputs

@@ -58,9 +58,10 @@
 //! - **MRR**: the reciprocal rank of the first relevant result (0.0 when
 //!   no ranked result is relevant).
 //! - **recall@k / precision@k**: the standard definitions —
-//!   `|relevant ∩ top-k| / |relevant|` and `|relevant ∩ top-k| / min(k,
+//!   `|relevant ∩ ranked[:k]| / |relevant|` and `|relevant ∩ ranked[:k]| / min(k,
 //!   |ranked|)` (trec_eval's convention: a run shorter than `k` is not
-//!   punished for positions it never filled).
+//!   punished for positions it never filled). Both formulas assume
+//!   deduped input; a duplicate counts once, at its first occurrence.
 //!
 //! # Edge-input policy (the module's one contract, stated once)
 //!
@@ -74,6 +75,28 @@
 //! upstream bug). Numeric arguments out of range (`k < 1`) raise too;
 //! the binding layer owns that validation exactly the way
 //! `bm25_impl`'s `k1`/`b` contract does.
+//!
+//! # The nDCG normalization under overflow (the saturating-ratio policy)
+//!
+//! The binding layer validates every gain finite and non-negative, but
+//! legal finite gains can still be so large the DCG and IDCG sums
+//! overflow to `+inf` (three gains of 1e308, or two of 1.7e308, are
+//! enough) — and IEEE `inf / inf` is NaN, which would break the pinned
+//! `[0, 1]` contract on a legal input. The core therefore normalizes
+//! with overflow-aware, saturating logic instead of a bare division:
+//! when either sum is non-finite the score is `1.0` if `dcg >= idcg`
+//! else `0.0`, and a finite ratio is clamped to `[0, 1]`. The policy is
+//! the monotone-total one: both sums are sums of non-negative terms
+//! under one discount schedule, with the ideal pool a superset of the
+//! ranked gains, so an overflowed DCG can at most match — never beat —
+//! an overflowed ideal, and `1.0` is the only in-interval answer
+//! consistent with the ordering the finite arithmetic reports. The
+//! saturation can over-report a ranking whose exact ratio sits below 1
+//! once the sums overflow (the low-order terms are lost); pinning the
+//! exact ratio there would cost a scale-normalizing pre-pass over every
+//! call for an input class (gains within ~16 orders of magnitude of
+//! f64's ceiling) no caller supplies, so the saturation is the
+//! documented approximation, not a hidden one.
 
 /// Reciprocal-rank-fuses the deduplicated lists (Cormack, Clarke &
 /// Buüttcher, SIGIR 2009: `score(d) = Σ 1/(k + r(d))`, ranks 1-based).
@@ -149,6 +172,12 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
 ///
 /// Returns `DCG@k / IDCG@k` in `[0, 1]`; a zero ideal (nothing judged
 /// relevant) is the documented `0.0` answer, not a division by zero.
+/// The ratio is computed with overflow-aware, saturating logic (see the
+/// module docs' "saturating-ratio policy"): legal finite gains can
+/// overflow both sums to `+inf`, where a bare `inf / inf` division
+/// would answer NaN and break the pinned interval — a non-finite sum
+/// saturates instead (`1.0` when `dcg >= idcg`, else `0.0`), and a
+/// finite ratio clamps to `[0, 1]`.
 pub fn ndcg_at_k(ranked_gains: &[f64], mut ideal_pool: Vec<f64>, k: usize) -> f64 {
     let dcg: f64 = ranked_gains
         .iter()
@@ -166,7 +195,15 @@ pub fn ndcg_at_k(ranked_gains: &[f64], mut ideal_pool: Vec<f64>, k: usize) -> f6
     if idcg == 0.0 {
         return 0.0;
     }
-    dcg / idcg
+    // The sums are non-negative-term sums of binding-validated finite
+    // gains, so a non-finite sum is exactly +inf (never NaN): saturate
+    // rather than divide inf by inf. An overflowed DCG can at most
+    // match the overflowed ideal (the pool is a superset of the ranked
+    // gains under the same discount schedule), so the tie answers 1.0.
+    if !dcg.is_finite() || !idcg.is_finite() {
+        return if dcg >= idcg { 1.0 } else { 0.0 };
+    }
+    (dcg / idcg).clamp(0.0, 1.0)
 }
 
 /// MRR: the reciprocal rank of the first relevant result, `0.0` when
@@ -382,6 +419,73 @@ mod tests {
     #[test]
     fn nothing_relevant_anywhere_scores_zero() {
         assert!(close(ndcg_at_k(&[0.0, 0.0, 0.0], vec![1.0], 3), 0.0));
+    }
+
+    // --- ndcg_at_k: the saturating-ratio policy (overflowed sums) -------
+
+    #[test]
+    fn three_huge_gains_saturate_at_one_not_nan() {
+        // 3 × 1e308: DCG and IDCG each sum past f64's ceiling to +inf;
+        // inf/inf is NaN in IEEE — the core saturates instead, and the
+        // perfect ranking (ranked gains == ideal pool, same discounts)
+        // pins the equality → 1.0 exactly.
+        assert_eq!(ndcg_at_k(&[1e308, 1e308, 1e308], vec![1e308; 3], 3), 1.0);
+    }
+
+    #[test]
+    fn two_huge_gains_saturate_at_one_not_nan() {
+        // 2 × 1.7e308 overflows each sum the same way (the red team's
+        // second repro shape).
+        assert_eq!(ndcg_at_k(&[1.7e308, 1.7e308], vec![1.7e308; 2], 2), 1.0);
+    }
+
+    #[test]
+    fn finite_dcg_under_an_infinite_ideal_saturates_at_zero() {
+        // A ranked DCG that stays finite under an ideal that overflows:
+        // the true ratio is ~1e-308-scale — the saturating answer is 0.0,
+        // inside the pinned interval either way.
+        assert_eq!(ndcg_at_k(&[1e308], vec![1e308; 3], 3), 0.0);
+    }
+
+    #[test]
+    fn mixed_huge_and_small_gains_saturate_monotonically() {
+        // Huge and small gains together, both sums overflowing: the
+        // equality shape (ranked gains == ideal pool) still pins 1.0
+        // exactly, and the documented saturation can over-report the
+        // imperfect overflowed shape at exactly 1.0 — inside the pinned
+        // interval either way.
+        assert_eq!(
+            ndcg_at_k(
+                &[1e308, 1e-300, 1e308, 1e308],
+                vec![1e308, 1e308, 1e308, 1e-300],
+                4
+            ),
+            1.0
+        );
+        let imperfect = ndcg_at_k(
+            &[1e308, 1e-300, 1e308, 1e308],
+            vec![1e308, 1e308, 1e308, 1e308],
+            4,
+        );
+        assert!((0.0..=1.0).contains(&imperfect));
+        // Where the mixed sums stay finite, the ratio is the ordinary
+        // one: 1e308 at rank 1 under an ideal of two 1e308s.
+        assert!(close(
+            ndcg_at_k(&[1e308, 1e-300], vec![1e308, 1e308], 2),
+            1e308 / (1e308 + 1e308 / 3.0_f64.log2())
+        ));
+    }
+
+    #[test]
+    fn moderate_ratios_are_untouched_by_the_clamp() {
+        // The clamp only guards the extremes: ordinary scores match the
+        // hand-computed value exactly as before the policy landed.
+        let dcg = 1.0 + 0.5;
+        let idcg = 1.0 + 1.0 / 3.0_f64.log2();
+        assert!(close(
+            ndcg_at_k(&[1.0, 0.0, 1.0], vec![1.0, 1.0], 3),
+            dcg / idcg
+        ));
     }
 
     // --- mrr ------------------------------------------------------------

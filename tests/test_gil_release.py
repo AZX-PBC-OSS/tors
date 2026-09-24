@@ -539,6 +539,14 @@ _B64_RATIO_BUDGET = 0.80
 # share grows with size). 0.80 sits ~1.3x above the worst 200k-cell
 # ratio and ~20% below the ~1.0 a lost-detach shape shows; the pinned
 # cell is the 200k size, where the 100ms ceiling still holds ~3x margin.
+# Id-shape caveat: the band was measured on cheap-to-hash ids (short str
+# ids, the _ident_items idiom); hash-expensive ids (10-int tuples are the
+# measured pathological shape) drive the walk's dict operations toward
+# interpreter-bound behavior -- the ratio there measures 0.98-1.00, i.e.
+# the call's whole wall is GIL-held and the budget does not transfer
+# across id shapes (the same caveat docs/async.md carries for the aio
+# spelling). The budget pins the str-id shape, not a detach guarantee
+# for every hashable id type.
 _RANK_FUSE_RATIO_BUDGET = 0.80
 
 # word_bounds's marshalling-band regression ceiling: not the suite's 100ms
@@ -3213,7 +3221,16 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     30.2-45.7ms walls, ratios 0.56-0.62, every sample inside both
     budgets (~1.3x ratio margin, ~3x ceiling margin); at 400k the band
     is 0.69-0.75 (measured, unasserted — the walk share grows with
-    size, which is why the pin is the 200k cell)."""
+    size, which is why the pin is the 200k cell).
+
+    Id-shape caveat (the aio caveat in docs/async.md, honestly recorded
+    here too): those bands were measured on the cheap-to-hash id shape
+    this cell builds (short ``str`` ids). With hash-expensive ids
+    (10-int tuples are the measured pathological shape) each dict
+    operation in the dedup walk costs its hash, the GIL-held share
+    approaches the call's full wall (the ratio measures 0.98-1.00) and
+    the 0.80 budget no longer describes the call — the budget pins the
+    str-id shape, not a detach guarantee for every hashable id type."""
     lists = _ranked_lists(200_000)
     asyncio.run(
         _assert_loop_stays_responsive(

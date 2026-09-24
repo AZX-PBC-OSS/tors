@@ -354,6 +354,48 @@ class TestNdcg:
         with pytest.raises(TypeError, match="unhashable"):
             ndcg_at_k([{"d": 1}], {"a"})  # type: ignore[list-item]
 
+    # The saturating-ratio policy (the red-team overflow find, fixed in
+    # the core): legal finite gains can overflow the DCG/IDCG sums to
+    # +inf, where IEEE inf/inf is NaN — the pinned [0.0, 1.0] contract
+    # holds instead, permanently pinned here.
+
+    def test_three_huge_gains_saturate_at_one_not_nan(self) -> None:
+        # 3 × 1e308 overflows both sums; the ranked gains equal the
+        # ideal pool, so the equality pins exactly 1.0.
+        ranked = ["a", "b", "c"]
+        assert ndcg_at_k(ranked, set(), gains={d: 1e308 for d in ranked}) == 1.0
+
+    def test_two_huge_gains_saturate_at_one_not_nan(self) -> None:
+        gains = {"a": 1.7e308, "b": 1.7e308}
+        assert ndcg_at_k(["a", "b"], set(), gains=gains) == 1.0
+
+    def test_finite_dcg_under_an_infinite_ideal_answers_zero(self) -> None:
+        # One huge ranked gain (DCG stays finite) under a three-huge
+        # ideal at k=4 (IDCG overflows): the saturating answer is 0.0.
+        # (k clamps to the ranking's length, so the ranking needs the
+        # four positions for the ideal to overflow.)
+        ranked = ["a", "x", "y", "z"]
+        gains = {"a": 1e308, "b": 1e308, "c": 1e308}
+        assert ndcg_at_k(ranked, set(), gains=gains) == 0.0
+
+    def test_mixed_huge_and_small_gains_stay_in_the_unit_interval(self) -> None:
+        gains = {"a": 1e308, "b": 1e-300, "c": 1e308}
+        score = ndcg_at_k(["a", "b", "c"], set(), gains=gains)
+        # The mixed sums stay finite here and the ranking is imperfect
+        # (the 1e-300 gain sits at rank 2, below the ideal's third
+        # 1e308): an ordinary ratio, strictly inside the interval.
+        assert 0.0 < score < 1.0
+
+    @given(
+        ranked=st.lists(_IDS, max_size=12),
+        gain=st.floats(min_value=0.0, max_value=1.7e308, allow_nan=False),
+    )
+    @settings(max_examples=200)
+    def test_extreme_gains_stay_in_the_unit_interval(self, ranked: list, gain: float) -> None:
+        gains = {d: gain for d in set(ranked)}
+        score = ndcg_at_k(ranked, set(), gains=gains)
+        assert 0.0 <= score <= 1.0
+
     @given(ranked=st.lists(_IDS, max_size=12), k=st.integers(1, 20) | st.none())
     @settings(max_examples=200)
     def test_score_always_in_the_unit_interval(self, ranked: list, k: int | None) -> None:

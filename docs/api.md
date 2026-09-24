@@ -4731,6 +4731,10 @@ wrong-type-entry contract `bm25_rank`'s corpus walk keeps).
   trec_eval's own convention for a run shorter than `k` (a system that
   returned fewer results is not punished for positions it never filled).
 
+Both set formulas assume deduped input: a duplicate counts once, at its
+first occurrence (e.g. `recall_at_k(["a", "a", "b"], {"a", "b"}, 2)` is
+`1.0`, not `0.5`).
+
 A duplicated id inside `ranked` counts once, at its first occurrence
 (the same dedup-first contract `rank_fuse` keeps: a repeat is a malformed
 ranking, and counting it twice would inflate precision and push nDCG past
@@ -4741,11 +4745,18 @@ ranking, and counting it twice would inflate precision and push nDCG past
 well-defined `0.0` — an empty `ranked`, an empty `relevant` set (no
 relevant document exists, so no hit is possible), and the
 zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
-NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative,
-non-finite, or non-numeric `gains` value). Wrong TYPES raise `TypeError`
+NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative
+or non-finite `gains` value). Wrong TYPES raise `TypeError`
 (a non-list `ranked`/`ranked_lists`, a non-set `relevant` — exactly `set`
-or `frozenset` — a non-dict `gains`, an unhashable id, whose error is
-Python's own).
+or `frozenset` — a non-dict `gains`, a non-numeric `gains` value (the
+extraction failure), an unhashable id, whose error is
+Python's own). For nDCG, legal finite gains can be so large the DCG and
+IDCG sums overflow to `+inf`; the score then saturates instead of
+dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
+DCG faces an infinite ideal, and a finite ratio clamps to
+`[0.0, 1.0]` — the monotone-total policy, since the ideal pool contains
+every ranked gain under the same discount schedule, so an overflowed DCG
+can at most match the overflowed ideal.
 
 **GIL model**: the fusion/dedup walk and the metrics' membership walks
 are interpreter-side hashing (Python-object hashing cannot leave the
@@ -4756,6 +4767,13 @@ sizes — the content_hash arg-walk class — so inputs past ~10^6 total
 entries hold the GIL for 100ms+ in the walk alone: this family is a
 reranking-scale primitive (hundreds to thousands of entries per list),
 not a whole-corpus one. Measured bands: `tests/test_gil_release.py`.
+Id-shape caveat, honestly stated: those bands were measured on
+cheap-to-hash ids (short `str` ids); hash-expensive ids (10-int tuples
+are the measured pathological shape) make each dedup/membership dict
+operation slower until the walk is effectively interpreter-bound — the
+GIL-held share approaches the call's full wall (measured ratios
+0.98-1.00 there) and no thread placement buys it back, the same
+id-shape caveat `docs/async.md` carries for the `aio` spelling.
 
 ```python
 rank_fuse([

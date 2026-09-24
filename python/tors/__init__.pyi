@@ -1370,10 +1370,15 @@ def rank_fuse(
 # deduplicated ranking's length. Edge inputs are well-defined zeros: an
 # empty ranked, an
 # empty relevant (with no gains), and the zero-ideal-DCG case (nothing
-# judged relevant) all answer 0.0. k < 1 and a negative, non-finite, or
-# non-numeric gains value raise ValueError; a non-list ranked, a non-set
-# relevant (exactly set or frozenset), or a non-dict gains raise TypeError;
-# an unhashable id raises TypeError (Python's own hash error).
+# judged relevant) all answer 0.0. Legal finite gains can be so large the
+# DCG and IDCG sums overflow to +inf (three gains of 1e308, or two of
+# 1.7e308); the normalization saturates instead of dividing inf/inf (NaN):
+# when either sum is non-finite the score is 1.0 if DCG >= IDCG else 0.0,
+# and a finite ratio clamps to [0.0, 1.0]. k < 1 and a negative or
+# non-finite gains value raise ValueError; a non-list ranked, a non-set
+# relevant (exactly set or frozenset), a non-dict gains, or a non-numeric
+# gains value raise TypeError; an unhashable id raises TypeError (Python's
+# own hash error).
 #
 # GIL note: the per-position gain walk (one __contains__/dict lookup per
 # ranked id -- interpreter hashing) under the GIL, the DCG/IDCG arithmetic
@@ -1401,7 +1406,9 @@ def mrr(
     relevant: set[Hashable] | frozenset[Hashable],
 ) -> float: ...
 
-# recall@k: |relevant ∩ ranked[:k]| / |relevant|. A k past the ranking's
+# recall@k: |relevant ∩ ranked[:k]| / |relevant| (the formula assumes
+# deduped input: a duplicate counts once, at its first occurrence). A k
+# past the ranking's
 # length simply uses every available position; a duplicated id counts once
 # at its first occurrence (the family's dedup-first contract). Edge inputs
 # are well-defined
@@ -1418,7 +1425,8 @@ def recall_at_k(
 # own convention for a run shorter than k: a system that returned fewer
 # results is not punished for positions it never filled (len(ranked) is the
 # DEDUPLICATED length: a duplicated id counts once at its first occurrence,
-# the family's dedup-first contract). Edge inputs are
+# the family's dedup-first contract; the formula assumes deduped input).
+# Edge inputs are
 # well-defined zeros: an empty ranked and an empty relevant both answer
 # 0.0. k < 1 raises ValueError; a non-set relevant raises TypeError; an
 # unhashable id raises TypeError (Python's own hash error). Same GIL model

@@ -5,9 +5,11 @@ every test below is an attempt to BREAK `tors.rank_fuse`, `ndcg_at_k`,
 `mrr`, `recall_at_k`, or `precision_at_k` (or their aio twins) against
 the published contract (docs/api.md, the module docstrings) and the
 source papers (Cormack SIGIR 2009 for RRF; Järvelin & Kekäläinen TOIS
-2002 for nDCG). Passing tests = failed attacks; the single RED test
-(xfail, strict) is a confirmed live defect and is reported in the
-red-team findings as P1.
+2002 for nDCG). Passing tests = failed attacks. The suite's one
+confirmed live defect (the DCG/IDCG overflow NaN, attack class 3) has
+been FIXED in the core — its test runs green here, and the invariant is
+pinned permanently in tests/test_rank_fusion.py (TestNdcg's overflow
+tests).
 
 Attack classes exercised here, on top of the shared seven-class contract:
 
@@ -20,7 +22,8 @@ Attack classes exercised here, on top of the shared seven-class contract:
    cross-type ids (1/True/1.0), and gains/relevant conflicts.
 3. Overflow hunt: huge-but-FINITE gains (legal per the documented
    domain) that overflow the DCG/IDCG sums to ±inf — the one confirmed
-   defect (NaN past the core's `idcg == 0.0` guard).
+   defect (NaN past the core's `idcg == 0.0` guard), now fixed by the
+   core's saturating-ratio policy and green here.
 4. TypeError discipline: unhashable ids and non-set `relevant` spelled
    identically across ALL FIVE functions (not just rank_fuse).
 5. Zero-division: the empty-data answers, the all-zero-gains ideal
@@ -256,20 +259,16 @@ class TestNdcgUnitIntervalHunt:
         s = ndcg_at_k(ranked, set(), gains=gains, k=k)
         assert 0.0 <= s <= 1.0
 
-    # The one live defect this hunt found: gains legal per the
-    # documented domain (finite, >= 0) but SO large that the DCG and
-    # IDCG sums overflow to +inf, and inf/inf = NaN slips past the
-    # core's `idcg == 0.0` zero-division guard. 3 gains of 1e308 each
-    # (or 2 of 1.7e308) suffice; `mixed` magnitudes NaN too. The
-    # documented contract ("in [0.0, 1.0]", "well-defined zeros", the
-    # zero-division hunt) is violated on a legal input.
-    @pytest.mark.xfail(
-        reason="P1: DCG/IDCG overflow to +inf for >=3 gains of ~1e308 "
-        "(>=2 of ~1.7e308) returns NaN — inf/inf bypasses the core's "
-        "`idcg == 0.0` guard; the pinned [0.0, 1.0] contract breaks for "
-        "finite, non-negative gains",
-        strict=True,
-    )
+    # Formerly the one live defect this hunt found (P0, since fixed in
+    # the core): gains legal per the documented domain (finite, >= 0)
+    # but SO large that the DCG and IDCG sums overflow to +inf, and
+    # inf/inf = NaN slipped past the core's old `idcg == 0.0`
+    # zero-division guard. The core now normalizes with saturating,
+    # overflow-aware logic (see rank_fusion_impl.rs's saturating-ratio
+    # policy), so this test runs green here AND is pinned permanently in
+    # tests/test_rank_fusion.py (TestNdcg's overflow tests) — the
+    # canonical suite carries the invariant, this file keeps the
+    # red-team repro shape.
     def test_extreme_finite_gains_stay_in_the_unit_interval(self) -> None:
         ranked = ["a", "b", "c"]
         s = ndcg_at_k(ranked, set(), gains={d: 1e308 for d in ranked})
