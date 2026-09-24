@@ -329,10 +329,7 @@ pub(crate) fn timeout_err(message: String) -> PyErr {
 /// own failure propagates unchanged rather than masking as a parameter
 /// error. Only a MISSING `__index__` (str, float, None, bytes) and an
 /// `__index__` result that is not an exact int (including `bool`, the
-/// same caller bug one dispatch removed) are `TypeError`. (Moved here
-/// from `py/minhash.rs`, which had the only copy, when
-/// `shingle_jaccard`/`simhash_distance` became the second and third
-/// consumers — the same one-home discipline as the walks above.)
+/// same caller bug one dispatch removed) are `TypeError`.
 pub(crate) fn extract_index<'py>(
     obj: &Bound<'py, PyAny>,
     name: &str,
