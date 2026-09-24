@@ -5,10 +5,10 @@
 //! 1. The offset round-trip: every returned sentence's CHARACTER offsets
 //!    slice the ORIGINAL text (via Python codepoint indexing, which Rust
 //!    models as `chars().collect()[start..end]`) to EXACTLY the returned
-//!    text — the property the FFI's other side pins.
+//!    text, the property the FFI's other side pins.
 //! 2. Batch hygiene: the sentences are in position order (pairwise
 //!    non-overlapping), every score is in `[0, 1]`, and the aggregate is
-//!    exactly the max per-sentence score — whatever the query/text
+//!    exactly the max per-sentence score, whatever the query/text
 //!    geometry. Degenerate inputs are valid answers (never a panic, never
 //!    an error): the empty text yields the empty result; an empty or
 //!    token-free query scores every sentence 0.0.

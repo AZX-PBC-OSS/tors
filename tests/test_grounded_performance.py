@@ -168,7 +168,7 @@ def test_the_floor_is_one_contains_pass() -> None:
 
 class TestGroundingCoverageWall:
     """The recall twin's wall lane: grounding_coverage's documented cost is
-    the classic weighted-LCS DP over the two token streams — O(|S| x |T|)
+    the classic weighted-LCS DP over the two token streams: O(|S| x |T|)
     TIME (the product both operands own, the same class levenshtein
     documents) with O(min(|S|, |T|)) MEMORY (two reused rows, never a
     materialized n*m matrix), each operand capped at its first 16384
@@ -200,7 +200,7 @@ class TestGroundingCoverageWall:
     def test_the_realistic_rag_shape_completes_inside_the_thread_hop_budget(self) -> None:
         # The utilization lane's real shape: a 4k-token retrieved context
         # against a 300-word response. Generous absolute ceiling on
-        # purpose — the ratio gates above carry the regression
+        # purpose; the ratio gates above carry the regression
         # sensitivity; this catches only a qualitative break (an
         # accidental n*m matrix allocation). The ceiling rides over the
         # dev-profile build the local suite runs (a release wheel scores

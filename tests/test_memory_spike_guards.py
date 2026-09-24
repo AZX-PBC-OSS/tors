@@ -293,7 +293,7 @@ class TestPythonSideMarshallingIsLinear:
 # src/grounded_impl.rs): ground_sentences holds one SentenceScore per
 # sentence (O(text)) and marshals one dict per sentence (O(sentences),
 # Python-side); grounding_coverage's DP is two reusable rows over the
-# SHORTER token stream — O(min(|S|, |T|)) — never a materialized n*m
+# SHORTER token stream, O(min(|S|, |T|)), never a materialized n*m
 # matrix. The guards pin both at their amplification shapes: a child runs
 # the call and reports its own peak RSS (VmHWM, the disposable-child
 # discipline), the ceiling tied to input bytes with baseline slack.
@@ -324,8 +324,8 @@ class TestGroundingBatchMemoryGuards:
         # THE amplification guard for the recall twin: two operands at the
         # DP's 16384-token cap (~100 KB each, ~200 KB of input). The
         # documented memory class is O(min(|S|, |T|)) (two rows); a
-        # materialized n*m f64 matrix at this size would be ~2.1 GiB —
-        # ~10,000x the input — and trip the input-tied ceiling by far.
+        # materialized n*m f64 matrix at this size would be ~2.1 GiB,
+        # ~10,000x the input, and trip the input-tied ceiling by far.
         input_bytes = len("word ") * 16_384 * 2
         kind, message, peak_kib, done = _run_child(
             "output = tors.grounding_coverage(source, text)",

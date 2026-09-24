@@ -1,13 +1,13 @@
 """Contract gate for ``tors.ground_sentences``: the sentence-level grounding
-batch — EVERY UAX #29 sentence of the text, scored against the query with
+batch: EVERY UAX #29 sentence of the text, scored against the query with
 the same ROUGE-W F1 the snippet surface ranks spans with, in position
 order, plus the aggregate (the best sentence's score, the documented max
 policy).
 
 The load-bearing property is the same one ``highlight`` stands on (the
 style of its pinned round-trip test is copied here): every sentence's
-offsets slice the ORIGINAL text — ``text[start:end] == sentence["text"]``
-— for every script (CJK, accents NFC/NFD, emoji ZWJ, RTL, astral planes),
+offsets slice the ORIGINAL text (``text[start:end] == sentence["text"]``)
+for every script (CJK, accents NFC/NFD, emoji ZWJ, RTL, astral planes),
 because the offsets are Python codepoint indices into the original string.
 
 The scoring contract and its bounds are documented in
@@ -34,7 +34,7 @@ _ANY_QUERY = st.text(max_size=40)
 
 class TestOffsetRoundTrip:
     """THE load-bearing property: every sentence's offsets slice the
-    original — text[s.start:s.end] is exactly s["text"]."""
+    original: text[s.start:s.end] is exactly s["text"]."""
 
     @settings(max_examples=300)
     @given(text=_ANY_TEXT, query=_ANY_QUERY)
@@ -63,7 +63,7 @@ class TestOffsetRoundTrip:
 
     def test_roundtrip_through_every_script_case(self) -> None:
         # The boundary-case battery, each hand-checked: CJK (unspaced),
-        # NFC and NFD accents, ZWJ emoji, RTL, astral planes — the same
+        # NFC and NFD accents, ZWJ emoji, RTL, astral planes, the same
         # cases test_grounding.py pins for the snippet offsets.
         cases = [
             "検索対象の文書には重要な情報が含まれています。次の文もある。",
@@ -142,7 +142,7 @@ class TestScoring:
         )
 
     def test_contiguous_term_runs_outrank_scattered_ones(self) -> None:
-        # ROUGE-W's shaping, as a behavior — the same pin the snippet
+        # ROUGE-W's shaping, as a behavior (the same pin the snippet
         # surface makes: adjacent query terms outrank spread ones.
         contiguous = "alpha beta and then more words follow here now. Tail."
         spread = "alpha x y z beta and then more words follow here now. Tail."
@@ -175,7 +175,7 @@ class TestMaxChars:
 
     def test_a_budget_smaller_than_one_token_still_scores_one_token(self) -> None:
         # The documented graceful floor: the scored window keeps at least
-        # one token — the sentence's FIRST token (a budget smaller than
+        # one token: the sentence's FIRST token (a budget smaller than
         # any token cannot reach a later one; that is the floor's shape).
         # Capitalized sentences: UAX #29's SB7 joins lowercase-after-
         # lowercase ("here. tail." is ONE sentence; see sentence_bounds).
@@ -215,7 +215,7 @@ class TestDegenerateInputs:
 
     def test_an_empty_or_token_free_query_scores_all_zero(self) -> None:
         # The segmentation is the answer's shape; the query only drives
-        # scores — every sentence is still reported.
+        # scores; every sentence is still reported.
         for query in ("", "   !!!   "):
             result = ground_sentences("Two sentences here. Another one.", query)
             assert len(result["sentences"]) == 2

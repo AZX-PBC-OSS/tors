@@ -1,5 +1,5 @@
 """Contract gate for ``tors.grounding_coverage``: the recall twin of
-``is_grounded`` — what fraction of the SOURCE's tokens the text actually
+``is_grounded``: what fraction of the SOURCE's tokens the text actually
 utilizes, one float in [0.0, 1.0], the model-free operationalization of
 TRACe's uTilization (Friel, Belyi & Sanyal 2024, RAGBench §3.2).
 
@@ -25,7 +25,7 @@ _ANY_TEXT = st.text(max_size=200)
 class TestConventions:
     def test_empty_and_token_free_operands_are_exactly_zero(self) -> None:
         # The pinned degeneracies: no source tokens, no text tokens, or
-        # either operand empty — no coverage to measure, 0.0 (TRACe's
+        # either operand empty: no coverage to measure, 0.0 (TRACe's
         # ratio is 0/0 there; 0.0 is the conservative reading).
         for source, text in [
             ("", ""),
@@ -41,7 +41,7 @@ class TestConventions:
         # 1.0 up to f64 rounding in the DP's accumulation (within 1e-9,
         # the documented band); the empty conventions above are exact
         # because no arithmetic runs on those paths.
-        for s in ["a", "the quick brown fox", "café über — 速い茶色の狐", "x " * 500]:
+        for s in ["a", "the quick brown fox", "café über 速い茶色の狐", "x " * 500]:
             assert grounding_coverage(s, s) == pytest.approx(1.0, abs=1e-9), s
 
     def test_disjoint_operands_are_exactly_zero(self) -> None:
@@ -49,9 +49,9 @@ class TestConventions:
 
     def test_cjk_range_punctuation_is_token_free(self) -> None:
         # CJK-range punctuation is NOT a token: UAX #29 segments it, but the
-        # grounding tokenizer drops every run with no alphanumeric character
-        # — the same rule non-CJK punctuation answers to (red-team P0: the
-        # CJK sub-split branch once skipped the rule, so "・" scored 1.0).
+        # grounding tokenizer drops every run with no alphanumeric character,
+        # the same rule non-CJK punctuation answers to.  The pin: the CJK
+        # sub-split branch applies the drop rule too, so "・" scores 0.0.
         # The sweep covers both branches: U+30FB/U+3099 sit in the CJK
         # sub-split's range; 。、「」〜 are 3000-block, the non-CJK branch.
         for text in ["・", "\u3099", "・。", "。", "、", "「」", "〜", "〽", "！？", "・ ・."]:
@@ -107,7 +107,7 @@ class TestScoring:
 
     def test_the_text_does_not_need_the_source_up_front(self) -> None:
         # Utilization, not containment: the source material can appear in
-        # any order and with filler between — this is the recall twin, not
+        # any order and with filler between; this is the recall twin, not
         # is_grounded.
         source = "alpha bravo charlie delta"
         text = "delta then alpha and bravo with charlie last"
@@ -158,7 +158,7 @@ class TestHostileInput:
     def test_a_token_flood_operand_stops_at_the_cap(self) -> None:
         # The bounded-scan discipline: at most the first 16384 tokens of
         # each operand are scanned, and the denominator is the SOURCE
-        # tokens actually scanned — a source past the cap paired with its
+        # tokens actually scanned; a source past the cap paired with its
         # own leading window still covers fully.
         source = "word " * 30_000
         assert grounding_coverage(source, source) == pytest.approx(1.0)

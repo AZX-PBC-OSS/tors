@@ -1,6 +1,6 @@
 //! Lexical claim-grounding check: the pure-Rust core of `tors.is_grounded`
 //! (the precision side) and `tors.grounding_coverage` (the recall side's
-//! source-utilization float — see the section at the end of these docs).
+//! source-utilization float; see the section at the end of these docs).
 //!
 //! Answers one narrow question: does `source` actually contain `claim`, or
 //! something close enough to it? This is a lexical check, not semantic:
@@ -101,11 +101,11 @@
 //!
 //! # The recall twin: `grounding_coverage` (source utilization)
 //!
-//! [`is_grounded_fuzzy`] is the PRECISION side of the grounding pair —
+//! [`is_grounded_fuzzy`] is the PRECISION side of the grounding pair:
 //! every part of the claim must be supported by the source. The recall
 //! side asks the converse question: how much of the SOURCE did the text
 //! actually USE? [`grounding_coverage`] answers it with one number in
-//! `[0.0, 1.0]` — the fraction of the source's tokens the text covers —
+//! `[0.0, 1.0]` (the fraction of the source's tokens the text covers)
 //! and is the model-free twin of TRACe's uTilization metric (Friel, Belyi
 //! & Sanyal 2024, "RAGBench: Explainable Benchmark for Retrieval-Augmented
 //! Generation Systems", §3.2: document utilization = `Len(U_i) / Len(d_i)`,
@@ -123,7 +123,7 @@
 //! weight. (1) Metric-family consistency: the snippet surfaces
 //! (`highlight`, `ground_sentences`) score ROUGE-W F1, and coverage is
 //! Equation 15's recall component of that same metric (Lin 2004, see
-//! `grounding_impl`'s module docs) — one tokenization (UAX #29 words,
+//! `grounding_impl`'s module docs): one tokenization (UAX #29 words,
 //! CJK per-character, case-fold + NFC), one shaping, so a claim's
 //! precision score and a source's coverage score never disagree about
 //! what a token is. A character-level Myers coverage would score an
@@ -131,31 +131,31 @@
 //! fold correctly matches. (2) The contiguity shaping is the right bias
 //! for "utilized": a text that quotes a contiguous passage of the source
 //! scores strictly higher than one scattering the same tokens through
-//! filler — plain LCS is indifferent to exactly the difference
+//! filler: plain LCS is indifferent to exactly the difference
 //! utilization is about. (3) A single global Myers alignment is
 //! order-anchored: one realigned region reshuffles every Equal op, while
 //! the weighted-LCS fill is a stable, candidate-monotone function of the
-//! token sequences (the max-on-match recurrence — see `grounding_impl`'s
+//! token sequences (the max-on-match recurrence; see `grounding_impl`'s
 //! fill docs: a greedy-run-weighted alignment score, deliberately not the
 //! literal weighted-LCS optimum and not bit-compatible with the official
 //! ROUGE package). (4) The
 //! difflib ratio is symmetric in its denominator (`2*M/(m+n)`), so
-//! "fraction of the source" is not what it measures — the recall
+//! "fraction of the source" is not what it measures: the recall
 //! normalization `f^-1(WLCS / f(|source|))` IS.
 //!
 //! Contract details, pinned in `tests/test_grounding_coverage.py`:
 //! identical `text` and `source` → `1.0` (up to f64 rounding in the DP's
-//! increment accumulation — within `1e-9`, pinned; the recurrence's own
+//! increment accumulation, within `1e-9`, pinned; the recurrence's own
 //! max-on-match spelling is what makes the value monotone in the
 //! candidate, see `grounding_impl`'s fill docs); disjoint or token-free
 //! text → `0.0`; adding source material to the text never lowers the
 //! score (the weighted LCS is monotone in the candidate); empty `source`,
 //! empty `text`, and token-free operands → `0.0` exactly (there are no
-//! tokens to cover — TRACe's ratio is undefined there, `0/0`, and a score
+//! tokens to cover; TRACe's ratio is undefined there, `0/0`, and a score
 //! is required: 0.0, the conservative reading). Cost: the classic
-//! weighted-LCS DP over the two token streams, O(|S|·|T|) time —
-//! the product both operands own, the same class `levenshtein` documents
-//! — with O(min(|S|, |T|)) MEMORY (two reused f64 rows + two run rows,
+//! weighted-LCS DP over the two token streams, O(|S|·|T|) time
+//! (the product both operands own, the same class `levenshtein` documents),
+//! with O(min(|S|, |T|)) MEMORY (two reused f64 rows + two run rows,
 //! never a materialized n·m matrix), bounded on both sides by
 //! `grounding_impl::MAX_TEXT_TOKENS` (at most the first 16384 tokens of
 //! each operand are scanned; a longer operand's tail is not measured,
@@ -582,12 +582,12 @@ pub fn is_grounded_fuzzy(
     Ok(best >= threshold)
 }
 
-/// What fraction of `source`'s tokens does `text` actually utilize — the
+/// What fraction of `source`'s tokens does `text` actually utilize, the
 /// recall twin of [`is_grounded_fuzzy`] (the precision side), the model-free
 /// operationalization of TRACe's uTilization (Friel, Belyi & Sanyal 2024,
-/// RAGBench, §3.2; see the module docs for the metric's choice — ROUGE-W
+/// RAGBench, §3.2; see the module docs for the metric's choice: ROUGE-W
 /// recall, Lin 2004's Equation 15 R factor over the grounding family's
-/// UAX #29 tokenization — and why not a difflib coverage). One float in
+/// UAX #29 tokenization, and why not a difflib coverage). One float in
 /// `[0.0, 1.0]`; identical text and source score `1.0`, disjoint or
 /// token-free operands and either-argument-empty score `0.0` (pinned).
 pub fn grounding_coverage(source: &str, text: &str) -> f64 {
@@ -602,7 +602,7 @@ pub fn grounding_coverage(source: &str, text: &str) -> f64 {
     // Intern both streams into one shared vocabulary of u32 ids: the DP's
     // per-cell compare becomes a machine-word compare (the two-document
     // worst case is ~10^8 cells; a String compare per cell would roughly
-    // double it). Equal normalized forms get equal ids — the fold/NFC
+    // double it). Equal normalized forms get equal ids, the fold/NFC
     // equivalence the tokenizer defines. A nested fn, not a closure, so
     // the key lifetime unifies across the two calls (the map borrows from
     // BOTH norm streams, each outliving it).
@@ -632,7 +632,7 @@ pub fn grounding_coverage(source: &str, text: &str) -> f64 {
     };
     let mut scratch = crate::grounding_impl::Scratch::default();
     let wlcs = crate::grounding_impl::rouge_w_wlcs_ids(rows, width, &mut scratch);
-    // Normalize by the SOURCE's token count — coverage is OF the source —
+    // Normalize by the SOURCE's token count (coverage is OF the source),
     // whichever side the fill happened to iterate. Clamp: the ratio is in
     // [0, 1] by the superadditivity argument the grounding module's docs
     // carry; the clamp keeps the caller-facing invariant airtight through
@@ -1290,7 +1290,7 @@ mod tests {
     fn coverage_of_identical_operands_is_one() {
         for s in [
             "The quick brown fox jumps over the lazy dog.",
-            "café über naïve — 速い茶色の狐",
+            "café über naïve 速い茶色の狐",
             "a",
             "一 二 三 四 五",
         ] {
@@ -1302,7 +1302,7 @@ mod tests {
     #[test]
     fn coverage_of_the_empty_and_token_free_conventions_is_zero() {
         // The pinned degeneracies: no source tokens, no text tokens, or
-        // either operand empty — no coverage to measure, 0.0.
+        // either operand empty: no coverage to measure, 0.0.
         for (s, t) in [
             ("", ""),
             ("", "text"),
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[test]
     fn coverage_matches_a_hand_computed_rouge_w_recall() {
-        // Oracle check: source [a, b, c, d] vs text [a, b] — one contiguous
+        // Oracle check: source [a, b, c, d] vs text [a, b]: one contiguous
         // run of 2, wlcs = f(2) = 2^1.2; R = f^-1(wlcs / f(4)).
         let got = grounding_coverage("a b c d", "a b");
         let f = |k: f64| k.powf(1.2);
@@ -1381,7 +1381,7 @@ mod tests {
 
     #[test]
     fn coverage_stays_in_the_unit_interval_under_hostile_shapes() {
-        // Adversarial pairs: repetitive, one-giant-token, mixed-script —
+        // Adversarial pairs: repetitive, one-giant-token, mixed-script;
         // every score in [0, 1], determinism included.
         let hostile: Vec<(String, String)> = vec![
             ("word ".repeat(5_000), "word ".repeat(2_500)),
@@ -1401,7 +1401,7 @@ mod tests {
     fn coverage_the_token_cap_bounds_both_operands() {
         // The bounded-scan discipline: at most the first MAX_TEXT_TOKENS
         // tokens of each operand are measured, and the denominator is the
-        // SOURCE tokens actually scanned — a source past the cap paired
+        // SOURCE tokens actually scanned; a source past the cap paired
         // with its own leading window still covers fully.
         let unit = "word ";
         let source: String = unit.repeat(30_000);

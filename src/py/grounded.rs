@@ -66,16 +66,16 @@ pub fn is_grounded(
 }
 
 /// `tors.grounding_coverage(source, text)`: what fraction of `source`'s
-/// tokens does `text` actually utilize — the recall twin of
+/// tokens does `text` actually utilize, the recall twin of
 /// `is_grounded` (the precision side), the model-free operationalization
 /// of TRACe's uTilization (Friel, Belyi & Sanyal 2024, RAGBench §3.2).
 /// See `src/grounded_impl.rs`'s module docs for the metric's choice
-/// (ROUGE-W recall — Lin 2004's Equation 15 R factor — over the grounding
+/// (ROUGE-W recall, Lin 2004's Equation 15 R factor, over the grounding
 /// family's UAX #29 tokenization) and why not a difflib coverage.
 ///
 /// Qualification: the WLCS fill is a monotone max-on-match recurrence
 /// (Lin 2004, Eq. 15, with the forced-diagonal branch replaced by max to
-/// preserve candidate monotonicity) — a greedy-run-weighted alignment
+/// preserve candidate monotonicity), a greedy-run-weighted alignment
 /// score, not the literal weighted-LCS optimum. NOT bit-compatible with
 /// the official ROUGE package or rouge-score; the deviation is deliberate
 /// (monotonicity) and verified in tests.
@@ -87,7 +87,7 @@ pub fn is_grounded(
 /// whether the information was genuinely used.
 ///
 /// GIL model: the two argument borrows under the GIL, the whole
-/// tokenize/intern/score pass (O(|S|·|T|) time, O(min(|S|, |T|)) memory —
+/// tokenize/intern/score pass (O(|S|·|T|) time, O(min(|S|, |T|)) memory,
 /// two rows, never an n·m matrix; each operand capped at its first 16384
 /// tokens) under one `py.detach`; the residue is a single float.
 #[pyfunction(signature = (source, text))]

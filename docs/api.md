@@ -2475,24 +2475,24 @@ one-word window and its 4-gram statistics are too sparse against a short
 query.
 
 A qualification that matters when comparing numbers: the WLCS fill runs in
-a **max-on-match spelling** — Lin's Figure 3 forces a match cell to extend
+a **max-on-match spelling**: Lin's Figure 3 forces a match cell to extend
 the diagonal run, and tors replaces that forced-diagonal branch with `max`
 against the skip options (Lin 2004, Eq. 15, with the forced-diagonal branch
 replaced by max to preserve candidate monotonicity). The deviation is
-deliberate: the forced diagonal is NOT monotone in the candidate — a match
+deliberate: the forced diagonal is NOT monotone in the candidate (a match
 cell forced to extend the run can strand accumulated credit when a later
 token re-matches, so a text offered MORE source material could score LESS,
-which would break the recall twin's contract. The max-on-match spelling
+which would break the recall twin's contract). The max-on-match spelling
 restores monotonicity (extending the text never lowers a coverage score,
 pinned under Hypothesis attack), at the cost of compatibility: these scores
 are **not bit-compatible with the official ROUGE package or the
 `rouge-score` PyPI library** (the fills disagree on ~12% of random token
 pairs). And because the DP keeps only two rows, it cannot represent
 Pareto (value, trailing-run) states: the score is the max-on-match
-recurrence — a greedy-run-weighted alignment score — not the literal
+recurrence, a greedy-run-weighted alignment score, not the literal
 weighted-LCS optimum over all monotone matchings (a brute-force oracle
 beats it on rare pairs; also pinned). Both deviations are documented
-semantics, verified in the test suite — not bugs.
+semantics, verified in the test suite, not bugs.
 
 Tokens come from UAX #29 word boundaries (the same segmentation
 `word_bounds` exposes), with one refinement: every CJK character (Han,
@@ -2551,58 +2551,58 @@ def ground_sentences(
 ```
 
 Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
-against `query`, in position order — the bridge primitive a downstream NLI
+against `query`, in position order: the bridge primitive a downstream NLI
 verifier (MiniCheck/SummaC style) consumes. Returns a `SentenceGrounding`
-(a `TypedDict`): `sentences` — one `GroundingSnippet`-shaped entry per
+(a `TypedDict`): `sentences`, one `GroundingSnippet`-shaped entry per
 sentence (`text`, `start`, `end`, `score`), whose offsets are the
 sentence's exact bounds (the tuples `tors.sentence_bounds(text)` returns)
 as Python str (codepoint) indices into the ORIGINAL `text`, so
 `text[start:end]` is exactly `sentence["text"]` for every sentence,
-token-free sentences included — and `score`, the aggregate.
+token-free sentences included, and `score`, the aggregate.
 
 The per-sentence score is the same ROUGE-W F1 the snippet surface ranks
 spans with (see `tors.highlight` above): one tokenization (UAX #29 words,
-CJK per character, case-fold + NFC), one shaping — and the same
+CJK per character, case-fold + NFC), one shaping, and the same
 qualification applies (the monotone max-on-match recurrence, not
 bit-compatible with the official ROUGE package or `rouge-score`). Note the
-argument order: `ground_sentences(text, query)` — the OPPOSITE of
+argument order: `ground_sentences(text, query)`, the OPPOSITE of
 `highlight(query, text)`. The citation unit is the
-sentence — the unit the attribution literature converged on (ALCE's
+sentence, the unit the attribution literature converged on (ALCE's
 snippet-mode baselines measure citation quality per sentence: Gao et al.
-2023, "Enabling Large Language Models to Generate Text with Citations") —
+2023, "Enabling Large Language Models to Generate Text with Citations"),
 and the score is a RANKING signal, not an answerability verdict (Joren et
 al. 2024, "Sufficient Context": whether a context suffices to answer is a
 semantic judgment no lexical overlap score can make). Consumers needing
 the verdict run their NLI model over the top-scored sentences.
 
-The aggregate `score` is the best sentence's F1 — the MAX, not the mean —
+The aggregate `score` is the best sentence's F1 (the MAX, not the mean)
 for three reasons: it is the retrieval signal the bridge needs ("does SOME
-sentence carry this query's evidence" — the argmax over units is exactly
+sentence carry this query's evidence"; the argmax over units is exactly
 how ALCE-style citation selection picks the evidence sentence); it mirrors
 `highlight`'s own aggregate (the best snippet's score), keeping the
-grounding family coherent; and it is stable under irrelevant additions — a
+grounding family coherent; and it is stable under irrelevant additions (a
 long document with one relevant sentence must not read as ungrounded
-because the document is long, which a mean rewards forgetting. The mean is
+because the document is long, which a mean rewards forgetting). The mean is
 deliberately not offered: "how much of this document is about the query"
 is a different question, and `sentence_bounds` + a fold in Python
 composes it trivially from the per-sentence scores.
 
 An empty or token-free `query` scores every sentence `0.0` (the
 segmentation is the answer's shape; the query only drives scores); an
-empty text returns the empty result — degenerate input is a valid answer,
+empty text returns the empty result: degenerate input is a valid answer,
 never an error. `max_chars` bounds each sentence's SCORED window: a
 sentence longer than the budget is scored over its leading
-token-boundary window (at least one token — `highlight`'s documented
+token-boundary window (at least one token, `highlight`'s documented
 floor), while its reported `start`/`end`/`text` still cover the WHOLE
 sentence; the window's exact boundary (where the leading window cuts off)
-is an implementation detail and deliberately not exposed — consumers get
+is an implementation detail and deliberately not exposed: consumers get
 the whole-sentence span and the window's score, which is the contract.
 `None` (the default) scores whole sentences, and `max_chars=0`
 is a `ValueError`. Like every integer parameter in the library,
-`max_chars` takes a plain int (a `bool` is its 0/1 int value — the
+`max_chars` takes a plain int (a `bool` is its 0/1 int value, the
 family-wide convention). Pathological chunks are bounded: at most the first
 16384 text tokens and 128 query terms are scanned (sentences past the cap
-score `0.0`, their offsets and text still exact) — the DP is two reusable
+score `0.0`, their offsets and text still exact); the DP is two reusable
 rows per sentence, never an n·m matrix, and the total work is linear in
 the text at a bounded query width.
 
@@ -2616,7 +2616,7 @@ tors.ground_sentences(
 #                 'end': 52, 'score': 0.44444444444444436},
 #                {'text': 'Replaced.', 'start': 52, 'end': 61, 'score': 0.0}],
 #  'score': 0.44444444444444436}
-# (the middle sentence's score is exactly 4/9 — the same Equation 15 F1
+# (the middle sentence's score is exactly 4/9, the same Equation 15 F1
 # highlight's example computes; the aggregate is the max of the three)
 ```
 
@@ -2627,31 +2627,31 @@ def grounding_coverage(source: str, text: str) -> float: ...
 ```
 
 Grounding recall / source utilization: what fraction of `source`'s tokens
-does `text` actually utilize — the recall twin of `tors.is_grounded`
+does `text` actually utilize, the recall twin of `tors.is_grounded`
 (the precision side: every claim supported). One float in `[0.0, 1.0]`,
 the model-free operationalization of TRACe's uTilization metric (Friel,
 Belyi & Sanyal 2024, "RAGBench: Explainable Benchmark for
 Retrieval-Augmented Generation Systems", §3.2: document utilization =
 `Len(U_i) / Len(d_i)`, the length of the utilized context spans over the
-context's length; Adherence — `is_grounded`'s lane — is the framework's
+context's length; Adherence (`is_grounded`'s lane) is the framework's
 precision metric). Where TRACe's U comes from an annotator's span
 labels, this is the lexical approximation: U is the token overlap of
 `text` with `source`.
 
-The measure is ROUGE-W recall — Lin 2004's Equation 15 recall component
+The measure is ROUGE-W recall, Lin 2004's Equation 15 recall component
 (`f^-1(WLCS / f(|source|))`) over the grounding family's own UAX #29
-tokenization — with the same qualification `highlight`'s scorer carries:
+tokenization, with the same qualification `highlight`'s scorer carries:
 the WLCS fill is the monotone max-on-match spelling (Lin's forced-diagonal
 branch replaced by max, so adding text never lowers coverage), which is
 deliberately NOT bit-compatible with the official ROUGE package or
 `rouge-score`, and it is a greedy-run-weighted alignment score rather than
-the literal weighted-LCS optimum — see the full note under
+the literal weighted-LCS optimum, see the full note under
 `tors.highlight`. It is not a difflib-style character coverage, for the
 same reasons the snippet surface scores ROUGE-W: one tokenization and one
 shaping shared with `highlight`/`ground_sentences`, so the precision and
 recall surfaces never disagree about what a token is (a case-fold or
 NFC/NFD difference matches; a character-level diff would count it
-lost); and the weighted-LCS shaping rewards CONTIGUITY — a text quoting a
+lost); and the weighted-LCS shaping rewards CONTIGUITY (a text quoting a
 contiguous passage of the source outscores one scattering the same
 tokens through filler, which is exactly the "actually utilized" signal
 utilization annotates.
@@ -2659,8 +2659,8 @@ utilization annotates.
 This is a lexical overlap signal, not a semantic one: it measures token
 coverage, not whether the information was genuinely used. Identical
 `text` and `source` are `1.0` (up to f64 rounding of the DP's
-accumulation — within `1e-9`, pinned); disjoint, token-free, or empty
-operands are exactly `0.0` (TRACe's ratio is undefined there — `0/0` —
+accumulation, within `1e-9`, pinned); disjoint, token-free, or empty
+operands are exactly `0.0` (TRACe's ratio is undefined there, `0/0`,
 and `0.0` is the conservative reading; pinned in
 `tests/test_grounding_coverage.py`). Cost: the classic weighted-LCS DP,
 `O(|S|·|T|)` time with `O(min(|S|, |T|))` memory (two reused rows,

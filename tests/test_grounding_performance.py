@@ -123,7 +123,7 @@ def _batch_wall(query: str, text: str) -> float:
 
 class TestGroundSentencesWall:
     """The batch twin of the highlight lane: ground_sentences' documented
-    cost is O(sentences x rouge_w DP) — the total DP work is |Q| x N (N =
+    cost is O(sentences x rouge_w DP): the total DP work is |Q| x N (N =
     the text's tokens, capped at 16384), linear in the text at a bounded
     query width, one reused scratch never wider than the longest sentence
     (src/grounding_impl.rs). Same machine-speed-immune ratio gates, same
@@ -151,7 +151,7 @@ class TestGroundSentencesWall:
     def test_the_batch_realistic_shape_completes_inside_the_thread_hop_budget(self) -> None:
         # 60-token query x 2k-token chunk, every sentence scored: the
         # consumer's per-document shape (the NLI bridge's own input).
-        # Generous absolute ceiling on purpose — the linear gate above
+        # Generous absolute ceiling on purpose; the linear gate above
         # carries the regression sensitivity; this catches a qualitative
         # break (an accidental whole-text DP or per-sentence reallocation).
         wall = _batch_wall(_QUERY, _latin_chunk(2_000))

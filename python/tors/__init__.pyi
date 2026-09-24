@@ -40,8 +40,8 @@ class ScrubPiiReport(TypedDict):
 
 # One `highlight` snippet: CHARACTER offsets (`start`/`end`, Python
 # codepoint indices) into the ORIGINAL text argument — `text[start:end]`
-# is exactly `text` — and the span's ROUGE-W-shaped F1 against the query
-# (`score`, in [0.0, 1.0]; the monotone max-on-match variant — see the
+# is exactly `text`, and the span's ROUGE-W-shaped F1 against the query
+# (`score`, in [0.0, 1.0]; the monotone max-on-match variant, see the
 # note on `highlight` below).
 class GroundingSnippet(TypedDict):
     text: str
@@ -58,9 +58,9 @@ class GroundingResult(TypedDict):
 
 # `ground_sentences`' shape: one GroundingSnippet-shaped entry per UAX #29
 # sentence of the text, in position order (its start/end are the sentence's
-# bounds — the exact tuples `tors.sentence_bounds(text)` returns — so
+# bounds, the exact tuples `tors.sentence_bounds(text)` returns, so
 # text[start:end] is exactly `text`, token-free sentences included), and
-# `score` the best sentence's score — the aggregate is the MAX, not the
+# `score` the best sentence's score: the aggregate is the MAX, not the
 # mean (0.0 when `sentences` is empty).
 class SentenceGrounding(TypedDict):
     sentences: list[GroundingSnippet]
@@ -756,19 +756,19 @@ def is_grounded(
 ) -> bool: ...
 
 # The recall twin of is_grounded (the precision side): what fraction of the
-# SOURCE's tokens does `text` actually utilize — the model-free
+# SOURCE's tokens does `text` actually utilize, the model-free
 # operationalization of TRACe's uTilization metric (Friel, Belyi & Sanyal
 # 2024, RAGBench §3.2: utilization = the length of the utilized context
 # spans over the context's length). Measured as ROUGE-W recall (Lin 2004's
 # Equation 15 R factor) over the grounding family's own UAX #29
-# tokenization (case-fold + NFC, CJK per character) — one tokenization and
+# tokenization (case-fold + NFC, CJK per character): one tokenization and
 # one shaping shared with `highlight`/`ground_sentences`, so the precision
 # and recall surfaces never disagree about what a token is; a text quoting
 # a CONTIGUOUS passage of the source outscores one scattering the same
 # tokens through filler (the weighted-LCS shaping). Qualification: the WLCS
 # fill is a ROUGE-W-shaped monotone max-on-match recurrence (Lin 2004,
 # Eq. 15, with the forced-diagonal branch replaced by max to preserve
-# candidate monotonicity) — a greedy-run-weighted alignment score, not the
+# candidate monotonicity), a greedy-run-weighted alignment score, not the
 # literal weighted-LCS optimum. NOT bit-compatible with the official ROUGE
 # package or rouge-score; the deviation is deliberate (monotonicity) and
 # verified in tests. A lexical overlap
@@ -796,7 +796,7 @@ def grounding_coverage(source: str, text: str) -> float: ...
 # best snippet's score. Qualification: the WLCS fill is a ROUGE-W-shaped
 # monotone max-on-match recurrence (Lin 2004, Eq. 15, with the
 # forced-diagonal branch replaced by max to preserve candidate
-# monotonicity) — a greedy-run-weighted alignment score, not the literal
+# monotonicity), a greedy-run-weighted alignment score, not the literal
 # weighted-LCS optimum. NOT bit-compatible with the official ROUGE package
 # or rouge-score; the deviation is deliberate (monotonicity) and verified
 # in tests. Empty/token-free query or text, and
@@ -819,30 +819,30 @@ def highlight(
 
 # Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
 # against `query` with the same ROUGE-W F1 the snippet surface ranks spans
-# with (the same qualified monotone max-on-match variant — see `highlight`'s
+# with (the same qualified monotone max-on-match variant, see `highlight`'s
 # note; not bit-compatible with the official ROUGE package), in position
-# order — the bridge primitive a downstream NLI verifier
+# order, the bridge primitive a downstream NLI verifier
 # (MiniCheck/SummaC style) consumes. Note the argument order:
-# `ground_sentences(text, query)` — the OPPOSITE of `highlight(query,
+# `ground_sentences(text, query)`, the OPPOSITE of `highlight(query,
 # text)`. The citation unit is the sentence (the
 # ALCE baselines' unit: Gao et al. 2023); the score is a RANKING signal, not
 # an answerability verdict (Joren et al. 2024, "Sufficient Context": a
-# lexical overlap cannot judge sufficiency — run a model over the
+# lexical overlap cannot judge sufficiency, run a model over the
 # top-scored sentences for that). The aggregate `score` is the best
 # sentence's F1 (the MAX, not the mean: the retrieval signal the bridge
 # needs, `highlight`'s own aggregate shape, and stable under irrelevant
-# additions — one evidence sentence in a long document must not read as
+# additions: one evidence sentence in a long document must not read as
 # ungrounded because the document is long). An empty/token-free query
 # scores every sentence 0.0 (the segmentation is the answer's shape; the
-# query only drives scores); an empty text returns the empty result —
+# query only drives scores); an empty text returns the empty result,
 # degenerate input is a valid answer, never an error. `max_chars` bounds
 # each sentence's SCORED window (a longer sentence is scored over its
 # leading token-boundary window, at least one token; its reported span
-# still covers the whole sentence — the exact window boundary is an
+# still covers the whole sentence, the exact window boundary is an
 # implementation detail, deliberately not exposed); `None` scores whole
 # sentences, 0 is a
 # ValueError. Like every integer parameter in the library, `max_chars`
-# takes a plain int (a bool is its 0/1 int value — the family-wide
+# takes a plain int (a bool is its 0/1 int value, the family-wide
 # convention). Pathological chunks are bounded: at most the first 16384
 # text tokens and 128 query terms are scanned (sentences past the cap score
 # 0.0, their offsets and text still exact).

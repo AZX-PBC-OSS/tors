@@ -156,19 +156,19 @@
 //! shared with `highlight`'s expansion step, so the batch's offsets are
 //! by construction those bounds), score EVERY sentence against `query`
 //! with the same ROUGE-W F1, and return every sentence with its score in
-//! position order. The citation unit is the sentence — the unit the
-//! attribution literature converged on (ALCE: Gao et al. 2023, "Enabling
+//! position order. The citation unit is the sentence (the unit the
+//! attribution literature converged on; ALCE: Gao et al. 2023, "Enabling
 //! Large Language Models to Generate Text with Citations"; see the
-//! candidate-expansion step below for how `highlight` already uses it) —
+//! candidate-expansion step below for how `highlight` already uses it),
 //! and the per-sentence score is a RANKING signal, not an answerability
 //! verdict (Joren et al. 2024, "Sufficient Context": sufficiency is a
-//! semantic judgment a lexical overlap cannot make — the honest-limitations
+//! semantic judgment a lexical overlap cannot make, the honest-limitations
 //! line the highlight docs carry applies verbatim here; consumers needing
 //! the verdict run their NLI model over the top-scored sentences). The
 //! aggregate is the MAX per-sentence score, not the mean: it is the
 //! retrieval signal the bridge needs ("does SOME sentence carry the
 //! evidence"), it mirrors `highlight`'s best-snippet aggregate, and it is
-//! stable under irrelevant additions — see [`ground_sentences`]'s docs for
+//! stable under irrelevant additions, see [`ground_sentences`]'s docs for
 //! the full justification.
 //!
 //! # Token normalization
@@ -405,24 +405,24 @@ fn shape_inv(x: f64) -> f64 {
 ///
 /// Recurrence (Lin 2004 §3.2's WLCS fill, in its max-on-match spelling):
 /// a match extends the current contiguous run `l`, crediting
-/// `f(l) - f(l-1)` — but only when the extension actually beats the skip
+/// `f(l) - f(l-1)`, but only when the extension actually beats the skip
 /// options, `max(cell above, cell to the left)`; a non-match takes the
 /// better of those two with the run reset. The max is not decoration:
 /// Lin's Figure 3 spells the forced-diagonal variant (a match cell ALWAYS
-/// extends the run), and that spelling is not monotone in the candidate —
+/// extends the run), and that spelling is not monotone in the candidate:
 /// a forced diagonal can strand accumulated credit when a later token
 /// re-matches (the coverage fuzz target caught a score DROPPING when the
 /// text gained source material: `[o, o]` scored against `[o, o, uua, o]`
 /// read 2.0 off the last cell where the optimal alignment held 2.297).
-/// A scoring function offered MORE evidence cannot report LESS — the
+/// A scoring function offered MORE evidence cannot report LESS: the
 /// max-on-match spelling restores that (it computes the max-on-match
 /// recurrence, a greedy-run-weighted alignment score, NOT the literal
 /// weighted-LCS optimum over alignments: the two-row DP cannot represent
 /// Pareto (value, trailing-run) states, so a brute-force oracle beats it on
-/// rare inputs — a documented, deliberate deviation, pinned in the test
+/// rare inputs, a documented, deliberate deviation, pinned in the test
 /// suite), and it reduces to Figure 3's value on every
 /// contiguous-run shape, which is what the shaping rewards. Only the
-/// score matters (never the alignment — see the module docs), so two
+/// score matters (never the alignment; see the module docs), so two
 /// rows suffice; no allocation is proportional to `q.len() * c.len()`.
 fn rouge_w_f1(q: &[String], c: &[&str], scratch: &mut Scratch) -> f64 {
     if q.is_empty() || c.is_empty() {
@@ -433,7 +433,7 @@ fn rouge_w_f1(q: &[String], c: &[&str], scratch: &mut Scratch) -> f64 {
         return 0.0;
     }
     // Lin 2004's Equation 15: the weighted score normalizes through the
-    // shaping function's INVERSE — R = f^-1(WLCS / f(m)) — not through f
+    // shaping function's INVERSE, R = f^-1(WLCS / f(m)), not through f
     // itself. f^-1 is what keeps the ratio in [0, 1] (WLCS <= f(m) by
     // superadditivity, so WLCS/f(m) <= 1 and f^-1 is monotone); applying f
     // instead over-scores long matches past 1.0 (the fuzz target caught
@@ -444,13 +444,13 @@ fn rouge_w_f1(q: &[String], c: &[&str], scratch: &mut Scratch) -> f64 {
     // with: the F1 of two factors in [0, 1] is in [0, 1] mathematically,
     // but the DP's increment accumulation can round a full-match score to
     // 1 + 2e-16 (the fuzz target caught exactly that under the
-    // max-on-match spelling), and the caller-facing invariant — every
-    // score in [0.0, 1.0] — must be airtight.
+    // max-on-match spelling), and the caller-facing invariant, every
+    // score in [0.0, 1.0], must be airtight.
     (2.0 * r * p / (r + p)).clamp(0.0, 1.0)
 }
 
 /// Equation 15's recall normalization alone, `f^-1(WLCS / f(|q|))`, from a
-/// caller-computed WLCS — `grounded_impl::grounding_coverage`'s denominator
+/// caller-computed WLCS, `grounded_impl::grounding_coverage`'s denominator
 /// step (it drives [`rouge_w_wlcs`] over interned id streams and normalizes
 /// through here, so the shaping constants live in exactly one place).
 pub(crate) fn rouge_w_recall_from_wlcs(q_len: usize, wlcs: f64) -> f64 {
@@ -461,23 +461,23 @@ pub(crate) fn rouge_w_recall_from_wlcs(q_len: usize, wlcs: f64) -> f64 {
 }
 
 /// The weighted-LCS fill over interned token-id streams (u32 machine-word
-/// compares): `grounded_impl::grounding_coverage`'s engine — it needs the
+/// compares): `grounded_impl::grounding_coverage`'s engine: it needs the
 /// raw WLCS (to normalize by the SOURCE's own length, not the id call's
 /// first argument), not the pre-shaped recall.
 pub(crate) fn rouge_w_wlcs_ids(q: &[u32], c: &[u32], scratch: &mut Scratch) -> f64 {
     rouge_w_wlcs(q, c, scratch)
 }
 
-/// The weighted-LCS fill itself (the recurrence above — Lin 2004 §3.2's
+/// The weighted-LCS fill itself (the recurrence above, Lin 2004 §3.2's
 /// WLCS fill in the max-on-match spelling, see [`rouge_w_f1`]'s docs for
 /// why not Figure 3's forced diagonal), shared by the F1 and recall
 /// spellings: two score rows + one run-length row, each
-/// `c.len() + 1` wide, over `q`'s rows — the caller's reusable scratch, so
+/// `c.len() + 1` wide, over `q`'s rows, the caller's reusable scratch, so
 /// repeated calls never reallocate. Generic over the token pair because
 /// two callers score with it: the in-module spellings pass the query's
 /// normalized terms (`String`) against a candidate's (`&str`), and
 /// `grounded_impl::grounding_coverage` passes two interned id streams
-/// (`u32` — machine-word compares, the per-cell cost that matters at a
+/// (`u32`; machine-word compares, the per-cell cost that matters at a
 /// two-document DP's ~10^8 cells). The recurrence only ever compares a
 /// row token to a width token, so `X: PartialEq<Y>` is the whole story.
 fn rouge_w_wlcs<X, Y>(q: &[X], c: &[Y], scratch: &mut Scratch) -> f64
@@ -502,7 +502,7 @@ where
                 let ext = scratch.score_a[j] + shape(run as f64) - shape(run as f64 - 1.0);
                 if up > ext || left > ext {
                     // The skip options beat the run extension: take them
-                    // and reset the run (the max-on-match spelling — see
+                    // and reset the run (the max-on-match spelling; see
                     // `rouge_w_f1`'s docs for why the forced diagonal is
                     // not an option).
                     scratch.run_b[j + 1] = 0;
@@ -526,7 +526,7 @@ where
 /// The reused DP scratch (see [`rouge_w_f1`]): allocated once per
 /// `highlight` call, reused across every candidate. `pub(crate)` so
 /// `grounded_impl`'s coverage core can drive the same fill with its own
-/// scratch — the fields stay private to this module, the fill is the only
+/// scratch, the fields stay private to this module, the fill is the only
 /// thing that touches them.
 #[derive(Default)]
 pub(crate) struct Scratch {
@@ -585,7 +585,7 @@ fn token_strictly_after(toks: &[Token], cp: usize) -> usize {
 }
 
 /// The text's UAX #29 sentence spans: `(cp_start, cp_end, byte_start,
-/// byte_end)` per sentence, in position order — the char spans are what
+/// byte_end)` per sentence, in position order, the char spans are what
 /// cross the FFI (Python codepoint indices), the byte spans what slice the
 /// `&str` for the sentence's text without re-indexing. The same
 /// segmentation `sentence_bounds` exposes (and `highlight`'s
@@ -767,7 +767,7 @@ pub fn highlight(query: &str, text: &str, max_snippets: usize, max_chars: usize)
 }
 
 /// One scored sentence of the batch: `text[start:end]` of the original
-/// text (CHARACTER offsets, codepoint indices — the sentence's exact
+/// text (CHARACTER offsets, codepoint indices, the sentence's exact
 /// bounds, so slicing the original always round-trips) plus the sentence's
 /// ROUGE-W F1 against the query (`score`, in `[0.0, 1.0]`; `0.0` when the
 /// sentence shares no token with the query).
@@ -780,7 +780,7 @@ pub struct SentenceScore {
 }
 
 /// The batch result: EVERY UAX #29 sentence of `text` in position order,
-/// each with its score, and the aggregate (`max` — see [`ground_sentences`]'s
+/// each with its score, and the aggregate (`max`, see [`ground_sentences`]'s
 /// docs).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentenceGrounding {
@@ -788,7 +788,7 @@ pub struct SentenceGrounding {
     pub score: f64,
 }
 
-/// The grounding tokenizer's normalized token stream as plain strings —
+/// The grounding tokenizer's normalized token stream as plain strings,
 /// `grounded_impl::grounding_coverage`'s input (the coverage core lives
 /// beside the difflib verdict it twins but scores over the SAME
 /// tokenization the grounding family scores with, so the three surfaces
@@ -798,26 +798,26 @@ pub(crate) fn normalized_tokens(text: &str) -> Vec<String> {
     tokens(text).into_iter().map(|t| t.norm).collect()
 }
 
-/// Score EVERY UAX #29 sentence of `text` against `query` — the batch
+/// Score EVERY UAX #29 sentence of `text` against `query`: the batch
 /// bridge primitive a downstream NLI verifier (MiniCheck/SummaC-style)
 /// consumes: per-sentence `{start, end, text, score}` in position order
 /// (offsets are CHARACTER indices into `text`, `text[s.start:s.end] ==
 /// s.text` exactly) plus an aggregate score. Citation unit = sentence, the
 /// ALCE baselines' own unit (Gao et al. 2023, "Enabling Large Language
 /// Models to Generate Text with Citations"); the per-sentence score is the
-/// same ROUGE-W F1 the snippet surface ranks spans with (Lin 2004 — see
+/// same ROUGE-W F1 the snippet surface ranks spans with (Lin 2004; see
 /// the module docs).
 ///
 /// # Aggregate policy: MAX, not mean
 ///
 /// The aggregate is the best sentence's F1 (`0.0` when there are no
 /// sentences or the query matches nothing). Three reasons, in decreasing
-/// weight: (1) it is the retrieval signal the downstream consumer needs —
+/// weight: (1) it is the retrieval signal the downstream consumer needs:
 /// "does SOME sentence carry this query's evidence" is the question an
 /// NLI bridge answers per sentence, and the max is exactly the ranking
 /// key that picks the evidence sentence; (2) it mirrors [`highlight`]'s
 /// own aggregate (the best snippet's score), keeping the family coherent;
-/// (3) it is stable under irrelevant additions — a long document with one
+/// (3) it is stable under irrelevant additions: a long document with one
 /// relevant sentence must not read as ungrounded because the document is
 /// long, which a mean rewards forgetting (and ALCE's sentence-level
 /// citation selection is likewise a max/argmax over units, not an
@@ -830,21 +830,21 @@ pub(crate) fn normalized_tokens(text: &str) -> Vec<String> {
 ///
 /// Total DP work is `sum_i |Q| * |s_i| <= |Q| * N` (N = the text's tokens,
 /// capped at [`MAX_TEXT_TOKENS`]; the query capped at [`MAX_QUERY_TOKENS`])
-/// — linear in the text at a bounded query width, one reusable
+/// is linear in the text at a bounded query width, one reusable
 /// [`Scratch`] never wider than the longest sentence's token count. A
 /// sentence whose tokens fall past the cap (a pathological single-token-
-/// flood chunk) scores `0.0` — its tokens are not evidence for this call,
-/// the same discipline `highlight` applies — while its offsets and text
+/// flood chunk) scores `0.0`: its tokens are not evidence for this call,
+/// the same discipline `highlight` applies, while its offsets and text
 /// stay exact. `max_chars` (when set) bounds the SCORED WINDOW of a
 /// sentence: a sentence longer than the budget is scored over its leading
 /// token-boundary window that fits (at least one token, `highlight`'s
 /// documented floor), its returned `start`/`end`/`text` still covering the
-/// WHOLE sentence — the budget bounds the DP, never the report. A value of
+/// WHOLE sentence: the budget bounds the DP, never the report. A value of
 /// 0 is rejected at the binding; `None` (the default) scores whole
 /// sentences.
 ///
 /// Empty/token-free `query`, or empty `text`, returns the matching empty
-/// shape (no sentences / all-zero scores) — degenerate input is a valid
+/// shape (no sentences / all-zero scores): degenerate input is a valid
 /// answer, never an error, the same convention [`highlight`] pins.
 pub fn ground_sentences(query: &str, text: &str, max_chars: Option<usize>) -> SentenceGrounding {
     let mut sentences: Vec<SentenceScore> = Vec::new();
@@ -1208,7 +1208,7 @@ mod tests {
         // Figure 3 spelling (a match cell FORCES the diagonal) reads
         // [o, o] vs [o, o, uua, o] off the last cell as two stranded
         // single matches (wlcs 2.0) where the optimal alignment holds one
-        // run of two (wlcs f(2) = 2.297) — a LONGER candidate scoring
+        // run of two (wlcs f(2) = 2.297), a LONGER candidate scoring
         // LESS. The max-on-match fill restores the optimum and with it
         // candidate-monotonicity: the identical-pair wlcs f(2) survives
         // appending tokens untouched.
@@ -1330,7 +1330,7 @@ mod tests {
     #[test]
     fn sentence_spans_match_the_published_sentence_bounds() {
         // The batch's offsets ARE `sentence_bounds`' tuples, by construction
-        // (the shared `sentence_spans` builder) — pinned against the
+        // (the shared `sentence_spans` builder), pinned against the
         // segmentation surface the docs publish.
         let text = "One. Two!! Three\r\nfour. 3.4 percent stays one.";
         let bounds = crate::segmentation_impl::sentence_bounds(text);
@@ -1444,7 +1444,7 @@ mod tests {
         // The family identity on the full-containment shape: a candidate
         // holding EXACTLY the query's tokens has precision 1, so F1 equals
         // recall there (a candidate with extra tokens deflates precision
-        // and F1 below recall — the F1/recall gap is the precision cost).
+        // and F1 below recall; the F1/recall gap is the precision cost).
         let exact: Vec<&str> = q.to_vec();
         let mut s = Scratch::default();
         let f1 = rouge_w_f1(

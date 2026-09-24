@@ -124,7 +124,7 @@ fn bench_grounding(c: &mut Criterion) {
     // --- ground_sentences: the per-sentence batch (the NLI bridge's own
     // input shape). Same chunks as the highlight group (the batch scores
     // EVERY sentence, so the per-chunk cells are the cost shape); the
-    // no-overlap cell (zero anchors anywhere — every sentence scores 0.0,
+    // no-overlap cell (zero anchors anywhere; every sentence scores 0.0,
     // the tokenization+segmentation floor) and a max_chars-clamped cell
     // (the scored-window budget at its most aggressive) complete the
     // family's coverage.

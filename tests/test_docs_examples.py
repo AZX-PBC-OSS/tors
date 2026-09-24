@@ -576,7 +576,7 @@ class TestGroundingBatchExamples:
                     "text": "The bushing torque spec was 42 Nm. ",
                     "start": 17,
                     "end": 52,
-                    # exactly 4/9 — the same Equation 15 F1 highlight's
+                    # exactly 4/9, the same Equation 15 F1 highlight's
                     # example computes
                     "score": 0.44444444444444436,
                 },

@@ -3158,9 +3158,9 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
 
 def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
     """The grounding batch's GIL claim, pinned directly (the chunk-family
-    cell's shape): the whole segment/tokenize/score pass — sentence
-    segmentation, the grounding tokenizer, and every sentence's ROUGE-W DP
-    — runs under one ``py.detach``, and the GIL-held residue is the
+    cell's shape): the whole segment/tokenize/score pass (sentence
+    segmentation, the grounding tokenizer, and every sentence's ROUGE-W DP)
+    runs under one ``py.detach``, and the GIL-held residue is the
     O(sentences) 4-key dict marshalling (the ``word_bounds`` list-shape
     class; ~222k sentences at 12 MiB of the chatlog corpus, the
     sentence_bounds cell's segment density).
@@ -3168,14 +3168,14 @@ def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
     Ceiling-only (``ratio_budget=None``, the chunk-family precedent): the
     sentence dicts' marshalling is the family's documented residue class,
     and the walls sit where a detach regression (the whole pass held)
-    blows the 100ms ceiling in every sample — the ceiling alone is the
+    blows the 100ms ceiling in every sample; the ceiling alone is the
     detach pin. The red side is asserted mechanically by the module's
     shared harness: a GIL-held whole pass holds at ratio ~1.0.
 
     Corpus size 3 MiB, deliberately under the suite's 12 MiB default:
-    the per-sentence residue is a 4-KEY dict (~0.7-0.8µs each — a hash
+    the per-sentence residue is a 4-KEY dict (~0.7-0.8µs each, a hash
     table, not a 2-tuple), so at 12 MiB of the chatlog corpus (~222k
-    sentences) the marshalling alone is ~170ms — past the 100ms ceiling,
+    sentences) the marshalling alone is ~170ms, past the 100ms ceiling,
     a budget the residue can never meet (the sentence_bounds list cell's
     2-tuples are ~5x cheaper per element). At 3 MiB (~55k sentences,
     measured ~40-50ms worst gaps of ~400ms walls: the ping floor plus
@@ -3194,12 +3194,12 @@ def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
 
 def test_grounding_coverage_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
     """The coverage twin's GIL claim: the whole tokenize/intern/score pass
-    under one ``py.detach``, the residue a single float — no marshalling
+    under one ``py.detach``, the residue a single float: no marshalling
     class at all (the ``utf8_is_valid`` extreme point, one axis over).
 
     Ceiling-only with an honest caveat, recorded: the core is the classic
     O(|S|·|T|) weighted-LCS DP (``src/grounded_impl.rs``'s docs), so the
-    wall at 12 MiB × 12 MiB operands is seconds — the shape the aio twin
+    wall at 12 MiB × 12 MiB operands is seconds, the shape the aio twin
     (and the perf lane's budgets) exist for. The DP's own token caps (the
     first 16384 tokens of each operand) keep the wall bounded at ~10^8
     cells, and a detach regression holds that whole wall against the

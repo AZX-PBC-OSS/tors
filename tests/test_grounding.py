@@ -102,8 +102,8 @@ class TestScoring:
     @given(text=_ANY_TEXT, query=_ANY_QUERY)
     def test_a_returned_snippet_always_contains_a_query_term(self, text: str, query: str) -> None:
         result = highlight(query, text, max_snippets=3, max_chars=400)
-        # The oracle is the tokenizer's OWN notion of a term — tors.word_bounds
-        # (UAX #29), the exact segmentation the scorer runs on — not a Python
+        # The oracle is the tokenizer's OWN notion of a term: tors.word_bounds
+        # (UAX #29), the exact segmentation the scorer runs on, not a Python
         # regex: `\w+` glues "0¼" into one term while UAX #29 splits 0|¼
         # (U+00BC is WB=Other), and every such divergence is a false oracle
         # failure.  Segments are case-folded NFC to mirror the matcher.
@@ -128,9 +128,10 @@ class TestScoring:
         assert result == {"snippets": [], "score": 0.0}
 
     def test_cjk_range_punctuation_is_token_free(self) -> None:
-        # Red-team P0, green pin: CJK-range punctuation (U+30FB middle dot,
-        # U+3099) is dropped by the tokenizer's no-alphanumeric rule like any
-        # other punctuation — token-free operands highlight nothing at 0.0.
+        # Green pin: CJK-range punctuation (U+30FB middle dot, U+3099) is
+        # token-free under both tokenizer branches: the no-alphanumeric rule
+        # drops it like any other punctuation, so token-free operands
+        # highlight nothing at 0.0.
         for text in ["・", "\u3099", "・。", "。、", "「」", "〜"]:
             assert not any(ch.isalnum() for ch in text), repr(text)
             assert highlight(text, text) == {"snippets": [], "score": 0.0}, repr(text)

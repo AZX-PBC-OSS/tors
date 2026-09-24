@@ -380,12 +380,12 @@ class TestRetrievalCeilingScaling:
 
 # --- ground_sentences / grounding_coverage: the grounding batch -------------
 #
-# ground_sentences' documented cost is O(sentences x rouge_w DP) — the total
+# ground_sentences' documented cost is O(sentences x rouge_w DP): the total
 # DP work is |Q| x N (N = the text's tokens, capped at 16384), linear in the
 # text at a bounded query width. grounding_coverage's documented cost is the
 # classic O(|S| x |T|) weighted-LCS DP (its own docs): time grows with the
 # PRODUCT of the operands, memory with the MINIMUM (two rows, never an n*m
-# matrix) — the product axis is pinned at its documented 4x-per-doubling
+# matrix), the product axis is pinned at its documented 4x-per-doubling
 # band, the one-sided axis (doubling one operand only) at the linear gate.
 
 
@@ -412,7 +412,7 @@ class TestGroundingBatchScaling:
     @pytest.mark.timing
     def test_coverage_one_sided_doubling_stays_linear(self) -> None:
         """Doubling the TEXT (the candidate stream) at a fixed source:
-        the DP's rows double, the width is fixed — measured ~2x, gate 3.0x
+        the DP's rows double, the width is fixed (measured ~2x, gate 3.0x
         per doubling."""
         source = "word " * 4_000
         small = _min_wall_ms(lambda: tors.grounding_coverage(source, "word " * 2_000))
@@ -422,7 +422,7 @@ class TestGroundingBatchScaling:
     @pytest.mark.timing
     def test_coverage_two_sided_doubling_stays_at_the_product(self) -> None:
         """Doubling BOTH operands (4x the DP cells): measured ~4x, gate
-        5.0x per doubling — the documented quadratic-product time class,
+        5.0x per doubling, the documented quadratic-product time class,
         pinned so an accidental CUBIC formulation (per-cell reallocation,
         an n·m matrix) blows through."""
         small = _min_wall_ms(lambda: _coverage_shape(2_000))
