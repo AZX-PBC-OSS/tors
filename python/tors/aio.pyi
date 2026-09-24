@@ -11,7 +11,7 @@ and checked against the sync stub by ``tests/test_aio.py``.
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from tors import CompiledLemmaDict, RepairAction, ScrubPiiReport, StemmerLanguage
+from tors import CompiledLemmaDict, GroundingResult, RepairAction, ScrubPiiReport, StemmerLanguage
 
 async def normalize(text: str) -> str: ...
 async def finalize(text: str) -> tuple[str, str]: ...
@@ -113,6 +113,13 @@ async def is_grounded(
     threshold: float = 0.85,
     deadline_ms: float | None = None,
 ) -> bool: ...
+async def highlight(
+    query: str,
+    text: str,
+    *,
+    max_snippets: int = 3,
+    max_chars: int = 400,
+) -> GroundingResult: ...
 async def similarity_ratio(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
 async def get_close_matches(
     word: str,

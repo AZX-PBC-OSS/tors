@@ -25,6 +25,7 @@ pub mod fence;
 pub mod forms;
 pub mod fuzzy;
 pub mod grounded;
+pub mod grounding;
 pub mod hash;
 pub mod html;
 pub mod json_repair;

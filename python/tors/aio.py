@@ -127,6 +127,7 @@ _WRAPPED = (
     "finalize_utf8",
     "find_patterns",
     "get_close_matches",
+    "highlight",
     "is_grounded",
     "jaro",
     "jaro_winkler",
