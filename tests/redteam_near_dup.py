@@ -30,7 +30,6 @@ import asyncio
 import random
 import subprocess
 import sys
-import time
 import unicodedata
 from itertools import product
 from time import monotonic
@@ -119,7 +118,7 @@ def oracle_pair_dup(a: str, b: str, threshold: float, method: str) -> bool:
     if method == "minhash":
         sa = tors.minhash_signature(fold(a), num_perm=128, shingle_size=3, seed=0)
         sb = tors.minhash_signature(fold(b), num_perm=128, shingle_size=3, seed=0)
-        return sum(x == y for x, y in zip(sa, sb)) / 128 >= threshold
+        return sum(x == y for x, y in zip(sa, sb, strict=True)) / 128 >= threshold
     raise AssertionError(method)
 
 
@@ -130,7 +129,11 @@ def oracle_dedup(texts: list[str], threshold: float, method: str) -> dict:
     groups: list[list[int]] = []
     for i, text in enumerate(texts):
         claim = next(
-            (ki for ki, rep in enumerate(kept) if oracle_pair_dup(text, texts[rep], threshold, method)),
+            (
+                ki
+                for ki, rep in enumerate(kept)
+                if oracle_pair_dup(text, texts[rep], threshold, method)
+            ),
             None,
         )
         if claim is None:
@@ -347,7 +350,10 @@ class TestShingleOracleDifferential:
 
     def test_wide_widths_on_random_pairs_agree_exactly(self) -> None:
         rng = random.Random(7)
-        pool = [" ".join(rng.choice(BATTERY[10:30]) for _ in range(rng.randint(1, 4))) for _ in range(30)]
+        pool = [
+            " ".join(rng.choice(BATTERY[10:30]) for _ in range(rng.randint(1, 4)))
+            for _ in range(30)
+        ]
         for width in [1, 4, 7, 12]:
             for _ in range(150):
                 a, b = rng.choice(pool), rng.choice(pool)
@@ -368,7 +374,11 @@ class TestShingleOracleDifferential:
         # policy, pinned against the oracle (which does the same).
         assert shingle_tuples("ﬁle", 1) == {("ﬁle",)}
         assert shingle_tuples("file", 1) == {("file",)}
-        assert tors.shingle_jaccard("ﬁle ﬁn", "file fin", width=1) == oracle_jaccard("ﬁle ﬁn", "file fin", width=1) == 0.0
+        assert (
+            tors.shingle_jaccard("ﬁle ﬁn", "file fin", width=1)
+            == oracle_jaccard("ﬁle ﬁn", "file fin", width=1)
+            == 0.0
+        )
 
     def test_turkish_and_cedilla_rows_match_the_fold_oracle(self) -> None:
         # The core's fold observed through the merge probe (threshold
@@ -513,7 +523,9 @@ class TestDedupOracleDifferential:
                 len(tors.dedup_near_dup(texts, threshold=t, method=method)["dropped"])
                 for t in ladder
             ]
-            assert all(b <= a for a, b in zip(counts, counts[1:])), (method, texts, counts)
+            assert all(
+                b <= a for a, b in zip(counts, counts[1:], strict=False)
+            ), (method, texts, counts)
 
 
 class TestThresholdExtremesAndBoundaries:
@@ -550,15 +562,17 @@ class TestThresholdExtremesAndBoundaries:
         assert tors.dedup_near_dup([base, upper], threshold=1.0, method="simhash")["kept"] == [0]
         # And a differing fingerprint does NOT merge at 1.0.
         other = "a completely different document about volcanic rock"
-        if tors.simhash_distance(tors.simhash64(fold(base)), tors.simhash64(fold(other))) > 0:
-            assert tors.dedup_near_dup([base, other], threshold=1.0, method="simhash")["kept"] == [0, 1]
+        d = tors.simhash_distance(tors.simhash64(fold(base)), tors.simhash64(fold(other)))
+        if d > 0:
+            kept = tors.dedup_near_dup([base, other], threshold=1.0, method="simhash")["kept"]
+            assert kept == [0, 1]
 
     def test_minhash_boundary_inclusivity(self) -> None:
         # Identical signatures agree on all 128 positions: dup at any
         # threshold incl. 1.0; a one-position difference is 127/128 and
         # must be refused at threshold just above 127/128, accepted at
         # exactly 127/128.
-        a, b = "the lighthouse keeper walked the stone steps", "compiler backends over graphs"
+        a = "the lighthouse keeper walked the stone steps"
         assert tors.dedup_near_dup([a, a], threshold=1.0, method="minhash")["kept"] == [0]
         sig_a = tors.minhash_signature(fold(a), num_perm=128, shingle_size=3, seed=0)
         assert len(set(sig_a)) > 64  # sanity: the corpus fixture is not degenerate
@@ -583,12 +597,16 @@ class TestOrderSensitivityPinned:
         assert tors.shingle_jaccard(self.A, self.C, width=w) == 0.0
 
     def test_order_changes_which_texts_survive(self) -> None:
-        assert tors.dedup_near_dup([self.A, self.B, self.C], threshold=self.T, method="shingle") == {
+        assert tors.dedup_near_dup(
+            [self.A, self.B, self.C], threshold=self.T, method="shingle"
+        ) == {
             "kept": [0, 2],
             "dropped": [1],
             "groups": [[0, 1], [2]],
         }
-        assert tors.dedup_near_dup([self.B, self.A, self.C], threshold=self.T, method="shingle") == {
+        assert tors.dedup_near_dup(
+            [self.B, self.A, self.C], threshold=self.T, method="shingle"
+        ) == {
             "kept": [0],
             "dropped": [1, 2],
             "groups": [[0, 1, 2]],
@@ -603,11 +621,13 @@ class TestOrderSensitivityPinned:
         ]
         corpus = [t for fam in families for t in fam]
         rng = random.Random(11)
-        expected_texts = {corpus[i] for i in tors.dedup_near_dup(corpus, threshold=0.9, method="shingle")["kept"]}
+        dedup = tors.dedup_near_dup(corpus, threshold=0.9, method="shingle")
+        expected_texts = {corpus[i] for i in dedup["kept"]}
         for _ in range(5):
             permuted = corpus[:]
             rng.shuffle(permuted)
-            kept_texts = {permuted[i] for i in tors.dedup_near_dup(permuted, threshold=0.9, method="shingle")["kept"]}
+            dedup = tors.dedup_near_dup(permuted, threshold=0.9, method="shingle")
+            kept_texts = {permuted[i] for i in dedup["kept"]}
             assert kept_texts == expected_texts
 
     def test_determinism_same_order_same_result(self) -> None:
@@ -756,7 +776,9 @@ class TestGilHeartbeat:
             gap, wall = await self._worst_gap(
                 lambda: tors.aio.dedup_near_dup(corpus, threshold=0.9, method="simhash")
             )
-            assert gap < max(0.05, 0.3 * wall), f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
+            assert gap < max(0.05, 0.3 * wall), (
+                f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
+            )
 
         asyncio.run(run())
 
@@ -768,7 +790,9 @@ class TestGilHeartbeat:
             gap, wall = await self._worst_gap(
                 lambda: tors.aio.shingle_jaccard(text_a, text_b)
             )
-            assert gap < max(0.05, 0.3 * wall), f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
+            assert gap < max(0.05, 0.3 * wall), (
+                f"loop blocked {gap * 1e3:.0f}ms of {wall * 1e3:.0f}ms"
+            )
 
         asyncio.run(run())
 
@@ -849,7 +873,8 @@ class TestScalingGateBites:
         return gate ** math.log2(factor) * small_ms
 
     def test_cubic_addon_blows_through_the_quadratic_class_gate(self) -> None:
-        corpus = lambda n: [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(n)]
+        def corpus(n: int) -> list[str]:
+            return [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(n)]
 
         def wall(fn, samples: int = 3) -> float:
             fn()
@@ -870,7 +895,7 @@ class TestScalingGateBites:
             acc = 0
             for i in range(n):
                 for j in range(n):
-                    for k in range(n):
+                    for _k in range(n):
                         acc += i & j
             honest(texts)
             assert acc >= 0
