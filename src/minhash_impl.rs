@@ -211,8 +211,11 @@ fn coefficients(num_perm: usize, seed: u64) -> Vec<(u64, u64)> {
 /// bytes the tokens themselves carry (the module doc's WB4 note) — and
 /// the digest is fed streaming, with no per-shingle allocation. The one
 /// spelling both the signature sweep and the distinct-shingle counter
-/// ride, so the shingle-hash contract cannot drift between them.
-fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>) -> u64 {
+/// ride, so the shingle-hash contract cannot drift between them. Shared
+/// with `near_dup_impl`'s shingle-set functions, so the crate has exactly
+/// one shingle hashing contract (the near-dup comparison layer's set
+/// operations ride the same framing, not a second, weaker one).
+pub(crate) fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>) -> u64 {
     let mut hasher = XxHash64::with_seed(0);
     hasher.write(&count.to_le_bytes());
     for token in tokens {

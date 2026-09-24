@@ -22,7 +22,7 @@
 
 use pyo3::exceptions::{PyTimeoutError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PySequence, PyString};
+use pyo3::types::{PyAny, PyBool, PyDict, PyInt, PyList, PySequence, PyString};
 
 /// The empty-entry contract of a `&str` list walk: a pattern list refuses
 /// an empty entry (`ValueError("empty pattern")`: an empty pattern would
@@ -315,4 +315,44 @@ pub(crate) fn validate_count_overlap(count_name: &str, count: i64, overlap: i64)
 /// that could otherwise drift apart.
 pub(crate) fn timeout_err(message: String) -> PyErr {
     PyTimeoutError::new_err(message)
+}
+
+/// The shared `__index__`-protocol extraction behind every int-like
+/// parameter (`minhash_signature`'s `num_perm`/`shingle_size`/`seed`,
+/// `shingle_jaccard`/`shingle_dice`'s `width`, `simhash_distance`'s
+/// fingerprint arguments): `bool` is rejected up front (it would
+/// otherwise launder to 0/1 through the index), then the `__index__`
+/// SLOT is dispatched — `getattr` plus call, never the instance's own
+/// `__and__`, so masking cannot alter the value and `__index__`-only
+/// int-likes (numpy integers) reduce identically. `__index__` itself IS
+/// caller code: it runs with its own side effects, exactly once, and its
+/// own failure propagates unchanged rather than masking as a parameter
+/// error. Only a MISSING `__index__` (str, float, None, bytes) and an
+/// `__index__` result that is not an exact int (including `bool`, the
+/// same caller bug one dispatch removed) are `TypeError`. (Moved here
+/// from `py/minhash.rs`, which had the only copy, when
+/// `shingle_jaccard`/`simhash_distance` became the second and third
+/// consumers — the same one-home discipline as the walks above.)
+pub(crate) fn extract_index<'py>(
+    obj: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Bound<'py, PyInt>> {
+    if obj.cast::<PyBool>().is_ok() {
+        return Err(PyTypeError::new_err(format!(
+            "{name} must be an int, not bool"
+        )));
+    }
+    let index = obj
+        .getattr("__index__")
+        .map_err(|_| PyTypeError::new_err(format!("{name} must be an int")))?;
+    let index = index.call0()?;
+    if index.cast::<PyBool>().is_ok() {
+        return Err(PyTypeError::new_err(format!(
+            "{name} must be an int, not bool"
+        )));
+    }
+    if index.cast::<PyInt>().is_err() {
+        return Err(PyTypeError::new_err(format!("{name} must be an int")));
+    }
+    Ok(index.cast_into::<PyInt>().expect("checked exact int above"))
 }

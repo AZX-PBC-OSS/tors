@@ -517,6 +517,53 @@ class TestRecipeRetrievalExamples:
         assert near <= 3, f"the one-character edit must be near-duplicate: {near}"
         assert unrelated > 15, f"an unrelated pair must sit far away: {unrelated}"
 
+    def test_simhash_distance_examples(self) -> None:
+        # docs/api.md's simhash_distance section: the one-word-edit pair
+        # sits single-digit bits apart, and the self-distance is 0.
+        a = tors.simhash64("the quick brown fox jumps over the lazy dog")
+        b = tors.simhash64("the quick brown fox jumps over the lazy cat")
+        assert tors.simhash_distance(a, b) == 9
+        assert tors.simhash_distance(a, a) == 0
+
+    def test_shingle_similarity_examples(self) -> None:
+        # docs/api.md's shingle_jaccard/shingle_dice section: the case
+        # reflow scores 1.0, the partial-overlap and empty-set rows are
+        # pinned literals.
+        assert (
+            tors.shingle_jaccard(
+                "The quarterly oil sample interval for field outages was adjusted",
+                "the QUARTERLY oil sample interval for field outages was adjusted",
+            )
+            == 1.0
+        )
+        x = "alpha beta gamma delta epsilon zeta"
+        y = "alpha beta gamma eta theta iota"
+        assert tors.shingle_jaccard(x, y) == 0.14285714285714285
+        assert tors.shingle_dice(x, y) == 0.25
+        assert tors.shingle_jaccard("", "alpha beta gamma") == 0.0
+        assert tors.shingle_jaccard("", "") == 1.0
+
+    def test_dedup_near_dup_examples(self) -> None:
+        # docs/api.md's dedup_near_dup section, both method rows and the
+        # empty-corpus row pinned byte-exact.
+        corpus = [
+            "The quarterly oil sample interval was adjusted after the audit.",
+            "the quarterly oil sample interval was adjusted after the audit",
+            "The quarterly oil sample interval was extended after the audit.",
+            "A completely different memo about the parking garage resurfacing.",
+        ]
+        assert tors.dedup_near_dup(corpus, threshold=0.8, method="simhash") == {
+            "kept": [0, 3],
+            "dropped": [1, 2],
+            "groups": [[0, 1, 2], [3]],
+        }
+        assert tors.dedup_near_dup(corpus, threshold=0.8, method="shingle") == {
+            "kept": [0, 2, 3],
+            "dropped": [1],
+            "groups": [[0, 1], [2], [3]],
+        }
+        assert tors.dedup_near_dup([]) == {"kept": [], "dropped": [], "groups": []}
+
     def test_merkle_diff_positional(self) -> None:
         a = "The quick brown fox jumps over the lazy dog.".split()
         b = "The quick brown fox jumps over the lazy dog!".split()

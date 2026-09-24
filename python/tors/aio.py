@@ -16,9 +16,10 @@ document, real overhead next to a microsecond-scale call over a short
 string. So this module covers only the functions whose realistic inputs
 are large enough that the thread-hop cost is reliably negligible: the
 chunking family, the retrieval/scoring primitives, the diff engine, the
-batch pipeline, the fuzzy-matching and JSON-repair families
-(``levenshtein``/``jaro``/``jaro_winkler``,
+batch pipeline, the fuzzy-matching, near-duplicate, and JSON-repair
+families (``levenshtein``/``jaro``/``jaro_winkler``,
 ``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
+``shingle_jaccard``/``shingle_dice``/``dedup_near_dup`` trio, the
 ``repair_json*`` trio: quadratic and linear native passes whose
 documented measurements reach seconds and minutes on large inputs), and
 the input-scaling text/byte pipeline codecs
@@ -87,9 +88,12 @@ __all__: list[str] = []
 # from tors.__all__ by exclusion (see the module docstring for why the
 # rest of tors intentionally has no async twin): the chunking family, the
 # retrieval/scoring primitives, the diff engine, the batch pipeline, the
-# fuzzy-matching and JSON-repair families (quadratic/linear native passes
-# whose docs measure seconds-to-minutes on large inputs), and the
-# input-scaling text/byte pipeline codecs (normalize/finalize,
+# fuzzy-matching, near-duplicate, and JSON-repair families
+# (levenshtein/jaro/jaro_winkler, similarity_ratio/get_close_matches,
+# is_grounded, shingle_jaccard/shingle_dice/dedup_near_dup, the
+# repair_json* trio: quadratic/linear native passes whose docs measure
+# seconds-to-minutes on large inputs), and the input-scaling text/byte
+# pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
 # both truncate spellings, strip_controls, scrub_log_text, scrub_pii (and
 # its report twin), word_bounds/sentence_bounds, the search/replace family
@@ -120,6 +124,7 @@ _WRAPPED = (
     "count_matches",
     "decode_utf16",
     "decode_utf8",
+    "dedup_near_dup",
     "diff_opcodes",
     "diff_opcodes_lines",
     "extract_code_blocks",
@@ -143,6 +148,8 @@ _WRAPPED = (
     "scrub_pii",
     "scrub_pii_report",
     "sentence_bounds",
+    "shingle_dice",
+    "shingle_jaccard",
     "similarity_ratio",
     "strip_code_fences",
     "strip_controls",

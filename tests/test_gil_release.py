@@ -2827,6 +2827,41 @@ def test_minhash_signature_in_a_thread_keeps_the_event_loop_at_heartbeat_granula
     )
 
 
+def _dedup_corpus(n_docs: int = 12_000, doc_tokens: int = 40) -> list[str]:
+    """A ~4.5 MiB corpus of fingerprint-DISTINCT documents (disjoint
+    vocabulary per row): the greedy sweep accumulates kept
+    representatives and actually walks its documented O(n²) pair ladder
+    (~72M pair checks), the shape the release claim is about. An
+    all-near-identical corpus would exit every pair check on the first
+    representative (and dedup to one group — the honest simhash answer
+    for near-identical documents)."""
+    return [" ".join(f"tok{i}_{j}" for j in range(doc_tokens)) for i in range(n_docs)]
+
+
+@pytest.mark.parametrize("size", [(12_000, 40)], ids=["12k-docs"])
+def test_dedup_near_dup_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size: tuple[int, int],
+) -> None:
+    """The near-dup dedup claim: the fingerprint pass AND the whole O(n²)
+    pairwise sweep (the documented, budget-pinned cost — no LSH index,
+    the doctrine's small-candidate-set scope) run under one ``py.detach``;
+    the GIL-held residue is the str-list extraction (one UTF-8 copy per
+    element, the standard O(total input) class, ~3-6ms at ~4.5 MiB) plus
+    the O(n + groups) index-list marshalling (~12k ints in three lists,
+    ~1-2ms), both small fractions of a ~0.2-0.4s wall.
+
+    Measured on the dev box (ambient load ~2, 3 samples per cell, 12k
+    documents at threshold 0.9, simhash method, all-distinct
+    fingerprints so the full pair ladder runs): worst gap 11-14ms of
+    230-420ms walls (ratio 0.03-0.06), deep inside both shared budgets."""
+    corpus = _dedup_corpus(*size)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.dedup_near_dup, corpus, threshold=0.9, method="simhash")
+        )
+    )
+
+
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,

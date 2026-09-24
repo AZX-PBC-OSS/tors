@@ -376,3 +376,66 @@ class TestRetrievalCeilingScaling:
 
         small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(200))
         _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+
+# --- dedup_near_dup: the documented quadratic pair sweep --------------------------
+#
+# The near-dup dedup is O(n^2) pair checks BY DESIGN (docs/design.md's
+# small-candidate-set scope: no LSH banding index, every call from
+# scratch). The pin here holds that documented cost CLASS: the sweep may
+# be quadratic, and must be nothing WORSE than quadratic, with an
+# explicit absolute wall budget for the documented candidate-set size.
+
+
+def _dedup_corpus(n: int) -> list:
+    # Fingerprint-distinct documents (disjoint vocabulary per row) so the
+    # greedy sweep accumulates kept representatives and walks the full
+    # pair ladder instead of exiting every check on the first one.
+    return [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(n)]
+
+
+def _assert_quadratic_per_doubling(
+    small_ms: float, large_ms: float, factor: int, gate: float
+) -> None:
+    """The quadratic-class gate: cost may grow up to `gate` per doubling
+    (4.0 is the quadratic bound itself; the gate sits above it for
+    measurement noise, while any cubic shape blows through)."""
+    import math
+
+    doublings = math.log2(factor)
+    allowed = gate**doublings
+    assert large_ms < allowed * small_ms, (
+        f"cost grew {small_ms:.2f}ms -> {large_ms:.2f}ms for a {factor}x input "
+        f"({large_ms / small_ms:.2f}x, allowed {allowed:.1f}x at {gate:.1f}x per "
+        "doubling): the sweep grew worse than its documented quadratic class"
+    )
+
+
+class TestDedupNearDupPairSweepScaling:
+    @pytest.mark.timing
+    def test_pair_sweep_stays_within_the_quadratic_class(self) -> None:
+        """1k -> 4k documents (4x, fingerprint-distinct, simhash method):
+        measured 14ms -> 74ms, ratio 5.3 (the linear fingerprint pass
+        dilutes the quadratic sweep at these sizes; 4x input means 16x
+        pair checks at full quadratic), gate 4.5x per doubling -- the
+        quadratic bound 4.0 plus measurement margin, far under any
+        cubic's 64x."""
+        small, large = _min_wall_ms(lambda: tors.dedup_near_dup(_dedup_corpus(1_000))), (
+            _min_wall_ms(lambda: tors.dedup_near_dup(_dedup_corpus(4_000)))
+        )
+        _assert_quadratic_per_doubling(small, large, 4, 4.5)
+
+    @pytest.mark.timing
+    def test_documented_candidate_set_has_an_explicit_wall_budget(self) -> None:
+        """The budget pin, absolute, not relative: the documented
+        small-candidate-set shape (1k documents, the size the API docs
+        name as the comfortable ceiling) must complete in well under a
+        second for the default method -- measured 14ms (simhash),
+        273ms (the shingle method's set intersections), 44ms (minhash).
+        2.0s is ~7x the worst measured method and still an honest
+        'sub-second-scale call' contract; a regression past it is a
+        defect, not noise."""
+        corpus = _dedup_corpus(1_000)
+        assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="simhash")) < 2_000.0
+        assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="shingle")) < 2_000.0
+        assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="minhash")) < 2_000.0

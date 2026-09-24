@@ -11,7 +11,14 @@ and checked against the sync stub by ``tests/test_aio.py``.
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from tors import CompiledLemmaDict, GroundingResult, RepairAction, ScrubPiiReport, StemmerLanguage
+from tors import (
+    CompiledLemmaDict,
+    DedupResult,
+    GroundingResult,
+    RepairAction,
+    ScrubPiiReport,
+    StemmerLanguage,
+)
 
 async def normalize(text: str) -> str: ...
 async def finalize(text: str) -> tuple[str, str]: ...
@@ -170,6 +177,14 @@ async def minhash_signature(
     shingle_size: int = 3,
     seed: int = 0,
 ) -> list[int]: ...
+async def shingle_jaccard(a: str, b: str, *, width: int = 3) -> float: ...
+async def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
+async def dedup_near_dup(
+    texts: list[str],
+    *,
+    threshold: float = 0.9,
+    method: Literal["simhash", "shingle", "minhash"] = "simhash",
+) -> DedupResult: ...
 async def tf_idf(
     corpus: list[str],
     *,

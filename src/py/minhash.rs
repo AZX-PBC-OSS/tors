@@ -1,8 +1,8 @@
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyInt};
 
 use crate::minhash_impl;
+use crate::py::_borrow::extract_index;
 
 /// `tors.minhash_signature(text, *, num_perm=128, shingle_size=3, seed=0)
 /// -> list[int]`: the MinHash signature of `text`'s word shingles, the
@@ -92,38 +92,6 @@ pub fn minhash_signature(
         )));
     }
     Ok(py.detach(|| minhash_impl::signature(text, num_perm as usize, shingle_size as usize, seed)))
-}
-
-/// The shared `__index__`-protocol extraction behind all three int
-/// parameters: `bool` is rejected up front (it would otherwise launder to
-/// 0/1 through the index), then the `__index__` SLOT is dispatched --
-/// `getattr` plus call, never the instance's own `__and__`, so masking
-/// cannot alter the value and `__index__`-only int-likes (numpy integers)
-/// reduce identically. `__index__` itself IS caller code: it runs with its
-/// own side effects, exactly once, and its own failure propagates
-/// unchanged rather than masking as a parameter error. Only a MISSING
-/// `__index__` (str, float, None, bytes) and an `__index__` result that is
-/// not an exact int (including `bool`, the same caller bug one dispatch
-/// removed) are `TypeError`.
-fn extract_index<'py>(obj: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyInt>> {
-    if obj.cast::<PyBool>().is_ok() {
-        return Err(PyTypeError::new_err(format!(
-            "{name} must be an int, not bool"
-        )));
-    }
-    let index = obj
-        .getattr("__index__")
-        .map_err(|_| PyTypeError::new_err(format!("{name} must be an int")))?;
-    let index = index.call0()?;
-    if index.cast::<PyBool>().is_ok() {
-        return Err(PyTypeError::new_err(format!(
-            "{name} must be an int, not bool"
-        )));
-    }
-    if index.cast::<PyInt>().is_err() {
-        return Err(PyTypeError::new_err(format!("{name} must be an int")));
-    }
-    Ok(index.cast_into::<PyInt>().expect("checked exact int above"))
 }
 
 /// `num_perm`'s extraction: the `__index__` protocol, narrowed to the i64

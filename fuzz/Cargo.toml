@@ -296,3 +296,10 @@ path = "fuzz_targets/json_schema_graph.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "near_dup"
+path = "fuzz_targets/near_dup.rs"
+test = false
+doc = false
+bench = false
