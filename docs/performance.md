@@ -331,3 +331,28 @@ records measured 428-497 ms, and the load-stable constant is the ratio,
 `find_patterns_iter`, `chunk_text_iter`, and friends) exist for exactly this:
 the same sequence, streamed, each `__next__` holding the GIL for one tuple,
 and the full drain ~2.1x faster in wall time in the measured case.
+
+## Snippet grounding (`highlight`)
+
+`highlight`'s wall is linear in the chunk (tokenization + the anchor walk
+dominate; the ROUGE-W DP is capped at 64 candidates with query-bounded
+rows), so the numbers that matter are the shapes a search surface calls:
+a 60-token query against chunks of 500 / 2k / 10k tokens (criterion,
+`benches/grounding.rs`, Linux dev box, 100 samples; the ratio gates are
+`tests/test_grounding_performance.py`):
+
+| chunk (tokens) | Latin | CJK |
+|---|---|---|
+| 500 | ~0.38 ms | ~0.36 ms |
+| 2 000 | ~1.2 ms | ~0.64 ms |
+| 10 000 | ~5.4 ms | ~2.6 ms |
+
+Two reference points on the same box: a no-overlap query (zero anchors —
+the tokenization floor, no DP) at 2k tokens is ~0.9 ms, and the dense
+adversarial cell (every token an anchor, 7k tokens) is ~4.1 ms — the
+candidate cap holds the selection's cost independent of match density.
+CJK's per-character tokens cost less than Latin words at the same nominal
+token count (single-codepoint tokens, no fold branching) despite ~3x the
+UTF-8 bytes. A 2k-token chunk — the per-hit shape a RAG search calls —
+sits at the ~1 ms thread-hop boundary, which is why `tors.aio.highlight`
+exists.

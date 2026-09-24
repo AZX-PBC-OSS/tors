@@ -172,6 +172,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grounding"
+path = "fuzz_targets/grounding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "phonetic"
 path = "fuzz_targets/phonetic.rs"
 test = false

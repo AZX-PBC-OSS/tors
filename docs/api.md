@@ -2440,6 +2440,82 @@ tors.is_grounded(
 # True
 ```
 
+## `tors.highlight`
+
+```python
+def highlight(
+    query: str,
+    text: str,
+    *,
+    max_snippets: int = 3,
+    max_chars: int = 400,
+) -> GroundingResult: ...
+```
+
+Snippet-provenance grounding: WHERE in `text` the query's evidence sits —
+the span-level provenance a search UI highlights and a citation deep-links
+to. Returns a `GroundingResult` (a `TypedDict`): `snippets` — up to
+`max_snippets` non-overlapping spans in position order, each a
+`GroundingSnippet` (`text`, `start`, `end`, `score`) whose offsets are
+Python str (codepoint) indices into the ORIGINAL `text`, so
+`text[start:end]` is exactly `snippet["text"]` for every snippet — and
+`score`, the best snippet's score in `[0.0, 1.0]` (`0.0` when there is no
+overlap at all). This is a lexical overlap metric, not a semantic one: it
+locates evidence, it does not judge answerability.
+
+The scorer is ROUGE-W F1 (Lin 2004, "ROUGE: A Package for Automatic
+Evaluation of Summaries", §3.2): a length-weighted longest common
+subsequence over token sequences, recall-oriented ("does this span cover
+the query's content") with a superlinear contiguity reward — terms
+occurring as a contiguous run outrank the same terms spread through
+filler — and the paper's Equation 15 normalization keeping every score in
+`[0, 1]`. BLEU (Papineni et al. 2002) was considered and rejected for this
+role: its precision-oriented, reference-anchored objective is gamed by a
+one-word window and its 4-gram statistics are too sparse against a short
+query.
+
+Tokens come from UAX #29 word boundaries (the same segmentation
+`word_bounds` exposes), with one refinement: every CJK character (Han,
+Hiragana, Katakana, Hangul) inside a word segment becomes its own token —
+UAX #29 keeps Katakana and Hangul runs joined, and unspaced CJK morphemes
+are the standard IR per-character fallback — so CJK text anchors at the
+same granularity the query does. Matching case-folds and NFC-canonicalizes
+(NFD accents match NFC queries); offsets land on token boundaries, which
+never split a grapheme cluster, so the round-trip holds through CJK,
+accents, ZWJ emoji and astral-plane text alike (pinned across all of
+these by `tests/test_grounding.py`, and fuzzed for by
+`fuzz_targets/grounding.rs`).
+
+Selection: text tokens matching any query term form anchor runs; each run
+expands to its UAX #29 sentence when the sentence fits `max_chars` (the
+citation unit the ALCE baselines use — Gao et al. 2023, "Enabling Large
+Language Models to Generate Text with Citations"), every span clamps to
+`max_chars` at token boundaries (a snippet always holds at least one
+token, even under a budget smaller than that token), the top candidates
+are scored and the greedy pass keeps the best-scoring non-overlapping set
+(the attribution-report shape: different regions of a chunk support
+different parts of an answer — RARR, Gao et al. 2022). The score is a
+ranking signal, not an answerability verdict (Joren et al. 2024,
+"Sufficient Context": sufficiency is a semantic judgment).
+
+Pathological chunks are bounded: at most the first 16384 text tokens and
+128 query terms are scanned, and at most 64 candidates reach the DP —
+the DP itself is two reusable rows over the query's terms, never an
+n·m matrix. An empty or token-free query, an empty or token-free text,
+and `max_snippets=0` return the empty result — degenerate input is a
+valid answer, never an error; `max_chars=0` is a `ValueError`.
+
+```python
+tors.highlight("torque spec", "The pump failed. The bushing torque spec was 42 Nm. Replaced.")
+# {'snippets': [{'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
+#                'end': 52, 'score': 0.429719627375509}], 'score': 0.429719627375509}
+```
+
+(The snippet's trailing space is the UAX #29 sentence convention
+`sentence_bounds` documents: SB10/SB11 attach a terminator's trailing
+space to the preceding sentence — the offsets are the sentence's, exactly
+as documented above.)
+
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
 ```python

@@ -19,7 +19,9 @@
 //! (the random-generation family: random
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
 //! [`pii_impl`] (contact-material scrub, the
-//! telemetry-safety port), and [`json_valid_impl`] (the RFC 8259
+//! telemetry-safety port), [`grounding_impl`] (snippet-provenance
+//! grounding: ROUGE-L span alignment for search-result highlighting), and
+//! [`json_valid_impl`] (the RFC 8259
 //! validity gate: orjson's acceptance set, no object tree, #61); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
 //! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
@@ -416,6 +418,7 @@ pub mod finalize_impl;
 pub mod forms_impl;
 pub mod fuzzy_impl;
 pub mod grounded_impl;
+pub mod grounding_impl;
 pub mod hash_impl;
 pub mod html_impl;
 pub mod html_table;
@@ -504,6 +507,7 @@ use py::fence::*;
 use py::forms::*;
 use py::fuzzy::*;
 use py::grounded::*;
+use py::grounding::*;
 use py::hash::*;
 use py::html::*;
 use py::json_repair::*;
@@ -651,6 +655,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
         pyo3::types::PyTuple::new(m.py(), pii_impl::KEY_FAMILY_NAMES)?,
     )?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
+    m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
     m.add_function(wrap_pyfunction!(content_hash, m)?)?;
