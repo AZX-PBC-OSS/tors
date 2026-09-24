@@ -92,11 +92,14 @@
 //! an overflowed ideal, and `1.0` is the only in-interval answer
 //! consistent with the ordering the finite arithmetic reports. The
 //! saturation can over-report a ranking whose exact ratio sits below 1
-//! once the sums overflow (the low-order terms are lost); pinning the
-//! exact ratio there would cost a scale-normalizing pre-pass over every
-//! call for an input class (gains within ~16 orders of magnitude of
-//! f64's ceiling) no caller supplies, so the saturation is the
-//! documented approximation, not a hidden one.
+//! once the sums overflow (the low-order terms are lost), and the
+//! `0.0` branch (finite DCG facing an infinite ideal) can under-report
+//! a near-perfect ranking all the way to 0.0; within that branch the
+//! error magnitude is unbounded across [0, 1]. Pinning the exact ratio
+//! would cost a scale-normalizing pre-pass over every call for an
+//! input class (gains within ~16 orders of magnitude of f64's
+//! ceiling) no caller supplies, so the saturation is the documented
+//! approximation, not a hidden one.
 
 /// Reciprocal-rank-fuses the deduplicated lists (Cormack, Clarke &
 /// Buüttcher, SIGIR 2009: `score(d) = Σ 1/(k + r(d))`, ranks 1-based).
@@ -113,9 +116,9 @@
 pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
     // The sweep needs one slot per index that can receive a vote: the
     // data's own max index bounds that, so a caller-supplied n_docs
-    // looser than the data (the fuzz target's first find: a sparse
-    // numbering with a huge table) costs no allocation: every index
-    // above the max is unvoted and filtered below anyway.
+    // looser than the data (a sparse numbering with a huge table)
+    // costs no allocation: every index above the max is unvoted and
+    // filtered below anyway.
     let max_index = lists
         .iter()
         .flat_map(|list| list.iter())
@@ -534,8 +537,9 @@ mod tests {
 
     #[test]
     fn recall_empty_relevant_is_zero_not_nan() {
-        // The core owns the documented empty-relevant answer (the fuzz
-        // target found the 0/0 NaN spelling of it first).
+        // The core owns the documented empty-relevant answer (0/0 is NaN
+        // without the guard; the sparse-numbering table shape is covered
+        // by the fuzz target).
         assert!(close(recall_at_k(&[true, true], 0, 2), 0.0));
         assert!(close(recall_at_k(&[], 0, 2), 0.0));
     }

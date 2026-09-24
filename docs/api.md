@@ -4750,13 +4750,19 @@ or non-finite `gains` value). Wrong TYPES raise `TypeError`
 (a non-list `ranked`/`ranked_lists`, a non-set `relevant` (exactly `set`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
 extraction failure), an unhashable id, whose error is
-Python's own). For nDCG, legal finite gains can be so large the DCG and
+Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
+extracts as its `0`/`1` value, the int-extraction convention). For
+nDCG, legal finite gains can be so large the DCG and
 IDCG sums overflow to `+inf`; the score then saturates instead of
 dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
 DCG faces an infinite ideal, and a finite ratio clamps to
 `[0.0, 1.0]` (the monotone-total policy, since the ideal pool contains
 every ranked gain under the same discount schedule, so an overflowed DCG
-can at most match the overflowed ideal).
+can at most match the overflowed ideal). The saturation's error is
+two-sided and unbounded within that branch: the `1.0` side can
+over-report an imperfect ranking, the `0.0` side can under-report a
+near-perfect one all the way to `0.0`; both directions apply only when
+the gains sit within ~16 orders of magnitude of f64's ceiling.
 
 **GIL model**: the fusion/dedup walk and the metrics' membership walks
 are interpreter-side hashing (Python-object hashing cannot leave the
