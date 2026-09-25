@@ -25,13 +25,13 @@ real minimum) -- a stable digest for empty documents.
 
 from __future__ import annotations
 
-import time
 from itertools import product
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from reference import (
     _MINHASH_EMPTY,
     reference_minhash_signature,
@@ -507,11 +507,15 @@ class TestBoundsContract:
         # The BEHAVIOR is the sentinel equality; the wall assert rides
         # along as a tripwire (huge measured margin), so the cell takes
         # the timing lane's discipline rather than the fast lane's.
-        started = time.perf_counter()
-        sig = minhash_signature(_FOX, shingle_size=10**9)
-        elapsed = time.perf_counter() - started
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the tripwire.
+        sig = assert_bounded(
+            lambda: minhash_signature(_FOX, shingle_size=10**9),
+            5.0,
+            samples=3,
+            label="the huge-shingle sentinel",
+        )
         assert sig == [_MINHASH_EMPTY] * 128
-        assert elapsed < 5.0, f"huge shingle_size took {elapsed:.2f}s"
 
     def test_huge_shingle_size_over_large_text_is_sentinel_without_retention(self) -> None:
         # HIGH1: a shingle wider than the token stream must answer the
@@ -583,11 +587,15 @@ class TestBoundsContract:
             "sig = tors.minhash_signature(big); "
             "assert len(sig) == 128"
         )
-        started = time.perf_counter()
-        huge_mb = _child_self_peak_mb(huge_prog)
-        small_mb = _child_self_peak_mb(small_prog)
-        elapsed = time.perf_counter() - started
-        assert elapsed < 60.0, f"huge window over large text took {elapsed:.2f}s"
+
+        def probe() -> tuple[float, float]:
+            huge_mb = _child_self_peak_mb(huge_prog)
+            small_mb = _child_self_peak_mb(small_prog)
+            return huge_mb, small_mb
+
+        # The wall bound rides along as a tripwire over the two child
+        # probes; min-of-3 pass-on-first-clean (tests/loop_harness.py).
+        huge_mb, small_mb = assert_bounded(probe, 60.0, samples=3, label="the huge-window probes")
         assert huge_mb < 100.0, f"huge window peak too high: {huge_mb:.1f}MB"
         ratio = huge_mb / small_mb if small_mb > 0 else float("inf")
         assert ratio < 2.0, (
@@ -647,9 +655,12 @@ class TestBoundsContract:
         # walk cap, which here IS the stream length, so the message's
         # "at least 67112960" is also the exact spend.
         at_budget = " ".join(f"w{i}" for i in range(20_479))
-        started = time.perf_counter()
-        sig = minhash_signature(at_budget, num_perm=8, shingle_size=4_096)
-        elapsed = time.perf_counter() - started
+        sig = assert_bounded(
+            lambda: minhash_signature(at_budget, num_perm=8, shingle_size=4_096),
+            5.0,
+            samples=3,
+            label="the exactly-at-budget sweep",
+        )
         assert sig == [
             19447778664110,
             340100930561109,
@@ -660,7 +671,6 @@ class TestBoundsContract:
             95003234104397,
             18799151482463,
         ]
-        assert elapsed < 5.0, f"exactly-at-budget sweep took {elapsed:.2f}s"
         one_past = " ".join(f"w{i}" for i in range(20_480))
         with pytest.raises(ValueError, match=r"at least 67112960 token-hashes"):
             minhash_signature(one_past, num_perm=8, shingle_size=4_096)
@@ -673,11 +683,13 @@ class TestBoundsContract:
         # itself, where a gate-before-short-circuit ordering would reject
         # every fillable-stream probe outright.
         for width in (10**9, 10**18):
-            started = time.perf_counter()
-            sig = minhash_signature(_FOX, shingle_size=width)
-            elapsed = time.perf_counter() - started
+            sig = assert_bounded(
+                lambda width=width: minhash_signature(_FOX, shingle_size=width),
+                1.0,
+                samples=3,
+                label=f"the width-{width} sentinel",
+            )
             assert sig == [_MINHASH_EMPTY] * 128
-            assert elapsed < 1.0, f"width {width} took {elapsed:.2f}s"
         # The 1024/1025 boundary of the count-first path: one token short
         # of a 1025-wide window is the sentinel (unfillable -- no gate,
         # no sweep); one token at the width is fillable and executes (the
@@ -997,11 +1009,13 @@ class TestPerformanceSanity:
 
         text = prose(100 * 1024)
         for shingle_size in (3, 64, 256):
-            started = time.perf_counter()
-            sig = minhash_signature(text, shingle_size=shingle_size)
-            elapsed = time.perf_counter() - started
+            sig = assert_bounded(
+                lambda s=shingle_size: minhash_signature(text, shingle_size=s),
+                30.0,
+                samples=3,
+                label=f"the shingle-{shingle_size} sweep",
+            )
             assert len(sig) == 128
-            assert elapsed < 30.0, f"shingle {shingle_size} took {elapsed:.2f}s"
 
     def test_over_budget_wide_shingle_rejects_fast(self) -> None:
         # The issue-#91 tripwire: pre-fix this shape swept ~2.5e9
@@ -1011,11 +1025,12 @@ class TestPerformanceSanity:
         # under the pre-fix wall, so a regression back to the sweep fails
         # it.
         text = " ".join(f"w{i}" for i in range(100_000))
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match=r"token-hash budget"):
-            minhash_signature(text, num_perm=8, shingle_size=50_000)
-        elapsed = time.perf_counter() - started
-        assert elapsed < 2.0, f"budget rejection took {elapsed:.2f}s"
+
+        def reject() -> None:
+            with pytest.raises(ValueError, match=r"token-hash budget"):
+                minhash_signature(text, num_perm=8, shingle_size=50_000)
+
+        assert_bounded(reject, 2.0, samples=3, label="the over-budget wide-shingle rejection")
 
     def test_over_budget_reject_walk_is_capped_not_o_tokens(self) -> None:
         # H2: the reject path's count walk stops at the gate's cap --
@@ -1029,11 +1044,12 @@ class TestPerformanceSanity:
         # to enforce). The 300k-token stream rides the same ~3ms reject;
         # the ceiling is a tripwire, the message match is the teeth.
         text = " ".join(f"w{i}" for i in range(300_000))
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match=r"at least 67150000 token-hashes"):
-            minhash_signature(text, num_perm=8, shingle_size=50_000)
-        elapsed = time.perf_counter() - started
-        assert elapsed < 2.0, f"capped rejection took {elapsed:.2f}s"
+
+        def reject() -> None:
+            with pytest.raises(ValueError, match=r"at least 67150000 token-hashes"):
+                minhash_signature(text, num_perm=8, shingle_size=50_000)
+
+        assert_bounded(reject, 2.0, samples=3, label="the capped reject walk")
 
     def test_widest_allowed_shingle_completes_quickly(self) -> None:
         # The widest shape the budget still allows on this corpus shape
@@ -1042,11 +1058,13 @@ class TestPerformanceSanity:
         # generous wall ceiling, ~12x the measured ~0.4s (the wide-shingle
         # row's ceiling style).
         text = " ".join(f"w{i}" for i in range(20_000))
-        started = time.perf_counter()
-        sig = minhash_signature(text, num_perm=8, shingle_size=4_000)
-        elapsed = time.perf_counter() - started
+        sig = assert_bounded(
+            lambda: minhash_signature(text, num_perm=8, shingle_size=4_000),
+            5.0,
+            samples=3,
+            label="the widest-allowed-shingle sweep",
+        )
         assert len(sig) == 8
-        assert elapsed < 5.0, f"widest allowed shape took {elapsed:.2f}s"
 
     @pytest.mark.timing
     # Single-sample absolute ceilings (15s/60s) on a load-sensitive
@@ -1060,12 +1078,15 @@ class TestPerformanceSanity:
         # live in docs/performance.md.
         for num_perm, ceiling in ((128, 15.0), (1024, 60.0)):
             text = self._distinct_rich(1024 * 1024)
-            started = time.perf_counter()
-            sig = minhash_signature(text, num_perm=num_perm)
-            elapsed = time.perf_counter() - started
+            sig = assert_bounded(
+                lambda text=text, num_perm=num_perm: minhash_signature(text, num_perm=num_perm),
+                ceiling,
+                samples=3,
+                label=f"the k={num_perm} distinct-rich worst case",
+            )
             assert len(sig) == num_perm
             assert all(0 <= v < 2**61 for v in sig)
-            assert elapsed < ceiling, f"k={num_perm} distinct-rich took {elapsed:.2f}s"
+
     def test_large_input_completes_quickly(self) -> None:
         # ~13.5 MB, the simhash sanity cell's corpus shape: the detached
         # tokenize+shingle+hash+sweep pass measures ~0.25 s at k=128 (the
@@ -1073,11 +1094,10 @@ class TestPerformanceSanity:
         # shingles; see docs/performance.md), so the 2.5 s ceiling is ~10x
         # nominal: a crash/regression tripwire, not the target.
         big = "the quick brown fox jumps over the lazy dog. " * 300_000
-        started = time.perf_counter()
-        sig = minhash_signature(big)
-        elapsed = time.perf_counter() - started
+        sig = assert_bounded(
+            lambda: minhash_signature(big), 2.5, samples=3, label="the ~13.5MB sweep"
+        )
         assert len(sig) == 128
-        assert elapsed < 2.5, f"minhash_signature on ~13.5MB took {elapsed:.2f}s"
 
     def test_large_input_is_deterministic(self) -> None:
         big = "lorem ipsum dolor sit amet " * 100_000

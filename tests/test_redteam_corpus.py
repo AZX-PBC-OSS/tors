@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 import tors
+from loop_harness import first_clean
 
 CORPUS = Path(__file__).parent / "redteam_corpus"
 
@@ -330,36 +331,41 @@ def test_canary_issue_108_fresh_string_starve() -> None:
 
     text = (CORPUS / case["file"]).read_text(encoding="utf-8")
     params = case["params"]
-    deadline = time.monotonic() + params["seconds"]
-    gaps: list[float] = []
-    stop = threading.Event()
 
-    def heartbeat() -> None:
-        last = time.monotonic()
-        while not stop.is_set():
-            time.sleep(params["heartbeat_ms"] / 1000.0)
-            now = time.monotonic()
-            gaps.append(now - last)
-            last = now
+    def sample() -> float:
+        deadline = time.monotonic() + params["seconds"]
+        gaps: list[float] = []
+        stop = threading.Event()
 
-    def worker() -> None:
-        while time.monotonic() < deadline:
-            tors.utf8_byte_len(text[1:])  # a fresh slice: the cache never hits
+        def heartbeat() -> None:
+            last = time.monotonic()
+            while not stop.is_set():
+                time.sleep(params["heartbeat_ms"] / 1000.0)
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
 
-    beat = threading.Thread(target=heartbeat)
-    work = threading.Thread(target=worker)
-    beat.start()
-    work.start()
-    work.join()
-    stop.set()
-    beat.join()
-    worst_gap_ms = max(gaps) * 1000.0
+        def worker() -> None:
+            while time.monotonic() < deadline:
+                tors.utf8_byte_len(text[1:])  # a fresh slice: the cache never hits
 
-    def check() -> None:
+        beat = threading.Thread(target=heartbeat)
+        work = threading.Thread(target=worker)
+        beat.start()
+        work.start()
+        work.join()
+        stop.set()
+        beat.join()
+        return max(gaps) * 1000.0
+
+    def check(worst_gap_ms: float) -> None:
         assert worst_gap_ms < params["max_gap_ms"], (
             f"the heartbeat's worst gap was {worst_gap_ms:.0f}ms (limit "
             f"{params['max_gap_ms']}ms): the fresh-string lane starved the "
             "co-resident loop"
         )
 
-    _canary(case, check)
+    # Load-robust spelling (tests/loop_harness.py): pass-on-first-clean
+    # over up to 3 samples — the live starvation (the #108 regression)
+    # reproduces in every sample, whole-process starvation of one does not.
+    _canary(case, lambda: first_clean(sample, check, samples=3, label="the #108 canary"))

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tors"
-version = "0.12.0"
+version = "0.13.0"
 description = "Fast, GIL-free text and document operations for Python — normalization, Unicode segmentation, diffing, fuzzy matching, chunking, encoding/near-dup detection, Merkle integrity, and URL/redaction utilities, backed by Rust."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,7 +52,7 @@ classifiers = [
 # release bump (release-please's extra-files only touches version lines,
 # not this one).
 [project.optional-dependencies]
-documents = ["tors-documents==0.12.*"]
+documents = ["tors-documents==0.13.*"]
 
 [project.urls]
 Homepage = "https://github.com/AZX-PBC-OSS/tors"
@@ -157,7 +157,8 @@ line-length = 100
 select = ["E", "W", "F", "I", "B", "UP", "BLE", "RUF022"]
 
 [tool.ruff.lint.isort]
-# tors (the package under test) and reference (the tests' shared oracle
-# module) are first-party, so their imports keep their own section after the
+# tors (the package under test), reference (the tests' shared oracle
+# module), and loop_harness (the timing cells' shared load-robustness
+# harness) are first-party, so their imports keep their own section after the
 # third-party block — the layout every test file already uses.
-known-first-party = ["tors", "reference", "documents"]
+known-first-party = ["tors", "reference", "documents", "loop_harness"]

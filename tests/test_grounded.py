@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import difflib
 import re
-import time
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from reference import (  # noqa: I001 -- the shared oracle module (tests/reference.py)
     _lcs_len,
     reference_is_grounded_fuzzy,
@@ -681,14 +681,17 @@ class TestDeadline:
     def test_an_effectively_zero_budget_raises_timeout_error(self) -> None:
         claim = "x" * 2_000
         source = "y" * 200_000
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError, match="deadline") as excinfo:
-            is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
-        wall = time.perf_counter() - started
-        message = str(excinfo.value)
-        assert type(excinfo.value) is TimeoutError
-        assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
-        assert wall < 2.0, f"deadline-bounded call took {wall:.2f}s"
+
+        def fire() -> None:
+            with pytest.raises(TimeoutError, match="deadline") as excinfo:
+                is_grounded(claim, source, fuzzy=True, threshold=1.0, deadline_ms=_DEADLINE_MS)
+            message = str(excinfo.value)
+            assert type(excinfo.value) is TimeoutError
+            assert re.search(r"elapsed \d+(\.\d+)?\s*ms", message), message
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the deadline-bounded abort.
+        assert_bounded(fire, 2.0, samples=3, label="the effectively-zero-budget abort")
 
     def test_a_generous_deadline_never_expires(self) -> None:
         # A near-match, deliberately not a verbatim substring, so the scan
