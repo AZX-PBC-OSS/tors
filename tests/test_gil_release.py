@@ -2015,7 +2015,7 @@ def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     surface it exists for: the whole multi-pass rule chain (DETAIL line
     scan, escaped-run scan, userinfo scan, query-param scan — the
     conninfo pass answering to its three names with the EXTENDED key set
-    the uri_query_creds_extended rule added, whose 15-entry name walk is
+    the uri_query_creds_extended rule added, whose 16-entry name walk is
     O(#names) per ``=`` and invisible at the ping-floor granularity —
     plus the splice) detached under one ``py.detach``, over the
     exception-shaped scrub corpus where every rule fires once per unit,

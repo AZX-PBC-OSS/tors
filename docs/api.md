@@ -684,13 +684,14 @@ Six names, one closed set:
 - `uri_query_creds_extended` — the SAME `[?&]` anchor over the EXTENDED
   credential-key set: the shared five plus the ops-standard
   query-parameter names (`access_key`, `api_key`, `apikey`, `auth`,
-  `key`, `passkey`, `sas_token`, `secret`, `sig`, `token`). The names
+  `key`, `passkey`, `pw`, `sas_token`, `secret`, `sig`, `token`). The names
   are the published scanner lists, transcribed and closed: ESLint
-  `no-sensitive-data-in-query`'s default sensitive terms (`password`,
-  `token`, `secret`, `api_key`/`apiKey`, `auth`), detect-secrets' AWS
-  secret-keyword list (`key`, `pwd`, `password`, `token`, `pass`), and
-  Azure's own SAS query grammar (`?sv=...&sig=...`) — the
-  credential-in-URL problem class CWE-598 names (query strings land in
+  `no-credentials-in-query-params` (eslint-plugin-browser-security)'s
+  default sensitive terms (`password`, `token`, `secret`, `api_key`/
+  `apiKey`, `auth`), detect-secrets' AWS secret-keyword list (`key`,
+  `pass`, `password`, `pw`, `pwd`, `token`), and Azure's own SAS
+  query grammar (`?sv=...&sig=...`) — the credential-in-URL problem
+  class CWE-598 names (query strings land in
   access logs, proxy logs, browser history, and the `Referer` header of
   every outbound link). Judicious cuts, stated: no
   `session`/`sessionid`/`sid` (session identifiers are not credentials;

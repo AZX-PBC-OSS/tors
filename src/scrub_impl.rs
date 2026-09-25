@@ -62,12 +62,13 @@
 //!   EXTENDED credential-key set — the five shared names plus the
 //!   ops-standard query-parameter names the adoption verdict flagged
 //!   (`sig=`, `api_key=`, `sas_token=`): `access_key`, `api_key`,
-//!   `apikey`, `auth`, `key`, `passkey`, `sas_token`, `secret`, `sig`,
-//!   `token`. The names are the published scanner lists, transcribed
-//!   and closed: ESLint `no-sensitive-data-in-query`'s default
-//!   sensitive terms (`password`, `token`, `secret`, `api_key`/
-//!   `apiKey`, `auth`), detect-secrets' AWS secret-keyword list
-//!   (`key`, `pwd`, `password`, `token`, `pass`), and Azure's own SAS
+//!   `apikey`, `auth`, `key`, `passkey`, `pw`, `sas_token`, `secret`,
+//!   `sig`, `token`. The names are the published scanner lists,
+//!   transcribed and closed: ESLint `no-credentials-in-query-params`
+//!   (eslint-plugin-browser-security)'s default sensitive terms
+//!   (`password`, `token`, `secret`, `api_key`/`apiKey`, `auth`),
+//!   detect-secrets' AWS secret-keyword list (`key`, `pass`, `password`,
+//!   `pw`, `pwd`, `token`), and Azure's own SAS
 //!   query grammar (`?sv=...&sig=...`, `sig` the shared-signature
 //!   parameter, `sas_token` the wrapper spelling), the credential-in-
 //!   URL problem class CWE-598 names (query strings land in access
@@ -1011,9 +1012,11 @@ const PARAM_NAMES: [&str; 5] = ["sslpassword", "passphrase", "password", "passwd
 /// `sas_token`, `password` inside `sslpassword`) resolve to the longest
 /// name at each `=`, whose anchor check then decides; a shorter suffix's
 /// anchor position would sit on a name char (a word byte) and fail
-/// either anchor's check anyway. No name is a prefix of another, so the
-/// reference regex's alternation order is free.
-const EXTENDED_PARAM_NAMES: [&str; 15] = [
+/// either anchor's check anyway. The reference regex's alternation is
+/// spelled in this same longest-first order (it backtracks either way,
+/// but the order keeps `pwd` tried before its prefix `pw`, the set's
+/// one prefix pair). No OTHER name is a prefix of another.
+const EXTENDED_PARAM_NAMES: [&str; 16] = [
     "sslpassword",
     "passphrase",
     "access_key",
@@ -1029,6 +1032,7 @@ const EXTENDED_PARAM_NAMES: [&str; 15] = [
     "key",
     "sig",
     "pwd",
+    "pw",
 ];
 
 /// Is `c` in the lookbehind class `[A-Za-z0-9_]` — explicitly ASCII (the
@@ -1625,13 +1629,19 @@ mod tests {
     }
 
     #[test]
-    fn extended_param_names_are_prefix_free_and_longest_first() {
-        // The regex alternation's order is free only under prefix-freedom;
-        // the scanner's first-hit-is-longest contract needs the sorted
-        // order. Both pins travel with the table.
+    fn extended_param_names_are_longest_first_with_one_documented_prefix_pair() {
+        // The scanner's first-hit-is-longest contract needs the sorted
+        // order. Prefix-freedom holds for every pair but ONE, the
+        // detect-secrets spelling `pw` inside `pwd`: the scanner never
+        // confuses them (a name matches only its own full text ending
+        // at the `=`), and the reference regex resolves the pair
+        // because its alternation is spelled longest-first too (pwd
+        // before pw) — the old "alternation order is free" note is
+        // order-DISCIPLINE for this pair. Both pins travel with the
+        // table.
         for (i, a) in EXTENDED_PARAM_NAMES.iter().enumerate() {
             for (j, b) in EXTENDED_PARAM_NAMES.iter().enumerate() {
-                if i != j {
+                if i != j && !(*a == "pwd" && *b == "pw") && !(*a == "pw" && *b == "pwd") {
                     assert!(!b.starts_with(a), "{a:?} is a prefix of {b:?}");
                 }
             }
@@ -1663,6 +1673,7 @@ mod tests {
             "secret",
             "passkey",
             "auth",
+            "pw",
             "password",
             "passphrase",
             "passwd",
@@ -1719,6 +1730,17 @@ mod tests {
             scrub("?sas_token=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
             "?sas_token=***"
         );
+        // The one prefix pair: `pw` inside `pwd` — each name matches
+        // only its own full text at the `=` (the longest-first table
+        // tries `pwd` first), so both mask and a `pw`-suffixed word
+        // never does.
+        assert_eq!(scrub("?pw=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "?pw=***");
+        assert_eq!(
+            scrub("?pwd=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?pwd=***"
+        );
+        assert_eq!(scrub("?pwx=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "?pwx=v");
+        assert_eq!(scrub("xpw=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "xpw=v");
         assert_eq!(
             scrub("?oauth_token=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
             "?oauth_token=v"

@@ -79,6 +79,7 @@ EXTENDED_RULE_NAMES = (
     "secret",
     "passkey",
     "auth",
+    "pw",
 )
 
 PG = ["pg_detail_lines"]
@@ -385,8 +386,9 @@ class TestUriQueryCredsExtended:
     query-parameter names the adoption verdict flagged (``sig=``,
     ``api_key=``, ``sas_token=``). The set's sources are the published
     scanner lists, transcribed and closed (ESLint
-    ``no-sensitive-data-in-query``'s default sensitive terms,
-    detect-secrets' AWS secret-keyword list, Azure's own SAS query
+    ``no-credentials-in-query-params`` (eslint-plugin-browser-security)'s
+    default sensitive terms, detect-secrets' AWS secret-keyword list,
+    Azure's own SAS query
     grammar ``?sv=...&sig=...``; the problem class is CWE-598 — query
     strings land in access logs, proxy logs, browser history, and the
     ``Referer`` header). A NEW NAME, not an ``extra_keys=`` parameter:
@@ -460,6 +462,14 @@ class TestUriQueryCredsExtended:
         assert scrub_log_text("?sas_token=v", ["uri_query_creds_extended"]) == (
             "?sas_token=***"
         )
+        # The set's one PREFIX pair: `pw` inside `pwd`. Each name
+        # matches only its own full text at the `=`, so `?pw=` and
+        # `?pwd=` both mask (as themselves), while a word-char tail
+        # (`pwx=`) or head (`xpw=`) is a near miss, never a mask.
+        assert scrub_log_text("?pw=v", ["uri_query_creds_extended"]) == "?pw=***"
+        assert scrub_log_text("?pwd=v", ["uri_query_creds_extended"]) == "?pwd=***"
+        assert scrub_log_text("?pwx=v", ["uri_query_creds_extended"]) == "?pwx=v"
+        assert scrub_log_text("xpw=v", ["uri_query_creds_extended"]) == "xpw=v"
 
     def test_value_spanning_to_end_of_string(self) -> None:
         # The token leg runs to whitespace/`&` — end of text included —
@@ -525,6 +535,8 @@ class TestConninfoPassRedteam:
             "authorize",
             "oauth_token",
             "xkey",
+            "pwx",
+            "pw2",
         ):
             assert scrub_log_text(f"?{name}=v", ["uri_query_creds_extended"]) == (
                 f"?{name}=v"

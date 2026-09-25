@@ -733,8 +733,10 @@ _CRED_PARAM_NAMES = ("password", "passphrase", "passwd", "pwd", "sslpassword")
 #: (the published scanner lists, transcribed and closed — see
 #: src/scrub_impl.rs for the sources and the judicious cuts). A SUPERSET
 #: of ``_CRED_PARAM_NAMES``; spelled longest-first like the scanner's
-#: table (the order is free for the regex alternation, no name is a
-#: prefix of another, but the tuple documents the resolution order).
+#: table (the alternation is spelled in this same order: it backtracks
+#: either way, but pwd-before-pw keeps the set's one prefix pair --
+#: ``pw`` inside ``pwd``, detect-secrets' own spelling -- off the
+#: backtracking path).
 _CRED_PARAM_NAMES_EXTENDED = (
     "sslpassword",
     "passphrase",
@@ -751,6 +753,7 @@ _CRED_PARAM_NAMES_EXTENDED = (
     "key",
     "sig",
     "pwd",
+    "pw",
 )
 
 #: The conninfo credential pass, the live chain's single combined regex:

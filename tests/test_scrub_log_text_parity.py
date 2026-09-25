@@ -141,6 +141,7 @@ QUOTED_CRED_PARAM_NAMES_EXTENDED: tuple[str, ...] = (
     "key",
     "sig",
     "pwd",
+    "pw",
 )
 _QUOTED_EXTENDED_NAMES = "|".join(QUOTED_CRED_PARAM_NAMES_EXTENDED)
 QUOTED_EXTENDED_PATTERNS: dict[str, str] = {
@@ -474,6 +475,9 @@ _CORPUS: list[str] = [
     "?SIG=abc&Api_Key=x&TOKEN=y",
     "?oauth_token=abc&key=abc",
     "?xapi_key=abc&xkey=abc",
+    "?pw=abc&x=1",
+    "?PW=abc&Pwd=y&pwx=z&xpw=1",
+    "?pw='q r'&next=2",
     "page?key=abc",
     "&&key=abc",
     "??key=abc",
@@ -622,11 +626,13 @@ _PARAM_GRID_NAME = [
     "secret",
     "passkey",
     "auth",
+    "pw",
     "Api_Key",
     "SAS_Token",
     "oauth_token",
     "xkey",
     "keys",
+    "pwx",
 ]
 _PARAM_GRID_VALUE = [
     "x",
