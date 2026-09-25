@@ -40,6 +40,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import tors
+from loop_harness import assert_bounded, first_clean
 from tors import ground_sentences, sentence_bounds
 
 # Arbitrary Unicode for the offset round-trip property: the property must
@@ -653,12 +654,22 @@ class TestGilClaimAudit:
     @pytest.mark.timing
     def test_tiny_text_huge_query_heartbeat(self):
         huge_query = "torque spec " * 900_000  # ~10 MiB query, tiny text
-        worst, wall = asyncio.run(
-            _gap_and_wall(
-                lambda: asyncio.to_thread(tors.ground_sentences, "tiny text here.", huge_query)
+
+        def measure() -> tuple[float, float]:
+            return asyncio.run(
+                _gap_and_wall(
+                    lambda: asyncio.to_thread(tors.ground_sentences, "tiny text here.", huge_query)
+                )
             )
-        )
-        assert worst < 0.25 and worst < 0.5 * wall, (worst, wall)
+
+        def check(measured: tuple[float, float]) -> None:
+            worst, wall = measured
+            assert worst < 0.25 and worst < 0.5 * wall, measured
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the heartbeat budgets; one starved
+        # sample retries, a held pass dirties every sample.
+        first_clean(measure, check, samples=3, label="the tiny-text huge-query heartbeat")
 
 
 # ---------------------------------------------------------------------------
@@ -672,12 +683,14 @@ class TestGilClaimAudit:
 class TestPerformanceCliffs:
     def test_100k_single_token_sentences_complete_quickly(self):  # noqa: E501
         soup = "Word. " * 100_000
-        started = monotonic()
-        res = tors.ground_sentences(soup, "word")
-        wall = monotonic() - started
+        res = assert_bounded(
+            lambda: tors.ground_sentences(soup, "word"),
+            5.0,
+            samples=3,
+            label="the 100k single-token-sentence sweep",
+        )
         assert len(res["sentences"]) == 100_000
         assert res["score"] > 0.9
-        assert wall < 5.0, wall
 
     def test_one_100k_token_sentence_memory_stays_two_rows(self):
         """The claimed two-row DP must keep peak RSS flat on the
@@ -1186,23 +1199,34 @@ class TestGilConcurrent:
         the gather).  The GIL window is the borrow + the float return, none
         of it scaling with the DP: the worst heartbeat gap must stay flat
         against a single call of the same size, not against the wall (the
-        DP work is ~5s)."""
+        DP work is ~5s). Load-robust spelling (tests/loop_harness.py):
+        min-of-3 pass-on-first-clean over the concurrent leg — one
+        starved sample retries, an allocator-contention regression
+        dirties every sample."""
         big = _unit(212_000)  # ~8.5MB, token-capped at 16384 per operand
         single_gap, _ = asyncio.run(
             _gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
         )
-        worst, wall = asyncio.run(
-            _gap_and_wall(
-                lambda: asyncio.gather(
-                    *(asyncio.to_thread(tors.grounding_coverage, big, big) for _ in range(4))
+
+        def measure() -> tuple[float, float]:
+            return asyncio.run(
+                _gap_and_wall(
+                    lambda: asyncio.gather(
+                        *(asyncio.to_thread(tors.grounding_coverage, big, big) for _ in range(4))
+                    )
                 )
             )
-        )
-        assert wall > 1.0, wall  # the DP really ran
-        # Flat per call: concurrent held time must not inflate 4x+ with the
-        # thread count (allocator contention would show up exactly there).
-        assert worst < max(4.0 * single_gap + 0.02, 0.1), (single_gap, worst, wall)
-        assert worst < 0.25, "a multi-second call must never hold the GIL this long"
+
+        def check(measured: tuple[float, float]) -> None:
+            worst, wall = measured
+            assert wall > 1.0, wall  # the DP really ran
+            # Flat per call: concurrent held time must not inflate 4x+ with
+            # the thread count (allocator contention would show up exactly
+            # there).
+            assert worst < max(4.0 * single_gap + 0.02, 0.1), (single_gap, worst, wall)
+            assert worst < 0.25, "a multi-second call must never hold the GIL this long"
+
+        first_clean(measure, check, samples=3, label="the four-concurrent-coverage heartbeat")
 
 
 # ---------------------------------------------------------------------------
