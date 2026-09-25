@@ -39,6 +39,7 @@ from time import monotonic
 import pytest
 
 import tors
+from loop_harness import first_clean
 
 # The growth gate per doubling: a linear path measures ~2.0-2.3x on a
 # quiet box (the chunk_text pin's own post-fix band: 2.03-2.26x); 3.0x
@@ -421,19 +422,35 @@ class TestRankFusionScaling:
 
     @pytest.mark.timing
     def test_ndcg_at_k_stays_linear_in_ranking_length(self) -> None:
-        """25k -> 100k ranked ids (4x; the relevant set scales with it):
+        """100k -> 400k ranked ids (4x; the relevant set scales with it):
         the membership walk is a constant number of set ops per id, the
-        detached arithmetic tail is O(n). Measured 3.24ms -> 18.31ms,
-        ratio 5.6 (~2.4x per doubling, ambient load ~5-20; the same
-        large-set cache-miss band the rank_fuse cell records), gate 3.0x
-        per doubling."""
+        detached arithmetic tail is O(n), gate 3.0x per doubling.
+        Recalibrated (was 25k -> 100k): sustained-2x-plus co-tenant load
+        drove the 100k wall to ~41ms (memory-band-bound large-set
+        cache-miss band, ~2.3x its quiet 18.3ms) while the 25k side kept
+        a clean ~3.4ms floor -- the ratio read 12.4x in every window
+        against the 9x gate, the exact sub-slice-floor skew
+        test_chunk_text_overlap_scaling.py documented ("the 50k base it
+        used to time was ~1.1ms, sub-slice, and a deliberately starved
+        run reddened the cell through exactly that skew"). Both sides
+        now time multi-slice memory-bound floors (measured quiet:
+        ~18ms -> ~85ms, ratio ~4.7, ~2.3x per doubling) whose
+        asymmetric-preemption windows amortize, so the ratio stays
+        in band under the same load. The quadratic red side (~16x per
+        4x) still fails the 9x gate by far."""
         def shape(n: int) -> float:
             ranked = [f"id_{i}" for i in range(n)]
             relevant = {ranked[i] for i in range(0, n, 3)}
             return tors.ndcg_at_k(ranked, relevant)
 
-        small, large = _min_wall_ms(lambda: shape(25_000)), _min_wall_ms(lambda: shape(100_000))
-        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+        def measure() -> tuple[float, float]:
+            return _min_wall_ms(lambda: shape(100_000)), _min_wall_ms(lambda: shape(400_000))
+
+        def check(walls: tuple[float, float]) -> None:
+            small, large = walls
+            _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+        first_clean(measure, check, samples=3, label="the ndcg_at_k scaling pin")
 
 
 # --- ground_sentences / grounding_coverage: the grounding batch -------------
@@ -459,13 +476,28 @@ def _coverage_shape(tokens: int) -> float:
 class TestGroundingBatchScaling:
     @pytest.mark.timing
     def test_ground_sentences_stays_linear_in_the_text(self) -> None:
-        """8k -> 16k -> 32k tokens (2x each): measured 1.4ms -> 2.7ms ->
-        5.5ms, ratios ~2.0 (linear), gate 3.0x per doubling. A per-sentence
-        rescan of the token stream (the quadratic shape) measures ~4x per
-        doubling here."""
-        small = _min_wall_ms(lambda: _ground_sentences_shape(8_000))
-        large = _min_wall_ms(lambda: _ground_sentences_shape(16_000))
-        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+        """32k -> 64k tokens (2x): measured ~5.5ms -> ~11ms, ratios ~2.0
+        (linear), gate 3.0x per doubling. A per-sentence rescan of
+        the token stream (the quadratic shape) measures ~4x per doubling
+        here. Recalibrated (was 8k -> 16k): at those sizes the small
+        side timed a sub-scheduler-slice ~1.4-3.4ms floor that kept its
+        clean window under co-tenant load while the large side's draws
+        all hit bursts (the ratio read 3.45x against the 3.0x gate, the
+        test_chunk_text_overlap_scaling.py sub-slice skew); both sides
+        now time multi-slice floors that inflate together. Load
+        robustness (tests/loop_harness.py): a real per-sentence rescan
+        holds the ratio in every measurement window, so the cell passes
+        on the first clean window over up to 3."""
+        def measure() -> tuple[float, float]:
+            small = _min_wall_ms(lambda: _ground_sentences_shape(32_000), samples=5)
+            large = _min_wall_ms(lambda: _ground_sentences_shape(64_000), samples=5)
+            return small, large
+
+        def check(walls: tuple[float, float]) -> None:
+            small, large = walls
+            _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+        first_clean(measure, check, samples=3, label="the ground_sentences scaling pin")
 
     @pytest.mark.timing
     def test_coverage_one_sided_doubling_stays_linear(self) -> None:

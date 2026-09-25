@@ -715,7 +715,7 @@ class TestPerformanceCliffs:
 
         _now = monotonic
 
-        def min_wall(fn, samples=3):
+        def min_wall(fn, samples=5):
             fn()
             runs = []
             for _ in range(samples):
@@ -724,8 +724,15 @@ class TestPerformanceCliffs:
                 runs.append(_now() - t0)
             return min(runs, default=1e9)
 
-        small = min_wall(lambda: shape(4_000))
-        large = min_wall(lambda: shape(16_000))
+        # 16k -> 64k tokens (4x, was 4k -> 16k): the small side's old
+        # ~1.2ms floor is sub-scheduler-slice and kept its clean window
+        # under co-tenant load while the large side's draws all hit
+        # bursts (the ratio read ~10.9x against the 10.8x gate -- the
+        # test_chunk_text_overlap_scaling.py sub-slice skew, whose fix
+        # is the sizes themselves: both sides now time multi-slice
+        # floors that inflate together).
+        small = min_wall(lambda: shape(16_000))
+        large = min_wall(lambda: shape(64_000))
         assert large < small * (3.0 ** 2) * 1.2, (small, large)  # 4x input, 3x/doubling
 
 

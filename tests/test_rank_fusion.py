@@ -37,6 +37,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tors
+from loop_harness import first_clean
 
 # The nDCG oracle differential needs scikit-learn, which is an optional
 # oracle dependency: the class skips itself when it is absent, and the
@@ -1083,21 +1084,44 @@ class TestPerfCliffs:
         # The two axis extremes at equal total entries: 10k lists x 1
         # doc (per-list overhead + output marshalling dominate) vs 1
         # list x 10k docs (pure walk). Each must stay inside the 3.0x
-        # per-doubling gate at a 4x input.
-        for shape in (
+        # per-doubling gate at a 4x input. Load robustness
+        # (tests/loop_harness.py): a real superlinear regression holds
+        # the ratio in every measurement window (the ratio is
+        # load-independent), so the cell passes on the first clean
+        # window over up to 3; one asymmetrically-preempted window on a
+        # shared runner (the small side keeps its clean floor while the
+        # large side's draws all hit bursts) no longer fails the cell.
+        shapes = (
             lambda n: [[f"d{i}"] for i in range(n)],
             lambda n: [[f"d{i}" for i in range(n)]],
             lambda n: [[f"d{(j * 13 + i) % n}" for i in range(n // 100)] for j in range(100)],
-        ):
-            # 25k -> 100k: the small cell's floor (~1.5ms at 10k) is
-            # noise-sensitive under a loaded runner; 4x past it the
-            # ratio is stable (the shared suite's own discipline).
-            small = _min_wall_ms(lambda s=shape: s(25_000))
-            large = _min_wall_ms(lambda s=shape: s(100_000))
-            assert large < 9.0 * small, (
-                f"{large:.2f}ms for 4x {small:.2f}ms ({large / small:.2f}x): "
-                "superlinear in the shape's axis"
-            )
+        )
+
+        def measure() -> list[tuple[float, float]]:
+            # 100k -> 400k: the small cell's old 25k floor (~1.5-3.5ms)
+            # is sub-scheduler-slice and kept its clean window under
+            # co-tenant load while the large side's draws all hit bursts
+            # (the ratio read 9.18x against the 9.0x gate -- the
+            # test_chunk_text_overlap_scaling.py sub-slice skew, whose
+            # fix is the sizes themselves); both sides now time
+            # multi-slice floors (measured quiet: 10.9/8.6/7.8ms ->
+            # 65.4/23.6/32.1ms, ratios 2.7-6.0x) that inflate together.
+            return [
+                (
+                    _min_wall_ms(lambda s=shape: s(100_000)),
+                    _min_wall_ms(lambda s=shape: s(400_000)),
+                )
+                for shape in shapes
+            ]
+
+        def check(walls: list[tuple[float, float]]) -> None:
+            for small, large in walls:
+                assert large < 9.0 * small, (
+                    f"{large:.2f}ms for 4x {small:.2f}ms ({large / small:.2f}x): "
+                    "superlinear in the shape's axis"
+                )
+
+        first_clean(measure, check, samples=3, label="the many-tiny-lists scaling pin")
 
     @pytest.mark.timing
     def test_constant_hash_hostile_ids_are_no_worse_than_the_interpreters_dict(
