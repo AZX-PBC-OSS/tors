@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.13.0...v0.14.0) (2026-09-25)
+
+
+### Features
+
+* **scrub:** secret-token redaction grammars ([#157](https://github.com/AZX-PBC-OSS/tors/issues/157)) ([cb913e9](https://github.com/AZX-PBC-OSS/tors/commit/cb913e96b988fd6eb59ac15ee72383e2833aa13c))
+
 ## [0.13.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.12.0...v0.13.0) (2026-09-25)
 
 
