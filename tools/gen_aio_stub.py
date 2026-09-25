@@ -89,12 +89,13 @@ def _ruff_format(text: str) -> str:
     return fixed.stdout
 
 
-def _spells_any(node: ast.FunctionDef) -> bool:
-    """Whether one sync stub signature's annotations spell ``Any``.
+def _spells_name(node: ast.FunctionDef, name: str) -> bool:
+    """Whether one sync stub signature's annotations spell a given bare
+    name (``Any``, ``Hashable``).
 
     Walks the annotation subtrees (parameters and return) only: a comment
     or docstring elsewhere in the source may name the type in prose, and
-    the header must import ``Any`` exactly when a signature needs it (an
+    the header must import a name exactly when a signature needs it (an
     unused import in the stub is as stale as a missing one).
     """
     args = node.args
@@ -108,11 +109,15 @@ def _spells_any(node: ast.FunctionDef) -> bool:
         if annotation is None:
             continue
         for sub in ast.walk(annotation):
-            if (isinstance(sub, ast.Name) and sub.id == "Any") or (
-                isinstance(sub, ast.Attribute) and sub.attr == "Any"
+            if (isinstance(sub, ast.Name) and sub.id == name) or (
+                isinstance(sub, ast.Attribute) and sub.attr == name
             ):
                 return True
     return False
+
+
+def _spells_any(node: ast.FunctionDef) -> bool:
+    return _spells_name(node, "Any")
 
 
 def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
@@ -126,6 +131,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
     body: list[str] = []
     translated = 0
     needs_any = False
+    needs_hashable = False
     used_type_names: set[str] = set()
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name not in wrapped:
@@ -137,6 +143,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         body.append("")
         translated += 1
         needs_any = needs_any or _spells_any(node)
+        needs_hashable = needs_hashable or _spells_name(node, "Hashable")
         # The sync stub's type-layer names (the structural TypedDicts and
         # the recursive alias, all module-level assigns in
         # ``__init__.pyi``): a translated signature that spells one must
@@ -159,7 +166,8 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         "and checked against the sync stub by ``tests/test_aio.py``.",
         '"""',
         "",
-        "from collections.abc import Sequence",
+        "from collections.abc import "
+        + ", ".join(sorted({"Sequence", *(["Hashable"] if needs_hashable else [])})),
         f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
         "from tors import CompiledLemmaDict, StemmerLanguage",

@@ -38,6 +38,7 @@ pub mod phonetic;
 pub mod pii;
 pub mod pipeline;
 pub mod random;
+pub mod rank_fusion;
 pub mod scan;
 pub mod scrub;
 pub mod search;

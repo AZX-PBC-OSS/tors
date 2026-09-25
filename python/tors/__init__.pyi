@@ -1,4 +1,4 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Hashable, Iterator, Sequence
 from typing import Any, Literal, SupportsIndex, TypedDict
 
 # The recursive JSON value: what `content_hash` accepts — the JSON
@@ -1317,6 +1317,125 @@ def bm25_rank(
     stemmer: StemmerLanguage | None = None,
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
+
+
+# Rank fusion + the IR ranking metrics, the retrieval-family companions to
+# bm25_rank (rank-space arithmetic over ids, no scores, no index, stateless).
+
+# Reciprocal Rank Fusion (Cormack, Clarke & Buettcher, SIGIR 2009,
+# https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf): fuses multiple ranked
+# lists of hashable doc ids into one ranking,
+# score(d) = sum over lists of 1 / (k + rank(d)) -- ranks 1-based, k=60 the
+# paper's own default, and RANKS ONLY, never raw scores (raw scores from
+# different retrieval systems are not comparable; ranks are). Returns
+# (id, score) for every distinct id across all lists, sorted by fused score
+# descending, ties broken by earliest first appearance across the lists in
+# caller order (a point the paper leaves open, pinned here as contract).
+# Returned ids are the original objects; dedup and equality follow Python's
+# own dict/set semantics (1, True, and 1.0 are the same id). A doc absent
+# from a list contributes no vote from it; a doc ranked twice in one list
+# votes once, at its first occurrence.
+#
+# k must be >= 1 (ValueError); ranked_lists must be a non-empty list of
+# lists (fusing zero lists is a ValueError -- the merkle_root "root of no
+# chunks" precedent: a zero-list call is almost certainly an upstream bug --
+# while an individual empty list is legal and contributes no votes, the
+# "this retriever returned nothing" shape). ranked_lists itself must be a
+# list and each entry a list (TypeError otherwise, the bm25_rank corpus
+# discipline); an unhashable id raises TypeError (Python's own hash error).
+#
+# GIL note: one GIL-held walk of every list (Python-object hashing IS
+# interpreter work: the content_hash arg-walk class), the score
+# accumulation + sort under one py.detach, then the O(distinct-ids) tuple
+# marshalling.
+def rank_fuse(
+    ranked_lists: list[list[Hashable]], *, k: int = 60
+) -> list[tuple[Hashable, float]]: ...
+
+# Normalized discounted cumulative gain at k (Järvelin & Kekäläinen, ACM
+# TOIS 20(4), 2002), in [0.0, 1.0]. ranked is a list of ids (best first);
+# relevant is a set of relevant ids -- binary relevance 1.0 -- or, with
+# gains, the baseline set whose members a graded gains dict overrides: the
+# gain of id d is gains[d] when the dict contains it, else 1.0 when d is in
+# relevant, else 0.0. The DCG uses the paper's log2 discount, rank 1
+# undiscounted: DCG@k = sum over i in 1..k of gain_i / log2(i + 1), over the
+# linear gain function (for binary relevance the paper's exponential
+# 2^rel - 1 variant is identical). The ideal DCG sorts the complete judged
+# pool -- every id in relevant (at its gain) plus every gains key --
+# descending and discounts the same way. A duplicated id inside ranked
+# counts once, at its first occurrence (the same dedup-first contract
+# rank_fuse keeps).
+#
+# k=None (the default) scores the whole ranking; k is clamped to the
+# deduplicated ranking's length. Edge inputs are well-defined zeros: an
+# empty ranked, an
+# empty relevant (with no gains), and the zero-ideal-DCG case (nothing
+# judged relevant) all answer 0.0. Legal finite gains can be so large the
+# DCG and IDCG sums overflow to +inf (three gains of 1e308, or two of
+# 1.7e308); the normalization saturates instead of dividing inf/inf (NaN):
+# when either sum is non-finite the score is 1.0 if DCG >= IDCG else 0.0,
+# and a finite ratio clamps to [0.0, 1.0]. k < 1 and a negative or
+# non-finite gains value raise ValueError; a non-list ranked, a non-set
+# relevant (exactly set or frozenset), a non-dict gains, or a non-numeric
+# gains value raise TypeError; an unhashable id raises TypeError (Python's
+# own hash error).
+#
+# GIL note: the per-position gain walk (one __contains__/dict lookup per
+# ranked id -- interpreter hashing) under the GIL, the DCG/IDCG arithmetic
+# under one py.detach, a single float out.
+def ndcg_at_k(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+    *,
+    k: int | None = None,
+    gains: dict[Hashable, float] | None = None,
+) -> float: ...
+
+# Reciprocal rank of the first relevant result (1/rank, ranks 1-based),
+# 0.0 when no ranked result is relevant -- and for an empty ranked: the
+# same well-defined zero. A duplicated id counts once at its first
+# occurrence (the family's dedup-first contract). relevant is exactly a
+# set or frozenset of ids
+# (TypeError otherwise); an unhashable id raises TypeError (Python's own
+# hash error).
+#
+# GIL note: the per-position membership walk under the GIL, the arithmetic
+# under one py.detach, a single float out.
+def mrr(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+) -> float: ...
+
+# recall@k: |relevant ∩ ranked[:k]| / |relevant| (the formula assumes
+# deduped input: a duplicate counts once, at its first occurrence). A k
+# past the ranking's
+# length simply uses every available position; a duplicated id counts once
+# at its first occurrence (the family's dedup-first contract). Edge inputs
+# are well-defined
+# zeros: an empty ranked and an empty relevant both answer 0.0. k < 1
+# raises ValueError; a non-set relevant raises TypeError; an unhashable id
+# raises TypeError (Python's own hash error). Same GIL model as mrr.
+def recall_at_k(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+    k: int,
+) -> float: ...
+
+# precision@k: |relevant ∩ ranked[:k]| / min(k, len(ranked)) -- trec_eval's
+# own convention for a run shorter than k: a system that returned fewer
+# results is not punished for positions it never filled (len(ranked) is the
+# DEDUPLICATED length: a duplicated id counts once at its first occurrence,
+# the family's dedup-first contract; the formula assumes deduped input).
+# Edge inputs are
+# well-defined zeros: an empty ranked and an empty relevant both answer
+# 0.0. k < 1 raises ValueError; a non-set relevant raises TypeError; an
+# unhashable id raises TypeError (Python's own hash error). Same GIL model
+# as mrr.
+def precision_at_k(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+    k: int,
+) -> float: ...
 
 # A stateless, general-purpose batch text preprocessor: every requested
 # step fused into one GIL-released pass over the whole texts list. Pure
