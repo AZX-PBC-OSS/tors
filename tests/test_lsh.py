@@ -25,6 +25,7 @@ guard here.
 
 from __future__ import annotations
 
+import math
 import random
 import struct
 import subprocess
@@ -473,3 +474,195 @@ out = tors.lsh_candidates(sigs, bands=32, rows=4)
 assert out == tors.lsh_candidates(sigs, bands=32, rows=4)
 print(vmhwm_kib())
 """
+
+
+class TestAdversarialPins:
+    """The red-team cells: hostile row values, shape edges, cross-process
+    determinism, and the S-curve's extremes, pinned green exactly as the
+    core behaves. The pair-SET contract under permutation is pinned above
+    (test_candidate_relation_survives_input_permutation); these hold the
+    rest of the attack surface."""
+
+    def test_shared_band_amid_max_disjoint_hostile_rows_is_a_candidate(self) -> None:
+        # The recall side under adversarial values: two signatures that
+        # agree on EXACTLY one band's rows and are otherwise maximally
+        # disjoint (u64::MAX vs 0), with duplicated rows WITHIN each
+        # signature (a degenerate frame the band hash must still frame
+        # injectively). The shared band's frames are identical, so the
+        # pair MUST be a candidate; no other pair may appear.
+        u64_max = 2**64 - 1
+        a = [u64_max] * 128
+        b = [0] * 128
+        a[1] = a[2] = u64_max  # duplicates within a, inside band 0
+        b[5] = b[6] = 0  # duplicates within b
+        for row in range(96, 104):  # band 12 of the 16x8 shape
+            a[row] = 42
+            b[row] = 42
+        out = tors.lsh_candidates([a, b], bands=16, rows=8)
+        assert out["pairs"] == [(0, 1)]
+
+    def test_hostile_row_values_across_shapes_stay_well_formed(self) -> None:
+        # u64::MAX, 0, and duplicate-heavy signatures at the shape
+        # extremes (bands=rows=1 included): determinism, the ascending
+        # i < j deduplicated shape, and agreement with the naive oracle
+        # on every shape.
+        u64_max = 2**64 - 1
+        sigs = [
+            [u64_max] * 8,
+            [u64_max] * 8,
+            [0] * 8,
+            [0, u64_max, 0, u64_max, 0, u64_max, 0, u64_max],
+            [u64_max, 0] * 4,
+        ]
+        for bands, rows in [(1, 8), (8, 1), (2, 4), (4, 2)]:
+            out = tors.lsh_candidates(sigs, bands=bands, rows=rows)
+            assert out["pairs"] == sorted(set(out["pairs"]))
+            assert all(i < j for i, j in out["pairs"])
+            assert out == tors.lsh_candidates(sigs, bands=bands, rows=rows)
+            assert out["pairs"] == oracle_candidates(sigs, bands, rows), (
+                bands,
+                rows,
+            )
+        # bands=rows=1: one 1-row vote, only the identical pair recalled.
+        assert tors.lsh_candidates([[5], [5], [7]], bands=1, rows=1)["pairs"] == [
+            (0, 1)
+        ]
+
+    def test_shape_overflow_ladder(self) -> None:
+        # The huge-shape ladder, pinned by rung: past i64 is an
+        # OverflowError (the int does not fit the extraction), within
+        # i64 but past the signature-length contract is a ValueError
+        # naming the product. Neither is silently truncated or wrapped.
+        sigs: list[list[int]] = []
+        with pytest.raises(OverflowError):
+            tors.lsh_candidates(sigs, bands=2**63, rows=1)
+        with pytest.raises(ValueError, match="bands \\* rows"):
+            tors.lsh_candidates(sigs, bands=2**63 - 1, rows=1)
+        for shape in [(2**62, 8), (2**40, 1), (2**31, 2**31)]:
+            with pytest.raises(ValueError, match="bands \\* rows"):
+                tors.lsh_candidates(sigs, bands=shape[0], rows=shape[1])
+        # The formula functions have no product contract (pure arithmetic
+        # over the two ints), and huge shapes stay inside [0, 1].
+        assert tors.lsh_probability(0.5, bands=10**18, rows=2) == 1.0
+        assert tors.lsh_threshold(bands=2**62, rows=1) == pytest.approx(
+            2**-62, rel=1e-12
+        )
+
+    def test_pair_list_is_identical_across_processes(self) -> None:
+        # The fixed-seed contract, pinned across processes: the band keys
+        # are XXH64 seed 0 in native code, so the pair list cannot drift
+        # with Python's hash randomization. Three child interpreters at
+        # different PYTHONHASHSEED values must emit identical pair lists
+        # (the std HashMap iteration order never escapes the core: only
+        # the sorted BTreeSet crosses out).
+        import os
+
+        script = (
+            "import random, tors\n"
+            "rng = random.Random(7)\n"
+            "sigs = [[rng.getrandbits(64) for _ in range(32)] for _ in range(40)]\n"
+            "for d in (3, 11, 29):\n"
+            "    sigs[d] = list(sigs[0])\n"
+            "print([tuple(p) for p in tors.lsh_candidates(sigs, bands=8, rows=4)['pairs']])\n"
+        )
+        runs: list[str] = []
+        for seed in ("0", "12345", "random"):
+            child = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            )
+            assert child.returncode == 0, child.stderr
+            runs.append(child.stdout)
+        assert runs[0] == runs[1] == runs[2]
+
+    def test_probability_extremes_stay_in_the_unit_band(self) -> None:
+        # The powf path at the extremes: subnormal s, s one ulp below 1,
+        # huge r (s^r underflows to 0 -> the honest 0.0), huge b. Every
+        # answer inside [0, 1]; the s=0 and s=1 ends exact. The
+        # sub-2**-54 floor at r=b=1 returns 0.0 where exact arithmetic
+        # gives s: the documented absolute floor (the grid pin's
+        # abs=1e-15, the fuzz margin's 1e-15) covers the 1 - (1 - s)
+        # cancellation.
+        tiny = [1e-300, 5e-324]
+        for bands, rows in [(1, 1), (32, 4), (16, 8)]:
+            for s in tiny:
+                p = tors.lsh_probability(s, bands=bands, rows=rows)
+                assert 0.0 <= p <= 1.0
+            one_ulp = math.nextafter(1.0, 0.0)
+            p = tors.lsh_probability(one_ulp, bands=bands, rows=rows)
+            assert 0.0 < p <= 1.0
+        # s^r underflow: 1e-300 ** 64 underflows min-subnormal f64, so
+        # 0.0 IS the correctly rounded curve value there; at r=b=1 the
+        # exact 1e-300 is representable but cancels, inside the floor.
+        assert tors.lsh_probability(1e-300, bands=64, rows=1) == 0.0
+        assert tors.lsh_probability(1e-300, bands=1, rows=1) == 0.0
+        assert tors.lsh_probability(1e-300, bands=1, rows=1) < 1e-15
+        # The one-ulp-below-1 end stays within an ulp of 1, never above.
+        one_ulp = math.nextafter(1.0, 0.0)
+        assert tors.lsh_probability(one_ulp, bands=1, rows=1) == pytest.approx(
+            one_ulp, rel=1e-15, abs=1e-15
+        )
+
+    def test_s_curve_matches_simulation_at_known_similarity(self) -> None:
+        # The one statistical pin of the S-curve itself: rows drawn so
+        # each agrees with probability s = 1/2 (the minhash agreement
+        # model), empirical candidate rate over 50k independent pairs at
+        # b=16/r=4 must land on 1 - (1 - s^r)^b = 0.6439 within 0.01
+        # (~4.7 sigma: sd = sqrt(p(1-p)/n) ~ 0.0021). Fixed seed.
+        rng = random.Random(20260925)
+        bands, rows, s, n = 16, 4, 0.5, 50_000
+        num_perm = bands * rows
+        hits = 0
+        for _ in range(n):
+            a = [rng.getrandbits(64) for _ in range(num_perm)]
+            c = [x if rng.random() < s else rng.getrandbits(64) for x in a]
+            if tors.lsh_candidates([a, c], bands=bands, rows=rows)["pairs"]:
+                hits += 1
+        empirical = hits / n
+        exact = 1 - (1 - s**rows) ** bands
+        assert abs(empirical - exact) < 0.01, (empirical, exact)
+
+    def test_all_identical_corpus_output_is_exactly_the_full_pair_set(self) -> None:
+        # The documented quadratic-output case: n identical signatures
+        # give exactly C(n, 2) pairs, ascending, complete -- output IS
+        # quadratic here, by design and documented; nothing more.
+        n = 1_000
+        sigs = [[7] * 128] * n
+        out = tors.lsh_candidates(sigs, bands=32, rows=4)
+        assert len(out["pairs"]) == n * (n - 1) // 2
+        assert out["pairs"] == [(i, j) for i in range(n) for j in range(i + 1, n)]
+
+    def test_bytes_signature_is_its_int_sequence(self) -> None:
+        # Pinned actual behavior: a bytes object IS a sequence of ints,
+        # so it is accepted as one signature's rows (b"abc" = [97, 98,
+        # 99]); only an ELEMENT that is bytes is the TypeError the strict
+        # element contract above pins. Two identical bytes objects are
+        # therefore candidates, like any identical rows.
+        out = tors.lsh_candidates([b"abc", b"abc"], bands=1, rows=3)
+        assert out["pairs"] == [(0, 1)]
+
+    def test_mapping_and_set_signatures_are_type_errors(self) -> None:
+        # Non-sequence containers refuse before any element work: a dict
+        # is a mapping, a set is neither ordered nor a PySequence, and a
+        # key view is not the value sequence -- all TypeError, never
+        # silent row loss.
+        for bad in [{"a": 1}, {1, 2, 3}, {1: None}.keys()]:
+            with pytest.raises(TypeError):
+                tors.lsh_candidates(bad, bands=1, rows=2)  # type: ignore[arg-type]
+
+    @pytest.mark.xfail(
+        reason="P1 (red team): the lsh_probability __doc__ claims "
+        "lsh_probability(0.8, bands=16, rows=8) is 'above 0.999' "
+        "(actual 0.9470) and lsh_probability(0.3, ...) 'below 0.001' "
+        "(actual 0.001049) -- both halves of the docstring's picking "
+        "example are false; the curve itself is correct.",
+        strict=True,
+    )
+    def test_docstring_picking_example_is_true(self) -> None:
+        # The __doc__ picking example, as behavior: with these claims in
+        # the function's own docstring, the numbers must hold.
+        assert tors.lsh_probability(0.8, bands=16, rows=8) > 0.999
+        assert tors.lsh_probability(0.3, bands=16, rows=8) < 0.001
