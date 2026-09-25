@@ -69,10 +69,12 @@ The cuts below are decisions, not oversights:
   (five private consumers; a follow-up contract that landed as its own
   pinned rule, not a silent widening of the ported one), the same way C1
   controls are a follow-up to `strip_controls` rather than a widening of
-  it. Further redaction grammars (national identifiers and the
-  zero-evidence credential shapes — Slack xox, Stripe, AWS AKIA) remain
-  separate follow-up contracts with their own
-  pinned sources, not silent extensions of this one.
+  it. Further redaction grammars are separate follow-up contracts with
+  their own pinned sources, not silent extensions of this one: the
+  zero-evidence credential shapes — Slack xox, Stripe, AWS AKIA — ship
+  as the `secret_tokens` grammar family (with the GitHub token classes
+  and PEM block spans) under their own cited vendor sources, and
+  national identifiers remain a follow-up contract.
 - **A general RNG engine surface.** The random-generation family is a
   closed set of named generators — `random_string`, `random_hex`,
   `random_b62`, `random_b64url`, `uuid4`, `uuid7` — over exactly two

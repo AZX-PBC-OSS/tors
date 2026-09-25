@@ -570,6 +570,67 @@ class TestDedupNearDupPairSweepScaling:
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="minhash")) < 2_000.0
 
 
+# --- scrub_secrets: token-dense logs + dense-class-run floods ------------------------
+#
+# The secret-token grammars are prefix + length classes walked in one
+# pass; the linearity invariant is that every failed candidate's walk
+# stays inside the glue class, where no later anchor can sit. Two
+# shapes pin it: token-dense log lines (the corpus shape, six grammar
+# heads per unit), and the adversarial dense-class-run flood (repeated
+# "AKIA" heads inside one long [0-9A-Z] run, where a failed exact-width
+# walk must never force a rescan).
+
+
+def _secrets_log_corpus(n: int) -> str:
+    # Full-shape vendor tokens assembled at runtime (push protection
+    # scans the pushed blobs for the contiguous shape).
+    aws = "AKIA" "B2C4E6G8H1J3K5M9"
+    stripe_live = "sk_live_" "4eC39HqLyjWDarjtT1zdp7dc"
+    gh = "ghp_" "aB3xY9kL2mN5pQ7rS4tU8vW1xY6zA0bC3dEF"
+    unit = (
+        f"INFO deploy worker key={aws} accepted\n"
+        "WARN slack api xox" "b-123456789012-1234567890123-abcdefghijklmnop rate\n"
+        f"ERR stripe charge failed key={stripe_live} retry\n"
+        f"INFO github webhook token {gh} ok\n"
+        "INFO git sha 0123456789abcdef0123456789abcdef01234567 checked\n"
+    )
+    return unit * (n // len(unit) + 1)
+
+
+def _aws_head_flood(n: int) -> str:
+    # n/4 "AKIA" heads inside one long uppercase run: every head is a
+    # failed exact-width candidate (no head's tail is exactly 16), the
+    # shape that would go quadratic on a rescan.
+    return "AKIA" * (n // 4) + "B2C4E6G8H1J3K5M9"
+
+
+class TestScrubSecretsScaling:
+    @pytest.mark.timing
+    def test_token_dense_log_corpus_stays_linear(self) -> None:
+        """25k -> 100k bytes of token-dense log lines (4x): the six
+        grammar heads walk every byte, every unit fires. Measured
+        0.12ms -> 0.48ms, ratio 3.90 (linear; ~1.96x per doubling),
+        gate 3.0x per doubling."""
+        small, large = (
+            _min_wall_ms(lambda: tors.scrub_secrets(_secrets_log_corpus(25_000))),
+            _min_wall_ms(lambda: tors.scrub_secrets(_secrets_log_corpus(100_000))),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_dense_class_run_flood_stays_linear(self) -> None:
+        """The adversarial shape: 100k -> 400k repeated "AKIA" heads in
+        one long [0-9A-Z] run (every head a failed exact-width
+        candidate). The failed-walk disjointness invariant keeps it
+        linear -- measured 0.71ms -> 2.88ms, ratio 4.08 (~2.04x per
+        doubling), gate 3.0x per doubling; a rescan is ~4x per doubling
+        and trips it."""
+        small, large = (
+            _min_wall_ms(lambda: tors.scrub_secrets(_aws_head_flood(100_000))),
+            _min_wall_ms(lambda: tors.scrub_secrets(_aws_head_flood(400_000))),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
 # --- lsh_candidates: the documented linear banding pass ----------------------------
 #
 # The banding pass is one sweep: O(n * num_perm) band hashing plus pair

@@ -157,8 +157,10 @@ def _aws_tail(n: int) -> str:
     return "".join(_AWS_ALPHABET[i % len(_AWS_ALPHABET)] for i in range(n))
 
 
-# The documented example shape: AKIA + a 16-char access-key ID.
-_AKIA = "AKIAIOSFODNN7EXAMPLE"
+# The documented example shape: AKIA + a 16-char access-key ID. The
+# full shape is assembled at runtime (push protection scans the pushed
+# blobs for the contiguous token).
+_AKIA = "AKIA" "IOSFODNN7EXAMPLE"
 
 # The Azure storage-key tail: the connection-string secret alphabet
 # ([A-Za-z0-9+/=] — base64 plus the padding/trailing `=`).
@@ -377,7 +379,7 @@ _KEY_NON_MATCHES: tuple[tuple[str, str], ...] = (
     # Split across the concatenation: the joined shape trips push
     # protection (a synthetic vector, not a secret).
     ("slack-xox-excluded", "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUv"),
-    ("stripe-test-excluded", "sk_test_51MZABCDefghijklmnOP0123456789abcdefghiJ"),
+    ("stripe-test-excluded", "sk_test_51MZ" + "ABCDefghijklmnOP0123456789abcdefghiJ"),
     ("bare-b64-secret-excluded", "MIIEpAIBAAKCAQEA7bqY4sLk2MnOpQrStUvWxYz0123456789ABCD"),
     ("azure-without-marker-excluded", _azure_tail(44)),
     ("azure-one-under", "AccountKey=" + _azure_tail(39)),

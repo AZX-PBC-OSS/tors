@@ -169,6 +169,8 @@ _WRAPPED = (
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",
+    "scrub_secrets",
+    "scrub_secrets_report",
     "sentence_bounds",
     "shingle_dice",
     "shingle_jaccard",

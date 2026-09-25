@@ -311,6 +311,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "secrets"
+path = "fuzz_targets/secrets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pii_escape_grammar"
 path = "fuzz_targets/pii_escape_grammar.rs"
 test = false

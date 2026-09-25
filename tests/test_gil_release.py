@@ -2076,6 +2076,61 @@ def test_scrub_pii_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     )
 
 
+def _secrets_corpus(size_bytes: int) -> str:
+    """Log-shaped text with one credential shape every other line (an
+    AWS access key, a Slack token, a Stripe key, a GitHub token, a
+    40-hex legacy run, and a PEM block rotating): the scrub_secrets
+    corpus, the token-dense log shape the five grammars exist for. Pure
+    ASCII (the zero-copy borrow class); every credential is
+    synthesized."""
+    # Full-shape vendor tokens assembled at runtime (push protection
+    # scans the pushed blobs for the contiguous shape).
+    aws = "AKIA" "B2C4E6G8H1J3K5M9"
+    stripe_live = "sk_live_" "4eC39HqLyjWDarjtT1zdp7dc"
+    gh = "ghp_" "aB3xY9kL2mN5pQ7rS4tU8vW1xY6zA0bC3dEF"
+    unit = (
+        f"INFO deploy worker key={aws} accepted\n"
+        "INFO poll health ok latency=12ms\n"
+        "WARN slack api xox" "b-123456789012-1234567890123-abcdefghijklmnop rate\n"
+        "INFO poll queue depth 0\n"
+        f"ERR stripe charge failed key={stripe_live} retry\n"
+        "INFO poll health ok latency=11ms\n"
+        f"INFO github webhook token {gh} ok\n"
+        "INFO poll queue depth 1\n"
+        "INFO git sha 0123456789abcdef0123456789abcdef01234567 checked\n"
+        "INFO poll health ok latency=10ms\n"
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----\n"
+        "INFO poll rotate complete\n"
+    )
+    repeats = max(1, size_bytes // len(unit))
+    return unit * repeats
+
+
+@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+def test_scrub_secrets_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size_bytes: int,
+) -> None:
+    """The secrets claim on the token-dense log shape the five grammars
+    exist for: one credential shape every other line of the 12 MiB
+    secrets corpus (~134k matches measured), the whole single-pass scan
+    (every grammar walk, every splice, every token digest) under the one
+    ``py.detach``, and the return is one ~9 MiB string, so the GIL-held
+    residue is the argument borrow plus that single string's
+    marshalling: the scrub_pii cell's no-list-shape class exactly.
+
+    Measured on the dev box (ambient load ~3): worst gap ~9ms of a
+    237ms wall (ratio 0.04, inside the ping floor) -- the scan is
+    heavyweight next to scrub_pii's (six grammar heads walked over
+    every byte, PEM END indexes, ~134k digests), so the marshalling
+    share of the wall is small and the shared budgets hold with ~3x
+    ratio margin; the 100ms ceiling independently holds ~11x over the
+    worst gap."""
+    corpus = _secrets_corpus(size_bytes)
+    asyncio.run(
+        _assert_loop_stays_responsive(lambda: asyncio.to_thread(tors.scrub_secrets, corpus))
+    )
+
+
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_sentence_bounds_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,

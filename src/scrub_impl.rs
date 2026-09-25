@@ -1,13 +1,15 @@
 //! Named-rule log and exception-text scrubbing, the pure-Rust core of
 //! `tors.scrub_log_text`: a hand-rolled scanner over a documented
-//! four-rule grammar, for scrubbing `str(exc)`/`repr(exc)`/rendered
+//! five-rule grammar, for scrubbing `str(exc)`/`repr(exc)`/rendered
 //! tracebacks before any of it reaches a log line, a span, or an
 //! exported attribute.
 //!
-//! Four rules, one name each, pinned to the documented grammar (the four
-//! compiled regexes this module implements are quoted in
+//! Five rules, one name each, four pinned to the documented grammar (the
+//! four compiled regexes this module implements are quoted in
 //! `tests/reference.py` and differentially enforced by
-//! `tests/test_scrub_log_text_parity.py`):
+//! `tests/test_scrub_log_text_parity.py`; the fifth, `secret_tokens`,
+//! delegates to `secret_impl`'s cited vendor grammars and splices each
+//! span to `***`):
 //!
 //! * `pg_detail_lines`: PostgreSQL `DETAIL:` lines quote caller-supplied
 //!   row values, so the whole line is dropped. Two segmenters under one
@@ -89,7 +91,9 @@
 //! Canonical order (the chain's own application order, not a caller
 //! choice): `pg_detail_lines` (real pass, then escaped pass), then
 //! `uri_userinfo`, then the conninfo credential pass (both anchor
-//! grammars under their two names), each rule a whole pass over the
+//! grammars under their two names), then `secret_tokens` last (its
+//! spans ride no other rule's anchors and no established rule sees its
+//! masks), each rule a whole pass over the
 //! current text before the next begins. The order is a contract because
 //! the rules interact: a DETAIL deletion can eat the `@` a userinfo mask
 //! anchors on, and the userinfo password class claims text a param value
@@ -472,8 +476,12 @@ impl RuleSet {
     /// see the module docs — the two conninfo names select the two anchor
     /// grammars of ONE pass).
     pub const LIBPQ_CONNINFO_CREDS: Self = Self(8);
+    /// Mask secret-token material (the `secret_impl` grammars: AWS
+    /// access keys, Slack tokens, Stripe keys, GitHub tokens, PEM
+    /// private-key blocks), each span spliced to `***`.
+    pub const SECRET_TOKENS: Self = Self(16);
     /// `rules=None`: the full chain, in canonical order.
-    pub const ALL: Self = Self(15);
+    pub const ALL: Self = Self(31);
 
     fn pg_detail_lines(self) -> bool {
         self.0 & Self::PG_DETAIL_LINES.0 != 0
@@ -489,6 +497,10 @@ impl RuleSet {
 
     fn libpq_conninfo_creds(self) -> bool {
         self.0 & Self::LIBPQ_CONNINFO_CREDS.0 != 0
+    }
+
+    fn secret_tokens(self) -> bool {
+        self.0 & Self::SECRET_TOKENS.0 != 0
     }
 }
 
@@ -1087,7 +1099,9 @@ fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) 
 /// The full chain, in canonical order: the DETAIL rule's two passes, then
 /// the userinfo mask, then the conninfo credential pass (both anchor
 /// grammars under their two names — one pass, the combined leftmost-first
-/// scan the live chain's single regex performs), each pass over the
+/// scan the live chain's single regex performs), then the secret-token
+/// mask (the `secret_impl` grammars, spans spliced to `***`, LAST so the
+/// established chain's contract is untouched), each pass over the
 /// current text, no pass rescanning another's output. A pass that fires
 /// moves the chain onto its owned output; a pass that does not fire
 /// returns the borrow, and the chain stays where it was. The result is
@@ -1110,6 +1124,12 @@ pub fn scrub_log_text(text: &str, rules: RuleSet) -> Cow<'_, str> {
         let src: &str = owned.as_deref().unwrap_or(text);
         let out = mask_conninfo_creds(src, rules.uri_query_creds(), rules.libpq_conninfo_creds());
         if let Cow::Owned(out) = out {
+            owned = Some(out);
+        }
+    }
+    if rules.secret_tokens() {
+        let src: &str = owned.as_deref().unwrap_or(text);
+        if let Cow::Owned(out) = crate::secret_impl::mask_secret_tokens(src) {
             owned = Some(out);
         }
     }

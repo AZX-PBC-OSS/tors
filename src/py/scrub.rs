@@ -26,10 +26,12 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
             "uri_userinfo" => set |= RuleSet::URI_USERINFO,
             "uri_query_creds" => set |= RuleSet::URI_QUERY_CREDS,
             "libpq_conninfo_creds" => set |= RuleSet::LIBPQ_CONNINFO_CREDS,
+            "secret_tokens" => set |= RuleSet::SECRET_TOKENS,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "rules must be one of ('pg_detail_lines', 'uri_userinfo', \
-                     'uri_query_creds', 'libpq_conninfo_creds'), not {other:?}"
+                     'uri_query_creds', 'libpq_conninfo_creds', 'secret_tokens'), \
+                     not {other:?}"
                 )));
             }
         }
@@ -37,14 +39,16 @@ fn parse_rules(rules: Option<Vec<String>>) -> PyResult<RuleSet> {
     Ok(set)
 }
 
-/// `tors.scrub_log_text`: the exception-text scrub grammar as four
+/// `tors.scrub_log_text`: the exception-text scrub grammar as five
 /// linear scans + splice under one `py.detach` — drop PostgreSQL DETAIL
 /// lines (real-newline, ExceptionGroup gutters included, and
 /// repr()-flattened, fail-closed), mask `scheme://user:password@host`
-/// userinfo passwords, and mask password-family connection parameters in
+/// userinfo passwords, mask password-family connection parameters in
 /// both spellings (URI query string and libpq keyword/value conninfo,
-/// case-insensitively) — byte-identical to the consumer's four compiled
-/// regexes (pinned by `tests/test_scrub_log_text_parity.py`).
+/// case-insensitively), and mask secret-token material (the
+/// `secret_impl` grammars) — byte-identical to the consumer's four
+/// compiled regexes (pinned by `tests/test_scrub_log_text_parity.py`),
+/// plus the cited-shape `secret_tokens` rule.
 ///
 /// `rules=None` (the default) runs the full chain in canonical order;
 /// `rules=[]` is the identity; duplicates dedupe and caller order is

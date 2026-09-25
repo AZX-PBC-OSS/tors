@@ -38,6 +38,17 @@ class ScrubPiiReport(TypedDict):
     skipped: dict[str, int]
     spans: list[Span]
 
+# `scrub_secrets_report`'s shape, all three keys present every time:
+# `text` is the scrubbed output (== scrub_secrets(...) byte-exact),
+# `redacted` the per-kind counts (lowercase names, absent kinds omitted;
+# the stripe rule reports stripe_live / stripe_test separately and the
+# github rule reports github_token / github_legacy_token), `spans` the
+# redaction spans (one scan, input codepoint indices, no offset mapping).
+class ScrubSecretsReport(TypedDict):
+    text: str
+    redacted: dict[str, int]
+    spans: list[Span]
+
 # One `highlight` snippet: CHARACTER offsets (`start`/`end`, Python
 # codepoint indices) into the ORIGINAL text argument — `text[start:end]`
 # is exactly `text`, and the span's ROUGE-W-shaped F1 against the query
@@ -207,13 +218,62 @@ def scrub_pii_report(
 ) -> ScrubPiiReport: ...
 
 
+# Secret-token redaction grammars, the cited vendor shapes scrub_pii's
+# evidence-backed keys rule deliberately does not carry (see
+# src/secret_impl.rs for the pins and the per-grammar false-positive
+# posture; prefix + length classes are intentionally recall-biased, and
+# the legacy GitHub 40-hex class matches every clean 40-char hex run,
+# SHA-1s and git commit ids included). Rules (None = all five):
+# aws_access_key (AKIA/ASIA + exactly 16 uppercase alphanumerics),
+# slack_token (case-insensitive xox[abprso]- + digit sections + alnum
+# tail), stripe_key (sk/rk/pk x live/test + 24+ alnum; the report says
+# live vs test), github_token (ghp/gho/ghu/ghs/ghr_ + exactly 36 base62,
+# plus the legacy exactly-40 hex class), pem_key (the whole
+# -----BEGIN/END PRIVATE KEY----- block span). Tokens are
+# <head>~<12-hex digest> over sha256(salt + match); salt=None resolves
+# to tors's "tors/scrub_secrets/v1" tag. Strictly idempotent: tokens are
+# fixed points. tors.scrub_secrets(s, rules) is s exactly when no
+# grammar matched.
+#
+# GIL note: detached_transform's shape (the rules=/salt= validation
+# under the GIL, the whole scan under one detach).
+def scrub_secrets(
+    text: str,
+    rules: Sequence[
+        Literal["aws_access_key", "slack_token", "stripe_key", "github_token", "pem_key"]
+    ]
+    | None = None,
+    *,
+    salt: str | None = None,
+) -> str: ...
+
+# The report twin of scrub_secrets: the same scrub for the same arguments
+# (report["text"] == scrub_secrets(...) byte-exact) plus the accounting --
+# per-kind counts (lowercase names, absent kinds omitted) under
+# "redacted" and the redaction spans under "spans" (ordered by start,
+# codepoint indices into the INPUT text, {"type": ..., "start": int,
+# "end": int}). The scan is one pass, so the spans are input coordinates
+# with no offset mapping. Empty input is the empty accounting. Same
+# single-detach GIL model.
+def scrub_secrets_report(
+    text: str,
+    rules: Sequence[
+        Literal["aws_access_key", "slack_token", "stripe_key", "github_token", "pem_key"]
+    ]
+    | None = None,
+    *,
+    salt: str | None = None,
+) -> ScrubSecretsReport: ...
+
+
 # Named-rule log and exception-text scrubbing, byte-identical to the
 # grammar definition it ships with (the four compiled regexes are quoted
 # in tests/reference.py and differentially enforced by
 # tests/test_scrub_log_text_parity.py). rules=None
 # runs the full chain in canonical order (pg_detail_lines -> uri_userinfo
 # -> the conninfo pass, whose uri_query_creds / libpq_conninfo_creds names
-# select the two anchor grammars of ONE pass); [] is the identity;
+# select the two anchor grammars of ONE pass; then secret_tokens, the
+# secret_impl grammars, spliced to ***). [] is the identity;
 # duplicates dedupe and caller order is irrelevant. An unknown name raises
 # ValueError naming the accepted set. SECURITY POLICY (issue #107,
 # inverting 0.7.0): the repr-flattened DETAIL run is FAIL-CLOSED — a
@@ -227,7 +287,13 @@ def scrub_pii_report(
 def scrub_log_text(
     text: str,
     rules: Sequence[
-        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+        Literal[
+            "pg_detail_lines",
+            "uri_userinfo",
+            "uri_query_creds",
+            "libpq_conninfo_creds",
+            "secret_tokens",
+        ]
     ]
     | None = None,
 ) -> str: ...

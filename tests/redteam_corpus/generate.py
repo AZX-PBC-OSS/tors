@@ -12,6 +12,10 @@ are chosen so a RELAPSE of the fixed defects crosses the manifest's
 wall limits at corpus scale (e.g. issue-92's flood is 1000 headers:
 the pre-fix cubic measured 2.6s, over the 2s canary limit, while the
 fix measures 0.5ms) — see the manifest for each entry's numbers.
+
+Full-shape vendor tokens are spelled with the manifest's `%%` splice
+marker right after the prefix head (the runner removes it before the
+scrub): the committed bytes never carry the contiguous token.
 """
 
 from __future__ import annotations
@@ -36,12 +40,21 @@ n = 1000
 )
 
 # issue-99: the leaked credential shapes (all redact on main now).
+# Full-shape vendor tokens are spelled with the corpus's `%%` splice
+# marker right after the prefix head (the canary's runner removes it
+# before the scrub): the committed bytes never carry the contiguous
+# token — push protection scans the pushed blobs.
+gho = "gho_" + "%%" + "16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x"
+ghu = "ghu_" + "%%" + "16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x"
+ghs = "ghs_" + "%%" + "16C7e42F292c6912E7710c838347Ae178B4a1"
+ghr = "ghr_" + "%%" + "16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x"
+glpat = "glpat-" + "%%" + "abcdefghij0123456789"
 (out / "issue-99-credentials.txt").write_text(
-    "auth failed for gho_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x\n"
-    "auth failed for ghu_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x\n"
-    "auth failed for ghs_16C7e42F292c6912E7710c838347Ae178B4a1\n"
-    "auth failed for ghr_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x\n"
-    "auth failed for glpat-abcdefghij0123456789\n"
+    f"auth failed for {gho}\n"
+    f"auth failed for {ghu}\n"
+    f"auth failed for {ghs}\n"
+    f"auth failed for {ghr}\n"
+    f"auth failed for {glpat}\n"
     "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQdGBGX...\n-----END PGP PRIVATE KEY BLOCK-----\n",
     encoding="utf-8",
 )
@@ -54,7 +67,9 @@ n = 1000
 (out / "issue-100-uXXXX.txt").write_text(
     "invalid key \\u0027sk-proj-abcdefghijklmnopqrstuvwx", encoding="utf-8"
 )
-(out / "issue-100-pctXX.txt").write_text("url?key%3DAIza" + "a" * 35, encoding="utf-8")
+(out / "issue-100-pctXX.txt").write_text(
+    "url?key%3DAIza" + "%%" + "a" * 35, encoding="utf-8"
+)
 
 # issue-101: the masked O(matches x value_len) shape (400k matches; the
 # value is a runner param: "x" * 400_000 — pre-fix ~5s, over the limit).

@@ -18,6 +18,7 @@ from tors import (
     GroundingResult,
     RepairAction,
     ScrubPiiReport,
+    ScrubSecretsReport,
     SentenceGrounding,
     StemmerLanguage,
 )
@@ -39,10 +40,34 @@ async def scrub_pii_report(
     salt: str | None = None,
     families: Sequence[str] | None = None,
 ) -> ScrubPiiReport: ...
+async def scrub_secrets(
+    text: str,
+    rules: Sequence[
+        Literal["aws_access_key", "slack_token", "stripe_key", "github_token", "pem_key"]
+    ]
+    | None = None,
+    *,
+    salt: str | None = None,
+) -> str: ...
+async def scrub_secrets_report(
+    text: str,
+    rules: Sequence[
+        Literal["aws_access_key", "slack_token", "stripe_key", "github_token", "pem_key"]
+    ]
+    | None = None,
+    *,
+    salt: str | None = None,
+) -> ScrubSecretsReport: ...
 async def scrub_log_text(
     text: str,
     rules: Sequence[
-        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+        Literal[
+            "pg_detail_lines",
+            "uri_userinfo",
+            "uri_query_creds",
+            "libpq_conninfo_creds",
+            "secret_tokens",
+        ]
     ]
     | None = None,
 ) -> str: ...

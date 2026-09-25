@@ -45,6 +45,7 @@ pub mod rank_fusion;
 pub mod scan;
 pub mod scrub;
 pub mod search;
+pub mod secret;
 pub mod segmentation;
 pub mod simhash;
 pub mod tfidf;
