@@ -139,6 +139,44 @@ otherwise use:
   `deadline_ms`: a character-level permutation grows ~n² under Myers (50k
   chars 0.32 s, 1M chars 183.6 s unbounded); the deadline turns that into a
   `TimeoutError`.
+- `rank_fuse` vs `ranx`'s RRF fusion (`ranx.fusion.rrf`, 0.3.21): the same
+  8 ranked lists (2,000 and 20,000 cheap-to-hash ids per list, ~60% pool
+  overlap, rankings that disagree in membership and order) fuse to the same
+  answer, checked both directions: the top-50 fused ordering overlaps ranx's
+  100%, and the RRF scores recompute in plain Python from the same lists to
+  a 3.5e-18 max delta. Walls: ~0.3 ms vs ~6-8 ms at 8x2k (~20x), ~4 ms vs
+  ~60-127 ms at 8x20k (~15x).
+- `ndcg_at_k` vs `sklearn.metrics.ndcg_score` (1.9) and `ranx.evaluate`
+  (`ndcg@10`): one fixed-seed 10k ranking, 1,000 relevant ids, two parked
+  inside the top 10 so the metric reads a partial value: all three read the
+  same 0.1834, ~0.4-0.7 ms vs sklearn's ~1.0 ms (~2x) and ranx's ~2.6-5 ms
+  (~5x). ranx models each ranked list as one Run (one retrieval system),
+  sklearn wants dense label/score arrays over the whole label set: the
+  input plumbing is the comparison's honest part, not a detail.
+- `chunk_to_offsets` vs `semchunk.chunk` (4.1.1, `offsets=True`): the same
+  1 MiB prose, 200-token budget, overlap 20, the same whitespace token
+  counter (pre-computed spans on the tors side): ~22 ms vs ~42-44 ms
+  (~1.9x). Different contracts by design (semchunk sentence-aligns its
+  windows, `chunk_to_offsets` packs the given spans exactly), so the
+  agreement check is the shared invariant only: both outputs tile the
+  text within budget.
+- `ground_sentences` / `highlight` vs `rouge_score` (0.1.2): scoring a
+  100 KiB document's 1,251 sentences against one query: one
+  `ground_sentences` call ~5.7-6.1 ms, one `highlight` ~5.2-5.5 ms, the
+  per-pair `RougeScorer.score` loop ~25-28 ms (~4-5x). The metrics differ
+  by design (ROUGE-1/ROUGE-L there, the ROUGE-W-shaped F1 here), so the
+  agreement check is the toy pair class: identical token sequences score
+  1.0 and disjoint ones 0.0 on all three surfaces.
+- `shingle_jaccard` vs the naive pure-Python spelling (the same UAX #29
+  tokens via `word_bounds`, lowercase + NFC fold, width-3 shingle tuples,
+  set Jaccard; Python's stdlib has no word segmenter, so the baseline
+  borrows only the segmentation): 100 KiB pairs read the same 0.692308
+  value, ~9 ms vs ~15 ms (~1.7x).
+
+The five races live in `tools/bench_sota.py` (same inputs both sides,
+min-of-N walls, the agreement check asserted before a number prints, box
+ambient load 1-2x across runs: transcribe the minima, the ratios are the
+stable quantity).
 
 ## One-shot hashing vs hashlib, honestly measured
 
