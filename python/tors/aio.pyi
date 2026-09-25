@@ -65,6 +65,7 @@ async def scrub_log_text(
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         ]

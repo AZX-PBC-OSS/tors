@@ -65,6 +65,22 @@ from hypothesis import strategies as st
 from reference import reference_scrub_log_text
 from tors import scrub_log_text
 
+# The extended credential-key set's names (the uri_query_creds_extended
+# rule), one spelling for the per-name vectors and the completeness lanes
+# below (src/scrub_impl.rs carries the sources and the judicious cuts).
+EXTENDED_RULE_NAMES = (
+    "sig",
+    "api_key",
+    "apikey",
+    "key",
+    "access_key",
+    "sas_token",
+    "token",
+    "secret",
+    "passkey",
+    "auth",
+)
+
 PG = ["pg_detail_lines"]
 URI_USER = ["uri_userinfo"]
 URI_QUERY = ["uri_query_creds"]
@@ -363,6 +379,133 @@ class TestLibpqConninfoCreds:
         assert both == scrub_log_text(text) == "host=h password=*** ?password=***"
 
 
+class TestUriQueryCredsExtended:
+    """The fifth named rule: the SAME ``[?&]`` URI-query anchor over the
+    EXTENDED credential-key set — the shared five plus the ops-standard
+    query-parameter names the adoption verdict flagged (``sig=``,
+    ``api_key=``, ``sas_token=``). The set's sources are the published
+    scanner lists, transcribed and closed (ESLint
+    ``no-sensitive-data-in-query``'s default sensitive terms,
+    detect-secrets' AWS secret-keyword list, Azure's own SAS query
+    grammar ``?sv=...&sig=...``; the problem class is CWE-598 — query
+    strings land in access logs, proxy logs, browser history, and the
+    ``Referer`` header). A NEW NAME, not an ``extra_keys=`` parameter:
+    the design charter closes the choice (new scrubs arrive as new named
+    rules with their own pinned contracts, never as parameters — a
+    pinned contract a caller can widen is not pinned).
+
+    Byte-identity discipline: the shared five's vectors are unchanged
+    under every lane, including the default chain (the superset lane
+    only ADDS names)."""
+
+    EXTENDED_NAMES = EXTENDED_RULE_NAMES
+
+    def test_every_extended_name_is_masked_name_preserved(self) -> None:
+        for name in self.EXTENDED_NAMES:
+            assert scrub_log_text(f"?{name}=v&x=1", ["uri_query_creds_extended"]) == (
+                f"?{name}=***&x=1"
+            ), name
+
+    def test_the_shared_five_ride_along_superset_lane(self) -> None:
+        for name in ("password", "passphrase", "passwd", "pwd", "sslpassword"):
+            assert scrub_log_text(f"?{name}=v", ["uri_query_creds_extended"]) == (
+                f"?{name}=***"
+            ), name
+
+    def test_names_are_case_insensitive(self) -> None:
+        assert scrub_log_text("?SIG=abc&Api_Key=x&TOKEN=y") == "?SIG=***&Api_Key=***&TOKEN=***"
+
+    def test_the_default_chain_includes_the_extension(self) -> None:
+        # The full chain runs the widest key set: the adoption verdict's
+        # whole point (a scrubber that leaves ?sig= verbatim without an
+        # opt-in is the under-redaction direction). The shared five's
+        # default-chain vectors do not move (the parity corpus pins them
+        # lane by lane).
+        assert scrub_log_text("?sig=abc&api_key=x") == "?sig=***&api_key=***"
+        assert scrub_log_text("?password=x&token=y") == "?password=***&token=***"
+
+    def test_the_base_rule_still_answers_only_the_shared_five(self) -> None:
+        # uri_query_creds's own contract does not widen: sig/api_key/
+        # sas_token/key are invisible to it (an explicit-rules caller
+        # keeps the exact five-name behavior).
+        for name in self.EXTENDED_NAMES:
+            assert scrub_log_text(f"?{name}=v", ["uri_query_creds"]) == f"?{name}=v", name
+
+    def test_delimiter_boundaries(self) -> None:
+        # The anchor is the char IMMEDIATELY before the name: `?`/`&`
+        # fire, a word char never does (the longest-first resolution
+        # puts the check on the right char: `xapi_key=`'s "api_key"
+        # suffix match anchors on `x`, a word char — no mask).
+        assert scrub_log_text("page?key=v", ["uri_query_creds_extended"]) == "page?key=***"
+        assert scrub_log_text("&&key=v", ["uri_query_creds_extended"]) == "&&key=***"
+        assert scrub_log_text("??key=v", ["uri_query_creds_extended"]) == "??key=***"
+        assert scrub_log_text("?xkey=v", ["uri_query_creds_extended"]) == "?xkey=v"
+        assert scrub_log_text("xkey=v", ["uri_query_creds_extended"]) == "xkey=v"
+        assert scrub_log_text("?oauth_token=v", ["uri_query_creds_extended"]) == "?oauth_token=v"
+        # The `#`-fragment and host splits are the caller's URL parsing:
+        # the grammar sees only the query-string text it is given.
+        assert scrub_log_text("https://h/p?sig=abc", ["uri_query_creds_extended"]) == (
+            "https://h/p?sig=***"
+        )
+
+    def test_longest_first_suffix_resolution(self) -> None:
+        # `key` is a trailing substring of `api_key`/`access_key`, and
+        # `token` of `sas_token`: the LONGEST name wins, whose anchor
+        # sits before the whole name. The shorter suffix's own anchor
+        # position would be a name char — blocked either way.
+        assert scrub_log_text("?api_key=v", ["uri_query_creds_extended"]) == "?api_key=***"
+        assert scrub_log_text("?access_key=v", ["uri_query_creds_extended"]) == (
+            "?access_key=***"
+        )
+        assert scrub_log_text("?sas_token=v", ["uri_query_creds_extended"]) == (
+            "?sas_token=***"
+        )
+
+    def test_value_spanning_to_end_of_string(self) -> None:
+        # The token leg runs to whitespace/`&` — end of text included —
+        # and a value may carry `=`/`@` (the #107 class).
+        assert scrub_log_text("?sig=to_end_of_string", ["uri_query_creds_extended"]) == (
+            "?sig=***"
+        )
+        assert scrub_log_text("?key=a=b@c", ["uri_query_creds_extended"]) == "?key=***"
+        assert scrub_log_text("?key=a b?key=c", ["uri_query_creds_extended"]) == (
+            "?key=*** b?key=***"
+        )
+
+    def test_quoted_values_and_the_empty_value_boundary(self) -> None:
+        # The libpq value legs are the shared grammar's.
+        assert scrub_log_text("?key='a b'&x=1", ["uri_query_creds_extended"]) == (
+            "?key=***&x=1"
+        )
+        assert scrub_log_text("?key='unterminated &sig=x", ["uri_query_creds_extended"]) == (
+            "?key=*** &sig=***"
+        )
+        assert scrub_log_text("?sig=", ["uri_query_creds_extended"]) == "?sig="
+        assert scrub_log_text("?sig", ["uri_query_creds_extended"]) == "?sig"
+
+    def test_the_lookbehind_anchor_stays_the_shared_five(self) -> None:
+        # The extension is URI-query-shaped: the libpq keyword grammar
+        # keeps the shared five (`key=k` at text start is a libpq
+        # keyword shape no source names).
+        assert scrub_log_text("key=k password=p", ["libpq_conninfo_creds"]) == "key=k password=***"
+        assert scrub_log_text(
+            "key=k password=p", ["libpq_conninfo_creds", "uri_query_creds_extended"]
+        ) == "key=k password=***"
+
+    def test_the_three_names_still_run_one_combined_pass(self) -> None:
+        text = "host=h password=p ?sig=q&token=r"
+        all_three = scrub_log_text(
+            text, ["uri_query_creds", "uri_query_creds_extended", "libpq_conninfo_creds"]
+        )
+        assert all_three == scrub_log_text(text) == "host=h password=*** ?sig=***&token=***"
+
+    def test_an_extended_key_value_never_survives_the_default_chain(self) -> None:
+        # Redaction completeness, per name: an alnum payload planted
+        # behind each extended key shape never survives the full chain.
+        for name in (*EXTENDED_RULE_NAMES, "password"):
+            assert scrub_log_text(f"?{name}=s3cretVal99&x=1") == f"?{name}=***&x=1", name
+
+
 class TestCanonicalOrder:
     def test_a_dsn_with_both_credential_shapes_masks_both(self) -> None:
         assert scrub_log_text("postgresql://worker:S3cr3t@db/prod?password=fallback") == (
@@ -437,7 +580,8 @@ class TestRulesParameter:
             scrub_log_text("x", ["pg_detail_lines", "uri_creds"])
         assert str(excinfo.value) == (
             "rules must be one of ('pg_detail_lines', 'uri_userinfo', "
-            "'uri_query_creds', 'libpq_conninfo_creds', 'secret_tokens'), "
+            "'uri_query_creds', 'uri_query_creds_extended', "
+            "'libpq_conninfo_creds', 'secret_tokens'), "
             "not \"uri_creds\""
         )
 
@@ -720,6 +864,40 @@ class TestHypothesisInvariants:
         once = scrub_log_text(text)
         twice = scrub_log_text(once)
         assert scrub_log_text(twice) == twice
+
+    @given(_ANY_TEXT)
+    @settings(max_examples=300)
+    def test_the_extended_rule_is_idempotent_and_byte_preserving(self, text: str) -> None:
+        # The extended rule's own lane: the identity return is the
+        # ORIGINAL object (byte-preservation — a pass that never fired
+        # must not spend a copy), and the rule converges by the second
+        # pass (its `***` splice re-matches its own value class).
+        once = scrub_log_text(text, ["uri_query_creds_extended"])
+        twice = scrub_log_text(once, ["uri_query_creds_extended"])
+        assert scrub_log_text(twice, ["uri_query_creds_extended"]) == twice
+        if once == text:
+            assert once is text
+
+    @given(_ANY_TEXT)
+    @settings(max_examples=300)
+    def test_the_extended_rule_matches_the_reference(self, text: str) -> None:
+        # Oracle parity on the single extended lane, over the same raw
+        # alphabet the whole-chain hypothesis lanes run.
+        assert scrub_log_text(text, ["uri_query_creds_extended"]) == (
+            reference_scrub_log_text(text, ["uri_query_creds_extended"])
+        )
+
+    @given(_ANY_TEXT)
+    @settings(max_examples=200)
+    def test_an_extended_key_value_never_survives_the_default_chain(self, text: str) -> None:
+        # Redaction completeness: an alnum payload planted behind each
+        # extended key shape never survives the full chain (the value
+        # classes accept it whole, so a survivor is unambiguously a miss).
+        payload = _legal_conninfo_value(text)
+        if not payload:
+            return
+        for name in EXTENDED_RULE_NAMES:
+            assert scrub_log_text(f"?{name}={payload}&x=1") == f"?{name}=***&x=1", name
 
     def test_the_param_mask_can_unblock_a_userinfo_match_on_pass_two(self) -> None:
         """The one documented non-idempotence class, pinned literally

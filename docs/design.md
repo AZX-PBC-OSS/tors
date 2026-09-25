@@ -51,7 +51,8 @@ The cuts below are decisions, not oversights:
   is about per-language datasets, not about naming a 16-codepoint hex
   alphabet. The same cut is why `scrub_log_text`'s rules
   are a closed set of *names* (`pg_detail_lines`, `uri_userinfo`,
-  `uri_query_creds`, `libpq_conninfo_creds`), not patterns: each rule is a
+  `uri_query_creds`, `uri_query_creds_extended`, `libpq_conninfo_creds`),
+  not patterns: each rule is a
   call-site regex the
   scrub exists to implement, hand-rolled in Rust and pinned byte-identical
   to the quoted grammar — a caller-supplied pattern language
@@ -69,7 +70,14 @@ The cuts below are decisions, not oversights:
   (five private consumers; a follow-up contract that landed as its own
   pinned rule, not a silent widening of the ported one), the same way C1
   controls are a follow-up to `strip_controls` rather than a widening of
-  it. Further redaction grammars are separate follow-up contracts with
+  it. The doctrine holds at the key-set scale too: the ops-standard
+  credential query parameters (`sig=`, `api_key=`, `sas_token=`, ...)
+  arrived as the NEW named rule `uri_query_creds_extended` (the same
+  `[?&]` anchor over a wider closed key set, the shared five included,
+  sources cited in the module docs), not as an `extra_keys=` parameter —
+  a pinned contract a caller can widen is not pinned, and there is no
+  measured re-materialization cost for a compiled handle to amortize.
+  Further redaction grammars are separate follow-up contracts with
   their own pinned sources, not silent extensions of this one: the
   zero-evidence credential shapes — Slack xox, Stripe, AWS AKIA — ship
   as the `secret_tokens` grammar family (with the GitHub token classes

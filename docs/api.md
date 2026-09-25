@@ -617,6 +617,7 @@ def scrub_log_text(
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         ]
@@ -628,13 +629,13 @@ def scrub_log_text(
 Named-rule log and exception-text scrubbing, five linear scans + splice
 under one `py.detach`: the scrub a worker applies to
 `str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
-line, a span, or an exported attribute, byte-identical to the four
-compiled regexes that define its grammar — pinned by a differential
+line, a span, or an exported attribute, byte-identical to the compiled
+regexes that define its grammar — pinned by a differential
 harness that races tors against that reference (see
 [Design and scope](design.md) for why this is a *named-rule* surface
 rather than a pattern parameter).
 
-Five rules, one closed set:
+Six names, one closed set:
 
 - `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
   values, so the whole line is dropped. Both separator spellings: real
@@ -665,19 +666,57 @@ Five rules, one closed set:
 - `uri_userinfo` — `scheme://user:password@host` becomes
   `scheme://user:***@host`: scheme and username preserved verbatim, empty
   username handled, password ending at the first `@`.
-- `uri_query_creds` / `libpq_conninfo_creds` — the password-family
-  connection parameters, ONE pass under two names (the two anchor grammars
-  of the live chain's single combined regex): `[?&]name=value` (URI query)
-  and the libpq keyword form `name=value` (a non-`[A-Za-z0-9_]` char — or
-  text start — before the name, so `host=h password=p` masks and `cpwd=`
-  does not). Names are the five credential parameters
-  (`password`, `passphrase`, `passwd`, `pwd`, `sslpassword`) matched
-  case-insensitively; the value is a libpq single-quoted string (spaces
-  allowed, `\'`/`\\` escapes honored) or an unquoted token running to
-  whitespace or `&` — deliberately NOT stopping at `@`: a password may
-  legally carry an unencoded `@`, and a mask that stops there leaves the
-  tail riding after the `***` (0.7.0 did exactly that). Name and delimiter
-  are preserved: `?password=a@b` → `?password=***`.
+- `uri_query_creds` — the URI-query anchor of the credential pass over
+  the five shared credential names, the grammar shared with
+  `libpq_conninfo_creds` below: `[?&]name=value` → `[?&]name=***`.
+
+  > [!WARNING]
+  > SECURITY-POLICY CHANGE (the weighted-RRF-and-secret-params release),
+  > widening the default chain: `uri_query_creds_extended` is new, and
+  > the full chain (`rules=None` included) now runs the EXTENDED key
+  > set. A text that carries `?sig=`/`?api_key=`/`?token=`/`?key=` (and
+  > the rest of the extended names) scrubbed differently before this
+  > release: the query value is masked where 0.x left it verbatim —
+  > over-redaction, never under (a delimiter miss must delete MORE
+  > text, never less of the secret). The shared five's behavior is
+  > byte-identical everywhere; `uri_query_creds` selected EXPLICITLY
+  > keeps the exact five-name contract.
+- `uri_query_creds_extended` — the SAME `[?&]` anchor over the EXTENDED
+  credential-key set: the shared five plus the ops-standard
+  query-parameter names (`access_key`, `api_key`, `apikey`, `auth`,
+  `key`, `passkey`, `sas_token`, `secret`, `sig`, `token`). The names
+  are the published scanner lists, transcribed and closed: ESLint
+  `no-sensitive-data-in-query`'s default sensitive terms (`password`,
+  `token`, `secret`, `api_key`/`apiKey`, `auth`), detect-secrets' AWS
+  secret-keyword list (`key`, `pwd`, `password`, `token`, `pass`), and
+  Azure's own SAS query grammar (`?sv=...&sig=...`) — the
+  credential-in-URL problem class CWE-598 names (query strings land in
+  access logs, proxy logs, browser history, and the `Referer` header of
+  every outbound link). Judicious cuts, stated: no
+  `session`/`sessionid`/`sid` (session identifiers are not credentials;
+  masking them corrupts a log line for nothing), no
+  `access_token`/`refresh_token`/`auth_token` (the `_token` suffix
+  family is real but open-ended — `oauth_token=` does not mask under
+  the closed set, the documented seam; more names arrive as evidence
+  names them, never by pattern).
+- `libpq_conninfo_creds` — the keyword/value anchor of the SAME pass:
+  `name=value` where the name is not the tail of a longer word (the
+  live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
+  (`host=db password='hun ter2'` — no `://`, no `?`) masks too, and
+  `cpwd=` is not mistaken for `pwd=`.
+
+  The shared value grammar, all three names: the credential names
+  (`uri_query_creds`/`libpq_conninfo_creds` match the five shared
+  parameters `password`, `passphrase`, `passwd`, `pwd`, `sslpassword`;
+  `uri_query_creds_extended` the extended superset) matched
+  CASE-INSENSITIVELY (libpq names are case-insensitive and operators'
+  DSNs echo back whatever casing was written), and the value is either
+  a libpq single-quoted string — which may carry spaces and honors the
+  `\'` and `\\` escapes — or an unquoted token running to whitespace or
+  `&`, deliberately NOT stopping at `@` (a password may legally contain
+  an unencoded `@`, and a mask that stops there leaves the tail riding
+  after the `***`). Name and delimiter are preserved: `?password=a@b` →
+  `?password=***`.
 - `secret_tokens` — the secret-token grammars of
   [`tors.scrub_secrets`](#torsscrub_secrets) over the SAME closed
   five-grammar set, each span spliced to `***` (this family's mask
@@ -691,8 +730,13 @@ Five rules, one closed set:
 `secret_tokens`, each
 rule a whole pass over the current text before the next begins (a DETAIL
 deletion can eat the `@` a userinfo mask anchors on — rule interaction is
-why the order is a contract, not a caller choice). Selecting both conninfo
-names runs the combined pass once, never two sequential substitutions.
+why the order is a contract, not a caller choice). The conninfo pass
+answers to THREE names (`uri_query_creds` the `[?&]` anchor over the
+shared five, `uri_query_creds_extended` the same anchor over the extended
+set, `libpq_conninfo_creds` the libpq keyword lookbehind over the shared
+five); any selection of them — including the default chain — runs the
+combined pass ONCE, each `=` matched against the widest key set its
+anchor selects, never two sequential substitutions.
 
 > [!WARNING]
 > The default chain can leave a credential fragment by design:
@@ -750,6 +794,18 @@ tors.scrub_log_text(
     ["uri_userinfo"],
 )
 # "connect dsn=postgresql://worker:***@db.internal:5432/prod"  (one rule alone)
+tors.scrub_log_text(
+    "GET https://api.internal/v1?sv=2020&sig=sha%3Dabc&api_key=kk123&sas_token=tok&x=1"
+)
+# "GET https://api.internal/v1?sv=2020&sig=***&api_key=***&sas_token=***&x=1"
+# (the extended key set: the full chain runs it by default)
+tors.scrub_log_text(
+    "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123",
+    ["uri_query_creds"],
+)
+# "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123"  (the base rule
+# answers only the shared five; the extended names ride with
+# "uri_query_creds_extended")
 ```
 
 **Async**: `await tors.aio.scrub_log_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).

@@ -4,10 +4,10 @@
 //! tracebacks before any of it reaches a log line, a span, or an
 //! exported attribute.
 //!
-//! Five rules, one name each, four pinned to the documented grammar (the
-//! four compiled regexes this module implements are quoted in
+//! Six rules, one name each, five pinned to the documented grammar (the
+//! five compiled regexes this module implements are quoted in
 //! `tests/reference.py` and differentially enforced by
-//! `tests/test_scrub_log_text_parity.py`; the fifth, `secret_tokens`,
+//! `tests/test_scrub_log_text_parity.py`; the sixth, `secret_tokens`,
 //! delegates to `secret_impl`'s cited vendor grammars and splices each
 //! span to `***`):
 //!
@@ -55,20 +55,61 @@
 //!   honored exactly (see `WORD_DEMOTE_RANGES` for the Unicode seam that
 //!   makes a naive `is_alphanumeric` check under-redact).
 //! * `uri_query_creds`: the URI-query anchor of the conninfo credential
-//!   pass — `[?&]name=value` → `[?&]name=***` — over the shared grammar
-//!   documented under `libpq_conninfo_creds` below.
+//!   pass — `[?&]name=value` → `[?&]name=***` over the five shared
+//!   credential names, the grammar documented under
+//!   `libpq_conninfo_creds` below.
+//! * `uri_query_creds_extended`: the SAME `[?&]` anchor over the
+//!   EXTENDED credential-key set — the five shared names plus the
+//!   ops-standard query-parameter names the adoption verdict flagged
+//!   (`sig=`, `api_key=`, `sas_token=`): `access_key`, `api_key`,
+//!   `apikey`, `auth`, `key`, `passkey`, `sas_token`, `secret`, `sig`,
+//!   `token`. The names are the published scanner lists, transcribed
+//!   and closed: ESLint `no-sensitive-data-in-query`'s default
+//!   sensitive terms (`password`, `token`, `secret`, `api_key`/
+//!   `apiKey`, `auth`), detect-secrets' AWS secret-keyword list
+//!   (`key`, `pwd`, `password`, `token`, `pass`), and Azure's own SAS
+//!   query grammar (`?sv=...&sig=...`, `sig` the shared-signature
+//!   parameter, `sas_token` the wrapper spelling), the credential-in-
+//!   URL problem class CWE-598 names (query strings land in access
+//!   logs, proxy logs, browser history, and the `Referer` header).
+//!   Judicious cuts: no `session`/`sessionid`/`sid` (session
+//!   IDENTIFIERS are not credentials; a masked `sid=` corrupts a log
+//!   line for nothing), no `access_token`/`refresh_token`/`auth_token`
+//!   (the `_token` suffix family is real but open-ended — `oauth_token`
+//!   alone would not mask under the closed set, the documented seam;
+//!   more arrive as evidence names them, never by pattern).
+//!
+//!   WHY A NEW NAME, not a parameter: the design charter ("New scrubs
+//!   arrive as new named rules with their own pinned contracts, never
+//!   as parameters") closes this choice — an `extra_keys=` parameter
+//!   was considered and declined exactly the way the
+//!   `CompiledLemmaDict`/`CompiledPatterns` pair was scoped to their
+//!   two measured costs. There is no measured re-materialization cost
+//!   to amortize (the name lists are static tables, the pass is
+//!   stateless per call), and a caller-supplied key list would make
+//!   the scrub's guarantee caller-configurable in exactly the way the
+//!   named-rule surface exists to refuse: a pinned contract you can
+//!   widen is not pinned. The extended set is a SUPERSET of the shared
+//!   five, so `["uri_query_creds_extended"]` answers everything
+//!   `["uri_query_creds"]` does; when BOTH (or either with
+//!   `libpq_conninfo_creds`) are selected the conninfo pass still runs
+//!   ONCE, each `=` position matched against the widest list its
+//!   anchor selects.
 //! * `libpq_conninfo_creds`: the keyword/value anchor of the SAME pass —
 //!   `name=value` where the name is not the tail of a longer word (the
 //!   live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
 //!   (`host=db password='hun ter2'` — no `://`, no `?`) masks too, and
-//!   `cpwd=` is not mistaken for `pwd=`. The two names select the two
-//!   anchor grammars of ONE conninfo pass, exactly the live chain's single
-//!   combined regex (anchor alternation `[?&]|(?<![A-Za-z0-9_])`); the
-//!   default chain (both selected) is that combined leftmost-first pass,
+//!   `cpwd=` is not mistaken for `pwd=`. The conninfo pass's names select
+//!   its anchor grammars and key sets of ONE pass, exactly the live
+//!   chain's single combined regex (anchor alternation
+//!   `[?&]|(?<![A-Za-z0-9_])`); the
+//!   default chain (all selected) is that combined leftmost-first pass,
 //!   never two sequential substitutions — a value's `***` splice must not
 //!   become a new anchor for a second pass. Selection is per anchor
-//!   grammar, so `["uri_query_creds"]` alone masks only `?`/`&`-anchored
-//!   params and `["libpq_conninfo_creds"]` alone only keyword-anchored
+//!   grammar and key set, so `["uri_query_creds"]` alone masks only
+//!   `?`/`&`-anchored params over the shared five,
+//!   `["uri_query_creds_extended"]` the same anchor over the extended
+//!   set, and `["libpq_conninfo_creds"]` alone only keyword-anchored
 //!   ones.
 //!
 //!   The shared value grammar, both anchors: the five credential parameter
@@ -90,8 +131,9 @@
 //!
 //! Canonical order (the chain's own application order, not a caller
 //! choice): `pg_detail_lines` (real pass, then escaped pass), then
-//! `uri_userinfo`, then the conninfo credential pass (both anchor
-//! grammars under their two names), then `secret_tokens` last (its
+//! `uri_userinfo`, then the conninfo credential pass (its anchor
+//! grammars and key sets under their three names), then `secret_tokens`
+//! last (its
 //! spans ride no other rule's anchors and no established rule sees its
 //! masks), each rule a whole pass over the
 //! current text before the next begins. The order is a contract because
@@ -470,8 +512,14 @@ impl RuleSet {
     pub const PG_DETAIL_LINES: Self = Self(1);
     /// Mask `scheme://user:password@host` userinfo passwords.
     pub const URI_USERINFO: Self = Self(2);
-    /// Mask password-family query parameters (`[?&]`-anchored).
+    /// Mask password-family query parameters (`[?&]`-anchored, the five
+    /// shared credential names).
     pub const URI_QUERY_CREDS: Self = Self(4);
+    /// Mask the EXTENDED credential-key set under the same `[?&]` anchor
+    /// (the shared five plus the ops-standard query-parameter names; see
+    /// the module docs for the set's sources and the new-name-not-
+    /// parameter decision).
+    pub const URI_QUERY_CREDS_EXTENDED: Self = Self(32);
     /// Mask password-family conninfo keywords (libpq lookbehind-anchored;
     /// see the module docs — the two conninfo names select the two anchor
     /// grammars of ONE pass).
@@ -480,8 +528,10 @@ impl RuleSet {
     /// access keys, Slack tokens, Stripe keys, GitHub tokens, PEM
     /// private-key blocks), each span spliced to `***`.
     pub const SECRET_TOKENS: Self = Self(16);
-    /// `rules=None`: the full chain, in canonical order.
-    pub const ALL: Self = Self(31);
+    /// `rules=None`: the full chain, in canonical order (the extended
+    /// query rule included: its anchor grammar is a strict widening of
+    /// `uri_query_creds`, so the full chain masks the union).
+    pub const ALL: Self = Self(63);
 
     fn pg_detail_lines(self) -> bool {
         self.0 & Self::PG_DETAIL_LINES.0 != 0
@@ -493,6 +543,10 @@ impl RuleSet {
 
     fn uri_query_creds(self) -> bool {
         self.0 & Self::URI_QUERY_CREDS.0 != 0
+    }
+
+    fn uri_query_creds_extended(self) -> bool {
+        self.0 & Self::URI_QUERY_CREDS_EXTENDED.0 != 0
     }
 
     fn libpq_conninfo_creds(self) -> bool {
@@ -507,6 +561,13 @@ impl RuleSet {
 impl std::ops::BitOrAssign for RuleSet {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
+    }
+}
+
+impl std::ops::BitOr for RuleSet {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
     }
 }
 
@@ -942,6 +1003,34 @@ fn mask_uri_userinfo(text: &str) -> Cow<'_, str> {
 /// hypothesis lanes.
 const PARAM_NAMES: [&str; 5] = ["sslpassword", "passphrase", "password", "passwd", "pwd"];
 
+/// The EXTENDED credential-key set for the `uri_query_creds_extended`
+/// rule: the five shared names plus the ops-standard query-parameter
+/// names (the module docs carry the sources and the judicious cuts).
+/// Longest first, the same discipline `PARAM_NAMES` keeps — the set's
+/// suffix overlaps (`key` inside `api_key`/`access_key`, `token` inside
+/// `sas_token`, `password` inside `sslpassword`) resolve to the longest
+/// name at each `=`, whose anchor check then decides; a shorter suffix's
+/// anchor position would sit on a name char (a word byte) and fail
+/// either anchor's check anyway. No name is a prefix of another, so the
+/// reference regex's alternation order is free.
+const EXTENDED_PARAM_NAMES: [&str; 15] = [
+    "sslpassword",
+    "passphrase",
+    "access_key",
+    "sas_token",
+    "password",
+    "api_key",
+    "passkey",
+    "apikey",
+    "secret",
+    "passwd",
+    "token",
+    "auth",
+    "key",
+    "sig",
+    "pwd",
+];
+
 /// Is `c` in the lookbehind class `[A-Za-z0-9_]` — explicitly ASCII (the
 /// live chain spells the class; a Unicode letter such as `é` is NOT in
 /// it, so `épassword=x` masks, where the `\b`-style Unicode word check
@@ -950,16 +1039,44 @@ fn is_conninfo_word_byte(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// Which name list the URI-query anchor matches against: `None` (the
+/// rule not selected), `Shared` (`uri_query_creds`, the five libpq
+/// credential names), or `Extended` (`uri_query_creds_extended`, the
+/// ops-standard superset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryNames {
+    None,
+    Shared,
+    Extended,
+}
+
+/// The longest name in `names` that ends exactly at the `=` at `eq`
+/// (case-insensitively, the IGNORECASE grammar) and starts at or after
+/// `cursor` (a name may not reach back into a consumed value). `names`
+/// is longest-first, so the first hit IS the longest match.
+fn match_name(names: &[&str], bytes: &[u8], eq: usize, cursor: usize) -> Option<usize> {
+    for name in names {
+        if eq >= name.len() {
+            let start = eq - name.len();
+            if start >= cursor && bytes[start..eq].eq_ignore_ascii_case(name.as_bytes()) {
+                return Some(start);
+            }
+        }
+    }
+    None
+}
+
 /// Mask the values of the password-family connection parameters, the
 /// `#107` re-sync of the 0.7.0 `uri_query_creds` rule: one pass over the
-/// two anchor grammars the live chain's single combined regex
+/// anchor grammars the live chain's single combined regex
 /// (`((?:[?&]|(?<![A-Za-z0-9_]))(?:password|passphrase|passwd|pwd|sslpassword)=)('(?:[^'\\]|\\.)*'|[^\s&]+)`,
-/// IGNORECASE) scans with — `query_anchor` selects the URI query `[?&]`
-/// anchor (the `uri_query_creds` rule), `lookbehind_anchor` the libpq
-/// keyword anchor (the `libpq_conninfo_creds` rule); the default chain
-/// selects both, which is the combined leftmost-first pass, never two
-/// sequential substitutions (a value's `***` splice must not become a
-/// new anchor for a second pass).
+/// IGNORECASE) scans with — `query` selects the URI query `[?&]` anchor
+/// (the `uri_query_creds` rule, the SHARED five names; the
+/// `uri_query_creds_extended` rule, the EXTENDED key set), `lookbehind`
+/// the libpq keyword anchor (the `libpq_conninfo_creds` rule); the
+/// default chain selects everything, which is the combined leftmost-first
+/// pass, never two sequential substitutions (a value's `***` splice must
+/// not become a new anchor for a second pass).
 ///
 /// Name and delimiter are kept verbatim — the masked form still names
 /// which setting carried the credential — and the value is replaced with
@@ -982,22 +1099,30 @@ fn is_conninfo_word_byte(c: char) -> bool {
 ///
 /// Anchoring is `=`-driven, not delimiter-driven: every match contains
 /// exactly one `name=`, so the scan iterates `=` positions (memchr) and
-/// reads the parameter name off the chars before it — this covers both
-/// anchor grammars in one left-to-right pass, the live regex's own scan
-/// order. A candidate fires when (a) the chars before the `=` equal one
-/// of the names case-insensitively (longest first, the leftmost-start
-/// preference the suffix overlap `password`/`sslpassword` needs), (b) the
-/// anchor immediately before the name is selected: `?`/`&` under
-/// `query_anchor`, a non-`[A-Za-z0-9_]` char (or start of text) under
-/// `lookbehind_anchor`, and (c) a value follows. Matches never overlap:
+/// reads the parameter name off the chars before it — this covers every
+/// selected anchor grammar in one left-to-right pass, the live regex's
+/// own scan order. A candidate fires when (a) the chars before the `=`
+/// equal one of that anchor's names case-insensitively (longest first,
+/// the leftmost-start preference the suffix overlaps
+/// `password`/`sslpassword` — and, extended, `key`/`api_key`/
+/// `access_key`, `token`/`sas_token` — need), (b) the anchor
+/// immediately before the name is selected: `?`/`&` under the query
+/// anchor, a non-`[A-Za-z0-9_]` char (or start of text) under the
+/// lookbehind anchor, and (c) a value follows. When both anchors are
+/// selected the query anchor is tried first per `=` (the leftmost-start
+/// order the combined regex's alternation spells), the lookbehind only
+/// if it does not fire; a failed longest match is never retried on a
+/// shorter suffix name, whose anchor position would sit on a word char
+/// inside the longer name and fail either anchor's check anyway.
+/// Matches never overlap:
 /// the cursor jumps past each consumed value, and a later name's anchor
 /// cannot reach back into a consumed value (a value ends only at
 /// whitespace, `&`, or a closing quote — every one of which is a valid,
 /// non-word anchor position for a FOLLOWING name, never a straddling
 /// one). Linear in the input, the contract every pass here owes the
 /// scrub API: each `=` costs O(longest name) plus its own value walk.
-fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) -> Cow<'_, str> {
-    debug_assert!(query_anchor || lookbehind_anchor);
+fn mask_conninfo_creds(text: &str, query: QueryNames, lookbehind: bool) -> Cow<'_, str> {
+    debug_assert!(query != QueryNames::None || lookbehind);
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
     let mut cursor = 0usize;
@@ -1007,42 +1132,48 @@ fn mask_conninfo_creds(text: &str, query_anchor: bool, lookbehind_anchor: bool) 
         }
         // (a) The parameter name ending at the `=`, longest first (the
         // `eq >= name.len()` guard: the text can open with `pwd=` before
-        // any longer name could fit).
+        // any longer name could fit), per anchor: the query anchor's
+        // list (the extended set when the extended rule selected it, a
+        // superset of the shared five), then the lookbehind's (always
+        // the shared five — libpq has no ops-param extension).
         let mut name_start = None;
-        for name in PARAM_NAMES {
-            if eq >= name.len() {
-                let start = eq - name.len();
-                if start >= cursor && bytes[start..eq].eq_ignore_ascii_case(name.as_bytes()) {
-                    name_start = Some(start);
-                    break;
+        if query != QueryNames::None {
+            let names: &[&str] = if query == QueryNames::Extended {
+                &EXTENDED_PARAM_NAMES
+            } else {
+                &PARAM_NAMES
+            };
+            name_start = match_name(names, bytes, eq, cursor);
+            if let Some(start) = name_start {
+                let anchored = start > 0 && matches!(&bytes[start - 1], b'?' | b'&');
+                if !anchored {
+                    name_start = None;
+                }
+            }
+        }
+        if name_start.is_none() && lookbehind {
+            name_start = match_name(&PARAM_NAMES, bytes, eq, cursor);
+            if let Some(start) = name_start {
+                let anchored = if start == 0 {
+                    true // no preceding char: the lookbehind succeeds
+                } else {
+                    let mut prev = start - 1;
+                    while !text.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    !text[prev..]
+                        .chars()
+                        .next()
+                        .is_some_and(is_conninfo_word_byte)
+                };
+                if !anchored {
+                    name_start = None;
                 }
             }
         }
         let Some(name_start) = name_start else {
             continue;
         };
-        // (b) The anchor immediately before the name, per selection.
-        // `eq > name_start >= cursor` bounds the char decode: the anchor
-        // position is at or after the last committed cursor, so the
-        // backward char walk cannot cross into a consumed value.
-        let anchored = if name_start == 0 {
-            lookbehind_anchor // no preceding char: the lookbehind succeeds
-        } else {
-            let mut prev = name_start - 1;
-            while !text.is_char_boundary(prev) {
-                prev -= 1;
-            }
-            match text[prev..].chars().next() {
-                Some(c @ ('?' | '&')) => {
-                    query_anchor || (lookbehind_anchor && !is_conninfo_word_byte(c))
-                }
-                Some(c) => lookbehind_anchor && !is_conninfo_word_byte(c),
-                None => false,
-            }
-        };
-        if !anchored {
-            continue;
-        }
         // (c) The value: a libpq single-quoted run (escapes honored) or
         // an unquoted token to whitespace/`&`.
         let mut end = eq + 1;
@@ -1120,9 +1251,16 @@ pub fn scrub_log_text(text: &str, rules: RuleSet) -> Cow<'_, str> {
             owned = Some(out);
         }
     }
-    if rules.uri_query_creds() || rules.libpq_conninfo_creds() {
+    if rules.uri_query_creds() || rules.uri_query_creds_extended() || rules.libpq_conninfo_creds() {
         let src: &str = owned.as_deref().unwrap_or(text);
-        let out = mask_conninfo_creds(src, rules.uri_query_creds(), rules.libpq_conninfo_creds());
+        let query = if rules.uri_query_creds_extended() {
+            QueryNames::Extended
+        } else if rules.uri_query_creds() {
+            QueryNames::Shared
+        } else {
+            QueryNames::None
+        };
+        let out = mask_conninfo_creds(src, query, rules.libpq_conninfo_creds());
         if let Cow::Owned(out) = out {
             owned = Some(out);
         }
@@ -1382,9 +1520,17 @@ mod tests {
             scrub("postgresql://h/db?sslpassword=p", RuleSet::ALL),
             "postgresql://h/db?sslpassword=***"
         );
+        // `key=` is NOT one of the five shared names: the base rule (and
+        // the libpq anchor) leave it alone. The FULL chain runs the
+        // extended key set (`uri_query_creds_extended`, the deliberate
+        // widening — see the module docs), where it masks.
         assert_eq!(
-            scrub("?SSLPassword=s&key=k", RuleSet::ALL),
+            scrub("?SSLPassword=s&key=k", RuleSet::URI_QUERY_CREDS),
             "?SSLPassword=***&key=k"
+        );
+        assert_eq!(
+            scrub("?SSLPassword=s&key=k", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?SSLPassword=***&key=***"
         );
         assert_eq!(scrub("?password=a=b?c", RuleSet::ALL), "?password=***");
         assert_eq!(scrub("a?password=1?pwd=2", RuleSet::ALL), "a?password=***");
@@ -1475,6 +1621,184 @@ mod tests {
                     assert!(!b.starts_with(a), "{a:?} is a prefix of {b:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn extended_param_names_are_prefix_free_and_longest_first() {
+        // The regex alternation's order is free only under prefix-freedom;
+        // the scanner's first-hit-is-longest contract needs the sorted
+        // order. Both pins travel with the table.
+        for (i, a) in EXTENDED_PARAM_NAMES.iter().enumerate() {
+            for (j, b) in EXTENDED_PARAM_NAMES.iter().enumerate() {
+                if i != j {
+                    assert!(!b.starts_with(a), "{a:?} is a prefix of {b:?}");
+                }
+            }
+            for (j, b) in EXTENDED_PARAM_NAMES.iter().enumerate() {
+                if i < j {
+                    assert!(
+                        b.len() <= a.len(),
+                        "{:?} (pos {i}) is shorter than {:?} (pos {j}): the table must stay longest-first",
+                        a,
+                        b
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_rule_covers_the_ops_standard_names() {
+        // Per-name vectors, one per key the adoption verdict flagged and
+        // its set carries (the shared five ride along as a superset).
+        for name in [
+            "sig",
+            "api_key",
+            "apikey",
+            "key",
+            "access_key",
+            "sas_token",
+            "token",
+            "secret",
+            "passkey",
+            "auth",
+            "password",
+            "passphrase",
+            "passwd",
+            "pwd",
+            "sslpassword",
+        ] {
+            assert_eq!(
+                scrub(&format!("?{name}=v&x=1"), RuleSet::URI_QUERY_CREDS_EXTENDED),
+                format!("?{name}=***&x=1"),
+                "{name}"
+            );
+            // Case-insensitive, the shared grammar's own rule.
+            assert_eq!(
+                scrub(&format!("?{name}=v"), RuleSet::URI_QUERY_CREDS_EXTENDED),
+                format!("?{name}=***"),
+                "{name} uppercase"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_rule_respects_the_anchor_and_value_boundaries() {
+        // The anchor: only `?`/`&` immediately before the name fires; a
+        // longer name's tail does not (the longest-first resolution puts
+        // the anchor check on the right char).
+        assert_eq!(
+            scrub("foo?key=v&next=1", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "foo?key=***&next=1"
+        );
+        assert_eq!(
+            scrub("&&key=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "&&key=***"
+        );
+        assert_eq!(
+            scrub("??key=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "??key=***"
+        );
+        // A word char between the anchor and the name blocks the mask.
+        assert_eq!(
+            scrub("?xkey=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?xkey=v"
+        );
+        assert_eq!(scrub("xkey=v", RuleSet::URI_QUERY_CREDS_EXTENDED), "xkey=v");
+        // Suffix discipline: the anchor sits before the WHOLE name.
+        assert_eq!(
+            scrub("?api_key=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?api_key=***"
+        );
+        assert_eq!(
+            scrub("?access_key=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?access_key=***"
+        );
+        assert_eq!(
+            scrub("?sas_token=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?sas_token=***"
+        );
+        assert_eq!(
+            scrub("?oauth_token=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?oauth_token=v"
+        );
+        // The value grammar is the shared one: to whitespace or `&`, the
+        // libpq quoted legs included, and a value may run to end of text.
+        assert_eq!(
+            scrub("?key=a b?key=c", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?key=*** b?key=***"
+        );
+        assert_eq!(
+            scrub("?key=a=b", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?key=***"
+        );
+        assert_eq!(scrub("?sig=", RuleSet::URI_QUERY_CREDS_EXTENDED), "?sig=");
+        assert_eq!(scrub("?sig", RuleSet::URI_QUERY_CREDS_EXTENDED), "?sig");
+        assert_eq!(
+            scrub("?key=v", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?key=***"
+        );
+        // End-of-text values (the `#` fragment case is the caller's URL
+        // splitting, the grammar sees only the query string).
+        assert_eq!(
+            scrub("https://h/p?sig=abc", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "https://h/p?sig=***"
+        );
+        // Quoted values, the libpq legs.
+        assert_eq!(
+            scrub("?key='a b'&x=1", RuleSet::URI_QUERY_CREDS_EXTENDED),
+            "?key=***&x=1"
+        );
+        // The extended set is a SUPERSET lane: the base five keep their
+        // exact vectors under the extended rule too, and the lookbehind
+        // grammar still answers to `libpq_conninfo_creds` only.
+        assert_eq!(
+            scrub(
+                "host=h api_key=k password=p",
+                RuleSet::URI_QUERY_CREDS_EXTENDED
+            ),
+            "host=h api_key=k password=p"
+        );
+        assert_eq!(
+            scrub("host=h api_key=k password=p", RuleSet::LIBPQ_CONNINFO_CREDS),
+            "host=h api_key=k password=***"
+        );
+        // The lookbehind grammar's name set stays the SHARED five: the
+        // ops-standard names are URI-query keys (`key=k` at text start is
+        // a libpq keyword shape no source names), so only the query
+        // anchor extends.
+        assert_eq!(
+            scrub(
+                "key=k password=p",
+                RuleSet::LIBPQ_CONNINFO_CREDS | RuleSet::URI_QUERY_CREDS_EXTENDED
+            ),
+            "key=k password=***"
+        );
+    }
+
+    #[test]
+    fn the_five_shared_names_keep_their_vectors_under_every_lane() {
+        // The byte-identity discipline, spelled: the base rule's and the
+        // libpq rule's pinned vectors do not move when the extended rule
+        // exists alongside them.
+        for text in [
+            "?password=x&passphrase=y&passwd=z&pwd=w",
+            "?password=a b?pwd=c@d&passwd=e",
+            "?password=a@b@c&x=1",
+            "host=db PASSWORD='hun ter2'",
+            "postgresql://h/db?sslpassword=p",
+        ] {
+            let base = scrub(
+                text,
+                RuleSet::URI_QUERY_CREDS | RuleSet::LIBPQ_CONNINFO_CREDS,
+            );
+            let extended = scrub(
+                text,
+                RuleSet::URI_QUERY_CREDS_EXTENDED | RuleSet::LIBPQ_CONNINFO_CREDS,
+            );
+            assert_eq!(base, extended, "{text:?}");
+            assert_eq!(scrub(text, RuleSet::ALL), base, "{text:?}");
         }
     }
 

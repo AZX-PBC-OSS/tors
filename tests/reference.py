@@ -708,7 +708,7 @@ def reference_first_invalid_offender(
 # --- the scrub_log_text oracle (the log-scrub grammar) --------------------
 #
 # ``tors.scrub_log_text`` is a named-rule scrubber, pinned byte-identical
-# to the four compiled regexes below (the grammar's definition, quoted in
+# to the compiled regexes below (the grammar's definition, quoted in
 # this file), and the canonical rule order (pg_detail_lines' two segmenters
 # first, then uri_userinfo, then the conninfo credential pass) is the
 # documented application order. The differential harness
@@ -727,6 +727,31 @@ _URI_CRED_RE = re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]*):([^\s@]+)@")
 #: passphrase). Spelled once here too and interpolated into the three
 #: compiled patterns below, the same derivation the live module does.
 _CRED_PARAM_NAMES = ("password", "passphrase", "passwd", "pwd", "sslpassword")
+
+#: The EXTENDED credential-key set the ``uri_query_creds_extended`` rule
+#: masks: the shared five plus the ops-standard query-parameter names
+#: (the published scanner lists, transcribed and closed — see
+#: src/scrub_impl.rs for the sources and the judicious cuts). A SUPERSET
+#: of ``_CRED_PARAM_NAMES``; spelled longest-first like the scanner's
+#: table (the order is free for the regex alternation, no name is a
+#: prefix of another, but the tuple documents the resolution order).
+_CRED_PARAM_NAMES_EXTENDED = (
+    "sslpassword",
+    "passphrase",
+    "access_key",
+    "sas_token",
+    "password",
+    "api_key",
+    "passkey",
+    "apikey",
+    "secret",
+    "passwd",
+    "token",
+    "auth",
+    "key",
+    "sig",
+    "pwd",
+)
 
 #: The conninfo credential pass, the live chain's single combined regex:
 #: the value is either a libpq single-quoted string (spaces allowed,
@@ -758,11 +783,31 @@ _LIBPQ_KEYWORD_ANCHOR_CRED_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The extended rule's own anchor split: the SAME ``[?&]`` URI-query
+#: anchor over the extended key set (the shared five included).
+_URI_QUERY_ANCHOR_CRED_EXTENDED_RE = re.compile(
+    r"([?&](?:" + "|".join(_CRED_PARAM_NAMES_EXTENDED) + r")=)('(?:[^'\\]|\\.)*'|[^\s&]+)",
+    re.IGNORECASE,
+)
+
+#: The three-name combined pass, the live chain's single leftmost-first
+#: scan when the anchor/key-set selections MIX (the extended query rule
+#: with the libpq lookbehind, or the shared query rule with either): the
+#: query anchor matches the WIDEST selected key set (extended ⊇ shared),
+#: the lookbehind always the shared five.
+_URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE = re.compile(
+    r"((?:[?&](?:" + "|".join(_CRED_PARAM_NAMES_EXTENDED) + r")"
+    r"|(?<![A-Za-z0-9_])(?:" + "|".join(_CRED_PARAM_NAMES) + r"))"
+    r"=)('(?:[^'\\]|\\.)*'|[^\s&]+)",
+    re.IGNORECASE,
+)
+
 #: The accepted rule names, in canonical application order.
 SCRUB_RULES: tuple[str, ...] = (
     "pg_detail_lines",
     "uri_userinfo",
     "uri_query_creds",
+    "uri_query_creds_extended",
     "libpq_conninfo_creds",
     "secret_tokens",
 )
@@ -782,28 +827,37 @@ def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> s
     is None`` runs the full chain in canonical order; a list/tuple selects a
     sub-chain (deduped, canonical order — the same contract tors spells);
     ``[]`` is the identity. The conninfo credential pass runs ONCE even when
-    both of its names are selected: the combined pattern then (the live
-    chain's semantics), the one selected anchor's split pattern otherwise."""
+    several of its names are selected: the pattern each ``=`` position
+    answers to is the combined alternation of the SELECTED anchor/key-set
+    pairs — the query anchor matches the widest selected key set (the
+    extended set is a superset of the shared five), the lookbehind always
+    the shared five — the live chain's combined leftmost-first scan, never
+    sequential per-anchor substitutions."""
     selected = frozenset(rules) if rules is not None else None
     names = SCRUB_RULES if selected is None else [n for n in SCRUB_RULES if n in selected]
     ran_conninfo = False
     for name in names:
-        if name in ("uri_query_creds", "libpq_conninfo_creds"):
+        if name in (
+            "uri_query_creds",
+            "uri_query_creds_extended",
+            "libpq_conninfo_creds",
+        ):
             if ran_conninfo:
-                continue  # the two names share one pass; already ran
+                continue  # the three names share one pass; already ran
             ran_conninfo = True
-            both = selected is None or (
-                "uri_query_creds" in selected and "libpq_conninfo_creds" in selected
-            )
-            pattern = (
-                _URI_PARAM_CRED_RE
-                if both
-                else (
-                    _URI_QUERY_ANCHOR_CRED_RE
-                    if name == "uri_query_creds"
-                    else _LIBPQ_KEYWORD_ANCHOR_CRED_RE
-                )
-            )
+            query_shared = selected is None or "uri_query_creds" in selected
+            query_extended = selected is None or "uri_query_creds_extended" in selected
+            lookbehind = selected is None or "libpq_conninfo_creds" in selected
+            if query_extended and lookbehind:
+                pattern = _URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE
+            elif query_extended:
+                pattern = _URI_QUERY_ANCHOR_CRED_EXTENDED_RE
+            elif query_shared and lookbehind:
+                pattern = _URI_PARAM_CRED_RE
+            elif query_shared:
+                pattern = _URI_QUERY_ANCHOR_CRED_RE
+            else:
+                pattern = _LIBPQ_KEYWORD_ANCHOR_CRED_RE
             text = pattern.sub(r"\1***", text)
             continue
         if name == "secret_tokens":

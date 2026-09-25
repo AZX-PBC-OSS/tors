@@ -2012,13 +2012,18 @@ def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     size_bytes: int,
 ) -> None:
     """The scrub claim, the replace_many dense cell's shape over the
-    surface it exists for: the whole four-pass rule chain (DETAIL line
-    scan, escaped-run scan, userinfo scan, query-param scan, plus the
-    splice) detached under one ``py.detach``, over the exception-shaped
-    scrub corpus where every rule fires once per unit, and the return is
-    one string, so the GIL-held residue is the argument borrow plus that
-    single string's marshalling — ``detached_transform``'s classes, the
-    no-list-shape prediction again.
+    surface it exists for: the whole multi-pass rule chain (DETAIL line
+    scan, escaped-run scan, userinfo scan, query-param scan — the
+    conninfo pass answering to its three names with the EXTENDED key set
+    the uri_query_creds_extended rule added, whose 15-entry name walk is
+    O(#names) per ``=`` and invisible at the ping-floor granularity —
+    plus the splice) detached under one ``py.detach``, over the
+    exception-shaped scrub corpus where every rule fires once per unit,
+    and the return is one string, so the GIL-held residue is the argument
+    borrow plus that single string's marshalling — ``detached_transform``'s
+    classes, the no-list-shape prediction again. The base cell's
+    budgets are unchanged by the extended key set: this cell IS the new
+    rule's GIL cell (the default chain runs the widest key set).
 
     The 96 MiB size is the cell's own derivation, not the suite's usual
     12 MiB: the scrub core is memchr/memmem-scanned Rust, so 12 MiB walls

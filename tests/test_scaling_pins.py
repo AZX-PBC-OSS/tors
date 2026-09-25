@@ -422,19 +422,38 @@ class TestRankFusionScaling:
 
     @pytest.mark.timing
     def test_weighted_rank_fuse_stays_linear_in_total_list_length(self) -> None:
-        """The weighted spelling over the SAME shape and span as the
-        unweighted pin above (10k -> 40k total entries across 5 lists,
-        one weight per list): the weighted pass is the same detach with a
-        multiply per vote, so the linear class and the gate carry over
-        unchanged (measured alongside the unweighted cell's 4.6x band;
-        a per-list rescan of the id table would measure ~4x per doubling
-        here too)."""
+        """The weighted spelling over the same shape as the unweighted
+        pin above, at the recalibrated in-scale span (100k -> 400k total
+        entries across 5 lists, one weight per list; the 10k small side
+        is sub-scheduler-slice and kept a clean floor under co-tenant
+        load while the large side's draws hit bursts -- the exact
+        asymmetric-preemption skew this file's recalibrated cells
+        document, and the one that reddened this cell in-suite once).
+        The weighted pass is the same detach with a multiply per vote,
+        so the linear class carries over; the gate is this file's own
+        3.5x-per-doubling idiom for a band that runs higher: at this
+        span the box's large-dict cache-miss band measures ~2.85-3.1x
+        per doubling (quiet: 15-16ms -> 124-141ms, ratios 7.8-9.14x per
+        4x, ambient load ~5-20), which no 3.0x-per-doubling gate admits;
+        3.5x (12.25x per 4x) sits ~35% above the worst observed honest
+        window while a quadratic's 16x per 4x still blows through. Load
+        robustness (tests/loop_harness.py): the ratio is
+        load-independent, so the cell passes on the first clean window
+        over up to 3. A per-list rescan of the id table would measure
+        ~4x per doubling here."""
         weights = [2.0, 1.0, 1.0, 1.0, 0.5]
-        small, large = (
-            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(10_000), weights=weights)),
-            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(40_000), weights=weights)),
-        )
-        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+        def measure() -> tuple[float, float]:
+            return (
+                _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(100_000), weights=weights)),
+                _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(400_000), weights=weights)),
+            )
+
+        def check(walls: tuple[float, float]) -> None:
+            small, large = walls
+            _assert_linear_per_doubling(small, large, 4, 3.5)
+
+        first_clean(measure, check, samples=3, label="the weighted rank_fuse scaling pin")
 
     @pytest.mark.timing
     def test_ndcg_at_k_stays_linear_in_ranking_length(self) -> None:

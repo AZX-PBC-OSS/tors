@@ -115,6 +115,23 @@ class TestApiReferenceExamples:
             == "connect dsn=postgresql://worker:***@db.internal:5432/prod"
         )
 
+    def test_scrub_log_text_extended_key_set_examples(self) -> None:
+        # docs/api.md's extended-key-set examples (uri_query_creds_extended,
+        # the default chain's widest key set), pinned byte-exact: the
+        # Azure-SAS/api-key shapes mask by default, and the base rule
+        # selected explicitly still answers only the shared five.
+        url = (
+            "GET https://api.internal/v1?sv=2020&sig=sha%3Dabc&api_key=kk123"
+            "&sas_token=tok&x=1"
+        )
+        assert tors.scrub_log_text(url) == (
+            "GET https://api.internal/v1?sv=2020&sig=***&api_key=***&sas_token=***&x=1"
+        )
+        assert tors.scrub_log_text(
+            "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123",
+            ["uri_query_creds"],
+        ) == "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123"
+
     def test_chunk_by_lines_log_windows(self) -> None:
         log = (
             "INFO boot\nINFO ready\n\nWARN disk at 90%\n"

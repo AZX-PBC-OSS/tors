@@ -267,12 +267,17 @@ def scrub_secrets_report(
 
 
 # Named-rule log and exception-text scrubbing, byte-identical to the
-# grammar definition it ships with (the four compiled regexes are quoted
+# grammar definition it ships with (the compiled regexes are quoted
 # in tests/reference.py and differentially enforced by
 # tests/test_scrub_log_text_parity.py). rules=None
 # runs the full chain in canonical order (pg_detail_lines -> uri_userinfo
-# -> the conninfo pass, whose uri_query_creds / libpq_conninfo_creds names
-# select the two anchor grammars of ONE pass; then secret_tokens, the
+# -> the conninfo pass, whose uri_query_creds / uri_query_creds_extended /
+# libpq_conninfo_creds names select the anchor grammars and key sets of
+# ONE pass: uri_query_creds is the [?&] anchor over the five shared
+# credential names, uri_query_creds_extended the SAME anchor over the
+# extended ops-standard key set (sig, api_key, sas_token, ... the shared
+# five included), libpq_conninfo_creds the libpq keyword lookbehind over
+# the shared five; then secret_tokens, the
 # secret_impl grammars, spliced to ***). [] is the identity;
 # duplicates dedupe and caller order is irrelevant. An unknown name raises
 # ValueError naming the accepted set. SECURITY POLICY (issue #107,
@@ -291,6 +296,7 @@ def scrub_log_text(
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         ]
