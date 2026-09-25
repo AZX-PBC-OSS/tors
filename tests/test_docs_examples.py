@@ -546,6 +546,23 @@ class TestRankFusionExamples:
             ("bird-c", 0.032266458495966696),
         ]
 
+    def test_rank_fuse_weighted_example(self) -> None:
+        # docs/api.md's weighted-RRF example, pinned byte-exact (the same
+        # discipline as the unweighted vector above).
+        fused = tors.rank_fuse(
+            [
+                ["cat-a", "dog-b", "bird-c"],
+                ["dog-b", "cat-a"],
+                ["bird-c"],
+            ],
+            weights=[2.0, 1.0, 1.0],
+        )
+        assert fused == [
+            ("cat-a", 0.04891591750396616),
+            ("dog-b", 0.048651507139079855),
+            ("bird-c", 0.04813947436898257),
+        ]
+
     def test_metric_literals_example(self) -> None:
         ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
         relevant = {"cat-a", "bird-c", "whale-e"}

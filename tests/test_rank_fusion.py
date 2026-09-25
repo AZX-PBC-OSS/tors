@@ -27,6 +27,7 @@ split bm25_rank keeps.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import math
 import time
@@ -200,6 +201,195 @@ class TestRankFuseArguments:
         assert len(fused) == 1
         assert fused[0][0] == 1
         assert fused[0][0] is not True  # the first occurrence's object
+
+
+class TestRankFuseWeights:
+    """The weighted-RRF extension (per-list weights, Elasticsearch's RRF
+    retriever weight shape / Redis's hybrid-ranking weighting): each
+    list's vote becomes ``w_i / (k + rank(d))``. The default
+    (``weights=None``) is the paper's original fusion EXACTLY, pinned
+    here byte-identical; the domain is strictly positive finite floats
+    (a zero-weight list is a miscounted retriever list, the ``k < 1``
+    class); a duplicate id votes once per LIST, weighted by THAT list's
+    weight (the dedup-first contract, extended); nDCG and the other
+    metrics are untouched."""
+
+    _LISTS = [["cat-a", "dog-b", "bird-c"], ["dog-b", "cat-a"], ["bird-c"]]
+
+    def test_weights_none_is_byte_identical_to_all_ones_and_to_the_unweighted_spelling(
+        self,
+    ) -> None:
+        # The default contract, pinned BIT for BIT: None == all-1.0 ==
+        # the pre-weights spelling. Not approx: identical.
+        plain = rank_fuse(self._LISTS, k=5)
+        assert rank_fuse(self._LISTS, k=5, weights=None) == plain
+        assert rank_fuse(self._LISTS, k=5, weights=[1.0, 1.0, 1.0]) == plain
+        assert rank_fuse(self._LISTS, k=5, weights=[1, 1, 1]) == plain  # ints launders to 1.0
+
+    def test_hand_computed_weighted_vector(self) -> None:
+        # Every vote carries its list's weight: d0 = 2/6 + 0.5/8 ...
+        fused = dict(
+            rank_fuse(
+                [["d0", "d1", "d2"], ["d2", "d3", "d0"], ["d1", "d2"]],
+                k=5,
+                weights=[2.0, 0.5, 1.0],
+            )
+        )
+        assert fused["d0"] == pytest.approx(2 / 6 + 0.5 / 8)
+        assert fused["d1"] == pytest.approx(2 / 7 + 1.0 / 6)
+        assert fused["d2"] == pytest.approx(2 / 8 + 0.5 / 6 + 1.0 / 7)
+        assert fused["d3"] == pytest.approx(0.5 / 7)
+
+    def test_docs_weighted_example_literal(self) -> None:
+        # docs/api.md's weighted example, pinned byte-exact (the same
+        # discipline tests/test_docs_examples.py keeps for the doc's
+        # other literals).
+        fused = rank_fuse(
+            [["cat-a", "dog-b", "bird-c"], ["dog-b", "cat-a"], ["bird-c"]],
+            weights=[2.0, 1.0, 1.0],
+        )
+        assert fused == [
+            ("cat-a", 0.04891591750396616),
+            ("dog-b", 0.048651507139079855),
+            ("bird-c", 0.04813947436898257),
+        ]
+
+    def test_doubling_a_weight_doubles_that_lists_contribution_exactly(self) -> None:
+        # A factor-of-two rescaling is exact in IEEE (no rounding to hide
+        # behind), so the single-vote scores double bit for bit.
+        single = [["a", "b", "c"]]
+        base = dict(rank_fuse(single, weights=[1.0]))
+        doubled = dict(rank_fuse(single, weights=[2.0]))
+        assert doubled["a"] == base["a"] + base["a"]
+        assert doubled["b"] == base["b"] + base["b"]
+        assert doubled["c"] == base["c"] + base["c"]
+
+    def test_one_list_behavior_is_linear_in_its_weight(self) -> None:
+        # The closed form IS w/(k+rank): every weight spelling agrees
+        # with the hand-computed formula (the ratio property, exactly).
+        single = [["a", "b", "c"]]
+        for weight in (0.5, 1.0, 2.5, 7.0, 1e6):
+            fused = dict(rank_fuse(single, k=60, weights=[weight]))
+            assert fused["a"] == pytest.approx(weight / 61, rel=1e-15)
+            assert fused["c"] == pytest.approx(weight / 63, rel=1e-15)
+
+    def test_weights_flip_the_consensus_trade(self) -> None:
+        # The extension's point: a 3x-weighted top vote outranks the two
+        # unweighted consensus votes it loses at equal weights.
+        shape = [["top"], ["cons"], ["cons"]]
+        assert [i for i, _ in rank_fuse(shape, weights=[1.0, 1.0, 1.0])] == ["cons", "top"]
+        fused = rank_fuse(shape, weights=[3.0, 1.0, 1.0])
+        assert [i for i, _ in fused] == ["top", "cons"]
+        assert fused[0][1] == pytest.approx(3 / 61)
+        assert fused[1][1] == pytest.approx(2 / 61)
+
+    def test_a_duplicate_votes_once_per_list_weighted_by_that_list(self) -> None:
+        # Dedup-first, extended: the fold is per list, and the single
+        # surviving vote is weighted by THAT list's weight only.
+        fused = dict(rank_fuse([["a", "a", "a"], ["a"]], weights=[2.0, 5.0]))
+        assert fused["a"] == pytest.approx(2 / 61 + 5 / 61)
+
+    def test_weights_do_not_touch_the_rank_space(self) -> None:
+        # A weight re-scales votes; it never advances or rewinds a rank:
+        # the single-list order is preserved under any weights.
+        assert [i for i, _ in rank_fuse([["a", "b", "c"]], weights=[100.0])] == ["a", "b", "c"]
+
+    @pytest.mark.parametrize("bad", [0.0, -0.5, float("nan"), float("inf")])
+    def test_non_positive_or_non_finite_weight_raises_value_error(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+            rank_fuse([["a"], ["b"]], weights=[1.0, bad])
+
+    def test_int_zero_and_negative_int_weights_raise_value_error(self) -> None:
+        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+            rank_fuse([["a"], ["b"]], weights=[1, 0])
+        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+            rank_fuse([["a"], ["b"]], weights=[1, -2])
+
+    def test_length_mismatch_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="one weight per ranked list: got 1 for 2"):
+            rank_fuse([["a"], ["b"]], weights=[1.0])
+        with pytest.raises(ValueError, match="one weight per ranked list: got 3 for 2"):
+            rank_fuse([["a"], ["b"]], weights=[1.0, 2.0, 3.0])
+        with pytest.raises(ValueError, match="one weight per ranked list: got 0 for 1"):
+            rank_fuse([["a"]], weights=[])
+
+    @pytest.mark.parametrize("bad", ["1.0", 1.0, {"w": 1.0}, 1])
+    def test_non_sequence_weights_raises_type_error(self, bad: object) -> None:
+        with pytest.raises(TypeError):
+            rank_fuse([["a"]], weights=bad)  # type: ignore[arg-type]
+
+    def test_non_numeric_weight_entry_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            rank_fuse([["a"]], weights=["heavy"])  # type: ignore[list-item]
+
+    def test_tuple_weights_are_accepted(self) -> None:
+        assert rank_fuse([["a"], ["b"]], weights=(2.0, 1.0)) == rank_fuse(
+            [["a"], ["b"]], weights=[2.0, 1.0]
+        )
+
+    def test_weighted_validation_precedes_the_fusion(self) -> None:
+        # A bad weight is refused before any id walk: an unhashable id
+        # downstream never gets to raise first.
+        with pytest.raises(ValueError, match="weights values"):
+            rank_fuse([{"un": "hashable"}], weights=[0.0])  # type: ignore[list-item]
+
+    @given(
+        lists=st.lists(st.lists(_IDS, min_size=1, max_size=8), min_size=1, max_size=5),
+        weights=st.lists(
+            st.floats(min_value=0.1, max_value=100.0, allow_nan=False), min_size=1, max_size=5
+        ),
+    )
+    @settings(max_examples=200)
+    def test_weighted_scores_match_the_closed_form(self, lists: list, weights: list) -> None:
+        n = min(len(lists), len(weights))
+        lists, weights = lists[:n], weights[:n]
+        fused = dict(rank_fuse(lists, weights=weights))
+        for doc_id, score in fused.items():
+            expected = 0.0
+            for weight, lst in zip(weights, lists, strict=True):
+                for position, entry in enumerate(dict.fromkeys(lst)):
+                    if entry == doc_id:
+                        expected += weight / (60 + position + 1)
+                        break  # one weighted vote per list, at the first occurrence
+            assert score == pytest.approx(expected, rel=1e-12)
+
+    @given(
+        lists=st.lists(st.lists(_IDS, min_size=1, max_size=8), min_size=1, max_size=5),
+        weights=st.lists(
+            st.floats(min_value=0.1, max_value=100.0, allow_nan=False), min_size=1, max_size=5
+        ),
+    )
+    @settings(max_examples=150)
+    def test_weighted_output_is_a_score_descending_permutation(
+        self, lists: list, weights: list
+    ) -> None:
+        n = min(len(lists), len(weights))
+        fused = rank_fuse(lists[:n], weights=weights[:n])
+        assert {i for i, _ in fused} == set(itertools.chain.from_iterable(lists[:n]))
+        scores = [s for _, s in fused]
+        assert scores == sorted(scores, reverse=True)
+        assert all(math.isfinite(s) and s > 0 for s in scores)
+
+    @given(
+        lists=st.lists(st.lists(_IDS, min_size=1, max_size=8), min_size=1, max_size=1),
+        weight=st.floats(min_value=0.1, max_value=100.0, allow_nan=False),
+    )
+    @settings(max_examples=100)
+    def test_doubling_a_weight_preserves_the_fused_order_in_the_one_list_shape(
+        self, lists: list, weight: float
+    ) -> None:
+        # One list: the weighting cancels out of the ORDER (every vote
+        # carries the same weight) whatever the weight is.
+        order_plain = [i for i, _ in rank_fuse(lists, weights=[weight])]
+        order_doubled = [i for i, _ in rank_fuse(lists, weights=[weight * 2.0])]
+        assert order_plain == order_doubled
+
+    def test_metrics_are_untouched_by_weights(self) -> None:
+        # nDCG and the other metrics take no weights: the extension is
+        # rank_fuse's alone (the task's own boundary: nDCG unchanged).
+        ranked, relevant = ["a", "b"], {"a"}
+        assert ndcg_at_k(ranked, relevant) == 1.0
+        assert "weights" not in inspect.signature(ndcg_at_k).parameters
 
 
 class TestRankFuseProperties:
@@ -980,6 +1170,9 @@ class TestAioTwins:
 
         async def run() -> None:
             assert await tors.aio.rank_fuse(lists, k=7) == rank_fuse(lists, k=7)
+            assert await tors.aio.rank_fuse(lists, k=7, weights=[2.0, 1.0, 1.0, 1.0, 1.0]) == (
+                rank_fuse(lists, k=7, weights=[2.0, 1.0, 1.0, 1.0, 1.0])
+            )
             assert await tors.aio.ndcg_at_k(ranked, relevant) == ndcg_at_k(ranked, relevant)
             assert await tors.aio.ndcg_at_k(
                 ranked, relevant, k=2, gains={"a": 3.0, "b": 1.0}

@@ -1730,6 +1730,17 @@ def bm25_rank(
 # from a list contributes no vote from it; a doc ranked twice in one list
 # votes once, at its first occurrence.
 #
+# weights= (the weighted-RRF extension, Elasticsearch's RRF-retriever weight
+# shape) optionally carries one positive finite float per list: each list's
+# vote becomes w_i / (k + rank(d)). weights=None (the default) is the paper's
+# original fusion exactly (all weights 1.0; outputs byte-identical, pinned).
+# A duplicate id votes once per LIST, weighted by THAT list's weight (the
+# dedup-first contract, extended). A zero, negative, NaN, or infinite weight
+# is a ValueError (strictly positive finite; a zero-weight list is a
+# miscounted retriever list, the k < 1 class), a length mismatch with
+# ranked_lists is a ValueError naming both sides, and a non-sequence weights
+# (a bare str included) or a non-numeric entry is a TypeError.
+#
 # k must be >= 1 (ValueError); ranked_lists must be a non-empty list of
 # lists (fusing zero lists is a ValueError -- the merkle_root "root of no
 # chunks" precedent: a zero-list call is almost certainly an upstream bug --
@@ -1739,11 +1750,11 @@ def bm25_rank(
 # discipline); an unhashable id raises TypeError (Python's own hash error).
 #
 # GIL note: one GIL-held walk of every list (Python-object hashing IS
-# interpreter work: the content_hash arg-walk class), the score
-# accumulation + sort under one py.detach, then the O(distinct-ids) tuple
-# marshalling.
+# interpreter work: the content_hash arg-walk class) plus the weights walk
+# and validation when supplied, the score accumulation + sort under one
+# py.detach, then the O(distinct-ids) tuple marshalling.
 def rank_fuse(
-    ranked_lists: list[list[Hashable]], *, k: int = 60
+    ranked_lists: list[list[Hashable]], *, k: int = 60, weights: Sequence[float] | None = None
 ) -> list[tuple[Hashable, float]]: ...
 
 # Normalized discounted cumulative gain at k (Järvelin & Kekäläinen, ACM

@@ -9,7 +9,10 @@
 //! id space (every list draws references into one pool, the realistic
 //! fusion shape, where the same documents recur across lists, unlike a
 //! corpus of disjoint strings), with throughput reported in total
-//! entries. The metrics are benched over a relevance-flag vector of the
+//! entries; the weighted spelling (per-list weights, the Elasticsearch
+//! weighted-RRF extension) benches the same shapes under a mixed
+//! weight vector, its cell directly comparable to the unweighted one.
+//! The metrics are benched over a relevance-flag vector of the
 //! same large scale: each is a linear sweep, and the interesting
 //! question is the constant, so one size per metric is enough.
 //!
@@ -23,7 +26,6 @@ mod common;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use tors::rank_fusion_impl::{mrr, ndcg_at_k, precision_at_k, rank_fuse, recall_at_k};
-
 /// The fusion workload: `n_lists` ranked lists of dedup indices over a
 /// shared id space of `id_space` documents; every list ranks entries
 /// drawn from the same pool (stride-sampled so the votes genuinely
@@ -47,7 +49,30 @@ fn bench_rank_fuse(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("total_entries", total),
             &lists,
-            |bench, lists| bench.iter(|| rank_fuse(black_box(lists), 60, black_box(total / 2))),
+            |bench, lists| {
+                bench.iter(|| rank_fuse(black_box(lists), 60, black_box(total / 2), None))
+            },
+        );
+    }
+    group.finish();
+}
+
+/// The weighted spelling over the same workload: one weight per list
+/// (the 2.0/1.0/1.0/1.0/0.5 hybrid shape), so the weighted cell's wall
+/// is directly comparable to the unweighted one at the same sizes —
+/// the extension must cost a multiply per vote, nothing else.
+fn bench_weighted_rank_fuse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rank_fuse_weighted");
+    for total in [10_000usize, 100_000, 400_000] {
+        let lists = fusion_lists(total, 5, total / 2);
+        let weights = [2.0f64, 1.0, 1.0, 1.0, 0.5];
+        group.throughput(Throughput::Elements(total as u64));
+        group.bench_with_input(
+            BenchmarkId::new("total_entries", total),
+            &lists,
+            |bench, lists| {
+                bench.iter(|| rank_fuse(black_box(lists), 60, black_box(total / 2), Some(&weights)))
+            },
         );
     }
     group.finish();
@@ -80,5 +105,10 @@ fn bench_metrics(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_rank_fuse, bench_metrics);
+criterion_group!(
+    benches,
+    bench_rank_fuse,
+    bench_weighted_rank_fuse,
+    bench_metrics
+);
 criterion_main!(benches);

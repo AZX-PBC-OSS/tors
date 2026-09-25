@@ -5537,7 +5537,7 @@ tors.bm25_rank("cafe", ["café société", "totally unrelated text"], strip_acce
 ## `tors.rank_fuse` / `tors.ndcg_at_k` / `tors.mrr` / `tors.recall_at_k` / `tors.precision_at_k`
 
 ```python
-def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60) -> list[tuple[Hashable, float]]: ...
+def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60, weights: Sequence[float] | None = None) -> list[tuple[Hashable, float]]: ...
 def ndcg_at_k(
     ranked: list[Hashable],
     relevant: set[Hashable] | frozenset[Hashable],
@@ -5578,6 +5578,26 @@ broken by earliest first appearance across the lists in caller order
 (a point the paper leaves open, pinned here as contract). Returned ids are
 the original objects; dedup and equality follow Python's own dict/set
 semantics (`1`, `True`, and `1.0` are the same id).
+
+**`weights=` is weighted RRF** (the extension the hybrid-retrieval
+engines ship): one optional positive finite float per list, each list's
+vote becoming `w_i / (k + rank(d))` instead of `1 / (k + rank(d))` —
+exactly Elasticsearch's RRF retriever per-child `weight` ("the weight
+that each score of this retriever's top docs will be multiplied in the
+RRF formula", `rrf_score = w_1 × rrf_score_1 + ...`, GA 9.2) and the
+same per-source weighting Redis's hybrid ranking applies when it
+combines a keyword and a vector leg. Weights live in score space, never
+rank space: a weight re-scales one list's votes and touches no rank.
+`weights=None` (the default) is the paper's original fusion EXACTLY:
+every weight 1.0 and the outputs are byte-identical to the unweighted
+spelling (pinned in `tests/test_rank_fusion.py`). A duplicate id votes
+once per LIST, weighted by THAT list's weight (the dedup-first contract,
+extended). A zero, negative, NaN, or infinite weight raises `ValueError`
+(strictly positive finite: Elasticsearch admits zero, tors does not —
+a zero-weight list is almost certainly a miscounted retriever list, the
+`k < 1` class); a length mismatch with `ranked_lists` raises
+`ValueError` naming both sides; a non-sequence `weights` (a bare `str`
+included) or a non-numeric entry raises `TypeError`.
 
 `k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty list
 of lists (`TypeError` otherwise; fusing zero lists is a `ValueError`, the
@@ -5623,10 +5643,12 @@ well-defined `0.0`: an empty `ranked`, an empty `relevant` set (no
 relevant document exists, so no hit is possible), and the
 zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
 NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative
-or non-finite `gains` value). Wrong TYPES raise `TypeError`
+or non-finite `gains` value; a zero, negative, or non-finite `weights`
+value). Wrong TYPES raise `TypeError`
 (a non-list `ranked`/`ranked_lists`, a non-set `relevant` (exactly `set`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
-extraction failure), an unhashable id, whose error is
+extraction failure), a non-sequence `weights` (a bare `str` included), a
+non-numeric `weights` entry, an unhashable id, whose error is
 Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
 extracts as its `0`/`1` value, the int-extraction convention). For
 nDCG, legal finite gains can be so large the DCG and
@@ -5676,6 +5698,19 @@ rank_fuse([
 #  ('bird-c', 0.032266458495966696)]
 # cat-a and dog-b tie (two votes each); cat-a appeared first and wins
 # the tie: earliest first appearance across the lists.
+
+rank_fuse(
+    [
+        ["cat-a", "dog-b", "bird-c"],
+        ["dog-b", "cat-a"],
+        ["bird-c"],
+    ],
+    weights=[2.0, 1.0, 1.0],        # weighted RRF: the BM25 leg counts double
+)
+# [('cat-a', 0.04891591750396616), ('dog-b', 0.048651507139079855),
+#  ('bird-c', 0.04813947436898257)]
+# cat-a's weighted votes (2/61 + 1/62) break the tie; bird-c's first-list
+# vote carries the 2.0 weight too (2/63 + 1/61).
 
 ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
 relevant = {"cat-a", "bird-c", "whale-e"}

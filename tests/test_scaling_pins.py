@@ -421,6 +421,22 @@ class TestRankFusionScaling:
         _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
 
     @pytest.mark.timing
+    def test_weighted_rank_fuse_stays_linear_in_total_list_length(self) -> None:
+        """The weighted spelling over the SAME shape and span as the
+        unweighted pin above (10k -> 40k total entries across 5 lists,
+        one weight per list): the weighted pass is the same detach with a
+        multiply per vote, so the linear class and the gate carry over
+        unchanged (measured alongside the unweighted cell's 4.6x band;
+        a per-list rescan of the id table would measure ~4x per doubling
+        here too)."""
+        weights = [2.0, 1.0, 1.0, 1.0, 0.5]
+        small, large = (
+            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(10_000), weights=weights)),
+            _min_wall_ms(lambda: tors.rank_fuse(_fusion_lists(40_000), weights=weights)),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
     def test_ndcg_at_k_stays_linear_in_ranking_length(self) -> None:
         """100k -> 400k ranked ids (4x; the relevant set scales with it):
         the membership walk is a constant number of set ops per id, the
