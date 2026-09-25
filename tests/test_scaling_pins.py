@@ -367,7 +367,7 @@ class TestRetrievalCeilingScaling:
     def test_bm25_corpus_axis_stays_linear(self) -> None:
         """The bm25 twin of the tf_idf pin. Originally 100 -> 200 (one
         doubling, gate 3.0x): on the loaded dev box (ambient load ~150,
-        fleet oversubscription) that cell measured 1.6-3.95x — a 3.95x
+        fleet oversubscription) that cell measured 1.6-3.95x; a 3.95x
         excursion blew the 3.0x gate once in nine full-lane runs, and NO
         one-doubling gate under a quadratic's 4x admits that band. The
         span widens to 2 doublings (100 -> 400), where the shared gate
@@ -438,7 +438,7 @@ class TestRankFusionScaling:
         Dev-box correction (this box, ambient load ~150): the cell
         measured 5.7-7.2x per 4x fresh and inflated past the shared
         3.0x-per-doubling gate under load/heap state (9.66x observed
-        in-suite, twice in six full-lane runs) — the inflation is NOT
+        in-suite, twice in six full-lane runs); the inflation is NOT
         proportional (the large cell is hit harder), so the ratio does
         not cancel and no span move fixes it (10k -> 40k measured
         10.04x under the same conditions). This cell therefore carries
