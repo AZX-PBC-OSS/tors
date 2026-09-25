@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.12.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.11.0...v0.12.0) (2026-09-25)
+
+
+### Features
+
+* **chunking:** token-budget chunking with overlap ([#151](https://github.com/AZX-PBC-OSS/tors/issues/151)) ([b1e31a9](https://github.com/AZX-PBC-OSS/tors/commit/b1e31a9f8ab216d7ca5bd4d900ea669ee272e236))
+* **grounding:** sentence-level grounding batch + source coverage ([#150](https://github.com/AZX-PBC-OSS/tors/issues/150)) ([eb0113c](https://github.com/AZX-PBC-OSS/tors/commit/eb0113ce63cfeb212b1d538b4df8bd7633fb418d))
+* **similarity:** near-duplicate detection and dedup helpers ([#149](https://github.com/AZX-PBC-OSS/tors/issues/149)) ([754aab3](https://github.com/AZX-PBC-OSS/tors/commit/754aab33ee006bcb53850395a820921d3ecb1c54))
+
 ## [0.11.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.10.1...v0.11.0) (2026-09-24)
 
 
