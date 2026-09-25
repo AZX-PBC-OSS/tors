@@ -365,17 +365,24 @@ class TestRetrievalCeilingScaling:
 
     @pytest.mark.timing
     def test_bm25_corpus_axis_stays_linear(self) -> None:
-        """The bm25 twin of the tf_idf pin: measured 12ms -> 26ms for
-        100 -> 200 documents x 500 words, ratio 2.1, gate 3.0x per
-        doubling."""
+        """The bm25 twin of the tf_idf pin. Originally 100 -> 200 (one
+        doubling, gate 3.0x): on the loaded dev box (ambient load ~150,
+        fleet oversubscription) that cell measured 1.6-3.95x; a 3.95x
+        excursion blew the 3.0x gate once in nine full-lane runs, and NO
+        one-doubling gate under a quadratic's 4x admits that band. The
+        span widens to 2 doublings (100 -> 400), where the shared gate
+        allows 9x: the loaded honest band (~2x/doubling, worst observed
+        step 3.95x -> ~8x compounded) stays under it while a quadratic's
+        16x still blows through. Corpus build stays inside the timed
+        lambda (both sizes build, the ratio cancels the linear build)."""
         def shape(docs: int) -> list:
             corpus = [
                 " ".join(f"w{d % 50}_{t % 500}" for t in range(500)) for d in range(docs)
             ]
             return tors.bm25_rank("w0_1 w1_2", corpus)
 
-        small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(200))
-        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+        small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(400))
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
 
 
 # --- rank_fuse: fusion at scale ------------------------------------------------------
@@ -426,14 +433,26 @@ class TestRankFusionScaling:
         detached arithmetic tail is O(n). Measured 3.24ms -> 18.31ms,
         ratio 5.6 (~2.4x per doubling, ambient load ~5-20; the same
         large-set cache-miss band the rank_fuse cell records), gate 3.0x
-        per doubling."""
+        per doubling.
+
+        Dev-box correction (this box, ambient load ~150): the cell
+        measured 5.7-7.2x per 4x fresh and inflated past the shared
+        3.0x-per-doubling gate under load/heap state (9.66x observed
+        in-suite, twice in six full-lane runs); the inflation is NOT
+        proportional (the large cell is hit harder), so the ratio does
+        not cancel and no span move fixes it (10k -> 40k measured
+        10.04x under the same conditions). This cell therefore carries
+        its own gate, the file's documented idiom for a band that runs
+        higher: 3.5x per doubling (12.25x per 4x) sits above the loaded
+        honest band (~10x worst observed) while a quadratic's 16x per
+        4x still blows through."""
         def shape(n: int) -> float:
             ranked = [f"id_{i}" for i in range(n)]
             relevant = {ranked[i] for i in range(0, n, 3)}
             return tors.ndcg_at_k(ranked, relevant)
 
         small, large = _min_wall_ms(lambda: shape(25_000)), _min_wall_ms(lambda: shape(100_000))
-        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+        _assert_linear_per_doubling(small, large, 4, 3.5)
 
 
 # --- ground_sentences / grounding_coverage: the grounding batch -------------

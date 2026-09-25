@@ -2631,6 +2631,14 @@ tors.ground_sentences(
 # highlight's example computes; the aggregate is the max of the three)
 ```
 
+Against the installed alternative: the batch call prices the same job
+`rouge_score`'s per-pair `RougeScorer.score` loop does (this document's
+1,251 sentences against one query) at ~4-5x under its wall, ~5.7-6.1 ms
+per `ground_sentences` call against ~25-28 ms for the loop, with
+`highlight` at ~5.2-5.5 ms; the metrics differ by design (ROUGE-1/L
+there, the ROUGE-W-shaped F1 here, the toy agreement on both sides),
+`tools/bench_sota.py`, bands in [Performance](performance.md).
+
 ## `tors.grounding_coverage`
 
 ```python
@@ -3662,6 +3670,12 @@ the cost/benefit study at [arXiv:2410.13070](https://arxiv.org/abs/2410.13070)
 splitting strategies not consistently worth their cost over simpler ones;
 this surface ships the cheap mechanical contract (boundary-safe packing
 under an exact token budget) and leaves the strategy to the caller.
+Against the installed alternative: `chunk_to_offsets` packs the same
+1 MiB, 200-token-budget, overlap-20 corpus in ~22 ms where
+`semchunk.chunk` (`offsets=True`, the same whitespace counter) takes
+~42-44 ms (~1.9x), the two outputs agreeing on the shared invariant
+(every chunk within budget, the text tiled) though not on windows
+(`tools/bench_sota.py`; bands in [Performance](performance.md)).
 
 ```python
 def word_counter(text: str) -> int:
@@ -4928,6 +4942,13 @@ GIL: two str borrows and the `width` validation under the GIL, the whole
 tokenize + shingle + set pass under one `py.detach`, a single float out.
 `aio` twins: `tors.aio.shingle_jaccard` / `tors.aio.shingle_dice`.
 
+Against the naive pure-Python spelling of the same job (the same UAX #29
+tokens, fold, and width-3 shingle tuples, sets and arithmetic in
+Python): ~9 ms vs ~15 ms on 100 KiB pairs, the same value out
+(~1.7x; Python's stdlib has no word segmenter, so the baseline borrows
+only `word_bounds`, `tools/bench_sota.py`, bands in
+[Performance](performance.md)).
+
 ## `tors.dedup_near_dup`
 
 ```python
@@ -5464,6 +5485,14 @@ operation slower until the walk is effectively interpreter-bound: the
 GIL-held share approaches the call's full wall (measured ratios
 0.98-1.00 there) and no thread placement buys it back, the same
 id-shape caveat `docs/async.md` carries for the `aio` spelling.
+
+Against the installed alternatives (`tools/bench_sota.py`, same inputs,
+agreement checked both directions; bands in
+[Performance](performance.md)): `rank_fuse` answers the same RRF
+`ranx.fusion.rrf` computes (top-50 ordering overlap 100%, plain-Python
+score recompute to a 3.5e-18 delta) at ~15-20x its wall, and
+`ndcg_at_k` reads the same value `sklearn.metrics.ndcg_score` and
+`ranx.evaluate` do at ~2x and ~5x theirs.
 
 ```python
 rank_fuse([

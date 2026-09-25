@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import itertools
 import os
 import sys
 import time
@@ -86,6 +85,7 @@ import traceback
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from loop_harness import heartbeat_gap_and_wall
 
 import tors
 
@@ -1225,16 +1225,6 @@ def test_growing_cost_counter_keeps_gil_held_time_tracking_the_callbacks() -> No
     while the counter runs (plus O(chunk) argument construction), so the
     worst heartbeat gap must track the (growing) callbacks, never the
     whole call: the heartbeat cells' ratio budget must hold."""
-    ticks: list[float] = []
-    stop = asyncio.Event()
-
-    async def heartbeat() -> None:
-        while True:
-            ticks.append(time.monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
-
     state = {"n": 0}
 
     def growing(s: str) -> int:
@@ -1252,20 +1242,11 @@ def test_growing_cost_counter_keeps_gil_held_time_tracking_the_callbacks() -> No
         "Eight. Nine. Ten. Eleven. Twelve. Thirteen. Fourteen."
     )
 
-    async def run() -> tuple[float, float]:
-        hb = asyncio.create_task(heartbeat())
-        await asyncio.sleep(0)
-        started = time.monotonic()
-        try:
-            await asyncio.to_thread(tors.chunk_to_budget, text, growing, max_tokens=2, overlap=1)
-        finally:
-            stop.set()
-            await hb
-        wall = time.monotonic() - started
-        worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-        return worst, wall
-
-    worst, wall = asyncio.run(run())
+    worst, wall = asyncio.run(
+        heartbeat_gap_and_wall(
+            lambda: asyncio.to_thread(tors.chunk_to_budget, text, growing, max_tokens=2, overlap=1)
+        )
+    )
     assert state["n"] > 20, "the corpus must exercise many growing calls"
     assert worst < 0.30 * wall or worst < 0.100, (
         f"held time does not track the callbacks: worst gap {worst * 1000:.0f}ms "
@@ -1465,30 +1446,9 @@ def test_unspanned_tail_rides_the_last_chunk_never_its_own() -> None:
 
 
 # ---- GIL claim audit (hostile heartbeat cells) -----------------------------------
-
-
-async def _gap_and_wall(op: object) -> tuple[float, float]:
-    ticks: list[float] = []
-    stop = asyncio.Event()
-
-    async def heartbeat() -> None:
-        while True:
-            ticks.append(time.monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
-
-    hb = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0)
-    started = time.monotonic()
-    try:
-        await op()
-    finally:
-        stop.set()
-        await hb
-    wall = time.monotonic() - started
-    worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-    return worst, wall
+# The measurement is tests/loop_harness.py's shared heartbeat_gap_and_wall
+# (the one copy of the 10ms heartbeat / worst-gap reduction the suite's
+# GIL cells repeat); the budgets below are this file's own.
 
 
 def _busy_at_3x(s: str) -> int:
@@ -1519,7 +1479,9 @@ def test_gil_heartbeat_survives_a_counter_that_releases_the_gil() -> None:
 
     text = "One. " * 200
     worst, wall = asyncio.run(
-        _gap_and_wall(lambda: asyncio.to_thread(tors.chunk_to_budget, text, sleepy, max_tokens=2))
+        heartbeat_gap_and_wall(
+            lambda: asyncio.to_thread(tors.chunk_to_budget, text, sleepy, max_tokens=2)
+        )
     )
     assert wall > 0.2  # the sleeps dominate: the call is genuinely long
     assert worst < 0.10, f"loop blocked {worst * 1000:.0f}ms of {wall * 1000:.0f}ms"
@@ -1538,7 +1500,7 @@ def test_gil_heartbeat_survives_reentrant_tors_calls_in_the_counter() -> None:
         return max(len(s.split()), 1)
 
     worst, wall = asyncio.run(
-        _gap_and_wall(
+        heartbeat_gap_and_wall(
             lambda: asyncio.to_thread(tors.chunk_to_budget, corpus, reentrant, max_tokens=100)
         )
     )
@@ -1556,7 +1518,7 @@ def test_gil_offsets_extraction_band_at_one_span_per_codepoint() -> None:
     corpus = unit * (2 * 1024 * 1024 // len(unit))
     spans = [(i, i + 1) for i in range(len(corpus)) if not corpus[i].isspace()]
     worst, wall = asyncio.run(
-        _gap_and_wall(
+        heartbeat_gap_and_wall(
             lambda: asyncio.to_thread(tors.chunk_to_offsets, corpus, spans, max_tokens=200)
         )
     )
@@ -1616,7 +1578,7 @@ def test_loop_schedulable_between_callbacks_above_the_switch_interval() -> None:
 
     text = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
     worst, wall = asyncio.run(
-        _gap_and_wall(
+        heartbeat_gap_and_wall(
             lambda: asyncio.to_thread(tors.chunk_to_budget, text, busy, max_tokens=2, overlap=1)
         )
     )
@@ -1637,7 +1599,7 @@ def test_heartbeat_cell_is_deterministic_across_20_runs() -> None:
     runs = 20
     for k in range(runs):
         worst, wall = asyncio.run(
-            _gap_and_wall(
+            heartbeat_gap_and_wall(
                 lambda: asyncio.to_thread(
                     tors.chunk_to_budget, _TEXT, _busy_at_3x, max_tokens=2, overlap=1
                 )
@@ -1662,7 +1624,7 @@ def test_heartbeat_budget_is_derived_from_switchinterval_at_runtime(interval: fl
     sys.setswitchinterval(interval)
     try:
         worst, wall = asyncio.run(
-            _gap_and_wall(
+            heartbeat_gap_and_wall(
                 lambda: asyncio.to_thread(
                     tors.chunk_to_budget, _TEXT, _busy_at_3x, max_tokens=2, overlap=1
                 )

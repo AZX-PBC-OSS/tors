@@ -18,7 +18,6 @@ on, not the algorithm's internals.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import re
 import subprocess
 import sys
@@ -38,6 +37,7 @@ from grounding_reference import (
 )
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from loop_harness import assert_heartbeat_clean, heartbeat_gap_and_wall
 
 import tors
 from tors import ground_sentences, sentence_bounds
@@ -535,73 +535,10 @@ class TestApiAbuse:
 
 
 # ---------------------------------------------------------------------------
-# GIL-claim audit: heartbeat harness, hostile sizes; held time must not
-# scale with input size for the detached pass.
+# GIL-claim audit: heartbeat harness (tests/loop_harness.py, the shared
+# measurement), hostile sizes; held time must not scale with input size
+# for the detached pass.
 # ---------------------------------------------------------------------------
-
-
-async def _gap_and_wall(op):
-    ticks = []
-    stop = asyncio.Event()
-
-    async def heartbeat():
-        while True:
-            ticks.append(monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
-
-    task = asyncio.create_task(heartbeat())
-    await asyncio.sleep(0)
-    started = monotonic()
-    try:
-        await (op() if callable(op) else op)
-        end = monotonic()
-    finally:
-        stop.set()
-        await task
-    wall = end - started
-    worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-    return worst, wall
-
-
-_HEARTBEAT_RATIO_BUDGET = 0.35
-_HEARTBEAT_CEILING_S = 0.5
-_HEARTBEAT_SAMPLES = 3
-
-
-async def _assert_heartbeat_clean(op, samples: int = _HEARTBEAT_SAMPLES) -> None:
-    """Assert ``op`` leaves the event loop schedulable, over up to ``samples``
-    measurements, passing on the first clean one (the harness's
-    ``test_gil_release.py`` pattern): a GIL-held whole pass misses its
-    budgets in EVERY sample, scheduler starvation of the heartbeat process
-    does not, so one starved sample retries instead of failing the cell.
-    A sample is clean exactly when the worst tick gap stays under BOTH the
-    ratio budget (a held whole pass reads ~1.0; the detached pass's residue
-    is the documented O(sentences) marshalling, a small fraction of the
-    wall) and the absolute ceiling (the marshalling band at the hostile
-    sizes tops out ~0.5s under ambient load, which inflates the wall the
-    residue scales with; the ceiling still catches a bounded pathological
-    hold however long the wall runs)."""
-    observed: list[tuple[float, float]] = []
-    for _ in range(samples):
-        worst, wall = await _gap_and_wall(op)
-        assert wall > 0.02, wall
-        observed.append((worst, wall))
-        if worst < _HEARTBEAT_RATIO_BUDGET * wall and worst < _HEARTBEAT_CEILING_S:
-            return
-    detail = "; ".join(
-        f"worst {worst * 1000:.0f}ms of a {wall * 1000:.0f}ms operation ({worst / wall:.0%})"
-        for worst, wall in observed
-    )
-    raise AssertionError(
-        f"the heartbeat missed its budgets in every one of {samples} samples "
-        f"({detail}): tors's py.detach release is not freeing the loop while "
-        "ground_sentences runs, or the return marshalling regressed out of "
-        "its band (src/grounding_impl.rs)"
-    )
-
-
 
 
 class TestGilClaimAudit:
@@ -618,8 +555,21 @@ class TestGilClaimAudit:
             # red side for every detach claim.
             return re.sub("x", "y", "x" * 30_000_000)
 
-        worst, wall = asyncio.run(_gap_and_wall(lambda: asyncio.to_thread(gil_held_c_call)))
+        worst, wall = asyncio.run(
+            heartbeat_gap_and_wall(lambda: asyncio.to_thread(gil_held_c_call))
+        )
         assert wall > 0.1 and worst > 0.1, (worst, wall)
+
+    @pytest.mark.timing
+    def test_the_shared_harness_budgets_fail_a_gil_held_pass(self):
+        """Red side for the shared budget shape: the same GIL-held C call
+        must FAIL ``assert_heartbeat_clean`` (a held pass reads a ~1.0
+        ratio in every sample), not merely report a large gap."""
+        def gil_held() -> object:
+            return asyncio.to_thread(re.sub, "x", "y", "x" * 30_000_000)
+
+        with pytest.raises(AssertionError, match="missed its budgets"):
+            asyncio.run(assert_heartbeat_clean(gil_held))
 
     @pytest.mark.timing
     @pytest.mark.parametrize("units", [24_000, 96_000, 212_000])  # ~1 / 4 / 9.5 MiB
@@ -628,7 +578,7 @@ class TestGilClaimAudit:
         # Detached pass + documented O(sentences) marshalling residue: the
         # gap must stay far under the wall (a held whole pass reads ~1.0).
         asyncio.run(
-            _assert_heartbeat_clean(
+            assert_heartbeat_clean(
                 lambda: asyncio.to_thread(tors.ground_sentences, big, "torque spec")
             )
         )
@@ -638,12 +588,12 @@ class TestGilClaimAudit:
     def test_grounding_coverage_held_time_does_not_scale(self, units):
         big = _unit(units)
         small_gap, _ = asyncio.run(
-            _gap_and_wall(
+            heartbeat_gap_and_wall(
                 lambda: asyncio.to_thread(tors.grounding_coverage, _unit(24_000), _unit(24_000))
             )
         )
         worst, wall = asyncio.run(
-            _gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
+            heartbeat_gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
         )
         # The point of detach: held time must not scale with input.  The
         # DP is 100x the cells at 10x the side; the GIL-held gap must stay
@@ -654,7 +604,7 @@ class TestGilClaimAudit:
     def test_tiny_text_huge_query_heartbeat(self):
         huge_query = "torque spec " * 900_000  # ~10 MiB query, tiny text
         worst, wall = asyncio.run(
-            _gap_and_wall(
+            heartbeat_gap_and_wall(
                 lambda: asyncio.to_thread(tors.ground_sentences, "tiny text here.", huge_query)
             )
         )
@@ -1189,10 +1139,10 @@ class TestGilConcurrent:
         DP work is ~5s)."""
         big = _unit(212_000)  # ~8.5MB, token-capped at 16384 per operand
         single_gap, _ = asyncio.run(
-            _gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
+            heartbeat_gap_and_wall(lambda: asyncio.to_thread(tors.grounding_coverage, big, big))
         )
         worst, wall = asyncio.run(
-            _gap_and_wall(
+            heartbeat_gap_and_wall(
                 lambda: asyncio.gather(
                     *(asyncio.to_thread(tors.grounding_coverage, big, big) for _ in range(4))
                 )
