@@ -392,6 +392,145 @@ class TestRankFuseWeights:
         assert "weights" not in inspect.signature(ndcg_at_k).parameters
 
 
+class TestRankFuseWeightsRedteam:
+    """Adversarial lanes for the weighted extension: overflow-adjacent and
+    denormal weights, bool/int laundering, sequence-protocol abuse,
+    validation ordering, and tie determinism under weights. All green
+    pins: these are the attacks the extension survives."""
+
+    def test_huge_weight_overflow_adjacent_stays_nan_free(self) -> None:
+        # 1e308 votes: single votes stay finite, sums can reach inf, but
+        # the all-positive domain can never produce a NaN and the sort
+        # stays total (no panic, no partial order).
+        lists = [["a", "b"], ["a", "c"], ["c"]]
+        fused = rank_fuse(lists, k=1, weights=[1e308, 1e308, 1e308])
+        scores = [s for _, s in fused]
+        assert all(not math.isnan(s) for s in scores)
+        assert scores == sorted(scores, reverse=True)
+        assert all(math.isinf(s) or s > 0 for s in scores)
+
+    def test_denormal_weight_keeps_docs_with_subnormal_scores(self) -> None:
+        # A denormal weight whose votes still round positive (1e-310 is
+        # subnormal; 1e-310/(k+r) > 2^-1074 for k+r <= 100k): every doc
+        # survives with a subnormal score, no NaN, order preserved.
+        fused = rank_fuse([["a", "b", "c"]], k=60, weights=[1e-310])
+        assert [i for i, _ in fused] == ["a", "b", "c"]
+        assert all(0.0 < s < 1e-305 for _, s in fused)
+
+    @pytest.mark.xfail(
+        reason=(
+            "underflow drop (P1): a doc whose EVERY vote underflows to 0.0"
+            " (legal weight 5e-324, the smallest subnormal, at k=60:"
+            " 5e-324/61 rounds to 0.0) is silently dropped by the core's"
+            " `*score > 0.0` collection filter -- the filter's premise"
+            " (every voted score positive) holds for the unweighted domain"
+            " (scores >= ~1e-5) but not under legal denormal weights, and"
+            " the documented contract is one (id, score) pair per distinct"
+            " id across all lists. Observed: rank_fuse([['a','b','c']],"
+            " weights=[5e-324]) == []."
+        ),
+        strict=True,
+    )
+    def test_a_doc_whose_votes_underflow_still_appears(self) -> None:
+        fused = rank_fuse([["a", "b", "c"]], k=60, weights=[5e-324])
+        assert {i for i, _ in fused} == {"a", "b", "c"}
+
+    def test_mixed_extreme_weights_stay_nan_free(self) -> None:
+        # inf-adjacent and tiny-but-not-underflowing weights in ONE call:
+        # the additions are all positive, so no NaN can arise; the
+        # huge-weight list dominates the order deterministically.
+        fused = rank_fuse([["a"], ["b"]], k=1, weights=[1e308, 1e-300])
+        assert fused[0][0] == "a"
+        assert not math.isnan(fused[0][1]) and not math.isnan(fused[1][1])
+        assert fused[1][1] == pytest.approx(1e-300 / 2.0, rel=1e-12)
+
+    def test_bool_weights_launder_to_their_int_values_then_hit_the_domain(self) -> None:
+        # The int-extraction convention (documented for k=/gains=): True
+        # is 1.0, False is 0.0 — and the 0.0 is then rejected by the
+        # strictly-positive domain, so a bool can never smuggle a
+        # zero-weight list past validation.
+        assert rank_fuse([["a"], ["b"]], weights=[True, True]) == rank_fuse(
+            [["a"], ["b"]], weights=[1.0, 1.0]
+        )
+        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+            rank_fuse([["a"], ["b"]], weights=[True, False])
+
+    def test_int_weights_are_accepted_as_floats(self) -> None:
+        assert rank_fuse([["a"], ["b"]], weights=[2, 1]) == rank_fuse(
+            [["a"], ["b"]], weights=[2.0, 1.0]
+        )
+
+    @pytest.mark.parametrize("bad", [{1.0, 2.0}, (w for w in [1.0]), {"w": 1.0}])
+    def test_non_sequence_protocol_abuse_raises_type_error(self, bad: object) -> None:
+        # Sets/generators/dicts: not sequences (a bare str is the
+        # documented char-splitting footgun) — all TypeError.
+        with pytest.raises(TypeError):
+            rank_fuse([["a"], ["b"]], weights=bad)  # type: ignore[arg-type]
+
+    def test_bytes_and_range_are_sequences_of_numerics(self) -> None:
+        # bytes/range ARE sequences (of ints, the accepted numeric type):
+        # b"12" launders to the CODE POINTS [49.0, 50.0] — surprising but
+        # int-consistent (never the str footgun, whose char entries are
+        # non-numeric), and range's 0 hits the strictly-positive domain.
+        assert rank_fuse([["a"], ["b"]], weights=b"12") == rank_fuse(
+            [["a"], ["b"]], weights=[49.0, 50.0]
+        )
+        with pytest.raises(ValueError, match="weights values must be finite and > 0"):
+            rank_fuse([["a"], ["b"]], weights=range(2))
+
+    def test_weights_validation_walks_before_any_id_hashing(self) -> None:
+        # Every validation failure outranks the unhashable-id TypeError:
+        # the length mismatch and the non-sequence check are the same
+        # argument-domain walk the zero-weight check is.
+        with pytest.raises(ValueError, match="one weight per ranked list"):
+            rank_fuse([[{"un": "hashable"}]], weights=[])  # type: ignore[list-item]
+        with pytest.raises(ValueError, match="one weight per ranked list"):
+            rank_fuse([[{"un": "hashable"}]], weights=[1.0, 2.0])  # type: ignore[list-item]
+        with pytest.raises(TypeError):
+            rank_fuse([[{"un": "hashable"}]], weights="heavy")  # type: ignore[arg-type]
+
+    def test_exact_tie_under_weights_breaks_by_first_appearance(self) -> None:
+        # 2/61 vs 1/61 + 1/61: an exact tie under weights; the winner is
+        # the earlier first appearance (list 0), deterministic.
+        fused = rank_fuse([["a"], ["b"], ["b"]], weights=[2.0, 1.0, 1.0], k=60)
+        assert fused[0][0] == "a" and fused[1][0] == "b"
+        assert fused[0][1] == fused[1][1]
+
+    @given(
+        lists=st.lists(st.lists(_IDS, min_size=1, max_size=8), min_size=1, max_size=5),
+        weights=st.lists(
+            st.floats(min_value=0.1, max_value=100.0, allow_nan=False), min_size=1, max_size=5
+        ),
+    )
+    @settings(max_examples=150)
+    def test_weights_none_is_byte_identical_to_all_ones_property(
+        self, lists: list, weights: list
+    ) -> None:
+        # The differential pin, property-shaped: the default spelling and
+        # the all-1.0 spelling agree bit for bit on every corpus shape.
+        n = len(lists)
+        assert rank_fuse(lists) == rank_fuse(lists, weights=None)
+        assert rank_fuse(lists) == rank_fuse(lists, weights=[1.0] * n)
+
+    @given(
+        lists=st.lists(st.lists(_IDS, min_size=1, max_size=6), min_size=1, max_size=4),
+        w1=st.floats(min_value=0.5, max_value=10.0, allow_nan=False),
+        w2=st.floats(min_value=0.5, max_value=10.0, allow_nan=False),
+    )
+    @settings(max_examples=100)
+    def test_raising_a_weight_never_lowers_a_voted_score(
+        self, lists: list, w1: float, w2: float
+    ) -> None:
+        # Score-space monotonicity (weights live in score space): every
+        # doc list 0 votes for scores >= under a LOWER weight for list 0.
+        # (Rank-space can flip -- that is the extension's point.)
+        low_w, high_w = min(w1, w2), max(w1, w2)
+        low = dict(rank_fuse(lists, weights=[low_w] + [1.0] * (len(lists) - 1)))
+        high = dict(rank_fuse(lists, weights=[high_w] + [1.0] * (len(lists) - 1)))
+        for doc in set(lists[0]):
+            assert high[doc] >= low[doc]
+
+
 class TestRankFuseProperties:
     @given(lists=_LISTS)
     @settings(max_examples=200)

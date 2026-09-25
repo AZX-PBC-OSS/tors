@@ -503,7 +503,102 @@ class TestUriQueryCredsExtended:
         # Redaction completeness, per name: an alnum payload planted
         # behind each extended key shape never survives the full chain.
         for name in (*EXTENDED_RULE_NAMES, "password"):
-            assert scrub_log_text(f"?{name}=s3cretVal99&x=1") == f"?{name}=***&x=1", name
+            assert scrub_log_text(f"?{name}=s3cretVal99&x=1") == f"?{name}=***&x=1"
+
+
+class TestConninfoPassRedteam:
+    """Adversarial lanes for the conninfo pass under its three names
+    (the extended key set included): near-miss names, the value grammar's
+    documented swallow seam, bit algebra, and the identity discipline.
+    All green pins: these are the attacks the pass survives."""
+
+    def test_near_miss_names_never_extend_past_the_name(self) -> None:
+        # The name must END exactly at the `=`: plurals and suffixed
+        # spellings are different words, and the shorter name's anchor
+        # would sit on a word char inside the longer one anyway.
+        for name in (
+            "signature",
+            "keys",
+            "tokens",
+            "secrets",
+            "apikey2",
+            "authorize",
+            "oauth_token",
+            "xkey",
+        ):
+            assert scrub_log_text(f"?{name}=v", ["uri_query_creds_extended"]) == (
+                f"?{name}=v"
+            ), name
+
+    def test_fragment_hash_rides_inside_the_value_span(self) -> None:
+        # The unquoted value runs to whitespace/`&` — a `#` is VALUE
+        # content (the caller's URL splitting owns the fragment), so the
+        # whole `abc#password=zz` span masks: over-redaction, and the
+        # swallowed `password=` site never needs its own pass.
+        assert scrub_log_text("?sig=abc#password=zz") == "?sig=***"
+        assert scrub_log_text("?sig=abc#password=zz", ["uri_query_creds_extended"]) == (
+            "?sig=***"
+        )
+
+    def test_the_value_swallow_fragment_seam_is_pre_existing_and_documented(self) -> None:
+        # The documented by-design fragment class (docs/api.md's warning):
+        # an earlier credential's unquoted value eats a LATER credential's
+        # masking opportunity when no whitespace/`&` intervenes, and the
+        # value grammar can split a libpq quoted leg at its internal
+        # space, leaving the tail verbatim. PRE-EXISTING on the shared
+        # five (main: `?password=AKIA...host=PASSWORD='hun ter2'` ->
+        # `?password=*** ter2'`); the extended set only reaches the seam
+        # from more anchors. Pinned as-is: do not reorder to "fix".
+        assert scrub_log_text("?password=AKIAIOSFODNN7EXAMPLEhost=PASSWORD='hun ter2'") == (
+            "?password=*** ter2'"
+        )
+        assert scrub_log_text("?sig=AKIAIOSFODNN7EXAMPLEhost=PASSWORD='q q'") == (
+            "?sig=*** q'"
+        )
+
+    def test_bit_32_composes_with_secret_tokens_after_it(self) -> None:
+        # ALL=63: the conninfo pass (bit 4/32 anchors) runs BEFORE
+        # secret_tokens (bit 16), so a secret-token span inside a
+        # conninfo value never gets its own mask (the whole value is
+        # already `***`), and the conninfo `***` splice is never
+        # re-caught by anything after it. Pinned end to end.
+        text = "?sig=xoxb-12345678901234567890&password=ghe_16abcdefghijkmnopqr"
+        fused = scrub_log_text(text)
+        assert fused == "?sig=***&password=***"
+        # The lone bits still map to their own lanes in composition.
+        assert scrub_log_text(
+            text, ["uri_query_creds_extended", "secret_tokens"]
+        ) == scrub_log_text(text)
+        assert scrub_log_text(
+            text, ["uri_query_creds", "secret_tokens"]
+        ) == "?sig=xoxb-12345678901234567890&password=***"
+
+    def test_the_extended_rule_alone_is_idempotent_on_its_own_masks(self) -> None:
+        # The `***` splice re-matches its own value class: converges by
+        # the second pass, byte-identical thereafter.
+        once = scrub_log_text("?key=a b?sig=c", ["uri_query_creds_extended"])
+        assert once == "?key=*** b?sig=***"
+        assert scrub_log_text(once, ["uri_query_creds_extended"]) == once
+
+    def test_extended_names_at_text_start_and_after_punctuation(self) -> None:
+        # The lookbehind grammar keeps the shared five, but the QUERY
+        # anchor only needs the IMMEDIATELY preceding char to be ?/&:
+        # punctuation and multi-char prefixes never fire, single ?/& runs do.
+        for pre in ("?", "&&", "??", "?&", "&?"):
+            assert scrub_log_text(f"{pre}sig=v", ["uri_query_creds_extended"]) == (
+                f"{pre}sig=***"
+            ), pre
+        for pre in ("=", " ", "-", "0", "_", ":"):
+            assert scrub_log_text(f"{pre}sig=v", ["uri_query_creds_extended"]) == (
+                f"{pre}sig=v"
+            ), pre
+
+    def test_long_values_and_long_names_terminate(self) -> None:
+        # The O(longest name) name walk per `=` over a 100KB single token:
+        # linear, no superlinear blowup, correct mask.
+        text = "?" + "a" * 100_000 + "&sig=" + "b" * 100_000
+        out = scrub_log_text(text, ["uri_query_creds_extended"])
+        assert out == "?" + "a" * 100_000 + "&sig=***"
 
 
 class TestCanonicalOrder:
