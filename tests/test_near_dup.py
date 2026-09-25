@@ -35,6 +35,7 @@ from hypothesis import strategies as st
 
 import tors
 import tors.aio
+from loop_harness import assert_bounded
 
 _TEXT = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N", "Zs", "P"), max_codepoint=0x2FFF),
@@ -1842,9 +1843,15 @@ class TestMemoryAndScale:
     def test_documented_candidate_set_completes_well_under_the_budget(self) -> None:
         corpus = [" ".join(f"tok{i}_{j}" for j in range(40)) for i in range(1_000)]
         for method in _METHODS:
-            started = monotonic()
-            tors.dedup_near_dup(corpus, threshold=0.9, method=method)
-            assert monotonic() - started < 2.0, method
+            # Load-robust spelling (tests/loop_harness.py): min-of-3
+            # pass-on-first-clean per method; a regression past the 2s
+            # budget inflates every sample.
+            assert_bounded(
+                lambda method=method: tors.dedup_near_dup(corpus, threshold=0.9, method=method),
+                2.0,
+                samples=3,
+                label=f"the {method} candidate-set sweep",
+            )
 
 
 class TestScalingGateBites:

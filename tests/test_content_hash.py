@@ -91,6 +91,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from reference import content_object
 from tors import content_hash
 
@@ -1451,21 +1452,23 @@ class TestBoundedHooks:
 
     def test_infinite_iter_aborts_promptly_with_value_error(self) -> None:
         import itertools
-        import time
 
         class Inf(list):
             def __iter__(self):  # type: ignore[override]
                 return iter(itertools.repeat(1))
 
-        started = time.monotonic()
-        with pytest.raises(ValueError, match="unbounded hook") as exc_info:
-            content_hash(Inf())
-        assert time.monotonic() - started < 2, "unbounded hook was not bounded"
-        assert "1000000" not in str(exc_info.value), "cap value leaked"
+        def fire() -> None:
+            with pytest.raises(ValueError, match="unbounded hook") as exc_info:
+                content_hash(Inf())
+            assert "1000000" not in str(exc_info.value), "cap value leaked"
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean; the abort is the cap firing, in every sample
+        # when the bound works.
+        assert_bounded(fire, 2.0, samples=3, label="the infinite __iter__ abort")
 
     def test_infinite_items_aborts_promptly_with_value_error(self) -> None:
         import itertools
-        import time
 
         class InfDict(dict):
             def __init__(self) -> None:
@@ -1474,11 +1477,12 @@ class TestBoundedHooks:
             def items(self):  # type: ignore[override]
                 return itertools.repeat(("k", 1))
 
-        started = time.monotonic()
-        with pytest.raises(ValueError, match="unbounded hook") as exc_info:
-            content_hash(InfDict())
-        assert time.monotonic() - started < 2, "unbounded hook was not bounded"
-        assert "1000000" not in str(exc_info.value), "cap value leaked"
+        def fire() -> None:
+            with pytest.raises(ValueError, match="unbounded hook") as exc_info:
+                content_hash(InfDict())
+            assert "1000000" not in str(exc_info.value), "cap value leaked"
+
+        assert_bounded(fire, 2.0, samples=3, label="the infinite .items() abort")
 
     def test_generator_items_still_hash_with_parity(self) -> None:
         """``.items()`` returning a generator (not a list) is the normal

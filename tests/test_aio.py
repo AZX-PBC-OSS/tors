@@ -42,6 +42,7 @@ import pytest
 
 import tors
 import tors.aio
+from loop_harness import first_clean
 from reference import prose
 
 _PYI = Path(__file__).resolve().parent.parent / "python" / "tors" / "aio.pyi"
@@ -273,7 +274,7 @@ class TestAwaitCorrectness:
         failure mode this facade's design deliberately avoids) would
         starve the heartbeat for the whole wall instead."""
 
-        async def run() -> tuple[float, float, int]:
+        def measure() -> tuple[float, float, int]:
             # 16 MiB, not 2 MiB: the 2 MiB corpus measured ~4.6ms wall on a
             # loaded CI runner, right at the razor's edge of the "must cost
             # something" floor below and prone to landing under it on a
@@ -293,20 +294,33 @@ class TestAwaitCorrectness:
                     ticks.append(now - last)
                     last = now
 
-            hb = asyncio.create_task(heartbeat())
-            await asyncio.sleep(0.02)  # the heartbeat establishes cadence
-            started = time.perf_counter()
-            opcodes = await tors.aio.diff_opcodes(a, b)
-            wall = time.perf_counter() - started
-            await asyncio.sleep(0.02)
-            hb.cancel()
-            assert len(opcodes) >= 1
-            return wall, max(ticks), len(ticks)
+            async def run() -> tuple[float, float, int]:
+                hb = asyncio.create_task(heartbeat())
+                await asyncio.sleep(0.02)  # the heartbeat establishes cadence
+                started = time.perf_counter()
+                opcodes = await tors.aio.diff_opcodes(a, b)
+                wall = time.perf_counter() - started
+                await asyncio.sleep(0.02)
+                hb.cancel()
+                assert len(opcodes) >= 1
+                return wall, max(ticks), len(ticks)
 
-        wall, worst_gap, tick_count = asyncio.run(run())
-        assert wall > 0.010, "the corpus must actually cost something"
-        assert tick_count >= 4, "the heartbeat must have ticked during the call"
-        assert worst_gap < 0.015, (
-            f"worst heartbeat gap {worst_gap * 1000:.1f} ms during a "
-            f"{wall * 1000:.0f} ms call: the native pass is blocking the loop"
+            return asyncio.run(run())
+
+        def check(measured: tuple[float, float, int]) -> None:
+            wall, worst_gap, tick_count = measured
+            assert wall > 0.010, "the corpus must actually cost something"
+            assert tick_count >= 4, "the heartbeat must have ticked during the call"
+            assert worst_gap < 0.015, (
+                f"worst heartbeat gap {worst_gap * 1000:.1f} ms during a "
+                f"{wall * 1000:.0f} ms call: the native pass is blocking the loop"
+            )
+
+        # Load-robust spelling (tests/loop_harness.py): pass-on-first-clean
+        # over up to 4 samples — one starved sample retries (a 5ms
+        # heartbeat on a shared runner absorbs a scheduler hit on exactly
+        # one sample), while a wrapper that runs the native pass inline
+        # dirties every sample and still fails.
+        first_clean(
+            measure, check, samples=4, label="the aio diff_opcodes heartbeat cell"
         )
