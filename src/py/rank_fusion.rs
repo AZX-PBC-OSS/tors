@@ -135,6 +135,14 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
     // The detached fusion pass: pure arithmetic over dedup indices.
     let fused = py.detach(|| rank_fusion_impl::rank_fuse(&lists_idx, k as u64, ids.len()));
     // The marshalling: original id objects by index, one tuple each.
+    // Scaling-pin note: an injected regression here must be
+    // `std::hint::black_box`-wrapped to be measured at all. A
+    // `take(pos + 1).count()`-style "re-scan" is not a valid probe:
+    // the id vector is an ExactSizeIterator, so LLVM folds the length
+    // subtraction to O(1) in release and the injection elides. The
+    // black-boxed per-entry recompute over `fused[..pos + 1]` is the
+    // elision-proof form; it fails tests/test_rank_fusion.py's 9.0x
+    // scaling gate 5/5 at the 10k -> 40k span (measured 13-15x).
     let out = PyList::empty(py);
     for (idx, score) in fused {
         out.append((ids[idx as usize].bind(py), score))?;
