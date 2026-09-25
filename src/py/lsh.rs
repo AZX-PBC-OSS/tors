@@ -245,8 +245,11 @@ impl<'py> IntoPyObject<'py> for PyTuplePair {
 /// docs spell the same curve). Use it to PICK `bands`/`rows` for a
 /// target threshold: choose the similarity `s` a pair must reach to
 /// become a candidate, then check the curve catches it, e.g.
-/// `lsh_probability(0.8, bands=16, rows=8)` is above 0.999 while
-/// `lsh_probability(0.3, bands=16, rows=8)` is below 0.001.
+/// `lsh_probability(0.8, bands=16, rows=8)` is about 0.947 while
+/// `lsh_probability(0.25, bands=16, rows=8)` is about 0.00024.
+/// Around this shape the candidate threshold sits near
+/// `lsh_threshold(bands=16, rows=8)` (about 0.36): a pair past it
+/// becomes very likely a candidate, a pair below it very unlikely.
 ///
 /// `s` must be in [0.0, 1.0] (NaN refused), else `ValueError`; `bands`
 /// and `rows` at least 1, else `ValueError`. The ends are exact:

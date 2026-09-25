@@ -653,16 +653,9 @@ class TestAdversarialPins:
             with pytest.raises(TypeError):
                 tors.lsh_candidates(bad, bands=1, rows=2)  # type: ignore[arg-type]
 
-    @pytest.mark.xfail(
-        reason="P1 (red team): the lsh_probability __doc__ claims "
-        "lsh_probability(0.8, bands=16, rows=8) is 'above 0.999' "
-        "(actual 0.9470) and lsh_probability(0.3, ...) 'below 0.001' "
-        "(actual 0.001049) -- both halves of the docstring's picking "
-        "example are false; the curve itself is correct.",
-        strict=True,
-    )
     def test_docstring_picking_example_is_true(self) -> None:
         # The __doc__ picking example, as behavior: with these claims in
         # the function's own docstring, the numbers must hold.
-        assert tors.lsh_probability(0.8, bands=16, rows=8) > 0.999
-        assert tors.lsh_probability(0.3, bands=16, rows=8) < 0.001
+        assert 0.94 < tors.lsh_probability(0.8, bands=16, rows=8) < 0.95
+        assert 0.0002 < tors.lsh_probability(0.25, bands=16, rows=8) < 0.0003
+        assert 0.70 < tors.lsh_threshold(bands=16, rows=8) < 0.71
