@@ -111,6 +111,7 @@ from collections.abc import Callable
 import pytest
 
 import tors
+from loop_harness import first_clean
 from reference import (
     contacts,
     content_object,
@@ -1302,30 +1303,46 @@ def test_chunk_hierarchical_none_splice_duplicates_are_inert_at_documented_budge
     ~7000x). The descending leg takes the sibling cell's 1.5x margin.
     The @2000 wall is the paragraph walk, so a paragraph-scanner retune
     moves the ceiling's headroom, not the ratio legs (both sides pay the
-    same walk)."""
+    same walk).
+
+    Load robustness (tests/loop_harness.py): the ratio gates hold a
+    regression in every measurement window (the ratio of a real dedup
+    loss is load-independent), so the cell measures both legs inside one
+    window and passes on the first clean window (up to 3); one
+    asymmetrically-preempted window no longer fails the cell on a
+    shared runner, and the dedup-loss red side still fails in every
+    window."""
     corpus = prose(6 * _MIB)
-    lone_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None]), corpus)
-    hundred_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None] * 100), corpus)
-    assert hundred_ms < 1.3 * lone_ms, (
-        f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms against "
-        f"{lone_ms:.2f}ms for [None] ({hundred_ms / lone_ms:.2f}x); duplicate None "
-        "splices are costing more than one spliced hierarchy at a budget that "
-        "never consults them"
-    )
-    assert hundred_ms < 2.5, (
-        f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms, over the "
-        "absolute ceiling (measured ~0.50ms, ceiling 2.5ms with ~5x load headroom); "
-        "duplicates are being built eagerly instead of deduped at slot construction"
-    )
     small = prose(1 * _MIB)
-    lone8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None]), small)
-    hundred8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None] * 100), small)
-    assert hundred8_ms < 1.5 * lone8_ms, (
-        f"chunk_hierarchical [None]*100 @8 1MiB took {hundred8_ms:.1f}ms against "
-        f"{lone8_ms:.1f}ms for [None] ({hundred8_ms / lone8_ms:.1f}x); duplicate "
-        "None splices are being rebuilt per slot instead of deduped on the "
-        "descending budget that consults them"
-    )
+
+    def measure() -> tuple[float, float, float, float]:
+        lone_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None]), corpus)
+        hundred_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 2000, [None] * 100), corpus)
+        lone8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None]), small)
+        hundred8_ms = _min_wall_ms(lambda s: chunk_hierarchical(s, 8, [None] * 100), small)
+        return lone_ms, hundred_ms, lone8_ms, hundred8_ms
+
+    def check(walls: tuple[float, float, float, float]) -> None:
+        lone_ms, hundred_ms, lone8_ms, hundred8_ms = walls
+        assert hundred_ms < 1.3 * lone_ms, (
+            f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms against "
+            f"{lone_ms:.2f}ms for [None] ({hundred_ms / lone_ms:.2f}x); duplicate None "
+            "splices are costing more than one spliced hierarchy at a budget that "
+            "never consults them"
+        )
+        assert hundred_ms < 2.5, (
+            f"chunk_hierarchical [None]*100 @2000 6MiB took {hundred_ms:.2f}ms, over the "
+            "absolute ceiling (measured ~0.50ms, ceiling 2.5ms with ~5x load headroom); "
+            "duplicates are being built eagerly instead of deduped at slot construction"
+        )
+        assert hundred8_ms < 1.5 * lone8_ms, (
+            f"chunk_hierarchical [None]*100 @8 1MiB took {hundred8_ms:.1f}ms against "
+            f"{lone8_ms:.1f}ms for [None] ({hundred8_ms / lone8_ms:.1f}x); duplicate "
+            "None splices are being rebuilt per slot instead of deduped on the "
+            "descending budget that consults them"
+        )
+
+    first_clean(measure, check, samples=3, label="the [None]*100 dedup contract")
 
 
 def test_chunk_by_words_is_its_own_word_walk() -> None:

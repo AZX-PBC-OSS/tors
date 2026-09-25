@@ -37,6 +37,7 @@ from typing import Any
 
 import pytest
 
+from loop_harness import assert_bounded
 from tors import repair_json, repair_json_diagnostics, repair_json_loads
 
 # The union schema the branch-aliasing gate is about: the string branch's
@@ -184,31 +185,32 @@ class TestSharedReferenceNodeCap:
     regress to a hang or a stack overflow."""
 
     def test_the_reported_shared_list_repro_refuses_quickly(self) -> None:
-        import time
-
         x = None
         for _ in range(48):
             x = [x, x]
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match="too many objects") as excinfo:
-            repair_json("{}", schema={"enum": x})
-        assert isinstance(excinfo.value, Exception)  # the catchable class
-        elapsed = time.perf_counter() - started
-        assert elapsed < 5.0, f"the refusal took {elapsed:.3f}s (measured ~0.2s)"
+
+        def fire() -> None:
+            with pytest.raises(ValueError, match="too many objects") as excinfo:
+                repair_json("{}", schema={"enum": x})
+            assert isinstance(excinfo.value, Exception)  # the catchable class
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean, measured ~0.2s, ceiling 5s.
+        assert_bounded(fire, 5.0, samples=3, label="the shared-list refusal")
 
     def test_shared_dict_refs_refuse_the_same_way(self) -> None:
         # The dict branch composes with its own mutation-snapshot fix: the
         # counter rides past the snapshot, per VISIT, so the same 2^n
         # shape over dicts refuses identically.
-        import time
-
         d: dict[str, Any] = {"type": "string"}
         for _ in range(40):
             d = {"allOf": [d, d]}
-        started = time.perf_counter()
-        with pytest.raises(ValueError, match="too many objects"):
-            repair_json("{}", schema=d)
-        assert time.perf_counter() - started < 5.0
+
+        def fire() -> None:
+            with pytest.raises(ValueError, match="too many objects"):
+                repair_json("{}", schema=d)
+
+        assert_bounded(fire, 5.0, samples=3, label="the shared-dict refusal")
 
     def test_a_self_referential_cycle_is_the_depth_refusal(self) -> None:
         x: list[Any] = []
@@ -221,14 +223,15 @@ class TestSharedReferenceNodeCap:
         # cannot fake: ~1.9M real leaves (plus their containers) under the
         # cap, flat — the walk converts them all (the instance then fails
         # the enum honestly, the repair layer's own answer, not the
-        # boundary's).
-        import time
-
+        # boundary's). Load-robust spelling (tests/loop_harness.py):
+        # min-of-3 pass-on-first-clean.
         members = [f"member{i}" for i in range(1_900_000)]
         schema = {"properties": {"absent": {"type": "string", "enum": members}}}
-        started = time.perf_counter()
-        assert repair_json('{"p": "zzz"}', schema=schema) == '{"p": "zzz"}'
-        assert time.perf_counter() - started < 30.0
+
+        def fire() -> None:
+            assert repair_json('{"p": "zzz"}', schema=schema) == '{"p": "zzz"}'
+
+        assert_bounded(fire, 30.0, samples=3, label="the 1.9M-leaf flat schema conversion")
 
 
 class TestWideSchemaPropertyLookups:

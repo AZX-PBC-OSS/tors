@@ -90,6 +90,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from reference import diff_pair_char_shuffled
 from tors import diff_opcodes, get_close_matches, similarity_ratio
 
@@ -665,10 +666,14 @@ class TestGetCloseMatches:
         with ``TimeoutError`` (the word here is the char-shuffled hard
         pair's a-side, its partner the first candidate)."""
         a, b = diff_pair_char_shuffled(_DEADLINE_PAIR_BYTES)
-        started = time.perf_counter()
-        with pytest.raises(TimeoutError, match="deadline"):
-            get_close_matches(a, [b, "zzz"], deadline_ms=_DEADLINE_MS)
-        assert time.perf_counter() - started < 1.0
+
+        def fire() -> None:
+            with pytest.raises(TimeoutError, match="deadline"):
+                get_close_matches(a, [b, "zzz"], deadline_ms=_DEADLINE_MS)
+
+        # Load-robust spelling (tests/loop_harness.py): min-of-3
+        # pass-on-first-clean over the deadline-bounded abort.
+        assert_bounded(fire, 1.0, samples=3, label="the deadline-bounded abort")
 
     def test_a_generous_deadline_yields_the_identical_list(self) -> None:
         """A far-future budget saturates to unbounded: the answer is
