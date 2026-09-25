@@ -2474,12 +2474,43 @@ role: its precision-oriented, reference-anchored objective is gamed by a
 one-word window and its 4-gram statistics are too sparse against a short
 query.
 
+A qualification that matters when comparing numbers: the WLCS fill runs in
+a **max-on-match spelling**: Lin's Figure 3 forces a match cell to extend
+the diagonal run, and tors replaces that forced-diagonal branch with `max`
+against the skip options (Lin 2004, Eq. 15, with the forced-diagonal branch
+replaced by max to preserve candidate monotonicity). The deviation is
+deliberate: the forced diagonal is NOT monotone in the candidate (a match
+cell forced to extend the run can strand accumulated credit when a later
+token re-matches, so a text offered MORE source material could score LESS,
+which would break the recall twin's contract). The max-on-match spelling
+restores monotonicity (extending the text never lowers a coverage score,
+pinned under Hypothesis attack), at the cost of compatibility: these scores
+are **not bit-compatible with the official ROUGE package or the
+`rouge-score` PyPI library** (the fills disagree on ~12% of random token
+pairs). And because the DP keeps only two rows, it cannot represent
+Pareto (value, trailing-run) states: the score is the max-on-match
+recurrence, a greedy-run-weighted alignment score, not the literal
+weighted-LCS optimum over all monotone matchings (a brute-force oracle
+beats it on rare pairs; also pinned). Both deviations are documented
+semantics, verified in the test suite, not bugs.
+
 Tokens come from UAX #29 word boundaries (the same segmentation
-`word_bounds` exposes), with one refinement: every CJK character (Han,
-Hiragana, Katakana, Hangul) inside a word segment becomes its own token —
-UAX #29 keeps Katakana and Hangul runs joined, and unspaced CJK morphemes
-are the standard IR per-character fallback — so CJK text anchors at the
-same granularity the query does. Matching case-folds and NFC-canonicalizes
+`word_bounds` exposes), with one refinement: every character in the
+Hiragana and Katakana blocks (U+3040–U+30FF), CJK Extension A
+(U+3400–U+4DBF), the CJK Unified Ideographs (U+4E00–U+9FFF), Hangul
+syllables (U+AC00–U+D7AF) and the CJK Compatibility Ideographs
+(U+F900–U+FAFF) inside a word segment becomes its own token (UAX #29
+keeps Katakana and Hangul runs joined, and unspaced CJK morphemes are
+the standard IR per-character fallback), so text in those blocks anchors
+at the same granularity the query does. The refinement does not reach
+the CJK-family blocks outside those ranges: halfwidth Katakana
+(U+FF66–U+FF9F), halfwidth Hangul (U+FFA0–U+FFDC) and Hangul jamo
+(U+1100–U+11FF) runs stay one token, so such a run matches a query term
+only whole: `ground_sentences("ｱｲｳｴｵ。", "ｳ")` scores 0.0 where the
+fullwidth twin `ground_sentences("アイウエオ。", "ウ")` scores 1/3 (one
+of the five run tokens matches; the contrast is pinned in
+`TestCjkFilterCollateral`, `tests/test_ground_sentences.py`).
+Matching case-folds and NFC-canonicalizes
 (NFD accents match NFC queries); offsets land on token boundaries, which
 never split a grapheme cluster, so the round-trip holds through CJK,
 accents, ZWJ emoji and astral-plane text alike (pinned across all of
@@ -2518,6 +2549,163 @@ tors.highlight("torque spec", "The pump failed. The bushing torque spec was 42 N
 `sentence_bounds` documents: SB10/SB11 attach a terminator's trailing
 space to the preceding sentence — the offsets are the sentence's, exactly
 as documented above.)
+
+## `tors.ground_sentences`
+
+```python
+def ground_sentences(
+    text: str,
+    query: str,
+    *,
+    max_chars: int | None = None,
+) -> SentenceGrounding: ...
+```
+
+Sentence-level grounding batch: EVERY UAX #29 sentence of `text`, scored
+against `query`, in position order: the bridge primitive a downstream NLI
+verifier (MiniCheck/SummaC style) consumes. Returns a `SentenceGrounding`
+(a `TypedDict`): `sentences`, one `GroundingSnippet`-shaped entry per
+sentence (`text`, `start`, `end`, `score`), whose offsets are the
+sentence's exact bounds (the tuples `tors.sentence_bounds(text)` returns)
+as Python str (codepoint) indices into the ORIGINAL `text`, so
+`text[start:end]` is exactly `sentence["text"]` for every sentence,
+token-free sentences included, and `score`, the aggregate.
+
+The per-sentence score is the same ROUGE-W F1 the snippet surface ranks
+spans with (see `tors.highlight` above): one tokenization (UAX #29 words,
+CJK per character, case-fold + NFC), one shaping, and the same
+qualification applies (the monotone max-on-match recurrence, not
+bit-compatible with the official ROUGE package or `rouge-score`). Note the
+argument order: `ground_sentences(text, query)`, the OPPOSITE of
+`highlight(query, text)`. The citation unit is the
+sentence, the unit the attribution literature converged on (ALCE's
+snippet-mode baselines measure citation quality per sentence: Gao et al.
+2023, "Enabling Large Language Models to Generate Text with Citations"),
+and the score is a RANKING signal, not an answerability verdict (Joren et
+al. 2024, "Sufficient Context": whether a context suffices to answer is a
+semantic judgment no lexical overlap score can make). Consumers needing
+the verdict run their NLI model over the top-scored sentences.
+
+The aggregate `score` is the best sentence's F1 (the MAX, not the mean)
+for three reasons: it is the retrieval signal the bridge needs ("does SOME
+sentence carry this query's evidence"; the argmax over units is exactly
+how ALCE-style citation selection picks the evidence sentence); it mirrors
+`highlight`'s own aggregate (the best snippet's score), keeping the
+grounding family coherent; and it is stable under irrelevant additions (a
+long document with one relevant sentence must not read as ungrounded
+because the document is long, which a mean rewards forgetting). The mean is
+deliberately not offered: "how much of this document is about the query"
+is a different question, and `sentence_bounds` + a fold in Python
+composes it trivially from the per-sentence scores.
+
+An empty or token-free `query` scores every sentence `0.0` (the
+segmentation is the answer's shape; the query only drives scores); an
+empty text returns the empty result: degenerate input is a valid answer,
+never an error. `max_chars` bounds each sentence's SCORED window: a
+sentence longer than the budget is scored over its leading
+token-boundary window (at least one token, `highlight`'s documented
+floor), while its reported `start`/`end`/`text` still cover the WHOLE
+sentence; the window's exact boundary (where the leading window cuts off)
+is an implementation detail and deliberately not exposed: consumers get
+the whole-sentence span and the window's score, which is the contract.
+`None` (the default) scores whole sentences, and `max_chars=0`
+is a `ValueError`. Like every integer parameter in the library,
+`max_chars` takes a plain int (a `bool` is its 0/1 int value, the
+family-wide convention). Pathological chunks are bounded: at most the first
+16384 text tokens and 128 query terms are scanned (sentences past the cap
+score `0.0`, their offsets and text still exact); the DP is two reusable
+rows per sentence, never an n·m matrix, and the total work is linear in
+the text at a bounded query width.
+
+```python
+tors.ground_sentences(
+    "The pump failed. The bushing torque spec was 42 Nm. Replaced.", "torque spec"
+)
+# {'sentences': [{'text': 'The pump failed. ', 'start': 0, 'end': 17,
+#                 'score': 0.0},
+#                {'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
+#                 'end': 52, 'score': 0.44444444444444436},
+#                {'text': 'Replaced.', 'start': 52, 'end': 61, 'score': 0.0}],
+#  'score': 0.44444444444444436}
+# (the middle sentence's score is exactly 4/9, the same Equation 15 F1
+# highlight's example computes; the aggregate is the max of the three)
+```
+
+## `tors.grounding_coverage`
+
+```python
+def grounding_coverage(source: str, text: str) -> float: ...
+```
+
+Grounding recall / source utilization: what fraction of `source`'s tokens
+does `text` actually utilize, the recall twin of `tors.is_grounded`
+(the precision side: every claim supported). One float in `[0.0, 1.0]`,
+the model-free operationalization of TRACe's uTilization metric (Friel,
+Belyi & Sanyal 2024, "RAGBench: Explainable Benchmark for
+Retrieval-Augmented Generation Systems", §3.2: document utilization =
+`Len(U_i) / Len(d_i)`, the length of the utilized context spans over the
+context's length; Adherence (`is_grounded`'s lane) is the framework's
+precision metric). Where TRACe's U comes from an annotator's span
+labels, this is the lexical approximation: U is the token overlap of
+`text` with `source`.
+
+The measure is ROUGE-W recall, Lin 2004's Equation 15 recall component
+(`f^-1(WLCS / f(|source|))`) over the grounding family's own UAX #29
+tokenization, with the same qualification `highlight`'s scorer carries:
+the WLCS fill is the monotone max-on-match spelling (Lin's forced-diagonal
+branch replaced by max, so adding text never lowers coverage), which is
+deliberately NOT bit-compatible with the official ROUGE package or
+`rouge-score`, and it is a greedy-run-weighted alignment score rather than
+the literal weighted-LCS optimum, see the full note under
+`tors.highlight`. It is not a difflib-style character coverage, for the
+same reasons the snippet surface scores ROUGE-W: one tokenization and one
+shaping shared with `highlight`/`ground_sentences`, so the precision and
+recall surfaces never disagree about what a token is (a case-fold or
+NFC/NFD difference matches; a character-level diff would count it
+lost); and the weighted-LCS shaping rewards CONTIGUITY (a text quoting a
+contiguous passage of the source outscores one scattering the same
+tokens through filler, which is exactly the "actually utilized" signal
+utilization annotates.
+
+This is a lexical overlap signal, not a semantic one: it measures token
+coverage, not whether the information was genuinely used. Identical
+`text` and `source` are `1.0` (up to f64 rounding of the DP's
+accumulation, within `1e-9`, pinned); disjoint, token-free, or empty
+operands are exactly `0.0` (TRACe's ratio is undefined there, `0/0`,
+and `0.0` is the conservative reading; pinned in
+`tests/test_grounding_coverage.py`). Cost: the classic weighted-LCS DP,
+`O(|S|·|T|)` time with `O(min(|S|, |T|))` memory (two reused rows,
+never a materialized n·m matrix); at most the first 16384 tokens of each
+operand are scanned, the denominator being the source tokens actually
+scanned.
+
+```python
+tors.grounding_coverage("the quick brown fox jumps over the lazy dog", "the lazy dog jumps")
+# 0.33333333333333337
+tors.grounding_coverage("same words both sides", "same words both sides")
+# 1.0
+tors.grounding_coverage("alpha bravo charlie", "xray yankee zulu")
+# 0.0
+tors.grounding_coverage("", "text")  # either side empty: exactly 0.0
+# 0.0
+```
+
+The score normalizes by the SOURCE's token count, so it is asymmetric in
+the operands: `text` holding every source token in one contiguous run
+scores `1.0` no matter how much extra material it carries, while the
+same pair swapped scores the matched fraction, `f^-1(f(3)/f(5)) = 3/5`:
+
+```python
+tors.grounding_coverage("ba ce di", "ba ce di fo gu")
+# 1.0
+tors.grounding_coverage("ba ce di fo gu", "ba ce di")
+# 0.6
+```
+
+Coverage is monotone in `text` (extending the text never lowers it) and
+deliberately NOT monotone in the query: extending the query with a term
+absent from the text lowers the score (the added term dilutes recall),
+expected behavior, not a defect.
 
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
@@ -3351,6 +3539,145 @@ tors.chunk_hierarchical(md, 10_000)
 #     paragraph/sentence/word levels (budget > heading > paragraph > ...).
 tors.chunk_hierarchical(md, 10_000, ["heading", None]) == tors.chunk_hierarchical(md, 10_000)
 # True: the "heading" sentinel + splice is the default hierarchy spelled out.
+```
+
+## `tors.chunk_to_budget` / `tors.chunk_to_offsets`
+
+```python
+def chunk_to_budget(
+    text: str,
+    token_counter: Callable[[str], int],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
+) -> list[tuple[int, int]]: ...
+
+def chunk_to_offsets(
+    text: str,
+    token_offsets: Sequence[tuple[int, int]],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
+) -> list[tuple[int, int]]: ...
+```
+
+**Async**: `await tors.aio.chunk_to_budget(...)` and
+`await tors.aio.chunk_to_offsets(...)` run these under `asyncio.to_thread`
+(see [Async use](async.md)).
+
+Token-budget chunking measured in the caller's own tokens: the packing
+primitive for LLM context windows, where the budget is a model's real token
+limit and a character proxy (`chunk_text`) is not good enough. The design is
+the segment-then-pack shape semchunk popularized
+([isaacus-dev/semchunk](https://github.com/isaacus-dev/semchunk)) and the
+LangChain/LlamaIndex token splitters ship, over tors's own UAX #29
+segmenters: cut `text` at sentence boundaries (a sentence whose own measured
+count exceeds `max_tokens` is re-cut at word boundaries; a single word still
+wider than the whole budget goes out whole (a covering chunker cannot split
+below its finest boundary), then greedily pack consecutive segments into
+chunks whose measured token count fits `max_tokens`. Returns `(start, end)`
+pairs in Python `str` index (codepoint) units: `text[start:end]` is the
+chunk. Empty text returns `[]`; text that fits whole returns one chunk.
+
+Two spellings, two measurement shapes:
+
+- **`chunk_to_budget`** takes the counter as a Python callable. It is called
+  with one CANDIDATE CHUNK's text per packing decision, never once per
+  boundary (O(segments) calls total, each counting at most one chunk's worth
+  of text), so counters that merge tokens across spaces or boundaries are
+  measured exactly as the emitted chunk will be, which is what makes the
+  per-chunk budget invariant hold for every counter. The counter must return
+  an `int` >= 1 for every sentence (`0`, a negative count, or an
+  unreasonably large value raise `ValueError`: a sentence measuring no
+  tokens makes the budget contract meaningless. A word-count tokenizer
+  (`len(text.split())`) measures zero any sentence that is a whitespace
+  run, not only whitespace-only text: UAX #29 makes a blank line a
+  sentence of its own (the second `\n` of `\n\n` is one), so
+  multi-paragraph text with blank lines raises the same error:
+  `"Paragraph one.\n\nParagraph two."`, any markdown blank-line document,
+  even a trailing blank line; whitespace-only text is the instance where
+  every sentence is blank. A non-int return raises
+  `TypeError`; a counter that raises propagates its exception
+  unchanged. This is the `CompiledLemmaDict`-style measured exception to the
+  stateless doctrine: a caller-supplied callable inside the packing.
+- **`chunk_to_offsets`** takes the token spans PRE-COMPUTED: a sequence of
+  `(start, end)` codepoint pairs, one per token, sorted and
+  non-overlapping (HuggingFace tokenizers' `Encoding.offsets` is this
+  shape after filtering zero-width spans (HF special tokens emit
+  `(0, 0)`); gaps are allowed, and untokenized text such as inter-token
+  whitespace measures 0 tokens). A span's token count is the number of
+  token pairs fully contained in it, so the packing is additive and exact
+  with no callback anywhere.
+
+`overlap` repeats trailing context into the next chunk: an `int` token count
+in `[0, max_tokens)` or a float ratio in `[0, 1)` (resolved as
+`floor(ratio * max_tokens)` tokens). The next chunk starts at the trailing
+segment boundary whose span back to the closed chunk's end measures at least
+the requested overlap: the RAG-retrieval shape where a fact split across a
+cut is still whole in the next chunk. The shared content is counter-relative:
+the overlap is certified by the same measurement the packing used, so a
+counter that certifies a whitespace run as a token can make the overlap a
+whitespace run. The overlap is declined for a
+transition when it cannot buy new context (a chunk shorter than the
+requested overlap, or a re-cut that would land a span strictly inside its
+predecessor): that one transition degrades to zero overlap rather than
+stall, loop, or emit the same text twice: the same forward-progress
+discipline `chunk_text`'s overlap applies. Chunks are non-empty, strictly
+increasing in both start and end, cover to the end of the text, and each
+fits the budget per the same measurement the packing used; with
+`overlap=0` they are a contiguous lossless covering partition.
+
+`max_tokens < 1`, an out-of-range `overlap` (either spelling), or a
+mis-shaped `token_offsets` sequence raise `ValueError` before any packing
+runs; a non-callable `token_counter` raises `TypeError`. An int beyond the
+i64 range the binding extracts (`max_tokens=10**30`) raises pyo3's own
+`OverflowError` at extraction instead, the `truncate_to_bounds`-identical
+pattern for every i64-typed size argument here, a clean Python error, never
+a panic. Text beyond `u32::MAX` bytes (4 GiB, the codepoint→byte offset
+grid the packing resolves spans through) also raises `ValueError` before
+any work runs, rather than silently truncating offsets.
+
+GIL model, stated honestly because the two spellings differ: **`chunk_to_budget` is NOT
+GIL-free**: its counter is Python and can only run under the GIL. The
+packing core runs under one `py.detach` and re-attaches the GIL per counter
+call, so the GIL is held only while the counter runs (plus O(chunk)
+argument construction), released for all native work between measurements.
+One measured caveat, because the doctrine forbids false GIL claims: the
+loop is schedulable between callbacks when each callback holds the GIL
+longer than `sys.getswitchinterval()` (5ms by default) or the native
+windows between them are substantial: a callback that straddles the
+switch interval forces CPython's fair GIL handoff (`gil_drop_request`). A
+GIL-held callback SHORTER than the switch interval on a small text
+(microsecond detach windows) can starve the loop for the whole call: the
+worker drops and re-acquires the GIL faster than the woken loop thread can
+take it. `tests/test_gil_release.py` pins the schedulable band for
+super-interval callbacks; for a fast counter on a small text, run the
+packing on a thread you control or use the GIL-free spelling below.
+**`chunk_to_offsets` is the GIL-free choice for
+hot paths**: the O(tokens) argument walk under the GIL, then the whole pack
+detached end to end, with the family's usual O(chunks) 2-tuple marshalling
+after. Like every chunker here, neither makes a retrieval-quality promise:
+the cost/benefit study at [arXiv:2410.13070](https://arxiv.org/abs/2410.13070)
+("Is Semantic Chunking Worth the Computational Cost?") found expensive
+splitting strategies not consistently worth their cost over simpler ones;
+this surface ships the cheap mechanical contract (boundary-safe packing
+under an exact token budget) and leaves the strategy to the caller.
+
+```python
+def word_counter(text: str) -> int:
+    return len(text.split())  # the docs' counter; any tokenizer callable works
+
+text = "One. Two. Three. Four."
+tors.chunk_to_budget(text, word_counter, max_tokens=2)
+# [(0, 10), (10, 22)]  -- "One. Two. " | "Three. Four."
+tors.chunk_to_budget(text, word_counter, max_tokens=2, overlap=1)
+# [(0, 10), (5, 17), (10, 22)]  -- "One. Two. " | "Two. Three. " | "Three. Four."
+tors.chunk_to_budget("a b c d e f g h", word_counter, max_tokens=3)
+# [(0, 6), (6, 12), (12, 15)]  -- a sentenceless run: word-boundary fallback
+
+spans = [(s, e) for s, e in tors.word_bounds(text) if text[s:e].strip()]
+tors.chunk_to_offsets(text, spans, max_tokens=4, overlap=2)
+# [(0, 10), (5, 17), (10, 22)]  -- the same shape, measured from spans
 ```
 
 ## `tors.chunk_cdc`
@@ -4862,6 +5189,154 @@ tors.bm25_rank(
 
 tors.bm25_rank("cafe", ["café société", "totally unrelated text"], strip_accents=True)
 # [(0, 0.7617001984175222), (1, 0.0)]
+```
+
+## `tors.rank_fuse` / `tors.ndcg_at_k` / `tors.mrr` / `tors.recall_at_k` / `tors.precision_at_k`
+
+```python
+def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60) -> list[tuple[Hashable, float]]: ...
+def ndcg_at_k(
+    ranked: list[Hashable],
+    relevant: set[Hashable] | frozenset[Hashable],
+    *,
+    k: int | None = None,
+    gains: dict[Hashable, float] | None = None,
+) -> float: ...
+def mrr(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable]) -> float: ...
+def recall_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable], k: int) -> float: ...
+def precision_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable], k: int) -> float: ...
+```
+
+**Async**: each of the five has an `await tors.aio.<name>(...)` twin under
+`asyncio.to_thread` (see [Async use](async.md)).
+
+The retrieval-family companions to `bm25_rank`: rank-space arithmetic over
+doc ids. No scores, no tokenization, no index, nothing stateful.
+
+**`rank_fuse` is Reciprocal Rank Fusion** (Cormack, Clarke & Buüttcher,
+"Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning
+Methods", SIGIR 2009, <https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>):
+given multiple ranked lists of hashable doc ids,
+
+```text
+score(d) = sum over lists of 1 / (k + rank(d))     -- ranks 1-based
+```
+
+it consumes RANKS ONLY, never raw scores; the paper's whole point is that
+raw scores from different retrieval systems (a BM25 score, a cosine
+similarity, a click count) are not comparable while ranks are. With one
+shared constant `k` (default 60, the paper's own, unchanged across its
+experiments) damping the top ranks, no single list's #1 swamps the
+others' votes. A document absent from a list contributes no vote from it;
+a document ranked twice in ONE list votes once, at its first occurrence
+(the later entries advance one rank). Returns `(id, score)` for every
+distinct id across all lists, sorted by fused score descending, ties
+broken by earliest first appearance across the lists in caller order
+(a point the paper leaves open, pinned here as contract). Returned ids are
+the original objects; dedup and equality follow Python's own dict/set
+semantics (`1`, `True`, and `1.0` are the same id).
+
+`k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty list
+of lists (`TypeError` otherwise; fusing zero lists is a `ValueError`, the
+`merkle_root` "root of no chunks" precedent: the formula is defined over
+one-or-more lists and a zero-list call is almost certainly an upstream
+bug) while an individual empty list is legal and contributes no votes,
+the "this retriever returned nothing" shape. An unhashable id raises
+`TypeError` (Python's own hash error: a dict cannot key it, the same
+wrong-type-entry contract `bm25_rank`'s corpus walk keeps).
+
+**The metrics** are the standard IR definitions over one ranking:
+
+- `ndcg_at_k`: normalized discounted cumulative gain (Järvelin &
+  Kekäläinen, "Cumulated gain-based evaluation of IR techniques", ACM
+  TOIS 20(4), 2002), in `[0.0, 1.0]`. `relevant` is a set of relevant ids
+  (binary relevance 1.0); `gains` is an optional graded override; the
+  gain of id `d` is `gains[d]` when the dict contains it, else `1.0` when
+  `d` is in `relevant`, else `0.0`. The DCG uses the paper's log2
+  discount, rank 1 undiscounted: `DCG@k = Σ_{i=1..k} gain_i / log2(i + 1)`
+  over the linear gain function (for binary relevance the paper's
+  exponential `2^rel − 1` variant is identical). The ideal DCG sorts the
+  complete judged pool, every id in `relevant` (at its gain) plus every
+  `gains` key, descending and discounts the same way.
+- `mrr`: the reciprocal rank of the first relevant result (`1/rank`,
+  ranks 1-based; `0.0` when no ranked result is relevant).
+- `recall_at_k`: `|relevant ∩ ranked[:k]| / |relevant|`.
+- `precision_at_k`: `|relevant ∩ ranked[:k]| / min(k, len(ranked))`,
+  trec_eval's own convention for a run shorter than `k` (a system that
+  returned fewer results is not punished for positions it never filled).
+
+Both set formulas assume deduped input: a duplicate counts once, at its
+first occurrence (e.g. `recall_at_k(["a", "a", "b"], {"a", "b"}, 2)` is
+`1.0`, not `0.5`).
+
+A duplicated id inside `ranked` counts once, at its first occurrence
+(the same dedup-first contract `rank_fuse` keeps: a repeat is a malformed
+ranking, and counting it twice would inflate precision and push nDCG past
+1). `k` past the ranking's length simply uses every available position
+(nDCG clamps `k` the same way).
+
+**Edge-input policy** (the family's one contract): empty DATA answers a
+well-defined `0.0`: an empty `ranked`, an empty `relevant` set (no
+relevant document exists, so no hit is possible), and the
+zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
+NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative
+or non-finite `gains` value). Wrong TYPES raise `TypeError`
+(a non-list `ranked`/`ranked_lists`, a non-set `relevant` (exactly `set`
+or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
+extraction failure), an unhashable id, whose error is
+Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
+extracts as its `0`/`1` value, the int-extraction convention). For
+nDCG, legal finite gains can be so large the DCG and
+IDCG sums overflow to `+inf`; the score then saturates instead of
+dividing `inf/inf` (NaN): `1.0` when `DCG >= IDCG`, `0.0` when a finite
+DCG faces an infinite ideal, and a finite ratio clamps to
+`[0.0, 1.0]` (the monotone-total policy, since the ideal pool contains
+every ranked gain under the same discount schedule, so an overflowed DCG
+can at most match the overflowed ideal). The saturation's error is
+two-sided and unbounded within that branch: the `1.0` side can
+over-report an imperfect ranking, the `0.0` side can under-report a
+near-perfect one all the way to `0.0`; both directions apply only when
+the gains sit within ~16 orders of magnitude of f64's ceiling.
+
+**GIL model**: the fusion/dedup walk and the metrics' membership walks
+are interpreter-side hashing (Python-object hashing cannot leave the
+GIL), and the O(distinct-ids) tuple marshalling rides with them; the
+score sweep, sort, and metric arithmetic run under one `py.detach`. The
+GIL-held share is structurally the majority of a fusion call at large
+sizes (the content_hash arg-walk class), so inputs past ~10^6 total
+entries hold the GIL for 100ms+ in the walk alone: this family is a
+reranking-scale primitive (hundreds to thousands of entries per list),
+not a whole-corpus one. Measured bands: `tests/test_gil_release.py`.
+Id-shape caveat, honestly stated: those bands were measured on
+cheap-to-hash ids (short `str` ids); hash-expensive ids (10-int tuples
+are the measured pathological shape) make each dedup/membership dict
+operation slower until the walk is effectively interpreter-bound: the
+GIL-held share approaches the call's full wall (measured ratios
+0.98-1.00 there) and no thread placement buys it back, the same
+id-shape caveat `docs/async.md` carries for the `aio` spelling.
+
+```python
+rank_fuse([
+    ["cat-a", "dog-b", "bird-c"],   # a BM25 reranker's top 3
+    ["dog-b", "cat-a"],             # a vector search's top 2
+    ["bird-c"],                     # a keyword filter's hit
+])
+# [('cat-a', 0.03252247488101534), ('dog-b', 0.03252247488101534),
+#  ('bird-c', 0.032266458495966696)]
+# cat-a and dog-b tie (two votes each); cat-a appeared first and wins
+# the tie: earliest first appearance across the lists.
+
+ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
+relevant = {"cat-a", "bird-c", "whale-e"}
+ndcg_at_k(ranked, relevant)          # 0.7039180890341347
+mrr(ranked, relevant)                # 1.0
+recall_at_k(ranked, relevant, 2)     # 0.3333333333333333
+recall_at_k(ranked, relevant, 4)     # 0.6666666666666666
+precision_at_k(ranked, relevant, 2)  # 0.5
+ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
+# (k=2's ideal packs two of the three relevant ids at ranks 1-2; one hit
+# at rank 1 scores 1/1.6309...)
+ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
 ```
 
 ## `tors.apply_pipeline`

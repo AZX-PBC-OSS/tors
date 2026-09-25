@@ -45,6 +45,7 @@ mod common;
 use common::prose;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+use tors::chunk_budget_impl;
 use tors::chunk_by_segment_impl;
 use tors::chunk_hierarchical_impl;
 use tors::chunk_impl;
@@ -331,10 +332,57 @@ fn bench_chunk_hierarchical(c: &mut Criterion) {
     group.finish();
 }
 
+/// The token-budget chunking group: `chunk_to_budget` (the callback
+/// spelling's packing core, driven here by a Rust-side counter closure
+/// (the same span-per-measurement shape the pyo3 binding drives with a
+/// Python callable, minus the interpreter hop the Python side
+/// contributes) against `chunk_to_offsets` (the GIL-free spelling over
+/// pre-computed token spans), at the small/medium/large corpus sizes the
+/// family's other groups use. The spans are word-aligned token pairs
+/// (the realistic tokenizer-offsets shape), built once per size outside
+/// the measured loop. Budget 200 tokens: several sentences per chunk,
+/// the realistic context-window shape. Run locally with
+/// `cargo bench --no-default-features --bench chunking`.
+fn bench_chunk_budget(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chunk_to_budget");
+    for target_bytes in [1024, 1024 * 1024, 12 * 1024 * 1024] {
+        let text = prose(target_bytes);
+        group.throughput(Throughput::Bytes(text.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("callback_counter", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    chunk_budget_impl::chunk_to_budget(black_box(text), 200, 0, |span| {
+                        Ok(span.split_whitespace().count() as u64)
+                    })
+                    .expect("valid packing")
+                })
+            },
+        );
+        let spans: Vec<(usize, usize)> = tors::segmentation_impl::word_bounds(&text)
+            .into_iter()
+            .filter(|&(s, e)| !text[s..e].trim().is_empty())
+            .collect();
+        group.bench_with_input(
+            BenchmarkId::new("precomputed_offsets", format!("{}B", text.len())),
+            &text,
+            |bench, text| {
+                bench.iter(|| {
+                    chunk_budget_impl::chunk_to_offsets(black_box(text), black_box(&spans), 200, 0)
+                        .expect("valid packing")
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_chunk_text,
     bench_chunk_cdc,
-    bench_chunk_hierarchical
+    bench_chunk_hierarchical,
+    bench_chunk_budget
 );
 criterion_main!(benches);

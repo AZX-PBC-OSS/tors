@@ -285,3 +285,61 @@ class TestPythonSideMarshallingIsLinear:
             f"the Python-side marshalling peak ({peak / len(text):.0f}x the text) is not "
             "linear in the output list"
         )
+
+
+# --- the grounding batch: the grounding surfaces' memory classes --------------------
+#
+# Both new surfaces are bounded by construction (src/grounding_impl.rs,
+# src/grounded_impl.rs): ground_sentences holds one SentenceScore per
+# sentence (O(text)) and marshals one dict per sentence (O(sentences),
+# Python-side); grounding_coverage's DP is two reusable rows over the
+# SHORTER token stream, O(min(|S|, |T|)), never a materialized n*m
+# matrix. The guards pin both at their amplification shapes: a child runs
+# the call and reports its own peak RSS (VmHWM, the disposable-child
+# discipline), the ceiling tied to input bytes with baseline slack.
+
+class TestGroundingBatchMemoryGuards:
+    def test_ground_sentences_sentence_soup_peak_is_tied_to_the_text(self) -> None:
+        # ~349k sentences from ~2.1 MB of input: the O(sentences) result
+        # shape at its densest legal form (one two-word sentence per 6
+        # bytes). A result structure NOT tied to the text size would blow
+        # the input-tied ceiling; the dicts' marshalling peak is Python-
+        # side, so the child measures the whole pipeline's peak.
+        input_bytes = len("Ab cd. ") * 50_000
+        kind, message, peak_kib, done = _run_child(
+            "output = tors.ground_sentences(text, 'ab cd')",
+            setup="text = 'Ab cd. ' * 50_000\n",
+            timeout=60.0,
+        )
+        _assert_alive(kind, message, done)
+        assert kind == "OK", f"the soup must batch cleanly, got {kind}: {message}"
+        ceiling_kib = (100 * input_bytes) // 1024 + 64 * 1024
+        assert peak_kib < ceiling_kib, (
+            f"peak {peak_kib / 1024:.0f} MiB exceeds the input-tied ceiling "
+            f"{ceiling_kib / 1024:.0f} MiB ({input_bytes / _MIB:.1f} MiB input): the "
+            "batch's per-sentence state is not tied to the text"
+        )
+
+    def test_grounding_coverage_peak_is_two_rows_never_the_product_matrix(self) -> None:
+        # THE amplification guard for the recall twin: two operands at the
+        # DP's 16384-token cap (~100 KB each, ~200 KB of input). The
+        # documented memory class is O(min(|S|, |T|)) (two rows); a
+        # materialized n*m f64 matrix at this size would be ~2.1 GiB,
+        # ~10,000x the input, and trip the input-tied ceiling by far.
+        input_bytes = len("word ") * 16_384 * 2
+        kind, message, peak_kib, done = _run_child(
+            "output = tors.grounding_coverage(source, text)",
+            setup=(
+                "source = 'word ' * 16_384\n"
+                "text = 'word ' * 16_384\n"
+            ),
+            timeout=120.0,
+        )
+        _assert_alive(kind, message, done)
+        assert kind == "OK", f"the capped DP must complete cleanly, got {kind}: {message}"
+        ceiling_kib = (100 * input_bytes) // 1024 + 64 * 1024
+        assert peak_kib < ceiling_kib, (
+            f"peak {peak_kib / 1024:.0f} MiB exceeds the input-tied ceiling "
+            f"{ceiling_kib / 1024:.0f} MiB ({input_bytes / _MIB:.1f} MiB input): the "
+            "DP materialized the n*m matrix (or worse) instead of two rows"
+        )

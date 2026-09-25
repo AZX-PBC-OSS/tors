@@ -137,6 +137,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "chunk-budget"
+path = "fuzz_targets/chunk_budget.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "uuid-text"
 path = "fuzz_targets/uuid_text.rs"
 test = false
@@ -179,6 +186,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ground_sentences"
+path = "fuzz_targets/ground_sentences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grounding_coverage"
+path = "fuzz_targets/grounding_coverage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "phonetic"
 path = "fuzz_targets/phonetic.rs"
 test = false
@@ -188,6 +209,13 @@ bench = false
 [[bin]]
 name = "bm25"
 path = "fuzz_targets/bm25.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rank_fusion"
+path = "fuzz_targets/rank_fusion.rs"
 test = false
 doc = false
 bench = false

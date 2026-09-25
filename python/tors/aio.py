@@ -19,7 +19,7 @@ chunking family, the retrieval/scoring primitives, the diff engine, the
 batch pipeline, the fuzzy-matching, near-duplicate, and JSON-repair
 families (``levenshtein``/``jaro``/``jaro_winkler``,
 ``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
-``shingle_jaccard``/``shingle_dice``/``dedup_near_dup`` trio, the
+grounding pair ``ground_sentences``/``grounding_coverage``, the
 ``repair_json*`` trio: quadratic and linear native passes whose
 documented measurements reach seconds and minutes on large inputs), and
 the input-scaling text/byte pipeline codecs
@@ -88,12 +88,9 @@ __all__: list[str] = []
 # from tors.__all__ by exclusion (see the module docstring for why the
 # rest of tors intentionally has no async twin): the chunking family, the
 # retrieval/scoring primitives, the diff engine, the batch pipeline, the
-# fuzzy-matching, near-duplicate, and JSON-repair families
-# (levenshtein/jaro/jaro_winkler, similarity_ratio/get_close_matches,
-# is_grounded, shingle_jaccard/shingle_dice/dedup_near_dup, the
-# repair_json* trio: quadratic/linear native passes whose docs measure
-# seconds-to-minutes on large inputs), and the input-scaling text/byte
-# pipeline codecs (normalize/finalize,
+# fuzzy-matching, grounding, and JSON-repair families (quadratic/linear native passes
+# whose docs measure seconds-to-minutes on large inputs), and the
+# input-scaling text/byte pipeline codecs (normalize/finalize,
 # decode_utf8/finalize_utf8/decode_utf16, b64_encode_bytes/b64_decode,
 # both truncate spellings, strip_controls, scrub_log_text, scrub_pii (and
 # its report twin), word_bounds/sentence_bounds, the search/replace family
@@ -121,6 +118,23 @@ _WRAPPED = (
     "chunk_cdc",
     "chunk_hierarchical",
     "chunk_text",
+    # chunk_to_budget is the one wrapped function that is not a single
+    # detached native pass: its token_counter is a Python callable that
+    # can only run under the GIL. The hop still helps when the loop can
+    # take the GIL between callbacks -- the packing core runs detached
+    # and re-attaches the GIL per counter call, so the worker's
+    # per-callback handoffs interleave with the event loop's thread
+    # (tests/test_gil_release.py pins the gap tracking the callbacks,
+    # never the call) -- where the sync spelling run inline would hold
+    # the GIL for the whole packing. Honest caveat, measured (finding
+    # R1): the interleave needs each callback to exceed
+    # sys.getswitchinterval() (5ms default) or substantial native
+    # windows between them; a sub-switch-interval callback on a small
+    # text can starve the loop for the whole call (the drop and
+    # re-acquire outruns the woken loop thread), for this hop exactly as
+    # for the sync spelling in a worker thread.
+    "chunk_to_budget",
+    "chunk_to_offsets",
     "count_matches",
     "decode_utf16",
     "decode_utf8",
@@ -132,13 +146,20 @@ _WRAPPED = (
     "finalize_utf8",
     "find_patterns",
     "get_close_matches",
+    "ground_sentences",
+    "grounding_coverage",
     "highlight",
     "is_grounded",
     "jaro",
     "jaro_winkler",
     "levenshtein",
     "minhash_signature",
+    "mrr",
+    "ndcg_at_k",
     "normalize",
+    "precision_at_k",
+    "rank_fuse",
+    "recall_at_k",
     "repair_json",
     "repair_json_diagnostics",
     "repair_json_loads",

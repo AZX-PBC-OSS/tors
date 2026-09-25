@@ -479,6 +479,7 @@ import itertools
 import json
 import random
 import string
+import sys
 import time
 import urllib.parse
 from collections.abc import Awaitable, Callable
@@ -528,6 +529,26 @@ _MIB = 1024 * 1024
 # measured ratio (0.61, 48 MiB under ambient load ~5.5) and ~20% below the ~1.0 a
 # GIL-held pass shows in every sample.
 _B64_RATIO_BUDGET = 0.80
+
+# rank_fuse's own ratio budget; the content_hash derivation shape: the
+# dedup walk (one Python dict lookup per entry -- interpreter hashing,
+# irreducible without an interpreter-free id format) plus the
+# O(distinct-ids) tuple marshalling are GIL-held by design, so the
+# residue is structurally the majority of the wall, not a small tail.
+# Measured on the dev box (ambient load ~2-4, 4 samples): 200k entries
+# across 5 lists, worst ratios 0.56-0.62; 400k, 0.69-0.75 (the walk
+# share grows with size). 0.80 sits ~1.3x above the worst 200k-cell
+# ratio and ~20% below the ~1.0 a lost-detach shape shows; the pinned
+# cell is the 200k size, where the 100ms ceiling still holds ~3x margin.
+# Id-shape caveat: the band was measured on cheap-to-hash ids (short str
+# ids, the _ident_items idiom); hash-expensive ids (10-int tuples are the
+# measured pathological shape) drive the walk's dict operations toward
+# interpreter-bound behavior -- the ratio there measures 0.98-1.00, i.e.
+# the call's whole wall is GIL-held and the budget does not transfer
+# across id shapes (the same caveat docs/async.md carries for the aio
+# spelling). The budget pins the str-id shape, not a detach guarantee
+# for every hashable id type.
+_RANK_FUSE_RATIO_BUDGET = 0.80
 
 # word_bounds's marshalling-band regression ceiling: not the suite's 100ms
 # ceiling, which the list-returning API shape cannot meet at whole-file sizes
@@ -3187,5 +3208,295 @@ def test_first_invalid_charset_in_a_thread_keeps_the_event_loop_at_heartbeat_gra
                 tors.first_invalid_charset, items, first=_IDENT_FIRST, rest=_IDENT_REST
             ),
             ratio_budget=None,
+        )
+    )
+
+
+# --- The rank-fusion / IR-metric family -------------------------------------------
+#
+# rank_fuse is the content_hash residue class over a list argument: the
+# dedup walk (one Python dict lookup per entry, interpreter hashing, the
+# same irreducible-without-an-interpreter-free-id-format price) plus the
+# O(distinct-ids) tuple marshalling are GIL-held, and the score
+# accumulation + sort run detached. The metrics (ndcg_at_k/mrr/
+# recall_at_k/precision_at_k) are the same class with a trivial detached
+# tail: their per-position membership walks ARE the call.
+
+def _ranked_lists(total_entries: int, n_lists: int = 5) -> list[list[str]]:
+    """A deterministic fusion workload: ``n_lists`` ranked lists over a
+    shared id space (half the entries distinct, so every id collects
+    votes from roughly half the lists, the consensus shape fusion
+    exists for), the _ident_items no-RNG idiom."""
+    per_list = total_entries // n_lists
+    id_space = total_entries // 2
+    return [
+        [f"id_{(j * per_list + i) % id_space}" for i in range(per_list)]
+        for j in range(n_lists)
+    ]
+
+
+def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The fusion claim: the score accumulation + sort (plain arithmetic
+    over dedup indices) run under one ``py.detach``; the GIL-held residue
+    is the dedup walk (one dict lookup per entry, Python-object hashing
+    IS interpreter work) plus the O(distinct-ids) ``(id, score)`` tuple
+    marshalling: the content_hash arg-walk class, structurally the
+    majority of the wall, hence the bespoke 0.80 budget
+    (``_RANK_FUSE_RATIO_BUDGET``) instead of the shared 0.30.
+
+    What the detach buys, and what it cannot: the detached pass is the
+    O(total-entries) score sweep and the O(distinct log distinct) sort;
+    the walk is irreducible (every step is a CPython dict operation on
+    caller objects). Caller guidance mirrors the content_hash cell's:
+    inputs past ~10^6 total entries hold the GIL for 100ms+ in the walk
+    alone; fusion is a reranking-scale primitive (hundreds to thousands
+    of entries per list), not a whole-corpus one.
+
+    Measured on the dev box (ambient load ~2-4, 4 samples per cell):
+    200k total entries across 5 lists: worst gaps 17.1-28.4ms of
+    30.2-45.7ms walls, ratios 0.56-0.62, every sample inside both
+    budgets (~1.3x ratio margin, ~3x ceiling margin); at 400k the band
+    is 0.69-0.75 (measured, unasserted; the walk share grows with
+    size, which is why the pin is the 200k cell).
+
+    Id-shape caveat (the aio caveat in docs/async.md, honestly recorded
+    here too): those bands were measured on the cheap-to-hash id shape
+    this cell builds (short ``str`` ids). With hash-expensive ids
+    (10-int tuples are the measured pathological shape) each dict
+    operation in the dedup walk costs its hash, the GIL-held share
+    approaches the call's full wall (the ratio measures 0.98-1.00);
+    the budget pins the str-id shape, not a detach guarantee for every
+    hashable id type."""
+    lists = _ranked_lists(200_000)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.rank_fuse, lists),
+            ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+        )
+    )
+
+
+def test_ndcg_at_k_on_a_large_ranking_keeps_the_loop_under_the_ceiling() -> None:
+    """The metrics' claim, ceiling-only (the first_invalid_charset
+    precedent, honestly so): the per-position membership walk (one
+    ``__contains__``/seen-set op per ranked id, interpreter hashing)
+    is GIL-held BY DESIGN and the detached arithmetic tail is trivial,
+    so the ratio is meaningless at every size; the 100ms ceiling is the
+    assertion. At the pinned 100k-id ranking the walk's contiguous hold
+    sits in the tens-of-ms band; a ranking two orders of magnitude past
+    reranking scale would outgrow the ceiling; the caller guidance is
+    the rank_fuse cell's (metrics are reranking-scale primitives).
+
+    Measured on the dev box (ambient load ~2-20, 5 samples per cell):
+    100k ids worst gaps 17.6-21.8ms of 19.7-23.9ms walls (ratios
+    0.85-0.91; the walk's contiguous hold IS the call, the detached
+    tail is invisible; hence ceiling-only, and the pinned size keeps the
+    hold well inside the 100ms ceiling with ~4x margin)."""
+    ranked = [f"id_{i}" for i in range(100_000)]
+    relevant = {f"id_{i}" for i in range(0, 100_000, 3)}
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.ndcg_at_k, ranked, relevant),
+            ratio_budget=None,
+        )
+    )
+
+
+def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The grounding batch's GIL claim, pinned directly (the chunk-family
+    cell's shape): the whole segment/tokenize/score pass (sentence
+    segmentation, the grounding tokenizer, and every sentence's ROUGE-W DP)
+    runs under one ``py.detach``, and the GIL-held residue is the
+    O(sentences) 4-key dict marshalling (the ``word_bounds`` list-shape
+    class; ~222k sentences at 12 MiB of the chatlog corpus, the
+    sentence_bounds cell's segment density).
+
+    Ceiling-only (``ratio_budget=None``, the chunk-family precedent): the
+    sentence dicts' marshalling is the family's documented residue class,
+    and the walls sit where a detach regression (the whole pass held)
+    blows the 100ms ceiling in every sample; the ceiling alone is the
+    detach pin. The red side is asserted mechanically by the module's
+    shared harness: a GIL-held whole pass holds at ratio ~1.0.
+
+    Corpus size 3 MiB, deliberately under the suite's 12 MiB default:
+    the per-sentence residue is a 4-KEY dict (~0.7-0.8µs each, a hash
+    table, not a 2-tuple), so at 12 MiB of the chatlog corpus (~222k
+    sentences) the marshalling alone is ~170ms, past the 100ms ceiling,
+    a budget the residue can never meet (the sentence_bounds list cell's
+    2-tuples are ~5x cheaper per element). At 3 MiB (~55k sentences,
+    measured ~40-50ms worst gaps of ~400ms walls: the ping floor plus
+    the dict band, ~2x margin) the ceiling-only cell passes as designed
+    and a held pass (~400ms) still misses the ceiling in every sample."""
+    corpus = _CORPORA["chatlog"](3 * _MIB)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.ground_sentences, corpus, "torque spec window acknowledged"
+            ),
+            ratio_budget=None,
+        )
+    )
+
+
+def test_grounding_coverage_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The coverage twin's GIL claim: the whole tokenize/intern/score pass
+    under one ``py.detach``, the residue a single float: no marshalling
+    class at all (the ``utf8_is_valid`` extreme point, one axis over).
+
+    Ceiling-only with an honest caveat, recorded: the core is the classic
+    O(|S|·|T|) weighted-LCS DP (``src/grounded_impl.rs``'s docs), so the
+    wall at 12 MiB × 12 MiB operands is seconds, the shape the aio twin
+    (and the perf lane's budgets) exist for. The DP's own token caps (the
+    first 16384 tokens of each operand) keep the wall bounded at ~10^8
+    cells, and a detach regression holds that whole wall against the
+    100ms ceiling in every sample: the ceiling alone discriminates. The
+    operands are capped at 2 MiB each here so the cell measures the
+    detach claim at a wall (~10-50ms) the ceiling can bound sanely; the
+    megabyte-scale cost shape is the perf lane's and the bench's job."""
+    source = _CORPORA["prose"](2 * _MIB)
+    text = _CORPORA["prose"](1 * _MIB)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.grounding_coverage, source, text),
+            ratio_budget=None,
+        )
+    )
+
+
+# ---- token-budget chunking (chunk_to_budget / chunk_to_offsets) -------------
+#
+# The two budget-chunking spellings sit at the family's two GIL extremes,
+# and the cells pin each at its honest pole:
+#
+# - chunk_to_offsets never calls back: the O(tokens) argument walk (the
+#   standard extraction class over a Python list of (start, end) tuples)
+#   is its only GIL-held residue before one end-to-end py.detach pack.
+#   That walk is the word_bounds list-marshalling class on the input side
+#   (O(n) tuple extraction under the GIL), so the cell carries a bespoke
+#   ratio budget derived from its measured band (the measured-band
+#   ratio-budget pattern: measured 0.25-0.29 at 2 MiB (493,440 token
+#   spans, extraction ~19ms of 65-73ms walls, ambient load 1-2), 0.60
+#   sits ~2x above the band and ~40% below the ~1.0 a detach regression
+#   shows (the whole pack held: gap ~= wall ~= 65ms at this size, caught
+#   by the ratio; the 100ms ceiling holds ~5x margin at the measured
+#   gaps).
+# - chunk_to_budget's counter is Python and can ONLY run under the GIL:
+#   the function is honestly NOT GIL-free, and the suite's claim for it
+#   is the architecture claim from src/py/chunk_budget.rs: the packing
+#   core runs detached and re-attaches the GIL per counter call, so the
+#   loop is schedulable BETWEEN callbacks and the worst gap tracks the
+#   callbacks themselves, never the whole call. QUALIFIED, measured:
+#   schedulability between callbacks requires each callback to exceed
+#   sys.getswitchinterval() (5ms default) or the native windows between
+#   them to be substantial (a
+#   straddling callback fires gil_drop_request, the fair handoff); a
+#   sub-switch-interval callback on a small text (microsecond detach
+#   windows) starves the loop for the whole call, so that boundary is
+#   documented on the surfaces, not claimed by a cell. Two cells pin the
+#   two directions the claim does make: a fast counter on a LARGE corpus
+#   (substantial native windows between callbacks: worst gap at the ping
+#   floor, ratio 0.07-0.11 measured, the function behaves like any
+#   detached native pass) and a deliberately slow GIL-held counter
+#   (time-budgeted at ~3x the switch interval per call, so the held
+#   window stays above the interval on any interpreter speed): the worst
+#   gap is a few coalesced callbacks, where a regression that moved the
+#   whole pack under a held GIL shows gap ~= wall and fails both budgets.
+#   The cell
+#   cannot and does not claim the callbacks are free; it claims
+#   everything between them is.
+
+
+def _budget_token_spans(corpus: str) -> list[tuple[int, int]]:
+    """Word-aligned token spans (the HuggingFace ``Encoding.offsets``
+    shape: one (start, end) pair per token, whitespace untokenized),
+    the realistic pre-computed input for ``chunk_to_offsets``."""
+    return [(s, e) for s, e in tors.word_bounds(corpus) if corpus[s:e].strip()]
+
+
+def _busy_token_counter(text: str) -> int:
+    """A GIL-held CPU-bound counter, time-budgeted at ~3x the GIL switch
+    interval per call: the honest slow-tokenizer model for the
+    between-callbacks cell.
+
+    The time budget (not a fixed iteration count) keeps every callback
+    comfortably above ``sys.getswitchinterval()`` (5ms) on any
+    interpreter speed (3.10-3.14). The mechanism: a sub-interval
+    callback starves the loop for the whole call, because the
+    worker drops and re-acquires the GIL faster than the woken loop
+    thread can take it, and ``gil_drop_request``'s fair handoff only
+    fires for callbacks that straddle the interval. Keeping every
+    callback comfortably above the interval on any interpreter speed
+    (3.10-3.14) is what makes the handoff the cell needs the one the
+    mechanism actually gives, in isolation and under load."""
+
+    def count(_text: str) -> int:
+        deadline = time.monotonic() + 3 * sys.getswitchinterval()
+        n = 0
+        i = 0
+        while time.monotonic() < deadline:
+            for _ in range(1_000):
+                i += 1
+                n += i * i
+        return max(len(_text.split()), 1)
+
+    return count(text)
+
+
+def test_chunk_to_offsets_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The GIL-free spelling's claim, at 2 MiB with 493,440 token spans:
+    the argument walk's contiguous GIL hold (the extraction class) and
+    the end-of-call marshalling stay inside the bespoke 0.60 ratio
+    budget and the 100ms ceiling; the pack itself is one py.detach. See
+    the section note above for the band and the budget."""
+    unit = "speaker: message with a few words and a number 42.\n"
+    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    spans = _budget_token_spans(corpus)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.chunk_to_offsets, corpus, spans, max_tokens=200),
+            ratio_budget=0.60,
+        )
+    )
+
+
+def test_chunk_to_budget_fast_counter_keeps_the_loop_at_heartbeat_granularity() -> None:
+    """The callback spelling with a cheap counter (``len(s.split())``):
+    the GIL is re-attached per counter call and released for the native
+    work between measurements, so the worst gap sits at the ping floor
+    (measured 10-11ms of 149-152ms walls, ratio 0.07-0.11). This is the
+    cell that would catch a regression moving the pack loop under one
+    held GIL: the whole ~150ms call would surface as one gap."""
+    unit = "speaker: message with a few words and a number 42.\n"
+    corpus = unit * (2 * 1024 * 1024 // len(unit))
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.chunk_to_budget, corpus, lambda s: len(s.split()), max_tokens=200
+            ),
+        )
+    )
+
+
+def test_chunk_to_budget_slow_counter_blocks_only_for_its_callbacks() -> None:
+    """The honesty cell: a counter that holds the GIL for ~3x the GIL
+    switch interval per call (time-budgeted; see ``_busy_token_counter``
+    for why the held window must stay above the interval on any
+    interpreter speed) makes the worst
+    gap a run of coalesced callbacks, never the whole call. The claim is
+    the architecture's QUALIFIED form: a callback that
+    straddles the switch interval fires ``gil_drop_request``'s fair GIL
+    handoff, so the loop is schedulable between callbacks and everything
+    between them is released native packing. The sub-switch-interval
+    caveat (a fast GIL-held callback on a small text can starve the
+    loop for the whole call) is the documented boundary (docs/api.md,
+    the ``.pyi`` and binding docstrings), stated there because it is a
+    timing property of the interpreter, not a contract this cell can
+    pin in either direction."""
+    text = "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten. Eleven. Twelve."
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.chunk_to_budget, text, _busy_token_counter, max_tokens=2, overlap=1
+            ),
         )
     )

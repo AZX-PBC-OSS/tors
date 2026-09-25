@@ -379,6 +379,10 @@ name = "retrieval"
 harness = false
 
 [[bench]]
+name = "rank_fusion"
+harness = false
+
+[[bench]]
 name = "json_repair"
 harness = false
 

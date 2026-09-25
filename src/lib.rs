@@ -20,11 +20,16 @@
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
 //! [`pii_impl`] (contact-material scrub, the
 //! telemetry-safety port), [`grounding_impl`] (snippet-provenance
-//! grounding: ROUGE-L span alignment for search-result highlighting), and
+//! grounding: ROUGE-L span alignment for search-result highlighting, the
+//! `ground_sentences` per-sentence batch, and the `grounding_coverage`
+//! utilization twin living beside the `grounded_impl` verdict it twins),
+//! [`rank_fusion_impl`] (reciprocal rank fusion and the IR ranking
+//! metrics over id space), and
 //! [`json_valid_impl`] (the RFC 8259
 //! validity gate: orjson's acceptance set, no object tree, #61); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
-//! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs)
+//! benches/text.rs, benches/utf8.rs, benches/diff.rs, benches/search.rs,
+//! benches/rank_fusion.rs)
 //! drive them directly:
 //! the pyo3 wrappers in this file only add the argument borrow and return
 //! marshalling, which the Python-side tests measure separately.
@@ -418,10 +423,25 @@
 //! its own codec label where the borrow's says utf-8, and the stdlib's
 //! `surrogatepass` acceptance mode is the one path tors does not offer.
 
+//! The token-budget chunking surface (`chunk_to_budget`/`chunk_to_offsets`,
+//! `chunk_budget_impl`) adds a residue axis no other surface has: a
+//! Python callable inside the native pass. `chunk_to_budget`'s packing
+//! core runs under one `py.detach` and re-attaches the GIL per counter
+//! call (`Python::attach` from inside the detach), so the GIL is held
+//! only while the caller's counter runs plus O(chunk) argument-string
+//! construction, released for every byte of native work between
+//! measurements, honestly documented as NOT GIL-free (a slow counter
+//! dominates the call and holds the GIL for its duration, exactly as it
+//! would in pure Python). `chunk_to_offsets` is the GIL-free twin: the
+//! O(tokens) argument walk under the GIL, then the whole pack
+//! (segmentation, budget cuts, overlap walk-backs) detached end to end,
+//! with the family's usual O(chunks) marshalling after.
+
 pub mod b64_impl;
 pub mod bm25_impl;
 pub mod canon_impl;
 pub mod charset_impl;
+pub mod chunk_budget_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
@@ -463,6 +483,7 @@ pub mod gfm_strip_impl;
 pub mod pdf_impl;
 pub mod pipeline_impl;
 pub mod random_impl;
+pub mod rank_fusion_impl;
 pub mod scan_impl;
 pub mod scrub_impl;
 pub mod search_impl;
@@ -516,6 +537,7 @@ use py::bm25::*;
 use py::canon::*;
 use py::charset::*;
 use py::chunk::*;
+use py::chunk_budget::*;
 use py::codec::*;
 use py::compiled_patterns::CompiledPatterns;
 use py::diff::*;
@@ -538,6 +560,7 @@ use py::phonetic::*;
 use py::pii::*;
 use py::pipeline::*;
 use py::random::*;
+use py::rank_fusion::*;
 use py::scan::*;
 use py::scrub::*;
 use py::search::*;
@@ -674,6 +697,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
+    m.add_function(wrap_pyfunction!(ground_sentences, m)?)?;
+    m.add_function(wrap_pyfunction!(grounding_coverage, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
     m.add_function(wrap_pyfunction!(content_hash, m)?)?;
@@ -699,6 +724,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_by_lines, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_by_lines_iter, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_to_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_to_offsets, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
     m.add_function(wrap_pyfunction!(simhash_distance, m)?)?;
@@ -717,6 +744,11 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(jaro_winkler, m)?)?;
     m.add_function(wrap_pyfunction!(replace_many_masked, m)?)?;
     m.add_function(wrap_pyfunction!(bm25_rank, m)?)?;
+    m.add_function(wrap_pyfunction!(rank_fuse, m)?)?;
+    m.add_function(wrap_pyfunction!(ndcg_at_k, m)?)?;
+    m.add_function(wrap_pyfunction!(mrr, m)?)?;
+    m.add_function(wrap_pyfunction!(recall_at_k, m)?)?;
+    m.add_function(wrap_pyfunction!(precision_at_k, m)?)?;
     m.add_function(wrap_pyfunction!(tf_idf, m)?)?;
     m.add_function(wrap_pyfunction!(apply_pipeline, m)?)?;
     m.add_function(wrap_pyfunction!(soundex, m)?)?;
