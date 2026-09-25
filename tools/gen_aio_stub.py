@@ -158,6 +158,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
             "Span",
             "ScrubPiiReport",
             "RepairAction",
+            "DedupResult",
             "GroundingResult",
             "SentenceGrounding",
         ):

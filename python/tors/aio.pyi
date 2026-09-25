@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from tors import (
     CompiledLemmaDict,
+    DedupResult,
     GroundingResult,
     RepairAction,
     ScrubPiiReport,
