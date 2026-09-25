@@ -568,3 +568,58 @@ class TestDedupNearDupPairSweepScaling:
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="simhash")) < 2_000.0
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="shingle")) < 2_000.0
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="minhash")) < 2_000.0
+
+
+# --- lsh_candidates: the documented linear banding pass ----------------------------
+#
+# The banding pass is one sweep: O(n * num_perm) band hashing plus pair
+# emission ONLY inside shared buckets (O(output) -- nothing is quadratic
+# in the bucket sizes beyond the pairs they contribute, the
+# output-sensitive contract docs/api.md states). The pins hold that
+# class on both axes: linear in n at a fixed shape, linear in the band
+# count at a fixed num_perm (the shape axis a caller tunes through the
+# S-curve).
+
+
+def _lsh_signatures(n: int, num_perm: int = 64) -> list:
+    # Signature-DISTINCT random u64 signatures: no bucket sharing, so the
+    # pass runs its full hashing sweep and emits (almost) no pairs -- the
+    # hashing cost is what is under test, not the marshalling.
+    import random
+
+    rng = random.Random(20260924)
+    return [[rng.getrandbits(64) for _ in range(num_perm)] for _ in range(n)]
+
+
+class TestLshCandidatesScaling:
+    @pytest.mark.timing
+    def test_stays_linear_in_the_signature_count(self) -> None:
+        """10k -> 20k signatures (2x, bands=16/rows=4 fixed, distinct
+        signatures): the hashing sweep is linear in n, measured ~2.1x,
+        gate 3.0x per doubling (a quadratic pairing pass over non-sharing
+        buckets would be nowhere near this gate)."""
+        small_sigs, large_sigs = _lsh_signatures(10_000), _lsh_signatures(20_000)
+        small = _min_wall_ms(lambda: tors.lsh_candidates(small_sigs, bands=16, rows=4))
+        large = _min_wall_ms(lambda: tors.lsh_candidates(large_sigs, bands=16, rows=4))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_stays_linear_in_the_band_count(self) -> None:
+        """Fixed 10k signatures at num_perm=64, bands 8 -> 16 (rows 8 ->
+        4, so every row is hashed exactly once either way and the bucket
+        tables double): measured ~2.1x, gate 3.0x per doubling."""
+        sigs = _lsh_signatures(10_000, num_perm=64)
+        small = _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=8, rows=8))
+        large = _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=16, rows=4))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_documented_corpus_shape_has_an_explicit_wall_budget(self) -> None:
+        """The budget pin, absolute, not relative: the documented
+        corpus-scale shape (20k signatures x 128 rows, bands=32/rows=4)
+        must complete in well under a second -- measured ~40ms of
+        hashing plus extraction. 1.0s is ~25x the measured band and
+        still pins the 'one fast pass' contract; a regression past it is
+        a defect, not noise."""
+        sigs = _lsh_signatures(20_000, num_perm=128)
+        assert _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=32, rows=4)) < 1_000.0

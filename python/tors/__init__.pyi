@@ -1467,7 +1467,8 @@ def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
 # the per-method early exits, O(total input) retained, NO persistent
 # index -- the LSH banding table a corpus-scale pipeline builds on these
 # signatures is caller state, docs/design.md's scope cut; beyond tens of
-# thousands of candidates, band minhash_signature output yourself). All
+# thousands of candidates, generate candidates from minhash_signature
+# output with lsh_candidates, then score them here). All
 # three methods share the grounding normalization policy (lowercase +
 # NFC), so a method switch cannot silently change what "same text"
 # means:
@@ -1499,6 +1500,71 @@ def dedup_near_dup(
     threshold: float = 0.9,
     method: Literal["simhash", "shingle", "minhash"] = "simhash",
 ) -> DedupResult: ...
+
+# `lsh_candidates`'s result: `pairs` is the candidate pair list, each pair
+# (i, j) with i < j, deduplicated across bands, in ascending (i, j) order.
+# The empty corpus (or one with no bucket-sharing signatures) gives
+# {"pairs": []}.
+class CandidatePairs(TypedDict):
+    pairs: list[tuple[int, int]]
+
+# MinHash LSH banding: the near-duplicate candidate generator, the
+# stateless companion to minhash_signature (Broder, Glassman, Manasse,
+# and Zweig, "Syntactic Clustering of the Web", WWW 1997; Leskovec,
+# Rajaraman, and Ullman, "Mining of Massive Datasets", ch. 3). Cuts every
+# signature into `bands` bands of `rows` rows -- every signature's length
+# MUST equal bands * rows, exactly what minhash_signature returns at
+# num_perm=bands*rows -- hashes each band's rows to a bucket key (XXH64
+# seed 0 over the length-prefixed little-endian row frame, the crate's
+# one hashing contract, fixed seed, no rng handle), and returns every
+# pair sharing at least one bucket. Deterministic: same signatures in,
+# same pairs out, every call, every process (permuting the input permutes
+# the same relation). One stateless pass: no table kept across calls, no
+# insert/query surface (datasketch's persistent MinHashLSH is that
+# incremental shape; tors deliberately ships only the one-shot pass).
+#
+# FALSE POSITIVES BY DESIGN, stated plainly: dissimilar signatures CAN
+# become candidates -- r rows agreeing by chance is the S-curve itself
+# (see lsh_probability), and a 64-bit band-key collision over different
+# row frames is possible at ~k^2/2^65 over k distinct keys. The output is
+# a recall-biased filter to SCORE downstream (shingle_jaccard,
+# dedup_near_dup), never a verdict.
+#
+# Bounds: bands and rows each at least 1 and every signature's length
+# equal to bands * rows, else ValueError before any work; the two shape
+# parameters ride __index__ (int-likes work, bool rejected). Signature
+# elements are STRICT (the bytes-element surfaces' convention): exact
+# non-negative ints within 2**64 - 1 (negative: ValueError, past the
+# range: OverflowError, non-int including bool: TypeError; no per-element
+# __index__ dispatch, so numpy int-likes convert first).
+# Cost: one pass, O(n * num_perm) band hashing plus pair emission ONLY
+# inside shared buckets (O(output)); memory O(n + pairs).
+#
+# GIL: the signature walk (one int extraction per element) and the bounds
+# validation under the GIL, the whole banding pass under one detach, then
+# the O(pairs) tuple-list marshalling.
+def lsh_candidates(signatures: list[list[int]], *, bands: int, rows: int) -> CandidatePairs: ...
+
+# The banding S-curve as a pure formula: the probability that two
+# signatures with Jaccard similarity s share at least one of `bands`
+# band buckets of `rows` rows, 1 - (1 - s**rows)**bands (Mining of
+# Massive Datasets ch. 3; datasketch's parameter-tuning docs spell the
+# same curve). Use it to PICK bands/rows for a target threshold. The ends
+# are exact: s = 0.0 gives 0.0, s = 1.0 gives 1.0 (identical signatures
+# are always candidates). s must be in [0.0, 1.0] (NaN refused) and
+# bands/rows at least 1, else ValueError. Pure float arithmetic over two
+# ints: no detach, no aio twin (the thread hop would cost more than the
+# call, the simhash_distance stay-sync class).
+def lsh_probability(s: float, *, bands: int, rows: int) -> float: ...
+
+# The approximate similarity threshold where the S-curve takes its step,
+# (1/bands)**(1/rows) (Mining of Massive Datasets ch. 3; datasketch's
+# docs carry the same formulation). An approximation, not an inversion of
+# lsh_probability: pairs at this similarity are candidates with
+# probability NEAR the curve's midpoint, not exactly 0.5. Pick a shape
+# here, then verify the actual curve with lsh_probability. Pure float
+# arithmetic over two ints: no detach, no aio twin.
+def lsh_threshold(*, bands: int, rows: int) -> float: ...
 
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased

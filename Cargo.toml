@@ -403,5 +403,9 @@ name = "near_dup"
 harness = false
 
 [[bench]]
+name = "lsh"
+harness = false
+
+[[bench]]
 name = "pii"
 harness = false

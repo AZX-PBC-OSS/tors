@@ -154,6 +154,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         # appear as ITSELF, not as a substring of another identifier.
 
         for type_name in (
+            "CandidatePairs",
             "JSONValue",
             "Span",
             "ScrubPiiReport",
