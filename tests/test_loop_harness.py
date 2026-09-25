@@ -24,7 +24,6 @@ import time
 import pytest
 
 import tors  # noqa: F401 -- the harness's subjects are tors ops in the real cells
-
 from loop_harness import assert_bounded, assert_heartbeat_clean, first_clean, gap_and_wall
 
 

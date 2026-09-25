@@ -14,12 +14,11 @@ widths, which is the entire reason the wide spelling exists.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from tors import simhash64, simhash128
 
 _TEXT = st.text(
@@ -241,16 +240,16 @@ class TestIndependenceFromSimhash64:
 
 
 class TestPerformanceSanity:
-    # Single-sample tripwire, huge measured margin (~9,000x): the timing
-    # lane's discipline, the fast lane never reds on a slow runner.
+    # Single-sample tripwire turned load-robust (tests/loop_harness.py):
+    # min-of-3 pass-on-first-clean, huge measured margin (~9,000x); the
+    # timing lane's discipline, the fast lane never reds on a slow runner.
     @pytest.mark.timing
     def test_large_input_completes_quickly(self) -> None:
         big = "the quick brown fox jumps over the lazy dog. " * 300_000  # ~13.5MB
-        start = time.perf_counter()
-        result = simhash128(big)
-        elapsed = time.perf_counter() - start
+        result = assert_bounded(
+            lambda: simhash128(big), 5.0, samples=3, label="the simhash128 ~13.5MB tripwire"
+        )
         assert isinstance(result, int)
-        assert elapsed < 5.0, f"simhash128 on ~13.5MB took {elapsed:.2f}s, expected < 5s"
 
     def test_large_input_is_deterministic(self) -> None:
         big = "lorem ipsum dolor sit amet " * 200_000

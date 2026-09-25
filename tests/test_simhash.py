@@ -12,12 +12,11 @@ independent recalibration.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from loop_harness import assert_bounded
 from tors import simhash64
 
 _TEXT = st.text(
@@ -188,18 +187,19 @@ class TestUnicode:
 
 
 class TestPerformanceSanity:
-    # The wall asserts below are single-sample tripwires with huge measured
-    # margins (~23,000x on this box), not the suite's min-of-N discipline:
-    # they ride the timing lane so a slow runner never reds the fast lane
-    # on them.
+    # The wall assert below is a tripwire with a huge measured margin
+    # (~23,000x on this box); it rides the timing lane so a slow runner
+    # never reds the fast lane on it. Load-robust spelling
+    # (tests/loop_harness.py): min-of-3 pass-on-first-clean, so one
+    # scheduler hit no longer fails the tripwire while a real regression
+    # inflates every sample.
     @pytest.mark.timing
     def test_large_input_completes_quickly(self) -> None:
         big = "the quick brown fox jumps over the lazy dog. " * 300_000  # ~13.5MB
-        start = time.perf_counter()
-        result = simhash64(big)
-        elapsed = time.perf_counter() - start
+        result = assert_bounded(
+            lambda: simhash64(big), 5.0, samples=3, label="the simhash64 ~13.5MB tripwire"
+        )
         assert isinstance(result, int)
-        assert elapsed < 5.0, f"simhash64 on ~13.5MB took {elapsed:.2f}s, expected < 5s"
 
     def test_large_input_is_deterministic(self) -> None:
         big = "lorem ipsum dolor sit amet " * 200_000
