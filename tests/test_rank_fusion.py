@@ -1089,11 +1089,26 @@ class TestPerfCliffs:
             lambda n: [[f"d{i}" for i in range(n)]],
             lambda n: [[f"d{(j * 13 + i) % n}" for i in range(n // 100)] for j in range(100)],
         ):
-            # 25k -> 100k: the small cell's floor (~1.5ms at 10k) is
-            # noise-sensitive under a loaded runner; 4x past it the
-            # ratio is stable (the shared suite's own discipline).
-            small = _min_wall_ms(lambda s=shape: s(25_000))
-            large = _min_wall_ms(lambda s=shape: s(100_000))
+            # 10k -> 40k: inside the documented reranking scale (the family
+            # docs scope rank_fuse to hundreds-to-thousands of entries per
+            # list), where the per-doubling slope is a stable algorithmic
+            # signal (measured 1.9-2.5x/doubling fresh-process and under
+            # pytest, on the dev box and CI). Past that scale a pytest
+            # process's heap state inflates the marshalling-heavy large call
+            # up to ~4x (measured 16-17x apparent per 4x at 25k-200k under
+            # pytest vs 2-2.5x for the identical shape in a fresh process;
+            # GC-independent) and the slope stops discriminating: the
+            # whole-corpus regime is covered by the wall-guidance pins
+            # instead (reranking-scale walls, e.g. the 30s bound on the
+            # heavy-hash cell), not by a slope gate. A quadratic regression
+            # still fails the 9.0x gate (16x for a 4x span) at this scale.
+            # The timed callable is the FUSION on the built lists, not the
+            # build: s(n) alone would pin the list construction (a test
+            # born measuring the wrong thing — caught by re-running the
+            # wave-1 injection experiment, which this pin sailed through
+            # while test_scaling_pins.py's rank_fuse pin failed).
+            small = _min_wall_ms(lambda s=shape: rank_fuse(s(10_000)))
+            large = _min_wall_ms(lambda s=shape: rank_fuse(s(40_000)))
             assert large < 9.0 * small, (
                 f"{large:.2f}ms for 4x {small:.2f}ms ({large / small:.2f}x): "
                 "superlinear in the shape's axis"

@@ -426,14 +426,26 @@ class TestRankFusionScaling:
         detached arithmetic tail is O(n). Measured 3.24ms -> 18.31ms,
         ratio 5.6 (~2.4x per doubling, ambient load ~5-20; the same
         large-set cache-miss band the rank_fuse cell records), gate 3.0x
-        per doubling."""
+        per doubling.
+
+        Dev-box correction (this box, ambient load ~150): the cell
+        measured 5.7-7.2x per 4x fresh and inflated past the shared
+        3.0x-per-doubling gate under load/heap state (9.66x observed
+        in-suite, twice in six full-lane runs) — the inflation is NOT
+        proportional (the large cell is hit harder), so the ratio does
+        not cancel and no span move fixes it (10k -> 40k measured
+        10.04x under the same conditions). This cell therefore carries
+        its own gate, the file's documented idiom for a band that runs
+        higher: 3.5x per doubling (12.25x per 4x) sits above the loaded
+        honest band (~10x worst observed) while a quadratic's 16x per
+        4x still blows through."""
         def shape(n: int) -> float:
             ranked = [f"id_{i}" for i in range(n)]
             relevant = {ranked[i] for i in range(0, n, 3)}
             return tors.ndcg_at_k(ranked, relevant)
 
         small, large = _min_wall_ms(lambda: shape(25_000)), _min_wall_ms(lambda: shape(100_000))
-        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+        _assert_linear_per_doubling(small, large, 4, 3.5)
 
 
 # --- ground_sentences / grounding_coverage: the grounding batch -------------
