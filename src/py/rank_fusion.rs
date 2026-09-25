@@ -122,7 +122,15 @@ fn check_weights(weights: &Bound<'_, PyAny>, n_lists: usize) -> PyResult<Vec<f64
 /// `ValueError`; a non-sequence `weights` (a bare `str` included) or a
 /// non-numeric entry raises `TypeError`. A duplicate id votes once per
 /// LIST, weighted by THAT list's weight (the dedup-first contract,
-/// extended).
+/// extended). Two honesty notes on that domain: a legal denormal weight
+/// can underflow a doc's every vote to exactly 0.0 (5e-324/61 rounds
+/// away at any rank) -- the id still appears, as a 0.0-score pair
+/// ordered last (score descending, ties by first appearance), because
+/// emission follows vote existence, not score positivity. And the
+/// sequence protocol is the plain one: `bytes` are a sequence of ints
+/// and launder to their code points (the int-extraction convention,
+/// `weights=b"12"` == `weights=[49.0, 50.0]`); a bare `str` is the
+/// char-splitting footgun and is refused.
 ///
 /// Returns `(id, score)` pairs for every distinct id across all lists,
 /// sorted by fused score descending, ties broken by earliest first

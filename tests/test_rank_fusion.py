@@ -417,23 +417,27 @@ class TestRankFuseWeightsRedteam:
         assert [i for i, _ in fused] == ["a", "b", "c"]
         assert all(0.0 < s < 1e-305 for _, s in fused)
 
-    @pytest.mark.xfail(
-        reason=(
-            "underflow drop (P1): a doc whose EVERY vote underflows to 0.0"
-            " (legal weight 5e-324, the smallest subnormal, at k=60:"
-            " 5e-324/61 rounds to 0.0) is silently dropped by the core's"
-            " `*score > 0.0` collection filter -- the filter's premise"
-            " (every voted score positive) holds for the unweighted domain"
-            " (scores >= ~1e-5) but not under legal denormal weights, and"
-            " the documented contract is one (id, score) pair per distinct"
-            " id across all lists. Observed: rank_fuse([['a','b','c']],"
-            " weights=[5e-324]) == []."
-        ),
-        strict=True,
-    )
     def test_a_doc_whose_votes_underflow_still_appears(self) -> None:
+        # The P1 pin, green (the core emits on the vote-existence
+        # signal, not score positivity): a legal weight whose EVERY vote
+        # underflows to 0.0 (5e-324, the smallest subnormal, at k=60:
+        # 5e-324/61 rounds to 0.0) no longer drops the doc -- the
+        # documented contract (one (id, score) pair per distinct id
+        # across all lists) holds with 0.0-score pairs, documented in
+        # api.md and the docstring.
         fused = rank_fuse([["a", "b", "c"]], k=60, weights=[5e-324])
-        assert {i for i, _ in fused} == {"a", "b", "c"}
+        assert [i for i, _ in fused] == ["a", "b", "c"]
+        assert all(s == 0.0 for _, s in fused)
+
+    def test_a_mixed_weights_row_keeps_both_the_underflowed_and_the_floating_doc(
+        self,
+    ) -> None:
+        # One doc's votes underflow (a: 5e-324/61 -> 0.0), another's do
+        # not (b: 1.0/61): BOTH appear, the positive score first, the
+        # underflowed doc last at 0.0 -- the deterministic order
+        # preserved (score desc, then first appearance).
+        fused = rank_fuse([["a"], ["b"]], k=60, weights=[5e-324, 1.0])
+        assert fused == [("b", pytest.approx(1 / 61)), ("a", 0.0)]
 
     def test_mixed_extreme_weights_stay_nan_free(self) -> None:
         # inf-adjacent and tiny-but-not-underflowing weights in ONE call:

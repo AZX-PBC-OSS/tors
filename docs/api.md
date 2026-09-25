@@ -5653,7 +5653,15 @@ extended). A zero, negative, NaN, or infinite weight raises `ValueError`
 a zero-weight list is almost certainly a miscounted retriever list, the
 `k < 1` class); a length mismatch with `ranked_lists` raises
 `ValueError` naming both sides; a non-sequence `weights` (a bare `str`
-included) or a non-numeric entry raises `TypeError`.
+included) or a non-numeric entry raises `TypeError`. Two honesty notes
+on that domain: a legal denormal weight can underflow a document's
+every vote to exactly `0.0` (`5e-324/61` rounds away at any rank) —
+the id still appears, as a `0.0`-score pair ordered last (score
+descending, ties among the `0.0` scores by first appearance), because
+emission follows vote existence, not score positivity. And the
+sequence protocol is the plain one: `bytes` are a sequence of ints and
+launder to their code points (the int-extraction convention:
+`weights=b"12"` is `weights=[49.0, 50.0]`); a bare `str` is refused.
 
 `k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty list
 of lists (`TypeError` otherwise; fusing zero lists is a `ValueError`, the

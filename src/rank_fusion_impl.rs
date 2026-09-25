@@ -73,6 +73,21 @@
 //! folds duplicates to their first occurrence, so a duplicate can never
 //! vote twice.
 //!
+//! # The weighted domain's underflow (the emission policy)
+//!
+//! The strictly-positive weight domain reaches all the way down to
+//! f64's smallest subnormal (`5e-324`), and a legal vote there can
+//! underflow: `5e-324 / 61` rounds to `0.0`, so a document whose every
+//! vote underflows scores exactly `0.0`. Emission is therefore the
+//! vote-existence signal (the first-appearance walk), never score
+//! positivity: every distinct id that received a vote appears — a
+//! `0.0`-score pair included, ordered last, ties among the `0.0`
+//! scores broken by first appearance like any other tie. Only an id
+//! NO list voted for (an index a loose dedup table sized; unreachable
+//! from the binding) is not emitted. The zero-weight list that would
+//! "legitimately" score `0.0` is not in the domain (rejected at the
+//! binding), so a `0.0` score is always the underflow shape.
+//!
 //! # The metrics
 //!
 //! - **nDCG**: Järvelin & Kekäläinen, "Cumulated gain-based evaluation of
@@ -146,7 +161,12 @@
 /// ties broken by earliest first appearance across the lists in caller
 /// order (tracked here in the same walk that scores), so the tie-break
 /// is the paper-shape contract no matter how the caller numbered its
-/// indices. `k` is trusted here as already-validated (`k >= 1`): the
+/// indices. Emission is vote-existence (one pair per distinct id any
+/// list voted for), not score positivity: a legal denormal weight can
+/// underflow a doc's every vote to 0.0 (5e-324/61 rounds away at any
+/// rank), and that id still appears -- as a 0.0-score pair, ordered
+/// last, ties among the 0.0 scores by first appearance. `k` is trusted
+/// here as already-validated (`k >= 1`): the
 /// pyo3 layer's job, matching this crate's usual split of caller-facing
 /// validation from the trusted core.
 pub fn rank_fuse(
@@ -194,11 +214,18 @@ pub fn rank_fuse(
     let mut ranked: Vec<(u32, f64)> = scores
         .into_iter()
         .enumerate()
-        // A zero score means zero votes: an index the caller's dedup
-        // table sized but no list ever ranked (unreachable from the
-        // binding, which only assigns indices on first sight), not a
-        // document to emit. Every voted score is positive.
-        .filter(|(_, score)| *score > 0.0)
+        // Emission is the VOTE-EXISTENCE signal (first_seen assigned in
+        // the scoring walk), never score positivity: a legal denormal
+        // weight (5e-324, the smallest subnormal) can underflow every
+        // one of a doc's votes to 0.0 (`w/(k+r)` rounds away at any
+        // rank), and the contract is one (id, score) pair per distinct
+        // voted id -- a 0.0-score pair included, ordered last (score
+        // descending) by first appearance among its 0.0 ties. The
+        // filter's remaining job is the one it always had: an index the
+        // caller's dedup table sized but no list ever ranked (a loose
+        // `n_docs`; unreachable from the binding, which only assigns
+        // indices on first sight) is still not a document to emit.
+        .filter(|(i, _)| first_seen[*i] != u32::MAX)
         .map(|(i, score)| (i as u32, score))
         .collect();
     ranked.sort_by(|(a_idx, a_score), (b_idx, b_score)| {
@@ -722,5 +749,41 @@ mod tests {
         for (_, score) in rank_fuse(&lists, 1, 3, Some(&[f64::MAX, 1e-300, 1.0])) {
             assert!(score.is_finite() && score > 0.0);
         }
+    }
+
+    #[test]
+    fn a_doc_whose_every_vote_underflows_still_appears() {
+        // The emission signal is vote existence, not score positivity:
+        // 5e-324 (the smallest subnormal) at k=60 underflows to exactly
+        // 0.0 at every rank (5e-324/61 rounds away), and the voted docs
+        // still emit -- 0.0-score pairs in first-appearance order (all
+        // scores tie at 0.0, so the tie-break decides).
+        let lists = [vec![0u32, 1, 2]];
+        let fused = rank_fuse(&lists, 60, 3, Some(&[5e-324]));
+        assert_eq!(fused, vec![(0, 0.0), (1, 0.0), (2, 0.0)]);
+    }
+
+    #[test]
+    fn an_underflowed_doc_and_a_floating_doc_share_one_output() {
+        // The mixed shape: doc 0's vote underflows to 0.0, doc 1's does
+        // not; both appear, the positive score first, the 0.0 last
+        // (score descending), the order deterministic.
+        let lists = [vec![0u32], vec![1u32]];
+        let fused = rank_fuse(&lists, 60, 2, Some(&[5e-324, 1.0]));
+        assert_eq!(fused[0], (1, 1.0 / 61.0));
+        assert_eq!(fused[1], (0, 0.0));
+    }
+
+    #[test]
+    fn a_loose_n_docs_still_emits_only_voted_indices() {
+        // The filter's surviving job: indices the caller's dedup table
+        // sized but no list voted for (here doc 3, inside a 4-wide
+        // table) stay unemitted, even though their score is 0.0 too.
+        let lists = [vec![0u32, 1, 2]];
+        let fused = rank_fuse(&lists, 60, 4, None);
+        assert_eq!(
+            fused.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 }

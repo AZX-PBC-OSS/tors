@@ -1,7 +1,9 @@
 //! `rank_fusion_impl` never panics on arbitrary fused/metric inputs: the
-//! fusion emits exactly the distinct ids that received votes, in
+//! fusion emits exactly the distinct ids that received votes (vote
+//! existence, not score positivity — a denormal weight can underflow a
+//! doc's every vote to 0.0 and the doc still appears), in
 //! score-descending order with ties broken by first appearance, all
-//! scores finite and positive; the metrics answer floats in [0, 1] for
+//! scores finite and non-negative; the metrics answer floats in [0, 1] for
 //! any flag vector and any k >= 1.
 
 #![no_main]
@@ -92,11 +94,14 @@ fuzz_target!(|input: Input| {
 
     let fused = tors::rank_fusion_impl::rank_fuse(&lists, k, n_docs, weights.as_deref());
 
-    // Every emitted score is finite and positive; the emitted indices
+    // Every emitted score is finite and non-negative (0.0 is the
+    // documented underflow shape: a voted doc whose denormal-weight
+    // votes round away — this target's own weights stay in the normal
+    // range, so positive here in practice); the emitted indices
     // are in range and pairwise distinct (one entry per voted doc).
     let mut seen = std::collections::HashSet::new();
     for (idx, score) in &fused {
-        assert!(score.is_finite() && *score > 0.0, "bad score {score}");
+        assert!(score.is_finite() && *score >= 0.0, "bad score {score}");
         assert!(*idx < n_docs as u32, "index out of range: {idx}");
         assert!(seen.insert(*idx), "duplicate fused index: {idx}");
     }

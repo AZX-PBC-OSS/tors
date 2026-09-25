@@ -1745,7 +1745,13 @@ def bm25_rank(
 # is a ValueError (strictly positive finite; a zero-weight list is a
 # miscounted retriever list, the k < 1 class), a length mismatch with
 # ranked_lists is a ValueError naming both sides, and a non-sequence weights
-# (a bare str included) or a non-numeric entry is a TypeError.
+# (a bare str included) or a non-numeric entry is a TypeError. A legal
+# denormal weight can underflow a doc's every vote to exactly 0.0
+# (5e-324/61 rounds away at any rank): the id still appears, as a
+# 0.0-score pair ordered last (score descending, ties by first appearance)
+# -- emission follows vote existence, not score positivity. bytes are a
+# sequence of ints and launder to their code points (the int-extraction
+# convention, weights=b"12" == weights=[49.0, 50.0]); a bare str is refused.
 #
 # k must be >= 1 (ValueError); ranked_lists must be a non-empty list of
 # lists (fusing zero lists is a ValueError -- the merkle_root "root of no
