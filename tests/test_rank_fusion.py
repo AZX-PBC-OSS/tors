@@ -1002,6 +1002,8 @@ class TestAioTwins:
         # loop heartbeats: the worst blocked share of the wall must stay
         # inside the pinned 0.80 band's own margin (pass-on-first-clean
         # over 4 samples, the harness's own retry discipline).
+        import tors.aio
+
         lists = _fusion_lists(200_000)
 
         async def measure() -> None:
