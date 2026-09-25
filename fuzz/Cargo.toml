@@ -207,6 +207,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "rank_fusion"
+path = "fuzz_targets/rank_fusion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tfidf"
 path = "fuzz_targets/tfidf.rs"
 test = false
