@@ -77,7 +77,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import itertools
 import os
 import sys
 import time
@@ -1226,16 +1225,6 @@ def test_growing_cost_counter_keeps_gil_held_time_tracking_the_callbacks() -> No
     while the counter runs (plus O(chunk) argument construction), so the
     worst heartbeat gap must track the (growing) callbacks, never the
     whole call: the heartbeat cells' ratio budget must hold."""
-    ticks: list[float] = []
-    stop = asyncio.Event()
-
-    async def heartbeat() -> None:
-        while True:
-            ticks.append(time.monotonic())
-            if stop.is_set():
-                return
-            await asyncio.sleep(0.01)
-
     state = {"n": 0}
 
     def growing(s: str) -> int:
@@ -1253,20 +1242,11 @@ def test_growing_cost_counter_keeps_gil_held_time_tracking_the_callbacks() -> No
         "Eight. Nine. Ten. Eleven. Twelve. Thirteen. Fourteen."
     )
 
-    async def run() -> tuple[float, float]:
-        hb = asyncio.create_task(heartbeat())
-        await asyncio.sleep(0)
-        started = time.monotonic()
-        try:
-            await asyncio.to_thread(tors.chunk_to_budget, text, growing, max_tokens=2, overlap=1)
-        finally:
-            stop.set()
-            await hb
-        wall = time.monotonic() - started
-        worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-        return worst, wall
-
-    worst, wall = asyncio.run(run())
+    worst, wall = asyncio.run(
+        heartbeat_gap_and_wall(
+            lambda: asyncio.to_thread(tors.chunk_to_budget, text, growing, max_tokens=2, overlap=1)
+        )
+    )
     assert state["n"] > 20, "the corpus must exercise many growing calls"
     assert worst < 0.30 * wall or worst < 0.100, (
         f"held time does not track the callbacks: worst gap {worst * 1000:.0f}ms "
