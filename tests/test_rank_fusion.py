@@ -1078,13 +1078,19 @@ class TestPerfCliffs:
             # GC-independent) and the slope stops discriminating: the
             # whole-corpus regime is covered by the wall-guidance pins
             # instead (reranking-scale walls, e.g. the 30s bound on the
-            # heavy-hash cell), not by a slope gate. A quadratic regression
-            # still fails the 9.0x gate (16x for a 4x span) at this scale.
+            # heavy-hash cell), not by a slope gate. The 9.0x gate has
+            # proven teeth: injecting a per-output-entry score recompute
+            # over the fused prefix (a quadratic marshalling cost, wrapped
+            # in std::hint::black_box so LLVM cannot elide it) fails this
+            # gate 5/5 at the 10k -> 40k span (measured 13-15x). The
+            # experiment's trap, recorded honestly: a `take(pos + 1)
+            # .count()`-style "re-scan" is NOT a valid injection, because
+            # the id list is an ExactSizeIterator and LLVM folds the
+            # length subtraction to O(1) in release, so that "quadratic"
+            # passes the pin while testing nothing.
             # The timed callable is the FUSION on the built lists, not the
-            # build: s(n) alone would pin the list construction (a test
-            # born measuring the wrong thing — caught by re-running the
-            # wave-1 injection experiment, which this pin sailed through
-            # while test_scaling_pins.py's rank_fuse pin failed).
+            # build: s(n) alone would pin the list construction, not the
+            # call this pin names.
             small = _min_wall_ms(lambda s=shape: rank_fuse(s(10_000)))
             large = _min_wall_ms(lambda s=shape: rank_fuse(s(40_000)))
             assert large < 9.0 * small, (
