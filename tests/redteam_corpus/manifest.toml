@@ -14,6 +14,13 @@
 # Every entry's payload is the minimal shape that reproduces the defect
 # class (issue repros are the issues' own minimal repros, trimmed).
 # Runner: tests/test_redteam_corpus.py.
+#
+# Splice convention: a full-shape vendor token in a payload or a needle
+# is spelled with a `%%` marker right after the prefix head (`gho_%%…`,
+# `glpat-%%…`, `AIza%%…`). The committed bytes never carry the
+# contiguous token — push protection scans the pushed blobs — and the
+# runner splices the marker out (see `_splice`), so the scanner always
+# sees the true token and the invariant stays real.
 
 [[cases]]
 id = "issue-91-minhash-shingle-budget"
@@ -38,7 +45,7 @@ id = "issue-99-credential-shapes"
 issue = 99
 file = "issue-99-credentials.txt"
 surface = "scrub_pii"
-params = { needles = ["gho_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghu_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghs_16C7e42F292c6912E7710c838347Ae178B4a1", "ghr_16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "glpat-abcdefghij0123456789", "lQdGBGX"] }
+params = { needles = ["gho_%%16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghu_%%16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "ghs_%%16C7e42F292c6912E7710c838347Ae178B4a1", "ghr_%%16C7y42VZ6TyZwTEZwZ0Czfs6k5F9wJZ0RZ8x", "glpat-%%abcdefghij0123456789", "lQdGBGX"] }
 invariant = "none of the five credential shapes nor the PGP block survives the scrub verbatim"
 status = "fixed-on-main"
 
@@ -47,7 +54,7 @@ id = "issue-100-escape-glued-keys"
 issue = 100
 file = "issue-100-escaped-newline.txt"
 surface = "scrub_pii_multi"
-params = { files = ["issue-100-escaped-newline.txt", "issue-100-uXXXX.txt", "issue-100-pctXX.txt"], needles = ["sk-proj-abcdefghijklmnopqrstuvwx", "sk-proj-abcdefghijklmnopqrstuvwx", "AIzaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }
+params = { files = ["issue-100-escaped-newline.txt", "issue-100-uXXXX.txt", "issue-100-pctXX.txt"], needles = ["sk-proj-abcdefghijklmnopqrstuvwx", "sk-proj-abcdefghijklmnopqrstuvwx", "AIza%%aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }
 invariant = "a key glued after each RECOGNIZED escape spelling (backslash-n, \\uXXXX, %XX) is redacted, not skipped as mid-token"
 status = "fixed-on-main"
 

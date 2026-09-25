@@ -764,6 +764,7 @@ SCRUB_RULES: tuple[str, ...] = (
     "uri_userinfo",
     "uri_query_creds",
     "libpq_conninfo_creds",
+    "secret_tokens",
 )
 
 #: Each rule's passes, in order: the DETAIL rule is one name over two
@@ -805,9 +806,272 @@ def reference_scrub_log_text(text: str, rules: Sequence[str] | None = None) -> s
             )
             text = pattern.sub(r"\1***", text)
             continue
+        if name == "secret_tokens":
+            text = _secret_tokens_mask(text)
+            continue
         for pattern, repl in _SCRUB_RULE_PASSES[name]:
             text = pattern.sub(repl, text)
     return text
+
+
+# --- the secret_tokens rule's oracle ------------------------------------------------
+#
+# A hand-rolled pure-Python transcription of src/secret_impl.rs's six
+# secret-token grammars (the same oracle discipline as
+# reference_find_unescaped: an independent spelling, never a call into the
+# crate). The scanner walks CHAR space, not bytes: every class the grammars
+# and the boundary rule consult is ASCII-only, so a codepoint walk sees
+# exactly the class memberships the byte walk sees (a multi-byte char's
+# continuation bytes sit outside every ASCII class on both sides, and every
+# ASCII byte is its own codepoint). The rule is one whole pass, applied
+# LAST in the chain (after the conninfo pass), each span spliced to `***`.
+
+_SECRET_AWS_PREFIXES = ("AKIA", "ASIA")
+_SECRET_GITHUB_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")
+_SECRET_STRIPE_PREFIXES = ("sk_live_", "sk_test_", "rk_live_", "rk_test_", "pk_live_", "pk_test_")
+_SECRET_HEX = frozenset("0123456789abcdefABCDEF")
+_SECRET_OCTAL = frozenset("01234567")
+_SECRET_B62 = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+)
+_SECRET_AWS_TAIL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+# The shared glue class [A-Za-z0-9_-] (pii_impl's key tail charset), the
+# legacy hex class's own word class [A-Za-z0-9_] (no dash), and the PEM
+# label word class [A-Za-z0-9].
+_SECRET_KEY_TAIL = _SECRET_B62 | {"_", "-"}
+_SECRET_LEGACY_GLUE = _SECRET_B62 | {"_"}
+_SECRET_PEM_WORD = _SECRET_B62
+
+
+def _secret_is_hex(c: str) -> bool:
+    return c in _SECRET_HEX
+
+
+def _secret_backslash_run_before(s: str, at: int) -> int:
+    run = 0
+    while run < at and s[at - 1 - run] == "\\":
+        run += 1
+    return run
+
+
+def _secret_escape_ends_before(s: str, i: int) -> bool:
+    """Char-space twin of pii_impl::escape_ends_before: the key-charset
+    char at ``i - 1`` ends a complete escape sequence (%XX, \\uXXXX,
+    \\UHHHHHHHH, \\xHH with an odd pinned backslash run, \\NNN octal with
+    maximal munch, or any byte after an odd backslash run)."""
+    if i >= 3 and s[i - 3] == "%" and s[i - 2] in _SECRET_HEX and s[i - 1] in _SECRET_HEX:
+        return True
+    if (
+        i >= 6
+        and s[i - 6] == "\\"
+        and s[i - 5] == "u"
+        and s[i - 4] in _SECRET_HEX
+        and s[i - 3] in _SECRET_HEX
+        and s[i - 2] in _SECRET_HEX
+        and s[i - 1] in _SECRET_HEX
+    ):
+        return True
+    if i >= 10 and s[i - 10] == "\\" and s[i - 9] == "U" and all(
+        c in _SECRET_HEX for c in s[i - 8 : i]
+    ):
+        return True
+    if (
+        i >= 4
+        and s[i - 4] == "\\"
+        and s[i - 3] == "x"
+        and s[i - 2] in _SECRET_HEX
+        and s[i - 1] in _SECRET_HEX
+        and _secret_backslash_run_before(s, i - 3) % 2 == 1
+    ):
+        return True
+    digits = 0
+    while digits < i and s[i - 1 - digits] in _SECRET_OCTAL:
+        digits += 1
+    if (
+        1 <= digits <= 3
+        and digits < i
+        and s[i - 1 - digits] == "\\"
+        and _secret_backslash_run_before(s, i - digits) % 2 == 1
+    ):
+        return True
+    return i >= 2 and _secret_backslash_run_before(s, i - 1) % 2 == 1
+
+
+def _secret_ansi_csi_ends_before(s: str, i: int) -> bool:
+    """Char-space twin of pii_impl::ansi_csi_ends_before: ``ESC [`` params
+    final, the final byte U+0040..U+007E."""
+    if not ("@" <= s[i - 1] <= "~"):
+        return False
+    j = i - 1
+    while j > 0 and " " <= s[j - 1] <= "?":
+        j -= 1
+    return j >= 2 and s[j - 1] == "[" and s[j - 2] == "\x1b"
+
+
+def _secret_pem_head_after_dash_run(s: str, i: int) -> bool:
+    """Char-space twin of pii_impl::pem_head_after_dash_run: the BEGIN
+    head after a dash run (armor) or a shared close's last label word."""
+    if not s.startswith("-----BEGIN ", i):
+        return False
+    if s[i - 1] == "-":
+        return True
+    if s[i - 1] not in _SECRET_PEM_WORD:
+        return False
+    return True
+
+
+def _secret_pem_label_at(s: str, i: int) -> tuple[tuple[int, int], int] | None:
+    """The PEM label grammar: word( word)* closed by ` PRIVATE KEY-----`
+    or ` PRIVATE KEY BLOCK-----`, terminator-first (the words are maximal
+    before the close). Returns the words' span and the index past the
+    close, or None."""
+    start = i
+    while True:
+        j = i
+        while j < len(s) and s[j] in _SECRET_PEM_WORD:
+            j += 1
+        if j == i:
+            return None  # an empty word: a leading or double space
+        if s.startswith(" PRIVATE KEY BLOCK-----", j):
+            return ((start, j), j + len(" PRIVATE KEY BLOCK-----"))
+        if s.startswith(" PRIVATE KEY-----", j):
+            return ((start, j), j + len(" PRIVATE KEY-----"))
+        if j < len(s) and s[j] == " ":
+            i = j + 1  # exactly one single space into the next word
+            continue
+        return None
+
+
+def _secret_pem_match_at(s: str, start: int) -> int | None:
+    """The PEM block span at ``start``: BEGIN label, then the FIRST
+    `-----END ` whose label parses AND spells the same words (a
+    mismatched or unparseable END is skipped, not fatal)."""
+    open_head = "-----BEGIN "
+    if not s.startswith(open_head, start):
+        return None
+    begin_label = _secret_pem_label_at(s, start + len(open_head))
+    if begin_label is None:
+        return None
+    (wstart, wend), k = begin_label
+    end_head = "-----END "
+    while k + len(end_head) <= len(s):
+        if s.startswith(end_head, k):
+            end_label = _secret_pem_label_at(s, k + len(end_head))
+            if end_label is not None and s[end_label[0][0] : end_label[0][1]] == (
+                s[wstart:wend]
+            ):
+                return end_label[1]
+        k += 1
+    return None
+
+
+def _secret_run_end(s: str, at: int, alphabet: frozenset[str]) -> int:
+    end = at
+    while end < len(s) and s[end] in alphabet:
+        end += 1
+    return end
+
+
+def _secret_match_end_at(s: str, i: int) -> int | None:
+    """The six grammars at one boundary-clean position, the scanner's own
+    order (first hit wins): aws_access_key, slack_token, stripe_key,
+    github_token (modern, then legacy), pem_key. The match END, or None."""
+    # aws_access_key: AKIA/ASIA + a maximal [0-9A-Z] run of EXACTLY 16
+    # (a longer run is a longer word, the near-miss the exact width
+    # exists to refuse). The first matching prefix decides: a wrong tail
+    # is a non-match, never a fall-through (the prefixes are mutually
+    # exclusive at one position anyway).
+    for prefix in _SECRET_AWS_PREFIXES:
+        if s.startswith(prefix, i):
+            tail = _secret_run_end(s, i + 4, _SECRET_AWS_TAIL)
+            return tail if tail - i == 20 else None
+    # slack_token: case-insensitive xox[abprso]- (digit-run + -)+ alnum+
+    # The dash at +4 opens the arm; a non-xox head there (PEM's own dash
+    # head included) falls through to the other grammars. Once the head
+    # ENGAGES, its decision is final (no later grammar shares the xox
+    # head): a section-grammar failure is the per-grammar non-match.
+    if i + 4 < len(s) and s[i + 4] == "-":
+        head = s[i : i + 4].lower()
+        if head[0] == "x" and head[1] == "o" and head[2] == "x" and head[3] in "abprso":
+            j = i + 5
+            sections = 0
+            while True:
+                digit_start = j
+                while j < len(s) and s[j] in "0123456789":
+                    j += 1
+                if j == digit_start:
+                    break
+                if j >= len(s) or s[j] != "-":
+                    return None  # a digit run not followed by a dash
+                j += 1
+                sections += 1
+            if sections:
+                final_start = j
+                j = _secret_run_end(s, j, _SECRET_B62)
+                if j > final_start:
+                    return j
+            return None
+    # stripe_key: one of the six prefixes + at least 24 base62, maximal.
+    for prefix in _SECRET_STRIPE_PREFIXES:
+        if s.startswith(prefix, i):
+            tail = _secret_run_end(s, i + len(prefix), _SECRET_B62)
+            return tail if tail - (i + len(prefix)) >= 24 else None
+    # github_token, modern: one of the five prefixes + EXACTLY 36 base62.
+    for prefix in _SECRET_GITHUB_PREFIXES:
+        if s.startswith(prefix, i):
+            tail = _secret_run_end(s, i + 4, _SECRET_B62)
+            return tail if tail - i == 40 else None
+    # github_token, legacy: a maximal hex run of EXACTLY 40 whose before
+    # AND after chars are not word chars (the word-boundary form the
+    # prefixless class needs; the before check is the class's OWN, on top
+    # of the shared gate's — an escape-carved hex-digit predecessor is
+    # still mid-word material).
+    if s[i] in _SECRET_HEX and (i == 0 or s[i - 1] not in _SECRET_LEGACY_GLUE):
+        tail = _secret_run_end(s, i, _SECRET_HEX)
+        if tail - i == 40 and (tail >= len(s) or s[tail] not in _SECRET_LEGACY_GLUE):
+            return tail
+    # pem_key: the whole BEGIN..END block span.
+    pem = _secret_pem_match_at(s, i)
+    if pem is not None:
+        return pem
+    return None
+
+
+def _secret_boundary_clean(s: str, i: int) -> bool:
+    """The shared boundary gate: a candidate glued to a preceding
+    key-charset char is mid-token and never fires, unless that char ends
+    a complete escape sequence or an ANSI CSI sequence (formatting
+    material) or the position opens a PEM BEGIN head after a dash run
+    (armor)."""
+    if i == 0 or s[i - 1] not in _SECRET_KEY_TAIL:
+        return True
+    return (
+        _secret_escape_ends_before(s, i)
+        or _secret_ansi_csi_ends_before(s, i)
+        or _secret_pem_head_after_dash_run(s, i)
+    )
+
+
+def _secret_tokens_mask(text: str) -> str:
+    """The secret_tokens pass: one left-to-right walk, every span spliced
+    to `***`, the scan resuming at each span's end (spans are consumed
+    whole, non-overlapping)."""
+    out: list[str] = []
+    pos = 0
+    i = 0
+    while i < len(text):
+        if not _secret_boundary_clean(text, i):
+            i += 1
+            continue
+        end = _secret_match_end_at(text, i)
+        if end is None:
+            i += 1
+            continue
+        out.append(text[pos:i])
+        out.append("***")
+        pos = i = end
+    out.append(text[pos:])
+    return "".join(out)
 
 
 _BACKSLASH = 0x5C  # b"\\"[0], the parity byte the whole escape question turns on

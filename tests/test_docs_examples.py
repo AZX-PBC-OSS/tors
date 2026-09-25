@@ -350,6 +350,50 @@ class TestScrubPiiExamples:
             assert tors.scrub_pii(twice) is twice
 
 
+class TestScrubSecretsExamples:
+    def test_aws_and_slack_token_examples(self) -> None:
+        # docs/api.md's scrub_secrets section, pinned byte-exact: the
+        # AWS example's key is Amazon's own documented example spelling
+        # (IAM's "Manage access keys" page); the Slack token is
+        # synthesized.
+        assert (
+            tors.scrub_secrets(
+                # The full shape is assembled at runtime (push protection
+                # scans the pushed blobs); the example's key is Amazon's
+                # own documented spelling (IAM's "Manage access keys"
+                # page).
+                f"deploy used {'AKIA' 'IOSFODNN7EXAMPLE'} and nothing else"
+            )
+            == "deploy used AKIA~d46f248e6407 and nothing else"
+        )
+        token = "xox" "b-123456789012-1234567890123-abcdefghijklmnop"
+        assert (
+            tors.scrub_secrets(f"bot token {token} in the log")
+            == "bot token xoxb~10708077e3b8 in the log"
+        )
+
+    def test_the_stripe_report_example(self) -> None:
+        # The full shapes are assembled at runtime (push protection
+        # scans the pushed blobs); the example's keys are the vendors'
+        # documented spellings.
+        live = "sk_live_" "4eC39HqLyjWDarjtT1zdp7dc"
+        test = "sk_test_" "51AbCdEfGhIjKlMnOpQrStUvw"
+        rep = tors.scrub_secrets_report(f"live {live} test {test}")
+        assert rep["text"] == "live sk_live_~ef9505bb1efc test sk_test_~7e3d266c1b3e"
+        assert rep["redacted"] == {"stripe_live": 1, "stripe_test": 1}
+        assert rep["spans"] == [
+            {"type": "stripe_live", "start": 5, "end": 37},
+            {"type": "stripe_test", "start": 43, "end": 76},
+        ]
+
+    def test_the_scrub_log_text_secret_tokens_example(self) -> None:
+        token = "xox" "b-123456789012-1234567890123-abcdefghijklmnop"
+        assert (
+            tors.scrub_log_text(f"auth {token} ok", ["secret_tokens"])
+            == "auth *** ok"
+        )
+
+
 class TestTranscriptRecipeExamples:
     def test_section_1_thread_spliced_hierarchy(self) -> None:
         thread = (

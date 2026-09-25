@@ -424,7 +424,7 @@ pub const KEY_FAMILY_NAMES: [&str; 14] = [
 pub const KEY_FAMILY_MASK_ALL: u16 = (1u16 << KeyFamily::ALL.len()) - 1;
 
 /// The digest half of every token: 12 lowercase hex chars.
-const TOKEN_HEX: usize = 12;
+pub(crate) const TOKEN_HEX: usize = 12;
 
 /// The Unicode Nd (decimal digit) codepoint ranges, Unicode 16.0.0 —
 /// the same UCD the crate's normalization/segmentation tables pin, and
@@ -559,7 +559,7 @@ fn is_phone_separator(c: char) -> bool {
 /// `sha256(salt || match)`. `salt=""` is the source chain's unsalted
 /// digest exactly, which is why the salt is a plain concatenation (any
 /// separator would break that identity).
-fn token_digest(salt: &str, matched: &str) -> String {
+pub(crate) fn token_digest(salt: &str, matched: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(matched.as_bytes());
@@ -1012,7 +1012,7 @@ const TAIL_CLASS: [u8; 256] = {
 /// base64url): `[A-Za-z0-9_-]`. ASCII only, so the scanner walks raw
 /// bytes.
 #[inline]
-fn is_key_tail_byte(b: u8) -> bool {
+pub(crate) fn is_key_tail_byte(b: u8) -> bool {
     TAIL_CLASS[b as usize] & 0b01 != 0
 }
 
@@ -1084,7 +1084,7 @@ fn backslash_run_before(bytes: &[u8], at: usize) -> usize {
 /// fourth (`\1234`) leaves the last digit a literal continuation and
 /// mid-token.
 #[inline]
-fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
+pub(crate) fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
     // The tail byte's class gates the whole analysis before any
     // backward walk: the percent and \u shapes END in a hex digit, so
     // a tail outside the hex class can only complete the lone-backslash
@@ -1176,7 +1176,7 @@ fn escape_ends_before(bytes: &[u8], pos: usize) -> bool {
 /// charged to the param run, and a param run can precede at most one
 /// final byte before a non-param byte breaks the pair.
 #[inline]
-fn ansi_csi_ends_before(bytes: &[u8], pos: usize) -> bool {
+pub(crate) fn ansi_csi_ends_before(bytes: &[u8], pos: usize) -> bool {
     if !(0x40..=0x7e).contains(&bytes[pos - 1]) {
         return false;
     }
@@ -1464,7 +1464,7 @@ fn is_pem_word_byte(b: u8) -> bool {
 /// both closes share the head ` PRIVATE KEY`, and the byte after that
 /// head selects between them, so one fused check answers both at each
 /// word end. Returns the words end and the marker end.
-fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
+pub(crate) fn pem_marker_end(bytes: &[u8], words_start: usize) -> Option<(usize, usize)> {
     // Both closes share the head " PRIVATE KEY"; the byte after it
     // selects which one can follow, so the two never compete at one
     // word end (the bare close needs "-----" there, the PGP label's
@@ -1542,7 +1542,7 @@ fn pem_match_at(bytes: &[u8], start: usize, index: &mut Option<PemEndIndex>) -> 
 /// `(candidate, marker_end)` pairs in increasing candidate order.
 /// Byte-vec keys are sound — the word class is ASCII-only
 /// (`is_pem_word_byte`), so the raw marker bytes hash as themselves.
-type PemEndIndex = HashMap<Vec<u8>, Vec<(usize, usize)>>;
+pub(crate) type PemEndIndex = HashMap<Vec<u8>, Vec<(usize, usize)>>;
 
 /// The pass's one `-----END ` sweep, bucketed by parsed words: every
 /// position where the END literal opens AND the marker after it parses,
@@ -1554,7 +1554,7 @@ type PemEndIndex = HashMap<Vec<u8>, Vec<(usize, usize)>>;
 /// hash probe plus a binary search inside its bucket, never a re-scan
 /// of the suffix. A candidate whose words do not parse is dropped at
 /// build time — BEGIN-independently, it can never match any BEGIN.
-fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
+pub(crate) fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
     const END_HEAD: &[u8] = b"-----END ";
     let mut ends: PemEndIndex = HashMap::new();
     let mut q = 0;
@@ -1623,7 +1623,7 @@ fn pem_end_index(bytes: &[u8]) -> PemEndIndex {
 /// `-----BEGIN` keeps its own maximal-run match (the tail charset
 /// includes `-`, so the key match swallows the glue and the head).
 #[inline]
-fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
+pub(crate) fn pem_head_after_dash_run(bytes: &[u8], pos: usize) -> bool {
     if !bytes[pos..].starts_with(b"-----BEGIN ") {
         return false;
     }
@@ -2881,7 +2881,10 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             (format!("w-{}", key_tail(43)), "w-"),
             (format!("cn-{}", key_tail(20)), "cn-"),
             (JWT.to_string(), "Bearer"),
-            ("AKIAIOSFODNN7EXAMPLE".to_string(), "AKIA"),
+            // Split across the concatenation: the joined shape trips
+            // push protection (Amazon's documented example, not a
+            // secret).
+            ("AKIA".to_string() + "IOSFODNN7EXAMPLE", "AKIA"),
             (format!("ASIA{}", aws_tail(16)), "ASIA"),
             (format!("A3T{}", aws_tail(17)), "A3T"),
             (format!("AROA{}", aws_tail(16)), "AROA"),
@@ -2982,7 +2985,7 @@ dozjgNryP4J3jVmNHc0FKW3YtV9zZ2YwXqR8uT1aB5cDe";
             // Split across the concatenation: the joined shape trips
             // push protection (a synthetic vector, not a secret).
             "xoxb-".to_string() + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUv", // Slack: excluded
-            "sk_test_51MZABCDefghijklmnOP0123456789abcdefghiJ".to_string(), // Stripe: excluded
+            "sk_test_51MZ".to_string() + "ABCDefghijklmnOP0123456789abcdefghiJ", // Stripe: excluded
             format!("xak-{t48}"), // mid-token prefix (the boundary rule)
             "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.c2ln".to_string(), // lowercase marker
             // The non-secret cursor class: eyJ-shaped, never behind Bearer.

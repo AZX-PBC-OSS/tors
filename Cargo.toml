@@ -409,3 +409,7 @@ harness = false
 [[bench]]
 name = "pii"
 harness = false
+
+[[bench]]
+name = "secret"
+harness = false

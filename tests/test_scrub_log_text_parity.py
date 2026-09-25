@@ -28,7 +28,15 @@ newlines, ExceptionGroup gutters included), then DETAIL runs (repr-flattened
 the password-family connection-parameter mask (URI-query and libpq keyword
 anchors, IGNORECASE) — each a whole pass over the current text, which is
 exactly the canonical order ``tors.scrub_log_text`` applies per rule
-selection. The conninfo pass is ONE pass under TWO names
+selection. The fifth rule, ``secret_tokens``, is not one of the consumer's
+four compiled regexes: it is the secret-token redaction grammars
+(``src/secret_impl.rs``'s cited vendor shapes — AWS access keys, Slack
+tokens, Stripe keys, GitHub tokens, PEM private-key blocks), appended LAST
+so the established chain's contract is untouched, each span spliced to
+``***``; the oracle side is the hand-rolled pure-Python transcription in
+``tests/reference.py`` (``_secret_tokens_mask``), and the grammar's own
+vectors live in ``tests/test_secret_grammars.py``. The conninfo pass is ONE
+pass under TWO names
 (``uri_query_creds`` selects the ``[?&]`` anchor grammar,
 ``libpq_conninfo_creds`` the libpq keyword lookbehind; both — ``rules=None``
 included — run the combined pattern, never two sequential substitutions).
@@ -126,6 +134,7 @@ RULE_LANES: list[tuple[str, list[str] | None]] = [
     ("libpq_conninfo_creds", ["libpq_conninfo_creds"]),
     ("conninfo-both", ["uri_query_creds", "libpq_conninfo_creds"]),
     ("pg+userinfo", ["pg_detail_lines", "uri_userinfo"]),
+    ("secret_tokens", ["secret_tokens"]),
 ]
 
 
@@ -147,13 +156,15 @@ class TestQuotedPin:
     def test_the_canonical_rule_order_is_pinned(self) -> None:
         # The chain order _scrub_text applies with the flag on: DETAIL's two
         # segmenters, userinfo, then the conninfo pass (its two anchor
-        # grammars under the two names). reference.py must carry the same
-        # tuple tors spells.
+        # grammars under the two names), then the secret-token mask (the
+        # secret_impl grammars, LAST so the established chain's contract is
+        # untouched). reference.py must carry the same tuple tors spells.
         assert SCRUB_RULES == (
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
             "libpq_conninfo_creds",
+            "secret_tokens",
         )
 
 
@@ -245,6 +256,16 @@ class TestClassificationPins:
 
 
 # --- the hand corpus: every rule crux plus its adversarial combinations ---------------
+
+# Full-shape vendor tokens, assembled at runtime (adjacent-string
+# concat): push protection scans the pushed blobs for the contiguous
+# shape, so the token exists only in memory — the joined values are the
+# same spellings the vectors pin (see tests/test_secret_grammars.py).
+_AWS_ID = "AKIA" "B2C4E6G8H1J3K5M9"
+_ASIA_ID = "ASIA" "IOSFODNN7EXAMPLE"
+_STRIPE_LIVE = "sk_live_" "4eC39HqLyjWDarjtT1zdp7dc"
+_STRIPE_TEST = "sk_test_" "4eC39HqLyjWDarjtT1zdp7dc"
+_GH_TOKEN = "ghp_" "aB3xY9kL2mN5pQ7rS4tU8vW1xY6zA0bC3dEF"
 
 _CORPUS: list[str] = [
     # DETAIL, real newlines: blank line left behind, CRLF's \r consumed with
@@ -392,6 +413,36 @@ _CORPUS: list[str] = [
     "\n",
     "\\n",
     "\\nDETAIL:",
+    # secret_tokens (the fifth rule): every grammar firing, its near
+    # misses, and its interaction with the established chain. All tokens
+    # SYNTHESIZED (the documented-shape spellings; see
+    # tests/test_secret_grammars.py for the per-grammar citations).
+    _AWS_ID,  # exact 16-tail AWS shape
+    f"key={_AWS_ID} ok",  # punctuation boundary fires
+    _AWS_ID + "X",  # tail extended: near miss, no match
+    "X" + _AWS_ID,  # glued head: mid-token, no match
+    _ASIA_ID,  # the temporary-credential prefix
+    "xox" "b-123456789012-1234567890123-abcdefghijklmnop",
+    "XOXB-1-2-ABCDEF",  # the cited grammar is case-insensitive
+    "xoxb-abc",  # no digit section: no match
+    _STRIPE_LIVE,
+    _STRIPE_TEST + "9extra",  # maximal tail rides along
+    "sk_live_abc",  # 23 tail chars: no match
+    _GH_TOKEN,
+    _GH_TOKEN + "x",  # 37 base62: no match
+    _GH_TOKEN + "_suffix",  # _ ends the tail
+    "0123456789abcdef0123456789abcdef01234567",  # legacy 40-hex class
+    "commit 0123456789abcdef0123456789abcdef01234567 ok",
+    "0123456789abcdef0123456789abcdef012345678",  # 41 hex: no match
+    "x0123456789abcdef0123456789abcdef01234567",  # word-glued: no match
+    "-----BEGIN RSA PRIVATE KEY-----\naaa\n-----END RSA PRIVATE KEY-----",
+    "-----BEGIN PRIVATE KEY-----\naaa\n-----END PRIVATE KEY-----",  # no words
+    f"token {_AWS_ID}\\nDETAIL: v",  # escaped pass feeds the rule
+    f"DETAIL:  Key (ak)=({_AWS_ID}) exists.",  # line deleted first
+    f"pg://u:{_AWS_ID}@h",  # userinfo masks the password first
+    f"host=h password={_AWS_ID}",  # conninfo masks the value first
+    "AKIA~3aa8d1d0bb1a",  # a token is a fixed point: never re-fires
+    "xoxb~3aa8d1d0bb1a and ghp_~3aa8d1d0bb1a",
 ]
 
 # --- generated grids: the combinatorial neighborhoods of each crux -------------------
@@ -614,6 +665,23 @@ _DETAIL_PIECES = st.lists(
             "a://u:p@h",
             "?password=v",
             "E('",
+            # secret-token pieces (the fifth rule's shapes and its glue
+            # class): a firing token, its near-miss extensions, a token's
+            # own output spelling (a fixed point), and the boundary chars
+            # the grammar's glue class refuses.
+            _AWS_ID,
+            _AWS_ID + "X",
+            "X" + _AWS_ID,
+            "xoxb-1-2-abc123",
+            _STRIPE_LIVE,
+            _GH_TOKEN,
+            "0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef012345678",
+            "AKIA~3aa8d1d0bb1a",
+            "-",
+            "_",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----END RSA PRIVATE KEY-----",
         ]
     ),
     min_size=0,

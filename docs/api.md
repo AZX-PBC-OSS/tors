@@ -613,13 +613,19 @@ Unicode/dependency bump (owner: the scrub_pii maintainer).
 def scrub_log_text(
     text: str,
     rules: Sequence[
-        Literal["pg_detail_lines", "uri_userinfo", "uri_query_creds", "libpq_conninfo_creds"]
+        Literal[
+            "pg_detail_lines",
+            "uri_userinfo",
+            "uri_query_creds",
+            "libpq_conninfo_creds",
+            "secret_tokens",
+        ]
     ]
     | None = None,
 ) -> str: ...
 ```
 
-Named-rule log and exception-text scrubbing, four linear scans + splice
+Named-rule log and exception-text scrubbing, five linear scans + splice
 under one `py.detach`: the scrub a worker applies to
 `str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
 line, a span, or an exported attribute, byte-identical to the four
@@ -628,7 +634,7 @@ harness that races tors against that reference (see
 [Design and scope](design.md) for why this is a *named-rule* surface
 rather than a pattern parameter).
 
-Four rules, one closed set:
+Five rules, one closed set:
 
 - `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
   values, so the whole line is dropped. Both separator spellings: real
@@ -672,9 +678,17 @@ Four rules, one closed set:
   legally carry an unencoded `@`, and a mask that stops there leaves the
   tail riding after the `***` (0.7.0 did exactly that). Name and delimiter
   are preserved: `?password=a@b` → `?password=***`.
+- `secret_tokens` — the secret-token grammars of
+  [`tors.scrub_secrets`](#torsscrub_secrets) over the SAME closed
+  five-grammar set, each span spliced to `***` (this family's mask
+  convention; run `scrub_secrets` when the token digests are wanted
+  instead). It runs LAST in the chain, after the conninfo pass: its
+  spans ride no other rule's anchors and no established rule sees its
+  masks.
 
 `rules=None` (the default) runs the full chain in canonical order:
-`pg_detail_lines` → `uri_userinfo` → the conninfo credential pass, each
+`pg_detail_lines` → `uri_userinfo` → the conninfo credential pass →
+`secret_tokens`, each
 rule a whole pass over the current text before the next begins (a DETAIL
 deletion can eat the `@` a userinfo mask anchors on — rule interaction is
 why the order is a contract, not a caller choice). Selecting both conninfo
@@ -739,6 +753,164 @@ tors.scrub_log_text(
 ```
 
 **Async**: `await tors.aio.scrub_log_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
+## `tors.scrub_secrets`
+
+```python
+def scrub_secrets(
+    text: str,
+    rules: Sequence[
+        Literal["aws_access_key", "slack_token", "stripe_key", "github_token", "pem_key"]
+    ]
+    | None = None,
+    *,
+    salt: str | None = None,
+) -> str: ...
+```
+
+Replace secret-token material — the credential shapes operators hit in
+logs that `scrub_pii`'s evidence-backed keys rule deliberately does not
+carry — with correlation tokens, in one GIL-released pass. Each span
+becomes `<head>~<digest>`: the head is the match's own non-secret prefix
+verbatim (`AKIA`, `xoxb`, `sk_live_`, `ghp_` — the half that tells the
+operator WHICH credential to rotate), or a constant when the grammar has
+none (`github` for the legacy hex class, `PEM` for the block span), and
+`<digest>` is the first 12 hex chars of `sha256(salt + match)` over the
+full match. `salt=None` resolves to tors's documented default
+`"tors/scrub_secrets/v1"` tag — a third domain-separation tag, so a
+secret digest never aliases a `scrub_pii` digest at the default
+settings; a KNOWN salt still leaves candidate-list confirmation
+possible: the tokens are redaction, not pseudonymization crypto.
+
+```python
+# The full shape is assembled at runtime: push protection scans the
+# pushed blobs for the contiguous token; the example's key is Amazon's
+# own documented spelling (IAM's "Manage access keys" page).
+key = "AKIA" + "IOSFODNN7EXAMPLE"
+tors.scrub_secrets(f"deploy used {key} and nothing else")
+# "deploy used AKIA~d46f248e6407 and nothing else"
+
+token = "xox" + "b-123456789012-1234567890123-abcdefghijklmnop"
+tors.scrub_secrets(f"bot token {token} in the log")
+# "bot token xoxb~10708077e3b8 in the log"
+```
+
+The five grammars, a closed set (anything else is a `ValueError` naming
+it). Every grammar is a hand-rolled single-pass scanner with anchored
+boundaries, the same architecture as `scrub_pii`: a prefix (or hex-run
+head) glued to a preceding key-charset char `[A-Za-z0-9_-]` is
+mid-token and never fires (`XAKIA…`), unless that char ends a complete
+escape sequence (`%XX`, `\uXXXX`, …) or an ANSI CSI sequence
+(formatting material, not a word), or the position opens a PEM BEGIN
+head after a dash run. Exact-width grammars refuse a candidate inside a
+LONGER run of their own alphabet (a near-miss is a longer word, never a
+match).
+
+- `aws_access_key` — `AKIA`/`ASIA` + exactly 16 chars of `[0-9A-Z]`.
+  The prefixes are the access-key-ID heads AWS's own docs spell
+  (the `AKIA` + `IOSFODNN7EXAMPLE` example, IAM's "Manage access keys"
+  page); the tail
+  alphabet is uppercase letters and digits — Amazon's example carries
+  both `I` and `O`, so there is no I/O exclusion to implement. The
+  class matches detect-secrets' AWS detector and trufflehog's
+  (`\b(?:AKIA|ABIA|ACCA)[A-Z0-9]{16}\b`); tors pins the two
+  live/temporary credential prefixes. AWS documents no checksum for
+  access key IDs, so none is validated and none is claimed. False
+  positives: 20-char `[0-9A-Z]` strings with an `AKIA`/`ASIA` head at a
+  clean boundary — rare outside real key material.
+- `slack_token` — case-insensitive `xox[abprso]-` + one or more
+  digit-run/dash sections + a final alphanumeric run: detect-secrets'
+  Slack detector (`xox(?:a|b|p|o|s|r)-(?:\d+-)+[a-z0-9]+` under
+  IGNORECASE), pinned verbatim. The classes are ASCII digits and
+  letters only: Python's `\d` under the cited pattern would also match
+  Unicode digits (`xoxb-١٢٣-…`), which the scanner refuses — a
+  documented scanner/oracle divergence. Slack's docs pin the prefixes it
+  documents today (`xoxb-` bot, `xoxp-` user) and the dash-separated
+  section structure whose final section is the secret (32 chars now, 6
+  or 10 before August 2016); trufflehog's stricter two-numeric-sections
+  spelling is a subset, and the looser cited grammar is the one pinned
+  (a redactor's misses are the dangerous direction). Slack's `xapp-`
+  app-level prefix is a different head and stays out. False positives:
+  non-Slack strings shaped `xox?-digits-digits-alnum`, rare outside
+  token-shaped fixtures.
+- `stripe_key` — `(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{24,}`, the
+  tail consumed maximally. Stripe's docs pin the six prefixes
+  (`pk_live_`/`rk_live_`/`sk_live_` and the `_test_` spellings) and no
+  length; trufflehog's detector (`[rs]k_live_[a-zA-Z0-9]{20,247}`)
+  brackets the documented example key spelling (`sk_live_` + 24), and
+  24+ keeps newer longer keys matching. No checksum is documented by
+  Stripe; none is validated or claimed. `pk_` keys are not secrets by
+  Stripe's own table and scrub anyway (over-redaction, safe direction);
+  the organization prefix `sk_org_` (no live/test half in Stripe's
+  docs) stays a documented exclusion. The REPORT says which environment
+  a key belongs to (`stripe_live`/`stripe_test`).
+- `github_token` — two classes under one name. Modern:
+  `(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}`, exactly 36 — GitHub's
+  token-format post pins the five prefixes, the `_` separator, and the
+  base62 body (30 random chars plus a 6-char checksum tail). GitHub
+  DEFINES that checksum (a 32-bit CRC32 base62-encoded) but does not
+  publish its exact construction, so tors validates no checksum and
+  claims none: recall-biased by design. Legacy: a maximal hex run of
+  exactly 40 chars at a word boundary — GitHub's post describes its own
+  pre-2021 tokens as "hex-encoded 40 character strings that are
+  indistinguishable from other encoded data like SHA hashes". That
+  legacy class is the maximally recall-biased rule in this family: EVERY
+  clean 40-char hex run matches, SHA-1 digests and git commit ids
+  included; a log stream dense with bare SHA-1s selects it knowingly.
+  The fine-grained `github_pat_` shape is not here — `scrub_pii`'s
+  `api_keys` rule carries it and the rest of its own evidence-backed
+  set.
+- `pem_key` — the `-----BEGIN <words> PRIVATE KEY-----` …
+  `-----END <same words> PRIVATE KEY-----` block span (RFC 7468's
+  framing), the WHOLE block the redacted span. Both markers required,
+  the label's words equal, the PGP ` PRIVATE KEY BLOCK-----` close
+  accepted the same way — the keys rule's own marker machinery, reused
+  rather than reimplemented. An unterminated BEGIN is a documented
+  non-match. The false-positive rate is negligible: the grammar is
+  self-validating.
+
+`rules=None` runs every grammar; `rules=[]` is the identity; each name
+selects that grammar. Tokens are fixed points by construction (every
+prefix's tail check lands on the `~`, never its own alphabet; the digest
+hex spells no prefix), so `scrub_secrets` is strictly idempotent —
+stronger than `scrub_pii`'s single re-fire corner.
+
+`tors.scrub_secrets(s, rules) is s` exactly when no grammar matched.
+
+**The report twin: `tors.scrub_secrets_report`.** The same scrub for the
+same arguments (`report["text"] == scrub_secrets(...)` byte-exact) plus
+the accounting, `scrub_pii_report`'s shape with all three keys present
+every time: `redacted` (per-kind counts, lowercase names, absent kinds
+omitted) and `spans` (ordered by start, codepoint indices into the
+INPUT text, each `{"type": ..., "start": ..., "end": ...}`). The scan
+is one pass, so the spans are input coordinates with no offset mapping:
+`text[span["start"]:span["end"]]` re-derives the matched credential
+shape from the input directly. Empty input is the empty accounting.
+
+```python
+# The full shapes are assembled at runtime: push protection scans the
+# pushed blobs for the contiguous token (the vendors' documented
+# example spellings).
+live = "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"
+test = "sk_test_" + "51AbCdEfGhIjKlMnOpQrStUvw"
+tors.scrub_secrets_report(f"live {live} test {test}")
+# {"text": "live sk_live_~ef9505bb1efc test sk_test_~7e3d266c1b3e",
+#  "redacted": {"stripe_live": 1, "stripe_test": 1},
+#  "spans": [{"type": "stripe_live", "start": 5, "end": 37},
+#            {"type": "stripe_test", "start": 43, "end": 76}]}
+```
+
+In `scrub_log_text`, the rule name `secret_tokens` runs these same five
+grammars over a log line and splices `***` over each span (this
+family's mask convention, no digests), last in the chain:
+
+```python
+token = "xox" + "b-123456789012-1234567890123-abcdefghijklmnop"
+tors.scrub_log_text(f"auth {token} ok", ["secret_tokens"])
+# "auth *** ok"
+```
+
+**Async**: `await tors.aio.scrub_secrets(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). `await tors.aio.scrub_secrets_report(...)` is the report twin under the same hop.
 
 ## `tors.nfc` / `tors.nfd` / `tors.nfkc` / `tors.nfkd`
 

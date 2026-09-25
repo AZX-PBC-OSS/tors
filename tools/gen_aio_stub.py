@@ -158,6 +158,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
             "JSONValue",
             "Span",
             "ScrubPiiReport",
+            "ScrubSecretsReport",
             "RepairAction",
             "DedupResult",
             "GroundingResult",

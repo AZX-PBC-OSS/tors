@@ -343,3 +343,40 @@ class TestGroundingBatchMemoryGuards:
             f"{ceiling_kib / 1024:.0f} MiB ({input_bytes / _MIB:.1f} MiB input): the "
             "DP materialized the n*m matrix (or worse) instead of two rows"
         )
+
+
+# --- scrub_secrets: the token-dense output lane -------------------------------------
+#
+# The secret-token grammars replace each span with a ~17-21-char token.
+# The SHORTEST matches (a minimum Slack shape: "xoxb-1-2-a" is 10 chars
+# for a 17-char token) make the OUTPUT a constant ~1.7x the input, the
+# family's worst factor and a constant: never input-dependent, never
+# matching-structure-dependent. The guard runs the dense
+# minimum-shape lane in a disposable child and pins the peak to the
+# input bytes (a few multiples of it), the same input-tied ceiling the
+# PEM-flood guard uses: any per-match buffering that scales with the
+# match COUNT beyond the output's own size trips it.
+
+
+class TestScrubSecretsPeakIsTiedToInput:
+    def test_dense_minimum_shape_peak_is_tied_to_input(self) -> None:
+        """Dense minimum Slack shapes (8 MiB of "xoxb-1-2-abc" units,
+        ~840k matches): the scrub's peak must stay tied to the input
+        (~8 MiB and its ~1.7x token output), never to the match
+        structure. A 30x-input ceiling holds the interpreter's own
+        baseline; per-match buffering beyond the output trips it."""
+        unit = "xoxb-1-2-abc "
+        units = 8 * _MIB // len(unit)
+        input_bytes = units * len(unit)
+        ceiling_kib = (30 * input_bytes) // 1024
+        setup = f"units = {units}\ntext = {unit!r} * units\n"
+        kind, message, peak_kib, done = _run_child(
+            "output = tors.scrub_secrets(text)", setup=setup, timeout=60.0
+        )
+        _assert_alive(kind, message, done)
+        assert kind == "OK", f"the dense lane must scrub cleanly, got {kind}: {message}"
+        assert peak_kib < ceiling_kib, (
+            f"peak {peak_kib / 1024:.0f} MiB exceeds the input-tied ceiling "
+            f"{ceiling_kib / 1024:.0f} MiB ({input_bytes / _MIB:.1f} MiB input): the "
+            "secret scan buffers per-match state that scales with the match count"
+        )

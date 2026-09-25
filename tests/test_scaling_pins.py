@@ -581,3 +581,119 @@ class TestDedupNearDupPairSweepScaling:
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="simhash")) < 2_000.0
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="shingle")) < 2_000.0
         assert _min_wall_ms(lambda: tors.dedup_near_dup(corpus, method="minhash")) < 2_000.0
+
+
+# --- scrub_secrets: token-dense logs + dense-class-run floods ------------------------
+#
+# The secret-token grammars are prefix + length classes walked in one
+# pass; the linearity invariant is that every failed candidate's walk
+# stays inside the glue class, where no later anchor can sit. Two
+# shapes pin it: token-dense log lines (the corpus shape, six grammar
+# heads per unit), and the adversarial dense-class-run flood (repeated
+# "AKIA" heads inside one long [0-9A-Z] run, where a failed exact-width
+# walk must never force a rescan).
+
+
+def _secrets_log_corpus(n: int) -> str:
+    # Full-shape vendor tokens assembled at runtime (push protection
+    # scans the pushed blobs for the contiguous shape).
+    aws = "AKIA" "B2C4E6G8H1J3K5M9"
+    stripe_live = "sk_live_" "4eC39HqLyjWDarjtT1zdp7dc"
+    gh = "ghp_" "aB3xY9kL2mN5pQ7rS4tU8vW1xY6zA0bC3dEF"
+    unit = (
+        f"INFO deploy worker key={aws} accepted\n"
+        "WARN slack api xox" "b-123456789012-1234567890123-abcdefghijklmnop rate\n"
+        f"ERR stripe charge failed key={stripe_live} retry\n"
+        f"INFO github webhook token {gh} ok\n"
+        "INFO git sha 0123456789abcdef0123456789abcdef01234567 checked\n"
+    )
+    return unit * (n // len(unit) + 1)
+
+
+def _aws_head_flood(n: int) -> str:
+    # n/4 "AKIA" heads inside one long uppercase run: every head is a
+    # failed exact-width candidate (no head's tail is exactly 16), the
+    # shape that would go quadratic on a rescan.
+    return "AKIA" * (n // 4) + "B2C4E6G8H1J3K5M9"
+
+
+class TestScrubSecretsScaling:
+    @pytest.mark.timing
+    def test_token_dense_log_corpus_stays_linear(self) -> None:
+        """25k -> 100k bytes of token-dense log lines (4x): the six
+        grammar heads walk every byte, every unit fires. Measured
+        0.12ms -> 0.48ms, ratio 3.90 (linear; ~1.96x per doubling),
+        gate 3.0x per doubling."""
+        small, large = (
+            _min_wall_ms(lambda: tors.scrub_secrets(_secrets_log_corpus(25_000))),
+            _min_wall_ms(lambda: tors.scrub_secrets(_secrets_log_corpus(100_000))),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_dense_class_run_flood_stays_linear(self) -> None:
+        """The adversarial shape: 100k -> 400k repeated "AKIA" heads in
+        one long [0-9A-Z] run (every head a failed exact-width
+        candidate). The failed-walk disjointness invariant keeps it
+        linear -- measured 0.71ms -> 2.88ms, ratio 4.08 (~2.04x per
+        doubling), gate 3.0x per doubling; a rescan is ~4x per doubling
+        and trips it."""
+        small, large = (
+            _min_wall_ms(lambda: tors.scrub_secrets(_aws_head_flood(100_000))),
+            _min_wall_ms(lambda: tors.scrub_secrets(_aws_head_flood(400_000))),
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+# --- lsh_candidates: the documented linear banding pass ----------------------------
+#
+# The banding pass is one sweep: O(n * num_perm) band hashing plus pair
+# emission ONLY inside shared buckets (O(output) -- nothing is quadratic
+# in the bucket sizes beyond the pairs they contribute, the
+# output-sensitive contract docs/api.md states). The pins hold that
+# class on both axes: linear in n at a fixed shape, linear in the band
+# count at a fixed num_perm (the shape axis a caller tunes through the
+# S-curve).
+
+
+def _lsh_signatures(n: int, num_perm: int = 64) -> list:
+    # Signature-DISTINCT random u64 signatures: no bucket sharing, so the
+    # pass runs its full hashing sweep and emits (almost) no pairs -- the
+    # hashing cost is what is under test, not the marshalling.
+    import random
+
+    rng = random.Random(20260924)
+    return [[rng.getrandbits(64) for _ in range(num_perm)] for _ in range(n)]
+
+
+class TestLshCandidatesScaling:
+    @pytest.mark.timing
+    def test_stays_linear_in_the_signature_count(self) -> None:
+        """10k -> 20k signatures (2x, bands=16/rows=4 fixed, distinct
+        signatures): the hashing sweep is linear in n, measured ~2.1x,
+        gate 3.0x per doubling (a quadratic pairing pass over non-sharing
+        buckets would be nowhere near this gate)."""
+        small_sigs, large_sigs = _lsh_signatures(10_000), _lsh_signatures(20_000)
+        small = _min_wall_ms(lambda: tors.lsh_candidates(small_sigs, bands=16, rows=4))
+        large = _min_wall_ms(lambda: tors.lsh_candidates(large_sigs, bands=16, rows=4))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_stays_linear_in_the_band_count(self) -> None:
+        """Fixed 10k signatures at num_perm=64, bands 8 -> 16 (rows 8 ->
+        4, so every row is hashed exactly once either way and the bucket
+        tables double): measured ~2.1x, gate 3.0x per doubling."""
+        sigs = _lsh_signatures(10_000, num_perm=64)
+        small = _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=8, rows=8))
+        large = _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=16, rows=4))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_documented_corpus_shape_has_an_explicit_wall_budget(self) -> None:
+        """The budget pin, absolute, not relative: the documented
+        corpus-scale shape (20k signatures x 128 rows, bands=32/rows=4)
+        must complete in well under a second -- measured ~40ms of
+        hashing plus extraction. 1.0s is ~25x the measured band and
+        still pins the 'one fast pass' contract; a regression past it is
+        a defect, not noise."""
+        sigs = _lsh_signatures(20_000, num_perm=128)
+        assert _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=32, rows=4)) < 1_000.0

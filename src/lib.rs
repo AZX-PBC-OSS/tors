@@ -499,6 +499,7 @@ pub mod rank_fusion_impl;
 pub mod scan_impl;
 pub mod scrub_impl;
 pub mod search_impl;
+pub mod secret_impl;
 pub mod segmentation_impl;
 pub mod simhash_impl;
 pub mod tfidf_impl;
@@ -577,6 +578,7 @@ use py::rank_fusion::*;
 use py::scan::*;
 use py::scrub::*;
 use py::search::*;
+use py::secret::*;
 use py::segmentation::*;
 use py::simhash::*;
 use py::tfidf::*;
@@ -701,6 +703,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scrub_log_text, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_pii, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_pii_report, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_secrets, m)?)?;
+    m.add_function(wrap_pyfunction!(scrub_secrets_report, m)?)?;
     // The canonical key-family tuple, in the scanner table's order: the
     // single source is `pii_impl::KEY_FAMILY_NAMES`, so the export can
     // never drift from the scanner (and the battery pins the literal).

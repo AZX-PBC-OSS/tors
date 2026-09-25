@@ -437,7 +437,8 @@ class TestRulesParameter:
             scrub_log_text("x", ["pg_detail_lines", "uri_creds"])
         assert str(excinfo.value) == (
             "rules must be one of ('pg_detail_lines', 'uri_userinfo', "
-            "'uri_query_creds', 'libpq_conninfo_creds'), not \"uri_creds\""
+            "'uri_query_creds', 'libpq_conninfo_creds', 'secret_tokens'), "
+            "not \"uri_creds\""
         )
 
     @pytest.mark.parametrize(
