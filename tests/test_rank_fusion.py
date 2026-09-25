@@ -35,6 +35,7 @@ from fractions import Fraction
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from loop_harness import heartbeat_gap_and_wall
 
 import tors
 
@@ -1005,10 +1006,10 @@ class TestAioTwins:
 
         async def measure() -> None:
             for _ in range(4):
-                worst_gap, wall = await self._gap_and_wall(lambda: tors.aio.rank_fuse(lists))
+                worst_gap, wall = await heartbeat_gap_and_wall(lambda: tors.aio.rank_fuse(lists))
                 if worst_gap / wall <= 0.80:
                     return
-            worst_gap, wall = await self._gap_and_wall(lambda: tors.aio.rank_fuse(lists))
+            worst_gap, wall = await heartbeat_gap_and_wall(lambda: tors.aio.rank_fuse(lists))
             assert worst_gap / wall <= 0.85, (
                 f"the aio twin blocked {worst_gap * 1e3:.0f}ms of a "
                 f"{wall * 1e3:.0f}ms call ({worst_gap / wall:.0%}): past the "
@@ -1016,31 +1017,6 @@ class TestAioTwins:
             )
 
         asyncio.run(measure())
-
-    @staticmethod
-    async def _gap_and_wall(op) -> tuple[float, float]:
-        ticks: list[float] = []
-        stop = asyncio.Event()
-
-        async def heartbeat() -> None:
-            while True:
-                ticks.append(time.monotonic())
-                if stop.is_set():
-                    return
-                await asyncio.sleep(0.010)
-
-        task = asyncio.create_task(heartbeat())
-        await asyncio.sleep(0)
-        started = time.monotonic()
-        try:
-            await op()
-            end = time.monotonic()
-        finally:
-            stop.set()
-            await task
-        wall = end - started
-        worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
-        return worst, wall
 
     def test_heavy_hash_ids_push_the_gil_share_toward_one_recorded_not_pinned(
         self,

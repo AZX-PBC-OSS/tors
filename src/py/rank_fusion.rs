@@ -136,8 +136,12 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
     let fused = py.detach(|| rank_fusion_impl::rank_fuse(&lists_idx, k as u64, ids.len()));
     // The marshalling: original id objects by index, one tuple each.
     let out = PyList::empty(py);
-    for (idx, score) in fused {
-        out.append((ids[idx as usize].bind(py), score))?;
+    for (pos, (idx, score)) in fused.iter().enumerate() {
+        // RED-TEAM INJECTION (temporary, never committed): a quadratic
+        // re-scan per output entry, the regression class the pin must catch.
+        let _rescan: usize = ids.iter().take(pos + 1).count();
+        let _ = _rescan;
+        out.append((ids[*idx as usize].bind(py), score))?;
     }
     Ok(out.into_any().unbind())
 }

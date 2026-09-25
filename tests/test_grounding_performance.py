@@ -47,7 +47,13 @@ _QUERY = (
     "report lists dielectric strength moisture content and dissolved gas "
     "concentrations for every sampled unit"
 )
-_SAMPLES = 5
+# 12-draw min (was 5): under the dev box's fleet oversubscription
+# (ambient load ~150 on 32 cores) a min-of-5 at millisecond walls
+# missed every quiet window during a preemption era — one rung
+# inflated 2.6x and the step around it breached the 1.6x-slack cap
+# (1000->2000 measured 3.36-4.47x, once fresh-process). The min-of-12
+# spans several eras; every cap below is unchanged.
+_SAMPLES = 12
 
 
 def _latin_chunk(tokens: int) -> str:

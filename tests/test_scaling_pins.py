@@ -365,17 +365,24 @@ class TestRetrievalCeilingScaling:
 
     @pytest.mark.timing
     def test_bm25_corpus_axis_stays_linear(self) -> None:
-        """The bm25 twin of the tf_idf pin: measured 12ms -> 26ms for
-        100 -> 200 documents x 500 words, ratio 2.1, gate 3.0x per
-        doubling."""
+        """The bm25 twin of the tf_idf pin. Originally 100 -> 200 (one
+        doubling, gate 3.0x): on the loaded dev box (ambient load ~150,
+        fleet oversubscription) that cell measured 1.6-3.95x — a 3.95x
+        excursion blew the 3.0x gate once in nine full-lane runs, and NO
+        one-doubling gate under a quadratic's 4x admits that band. The
+        span widens to 2 doublings (100 -> 400), where the shared gate
+        allows 9x: the loaded honest band (~2x/doubling, worst observed
+        step 3.95x -> ~8x compounded) stays under it while a quadratic's
+        16x still blows through. Corpus build stays inside the timed
+        lambda (both sizes build, the ratio cancels the linear build)."""
         def shape(docs: int) -> list:
             corpus = [
                 " ".join(f"w{d % 50}_{t % 500}" for t in range(500)) for d in range(docs)
             ]
             return tors.bm25_rank("w0_1 w1_2", corpus)
 
-        small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(200))
-        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+        small, large = _min_wall_ms(lambda: shape(100)), _min_wall_ms(lambda: shape(400))
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
 
 
 # --- rank_fuse: fusion at scale ------------------------------------------------------
