@@ -2573,6 +2573,7 @@ dependencies = [
  "memchr",
  "sha2 0.11.0",
  "tors-core",
+ "twox-hash",
  "unicode-segmentation",
 ]
 

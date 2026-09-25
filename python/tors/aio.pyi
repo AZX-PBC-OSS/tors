@@ -12,6 +12,7 @@ from collections.abc import Callable, Hashable, Sequence
 from typing import Any, Literal
 
 from tors import (
+    CandidatePairs,
     CompiledLemmaDict,
     DedupResult,
     GroundingResult,
@@ -207,6 +208,9 @@ async def dedup_near_dup(
     threshold: float = 0.9,
     method: Literal["simhash", "shingle", "minhash"] = "simhash",
 ) -> DedupResult: ...
+async def lsh_candidates(
+    signatures: list[list[int]], *, bands: int, rows: int
+) -> CandidatePairs: ...
 async def tf_idf(
     corpus: list[str],
     *,

@@ -4571,10 +4571,12 @@ under.
 
 **The LSH table is caller state.** tors stays stateless
 ([design.md](design.md)): this function computes one document's signature
-and keeps nothing; the banding table, the candidate store, and the
-threshold calibration are the caller's. A banding helper (cut a signature
-into `r`-element bands and hash them for table keys) is a future
-companion question, not something hidden inside this core.
+and keeps nothing; the persistent banding table, the candidate store, and
+the threshold calibration are the caller's. The one-shot pass over
+signatures already in hand is `lsh_candidates` below: cut every signature
+into `r`-row bands, hash each band to a bucket key, and recall every
+bucket-sharing pair in one call — no table to insert into or query
+against.
 
 **Bounds.** `num_perm` must be in `[1, 1024]` and `shingle_size` at least
 1; an in-range value outside those bounds raises `ValueError` naming the
@@ -4669,6 +4671,153 @@ tors.minhash_signature("")[:3]
 # [18446744073709551615, 18446744073709551615, 18446744073709551615]:
 # the empty-shingle-set sentinel
 ```
+
+## `tors.lsh_candidates`
+
+```python
+def lsh_candidates(
+    signatures: list[list[int]], *, bands: int, rows: int
+) -> CandidatePairs: ...
+```
+
+The MinHash LSH banding pass: the near-duplicate candidate generator that
+turns a corpus of `minhash_signature` signatures into candidate pairs in
+one stateless call. Broder, Glassman, Manasse, and Zweig, "Syntactic
+Clustering of the Web" (WWW 1997) supply the shingling + resemblance
+frame `minhash_signature` estimates; Leskovec, Rajaraman, and Ullman,
+"Mining of Massive Datasets", ch. 3 the banding probability model.
+Every signature is cut into `bands` bands of `rows` rows — every
+signature's length MUST equal `bands * rows`, exactly what
+`minhash_signature` returns at `num_perm=bands*rows` — each band's rows
+hash to one 64-bit bucket key (XXH64, seed 0, over the length-prefixed
+little-endian row frame, the crate's one hashing contract, a FIXED seed:
+no rng handle, the same signatures band to the same buckets every call,
+every process), and every pair of signatures sharing at least one bucket
+comes back as a candidate:
+
+```python
+sigs = [tors.minhash_signature(t) for t in (original, edited, unrelated)]
+tors.lsh_candidates(sigs, bands=32, rows=4)
+# {'pairs': [(0, 1)]}: the near-duplicate pair is recalled, the
+# unrelated pair sits below the false-positive floor
+tors.lsh_candidates([], bands=32, rows=4)
+# {'pairs': []}
+```
+
+Returns `{"pairs": [(i, j), ...]}` with `i < j`, deduplicated across
+bands (a pair sharing several band buckets appears once) and in ascending
+`(i, j)` order. The candidate relation is a function of the signatures'
+CONTENT, not their positions: permuting the input permutes the same
+relation, pinned in `tests/test_lsh.py`.
+
+**The false-positive contract, stated plainly.** Dissimilar signatures
+CAN become candidates, in exactly two ways, and both are by design:
+
+- `rows` rows agreeing by chance is the S-curve itself —
+  `lsh_probability` gives a pair its candidate probability at any
+  similarity, so low-similarity pairs leak through wherever the curve is
+  not flat at zero.
+- Two DIFFERENT row frames colliding in the 64-bit band key is possible
+  at ~k²/2^65 over k distinct keys — negligible, but nonzero, and
+  deliberately NOT engineered away (a second hash pass or a 128-bit key
+  buys nothing against a false-positive budget the chance-agreement
+  channel already dominates).
+
+LSH banding trades precision for recall everywhere it is used; the pair
+list is a recall-biased filter to SCORE downstream (`shingle_jaccard`,
+`dedup_near_dup`), never a verdict. Identical signatures are ALWAYS
+candidates (every band collides deterministically) — the curve's
+`s = 1` end, pinned exactly.
+
+**Choosing `bands` and `rows`.** The shape sets the recall/precision
+step: `lsh_probability` evaluates the S-curve for a candidate shape,
+`lsh_threshold` gives its approximate step location. At
+`bands=32, rows=4` (the example above) a pair at similarity 0.6 is
+recalled with probability ~0.988 while 0.1 sits at ~0.003.
+
+**Cost and memory (output-sensitive by construction).** One pass:
+`O(n · num_perm)` band hashing (each band's key `O(rows)`, so linear in
+the signature data itself) plus pair emission ONLY inside shared
+buckets, which is `O(output)` by definition — nothing compares
+signatures that share no bucket, so there is no `n²` anywhere except
+through the output. Resident memory is one band's bucket table (freed
+per band) plus the dedup set, `O(n + pairs)`. The linear class is pinned
+by growth-ratio cells in `tests/test_scaling_pins.py`, the memory class
+by a VmHWM guard in `tests/test_lsh.py`, and the pass is benchmarked in
+`benches/lsh.rs`.
+
+**Bounds.** `bands` and `rows` must each be at least 1 and every
+signature's length exactly `bands * rows`, each a `ValueError` naming
+the contract before any work runs; the two shape parameters ride the
+`__index__` protocol (int-likes work, `bool` rejected). Signature
+elements are STRICT, the bytes-element surfaces' convention: exact
+non-negative ints within `2**64 - 1` (a negative: `ValueError`, past the
+range: `OverflowError`, a non-int including `bool`: `TypeError`; no
+per-element `__index__` dispatch, so numpy int-likes convert first).
+
+GIL: the `signatures` walk (one int extraction per element, the standard
+`O(n · num_perm)` arg-walk class) and the bounds validation under the
+GIL, then the whole banding pass under one `py.detach`, then the
+`O(pairs)` tuple-list marshalling. `aio` twin:
+`tors.aio.lsh_candidates`.
+
+## `tors.lsh_probability`
+
+```python
+def lsh_probability(s: float, *, bands: int, rows: int) -> float: ...
+```
+
+The banding S-curve as a pure formula: the probability that two
+signatures with Jaccard similarity `s` share at least one of `bands`
+band buckets of `rows` rows, `1 - (1 - s**rows)**bands` (Mining of
+Massive Datasets, ch. 3; datasketch's parameter-tuning docs spell the
+same curve). Flat near 0, a steep step around the approximate threshold
+`(1/bands)**(1/rows)` (`lsh_threshold`), flat near 1 — the curve to
+CONSULT when picking a shape for a target similarity:
+
+```python
+tors.lsh_probability(0.0, bands=32, rows=4)
+# 0.0: the exact zero end — disjoint signatures are candidates only
+# through lsh_candidates' false-positive channels
+tors.lsh_probability(1.0, bands=32, rows=4)
+# 1.0: the exact one end — identical signatures are always candidates
+tors.lsh_probability(0.6, bands=32, rows=4)
+# 0.9882238254216146
+tors.lsh_probability(0.1, bands=32, rows=4)
+# 0.003195044956405657
+```
+
+`s` must be in `[0.0, 1.0]` (NaN refused), else `ValueError`; `bands`
+and `rows` at least 1, else `ValueError`. The ends are exact and the
+curve is monotone in `s` — both pinned against exact
+`fractions.Fraction` arithmetic and over a grid of sample points in
+`tests/test_lsh.py`. Pure float arithmetic over two integers: no GIL
+release (the `simhash_distance` zero-detach class) and no `aio` twin —
+the thread hop would cost more than the call.
+
+## `tors.lsh_threshold`
+
+```python
+def lsh_threshold(*, bands: int, rows: int) -> float: ...
+```
+
+The approximate similarity threshold where the S-curve takes its step,
+`(1/bands)**(1/rows)` — the same formulation Mining of Massive Datasets
+ch. 3 and datasketch's docs carry. An APPROXIMATION, not an inversion of
+`lsh_probability`: a pair at this similarity is a candidate with
+probability NEAR the curve's midpoint, not exactly 0.5. Pick a shape
+here, then verify the actual curve with `lsh_probability`:
+
+```python
+tors.lsh_threshold(bands=16, rows=8)
+# 0.7071067811865476
+tors.lsh_probability(tors.lsh_threshold(bands=16, rows=8), bands=16, rows=8)
+# 0.6439258695482072: near the midpoint, not exactly 0.5
+```
+
+More bands lower the threshold (recall up), more rows raise it, and the
+one-band edge sits at `(1/1)**(1/r) = 1`. Pure float arithmetic over two
+integers: no GIL release, no `aio` twin.
 
 ## `tors.simhash_distance`
 
@@ -4860,7 +5009,8 @@ on these signatures is caller state — docs/design.md's scope cut, the
 same boundary `bm25_rank` sits on. The quadratic wall is pinned with an
 explicit budget in `tests/test_scaling_pins.py` and benchmarked at
 n = 100/1k/10k in `benches/near_dup.rs`; beyond tens of thousands of
-candidates, band `minhash_signature` output yourself.
+candidates, generate candidates from `minhash_signature` output with
+`lsh_candidates` and score them here.
 
 `threshold` must be in [0.0, 1.0] (NaN refused), else `ValueError`; a
 non-str element raises `TypeError`. The empty list gives the empty

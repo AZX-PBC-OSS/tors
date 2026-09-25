@@ -107,18 +107,21 @@ The cuts below are decisions, not oversights:
   corpus repeatedly. Reach for a real search engine (`tantivy`, in Rust) for
   that; `tors` does not build or expose index objects.
 - **An LSH banding index.** `minhash_signature` computes one document's
-  MinHash signature from scratch and keeps nothing across calls; the
-  banding table and candidate store a corpus-scale near-duplicate pipeline
-  builds on those signatures are caller state, the same boundary that
-  keeps `bm25_rank` index-free. A banding helper (cutting a signature into
-  `r`-element bands and hashing them for table keys) is a future
-  companion question, not a hidden commitment inside the signature core.
-  The near-duplicate comparison layer (`simhash_distance`,
-  `shingle_jaccard`/`shingle_dice`, `dedup_near_dup`) lives on the same
-  side of the boundary: it scores PAIRS and sweeps SMALL candidate lists
-  in one call — `dedup_near_dup` is O(n²) pair checks by documented,
-  budget-pinned design, never an index — so corpus-scale recall still
-  bands signatures in caller code.
+  MinHash signature from scratch and keeps nothing across calls, and the
+  banding companion (`lsh_candidates`, with `lsh_probability`/
+  `lsh_threshold` for shape picking) is a stateless one-shot pass: one
+  call takes every signature in hand and returns every candidate pair —
+  no table held across calls, no insert/query surface (datasketch's
+  persistent `MinHashLSH` is that incremental shape). The persistent
+  banding table and candidate store a corpus-scale near-duplicate
+  pipeline queries incrementally stay caller state, the same boundary
+  that keeps `bm25_rank` index-free. The near-duplicate comparison layer
+  (`simhash_distance`, `shingle_jaccard`/`shingle_dice`,
+  `dedup_near_dup`) sits on the same side of the boundary: it scores
+  PAIRS and sweeps SMALL candidate lists in one call — `dedup_near_dup`
+  is O(n²) pair checks by documented, budget-pinned design, never an
+  index — so corpus-scale recall runs `lsh_candidates` for the pair
+  list and scores it downstream.
 - **A bespoke coroutine API.** Every function already releases the GIL for
   its native pass, so the async surface is one thread dispatch per call
   ([`tors.aio`](async.md)) rather than a purpose-built event-loop
