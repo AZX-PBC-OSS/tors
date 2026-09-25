@@ -434,3 +434,55 @@ class TestRankFusionScaling:
 
         small, large = _min_wall_ms(lambda: shape(25_000)), _min_wall_ms(lambda: shape(100_000))
         _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+
+# --- ground_sentences / grounding_coverage: the grounding batch -------------
+#
+# ground_sentences' documented cost is O(sentences x rouge_w DP): the total
+# DP work is |Q| x N (N = the text's tokens, capped at 16384), linear in the
+# text at a bounded query width. grounding_coverage's documented cost is the
+# classic O(|S| x |T|) weighted-LCS DP (its own docs): time grows with the
+# PRODUCT of the operands, memory with the MINIMUM (two rows, never an n*m
+# matrix), the product axis is pinned at its documented 4x-per-doubling
+# band, the one-sided axis (doubling one operand only) at the linear gate.
+
+
+def _ground_sentences_shape(tokens: int) -> object:
+    text = ("Word. " * (tokens // 2))[:-1]
+    return tors.ground_sentences(text, "word")
+
+
+def _coverage_shape(tokens: int) -> float:
+    return tors.grounding_coverage(("word " * tokens)[: 4 * tokens], ("word " * tokens))
+
+
+class TestGroundingBatchScaling:
+    @pytest.mark.timing
+    def test_ground_sentences_stays_linear_in_the_text(self) -> None:
+        """8k -> 16k -> 32k tokens (2x each): measured 1.4ms -> 2.7ms ->
+        5.5ms, ratios ~2.0 (linear), gate 3.0x per doubling. A per-sentence
+        rescan of the token stream (the quadratic shape) measures ~4x per
+        doubling here."""
+        small = _min_wall_ms(lambda: _ground_sentences_shape(8_000))
+        large = _min_wall_ms(lambda: _ground_sentences_shape(16_000))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_coverage_one_sided_doubling_stays_linear(self) -> None:
+        """Doubling the TEXT (the candidate stream) at a fixed source:
+        the DP's rows double, the width is fixed (measured ~2x, gate 3.0x
+        per doubling."""
+        source = "word " * 4_000
+        small = _min_wall_ms(lambda: tors.grounding_coverage(source, "word " * 2_000))
+        large = _min_wall_ms(lambda: tors.grounding_coverage(source, "word " * 4_000))
+        _assert_linear_per_doubling(small, large, 2, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_coverage_two_sided_doubling_stays_at_the_product(self) -> None:
+        """Doubling BOTH operands (4x the DP cells): measured ~4x, gate
+        5.0x per doubling, the documented quadratic-product time class,
+        pinned so an accidental CUBIC formulation (per-cell reallocation,
+        an n·m matrix) blows through."""
+        small = _min_wall_ms(lambda: _coverage_shape(2_000))
+        large = _min_wall_ms(lambda: _coverage_shape(4_000))
+        _assert_linear_per_doubling(small, large, 2, 5.0)

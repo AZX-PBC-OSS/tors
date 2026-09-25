@@ -20,7 +20,9 @@
 //! strings over any alphabet, hex/b62/b64url tokens and keys, UUIDv4/v7),
 //! [`pii_impl`] (contact-material scrub, the
 //! telemetry-safety port), [`grounding_impl`] (snippet-provenance
-//! grounding: ROUGE-L span alignment for search-result highlighting),
+//! grounding: ROUGE-L span alignment for search-result highlighting, the
+//! `ground_sentences` per-sentence batch, and the `grounding_coverage`
+//! utilization twin living beside the `grounded_impl` verdict it twins),
 //! [`rank_fusion_impl`] (reciprocal rank fusion and the IR ranking
 //! metrics over id space), and
 //! [`json_valid_impl`] (the RFC 8259
@@ -661,6 +663,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(is_grounded, m)?)?;
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
+    m.add_function(wrap_pyfunction!(ground_sentences, m)?)?;
+    m.add_function(wrap_pyfunction!(grounding_coverage, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
     m.add_function(wrap_pyfunction!(content_hash, m)?)?;
