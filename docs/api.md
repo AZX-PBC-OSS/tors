@@ -4670,6 +4670,213 @@ tors.minhash_signature("")[:3]
 # the empty-shingle-set sentinel
 ```
 
+## `tors.simhash_distance`
+
+```python
+def simhash_distance(a: int, b: int) -> int: ...
+```
+
+The Hamming distance between two simhash fingerprints — the values
+`tors.simhash64`/`tors.simhash128` return: the count of bit positions at
+which they differ. Zero means an identical fingerprint (the near-dup
+gate's "same token multiset" equality: same words, any order, any
+whitespace); small distances are the near-duplicate band whose
+calibration is corpus-dependent (`simhash64`'s measured anchors and their
+caveats apply unchanged — calibrate per deployment).
+
+```python
+a = tors.simhash64("the quick brown fox jumps over the lazy dog")
+b = tors.simhash64("the quick brown fox jumps over the lazy cat")
+tors.simhash_distance(a, b)
+# 9: one word changed, the fingerprint moved a few bits, not half the
+# width (unrelated-text pairs sit far wider apart)
+tors.simhash_distance(a, a)
+# 0
+```
+
+Both spellings are supported, but a pair must come from ONE of them:
+mixing a 64-bit with a 128-bit fingerprint raises `ValueError`. The
+honest mechanics, since a Python int carries no width metadata: each
+argument is classified by magnitude (only a 128-bit fingerprint can be
+`>= 2**64`) and a pair split across that line is refused — which catches
+the real caller bug (one `simhash64` value against one `simhash128`
+value); a pair that both fit in 64 bits compares correctly either way,
+because the arithmetic itself is width-blind `(a ^ b).bit_count()`.
+
+A non-int argument (including `bool`) raises `TypeError`; a negative int
+raises `ValueError` (fingerprints are unsigned); an int past `2**128`
+raises `OverflowError`. Both arguments ride the `__index__` protocol, so
+int-likes (numpy integers) work.
+
+GIL: the crate's zero-detach extreme point (the `uuid_parse` class) — the
+whole work is one xor-and-popcount over two borrowed ints, strictly less
+than the argument extraction that precedes it. No `aio` twin.
+
+## `tors.shingle_jaccard` / `tors.shingle_dice`
+
+```python
+def shingle_jaccard(a: str, b: str, *, width: int = 3) -> float: ...
+def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
+```
+
+The two set-similarity readings of Broder 1997's shingling + resemblance
+(the definition near-duplicate detection is about, and the exact quantity
+`tors.minhash_signature` estimates): each text is reduced to its set of
+`width`-token WORD shingles, and the pair is scored as either the Jaccard
+index `|A ∩ B| / |A ∪ B|` or the Dice coefficient
+`2|A ∩ B| / (|A| + |B|)`. Dice weights agreement toward the small-set
+side (a shared sliver of a huge set moves Dice more than Jaccard), so
+`dice >= jaccard` for every pair.
+
+**Word shingles, not character shingles** (the same rationale
+`minhash_signature` documents): near-duplicates preserve word sequence —
+a paragraph reflowed or a word swapped keeps most of its word k-grams,
+where character k-grams shift wholesale. Tokens are the crate's one
+real-word tokenizer: UAX #29 word segments (`word_bounds`' segmentation),
+whitespace-only segments skipped — so CJK text (no spaces) still yields
+per-ideograph tokens, and emoji/punctuation segments are tokens.
+
+**Normalization is the grounding layer's matching form**: each token is
+lowercased and canonicalized to NFC before hashing, so case and
+whitespace shape are invisible (`"Hello World"` and `"hello world"` score
+1.0), and NFC-equivalent inputs behave identically (NFD "café" and NFC
+"café" are the same tokens). Punctuation is NOT invisible: the tokenizer
+keeps punctuation-only segments as tokens (simhash's and minhash's own
+rule), so a comma lands in the shingle stream — inserting punctuation is
+an edit, not a reflow.
+
+The empty-set convention: text with no word tokens (empty,
+whitespace-only, or fewer tokens than `width`) has an EMPTY shingle set;
+two empty sets score 1.0 (∅ ⊆ ∅ — two token-free texts are duplicates of
+each other, which is what `dedup_near_dup(method="shingle")` must
+conclude too), exactly one empty side scores 0.0.
+
+```python
+tors.shingle_jaccard(
+    "The quarterly oil sample interval for field outages was adjusted",
+    "the QUARTERLY oil sample interval for field outages was adjusted",
+)
+# 1.0: case and whitespace shape are invisible
+tors.shingle_jaccard("alpha beta gamma delta epsilon zeta",
+                     "alpha beta gamma eta theta iota")
+# 0.14285714285714285: the shared head is 1 of 7+ shingles
+tors.shingle_dice("alpha beta gamma delta epsilon zeta",
+                  "alpha beta gamma eta theta iota")
+# 0.25: the same agreement, small-set-weighted
+tors.shingle_jaccard("", "alpha beta gamma")
+# 0.0; tors.shingle_jaccard("", "") -> 1.0 (the empty-set convention)
+```
+
+Bounds: `width` must be >= 1 (`ValueError`), rides the `__index__`
+protocol (`bool` rejected), and a `width` past 1024 over a stream that
+fills the window raises the same sweep-budget `ValueError`
+`minhash_signature` raises (the cost shape is identical: each step
+re-hashes the live window). A non-str argument raises `TypeError`; a
+lone surrogate raises `UnicodeEncodeError` (the crate-wide str-borrow
+contract).
+
+GIL: two str borrows and the `width` validation under the GIL, the whole
+tokenize + shingle + set pass under one `py.detach`, a single float out.
+`aio` twins: `tors.aio.shingle_jaccard` / `tors.aio.shingle_dice`.
+
+## `tors.dedup_near_dup`
+
+```python
+def dedup_near_dup(
+    texts: list[str],
+    *,
+    threshold: float = 0.9,
+    method: Literal["simhash", "shingle", "minhash"] = "simhash",
+) -> DedupResult: ...
+```
+
+Greedy keep-first near-duplicate dedup over a list of strings — the
+corpus-preparation step Lee et al. 2021 showed pays off at LLM
+pretraining scale (<https://arxiv.org/abs/2107.06499>), and the BigCode /
+starcode pipelines run as an exact-hash pass followed by near-dup passes
+with a calibrated threshold. Returns a dict with three keys, all present
+every time, all indices into the INPUT order:
+
+- `kept`: the representatives, ascending — text `i` is kept iff no
+  EARLIER kept text is within `threshold` of it. Input order is the
+  tie-break by construction, so the result is deterministic and order-
+  preserving: the first of a duplicate family survives.
+- `dropped`: the absorbed texts, ascending.
+- `groups`: a full partition of `range(len(texts))`, in representative
+  order — each group is one kept representative followed by the texts it
+  absorbed (singleton groups are kept texts with no duplicates).
+  `kept == [g[0] for g in groups]` and
+  `sorted(kept + dropped) == list(range(len(texts)))` always hold.
+
+```python
+corpus = [
+    "The quarterly oil sample interval was adjusted after the audit.",
+    "the quarterly oil sample interval was adjusted after the audit",
+    "The quarterly oil sample interval was extended after the audit.",
+    "A completely different memo about the parking garage resurfacing.",
+]
+tors.dedup_near_dup(corpus, threshold=0.8, method="simhash")
+# {'kept': [0, 3], 'dropped': [1, 2], 'groups': [[0, 1, 2], [3]]}
+tors.dedup_near_dup(corpus, threshold=0.8, method="shingle")
+# {'kept': [0, 2, 3], 'dropped': [1], 'groups': [[0, 1], [2], [3]]}
+# (the shingle method's exact trigram Jaccard keeps the one-word-edit
+# row; the simhash vote still sees the shared bag of words)
+tors.dedup_near_dup([])
+# {'kept': [], 'dropped': [], 'groups': []}
+```
+
+The three methods (an unknown name raises `ValueError` naming every
+choice) share one normalization policy — the grounding layer's lowercase
++ NFC fold — so switching methods cannot silently change what "same
+text" means:
+
+- `"simhash"` (default): a pair is duplicates when the Hamming distance
+  between the 64-bit fingerprints of the folded texts is at most
+  `floor((1 - threshold) * 64)` (threshold 0.9 -> 6 bits). Fastest; the
+  bag-of-words vote makes it blind to word ORDER (a permutation
+  fingerprints identically) and its band is corpus-dependent — the
+  `simhash64` calibration caveat applies to the threshold.
+- `"shingle"`: duplicates when the EXACT Jaccard index of the
+  3-token word-shingle sets is at least `threshold` (the
+  `shingle_jaccard` semantics, fixed width 3). The precise, slower
+  reading; order-sensitive where simhash is not. The threshold
+  comparison is float: a pair whose exact Jaccard rounds up to exactly
+  the threshold merges (its exact value sits a hair below the
+  threshold's rational value); the error is at most one ulp in the
+  merge direction, never the data-loss direction.
+- `"minhash"`: duplicates when the agreement fraction of the two
+  128-permutation `minhash_signature` signatures (its defaults:
+  shingle_size 3, seed 0) is at least `threshold` — the estimated
+  Jaccard (standard error `sqrt(J(1-J)/128)` ~ 0.044) for texts too
+  wide to intersect exactly.
+
+**Scope — small candidate sets, honestly**: the sweep is O(n²) pair
+checks by design, with the per-method early exits (the popcount is O(1);
+the shingle method skips a pair whose cardinality ratio already fails
+the threshold; the MinHash count aborts the moment agreement is
+unreachable), holding O(total input) of fingerprint state and NO
+persistent index. The LSH banding table a corpus-scale pipeline builds
+on these signatures is caller state — docs/design.md's scope cut, the
+same boundary `bm25_rank` sits on. The quadratic wall is pinned with an
+explicit budget in `tests/test_scaling_pins.py` and benchmarked at
+n = 100/1k/10k in `benches/near_dup.rs`; beyond tens of thousands of
+candidates, band `minhash_signature` output yourself.
+
+`threshold` must be in [0.0, 1.0] (NaN refused), else `ValueError`; a
+non-str element raises `TypeError`. The empty list gives the empty
+result; all-identical input keeps exactly the first text; two token-free
+texts (empty, whitespace-only) are duplicates of each other (the empty-
+set convention above). The convention's 0.0 side (exactly one token-free
+text) is a shingle/minhash special case: under the simhash method
+token-free text fingerprints to 0, and at a low enough threshold it can
+merge with a real text.
+
+GIL: the list extraction (one str copy per element, the standard
+O(total input) class) and the threshold/method validation under the GIL,
+then the fingerprint pass AND the pairwise sweep under one `py.detach`,
+then the O(n + groups) index-list marshalling. `aio` twin:
+`tors.aio.dedup_near_dup`.
+
 ## `tors.CompiledLemmaDict`
 
 ```python

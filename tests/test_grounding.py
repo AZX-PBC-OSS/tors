@@ -114,13 +114,15 @@ class TestScoring:
         # (UAX #29), the exact segmentation the scorer runs on, not a Python
         # regex: `\w+` glues "0¼" into one term while UAX #29 splits 0|¼
         # (U+00BC is WB=Other), and every such divergence is a false oracle
-        # failure.  Segments are case-folded NFC to mirror the matcher.
-        terms = [query[s:e] for s, e in word_bounds(query)]
+        # failure.  Segments are case-folded NFC to mirror the matcher: a
+        # decomposed query segment must match the snippet's composed form.
+        terms = [
+            unicodedata.normalize("NFC", query[s:e]).lower()
+            for s, e in word_bounds(query)
+        ]
         for snippet in result["snippets"]:
             body = unicodedata.normalize("NFC", snippet["text"]).lower()
-            assert any(unicodedata.normalize("NFC", term).lower() in body for term in terms), (
-                snippet
-            )
+            assert any(term in body for term in terms), snippet
 
     def test_the_exact_match_scores_about_one(self) -> None:
         result = highlight(

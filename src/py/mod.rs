@@ -34,6 +34,7 @@ pub mod json_valid;
 pub mod lemma_dict;
 pub mod merkle;
 pub mod minhash;
+pub mod near_dup;
 pub mod normalize;
 pub mod phonetic;
 pub mod pii;

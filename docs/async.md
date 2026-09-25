@@ -27,9 +27,11 @@ chunk with the DP capped, but a 2k-token chunk already measures ~1 ms —
 thread-hop territory), the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, the
-fuzzy-matching and JSON-repair families
+fuzzy-matching, near-duplicate, and JSON-repair families
 (`levenshtein`/`jaro`/`jaro_winkler`, `similarity_ratio`/
-`get_close_matches`, `is_grounded`, and the `repair_json*` trio:
+`get_close_matches`, `is_grounded`, `shingle_jaccard`/`shingle_dice`/
+`dedup_near_dup` (the O(n²) pair sweep the near-dup docs pin), and the
+`repair_json*` trio:
 quadratic and linear native passes whose documented measurements reach
 seconds and minutes on large inputs, exactly the calls that starve a loop
 un-wrapped), both truncate spellings,
@@ -58,7 +60,8 @@ wrapper body) as well as behaviorally (a heartbeat coroutine keeps ticking
 with worst gaps well under the call's own wall during a large `diff_opcodes`
 await), and pins the covered set against `tors.aio._WRAPPED`: the curated
 list is the contract, and the families it names are the input-scaling set
-it covers — the chunking, fuzzy-matching, and JSON-repair families
+it covers — the chunking, fuzzy-matching, near-duplicate, and JSON-repair
+families
 (minutes-scale calls most need the thread hop), the search/replace family
 (`find_patterns`, `count_matches`, `replace_many`,
 `replace_many_masked`), the code-block family (`extract_code_blocks`,

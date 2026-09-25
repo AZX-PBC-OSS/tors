@@ -16,8 +16,8 @@ document, real overhead next to a microsecond-scale call over a short
 string. So this module covers only the functions whose realistic inputs
 are large enough that the thread-hop cost is reliably negligible: the
 chunking family, the retrieval/scoring primitives, the diff engine, the
-batch pipeline, the fuzzy-matching and JSON-repair families
-(``levenshtein``/``jaro``/``jaro_winkler``,
+batch pipeline, the fuzzy-matching, near-duplicate, and JSON-repair
+families (``levenshtein``/``jaro``/``jaro_winkler``,
 ``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
 grounding pair ``ground_sentences``/``grounding_coverage``, the
 ``repair_json*`` trio: quadratic and linear native passes whose
@@ -138,6 +138,7 @@ _WRAPPED = (
     "count_matches",
     "decode_utf16",
     "decode_utf8",
+    "dedup_near_dup",
     "diff_opcodes",
     "diff_opcodes_lines",
     "extract_code_blocks",
@@ -168,6 +169,8 @@ _WRAPPED = (
     "scrub_pii",
     "scrub_pii_report",
     "sentence_bounds",
+    "shingle_dice",
+    "shingle_jaccard",
     "similarity_ratio",
     "strip_code_fences",
     "strip_controls",

@@ -284,6 +284,22 @@
 //! measured bands and the caller-side input-size guidance; there is no
 //! `deadline_ms` here, the cost shape is linear, not superlinear).
 //!
+//! The near-duplicate comparison surface (`simhash_distance`/
+//! `shingle_jaccard`/`shingle_dice`/`dedup_near_dup`, `near_dup_impl`)
+//! adds the batch-corpus shapes on top of the similarity primitives:
+//! `simhash_distance` is the zero-detach extreme point (uuid_parse's
+//! class — the whole work is one xor-and-popcount over two borrowed
+//! ints, strictly less than the extraction that precedes it), the pair
+//! similarities are two str-in borrows plus one detached tokenize +
+//! shingle + set pass with a float out, and `dedup_near_dup` is the
+//! corpus shape (one O(total-input) str-list extraction and the
+//! threshold/method validation under the GIL, the fingerprint pass AND
+//! the O(n²) pairwise sweep under one `py.detach`, then the O(n +
+//! groups) index-list marshalling — the int-list class at corpus
+//! scale). No persistent index and no per-call state: the O(n²) pair
+//! sweep is the documented, budget-pinned cost (docs/design.md's
+//! small-candidate-set scope), not a residue class to explain away.
+//!
 //! The object content-addressing surface (`content_hash`) adds a residue
 //! class of its own, the arg-walk class scaled to a whole object tree:
 //! the walk that materializes the canonical form's owned value tree runs
@@ -447,6 +463,7 @@ pub mod json_schema_impl;
 pub mod json_valid_impl;
 pub mod merkle_impl;
 pub mod minhash_impl;
+pub mod near_dup_impl;
 pub mod normalize_impl;
 pub mod phonetic_impl;
 pub mod pii_impl;
@@ -537,6 +554,7 @@ use py::json_valid::*;
 use py::lemma_dict::CompiledLemmaDict;
 use py::merkle::*;
 use py::minhash::*;
+use py::near_dup::*;
 use py::normalize::*;
 use py::phonetic::*;
 use py::pii::*;
@@ -710,6 +728,10 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_to_offsets, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
+    m.add_function(wrap_pyfunction!(simhash_distance, m)?)?;
+    m.add_function(wrap_pyfunction!(shingle_jaccard, m)?)?;
+    m.add_function(wrap_pyfunction!(shingle_dice, m)?)?;
+    m.add_function(wrap_pyfunction!(dedup_near_dup, m)?)?;
     m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;
     m.add_function(wrap_pyfunction!(quote, m)?)?;
     m.add_function(wrap_pyfunction!(quote_plus, m)?)?;

@@ -164,6 +164,7 @@ edge cases are in the [API reference](docs/api.md).
 | Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical`, `chunk_to_budget`, `chunk_to_offsets` |
 | Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `minhash_signature`, `merkle_root`, `merkle_diff`, `content_hash` |
 | Rank fusion & IR metrics | `rank_fuse` (Reciprocal Rank Fusion, Cormack/Clarke/Buüttcher SIGIR 2009, ranks only, never raw scores), `ndcg_at_k` (Järvelin & Kekäläinen TOIS 2002), `mrr`, `recall_at_k`, `precision_at_k` |
+| Near-duplicate detection & dedup | `simhash_distance`, `shingle_jaccard`, `shingle_dice`, `dedup_near_dup` (greedy keep-first over small candidate sets; no LSH index) |
 | UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |
 | Document-format extraction (`tors.documents`) | `to_markdown`, `to_text`, `sniff`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris` |

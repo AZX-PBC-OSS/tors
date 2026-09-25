@@ -1409,6 +1409,97 @@ def minhash_signature(
     seed: int = 0,
 ) -> list[int]: ...
 
+# `dedup_near_dup`'s result, all three keys present every time, all
+# indices into the INPUT order: `kept` the representatives (ascending;
+# text i is kept iff no EARLIER kept text is within threshold of it, so
+# input order is the tie-break), `dropped` the absorbed texts (ascending),
+# `groups` a full partition of range(len(texts)) in representative order
+# -- each group is one kept representative followed by the texts it
+# absorbed (singleton groups are kept texts with no duplicates);
+# kept == [g[0] for g in groups] and sorted(kept + dropped) ==
+# list(range(len(texts))) always hold.
+class DedupResult(TypedDict):
+    kept: list[int]
+    dropped: list[int]
+    groups: list[list[int]]
+
+# The Hamming distance between two simhash fingerprints (the values
+# simhash64/simhash128 return): the count of bit positions at which they
+# differ. Zero means an identical fingerprint (the near-dup gate's "same
+# token multiset" equality: same words, any order, any whitespace);
+# small distances are the near-duplicate band whose calibration is
+# corpus-dependent (see simhash64's measured anchors). Both spellings
+# are supported, but a pair must come from ONE: mixing a 64-bit with a
+# 128-bit fingerprint raises ValueError (classified by magnitude -- only
+# a 128-bit fingerprint can be >= 2**64 -- which catches the real mixup;
+# the arithmetic itself is width-blind). Non-int (including bool):
+# TypeError; negative: ValueError (fingerprints are unsigned); past
+# 2**128: OverflowError. No aio twin: the whole work is one
+# xor-and-popcount over two ints, less than the extraction itself.
+def simhash_distance(a: int, b: int) -> int: ...
+
+# The Jaccard index of the two texts' width-token WORD shingle sets,
+# |A ∩ B| / |A ∪ B| -- Broder 1997's resemblance, the exact quantity
+# minhash_signature estimates. Word shingles (not character shingles):
+# near-duplicates preserve word sequence where a reflow shifts character
+# k-grams wholesale. Tokens are the crate's one real-word tokenizer (UAX
+# #29 word segments, whitespace-only segments skipped), each lowercased
+# and NFC-canonicalized (the grounding layer's matching form), so case
+# and whitespace shape are invisible and NFC-equivalent inputs behave
+# identically. Identical shingle sets 1.0, disjoint 0.0; the empty-set
+# convention: two token-free texts (empty, whitespace-only, or fewer
+# tokens than width) score 1.0 (∅ ⊆ ∅), exactly one token-free side 0.0.
+# width must be >= 1 (ValueError); a width past 1024 over a stream that
+# fills the window raises the same sweep-budget ValueError
+# minhash_signature raises. Non-str: TypeError; lone surrogates:
+# UnicodeEncodeError (the crate-wide str-borrow contract).
+def shingle_jaccard(a: str, b: str, *, width: int = 3) -> float: ...
+
+# The Dice coefficient of the same shingle sets, 2|A ∩ B| / (|A| + |B|):
+# the same agreement Jaccard measures, weighted toward the small-set
+# side. Everything else -- tokenization, normalization, the empty-set
+# convention, the width and str-borrow bounds, the GIL model --
+# shingle_jaccard's exactly.
+def shingle_dice(a: str, b: str, *, width: int = 3) -> float: ...
+
+# Greedy keep-first near-duplicate dedup over a list of strings, the
+# small-candidate-set scope the doctrine allows (O(n^2) pair checks with
+# the per-method early exits, O(total input) retained, NO persistent
+# index -- the LSH banding table a corpus-scale pipeline builds on these
+# signatures is caller state, docs/design.md's scope cut; beyond tens of
+# thousands of candidates, band minhash_signature output yourself). All
+# three methods share the grounding normalization policy (lowercase +
+# NFC), so a method switch cannot silently change what "same text"
+# means:
+# - "simhash" (default): duplicates when the Hamming distance between
+#   the 64-bit fingerprints of the folded texts is at most
+#   floor((1 - threshold) * 64) (threshold 0.9 -> 6 bits);
+# - "shingle": duplicates when the EXACT Jaccard index of the 3-token
+#   word-shingle sets is at least threshold (the threshold comparison
+#   is float: a pair whose exact Jaccard rounds up to exactly the
+#   threshold merges; the error is at most one ulp in the merge
+#   direction, never the data-loss direction);
+# - "minhash": duplicates when the agreement fraction of the two
+#   128-permutation minhash_signature signatures (shingle_size 3,
+#   seed 0) is at least threshold -- the estimated Jaccard (standard
+#   error sqrt(J(1-J)/128)) for corpora too wide to intersect pairwise.
+# threshold must be in [0.0, 1.0] (NaN refused), else ValueError; an
+# unknown method raises ValueError naming every choice; a non-str
+# element raises TypeError. Empty list -> the empty result;
+# all-identical input keeps exactly the first text; two token-free
+# texts (empty, whitespace-only) are duplicates of each other (the
+# empty-set convention), whose 0.0 side (exactly one token-free text)
+# is a shingle/minhash special case: under the simhash method
+# token-free text fingerprints to 0, and at a low enough threshold it
+# can merge with a real text. Deterministic (input order is the
+# tie-break).
+def dedup_near_dup(
+    texts: list[str],
+    *,
+    threshold: float = 0.9,
+    method: Literal["simhash", "shingle", "minhash"] = "simhash",
+) -> DedupResult: ...
+
 # Stateless: no vocabulary/vectorizer object persists between calls.
 # Tokenization: UAX #29 word segments, non-whitespace only, lowercased
 # (Unicode-correct str.lower, not ASCII-only). TF is the raw term count

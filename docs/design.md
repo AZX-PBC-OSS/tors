@@ -113,6 +113,12 @@ The cuts below are decisions, not oversights:
   keeps `bm25_rank` index-free. A banding helper (cutting a signature into
   `r`-element bands and hashing them for table keys) is a future
   companion question, not a hidden commitment inside the signature core.
+  The near-duplicate comparison layer (`simhash_distance`,
+  `shingle_jaccard`/`shingle_dice`, `dedup_near_dup`) lives on the same
+  side of the boundary: it scores PAIRS and sweeps SMALL candidate lists
+  in one call — `dedup_near_dup` is O(n²) pair checks by documented,
+  budget-pinned design, never an index — so corpus-scale recall still
+  bands signatures in caller code.
 - **A bespoke coroutine API.** Every function already releases the GIL for
   its native pass, so the async surface is one thread dispatch per call
   ([`tors.aio`](async.md)) rather than a purpose-built event-loop

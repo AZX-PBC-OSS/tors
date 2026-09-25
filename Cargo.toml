@@ -399,5 +399,9 @@ name = "minhash"
 harness = false
 
 [[bench]]
+name = "near_dup"
+harness = false
+
+[[bench]]
 name = "pii"
 harness = false
