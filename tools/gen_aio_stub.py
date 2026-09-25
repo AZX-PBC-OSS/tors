@@ -133,6 +133,8 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
     needs_any = False
     needs_hashable = False
     used_type_names: set[str] = set()
+    import re
+
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.name not in wrapped:
             continue
@@ -150,7 +152,6 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         # import it — the generated stub is a standalone module, and
         # ruff's F821 gate reads it. Word-boundary match: a name must
         # appear as ITSELF, not as a substring of another identifier.
-        import re
 
         for type_name in (
             "JSONValue",
@@ -162,6 +163,10 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         ):
             if re.search(rf"\b{type_name}\b", chunk):
                 used_type_names.add(type_name)
+    # The collections.abc names travel only when a translated signature
+    # spells them (the same freshness rule as Any below: an unused
+    # import in the stub is as stale as a missing one); the scan runs
+    # inline in the header build below.
     header = [
         '"""The awaitable spellings of tors\'s large-input functions (see',
         "``tors/aio.py`` for which functions and why only these). Signatures",
@@ -174,7 +179,19 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         '"""',
         "",
         "from collections.abc import "
-        + ", ".join(sorted({"Sequence", *(["Hashable"] if needs_hashable else [])})),
+        + ", ".join(
+            sorted(
+                {
+                    "Sequence",
+                    *(["Hashable"] if needs_hashable else []),
+                    *{
+                        name
+                        for name in ("Callable", "Iterator", "Sequence")
+                        if re.search(rf"\b{name}\b", "\n".join(body))
+                    },
+                }
+            )
+        ),
         f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
         "from tors import CompiledLemmaDict, StemmerLanguage",

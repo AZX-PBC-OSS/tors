@@ -184,6 +184,19 @@ class TestAwaitCorrectness:
             ("chunk_by_lines", ("l1\nl2\nl3\nl4\nl5", 2), {}),
             ("chunk_cdc", (b"x" * 20_000,), {}),
             ("chunk_hierarchical", ("One. Two. Three. Four.", 8), {}),
+            # the token-budget twins' keyword-only max_tokens/overlap
+            # marshalling through to_thread's kwargs path (the aio
+            # twins are in this sweep like every other chunker)
+            (
+                "chunk_to_budget",
+                ("One. Two. Three. Four.", lambda s: len(s.split())),
+                {"max_tokens": 2},
+            ),
+            (
+                "chunk_to_offsets",
+                ("One. Two. Three. Four.", [(0, 4), (5, 9), (10, 16), (17, 22)]),
+                {"max_tokens": 3, "overlap": 1},
+            ),
             (
                 "minhash_signature",
                 ("the quick brown fox jumps over the lazy dog",),

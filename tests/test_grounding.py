@@ -23,15 +23,23 @@ from hypothesis import strategies as st
 
 from tors import highlight, word_bounds
 
-# Arbitrary Unicode for the offset round-trip property: the property must
-# hold for ANY text the pipeline can see, so no alphabet restrictions beyond
-# surrogates (never valid in Python str from decoded bytes anyway).
 _ANY_TEXT = st.text(max_size=300)
 _ANY_QUERY = st.text(max_size=40)
 
 # Terms planted into drawn text: words that ARE in the text, so the
 # "every snippet contains a query term" invariant is exercisable.
 _WORDS = ["embedding", "model", "café", "検索", "العقد", "torque", "naïve"]
+
+
+def _is_cjk_char(ch: str) -> bool:
+    """The grounding tokenizer's CJK ranges (grounding_impl::is_cjk)."""
+    return (
+        "\u3040" <= ch <= "\u30FF"  # Hiragana + Katakana
+        or "\u3400" <= ch <= "\u4DBF"  # CJK Extension A
+        or "\u4E00" <= ch <= "\u9FFF"  # CJK Unified Ideographs
+        or "\uAC00" <= ch <= "\uD7AF"  # Hangul syllables
+        or "\uF900" <= ch <= "\uFAFF"  # CJK Compatibility Ideographs
+    )
 
 
 class TestOffsetRoundTrip:

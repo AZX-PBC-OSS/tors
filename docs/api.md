@@ -3541,6 +3541,145 @@ tors.chunk_hierarchical(md, 10_000, ["heading", None]) == tors.chunk_hierarchica
 # True: the "heading" sentinel + splice is the default hierarchy spelled out.
 ```
 
+## `tors.chunk_to_budget` / `tors.chunk_to_offsets`
+
+```python
+def chunk_to_budget(
+    text: str,
+    token_counter: Callable[[str], int],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
+) -> list[tuple[int, int]]: ...
+
+def chunk_to_offsets(
+    text: str,
+    token_offsets: Sequence[tuple[int, int]],
+    *,
+    max_tokens: int,
+    overlap: int | float = 0,
+) -> list[tuple[int, int]]: ...
+```
+
+**Async**: `await tors.aio.chunk_to_budget(...)` and
+`await tors.aio.chunk_to_offsets(...)` run these under `asyncio.to_thread`
+(see [Async use](async.md)).
+
+Token-budget chunking measured in the caller's own tokens: the packing
+primitive for LLM context windows, where the budget is a model's real token
+limit and a character proxy (`chunk_text`) is not good enough. The design is
+the segment-then-pack shape semchunk popularized
+([isaacus-dev/semchunk](https://github.com/isaacus-dev/semchunk)) and the
+LangChain/LlamaIndex token splitters ship, over tors's own UAX #29
+segmenters: cut `text` at sentence boundaries (a sentence whose own measured
+count exceeds `max_tokens` is re-cut at word boundaries; a single word still
+wider than the whole budget goes out whole (a covering chunker cannot split
+below its finest boundary), then greedily pack consecutive segments into
+chunks whose measured token count fits `max_tokens`. Returns `(start, end)`
+pairs in Python `str` index (codepoint) units: `text[start:end]` is the
+chunk. Empty text returns `[]`; text that fits whole returns one chunk.
+
+Two spellings, two measurement shapes:
+
+- **`chunk_to_budget`** takes the counter as a Python callable. It is called
+  with one CANDIDATE CHUNK's text per packing decision, never once per
+  boundary (O(segments) calls total, each counting at most one chunk's worth
+  of text), so counters that merge tokens across spaces or boundaries are
+  measured exactly as the emitted chunk will be, which is what makes the
+  per-chunk budget invariant hold for every counter. The counter must return
+  an `int` >= 1 for every sentence (`0`, a negative count, or an
+  unreasonably large value raise `ValueError`: a sentence measuring no
+  tokens makes the budget contract meaningless. A word-count tokenizer
+  (`len(text.split())`) measures zero any sentence that is a whitespace
+  run, not only whitespace-only text: UAX #29 makes a blank line a
+  sentence of its own (the second `\n` of `\n\n` is one), so
+  multi-paragraph text with blank lines raises the same error:
+  `"Paragraph one.\n\nParagraph two."`, any markdown blank-line document,
+  even a trailing blank line; whitespace-only text is the instance where
+  every sentence is blank. A non-int return raises
+  `TypeError`; a counter that raises propagates its exception
+  unchanged. This is the `CompiledLemmaDict`-style measured exception to the
+  stateless doctrine: a caller-supplied callable inside the packing.
+- **`chunk_to_offsets`** takes the token spans PRE-COMPUTED: a sequence of
+  `(start, end)` codepoint pairs, one per token, sorted and
+  non-overlapping (HuggingFace tokenizers' `Encoding.offsets` is this
+  shape after filtering zero-width spans (HF special tokens emit
+  `(0, 0)`); gaps are allowed, and untokenized text such as inter-token
+  whitespace measures 0 tokens). A span's token count is the number of
+  token pairs fully contained in it, so the packing is additive and exact
+  with no callback anywhere.
+
+`overlap` repeats trailing context into the next chunk: an `int` token count
+in `[0, max_tokens)` or a float ratio in `[0, 1)` (resolved as
+`floor(ratio * max_tokens)` tokens). The next chunk starts at the trailing
+segment boundary whose span back to the closed chunk's end measures at least
+the requested overlap: the RAG-retrieval shape where a fact split across a
+cut is still whole in the next chunk. The shared content is counter-relative:
+the overlap is certified by the same measurement the packing used, so a
+counter that certifies a whitespace run as a token can make the overlap a
+whitespace run. The overlap is declined for a
+transition when it cannot buy new context (a chunk shorter than the
+requested overlap, or a re-cut that would land a span strictly inside its
+predecessor): that one transition degrades to zero overlap rather than
+stall, loop, or emit the same text twice: the same forward-progress
+discipline `chunk_text`'s overlap applies. Chunks are non-empty, strictly
+increasing in both start and end, cover to the end of the text, and each
+fits the budget per the same measurement the packing used; with
+`overlap=0` they are a contiguous lossless covering partition.
+
+`max_tokens < 1`, an out-of-range `overlap` (either spelling), or a
+mis-shaped `token_offsets` sequence raise `ValueError` before any packing
+runs; a non-callable `token_counter` raises `TypeError`. An int beyond the
+i64 range the binding extracts (`max_tokens=10**30`) raises pyo3's own
+`OverflowError` at extraction instead, the `truncate_to_bounds`-identical
+pattern for every i64-typed size argument here, a clean Python error, never
+a panic. Text beyond `u32::MAX` bytes (4 GiB, the codepoint→byte offset
+grid the packing resolves spans through) also raises `ValueError` before
+any work runs, rather than silently truncating offsets.
+
+GIL model, stated honestly because the two spellings differ: **`chunk_to_budget` is NOT
+GIL-free**: its counter is Python and can only run under the GIL. The
+packing core runs under one `py.detach` and re-attaches the GIL per counter
+call, so the GIL is held only while the counter runs (plus O(chunk)
+argument construction), released for all native work between measurements.
+One measured caveat, because the doctrine forbids false GIL claims: the
+loop is schedulable between callbacks when each callback holds the GIL
+longer than `sys.getswitchinterval()` (5ms by default) or the native
+windows between them are substantial: a callback that straddles the
+switch interval forces CPython's fair GIL handoff (`gil_drop_request`). A
+GIL-held callback SHORTER than the switch interval on a small text
+(microsecond detach windows) can starve the loop for the whole call: the
+worker drops and re-acquires the GIL faster than the woken loop thread can
+take it. `tests/test_gil_release.py` pins the schedulable band for
+super-interval callbacks; for a fast counter on a small text, run the
+packing on a thread you control or use the GIL-free spelling below.
+**`chunk_to_offsets` is the GIL-free choice for
+hot paths**: the O(tokens) argument walk under the GIL, then the whole pack
+detached end to end, with the family's usual O(chunks) 2-tuple marshalling
+after. Like every chunker here, neither makes a retrieval-quality promise:
+the cost/benefit study at [arXiv:2410.13070](https://arxiv.org/abs/2410.13070)
+("Is Semantic Chunking Worth the Computational Cost?") found expensive
+splitting strategies not consistently worth their cost over simpler ones;
+this surface ships the cheap mechanical contract (boundary-safe packing
+under an exact token budget) and leaves the strategy to the caller.
+
+```python
+def word_counter(text: str) -> int:
+    return len(text.split())  # the docs' counter; any tokenizer callable works
+
+text = "One. Two. Three. Four."
+tors.chunk_to_budget(text, word_counter, max_tokens=2)
+# [(0, 10), (10, 22)]  -- "One. Two. " | "Three. Four."
+tors.chunk_to_budget(text, word_counter, max_tokens=2, overlap=1)
+# [(0, 10), (5, 17), (10, 22)]  -- "One. Two. " | "Two. Three. " | "Three. Four."
+tors.chunk_to_budget("a b c d e f g h", word_counter, max_tokens=3)
+# [(0, 6), (6, 12), (12, 15)]  -- a sentenceless run: word-boundary fallback
+
+spans = [(s, e) for s, e in tors.word_bounds(text) if text[s:e].strip()]
+tors.chunk_to_offsets(text, spans, max_tokens=4, overlap=2)
+# [(0, 10), (5, 17), (10, 22)]  -- the same shape, measured from spans
+```
+
 ## `tors.chunk_cdc`
 
 ```python
