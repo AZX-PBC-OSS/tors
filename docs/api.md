@@ -2495,11 +2495,22 @@ beats it on rare pairs; also pinned). Both deviations are documented
 semantics, verified in the test suite, not bugs.
 
 Tokens come from UAX #29 word boundaries (the same segmentation
-`word_bounds` exposes), with one refinement: every CJK character (Han,
-Hiragana, Katakana, Hangul) inside a word segment becomes its own token —
-UAX #29 keeps Katakana and Hangul runs joined, and unspaced CJK morphemes
-are the standard IR per-character fallback — so CJK text anchors at the
-same granularity the query does. Matching case-folds and NFC-canonicalizes
+`word_bounds` exposes), with one refinement: every character in the
+Hiragana and Katakana blocks (U+3040–U+30FF), CJK Extension A
+(U+3400–U+4DBF), the CJK Unified Ideographs (U+4E00–U+9FFF), Hangul
+syllables (U+AC00–U+D7AF) and the CJK Compatibility Ideographs
+(U+F900–U+FAFF) inside a word segment becomes its own token (UAX #29
+keeps Katakana and Hangul runs joined, and unspaced CJK morphemes are
+the standard IR per-character fallback), so text in those blocks anchors
+at the same granularity the query does. The refinement does not reach
+the CJK-family blocks outside those ranges: halfwidth Katakana
+(U+FF66–U+FF9F), halfwidth Hangul (U+FFA0–U+FFDC) and Hangul jamo
+(U+1100–U+11FF) runs stay one token, so such a run matches a query term
+only whole: `ground_sentences("ｱｲｳｴｵ。", "ｳ")` scores 0.0 where the
+fullwidth twin `ground_sentences("アイウエオ。", "ウ")` scores 1/3 (one
+of the five run tokens matches; the contrast is pinned in
+`TestCjkFilterCollateral`, `tests/test_ground_sentences.py`).
+Matching case-folds and NFC-canonicalizes
 (NFD accents match NFC queries); offsets land on token boundaries, which
 never split a grapheme cluster, so the round-trip holds through CJK,
 accents, ZWJ emoji and astral-plane text alike (pinned across all of
@@ -2678,6 +2689,23 @@ tors.grounding_coverage("alpha bravo charlie", "xray yankee zulu")
 tors.grounding_coverage("", "text")  # either side empty: exactly 0.0
 # 0.0
 ```
+
+The score normalizes by the SOURCE's token count, so it is asymmetric in
+the operands: `text` holding every source token in one contiguous run
+scores `1.0` no matter how much extra material it carries, while the
+same pair swapped scores the matched fraction, `f^-1(f(3)/f(5)) = 3/5`:
+
+```python
+tors.grounding_coverage("ba ce di", "ba ce di fo gu")
+# 1.0
+tors.grounding_coverage("ba ce di fo gu", "ba ce di")
+# 0.6
+```
+
+Coverage is monotone in `text` (extending the text never lowers it) and
+deliberately NOT monotone in the query: extending the query with a term
+absent from the text lowers the score (the added term dilutes recall),
+expected behavior, not a defect.
 
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 

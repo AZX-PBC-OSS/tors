@@ -13,9 +13,15 @@ in ``src/grounded_impl.rs``; this file pins what a consumer can rely on.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
+from time import monotonic
+
 import pytest
 from grounding_reference import (
     _cov,
+    _f,
+    _finv,
     _score_sentence,
     _word_seqs,
 )
@@ -254,5 +260,106 @@ class TestScoreInvariantTorture:
         c = _cov("bravo charlie delta", "alpha bravo charlie")
         assert a == b
         assert c == pytest.approx(a, abs=1e-9)  # WLCS symmetric, denominator differs
+
+
+class TestGroundingCoverageWave2:
+    def test_asymmetry_pinned_numerically(self):
+        """coverage(source, text) normalizes by the SOURCE; swapped operands
+        give a different number (recall of a different denominator).  The
+        docs carry the f(|source|) formula but no numeric example; pinned
+        here: a 3-of-5 contiguous overlap reads 1.0 one way, exactly 3/5 the
+        other (Equation 15: finv(f(3)/f(5)) = 3/5)."""
+        five = "ba ce di fo gu"
+        three = "ba ce di"
+        assert _cov(three, five) == pytest.approx(1.0, abs=1e-9)
+        assert _cov(five, three) == pytest.approx(3.0 / 5.0, abs=1e-9)
+        assert _cov(three, five) != pytest.approx(_cov(five, three), abs=1e-9)
+
+    def test_verbatim_containment_inside_a_larger_body_is_exactly_one(self):
+        """Text that CONTAINS the source verbatim inside a larger body covers
+        the source fully: recall normalizes by the source alone, so this is
+        exactly 1.0 -- a naive containment heuristic agrees here.  The two
+        DISAGREE on the scattered case below, which is the point of the
+        contiguity shaping."""
+        assert _cov("ba ce di", "x ba ce di y") == pytest.approx(1.0, abs=1e-9)
+
+    def test_scattered_coverage_diverges_from_a_naive_containment_heuristic(self):
+        """A naive set-containment heuristic ('every source token appears in
+        the text') reads 1.0 here; ROUGE-W recall reads finv(3/f(3)) = 3^(-1/6)
+        ~ 0.83 -- contiguity is the signal a set overlap cannot see."""
+        source = "ba ce di"
+        text = "ba x ce y di"
+        assert all(tok in text.split() for tok in source.split()), "precondition"
+        naive = 1.0
+        got = _cov(source, text)
+        assert got == pytest.approx(_finv(3.0 / _f(3)), abs=1e-9)
+        assert got < naive, "the shaping must price the scattered quoting below naive containment"
+
+    def test_cap_boundary_signal_on_the_last_scanned_token_and_past_it(self):
+        """16384-token cap: 'alpha' is the LAST scanned source token (the
+        denominator is the scanned 16384), 'beta' sits past the cap and is
+        silently ignored -- the documented bounded-scan discipline.  Hand
+        values: finv(f(1)/f(16384)) = 1/16384 exactly; two contiguous head
+        tokens read finv(f(2)/f(16384)) = 2/16384 exactly (Equation 15)."""
+        noise = " ".join(f"n{i}" for i in range(16_383))
+        source = f"{noise} alpha beta"
+        scanned = 16_384
+        whole = _cov(source, "alpha beta")
+        assert whole == pytest.approx(_finv(_f(1.0) / _f(scanned)), abs=1e-12)
+        assert whole == pytest.approx(1.0 / scanned, rel=1e-9)
+        # Past the cap: silently ignored (documented), exactly 0.0.
+        assert _cov(source, "beta") == 0.0
+        # The last scanned token alone scores the same full-recall shape.
+        assert _cov(source, "alpha") == pytest.approx(_finv(_f(1.0) / _f(scanned)), abs=1e-12)
+        # Head tokens: two contiguous matches over the scanned denominator.
+        assert _cov(source, "n0 n1") == pytest.approx(_finv(_f(2.0) / _f(scanned)), abs=1e-12)
+
+    def test_text_past_the_cap_ignored_even_when_it_is_all_the_signal(self):
+        # Inverse shape: the SOURCE fits under the cap; the TEXT's signal
+        # sits past ITS cap.  The text's tail is not measured, so the score
+        # reads only the text's leading 16384 tokens.
+        source = "alpha beta"
+        text = f"{'filler '.join(['x'] * 16_384)}alpha beta"
+        got = _cov(source, text)
+        assert 0.0 <= got < 1.0
+        assert got < _cov(source, "alpha beta"), (
+            "the same signal, pushed past the text cap, must not score full"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. GIL wave 2: four CONCURRENT 10MB calls -- held time per call must stay
+# flat (no allocator-contention leak into the GIL window).
+# ---------------------------------------------------------------------------
+
+
+async def _gap_and_wall(calls):
+    """Run `calls` concurrently under a 10ms heartbeat; return (worst gap,
+    total wall)."""
+    ticks: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat():
+        while True:
+            ticks.append(monotonic())
+            if stop.is_set():
+                return
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0)
+    started = monotonic()
+    try:
+        await asyncio.gather(*calls)
+        end = monotonic()
+    finally:
+        stop.set()
+        await task
+    worst = max((b - a for a, b in itertools.pairwise(ticks)), default=0.0)
+    return worst, end - started
+
+
+def _unit(n: int) -> str:
+    return "The pump failed with torque spec drift. " * n
 
 

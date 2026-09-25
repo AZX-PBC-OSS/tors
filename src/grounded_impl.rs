@@ -123,8 +123,8 @@
 //! weight. (1) Metric-family consistency: the snippet surfaces
 //! (`highlight`, `ground_sentences`) score ROUGE-W F1, and coverage is
 //! Equation 15's recall component of that same metric (Lin 2004, see
-//! `grounding_impl`'s module docs): one tokenization (UAX #29 words,
-//! CJK per-character, case-fold + NFC), one shaping, so a claim's
+//! `grounding_impl`'s module docs): one tokenization (UAX #29 words, the
+//! CJK blocks per character, case-fold + NFC), one shaping, so a claim's
 //! precision score and a source's coverage score never disagree about
 //! what a token is. A character-level Myers coverage would score an
 //! NFC/NFD variant or case difference as lost characters the token-level

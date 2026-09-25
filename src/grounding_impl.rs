@@ -179,15 +179,21 @@
 //! marks (NFD "cafe\u{301}" is one token folding to the same norm as NFC
 //! "café"), ZWJ emoji sequences survive as single tokens, RTL text yields
 //! the same logical-order tokens any scanner should. One refinement the
-//! UAX #29 tables do not make themselves: every CJK character (Han,
-//! Hiragana, Katakana, Hangul — see [`is_cjk`]) inside a word segment
-//! becomes its OWN token. UAX #29 splits Han and Hiragana per character
-//! but keeps Katakana and Hangul runs joined (verified against this
-//! crate's own `word_bounds`: `日本語のテキスト` →
+//! UAX #29 tables do not make themselves: every character in the blocks
+//! [`is_cjk`] covers (Hiragana + Katakana U+3040-30FF, CJK Extension A
+//! U+3400-4DBF, the CJK Unified Ideographs U+4E00-9FFF, Hangul syllables
+//! U+AC00-D7AF, CJK Compatibility Ideographs U+F900-FAFF) inside a word
+//! segment becomes its OWN token. UAX #29 splits Han and Hiragana per
+//! character but keeps Katakana and Hangul runs joined (verified against
+//! this crate's own `word_bounds`: `日本語のテキスト` →
 //! `日|本|語|の|テキスト`), and unspaced CJK morphemes are the standard
 //! IR per-character fallback (Lin 2004's Chinese evaluations tokenize per
 //! character for the same reason): without it a Katakana query term could
-//! never partially match inside a longer Katakana run. The sub-split walks
+//! never partially match inside a longer Katakana run. The refinement does
+//! NOT reach the CJK-family blocks outside [`is_cjk`]: halfwidth Katakana
+//! (U+FF66-FF9F), halfwidth Hangul (U+FFA0-FFDC) and Hangul jamo
+//! (U+1100-11FF) runs stay ONE token, so such a run matches only whole.
+//! The sub-split walks
 //! grapheme clusters, never bytes or bare chars, so a CJK base with
 //! combining marks stays one token. Matching is case-folded per character
 //! (the full `char::to_lowercase` mapping; a few foldings change length,

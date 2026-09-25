@@ -761,7 +761,9 @@ def is_grounded(
 # 2024, RAGBench §3.2: utilization = the length of the utilized context
 # spans over the context's length). Measured as ROUGE-W recall (Lin 2004's
 # Equation 15 R factor) over the grounding family's own UAX #29
-# tokenization (case-fold + NFC, CJK per character): one tokenization and
+# tokenization (case-fold + NFC; the CJK blocks per character, see
+# docs/api.md: halfwidth forms and jamo streams stay one token): one
+# tokenization and
 # one shaping shared with `highlight`/`ground_sentences`, so the precision
 # and recall surfaces never disagree about what a token is; a text quoting
 # a CONTIGUOUS passage of the source outscores one scattering the same
