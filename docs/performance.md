@@ -162,7 +162,7 @@ otherwise use:
   text within budget.
 - `ground_sentences` / `highlight` vs `rouge_score` (0.1.2): scoring a
   100 KiB document's 1,251 sentences against one query: one
-  `ground_sentences` call ~5.7-6.1 ms, one `highlight` ~5.2-5.5 ms, the
+  `ground_sentences` call ~5.7-6.3 ms, one `highlight` ~5.2-5.5 ms, the
   per-pair `RougeScorer.score` loop ~25-28 ms (~4-5x). The metrics differ
   by design (ROUGE-1/ROUGE-L there, the ROUGE-W-shaped F1 here), so the
   agreement check is the toy pair class: identical token sequences score
@@ -175,8 +175,9 @@ otherwise use:
 
 The five races live in `tools/bench_sota.py` (same inputs both sides,
 min-of-N walls, the agreement check asserted before a number prints, box
-ambient load 1-2x across runs: transcribe the minima, the ratios are the
-stable quantity).
+ambient loads 1-31 across runs, the `ground_sentences` 6.25 ms high end
+recomputed at the top of that range: transcribe the minima, the ratios
+are the stable quantity).
 
 ## One-shot hashing vs hashlib, honestly measured
 
