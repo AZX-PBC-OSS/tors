@@ -607,6 +607,17 @@ _SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
 # over the worst gap. Same derivation shape as _B64_RATIO_BUDGET.
 _CONTENT_HASH_RATIO_BUDGET = 0.80
 
+# The MinHash banding cell's per-cell ratio budget, the same derivation
+# shape: the signatures walk (one exact-int extraction per element over
+# n x num_perm Python ints) is a structurally large GIL-held arg-walk,
+# the content_hash class, and at 4k x 128 it is ~half the call. Measured
+# on the dev box (ambient load ~2, 3 samples, 4k signatures, bands=32/
+# rows=4, all-distinct signatures so the detached hashing sweep runs at
+# full length): worst gaps 32-53ms of 68-86ms walls, ratios 0.47-0.61.
+# 0.75 sits ~1.2x above that worst ratio and well below the ~1.0 a lost
+# detach shows; the 100ms ceiling holds ~2x margin over the worst gap.
+_LSH_RATIO_BUDGET = 0.75
+
 # The line-heavy corpus for the chunking family's cells (#30 item 5): the
 # chat-thread/log shape the streaming twins' own docstrings justify
 # themselves with ("a line-oriented corpus (a multi-MiB log or transcript)
@@ -2879,6 +2890,48 @@ def test_dedup_near_dup_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.dedup_near_dup, corpus, threshold=0.9, method="simhash")
+        )
+    )
+
+
+def _lsh_signatures(n_sigs: int = 4_000, num_perm: int = 128) -> list[list[int]]:
+    """Signature-DISTINCT random u64 signatures (one shared rng, fixed
+    seed): no bucket sharing, so the banding pass runs its full hashing
+    sweep and emits (almost) no pairs, the shape the release claim is
+    about. Built once per cell; ~4.3k x 128 Python ints is ~2s of
+    setup, paid once."""
+    import random
+
+    rng = random.Random(20260924)
+    return [[rng.getrandbits(64) for _ in range(num_perm)] for _ in range(n_sigs)]
+
+
+@pytest.mark.parametrize("size", [(4_000, 128)], ids=["4k-sigs"])
+def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+    size: tuple[int, int],
+) -> None:
+    """The MinHash banding claim: the signatures walk (one exact-int
+    extraction per element, the standard arg-walk class over
+    n * num_perm Python ints -- a structurally large GIL-held residue,
+    the content_hash class, hence the per-cell ratio budget) runs under
+    the GIL, then the WHOLE banding pass (hash every band, bucket it,
+    emit pairs) under one ``py.detach`` -- the pass is pure native,
+    detach end to end -- and the residue is the O(pairs) tuple-list
+    marshalling.
+
+    Measured on the dev box (ambient load ~2, 3 samples per cell, 4k
+    signatures x 128 rows, bands=32/rows=4, all-distinct signatures so
+    the hashing sweep runs at full length): worst gaps 32-53ms of
+    68-86ms walls (ratios 0.47-0.61), the walk the dominant share, the
+    detached pass the rest."""
+    n_sigs, num_perm = size
+    signatures = _lsh_signatures(n_sigs, num_perm)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(
+                tors.lsh_candidates, signatures, bands=32, rows=num_perm // 32
+            ),
+            ratio_budget=_LSH_RATIO_BUDGET,
         )
     )
 

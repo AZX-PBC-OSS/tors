@@ -31,6 +31,12 @@ unicode-segmentation = "1.13.3"
 # root memchr pin; occurrence search only — the parity walk stays
 # independent).
 memchr = "2.8.3"
+# The lsh target's band-key oracle: the same crate (and version) the
+# core's one hashing contract runs on, hand-synced to the root
+# Cargo.toml's twox-hash pin (the sha2/const-hex discipline above). The
+# target re-derives the frame itself so the oracle stays an independent
+# spelling, not a call into the code under test.
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash64", "std"] }
 
 [dependencies.tors]
 # The crates.io package is `tors-core` (the plain `tors` name is an unrelated,
@@ -328,6 +334,13 @@ bench = false
 [[bin]]
 name = "near_dup"
 path = "fuzz_targets/near_dup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lsh"
+path = "fuzz_targets/lsh.rs"
 test = false
 doc = false
 bench = false

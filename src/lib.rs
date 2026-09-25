@@ -300,6 +300,17 @@
 //! sweep is the documented, budget-pinned cost (docs/design.md's
 //! small-candidate-set scope), not a residue class to explain away.
 //!
+//! The MinHash banding surface (`lsh_candidates`/`lsh_probability`/
+//! `lsh_threshold`, `lsh_impl`) is the candidate generator beside those
+//! two: `lsh_candidates` is the corpus shape over SIGNATURES (one
+//! O(n·num_perm) int-element walk under the GIL, the whole banding pass
+//! under one `py.detach` — hash every band, bucket it, emit only pairs
+//! that share a bucket — then the O(pairs) tuple-list marshalling), and
+//! the two formulas are pure float arithmetic over two ints, the
+//! zero-detach `simhash_distance` class with no `aio` twin. No
+//! persistent table exists on either path: one pass, output-sensitive
+//! memory.
+//!
 //! The object content-addressing surface (`content_hash`) adds a residue
 //! class of its own, the arg-walk class scaled to a whole object tree:
 //! the walk that materializes the canonical form's owned value tree runs
@@ -461,6 +472,7 @@ pub mod html_table;
 pub mod json_repair;
 pub mod json_schema_impl;
 pub mod json_valid_impl;
+pub mod lsh_impl;
 pub mod merkle_impl;
 pub mod minhash_impl;
 pub mod near_dup_impl;
@@ -552,6 +564,7 @@ use py::html::*;
 use py::json_repair::*;
 use py::json_valid::*;
 use py::lemma_dict::CompiledLemmaDict;
+use py::lsh::*;
 use py::merkle::*;
 use py::minhash::*;
 use py::near_dup::*;
@@ -733,6 +746,9 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shingle_dice, m)?)?;
     m.add_function(wrap_pyfunction!(dedup_near_dup, m)?)?;
     m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(lsh_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(lsh_probability, m)?)?;
+    m.add_function(wrap_pyfunction!(lsh_threshold, m)?)?;
     m.add_function(wrap_pyfunction!(quote, m)?)?;
     m.add_function(wrap_pyfunction!(quote_plus, m)?)?;
     m.add_function(wrap_pyfunction!(unquote, m)?)?;

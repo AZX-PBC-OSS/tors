@@ -153,6 +153,7 @@ _WRAPPED = (
     "jaro",
     "jaro_winkler",
     "levenshtein",
+    "lsh_candidates",
     "minhash_signature",
     "mrr",
     "ndcg_at_k",

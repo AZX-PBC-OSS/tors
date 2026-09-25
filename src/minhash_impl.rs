@@ -13,8 +13,10 @@
 //! report). A 100k-document ingestion pipeline bands the signatures
 //! (LSH) and recalls every pair above a similarity threshold; the LSH
 //! table itself is caller state — tors stays stateless (docs/design.md's
-//! scope cut), and a banding helper is a future question, not a hidden
-//! one inside this core.
+//! scope cut) — and the banding pass that turns signatures into
+//! candidate pairs is its own stateless module (`lsh_impl`: one call,
+//! one pass, no persistent table), never a hidden handle inside this
+//! core.
 //!
 //! # The estimator contract
 //!
@@ -225,6 +227,28 @@ pub(crate) fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>)
                 .to_le_bytes(),
         );
         hasher.write(token.as_bytes());
+    }
+    hasher.finish()
+}
+
+/// The crate's one hashing contract applied to raw u64 values: XXH64
+/// (seed 0) over the length-prefixed little-endian frame -- LE64 of the
+/// value count, then LE64 of each value -- the same framing discipline
+/// [`hash_tokens`] spells for token windows, over rows instead of
+/// strings. Shared `pub(crate)` with `lsh_impl`, whose band keys are
+/// exactly this frame over one band's `r` signature rows, so the crate
+/// keeps exactly one XXH64 contract (one seed, one framing, whatever the
+/// unit) and the band keys cannot drift from the shingle hashes' frozen
+/// arithmetic.
+pub(crate) fn hash_u64_frame(rows: &[u64]) -> u64 {
+    let mut hasher = XxHash64::with_seed(0);
+    hasher.write(
+        &u64::try_from(rows.len())
+            .expect("row frame longer than u64::MAX values")
+            .to_le_bytes(),
+    );
+    for row in rows {
+        hasher.write(&row.to_le_bytes());
     }
     hasher.finish()
 }
