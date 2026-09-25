@@ -72,7 +72,7 @@ async def heartbeat_gap_and_wall(
 async def assert_heartbeat_clean(
     op: Callable[[], Awaitable[object]] | Awaitable[object],
     ratio: float = DEFAULT_RATIO_BUDGET,
-    ceiling: float | None = DEFAULT_CEILING_S,
+    ceiling: float = DEFAULT_CEILING_S,
     samples: int = DEFAULT_SAMPLES,
 ) -> None:
     """Assert ``op`` leaves the event loop schedulable, over up to
@@ -82,14 +82,16 @@ async def assert_heartbeat_clean(
     heartbeat task does not, so one starved sample retries instead of
     failing the cell. A sample is clean exactly when the worst tick gap
     stays under BOTH the ratio budget (a fraction of the wall) and the
-    absolute ceiling in seconds (``None`` disables it for cells that
-    budget the ratio alone)."""
+    absolute ceiling in seconds."""
     observed: list[tuple[float, float]] = []
     for _ in range(samples):
         worst, wall = await heartbeat_gap_and_wall(op)
-        assert wall > 0.02, wall
+        assert wall > 0.02, (
+            f"the op finished in {wall * 1000:.1f}ms, under the 20ms "
+            "floor a heartbeat measurement can read"
+        )
         observed.append((worst, wall))
-        if worst < ratio * wall and (ceiling is None or worst < ceiling):
+        if worst < ratio * wall and worst < ceiling:
             return
     detail = "; ".join(
         f"worst {worst * 1000:.0f}ms of a {wall * 1000:.0f}ms operation ({worst / wall:.0%})"
