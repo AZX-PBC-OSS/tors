@@ -89,12 +89,13 @@ def _ruff_format(text: str) -> str:
     return fixed.stdout
 
 
-def _spells_any(node: ast.FunctionDef) -> bool:
-    """Whether one sync stub signature's annotations spell ``Any``.
+def _spells_name(node: ast.FunctionDef, name: str) -> bool:
+    """Whether one sync stub signature's annotations spell a given bare
+    name (``Any``, ``Hashable``).
 
     Walks the annotation subtrees (parameters and return) only: a comment
     or docstring elsewhere in the source may name the type in prose, and
-    the header must import ``Any`` exactly when a signature needs it (an
+    the header must import a name exactly when a signature needs it (an
     unused import in the stub is as stale as a missing one).
     """
     args = node.args
@@ -108,11 +109,15 @@ def _spells_any(node: ast.FunctionDef) -> bool:
         if annotation is None:
             continue
         for sub in ast.walk(annotation):
-            if (isinstance(sub, ast.Name) and sub.id == "Any") or (
-                isinstance(sub, ast.Attribute) and sub.attr == "Any"
+            if (isinstance(sub, ast.Name) and sub.id == name) or (
+                isinstance(sub, ast.Attribute) and sub.attr == name
             ):
                 return True
     return False
+
+
+def _spells_any(node: ast.FunctionDef) -> bool:
+    return _spells_name(node, "Any")
 
 
 def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
@@ -126,6 +131,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
     body: list[str] = []
     translated = 0
     needs_any = False
+    needs_hashable = False
     used_type_names: set[str] = set()
     import re
 
@@ -139,23 +145,28 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         body.append("")
         translated += 1
         needs_any = needs_any or _spells_any(node)
+        needs_hashable = needs_hashable or _spells_name(node, "Hashable")
         # The sync stub's type-layer names (the structural TypedDicts and
         # the recursive alias, all module-level assigns in
         # ``__init__.pyi``): a translated signature that spells one must
         # import it — the generated stub is a standalone module, and
         # ruff's F821 gate reads it. Word-boundary match: a name must
         # appear as ITSELF, not as a substring of another identifier.
-        for type_name in ("JSONValue", "Span", "ScrubPiiReport", "RepairAction", "GroundingResult"):
+
+        for type_name in (
+            "JSONValue",
+            "Span",
+            "ScrubPiiReport",
+            "RepairAction",
+            "GroundingResult",
+            "SentenceGrounding",
+        ):
             if re.search(rf"\b{type_name}\b", chunk):
                 used_type_names.add(type_name)
     # The collections.abc names travel only when a translated signature
     # spells them (the same freshness rule as Any below: an unused
-    # import in the stub is as stale as a missing one).
-    abc_names = [
-        name
-        for name in ("Callable", "Iterator", "Sequence")
-        if re.search(rf"\b{name}\b", "\n".join(body))
-    ]
+    # import in the stub is as stale as a missing one); the scan runs
+    # inline in the header build below.
     header = [
         '"""The awaitable spellings of tors\'s large-input functions (see',
         "``tors/aio.py`` for which functions and why only these). Signatures",
@@ -167,7 +178,20 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
         "and checked against the sync stub by ``tests/test_aio.py``.",
         '"""',
         "",
-        f"from collections.abc import {', '.join(abc_names)}",
+        "from collections.abc import "
+        + ", ".join(
+            sorted(
+                {
+                    "Sequence",
+                    *(["Hashable"] if needs_hashable else []),
+                    *{
+                        name
+                        for name in ("Callable", "Iterator", "Sequence")
+                        if re.search(rf"\b{name}\b", "\n".join(body))
+                    },
+                }
+            )
+        ),
         f"from typing import {('Any, ' if needs_any else '')}Literal",
         "",
         "from tors import CompiledLemmaDict, StemmerLanguage",

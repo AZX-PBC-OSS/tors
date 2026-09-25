@@ -164,3 +164,46 @@ def test_the_floor_is_one_contains_pass() -> None:
         f" (ratio {fuzzy_us / contains_us:.2f}x): work is running ahead of"
         " the exact-containment floor"
     )
+
+
+class TestGroundingCoverageWall:
+    """The recall twin's wall lane: grounding_coverage's documented cost is
+    the classic weighted-LCS DP over the two token streams: O(|S| x |T|)
+    TIME (the product both operands own, the same class levenshtein
+    documents) with O(min(|S|, |T|)) MEMORY (two reused rows, never a
+    materialized n*m matrix), each operand capped at its first 16384
+    tokens (src/grounded_impl.rs). The one-sided axis (doubling ONE
+    operand) is linear; the two-sided axis is the documented product,
+    pinned at its 4x-per-doubling band so an accidental cubic formulation
+    (per-cell reallocation, an n*m matrix) blows through the gate."""
+
+    def _wall(self, *args: str) -> float:
+        return _min_wall_us(tors.grounding_coverage, *args) / 1e6  # -> seconds
+
+    def test_one_sided_doubling_stays_linear(self) -> None:
+        source = "word " * 4_000
+        small = self._wall(source, "word " * 2_000)
+        large = self._wall(source, "word " * 4_000)
+        assert large / max(small, 1e-9) < 2 * 1.6, (
+            f"one-sided doubling grew {large / small:.2f}x (allowed < 3.2x)"
+        )
+
+    def test_two_sided_doubling_stays_at_the_product(self) -> None:
+        small = self._wall("word " * 2_000, "word " * 2_000)
+        large = self._wall("word " * 4_000, "word " * 4_000)
+        # 4x cells for 2x per side: the documented product class; a
+        # cubic-per-doubling step (>= 8x) trips.
+        assert large / max(small, 1e-9) < 4.0 * 1.6, (
+            f"two-sided doubling grew {large / small:.2f}x (allowed < 6.4x)"
+        )
+
+    def test_the_realistic_rag_shape_completes_inside_the_thread_hop_budget(self) -> None:
+        # The utilization lane's real shape: a 4k-token retrieved context
+        # against a 300-word response. Generous absolute ceiling on
+        # purpose; the ratio gates above carry the regression
+        # sensitivity; this catches only a qualitative break (an
+        # accidental n*m matrix allocation). The ceiling rides over the
+        # dev-profile build the local suite runs (a release wheel scores
+        # the same shape an order of magnitude under it).
+        wall = self._wall("word " * 4_000, "word " * 300)
+        assert wall < 0.5, f"4k-token context vs 300-word response took {wall * 1e3:.1f}ms"

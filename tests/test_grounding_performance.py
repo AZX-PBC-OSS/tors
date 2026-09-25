@@ -110,3 +110,56 @@ class TestHighlightWall:
         # qualitative break (an accidental whole-text DP would blow past it).
         wall = _wall(_QUERY, _latin_chunk(2_000))
         assert wall < 0.1, f"2k-token chunk took {wall * 1e3:.1f}ms"
+
+
+def _batch_wall(query: str, text: str) -> float:
+    best = float("inf")
+    for _ in range(_SAMPLES):
+        start = monotonic()
+        tors.ground_sentences(text, query)
+        best = min(best, monotonic() - start)
+    return best
+
+
+class TestGroundSentencesWall:
+    """The batch twin of the highlight lane: ground_sentences' documented
+    cost is O(sentences x rouge_w DP): the total DP work is |Q| x N (N =
+    the text's tokens, capped at 16384), linear in the text at a bounded
+    query width, one reused scratch never wider than the longest sentence
+    (src/grounding_impl.rs). Same machine-speed-immune ratio gates, same
+    in-cell verdicts."""
+
+    def test_full_batch_stays_linear_in_the_chunk(self) -> None:
+        walls = {
+            tokens: _batch_wall(_QUERY, _latin_chunk(tokens))
+            for tokens in (500, 1_000, 2_000, 4_000, 10_000)
+        }
+        for small, large in ((500, 1_000), (1_000, 2_000), (2_000, 4_000), (4_000, 10_000)):
+            ratio = walls[large] / max(walls[small], 1e-9)
+            growth = large / small
+            assert ratio < growth * 1.6, (
+                f"{small}->{large} tokens: batch wall grew {ratio:.2f}x for "
+                f"{growth:.0f}x the chunk ({walls}): a superlinear step leaked "
+                "past the caps"
+            )
+
+    def test_batch_cjk_costs_a_small_constant_of_latin_at_equal_token_counts(self) -> None:
+        latin = _batch_wall(_QUERY, _latin_chunk(2_000))
+        cjk = _batch_wall(_QUERY, _cjk_chunk(2_000))
+        assert cjk < latin * 3.0, f"cjk {cjk * 1e3:.1f}ms vs latin {latin * 1e3:.1f}ms"
+
+    def test_the_batch_realistic_shape_completes_inside_the_thread_hop_budget(self) -> None:
+        # 60-token query x 2k-token chunk, every sentence scored: the
+        # consumer's per-document shape (the NLI bridge's own input).
+        # Generous absolute ceiling on purpose; the linear gate above
+        # carries the regression sensitivity; this catches a qualitative
+        # break (an accidental whole-text DP or per-sentence reallocation).
+        wall = _batch_wall(_QUERY, _latin_chunk(2_000))
+        assert wall < 0.5, f"2k-token chunk batch took {wall * 1e3:.1f}ms"
+
+    def test_the_batch_no_overlap_floor_stays_linear(self) -> None:
+        small = _batch_wall("zebra quantum xylophone", _latin_chunk(2_000))
+        large = _batch_wall("zebra quantum xylophone", _latin_chunk(10_000))
+        assert large / max(small, 1e-9) < 10_000 / 2_000 * 1.6, (
+            f"batch no-overlap floor grew {large / small:.2f}x for 5x the chunk"
+        )
