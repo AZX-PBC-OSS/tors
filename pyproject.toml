@@ -52,7 +52,7 @@ classifiers = [
 # release bump (release-please's extra-files only touches version lines,
 # not this one).
 [project.optional-dependencies]
-documents = ["tors-documents==0.14.*"]
+documents = ["tors-documents==0.15.*"]
 
 [project.urls]
 Homepage = "https://github.com/AZX-PBC-OSS/tors"
