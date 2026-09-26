@@ -1026,7 +1026,16 @@ impl Parser {
         let mut number_str = String::new();
         let is_array = self.ctx_current() == Some(Ctx::Array);
         while let Some(ch) = self.cur() {
-            if !NUMBER_CHARS.contains(&ch) || (is_array && ch == ',') {
+            // A '+' or '-' is a number char ONLY as an exponent sign: the
+            // char directly after 'e'/'E' ('1e+84' is one number; the
+            // oracle 0.63.5's own tokenizer fixed the same split bug).
+            // Everywhere else it terminates the run.
+            let sign_after_exponent = matches!(ch, '+' | '-')
+                && number_str
+                    .chars()
+                    .last()
+                    .is_some_and(|p| p == 'e' || p == 'E');
+            if (!NUMBER_CHARS.contains(&ch) && !sign_after_exponent) || (is_array && ch == ',') {
                 break;
             }
             // Python digit-group underscores are consumed but not kept.
@@ -1047,10 +1056,13 @@ impl Parser {
         }
         if matches!(
             number_str.chars().last(),
-            Some('-') | Some('e') | Some('E') | Some('/') | Some(',')
+            Some('-') | Some('e') | Some('E') | Some('/') | Some(',') | Some('+')
         ) {
             // The number ends with a character that cannot end a number or
-            // currency: rolling back one.
+            // currency: rolling back one. A trailing '+' or '-' is a
+            // dangling exponent sign ('1e+' -> the string "1e", the
+            // oracle's own shape); the '-' case also covers a bare
+            // trailing minus.
             number_str.pop();
             self.index -= 1;
         }
