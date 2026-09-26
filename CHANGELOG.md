@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.15.0...v0.15.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **docs:** remove the assembled fragments from the docs tree, gate the docs build on PRs ([#163](https://github.com/AZX-PBC-OSS/tors/issues/163)) ([73a6671](https://github.com/AZX-PBC-OSS/tors/commit/73a667106fc83612060afb9a39e49324b73f8eb7))
+
 ## [0.15.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.14.0...v0.15.0) (2026-09-26)
 
 
