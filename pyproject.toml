@@ -63,7 +63,7 @@ Changelog = "https://github.com/AZX-PBC-OSS/tors/releases"
 dev = [
     "hypothesis>=6.167.1",
     # json-repair is the exact-pinned differential oracle for tests/test_json_repair.py (a version bump is a deliberate parity re-sync); jsonschema is that suite's schema-mode runtime.
-    "json-repair==0.63.4",
+    "json-repair==0.63.5",
     "jsonschema>=4.21",
     "maturin>=1.15.0",
     # xxhash is the exact-pinned differential oracle hash for
