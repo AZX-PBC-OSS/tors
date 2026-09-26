@@ -1,7 +1,8 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySet};
+use pyo3::types::{PyDict, PyList, PySequence, PySet, PyString};
 
+use crate::py::_borrow::MAX_LIST_ITEMS;
 use crate::rank_fusion_impl;
 
 /// The `relevant` argument's accepted spellings, checked once up front:
@@ -46,7 +47,55 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
     Ok(gain)
 }
 
-/// `tors.rank_fuse(ranked_lists, *, k=60) -> list[tuple[Hashable, float]]`:
+/// `weights`' shared validation: a sequence of positive finite floats,
+/// one per ranked list. A non-sequence (and a bare `str`, the
+/// char-splitting footgun) is a `TypeError`; a non-numeric entry is the
+/// extraction failure's `TypeError` (the `gains` convention); a zero,
+/// negative, NaN, or infinite weight is a `ValueError` (strictly
+/// positive finite, the documented domain — Elasticsearch admits zero,
+/// tors does not: a zero-weight list is almost certainly a miscounted
+/// retriever list, the `k < 1` class); a length mismatch is a
+/// `ValueError` naming both sides. The walk is the bounded manual one
+/// (`MAX_LIST_ITEMS`): it never reads `__len__`, so a lying
+/// `__len__` cannot size the Vec for the caller (the #112 class), and
+/// the honest population (one weight per retriever list) sits orders of
+/// magnitude under the cap.
+fn check_weights(weights: &Bound<'_, PyAny>, n_lists: usize) -> PyResult<Vec<f64>> {
+    if weights.is_instance_of::<PyString>() {
+        return Err(PyTypeError::new_err(
+            "weights must be a sequence of floats, not str",
+        ));
+    }
+    let seq = weights.cast::<PySequence>().map_err(|_| {
+        PyTypeError::new_err("weights must be a sequence of positive finite floats")
+    })?;
+    let mut out: Vec<f64> = Vec::new();
+    for handle in seq.try_iter()? {
+        let handle = handle?;
+        let weight = handle.extract::<f64>()?;
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "weights values must be finite and > 0, got {weight}"
+            )));
+        }
+        out.push(weight);
+        if out.len() > MAX_LIST_ITEMS {
+            return Err(PyValueError::new_err(
+                "rank_fuse() weights sequence yielded too many items: refusing an unbounded batch",
+            ));
+        }
+    }
+    if out.len() != n_lists {
+        return Err(PyValueError::new_err(format!(
+            "weights must have one weight per ranked list: got {} for {} lists",
+            out.len(),
+            n_lists
+        )));
+    }
+    Ok(out)
+}
+
+/// `tors.rank_fuse(ranked_lists, *, k=60, weights=None) -> list[tuple[Hashable, float]]`:
 /// Reciprocal Rank Fusion (Cormack, Clarke & Buüttcher, SIGIR 2009,
 /// https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf): fuses multiple
 /// ranked lists of hashable doc ids into one ranking,
@@ -57,6 +106,31 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 /// ranks are, so a doc absent from a list contributes no vote from it,
 /// and a doc ranked twice in one list votes once (at its FIRST
 /// occurrence: the dedup-first pass folds duplicates).
+///
+/// `weights` (the weighted-RRF extension) optionally carries one
+/// positive finite float per list: each list's vote becomes
+/// `w_i / (k + rank(d))`, the same per-retriever weighting
+/// Elasticsearch's RRF retriever applies (`weight × 1 / (rank +
+/// rank_constant)`, GA 9.2) and the same per-source weighting Redis's
+/// hybrid ranking applies when it combines the keyword and vector legs
+/// of a hybrid query. `weights=None` (the default) is the paper's
+/// original fusion exactly: every weight 1.0, outputs byte-identical to
+/// the unweighted spelling (pinned). A zero, negative, NaN, or infinite
+/// weight raises `ValueError` (a zero-weight list is a miscounted
+/// retriever list, the `k < 1` class; Elasticsearch admits zero, tors
+/// does not); a length mismatch with `ranked_lists` raises
+/// `ValueError`; a non-sequence `weights` (a bare `str` included) or a
+/// non-numeric entry raises `TypeError`. A duplicate id votes once per
+/// LIST, weighted by THAT list's weight (the dedup-first contract,
+/// extended). Two honesty notes on that domain: a legal denormal weight
+/// can underflow a doc's every vote to exactly 0.0 (5e-324/61 rounds
+/// away at any rank) -- the id still appears, as a 0.0-score pair
+/// ordered last (score descending, ties by first appearance), because
+/// emission follows vote existence, not score positivity. And the
+/// sequence protocol is the plain one: `bytes` are a sequence of ints
+/// and launder to their code points (the int-extraction convention,
+/// `weights=b"12"` == `weights=[49.0, 50.0]`); a bare `str` is the
+/// char-splitting footgun and is refused.
 ///
 /// Returns `(id, score)` pairs for every distinct id across all lists,
 /// sorted by fused score descending, ties broken by earliest first
@@ -79,12 +153,18 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 /// GIL model: one GIL-held walk of every list (Python-object hashing IS
 /// interpreter work: each occurrence is one dict lookup (an existing
 /// entry folds a within-list duplicate, a fresh one joins the id table);
-/// the same arg-walk class `content_hash`'s object walk is), then the
+/// the same arg-walk class `content_hash`'s object walk is), plus the
+/// `weights` walk and validation when supplied, then the
 /// score accumulation + sort (plain arithmetic over dedup indices) under
 /// one `py.detach`, then the O(distinct-ids) `(id, score)` tuple
 /// marshalling.
-#[pyfunction(signature = (ranked_lists, *, k = 60))]
-pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyResult<Py<PyAny>> {
+#[pyfunction(signature = (ranked_lists, *, k = 60, weights = None))]
+pub fn rank_fuse(
+    py: Python<'_>,
+    ranked_lists: Bound<'_, PyList>,
+    k: i64,
+    weights: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let k = check_k(k)?;
     if ranked_lists.is_empty() {
         return Err(PyValueError::new_err(
@@ -92,6 +172,14 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
              defined answer (every call site so far meant an upstream bug)",
         ));
     }
+    // The weights walk and validation runs BEFORE the dedup pass (it is
+    // the cheap argument-domain check: a bad weight is refused before
+    // any caller id is hashed, the argument-validation-before-work
+    // order every binding in this crate keeps).
+    let weights: Vec<f64> = match weights {
+        None => Vec::new(),
+        Some(any) => check_weights(any, ranked_lists.len())?,
+    };
     // The GIL-held dedup pass: one dict (id -> first-appearance index)
     // and one id table in that order. Dict lookups raise Python's own
     // TypeError on an unhashable id; equality semantics are the dict's.
@@ -132,8 +220,20 @@ pub fn rank_fuse(py: Python<'_>, ranked_lists: Bound<'_, PyList>, k: i64) -> PyR
         }
         lists_idx.push(indices);
     }
-    // The detached fusion pass: pure arithmetic over dedup indices.
-    let fused = py.detach(|| rank_fusion_impl::rank_fuse(&lists_idx, k as u64, ids.len()));
+    // The detached fusion pass: pure arithmetic over dedup indices. The
+    // weights (validated above, one per list) ride in as a slice.
+    let fused = py.detach(|| {
+        rank_fusion_impl::rank_fuse(
+            &lists_idx,
+            k as u64,
+            ids.len(),
+            if weights.is_empty() {
+                None
+            } else {
+                Some(&weights)
+            },
+        )
+    });
     // The marshalling: original id objects by index, one tuple each.
     // Scaling-pin note: an injected regression here must be
     // `std::hint::black_box`-wrapped to be measured at all. A

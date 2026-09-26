@@ -51,6 +51,7 @@ fuzz_target!(|s: &str| {
         RuleSet::PG_DETAIL_LINES,
         RuleSet::URI_USERINFO,
         RuleSet::URI_QUERY_CREDS,
+        RuleSet::URI_QUERY_CREDS_EXTENDED,
     ] {
         let mut cur = scrub_log_text(s, rule);
         let mut converged = false;
@@ -103,6 +104,19 @@ fuzz_target!(|s: &str| {
         format!("?passwd={secret}&x=1"),
         format!("?pwd={secret}&x=1"),
         format!("?sslpassword={secret}&x=1"),
+        // The extended key set's shapes (the default chain runs the
+        // widest key set): an alnum value behind an ops-standard key
+        // never survives either.
+        format!("?sig={secret}&x=1"),
+        format!("?api_key={secret}&x=1"),
+        format!("?apikey={secret}&x=1"),
+        format!("?key={secret}&x=1"),
+        format!("?access_key={secret}&x=1"),
+        format!("?sas_token={secret}&x=1"),
+        format!("?token={secret}&x=1"),
+        format!("?secret={secret}&x=1"),
+        format!("?passkey={secret}&x=1"),
+        format!("?auth={secret}&x=1"),
         format!("x\nDETAIL:{secret}\ny"),
         format!("E('x\\nDETAIL:{secret}')"),
     ] {
@@ -159,6 +173,20 @@ fuzz_target!(|s: &str| {
         scrub_log_text("?password=&x=1", RuleSet::ALL).as_ref(),
         "?password=&x=1"
     );
+    // The extended key set: name preserved, value masked; the base rule
+    // alone still leaves the extended keys alone (the superset lane only
+    // adds names), and the anchor/delimiter discipline holds under the
+    // fuzzer's own shapes too.
+    assert_eq!(
+        scrub_log_text("?api_key=v&next=1", RuleSet::ALL).as_ref(),
+        "?api_key=***&next=1"
+    );
+    assert_eq!(
+        scrub_log_text("?api_key=v&next=1", RuleSet::URI_QUERY_CREDS).as_ref(),
+        "?api_key=v&next=1"
+    );
+    assert_eq!(scrub_log_text("?xkey=v", RuleSet::ALL).as_ref(), "?xkey=v");
+    assert_eq!(scrub_log_text("?key=", RuleSet::ALL).as_ref(), "?key=");
     // Uppercase scheme alphabet.
     assert_eq!(
         scrub_log_text("HTTP://U:PW@H", RuleSet::ALL).as_ref(),

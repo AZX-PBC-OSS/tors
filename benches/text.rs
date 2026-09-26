@@ -47,7 +47,10 @@
 //! exception-shaped corpus (the text.rs-local `scrub` recipe, pinned to
 //! `reference.scrub_corpus` by the corpus-parity gate) at the same ladder:
 //! every rule fires once per unit, so the cells measure the four
-//! memchr/memmem scan passes plus the splice, never the identity fast path.
+//! memchr/memmem scan passes plus the splice, never the identity fast path
+//! — plus the extended-key-set legs (`uri_query_creds_extended`, the
+//! wider 15-entry name table: the same chain over the same corpus, and a
+//! query-dense corpus the extended names actually fire on).
 //!
 //! These guard tors against its own regressions across versions — the
 //! cross-implementation wall-time claims are owned by tests/test_performance.py
@@ -290,7 +293,41 @@ fn bench_scrub_log_text(c: &mut Criterion) {
                 b.iter(|| scrub_impl::scrub_log_text(black_box(text), black_box(RuleSet::ALL)))
             },
         );
+        // The extended key set under the same chain: the conninfo pass's
+        // name walk reads the 15-entry extended table instead of the
+        // five-entry one (the corpus's query params are shared-five
+        // names, so the extra names cost their scan and fire nothing).
+        group.bench_with_input(
+            BenchmarkId::new("exceptions-extended", format!("{}B", corpus.len())),
+            &corpus,
+            |b, text| {
+                b.iter(|| {
+                    scrub_impl::scrub_log_text(
+                        black_box(text),
+                        black_box(RuleSet::ALL | RuleSet::URI_QUERY_CREDS_EXTENDED),
+                    )
+                })
+            },
+        );
     }
+    // A query-dense corpus the extended names actually fire on: one DSN
+    // unit carrying sig/api_key/sas_token params, so the leg measures
+    // the wider table's real masked-output work, not just its misses.
+    let dense =
+        "GET https://h/p?sv=2020&sig=abc123&api_key=kk&sas_token=t&key=k&x=1\n".repeat(1024);
+    group.throughput(Throughput::Bytes(dense.len() as u64));
+    group.bench_with_input(
+        BenchmarkId::new("query-dense-extended", format!("{}B", dense.len())),
+        &dense,
+        |b, text| {
+            b.iter(|| {
+                scrub_impl::scrub_log_text(
+                    black_box(text),
+                    black_box(RuleSet::ALL | RuleSet::URI_QUERY_CREDS_EXTENDED),
+                )
+            })
+        },
+    );
     group.finish();
 }
 

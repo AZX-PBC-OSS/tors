@@ -2012,13 +2012,18 @@ def test_scrub_log_text_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     size_bytes: int,
 ) -> None:
     """The scrub claim, the replace_many dense cell's shape over the
-    surface it exists for: the whole four-pass rule chain (DETAIL line
-    scan, escaped-run scan, userinfo scan, query-param scan, plus the
-    splice) detached under one ``py.detach``, over the exception-shaped
-    scrub corpus where every rule fires once per unit, and the return is
-    one string, so the GIL-held residue is the argument borrow plus that
-    single string's marshalling — ``detached_transform``'s classes, the
-    no-list-shape prediction again.
+    surface it exists for: the whole multi-pass rule chain (DETAIL line
+    scan, escaped-run scan, userinfo scan, query-param scan — the
+    conninfo pass answering to its three names with the EXTENDED key set
+    the uri_query_creds_extended rule added, whose 16-entry name walk is
+    O(#names) per ``=`` and invisible at the ping-floor granularity —
+    plus the splice) detached under one ``py.detach``, over the
+    exception-shaped scrub corpus where every rule fires once per unit,
+    and the return is one string, so the GIL-held residue is the argument
+    borrow plus that single string's marshalling — ``detached_transform``'s
+    classes, the no-list-shape prediction again. The base cell's
+    budgets are unchanged by the extended key set: this cell IS the new
+    rule's GIL cell (the default chain runs the widest key set).
 
     The 96 MiB size is the cell's own derivation, not the suite's usual
     12 MiB: the scrub core is memchr/memmem-scanned Rust, so 12 MiB walls
@@ -3379,6 +3384,34 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.rank_fuse, lists),
+            ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+        )
+    )
+
+
+def test_weighted_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The weighted spelling's claim, the rank_fuse cell's own classes
+    with one more GIL-held walk bolted on: the weights= sequence walk and
+    its per-entry validation (one extract + range check per weight, a
+    hand-widened cost but the same interpreter-side class) join the dedup
+    walk under the GIL; the detached pass gains a multiply per vote,
+    nothing else. The budget is the rank_fuse cell's 0.80 unchanged, over
+    the same workload shape (the weighted weights walk is O(#lists),
+    invisible next to the O(entries) dedup walk).
+
+    Measured alongside the unweighted cell in the same session (ambient
+    load varying, 4 samples per cell): 200k total entries across 5
+    lists, weights=[2.0, 1.0, 1.0, 1.0, 0.5]: worst gaps 16.0-19.0ms of
+    16.1-30.6ms walls, ratios 0.62 on the uncontended samples — the
+    unweighted cell's own band (0.52-0.62 this session), as predicted:
+    the weighted pass is the same detach with a multiply, and the loaded
+    samples read ~1.0 on both spellings alike (the scheduler-starved
+    shape the first-clean retry discipline rides through)."""
+    lists = _ranked_lists(200_000)
+    weights = [2.0, 1.0, 1.0, 1.0, 0.5]
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.rank_fuse, lists, k=60, weights=weights),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
         )
     )

@@ -39,11 +39,54 @@
 //! in caller order (the natural deterministic reading: earlier evidence
 //! outranks later), not by id value or sort-stable accident.
 //!
+//! # Weighted RRF (the `weights` extension)
+//!
+//! The weighted spelling multiplies each list's vote by that list's
+//! weight: `score(d) = sum over lists of w_i / (k + r(d))`. This is
+//! Elasticsearch's weighted RRF (the RRF retriever's per-child-retriever
+//! `weight`, GA 9.2: "the weight that each score of this retriever's top
+//! docs will be multiplied in the RRF formula",
+//! https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/rrf-retriever,
+//! and the Elastic Search Labs writeup "Weighted reciprocal rank fusion
+//! (RRF) in Elasticsearch", which spells the same formula
+//! `weight × 1 / (rank + rank_constant)`), and the same per-source
+//! weighting Redis's hybrid ranking applies when the keyword and vector
+//! legs of a hybrid query are combined. Weights live in SCORE space,
+//! never rank space: a weight re-scales one list's votes, it does not
+//! touch any rank. `weights=None` (the default) is the paper's original
+//! fusion exactly — every weight is 1.0, and the binding passes `None`
+//! so the default path executes the identical arithmetic it always did
+//! (the outputs are pinned byte-identical in tests/test_rank_fusion.py).
+//! The domain is STRICTLY positive finite floats: Elasticsearch admits
+//! zero (a muted retriever), tors does not — a zero-weight list is
+//! almost certainly a miscounted retriever list, the `k < 1` class, and
+//! is rejected (`ValueError`) along with negative, NaN, and infinite
+//! weights, `gains`' finite/non-negative validation shape. A duplicate
+//! id votes once per LIST (the dedup-first contract, documented since
+//! wave 1): each of its votes is weighted by THAT list's weight, so a
+//! doc folded inside a 2.0-weighted list still only ever casts that
+//! list's weighted vote.
+//!
 //! A document absent from a list simply contributes no vote from it
 //! (there is no "rank N+1 penalty" in RRF); a document appearing twice
 //! in ONE list is a malformed ranking: the dedup-first binding pass
 //! folds duplicates to their first occurrence, so a duplicate can never
 //! vote twice.
+//!
+//! # The weighted domain's underflow (the emission policy)
+//!
+//! The strictly-positive weight domain reaches all the way down to
+//! f64's smallest subnormal (`5e-324`), and a legal vote there can
+//! underflow: `5e-324 / 61` rounds to `0.0`, so a document whose every
+//! vote underflows scores exactly `0.0`. Emission is therefore the
+//! vote-existence signal (the first-appearance walk), never score
+//! positivity: every distinct id that received a vote appears — a
+//! `0.0`-score pair included, ordered last, ties among the `0.0`
+//! scores broken by first appearance like any other tie. Only an id
+//! NO list voted for (an index a loose dedup table sized; unreachable
+//! from the binding) is not emitted. The zero-weight list that would
+//! "legitimately" score `0.0` is not in the domain (rejected at the
+//! binding), so a `0.0` score is always the underflow shape.
 //!
 //! # The metrics
 //!
@@ -102,18 +145,36 @@
 //! approximation, not a hidden one.
 
 /// Reciprocal-rank-fuses the deduplicated lists (Cormack, Clarke &
-/// Buüttcher, SIGIR 2009: `score(d) = Σ 1/(k + r(d))`, ranks 1-based).
+/// Buüttcher, SIGIR 2009: `score(d) = Σ 1/(k + r(d))`, ranks 1-based),
+/// with optional per-list weights (the weighted-RRF extension: see the
+/// module docs; `weights[i]` scales list `i`'s votes,
+/// `score(d) = Σ w_i/(k + r(d))`).
 ///
 /// `lists` holds per-list vectors of dedup indices (the py layer's id
-/// table); `n_docs` is the number of distinct ids. Returns one
+/// table); `n_docs` is the number of distinct ids. `weights` is
+/// `None` (the all-1.0 default, the paper's own fusion) or one positive
+/// finite weight per list; a weight slice shorter than `lists` is
+/// tolerated at the core (the missing tails answer 1.0) because the
+/// fuzz target exercises the padding shapes, but the binding validates
+/// the exact length before handing the slice over. Returns one
 /// `(index, score)` pair per distinct id, sorted by score descending,
 /// ties broken by earliest first appearance across the lists in caller
 /// order (tracked here in the same walk that scores), so the tie-break
 /// is the paper-shape contract no matter how the caller numbered its
-/// indices. `k` is trusted here as already-validated (`k >= 1`): the
+/// indices. Emission is vote-existence (one pair per distinct id any
+/// list voted for), not score positivity: a legal denormal weight can
+/// underflow a doc's every vote to 0.0 (5e-324/61 rounds away at any
+/// rank), and that id still appears -- as a 0.0-score pair, ordered
+/// last, ties among the 0.0 scores by first appearance. `k` is trusted
+/// here as already-validated (`k >= 1`): the
 /// pyo3 layer's job, matching this crate's usual split of caller-facing
 /// validation from the trusted core.
-pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
+pub fn rank_fuse(
+    lists: &[Vec<u32>],
+    k: u64,
+    n_docs: usize,
+    weights: Option<&[f64]>,
+) -> Vec<(u32, f64)> {
     // The sweep needs one slot per index that can receive a vote: the
     // data's own max index bounds that, so a caller-supplied n_docs
     // looser than the data (a sparse numbering with a huge table)
@@ -129,12 +190,18 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
     let mut scores = vec![0.0f64; n_docs];
     let mut first_seen = vec![u32::MAX; n_docs];
     let mut seen_count = 0u32;
-    for list in lists {
+    for (list_idx, list) in lists.iter().enumerate() {
+        // The default path's multiplier is exactly 1.0, so the division
+        // below is the identical expression the unweighted spelling has
+        // always executed (weights=None IS all-1.0, byte for byte).
+        let weight = weights
+            .and_then(|w| w.get(list_idx).copied())
+            .unwrap_or(1.0);
         for (position, &doc) in list.iter().enumerate() {
             let doc = doc as usize;
             // Ranks are 1-based (the paper's own convention): the first
             // entry of a list contributes 1/(k + 1).
-            scores[doc] += 1.0 / (k as f64 + position as f64 + 1.0);
+            scores[doc] += weight / (k as f64 + position as f64 + 1.0);
             // First appearance, in the same pass: lists in caller
             // order, positions within a list, so the first walk visit
             // IS the earliest appearance.
@@ -147,11 +214,18 @@ pub fn rank_fuse(lists: &[Vec<u32>], k: u64, n_docs: usize) -> Vec<(u32, f64)> {
     let mut ranked: Vec<(u32, f64)> = scores
         .into_iter()
         .enumerate()
-        // A zero score means zero votes: an index the caller's dedup
-        // table sized but no list ever ranked (unreachable from the
-        // binding, which only assigns indices on first sight), not a
-        // document to emit. Every voted score is positive.
-        .filter(|(_, score)| *score > 0.0)
+        // Emission is the VOTE-EXISTENCE signal (first_seen assigned in
+        // the scoring walk), never score positivity: a legal denormal
+        // weight (5e-324, the smallest subnormal) can underflow every
+        // one of a doc's votes to 0.0 (`w/(k+r)` rounds away at any
+        // rank), and the contract is one (id, score) pair per distinct
+        // voted id -- a 0.0-score pair included, ordered last (score
+        // descending) by first appearance among its 0.0 ties. The
+        // filter's remaining job is the one it always had: an index the
+        // caller's dedup table sized but no list ever ranked (a loose
+        // `n_docs`; unreachable from the binding, which only assigns
+        // indices on first sight) is still not a document to emit.
+        .filter(|(i, _)| first_seen[*i] != u32::MAX)
         .map(|(i, score)| (i as u32, score))
         .collect();
     ranked.sort_by(|(a_idx, a_score), (b_idx, b_score)| {
@@ -268,7 +342,7 @@ mod tests {
         // rank 2); d1 = 1/62 (L0 rank 2) + 1/61 (L1 rank 1). The scores
         // tie exactly; first appearance breaks the tie (d0 first).
         let lists = [vec![0u32, 1u32], vec![1u32, 0u32]];
-        let fused = rank_fuse(&lists, 60, 2);
+        let fused = rank_fuse(&lists, 60, 2, None);
         assert_eq!(fused[0].0, 0);
         assert!(close(fused[0].1, fused[1].1));
         assert_eq!(fused[0].1, fused[1].1);
@@ -280,7 +354,7 @@ mod tests {
         // The RRF thesis: a document ranked 2nd by two lists beats a
         // document ranked 1st by one (and absent from the other).
         let lists = [vec![0u32, 1u32], vec![2u32, 1u32]];
-        let fused = rank_fuse(&lists, 60, 3);
+        let fused = rank_fuse(&lists, 60, 3, None);
         // d1: 1/62 + 1/62 = 0.03225...; d0: 1/61; d2: 1/61.
         assert_eq!(fused[0].0, 1);
         // The two single-vote documents tie at 1/61; d0 appeared first.
@@ -295,7 +369,7 @@ mod tests {
         // A single list of three: the top document scores exactly 1/61
         // at k=60 (not 1/60), the third 1/63.
         let lists = [vec![0u32, 1u32, 2u32]];
-        let fused = rank_fuse(&lists, 60, 3);
+        let fused = rank_fuse(&lists, 60, 3, None);
         assert!(close(fused[0].1, 1.0 / 61.0));
         assert!(close(fused[2].1, 1.0 / 63.0));
     }
@@ -305,7 +379,7 @@ mod tests {
         // k tunes how sharply the top of a list is weighted; ranks, not
         // scores, are consumed either way.
         let lists = [vec![0u32, 1u32], vec![1u32]];
-        let fused_k1 = rank_fuse(&lists, 1, 2);
+        let fused_k1 = rank_fuse(&lists, 1, 2, None);
         // d0: 1/2; d1: 1/3 + 1/2 = 0.8333...; d1 wins (two votes beat one).
         assert_eq!(fused_k1[0].0, 1);
         assert!(close(fused_k1[0].1, 1.0 / 3.0 + 1.0 / 2.0));
@@ -317,7 +391,7 @@ mod tests {
         // Both documents score exactly 1/61 (rank 1 of one list each);
         // the HIGHER id appeared first and must outrank the lower.
         let lists = [vec![9u32], vec![3u32]];
-        let fused = rank_fuse(&lists, 60, 10);
+        let fused = rank_fuse(&lists, 60, 10, None);
         assert!(close(fused[0].1, fused[1].1));
         assert_eq!(fused[0].0, 9);
         assert_eq!(fused[1].0, 3);
@@ -326,7 +400,7 @@ mod tests {
     #[test]
     fn single_list_preserves_its_order() {
         let lists = [vec![4u32, 0u32, 2u32]];
-        let fused = rank_fuse(&lists, 60, 5);
+        let fused = rank_fuse(&lists, 60, 5, None);
         assert_eq!(
             fused.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
             vec![4, 0, 2]
@@ -336,7 +410,7 @@ mod tests {
     #[test]
     fn empty_inner_lists_contribute_no_votes() {
         let lists = [vec![1u32], Vec::new(), vec![0u32]];
-        let fused = rank_fuse(&lists, 60, 2);
+        let fused = rank_fuse(&lists, 60, 2, None);
         assert_eq!(
             fused.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
             vec![1, 0]
@@ -351,14 +425,14 @@ mod tests {
         // binding's dedup-first pass is what makes this unreachable from
         // Python (pinned py-side, not here).
         let lists = [vec![0u32, 0u32]];
-        let fused = rank_fuse(&lists, 60, 1);
+        let fused = rank_fuse(&lists, 60, 1, None);
         assert!(close(fused[0].1, 1.0 / 61.0 + 1.0 / 62.0));
     }
 
     #[test]
     fn scores_are_finite_and_positive() {
         let lists = [vec![0u32, 1, 2], vec![2, 1], Vec::new(), vec![1]];
-        for (_, score) in rank_fuse(&lists, 1, 3) {
+        for (_, score) in rank_fuse(&lists, 1, 3, None) {
             assert!(score.is_finite() && score > 0.0);
         }
     }
@@ -573,7 +647,7 @@ mod tests {
         // d2: 1/8 + 1/6 + 1/7 = 0.434523... (L0 rank 3, L1 rank 1, L2 rank 2)
         // d3: 1/7 = 0.142857...        (L1 rank 2)
         let lists = [vec![0u32, 1, 2], vec![2u32, 3, 0], vec![1u32, 2]];
-        let fused = rank_fuse(&lists, 5, 4);
+        let fused = rank_fuse(&lists, 5, 4, None);
         let by_id: std::collections::HashMap<u32, f64> = fused.iter().copied().collect();
         assert!(close(by_id[&0], 1.0 / 6.0 + 1.0 / 8.0));
         assert!(close(by_id[&1], 1.0 / 7.0 + 1.0 / 6.0));
@@ -582,6 +656,134 @@ mod tests {
         assert_eq!(
             fused.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
             vec![2, 1, 0, 3]
+        );
+    }
+
+    // --- rank_fuse: the weighted extension -------------------------------
+
+    #[test]
+    fn weights_none_is_byte_identical_to_all_ones() {
+        // The default must be THE paper fusion, not a weighted spelling
+        // of it: same scores bit for bit, same order.
+        let lists = [vec![0u32, 1, 2], vec![2u32, 0], vec![1u32]];
+        let plain = rank_fuse(&lists, 60, 3, None);
+        let ones = rank_fuse(&lists, 60, 3, Some(&[1.0, 1.0, 1.0]));
+        assert_eq!(plain, ones);
+    }
+
+    #[test]
+    fn hand_computed_weighted_fusion() {
+        // The k=5 three-list vector with weights [2.0, 0.5, 1.0]: every
+        // vote carries its list's weight.
+        // d0: 2/6 (L0 rank 1) + 0.5/8 (L1 rank 3)
+        // d1: 2/7 (L0 rank 2) + 1.0/6 (L2 rank 1)
+        // d2: 2/8 + 0.5/6 (L1 rank 1) + 1.0/7 (L2 rank 2)
+        // d3: 0.5/7 (L1 rank 2)
+        let lists = [vec![0u32, 1, 2], vec![2u32, 3, 0], vec![1u32, 2]];
+        let fused = rank_fuse(&lists, 5, 4, Some(&[2.0, 0.5, 1.0]));
+        let by_id: std::collections::HashMap<u32, f64> = fused.iter().copied().collect();
+        assert!(close(by_id[&0], 2.0 / 6.0 + 0.5 / 8.0));
+        assert!(close(by_id[&1], 2.0 / 7.0 + 1.0 / 6.0));
+        assert!(close(by_id[&2], 2.0 / 8.0 + 0.5 / 6.0 + 1.0 / 7.0));
+        assert!(close(by_id[&3], 0.5 / 7.0));
+    }
+
+    #[test]
+    fn doubling_a_weight_doubles_that_lists_contribution_exactly() {
+        // The contribution w/(k+r) doubles exactly under a doubled
+        // weight (a factor-of-two scaling is exact in IEEE, no rounding
+        // to hide behind), pinned bit for bit on a single-list shape
+        // where the whole score IS that list's contribution.
+        let lists = [vec![0u32, 1, 2, 3]];
+        let singles = rank_fuse(&lists, 60, 4, Some(&[1.0]));
+        let doubled = rank_fuse(&lists, 60, 4, Some(&[2.0]));
+        for (a, b) in singles.iter().zip(doubled.iter()) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(b.1, 2.0 * a.1);
+        }
+    }
+
+    #[test]
+    fn weights_can_flip_a_consensus_loss() {
+        // The point of the extension: a 3x-weighted single top vote can
+        // outrank the two unweighted consensus votes it loses at equal
+        // weights (3/61 > 2/62 ... where the unweighted 1/61 < 2/62).
+        let vote_shape = [vec![0u32], vec![1u32], vec![1u32]];
+        let equal = rank_fuse(&vote_shape, 60, 2, Some(&[1.0, 1.0, 1.0]));
+        assert_eq!(equal[0].0, 1); // two consensus votes win at equal weights
+        let boosted = rank_fuse(&vote_shape, 60, 2, Some(&[3.0, 1.0, 1.0]));
+        assert_eq!(boosted[0].0, 0); // the weighted top rank now wins
+        assert!(close(boosted[0].1, 3.0 / 61.0));
+        assert!(close(boosted[1].1, 1.0 / 61.0 + 1.0 / 61.0));
+    }
+
+    #[test]
+    fn a_duplicates_votes_are_weighted_per_occurrence_the_core_assumes_dedup() {
+        // The core is trusted with deduped lists (the binding's job, as
+        // the unweighted duplicate test above pins): a repeated index is
+        // three votes from one list, each at THAT list's weight. The
+        // dedup-first weighted contract (one vote per LIST, weighted by
+        // that list) is the binding pass's, pinned py-side.
+        let lists = [vec![0u32, 0, 0], vec![0u32]];
+        let fused = rank_fuse(&lists, 60, 1, Some(&[2.0, 5.0]));
+        assert!(close(
+            fused[0].1,
+            2.0 / 61.0 + 2.0 / 62.0 + 2.0 / 63.0 + 5.0 / 61.0
+        ));
+    }
+
+    #[test]
+    fn short_weight_slice_defaults_the_tail_to_one() {
+        // The core tolerates a loose slice (the binding validates the
+        // exact length); the missing tail votes at weight 1.0.
+        let lists = [vec![0u32], vec![1u32]];
+        let fused = rank_fuse(&lists, 60, 2, Some(&[4.0]));
+        let by_id: std::collections::HashMap<u32, f64> = fused.iter().copied().collect();
+        assert!(close(by_id[&0], 4.0 / 61.0));
+        assert!(close(by_id[&1], 1.0 / 61.0));
+    }
+
+    #[test]
+    fn weighted_scores_stay_finite_and_positive() {
+        let lists = [vec![0u32, 1], vec![2u32], Vec::new()];
+        for (_, score) in rank_fuse(&lists, 1, 3, Some(&[f64::MAX, 1e-300, 1.0])) {
+            assert!(score.is_finite() && score > 0.0);
+        }
+    }
+
+    #[test]
+    fn a_doc_whose_every_vote_underflows_still_appears() {
+        // The emission signal is vote existence, not score positivity:
+        // 5e-324 (the smallest subnormal) at k=60 underflows to exactly
+        // 0.0 at every rank (5e-324/61 rounds away), and the voted docs
+        // still emit -- 0.0-score pairs in first-appearance order (all
+        // scores tie at 0.0, so the tie-break decides).
+        let lists = [vec![0u32, 1, 2]];
+        let fused = rank_fuse(&lists, 60, 3, Some(&[5e-324]));
+        assert_eq!(fused, vec![(0, 0.0), (1, 0.0), (2, 0.0)]);
+    }
+
+    #[test]
+    fn an_underflowed_doc_and_a_floating_doc_share_one_output() {
+        // The mixed shape: doc 0's vote underflows to 0.0, doc 1's does
+        // not; both appear, the positive score first, the 0.0 last
+        // (score descending), the order deterministic.
+        let lists = [vec![0u32], vec![1u32]];
+        let fused = rank_fuse(&lists, 60, 2, Some(&[5e-324, 1.0]));
+        assert_eq!(fused[0], (1, 1.0 / 61.0));
+        assert_eq!(fused[1], (0, 0.0));
+    }
+
+    #[test]
+    fn a_loose_n_docs_still_emits_only_voted_indices() {
+        // The filter's surviving job: indices the caller's dedup table
+        // sized but no list voted for (here doc 3, inside a 4-wide
+        // table) stay unemitted, even though their score is 0.0 too.
+        let lists = [vec![0u32, 1, 2]];
+        let fused = rank_fuse(&lists, 60, 4, None);
+        assert_eq!(
+            fused.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
     }
 }

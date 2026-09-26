@@ -2,7 +2,7 @@
 
 The oracle is this repo's own pure-Python reference
 (``tests/reference.py::reference_scrub_log_text``), and the grammar's
-definition is the four compiled regexes quoted below, in this file — the
+definition is the compiled regexes quoted below, in this file — the
 extension is pinned against them exactly (
 
 .. code-block:: python
@@ -25,8 +25,8 @@ if they ever differ from what this header means). The chain order is
 ``_scrub_text``'s own with the redaction flag on: DETAIL lines (real
 newlines, ExceptionGroup gutters included), then DETAIL runs (repr-flattened
 ``\\n`` separators, fail-closed at end of line), then the userinfo mask, then
-the password-family connection-parameter mask (URI-query and libpq keyword
-anchors, IGNORECASE) — each a whole pass over the current text, which is
+the credential-parameter mask (URI-query and libpq keyword anchors,
+IGNORECASE) — each a whole pass over the current text, which is
 exactly the canonical order ``tors.scrub_log_text`` applies per rule
 selection. The fifth rule, ``secret_tokens``, is not one of the consumer's
 four compiled regexes: it is the secret-token redaction grammars
@@ -36,10 +36,14 @@ so the established chain's contract is untouched, each span spliced to
 ``***``; the oracle side is the hand-rolled pure-Python transcription in
 ``tests/reference.py`` (``_secret_tokens_mask``), and the grammar's own
 vectors live in ``tests/test_secret_grammars.py``. The conninfo pass is ONE
-pass under TWO names
-(``uri_query_creds`` selects the ``[?&]`` anchor grammar,
-``libpq_conninfo_creds`` the libpq keyword lookbehind; both — ``rules=None``
-included — run the combined pattern, never two sequential substitutions).
+pass under THREE names
+(``uri_query_creds`` selects the ``[?&]`` anchor grammar over the five
+shared credential names, ``uri_query_creds_extended`` the SAME anchor over
+the extended ops-standard key set (``sig``, ``api_key``, ``sas_token``,
+...; the shared five included — the superset lane), ``libpq_conninfo_creds``
+the libpq keyword lookbehind over the shared five; any combination —
+``rules=None`` included — runs the combined pattern, never sequential
+substitutions).
 A change to any
 pattern or to the order is a deliberate grammar change: it lands here and
 in ``tests/reference.py`` together, visibly, never as a silent tors
@@ -81,10 +85,13 @@ from hypothesis import strategies as st
 import tors
 from reference import (
     _CRED_PARAM_NAMES,
+    _CRED_PARAM_NAMES_EXTENDED,
     _PG_DETAIL_ESCAPED_RE,
     _PG_DETAIL_RE,
     _URI_CRED_RE,
     _URI_PARAM_CRED_RE,
+    _URI_QUERY_ANCHOR_CRED_EXTENDED_RE,
+    _URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE,
     SCRUB_RULES,
     reference_scrub_log_text,
     scrub_corpus,
@@ -114,11 +121,47 @@ QUOTED_CRED_PARAM_NAMES: tuple[str, ...] = (
     "pwd",
     "sslpassword",
 )
+# The extended rule's key set and its two split patterns, pinned the same
+# way (the reference builds them from the tuple; these are the assembled
+# bytes). The mixed combined pattern's two name lists are quoted as one
+# string each (the reference interpolates both).
+QUOTED_CRED_PARAM_NAMES_EXTENDED: tuple[str, ...] = (
+    "sslpassword",
+    "passphrase",
+    "access_key",
+    "sas_token",
+    "password",
+    "api_key",
+    "passkey",
+    "apikey",
+    "secret",
+    "passwd",
+    "token",
+    "auth",
+    "key",
+    "sig",
+    "pwd",
+    "pw",
+)
+_QUOTED_EXTENDED_NAMES = "|".join(QUOTED_CRED_PARAM_NAMES_EXTENDED)
+QUOTED_EXTENDED_PATTERNS: dict[str, str] = {
+    "_URI_QUERY_ANCHOR_CRED_EXTENDED_RE": (
+        rf"([?&](?:{_QUOTED_EXTENDED_NAMES})=)('(?:[^'\\]|\\.)*'|[^\s&]+)"
+    ),
+    "_URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE": (
+        rf"((?:[?&](?:{_QUOTED_EXTENDED_NAMES})"
+        r"|(?<![A-Za-z0-9_])(?:password|passphrase|passwd|pwd|sslpassword))"
+        r"=)('(?:[^'\\]|\\.)*'|[^\s&]+)"
+    ),
+}
 _COMPILED_PATTERNS: dict[str, re.Pattern[str]] = {
     "_PG_DETAIL_RE": _PG_DETAIL_RE,
     "_PG_DETAIL_ESCAPED_RE": _PG_DETAIL_ESCAPED_RE,
     "_URI_CRED_RE": _URI_CRED_RE,
     "_URI_PARAM_CRED_RE": _URI_PARAM_CRED_RE,
+} | {
+    "_URI_QUERY_ANCHOR_CRED_EXTENDED_RE": _URI_QUERY_ANCHOR_CRED_EXTENDED_RE,
+    "_URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE": _URI_QUERY_AND_LIBPQ_CRED_EXTENDED_RE,
 }
 
 # The rule lanes every corpus case runs under: the full chain, each rule
@@ -131,8 +174,15 @@ RULE_LANES: list[tuple[str, list[str] | None]] = [
     ("pg_detail_lines", ["pg_detail_lines"]),
     ("uri_userinfo", ["uri_userinfo"]),
     ("uri_query_creds", ["uri_query_creds"]),
+    ("uri_query_creds_extended", ["uri_query_creds_extended"]),
     ("libpq_conninfo_creds", ["libpq_conninfo_creds"]),
     ("conninfo-both", ["uri_query_creds", "libpq_conninfo_creds"]),
+    ("conninfo-extended", ["uri_query_creds_extended", "libpq_conninfo_creds"]),
+    ("conninfo-all-three", [
+        "uri_query_creds",
+        "uri_query_creds_extended",
+        "libpq_conninfo_creds",
+    ]),
     ("pg+userinfo", ["pg_detail_lines", "uri_userinfo"]),
     ("secret_tokens", ["secret_tokens"]),
 ]
@@ -153,16 +203,27 @@ class TestQuotedPin:
         # the tuple, not the interpolation.
         assert _CRED_PARAM_NAMES == QUOTED_CRED_PARAM_NAMES
 
+    def test_the_extended_cred_param_names_are_the_quoted_pin(self) -> None:
+        # The extended key set's twin pin: reference.py's tuple, the
+        # quoted order (longest first), and the superset relationship the
+        # combined-pattern selection relies on.
+        assert _CRED_PARAM_NAMES_EXTENDED == QUOTED_CRED_PARAM_NAMES_EXTENDED
+        assert set(QUOTED_CRED_PARAM_NAMES) < set(QUOTED_CRED_PARAM_NAMES_EXTENDED)
+        lengths = [len(n) for n in QUOTED_CRED_PARAM_NAMES_EXTENDED]
+        assert lengths == sorted(lengths, reverse=True)
+
     def test_the_canonical_rule_order_is_pinned(self) -> None:
         # The chain order _scrub_text applies with the flag on: DETAIL's two
-        # segmenters, userinfo, then the conninfo pass (its two anchor
-        # grammars under the two names), then the secret-token mask (the
-        # secret_impl grammars, LAST so the established chain's contract is
-        # untouched). reference.py must carry the same tuple tors spells.
+        # segmenters, userinfo, then the conninfo pass (its anchor grammars
+        # and key sets under the three names), then the secret-token mask
+        # (the secret_impl grammars, LAST so the established chain's
+        # contract is untouched). reference.py must carry the same tuple
+        # tors spells.
         assert SCRUB_RULES == (
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         )
@@ -397,6 +458,41 @@ _CORPUS: list[str] = [
     "?pwd=a?password=b",
     " password=a&password=b",
     "?password=a=password",
+    # The extended key set (uri_query_creds_extended): the ops-standard
+    # names the adoption verdict flagged, near misses (longer names whose
+    # tails are keys: oauth_token, api_key inside xapi_key), the
+    # delimiter boundaries, values spanning to end of text, quoted
+    # values, the shared-five vectors byte-identical under the
+    # superset lane.
+    "?sig=abc&x=1",
+    "?api_key=abc&x=1",
+    "?apikey=abc",
+    "?key=abc",
+    "?access_key=ABCDEF&sig=xyz",
+    "?sv=2020&sig=sha%3Dabc&sas_token=tok",
+    "?token=abc&next=5",
+    "?secret=abc&passkey=p&auth=q",
+    "?SIG=abc&Api_Key=x&TOKEN=y",
+    "?oauth_token=abc&key=abc",
+    "?xapi_key=abc&xkey=abc",
+    "?pw=abc&x=1",
+    "?PW=abc&Pwd=y&pwx=z&xpw=1",
+    "?pw='q r'&next=2",
+    "page?key=abc",
+    "&&key=abc",
+    "??key=abc",
+    "?xkey=abc",
+    "xkey=abc",
+    "?key=a=b",
+    "?key=",
+    "?key",
+    "?key=a b?key=c",
+    "?key='a b'&x=1",
+    "?key='unterminated &sig=x",
+    "https://h/p?sig=abc",
+    "?key=abc&next=1",
+    "?sig=to_end_of_string_no_terminator",
+    "?password=still_the_shared_five&passphrase=x",
     # chain shapes: both credential shapes on one DSN, embedded param inside
     # a userinfo password, the DETAIL-eats-the-@ order interaction, an
     # escaped DETAIL inside a would-be password, mixed real text.
@@ -517,6 +613,26 @@ _PARAM_GRID_NAME = [
     "pwdx",
     "pass",
     "p",
+    # The extended key set (uri_query_creds_extended) and its near
+    # misses: the longest-first suffix overlaps, the lookbehind-blocked
+    # word-char tails.
+    "sig",
+    "api_key",
+    "apikey",
+    "key",
+    "access_key",
+    "sas_token",
+    "token",
+    "secret",
+    "passkey",
+    "auth",
+    "pw",
+    "Api_Key",
+    "SAS_Token",
+    "oauth_token",
+    "xkey",
+    "keys",
+    "pwx",
 ]
 _PARAM_GRID_VALUE = [
     "x",
@@ -664,6 +780,8 @@ _DETAIL_PIECES = st.lists(
             ")",
             "a://u:p@h",
             "?password=v",
+            "?api_key=v",
+            "?sig=v",
             "E('",
             # secret-token pieces (the fifth rule's shapes and its glue
             # class): a firing token, its near-miss extensions, a token's
@@ -698,7 +816,12 @@ class TestHypothesisDifferential:
     @settings(max_examples=250, deadline=None)
     def test_ascii_structural_alphabet_every_lane(self, text: str) -> None:
         assert tors.scrub_log_text(text) == reference_scrub_log_text(text)
-        for rules in (["pg_detail_lines"], ["uri_userinfo"], ["uri_query_creds"]):
+        for rules in (
+            ["pg_detail_lines"],
+            ["uri_userinfo"],
+            ["uri_query_creds"],
+            ["uri_query_creds_extended"],
+        ):
             assert tors.scrub_log_text(text, rules) == reference_scrub_log_text(text, rules)
 
     @given(_UNICODE_EDGE_ALPHABET)
@@ -711,7 +834,12 @@ class TestHypothesisDifferential:
         # username/password/value classes) — plus NBSP, U+2028, CJK
         # numerals (Numeric_Type letters: word chars under both), and Nl.
         assert tors.scrub_log_text(text) == reference_scrub_log_text(text)
-        for rules in (["pg_detail_lines"], ["uri_userinfo"], ["uri_query_creds"]):
+        for rules in (
+            ["pg_detail_lines"],
+            ["uri_userinfo"],
+            ["uri_query_creds"],
+            ["uri_query_creds_extended"],
+        ):
             assert tors.scrub_log_text(text, rules) == reference_scrub_log_text(text, rules)
 
     @given(_DETAIL_PIECES)

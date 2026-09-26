@@ -153,7 +153,7 @@ edge cases are in the [API reference](docs/api.md).
 | Text segmentation (UAX #29) | `grapheme_count`, `word_bounds`(+`_iter`), `word_count`, `sentence_bounds`(+`_iter`), `sentence_count` |
 | Diffing (`difflib`-compatible) | `diff_opcodes`, `diff_opcodes_lines` |
 | Fuzzy & phonetic matching | `similarity_ratio`, `get_close_matches`, `levenshtein`, `jaro`, `jaro_winkler`, `soundex`, `metaphone`, `double_metaphone`, `nysiis`, `daitch_mokotoff`, `refined_soundex` |
-| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text`, `CompiledPatterns` |
+| Multi-pattern search & redaction | `find_patterns`(+`_iter`), `count_matches`, `replace_many`, `replace_many_masked`, `scrub_log_text` (five named rules, the extended credential-key set included), `CompiledPatterns` |
 | Escape-parity byte scan | `contains_unescaped`, `find_unescaped` |
 | JSON validity gate (parse-and-discard) | `json_is_valid` |
 | Byte lengths without the encode copy | `utf8_byte_len`, `utf16_byte_len` |
@@ -164,7 +164,7 @@ edge cases are in the [API reference](docs/api.md).
 | URL encoding | `quote`, `quote_plus`, `unquote`, `unquote_plus` |
 | Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical`, `chunk_to_budget`, `chunk_to_offsets` |
 | Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `minhash_signature`, `merkle_root`, `merkle_diff`, `content_hash` |
-| Rank fusion & IR metrics | `rank_fuse` (Reciprocal Rank Fusion, Cormack/Clarke/Buüttcher SIGIR 2009, ranks only, never raw scores), `ndcg_at_k` (Järvelin & Kekäläinen TOIS 2002), `mrr`, `recall_at_k`, `precision_at_k` |
+| Rank fusion & IR metrics | `rank_fuse` (Reciprocal Rank Fusion, Cormack/Clarke/Buüttcher SIGIR 2009, ranks only, never raw scores, optional per-list weights: weighted RRF), `ndcg_at_k` (Järvelin & Kekäläinen TOIS 2002), `mrr`, `recall_at_k`, `precision_at_k` |
 | Near-duplicate detection & dedup | `simhash_distance`, `shingle_jaccard`, `shingle_dice`, `dedup_near_dup` (greedy keep-first over small candidate sets), `lsh_candidates`/`lsh_probability`/`lsh_threshold` (stateless MinHash banding over `minhash_signature` output; no persistent LSH index) |
 | UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |

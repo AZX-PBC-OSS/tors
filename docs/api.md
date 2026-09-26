@@ -617,6 +617,7 @@ def scrub_log_text(
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         ]
@@ -628,13 +629,13 @@ def scrub_log_text(
 Named-rule log and exception-text scrubbing, five linear scans + splice
 under one `py.detach`: the scrub a worker applies to
 `str(exc)`/`repr(exc)`/rendered tracebacks before any of it reaches a log
-line, a span, or an exported attribute, byte-identical to the four
-compiled regexes that define its grammar — pinned by a differential
+line, a span, or an exported attribute, byte-identical to the compiled
+regexes that define its grammar — pinned by a differential
 harness that races tors against that reference (see
 [Design and scope](design.md) for why this is a *named-rule* surface
 rather than a pattern parameter).
 
-Five rules, one closed set:
+Six names, one closed set:
 
 - `pg_detail_lines` — PostgreSQL `DETAIL:` lines quote caller-supplied row
   values, so the whole line is dropped. Both separator spellings: real
@@ -665,19 +666,58 @@ Five rules, one closed set:
 - `uri_userinfo` — `scheme://user:password@host` becomes
   `scheme://user:***@host`: scheme and username preserved verbatim, empty
   username handled, password ending at the first `@`.
-- `uri_query_creds` / `libpq_conninfo_creds` — the password-family
-  connection parameters, ONE pass under two names (the two anchor grammars
-  of the live chain's single combined regex): `[?&]name=value` (URI query)
-  and the libpq keyword form `name=value` (a non-`[A-Za-z0-9_]` char — or
-  text start — before the name, so `host=h password=p` masks and `cpwd=`
-  does not). Names are the five credential parameters
-  (`password`, `passphrase`, `passwd`, `pwd`, `sslpassword`) matched
-  case-insensitively; the value is a libpq single-quoted string (spaces
-  allowed, `\'`/`\\` escapes honored) or an unquoted token running to
-  whitespace or `&` — deliberately NOT stopping at `@`: a password may
-  legally carry an unencoded `@`, and a mask that stops there leaves the
-  tail riding after the `***` (0.7.0 did exactly that). Name and delimiter
-  are preserved: `?password=a@b` → `?password=***`.
+- `uri_query_creds` — the URI-query anchor of the credential pass over
+  the five shared credential names, the grammar shared with
+  `libpq_conninfo_creds` below: `[?&]name=value` → `[?&]name=***`.
+
+  > [!WARNING]
+  > SECURITY-POLICY CHANGE (the weighted-RRF-and-secret-params release),
+  > widening the default chain: `uri_query_creds_extended` is new, and
+  > the full chain (`rules=None` included) now runs the EXTENDED key
+  > set. A text that carries `?sig=`/`?api_key=`/`?token=`/`?key=` (and
+  > the rest of the extended names) scrubbed differently before this
+  > release: the query value is masked where 0.x left it verbatim —
+  > over-redaction, never under (a delimiter miss must delete MORE
+  > text, never less of the secret). The shared five's behavior is
+  > byte-identical everywhere; `uri_query_creds` selected EXPLICITLY
+  > keeps the exact five-name contract.
+- `uri_query_creds_extended` — the SAME `[?&]` anchor over the EXTENDED
+  credential-key set: the shared five plus the ops-standard
+  query-parameter names (`access_key`, `api_key`, `apikey`, `auth`,
+  `key`, `passkey`, `pw`, `sas_token`, `secret`, `sig`, `token`). The names
+  are the published scanner lists, transcribed and closed: ESLint
+  `no-credentials-in-query-params` (eslint-plugin-browser-security)'s
+  default sensitive terms (`password`, `token`, `secret`, `api_key`/
+  `apiKey`, `auth`), detect-secrets' AWS secret-keyword list (`key`,
+  `pass`, `password`, `pw`, `pwd`, `token`), and Azure's own SAS
+  query grammar (`?sv=...&sig=...`) — the credential-in-URL problem
+  class CWE-598 names (query strings land in
+  access logs, proxy logs, browser history, and the `Referer` header of
+  every outbound link). Judicious cuts, stated: no
+  `session`/`sessionid`/`sid` (session identifiers are not credentials;
+  masking them corrupts a log line for nothing), no
+  `access_token`/`refresh_token`/`auth_token` (the `_token` suffix
+  family is real but open-ended — `oauth_token=` does not mask under
+  the closed set, the documented seam; more names arrive as evidence
+  names them, never by pattern).
+- `libpq_conninfo_creds` — the keyword/value anchor of the SAME pass:
+  `name=value` where the name is not the tail of a longer word (the
+  live chain's `(?<![A-Za-z0-9_])` lookbehind), so libpq conninfo text
+  (`host=db password='hun ter2'` — no `://`, no `?`) masks too, and
+  `cpwd=` is not mistaken for `pwd=`.
+
+  The shared value grammar, all three names: the credential names
+  (`uri_query_creds`/`libpq_conninfo_creds` match the five shared
+  parameters `password`, `passphrase`, `passwd`, `pwd`, `sslpassword`;
+  `uri_query_creds_extended` the extended superset) matched
+  CASE-INSENSITIVELY (libpq names are case-insensitive and operators'
+  DSNs echo back whatever casing was written), and the value is either
+  a libpq single-quoted string — which may carry spaces and honors the
+  `\'` and `\\` escapes — or an unquoted token running to whitespace or
+  `&`, deliberately NOT stopping at `@` (a password may legally contain
+  an unencoded `@`, and a mask that stops there leaves the tail riding
+  after the `***`). Name and delimiter are preserved: `?password=a@b` →
+  `?password=***`.
 - `secret_tokens` — the secret-token grammars of
   [`tors.scrub_secrets`](#torsscrub_secrets) over the SAME closed
   five-grammar set, each span spliced to `***` (this family's mask
@@ -691,8 +731,13 @@ Five rules, one closed set:
 `secret_tokens`, each
 rule a whole pass over the current text before the next begins (a DETAIL
 deletion can eat the `@` a userinfo mask anchors on — rule interaction is
-why the order is a contract, not a caller choice). Selecting both conninfo
-names runs the combined pass once, never two sequential substitutions.
+why the order is a contract, not a caller choice). The conninfo pass
+answers to THREE names (`uri_query_creds` the `[?&]` anchor over the
+shared five, `uri_query_creds_extended` the same anchor over the extended
+set, `libpq_conninfo_creds` the libpq keyword lookbehind over the shared
+five); any selection of them — including the default chain — runs the
+combined pass ONCE, each `=` matched against the widest key set its
+anchor selects, never two sequential substitutions.
 
 > [!WARNING]
 > The default chain can leave a credential fragment by design:
@@ -750,6 +795,18 @@ tors.scrub_log_text(
     ["uri_userinfo"],
 )
 # "connect dsn=postgresql://worker:***@db.internal:5432/prod"  (one rule alone)
+tors.scrub_log_text(
+    "GET https://api.internal/v1?sv=2020&sig=sha%3Dabc&api_key=kk123&sas_token=tok&x=1"
+)
+# "GET https://api.internal/v1?sv=2020&sig=***&api_key=***&sas_token=***&x=1"
+# (the extended key set: the full chain runs it by default)
+tors.scrub_log_text(
+    "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123",
+    ["uri_query_creds"],
+)
+# "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123"  (the base rule
+# answers only the shared five; the extended names ride with
+# "uri_query_creds_extended")
 ```
 
 **Async**: `await tors.aio.scrub_log_text(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
@@ -5537,7 +5594,7 @@ tors.bm25_rank("cafe", ["café société", "totally unrelated text"], strip_acce
 ## `tors.rank_fuse` / `tors.ndcg_at_k` / `tors.mrr` / `tors.recall_at_k` / `tors.precision_at_k`
 
 ```python
-def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60) -> list[tuple[Hashable, float]]: ...
+def rank_fuse(ranked_lists: list[list[Hashable]], *, k: int = 60, weights: Sequence[float] | None = None) -> list[tuple[Hashable, float]]: ...
 def ndcg_at_k(
     ranked: list[Hashable],
     relevant: set[Hashable] | frozenset[Hashable],
@@ -5578,6 +5635,34 @@ broken by earliest first appearance across the lists in caller order
 (a point the paper leaves open, pinned here as contract). Returned ids are
 the original objects; dedup and equality follow Python's own dict/set
 semantics (`1`, `True`, and `1.0` are the same id).
+
+**`weights=` is weighted RRF** (the extension the hybrid-retrieval
+engines ship): one optional positive finite float per list, each list's
+vote becoming `w_i / (k + rank(d))` instead of `1 / (k + rank(d))` —
+exactly Elasticsearch's RRF retriever per-child `weight` ("the weight
+that each score of this retriever's top docs will be multiplied in the
+RRF formula", `rrf_score = w_1 × rrf_score_1 + ...`, GA 9.2) and the
+same per-source weighting Redis's hybrid ranking applies when it
+combines a keyword and a vector leg. Weights live in score space, never
+rank space: a weight re-scales one list's votes and touches no rank.
+`weights=None` (the default) is the paper's original fusion EXACTLY:
+every weight 1.0 and the outputs are byte-identical to the unweighted
+spelling (pinned in `tests/test_rank_fusion.py`). A duplicate id votes
+once per LIST, weighted by THAT list's weight (the dedup-first contract,
+extended). A zero, negative, NaN, or infinite weight raises `ValueError`
+(strictly positive finite: Elasticsearch admits zero, tors does not —
+a zero-weight list is almost certainly a miscounted retriever list, the
+`k < 1` class); a length mismatch with `ranked_lists` raises
+`ValueError` naming both sides; a non-sequence `weights` (a bare `str`
+included) or a non-numeric entry raises `TypeError`. Two honesty notes
+on that domain: a legal denormal weight can underflow a document's
+every vote to exactly `0.0` (`5e-324/61` rounds away at any rank) —
+the id still appears, as a `0.0`-score pair ordered last (score
+descending, ties among the `0.0` scores by first appearance), because
+emission follows vote existence, not score positivity. And the
+sequence protocol is the plain one: `bytes` are a sequence of ints and
+launder to their code points (the int-extraction convention:
+`weights=b"12"` is `weights=[49.0, 50.0]`); a bare `str` is refused.
 
 `k` must be >= 1 (`ValueError`); `ranked_lists` must be a non-empty list
 of lists (`TypeError` otherwise; fusing zero lists is a `ValueError`, the
@@ -5623,10 +5708,12 @@ well-defined `0.0`: an empty `ranked`, an empty `relevant` set (no
 relevant document exists, so no hit is possible), and the
 zero-ideal-DCG case (nothing judged relevant) included. Out-of-range
 NUMERICS raise `ValueError` (`k < 1` everywhere `k` appears; a negative
-or non-finite `gains` value). Wrong TYPES raise `TypeError`
+or non-finite `gains` value; a zero, negative, or non-finite `weights`
+value). Wrong TYPES raise `TypeError`
 (a non-list `ranked`/`ranked_lists`, a non-set `relevant` (exactly `set`
 or `frozenset`), a non-dict `gains`, a non-numeric `gains` value (the
-extraction failure), an unhashable id, whose error is
+extraction failure), a non-sequence `weights` (a bare `str` included), a
+non-numeric `weights` entry, an unhashable id, whose error is
 Python's own; a `bool` where an int belongs (`k=True`) or in `gains`
 extracts as its `0`/`1` value, the int-extraction convention). For
 nDCG, legal finite gains can be so large the DCG and
@@ -5676,6 +5763,19 @@ rank_fuse([
 #  ('bird-c', 0.032266458495966696)]
 # cat-a and dog-b tie (two votes each); cat-a appeared first and wins
 # the tie: earliest first appearance across the lists.
+
+rank_fuse(
+    [
+        ["cat-a", "dog-b", "bird-c"],
+        ["dog-b", "cat-a"],
+        ["bird-c"],
+    ],
+    weights=[2.0, 1.0, 1.0],        # weighted RRF: the BM25 leg counts double
+)
+# [('cat-a', 0.04891591750396616), ('dog-b', 0.048651507139079855),
+#  ('bird-c', 0.04813947436898257)]
+# cat-a's weighted votes (2/61 + 1/62) break the tie; bird-c's first-list
+# vote carries the 2.0 weight too (2/63 + 1/61).
 
 ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
 relevant = {"cat-a", "bird-c", "whale-e"}

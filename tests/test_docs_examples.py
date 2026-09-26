@@ -115,6 +115,23 @@ class TestApiReferenceExamples:
             == "connect dsn=postgresql://worker:***@db.internal:5432/prod"
         )
 
+    def test_scrub_log_text_extended_key_set_examples(self) -> None:
+        # docs/api.md's extended-key-set examples (uri_query_creds_extended,
+        # the default chain's widest key set), pinned byte-exact: the
+        # Azure-SAS/api-key shapes mask by default, and the base rule
+        # selected explicitly still answers only the shared five.
+        url = (
+            "GET https://api.internal/v1?sv=2020&sig=sha%3Dabc&api_key=kk123"
+            "&sas_token=tok&x=1"
+        )
+        assert tors.scrub_log_text(url) == (
+            "GET https://api.internal/v1?sv=2020&sig=***&api_key=***&sas_token=***&x=1"
+        )
+        assert tors.scrub_log_text(
+            "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123",
+            ["uri_query_creds"],
+        ) == "GET https://api.internal/v1?sig=sha%3Dabc&api_key=kk123"
+
     def test_chunk_by_lines_log_windows(self) -> None:
         log = (
             "INFO boot\nINFO ready\n\nWARN disk at 90%\n"
@@ -544,6 +561,23 @@ class TestRankFusionExamples:
             ("cat-a", 0.03252247488101534),
             ("dog-b", 0.03252247488101534),
             ("bird-c", 0.032266458495966696),
+        ]
+
+    def test_rank_fuse_weighted_example(self) -> None:
+        # docs/api.md's weighted-RRF example, pinned byte-exact (the same
+        # discipline as the unweighted vector above).
+        fused = tors.rank_fuse(
+            [
+                ["cat-a", "dog-b", "bird-c"],
+                ["dog-b", "cat-a"],
+                ["bird-c"],
+            ],
+            weights=[2.0, 1.0, 1.0],
+        )
+        assert fused == [
+            ("cat-a", 0.04891591750396616),
+            ("dog-b", 0.048651507139079855),
+            ("bird-c", 0.04813947436898257),
         ]
 
     def test_metric_literals_example(self) -> None:

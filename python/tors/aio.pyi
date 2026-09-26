@@ -65,6 +65,7 @@ async def scrub_log_text(
             "pg_detail_lines",
             "uri_userinfo",
             "uri_query_creds",
+            "uri_query_creds_extended",
             "libpq_conninfo_creds",
             "secret_tokens",
         ]
@@ -254,7 +255,7 @@ async def bm25_rank(
     lemma_dict: dict[str, str] | CompiledLemmaDict | None = None,
 ) -> list[tuple[int, float]]: ...
 async def rank_fuse(
-    ranked_lists: list[list[Hashable]], *, k: int = 60
+    ranked_lists: list[list[Hashable]], *, k: int = 60, weights: Sequence[float] | None = None
 ) -> list[tuple[Hashable, float]]: ...
 async def ndcg_at_k(
     ranked: list[Hashable],
