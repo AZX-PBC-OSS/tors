@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.14.0...v0.15.0) (2026-09-26)
+
+
+### Features
+
+* **ranking,scrub:** weighted rank fusion + extended credential param names ([#159](https://github.com/AZX-PBC-OSS/tors/issues/159)) ([a6e6828](https://github.com/AZX-PBC-OSS/tors/commit/a6e6828b56eb7f113d48bcbc9a6cc445faffe760))
+
+
+### Documentation
+
+* **api:** every exported name documented, every aio twin stated, every example executed ([#162](https://github.com/AZX-PBC-OSS/tors/issues/162)) ([70587ac](https://github.com/AZX-PBC-OSS/tors/commit/70587acb1b8d0a68c036d3dbfae3e0c7e03b3bcf))
+
 ## [0.14.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.13.0...v0.14.0) (2026-09-25)
 
 
