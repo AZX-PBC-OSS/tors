@@ -125,8 +125,16 @@ jobs:
         # tors wheel (whose maturin build is the test job's business; the
         # Rust gates above already compile the code it would wrap).
         run: |
-          uv sync --locked --no-install-project
+          uv sync --locked --no-install-project --group docs
           uv run --no-sync ruff check .
+
+      - name: Docs build
+        # The docs gate: mkdocs strict (a broken nav entry or bad link
+        # fails this PR instead of red main's deploy after merge — the
+        # docs workflow deploys from main pushes only, so this lane is
+        # the PR's only docs check). --site-dir keeps the build out of
+        # the repo; the deploy stays the docs workflow's.
+        run: uv run --no-sync mkdocs build --strict --site-dir /tmp/tors-docs-site
 
       - name: Pyright
         # The typed-surface gate: strict checking over the stubs and the
