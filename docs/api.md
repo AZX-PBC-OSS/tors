@@ -494,7 +494,9 @@ second scrub. `[]` is the identity
 (the original object); duplicates dedupe and listing order is irrelevant;
 each name restricts the scrub to that rule.
 
-**The report twin: `tors.scrub_pii_report`.** The same scrub under the
+### The report twin: `tors.scrub_pii_report`
+
+The same scrub The same scrub under the
 same single GIL-released pass, plus the accounting:
 
 ```python
@@ -504,7 +506,7 @@ def scrub_pii_report(
     *,
     salt: str | None = None,
     families: Sequence[str] | None = None,
-) -> dict: ...
+) -> ScrubPiiReport: ...
 ```
 
 `report["text"] == scrub_pii(text, rules, salt=salt, families=families)`
@@ -934,7 +936,9 @@ stronger than `scrub_pii`'s single re-fire corner.
 
 `tors.scrub_secrets(s, rules) is s` exactly when no grammar matched.
 
-**The report twin: `tors.scrub_secrets_report`.** The same scrub for the
+### The report twin: `tors.scrub_secrets_report`
+
+The same scrub The same scrub for the
 same arguments (`report["text"] == scrub_secrets(...)` byte-exact) plus
 the accounting, `scrub_pii_report`'s shape with all three keys present
 every time: `redacted` (per-kind counts, lowercase names, absent kinds
@@ -2343,6 +2347,9 @@ differential suite pins everything else to json-repair==0.63.4:
   which branch applies (upstream's fast path has the same
   reach).
 
+**Async**: `await tors.aio.repair_json(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The whole repair pass is one detached native pass whose documented measurements reach seconds and minutes on large inputs, so the tens-of-microsecond hop is noise on MB-scale documents; a KiB-scale LLM snippet repairs in microseconds, prefer the sync spelling there.
+
+Evidence: `src/py/json_repair.rs` runs the fence pre-pass, strict probe, repair parser, and serializer under one `py.detach`; `tests/test_gil_release.py::test_repair_json_in_a_thread_...` measures a 12 MiB damaged payload at a 122 ms wall (ratio 0.08), and `docs/async.md` states the "seconds and minutes on large inputs" band.
 ## `tors.repair_json_loads`
 
 ```python
@@ -2376,6 +2383,9 @@ tors.repair_json_loads("{'users': [{'name': 'Ada',}]}")
 # {'users': [{'name': 'Ada'}]}
 ```
 
+**Async**: `await tors.aio.repair_json_loads(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). It is `tors.repair_json`'s exact pass with the decoded object marshalled out, so the same story holds: the hop is noise next to a multi-MB repair, real overhead next to a microsecond-scale KiB snippet; prefer the sync spelling on snippets, `tors.aio` on documents.
+
+Evidence: `src/py/json_repair.rs` (the same `py.detach(|| json_repair::repair(...))` pass as `repair_json`, difference is return marshalling only); the 12 MiB GIL cell above covers the pass both spellings share.
 ## `tors.repair_json_diagnostics`
 
 ```python
@@ -2514,6 +2524,9 @@ value, diags = tors.repair_json_diagnostics(
 # ({'count': 4}, [{'action': 'coerce', 'path': '$.count', ...}])
 ```
 
+**Async**: `await tors.aio.repair_json_diagnostics(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Same detached pass as `tors.repair_json`, with an O(actions) diagnostics list added to the residue, so the guidance is unchanged: prefer the sync spelling on KiB-scale snippets, `tors.aio` on MB-scale documents.
+
+Evidence: `src/py/json_repair.rs` detaches the identical repair pass and only appends the diagnostics-list marshalling after it; the schema-layer action log is bounded by the repair actions actually taken, not by input size.
 ## `tors.truncate_to_bounds`
 
 ```python
@@ -2556,6 +2569,9 @@ tors.truncate_to_bounds("One. Two. Three.", 10, boundary="sentence")
 # "One. Two."
 ```
 
+**Async**: `await tors.aio.truncate_to_bounds(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)).
+
+Evidence: sibling `tors.truncate_ellipsis` (same `detached_transform` GIL shape, `src/py/truncate.rs`) carries exactly this plain line at `docs/api.md:2531`; no test or doc states a size threshold for the truncation pair, so no cost sentence is invented.
 ## `tors.truncate_ellipsis`
 
 ```python
@@ -2669,6 +2685,9 @@ tors.is_grounded(
 # True
 ```
 
+**Async**: `await tors.aio.is_grounded(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The default exact path is a memchr-class containment that finishes in microseconds even on MiB passages, pure overhead to hop; `fuzzy=True`'s windowed diff scan is linear in the source and is the shape a long retrieved passage makes millisecond-scale, where the hop is noise.
+
+Evidence: `src/py/grounded.rs` documents `fuzzy=False` as one `py.detach`'d `memmem` check and `fuzzy=True` as the whole windowed scan under one `py.detach`; `docs/api.md` (lines 2549-2551, 2587-2593) puts the exact path at memchr speed and the fuzzy windowing at linear-in-source cost with an O(claim)-sized buffer.
 ## `tors.highlight`
 
 ```python
@@ -2779,6 +2798,9 @@ tors.highlight("torque spec", "The pump failed. The bushing torque spec was 42 N
 space to the preceding sentence — the offsets are the sentence's, exactly
 as documented above.)
 
+**Async**: `await tors.aio.highlight(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The capped grounding pass measures ~1 ms on a 2k-token chunk (docs/async.md's own thread-hop-territory threshold) and ~5 ms at document scale, so the hop is noise at chunk scale and up; a sentence-length text is a microsecond pass, prefer the sync spelling there.
+
+Evidence: `src/py/grounding.rs` runs the whole pass under one `py.detach`; `docs/async.md` lines 25-27 state "a 2k-token chunk already measures ~1 ms", and `docs/performance.md` lines 163-165 measure one `highlight` at ~5.2-5.5 ms.
 ## `tors.ground_sentences`
 
 ```python
@@ -2868,6 +2890,9 @@ per `ground_sentences` call against ~25-28 ms for the loop, with
 there, the ROUGE-W-shaped F1 here, the toy agreement on both sides),
 `tools/bench_sota.py`, bands in [Performance](performance.md).
 
+**Async**: `await tors.aio.ground_sentences(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The batch runs the grounding pass over every sentence of the text (measured ~6 ms on a 1,251-sentence document, ~400 ms walls at 3 MiB of chatlog), so the hop is noise at any batch scale; a short paragraph is microsecond-scale, prefer the sync spelling there.
+
+Evidence: `src/py/grounding.rs` detaches the whole segment/tokenize/score pass; `tests/test_gil_release.py::test_ground_sentences_in_a_thread_...` measures ~40-50 ms gaps of ~400 ms walls at 3 MiB (~55k sentences), and `docs/performance.md` measures ~5.7-6.3 ms on the 1,251-sentence document.
 ## `tors.grounding_coverage`
 
 ```python
@@ -2944,6 +2969,9 @@ deliberately NOT monotone in the query: extending the query with a term
 absent from the text lowers the score (the added term dilutes recall),
 expected behavior, not a defect.
 
+**Async**: `await tors.aio.grounding_coverage(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The weighted-LCS DP is O(|S|·|T|) up to the 16384-token operand caps, milliseconds at page scale and seconds at the caps, so the hop is noise on document-scale operands; a sentence-or-paragraph pair is a microsecond pass, prefer the sync spelling there.
+
+Evidence: `src/py/grounded.rs` detaches the whole pass with a single-float residue; `tests/test_gil_release.py::test_grounding_coverage_in_a_thread_...` states the wall at 12 MiB x 12 MiB operands is seconds (caps bounding it at ~10^8 cells) and measures ~10-50 ms walls at 2 MiB + 1 MiB.
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
 ```python
@@ -3025,6 +3053,9 @@ tors.get_close_matches("appel", ["ape", "apple", "peach", "puppy"])
 # ['apple', 'ape']
 ```
 
+**Async**: `await tors.aio.similarity_ratio(...)` and `await tors.aio.get_close_matches(...)` run under `asyncio.to_thread` (see [Async use](async.md)). A two-short-string ratio is a microsecond call the hop outruns; the bulk sweep is where the twin pays, measured ~65 ms walls over 13,900 x 664-char candidates with the whole per-candidate Myers sweep detached.
+
+Evidence: `src/py/fuzzy.rs` detaches the Myers scoring (one pair for `similarity_ratio`, the sweep for `get_close_matches`); `tests/test_gil_release.py::test_get_close_matches_bulk_...` measures worst gaps 10.6-11.3 ms of 64.2-71.7 ms walls (ratio 0.15-0.18) on that corpus.
 ## `tors.levenshtein` / `tors.jaro` / `tors.jaro_winkler`
 
 ```python
@@ -3071,6 +3102,9 @@ tors.jaro_winkler("MARTHA", "MARHTA")
 # 0.9611111111111111
 ```
 
+**Async**: `await tors.aio.levenshtein(...)`, `await tors.aio.jaro(...)`, and `await tors.aio.jaro_winkler(...)` run under `asyncio.to_thread` (see [Async use](async.md)). Each is a quadratic DP over the operand lengths: the hop costs more than the call on the word/name-scale pairs these metrics usually see, and is noise on the multi-KB and adversarial multi-MB operands the two-row DP and `deadline_ms` exist for.
+
+Evidence: `src/py/fuzzy.rs` detaches the DP/matching pass with a single int/float out (no marshalling class), and `docs/api.md` (lines 2985-2991, 3004-3008) documents the O(n·m) worst case, the linear-space two-row DP, and the adversarial multi-MB sizing; no test pins a KB crossover, so the line stays qualitative.
 ## `tors.quote` / `tors.quote_plus` / `tors.unquote` / `tors.unquote_plus`
 
 ```python
@@ -3977,6 +4011,8 @@ The object content hash: the lowercase-hex SHA-256 of the object's
 **canonical form**, where the canonical form is EXACTLY
 
 ```python
+import json
+
 json.dumps(obj, sort_keys=True, separators=(",", ":"))
 ```
 
@@ -3984,6 +4020,9 @@ with `json.dumps`'s defaults `ensure_ascii=True` and `allow_nan` — so the
 oracle is the stdlib itself, total and always available:
 
 ```python
+import hashlib
+import json
+
 hashlib.sha256(
     json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
@@ -4242,7 +4281,7 @@ tors.merkle_diff([b"a", b"b"], [b"a", b"b", b"c", b"d"])
 # [2, 3]: every trailing index beyond the shorter list's length
 ```
 
-## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex` and their `_digest` twins
+## `tors.md5_hex` / `tors.sha1_hex` / `tors.sha256_hex` / `tors.sha512_hex` / `tors.hmac_sha256_hex` and the `_digest` twins (`tors.md5_digest` / `tors.sha1_digest` / `tors.sha256_digest` / `tors.sha512_digest` / `tors.hmac_sha256_digest`)
 
 ```python
 def md5_hex(data: str | bytes) -> str: ...        # 32 lowercase hex chars
@@ -4360,6 +4399,19 @@ OpenSSL engines (hardware SHA extensions) win or tie at engine-dominated
   superlinear structure for an adversary to feed — a caller already
   controls the one lever that bounds the cost (how many bytes they pass).
 
+Add to the section's contract prose (after the "Stateless one-shot" and
+GIL-model paragraphs, before "### Raw digest bytes"):
+
+**No `tors.aio` twin.** The hashing family is absent from
+`tors.aio._WRAPPED` on the module's own size discipline: a one-shot
+digest over the inputs this surface exists for (cache keys, request
+signatures, webhook bodies) is a microsecond-scale call, and the
+`asyncio.to_thread` hop costs tens of microseconds, more than the call
+itself (see [Async use](async.md)). A coroutine that does hash a
+multi-MiB payload wraps manually, `await asyncio.to_thread(tors.sha256_digest, blob)`;
+the GIL is released for the digest either way, so the wrap buys the loop
+its wall clock back and nothing else.
+
 ### Raw digest bytes: the `_digest` spellings
 
 The five `_digest` names return the digest as raw `bytes` — the same
@@ -4368,7 +4420,7 @@ twins (str input is its UTF-8 bytes; exactly-`bytes` in, so
 `bytearray`/`memoryview` raise TypeError — wrap first, `bytes(buf)`;
 a lone surrogate raises
 UnicodeEncodeError at the borrow; any key length legal, empty included;
-the key borrowed and validated before the data; empty input legal) —
+the key borrowed and validated before the data) —
 without the hex tail. One digest computation per call, two output
 spellings to choose from; `tors.md5_digest(x)` is exactly
 `bytes.fromhex(tors.md5_hex(x))`.
@@ -4484,6 +4536,83 @@ tors.md5_hex(body) == "487f5cc2c45cc57e638d9fce8c33d95c"  # the declared ETag
 a timing side channel has nothing to leak. Secret comparisons (HMAC
 signatures, tokens) must use `hmac.compare_digest` as in the webhook
 cells above — never `==`.
+
+### The `_digest` twins: the bytes-side pins
+
+The five raw-digest names return a fresh, immutable `bytes` object of
+exactly one length each: `md5_digest` 16 bytes, `sha1_digest` 20,
+`sha256_digest` 32, `sha512_digest` 64, `hmac_sha256_digest` 32. The
+object is built per call (`PyBytes::new`), never cached or interned, so
+handing the digest to a second consumer layer cannot alias tors's
+internals. Three parity identities hold for every input and are pinned
+differentially in `tests/test_hash.py` (`TestDifferentialParity`,
+hypothesis corpora plus RFC 1321 / FIPS 180-4 / RFC 4231 known-answer
+vectors through both spellings):
+
+- `tors.md5_digest(x) == hashlib.md5(x).digest()` and likewise for
+  sha1/sha256/sha512 (cross-implementation agreement: RustCrypto vs
+  OpenSSL);
+- `tors.hmac_sha256_digest(k, x) == hmac.new(k, x,
+  hashlib.sha256).digest()`, any key length, empty included (an empty
+  key IS the zero-padded 64-byte key, RFC 2104's padding rule);
+- `tors.<alg>_hex(x) == tors.<alg>_digest(x).hex()`: one digest
+  computation per call, the hex path consumes the digest path.
+
+The argument contract is the `_hex` twins' byte for byte, and the error
+messages name the argument that failed:
+
+```python
+import hashlib
+import tors
+
+digest = tors.sha512_digest("payload")            # str in: its UTF-8 bytes
+len(digest)
+# 64
+digest == hashlib.sha512(b"payload").digest()     # cross-implementation parity
+# True
+tors.sha512_hex("payload") == digest.hex()        # one computation, two spellings
+# True
+```
+
+```python
+import tors
+
+tors.sha256_digest(bytearray(b"payload"))
+# TypeError: data must be str or bytes, not <class 'bytearray'>
+```
+
+A `bytes` SUBCLASS is accepted (pyo3's `PyBytes` borrow covers
+subclasses); `bytearray`, `memoryview`, and everything else that is not
+exactly `str` or `bytes` raise `TypeError` with that message shape,
+because the GIL-released digest reads an immutable buffer. On the HMAC
+spellings the key is borrowed and validated before the data, so when
+both arguments are bad the KEY's error is the one that fires:
+
+```python
+import hashlib
+import hmac as hmac_module
+import tors
+
+tors.hmac_sha256_digest(None, bytearray(b"data"))
+# TypeError: key must be str or bytes, not <class 'NoneType'>
+
+tors.hmac_sha256_digest(b"", b"payload") == hmac_module.new(b"", b"payload", hashlib.sha256).digest()
+# True
+tors.hmac_sha256_digest(b"", b"payload") == tors.hmac_sha256_digest(b"\x00" * 64, b"payload")
+# True
+```
+
+The empty input is a pinned known answer in every algorithm, the digest
+of the empty string (FIPS 180-4 / RFC 1321's vectors themselves):
+
+```python
+import tors
+
+tors.sha256_digest(b"").hex()
+# 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+tors.md5_digest(b"").hex()
+# 'd41d8cd98f00b204e9800998ecf8427e'
+```
 
 ## `tors.uuid7_timestamp_ms` / `tors.uuid_version` / `tors.uuid_parse`
 
@@ -5004,6 +5133,9 @@ GIL, then the whole banding pass under one `py.detach`, then the
 `O(pairs)` tuple-list marshalling. `aio` twin:
 `tors.aio.lsh_candidates`.
 
+**Async**: `await tors.aio.lsh_candidates(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Honest caveat, measured: the O(n · num_perm) signature walk is interpreter-side int extraction and stays GIL-held inside the worker thread (ratios 0.47-0.61 at 4k x 128 signatures), so the hop buys the detached banding pass and the caller's concurrency shape, not a fully detached call.
+
+Evidence: `src/py/lsh.rs` runs the signature walk under the GIL and only the banding pass under one `py.detach`; `tests/test_gil_release.py::test_lsh_candidates_in_a_thread_...` measures worst gaps 32-53 ms of 68-86 ms walls (ratios 0.47-0.61) against the bespoke `_LSH_RATIO_BUDGET = 0.75`. NOTE: the section's trailing "GIL:" paragraph ends with "`aio` twin: `tors.aio.lsh_candidates`."; fold that sentence into this line (or delete it) so the twin is stated once.
 ## `tors.lsh_probability`
 
 ```python
@@ -5178,6 +5310,9 @@ Python): ~9 ms vs ~15 ms on 100 KiB pairs, the same value out
 only `word_bounds`, `tools/bench_sota.py`, bands in
 [Performance](performance.md)).
 
+**Async**: `await tors.aio.shingle_jaccard(...)` and `await tors.aio.shingle_dice(...)` run under `asyncio.to_thread` (see [Async use](async.md)). The whole tokenize + shingle + set pass is one detached native pass measuring ~9 ms on 100 KiB pairs, so the hop is noise there and up; a short-string pair is a microsecond call, prefer the sync spelling there.
+
+Evidence: `src/py/near_dup.rs` detaches the whole pass with a single float out; `docs/api.md` lines 5117-5122 measure ~9 ms native on 100 KiB pairs (vs ~15 ms pure Python). NOTE: the section's trailing "GIL:" paragraph ends with "`aio` twins: `tors.aio.shingle_jaccard` / `tors.aio.shingle_dice`."; fold or delete, as above.
 ## `tors.dedup_near_dup`
 
 ```python
@@ -5277,6 +5412,9 @@ then the fingerprint pass AND the pairwise sweep under one `py.detach`,
 then the O(n + groups) index-list marshalling. `aio` twin:
 `tors.aio.dedup_near_dup`.
 
+**Async**: `await tors.aio.dedup_near_dup(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The fingerprint pass and the documented O(n²) pairwise sweep run detached as one pass (12k documents measure ~0.2-0.4 s walls), so the hop is noise on any corpus-shaped list; a handful of short strings is microsecond-scale, prefer the sync spelling there.
+
+Evidence: `src/py/near_dup.rs` detaches the fingerprint pass AND the pairwise sweep together; `tests/test_gil_release.py::test_dedup_near_dup_in_a_thread_...` measures worst gap 11-14 ms of 230-420 ms walls (ratio 0.03-0.06) at 12k documents with the full pair ladder walked. NOTE: the trailing "GIL:" paragraph ends with "`aio` twin: `tors.aio.dedup_near_dup`."; fold or delete.
 ## `tors.CompiledLemmaDict`
 
 ```python
@@ -5607,7 +5745,13 @@ def recall_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hash
 def precision_at_k(ranked: list[Hashable], relevant: set[Hashable] | frozenset[Hashable], k: int) -> float: ...
 ```
 
-**Async**: each of the five has an `await tors.aio.<name>(...)` twin under
+**Async**: each of the five has an awaitable twin under `asyncio.to_thread` (see [Async use](async.md)): `await tors.aio.rank_fuse(...)`, `await tors.aio.ndcg_at_k(...)`, `await tors.aio.mrr(...)`, `await tors.aio.recall_at_k(...)`, and `await tors.aio.precision_at_k(...)`. Honest caveat, measured: the fusion dedup walk and the metrics' membership walks are interpreter-side hashing and stay GIL-held inside the worker thread (ratios 0.56-0.62 at 200k entries for `rank_fuse`, 0.85-0.91 at 100k ids for `ndcg_at_k`), so the hop buys the detached arithmetic and the caller's concurrency shape; past ~10^6 total entries the walk alone holds the GIL for 100ms+ and no placement buys it back.
+
+Evidence: `src/py/rank_fusion.rs` holds the walks under the GIL and detaches only the sweep/sort/metric arithmetic; `tests/test_gil_release.py::test_rank_fuse_in_a_thread_...` (ratios 0.56-0.62 at 200k, bespoke 0.80 budget) and `::test_ndcg_at_k_on_a_large_ranking_...` (0.85-0.91 at 100k, ceiling-only) carry the bands, and the section's own GIL-model paragraph (lines 5644-5659) states the ~10^6-entry guidance and id-shape caveat.
+
+This line REPLACES docs/api.md lines 5553-5554 (the audit missed the section because the existing collective line names no twin explicitly; it also lacks the cost guidance every other wrapped family's line carries). It is the only entry here that is a replacement rather than an insertion.
+
+---
 `asyncio.to_thread` (see [Async use](async.md)).
 
 The retrieval-family companions to `bm25_rank`: rank-space arithmetic over
@@ -5754,7 +5898,7 @@ score recompute to a 3.5e-18 delta) at ~15-20x its wall, and
 `ranx.evaluate` do at ~2x and ~5x theirs.
 
 ```python
-rank_fuse([
+tors.rank_fuse([
     ["cat-a", "dog-b", "bird-c"],   # a BM25 reranker's top 3
     ["dog-b", "cat-a"],             # a vector search's top 2
     ["bird-c"],                     # a keyword filter's hit
@@ -5779,15 +5923,15 @@ rank_fuse(
 
 ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
 relevant = {"cat-a", "bird-c", "whale-e"}
-ndcg_at_k(ranked, relevant)          # 0.7039180890341347
-mrr(ranked, relevant)                # 1.0
-recall_at_k(ranked, relevant, 2)     # 0.3333333333333333
-recall_at_k(ranked, relevant, 4)     # 0.6666666666666666
-precision_at_k(ranked, relevant, 2)  # 0.5
-ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
+tors.ndcg_at_k(ranked, relevant)          # 0.7039180890341347
+tors.mrr(ranked, relevant)                # 1.0
+tors.recall_at_k(ranked, relevant, 2)     # 0.3333333333333333
+tors.recall_at_k(ranked, relevant, 4)     # 0.6666666666666666
+tors.precision_at_k(ranked, relevant, 2)  # 0.5
+tors.ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
 # (k=2's ideal packs two of the three relevant ids at ranks 1-2; one hit
 # at rank 1 scores 1/1.6309...)
-ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
+tors.ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
 ```
 
 ## `tors.apply_pipeline`
@@ -6551,6 +6695,127 @@ length/uniqueness/subset algebra that makes the family coherent
 (tests/test_first_invalid_charset.py); the stub carries their type (`str`)
 and is held to `tors.__all__` by the same drift guard as every function
 (tests/test_pyi_drift.py).
+
+## Module data: `tors.CHARSET_B62` / `tors.CHARSET_B64URL` / `tors.CHARSET_HEX_LOWER` / `tors.CHARSET_HEX_MIXED` / `tors.CHARSET_HEX_UPPER` / `tors.KEY_FAMILIES`
+
+```python
+tors.CHARSET_B62: str
+tors.CHARSET_B64URL: str
+tors.CHARSET_HEX_LOWER: str
+tors.CHARSET_HEX_MIXED: str
+tors.CHARSET_HEX_UPPER: str
+tors.KEY_FAMILIES: tuple[str, ...]
+```
+
+Six published module data constants: the five pinned alphabets the
+batch validators consume and the canonical key-family tuple the
+credential scrubber consumes. They are data, not functions, on purpose
+(the [Common alphabets](#common-alphabets) subsection under
+`first_invalid_charset` records the scope decision): named per-alphabet
+validator wrappers would each delegate to the same core for zero
+performance gain, so the constants kill the only real friction, the
+transcription risk of re-spelling a 62-character alphabet (a wrong
+62-character set still validates *something*) or re-enumerating a
+closed family set by hand, at every call site. Being data, they carry
+no argument contract, no GIL story (nothing runs), and no `tors.aio`
+twin (`aio` wraps functions; a constant read is not a call to hide).
+All six sit in `tors.__all__`, and the stub is held to it by the same
+drift guard as every function (`tests/test_pyi_drift.py`).
+
+The five alphabets are plain `str` literals defined in the package's
+`__init__.py`, and their CONTENT is contract, pinned byte-exact in
+`tests/test_first_invalid_charset.py`; the stub carries the type only,
+so the live module stays the single spelling of each alphabet:
+
+```python
+import tors
+
+tors.CHARSET_B62
+# '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+tors.CHARSET_B64URL
+# 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+tors.CHARSET_HEX_LOWER
+# '0123456789abcdef'
+tors.CHARSET_HEX_UPPER
+# '0123456789ABCDEF'
+tors.CHARSET_HEX_MIXED
+# '0123456789abcdefABCDEF'
+
+(len(tors.CHARSET_B62), len(tors.CHARSET_B64URL),
+ len(tors.CHARSET_HEX_LOWER), len(tors.CHARSET_HEX_MIXED), len(tors.CHARSET_HEX_UPPER))
+# (62, 64, 16, 22, 16)
+```
+
+`CHARSET_B64URL` is RFC 4648 §5's url-safe alphabet, UNPADDED: `=` is
+positionally structured, not a codepoint a flat charset can admit
+(b64_decode is the strict base64 validator; the Common alphabets
+subsection has the full reasoning). `CHARSET_HEX_MIXED` is the
+22-codepoint union of the two hex spellings, for validators that must
+accept either case. Membership is per scalar codepoint with no
+normalization, order and duplicates in a spelling irrelevant. Each
+constant feeds `first_invalid_charset`/`first_invalid_offender` as the
+`rest=` set (or `first=` for position 0); the uniform `first=None`
+spelling makes it a single argument:
+
+```python
+import tors
+
+digests = ["487f5cc2c45cc57e638d9fce8c33d95c", "487F5CC2C45CC57E638D9FCE8C33D95C"]
+tors.first_invalid_charset(digests, rest=tors.CHARSET_HEX_LOWER)
+# 1    (the uppercase digest offends the lowercase alphabet)
+tors.first_invalid_charset(digests, rest=tors.CHARSET_HEX_MIXED)
+# -1   (both pass the case-insensitive union)
+```
+
+`KEY_FAMILIES` is different in one respect: it is exported from the
+Rust core, built from the same single source (`pii_impl`'s
+`KEY_FAMILY_NAMES`) the `api_keys` scanner's grammar table and the
+`families=` unknown-name error are spelled from, so the tuple, the
+accepted names, and the error message cannot drift apart. It is the
+fourteen key-family names in the `KeyFamily` discriminant order:
+
+```python
+import tors
+
+tors.KEY_FAMILIES
+# ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github',
+#  'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure', 'gitlab')
+tuple(f for f in tors.KEY_FAMILIES if f != "jwt")[:3]
+# ('openai', 'anthropic', 'google')
+```
+
+Its consumer is `scrub_pii`/`scrub_pii_report`'s `families=` parameter
+(see that section's Key-family selection): `families=None` is every
+family this version knows, the set grows when new families land
+(semver-visible, so stability-seeking callers list names explicitly),
+and an unknown name is refused with an error that names the accepted
+set, which is the tuple itself:
+
+```python
+import tors
+
+tors.scrub_pii("ssn 123-45-6789", families=["ssn"])
+# ValueError: families must be one of ('openai', 'anthropic', 'google', 'fireworks', 'modal', 'github', 'minted', 'jwt', 'aws', 'xai', 'gcp_oauth', 'pem', 'azure', 'gitlab'), not "ssn"
+```
+
+## `tors.__version__`
+
+The installed distribution's version, read once at import from its
+metadata (`importlib.metadata.version("tors")`, the same source
+`pip`/`uv` report, so they cannot disagree; pinned by
+`tests/test_package_version.py`). It is never a second literal in the
+source that release tooling cannot bump. Where the distribution
+metadata is absent (a source tree imported off-path) it answers
+`"unknown"` rather than lying. Declared on the typed surface as plain
+`str` (the value is import-computed, not a constant the stub could
+lie about).
+
+```python
+import tors
+
+tors.__version__
+# '0.14.0'
+```
 
 ## `tors.documents`
 
