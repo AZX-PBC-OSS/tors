@@ -119,7 +119,7 @@ rphonetic = { version = "4.0.0", features = ["embedded_dm"] }
 # for schemas that $ref out to URLs and files; tors resolves LOCAL `#/...`
 # JSON pointers only — json_repair's SchemaRepairer raises on any other $ref
 # spelling, and tors keeps that contract — so the resolvers are pure weight.
-jsonschema = { version = "0.56", default-features = false }
+jsonschema = { version = "0.57", default-features = false }
 # The JSON interchange type the validator works over (and the shape the
 # schema/`Value` boundary conversions speak). Already in the tree as
 # criterion's transitive, so the direct edge adds no new package — the same
