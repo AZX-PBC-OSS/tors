@@ -90,6 +90,10 @@ lint:
 	cargo clippy --all-targets --no-default-features --features documents -- -D warnings
 	cargo clippy --all-targets --manifest-path tors-documents/Cargo.toml -- -D warnings
 	uv run --no-sync ruff check .
+	# The docs gate: the site builds strict (a broken nav entry or bad
+	# link fails the PR instead of red main's deploy after merge; the
+	# deploy itself stays the docs workflow's, main-push-only).
+	uv run --no-sync mkdocs build --strict --site-dir /tmp/tors-docs-site
 	# The typed-surface gate: strict pyright over the stubs and the
 	# consumer scratch (pyrightconfig.json); uvx pins the version the
 	# config is verified against, so the gate is deterministic.
