@@ -1,8 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::grounding_impl;
+use crate::py::_borrow::{EmptyPolicy, borrow_str_list, validate_unit_interval};
 
 /// `tors.highlight(query, text, *, max_snippets=3, max_chars=400)`:
 /// the best-matching snippet(s) of `text` for `query`, with CHARACTER
@@ -115,4 +116,94 @@ pub fn ground_sentences(
     out.set_item("sentences", sentences)?;
     out.set_item("score", result.score)?;
     Ok(out.into_pyobject(py)?.into_any().unbind())
+}
+
+/// `tors.grounding_report(text, sources, query=None, *, threshold=0.85)`:
+/// the production grounding-report composition, the pipeline shape the
+/// Deepchecks "Grounded in Context" framework makes (Gerner et al. 2025,
+/// "Grounded in Context: Retrieval-Based Method for Hallucination
+/// Detection", arXiv 2504.15771: decompose the output into statements,
+/// score each statement against the context, aggregate into one verdict),
+/// with tors's lexical layer in place of the paper's NLI entailment
+/// model. See `src/grounding_impl.rs` for the composition's exact
+/// definitions.
+///
+/// Returns the report dict, every key present every time:
+/// `{"sentences": [{"text", "start", "end", "best_source", "score",
+/// "grounded"}, ...], "aggregate": {"grounded_ratio", "grounded",
+/// "sentences", "mean_score", "best_score", "coverage", "query_score"}}`.
+/// Each sentence entry is a UAX #29 sentence of `text` in position order
+/// (its offsets are `sentence_bounds`' exact tuples, codepoint indices,
+/// so `text[start:end] == sentence["text"]` exactly), `best_source` the
+/// index of the source holding the sentence's best alignment (`None`
+/// when there is none: no sources, or no source shares a token),
+/// `score` that alignment's ROUGE-W F1 in `[0.0, 1.0]` (the per-pair
+/// score is `highlight`'s own, the sentence scored as the query at the
+/// family's default 1-snippet/400-char budget), and `grounded` the
+/// threshold verdict (`score >= threshold` AND an alignment exists: no
+/// sources grounds nothing, even at `threshold=0.0`). The aggregate:
+/// `grounded_ratio` the grounded fraction (`0.0` for no sentences),
+/// `grounded`/`sentences` the counts, `mean_score`/`best_score` the
+/// per-sentence score mean/max, `coverage` the text-level token
+/// utilization of the text against the newline-joined sources
+/// (`grounding_coverage`'s recall twin, `0.0` with no sources), and
+/// `query_score` the optional query's `ground_sentences` aggregate over
+/// the text (the best sentence's F1 against the query: WHICH grounded
+/// sentence reads first; `0.0` when `query` is `None`).
+///
+/// This is the LEXICAL layer, named as such: the paper's step 5 (NLI
+/// entailment per claim-context pair) is the handoff a consumer's own
+/// model takes over from, the same line `ground_sentences` documents.
+/// `threshold` must be in `[0.0, 1.0]`.
+///
+/// GIL model: ONE detached pass for the WHOLE report (the argument
+/// borrows and the threshold validation under the GIL, then the
+/// segmentation, every per-(sentence, source) highlight score, the
+/// coverage and the query pass inside a single `py.detach`); the
+/// underlying primitives already detach their own passes when called
+/// directly, and composing them here must not multiply that into one
+/// detach per sentence, so the composition runs server-side, detached
+/// once; the residue is the O(sentences) dict marshalling.
+#[pyfunction(signature = (text, sources, query = None, *, threshold = 0.85))]
+pub fn grounding_report(
+    py: Python<'_>,
+    text: &str,
+    sources: Bound<'_, PyList>,
+    query: Option<&str>,
+    threshold: f64,
+) -> PyResult<Py<PyAny>> {
+    validate_unit_interval("threshold", threshold, false)?;
+    // The bounded collect-handles-then-borrow walk (`borrow_str_list`):
+    // each source borrowed zero-copy, the borrows alive across the
+    // detach by the walk's own soundness argument (src/py/_borrow.rs).
+    // An empty source entry is legal (an empty source aligns nothing,
+    // highlight's documented degenerate answer).
+    borrow_str_list(&sources, EmptyPolicy::Allow, |_items, borrowed| {
+        let result =
+            py.detach(|| grounding_impl::grounding_report(text, borrowed, query, threshold));
+        let n = result.sentences.len();
+        let sentences = PyList::empty(py);
+        for s in &result.sentences {
+            let d = PyDict::new(py);
+            d.set_item("text", &s.text)?;
+            d.set_item("start", s.start)?;
+            d.set_item("end", s.end)?;
+            d.set_item("best_source", s.best_source)?;
+            d.set_item("score", s.score)?;
+            d.set_item("grounded", s.grounded)?;
+            sentences.append(d)?;
+        }
+        let aggregate = PyDict::new(py);
+        aggregate.set_item("grounded_ratio", result.grounded_ratio)?;
+        aggregate.set_item("grounded", result.grounded_count)?;
+        aggregate.set_item("sentences", n)?;
+        aggregate.set_item("mean_score", result.mean_score)?;
+        aggregate.set_item("best_score", result.best_score)?;
+        aggregate.set_item("coverage", result.coverage)?;
+        aggregate.set_item("query_score", result.query_score)?;
+        let out = PyDict::new(py);
+        out.set_item("sentences", sentences)?;
+        out.set_item("aggregate", aggregate)?;
+        Ok(out.into_pyobject(py)?.into_any().unbind())
+    })
 }

@@ -160,11 +160,12 @@ edge cases are in the [API reference](docs/api.md).
 | Batch charset validation | `first_invalid_charset`, `first_invalid_offender` (the same scan's offender detail — item index, codepoint position, character — for rejection messages), `CHARSET_B62`/`_B64URL`/`_HEX_LOWER`/`_HEX_UPPER`/`_HEX_MIXED` (pinned alphabets that pair with the validator as data) |
 | Markdown / code-fence extraction | `extract_code_blocks`, `strip_code_fences`, `dedent` |
 | JSON repair (json_repair port) | `repair_json`, `repair_json_loads`, `repair_json_diagnostics` |
-| Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded`, `highlight`, `ground_sentences`, `grounding_coverage` |
+| Truncation & lexical grounding | `truncate_to_bounds`, `truncate_ellipsis`, `is_grounded`, `highlight`, `ground_sentences`, `grounding_coverage`, `grounding_report` (per-sentence verdicts + aggregate, the lexical Grounded-in-Context shape) |
 | URL encoding | `quote`, `quote_plus`, `unquote`, `unquote_plus` |
-| Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical`, `chunk_to_budget`, `chunk_to_offsets` |
-| Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `minhash_signature` (classic k-permutation or SuperMinHash engine, optional b-bit compression), `minhash_jaccard`, `weighted_minhash_signature` (Consistent Weighted Sampling over token counts), `minhash_weighted_jaccard`, `merkle_root`, `merkle_diff`, `content_hash` |
+| Text chunking | `chunk_cdc`, `chunk_text`(+`_iter`), `chunk_by_words`/`_sentences`/`_paragraphs`/`_lines`(+`_iter`), `chunk_hierarchical`, `chunk_to_budget`, `chunk_to_offsets`, `chunk_overlap_cost` (the 1/(1-overlap) index-inflation factor), `chunk_quality` (integrity + cohesion, the LREC 2026 adaptive-chunking metrics) |
+
 | Rank fusion & IR metrics | `rank_fuse` (Reciprocal Rank Fusion, Cormack/Clarke/Buüttcher SIGIR 2009, ranks only, never raw scores, optional per-list weights: weighted RRF), `ndcg_at_k` (Järvelin & Kekäläinen TOIS 2002), `mrr`, `recall_at_k`, `precision_at_k` |
+| Information retrieval & integrity | `tf_idf`, `bm25_rank`, `simhash64`, `simhash128`, `minhash_signature` (classic k-permutation or SuperMinHash engine, optional b-bit compression), `minhash_jaccard`, `weighted_minhash_signature` (Consistent Weighted Sampling over token counts), `minhash_weighted_jaccard`, `merkle_root`, `merkle_diff`, `content_hash` |
 | Near-duplicate detection & dedup | `simhash_distance`, `shingle_jaccard`, `shingle_dice`, `dedup_near_dup` (greedy keep-first over small candidate sets), `lsh_candidates`/`lsh_probability`/`lsh_threshold` (stateless MinHash banding over `minhash_signature` output; no persistent LSH index) |
 | UUIDv7 field operations | `uuid7_timestamp_ms`, `uuid_version`, `uuid_parse` |
 | Text-processing pipelines | `apply_pipeline`, `CompiledLemmaDict` |

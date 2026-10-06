@@ -163,6 +163,8 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
             "DedupResult",
             "GroundingResult",
             "SentenceGrounding",
+            "ChunkQuality",
+            "GroundingReport",
         ):
             if re.search(rf"\b{type_name}\b", chunk):
                 used_type_names.add(type_name)

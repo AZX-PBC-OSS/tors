@@ -458,6 +458,7 @@ pub mod chunk_budget_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
+pub mod chunk_quality_impl;
 pub mod controls_impl;
 pub mod decode_impl;
 pub mod diff_impl;
@@ -718,6 +719,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(ground_sentences, m)?)?;
     m.add_function(wrap_pyfunction!(grounding_coverage, m)?)?;
+    m.add_function(wrap_pyfunction!(grounding_report, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
     m.add_function(wrap_pyfunction!(content_hash, m)?)?;
@@ -745,6 +747,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_to_budget, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_to_offsets, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_overlap_cost, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_quality, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
     m.add_function(wrap_pyfunction!(simhash_distance, m)?)?;
