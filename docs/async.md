@@ -15,7 +15,7 @@ The `await tors.aio.tf_idf(corpus)` call runs the native pass in a worker
 thread via `asyncio.to_thread`, and the event loop stays responsive for
 the whole call.
 
-It covers only the large-input functions: the chunking family, `tf_idf`,
+It covers the large-input functions: the chunking family, `tf_idf`,
 `bm25_rank`, the rank-fusion family (`rank_fuse`, `ndcg_at_k`, `mrr`,
 `recall_at_k`, `precision_at_k`; the fusion/membership walks over large
 rankings are interpreter-side hashing, so the worker thread buys their
@@ -47,7 +47,11 @@ bounds reporters `word_bounds`/`sentence_bounds` (their marshalling band
 at whole-file sizes is the list shape's own; see performance.md). Thread dispatch costs on the order of
 tens of microseconds: noise next to a millisecond-or-slower native pass over a
 real corpus or document, real overhead next to a microsecond-scale call over a
-short string. Exception-size guidance: `scrub_log_text`'s error-path inputs
+short string. The fuzzy-metric twins (`levenshtein`/`jaro`/
+`jaro_winkler`, the ranking metrics, `similarity_ratio`/
+`get_close_matches`) are included for uniformity and completeness
+rather than for the hop; each one's section in api.md states the
+per-call cost honestly. Exception-size guidance: `scrub_log_text`'s error-path inputs
 are KiB-scale (microseconds per call — prefer the sync spelling); its `aio`
 twin is for MB-scale aggregates only (batched logs, multi-MB corpora).
 Wrapping every export would make the small, common calls slower
