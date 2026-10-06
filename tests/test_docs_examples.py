@@ -630,6 +630,36 @@ class TestRankFusionExamples:
             ("bird-c", 0.04813947436898257),
         ]
 
+    def test_score_fuse_examples(self) -> None:
+        # docs/api.md's score_fuse section, all four output literals
+        # pinned byte-exact (the rank_fuse discipline above, extended
+        # to the score-space sibling).
+        lists = [
+            [("cat-a", 1.0), ("dog-b", 0.5)],
+            [("dog-b", 0.8), ("cat-a", 0.2)],
+            [("bird-c", 3.0)],
+        ]
+        assert tors.score_fuse(lists) == [
+            ("cat-a", 2.0),
+            ("dog-b", 2.0),
+            ("bird-c", 0.5),
+        ]
+        assert tors.score_fuse(lists, method="linear") == [
+            ("cat-a", 1.0),
+            ("dog-b", 1.0),
+            ("bird-c", 0.5),
+        ]
+        assert tors.score_fuse(lists, method="borda") == [
+            ("cat-a", 0.5),
+            ("dog-b", 0.5),
+            ("bird-c", 0.0),
+        ]
+        assert tors.score_fuse(lists, weights=[2.0, 1.0, 1.0]) == [
+            ("cat-a", 4.0),
+            ("dog-b", 2.0),
+            ("bird-c", 0.5),
+        ]
+
     def test_metric_literals_example(self) -> None:
         ranked = ["cat-a", "dog-b", "bird-c", "fish-d"]
         relevant = {"cat-a", "bird-c", "whale-e"}

@@ -5505,7 +5505,7 @@ the signature data itself) plus pair emission ONLY inside shared
 buckets, which is `O(output)` by definition — nothing compares
 signatures that share no bucket, so there is no `n²` anywhere except
 through the output. Resident memory is one band's bucket table (freed
-per band) plus the dedup set, `O(n + pairs)`. The linear class is pinned
+per band) plus the sorted pair accumulator's merge scratch, `O(n + pairs)`. The linear class is pinned
 by growth-ratio cells in `tests/test_scaling_pins.py`, the memory class
 by a VmHWM guard in `tests/test_lsh.py`, and the pass is benchmarked in
 `benches/lsh.rs`.
@@ -6459,6 +6459,196 @@ tors.ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
 # (k=2's ideal packs two of the three relevant ids at ranks 1-2; one hit
 # at rank 1 scores 1/1.6309...)
 tors.ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
+```
+
+## `tors.score_fuse`
+
+```python
+def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
+```
+
+**Async**: `await tors.aio.score_fuse(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Honest caveat, measured, the same one `rank_fuse`'s line carries: the pair walk (one dict op plus one score extraction per entry, interpreter hashing) and the O(distinct-ids) tuple marshalling are GIL-held inside the worker thread (ratios 0.52-0.74 at 100k entries across the three methods), so the hop buys the detached arithmetic and the caller's concurrency shape; past ~10^6 total entries the walk alone holds the GIL for 100ms+ and no placement buys it back. Evidence: `src/py/score_fusion.rs` holds the walk under the GIL and detaches the normalization/accumulation/sort; `tests/test_gil_release.py::test_score_fuse_in_a_thread_...` carries the band.
+
+`score_fuse` is the **score-based sibling of `rank_fuse`**: the same id
+table, the same first-appearance tie-break, the same one-pair-per-id
+emission, but the input consumes raw similarity scores instead of ranks
+-- `(id, score)` pairs (a BM25 output, a cosine similarity, a click
+count), the other half of the fusion problem. Three methods: CombMNZ and the linear pattern are the two score-based
+baselines of Cormack, Clarke & Buüttcher's SIGIR 2009 comparison (the
+RRF paper's own baseline set,
+<https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>, where CombMNZ is
+the strongest score-based baseline they report); linear is
+Elasticsearch's linear-retriever pattern:
+<https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/linear-retriever>.
+
+- **`method="combmnz"`** (the default), Fox & Shaw, "Combination of
+  Multiple Searches", TREC-2 1994: with `norm_i` the min-max
+  normalized scores of list `i`,
+
+  ```text
+  score(d) = lists(d) x sum over lists of w_i x norm_i(d)
+  ```
+
+  CombSUM times the number of lists containing `d` (the MNZ
+  multiplier: each additional list's hit is a vote of confidence in
+  the score itself). The strongest score-based
+  baseline in the Cormack 2009 comparison (their own wording: RRF beats
+  it in all but one of their topics), hence the default.
+- **`method="borda"`**: the rank-based count,
+  `score(d) = sum over lists of w_i x (n_i - rank_i(d)) / n_i`, ranks
+  1-based over the DEDUPLICATED list (a duplicate folds to its first
+  occurrence and later ids advance one position, `rank_fuse`'s
+  contract). The votes are RANK-based deliberately: Borda counts are
+  defined over positions (each list elects its top document with
+  `n-1` points and its last with 0), and the `(n - rank)/n` spelling
+  only rescales that count to `[0, 1)` so a weight means the same
+  thing over a 3-document list and a 300-document one. Normalizing
+  the scores here (min-max, the CombMNZ spelling) would not be Borda:
+  it would smuggle score magnitudes back into the one method whose
+  entire point is that only the ordering votes.
+- **`method="linear"`**: the Elasticsearch linear-retriever pattern
+  (<https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/linear-retriever>):
+  `score(d) = sum over lists of w_i x norm_i(d)` -- no MNZ
+  multiplier, min-max normalized, the same per-retriever `weight`
+  shape weighted RRF carries.
+
+**The normalization conventions** (pinned in `tests/test_score_fusion.py`):
+`norm_i` is min-max per list over that list's OWN scores, and the
+edges are pinned:
+
+- **A zero-range list** -- every score equal, a single-entry list
+  included -- normalizes every entry to the neutral midpoint `0.5`.
+  The list carries order information only ("all these docs tie"); the
+  midpoint invents neither a winner (`1.0`) nor a loser (`0.0`), and a
+  linear sum carries it without distortion.
+- **Negative scores are legal.** Min-max maps ANY finite range onto
+  `[0, 1]` (`(s - min)/(max - min)` shifts and rescales; the signs of
+  the raw scores wash out), so a cosine-similarity list (`-1..1`) and
+  a BM25 list (`0..40`) normalize to the same interval. The rejected
+  domain is only non-finite scores: a NaN poisons every comparison it
+  touches and an infinite min or max makes `max - min` ill-defined --
+  NaN and both infinites raise `ValueError`, the `gains`
+  finite-domain discipline.
+- **A range that itself overflows** (`-1.7e308` to `+1.7e308`: legal
+  finite scores whose `max - min` is `+inf`) saturates instead of
+  dividing `inf/inf` (NaN): a numerator that overflowed against the
+  infinite range answers exactly `1.0` (`max` itself is the first such
+  numerator; the top of the scale), while finite numerators divide to
+  exactly `0.0` -- not merely small values: a finite number divided by
+  `+inf` is `0.0` in float arithmetic, so the overflowed list's
+  internal order collapses to two buckets (`1.0` for the overflowed
+  maxima, `0.0` for everything else). The policy is monotone and
+  NaN-free, the same
+  documented approximation `ndcg_at_k`'s saturating ratio carries,
+  with the same one-sided cost: near-top scores can over-report as
+  exactly `1.0` when both score extremes sit within ~16 orders of
+  magnitude of f64's ceiling.
+
+The rest is `rank_fuse`'s discipline carried over unchanged (one
+spelling note: `k` here is an OUTPUT CUTOFF -- the top-k pairs returned;
+`rank_fuse`'s `k` is the RRF rank constant inside the scoring formula.
+Same name, different job, each documented on its own call).
+`scored_lists` is a non-empty list of lists of `(id, score)` pairs
+(fusing zero lists raises `ValueError`, the `merkle_root` "root of no
+chunks" precedent; an individual empty list is legal and contributes
+no votes, the "this retriever returned nothing" shape). A duplicate id
+folds to its FIRST occurrence per list -- the first score stands, and
+a folded-away score does not shape that list's min-max range -- while
+the same id in a DIFFERENT list votes again with its own score (the
+whole point of fusion). Dedup and equality follow Python's own
+dict/set semantics (`1`, `True`, and `1.0` are the same id, the first
+spelling returned); an unhashable id raises `TypeError` (Python's own
+hash error); a malformed pair (not a 2-element sequence) or a
+non-numeric score raises `TypeError`.
+
+`weights=` optionally carries one positive finite float per list (the
+weighted-RRF philosophy extended to score space: a weight re-scales
+one list's contribution, never the vote's shape). `weights=None` (the
+default) is the all-1.0 unweighted fusion EXACTLY, outputs
+byte-identical to the unweighted spelling (pinned). A zero, negative,
+NaN, or infinite weight raises `ValueError` (strictly positive
+finite, `rank_fuse`'s own domain: a zero-weight list is almost
+certainly a miscounted retriever list); a length mismatch with
+`scored_lists` raises `ValueError` naming both sides; a non-sequence
+`weights` (a bare `str` included) or a non-numeric entry raises
+`TypeError`. `method` must be exactly one of `"combmnz"`, `"borda"`,
+`"linear"` (case-sensitive; `ValueError` naming the accepted set
+otherwise). `k=None` (the default) returns every distinct id; `k=N`
+the top N (`k < 1` raises `ValueError`, truncation clamps to the
+distinct-id count).
+
+Returns `(id, score)` pairs for every distinct id across all lists,
+sorted by fused score descending, ties broken by earliest first
+appearance across the lists in caller order (`rank_fuse`'s contract,
+extended to score space). Emission is vote-existence, not score
+positivity: a fused `0.0` (Borda's last place, a list's minimum, an
+underflowed denormal weight) still appears, ordered last. Scores are
+finite-or-`+inf`, never NaN (all-nonneg accumulations; the saturating
+norm above).
+
+**GIL model**: one GIL-held walk of every pair (the id table is a
+dict, Python-object hashing IS interpreter work, plus one score
+extraction per entry -- `rank_fuse`'s arg-walk class, one conversion
+heavier), the `weights` walk and validation when supplied, then the
+per-list min-max, normalization, weighted accumulation, MNZ counts,
+and sort (plain arithmetic over dedup indices) under one `py.detach`,
+then the O(distinct-ids) `(id, score)` tuple marshalling. The same
+reranking-scale guidance as `rank_fuse`: hundreds to thousands of
+entries per list, not whole-corpus; the id-shape caveat
+(hash-expensive ids push the GIL-held share toward 1.0) carries over
+verbatim. Measured bands: `tests/test_gil_release.py`, scaling pins
+in `tests/test_scaling_pins.py`.
+
+```python
+tors.score_fuse([
+    [("cat-a", 1.0), ("dog-b", 0.5)],   # a BM25 reranker's (id, score) top 2
+    [("dog-b", 0.8), ("cat-a", 0.2)],   # a vector search's top 2
+    [("bird-c", 3.0)],                  # a keyword filter's single hit
+])
+# [('cat-a', 2.0), ('dog-b', 2.0), ('bird-c', 0.5)]
+# cat-a and dog-b tie (norm 1.0 from each of two lists, x2 lists =
+# 2.0 each); cat-a appeared first and wins the tie. bird-c rides a
+# single-entry (zero-range) list at the neutral 0.5.
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    method="linear",                    # Elastic's linear retriever: no MNZ boost
+)
+# [('cat-a', 1.0), ('dog-b', 1.0), ('bird-c', 0.5)]
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    method="borda",                     # positions vote, magnitudes never
+)
+# [('cat-a', 0.5), ('dog-b', 0.5), ('bird-c', 0.0)]
+# cat-a: (2-1)/2 from list 0 + 0 from list 1; bird-c: (1-1)/1 = 0,
+# still emitted (vote existence, ordered last).
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    weights=[2.0, 1.0, 1.0],            # weighted CombMNZ: the BM25 leg counts double
+)
+# [('cat-a', 4.0), ('dog-b', 2.0), ('bird-c', 0.5)]
+# cat-a's weighted vote (2.0 x 1.0 from list 0) breaks the 2.0/2.0
+# tie; bird-c's single-list 0.5 carries its own list's weight (1.0).
 ```
 
 ## `tors.apply_pipeline`

@@ -20,7 +20,9 @@ It covers only the large-input functions: the chunking family, `tf_idf`,
 `recall_at_k`, `precision_at_k`; the fusion/membership walks over large
 rankings are interpreter-side hashing, so the worker thread buys their
 detached arithmetic plus the caller's concurrency shape, and the measured
-GIL bands in test_gil_release.py carry the honest residue),
+GIL bands in test_gil_release.py carry the honest residue) and its
+score-space sibling `score_fuse` (the same walk class, one score
+extraction per entry heavier; same honest residue),
 `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
 `minhash_signature`, `highlight` (the grounding pass is linear in the
 chunk with the DP capped, but a 2k-token chunk already measures ~1 ms —

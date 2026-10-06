@@ -488,6 +488,54 @@ class TestRankFusionScaling:
         first_clean(measure, check, samples=3, label="the ndcg_at_k scaling pin")
 
 
+# --- score_fuse: fusion at scale -----------------------------------------------------
+
+
+def _scored_lists(total_entries: int, n_lists: int = 5) -> list:
+    """The rank_fuse pin's shared-pool workload, extended to (id, score)
+    pairs: n_lists scored lists over one shared id space (half the
+    entries distinct, str objects built once and reused across lists so
+    the per-object str hashes are cached), scores a pure function of the
+    position."""
+    pool = [f"id_{i}" for i in range(total_entries // 2)]
+    per_list = total_entries // n_lists
+    return [
+        [(pool[(j * 7 + i * 3) % len(pool)], ((i * 37) % 100) / 100.0) for i in range(per_list)]
+        for j in range(n_lists)
+    ]
+
+
+class TestScoreFusionScaling:
+    @pytest.mark.timing
+    def test_score_fuse_stays_linear_in_total_entries(self) -> None:
+        """10k -> 40k total entries across 5 lists (4x; the output is
+        bounded by the distinct-id count, here half the entries), all
+        three methods: the pair walk is one dict op + one score
+        extraction per entry, the detached pass is the per-list min-max
+        + weighted accumulation + the MNZ counts + an O(distinct log
+        distinct) sort, so the whole call is linear (up to the sort's
+        log factor) in TOTAL entries, rank_fuse's own pin's class
+        (borda's vote is one divide per entry, the same linear class).
+        Measured 1.9-2.2ms -> 8-9ms across the methods, ratios 4.0-4.6
+        (~2.0-2.2x per doubling, ambient load ~2-4), gate 3.0x per
+        doubling. A per-list rescan of the id table (the quadratic
+        shape) would measure ~4x per doubling here."""
+        def measure() -> list[tuple[float, float]]:
+            return [
+                (
+                    _min_wall_ms(lambda m=m: tors.score_fuse(_scored_lists(10_000), method=m)),
+                    _min_wall_ms(lambda m=m: tors.score_fuse(_scored_lists(40_000), method=m)),
+                )
+                for m in ("combmnz", "borda", "linear")
+            ]
+
+        def check(walls: list[tuple[float, float]]) -> None:
+            for small, large in walls:
+                _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+        first_clean(measure, check, samples=3, label="the score_fuse scaling pin")
+
+
 # --- ground_sentences / grounding_coverage: the grounding batch -------------
 #
 # ground_sentences' documented cost is O(sentences x rouge_w DP): the total

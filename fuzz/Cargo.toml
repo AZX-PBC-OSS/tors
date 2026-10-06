@@ -227,6 +227,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "score_fusion"
+path = "fuzz_targets/score_fusion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tfidf"
 path = "fuzz_targets/tfidf.rs"
 test = false
