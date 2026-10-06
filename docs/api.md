@@ -5398,7 +5398,7 @@ the signature data itself) plus pair emission ONLY inside shared
 buckets, which is `O(output)` by definition — nothing compares
 signatures that share no bucket, so there is no `n²` anywhere except
 through the output. Resident memory is one band's bucket table (freed
-per band) plus the dedup set, `O(n + pairs)`. The linear class is pinned
+per band) plus the sorted pair accumulator's merge scratch, `O(n + pairs)`. The linear class is pinned
 by growth-ratio cells in `tests/test_scaling_pins.py`, the memory class
 by a VmHWM guard in `tests/test_lsh.py`, and the pass is benchmarked in
 `benches/lsh.rs`.

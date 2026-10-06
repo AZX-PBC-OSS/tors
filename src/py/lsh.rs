@@ -182,7 +182,7 @@ fn validate_bands_rows(bands: i64, rows: i64) -> PyResult<usize> {
 /// Cost: one pass, `O(n * num_perm)` band hashing plus pair emission
 /// ONLY inside shared buckets, which is O(output): nothing is quadratic
 /// in the bucket sizes beyond the pairs they contribute. Memory is one
-/// band's bucket table plus the dedup set, `O(n + pairs)`.
+/// band's bucket table plus the sorted pair accumulator's merge scratch, `O(n + pairs)`.
 ///
 /// GIL model: the `signatures` walk (one int extraction per element, the
 /// standard O(n * num_perm) arg-walk class) and the bounds validation
