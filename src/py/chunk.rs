@@ -685,8 +685,9 @@ pub fn chunk_overlap_cost(_py: Python<'_>, overlap: f64) -> PyResult<f64> {
 
 /// `tors.chunk_quality(chunks, text, *, tau=0) -> dict`: the two intrinsic
 /// chunk-quality metrics of the LREC 2026 adaptive-chunking study
-/// (Madan et al. 2026, "Adaptive Chunking", arXiv 2603.25333,
-/// `ekimetrics/adaptive-chunking`) over the caller's own chunk spans: the
+/// (de Moura Júnior, Lelong & Blangero, "Adaptive Chunking",
+/// arXiv 2603.25333, `ekimetrics/adaptive-chunking`) over the caller's
+/// own chunk spans: the
 /// `(start, end)` tuples any member of the chunk family returns, or any
 /// hand-built spans. See `src/chunk_quality_impl.rs` for the metrics'
 /// definitions and their study.

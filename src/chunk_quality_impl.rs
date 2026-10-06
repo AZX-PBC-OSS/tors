@@ -5,9 +5,9 @@
 //! measures of how well a caller's own chunk spans
 //! (`chunk_text`/`chunk_hierarchical`/`chunk_by_*`'s `(start, end)`
 //! tuples, or any hand-built spans) respect the text's structure, from
-//! the adaptive-chunking metrics study (Madan et al. 2026, "Adaptive
-//! Chunking: Improving RAG Performance via a Bottom-Up Approach",
-//! LREC 2026, arXiv 2603.25333, the `ekimetrics/adaptive-chunking`
+//! the adaptive-chunking metrics study (de Moura Júnior, Lelong &
+//! Blangero, "Adaptive Chunking: Optimizing Chunking-Method Selection
+//! for RAG", LREC 2026, arXiv 2603.25333, the
 //! reference implementation's metric suite):
 //!
 //! - **integrity**: the study's Block Integrity (BI), the fraction of

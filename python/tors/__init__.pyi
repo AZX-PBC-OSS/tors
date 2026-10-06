@@ -1518,8 +1518,9 @@ def chunk_to_offsets(
 def chunk_overlap_cost(overlap: float) -> float: ...
 
 # The two intrinsic chunk-quality metrics of the LREC 2026
-# adaptive-chunking study (Madan et al. 2026, arXiv 2603.25333,
-# ekimetrics/adaptive-chunking) over the caller's own chunk spans (any
+# adaptive-chunking study (de Moura Júnior, Lelong & Blangero 2026,
+# arXiv 2603.25333, ekimetrics/adaptive-chunking) over the caller's own
+# chunk spans (any
 # chunk-family (start, end) tuples, or hand-built spans): `integrity`
 # the study's Block Integrity over the suite's own UAX #29 sentence
 # spans (a chunk boundary crossing a sentence when it falls strictly

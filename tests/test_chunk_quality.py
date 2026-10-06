@@ -1,6 +1,7 @@
 """Contract gate for ``tors.chunk_quality``: the two intrinsic
-chunk-quality metrics of the LREC 2026 adaptive-chunking study (Madan et
-al. 2026, "Adaptive Chunking", arXiv 2603.25333) over the caller's own
+chunk-quality metrics of the LREC 2026 adaptive-chunking study (de
+Moura Júnior, Lelong & Blangero 2026, "Adaptive Chunking", arXiv
+2603.25333) over the caller's own
 chunk spans: Block Integrity (the fraction of the text's UAX #29
 sentences no chunk boundary crosses, within the tolerance ``tau``) and
 Intra-Chunk Cohesion (the mean within-chunk sentence-to-chunk Dice

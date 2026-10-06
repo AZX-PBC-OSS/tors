@@ -3028,7 +3028,9 @@ Returns the report dict, every key present every time:
   that complements the per-sentence precision lens; `0.0` with no
   sources), and `query_score` the optional query's `ground_sentences`
   aggregate (the best sentence's F1 against the query: WHICH grounded
-  sentence reads first; `0.0` when `query` is `None`).
+  sentence reads first; `0.0` when `query` is `None`. An empty-string
+  `query=""` pins to that same `0.0` — for the scoring, `query=""` and
+  `query=None` are identical).
 
 **WHY this shape**: the decomposition-then-verification pipeline is
 what makes long contexts tractable for a verifier (the paper's own
@@ -4199,9 +4201,10 @@ def chunk_quality(
 ```
 
 **WHAT**: the two intrinsic chunk-quality metrics of the adaptive-
-chunking study (Madan et al. 2026, "Adaptive Chunking: Improving RAG
-Performance via a Bottom-Up Approach", LREC 2026, arXiv 2603.25333, the
-`ekimetrics/adaptive-chunking` reference implementation) computed over
+chunking study (de Moura Júnior, Lelong & Blangero, "Adaptive Chunking:
+Optimizing Chunking-Method Selection for RAG", LREC 2026, arXiv
+2603.25333, the `ekimetrics/adaptive-chunking` reference implementation)
+computed over
 the caller's own chunk spans: the `(start, end)` tuples any member of
 the chunk family returns, or any hand-built spans. Returns
 `{"integrity": float, "cohesion": float}`, both in `[0.0, 1.0]`, both

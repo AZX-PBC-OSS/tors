@@ -326,8 +326,14 @@ class TestGilHeartbeat:
 
     def test_heartbeat_stays_clean_at_document_scale(self) -> None:
         sentence = "The quarterly oil sample interval was adjusted after the review. "
-        text = sentence * 120  # ~9.5 KB, ~120 sentences
-        sources = [sentence * 40, "Unrelated maintenance notes. " * 40]
+        # ~80 KB, ~1200 sentences: sized so the op's own wall clears the
+        # 30% ratio budget's geometry with margin (the intrinsic best-case
+        # gap is the ~10ms ping period plus hop overhead, ~2-3% of this
+        # pass, against a budget needing wall >= ~35ms; the previous
+        # ~9.5KB/120-sentence input ran 28-30ms under pytest and the
+        # heartbeat's own ping fell outside the ratio it implied).
+        text = sentence * 1200
+        sources = [sentence * 40, "Unrelated maintenance notes. " * 40, sentence * 40]
         # The awaitable spelling IS the heartbeat cell's op: the sync
         # call blocks its own coroutine's turn on the loop by
         # definition (loop_harness's awaitable-factory shape), and this
