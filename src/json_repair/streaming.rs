@@ -100,7 +100,17 @@
 //!   -> `[]`, `[1, [` -> `[1]`) and closes at a member-value position
 //!   or the root (`{"a": [` -> `{"a": []}`), an array's trailing
 //!   strictly-empty member drops with it (`[[], []` -> `[[]]`,
-//!   `[1, []` -> `[1]`) — the pending number/word resolves by the same
+//!   `[1, []` -> `[1]`), and the engine's two array-lane item drops
+//!   reproduce: the stray `...` (an item whose parse is the exact
+//!   string `"..."` with the parse ending on a `.` — the cut's open
+//!   string and a bare number-run alike: `["...` and `[1, ...` to
+//!   `[]`/`[1]`, while the CLOSED `["..."]` element's parse ends on
+//!   its quote and stays) and the strictly-empty item whose next char
+//!   is not a separator (`[[] ,` -> `[]`, `[[] , 1` -> `[1]`; the
+//!   decision defers to close time because the engine's whole-input
+//!   `loads` fast path keeps every element whenever the text ends up
+//!   valid, so the drop is a cut-only observable) — the pending
+//!   number/word resolves by the same
 //!   rules that terminate it mid-stream (an element that renders empty
 //!   retracts whole: `[1, -` -> `[1]`), through the literal table (the
 //!   special floats' spellings heal to STRINGS: `[NaN` -> `["NaN"]`,
@@ -203,6 +213,7 @@
 use super::dumps::push_escaped_char;
 use super::strict::loads_strict;
 use super::{MAX_NESTING, STRING_DELIMITERS, Value, dumps as serializer, normalize_big_int_text};
+use crate::normalize_impl::is_py_whitespace;
 
 /// The close-time cascade's LOCAL copy of one frame's state (the
 /// cascade retracts renderings and walks the stack without touching
@@ -250,6 +261,33 @@ pub struct StreamingRepairer {
     /// quote (set at `open_string`; a closed string's value stays): the
     /// escape-tail strip's lower bound at close time.
     last_string_start: Option<usize>,
+    /// The last RAW char consumed while a string was open (reset at
+    /// `open_string`): the cut-time stand-in for the engine's `get(-1)`
+    /// cursor look at the same position (the engine reads the raw input,
+    /// not the healed accumulator).
+    string_raw_tail: Option<char>,
+    /// The immediately-preceding char's `str.isspace()` (the machine's
+    /// one-char look-back): the engine's strictly-empty item skip reads
+    /// the char at the same spot.
+    prev_char_ws: bool,
+    /// The deferred strictly-empty element drops (the engine's array
+    /// skip): a `(rendering start, rendering end, the element was the
+    /// frame's first, the frame's index)` span per ws-preceded comma
+    /// after such an element. The engine decides at the element's own
+    /// return (the next char, whitespace included, drops it); the
+    /// machine defers to close time because the WHOLE-INPUT
+    /// `json.loads` fast path keeps the element whenever the text ends
+    /// up valid -- a mid-stream retract could not undo itself. Drained
+    /// by `render_closed` (pure, local) unless the root closed cleanly.
+    empty_marks: Vec<EmptyMark>,
+}
+
+/// One deferred strictly-empty element drop; see `empty_marks`.
+struct EmptyMark {
+    start: usize,
+    end: usize,
+    was_first: bool,
+    frame: usize,
 }
 
 /// One open container: the engine's context entry, structural part.
@@ -543,6 +581,9 @@ impl StreamingRepairer {
             finished: false,
             emitted: 0,
             last_string_start: None,
+            string_raw_tail: None,
+            prev_char_ws: false,
+            empty_marks: Vec::new(),
         }
     }
 
@@ -600,7 +641,16 @@ impl StreamingRepairer {
 
     /// The per-char dispatch: comments first (they consume anything),
     /// then the open string, then the pending token, then structure.
+    /// The one-char look-back (`prev_char_ws`) settles AFTER the
+    /// dispatch: the readers (the empty-element skip's mark) want the
+    /// char BEFORE this one.
     fn process(&mut self, c: char) -> Result<(), String> {
+        let out = self.process_inner(c);
+        self.prev_char_ws = is_py_whitespace(c);
+        out
+    }
+
+    fn process_inner(&mut self, c: char) -> Result<(), String> {
         if self.comment.is_some() {
             self.feed_comment(c);
             return Ok(());
@@ -609,6 +659,7 @@ impl StreamingRepairer {
             // Take and put back (state moves, nothing reallocates): the
             // close transition needs `&mut self` while the feed needs the
             // string state out of it.
+            self.string_raw_tail = Some(c);
             let mut st = self.string.take().expect("checked above");
             let closed = st.feed(c, &mut self.out, self.ensure_ascii);
             if closed {
@@ -787,6 +838,33 @@ impl StreamingRepairer {
                     let obj = matches!(self.frames.last().map(|f| &f.kind), Some(FrameKind::Obj));
                     match c {
                         ',' => {
+                            // The engine's strictly-empty item skip
+                            // (parse_array: such an element is appended
+                            // only when `,` or the closer follows it
+                            // IMMEDIATELY; any other char -- whitespace
+                            // included -- drops it at the element's own
+                            // return). The machine cannot decide
+                            // mid-stream (the whole-input `json.loads`
+                            // fast path keeps the element whenever the
+                            // text ends up valid), so the drop defers:
+                            // the span marks, `render_closed` drains.
+                            if !obj
+                                && self.prev_char_ws
+                                && let Some(f) = self.frames.last()
+                                && let Some(start) = f.member_start
+                                && start <= self.out.len()
+                            {
+                                let raw = &self.out[start..];
+                                let content = raw.strip_prefix(", ").unwrap_or(raw);
+                                if matches!(content, "[]" | "{}" | "\"\"") {
+                                    self.empty_marks.push(EmptyMark {
+                                        start,
+                                        end: self.out.len(),
+                                        was_first: f.member_count == 1,
+                                        frame: self.frames.len() - 1,
+                                    });
+                                }
+                            }
                             self.note_comma();
                             self.pos = if obj { Pos::Key } else { Pos::Value };
                         }
@@ -929,7 +1007,7 @@ impl StreamingRepairer {
                     self.pos = Pos::AfterValue;
                     return self.process(c);
                 }
-                self.finish_number(&text, key);
+                self.finish_number(&text, key, popped.or_else(|| text.chars().next_back()));
                 // A pop that EMPTIES the run drops the popped char: the
                 // reprocess would re-create the same one-char pending at
                 // an after-value position (a `-` or `.` in an array),
@@ -1197,6 +1275,7 @@ impl StreamingRepairer {
 
     fn open_string(&mut self, delim: char, is_key: bool) {
         self.last_string_start = Some(self.out.len());
+        self.string_raw_tail = None;
         self.out.push('"');
         if is_key {
             // A key string is in key position whatever the position it
@@ -1299,6 +1378,18 @@ impl StreamingRepairer {
                         if pos < self.out.len() && self.out.as_bytes()[pos] == b'[' {
                             self.out.drain(pos..pos + 1);
                             self.emitted = self.emitted.min(pos);
+                            // The deferred empty-element marks live in
+                            // the same buffer: every span at/after the
+                            // removed bracket shifts left with it (a
+                            // span the bracket sat inside cannot exist —
+                            // a marked element's rendering is exactly
+                            // `[]`/`{}`/`""`, bracket-free).
+                            for m in &mut self.empty_marks {
+                                if m.start > pos {
+                                    m.start -= 1;
+                                    m.end -= 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -1310,8 +1401,11 @@ impl StreamingRepairer {
 
     /// The number run's terminator: the engine's value lanes over the
     /// (underscore-filtered) run text; a key-position number renders as
-    /// the quoted run text (`{12: 1}` -> `{"12": 1}`).
-    fn finish_number(&mut self, text: &str, key: bool) {
+    /// the quoted run text (`{12: 1}` -> `{"12": 1}`). `raw_last` is the
+    /// run's own last raw char (the popped rollback char when one
+    /// popped, else the run's tail): the engine's `get(-1)` look at the
+    /// same cursor.
+    fn finish_number(&mut self, text: &str, key: bool, raw_last: Option<char>) {
         if key {
             let filtered: String = text.chars().filter(|&c| c != '_').collect();
             let rendered = serializer::dumps(&Value::Str(filtered), self.ensure_ascii);
@@ -1320,6 +1414,15 @@ impl StreamingRepairer {
             return;
         }
         let value = render_number_value(text);
+        // The stray-`...` drop: the run's value lanes made the exact
+        // string `...` and the parse ended on the final dot — an array
+        // item position ignores it whole (the engine's array lane; the
+        // element's slot and separator retract with it).
+        if is_stray_ellipsis(&value, raw_last, self.frames.last().map(|f| f.kind)) {
+            self.retract_in_flight_member();
+            self.pos = Pos::AfterValue;
+            return;
+        }
         let rendered = serializer::dumps(&value, self.ensure_ascii);
         self.out.push_str(&rendered);
         self.pos = Pos::AfterValue;
@@ -1363,20 +1466,28 @@ impl StreamingRepairer {
                 text, key: false, ..
             }) => {
                 let mut run = text.clone();
-                pop_trailing_number_char(&mut run);
+                let popped = pop_trailing_number_char(&mut run);
                 // An empty run at an item position renders nothing: the
                 // element retracts in the cascade below (the engine's
                 // `[1, -` -> `[1]` heal); an object member value still
-                // heals to `""` (`{"a": -` -> `{"a": ""}`).
+                // heals to `""` (`{"a": -` -> `{"a": ""}`). The same
+                // lane's stray-`...` drop: a run whose value is the
+                // exact string `...` and whose last raw char is the
+                // final dot retracts at an item position too (the
+                // engine's array lane; the cascade takes the separator).
                 let array_like = self
                     .frames
                     .last()
                     .is_some_and(|f| !matches!(f.kind, FrameKind::Obj));
-                if !(run.is_empty() && array_like) {
-                    s.push_str(&serializer::dumps(
-                        &render_number_value(&run),
-                        self.ensure_ascii,
-                    ));
+                let value = render_number_value(&run);
+                let stray = array_like
+                    && is_stray_ellipsis(
+                        &value,
+                        popped.or_else(|| run.chars().next_back()),
+                        self.frames.last().map(|f| f.kind),
+                    );
+                if !(run.is_empty() && array_like) && !stray {
+                    s.push_str(&serializer::dumps(&value, self.ensure_ascii));
                 }
             }
             Some(Pending::Word {
@@ -1449,14 +1560,41 @@ impl StreamingRepairer {
         {
             s.push('"');
         }
+        // The engine's stray-`...` drop (array.rs's parse_array_items:
+        // "the stray '...' is ignored"): an ARRAY item whose parse is the
+        // exact string `...` with the parse ending on a `.` is skipped
+        // whole. At a cut the open string IS that parse: the rendered
+        // element spells `"..."` and the last raw char is the final dot
+        // (the engine's own two conditions -- the parsed value and the
+        // `get(-1)` cursor look). The parent's deferred-separator cascade
+        // below then retracts the element; a CLOSED `"..."` element does
+        // not qualify (its parse ended on the quote, not a dot).
+        let stray_ellipsis = self.string.is_some()
+            && self
+                .frames
+                .last()
+                .is_some_and(|f| f.member_start.is_some())
+            && self
+                .last_string_start
+                .is_some_and(|qs| s.get(qs..).is_some_and(|rendered| rendered == "\"...\""))
+            // The rendered element IS the engine's parsed value here: the
+            // same classification (the raw `get(-1)` look, the array
+            // lane's frame) decides.
+            && is_stray_ellipsis(
+                &Value::Str("...".into()),
+                self.string_raw_tail,
+                self.frames.last().map(|f| f.kind),
+            );
         // The empty-container cascade (the engine's truncated-output
         // heal): a still-open container with no members drops whole when
         // it sits at an item position (`[[` -> `[]`, `[1, [` -> `[1]`)
         // and closes as `[]`/`{}` at a member-value position or the root
         // (`{"a": [` -> `{"a": []}`); an array's trailing strictly-empty
         // member (closed or just rendered: `[]`, `{}`, `""`) drops too
-        // (`[[], []` -> `[[]]`, `[1, []` -> `[1]`). The walk is local:
-        // snapshot purity (the machine's own state never moves).
+        // (`[[], []` -> `[[]]`, `[1, []` -> `[1]`), as does the trailing
+        // stray-`...` string element the engine's array lane ignores.
+        // The walk is local: snapshot purity (the machine's own state
+        // never moves).
         let mut info: Vec<FrameInfo> = self
             .frames
             .iter()
@@ -1473,6 +1611,65 @@ impl StreamingRepairer {
             // now walk on through the emptied frame
             info[i - 1].member_count = info[i - 1].member_count.saturating_sub(1);
             info[i - 1].member_start = None;
+        }
+        // The deferred strictly-empty element drops (the engine's array
+        // skip; see `empty_marks`): the marked renderings drain here,
+        // newest first (later spans sit at higher offsets). A root that
+        // closed cleanly means the whole input was one valid value -- the
+        // engine's own `json.loads` fast path, which keeps every element
+        // -- so the marks only ever fire on a cut. The demotion: a
+        // dropped FIRST element promotes the next one to the frame's
+        // first slot, and its deferred separator goes with the drop.
+        if !self.top_done {
+            for mark in self.empty_marks.iter().rev() {
+                let (start, end) = (mark.start, mark.end);
+                if end > s.len() || start >= end {
+                    continue;
+                }
+                // The marked frame's own bookkeeping first, on the
+                // ORIGINAL coordinates: the marked element was the
+                // frame's last member exactly when the member_start
+                // still points into the span.
+                if let Some(f) = info.get_mut(mark.frame) {
+                    f.member_count = f.member_count.saturating_sub(1);
+                    if f.member_start.is_some_and(|ms| ms >= start && ms < end) {
+                        f.member_start = None;
+                    }
+                    if let Some(p) = &mut f.paren {
+                        p.elems = p.elems.saturating_sub(1);
+                    }
+                }
+                // The span's drain: every position at/after its end
+                // shifts left by the span's length.
+                s.drain(start..end);
+                let span = end - start;
+                for f in info.iter_mut() {
+                    if f.member_start.is_some_and(|ms| ms >= end) {
+                        f.member_start = f.member_start.map(|ms| ms - span);
+                    }
+                    if let Some(p) = &mut f.paren
+                        && p.brace_pos >= end
+                    {
+                        p.brace_pos -= span;
+                    }
+                }
+                // The demotion: a dropped FIRST element promotes the
+                // next one to the frame's first slot, and its deferred
+                // separator (the two chars now at the slot) goes too.
+                if mark.was_first && s[start..].starts_with(", ") {
+                    s.drain(start..start + 2);
+                    for f in info.iter_mut() {
+                        if f.member_start.is_some_and(|ms| ms >= start + 2) {
+                            f.member_start = f.member_start.map(|ms| ms - 2);
+                        }
+                        if let Some(p) = &mut f.paren
+                            && p.brace_pos >= start + 2
+                        {
+                            p.brace_pos -= 2;
+                        }
+                    }
+                }
+            }
         }
         while i > 0 {
             let (kind, mc, ms) = {
@@ -1511,7 +1708,11 @@ impl StreamingRepairer {
             let content = raw.strip_prefix(", ").unwrap_or(raw);
             let separator_pending = self.pos == Pos::Value && !value_in_flight;
             if !separator_pending
-                && (content.is_empty() || content == "\"\"" || content == "[]" || content == "{}")
+                && (content.is_empty()
+                    || content == "\"\""
+                    || content == "[]"
+                    || content == "{}"
+                    || (stray_ellipsis && content == "\"...\""))
             {
                 s.truncate(start);
                 info[i - 1].member_count -= 1;
@@ -1634,6 +1835,20 @@ fn strip_trailing_newline_tail(s: &mut String, lower: usize, open_ended: bool) -
         s.truncate(i);
     }
     any && quote
+}
+
+/// The engine's stray-`...` classification (array.rs's parse_array_items,
+/// upstream's "the stray '...' is ignored" branch): an ARRAY item whose
+/// parse came back the exact string `...` and whose parse's last consumed
+/// char was a `.` is skipped whole. The raw look (`self.get(-1)`) is what
+/// separates a cut's unterminated string and a bare number-run from a
+/// CLOSED `"..."` element (its parse ends on the quote) — the same value,
+/// kept there. Object member values keep their `...`: the rule lives in
+/// the array lane alone (parenthesized containers parse through it too).
+fn is_stray_ellipsis(value: &Value, raw_last: Option<char>, frame: Option<FrameKind>) -> bool {
+    raw_last == Some('.')
+        && matches!(value, Value::Str(text) if text == "...")
+        && frame.is_some_and(|k| !matches!(k, FrameKind::Obj))
 }
 
 /// parse_number's value lanes over the run text (underscores were
@@ -2026,6 +2241,115 @@ mod tests {
             // own split)
             (r#"{"a": -}"#, r#"{"a": ""}"#),
             (r#"{"a": -"#, r#"{"a": ""}"#),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_stray_ellipsis_drop_matches_the_engine() {
+        // The engine's array-lane stray-'...' drop (parse_array_items):
+        // an item whose parse is the exact string "..." with the parse
+        // ending on a '.' is ignored whole. At a cut that is the open
+        // string's content (the fuzz-found divergence: " [\r\r\"..."
+        // streamed ["..."] where the engine retracts to []), and a bare
+        // number-run's value lanes make the same string (the closed
+        // ["..."] element's parse ends on its QUOTE and stays).
+        for (text, want) in [
+            (" [\r\r\"...", "[]"),
+            ("[\"...", "[]"),
+            ("[[\"...", "[]"),
+            ("[1, \"...", "[1]"),
+            ("[1, 2, \"...", "[1, 2]"),
+            ("{\"a\": [\"...", "{\"a\": []}"),
+            ("[1, [\"...", "[1]"),
+            ("(\"...", "[]"),
+            ("[[...", "[]"),
+            ("[1, ...", "[1]"),
+            ("[..., 1]", "[1]"),
+            ("[1, [] , 2 ", "[1, 2]"),
+            // not the drop: the element's parse ends on something else,
+            // or the content is not exactly three dots
+            ("[\"....", "[\"....\"]"),
+            ("[\"..", "[\"..\"]"),
+            ("[\".", "[\".\"]"),
+            ("[\" ...", "[\" ...\"]"),
+            ("[\"  ...  ", "[\"  ...\"]"),
+            ("[\"a...b", "[\"a...b\"]"),
+            ("[\"...\", \"x\"", "[\"...\", \"x\"]"),
+            ("[\"...\"]", "[\"...\"]"),
+            ("[\"...\n", "[\"...\"]"),
+            ("[\"...\\", "[\"...\\\\\"]"),
+            ("{\"k\": \"...", "{\"k\": \"...\"}"),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_strictly_empty_item_skip_matches_the_engine() {
+        // The engine's array-lane skip (parse_array_items): a
+        // strictly-empty container/"" item is appended only when `,` or
+        // the closer follows it IMMEDIATELY; whitespace between drops
+        // the item at its own return. The machine defers the decision
+        // to close time (the engine's whole-input loads fast path keeps
+        // every element whenever the text ends up valid), so every pin
+        // here is a cut.
+        for (text, want) in [
+            ("[[]\r, ", "[]"),
+            ("[[] ,", "[]"),
+            ("[[]  ,", "[]"),
+            ("[[] , 1", "[1]"),
+            ("[[] , 2", "[2]"),
+            ("[[] ,[]", "[]"),
+            ("[[] , []", "[]"),
+            ("[[] , [] , [] ", "[]"),
+            ("[1, []\r, ", "[1]"),
+            ("[1, []\r, 2", "[1, 2]"),
+            ("[1, [] , 2 ", "[1, 2]"),
+            ("[1, [] , 2", "[1, 2]"),
+            ("[1, [2, [] , 3", "[1, [2, 3]]"),
+            ("[[]\r, []", "[]"),
+            ("[[]\r, [] , 1", "[1]"),
+            ("[[] , [] , 1", "[1]"),
+            ("[[], [] ,", "[[]]"),
+            ("[[], [] , 1", "[[], 1]"),
+            ("[[] , [] , 1", "[1]"),
+            ("[[] , 1 , 2 ", "[1, 2]"),
+            ("[[] , \"k", "[\"k\"]"),
+            ("[[] , 1", "[1]"),
+            ("[{}\r, ", "[]"),
+            ("[\"\"\r, ", "[]"),
+            ("[\"\" , 1", "[1]"),
+            ("[1, [[] , 2], 3", "[1, [2], 3]"),
+            ("[[], [[] , 2], 3", "[[], [2], 3]"),
+            ("{\"a\": [[] , ", "{\"a\": []}"),
+            ("[[[] , 1", "[[1]]"),
+            ("[[] , 1 , 2 ", "[1, 2]"),
+            ("[[], [] , [] ,", "[[]]"),
+            // the comma DIRECTLY after the element keeps it (the
+            // engine's own split), and the complete documents keep
+            // everything (the loads class)
+            ("[[], ", "[[]]"),
+            ("[[], 1", "[[], 1]"),
+            ("[[], 1]", "[[], 1]"),
+            ("[[] , 1]", "[[], 1]"),
+            ("[\"\" , 1]", "[\"\", 1]"),
+            ("[[], [] , 1]", "[[], [], 1]"),
+            ("[1, [] , 2]", "[1, [], 2]"),
+            ("[[] , 1 , 2]", "[[], 1, 2]"),
+            ("[[], [[] , [] , 1]]", "[[], [[], [], 1]]"),
+            // in an object the member value keeps its empty container
+            // (the rule is the array lane's alone)
+            ("{\"a\": [] , 1", "{\"a\": []}"),
+            ("{\"a\": []\r, ", "{\"a\": []}"),
+            ("{\"a\": {} , ", "{\"a\": {}}"),
         ] {
             assert_eq!(streamed(text, 3), want, "{text:?}");
             let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())

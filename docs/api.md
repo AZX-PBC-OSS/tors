@@ -2568,7 +2568,8 @@ O(stream) marshalling per chunk: the same quadratic-per-chunk class the
 linearity pin gates; concatenate the deltas to reconstruct the emitted
 stream, and treat `snapshot`/`end` as the authority (a late repair that
 retracts text — the dangling-member drop, the grouping-paren unwrap, the
-empty-element retract — truncates the emitted stream behind the delta
+empty-element retract, the array lane's stray-`...` and strictly-empty
+item drops — truncates or drains the emitted stream behind the delta
 cursor).
 
 **The repair semantics** match the whole-text engine's on the classes a
@@ -2593,7 +2594,11 @@ total text for every class above: the chunk-boundary sweep suite
 every corpus text through the repairer and diffs the end against the
 whole-text engine, the oracle (`json-repair`, exact-pinned) covering the
 repaired-complete case, and hypothesis streams random JSON documents
-through random chunkings the same way.
+through random chunkings the same way. The array lane's item drops are
+part of that claim: a cut whose open string holds the stray `...` run,
+and a cut after a whitespace-followed strictly-empty item, both
+reproduce the whole-text answer byte for byte (pinned in the machine's
+own test module and exercised by the fuzz target's engine-parity gate).
 
 **Partial literals, the decided case**: there is NO `tru` -> `true`
 healing. The engine's own partial semantics decide, and the stream
@@ -2617,7 +2622,16 @@ mid-string newline passes); open containers close with their own brackets
 `[]`, `[1, [` to `[1]`) and closes at a member-value position or the root
 (`{"a": [` to `{"a": []}`), and an array's trailing strictly-empty member
 drops with it (`[[], []` to `[[]]`, `[1, []` to `[1]`), the cascade
-walking up the stack; the pending number/word resolves by the same rules
+walking up the stack; the array lane's own item drops reproduce too —
+the stray `...` (an item whose parse is the exact string `"..."` with
+the parse ending on a `.`: the cut's open string `" [\r\r"...` to `[]`,
+a bare number-run `[1, ...` to `[1]`, the closed `["..."]` element
+staying) and the strictly-empty item whose next char is not a separator
+(`[[] ,` to `[]`, `[[] , 1` to `[1]`, the comma directly after the
+element keeping it — the decision deferred to close time, because the
+engine's whole-input `json.loads` fast path keeps every element whenever
+the text ends up valid, so the drop is a cut-only observable); the
+pending number/word resolves by the same rules
 that terminate it mid-stream — through the literal table, so the special
 floats' spellings heal to strings (`[NaN` to `["NaN"]`, where the
 complete document keeps the float) and a number-born word drops its

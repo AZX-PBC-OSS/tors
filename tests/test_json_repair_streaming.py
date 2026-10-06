@@ -193,6 +193,46 @@ TRUNCATION = [
     '[{}, "',
     '{"a": [1, "',
     '[1, "\\',
+    # the array lane's item drops at the cut: the stray '...' (an open
+    # string's content or a bare number-run parsing to the exact string
+    # "..." with the parse ending on a '.'; the closed ["..."] element's
+    # parse ends on its quote and stays) and the strictly-empty item
+    # whose next char is not a separator (the engine's own skip, the
+    # decision deferred to close time: the whole-input loads fast path
+    # keeps every element whenever the text ends up valid)
+    ' [\r\r"...',
+    '["...',
+    '[[...',
+    '[[...',
+    '[1, "...',
+    '[1, 2, "...',
+    '{"a": ["...',
+    '{"a": [1, "...',
+    '("...',
+    '[1, ...',
+    '[..., 1]',
+    '["....',
+    '["..',
+    '[" ...',
+    '["...',
+    '[[] ,',
+    '[[]  ,',
+    '[[] , 1',
+    '[[] , 2',
+    '[[]\r, ',
+    '[[], [] ,',
+    '[[], [] , 1',
+    '[[] ,[]',
+    '[[] , []',
+    '[1, []\r, ',
+    '[1, []\r, 2',
+    '[1, [] , 2 ',
+    '[[], [[] , 2], 3',
+    '[[] , "k',
+    '[{}\r, ',
+    '[""\r, ',
+    '["" , 1',
+    '[[] , 1 , 2 ',
     # the escape-tail heal (rstrip on the open string's content, the
     # newline-run on a closed string at the tail)
     '{"k": "a\\n',
