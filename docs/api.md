@@ -2972,6 +2972,121 @@ expected behavior, not a defect.
 **Async**: `await tors.aio.grounding_coverage(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The weighted-LCS DP is O(|S|·|T|) up to the 16384-token operand caps, milliseconds at page scale and seconds at the caps, so the hop is noise on document-scale operands; a sentence-or-paragraph pair is a microsecond pass, prefer the sync spelling there.
 
 Evidence: `src/py/grounded.rs` detaches the whole pass with a single-float residue; `tests/test_gil_release.py::test_grounding_coverage_in_a_thread_...` states the wall at 12 MiB x 12 MiB operands is seconds (caps bounding it at ~10^8 cells) and measures ~10-50 ms walls at 2 MiB + 1 MiB.
+
+## `tors.grounding_report`
+
+```python
+def grounding_report(
+    text: str,
+    sources: list[str],
+    query: str | None = None,
+    *,
+    threshold: float = 0.85,
+) -> GroundingReport: ...
+```
+
+**WHAT**: the production grounding-report composition: per-sentence
+grounding verdicts over a list of sources, plus the aggregate verdict.
+The pipeline shape is the Deepchecks "Grounded in Context" framework's
+(Gerner et al. 2025, "Grounded in Context: Retrieval-Based Method for
+Hallucination Detection", arXiv 2504.15771): decompose the output into
+statements, score each statement against the context, aggregate the
+per-statement scores into one verdict. tors implements the shape with
+its lexical layer, the paper's NLI entailment model (its step 5)
+deliberately left as the handoff: the verdict here is a lexical-overlap
+threshold, the same honest line `ground_sentences` draws (a lexical
+overlap cannot judge entailment; consumers needing that run their NLI
+model over the top-scored sentences).
+
+Returns the report dict, every key present every time:
+
+- `sentences`: one entry per UAX #29 sentence of `text`, position
+  order, each `{"text", "start", "end", "best_source", "score",
+  "grounded"}`. The offsets are the sentence's exact bounds (the tuples
+  `tors.sentence_bounds(text)` returns, Python codepoint indices, so
+  `text[start:end]` is exactly `sentence["text"]`).
+- `best_source`: the index of the source holding the sentence's best
+  alignment, earliest source winning ties; `None` when there is no
+  alignment at all (no sources, or no source shares a token with the
+  sentence), `score` `0.0` with it.
+- `score`: that best alignment's ROUGE-W F1 in `[0.0, 1.0]`, the score
+  `tors.highlight(sentence, source, max_snippets=1, max_chars=400)`
+  itself reports (the sentence scored as the query at the family's
+  default snippet budget), so a report sentence's score is exactly
+  reproducible from the primitives.
+- `grounded`: `score >= threshold` AND an alignment exists (no sources
+  grounds nothing, even at `threshold=0.0`). `threshold` defaults to
+  `is_grounded`'s documented 0.85 and must be in `[0.0, 1.0]`.
+- `aggregate`: `{"grounded_ratio", "grounded", "sentences",
+  "mean_score", "best_score", "coverage", "query_score"}`.
+  `grounded_ratio` is the grounded fraction (`0.0` for no sentences),
+  `grounded`/`sentences` the counts, `mean_score`/`best_score` the
+  per-sentence score mean/max, `coverage` the text-level token
+  utilization of `text` against the newline-joined sources
+  (`tors.grounding_coverage(text, "\n".join(sources))`: what fraction
+  of the output's own tokens the sources supply, the recall reading
+  that complements the per-sentence precision lens; `0.0` with no
+  sources), and `query_score` the optional query's `ground_sentences`
+  aggregate (the best sentence's F1 against the query: WHICH grounded
+  sentence reads first; `0.0` when `query` is `None`).
+
+**WHY this shape**: the decomposition-then-verification pipeline is
+what makes long contexts tractable for a verifier (the paper's own
+motivation: an NLI encoder with a 512-token window cannot score a
+whole response against a whole context, so each claim gets its own
+small premise set); tors's report hands the consumer that same
+structure with the lexical scores in place, so the cheap pass ranks
+and filters (which sentences, which sources, at what threshold) before
+the expensive model runs. The aggregate is deliberately plural (ratio,
+counts, mean, best, coverage, query lens) rather than one number: a
+single significant ungrounded sentence is invisible in a mean but
+blunt in `grounded_ratio`, while the mean answers "how much of this
+text is supported" and `coverage` catches wholesale fabrication the
+per-sentence alignment can miss.
+
+**HOW**: `sources` is a list of strings (an empty entry is legal and
+aligns nothing). Degenerate inputs are pinned shapes, never errors: an
+empty text returns the all-empty report (empty sentence list, every
+aggregate key at 0.0); no sources grounds nothing (every
+`best_source` `None`, `grounded` `False`, `grounded_ratio` and
+`coverage` `0.0`).
+
+```python
+text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+tors.grounding_report(text, ["Service log: the bushing torque spec was 42 Nm."], query="torque")
+# {'sentences': [{'text': 'The pump failed. ', 'start': 0, 'end': 17,
+#                 'best_source': 0, 'score': 0.16666666666666669, 'grounded': False},
+#                {'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
+#                 'end': 52, 'best_source': 0, 'score': 0.8750000000000003,
+#                 'grounded': True},
+#                {'text': 'Replaced.', 'start': 52, 'end': 61,
+#                 'best_source': None, 'score': 0.0, 'grounded': False}],
+#  'aggregate': {'grounded_ratio': 0.3333333333333333, 'grounded': 1,
+#                'sentences': 3, 'mean_score': 0.3472222222222223,
+#                'best_score': 0.8750000000000003,
+#                'coverage': 0.6363636363636365, 'query_score': 0.25}}
+```
+
+**Async**: `await tors.aio.grounding_report(...)` runs this under
+`asyncio.to_thread` (see [Async use](async.md)). The report's cost is
+linear in (sentences x sources) highlight passes (each bounded by the
+family's query cap and the 400-char budget, the source re-tokenized per
+pair), milliseconds at page scale and hundreds of milliseconds at
+document scale, so the hop is noise on document-scale inputs; a
+one-sentence text is a microsecond pass, prefer the sync spelling
+there.
+
+Evidence: `src/grounding_impl.rs`'s `grounding_report` composes the
+in-module segmentation, `highlight`'s per-pair scoring, and
+`grounded_impl::grounding_coverage` and `ground_sentences`' aggregate
+unchanged; `src/py/grounding.rs` runs the WHOLE composition under one
+`py.detach` (never one detach per sentence; the residue is the
+O(sentences) dict marshalling); the differential oracle is the same
+composition in Python (`sentence_bounds` + `highlight` +
+`grounding_coverage` + `ground_sentences`), pinned exact in
+`tests/test_grounding_report.py`, with the heartbeat cell at document
+scale and the (sentences x sources) scaling pin beside it.
+
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
 ```python
@@ -3222,6 +3337,20 @@ land a span strictly inside the previous chunk (the same text embedded twice,
 the failure mode #83 fixed), the next chunk starts at the previous chunk's end
 instead, so a chunk is never contained in its predecessor.
 
+The 2026 systematic chunking study prices this knob end to end: across paired
+configurations on Natural Questions, adding 10-20% overlap did not improve
+retrieval (`|Δ BERTScore| <= 0.004`, EM differences `<= 0.001`) while chunk
+count and index size inflated by exactly `1/(1 - r)` (Bennani & Moslonka 2026,
+"A Systematic Analysis of Chunking Strategies for Reliable Question
+Answering", arXiv 2601.14123, Finding F1), so its recommendation is
+`overlap = 0` unless you have evidence your retriever benefits from boundary
+redundancy. That is why every member of this family defaults to `overlap=0`,
+and `tors.chunk_overlap_cost` returns the inflation factor for any ratio you
+are considering. The same study's method finding (sentence/structure-aware
+chunking beats token chunking: sentence ≈ semantic > token) is what
+`boundary="sentence"`, `chunk_by_sentences`, and `chunk_hierarchical`'s
+default hierarchy implement.
+
 `max_chars < 1` or `overlap < 0` raise `ValueError`; an unrecognized `boundary` raises
 `ValueError` (the `truncate_to_bounds` spelling). `chunk_cdc`'s byte-level sibling:
 `chunk_text` is the semantic/embedding-pipeline chunker (word/sentence-aware, sized
@@ -3302,7 +3431,11 @@ token's start through the last included token's end, not through any trailing
 whitespace after it, so unlike `chunk_text`'s covering-partition contract,
 non-overlapping chunks here are not necessarily contiguous. The final chunk may hold
 fewer than `words_per_chunk` tokens when the total doesn't divide evenly. `overlap`
-words repeat at the start of the next chunk. Empty text, or text with no word tokens
+words repeat at the start of the next chunk. (On overlap's documented price:
+the 2026 systematic study measured no retrieval gain from 10-20% overlap
+against its exact `1/(1-r)` index inflation, arXiv 2601.14123, Finding F1;
+`overlap=0` is this family's default recommendation and
+`tors.chunk_overlap_cost` prices the factor.) Empty text, or text with no word tokens
 at all, returns `[]`.
 
 `words_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >= words_per_chunk`
@@ -3690,7 +3823,11 @@ silently degrades to zero overlap for just that one transition, the same
 snap-collapse `chunk_text` already applies — and so does an overlap whose
 re-cut would land the next chunk strictly inside its predecessor (the same
 text twice, no new context): the transition falls back to the zero-overlap
-cut instead, so ends always strictly advance.
+cut instead, so ends always strictly advance. (The knob's documented
+default: the 2026 systematic study found no retrieval gain from 10-20%
+overlap against its exact `1/(1-r)` index inflation, arXiv 2601.14123,
+Finding F1; `overlap=0` is the family default and
+`tors.chunk_overlap_cost` prices the factor.)
 
 `overlap_boundary="word"` opts the snap into word-aware tails (#47) for
 exactly the embedding-pipeline shape a mid-word tail start is a rough
@@ -3896,7 +4033,11 @@ stall, loop, or emit the same text twice: the same forward-progress
 discipline `chunk_text`'s overlap applies. Chunks are non-empty, strictly
 increasing in both start and end, cover to the end of the text, and each
 fits the budget per the same measurement the packing used; with
-`overlap=0` they are a contiguous lossless covering partition.
+`overlap=0` they are a contiguous lossless covering partition. (The knob's
+documented default, family-wide: the 2026 systematic study found no
+retrieval gain from 10-20% overlap against its exact `1/(1-r)` index
+inflation, arXiv 2601.14123, Finding F1; `tors.chunk_overlap_cost` prices
+the factor.)
 
 `max_tokens < 1`, an out-of-range `overlap` (either spelling), or a
 mis-shaped `token_offsets` sequence raise `ValueError` before any packing
@@ -4000,6 +4141,147 @@ example values, not independently chosen.
 tors.chunk_cdc(b"hello world " * 10_000)
 # [(0, 65534), (65534, 120000)]
 ```
+
+## `tors.chunk_overlap_cost`
+
+```python
+def chunk_overlap_cost(overlap: float) -> float: ...
+```
+
+**WHAT**: the chunk family's overlap knob, priced: the index-inflation
+factor `1 / (1 - overlap)` for an overlap ratio in `[0.0, 1.0)`. The
+2026 systematic chunking study (Bennani & Moslonka 2026, "A Systematic
+Analysis of Chunking Strategies for Reliable Question Answering",
+arXiv 2601.14123, Finding F1) measured that adding 10-20% overlap did
+NOT improve retrieval (`|Δ BERTScore| <= 0.004`, EM differences
+`<= 0.001`) while chunk count and index size inflated by exactly
+`1 / (1 - r)` (their worked example: `r = 0.2` is 1.25x more chunks,
+ingestion time and storage), and recommended `overlap = 0` unless you
+have evidence your retriever benefits from boundary redundancy. That is
+why every member of the chunk family defaults to `overlap=0`; this
+function prices whatever ratio you are considering anyway.
+
+**WHY a function and not a comment**: the cost is not linear in the
+overlap and not intuitive at the top of the range (0.5 is 2x, 0.9 is
+10x, 0.99 is 100x), so a caller tuning `overlap` by feel against a
+storage budget benefits from the exact factor, and the domain's edge
+(`overlap >= 1` is infinite inflation: a chunker whose overlap equals
+its budget never advances, and the index it would build is infinite) is
+the asymptote named in the error rather than an `inf` silently flowing
+into a size estimate.
+
+**HOW**: `overlap` must be a finite float in `[0.0, 1.0)`; negative
+values, values at or past 1.0, and `NaN` raise `ValueError` naming the
+asymptote. Pure float arithmetic: no GIL release (the work is strictly
+less than the argument extraction around it, the `simhash_distance`
+zero-detach class), and no `aio` twin for the same reason.
+
+```python
+tors.chunk_overlap_cost(0.0)
+# 1.0
+tors.chunk_overlap_cost(0.2)
+# 1.25
+tors.chunk_overlap_cost(0.5)
+# 2.0
+tors.chunk_overlap_cost(0.75)
+# 4.0
+```
+
+## `tors.chunk_quality`
+
+```python
+def chunk_quality(
+    chunks: Sequence[tuple[int, int]],
+    text: str,
+    *,
+    tau: int = 0,
+) -> ChunkQuality: ...
+```
+
+**WHAT**: the two intrinsic chunk-quality metrics of the adaptive-
+chunking study (Madan et al. 2026, "Adaptive Chunking: Improving RAG
+Performance via a Bottom-Up Approach", LREC 2026, arXiv 2603.25333, the
+`ekimetrics/adaptive-chunking` reference implementation) computed over
+the caller's own chunk spans: the `(start, end)` tuples any member of
+the chunk family returns, or any hand-built spans. Returns
+`{"integrity": float, "cohesion": float}`, both in `[0.0, 1.0]`, both
+keys always present.
+
+- `integrity` is the study's **Block Integrity**: the fraction of the
+  text's UAX #29 sentences (the suite's own segmentation, the same
+  bounds `sentence_bounds` publishes, standing in for the study's
+  annotated gold blocks) that NO chunk boundary crosses. A boundary
+  crosses a sentence when it falls strictly inside the sentence's span,
+  farther than `tau` codepoints (the tolerance, default 0, for
+  segmenter jitter) from BOTH edges. A boundary exactly at a sentence
+  edge is never a crossing; sentence-sized chunks score 1.0 by
+  construction.
+- `cohesion` is the study's **Intra-Chunk Cohesion** as tors's
+  dependency-free LEXICAL PROXY: the mean Dice coefficient
+  (`shingle_dice`'s exact quantity, `2|A ∩ B| / (|A| + |B|)` over the
+  width-3 word-shingle sets, the same UAX #29 tokenization and
+  case-fold+NFC matching form the near-duplicate family uses) between
+  each sentence and its containing chunk, averaged over the
+  (sentence, chunk) pairs that exist (containment is the assignment; a
+  sentence no chunk contains contributes to neither metric, its damage
+  is `integrity`'s).
+
+**The honest caveat, stated because the names invite the comparison**:
+the study's ICC scores sentence-to-chunk similarity with EMBEDDING
+cosine similarity. tors's version is a different, weaker, but usable
+signal: it rewards chunks whose sentences share surface vocabulary and
+penalizes chunks that stitch unrelated sentences together, but it
+cannot see topical continuity that shares no words (a pronoun-heavy
+continuation scores low), it inherits the shingle family's empty-set
+conventions (a sentence shorter than the shingle width has an empty
+shingle set; two empty sets score 1.0, exactly one empty 0.0), and its
+numbers are NOT comparable to the paper's. What it buys is that the
+metrics run with no model, no network, and no dependency beyond the
+crate's own segmenters and shingle hashes, so a chunking-config sweep
+can gate on them per document, in milliseconds, the way the study's
+selector does.
+
+**Degenerate shapes, pinned**: an empty chunk list or an empty text
+gives `{"integrity": 1.0, "cohesion": 0.0}` (no boundary crosses
+anything, vacuously; no sentence-chunk pair exists, the conservative
+0/0 reading, the same convention `grounding_coverage` pins). A span out
+of `text`'s range or with `start > end` raises `ValueError`; `tau < 0`
+raises `ValueError`.
+
+```python
+text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+tors.chunk_quality(tors.chunk_by_sentences(text, 1), text)
+# {'integrity': 1.0, 'cohesion': 1.0}
+tors.chunk_quality([(0, 61)], text)
+# {'integrity': 1.0, 'cohesion': 0.31746031746031744}
+tors.chunk_quality([(0, 30), (30, 61)], text)
+# {'integrity': 0.6666666666666667, 'cohesion': 0.2857142857142857}
+tors.chunk_quality([], text)
+# {'integrity': 1.0, 'cohesion': 0.0}
+```
+
+(The second call: one chunk covering everything, so nothing is crossed;
+the middle sentence's shingles all ride inside the chunk's (Dice 2/3)
+while the flanking sentences' sets are mostly new material to the chunk
+(Dice 2/7) or empty outright ("Replaced." has fewer tokens than the
+shingle width: the exactly-one-empty convention scores 0.0), and the
+mean of 2/7, 2/3, 0 is 0.3174. The third call: the boundary at 30 cuts
+the middle sentence, span (17, 52), and integrity pays for it.)
+
+**Async**: `await tors.aio.chunk_quality(...)` runs this under
+`asyncio.to_thread` (see [Async use](async.md)). The pass is one
+segmentation plus one shingle pass per chunk and sentence, linear in
+the text, milliseconds at page scale and tens of milliseconds at MiB
+scale, so the hop is noise on document-scale inputs; a short paragraph
+is a microsecond pass, prefer the sync spelling there.
+
+Evidence: `src/chunk_quality_impl.rs` defines both metrics over the
+shared segmenters (`grounding_impl::sentence_spans`) and the
+near-duplicate family's shingle hashes (`near_dup_impl::shingle_hashes`,
+width 3); `src/py/chunk.rs` detaches the whole pass with a two-key dict
+residue; the differential oracle is the published-primitive composition
+(`tors.sentence_bounds` + `tors.shingle_dice`), pinned exact in
+`tests/test_chunk_quality.py`, with the linear scaling cell beside it.
 
 ## `tors.content_hash`
 
