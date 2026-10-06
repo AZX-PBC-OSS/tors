@@ -185,6 +185,16 @@ class TestAwaitCorrectness:
             ("chunk_by_lines", ("l1\nl2\nl3\nl4\nl5", 2), {}),
             ("chunk_cdc", (b"x" * 20_000,), {}),
             ("chunk_hierarchical", ("One. Two. Three. Four.", 8), {}),
+            # the two 2026 chunk-evaluation/report surfaces, same sweep
+            ("chunk_quality", ([(0, 8), (8, 17)], "cats are cute and cats are fun"), {}),
+            (
+                "grounding_report",
+                (
+                    "The pump failed. The bushing torque spec was 42 Nm.",
+                    ["log: the bushing torque spec was 42 Nm"],
+                ),
+                {"query": "torque"},
+            ),
             # the token-budget twins' keyword-only max_tokens/overlap
             # marshalling through to_thread's kwargs path (the aio
             # twins are in this sweep like every other chunker)

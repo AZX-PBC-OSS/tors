@@ -182,6 +182,11 @@ jobs:
     permissions:
       id-token: write # Trusted Publishing: no API token secret needed or used.
     steps:
+      # lfs: uniform policy (see the wheels-linux checkout note); the prune
+      # step below also needs the tools/ script this checkout provides.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: "wheels-*"
@@ -205,8 +210,30 @@ jobs:
           test "${#sdists[@]}" -eq 1
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Prune files already on PyPI
+        # Idempotent re-run gate (the 2026-09-26 double-dispatch's red X):
+        # PyPI rejects filename reuse with 400 AFTER the whole build matrix
+        # went green, so a re-dispatch of an already-published version could
+        # never go green. tools/pypi_prune_published.py drops every file
+        # PyPI already hosts (by filename — the only identity PyPI enforces;
+        # hashes don't survive a rebuilt wheel), turning a re-dispatch into
+        # a no-op and a partial upload into "publish just the missing
+        # files". The count assert above still pins the build matrix; the
+        # prune only trims what the registry verifiably has.
+        run: python3 tools/pypi_prune_published.py dist
       - name: Publish
-        run: uv publish --trusted-publishing automatic dist/*
+        # The empty-dist branch is the prune's "everything already shipped"
+        # outcome: `uv publish` cannot express "no files" as success (the
+        # v0.6.0 failure mode), so a complete re-dispatch exits green on the
+        # notice instead of dying on "No files found to publish".
+        run: |
+          shopt -s nullglob
+          files=(dist/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::every distribution is already on PyPI; nothing to publish (idempotent re-run)"
+          else
+            uv publish --trusted-publishing automatic dist/*
+          fi
 
   # The tors-documents payload wheel: the `pip install tors[documents]` extra's
   # payload, built from tors-documents/ through that directory's own
@@ -329,6 +356,11 @@ jobs:
     permissions:
       id-token: write # Trusted Publishing: no API token secret needed or used.
     steps:
+      # lfs: uniform policy (see the wheels-linux checkout note); the prune
+      # step below also needs the tools/ script this checkout provides.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: "documents-wheels-*"
@@ -349,8 +381,23 @@ jobs:
           test "${#wheels[@]}" -eq 8
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Prune files already on PyPI
+        # Same idempotent re-run gate as the base publish job above (the
+        # 2026-09-26 double-dispatch died HERE on
+        # tors_documents-0.15.1-*.whl "File already exists"): prune what
+        # PyPI verifiably hosts before `uv publish` can trip over it.
+        run: python3 tools/pypi_prune_published.py dist
       - name: Publish
-        run: uv publish --trusted-publishing automatic dist/*
+        # Empty dist/ = the prune's "everything already shipped" outcome;
+        # skip green rather than die on "No files found to publish".
+        run: |
+          shopt -s nullglob
+          files=(dist/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::every distribution is already on PyPI; nothing to publish (idempotent re-run)"
+          else
+            uv publish --trusted-publishing automatic dist/*
+          fi
 
   publish-crate:
     name: Publish to crates.io
@@ -385,6 +432,15 @@ jobs:
         # libpython, which breaks a plain `cargo publish` verification build the same way
         # it breaks `cargo test`/`cargo build`; see Cargo.toml's own feature comment.
         #
+        # Idempotent re-run gate (the 2026-09-26 double-dispatch's red X):
+        # crates.io rejects an already-published version ("crate tors-core@X
+        # already exists on crates.io index", exit 101) AFTER the whole build
+        # matrix went green, so a re-dispatch of a released version could
+        # never go green. 200 = already published, skip green; 404 =
+        # genuinely new, publish; anything else fails OPEN into cargo
+        # publish — the registry itself stays the source of truth on a
+        # duplicate, so a probe outage can never suppress a real release.
+        #
         # Lockfile self-heal: a release tag can carry a Cargo.lock whose root-package
         # version predates the release PR's version bump (release-please bumps
         # versions without refreshing locks), and cargo rewrites that one field on
@@ -395,5 +451,18 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --retry 5 \
+            -A tors-publish-workflow "https://crates.io/api/v1/crates/tors-core/${version}")"
+          case "$status" in
+            200)
+              echo "::notice::tors-core@${version} is already on crates.io; nothing to publish (idempotent re-run)"
+              exit 0
+              ;;
+            404) ;;
+            *)
+              echo "::warning::unexpected crates.io API status ${status} for tors-core@${version}; proceeding to publish"
+              ;;
+          esac
           git diff --exit-code -- . ':!Cargo.lock'
           cargo publish -p tors-core --no-default-features --allow-dirty
