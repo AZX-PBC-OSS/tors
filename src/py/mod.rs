@@ -43,6 +43,7 @@ pub mod pipeline;
 pub mod random;
 pub mod rank_fusion;
 pub mod scan;
+pub mod score_fusion;
 pub mod scrub;
 pub mod search;
 pub mod secret;

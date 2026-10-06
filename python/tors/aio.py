@@ -166,6 +166,7 @@ _WRAPPED = (
     "repair_json_loads",
     "replace_many",
     "replace_many_masked",
+    "score_fuse",
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",

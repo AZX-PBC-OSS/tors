@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from collections.abc import Callable, Sequence
@@ -1486,3 +1487,108 @@ def reference_minhash_signature(
             if h < signature[j]:
                 signature[j] = h
     return signature
+
+
+# --- the score_fusion oracle ---------------------------------------------------
+#
+# ``tors.score_fuse``'s three methods (the score-space sibling of the
+# rank_fuse family), transcribed from the documented formulas as a naive
+# pure-Python walk: dict-based dedup, list min()/max(), one accumulator
+# per id. Shares no machinery with the Rust side (no dedup-index table,
+# no sort-restart tie logic), so agreement is evidence about the
+# contract, not a shared bug. The accumulation ORDER (lists in caller
+# order, the MNZ multiplier applied once after the per-list walk) and
+# every normalization convention below are the documented contract this
+# oracle and the Rust core implement independently.
+
+#: The accepted ``method=`` spellings, in the core's parse order.
+SCORE_FUSION_METHODS: tuple[str, ...] = ("combmnz", "borda", "linear")
+
+
+def reference_score_fuse(
+    scored_lists: list[list[tuple[object, float]]],
+    method: str = "combmnz",
+    weights: list[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[object, float]]:
+    """The score-fusion oracle, byte-exact: one ``(id, score)`` pair per
+    distinct id across all lists, fused score descending, ties broken by
+    earliest first appearance across the lists in caller order, ``k``
+    truncating the top N.
+
+    The per-method formulas (docs/api.md's ``tors.score_fuse`` section
+    is their normative statement):
+
+    - ``combmnz``: ``score(d) = lists(d) x sum_i w_i x norm_i(d)`` --
+      CombSUM (each list's min-max-normalized score, weighted) times
+      the number of lists containing ``d``. ``norm_i`` is min-max per
+      list over the list's OWN deduplicated scores; a zero-range list
+      (every score equal, a single-entry list included) normalizes to
+      the neutral midpoint ``0.5``; a numerator that overflows against
+      an overflowed range saturates to ``1.0`` (never ``inf/inf``).
+    - ``borda``: rank-based votes ``(n_i - rank_i(d)) / n_i`` weighted
+      and summed -- positions vote, magnitudes never (the literature's
+      Borda count, rescaled to ``[0, 1)``).
+    - ``linear``: ``score(d) = sum_i w_i x norm_i(d)``, no MNZ
+      multiplier (Elasticsearch's linear-retriever pattern).
+
+    Duplicates fold to their first occurrence per list (first score
+    stands, later ids advance one Borda rank); weights default to
+    all-1.0; every distinct id emits (vote-existence, a fused ``0.0``
+    included, ordered last)."""
+    assert method in SCORE_FUSION_METHODS, method
+    if weights is None:
+        weights = [1.0] * len(scored_lists)
+    # Fold first occurrences per list (the dedup-first contract): the
+    # surviving entry's score is the FIRST occurrence's, and the later
+    # ids advance one position in the (borda) ranking.
+    folded: list[list[tuple[object, float]]] = []
+    for lst in scored_lists:
+        seen: set[object] = set()
+        entries: list[tuple[object, float]] = []
+        for id_, score in lst:
+            if id_ in seen:
+                continue
+            seen.add(id_)
+            entries.append((id_, float(score)))
+        folded.append(entries)
+
+    fused: dict[object, float] = {}
+    counts: dict[object, int] = {}
+    appearance: dict[object, int] = {}
+    seen_count = 0
+    for i, entries in enumerate(folded):
+        if not entries:
+            continue
+        w = weights[i]
+        if method == "borda":
+            n = len(entries)
+            for pos, (id_, _) in enumerate(entries):
+                vote = (n - pos - 1) / n
+                fused[id_] = fused.get(id_, 0.0) + w * vote
+                counts[id_] = counts.get(id_, 0) + 1
+                if id_ not in appearance:
+                    appearance[id_] = seen_count
+                    seen_count += 1
+        else:
+            scores = [s for _, s in entries]
+            mn, mx = min(scores), max(scores)
+            rng = mx - mn
+            for id_, s in entries:
+                if rng == 0.0:
+                    norm = 0.5
+                else:
+                    num = s - mn
+                    norm = 1.0 if math.isinf(num) else num / rng
+                fused[id_] = fused.get(id_, 0.0) + w * norm
+                counts[id_] = counts.get(id_, 0) + 1
+                if id_ not in appearance:
+                    appearance[id_] = seen_count
+                    seen_count += 1
+    if method == "combmnz":
+        for id_ in fused:
+            fused[id_] = fused[id_] * counts[id_]
+    ranked = sorted(fused.items(), key=lambda t: (-t[1], appearance[t[0]]))
+    if k is not None:
+        ranked = ranked[:k]
+    return ranked

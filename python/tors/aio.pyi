@@ -278,6 +278,13 @@ async def precision_at_k(
     relevant: set[Hashable] | frozenset[Hashable],
     k: int,
 ) -> float: ...
+async def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
 async def apply_pipeline(
     texts: list[str],
     *,
