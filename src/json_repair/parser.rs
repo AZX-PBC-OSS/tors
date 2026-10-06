@@ -1023,6 +1023,7 @@ impl Parser {
     /// "1/2", ranges "10-20", trailing separators), which come back as
     /// strings.
     fn parse_number(&mut self) -> Result<Value, String> {
+        let number_start_index = self.index;
         let mut number_str = String::new();
         let is_array = self.ctx_current() == Some(Ctx::Array);
         while let Some(ch) = self.cur() {
@@ -1045,13 +1046,16 @@ impl Parser {
             self.index += 1;
         }
         if self.cur().is_some_and(|ch| ch.is_alphabetic()) {
-            // This was a string instead, sorry. Rewind over the accumulated
-            // characters: by len(number_str), not by the consumed-run
-            // length: the cursor lands len(underscores) past the run
-            // start, so skipped underscores end up inside the reparsed
-            // string ('{"k": 12_abc}' -> "2_abc"): upstream's exact
-            // arithmetic ('{"k": 12_abc}' keeps the underscore), kept.
-            self.index -= number_str.chars().count();
+            // This was a string instead, sorry. Rewind to the run's START
+            // index — absolute, upstream 0.63.5's `self.index =
+            // number_start_index` — rather than backing off over the
+            // accumulated characters. The run's underscores were consumed
+            // but never pushed onto `number_str`, so rewinding to the run
+            // start is what keeps them inside the reparsed string
+            // ('{"k": 12_abc}' -> "12_abc"); backing off by
+            // len(number_str) would land len(underscores) past it and
+            // drop them ('12_abc' -> "2_abc").
+            self.index = number_start_index;
             return self.parse_string();
         }
         if matches!(
