@@ -1371,7 +1371,7 @@ def _row_as_f64(v: int) -> float:
 
 
 class TestBBitCompression:
-    """`bits=`: Li and König's b-bit MinHash (WDE 2010). `None` (the
+    """`bits=`: Li and König's b-bit MinHash (WWW 2010). `None` (the
     default) is the full u64 rows, byte-identical to the pre-bits output;
     an int in [1, 63] keeps the lowest b bits of every row, and
     `minhash_jaccard` applies the 2^-b chance correction the masked

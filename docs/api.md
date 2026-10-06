@@ -5405,8 +5405,7 @@ correction `(p_hat - 2^-b) / (1 - 2^-b)`, restoring unbiasedness. The
 corrected estimate can land slightly NEGATIVE at true similarity zero (a
 finite sample's chance term can exceed the observed agreement) -- that
 is the unbiased estimator's honest shape, not a bug; threshold callers
-should compare raw agreement fractions instead. The variance is at most ~3x the full rows'
-full rows once `b >= log2(1/J)`.
+should compare raw agreement fractions instead. The variance is at most ~3x the full rows' once `b >= log2(1/J)`.
 
 Both signatures must be equal-length and non-empty, else `ValueError`
 naming the lengths; row elements ride the strict int convention
