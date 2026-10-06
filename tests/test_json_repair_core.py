@@ -857,6 +857,47 @@ class TestCorpusStrings:
         )
         assert repair_json("[1, 2notanumber]") == '[1, "2notanumber"]'  # upstream edge cases
 
+    def test_exponent_sign_and_underscore_rewind_str(self) -> None:
+        # The exponent-sign family: a '+'/'-' is part of the number run only
+        # directly after 'e'/'E' — signed, unsigned, bare, and dangling
+        # spellings. Pinned against the json-repair==0.63.5 oracle's actual
+        # output (the differential suite re-proves the pin live).
+        assert repair_json('{"k": 1e+55}') == '{"k": 1e+55}'
+        assert repair_json('{"k": 1e55}') == '{"k": 1e+55}'
+        assert repair_json('{"k": 1e}') == '{"k": 1}'
+        assert repair_json('{"k": 1e+}') == '{"k": "1e"}'
+        assert repair_json('{"k": 1e-}') == '{"k": "1e"}'
+        assert repair_json('{"k": 1e-5}') == '{"k": 1e-05}'
+        assert repair_json('{"k": 1E5}') == '{"k": 100000.0}'
+        assert repair_json('{"k": 1e+55x}') == '{"k": "1e+55x"}'
+        assert repair_json('{"k": 1x+55}') == '{"k": "1x+55"}'
+        assert repair_json('{"k": 1e+ 55}') == '{"k": "1e"}'
+        assert repair_json('{"k": 1e55.2}') == '{"k": "1e55.2"}'
+        assert repair_json('{"k": -1e+55}') == '{"k": -1e+55}'
+        assert repair_json('{"k": 1e55e5}') == '{"k": "1e55e5"}'
+        assert repair_json('{"k": 0e0}') == '{"k": 0.0}'
+        assert repair_json('{"k": 1e-+5}') == '{"k": "1e"}'
+        assert repair_json('{"k": 1e+5-}') == '{"k": 100000.0}'
+        assert repair_json('{"k": 1e_+}') == '{"k": "1e"}'
+        assert repair_json('{"k": 1_e_+}') == '{"k": "1e"}'
+        assert repair_json('[1e+55x]') == '["1e+55x"]'
+        assert repair_json('[1e+ 55]') == '["1e", 55]'
+        assert repair_json('[1e-+5]') == '["1e", 5]'
+        assert repair_json('[1e]') == '[1, "e"]'
+        # The underscore-rewind family: a number run followed by letters
+        # reparses as a string, and the rewind lands on the run's START
+        # index (absolute, the 0.63.5 oracle's `self.index =
+        # number_start_index`), so underscores consumed but never pushed
+        # onto the number text stay inside the reparsed string.
+        assert repair_json('{"k": 12_abc}') == '{"k": "12_abc"}'
+        assert repair_json('{"k": 1_x}') == '{"k": "1_x"}'
+        assert repair_json('{"k": 1_000_x}') == '{"k": "1_000_x"}'
+        assert repair_json('{"k": 1e5_abc}') == '{"k": "1e5_abc"}'
+        assert repair_json('[12_abc]') == '["12_abc"]'
+        assert repair_json('[1_x]') == '["1_x"]'
+        assert repair_json('[1_000_x]') == '["1_000_x"]'
+        assert repair_json('[1e5_abc]') == '["1e5_abc"]'
+
     def test_parse_comment_str(self) -> None:
         assert repair_json("/") == ""  # upstream test_parse_comment
         assert repair_json('/* comment */ {"key": "value"}')  # upstream test_parse_comment
