@@ -25,19 +25,26 @@ real minimum) -- a stable digest for empty documents.
 
 from __future__ import annotations
 
+import asyncio
+import os
+import random
+import warnings
 from itertools import product
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from loop_harness import assert_bounded
+import tors
+from loop_harness import assert_bounded, assert_heartbeat_clean
 from reference import (
     _MINHASH_EMPTY,
+    reference_minhash_jaccard,
     reference_minhash_signature,
     reference_minhash_tokens,
+    reference_superminhash_signature,
 )
-from tors import minhash_signature
+from tors import minhash_jaccard, minhash_signature
 
 # The mixed text alphabet: letters, numbers, punctuation, spaces, the
 # hard-break whitespace, the C0/C1 controls (U+001F separator included),
@@ -1102,3 +1109,395 @@ class TestPerformanceSanity:
     def test_large_input_is_deterministic(self) -> None:
         big = "lorem ipsum dolor sit amet " * 100_000
         assert minhash_signature(big) == minhash_signature(big)
+
+# --- The literature additions -------------------------------------------------------
+#
+# The RMSE grid cells below share one corpus builder: sets A, B over a token
+# vocabulary with a pinned union cardinality u and Jaccard J, spelled as
+# shingle_size=1 texts so the shingle set IS the token set (the estimator's
+# true J is then exact by construction). Everything is deterministic (no
+# rng beyond the fixed-seed vocabulary shuffle), so the RMSE numbers are
+# constants of the build, re-measured here and pinned with margin.
+
+
+def _jaccard_grid_pair(u: int, j_target: float, seed: int) -> tuple[str, str, float]:
+    """Two shingle_size=1 texts over a union of ``u`` distinct tokens with
+    Jaccard as close to ``j_target`` as the integer split allows, plus the
+    EXACT Jaccard the split realized."""
+    rng = random.Random(seed)
+    vocab = [f"w{i:05d}" for i in range(u)]
+    rng.shuffle(vocab)
+    inter = int(round(j_target * u))
+    intersection, rest = vocab[:inter], vocab[inter:]
+    only_a = rest[: len(rest) // 2]
+    only_b = rest[len(rest) // 2 :]
+    a_text = " ".join(intersection + only_a)
+    b_text = " ".join(intersection + only_b)
+    union = len(intersection) + len(only_a) + len(only_b)
+    exact = len(intersection) / union
+    return a_text, b_text, exact
+
+
+def _rmse(estimates: list[float], exact: float) -> float:
+    return sum((e - exact) ** 2 for e in estimates) ** 0.5 / len(estimates) ** 0.5
+
+
+class TestSuperMinHashMethod:
+    """`method="superminhash"`: Ertl's SuperMinHash (arXiv 1706.05698) as
+    the second engine behind `minhash_signature`'s `method` knob. The
+    classic default is byte-identical to every pre-method signature ever
+    produced (the existing pins above stay green untouched); the new
+    engine shares the shingle set, the determinism contract, and the
+    empty-set sentinel, and differs in the rows themselves (different
+    estimator structure, no prefix property)."""
+
+    def test_deterministic_across_calls_and_seeds(self) -> None:
+        text = "the quarterly oil sample interval for field outages"
+        a = minhash_signature(text, method="superminhash", num_perm=128)
+        assert a == minhash_signature(text, method="superminhash", num_perm=128)
+        assert a == minhash_signature("".join(text), method="superminhash", num_perm=128)
+        assert a != minhash_signature(text, method="superminhash", num_perm=128, seed=1)
+        # The negative-seed reduction rides: seed=-1 is seed=2**64-1.
+        assert minhash_signature(text, method="superminhash", seed=-1) == minhash_signature(
+            text, method="superminhash", seed=2**64 - 1
+        )
+
+    def test_empty_convention_matches_the_classic_sentinel(self) -> None:
+        for text in ("", "   ", "\t\n ", "one two"):
+            assert minhash_signature(text, method="superminhash") == [_MINHASH_EMPTY] * 128, (
+                f"{text!r}"
+            )
+        for seed in (0, 1, -1, 2**100):
+            assert minhash_signature("", method="superminhash", seed=seed) == [_MINHASH_EMPTY] * 128
+        # A real document never emits the sentinel pattern: the rows are
+        # finite f64 bit patterns (u64 MAX is a NaN pattern), values in
+        # [0, m).
+        sig = minhash_signature(_FOX, method="superminhash")
+        for v in sig:
+            h = _row_as_f64(v)
+            assert 0.0 <= h < 128.0, f"row {v} decodes to {h}"
+
+    def test_no_prefix_property_across_num_perm(self) -> None:
+        # The structural difference the docs state: the SuperMinHash
+        # permutation is generated per element over the signature size m,
+        # so k=8 is NOT k=128's first 8 rows (the classic engine's prefix
+        # property does not transfer).
+        full = minhash_signature(_FOX, method="superminhash")
+        assert minhash_signature(_FOX, method="superminhash", num_perm=8) != full[:8]
+
+    def test_methods_are_not_cross_compatible(self) -> None:
+        # The documented caller error, made visible: the same text at the
+        # same parameters through the two engines disagrees on essentially
+        # every row (different estimator structures -- the agreement
+        # fraction of a mixed pair estimates nothing). Deterministic row:
+        # the disagreement is pinned exactly.
+        a = minhash_signature(_FOX, method="xxh", num_perm=64)
+        b = minhash_signature(_FOX, method="superminhash", num_perm=64)
+        assert sum(x == y for x, y in zip(a, b, strict=True)) == 0
+
+    def test_method_validation(self) -> None:
+        with pytest.raises(ValueError, match=r'"xxh" or "superminhash"'):
+            minhash_signature(_FOX, method="supermin")
+        with pytest.raises(ValueError, match=r'"xxh" or "superminhash"'):
+            minhash_signature(_FOX, method="")
+        for bad in (0, True, None, b"xxh", 1.0):
+            with pytest.raises(TypeError):
+                minhash_signature(_FOX, method=bad)  # type: ignore[arg-type]
+
+    def test_bits_with_superminhash_is_a_value_error(self) -> None:
+        # The b-bit estimator's math needs uniform integer rows; the
+        # SuperMinHash rows are f64 bit patterns. The combination is
+        # refused, named, before any work.
+        with pytest.raises(ValueError, match="superminhash"):
+            minhash_signature(_FOX, method="superminhash", bits=8)
+
+    def test_matches_the_pure_python_oracle(self) -> None:
+        # The differential pin over the same battery shape the classic
+        # oracle cell rides: the algorithm transcription (Algorithm 4's
+        # lazy-init permutation, the histogram early exit, the pinned draw
+        # order) agrees with an independent pure-Python spelling.
+        rows = [
+            _FOX,
+            "a\r\nb",
+            "café société naïve 東京は日本の首都です",
+            "ab cd ef " * 50,
+            "Hello, world! One. Two.",
+            "   ",
+        ]
+        for text in rows:
+            for kwargs in (
+                {"num_perm": 8, "shingle_size": 3, "seed": 0},
+                {"num_perm": 16, "shingle_size": 2, "seed": 42},
+                {"num_perm": 4, "shingle_size": 1, "seed": -1},
+            ):
+                assert minhash_signature(
+                    text, method="superminhash", **kwargs
+                ) == reference_superminhash_signature(text, **kwargs), (
+                    f"oracle disagreement for {text!r} {kwargs}"
+                )
+
+    @given(text=_TEXT, num_perm=_NUM_PERM, shingle_size=_SHINGLE_SIZE, seed=_SEED)
+    @settings(max_examples=100)
+    def test_matches_the_oracle_hypothesis_lane(self, text, num_perm, shingle_size, seed):
+        assert minhash_signature(
+            text, method="superminhash", num_perm=num_perm, shingle_size=shingle_size, seed=seed
+        ) == reference_superminhash_signature(
+            text, num_perm=num_perm, shingle_size=shingle_size, seed=seed
+        )
+
+    def test_identical_texts_are_identical_signatures_and_lsh_candidates(self) -> None:
+        # The banding consumer's signature contract, on the new engine:
+        # identical content -> identical signatures, and identical
+        # signatures are always LSH candidates (lsh_candidates bands
+        # whatever rows it is given; the near-dup pair is recalled).
+        sig = minhash_signature(_FOX, method="superminhash")
+        sigs = [sig, sig, minhash_signature(_FOX.replace("fox", "cat"), method="superminhash")]
+        out = tors.lsh_candidates(sigs, bands=32, rows=4)
+        assert (0, 1) in out["pairs"]
+
+    @pytest.mark.timing
+    def test_jaccard_estimation_rmse_grid_both_engines(self) -> None:
+        # The estimator-quality cell, the paper's own evaluation shape
+        # (section 2.2's simulation grid): sets over union cardinalities
+        # u in {30, 100, 1000} at J in {0.1, 0.5, 0.9}, 200 trials per
+        # cell, RMSE of the agreement estimator per engine. The pinned
+        # claims: both engines are unbiased (every RMSE well inside the
+        # classic binomial band sqrt(J(1-J)/128), worst case 0.044), and
+        # SuperMinHash's variance advantage is real where the paper says
+        # it lives -- u < m (30, 100) with RMSE ~0.7x the classic
+        # engine's, converging to parity by u >> m (1000).
+        measured: list[tuple[int, float, str, float]] = []
+        for method in ("xxh", "superminhash"):
+            for u in (30, 100, 1000):
+                for j_target in (0.1, 0.5, 0.9):
+                    estimates = []
+                    exacts = []
+                    for trial in range(200):
+                        a_text, b_text, exact = _jaccard_grid_pair(u, j_target, seed=trial * 31 + u)
+                        sig_a = minhash_signature(
+                            a_text, num_perm=128, shingle_size=1, method=method, seed=7
+                        )
+                        sig_b = minhash_signature(
+                            b_text, num_perm=128, shingle_size=1, method=method, seed=7
+                        )
+                        estimates.append(minhash_jaccard(sig_a, sig_b))
+                        exacts.append(exact)
+                    exact = sum(exacts) / len(exacts)
+                    rmse = _rmse(estimates, exact)
+                    measured.append((u, j_target, method, rmse))
+        classic = {(u, j): r for (u, j, m, r) in measured if m == "xxh"}
+        super_ = {(u, j): r for (u, j, m, r) in measured if m == "superminhash"}
+        # Unbiased: every cell inside the classic estimator's 1.5-sigma
+        # worst-case band times a safety factor (the measured range spans
+        # 0.017-0.050; the ceiling sits above it, below any real bug).
+        for rmse in list(classic.values()) + list(super_.values()):
+            assert rmse < 0.06, rmse
+        # The variance advantage at u < m (the paper's alpha(m, u) < 1):
+        # deterministic corpora, so the ordering is a constant.
+        for u in (30, 100):
+            for j in (0.1, 0.5, 0.9):
+                assert super_[(u, j)] < classic[(u, j)], (u, j)
+        # ...and convergence at u >> m: the same J cell's ratio nears 1.
+        for j in (0.1, 0.5, 0.9):
+            ratio = super_[(1000, j)] / classic[(1000, j)]
+            assert 0.7 < ratio < 1.15, (j, ratio)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="no os.fork on this platform")
+    def test_fork_child_signatures_are_identical(self) -> None:
+        # The fork-safety positive control (test_random.py's TestForkSafety
+        # pattern): the engines hold NO per-process state -- a cached RNG
+        # or a lazy global would replay the parent's stream in the child
+        # or diverge outright. Parent and child compute both engines'
+        # signatures of the same fixed text; byte equality IS the
+        # argument.
+        text = "the quick brown fox jumps over the lazy dog"
+        parent = (
+            minhash_signature(text, method="xxh", num_perm=64),
+            minhash_signature(text, method="superminhash", num_perm=64),
+        )
+        read_fd, write_fd = os.pipe()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            pid = os.fork()
+        if pid == 0:  # child: compute, report over the pipe, exit cleanly.
+            try:
+                os.close(read_fd)
+                child = (
+                    minhash_signature(text, method="xxh", num_perm=64),
+                    minhash_signature(text, method="superminhash", num_perm=64),
+                )
+                os.write(write_fd, repr(child).encode("ascii"))
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        chunks = []
+        while True:
+            chunk = os.read(read_fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        os.close(read_fd)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        child_xh, child_super = eval(  # noqa: S307 - the child's own repr, fixed shape
+            b"".join(chunks).decode("ascii")
+        )
+        assert child_xh == parent[0]
+        assert child_super == parent[1]
+
+    @pytest.mark.timing
+    def test_superminhash_pass_keeps_the_event_loop_responsive(self) -> None:
+        # The GIL cell, the test_gil_release.py pattern through the shared
+        # harness: the whole tokenize + shingle + SuperMinHash sweep runs
+        # under one py.detach, so a thread-hopped pass over ~12 MiB of
+        # prose leaves the loop at heartbeat granularity (the corpus is
+        # the classic cell's 12 MiB shape: a pass this fast at 1 MiB
+        # would sit on the 10ms heartbeat cadence's ratio knife-edge).
+        from reference import prose
+
+        corpus = prose(12 * 1024 * 1024)
+        assert_heartbeat_clean(
+            lambda: asyncio.to_thread(minhash_signature, corpus, method="superminhash"),
+            subject="the superminhash pass",
+        )
+
+
+def _row_as_f64(v: int) -> float:
+    """The f64 a SuperMinHash row's bit pattern carries (the paper's real
+    value r + j in [0, m); the row-range decode the cell above reads)."""
+    import struct
+
+    return struct.unpack("<d", struct.pack("<Q", v))[0]
+
+
+class TestBBitCompression:
+    """`bits=`: Li and König's b-bit MinHash (WDE 2010). `None` (the
+    default) is the full u64 rows, byte-identical to the pre-bits output;
+    an int in [1, 63] keeps the lowest b bits of every row, and
+    `minhash_jaccard` applies the 2^-b chance correction the masked
+    agreement's unbiasedness needs."""
+
+    def test_bits_none_is_byte_identical_to_the_unmasked_output(self) -> None:
+        for kwargs in ({}, {"seed": 42}, {"num_perm": 8, "shingle_size": 2, "seed": -1}):
+            plain = minhash_signature(_FOX, **kwargs)
+            assert minhash_signature(_FOX, bits=None, **kwargs) == plain
+            assert minhash_signature(_FOX, method="xxh", bits=None, **kwargs) == plain
+
+    def test_masked_rows_are_the_low_bits_of_the_full_rows(self) -> None:
+        full = minhash_signature(_FOX, num_perm=64)
+        for bits in (1, 2, 4, 8, 16, 63):
+            mask = (1 << bits) - 1
+            assert minhash_signature(_FOX, num_perm=64, bits=bits) == [v & mask for v in full], (
+                f"bits={bits}"
+            )
+
+    @pytest.mark.parametrize("bits", [0, -1, 64, 65, 10**9])
+    def test_bits_out_of_bounds_raise_value_error(self, bits: int) -> None:
+        with pytest.raises(ValueError, match="between 1 and 63"):
+            minhash_signature(_FOX, bits=bits)
+
+    def test_bits_argument_contract(self) -> None:
+        # The house argument discipline: bool rejected (a bit-width of
+        # True is a caller bug, not 1), non-ints TypeError, huge ints
+        # OverflowError at extraction, __index__ int-likes accepted
+        # (None is the VALID full-row default and raises nothing).
+        for bad in (True, False, "4", 4.0, b"4"):
+            with pytest.raises(TypeError):
+                minhash_signature(_FOX, bits=bad)  # type: ignore[arg-type]
+        with pytest.raises(OverflowError):
+            minhash_signature(_FOX, bits=10**30)
+
+        class IndexOnly:
+            def __init__(self, value: int) -> None:
+                self._value = value
+
+            def __index__(self) -> int:
+                return self._value
+
+        assert minhash_signature(_FOX, bits=IndexOnly(4)) == minhash_signature(_FOX, bits=4)
+
+    def test_estimator_matches_the_manual_correction(self) -> None:
+        sig_a = minhash_signature(_FOX)
+        sig_b = minhash_signature(_FOX.replace("fox", "cat"))
+        manual_agree = sum(x == y for x, y in zip(sig_a, sig_b, strict=True))
+        assert minhash_jaccard(sig_a, sig_b) == manual_agree / len(sig_a)
+        for bits in (1, 2, 4, 8, 16):
+            mask = (1 << bits) - 1
+            agree = sum(1 for x, y in zip(sig_a, sig_b, strict=True) if x & mask == y & mask)
+            p_hat = agree / len(sig_a)
+            expected = (p_hat - 2.0**-bits) / (1.0 - 2.0**-bits)
+            assert minhash_jaccard(sig_a, sig_b, bits=bits) == pytest.approx(expected, abs=1e-12)
+        # Identical signatures estimate 1.0 at every width; the estimator
+        # agrees with the pure-Python oracle over both spellings.
+        assert minhash_jaccard(sig_a, sig_a, bits=4) == 1.0
+        assert minhash_jaccard(sig_a, sig_b, bits=4) == reference_minhash_jaccard(
+            sig_a, sig_b, bits=4
+        )
+
+    def test_estimator_length_and_shape_contract(self) -> None:
+        sig = minhash_signature(_FOX, num_perm=8)
+        with pytest.raises(ValueError, match="lengths differ"):
+            minhash_jaccard(sig, sig[:4])
+        with pytest.raises(ValueError, match="estimate nothing"):
+            minhash_jaccard([], [])
+        with pytest.raises(ValueError, match="between 1 and 63"):
+            minhash_jaccard(sig, sig, bits=0)
+        for bad in ([1, True], ["1"], [1, 1.0]):
+            with pytest.raises((TypeError, ValueError)):
+                minhash_jaccard(bad, bad)  # type: ignore[arg-type]
+
+    @pytest.mark.timing
+    def test_bbit_accuracy_vs_bits_ladder(self) -> None:
+        # The paper's shape (Li and König, section "accuracy"): RMSE of
+        # the b-bit estimator at b = 1, 2, 4, 8, 16 over 300 trials at
+        # u = 200, J = 0.5, against the full-row RMSE. The pinned ladder:
+        # small b pays the chance term (b=1 measurably worse than full),
+        # the ladder converges by b ~ log2(1/J) + 3, and b = 16 is
+        # statistically indistinguishable from full rows.
+        ladders: dict[object, float] = {}
+        for bits in (1, 2, 4, 8, 16, None):
+            estimates = []
+            exacts = []
+            for trial in range(300):
+                a_text, b_text, exact = _jaccard_grid_pair(200, 0.5, seed=trial * 17 + 3)
+                sig_a = minhash_signature(a_text, num_perm=128, shingle_size=1, seed=7)
+                sig_b = minhash_signature(b_text, num_perm=128, shingle_size=1, seed=7)
+                estimates.append(minhash_jaccard(sig_a, sig_b, bits=bits))
+                exacts.append(exact)
+            ladders[bits] = _rmse(estimates, sum(exacts) / len(exacts))
+        # The chance term's cost at b=1 is real and bounded; convergence
+        # by b=8 (measured: 0.070 at b=1 down to 0.041 by b=8, full rows
+        # 0.043); b=16 within 15% of full.
+        assert ladders[1] > ladders[4] > ladders[8]
+        assert ladders[1] > 0.05
+        assert ladders[8] < 0.055
+        assert ladders[16] < 0.05
+        assert abs(ladders[16] - ladders[None]) < 0.015
+
+    def test_bbit_signatures_band_with_the_corrected_collision_math(self) -> None:
+        # lsh_candidates accepts b-bit rows (bands/rows over the masked
+        # values -- identical content still produces identical signatures,
+        # still always candidates). The collision math the caller needs:
+        # per band of r rows the collision probability is
+        # (J + (1-J) * 2^-b)^r, not J^r -- the chance term per row lifts
+        # the false-positive floor to (2^-b)^r per band, which is why the
+        # accuracy contract b >= log2(1/J) doubles as the banding
+        # contract. Pinned: the near-dup pair is recalled through the
+        # masked rows at b=8, r=2 (chance floor (1/256)^2 ~ 0, and the
+        # pair's J ~ 0.85 puts the per-band collision at ~0.73, so the
+        # 8-band recall is ~1 - 0.27^8 -- deterministic here because the
+        # signatures are), and two DISJOINT documents stay below the floor
+        # at that width.
+        near = _FOX + " one two three four five six"
+        near_a = near * 3
+        near_b = (near.replace("quick", "fast")) * 3
+        disjoint = "pack my box with five dozen liquor jugs and mixed flour"
+        sigs = [
+            minhash_signature(near_a, num_perm=16, bits=8),
+            minhash_signature(near_b, num_perm=16, bits=8),
+            minhash_signature(disjoint, num_perm=16, bits=8),
+        ]
+        out = tors.lsh_candidates(sigs, bands=8, rows=2)
+        assert (0, 1) in out["pairs"]
+        assert (0, 2) not in out["pairs"]
+        assert (1, 2) not in out["pairs"]

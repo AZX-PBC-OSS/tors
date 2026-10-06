@@ -137,7 +137,7 @@
 //! hop the GIL-heartbeat cell pins — for callers that want the wait off
 //! the event loop entirely.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher as _;
 
 use twox_hash::XxHash64;
@@ -229,6 +229,15 @@ pub(crate) fn hash_tokens<'a>(count: u64, tokens: impl Iterator<Item = &'a str>)
         hasher.write(token.as_bytes());
     }
     hasher.finish()
+}
+
+/// One token's identity hash: the shingle_size-1 shingle hash (the
+/// single-token window under the same length-prefixed framing), the
+/// weighted engine's token key. Shared `pub(crate)` with the pyo3
+/// binding's explicit-weight mapping, whose keys are hashed outside the
+/// detached pass but through this same contract.
+pub(crate) fn token_hash(token: &str) -> u64 {
+    hash_tokens(1, std::iter::once(token))
 }
 
 /// The crate's one hashing contract applied to raw u64 values: XXH64
@@ -535,6 +544,362 @@ pub fn distinct_shingle_count(text: &str, shingle_size: usize) -> usize {
         }
     }
     seen.len()
+}
+
+// ---------------------------------------------------------------------------
+// The SuperMinHash engine (Ertl, arXiv 1706.05698)
+// ---------------------------------------------------------------------------
+
+/// One uniform draw in (0, 1) from a SplitMix64 chain state: the top 53
+/// bits of the draw, scaled into the open unit interval with the +0.5
+/// centering that keeps both endpoints unreachable (`u > 0` makes the
+/// logarithmic draws below finite, `u < 1` makes `1 - u` positive). The
+/// same spelling every float draw of the new engines rides, so the
+/// conversion is pinned in exactly one place.
+fn uniform_open(state: &mut u64) -> f64 {
+    let draw = splitmix64(state);
+    ((draw >> 11) as f64 + 0.5) * (1.0 / (1u64 << 53) as f64)
+}
+
+/// One standard exponential draw from a uniform in (0, 1): the inverse
+/// CDF `-ln(1 - u)`, strictly positive and finite because
+/// `u` is (the `uniform_open` contract).
+fn exponential_open(state: &mut u64) -> f64 {
+    -(1.0 - uniform_open(state)).ln()
+}
+
+/// The per-element pseudorandom stream both new engines draw from: the
+/// crate's one XXH64 contract over the little-endian frame of the given
+/// words (`hash_u64_frame`), the digest standing in for the paper's
+/// "initialize pseudo-random generator with seed d" -- the element itself
+/// IS the seed, exactly as Algorithm 4 of arXiv 1706.05698 states it. The
+/// caller advances the returned state through `splitmix64` per draw.
+fn element_stream(words: &[u64]) -> u64 {
+    hash_u64_frame(words)
+}
+
+/// The SuperMinHash signature of `text`'s word shingles: Ertl's
+/// SuperMinHash algorithm (arXiv 1706.05698, Algorithm 4) over the same
+/// shingle set the classic sweep rides. The signature values are REAL
+/// numbers in [0, m) -- `r + j` with `r` uniform in (0, 1) and `j` the
+/// permutation position -- so each row is emitted as the f64 bit pattern,
+/// the exact encoding that keeps "same winning shingle" an exact row
+/// equality (finite f64 bit patterns never collide with the u64 MAX
+/// sentinel, the empty-set convention below). Two documents agree at
+/// position j exactly when the same shingle achieves the minimum, so the
+/// agreement-fraction estimator stays unbiased (the paper's equation 2
+/// holds for the `r + pi` values) with the paper's STRICTLY SMALLER
+/// variance for small sets (section 2.2, the alpha(m, u) factor -- ~half
+/// the classic variance when the union cardinality is under the signature
+/// size).
+///
+/// The algorithm is order-sensitive (the in-place permutation state does
+/// not commute across elements the way a min does), so the sweep order is
+/// pinned: the distinct shingle hashes ASCENDING -- fully deterministic
+/// across processes, machines, and platforms (the classic sweep's
+/// order-independence argument does not transfer, and no `RandomState`
+/// iteration order ever escapes). Duplicates ride the distinct set exactly
+/// as the classic sweep does (the paper's section 2.3 note: repeated
+/// insertions change no signature state).
+///
+/// NOT a prefix property: the permutation structure depends on m, so
+/// unlike the classic engine a smaller `num_perm` is NOT a prefix of a
+/// larger signature, and signatures from different `num_perm` values (or
+/// different methods) are not comparable -- the estimator reads only
+/// paired rows from signatures produced at identical parameters.
+fn superminhash_rows(shingles: &[u64], num_perm: usize, seed: u64) -> Vec<u64> {
+    let m = num_perm;
+    // Algorithm 4's state: h the signature values (infinite = unfilled),
+    // p the in-place permutation array (lazily initialized per element via
+    // q, the paper's -1 spelled as usize::MAX), b the histogram of
+    // integral parts (b[m-1] counts values >= m-1, the infinities
+    // included), a the maximum nonzero histogram index (the early-exit
+    // frontier: updates are impossible past it).
+    let mut h = vec![f64::INFINITY; m];
+    let mut p = vec![0usize; m];
+    let mut q = vec![usize::MAX; m];
+    let mut b = vec![0usize; m];
+    b[m - 1] = m;
+    let mut a = m - 1;
+    for (i, &d) in shingles.iter().enumerate() {
+        let mut state = element_stream(&[seed, d]);
+        let mut j = 0usize;
+        while j <= a {
+            // The draws per iteration, in pinned order: r first, then the
+            // swap target k uniform over {j..m-1} (the paper's "uniform
+            // random number from {j, ..., m-1}"; the SplitMix64 modulo
+            // reduction carries the same negligible 2^-64-scale bias the
+            // classic coefficients' reductions carry).
+            let r = uniform_open(&mut state);
+            let k = j + (splitmix64(&mut state) % (m - j) as u64) as usize;
+            if q[j] != i {
+                q[j] = i;
+                p[j] = j;
+            }
+            if q[k] != i {
+                q[k] = i;
+                p[k] = k;
+            }
+            p.swap(j, k);
+            let slot = p[j];
+            let candidate = r + j as f64;
+            if candidate < h[slot] {
+                // f64::INFINITY saturates the as-cast to usize::MAX, so
+                // the min() lands every first update at m-1 (the paper's
+                // floor(infinity) case).
+                let j_old = (h[slot].floor() as usize).min(m - 1);
+                h[slot] = candidate;
+                if j < j_old {
+                    b[j_old] -= 1;
+                    b[j] += 1;
+                    while b[a] == 0 {
+                        a -= 1;
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+    h.iter()
+        .map(|&v| if v.is_finite() { v.to_bits() } else { u64::MAX })
+        .collect()
+}
+
+/// The SuperMinHash surface twin of [`signature`]: the same shingle
+/// collection (the streamed window, the dedup-first distinct set, the
+/// same budget gates) with the sweep swapped for Ertl's Algorithm 4. The
+/// distinct hashes are sorted ascending before the sweep -- the pinned
+/// deterministic order the order-sensitive algorithm needs (see
+/// [`superminhash_rows`]).
+pub fn superminhash_signature(
+    text: &str,
+    num_perm: usize,
+    shingle_size: usize,
+    seed: u64,
+) -> Vec<u64> {
+    assert!(
+        num_perm <= 1 << 20,
+        "num_perm {num_perm} exceeds the core sanity ceiling (2^20; the binding caps at 1024)"
+    );
+    if num_perm == 0 || shingle_size == 0 {
+        return vec![u64::MAX; num_perm];
+    }
+    if shingle_size > WIDE_WINDOW_COUNT_FIRST
+        && token_count_up_to(text, shingle_size) < shingle_size
+    {
+        return vec![u64::MAX; num_perm];
+    }
+    assert_sweep_within_budget(text, shingle_size);
+    let mut window: VecDeque<String> = VecDeque::new();
+    let mut distinct: HashSet<u64> = HashSet::with_capacity(distinct_capacity_guess(text));
+    for token in normalized_word_tokens_stream(text) {
+        window.push_back(token);
+        if window.len() > shingle_size {
+            window.pop_front();
+        }
+        if window.len() == shingle_size {
+            distinct.insert(hash_live_window(&window));
+        }
+    }
+    let mut shingles: Vec<u64> = distinct.into_iter().collect();
+    shingles.sort_unstable();
+    superminhash_rows(&shingles, num_perm, seed)
+}
+
+/// The b-bit Jaccard estimator over two signatures of equal length: the
+/// paired-row agreement fraction, masked to the lowest `bits` bits when
+/// some. `None` is the classic agreement estimator (unbiased over the
+/// affine rows' full range). `Some(bits)` is Li and König's b-bit
+/// minwise estimator (Li and König, WDE 2010, "b-Bit Minwise
+/// Hashing": the agreement probability of masked rows is
+/// `J + (1 - J) * 2^-b`, so the unbiased estimate is the corrected
+/// fraction `(p_hat - 2^-b) / (1 - 2^-b)` -- which can land slightly
+/// NEGATIVE at true similarity zero (the correction subtracts the chance
+/// term from a finite sample); that is the unbiased estimator's honest
+/// shape, not a bug, and callers thresholding should compare the raw
+/// agreement fraction instead. The variance matches the full-row
+/// estimator's once `b >= log2(1/J)` (below that the chance-agreement
+/// term dominates the information the rows carry).
+pub fn jaccard_estimate(a: &[u64], b: &[u64], bits: Option<u32>) -> f64 {
+    assert_eq!(a.len(), b.len(), "signature lengths differ");
+    assert!(!a.is_empty(), "empty signatures estimate nothing");
+    let agree = match bits {
+        None => a.iter().zip(b).filter(|(x, y)| x == y).count(),
+        Some(bits) => {
+            let mask = (1u64 << bits) - 1;
+            a.iter()
+                .zip(b)
+                .filter(|&(&x, &y)| (x & mask) == (y & mask))
+                .count()
+        }
+    };
+    let p_hat = agree as f64 / a.len() as f64;
+    match bits {
+        None => p_hat,
+        Some(bits) => {
+            let chance = 2f64.powi(-(bits as i32));
+            (p_hat - chance) / (1.0 - chance)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The weighted engine (Consistent Weighted Sampling, Ioffe 2010)
+// ---------------------------------------------------------------------------
+
+/// Token occurrence counts by shingle hash: the multiset weights the
+/// weighted engine rides, keyed by the crate's one hashing contract
+/// applied to each token as its own one-token window (`hash_tokens` with
+/// count 1 -- the shingle_size-1 shingle hash, so a token's identity is
+/// the same XXH64 value the classic engine's narrowest shingles carry).
+/// Counting rides hashes, not strings (resident memory stays O(distinct)
+/// u64s like the classic sweep's set); two distinct tokens colliding in
+/// XXH64 is the ~n^2/2^65 negligible-by-design channel the LSH band keys
+/// already document.
+fn token_hash_counts(tokens: impl Iterator<Item = impl AsRef<str>>) -> Vec<(u64, f64)> {
+    let mut counts: HashMap<u64, u64> = HashMap::new();
+    for token in tokens {
+        *counts.entry(token_hash(token.as_ref())).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(h, count)| (h, count as f64))
+        .collect()
+}
+
+/// The ICWS signature of a weighted token multiset: Ioffe's Improved
+/// Consistent Weighted Sampling (ICDM 2010, "Improved Consistent
+/// Sampling, Weighted MinHash and L1 Sketching"), the active-index scheme
+/// Shrivastava's NeurIPS 2016 paper restates as its Algorithm 1. For each
+/// permutation j (0-based) and each token hash h with weight w > 0:
+///
+/// - the per-(j, h) stream is the crate's one XXH64 contract over the
+///   frame `[seed, j, h]` (`hash_u64_frame`), advanced by SplitMix64;
+/// - five draws in pinned order: `r = e(u1) + e(u2)` and
+///   `c = e(u3) + e(u4)` (each the sum of two standard exponentials, i.e.
+///   Gamma(2, 1), the paper's distribution), then `beta = u5` uniform;
+///   `e(u) = -ln(1 - u)` is the inverse-CDF exponential over
+///   `uniform_open`'s (0, 1) draws;
+/// - `t = ln(w) / r + beta` (the active index), `y = exp(r * (t - beta))`,
+///   `z = y * exp(r)`, `a = c / z`;
+/// - the permutation's sample is the token achieving the MINIMUM `a`
+///   (ties, measure-zero in exact arithmetic, break to the LOWEST token
+///   hash: the sweep runs over tokens sorted ascending by (hash, weight)
+///   and only a strictly smaller `a` replaces the incumbent);
+/// - the signature rows are the pair `(hash, t)` of the winner, with `t`
+///   emitted as its f64 bit pattern (the injective encoding that keeps
+///   "same active index" an exact row equality for every positive weight,
+///   fractional ones included; finite f64 never produces the u64 MAX
+///   sentinel pattern, which stays the empty-multiset convention).
+///
+/// The pair-agreement fraction of two such signatures estimates the
+/// GENERALIZED (weighted) Jaccard similarity
+/// `sum(min(w_a, w_b)) / sum(max(w_a, w_b))` -- Ioffe's consistency
+/// theorem, the property the empirical accuracy cell pins against exact
+/// count-vector Jaccards. The estimator is consistent, not row-wise
+/// independent; the sample per permutation reads every token, so the
+/// pass is O(num_perm * distinct_tokens).
+pub fn weighted_signature_from_weights(
+    mut items: Vec<(u64, f64)>,
+    num_perm: usize,
+    seed: u64,
+) -> Vec<u64> {
+    assert!(
+        num_perm <= 1 << 20,
+        "num_perm {num_perm} exceeds the core sanity ceiling (2^20; the binding caps at 1024)"
+    );
+    // Weights are validated for the direct Rust caller (the binding
+    // rejects negatives, NaN, and infinities as ValueErrors before here):
+    // zero weights are the absent-token case (a zero-weight token
+    // contributes nothing to the generalized Jaccard), positive weights
+    // only past this line, so the logarithms below are finite.
+    for (_, w) in &items {
+        assert!(
+            w.is_finite() && *w >= 0.0,
+            "weights must be finite and non-negative, not {w}"
+        );
+    }
+    items.retain(|&(_, w)| w > 0.0);
+    if num_perm == 0 || items.is_empty() {
+        return vec![u64::MAX; 2 * num_perm];
+    }
+    // The pinned sweep order: ascending (hash, weight). Deterministic
+    // across processes (no RandomState order escapes), and the tie-break
+    // the argmin's strict comparison rides.
+    items.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)));
+    let mut sig = vec![u64::MAX; 2 * num_perm];
+    for (j, pair) in sig.chunks_mut(2).enumerate() {
+        // The incumbent: Option, not an infinity sentinel -- a candidate
+        // whose z underflowed to zero scores +inf (c/z over IEEE float
+        // division) and must still win when it is the ONLY candidate
+        // (the single-token multiset samples its one token at every
+        // permutation, whatever its weight's scale); the strict <
+        // comparison keeps the lowest-hash tie-break for real races.
+        let mut best: Option<(f64, u64, f64)> = None;
+        for &(hash, w) in &items {
+            let mut state = element_stream(&[seed, j as u64, hash]);
+            // Gamma(2, 1) = the sum of two standard exponentials; the
+            // draw order is pinned: r's pair, then c's pair, then beta.
+            let r = exponential_open(&mut state) + exponential_open(&mut state);
+            let c = exponential_open(&mut state) + exponential_open(&mut state);
+            let beta = uniform_open(&mut state);
+            // The floor is the consistency-bearing step (the survey's
+            // equation 7): t is the INTEGER active index -- the weight-
+            // independent grid the pair (hash, t) rides, so two documents
+            // naming the same token at different weights still agree
+            // exactly when the token wins both processes.
+            let t = (w.ln() / r + beta).floor();
+            let y = (r * (t - beta)).exp();
+            let z = y * r.exp();
+            let score = c / z;
+            let wins = match best {
+                None => true,
+                Some((best_a, _, _)) => score < best_a,
+            };
+            if wins {
+                best = Some((score, hash, t));
+            }
+        }
+        let (_, best_hash, best_t) = best.expect("the item list is non-empty");
+        pair[0] = best_hash;
+        pair[1] = best_t.to_bits();
+    }
+    sig
+}
+
+/// The weighted engine's surface twin: `text`'s token counts (the crate's
+/// one tokenizer, the same stream the classic sweep rides) as the
+/// multiset weights, then [`weighted_signature_from_weights`].
+pub fn weighted_signature_text(text: &str, num_perm: usize, seed: u64) -> Vec<u64> {
+    let weights = token_hash_counts(normalized_word_tokens_stream(text));
+    weighted_signature_from_weights(weights, num_perm, seed)
+}
+
+/// The token-list twin: each element one occurrence (the caller's
+/// spelling of the multiset -- no re-tokenization, so token lists a
+/// caller built with a domain-specific segmenter weight exactly as
+/// given).
+pub fn weighted_signature_tokens(tokens: &[String], num_perm: usize, seed: u64) -> Vec<u64> {
+    let weights = token_hash_counts(tokens.iter().map(String::as_str));
+    weighted_signature_from_weights(weights, num_perm, seed)
+}
+
+/// The generalized-Jaccard estimator over two ICWS signatures: the
+/// fraction of permutations whose `(hash, t)` pairs agree (Ioffe's
+/// consistency property). Signatures must be equal-length 2k-row pairs;
+/// mismatched or odd lengths are a caller bug named in the panic (the
+/// binding validates both as ValueErrors).
+pub fn weighted_jaccard_estimate(a: &[u64], b: &[u64]) -> f64 {
+    assert_eq!(a.len(), b.len(), "signature lengths differ");
+    assert!(
+        !a.is_empty() && a.len().is_multiple_of(2),
+        "not an ICWS signature shape"
+    );
+    let num_perm = a.len() / 2;
+    let agree = (0..num_perm)
+        .filter(|&j| a[2 * j] == b[2 * j] && a[2 * j + 1] == b[2 * j + 1])
+        .count();
+    agree as f64 / num_perm as f64
 }
 
 #[cfg(test)]
@@ -1071,5 +1436,178 @@ mod tests {
         assert_eq!(agreement(&near_a, &near_b), 74);
         assert_eq!(agreement(&moderate_a, &moderate_b), 22);
         assert_eq!(agreement(&disjoint_a, &disjoint_b), 0);
+    }
+
+    #[test]
+    fn superminhash_determinism_sentinels_and_row_range() {
+        // The determinism contract carries over: same text, same
+        // parameters, identical rows across calls and objects; different
+        // seed draws a different stream.
+        let text = "the quick brown fox jumps over the lazy dog";
+        let a = superminhash_signature(text, 128, 3, 0);
+        assert_eq!(a, superminhash_signature(text, 128, 3, 0));
+        assert_eq!(a, superminhash_signature(text, 128, 3, 0));
+        assert_ne!(a, superminhash_signature(text, 128, 3, 1));
+        // The empty-shingle-set convention: the u64 MAX sentinel,
+        // seed-invariant, exactly the classic engine's shape.
+        for text in ["", "   ", "one two"] {
+            assert_eq!(superminhash_signature(text, 8, 3, 0), vec![u64::MAX; 8]);
+        }
+        assert_eq!(superminhash_signature("", 8, 12345, 0), vec![u64::MAX; 8]);
+        // Real rows decode to finite values in [0, m) (the paper's r + j
+        // range): the f64 bit patterns never touch the sentinel pattern
+        // (u64 MAX is a NaN pattern; h is finite).
+        for &v in &a {
+            assert_ne!(v, u64::MAX);
+            let h = f64::from_bits(v);
+            assert!(
+                h.is_finite() && (0.0..128.0).contains(&h),
+                "row {v} decodes to {h}"
+            );
+        }
+        // The classic engine's num_perm prefix property does NOT hold:
+        // the permutation structure depends on m, so k=8 is not a prefix
+        // of k=128 (pinned so the documented difference cannot silently
+        // become an accidental equality claim).
+        assert_ne!(
+            superminhash_signature(text, 8, 3, 0),
+            superminhash_signature(text, 128, 3, 0)[..8]
+        );
+        // Case and whitespace shape are invisible (same token stream).
+        assert_eq!(
+            superminhash_signature("Hello, WORLD! one two three", 64, 3, 0),
+            superminhash_signature("hello, world! one\ttwo\nthree", 64, 3, 0)
+        );
+    }
+
+    #[test]
+    fn superminhash_agreement_orders_the_fixture_pairs() {
+        // The estimator over the same three fixture pairs the classic
+        // engine pins: near-duplicates recall high, disjoint pairs recall
+        // ~zero, and the ordering is wide. Counts are deterministic (the
+        // sweep order is pinned), so these are exact integers.
+        let base_sentence = "The quarterly oil sample interval for field outages was adjusted \
+                             after the bushing torque specifications changed. Maintenance \
+                             windows now close within fourteen days. ";
+        let near_a = base_sentence.repeat(3);
+        let near_b = near_a
+            .clone()
+            .replace("quarterly", "monthly")
+            .replace("bushing", "insulator");
+        let disjoint_a = "the quick brown fox jumps over the lazy dog ".repeat(6);
+        let disjoint_b =
+            "compiler backends schedule instructions over directed acyclic graphs ".repeat(6);
+        let agreement = |a: &str, b: &str| {
+            let sig_a = superminhash_signature(a, 128, 3, 0);
+            let sig_b = superminhash_signature(b, 128, 3, 0);
+            sig_a.iter().zip(&sig_b).filter(|(x, y)| x == y).count()
+        };
+        // Exact J 0.6129; the classic engine's estimate is 74/128.
+        assert_eq!(agreement(&near_a, &near_b), 75);
+        // Disjoint sets: zero agreement, deterministically.
+        assert_eq!(agreement(&disjoint_a, &disjoint_b), 0);
+    }
+
+    #[test]
+    fn bbit_estimator_matches_the_manual_correction() {
+        let a = vec![0b1010u64, 5, 7];
+        let b = vec![0b0010u64, 5, 9];
+        // bits=None: the plain agreement fraction.
+        assert!((jaccard_estimate(&a, &b, None) - 1.0 / 3.0).abs() < 1e-15);
+        // bits=1: masks 0b10|0b11... rows: 0 vs 0, 1 vs 1, 1 vs 1: all
+        // agree, p_hat = 1, corrected (1 - 1/2)/(1 - 1/2) = 1.
+        assert!((jaccard_estimate(&a, &b, Some(1)) - 1.0).abs() < 1e-15);
+        // bits=2: 0b10 vs 0b10, 0b01 vs 0b01, 0b11 vs 0b01: p_hat = 2/3,
+        // corrected (2/3 - 1/4)/(3/4) = 5/9.
+        assert!((jaccard_estimate(&a, &b, Some(2)) - 5.0 / 9.0).abs() < 1e-12);
+        // The corrected estimator may go negative at true zero (the
+        // chance term exceeds the observed agreement): honest, documented.
+        let neg = jaccard_estimate(&[0u64, 0], &[1u64, 1], Some(1));
+        assert!(neg < 0.0, "{neg}");
+        // Identical signatures estimate 1.0 at every bits value.
+        for bits in [None, Some(1), Some(8), Some(63)] {
+            assert!((jaccard_estimate(&a, &a, bits) - 1.0).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "signature lengths differ")]
+    fn bbit_estimator_panics_on_a_length_mismatch() {
+        let _ = jaccard_estimate(&[1u64], &[1u64, 2], None);
+    }
+
+    #[test]
+    fn weighted_icws_pins_the_single_token_and_sentinel_conventions() {
+        // One token, weight 1: EVERY permutation samples it (the argmin
+        // over one candidate), and t = floor(ln(1)/r + beta) = floor(beta)
+        // = 0, so the signature is (hash, 0) repeated. h is the
+        // shingle_size-1 shingle hash of the token.
+        let h = hash_tokens(1, std::iter::once("hello"));
+        let sig = weighted_signature_text("hello", 8, 0);
+        assert_eq!(sig, vec![h, 0u64, h, 0, h, 0, h, 0, h, 0, h, 0, h, 0, h, 0]);
+        // Empty multiset conventions: empty text, whitespace-only text
+        // (no tokens), an empty weight list, and an all-zero weight list
+        // are the u64 MAX sentinel, 2 rows per permutation.
+        let sentinel = vec![u64::MAX; 16];
+        assert_eq!(weighted_signature_text("", 8, 0), sentinel);
+        assert_eq!(weighted_signature_text("   ", 8, 0), sentinel);
+        assert_eq!(weighted_signature_from_weights(vec![], 8, 0), sentinel);
+        assert_eq!(
+            weighted_signature_from_weights(vec![(h, 0.0)], 8, 0),
+            sentinel
+        );
+        // Seed-invariant on the empty multiset.
+        assert_eq!(weighted_signature_text("", 8, 42), sentinel);
+        // Determinism across calls; a different seed draws differently
+        // over a real multiset.
+        let a = weighted_signature_text("the quick brown fox jumps", 64, 0);
+        assert_eq!(
+            a,
+            weighted_signature_text("the quick brown fox jumps", 64, 0)
+        );
+        assert_ne!(
+            a,
+            weighted_signature_text("the quick brown fox jumps", 64, 1)
+        );
+    }
+
+    #[test]
+    fn weighted_icws_sees_token_frequency_the_binary_engine_cannot() {
+        // The WHAT-it-adds pin: "aaa bbb" and "aaa aaa bbb" hold the SAME
+        // token set, so the binary engine (shingle_size 1) sees identical
+        // signatures and estimates J = 1 -- frequency is invisible to it.
+        // The weighted engine reads the counts (1,1) vs (2,1), whose
+        // generalized Jaccard is exactly 2/3, and estimates near it.
+        let binary_a = signature("aaa bbb", 128, 1, 0);
+        let binary_b = signature("aaa aaa bbb", 128, 1, 0);
+        assert_eq!(binary_a, binary_b);
+        let a = weighted_signature_text("aaa bbb", 64, 0);
+        let b = weighted_signature_text("aaa aaa bbb", 64, 0);
+        let est = weighted_jaccard_estimate(&a, &b);
+        assert!((est - 2.0 / 3.0).abs() < 0.15, "{est}");
+        // Identical multisets estimate exactly 1.0.
+        let est_self = weighted_jaccard_estimate(&a, &a);
+        assert!((est_self - 1.0).abs() < 1e-15);
+        // The estimator averages to the true generalized Jaccard over the
+        // fixture count vectors (the empirical anchor the Python RMSE
+        // grid scales up): (2,0,1) vs (1,1,1) has true J
+        // (1+0+1)/(2+1+1) = 0.5.
+        let c = weighted_signature_text("x x z", 256, 0);
+        let d = weighted_signature_text("x y z", 256, 0);
+        let est_cd = weighted_jaccard_estimate(&c, &d);
+        assert!((est_cd - 0.5).abs() < 0.1, "{est_cd}");
+    }
+
+    #[test]
+    #[should_panic(expected = "signature lengths differ")]
+    fn weighted_jaccard_estimate_panics_on_a_length_mismatch() {
+        let _ = weighted_jaccard_estimate(&[1u64, 2], &[1u64]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not an ICWS signature shape")]
+    fn weighted_jaccard_estimate_panics_on_an_odd_length() {
+        let bad = [1u64, 2, 3];
+        let _ = weighted_jaccard_estimate(&bad, &bad);
     }
 }

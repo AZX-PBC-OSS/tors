@@ -189,7 +189,7 @@ def _translate(source: str, wrapped: frozenset[str]) -> tuple[str, int]:
                     *(["Hashable"] if needs_hashable else []),
                     *{
                         name
-                        for name in ("Callable", "Iterator", "Sequence")
+                        for name in ("Callable", "Iterator", "Mapping", "Sequence")
                         if re.search(rf"\b{name}\b", "\n".join(body))
                     },
                 }

@@ -732,3 +732,41 @@ class TestLshCandidatesScaling:
         a defect, not noise."""
         sigs = _lsh_signatures(20_000, num_perm=128)
         assert _min_wall_ms(lambda: tors.lsh_candidates(sigs, bands=32, rows=4)) < 1_000.0
+# --- minhash: the SuperMinHash and weighted (ICWS) engines --------------------------
+#
+# The two literature engines behind minhash_signature's method= knob and the
+# weighted_minhash_signature surface: both sweep distinct shingles/tokens
+# times num_perm, so the adversarial shape is the distinct-rich corpus (every
+# token unique -- the shape where the count/sweep work is full-size, the
+# minhash TestPerformanceSanity._distinct_rich discipline).
+
+
+def _distinct_rich_text(n: int) -> str:
+    return " ".join(f"tok{i:06d}" for i in range(n))
+
+
+class TestMinhashEngineScaling:
+    @pytest.mark.timing
+    def test_superminhash_stays_linear_in_tokens(self) -> None:
+        """Distinct-rich 20k -> 80k tokens (4x) at num_perm=128: the
+        SuperMinHash sweep is O(distinct * expected-loop-depth), the
+        paper's O(n + m log^2 m) amortized shape, measured ~3.7x, gate
+        3.0x per doubling (9x at 4x input)."""
+        small_text, large_text = _distinct_rich_text(20_000), _distinct_rich_text(80_000)
+        small = _min_wall_ms(
+            lambda: tors.minhash_signature(small_text, num_perm=128, method="superminhash")
+        )
+        large = _min_wall_ms(
+            lambda: tors.minhash_signature(large_text, num_perm=128, method="superminhash")
+        )
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)
+
+    @pytest.mark.timing
+    def test_weighted_icws_stays_linear_in_tokens(self) -> None:
+        """Distinct-rich 20k -> 80k tokens (4x) at num_perm=128: the count
+        walk is O(tokens) and the ICWS sweep O(distinct * num_perm),
+        measured ~3.9x, gate 3.0x per doubling."""
+        small_text, large_text = _distinct_rich_text(20_000), _distinct_rich_text(80_000)
+        small = _min_wall_ms(lambda: tors.weighted_minhash_signature(small_text, num_perm=128))
+        large = _min_wall_ms(lambda: tors.weighted_minhash_signature(large_text, num_perm=128))
+        _assert_linear_per_doubling(small, large, 4, LINEAR_GATE_PER_DOUBLING)

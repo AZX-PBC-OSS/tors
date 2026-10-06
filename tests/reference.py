@@ -15,7 +15,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
+import struct
 import unicodedata
 from collections.abc import Callable, Sequence
 
@@ -1486,3 +1488,205 @@ def reference_minhash_signature(
             if h < signature[j]:
                 signature[j] = h
     return signature
+# --- The SuperMinHash and weighted (ICWS) oracles -----------------------------------
+#
+# The two literature engines the minhash family gained, transcribed from the
+# same pinned contracts src/minhash_impl.rs documents. Both ride the same
+# draw primitive the SplitMix64 oracle above spells (a uniform in (0, 1) from
+# the top 53 bits, centered by +0.5 so both endpoints stay unreachable), and
+# both key their per-element streams through the crate's one XXH64 contract
+# (the length-prefixed little-endian frame, here over u64 words).
+
+
+def _minhash_u64_frame(rows: list[int]) -> bytes:
+    """The u64 row frame: LE64 of the count, then LE64 of each row (the
+    framing the band keys and the new engines' stream seeds ride)."""
+    return struct.pack("<Q", len(rows)) + b"".join(struct.pack("<Q", row) for row in rows)
+
+
+def _uniform_open(state: int) -> tuple[int, float]:
+    """One uniform in (0, 1) from the SplitMix64 chain: the top 53 bits of
+    the draw scaled by 2^-53 and centered by +0.5 half-ulp, so the value is
+    strictly between the endpoints (the property the logarithmic draws
+    need)."""
+    state, z = _splitmix64(state)
+    return state, ((z >> 11) + 0.5) * 2.0**-53
+
+
+def _exponential_open(state: int) -> tuple[int, float]:
+    """One standard exponential from the chain: the inverse CDF over the
+    open uniform, ``-ln(1 - u)``."""
+    state, u = _uniform_open(state)
+    return state, -math.log(1.0 - u)
+
+
+def reference_superminhash_signature(
+    text: str, *, num_perm: int = 128, shingle_size: int = 3, seed: int = 0
+) -> list[int]:
+    """The SuperMinHash oracle (Ertl, arXiv 1706.05698, Algorithm 4) over
+    ``reference_minhash_tokens``' stream. The distinct shingle hashes sweep
+    in ascending order (the pinned deterministic order the order-sensitive
+    in-place state needs); each element's stream is XXH64 over the frame
+    ``[seed, d]``, advanced by SplitMix64; per while-iteration the draws
+    are ``r`` first, then the swap target uniform over ``{j..m-1}``. The
+    histogram b (integral parts of the current signature values, the last
+    bucket counting values >= m-1) and the frontier a (its maximum nonzero
+    index) give the early exit. Signature values are the real numbers
+    ``r + j`` in [0, m); each row is emitted as the f64 bit pattern, the
+    u64 MAX sentinel answering the empty set."""
+    import xxhash
+
+    tokens = reference_minhash_tokens(text)
+    m = num_perm
+    if len(tokens) < shingle_size or m == 0:
+        return [_MINHASH_EMPTY] * m
+    distinct = {
+        xxhash.xxh64_intdigest(_minhash_frame(tokens[i : i + shingle_size]))
+        for i in range(len(tokens) - shingle_size + 1)
+    }
+    h = [math.inf] * m
+    p = [0] * m
+    q = [_U64_MASK] * m
+    b = [0] * m
+    b[m - 1] = m
+    a = m - 1
+    for i, d in enumerate(sorted(distinct)):
+        state = xxhash.xxh64_intdigest(_minhash_u64_frame([seed & _U64_MASK, d]))
+        j = 0
+        while j <= a:
+            state, r = _uniform_open(state)
+            state, draw = _splitmix64(state)
+            k = j + draw % (m - j)
+            if q[j] != i:
+                q[j] = i
+                p[j] = j
+            if q[k] != i:
+                q[k] = i
+                p[k] = k
+            p[j], p[k] = p[k], p[j]
+            if r + j < h[p[j]]:
+                # Python's floor of an infinity overflows the int
+                # conversion (Rust's saturating as-cast lands at
+                # usize::MAX, which the min() then caps at m - 1): the
+                # oracle spells both branches.
+                j_old = m - 1 if math.isinf(h[p[j]]) else min(math.floor(h[p[j]]), m - 1)
+                h[p[j]] = r + j
+                if j < j_old:
+                    b[j_old] -= 1
+                    b[j] += 1
+                    while b[a] == 0:
+                        a -= 1
+            j += 1
+    return [_MINHASH_EMPTY if math.isinf(v) else struct_bits(v) for v in h]
+
+
+def struct_bits(v: float) -> int:
+    """The f64 bit pattern of a finite float, as the u64 the engine emits."""
+    return struct.unpack("<Q", struct.pack("<d", v))[0]
+
+
+def reference_icws_signature(
+    weights: dict[str, float], *, num_perm: int, seed: int = 0
+) -> list[int]:
+    """The ICWS oracle (Ioffe, ICDM 2010; Shrivastava's NeurIPS 2016
+    Algorithm 1 restatement) over an explicit {token: weight} mapping:
+    zero weights are the absent-token case, so the multiset is the
+    positive entries only. Per permutation j and token (hash h, weight w):
+    the stream is XXH64 over the frame ``[seed, j, h]``; five draws in
+    pinned order (r's exponential pair, c's pair, then beta uniform) give
+    ``r, c ~ Gamma(2, 1)`` and ``beta ~ U(0, 1)``; ``t = floor(ln(w)/r +
+    beta)`` (the consistency-bearing integer active index), ``y =
+    exp(r*(t - beta))``, ``z = y*exp(r)``, ``a = c/z``; the permutation's
+    sample is the token minimizing ``a`` (tokens sweep in ascending
+    (hash, weight) order; ties are measure-zero and break to the lower
+    hash under the strict comparison). The signature rows are the winner
+    pair ``(hash, t)``, t emitted as its f64 bit pattern; an empty
+    multiset is the all-sentinel signature."""
+    import xxhash
+
+    items = sorted(
+        (xxhash.xxh64_intdigest(_minhash_frame([token])), weight)
+        for token, weight in weights.items()
+        if weight > 0
+    )
+    m = num_perm
+    if not items or m == 0:
+        return [_MINHASH_EMPTY] * (2 * m)
+    sig: list[int] = []
+    for j in range(m):
+        best: tuple[float, int, float] | None = None
+        for h, w in items:
+            state = xxhash.xxh64_intdigest(_minhash_u64_frame([seed & _U64_MASK, j, h]))
+            state, e1 = _exponential_open(state)
+            state, e2 = _exponential_open(state)
+            state, e3 = _exponential_open(state)
+            state, e4 = _exponential_open(state)
+            state, beta = _uniform_open(state)
+            r = e1 + e2
+            c = e3 + e4
+            t = math.floor(math.log(w) / r + beta)
+            y = math.exp(r * (t - beta))
+            z = y * math.exp(r)
+            # IEEE float division (c/0.0 = +inf in Rust, an OverflowError
+            # in Python): an underflowed z scores +inf and still wins
+            # when it is the only candidate, which the None-incumbent
+            # spelling below keeps.
+            score = c / z if z > 0 else math.inf
+            wins = best is None or score < best[0]
+            if wins:
+                best = (score, h, float(t))
+        assert best is not None
+        sig.extend([best[1], struct_bits(best[2])])
+    return sig
+
+
+def reference_weighted_minhash_signature(
+    text_or_tokens: str | list[str] | dict[str, float], *, num_perm: int, seed: int = 0
+) -> list[int]:
+    """The weighted oracle over the three input spellings: a str rides
+    ``reference_minhash_tokens`` (the tokenizer stream), a list is the
+    literal occurrence multiset, a mapping the explicit weights; all
+    reduce to the {token: weight} table ``reference_icws_signature``
+    consumes. Token identity is the single-token shingle frame's XXH64,
+    the same value on every spelling."""
+    if isinstance(text_or_tokens, str):
+        counts: dict[str, float] = {}
+        for token in reference_minhash_tokens(text_or_tokens):
+            counts[token] = counts.get(token, 0) + 1
+    elif isinstance(text_or_tokens, dict):
+        counts = dict(text_or_tokens)
+    else:
+        counts = {}
+        for token in text_or_tokens:
+            counts[token] = counts.get(token, 0) + 1
+    return reference_icws_signature(counts, num_perm=num_perm, seed=seed)
+
+
+def reference_minhash_weighted_jaccard(sig_a: list[int], sig_b: list[int]) -> float:
+    """The generalized-Jaccard estimator: the fraction of permutations
+    whose (token_hash, active-index) pairs agree."""
+    assert len(sig_a) == len(sig_b) and len(sig_a) % 2 == 0 and sig_a
+    num_perm = len(sig_a) // 2
+    agree = sum(
+        1
+        for j in range(num_perm)
+        if sig_a[2 * j] == sig_b[2 * j] and sig_a[2 * j + 1] == sig_b[2 * j + 1]
+    )
+    return agree / num_perm
+
+
+def reference_minhash_jaccard(
+    sig_a: list[int], sig_b: list[int], *, bits: int | None = None
+) -> float:
+    """The estimator oracle: the paired-row agreement fraction, masked to
+    the lowest ``bits`` bits when some, with the b-bit chance correction
+    ``(p_hat - 2^-b) / (1 - 2^-b)`` applied when they are."""
+    assert len(sig_a) == len(sig_b) and sig_a
+    if bits is None:
+        agree = sum(1 for x, y in zip(sig_a, sig_b, strict=True) if x == y)
+        return agree / len(sig_a)
+    mask = (1 << bits) - 1
+    agree = sum(1 for x, y in zip(sig_a, sig_b, strict=True) if x & mask == y & mask)
+    p_hat = agree / len(sig_a)
+    chance = 2.0**-bits
+    return (p_hat - chance) / (1.0 - chance)
