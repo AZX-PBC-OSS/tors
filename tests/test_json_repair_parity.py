@@ -124,6 +124,41 @@ CORPUS: list[tuple[str, dict[str, Any]]] = [(raw, {}) for raw in _BASE_RAWS] + [
     (raw, {"skip_json_loads": True}) for raw in _BASE_RAWS
 ]
 
+# The number-shape vectors: the exponent-sign family (a '+'/'-' joins the
+# number run only directly after 'e'/'E') and the underscore-rewind family (a
+# number run followed by letters reparses as a string; the cursor rewinds to
+# the run's START index, so consumed-but-dropped underscores stay inside the
+# reparsed string). Pinned as literals in tests/test_json_repair_core.py;
+# this differential re-proves them live against the pinned oracle.
+_NUMBER_SHAPE_RAWS: list[str] = [
+    '{"k": 1e+55}',
+    '{"k": 1e55}',
+    '{"k": 1e}',
+    '{"k": 1e+}',
+    '{"k": 1e-}',
+    '{"k": 1e-5}',
+    '{"k": 1E5}',
+    '{"k": 1e+55x}',
+    '{"k": 1x+55}',
+    '{"k": 1e+ 55}',
+    '{"k": 1e55.2}',
+    '{"k": -1e+55}',
+    '{"k": 1e55e5}',
+    '{"k": 0e0}',
+    '{"k": 1e-+5}',
+    '{"k": 1e+5-}',
+    '{"k": 1e_+}',
+    '{"k": 1_e_+}',
+    '{"k": 12_abc}',
+    '{"k": 1_x}',
+    '{"k": 1_000_x}',
+    '{"k": 1e5_abc}',
+    '[12_abc]',
+    '[1_x]',
+    '[1_000_x]',
+    '[1e5_abc]',
+]
+
 # Deliberately excluded from every schema differential below (§9.7 tors-native
 # behavior changes, pinned tors-side elsewhere, never oracle-compared here):
 # - typo keys remapped via the key-normalization/fuzzy ladder (§6.0-1): §9.7
@@ -250,6 +285,17 @@ class TestDifferentialParity:
         got = tors.repair_json_loads(raw, **kwargs)
         want = json_repair_lib.loads(raw, **kwargs)
         assert got == want
+
+    @pytest.mark.parametrize(
+        "raw",
+        _NUMBER_SHAPE_RAWS,
+        ids=[f"number-shape-{i}" for i in range(len(_NUMBER_SHAPE_RAWS))],
+    )
+    def test_number_shape_str_parity(self, raw: str) -> None:
+        got = tors.repair_json(raw)
+        want = json_repair_lib.repair_json(raw)
+        assert got == want
+        assert tors.repair_json_loads(raw) == json_repair_lib.loads(raw)
 
     @pytest.mark.parametrize(
         ("raw", "schema"),
