@@ -27,8 +27,10 @@ fn check_relevant(relevant: &Bound<'_, PyAny>) -> PyResult<()> {
 /// extracted as i64 so an out-of-range int is pyo3's own OverflowError
 /// (the `truncate_to_bounds`-identical pattern) and a non-int is a
 /// `TypeError`; a negative or zero `k` is a range error, `ValueError`
-/// naming the bound.
-fn check_k(k: i64) -> PyResult<usize> {
+/// naming the bound. Shared with `score_fuse` (its `k` is a top-N
+/// truncation with the same `>= 1` floor: a zero-window fusion answers
+/// nothing and is a caller bug, the same class).
+pub(crate) fn check_k(k: i64) -> PyResult<usize> {
     if k < 1 {
         return Err(PyValueError::new_err(format!("k must be >= 1, got {k}")));
     }
@@ -59,8 +61,16 @@ fn check_gain(id: &Bound<'_, PyAny>, gain: f64) -> PyResult<f64> {
 /// (`MAX_LIST_ITEMS`): it never reads `__len__`, so a lying
 /// `__len__` cannot size the Vec for the caller (the #112 class), and
 /// the honest population (one weight per retriever list) sits orders of
-/// magnitude under the cap.
-fn check_weights(weights: &Bound<'_, PyAny>, n_lists: usize) -> PyResult<Vec<f64>> {
+/// magnitude under the cap. `caller` names the surface in the cap
+/// error (the message's own contract: `rank_fuse()` / `score_fuse()`)
+/// and `noun` names the lists ("ranked" / "scored") in the
+/// length-mismatch error.
+pub(crate) fn check_weights(
+    weights: &Bound<'_, PyAny>,
+    n_lists: usize,
+    caller: &str,
+    noun: &str,
+) -> PyResult<Vec<f64>> {
     if weights.is_instance_of::<PyString>() {
         return Err(PyTypeError::new_err(
             "weights must be a sequence of floats, not str",
@@ -80,14 +90,14 @@ fn check_weights(weights: &Bound<'_, PyAny>, n_lists: usize) -> PyResult<Vec<f64
         }
         out.push(weight);
         if out.len() > MAX_LIST_ITEMS {
-            return Err(PyValueError::new_err(
-                "rank_fuse() weights sequence yielded too many items: refusing an unbounded batch",
-            ));
+            return Err(PyValueError::new_err(format!(
+                "{caller}() weights sequence yielded too many items: refusing an unbounded batch",
+            )));
         }
     }
     if out.len() != n_lists {
         return Err(PyValueError::new_err(format!(
-            "weights must have one weight per ranked list: got {} for {} lists",
+            "weights must have one weight per {noun} list: got {} for {} lists",
             out.len(),
             n_lists
         )));
@@ -178,7 +188,7 @@ pub fn rank_fuse(
     // order every binding in this crate keeps).
     let weights: Vec<f64> = match weights {
         None => Vec::new(),
-        Some(any) => check_weights(any, ranked_lists.len())?,
+        Some(any) => check_weights(any, ranked_lists.len(), "rank_fuse", "ranked")?,
     };
     // The GIL-held dedup pass: one dict (id -> first-appearance index)
     // and one id table in that order. Dict lookups raise Python's own

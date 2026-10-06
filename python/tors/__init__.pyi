@@ -1976,6 +1976,60 @@ def precision_at_k(
     k: int,
 ) -> float: ...
 
+# Score-based fusion, the score-space sibling of rank_fuse (same id
+# table, same first-appearance tie-break, same emission contract; raw
+# similarity scores consumed instead of ranks). Three methods:
+#
+# - "combmnz" (the default), Fox & Shaw, "Combination of Multiple
+#   Searches", TREC-2 1994: score(d) = lists(d) x sum_i w_i x
+#   norm_i(d) -- CombSUM x the containing-list count, norm min-max per
+#   list over the list's OWN scores. The best of the score-based family
+#   in Cormack/Clarke/Buuttcher's SIGIR 2009 comparison, hence the
+#   default.
+# - "borda": the rank-based count, score(d) = sum_i w_i x (n - rank)/n
+#   (ranks 1-based over the DEDUPLICATED list). Deliberately RANK-based:
+#   Borda counts are defined over positions; the (n - rank)/n spelling
+#   only rescales the count to [0, 1) so a weight means the same thing
+#   over lists of any length.
+# - "linear": Elasticsearch's linear-retriever pattern, score(d) =
+#   sum_i w_i x norm_i(d), no MNZ multiplier.
+#
+# Conventions (pinned in tests/test_score_fusion.py): a zero-range list
+# (every score equal, a single-entry list included) normalizes to the
+# neutral midpoint 0.5; negative scores are LEGAL (min-max maps any
+# finite range onto [0, 1]); non-finite scores (NaN, both infinites)
+# raise ValueError; a range that itself overflows saturates instead of
+# dividing inf/inf (the overflowed numerator answers exactly 1.0, the
+# ndcg_at_k saturating-ratio precedent). A duplicate id folds to its
+# FIRST occurrence per list (its first score stands; the same id in a
+# different list votes again with its own score). weights: one positive
+# finite float per list (strictly positive finite, rank_fuse's own
+# domain; ValueError otherwise, TypeError for a non-sequence or
+# non-numeric entry; weights=None is the all-1.0 unweighted fusion
+# EXACTLY, byte-identical, pinned). k=None returns every distinct id;
+# k=N the top N (k < 1: ValueError). scored_lists must be a non-empty
+# list of lists of (id, score) pairs (zero lists: ValueError; a
+# malformed pair or a non-numeric score: TypeError; an unhashable id:
+# TypeError, Python's own hash error). Emission is vote-existence: one
+# (id, score) pair per distinct id, a fused 0.0 (Borda's last place, an
+# underflowed denormal weight) included, ordered last; order is fused
+# score descending, ties by earliest first appearance across the lists
+# in caller order (rank_fuse's contract, extended).
+#
+# GIL note: one GIL-held walk of every pair (Python-object hashing IS
+# interpreter work: the rank_fuse arg-walk class plus one score
+# extraction per entry) plus the weights walk and validation when
+# supplied, the per-list min-max + normalization + weighted accumulation
+# + MNZ counts + sort under one py.detach, then the O(distinct-ids)
+# tuple marshalling.
+def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
+
 # A stateless, general-purpose batch text preprocessor: every requested
 # step fused into one GIL-released pass over the whole texts list. Pure
 # function composition, not a re.compile()-style compiled-
