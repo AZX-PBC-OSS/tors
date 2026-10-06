@@ -54,11 +54,15 @@ LINEAR_GATE_PER_DOUBLING = 3.0
 #   comments, prose prefixes, tuples, mismatched closers, number
 #   rollback); end() == repair_json(text) for every text here too.
 #
-# Deliberately ABSENT (the documented divergences, pinned separately):
-# string re-synchronization ('{"a": "hello}'), doubled quotes, in-container
-# comments, multi-top-level documents, and the mid-pair first-member shape
-# ('{"a"'), where the engine's whole-text machinery re-decides earlier
-# text in ways a linear stream cannot replay.
+# Deliberately ABSENT (the documented divergences, pinned separately in
+# DIVERGENCES below): string re-synchronization ('{"a": "hello}'),
+# doubled quotes/escapes, in-container comments, multi-top-level
+# documents, the missing-colon shape ('{"a" 1}'), the first-member
+# dangling key ('{"a"'), the compound missing-key shape, the
+# word-swallow past a mismatched closer, the mid-document closed-string
+# newline-run, and the mid-pair first-member shape ('{"a"'), where the
+# engine's whole-text machinery re-decides earlier text in ways a linear
+# stream cannot replay.
 
 VALID = [
     '{"a": 1}',
@@ -119,6 +123,102 @@ TRUNCATION = [
     '{"a": "hel" ',
     '{"a": 12',
     '{"a": [1, 2} ',
+    # the nested-empty-container prefixes: the heal drops a still-open
+    # empty container at an item position and keeps it at a member-value
+    # position (the engine's own heal, byte-exact)
+    '[[',
+    '[[[',
+    '[[{',
+    '[1, [',
+    '[1, [{',
+    '[{}, [',
+    '[[], [',
+    '[[1], [',
+    '["x", [',
+    '{"a": [1, {',
+    '{"a": [1, [',
+    '{"a": {"b": [',
+    '{"a": [',
+    '{"a": {',
+    '{"a": [{"b": {',
+    '[{',
+    '[1, {',
+    '{"a": 1, "b": [',
+    '[1, []',
+    '{"a": []',
+    '{"a": [[]',
+    '[1, [2, [',
+    '[1, [2, [3, [',
+    '[[1], [2, [',
+    '{"a": [1], "b": {',
+    '{"a": [1], "b": [',
+    '{"x": [[',
+    '{"x": [[1], [',
+    '[1, tru, {',
+    '{"a": (',
+    '{"a": [(',
+    '[(',
+    '[1, (',
+    '[[], []',
+    '[[], \r',
+    '[[], [',
+    '[[]',
+    '[[1]',
+    '{"a": [[], []',
+    '{"a": [[]',
+    '{"a": {b: {',
+    '{"a": [{',
+    '[1, [], 2',
+    '[[], 1',
+    '[[], []]',
+    '{"a": 1, "b": [[], []',
+    '[[], [], [',
+    '{"a": [[1], [[2]]',
+    '[[[]',
+    '[[[], [',
+    '{: [',
+    '{"a": [[[]',
+    '[1, [[[]',
+    '([',
+    '(1, [',
+    '([1',
+    '[[], [{"a": [',
+    '{: [1, 2]}',
+    '[1, []] ,',
+    '[1, [[',
+    # the empty-element retractions (the falsy-nudge class)
+    '[1, "',
+    '[1, ""',
+    '[1, -',
+    '[{}, "',
+    '{"a": [1, "',
+    '[1, "\\',
+    # the escape-tail heal (rstrip on the open string's content, the
+    # newline-run on a closed string at the tail)
+    '{"k": "a\\n',
+    '{"k": "a\\n"',
+    '{"k": "a\\n\\t',
+    '{"k": "a\\n\\t"',
+    '{"k": "a\\n ',
+    '{"k": "a \\n"',
+    '{"k": "a\\n\\n',
+    '{"k": "a\\r\\n"',
+    '{"k": "a\\r"',
+    '{"k": "a "',
+    '{"k": "a b ',
+    '{"k": "  ',
+    '{"k": "a\\u0041',
+    '{"k": "a\\u0041"',
+    '["a\\n',
+    '{"a": "x\\n", "b": 1}',
+    # the in-flight special-float word at the cut heals to the string
+    # (the strict class keeps the float in the complete document)
+    '[NaN',
+    '[Infinity',
+    '{"a": NaN',
+    '{"a": Infinity',
+    '{"a": -Infinity',
+    '[1, -NaN',
 ]
 
 MALFORMED = [
@@ -131,9 +231,36 @@ MALFORMED = [
     '{a: 1}',
     '{a: 1, b: 2}',
     '{12: 1}',
+    '{: 1}',
+    '{ : 1}',
+    '{:}',
     '{"a": None}',
     '{"a": True, "b": False}',
     '[True, False, None]',
+    # the keyword family matches case-insensitively (the engine's own
+    # observable); the special floats stay exact-spelling
+    '{"a": TRUE}',
+    '{"a": FALSE}',
+    '{"a": NULL}',
+    '{"a": NONE}',
+    '{"a": tRuE}',
+    '[TRUE, FALSE, NULL, NONE, tRuE]',
+    '{"a": TRUE, "b": FALSE, "c": NULL, "d": NONE}',
+    '{"a": nan}',
+    '{"a": NAN}',
+    '{"a": nAn}',
+    '{"a": infinity}',
+    '{"a": INFINITY}',
+    '{"a": -infinity}',
+    '{"a": -TRUE}',
+    '{"a": -tru}',
+    '{"a": -abc}',
+    '{"a": -x}',
+    '{"a": -nan}',
+    '{"a": -NaN}',
+    '[-NaN]',
+    '[1, -ab]',
+    '{"a": -12abc}',
     '{"a": 1e}',
     '{"a": 1e+}',
     '{"a": -}',
@@ -156,6 +283,7 @@ MALFORMED = [
     '(1,)',
     '(1, 2)',
     '{"a": (1, 2)}',
+    '(1, -)',
     '// lead\n{"a": 1}',
     '/*x*/{"a": 1}',
     '# c\n{"a": 1}',
@@ -164,9 +292,76 @@ MALFORMED = [
     '{"a": 1} junk',
     '{a: 1, b}',
     '{"a": "x", "b"}',
+    # the rollback-cycle shapes: the empty element retracts (the
+    # falsy-nudge class), the popped sign never becomes one
+    '[1e-}',
+    '[1E-}',
+    '[1e+-}',
+    '[1,-]',
+    '[1-]',
+    '[1-}',
+    '[1, 2e-}',
+    '[1e-]',
+    '[1e- ',
+    '[1e- 2]',
 ]
 
 CORPUS = VALID + TRUNCATION + MALFORMED
+
+# The documented divergences (whole-text-only machinery the linear
+# stream cannot replay): deliberately ABSENT from the parity corpus
+# above, pinned here to their documented shapes — the stream's end()
+# stays valid JSON (or the empty sentinel) and the divergence class
+# stays put at every split position.
+DIVERGENCES = [
+    # multi top-level values: the engine array-wraps, the stream keeps
+    # the first
+    ('{"a": 1}\n{"b": 2}\n', '[{"a": 1}, {"b": 2}]', '{"a": 1}'),
+    # in-container comment: the engine consumes the value, the stream
+    # parses it
+    ('{"a": /*c*/ 1}', '{"a": ""}', '{"a": 1}'),
+    # string re-synchronization: the engine terminates the damaged string
+    # at the structural closer
+    ('{"a": "hello}', '{"a": "hello"}', '{"a": "hello}"}'),
+    ('{"a": "x\\", "b": 1}', '{"a": "x\\"", "b": 1}', '{"a": "x\\", ", "b\\"": 1}'),
+    # doubled-escape repair: whole-text-only
+    ('{"a": "\\\\\\\\"', '{"a": "\\""}', '{"a": "\\\\\\\\"}'),
+    # the engine's unterminated-string fixup re-decides a trailing
+    # backslash-escape run
+    ('{"k": "a\\n\\t\\\\\\"b', '{"k": "a\\n\\t\\"b"}', '{"k": "a\\n\\t\\\\\\"b"}'),
+    # missing colon: the stream keeps the value, the engine heals ""
+    ('{"a" 1}', '{"a": ""}', '{"a": 1}'),
+    # the first-member dangling key: the engine falls back to an array
+    ('{"a"', '["a"]', '{}'),
+    # the compound missing-key shape: the engine's key reparse swallows
+    # the comma
+    ('{: 1, : 2}', '{"1,": 2}', '{}'),
+    # the word-swallow: a bare word born at an array position runs past
+    # a mismatched closer in the engine's reparse
+    ('[1e}', '[1, "e}"]', '[1, "e"]'),
+    ('[1, tru}', '[1, "tru}"]', '[1, "tru"]'),
+    ('[1, e-}', '[1, "e-}"]', '[1, "e-"]'),
+    ('[1, e }', '[1, "e }"]', '[1, "e"]'),
+    ('[e-}]', '["e-}"]', '["e-"]'),
+    # the mid-document closed-string newline-run: the engine's repair
+    # lane strips it wherever the string appears (the whole input not
+    # strict-valid); the linear stream keeps the strict spelling — only
+    # the tail-of-stream case (the string last before the cut) matches
+    ('{"a": "x\\n", "b": 1', '{"a": "x", "b": 1}', '{"a": "x\\n", "b": 1}'),
+    ('[1, "x\\n", 2', '[1, "x", 2]', '[1, "x\\n", 2]'),
+    # the mid-document special-float word: the engine's repair lane
+    # quotes it wherever it appears (the whole input not strict-valid);
+    # the stream keeps the float mid-stream (the strict spelling) and
+    # matches only the in-flight-at-the-cut case
+    ('[NaN, 1', '["NaN", 1]', '[NaN, 1]'),
+    ('{"a": NaN, "b": 1', '{"a": "NaN", "b": 1}', '{"a": NaN, "b": 1}'),
+    # the paren-with-colon conversion: the engine turns a colon inside
+    # the parenthesized container into an object
+    ('("a": ', '{"a": ""}', '"a"'),
+    # the mismatched-closer garbage: the engine's whole-text close-up
+    # re-decides earlier structure
+    ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{"0": []}'),
+]
 
 
 def stream(text: str, splits: list[int], *, ensure_ascii: bool = True) -> tuple[list[str], str]:
@@ -370,6 +565,162 @@ class TestDocumentedDecisions:
         d2 = r2.push("}")
         assert "".join([d1, d2]) == '{"a": 1, }'
         assert r2.end() == '{"a": 1}'
+
+    def test_empty_trailing_container_heal_matches_the_engine(self) -> None:
+        """The heal class the review round caught: a still-open empty
+        container drops whole at an item position and closes at a
+        member-value position or the root, and an array's trailing
+        strictly-empty member drops — all byte-identical to the
+        whole-text engine (and through it the oracle)."""
+        for text, want in [
+            ("[[", "[]"),
+            ("[[{", "[]"),
+            ("[1, [", "[1]"),
+            ('[{}, [', "[{}]"),
+            ("[[1], [", "[[1]]"),
+            ('{"a": {"b": [', '{"a": {"b": []}}'),
+            ('{"a": [', '{"a": []}'),
+            ("[[], []", "[[]]"),
+            ("[[[]", "[]"),
+            ("[1, []", "[1]"),
+            ('[1, "', "[1]"),
+            ('[1, -', "[1]"),
+            ("[1,-]", "[1]"),
+            ("[1e-}", '["1e"]'),
+            ("[1e+-}", '["1e+"]'),
+            ("(\x0b-\x00", "[]"),
+            ("(1, -)", "[1]"),
+        ]:
+            r = tors.JsonRepairer()
+            r.push(text)
+            assert r.end() == want, f"{text!r}"
+            assert r.end() == tors.repair_json(text), f"{text!r} (engine)"
+
+    def test_missing_key_colon_drops_the_pair(self) -> None:
+        """`{: 1}` heals to `{}` (the engine's repair lane: the whole
+        pair drops), while the valid shape `{"": 1}` passes through
+        untouched."""
+        r = tors.JsonRepairer()
+        r.push("{: 1}")
+        assert r.end() == tors.repair_json("{: 1}") == "{}"
+        r2 = tors.JsonRepairer()
+        r2.push('{: 1, "b": 2}')
+        assert r2.end() == tors.repair_json('{: 1, "b": 2}') == '{"b": 2}'
+        r3 = tors.JsonRepairer()
+        r3.push('{"": 1}')
+        assert r3.end() == '{"": 1}' == tors.repair_json('{"": 1}')
+
+    def test_keyword_family_is_case_insensitive(self) -> None:
+        """The literal family matches case-insensitively (the engine's
+        observable); the special floats stay exact-spelling; a word born
+        from a number run drops its stray leading sign; keys keep their
+        casing."""
+        for text, want in [
+            ('{"a": TRUE}', '{"a": true}'),
+            ('{"a": tRuE}', '{"a": true}'),
+            ('{"a": FALSE}', '{"a": false}'),
+            ('{"a": NULL}', '{"a": null}'),
+            ('{"a": NONE}', '{"a": null}'),
+            ("[TRUE, FALSE, NULL, NONE, tRuE]", "[true, false, null, null, true]"),
+            ('{"a": nan}', '{"a": "nan"}'),
+            ('{"a": NAN}', '{"a": "NAN"}'),
+            ('{"a": NaN}', '{"a": NaN}'),
+            ('{"a": Infinity}', '{"a": Infinity}'),
+            ('{"a": INFINITY}', '{"a": "INFINITY"}'),
+            ('{"a": -Infinity}', '{"a": -Infinity}'),
+            ('{"a": -NaN}', '{"a": "NaN"}'),
+            ('{"a": -abc}', '{"a": "abc"}'),
+            ('{"a": -TRUE}', '{"a": true}'),
+            ('{"a": -12abc}', '{"a": "12abc"}'),
+            ('{"TRUE": 1}', '{"TRUE": 1}'),
+        ]:
+            r = tors.JsonRepairer()
+            r.push(text)
+            assert r.end() == want, f"{text!r}"
+            assert r.end() == tors.repair_json(text), f"{text!r} (engine)"
+
+    def test_top_level_quoted_string_end_matches_the_engine(self) -> None:
+        """end() equals the engine on the same total text: a completed
+        strict double-quoted top-level string commits (`"hi"` ->
+        `"hi"`); a single-quoted one was prose to the whole-text engine
+        (`'hi'` -> `''`). Mid-stream a top-level string is a provisional
+        scalar (the deltas are empty, the snapshot the end's own answer
+        — the pinned snapshot==end invariant); the distinction from the
+        whole-text engine is only ever visible in WHAT end() commits."""
+        r = tors.JsonRepairer()
+        assert r.push("'hi'") == ""
+        assert r.snapshot() == ""
+        assert r.end() == tors.repair_json("'hi'") == ""
+        r2 = tors.JsonRepairer()
+        assert r2.push('"hi"') == ""
+        assert r2.snapshot() == '"hi"'
+        assert r2.end() == '"hi"' == tors.repair_json('"hi"')
+
+    def test_in_flight_word_heals_through_the_literal_table(self) -> None:
+        """The engine's repair-lane observable for a word still in flight
+        at the cut: the special floats' spellings heal to STRINGS (the
+        strict fast path keeps them mid-stream: ``[NaN]`` streams to
+        ``[NaN]``, the cut ``[NaN`` heals to ``["NaN"]``), and a word
+        born from a number run drops its stray leading sign."""
+        for text, want in [
+            ("[NaN", '["NaN"]'),
+            ("[Infinity", '["Infinity"]'),
+            ('{"a": NaN', '{"a": "NaN"}'),
+            ('{"a": Infinity', '{"a": "Infinity"}'),
+            ('{"a": -Infinity', '{"a": "Infinity"}'),
+            ("[1, -NaN", '[1, "NaN"]'),
+            # the complete documents keep the floats (the strict class)
+            ("[NaN]", "[NaN]"),
+            ("[Infinity]", "[Infinity]"),
+            ('{"a": NaN}', '{"a": NaN}'),
+            ('{"a": -Infinity}', '{"a": -Infinity}'),
+        ]:
+            r = tors.JsonRepairer()
+            r.push(text)
+            assert r.end() == want, f"{text!r}"
+            assert r.end() == tors.repair_json(text), f"{text!r} (engine)"
+
+    def test_escape_tail_heal_matches_the_engine(self) -> None:
+        """The engine's own escape-tail heal: an unterminated string's
+        content rstrips (Python's whitespace set), and a closed string
+        that ENDS the stream on a newline-run loses it; a tab, a
+        backspace, or a mid-string newline passes."""
+        for text, want in [
+            ('{"k": "a\\n', '{"k": "a"}'),
+            ('{"k": "a\\n\\t', '{"k": "a"}'),
+            ('{"k": "a\\n ', '{"k": "a"}'),
+            ('{"k": "a \\n"', '{"k": "a"}'),
+            ('{"k": "a\\n"', '{"k": "a"}'),
+            ('{"k": "\\n"', '{"k": ""}'),
+            ('{"k": "a\\n\\t"', '{"k": "a\\n\\t"}'),
+            ('{"k": "a\\r"', '{"k": "a\\r"}'),
+            ('{"k": "a\\t"', '{"k": "a\\t"}'),
+            ('{"k": "a "', '{"k": "a "}'),
+            ('{"k": "a ', '{"k": "a"}'),
+            ('{"k": "a b ', '{"k": "a b"}'),
+            ('{"k": "  ', '{"k": ""}'),
+            ('{"k": "a\x08', '{"k": "a\\b"}'),
+            ('["a\\n', '["a"]'),
+            ('{"a": "x\\n", "b": 1}', '{"a": "x\\n", "b": 1}'),
+        ]:
+            r = tors.JsonRepairer()
+            r.push(text)
+            assert r.end() == want, f"{text!r}"
+            assert r.end() == tors.repair_json(text), f"{text!r} (engine)"
+
+    def test_documented_divergences_stay_valid_and_put(self) -> None:
+        """The documented divergence classes: the stream's end() keeps
+        the documented shape at every split position, valid JSON or the
+        empty sentinel throughout."""
+        for text, engine_shape, stream_shape in DIVERGENCES:
+            assert tors.repair_json(text) == engine_shape, (
+                f"engine drifted on {text!r}"
+            )
+            for k in range(1, len(text)):
+                _, got = stream(text, [k])
+                _assert_loads_or_empty(got)
+            _, one = stream(text, [])
+            assert one == stream_shape, f"{text!r}: {one!r} != {stream_shape!r}"
 
 
 # --- escape and unicode state across boundaries ---------------------------------

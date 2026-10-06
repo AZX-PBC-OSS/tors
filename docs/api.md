@@ -2570,21 +2570,25 @@ document so far because a per-push whole-document return is itself
 O(stream) marshalling per chunk: the same quadratic-per-chunk class the
 linearity pin gates; concatenate the deltas to reconstruct the emitted
 stream, and treat `snapshot`/`end` as the authority (a late repair that
-retracts text, the dangling-member drop documented below, truncates the
-emitted stream behind the delta cursor).
+retracts text — the dangling-member drop, the grouping-paren unwrap, the
+empty-element retract — truncates the emitted stream behind the delta
+cursor).
 
 **The repair semantics** match the whole-text engine's on the classes a
 stream can decide per character: single-quote and curly-quote delimiters
 normalize to `"`; missing commas insert and trailing commas disappear
 (deferred separators: the comma emits when the next member starts, so both
 are correct with no rewriting); bare words and Python literals repair
-(`None`/`True`/`False` to `null`/`true`/`false`, other bare words to
-strings); numbers follow the engine's run-and-rollback lanes (`1e+` heals
-to `"1e"`, `1,000` to `"1,000"`, `12abc` to `"12abc"`); comments skip
-(top-level ones exactly like the engine); tuples and groupings split the
-engine's own way (`(1)` to `1`, `(1,)` to `[1]`, `{"a": (1, 2)}` to
-`{"a": [1, 2]}`); a closer matching a frame below the innermost one closes
-the levels between (`{"a": [1, 2}` to `{"a": [1, 2]}`). The output is
+(`None`/`True`/`False` to `null`/`true`/`false`, case-insensitively —
+`TRUE`/`tRuE`/`NONE` too — other bare words to strings at their own
+casing, the strict special floats `NaN`/`Infinity`/`-Infinity` kept at
+their exact spellings); numbers follow the engine's run-and-rollback
+lanes (`1e+` heals to `"1e"`, `1,000` to `"1,000"`, `12abc` to
+`"12abc"`); comments skip (top-level ones exactly like the engine);
+tuples and groupings split the engine's own way (`(1)` to `1`, `(1,)` to
+`[1]`, `{"a": (1, 2)}` to `{"a": [1, 2]}`); a closer matching a frame
+below the innermost one closes the levels between (`{"a": [1, 2}` to
+`{"a": [1, 2]}`). The output is
 canonical `json.dumps`-parity text (the same escape table, `ensure_ascii`
 the same knob), so `end()` is byte-identical to `repair_json` on the same
 total text for every class above: the chunk-boundary sweep suite
@@ -2607,19 +2611,43 @@ through raw. Deciding otherwise would break the end-equals-engine
 differential this surface is tested with.
 
 **The truncation heal** (`end`/`snapshot` on a cut-off stream): an open
-string closes with `"`, open containers close with their own brackets, the
-pending number/word resolves by the same rules that terminate it
-mid-stream, a missing value after `:` heals to `""`, a trailing separator
-disappears, and a dangling key drops (the engine's continuation behavior).
-Escapes and surrogate pairs are machine state: a backslash, a `\u` escape's
-hex digits, or the two escapes of a surrogate pair may straddle chunks
-freely; a lone surrogate escape decodes to U+FFFD, the engine's documented
-divergence from the oracle.
+string closes with `"` — its content rstrips first (Python's whitespace
+set: `{"k": "a b ` heals to `{"k": "a b"}`, `{"k": "a\n` to `{"k": "a"}`,
+the engine's own escape-tail heal); a closed string that ENDS the stream
+on a newline-run loses the run (`{"k": "a\n"` to `{"k": "a"}`, a tab or a
+mid-string newline passes); open containers close with their own brackets
+— a still-open EMPTY container drops whole at an item position (`[[` to
+`[]`, `[1, [` to `[1]`) and closes at a member-value position or the root
+(`{"a": [` to `{"a": []}`), and an array's trailing strictly-empty member
+drops with it (`[[], []` to `[[]]`, `[1, []` to `[1]`), the cascade
+walking up the stack; the pending number/word resolves by the same rules
+that terminate it mid-stream — through the literal table, so the special
+floats' spellings heal to strings (`[NaN` to `["NaN"]`, where the
+complete document keeps the float) and a number-born word drops its
+stray leading sign (`{"a": -NaN` to `{"a": "NaN"}`) — an element that
+renders empty retracts whole (`[1, -` to `[1]`, the engine's falsy-nudge
+rule), a missing value after `:` heals to `""`, a missing KEY drops the
+whole pair (`{: 1}` to `{}`, the valid `{"": 1}` passing through
+untouched), and a trailing separator disappears. Escapes and surrogate
+pairs are machine state: a backslash, a `\u` escape's hex digits, or the
+two escapes of a surrogate pair may straddle chunks freely; a lone
+surrogate escape decodes to U+FFFD, the engine's documented divergence
+from the oracle.
+
+**Top-level strings, the mid-stream vs end distinction**: a top-level
+string is a provisional scalar, exactly like a number or a word: the
+pushes emit nothing while it streams, and the snapshot is the end's own
+answer (the pinned `snapshot() == end()` invariant). At `end()` the
+commit equals the whole-text engine's: a completed strict double-quoted
+string commits (`"hi"` to `"hi"`); a single-quoted one was prose to the
+engine (`'hi'` to `''`). Mid-stream the two spellings are held
+identically — the distinction is only ever visible in what `end()`
+commits.
 
 **Documented divergences** (the full list; the output stays valid JSON or
 the empty sentinel in every case): the engine's deep string
 re-synchronization (it terminates a damaged string at a structural closer:
-`{"a": "hello}` to `{"a": "hello"}`) and doubled-quote repair are
+`{"a": "hello}` to `{"a": "hello"}`) and doubled-quote/escape repair are
 whole-text-only, the stream closing strings at the delimiter or at `end`;
 the engine's in-container comment consumes the value after it
 (`{"a": /*x*/ 1}` to `{"a": ""}`) where the stream skips the comment and
@@ -2627,9 +2655,23 @@ parses the value; multiple top-level values keep the first (the engine may
 array-wrap: compose with `repair_json` when that matters); the fence
 pre-pass is not streamed (feed unwrapped text, or compose with
 `tors.extract_code_blocks`); a missing colon inserts one and keeps the
-value where the engine's repair lane heals `{"a" 1}` to `{"a": ""}`; and
-the first-member dangling-key shape heals to `{}` where the whole-text
-engine falls back to an array (`{"a"` to `["a"]`).
+value where the engine's repair lane heals `{"a" 1}` to `{"a": ""}`; the
+first-member dangling-key shape heals to `{}` where the whole-text
+engine falls back to an array (`{"a"` to `["a"]`); the strict-vs-repair
+split on trailing tails (the engine's REPAIR lane decides by the WHOLE
+input: the complete document `{"a": "x\n", "b": 1}` keeps the string's
+newline and `[NaN, 1]` keeps the float, but the cut `{"a": "x\n", "b": 1`
+strips the newline and `[NaN, 1` quotes the float — the stream keeps the
+strict spelling mid-document and matches only the tail-of-stream cases:
+the string last before the cut, the word still in flight); the paren-with-
+colon conversion (the engine turns a colon inside the parenthesized
+container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
+the mismatched-closer garbage where the engine's whole-text close-up
+re-decides earlier structure (both outputs valid); the word-swallow (a
+bare word born at an array position runs past a mismatched closer in the
+engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); and the
+compound missing-key shape, where the engine's key reparse swallows the
+comma (`{: 1, : 2}` to `{"1,": 2}`, the stream `{}`).
 
 **Argument contract**: `push` takes exactly a `str` (`TypeError` otherwise;
 a lone surrogate in it raises `UnicodeEncodeError` at the boundary, the

@@ -25,7 +25,8 @@
 //!   open state (an unterminated string, unclosed containers) still open.
 //!   Concatenating the deltas reconstructs the emitted stream, with one
 //!   documented exception: a late repair that retracts text (the
-//!   dangling-member drop, the grouping-paren unwrap) truncates `out`
+//!   dangling-member drop, the grouping-paren unwrap, the empty-element
+//!   retract) truncates `out`
 //!   behind the delta cursor, so the final authority is `snapshot`/`end`,
 //!   never the concatenation.
 //! - [`snapshot`] renders the current state closed: the pending token
@@ -63,11 +64,14 @@
 //!   mid-stream, `{"a": 1,}` and `[1, 2,]` never emit the stray comma).
 //! - **Bare words**: an unquoted run (keys and values) is held until its
 //!   terminator, then emitted as a string, or as the literal when it is
-//!   exactly `true`/`True`/`false`/`False`/`null`/`None` (the repair
-//!   lane's keyword family, the whole-text observable for the
-//!   not-loads-valid literals) or the strict grammar's special floats
-//!   `NaN`/`Infinity`/`-Infinity` (loads-valid, so the whole-text
-//!   observable keeps the floats). Other words repair to strings
+//!   the CASE-INSENSITIVE `true`/`false`/`null`/`none` family (the
+//!   repair lane's keyword family: `TRUE`/`tRuE`/`NONE` repair to
+//!   `true`/`true`/`null`) or the strict grammar's special floats at
+//!   their exact spellings `NaN`/`Infinity`/`-Infinity` (loads-valid, so
+//!   the whole-text observable keeps the floats; `nan`/`INFINITY` are
+//!   strings at their own casing). A word born from a number run drops
+//!   its stray leading sign (`{"a": -NaN}` -> `{"a": "NaN"}`,
+//!   `{"a": -abc}` -> `{"a": "abc"}`). Other words repair to strings
 //!   (`undefined`, `NaN2`).
 //! - **Numbers**: the engine's `parse_number` rules, mirrored: the
 //!   `NUMBER_CHARS` run (`,` joins the run inside objects, breaks it
@@ -87,10 +91,23 @@
 //!   `{"a": [1, 2}` -> `{"a": [1, 2]}` shape); a closer matching nothing
 //!   is skipped as garbage.
 //! - **The truncated-output heal** (`end`/`snapshot` on a cut-off
-//!   stream): an open string closes with `"`, open containers close with
-//!   their own brackets, the pending number/word resolves by the same
-//!   rules that terminate it mid-stream, a missing value after `:` heals
-//!   to `""`, and a trailing separator disappears. `{"a": "hel` heals to
+//!   stream): an open string closes with `"` (its content rstripped —
+//!   Python's whitespace set, the engine's own escape-tail heal:
+//!   `{"k": "a\n ` -> `{"k": "a"}`), a CLOSED string that ends the
+//!   stream on a newline-run loses the run (`{"k": "a\n"` ->
+//!   `{"k": "a"}`), open containers close with their own brackets — a
+//!   still-open EMPTY container drops whole at an item position (`[[`
+//!   -> `[]`, `[1, [` -> `[1]`) and closes at a member-value position
+//!   or the root (`{"a": [` -> `{"a": []}`), an array's trailing
+//!   strictly-empty member drops with it (`[[], []` -> `[[]]`,
+//!   `[1, []` -> `[1]`) — the pending number/word resolves by the same
+//!   rules that terminate it mid-stream (an element that renders empty
+//!   retracts whole: `[1, -` -> `[1]`), through the literal table (the
+//!   special floats' spellings heal to STRINGS: `[NaN` -> `["NaN"]`,
+//!   the strict class keeps the float in the complete document), a
+//!   missing value after `:`
+//!   heals to `""`, a missing KEY drops the whole pair (`{: 1}` ->
+//!   `{}`), and a trailing separator disappears. `{"a": "hel` heals to
 //!   `{"a": "hel"}`, `{"a": [1, 2` to `{"a": [1, 2]}`, `{"a":` to
 //!   `{"a": ""}`.
 //! - **Partial literals** (the decision the surface is asked about
@@ -102,9 +119,11 @@
 //!   container is a string). The streaming machine reproduces exactly
 //!   that: a top-level word/number is held as a provisional scalar and
 //!   committed at `end` only when the text held so far is one strict JSON
-//!   value (`loads`-parity), else discarded as prose; an in-container
-//!   word heals to its string. Deciding otherwise would break the
-//!   end()-equals-engine differential this surface is tested with.
+//!   value (`loads`-parity; a top-level string commits only from the
+//!   strict `"` delimiter — `'hi'` was prose to the engine, `''`), else
+//!   discarded as prose; an in-container word heals to its string.
+//!   Deciding otherwise would break the end()-equals-engine differential
+//!   this surface is tested with.
 //! - **Top-level prose**: input before the first container is skipped
 //!   (`Answer: {"a": 1}` -> `{"a": 1}`), as are trailing top-level tokens
 //!   after the root value closed (`{"a": 1} junk` -> `{"a": 1}`). A
@@ -139,11 +158,28 @@
 //!   (`{"a": 1 2}` -> `{"a": 1}`); the stream skips it too when it cannot
 //!   be a key (digits), and keeps string/word continuations as keys (the
 //!   engine's `{"a": 1 "b": 2}` -> `{"a": 1, "b": 2}` shape, which the
-//!   stream matches). The same drop-machinery shows on the rollback-
-//!   cycle shapes in arrays (`[1e-}`: the engine `["1e"]`, the stream
-//!   `["1e", ""]`) and on bare words beginning with a stray minus
-//!   (`{"a": -NaN}`: the engine `"NaN"`, the stream `"-NaN"`); the
-//!   outputs stay valid JSON on both sides.
+//!   stream matches).
+//! - **The word-swallow**: a bare word born at an array position runs
+//!   past a mismatched closer in the engine's reparse (`[1e}` -> the
+//!   engine `[1, "e}"]`, the stream `[1, "e"]`; `[1, tru}` ->
+//!   `[1, "tru}"]` vs `[1, "tru"]`), as does the compound missing-key
+//!   shape's key (`{: 1, : 2}` -> the engine `{"1,": 2}`, the stream
+//!   `{}`); the outputs stay valid JSON on both sides.
+//! - **The strict-vs-repair split on trailing tails**: the engine's
+//!   REPAIR lane decides by the WHOLE input — the complete document
+//!   `{"a": "x\n", "b": 1}` keeps the string's newline and `[NaN, 1]`
+//!   keeps the float, but the cut `{"a": "x\n", "b": 1` strips the
+//!   newline and `[NaN, 1` quotes the float. The stream keeps the
+//!   strict spelling mid-document and matches only the tail-of-stream
+//!   cases (the string last before the cut; the word still in flight,
+//!   healed through the literal table).
+//! - **The paren-with-colon conversion**: the engine turns a colon
+//!   inside the parenthesized container into an object (`("a": ` ->
+//!   `{"a": ""}`); the stream keeps the tuple machinery (`"a"`), valid
+//!   JSON on both sides.
+//! - **The mismatched-closer garbage**: the engine's whole-text
+//!   close-up re-decides earlier structure on garbage
+//!   (`{{\r]0\x01...('` -> `[]`, the stream `{"0": []}`), both valid.
 //! - **Multiple top-level values**: the engine's whole-text loop may
 //!   merge or array-wrap them (`{"a":1}{"b":2}` -> `[{"a": 1}, {"b": 2}]`);
 //!   the stream finalizes the first and drops the rest. Compose with
@@ -167,6 +203,16 @@
 use super::dumps::push_escaped_char;
 use super::strict::loads_strict;
 use super::{MAX_NESTING, STRING_DELIMITERS, Value, dumps as serializer, normalize_big_int_text};
+
+/// The close-time cascade's LOCAL copy of one frame's state (the
+/// cascade retracts renderings and walks the stack without touching
+/// the machine: `render_closed` is pure, `snapshot` purity).
+struct FrameInfo {
+    kind: FrameKind,
+    member_count: usize,
+    member_start: Option<usize>,
+    paren: Option<ParenFrame>,
+}
 
 /// The streaming repairer: see the module docs for the contract, the
 /// semantics, and the divergences.
@@ -200,6 +246,10 @@ pub struct StreamingRepairer {
     finished: bool,
     /// The `out` length returned by the last `push`: the delta cursor.
     emitted: usize,
+    /// The `out` position of the most recent string rendering's opening
+    /// quote (set at `open_string`; a closed string's value stays): the
+    /// escape-tail strip's lower bound at close time.
+    last_string_start: Option<usize>,
 }
 
 /// One open container: the engine's context entry, structural part.
@@ -215,7 +265,7 @@ struct Frame {
     paren: Option<ParenFrame>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum FrameKind {
     Obj,
     Arr,
@@ -236,6 +286,7 @@ impl FrameKind {
 /// exactly one element and no comma means a grouping (unwrap), anything
 /// else means a tuple (close as an array) — the engine's own split,
 /// `(1)` -> `1` vs `(1,)`/`(1, 2)`/`()` -> `[..]`.
+#[derive(Clone, Copy)]
 struct ParenFrame {
     brace_pos: usize,
     elems: usize,
@@ -433,6 +484,12 @@ enum Pending {
     Word {
         text: String,
         key: bool,
+        /// The word was born from a number run (the engine's
+        /// rewind-and-reparse): a leading `-` was a stray sign, dropped
+        /// at the render (`{"a": -NaN}` -> `{"a": "NaN"}`) unless the
+        /// full word is the strict `-Infinity` spelling (the number
+        /// lane keeps it, a special float).
+        from_number_run: bool,
     },
     TopNum {
         text: String,
@@ -485,6 +542,7 @@ impl StreamingRepairer {
             ensure_ascii,
             finished: false,
             emitted: 0,
+            last_string_start: None,
         }
     }
 
@@ -641,29 +699,28 @@ impl StreamingRepairer {
                     '}' | ']' | ')' => self.close_up(c),
                     ',' => {}
                     ':' => {
-                        // A missing key: an empty-string key (a
-                        // documented divergence: the engine's repair lane
-                        // drops the whole pair, `{: 1}` -> `{}`; the
-                        // stream keeps it, `{"": 1}`, because the strict
-                        // fast path keeps `{"": 1}` too and valid input
-                        // must pass through untouched).
-                        self.begin_member();
-                        self.out.push_str("\"\"");
-                        self.pos = Pos::Colon;
+                        // A missing key: the whole pair drops (the
+                        // engine's repair lane: `{: 1}` -> `{}`). The
+                        // `:` is skipped and the would-be value becomes
+                        // a dangling key that drops the same way. Valid
+                        // input never lands here: a closed key string
+                        // leaves Pos::Colon, so `{"": 1}` passes through
+                        // untouched.
                     }
                     c if STRING_DELIMITERS.contains(&c) => {
-                        self.begin_member();
+                        self.begin_common();
                         self.open_string(c, true);
                     }
                     c if c.is_alphabetic() => {
-                        self.begin_member();
+                        self.begin_common();
                         self.pending = Some(Pending::Word {
                             text: c.to_string(),
                             key: true,
+                            from_number_run: false,
                         });
                     }
                     c if c.is_ascii_digit() || c == '-' || c == '.' => {
-                        self.begin_member();
+                        self.begin_common();
                         self.pending = Some(Pending::Num {
                             text: c.to_string(),
                             key: true,
@@ -741,13 +798,14 @@ impl StreamingRepairer {
                         // `{"a": 1}`).
                         _ if obj => {
                             if STRING_DELIMITERS.contains(&c) {
-                                self.begin_member();
+                                self.begin_common();
                                 self.open_string(c, true);
                             } else if c.is_alphabetic() {
-                                self.begin_member();
+                                self.begin_common();
                                 self.pending = Some(Pending::Word {
                                     text: c.to_string(),
                                     key: true,
+                                    from_number_run: false,
                                 });
                             }
                         }
@@ -795,6 +853,7 @@ impl StreamingRepairer {
                 self.pending = Some(Pending::Word {
                     text: c.to_string(),
                     key: false,
+                    from_number_run: false,
                 });
             }
             c if c.is_ascii_digit() || c == '-' || c == '.' => {
@@ -841,20 +900,43 @@ impl StreamingRepairer {
                     // The run was a string after all (the engine's
                     // rewind-and-reparse: the whole run becomes a bare
                     // word, digits and underscores included:
-                    // `{"a": 12abc}` -> `{"a": "12abc"}`).
+                    // `{"a": 12abc}` -> `{"a": "12abc"}`). A leading
+                    // `-` followed by a letter was a stray sign, dropped
+                    // at the render (when the word is complete).
                     text.push(c);
-                    self.pending = Some(Pending::Word { text, key });
+                    self.pending = Some(Pending::Word {
+                        text,
+                        key,
+                        from_number_run: true,
+                    });
                     return Ok(());
                 }
                 let popped = pop_trailing_number_char(&mut text);
+                // An empty run at an item position retracts the element
+                // whole (the engine's falsy-nudge progress rule: the
+                // rolled-back sign emits nothing in an array, `[1,-]` ->
+                // `[1]`, `[1e-}` -> `["1e"]`); in an object the member
+                // value heals to `""` (`{"a": -}`), the engine's own
+                // split.
+                if text.is_empty()
+                    && !key
+                    && self
+                        .frames
+                        .last()
+                        .is_some_and(|f| !matches!(f.kind, FrameKind::Obj))
+                {
+                    self.retract_in_flight_member();
+                    self.pos = Pos::AfterValue;
+                    return self.process(c);
+                }
                 self.finish_number(&text, key);
                 // A pop that EMPTIES the run drops the popped char: the
                 // reprocess would re-create the same one-char pending at
                 // an after-value position (a `-` or `.` in an array),
                 // whose termination would pop it again, forever (the
                 // engine escapes the same cycle through its falsy-nudge
-                // progress rule; this is the machine's: the empty run
-                // already healed to `""`, the sign is gone).
+                // progress rule; this is the machine's: the reprocessed
+                // sign's one-char element retracts, the heal terminates).
                 if let Some(p) = popped
                     && !text.is_empty()
                 {
@@ -862,7 +944,11 @@ impl StreamingRepairer {
                 }
                 self.process(c)
             }
-            Some(Pending::Word { mut text, key }) => {
+            Some(Pending::Word {
+                mut text,
+                key,
+                from_number_run,
+            }) => {
                 if key && c == ':' {
                     // The colon proves it was a key: commit it.
                     let rendered =
@@ -881,14 +967,18 @@ impl StreamingRepairer {
                         self.drop_dangling_member();
                         return self.process(c);
                     }
-                    let value = keyword_or_str(text.trim());
+                    let value = render_word(text.trim(), from_number_run);
                     self.out
                         .push_str(&serializer::dumps(&value, self.ensure_ascii));
                     self.pos = Pos::AfterValue;
                     return self.process(c);
                 }
                 text.push(c);
-                self.pending = Some(Pending::Word { text, key });
+                self.pending = Some(Pending::Word {
+                    text,
+                    key,
+                    from_number_run,
+                });
                 Ok(())
             }
             Some(Pending::TopNum { mut text, done }) => {
@@ -1058,27 +1148,39 @@ impl StreamingRepairer {
         }
     }
 
-    /// The deferred separator plus the member bookkeeping, at a KEY's
-    /// start: `member_start` lands BEFORE the deferred separator, so the
-    /// dangling-member drop takes the separator with it.
-    fn begin_member(&mut self) {
-        if let Some(f) = self.frames.last_mut() {
-            f.member_start = Some(self.out.len());
-        }
-        self.begin_common();
-    }
-
-    /// The deferred separator: `", "` emits when the next member/item
-    /// STARTS, which makes missing commas and trailing commas both
-    /// correct with no rewriting.
+    /// The member/item bookkeeping, at a KEY's or ITEM's start:
+    /// `member_start` lands BEFORE the deferred separator (so the
+    /// dangling-member drop and the heal's empty-element retract both
+    /// take the separator with it), for every frame kind — object keys,
+    /// array items and tuple items alike.
     fn begin_common(&mut self) {
         if let Some(f) = self.frames.last_mut() {
+            f.member_start = Some(self.out.len());
             if f.member_count > 0 {
                 self.out.push_str(", ");
             }
             f.member_count += 1;
             if let Some(p) = f.paren.as_mut() {
                 p.elems += 1;
+            }
+        }
+    }
+
+    /// Retract the in-flight member/item whole: the rendering since
+    /// `member_start` (the deferred separator included) truncates back,
+    /// the member count and the tuple's element count restore. The
+    /// mid-stream form of the heal's empty-element retract.
+    fn retract_in_flight_member(&mut self) {
+        if let Some(f) = self.frames.last_mut()
+            && let Some(start) = f.member_start.take()
+        {
+            if start <= self.out.len() {
+                self.out.truncate(start);
+                self.emitted = self.emitted.min(start);
+            }
+            f.member_count = f.member_count.saturating_sub(1);
+            if let Some(p) = f.paren.as_mut() {
+                p.elems = p.elems.saturating_sub(1);
             }
         }
     }
@@ -1094,6 +1196,7 @@ impl StreamingRepairer {
     }
 
     fn open_string(&mut self, delim: char, is_key: bool) {
+        self.last_string_start = Some(self.out.len());
         self.out.push('"');
         if is_key {
             // A key string is in key position whatever the position it
@@ -1248,10 +1351,12 @@ impl StreamingRepairer {
             }
             _ => None,
         };
+        let mut dangling_dropped = false;
         if let Some(start) = dangling
             && start <= s.len()
         {
             s.truncate(start);
+            dangling_dropped = true;
         }
         match &self.pending {
             Some(Pending::Num {
@@ -1259,16 +1364,39 @@ impl StreamingRepairer {
             }) => {
                 let mut run = text.clone();
                 pop_trailing_number_char(&mut run);
-                s.push_str(&serializer::dumps(
-                    &render_number_value(&run),
-                    self.ensure_ascii,
-                ));
+                // An empty run at an item position renders nothing: the
+                // element retracts in the cascade below (the engine's
+                // `[1, -` -> `[1]` heal); an object member value still
+                // heals to `""` (`{"a": -` -> `{"a": ""}`).
+                let array_like = self
+                    .frames
+                    .last()
+                    .is_some_and(|f| !matches!(f.kind, FrameKind::Obj));
+                if !(run.is_empty() && array_like) {
+                    s.push_str(&serializer::dumps(
+                        &render_number_value(&run),
+                        self.ensure_ascii,
+                    ));
+                }
             }
-            Some(Pending::Word { text, key: false }) => {
-                s.push_str(&serializer::dumps(
-                    &keyword_or_str(text.trim()),
-                    self.ensure_ascii,
-                ));
+            Some(Pending::Word {
+                text,
+                key: false,
+                from_number_run,
+            }) => {
+                // The engine's repair-lane observable for the in-flight
+                // word at the cut: the literal table only — the special
+                // floats' spellings heal to STRINGS (the strict fast
+                // path keeps them mid-stream: `[NaN]` streams to
+                // `[NaN]`, the cut `[NaN` heals to `["NaN"]`), and a
+                // word born from a number run drops its stray leading
+                // sign (`{"a": -Infinity` -> `{"a": "Infinity"}`).
+                let word = text.trim();
+                let value = match (from_number_run, word.strip_prefix('-')) {
+                    (true, Some(rest)) => literal_or_str(rest),
+                    _ => literal_or_str(word),
+                };
+                s.push_str(&serializer::dumps(&value, self.ensure_ascii));
             }
             // Provisional top-level scalars: committed only when the held
             // text is one strict JSON value (the engine's own partial
@@ -1279,11 +1407,18 @@ impl StreamingRepairer {
                     s.push_str(&serializer::dumps(&v, self.ensure_ascii));
                 }
             }
+            // A completed top-level string commits only from the strict
+            // `"` delimiter (the engine's observable: `"hi"` -> `"hi"`,
+            // but `'hi'` — repaired mid-stream, quoted and valid in the
+            // deltas and the snapshot — was prose to the whole-text
+            // engine, `''`); the top-level empty string IS the
+            // nothing-recoverable sentinel's spelling: the engine
+            // renders it bare.
             Some(Pending::TopStr {
-                buf, done: true, ..
-            }) if buf != "\"\"" => {
-                // The top-level empty string IS the nothing-recoverable
-                // sentinel's spelling: the engine renders it bare.
+                buf,
+                st,
+                done: true,
+            }) if buf != "\"\"" && st.delim == '"' => {
                 s.push_str(buf);
             }
             _ => {}
@@ -1301,11 +1436,104 @@ impl StreamingRepairer {
             st.render_tail(&mut s, self.ensure_ascii);
             s.push('"');
         }
-        for frame in self.frames.iter().rev() {
+        // The escape-tail heal: a string rendering that ends the stream
+        // with a trailing newline-run loses it (the engine's own heal:
+        // `{"k": "a\n` -> `{"k": "a"}`, `{"k": "\n"` -> `{"k": ""}`),
+        // where a tab or a mid-string newline passes. The strip runs on
+        // the closed rendering (the string quoted shut above), so a
+        // consumed close quote goes straight back; the cascade may still
+        // retract the member whole.
+        if !self.frames.is_empty()
+            && let Some(qs) = self.last_string_start
+            && strip_trailing_newline_tail(&mut s, qs + 1, self.string.is_some())
+        {
+            s.push('"');
+        }
+        // The empty-container cascade (the engine's truncated-output
+        // heal): a still-open container with no members drops whole when
+        // it sits at an item position (`[[` -> `[]`, `[1, [` -> `[1]`)
+        // and closes as `[]`/`{}` at a member-value position or the root
+        // (`{"a": [` -> `{"a": []}`); an array's trailing strictly-empty
+        // member (closed or just rendered: `[]`, `{}`, `""`) drops too
+        // (`[[], []` -> `[[]]`, `[1, []` -> `[1]`). The walk is local:
+        // snapshot purity (the machine's own state never moves).
+        let mut info: Vec<FrameInfo> = self
+            .frames
+            .iter()
+            .map(|f| FrameInfo {
+                kind: f.kind,
+                member_count: f.member_count,
+                member_start: f.member_start,
+                paren: f.paren,
+            })
+            .collect();
+        let mut i = info.len();
+        if dangling_dropped && i > 0 {
+            // the dropped member's slot goes with it: the cascade may
+            // now walk on through the emptied frame
+            info[i - 1].member_count = info[i - 1].member_count.saturating_sub(1);
+            info[i - 1].member_start = None;
+        }
+        while i > 0 {
+            let (kind, mc, ms) = {
+                let f = &info[i - 1];
+                (f.kind, f.member_count, f.member_start)
+            };
+            if mc == 0 {
+                if i == 1 || info[i - 2].kind == FrameKind::Obj {
+                    // The root, or a member value: keep, close it below.
+                    break;
+                }
+                // An item-position container: retract the rendering
+                // (the parent's deferred separator included) and keep
+                // walking: the parent may itself have become empty.
+                if let Some(start) = info[i - 2].member_start
+                    && start <= s.len()
+                {
+                    s.truncate(start);
+                }
+                info[i - 2].member_count -= 1;
+                info[i - 2].member_start = None;
+                if let Some(p) = &mut info[i - 2].paren {
+                    p.elems = p.elems.saturating_sub(1);
+                }
+                i -= 1;
+                continue;
+            }
+            if kind == FrameKind::Obj || ms.is_none() {
+                break;
+            }
+            let start = ms.expect("checked above");
+            if start > s.len() {
+                break;
+            }
+            let raw = &s[start..];
+            let content = raw.strip_prefix(", ").unwrap_or(raw);
+            let separator_pending = self.pos == Pos::Value && !value_in_flight;
+            if !separator_pending
+                && (content.is_empty() || content == "\"\"" || content == "[]" || content == "{}")
+            {
+                s.truncate(start);
+                info[i - 1].member_count -= 1;
+                info[i - 1].member_start = None;
+                // the tuple's element count goes with the member (an
+                // emptied paren must close as an array, never take the
+                // grouping unwrap)
+                if let Some(p) = &mut info[i - 1].paren {
+                    p.elems = p.elems.saturating_sub(1);
+                }
+                continue;
+            }
+            break;
+        }
+        // Only the frames the cascade kept still close (the retracted
+        // containers' renderings are gone with their brackets), and the
+        // paren decision reads the cascade-adjusted element counts.
+        for (idx, frame) in self.frames.iter().enumerate().take(i).rev() {
             match frame.kind {
                 FrameKind::Obj => s.push('}'),
                 FrameKind::Arr => s.push(']'),
-                FrameKind::Paren => match frame.paren.as_ref() {
+                FrameKind::Paren => match info[idx].paren {
                     Some(p) if p.comma_seen || p.elems != 1 => s.push(']'),
                     Some(p) => {
                         // An unclosed single-element grouping unwraps.
@@ -1331,6 +1559,81 @@ fn pop_trailing_number_char(run: &mut String) -> Option<char> {
         Some('-') | Some('e') | Some('E') | Some('/') | Some(',') | Some('+') => run.pop(),
         _ => None,
     }
+}
+
+/// The escape-tail heal's scan: does the text end (past an optional close
+/// quote) with the tail the engine's heal strips, and if so truncate it
+/// and return true (the caller re-appends the consumed close quote).
+/// `lower` bounds the scan (the string rendering's content start: the
+/// opening quote and everything before it stay). The two cases the
+/// engine's own heal splits:
+///
+/// - an UNTERMINATED string (`open_ended`, the string still open at the
+///   cut): the decoded content RSTRIPS — Python's whitespace set in its
+///   rendered forms (a raw space, the `\t`/`\n`/`\r`/`\f` escapes, the
+///   6-byte `\u000b`), backspace included in nothing (`{"k": "a b ` ->
+///   `{"k": "a b"}`, `{"k": "  ` -> `{"k": ""}`),
+/// - a CLOSED string: only a trailing NEWLINE-run (a `\n` required, a
+///   `\r` only directly before a `\n`) plus the plain spaces that
+///   preceded it, the run adjacent to the close (`{"k": "a\n"` ->
+///   `{"k": "a"}`, `{"k": "a \n"` -> `{"k": "a"}`, while `{"k": "a\n "`
+///   and `{"k": "a\r"` and `{"k": "a\n\t"` keep their content).
+///
+/// An escaped backslash before a 2-byte escape blocks it (a literal
+/// backslash-n content, `{"k": "a\\n"`, is not a newline at all).
+fn strip_trailing_newline_tail(s: &mut String, lower: usize, open_ended: bool) -> bool {
+    let b = s.as_bytes();
+    let mut i = s.len();
+    let mut quote = false;
+    if i > lower && b[i - 1] == b'"' {
+        i -= 1;
+        quote = true;
+    }
+    let mut any = false;
+    if open_ended {
+        loop {
+            if i > lower && b[i - 1] == b' ' {
+                i -= 1;
+                any = true;
+            } else if i >= lower + 2
+                && b[i - 2] == b'\\'
+                && matches!(b[i - 1], b't' | b'n' | b'r' | b'f')
+                && (i < 3 || b[i - 3] != b'\\')
+            {
+                i -= 2;
+                any = true;
+            } else if i >= lower + 6 && &b[i - 6..i] == b"\\u000b" && (i < 7 || b[i - 7] != b'\\') {
+                i -= 6;
+                any = true;
+            } else {
+                break;
+            }
+        }
+    } else {
+        while i >= lower + 2
+            && b[i - 2] == b'\\'
+            && b[i - 1] == b'n'
+            && (i < 3 || b[i - 3] != b'\\')
+        {
+            i -= 2;
+            any = true;
+            // a \r directly before the consumed \n joins the run
+            if i >= lower + 2
+                && b[i - 2] == b'\\'
+                && b[i - 1] == b'r'
+                && (i < 3 || b[i - 3] != b'\\')
+            {
+                i -= 2;
+            }
+            while i > lower && b[i - 1] == b' ' {
+                i -= 1;
+            }
+        }
+    }
+    if any {
+        s.truncate(i);
+    }
+    any && quote
 }
 
 /// parse_number's value lanes over the run text (underscores were
@@ -1359,20 +1662,54 @@ fn render_number_value(text: &str) -> Value {
     }
 }
 
+/// A bare word's render: the keyword table, and — for a word born from
+/// a number run — the engine's stray-sign drop (`{"a": -NaN}` ->
+/// `{"a": "NaN"}` as a string, `{"a": -abc}` -> `{"a": "abc"}`), the
+/// strict `-Infinity` spelling excepted (the number lane keeps it, a
+/// special float). The word is complete here: the decision sees the
+/// whole run.
+fn render_word(word: &str, from_number_run: bool) -> Value {
+    if from_number_run
+        && let Some(rest) = word.strip_prefix('-')
+        && rest != "Infinity"
+    {
+        return literal_or_str(rest);
+    }
+    keyword_or_str(word)
+}
+
 /// The keyword set for bare words. The Python-literal family follows the
-/// repair lane (the whole-text engine's observable for them: the strict
-/// fast path never fires on `None`/`True`, they are not loads-valid);
-/// the strict grammar's special floats follow the fast path (it loads
-/// them, so the whole-text observable keeps the floats, not strings).
+/// repair lane and matches CASE-INSENSITIVELY (the whole-text engine's
+/// observable: `TRUE`/`tRuE`/`NONE` repair to `true`/`true`/`null`); the
+/// strict grammar's special floats follow the fast path (it loads them,
+/// so the whole-text observable keeps the floats) but only at their exact
+/// spellings (`nan`/`INFINITY` stay strings at their own casing —
+/// `{"a": NAN}` -> `{"a": "NAN"}` — the engine's own split).
 fn keyword_or_str(word: &str) -> Value {
-    match word {
-        "true" | "True" => Value::Bool(true),
-        "false" | "False" => Value::Bool(false),
-        "null" | "None" => Value::Null,
-        "NaN" => Value::Float(f64::NAN),
-        "Infinity" => Value::Float(f64::INFINITY),
-        "-Infinity" => Value::Float(f64::NEG_INFINITY),
-        other => Value::Str(other.to_string()),
+    match word.to_lowercase().as_str() {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" | "none" => Value::Null,
+        _ => match word {
+            "NaN" => Value::Float(f64::NAN),
+            "Infinity" => Value::Float(f64::INFINITY),
+            "-Infinity" => Value::Float(f64::NEG_INFINITY),
+            // the string spelling keeps the word's own casing
+            _ => Value::Str(word.to_string()),
+        },
+    }
+}
+
+/// The literal-only variant for a word whose leading `-` was a stripped
+/// stray sign: the case-insensitive literal table without the special
+/// floats (the engine's word lane after the rewind: `{"a": -NaN}` ->
+/// `{"a": "NaN"}` as a STRING, `{"a": -true}` -> `{"a": true}`).
+fn literal_or_str(word: &str) -> Value {
+    match word.to_lowercase().as_str() {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" | "none" => Value::Null,
+        _ => Value::Str(word.to_string()),
     }
 }
 
@@ -1458,6 +1795,71 @@ mod tests {
             r#"{"a": 12}"#,
             r#"{"a": 1.5e3}"#,
             r#"{"a": 123456789012345678901234567890}"#,
+            // the heal class: empty containers, the falsy-nudge
+            // retractions, the escape tails, the missing-key colon
+            "[[",
+            "[1, [",
+            r#"{"a": {"b": ["#,
+            r#"{"a": ["#,
+            "[[], [",
+            "[[], []",
+            "[[[]",
+            r#"{"a": [["#,
+            "[{}, [",
+            r#"{"a": [{"b": {"#,
+            r#"{"a": 1, "b": ["#,
+            "(1, [",
+            "([",
+            r#"{"a": ("#,
+            r#"{"a": [("#,
+            "[1, \"",
+            "[1, -",
+            "[1,-]",
+            "[1e-}",
+            "[1e+-}",
+            "[1e- 2]",
+            "(\u{b}-\0",
+            r#"{"k": "a\n"#,
+            r#"{"k": "a\n""#,
+            r#"{"k": "a\n\t"#,
+            r#"{"k": "a\n ""#,
+            r#"{"k": "a \n""#,
+            r#"{"k": "\n""#,
+            r#"{"k": "a\t""#,
+            r#"{"k": "a\r""#,
+            r#"{"k": "a ""#,
+            r#"{"k": "a b "#,
+            r#"{"k": "  "#,
+            "[\"a\\n",
+            r#"{"a": "x\n", "b": 1}"#,
+            r#"{"a": "x\n""#,
+            "{: 1}",
+            "{ : 1}",
+            "{:}",
+            r#"{"": 1}"#,
+            r#"{: 1, "b": 2}"#,
+            // the keyword family: case-insensitive literals, the exact
+            // special-float spellings, the stray-sign drop
+            r#"{"a": TRUE}"#,
+            r#"{"a": tRuE}"#,
+            r#"{"a": FALSE}"#,
+            r#"{"a": NULL}"#,
+            r#"{"a": NONE}"#,
+            "[TRUE, FALSE, NULL, NONE, tRuE]",
+            r#"{"a": nan}"#,
+            r#"{"a": NAN}"#,
+            r#"{"a": NaN}"#,
+            r#"{"a": Infinity}"#,
+            r#"{"a": INFINITY}"#,
+            r#"{"a": -Infinity}"#,
+            r#"{"a": -infinity}"#,
+            r#"{"a": -NaN}"#,
+            r#"{"a": -TRUE}"#,
+            r#"{"a": -tru}"#,
+            r#"{"a": -abc}"#,
+            r#"{"a": -12abc}"#,
+            "[-NaN]",
+            r#"{"TRUE": 1}"#,
         ] {
             let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
                 .expect("engine repair succeeds");
@@ -1514,14 +1916,171 @@ mod tests {
     fn provisional_top_level_scalars_match_the_engine() {
         // The partial-literal decision: 'tru' is the engine's prose
         // sentinel at top level, and a complete strict scalar commits.
+        // A completed top-level STRING commits only from the strict `"`
+        // delimiter: `"hi"` is `"hi"`, `'hi'` was prose to the whole-
+        // text engine (`''`) — end() equals the engine on both.
         assert_eq!(streamed("tru", 1), "");
         assert_eq!(streamed("true", 1), "true");
         assert_eq!(streamed("12", 1), "12");
         assert_eq!(streamed(r#""hi""#, 1), r#""hi""#);
+        assert_eq!(streamed("'hi'", 1), "");
         assert_eq!(streamed(r#""hi"#, 1), "");
         assert_eq!(streamed("None", 1), "");
         assert_eq!(streamed("NaN", 1), "NaN");
         assert_eq!(streamed("12 13", 1), "");
+    }
+
+    #[test]
+    fn the_in_flight_word_heals_through_the_literal_table() {
+        // The engine's repair-lane observable for a word still in
+        // flight at the cut: the special floats' spellings heal to
+        // STRINGS (the strict fast path keeps them mid-stream:
+        // `[NaN]` streams to `[NaN]`, the cut `[NaN` heals to
+        // `["NaN"]`), and a word born from a number run drops its
+        // stray leading sign.
+        for (text, want) in [
+            ("[NaN", r#"["NaN"]"#),
+            ("[Infinity", r#"["Infinity"]"#),
+            (r#"{"a": NaN"#, r#"{"a": "NaN"}"#),
+            (r#"{"a": Infinity"#, r#"{"a": "Infinity"}"#),
+            (r#"{"a": -Infinity"#, r#"{"a": "Infinity"}"#),
+            ("[1, -NaN", r#"[1, "NaN"]"#),
+            // the complete documents keep the floats (the strict class)
+            ("[NaN]", "[NaN]"),
+            ("[Infinity]", "[Infinity]"),
+            (r#"{"a": NaN}"#, r#"{"a": NaN}"#),
+            (r#"{"a": -Infinity}"#, r#"{"a": -Infinity}"#),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_empty_container_heal_matches_the_engine() {
+        // The engine's truncated-output heal: a still-open empty
+        // container drops at an item position, closes at a member-value
+        // position or the root; an array's trailing strictly-empty
+        // member drops; the cascade walks up.
+        for (text, want) in [
+            ("[[", "[]"),
+            ("[[[", "[]"),
+            ("[[{", "[]"),
+            ("[1, [", "[1]"),
+            ("[1, [{", "[1]"),
+            ("[{}, [", "[{}]"),
+            ("[[], [", "[[]]"),
+            ("[[1], [", "[[1]]"),
+            (r#"["x", ["#, r#"["x"]"#),
+            (r#"{"a": [1, {"#, r#"{"a": [1]}"#),
+            (r#"{"a": [1, ["#, r#"{"a": [1]}"#),
+            (r#"{"a": {"b": ["#, r#"{"a": {"b": []}}"#),
+            (r#"{"a": ["#, r#"{"a": []}"#),
+            (r#"{"a": {"#, r#"{"a": {}}"#),
+            (r#"{"a": [{"b": {"#, r#"{"a": [{"b": {}}]}"#),
+            ("[{", "[]"),
+            ("[1, {", "[1]"),
+            (r#"{"a": 1, "b": ["#, r#"{"a": 1, "b": []}"#),
+            ("[1, []", "[1]"),
+            (r#"{"a": []"#, r#"{"a": []}"#),
+            (r#"{"a": [["#, r#"{"a": []}"#),
+            ("[1, [2, [", "[1, [2]]"),
+            ("[[], []", "[[]]"),
+            ("[[[]", "[]"),
+            ("[1, [[[]", "[1]"),
+            ("([", "[]"),
+            ("(1, [", "[1]"),
+            (r#"{"a": ("#, r#"{"a": []}"#),
+            (r#"{"a": [("#, r#"{"a": []}"#),
+            ("[[], [{\"a\": [", "[[], [{\"a\": []}]]"),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_empty_element_retract_matches_the_engine() {
+        // The falsy-nudge class: an element that renders empty retracts
+        // whole (the deferred separator included); the popped rollback
+        // sign's one-char element retracts the same way, no cycle.
+        for (text, want) in [
+            (r#"[1, ""#, "[1]"),
+            (r#"[1, """#, "[1]"),
+            ("[1, -", "[1]"),
+            ("[1,-]", "[1]"),
+            ("[1-]", "[1]"),
+            ("[1e-}", r#"["1e"]"#),
+            ("[1e+-}", r#"["1e+"]"#),
+            ("[1, 2e-}", r#"[1, "2e"]"#),
+            ("[1e-]", r#"["1e"]"#),
+            ("[1e- 2]", r#"["1e", 2]"#),
+            ("(\u{b}-\0", "[]"),
+            ("(1, -)", "[1]"),
+            (r#"{"a": [1, ""#, r#"{"a": [1]}"#),
+            // in an object the member value heals to "" (the engine's
+            // own split)
+            (r#"{"a": -}"#, r#"{"a": ""}"#),
+            (r#"{"a": -"#, r#"{"a": ""}"#),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_escape_tail_heal_matches_the_engine() {
+        // The engine's escape-tail heal: an unterminated string's
+        // content rstrips (Python's whitespace set: the raw space, the
+        // \t/\n/\r/\f escapes, the 6-byte \u000b; a backspace passes);
+        // a CLOSED string loses only a trailing newline-run adjacent to
+        // its close; an escaped backslash-n is not a newline at all.
+        for (text, want) in [
+            (r#"{"k": "a\n"#, r#"{"k": "a"}"#),
+            (r#"{"k": "a\n\t"#, r#"{"k": "a"}"#),
+            (r#"{"k": "a\n "#, r#"{"k": "a"}"#),
+            (r#"{"k": "a \n""#, r#"{"k": "a"}"#),
+            (r#"{"k": "a\n""#, r#"{"k": "a"}"#),
+            (r#"{"k": "\n""#, r#"{"k": ""}"#),
+            (r#"{"k": "\n"#, r#"{"k": ""}"#),
+            (r#"{"k": "a\n\n"#, r#"{"k": "a"}"#),
+            (r#"{"k": "a\r\n""#, r#"{"k": "a"}"#),
+            (r#"{"k": "a\r""#, r#"{"k": "a\r"}"#),
+            (r#"{"k": "a\t""#, r#"{"k": "a\t"}"#),
+            (r#"{"k": "a\n\t""#, r#"{"k": "a\n\t"}"#),
+            (r#"{"k": "a\n ""#, r#"{"k": "a\n "}"#),
+            (r#"{"k": "a\\n""#, r#"{"k": "a\\n"}"#),
+            (r#"{"k": "a ""#, r#"{"k": "a "}"#),
+            (r#"{"k": "a b ""#, r#"{"k": "a b "}"#),
+            (r#"{"k": "a "#, r#"{"k": "a"}"#),
+            (r#"{"k": "a b "#, r#"{"k": "a b"}"#),
+            (r#"{"k": "  "#, r#"{"k": ""}"#),
+            ("{\"k\": \"a\x08", "{\"k\": \"a\\b\"}"),
+            (r#"["a\n"#, r#"["a"]"#),
+            (r#"{"a": "x\n", "b": 1}"#, r#"{"a": "x\n", "b": 1}"#),
+        ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_missing_key_colon_drops_the_pair() {
+        // `{: 1}` -> `{}` (the engine's repair lane: the whole pair
+        // drops); the valid `{"": 1}` passes through untouched.
+        assert_eq!(streamed("{: 1}", 2), "{}");
+        assert_eq!(streamed("{ : 1}", 2), "{}");
+        assert_eq!(streamed("{:}", 1), "{}");
+        assert_eq!(streamed(r#"{: 1, "b": 2}"#, 2), r#"{"b": 2}"#);
+        assert_eq!(streamed(r#"{"": 1}"#, 2), r#"{"": 1}"#);
     }
 
     #[test]
