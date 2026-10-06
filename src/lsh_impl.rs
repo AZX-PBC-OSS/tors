@@ -134,7 +134,7 @@ pub fn lsh_candidates(signatures: &[Vec<u64>], bands: usize, rows: usize) -> Can
     // it — same output, but the merge is linear over contiguous memory
     // instead of O(log k) tree inserts with a node hop per lookup.
     // Measured (min-of-3 walls, bands=16 rows=8): 10k identical
-    // signatures 36.9ms -> 4.4ms, 10k/50-family corpus 753ms -> 320ms,
+    // n=1000-identical 320.5ms -> 77.8ms (e2e); the 50M-pair flood 44.6s -> 9.0s; the criterion cells random-only, 10k/50-family corpus 753ms -> 320ms,
     // 10k/2000-family 23.8ms -> 12.2ms; random (pair-free) signatures
     // unchanged (the criterion bench pins both directions).
     // Memory stays the documented O(pairs) class — accumulator + merge
@@ -240,7 +240,7 @@ pub fn lsh_threshold(bands: usize, rows: usize) -> f64 {
 mod tests {
     use super::*;
 
-    /// The naive spec spelling the BTreeSet core is pinned against:
+    /// The naive spec spelling the merge-dedup core is pinned against:
     /// recompute the candidate relation per band with a fresh map and a
     /// sort-dedup, no shared code beyond the band hash itself.
     fn naive_candidates(signatures: &[Vec<u64>], bands: usize, rows: usize) -> Vec<(usize, usize)> {
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn core_matches_the_naive_reference_over_a_battery() {
-        // The differential pin: the BTreeSet core must agree with the
+        // The differential pin: the merge-dedup core must agree with the
         // sort-dedup naive spelling over a mixed corpus at several
         // (bands, rows) shapes.
         let sigs: Vec<Vec<u64>> = [
