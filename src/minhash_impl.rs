@@ -710,14 +710,14 @@ pub fn superminhash_signature(
 /// paired-row agreement fraction, masked to the lowest `bits` bits when
 /// some. `None` is the classic agreement estimator (unbiased over the
 /// affine rows' full range). `Some(bits)` is Li and König's b-bit
-/// minwise estimator (Li and König, WDE 2010, "b-Bit Minwise
+/// minwise estimator (Li and König, WWW 2010, "b-Bit Minwise
 /// Hashing": the agreement probability of masked rows is
 /// `J + (1 - J) * 2^-b`, so the unbiased estimate is the corrected
 /// fraction `(p_hat - 2^-b) / (1 - 2^-b)` -- which can land slightly
 /// NEGATIVE at true similarity zero (the correction subtracts the chance
 /// term from a finite sample); that is the unbiased estimator's honest
 /// shape, not a bug, and callers thresholding should compare the raw
-/// agreement fraction instead. The variance matches the full-row
+/// agreement fraction instead. The variance is at most ~3x the full-row
 /// estimator's once `b >= log2(1/J)` (below that the chance-agreement
 /// term dominates the information the rows carry).
 pub fn jaccard_estimate(a: &[u64], b: &[u64], bits: Option<u32>) -> f64 {

@@ -37,7 +37,7 @@ use crate::py::_borrow::extract_index;
 /// deterministic and self-consistent: identical text at identical
 /// parameters gives identical rows, forever, within one tors version.
 ///
-/// `bits` is b-bit compression (Li and König, WDE 2010): `None` (the
+/// `bits` is b-bit compression (Li and König, WWW 2010): `None` (the
 /// default) returns the full u64 rows, byte-identical to the unmasked
 /// output; an int in [1, 63] keeps the LOWEST `bits` bits of every row --
 /// `num_perm` rows shrink to a b-bit fingerprint, and the paired-row
@@ -309,13 +309,13 @@ fn row_element_error(item: &Bound<'_, PyAny>, name: &str) -> PyErr {
 /// fraction -- the one-expression estimator docs/api.md spells, exact
 /// contract over the classic engine's rows and the agreement-fraction
 /// estimator over SuperMinHash rows alike. `bits=b` (1..=63) is the
-/// b-bit estimator over b-bit-compressed rows (Li and König, WDE 2010):
+/// b-bit estimator over b-bit-compressed rows (Li and König, WWW 2010):
 /// masked rows agree with probability `J + (1 - J) * 2^-b`, so the
 /// returned estimate applies the chance correction
 /// `(p_hat - 2^-b) / (1 - 2^-b)` -- unbiased, but able to land slightly
 /// NEGATIVE at true similarity zero (a finite sample's chance term can
 /// exceed the observed agreement); threshold callers should compare raw
-/// agreement fractions instead. The variance matches full rows once
+/// agreement fractions instead. The variance is at most ~3x the full rows' once
 /// `b >= log2(1/J)`.
 ///
 /// Both signatures must be equal-length and non-empty, else `ValueError`

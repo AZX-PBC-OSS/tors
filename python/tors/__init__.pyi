@@ -1489,7 +1489,7 @@ def simhash128(text: str) -> int: ...
 # self-consistent: identical text at identical parameters gives
 # identical rows, forever, within one tors version.
 #
-# bits is b-bit compression (Li and König, WDE 2010): None (default)
+# bits is b-bit compression (Li and König, WWW 2010): None (default)
 # returns the full u64 rows, byte-identical to the unmasked output; an
 # int in [1, 63] keeps the LOWEST bits of every row, and the paired-row
 # agreement estimator then needs the 2^-b chance correction
@@ -1512,12 +1512,12 @@ def minhash_signature(
 # signatures. bits=None counts rows equal at full width and returns the
 # agreement fraction (the one-expression estimator the api docs spell).
 # bits=b (1..=63) is the b-bit estimator over b-bit-compressed rows
-# (Li and König, WDE 2010): masked rows agree with probability
+# (Li and König, WWW 2010): masked rows agree with probability
 # J + (1 - J) * 2^-b, so the returned estimate applies the chance
 # correction (p_hat - 2^-b) / (1 - 2^-b) -- unbiased, but able to land
 # slightly NEGATIVE at true similarity zero (a finite sample's chance
 # term can exceed the observed agreement); threshold callers should
-# compare raw agreement fractions instead. The variance matches full
+# compare raw agreement fractions instead. The variance is at most ~3x full
 # rows once b >= log2(1/J). Both signatures must be equal-length and
 # non-empty, else ValueError naming the lengths; elements ride the
 # strict int convention (lsh_candidates's: negative ValueError, past

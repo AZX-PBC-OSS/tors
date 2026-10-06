@@ -4908,14 +4908,14 @@ rows are f64 bit patterns of real values in [0, m), not uniform
 integers.
 
 **b-bit compression (`bits=`).** An int in [1, 63] keeps the LOWEST
-`bits` bits of every row (Li and König, "b-Bit Minwise Hashing", WDE
+`bits` bits of every row (Li and König, "b-Bit Minwise Hashing", WWW
 2010): `num_perm` full rows compress to a `b·num_perm`-bit fingerprint.
 The default `None` is the full u64 rows, byte-identical to the unmasked
 output. The masked rows' agreement probability is
 `J + (1 - J)·2^-b` (distinct min-hashes collide on their low b bits with
 probability 2^-b), so the unbiased estimate is the corrected fraction
 `(p_hat - 2^-b) / (1 - 2^-b)`, which `minhash_jaccard(..., bits=b)`
-computes. The accuracy contract: the variance matches full rows once
+computes. The accuracy contract: the variance is at most ~3x the full rows' once
 `b >= log2(1/J)` (below that, the chance term dominates the information
 the rows carry; measured: at J = 0.5 the RMSE ladder sits at 0.070 for
 b=1, 0.048 for b=4, 0.041 for b=8, against 0.043 for full rows at k=128).
@@ -5114,13 +5114,13 @@ The paired-row Jaccard estimator over two `minhash_signature`
 signatures: `bits=None` counts rows equal at full width and returns the
 agreement fraction (the one-expression estimator above, as a call);
 `bits=b` is the b-bit estimator over b-bit-compressed rows (Li and
-König, WDE 2010): masked rows agree with probability
+König, WWW 2010): masked rows agree with probability
 `J + (1 - J)·2^-b`, so the returned estimate applies the chance
 correction `(p_hat - 2^-b) / (1 - 2^-b)`, restoring unbiasedness. The
 corrected estimate can land slightly NEGATIVE at true similarity zero (a
 finite sample's chance term can exceed the observed agreement) -- that
 is the unbiased estimator's honest shape, not a bug; threshold callers
-should compare raw agreement fractions instead. The variance matches
+should compare raw agreement fractions instead. The variance is at most ~3x the full rows'
 full rows once `b >= log2(1/J)`.
 
 Both signatures must be equal-length and non-empty, else `ValueError`
