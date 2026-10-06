@@ -85,7 +85,16 @@
 //!   that closes as a tuple at `)` when it held a comma or more than one
 //!   element; a single-element comma-less `(...)` is a grouping and
 //!   unwraps to its element (`(1)` repairs to `1`, `(1,)` to `[1]`, the
-//!   engine's own split).
+//!   engine's own split). The group's loop runs under `)` as ITS closing
+//!   delimiter (the engine's parse_array lane): a `]` inside an open
+//!   group is a garbage item the strictly-empty skip consumes — nothing
+//!   closes, the group keeps parsing (`[(], 1, 2]` -> `[[1, 2]]`, the
+//!   `]` swallowed) — and a `}` terminates the group and is consumed by
+//!   it (`[(}]` -> `[[]]`). An empty group closed under its own `)`
+//!   defers the item skip to the NEXT char (`,` or the parent's closer
+//!   keeps the element, anything else drops it and is eaten with it:
+//!   `[()]` -> `[[]]` but `[() ]` -> `[]`); a group the `]` left open
+//!   retracts at close time like any empty container (`[(]` -> `[]`).
 //! - **Mismatched closers**: a closer matching a frame below the
 //!   innermost one closes the levels between (the engine's
 //!   `{"a": [1, 2}` -> `{"a": [1, 2]}` shape); a closer matching nothing
@@ -280,6 +289,12 @@ pub struct StreamingRepairer {
     /// up valid -- a mid-stream retract could not undo itself. Drained
     /// by `render_closed` (pure, local) unless the root closed cleanly.
     empty_marks: Vec<EmptyMark>,
+    /// The strictly-empty paren item's deferred one-char decision; see
+    /// `EmptyParenPending`. Armed at the paren's own-`)` close (and the
+    /// `}`-terminated one), resolved by the next char, never carried
+    /// across a push boundary in any observable way (the state is part
+    /// of the machine, so chunk splits do not change the outcome).
+    empty_paren_pending: Option<EmptyParenPending>,
 }
 
 /// One deferred strictly-empty element drop; see `empty_marks`.
@@ -288,6 +303,19 @@ struct EmptyMark {
     end: usize,
     was_first: bool,
     frame: usize,
+}
+
+/// The strictly-empty paren item's one-char decision: the paren closed
+/// under its OWN `)` with no elements (its rendering is exactly `[]`),
+/// its parent is an array-lane frame holding it as an in-flight member,
+/// and the engine's item skip now reads the NEXT char: a `,` or the
+/// parent's closer keeps the element, any other char drops it -- and is
+/// consumed with it (the engine's one-char stall guard).
+/// `start` is the member rendering's start (the deferred separator
+/// included); `parent_paren` distinguishes the paren lane's `)` closer.
+struct EmptyParenPending {
+    start: usize,
+    parent_paren: bool,
 }
 
 /// One open container: the engine's context entry, structural part.
@@ -584,6 +612,7 @@ impl StreamingRepairer {
             string_raw_tail: None,
             prev_char_ws: false,
             empty_marks: Vec::new(),
+            empty_paren_pending: None,
         }
     }
 
@@ -616,6 +645,7 @@ impl StreamingRepairer {
             self.string = None;
             self.pending = None;
             self.comment = None;
+            self.empty_paren_pending = None;
             self.finished = true;
         }
         Ok(self.out.clone())
@@ -645,6 +675,20 @@ impl StreamingRepairer {
     /// dispatch: the readers (the empty-element skip's mark) want the
     /// char BEFORE this one.
     fn process(&mut self, c: char) -> Result<(), String> {
+        // The strictly-empty paren item's decision (see
+        // `EmptyParenPending`): the char after the paren's own `)` is the
+        // engine's skip cursor. A `,` or the parent frame's closer keeps
+        // the element; everything else drops it and is CONSUMED with it
+        // (parse_array's one-char stall guard: the skip's `index += 1`
+        // eats exactly one char, whatever it is).
+        if let Some(pending) = self.empty_paren_pending.take() {
+            let parent_closer = if pending.parent_paren { ')' } else { ']' };
+            if c != ',' && c != parent_closer {
+                self.drop_marked_member(pending.start);
+                self.prev_char_ws = is_py_whitespace(c);
+                return Ok(());
+            }
+        }
         let out = self.process_inner(c);
         self.prev_char_ws = is_py_whitespace(c);
         out
@@ -1342,9 +1386,28 @@ impl StreamingRepairer {
     }
 
     /// Close the deepest frame this closer matches, closing the levels
-    /// above it first (the engine's `{"a": [1, 2}` shape); a closer that
-    /// matches nothing is garbage and is skipped.
+    /// above it first (the engine's `{"a": [1, 2}` shape). Two closer
+    /// shapes belong to the parenthesized lane instead (parse_array runs
+    /// the paren's group with `)` as its closing delimiter):
+    ///
+    /// - a `]` while a paren is the innermost frame is a garbage ITEM
+    ///   inside the group's array loop (the strictly-empty skip consumes
+    ///   it): nothing closes -- the group stays open and keeps parsing;
+    /// - a `}` while a paren is the innermost frame TERMINATES the
+    ///   group's loop and is consumed by it: the paren closes as if its
+    ///   own `)` had arrived (and the strictly-empty decision defers to
+    ///   the next char, the group's own item skip reading the char after
+    ///   the consumed `}`).
     fn close_up(&mut self, closer: char) {
+        if matches!(self.frames.last().map(|f| f.kind), Some(FrameKind::Paren)) {
+            if closer == ']' {
+                return;
+            }
+            if closer == '}' {
+                self.pop_frame();
+                return;
+            }
+        }
         let Some(idx) = self.frames.iter().rposition(|f| f.kind.matches(closer)) else {
             return;
         };
@@ -1393,10 +1456,47 @@ impl StreamingRepairer {
                         }
                     }
                 }
+                // The strictly-empty paren item's deferred decision
+                // (`EmptyParenPending`): the paren closed under its own
+                // `)` (or the `}` that terminated its group's loop) with
+                // no elements -- its rendering is exactly `[]`, the
+                // parent array lane holds it as an in-flight member, and
+                // the engine's item skip reads the NEXT char. An
+                // object-lane parent keeps its member value (the skip is
+                // parse_array's rule alone); a root paren has no parent
+                // to decide about.
+                if frame.paren.is_some_and(|p| p.elems == 0)
+                    && let Some(parent) = self.frames.last_mut()
+                    && !matches!(parent.kind, FrameKind::Obj)
+                    && parent.member_start.is_some()
+                {
+                    self.empty_paren_pending = Some(EmptyParenPending {
+                        start: parent.member_start.expect("checked above"),
+                        parent_paren: parent.kind == FrameKind::Paren,
+                    });
+                }
             }
         }
         self.pos = Pos::AfterValue;
         self.top_done = self.frames.is_empty();
+    }
+
+    /// The pending decision's drop: the member rendering at `start` (the
+    /// deferred separator included) retracts whole and the parent
+    /// frame's bookkeeping restores (the completed-member form of
+    /// `retract_in_flight_member`).
+    fn drop_marked_member(&mut self, start: usize) {
+        if let Some(f) = self.frames.last_mut() {
+            if start <= self.out.len() {
+                self.out.truncate(start);
+                self.emitted = self.emitted.min(start);
+            }
+            f.member_start = None;
+            f.member_count = f.member_count.saturating_sub(1);
+            if let Some(p) = &mut f.paren {
+                p.elems = p.elems.saturating_sub(1);
+            }
+        }
     }
 
     /// The number run's terminator: the engine's value lanes over the
@@ -1689,7 +1789,7 @@ impl StreamingRepairer {
                 {
                     s.truncate(start);
                 }
-                info[i - 2].member_count -= 1;
+                info[i - 2].member_count = info[i - 2].member_count.saturating_sub(1);
                 info[i - 2].member_start = None;
                 if let Some(p) = &mut info[i - 2].paren {
                     p.elems = p.elems.saturating_sub(1);
@@ -1715,7 +1815,7 @@ impl StreamingRepairer {
                     || (stray_ellipsis && content == "\"...\""))
             {
                 s.truncate(start);
-                info[i - 1].member_count -= 1;
+                info[i - 1].member_count = info[i - 1].member_count.saturating_sub(1);
                 info[i - 1].member_start = None;
                 // the tuple's element count goes with the member (an
                 // emptied paren must close as an array, never take the
@@ -2351,6 +2451,63 @@ mod tests {
             ("{\"a\": []\r, ", "{\"a\": []}"),
             ("{\"a\": {} , ", "{\"a\": {}}"),
         ] {
+            assert_eq!(streamed(text, 3), want, "{text:?}");
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            assert_eq!(streamed(text, 3), serializer::dumps(&value, true));
+        }
+    }
+
+    #[test]
+    fn the_mismatched_closer_paren_family_matches_the_engine() {
+        // The paren lane's closer rules (the group parses through
+        // parse_array with `)` as ITS closing delimiter): a `]` inside an
+        // open group is a garbage item the strictly-empty skip consumes —
+        // the group stays open and keeps parsing (`[(], 1, 2]` re-lands
+        // the `1, 2` inside the group, the engine's own swallow); a `}`
+        // TERMINATES the group's loop and is consumed by it (`[(}]` —
+        // the group closes at the `}` and the `]` keeps the element). An
+        // EMPTY group closed under its own `)` defers the item-skip
+        // decision to the NEXT char (`,` or the parent's closer keeps;
+        // anything else — whitespace included — drops the element and is
+        // eaten with it, the skip's one-char stall guard), and a group
+        // the `]` left open retracts at close time like any empty
+        // container. The last pair is the libFuzzer-minimized underflow
+        // repro (the close-time walk's `member_count` decrement is
+        // saturating now).
+        for (text, want) in [
+            ("[(]", "[]"),
+            ("[(],", "[]"),
+            ("[(] ]", "[]"),
+            ("[(])", "[]"),
+            ("[(,]", "[]"),
+            ("[( ]", "[]"),
+            ("[( ],", "[]"),
+            ("((]", "[]"),
+            ("[[(]", "[]"),
+            ("([( ]", "[]"),
+            ("[1,(]", "[1]"),
+            ("[(),(]", "[[]]"),
+            ("[(]x", "[\"x\"]"),
+            ("[(], 1, 2]", "[[1, 2]]"),
+            ("[( ], 1", "[[1]]"),
+            ("[(}]", "[[]]"),
+            ("[() ]", "[]"),
+            ("[() ,]", "[]"),
+            ("[()), ]", "[]"),
+            ("[()x]", "[]"),
+            ("[()x", "[]"),
+            ("[()]x", "[[]]"),
+            ("[()]", "[[]]"),
+            ("[()],", "[[]]"),
+            ("[(), ", "[[]]"),
+            ("[1, ()]", "[1, []]"),
+            ("[1, () ", "[1]"),
+            ("{\"a\": (]", "{\"a\": []}"),
+            ("{\"a\": [()]", "{\"a\": [[]]}"),
+            ("\u{16}[(()\t,)((\u{1}", "[]"),
+        ] {
+            assert_eq!(streamed(text, 1), want, "{text:?} (one-char pushes)");
             assert_eq!(streamed(text, 3), want, "{text:?}");
             let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
                 .expect("engine repair succeeds");
