@@ -5952,11 +5952,13 @@ def score_fuse(
 table, the same first-appearance tie-break, the same one-pair-per-id
 emission, but the input consumes raw similarity scores instead of ranks
 -- `(id, score)` pairs (a BM25 output, a cosine similarity, a click
-count), the other half of the fusion problem. Three methods, the two
-score-based ones from Cormack, Clarke & Buüttcher's SIGIR 2009
-comparison (the RRF paper's own baseline set,
-<https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>) plus
+count), the other half of the fusion problem. Three methods: CombMNZ and the linear pattern are the two score-based
+baselines of Cormack, Clarke & Buüttcher's SIGIR 2009 comparison (the
+RRF paper's own baseline set,
+<https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>, where CombMNZ is
+the strongest score-based baseline they report); linear is
 Elasticsearch's linear-retriever pattern:
+<https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/linear-retriever>.
 
 - **`method="combmnz"`** (the default), Fox & Shaw, "Combination of
   Multiple Searches", TREC-2 1994: with `norm_i` the min-max
@@ -5968,8 +5970,9 @@ Elasticsearch's linear-retriever pattern:
 
   CombSUM times the number of lists containing `d` (the MNZ
   multiplier: each additional list's hit is a vote of confidence in
-  the score itself). The best performer of the score-based family in
-  the Cormack 2009 comparison, hence the default.
+  the score itself). The strongest score-based
+  baseline in the Cormack 2009 comparison (their own wording: RRF beats
+  it in all but one of their topics), hence the default.
 - **`method="borda"`**: the rank-based count,
   `score(d) = sum over lists of w_i x (n_i - rank_i(d)) / n_i`, ranks
   1-based over the DEDUPLICATED list (a duplicate folds to its first
@@ -6010,13 +6013,20 @@ edges are pinned:
   dividing `inf/inf` (NaN): a numerator that overflowed against the
   infinite range answers exactly `1.0` (`max` itself is the first such
   numerator; the top of the scale), while finite numerators divide to
-  `0.0`-scale values. The policy is monotone and NaN-free, the same
+  exactly `0.0` -- not merely small values: a finite number divided by
+  `+inf` is `0.0` in float arithmetic, so the overflowed list's
+  internal order collapses to two buckets (`1.0` for the overflowed
+  maxima, `0.0` for everything else). The policy is monotone and
+  NaN-free, the same
   documented approximation `ndcg_at_k`'s saturating ratio carries,
   with the same one-sided cost: near-top scores can over-report as
   exactly `1.0` when both score extremes sit within ~16 orders of
   magnitude of f64's ceiling.
 
-The rest is `rank_fuse`'s discipline carried over unchanged.
+The rest is `rank_fuse`'s discipline carried over unchanged (one
+spelling note: `k` here is an OUTPUT CUTOFF -- the top-k pairs returned;
+`rank_fuse`'s `k` is the RRF rank constant inside the scoring formula.
+Same name, different job, each documented on its own call).
 `scored_lists` is a non-empty list of lists of `(id, score)` pairs
 (fusing zero lists raises `ValueError`, the `merkle_root` "root of no
 chunks" precedent; an individual empty list is legal and contributes
