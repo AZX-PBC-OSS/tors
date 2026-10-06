@@ -1,11 +1,12 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 
 use crate::EagerIter;
 use crate::chunk_by_segment_impl;
 use crate::chunk_hierarchical_impl;
 use crate::chunk_impl;
+use crate::chunk_quality_impl;
 use crate::parse_boundary;
 use crate::py::_borrow::{bounded_str_list, convert_str_arg, validate_count_overlap};
 use crate::py::eager_iter_class;
@@ -643,4 +644,114 @@ pub fn chunk_by_lines_iter(
     let overlap = overlap as usize;
     let chunks = py.detach(|| chunk_by_segment_impl::chunk_by_lines(s, lines_per_chunk, overlap));
     Py::new(py, ChunkByLinesIter(EagerIter::new(py, text, chunks)))
+}
+
+/// `tors.chunk_overlap_cost(overlap) -> float`: the index-inflation factor
+/// `1 / (1 - overlap)` for an overlap ratio in `[0.0, 1.0)`, the cost side
+/// of the chunk family's overlap knobs. The 2026 systematic chunking
+/// study (Bennani & Moslonka 2026, "A Systematic Analysis of Chunking
+/// Strategies for Reliable Question Answering", arXiv 2601.14123,
+/// Finding F1) measured that adding 10-20% overlap did NOT improve
+/// retrieval (`|Delta BERTScore| <= 0.004`, EM differences `<= 0.001`)
+/// while chunk count and index size inflate by exactly `1 / (1 - r)`
+/// (their example: `r = 0.2` is 1.25x more chunks, ingestion time and
+/// storage), so the study's recommendation is `overlap = 0` unless you
+/// have evidence your retriever benefits from boundary redundancy, which
+/// is why every member of this family defaults to `overlap=0`. This
+/// function prices that knob: what a given `overlap` costs the index.
+///
+/// `overlap` must be a finite float in `[0.0, 1.0)`: negative values and
+/// values at or past 1.0 raise `ValueError` (the factor diverges as
+/// `overlap` approaches 1: the asymptote IS the answer, an `overlap = 1`
+/// chunker never advances and an index built from it is infinite, so the
+/// error names the asymptote rather than returning `inf`; `NaN` is
+/// rejected with the other out-of-range values). Pure float arithmetic:
+/// no detach (the `simhash_distance`/`lsh_probability` zero-detach class,
+/// the work is strictly less than the argument extraction around it), no
+/// aio twin.
+#[pyfunction(signature = (overlap))]
+pub fn chunk_overlap_cost(_py: Python<'_>, overlap: f64) -> PyResult<f64> {
+    // One rejection message covering every out-of-range shape (negative,
+    // NaN, at-or-past the asymptote), the asymptote named because it is
+    // the mathematical answer the caller may be probing for.
+    if !overlap.is_finite() || overlap < 0.0 || overlap >= 1.0 {
+        return Err(PyValueError::new_err(format!(
+            "overlap must be in [0.0, 1.0): 1/(1-overlap) inflates without bound as overlap \
+             approaches 1 (the asymptote), got {overlap}"
+        )));
+    }
+    Ok(1.0 / (1.0 - overlap))
+}
+
+/// `tors.chunk_quality(chunks, text, *, tau=0) -> dict`: the two intrinsic
+/// chunk-quality metrics of the LREC 2026 adaptive-chunking study
+/// (de Moura Júnior, Lelong & Blangero, "Adaptive Chunking",
+/// arXiv 2603.25333, `ekimetrics/adaptive-chunking`) over the caller's
+/// own chunk spans: the
+/// `(start, end)` tuples any member of the chunk family returns, or any
+/// hand-built spans. See `src/chunk_quality_impl.rs` for the metrics'
+/// definitions and their study.
+///
+/// Returns `{"integrity": float, "cohesion": float}`, both in `[0.0,
+/// 1.0]`, both keys always present. `integrity` is the study's Block
+/// Integrity: the fraction of the text's UAX #29 sentences (the suite's
+/// own segmentation standing in for the study's gold blocks) that NO
+/// chunk boundary crosses, a boundary crossing when it falls strictly
+/// inside a sentence's span farther than `tau` codepoints (the tolerance,
+/// default 0, for segmenter jitter) from both edges. `cohesion` is the
+/// study's Intra-Chunk Cohesion as tors's DEPENDENCY-FREE LEXICAL PROXY:
+/// the mean Dice coefficient over the width-3 word-shingle sets
+/// (`shingle_dice`'s exact quantity, the suite's own shingle primitives)
+/// of each sentence and its containing chunk. The honest caveat: the
+/// study's ICC uses embedding cosine similarity; tors's proxy is a
+/// different, weaker, but usable signal (it rewards vocabulary-sharing
+/// chunks, cannot see wordless topical continuity, and inherits the
+/// shingle family's empty-set conventions), not the paper's number, and
+/// the two must never be compared as if interchangeable.
+///
+/// Degenerate inputs are pinned shapes, never errors: an empty chunk
+/// list or empty text gives `{"integrity": 1.0, "cohesion": 0.0}` (no
+/// boundary crosses anything, vacuously; no sentence-chunk pair exists,
+/// the conservative 0/0 pin). A span out of `text`'s range or with
+/// `start > end` raises `ValueError`; `tau < 0` raises `ValueError`.
+///
+/// GIL model: the `chunks` walk and the `tau` validation under the GIL,
+/// the whole segment/shingle/score pass under one `py.detach`, the
+/// residue a two-key dict.
+#[pyfunction(signature = (chunks, text, *, tau = 0))]
+pub fn chunk_quality(
+    py: Python<'_>,
+    chunks: Bound<'_, PyAny>,
+    text: &str,
+    tau: i64,
+) -> PyResult<Py<PyAny>> {
+    if tau < 0 {
+        return Err(PyValueError::new_err(format!(
+            "tau must be >= 0, got {tau}"
+        )));
+    }
+    // The bounded manual walk (`bounded_str_list`, the #112 class's fix):
+    // never a `Vec<(i64, i64)>` extraction, which would size from a
+    // lying `__len__`, and a bare `str` is refused up front (it would
+    // otherwise launder into per-character 2-sequences).
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    // The spans are codepoint offsets (the chunk family's units), so the
+    // range bound is the char count, never the byte length.
+    let text_len = text.chars().count();
+    bounded_str_list("chunk_quality", "chunks", &chunks, |handle| {
+        let (start, end) = handle.extract::<(i64, i64)>()?;
+        if start < 0 || end < start || end as usize > text_len {
+            return Err(PyValueError::new_err(format!(
+                "chunk_quality: every chunk span must satisfy 0 <= start <= end <= \
+                 len(text) (len {text_len}), got ({start}, {end})"
+            )));
+        }
+        spans.push((start as usize, end as usize));
+        Ok(())
+    })?;
+    let quality = py.detach(|| chunk_quality_impl::chunk_quality(&spans, text, tau as usize));
+    let out = PyDict::new(py);
+    out.set_item("integrity", quality.integrity)?;
+    out.set_item("cohesion", quality.cohesion)?;
+    Ok(out.into_any().unbind())
 }

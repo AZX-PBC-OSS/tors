@@ -18,6 +18,8 @@ from __future__ import annotations
 import time
 import uuid as stdlib_uuid
 
+import pytest
+
 import tors
 
 
@@ -820,6 +822,127 @@ class TestGroundingBatchExamples:
         assert tors.grounding_coverage("same words both sides", "same words both sides") == 1.0
         assert tors.grounding_coverage("alpha bravo charlie", "xray yankee zulu") == 0.0
         assert tors.grounding_coverage("", "text") == 0.0
+
+    def test_grounding_report_example(self) -> None:
+        # docs/api.md's grounding_report section, pinned byte-exact: the
+        # lexical Grounded-in-Context shape over the pump-service text,
+        # one source carrying the middle sentence, the query lens set.
+        text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+        assert tors.grounding_report(
+            text, ["Service log: the bushing torque spec was 42 Nm."], query="torque"
+        ) == {
+            "sentences": [
+                {
+                    "text": "The pump failed. ",
+                    "start": 0,
+                    "end": 17,
+                    "best_source": 0,
+                    "score": 0.16666666666666669,
+                    "grounded": False,
+                },
+                {
+                    "text": "The bushing torque spec was 42 Nm. ",
+                    "start": 17,
+                    "end": 52,
+                    "best_source": 0,
+                    "score": 0.8750000000000003,
+                    "grounded": True,
+                },
+                {
+                    "text": "Replaced.",
+                    "start": 52,
+                    "end": 61,
+                    "best_source": None,
+                    "score": 0.0,
+                    "grounded": False,
+                },
+            ],
+            "aggregate": {
+                "grounded_ratio": 0.3333333333333333,
+                "grounded": 1,
+                "sentences": 3,
+                "mean_score": 0.3472222222222223,
+                "best_score": 0.8750000000000003,
+                "coverage": 0.6363636363636365,
+                "query_score": 0.25,
+            },
+        }
+        # The no-sources degenerate shape the section pins too.
+        assert tors.grounding_report(text, []) == {
+            "sentences": [
+                {
+                    "text": "The pump failed. ",
+                    "start": 0,
+                    "end": 17,
+                    "best_source": None,
+                    "score": 0.0,
+                    "grounded": False,
+                },
+                {
+                    "text": "The bushing torque spec was 42 Nm. ",
+                    "start": 17,
+                    "end": 52,
+                    "best_source": None,
+                    "score": 0.0,
+                    "grounded": False,
+                },
+                {
+                    "text": "Replaced.",
+                    "start": 52,
+                    "end": 61,
+                    "best_source": None,
+                    "score": 0.0,
+                    "grounded": False,
+                },
+            ],
+            "aggregate": {
+                "grounded_ratio": 0.0,
+                "grounded": 0,
+                "sentences": 3,
+                "mean_score": 0.0,
+                "best_score": 0.0,
+                "coverage": 0.0,
+                "query_score": 0.0,
+            },
+        }
+
+
+class TestChunkQualityExamples:
+    """docs/api.md's chunk_overlap_cost / chunk_quality sections, pinned
+    byte-exact like every other docs example here."""
+
+    def test_chunk_overlap_cost_examples(self) -> None:
+        assert tors.chunk_overlap_cost(0.0) == 1.0
+        assert tors.chunk_overlap_cost(0.2) == 1.25
+        assert tors.chunk_overlap_cost(0.5) == 2.0
+        assert tors.chunk_overlap_cost(0.75) == 4.0
+        with pytest.raises(ValueError, match="asymptote"):
+            tors.chunk_overlap_cost(1.0)
+
+    def test_chunk_quality_examples(self) -> None:
+        text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+        # Sentence-sized chunks: nothing crossed, every chunk IS its
+        # sentence.
+        assert tors.chunk_quality(tors.chunk_by_sentences(text, 1), text) == {
+            "integrity": 1.0,
+            "cohesion": 1.0,
+        }
+        # One chunk covering everything: no boundary crosses a sentence,
+        # and each sentence's shingle set rides inside the chunk's
+        # (Dice 2*2/(2+10) = 1/3 per sentence).
+        assert tors.chunk_quality([(0, 61)], text) == {
+            "integrity": 1.0,
+            "cohesion": 0.31746031746031744,
+        }
+        # A boundary at 30 cuts the middle sentence (span (17, 52)):
+        # integrity pays for it.
+        assert tors.chunk_quality([(0, 30), (30, 61)], text) == {
+            "integrity": 0.6666666666666667,
+            "cohesion": 0.2857142857142857,
+        }
+        # The degenerate pin: no chunks, nothing crossed, nothing to
+        # average.
+        assert tors.chunk_quality([], text) == {"integrity": 1.0, "cohesion": 0.0}
 
 
 class TestIndexExamples:

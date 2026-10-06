@@ -597,8 +597,12 @@ fn token_strictly_after(toks: &[Token], cp: usize) -> usize {
 /// segmentation `sentence_bounds` exposes (and `highlight`'s
 /// sentence-expansion step uses), built once and shared by both surfaces
 /// so the batch API's per-sentence offsets are BY CONSTRUCTION the bounds
-/// `sentence_bounds(text)` returns.
-fn sentence_spans(text: &str) -> Vec<(usize, usize, usize, usize)> {
+/// `sentence_bounds(text)` returns. `pub(crate)` so the report
+/// composition (`grounding_report`) and the chunk-quality metrics
+/// (`chunk_quality_impl`) segment with the same bounds instead of
+/// re-deriving a second segmentation that could drift from
+/// `sentence_bounds`' (the family-wide one-segmentation discipline).
+pub(crate) fn sentence_spans(text: &str) -> Vec<(usize, usize, usize, usize)> {
     let mut sentences: Vec<(usize, usize, usize, usize)> = Vec::new();
     let mut cp = 0usize;
     for (byte_start, segment) in text.split_sentence_bound_indices() {
@@ -900,6 +904,189 @@ pub fn ground_sentences(query: &str, text: &str, max_chars: Option<usize>) -> Se
         sentences,
         score: best,
     }
+}
+
+/// The report's per-(sentence, source) highlight budget: the sentence is
+/// scored the way `tors.highlight`'s own default caller scores a query,
+/// `max_snippets=1` (only the best alignment's score is wanted, never a
+/// snippet list) at `max_chars=400` (the documented default budget: the
+/// claim-sized window a citation consumer reads). A sentence longer than
+/// the budget scores over `highlight`'s own clamped candidates, the
+/// family's documented floor behavior (at least one token), the same
+/// limitation a direct `highlight` call has.
+const REPORT_MAX_CHARS: usize = 400;
+
+/// One sentence of the grounding report: `text[start:end]` of the original
+/// text (CHARACTER offsets, codepoint indices, the sentence's exact bounds
+/// `sentence_bounds` publishes), `best_source` the index of the source the
+/// sentence's best alignment sits in (`None` when there is no alignment at
+/// all: no sources, or no source shares a token with the sentence),
+/// `score` that best alignment's ROUGE-W F1 in `[0.0, 1.0]` (`0.0` when
+/// `best_source` is `None`), and `grounded` the threshold verdict
+/// (`score >= threshold` AND an alignment exists: an empty source list
+/// grounds nothing, even at `threshold == 0.0`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportSentence {
+    pub text: String,
+    pub start: usize,
+    pub end: usize,
+    pub best_source: Option<usize>,
+    pub score: f64,
+    pub grounded: bool,
+}
+
+/// The whole report: every sentence in position order plus the aggregate
+/// verdict, every field always present (the house result-object style).
+/// `grounded_ratio` is `grounded_count / sentences.len()` (`0.0` when
+/// there are no sentences), `mean_score` the per-sentence score mean
+/// (`0.0` when empty), `best_score` the max per-sentence score (`0.0`
+/// when empty), `coverage` the text-level token utilization of the
+/// reported text against the joined sources (`grounded_impl`'s
+/// `grounding_coverage(text, sources_joined_with_newlines)`: what fraction
+/// of the output's own tokens the sources actually supply, `0.0` with no
+/// sources or empty text), and `query_score` the optional query's
+/// `ground_sentences` aggregate over the text (the best sentence's F1
+/// against the query: the retrieval lens on WHICH grounded sentence to
+/// read first; `0.0` when no query was given).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroundingReport {
+    pub sentences: Vec<ReportSentence>,
+    pub grounded_ratio: f64,
+    pub grounded_count: usize,
+    pub mean_score: f64,
+    pub best_score: f64,
+    pub coverage: f64,
+    pub query_score: f64,
+}
+
+/// The grounding report: the Deepchecks "Grounded in Context" pipeline
+/// shape (Gerner et al. 2025, "Grounded in Context: Retrieval-Based Method
+/// for Hallucination Detection", arXiv 2504.15771: decompose the output
+/// into statements, score each statement against the context, aggregate
+/// the scores into one verdict) with the lexical layer tors has and the
+/// NLI entailment model the paper's step 5 names and tors deliberately
+/// does not pretend to have (the verdict here is a lexical-overlap
+/// threshold, the handoff point where a consumer's own NLI model takes
+/// over; see [`ground_sentences`]'s docs for the honest-limitations line).
+///
+/// Decomposition is the suite's own UAX #29 sentence segmentation
+/// ([`sentence_spans`], the bounds `sentence_bounds` publishes, the
+/// citation unit the attribution literature converged on). Per-sentence
+/// scoring is the family's own best sentence-source alignment: for each
+/// (sentence, source) pair, [`highlight`]'s core scores the sentence as
+/// the query against the source at the report budget (1 snippet,
+/// [`REPORT_MAX_CHARS`]) and the sentence's `score`/`best_source` are the
+/// max/argmax over sources (earliest source wins ties; `None` when no
+/// source aligns at all, `score` `0.0` with it). Aggregation: the
+/// fraction of sentences whose best alignment reaches `threshold` (the
+/// per-sentence `grounded` verdict), plus the text-level coverage recall
+/// and the optional query's own best-sentence score, see
+/// [`GroundingReport`] for every field's exact definition.
+///
+/// Total cost is linear in (sentences x sources) x highlight's bounded
+/// per-pair pass (the source re-tokenized per pair, the DP bounded by the
+/// query cap and the budget's token width, the documented
+/// adversarial-density caps all inherited), one reusable call shape the
+/// binding runs under a single `py.detach` for the WHOLE report (the
+/// composition is the detached pass; nothing inside it re-attaches).
+fn grounding_report_core(
+    sentences: &[(usize, usize, usize, usize)],
+    text: &str,
+    sources: &[&str],
+    query: Option<&str>,
+    threshold: f64,
+) -> GroundingReport {
+    let mut out: Vec<ReportSentence> = Vec::with_capacity(sentences.len());
+    let mut grounded_count = 0usize;
+    let mut sum = 0.0f64;
+    let mut best = 0.0f64;
+    for &(ss, se, bs, be) in sentences {
+        let claim = &text[bs..be];
+        // The best sentence-source alignment: highlight's own score, the
+        // argmax over sources with the earliest index winning ties (`>`,
+        // never `>=`). No source sharing a token leaves the alignment
+        // None at score 0.0: an empty source list grounds nothing.
+        let mut best_score = 0.0f64;
+        let mut best_src: Option<usize> = None;
+        for (j, src) in sources.iter().enumerate() {
+            let g = highlight(claim, src, 1, REPORT_MAX_CHARS);
+            if g.score > best_score {
+                best_score = g.score;
+                best_src = Some(j);
+            }
+        }
+        let grounded = best_src.is_some() && best_score >= threshold;
+        if grounded {
+            grounded_count += 1;
+        }
+        sum += best_score;
+        best = best.max(best_score);
+        out.push(ReportSentence {
+            text: text[bs..be].to_owned(),
+            start: ss,
+            end: se,
+            best_source: best_src,
+            score: best_score,
+            grounded,
+        });
+    }
+    let n = out.len();
+    let grounded_ratio = if n == 0 {
+        0.0
+    } else {
+        grounded_count as f64 / n as f64
+    };
+    let mean_score = if n == 0 { 0.0 } else { sum / n as f64 };
+    // The text-level coverage recall: what fraction of the reported
+    // text's own tokens the sources supply, the recall twin
+    // `grounding_coverage` computes over the whole text at once (the
+    // per-sentence scores above are the precision-side lens). The sources
+    // ride joined with newlines (separate documents, one utilization
+    // target); no sources means nothing supplies the text, exactly 0.0.
+    let coverage = if sources.is_empty() || text.is_empty() {
+        0.0
+    } else {
+        crate::grounded_impl::grounding_coverage(text, &sources.join("\n"))
+    };
+    // The optional query's retrieval lens: `ground_sentences`' aggregate
+    // (the best sentence's F1 against the query), 0.0 when no query.
+    let query_score = match query {
+        Some(q) if !q.is_empty() => ground_sentences(q, text, None).score,
+        _ => 0.0,
+    };
+    GroundingReport {
+        sentences: out,
+        grounded_ratio,
+        grounded_count,
+        mean_score,
+        best_score: best,
+        coverage,
+        query_score,
+    }
+}
+
+/// The report entry the binding calls: segmentation built once here so an
+/// empty text short-circuits before any source work (the pinned empty
+/// shape), then the core pass above.
+pub fn grounding_report(
+    text: &str,
+    sources: &[&str],
+    query: Option<&str>,
+    threshold: f64,
+) -> GroundingReport {
+    let sentences = sentence_spans(text);
+    if sentences.is_empty() {
+        return GroundingReport {
+            sentences: Vec::new(),
+            grounded_ratio: 0.0,
+            grounded_count: 0,
+            mean_score: 0.0,
+            best_score: 0.0,
+            coverage: 0.0,
+            query_score: 0.0,
+        };
+    }
+    grounding_report_core(&sentences, text, sources, query, threshold)
 }
 
 #[cfg(test)]
