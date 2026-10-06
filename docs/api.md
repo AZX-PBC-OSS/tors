@@ -3172,6 +3172,123 @@ expected behavior, not a defect.
 **Async**: `await tors.aio.grounding_coverage(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). The weighted-LCS DP is O(|S|·|T|) up to the 16384-token operand caps, milliseconds at page scale and seconds at the caps, so the hop is noise on document-scale operands; a sentence-or-paragraph pair is a microsecond pass, prefer the sync spelling there.
 
 Evidence: `src/py/grounded.rs` detaches the whole pass with a single-float residue; `tests/test_gil_release.py::test_grounding_coverage_in_a_thread_...` states the wall at 12 MiB x 12 MiB operands is seconds (caps bounding it at ~10^8 cells) and measures ~10-50 ms walls at 2 MiB + 1 MiB.
+
+## `tors.grounding_report`
+
+```python
+def grounding_report(
+    text: str,
+    sources: list[str],
+    query: str | None = None,
+    *,
+    threshold: float = 0.85,
+) -> GroundingReport: ...
+```
+
+**WHAT**: the production grounding-report composition: per-sentence
+grounding verdicts over a list of sources, plus the aggregate verdict.
+The pipeline shape is the Deepchecks "Grounded in Context" framework's
+(Gerner et al. 2025, "Grounded in Context: Retrieval-Based Method for
+Hallucination Detection", arXiv 2504.15771): decompose the output into
+statements, score each statement against the context, aggregate the
+per-statement scores into one verdict. tors implements the shape with
+its lexical layer, the paper's NLI entailment model (its step 5)
+deliberately left as the handoff: the verdict here is a lexical-overlap
+threshold, the same honest line `ground_sentences` draws (a lexical
+overlap cannot judge entailment; consumers needing that run their NLI
+model over the top-scored sentences).
+
+Returns the report dict, every key present every time:
+
+- `sentences`: one entry per UAX #29 sentence of `text`, position
+  order, each `{"text", "start", "end", "best_source", "score",
+  "grounded"}`. The offsets are the sentence's exact bounds (the tuples
+  `tors.sentence_bounds(text)` returns, Python codepoint indices, so
+  `text[start:end]` is exactly `sentence["text"]`).
+- `best_source`: the index of the source holding the sentence's best
+  alignment, earliest source winning ties; `None` when there is no
+  alignment at all (no sources, or no source shares a token with the
+  sentence), `score` `0.0` with it.
+- `score`: that best alignment's ROUGE-W F1 in `[0.0, 1.0]`, the score
+  `tors.highlight(sentence, source, max_snippets=1, max_chars=400)`
+  itself reports (the sentence scored as the query at the family's
+  default snippet budget), so a report sentence's score is exactly
+  reproducible from the primitives.
+- `grounded`: `score >= threshold` AND an alignment exists (no sources
+  grounds nothing, even at `threshold=0.0`). `threshold` defaults to
+  `is_grounded`'s documented 0.85 and must be in `[0.0, 1.0]`.
+- `aggregate`: `{"grounded_ratio", "grounded", "sentences",
+  "mean_score", "best_score", "coverage", "query_score"}`.
+  `grounded_ratio` is the grounded fraction (`0.0` for no sentences),
+  `grounded`/`sentences` the counts, `mean_score`/`best_score` the
+  per-sentence score mean/max, `coverage` the text-level token
+  utilization of `text` against the newline-joined sources
+  (`tors.grounding_coverage(text, "\n".join(sources))`: what fraction
+  of the output's own tokens the sources supply, the recall reading
+  that complements the per-sentence precision lens; `0.0` with no
+  sources), and `query_score` the optional query's `ground_sentences`
+  aggregate (the best sentence's F1 against the query: WHICH grounded
+  sentence reads first; `0.0` when `query` is `None`. An empty-string
+  `query=""` pins to that same `0.0` — for the scoring, `query=""` and
+  `query=None` are identical).
+
+**WHY this shape**: the decomposition-then-verification pipeline is
+what makes long contexts tractable for a verifier (the paper's own
+motivation: an NLI encoder with a 512-token window cannot score a
+whole response against a whole context, so each claim gets its own
+small premise set); tors's report hands the consumer that same
+structure with the lexical scores in place, so the cheap pass ranks
+and filters (which sentences, which sources, at what threshold) before
+the expensive model runs. The aggregate is deliberately plural (ratio,
+counts, mean, best, coverage, query lens) rather than one number: a
+single significant ungrounded sentence is invisible in a mean but
+blunt in `grounded_ratio`, while the mean answers "how much of this
+text is supported" and `coverage` catches wholesale fabrication the
+per-sentence alignment can miss.
+
+**HOW**: `sources` is a list of strings (an empty entry is legal and
+aligns nothing). Degenerate inputs are pinned shapes, never errors: an
+empty text returns the all-empty report (empty sentence list, every
+aggregate key at 0.0); no sources grounds nothing (every
+`best_source` `None`, `grounded` `False`, `grounded_ratio` and
+`coverage` `0.0`).
+
+```python
+text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+tors.grounding_report(text, ["Service log: the bushing torque spec was 42 Nm."], query="torque")
+# {'sentences': [{'text': 'The pump failed. ', 'start': 0, 'end': 17,
+#                 'best_source': 0, 'score': 0.16666666666666669, 'grounded': False},
+#                {'text': 'The bushing torque spec was 42 Nm. ', 'start': 17,
+#                 'end': 52, 'best_source': 0, 'score': 0.8750000000000003,
+#                 'grounded': True},
+#                {'text': 'Replaced.', 'start': 52, 'end': 61,
+#                 'best_source': None, 'score': 0.0, 'grounded': False}],
+#  'aggregate': {'grounded_ratio': 0.3333333333333333, 'grounded': 1,
+#                'sentences': 3, 'mean_score': 0.3472222222222223,
+#                'best_score': 0.8750000000000003,
+#                'coverage': 0.6363636363636365, 'query_score': 0.25}}
+```
+
+**Async**: `await tors.aio.grounding_report(...)` runs this under
+`asyncio.to_thread` (see [Async use](async.md)). The report's cost is
+linear in (sentences x sources) highlight passes (each bounded by the
+family's query cap and the 400-char budget, the source re-tokenized per
+pair), milliseconds at page scale and hundreds of milliseconds at
+document scale, so the hop is noise on document-scale inputs; a
+one-sentence text is a microsecond pass, prefer the sync spelling
+there.
+
+Evidence: `src/grounding_impl.rs`'s `grounding_report` composes the
+in-module segmentation, `highlight`'s per-pair scoring, and
+`grounded_impl::grounding_coverage` and `ground_sentences`' aggregate
+unchanged; `src/py/grounding.rs` runs the WHOLE composition under one
+`py.detach` (never one detach per sentence; the residue is the
+O(sentences) dict marshalling); the differential oracle is the same
+composition in Python (`sentence_bounds` + `highlight` +
+`grounding_coverage` + `ground_sentences`), pinned exact in
+`tests/test_grounding_report.py`, with the heartbeat cell at document
+scale and the (sentences x sources) scaling pin beside it.
+
 ## `tors.similarity_ratio` / `tors.get_close_matches`
 
 ```python
@@ -3422,6 +3539,20 @@ land a span strictly inside the previous chunk (the same text embedded twice,
 the failure mode #83 fixed), the next chunk starts at the previous chunk's end
 instead, so a chunk is never contained in its predecessor.
 
+The 2026 systematic chunking study prices this knob end to end: across paired
+configurations on Natural Questions, adding 10-20% overlap did not improve
+retrieval (`|Δ BERTScore| <= 0.004`, EM differences `<= 0.001`) while chunk
+count and index size inflated by exactly `1/(1 - r)` (Bennani & Moslonka 2026,
+"A Systematic Analysis of Chunking Strategies for Reliable Question
+Answering", arXiv 2601.14123, Finding F1), so its recommendation is
+`overlap = 0` unless you have evidence your retriever benefits from boundary
+redundancy. That is why every member of this family defaults to `overlap=0`,
+and `tors.chunk_overlap_cost` returns the inflation factor for any ratio you
+are considering. The same study's method finding (sentence/structure-aware
+chunking beats token chunking: sentence ≈ semantic > token) is what
+`boundary="sentence"`, `chunk_by_sentences`, and `chunk_hierarchical`'s
+default hierarchy implement.
+
 `max_chars < 1` or `overlap < 0` raise `ValueError`; an unrecognized `boundary` raises
 `ValueError` (the `truncate_to_bounds` spelling). `chunk_cdc`'s byte-level sibling:
 `chunk_text` is the semantic/embedding-pipeline chunker (word/sentence-aware, sized
@@ -3502,7 +3633,11 @@ token's start through the last included token's end, not through any trailing
 whitespace after it, so unlike `chunk_text`'s covering-partition contract,
 non-overlapping chunks here are not necessarily contiguous. The final chunk may hold
 fewer than `words_per_chunk` tokens when the total doesn't divide evenly. `overlap`
-words repeat at the start of the next chunk. Empty text, or text with no word tokens
+words repeat at the start of the next chunk. (On overlap's documented price:
+the 2026 systematic study measured no retrieval gain from 10-20% overlap
+against its exact `1/(1-r)` index inflation, arXiv 2601.14123, Finding F1;
+`overlap=0` is this family's default recommendation and
+`tors.chunk_overlap_cost` prices the factor.) Empty text, or text with no word tokens
 at all, returns `[]`.
 
 `words_per_chunk < 1` or `overlap < 0` raise `ValueError`; `overlap >= words_per_chunk`
@@ -3890,7 +4025,11 @@ silently degrades to zero overlap for just that one transition, the same
 snap-collapse `chunk_text` already applies — and so does an overlap whose
 re-cut would land the next chunk strictly inside its predecessor (the same
 text twice, no new context): the transition falls back to the zero-overlap
-cut instead, so ends always strictly advance.
+cut instead, so ends always strictly advance. (The knob's documented
+default: the 2026 systematic study found no retrieval gain from 10-20%
+overlap against its exact `1/(1-r)` index inflation, arXiv 2601.14123,
+Finding F1; `overlap=0` is the family default and
+`tors.chunk_overlap_cost` prices the factor.)
 
 `overlap_boundary="word"` opts the snap into word-aware tails (#47) for
 exactly the embedding-pipeline shape a mid-word tail start is a rough
@@ -4096,7 +4235,11 @@ stall, loop, or emit the same text twice: the same forward-progress
 discipline `chunk_text`'s overlap applies. Chunks are non-empty, strictly
 increasing in both start and end, cover to the end of the text, and each
 fits the budget per the same measurement the packing used; with
-`overlap=0` they are a contiguous lossless covering partition.
+`overlap=0` they are a contiguous lossless covering partition. (The knob's
+documented default, family-wide: the 2026 systematic study found no
+retrieval gain from 10-20% overlap against its exact `1/(1-r)` index
+inflation, arXiv 2601.14123, Finding F1; `tors.chunk_overlap_cost` prices
+the factor.)
 
 `max_tokens < 1`, an out-of-range `overlap` (either spelling), or a
 mis-shaped `token_offsets` sequence raise `ValueError` before any packing
@@ -4200,6 +4343,148 @@ example values, not independently chosen.
 tors.chunk_cdc(b"hello world " * 10_000)
 # [(0, 65534), (65534, 120000)]
 ```
+
+## `tors.chunk_overlap_cost`
+
+```python
+def chunk_overlap_cost(overlap: float) -> float: ...
+```
+
+**WHAT**: the chunk family's overlap knob, priced: the index-inflation
+factor `1 / (1 - overlap)` for an overlap ratio in `[0.0, 1.0)`. The
+2026 systematic chunking study (Bennani & Moslonka 2026, "A Systematic
+Analysis of Chunking Strategies for Reliable Question Answering",
+arXiv 2601.14123, Finding F1) measured that adding 10-20% overlap did
+NOT improve retrieval (`|Δ BERTScore| <= 0.004`, EM differences
+`<= 0.001`) while chunk count and index size inflated by exactly
+`1 / (1 - r)` (their worked example: `r = 0.2` is 1.25x more chunks,
+ingestion time and storage), and recommended `overlap = 0` unless you
+have evidence your retriever benefits from boundary redundancy. That is
+why every member of the chunk family defaults to `overlap=0`; this
+function prices whatever ratio you are considering anyway.
+
+**WHY a function and not a comment**: the cost is not linear in the
+overlap and not intuitive at the top of the range (0.5 is 2x, 0.9 is
+10x, 0.99 is 100x), so a caller tuning `overlap` by feel against a
+storage budget benefits from the exact factor, and the domain's edge
+(`overlap >= 1` is infinite inflation: a chunker whose overlap equals
+its budget never advances, and the index it would build is infinite) is
+the asymptote named in the error rather than an `inf` silently flowing
+into a size estimate.
+
+**HOW**: `overlap` must be a finite float in `[0.0, 1.0)`; negative
+values, values at or past 1.0, and `NaN` raise `ValueError` naming the
+asymptote. Pure float arithmetic: no GIL release (the work is strictly
+less than the argument extraction around it, the `simhash_distance`
+zero-detach class), and no `aio` twin for the same reason.
+
+```python
+tors.chunk_overlap_cost(0.0)
+# 1.0
+tors.chunk_overlap_cost(0.2)
+# 1.25
+tors.chunk_overlap_cost(0.5)
+# 2.0
+tors.chunk_overlap_cost(0.75)
+# 4.0
+```
+
+## `tors.chunk_quality`
+
+```python
+def chunk_quality(
+    chunks: Sequence[tuple[int, int]],
+    text: str,
+    *,
+    tau: int = 0,
+) -> ChunkQuality: ...
+```
+
+**WHAT**: the two intrinsic chunk-quality metrics of the adaptive-
+chunking study (de Moura Júnior, Lelong & Blangero, "Adaptive Chunking:
+Optimizing Chunking-Method Selection for RAG", LREC 2026, arXiv
+2603.25333, the `ekimetrics/adaptive-chunking` reference implementation)
+computed over
+the caller's own chunk spans: the `(start, end)` tuples any member of
+the chunk family returns, or any hand-built spans. Returns
+`{"integrity": float, "cohesion": float}`, both in `[0.0, 1.0]`, both
+keys always present.
+
+- `integrity` is the study's **Block Integrity**: the fraction of the
+  text's UAX #29 sentences (the suite's own segmentation, the same
+  bounds `sentence_bounds` publishes, standing in for the study's
+  annotated gold blocks) that NO chunk boundary crosses. A boundary
+  crosses a sentence when it falls strictly inside the sentence's span,
+  farther than `tau` codepoints (the tolerance, default 0, for
+  segmenter jitter) from BOTH edges. A boundary exactly at a sentence
+  edge is never a crossing; sentence-sized chunks score 1.0 by
+  construction.
+- `cohesion` is the study's **Intra-Chunk Cohesion** as tors's
+  dependency-free LEXICAL PROXY: the mean Dice coefficient
+  (`shingle_dice`'s exact quantity, `2|A ∩ B| / (|A| + |B|)` over the
+  width-3 word-shingle sets, the same UAX #29 tokenization and
+  case-fold+NFC matching form the near-duplicate family uses) between
+  each sentence and its containing chunk, averaged over the
+  (sentence, chunk) pairs that exist (containment is the assignment; a
+  sentence no chunk contains contributes to neither metric, its damage
+  is `integrity`'s).
+
+**The honest caveat, stated because the names invite the comparison**:
+the study's ICC scores sentence-to-chunk similarity with EMBEDDING
+cosine similarity. tors's version is a different, weaker, but usable
+signal: it rewards chunks whose sentences share surface vocabulary and
+penalizes chunks that stitch unrelated sentences together, but it
+cannot see topical continuity that shares no words (a pronoun-heavy
+continuation scores low), it inherits the shingle family's empty-set
+conventions (a sentence shorter than the shingle width has an empty
+shingle set; two empty sets score 1.0, exactly one empty 0.0), and its
+numbers are NOT comparable to the paper's. What it buys is that the
+metrics run with no model, no network, and no dependency beyond the
+crate's own segmenters and shingle hashes, so a chunking-config sweep
+can gate on them per document, in milliseconds, the way the study's
+selector does.
+
+**Degenerate shapes, pinned**: an empty chunk list or an empty text
+gives `{"integrity": 1.0, "cohesion": 0.0}` (no boundary crosses
+anything, vacuously; no sentence-chunk pair exists, the conservative
+0/0 reading, the same convention `grounding_coverage` pins). A span out
+of `text`'s range or with `start > end` raises `ValueError`; `tau < 0`
+raises `ValueError`.
+
+```python
+text = "The pump failed. The bushing torque spec was 42 Nm. Replaced."
+tors.chunk_quality(tors.chunk_by_sentences(text, 1), text)
+# {'integrity': 1.0, 'cohesion': 1.0}
+tors.chunk_quality([(0, 61)], text)
+# {'integrity': 1.0, 'cohesion': 0.31746031746031744}
+tors.chunk_quality([(0, 30), (30, 61)], text)
+# {'integrity': 0.6666666666666667, 'cohesion': 0.2857142857142857}
+tors.chunk_quality([], text)
+# {'integrity': 1.0, 'cohesion': 0.0}
+```
+
+(The second call: one chunk covering everything, so nothing is crossed;
+the middle sentence's shingles all ride inside the chunk's (Dice 2/3)
+while the flanking sentences' sets are mostly new material to the chunk
+(Dice 2/7) or empty outright ("Replaced." has fewer tokens than the
+shingle width: the exactly-one-empty convention scores 0.0), and the
+mean of 2/7, 2/3, 0 is 0.3174. The third call: the boundary at 30 cuts
+the middle sentence, span (17, 52), and integrity pays for it.)
+
+**Async**: `await tors.aio.chunk_quality(...)` runs this under
+`asyncio.to_thread` (see [Async use](async.md)). The pass is one
+segmentation plus one shingle pass per chunk and sentence, linear in
+the text, milliseconds at page scale and tens of milliseconds at MiB
+scale, so the hop is noise on document-scale inputs; a short paragraph
+is a microsecond pass, prefer the sync spelling there.
+
+Evidence: `src/chunk_quality_impl.rs` defines both metrics over the
+shared segmenters (`grounding_impl::sentence_spans`) and the
+near-duplicate family's shingle hashes (`near_dup_impl::shingle_hashes`,
+width 3); `src/py/chunk.rs` detaches the whole pass with a two-key dict
+residue; the differential oracle is the published-primitive composition
+(`tors.sentence_bounds` + `tors.shingle_dice`), pinned exact in
+`tests/test_chunk_quality.py`, with the linear scaling cell beside it.
 
 ## `tors.content_hash`
 
@@ -5313,7 +5598,7 @@ the signature data itself) plus pair emission ONLY inside shared
 buckets, which is `O(output)` by definition — nothing compares
 signatures that share no bucket, so there is no `n²` anywhere except
 through the output. Resident memory is one band's bucket table (freed
-per band) plus the dedup set, `O(n + pairs)`. The linear class is pinned
+per band) plus the sorted pair accumulator's merge scratch, `O(n + pairs)`. The linear class is pinned
 by growth-ratio cells in `tests/test_scaling_pins.py`, the memory class
 by a VmHWM guard in `tests/test_lsh.py`, and the pass is benchmarked in
 `benches/lsh.rs`.
@@ -6132,6 +6417,196 @@ tors.ndcg_at_k(ranked, relevant, k=2)     # 0.6131471927654584
 # (k=2's ideal packs two of the three relevant ids at ranks 1-2; one hit
 # at rank 1 scores 1/1.6309...)
 tors.ndcg_at_k(ranked, relevant, gains={"cat-a": 3.0, "bird-c": 1.0})
+```
+
+## `tors.score_fuse`
+
+```python
+def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
+```
+
+**Async**: `await tors.aio.score_fuse(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Honest caveat, measured, the same one `rank_fuse`'s line carries: the pair walk (one dict op plus one score extraction per entry, interpreter hashing) and the O(distinct-ids) tuple marshalling are GIL-held inside the worker thread (ratios 0.52-0.74 at 100k entries across the three methods), so the hop buys the detached arithmetic and the caller's concurrency shape; past ~10^6 total entries the walk alone holds the GIL for 100ms+ and no placement buys it back. Evidence: `src/py/score_fusion.rs` holds the walk under the GIL and detaches the normalization/accumulation/sort; `tests/test_gil_release.py::test_score_fuse_in_a_thread_...` carries the band.
+
+`score_fuse` is the **score-based sibling of `rank_fuse`**: the same id
+table, the same first-appearance tie-break, the same one-pair-per-id
+emission, but the input consumes raw similarity scores instead of ranks
+-- `(id, score)` pairs (a BM25 output, a cosine similarity, a click
+count), the other half of the fusion problem. Three methods: CombMNZ and the linear pattern are the two score-based
+baselines of Cormack, Clarke & Buüttcher's SIGIR 2009 comparison (the
+RRF paper's own baseline set,
+<https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf>, where CombMNZ is
+the strongest score-based baseline they report); linear is
+Elasticsearch's linear-retriever pattern:
+<https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/linear-retriever>.
+
+- **`method="combmnz"`** (the default), Fox & Shaw, "Combination of
+  Multiple Searches", TREC-2 1994: with `norm_i` the min-max
+  normalized scores of list `i`,
+
+  ```text
+  score(d) = lists(d) x sum over lists of w_i x norm_i(d)
+  ```
+
+  CombSUM times the number of lists containing `d` (the MNZ
+  multiplier: each additional list's hit is a vote of confidence in
+  the score itself). The strongest score-based
+  baseline in the Cormack 2009 comparison (their own wording: RRF beats
+  it in all but one of their topics), hence the default.
+- **`method="borda"`**: the rank-based count,
+  `score(d) = sum over lists of w_i x (n_i - rank_i(d)) / n_i`, ranks
+  1-based over the DEDUPLICATED list (a duplicate folds to its first
+  occurrence and later ids advance one position, `rank_fuse`'s
+  contract). The votes are RANK-based deliberately: Borda counts are
+  defined over positions (each list elects its top document with
+  `n-1` points and its last with 0), and the `(n - rank)/n` spelling
+  only rescales that count to `[0, 1)` so a weight means the same
+  thing over a 3-document list and a 300-document one. Normalizing
+  the scores here (min-max, the CombMNZ spelling) would not be Borda:
+  it would smuggle score magnitudes back into the one method whose
+  entire point is that only the ordering votes.
+- **`method="linear"`**: the Elasticsearch linear-retriever pattern
+  (<https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers/linear-retriever>):
+  `score(d) = sum over lists of w_i x norm_i(d)` -- no MNZ
+  multiplier, min-max normalized, the same per-retriever `weight`
+  shape weighted RRF carries.
+
+**The normalization conventions** (pinned in `tests/test_score_fusion.py`):
+`norm_i` is min-max per list over that list's OWN scores, and the
+edges are pinned:
+
+- **A zero-range list** -- every score equal, a single-entry list
+  included -- normalizes every entry to the neutral midpoint `0.5`.
+  The list carries order information only ("all these docs tie"); the
+  midpoint invents neither a winner (`1.0`) nor a loser (`0.0`), and a
+  linear sum carries it without distortion.
+- **Negative scores are legal.** Min-max maps ANY finite range onto
+  `[0, 1]` (`(s - min)/(max - min)` shifts and rescales; the signs of
+  the raw scores wash out), so a cosine-similarity list (`-1..1`) and
+  a BM25 list (`0..40`) normalize to the same interval. The rejected
+  domain is only non-finite scores: a NaN poisons every comparison it
+  touches and an infinite min or max makes `max - min` ill-defined --
+  NaN and both infinites raise `ValueError`, the `gains`
+  finite-domain discipline.
+- **A range that itself overflows** (`-1.7e308` to `+1.7e308`: legal
+  finite scores whose `max - min` is `+inf`) saturates instead of
+  dividing `inf/inf` (NaN): a numerator that overflowed against the
+  infinite range answers exactly `1.0` (`max` itself is the first such
+  numerator; the top of the scale), while finite numerators divide to
+  exactly `0.0` -- not merely small values: a finite number divided by
+  `+inf` is `0.0` in float arithmetic, so the overflowed list's
+  internal order collapses to two buckets (`1.0` for the overflowed
+  maxima, `0.0` for everything else). The policy is monotone and
+  NaN-free, the same
+  documented approximation `ndcg_at_k`'s saturating ratio carries,
+  with the same one-sided cost: near-top scores can over-report as
+  exactly `1.0` when both score extremes sit within ~16 orders of
+  magnitude of f64's ceiling.
+
+The rest is `rank_fuse`'s discipline carried over unchanged (one
+spelling note: `k` here is an OUTPUT CUTOFF -- the top-k pairs returned;
+`rank_fuse`'s `k` is the RRF rank constant inside the scoring formula.
+Same name, different job, each documented on its own call).
+`scored_lists` is a non-empty list of lists of `(id, score)` pairs
+(fusing zero lists raises `ValueError`, the `merkle_root` "root of no
+chunks" precedent; an individual empty list is legal and contributes
+no votes, the "this retriever returned nothing" shape). A duplicate id
+folds to its FIRST occurrence per list -- the first score stands, and
+a folded-away score does not shape that list's min-max range -- while
+the same id in a DIFFERENT list votes again with its own score (the
+whole point of fusion). Dedup and equality follow Python's own
+dict/set semantics (`1`, `True`, and `1.0` are the same id, the first
+spelling returned); an unhashable id raises `TypeError` (Python's own
+hash error); a malformed pair (not a 2-element sequence) or a
+non-numeric score raises `TypeError`.
+
+`weights=` optionally carries one positive finite float per list (the
+weighted-RRF philosophy extended to score space: a weight re-scales
+one list's contribution, never the vote's shape). `weights=None` (the
+default) is the all-1.0 unweighted fusion EXACTLY, outputs
+byte-identical to the unweighted spelling (pinned). A zero, negative,
+NaN, or infinite weight raises `ValueError` (strictly positive
+finite, `rank_fuse`'s own domain: a zero-weight list is almost
+certainly a miscounted retriever list); a length mismatch with
+`scored_lists` raises `ValueError` naming both sides; a non-sequence
+`weights` (a bare `str` included) or a non-numeric entry raises
+`TypeError`. `method` must be exactly one of `"combmnz"`, `"borda"`,
+`"linear"` (case-sensitive; `ValueError` naming the accepted set
+otherwise). `k=None` (the default) returns every distinct id; `k=N`
+the top N (`k < 1` raises `ValueError`, truncation clamps to the
+distinct-id count).
+
+Returns `(id, score)` pairs for every distinct id across all lists,
+sorted by fused score descending, ties broken by earliest first
+appearance across the lists in caller order (`rank_fuse`'s contract,
+extended to score space). Emission is vote-existence, not score
+positivity: a fused `0.0` (Borda's last place, a list's minimum, an
+underflowed denormal weight) still appears, ordered last. Scores are
+finite-or-`+inf`, never NaN (all-nonneg accumulations; the saturating
+norm above).
+
+**GIL model**: one GIL-held walk of every pair (the id table is a
+dict, Python-object hashing IS interpreter work, plus one score
+extraction per entry -- `rank_fuse`'s arg-walk class, one conversion
+heavier), the `weights` walk and validation when supplied, then the
+per-list min-max, normalization, weighted accumulation, MNZ counts,
+and sort (plain arithmetic over dedup indices) under one `py.detach`,
+then the O(distinct-ids) `(id, score)` tuple marshalling. The same
+reranking-scale guidance as `rank_fuse`: hundreds to thousands of
+entries per list, not whole-corpus; the id-shape caveat
+(hash-expensive ids push the GIL-held share toward 1.0) carries over
+verbatim. Measured bands: `tests/test_gil_release.py`, scaling pins
+in `tests/test_scaling_pins.py`.
+
+```python
+tors.score_fuse([
+    [("cat-a", 1.0), ("dog-b", 0.5)],   # a BM25 reranker's (id, score) top 2
+    [("dog-b", 0.8), ("cat-a", 0.2)],   # a vector search's top 2
+    [("bird-c", 3.0)],                  # a keyword filter's single hit
+])
+# [('cat-a', 2.0), ('dog-b', 2.0), ('bird-c', 0.5)]
+# cat-a and dog-b tie (norm 1.0 from each of two lists, x2 lists =
+# 2.0 each); cat-a appeared first and wins the tie. bird-c rides a
+# single-entry (zero-range) list at the neutral 0.5.
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    method="linear",                    # Elastic's linear retriever: no MNZ boost
+)
+# [('cat-a', 1.0), ('dog-b', 1.0), ('bird-c', 0.5)]
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    method="borda",                     # positions vote, magnitudes never
+)
+# [('cat-a', 0.5), ('dog-b', 0.5), ('bird-c', 0.0)]
+# cat-a: (2-1)/2 from list 0 + 0 from list 1; bird-c: (1-1)/1 = 0,
+# still emitted (vote existence, ordered last).
+
+tors.score_fuse(
+    [
+        [("cat-a", 1.0), ("dog-b", 0.5)],
+        [("dog-b", 0.8), ("cat-a", 0.2)],
+        [("bird-c", 3.0)],
+    ],
+    weights=[2.0, 1.0, 1.0],            # weighted CombMNZ: the BM25 leg counts double
+)
+# [('cat-a', 4.0), ('dog-b', 2.0), ('bird-c', 0.5)]
+# cat-a's weighted vote (2.0 x 1.0 from list 0) breaks the 2.0/2.0
+# tie; bird-c's single-list 0.5 carries its own list's weight (1.0).
 ```
 
 ## `tors.apply_pipeline`

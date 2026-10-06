@@ -20,11 +20,18 @@ It covers only the large-input functions: the chunking family, `tf_idf`,
 `recall_at_k`, `precision_at_k`; the fusion/membership walks over large
 rankings are interpreter-side hashing, so the worker thread buys their
 detached arithmetic plus the caller's concurrency shape, and the measured
-GIL bands in test_gil_release.py carry the honest residue),
+GIL bands in test_gil_release.py carry the honest residue) and its
+score-space sibling `score_fuse` (the same walk class, one score
+extraction per entry heavier; same honest residue),
 `diff_opcodes`, `diff_opcodes_lines`, `apply_pipeline`,
 `minhash_signature`, `highlight` (the grounding pass is linear in the
 chunk with the DP capped, but a 2k-token chunk already measures ~1 ms —
-thread-hop territory), the
+thread-hop territory), the grounding pair `ground_sentences`/
+`grounding_coverage` plus the grounding-report composition
+`grounding_report` (linear in sentences x sources, document scale is
+its home input), the chunk-quality metrics `chunk_quality` (linear in
+the text; `chunk_overlap_cost` is deliberately absent, pure float
+arithmetic, the random-generators' exclusion class), the
 `normalize`/`finalize` pipeline pair, the `decode_utf8`/`finalize_utf8`/
 `decode_utf16`/`b64_encode_bytes`/`b64_decode` byte codecs, the
 fuzzy-matching, near-duplicate, and JSON-repair families

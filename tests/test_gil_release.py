@@ -3417,6 +3417,56 @@ def test_weighted_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     )
 
 
+def _scored_lists_for_gil(total_entries: int, n_lists: int = 5) -> list:
+    """The fusion cell's deterministic workload, extended to (id, score)
+    pairs (the dedup walk is one dict op per pair PLUS one float
+    extraction per pair -- a strictly heavier interpreter-side walk than
+    rank_fuse's bare-id one, the honest gap between the two cells)."""
+    per_list = total_entries // n_lists
+    id_space = total_entries // 2
+    return [
+        [
+            (f"id_{(j * per_list + i) % id_space}", ((i * 37) % 100) / 100.0)
+            for i in range(per_list)
+        ]
+        for j in range(n_lists)
+    ]
+
+
+def test_score_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
+    """The score-fusion claim, the rank_fuse cell's own classes with a
+    heavier walk: the GIL-held residue is the pair walk (one dict lookup
+    + one score extraction per entry, Python-object hashing IS
+    interpreter work) plus the O(distinct-ids) ``(id, score)`` tuple
+    marshalling; the detached pass is the per-list min-max, the
+    weighted accumulation, the MNZ counts, and the sort. The budget is
+    the rank_fuse cell's 0.80 unchanged -- the extraction the
+    unweighted walk never paid is one C-level float conversion per
+    entry, the same interpreter-side class -- at the 100k shape (the
+    200k shape's walls run 85-230ms, past the 100ms absolute ceiling's
+    comfort band; 100k keeps every sample inside both budgets).
+
+    Measured on the dev box (ambient load ~2-4, 4 samples per method):
+    100k total entries across 5 lists -- combmnz worst gaps 29-46ms of
+    55-74ms walls (ratios 0.52-0.61), borda 20-31ms of 30-45ms (0.66-
+    0.73), linear 27-64ms of 50-87ms (0.54-0.74); the pair walk +
+    marshalling are structurally the majority, the same shape rank_fuse
+    measures, and the 0.80 budget holds with ~1.1x margin at the worst
+    observed window. Caller guidance is the rank_fuse cell's own:
+    reranking-scale primitive (hundreds to thousands of entries per
+    list), not a whole-corpus one; the id-shape caveat (hash-expensive
+    ids push the GIL-held share toward 1.0) carries over verbatim --
+    recorded, not re-pinned, in test_score_fusion.py.
+    """
+    lists = _scored_lists_for_gil(100_000)
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(tors.score_fuse, lists),
+            ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+        )
+    )
+
+
 def test_ndcg_at_k_on_a_large_ranking_keeps_the_loop_under_the_ceiling() -> None:
     """The metrics' claim, ceiling-only (the first_invalid_charset
     precedent, honestly so): the per-position membership walk (one

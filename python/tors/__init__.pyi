@@ -76,6 +76,57 @@ class GroundingResult(TypedDict):
 class SentenceGrounding(TypedDict):
     sentences: list[GroundingSnippet]
     score: float
+
+# `chunk_quality`'s shape, both keys present every time, both in
+# [0.0, 1.0]: `integrity` the fraction of the text's UAX #29 sentences no
+# chunk boundary crosses (the adaptive-chunking study's Block Integrity,
+# the suite's own segmentation as the gold blocks), `cohesion` the mean
+# within-chunk sentence-to-chunk Dice similarity over width-3 word
+# shingles (the study's Intra-Chunk Cohesion as tors's dependency-free
+# LEXICAL PROXY: the honest caveat is that the study's ICC uses embedding
+# cosine similarity, a different, weaker-but-usable signal here, never a
+# drop-in for the paper's numbers).
+class ChunkQuality(TypedDict):
+    integrity: float
+    cohesion: float
+
+# One `grounding_report` sentence entry, all six keys present every time:
+# the UAX #29 sentence's exact bounds (`text[start:end]` is exactly
+# `text`), `best_source` the index of the source holding the sentence's
+# best alignment (`None` when there is none: no sources, or no source
+# shares a token with the sentence), `score` that alignment's ROUGE-W F1
+# in [0.0, 1.0] (0.0 when `best_source` is None), `grounded` the
+# threshold verdict (score >= threshold AND an alignment exists).
+class GroundingReportSentence(TypedDict):
+    text: str
+    start: int
+    end: int
+    best_source: int | None
+    score: float
+    grounded: bool
+
+# `grounding_report`'s aggregate, all seven keys present every time:
+# `grounded_ratio` the grounded fraction of sentences (0.0 for no
+# sentences), `grounded`/`sentences` the counts, `mean_score`/`best_score`
+# the per-sentence score mean/max, `coverage` the text-level token
+# utilization of the text against the newline-joined sources
+# (`grounding_coverage`'s recall reading, 0.0 with no sources), and
+# `query_score` the optional query's `ground_sentences` aggregate (the
+# best sentence's F1 against the query; 0.0 when no query was given).
+class GroundingReportAggregate(TypedDict):
+    grounded_ratio: float
+    grounded: int
+    sentences: int
+    mean_score: float
+    best_score: float
+    coverage: float
+    query_score: float
+
+# `grounding_report`'s shape, both keys present every time.
+class GroundingReport(TypedDict):
+    sentences: list[GroundingReportSentence]
+    aggregate: GroundingReportAggregate
+
 # One `repair_json_diagnostics` entry, all six keys present every time
 # (`from`/`to`/`suggestion` are None when the action did not move a value
 # or offer a hint — a stable shape consumers can index blindly). The
@@ -1019,6 +1070,35 @@ def ground_sentences(
     max_chars: int | None = None,
 ) -> SentenceGrounding: ...
 
+# The grounding-report composition: the Deepchecks "Grounded in Context"
+# pipeline shape (Gerner et al. 2025, arXiv 2504.15771: decompose the
+# output into statements, score each statement against the context,
+# aggregate into one verdict) with tors's lexical layer in place of the
+# paper's NLI entailment model. Decomposition is the suite's UAX #29
+# sentence segmentation (sentence_bounds' exact tuples); per-sentence
+# scoring is the best sentence-source alignment highlight itself scores
+# (the sentence as the query, 1 snippet, the default 400-char budget),
+# best_source the argmax source index (None when nothing aligns);
+# `grounded` is threshold-parameterized (is_grounded's documented 0.85
+# default) and no source list grounds nothing even at threshold 0.0.
+# The aggregate's `coverage` is grounding_coverage's text-level recall
+# reading and `query_score` the optional query's ground_sentences
+# aggregate (0.0 when query is None). The LEXICAL layer, named as such:
+# the paper's NLI entailment step is the handoff a consumer's own model
+# takes over from.
+#
+# GIL note: ONE detached pass for the WHOLE report (the composition runs
+# server-side, never one detach per sentence: the underlying primitives
+# already detach their own passes when called directly); the residue is
+# only the O(sentences) dict marshalling.
+def grounding_report(
+    text: str,
+    sources: list[str],
+    query: str | None = None,
+    *,
+    threshold: float = 0.85,
+) -> GroundingReport: ...
+
 # GIL note: urllib.parse.quote/unquote are pure Python: a GIL-held
 # whole-text pass for the most-used encoding operation in web/ingestion
 # pipelines. These are byte-exact stdlib parity (pinned differentially per
@@ -1512,6 +1592,48 @@ def chunk_to_offsets(
     overlap: int | float = 0,
 ) -> list[tuple[int, int]]: ...
 
+# The chunk family's overlap knob, priced: the index-inflation factor
+# 1 / (1 - overlap) for an overlap ratio in [0.0, 1.0). The 2026
+# systematic chunking study (Bennani & Moslonka 2026, arXiv 2601.14123,
+# Finding F1) measured that 10-20% overlap did not improve retrieval
+# (|Delta BERTScore| <= 0.004) while chunk count and index size inflate
+# by exactly this factor (overlap=0.2 is 1.25x more chunks), hence the
+# family's documented overlap=0 default recommendation. Negative values
+# and values at or past 1.0 raise ValueError (the factor diverges at the
+# asymptote overlap=1: an index built from it is infinite), NaN with
+# them. Pure float arithmetic: no detach, no aio twin.
+def chunk_overlap_cost(overlap: float) -> float: ...
+
+# The two intrinsic chunk-quality metrics of the LREC 2026
+# adaptive-chunking study (de Moura Júnior, Lelong & Blangero 2026,
+# arXiv 2603.25333, ekimetrics/adaptive-chunking) over the caller's own
+# chunk spans (any
+# chunk-family (start, end) tuples, or hand-built spans): `integrity`
+# the study's Block Integrity over the suite's own UAX #29 sentence
+# spans (a chunk boundary crossing a sentence when it falls strictly
+# inside its span farther than `tau` codepoints, default 0, from both
+# edges), `cohesion` the study's Intra-Chunk Cohesion as tors's
+# dependency-free LEXICAL PROXY (the mean Dice over width-3 word-shingle
+# sets of each sentence and its containing chunk; the study's ICC uses
+# embedding cosine similarity, a different, weaker-but-usable signal,
+# never comparable to the paper's numbers). Both in [0.0, 1.0], both
+# keys always present. Degenerate inputs are pinned shapes, never
+# errors: an empty chunk list or empty text gives integrity 1.0 (no
+# boundary crosses anything, vacuously) and cohesion 0.0 (no
+# sentence-chunk pair exists, the conservative 0/0 pin). A span out of
+# text's range or with start > end raises ValueError; tau < 0 raises
+# ValueError.
+#
+# GIL note: the chunks walk and the tau validation under the GIL, the
+# whole segment/shingle/score pass under one py.detach; the residue is a
+# two-key dict.
+def chunk_quality(
+    chunks: Sequence[tuple[int, int]],
+    text: str,
+    *,
+    tau: int = 0,
+) -> ChunkQuality: ...
+
 # GIL note: the whole tokenize (UAX #29 words) + FNV-1a hash + 64-bit vote
 # pass runs GIL-released; a single int return (no marshalling class).
 # Deterministic across processes (FNV-1a, not the per-process-seeded
@@ -1940,6 +2062,60 @@ def precision_at_k(
     relevant: set[Hashable] | frozenset[Hashable],
     k: int,
 ) -> float: ...
+
+# Score-based fusion, the score-space sibling of rank_fuse (same id
+# table, same first-appearance tie-break, same emission contract; raw
+# similarity scores consumed instead of ranks). Three methods:
+#
+# - "combmnz" (the default), Fox & Shaw, "Combination of Multiple
+#   Searches", TREC-2 1994: score(d) = lists(d) x sum_i w_i x
+#   norm_i(d) -- CombSUM x the containing-list count, norm min-max per
+#   list over the list's OWN scores. The best of the score-based family
+#   in Cormack/Clarke/Buuttcher's SIGIR 2009 comparison, hence the
+#   default.
+# - "borda": the rank-based count, score(d) = sum_i w_i x (n - rank)/n
+#   (ranks 1-based over the DEDUPLICATED list). Deliberately RANK-based:
+#   Borda counts are defined over positions; the (n - rank)/n spelling
+#   only rescales the count to [0, 1) so a weight means the same thing
+#   over lists of any length.
+# - "linear": Elasticsearch's linear-retriever pattern, score(d) =
+#   sum_i w_i x norm_i(d), no MNZ multiplier.
+#
+# Conventions (pinned in tests/test_score_fusion.py): a zero-range list
+# (every score equal, a single-entry list included) normalizes to the
+# neutral midpoint 0.5; negative scores are LEGAL (min-max maps any
+# finite range onto [0, 1]); non-finite scores (NaN, both infinites)
+# raise ValueError; a range that itself overflows saturates instead of
+# dividing inf/inf (the overflowed numerator answers exactly 1.0, the
+# ndcg_at_k saturating-ratio precedent). A duplicate id folds to its
+# FIRST occurrence per list (its first score stands; the same id in a
+# different list votes again with its own score). weights: one positive
+# finite float per list (strictly positive finite, rank_fuse's own
+# domain; ValueError otherwise, TypeError for a non-sequence or
+# non-numeric entry; weights=None is the all-1.0 unweighted fusion
+# EXACTLY, byte-identical, pinned). k=None returns every distinct id;
+# k=N the top N (k < 1: ValueError). scored_lists must be a non-empty
+# list of lists of (id, score) pairs (zero lists: ValueError; a
+# malformed pair or a non-numeric score: TypeError; an unhashable id:
+# TypeError, Python's own hash error). Emission is vote-existence: one
+# (id, score) pair per distinct id, a fused 0.0 (Borda's last place, an
+# underflowed denormal weight) included, ordered last; order is fused
+# score descending, ties by earliest first appearance across the lists
+# in caller order (rank_fuse's contract, extended).
+#
+# GIL note: one GIL-held walk of every pair (Python-object hashing IS
+# interpreter work: the rank_fuse arg-walk class plus one score
+# extraction per entry) plus the weights walk and validation when
+# supplied, the per-list min-max + normalization + weighted accumulation
+# + MNZ counts + sort under one py.detach, then the O(distinct-ids)
+# tuple marshalling.
+def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
 
 # A stateless, general-purpose batch text preprocessor: every requested
 # step fused into one GIL-released pass over the whole texts list. Pure

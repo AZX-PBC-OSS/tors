@@ -20,6 +20,8 @@ batch pipeline, the fuzzy-matching, near-duplicate, and JSON-repair
 families (``levenshtein``/``jaro``/``jaro_winkler``,
 ``similarity_ratio``/``get_close_matches``, ``is_grounded``, the
 grounding pair ``ground_sentences``/``grounding_coverage``, the
+grounding-report composition ``grounding_report`` and the chunk-quality
+metrics ``chunk_quality``, both linear passes at document scale, the
 ``repair_json*`` trio: quadratic and linear native passes whose
 documented measurements reach seconds and minutes on large inputs), and
 the input-scaling text/byte pipeline codecs
@@ -129,6 +131,7 @@ _WRAPPED = (
     "chunk_by_words",
     "chunk_cdc",
     "chunk_hierarchical",
+    "chunk_quality",
     "chunk_text",
     # chunk_to_budget is the one wrapped function that is not a single
     # detached native pass: its token_counter is a Python callable that
@@ -160,6 +163,7 @@ _WRAPPED = (
     "get_close_matches",
     "ground_sentences",
     "grounding_coverage",
+    "grounding_report",
     "highlight",
     "is_grounded",
     "jaro",
@@ -178,6 +182,7 @@ _WRAPPED = (
     "repair_json_loads",
     "replace_many",
     "replace_many_masked",
+    "score_fuse",
     "scrub_log_text",
     "scrub_pii",
     "scrub_pii_report",

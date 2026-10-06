@@ -24,7 +24,9 @@
 //! `ground_sentences` per-sentence batch, and the `grounding_coverage`
 //! utilization twin living beside the `grounded_impl` verdict it twins),
 //! [`rank_fusion_impl`] (reciprocal rank fusion and the IR ranking
-//! metrics over id space), and
+//! metrics over id space), [`score_fusion_impl`] (score-based fusion
+//! over (id, score) pairs: CombMNZ, Borda, and the linear-retriever
+//! sum, the score-space sibling of `rank_fuse`), and
 //! [`json_valid_impl`] (the RFC 8259
 //! validity gate: orjson's acceptance set, no object tree, #61); they are
 //! public so the criterion benches (benches/normalize.rs, benches/bytes.rs,
@@ -456,6 +458,7 @@ pub mod chunk_budget_impl;
 pub mod chunk_by_segment_impl;
 pub mod chunk_hierarchical_impl;
 pub mod chunk_impl;
+pub mod chunk_quality_impl;
 pub mod controls_impl;
 pub mod decode_impl;
 pub mod diff_impl;
@@ -497,6 +500,7 @@ pub mod pipeline_impl;
 pub mod random_impl;
 pub mod rank_fusion_impl;
 pub mod scan_impl;
+pub mod score_fusion_impl;
 pub mod scrub_impl;
 pub mod search_impl;
 pub mod secret_impl;
@@ -576,6 +580,7 @@ use py::pipeline::*;
 use py::random::*;
 use py::rank_fusion::*;
 use py::scan::*;
+use py::score_fusion::*;
 use py::scrub::*;
 use py::search::*;
 use py::secret::*;
@@ -716,6 +721,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(highlight, m)?)?;
     m.add_function(wrap_pyfunction!(ground_sentences, m)?)?;
     m.add_function(wrap_pyfunction!(grounding_coverage, m)?)?;
+    m.add_function(wrap_pyfunction!(grounding_report, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_root, m)?)?;
     m.add_function(wrap_pyfunction!(merkle_diff, m)?)?;
     m.add_function(wrap_pyfunction!(content_hash, m)?)?;
@@ -743,6 +749,8 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_hierarchical, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_to_budget, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_to_offsets, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_overlap_cost, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_quality, m)?)?;
     m.add_function(wrap_pyfunction!(simhash64, m)?)?;
     m.add_function(wrap_pyfunction!(simhash128, m)?)?;
     m.add_function(wrap_pyfunction!(simhash_distance, m)?)?;
@@ -765,6 +773,7 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(replace_many_masked, m)?)?;
     m.add_function(wrap_pyfunction!(bm25_rank, m)?)?;
     m.add_function(wrap_pyfunction!(rank_fuse, m)?)?;
+    m.add_function(wrap_pyfunction!(score_fuse, m)?)?;
     m.add_function(wrap_pyfunction!(ndcg_at_k, m)?)?;
     m.add_function(wrap_pyfunction!(mrr, m)?)?;
     m.add_function(wrap_pyfunction!(recall_at_k, m)?)?;

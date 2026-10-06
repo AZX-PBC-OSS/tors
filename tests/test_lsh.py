@@ -554,7 +554,7 @@ class TestAdversarialPins:
         # with Python's hash randomization. Three child interpreters at
         # different PYTHONHASHSEED values must emit identical pair lists
         # (the std HashMap iteration order never escapes the core: only
-        # the sorted BTreeSet crosses out).
+        # the sorted accumulator crosses out).
         import os
 
         script = (

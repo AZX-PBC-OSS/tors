@@ -13,8 +13,10 @@ from typing import Any, Literal
 
 from tors import (
     CandidatePairs,
+    ChunkQuality,
     CompiledLemmaDict,
     DedupResult,
+    GroundingReport,
     GroundingResult,
     RepairAction,
     ScrubPiiReport,
@@ -162,6 +164,13 @@ async def ground_sentences(
     *,
     max_chars: int | None = None,
 ) -> SentenceGrounding: ...
+async def grounding_report(
+    text: str,
+    sources: list[str],
+    query: str | None = None,
+    *,
+    threshold: float = 0.85,
+) -> GroundingReport: ...
 async def similarity_ratio(a: str, b: str, *, deadline_ms: float | None = None) -> float: ...
 async def get_close_matches(
     word: str,
@@ -219,6 +228,12 @@ async def chunk_to_offsets(
     max_tokens: int,
     overlap: int | float = 0,
 ) -> list[tuple[int, int]]: ...
+async def chunk_quality(
+    chunks: Sequence[tuple[int, int]],
+    text: str,
+    *,
+    tau: int = 0,
+) -> ChunkQuality: ...
 async def minhash_signature(
     text: str,
     *,
@@ -278,6 +293,13 @@ async def precision_at_k(
     relevant: set[Hashable] | frozenset[Hashable],
     k: int,
 ) -> float: ...
+async def score_fuse(
+    scored_lists: list[list[tuple[Hashable, float]]],
+    *,
+    method: str = "combmnz",
+    weights: Sequence[float] | None = None,
+    k: int | None = None,
+) -> list[tuple[Hashable, float]]: ...
 async def apply_pipeline(
     texts: list[str],
     *,
