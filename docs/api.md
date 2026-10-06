@@ -2527,6 +2527,164 @@ value, diags = tors.repair_json_diagnostics(
 **Async**: `await tors.aio.repair_json_diagnostics(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Same detached pass as `tors.repair_json`, with an O(actions) diagnostics list added to the residue, so the guidance is unchanged: prefer the sync spelling on KiB-scale snippets, `tors.aio` on MB-scale documents.
 
 Evidence: `src/py/json_repair.rs` detaches the identical repair pass and only appends the diagnostics-list marshalling after it; the schema-layer action log is bounded by the repair actions actually taken, not by input size.
+## `tors.JsonRepairer`
+
+```python
+class JsonRepairer:
+    def __init__(self, *, ensure_ascii: bool = True) -> None: ...
+    def push(self, chunk: str) -> str: ...
+    def end(self) -> str: ...
+    def snapshot(self) -> str: ...
+    def reset(self) -> None: ...
+```
+
+The stateful incremental repairer for LLM token streams: the same repair
+semantics `tors.repair_json` applies whole-text, applied chunk by chunk as
+the tokens arrive. **Why it exists**: a token stream cannot call
+`repair_json` per chunk. The engine owns the whole input and re-decides it
+with lookahead and splices; re-running any whole-text pass per push re-parses
+the accumulated text every time, the quadratic shape the
+suture/repair-json-stream publish measures at ~15x the wall when the chunk
+count quadruples. `JsonRepairer` is the streaming answer: one left-to-right
+state machine (the container stack, the string/escape state, one pending
+token), every chunk processed exactly once, nothing ever re-parsed: the total
+work is linear in the total bytes at any chunk size (~4x wall per 4x input,
+pinned; at a fixed 4KiB chunk size the machine streams 128KiB in 2.55ms and
+512KiB in 10.87ms, ratio 4.26, ~2.1x per doubling, and the 128-push stream
+costs 0.54x one whole-text repair of the same text). The documented
+anti-pattern (a per-chunk re-parse) measures ~16x on the same pin and fails
+it.
+
+**The contract**. `push(chunk)` feeds one chunk and returns the text THIS
+call newly emitted: canonical JSON with the stream's open state still open
+(the delta; a pending number or bare word streams out when its run
+terminates). `snapshot()` renders the current state closed: the pending
+token resolved, the open string quoted shut, the open containers closed;
+the result is loadable JSON at every point of the stream (the live-preview
+shape), it never consumes anything, and `snapshot() == end()` on the same
+prefix, always (pinned at every split position of the sweep corpus).
+`end()` finalizes: the truncated-output heal; a second `end()` returns the
+same text; `push` after `end()` raises `ValueError`; `reset()` restores a
+fresh state. `push` returns the newly emitted text rather than the whole
+document so far because a per-push whole-document return is itself
+O(stream) marshalling per chunk: the same quadratic-per-chunk class the
+linearity pin gates; concatenate the deltas to reconstruct the emitted
+stream, and treat `snapshot`/`end` as the authority (a late repair that
+retracts text, the dangling-member drop documented below, truncates the
+emitted stream behind the delta cursor).
+
+**The repair semantics** match the whole-text engine's on the classes a
+stream can decide per character: single-quote and curly-quote delimiters
+normalize to `"`; missing commas insert and trailing commas disappear
+(deferred separators: the comma emits when the next member starts, so both
+are correct with no rewriting); bare words and Python literals repair
+(`None`/`True`/`False` to `null`/`true`/`false`, other bare words to
+strings); numbers follow the engine's run-and-rollback lanes (`1e+` heals
+to `"1e"`, `1,000` to `"1,000"`, `12abc` to `"12abc"`); comments skip
+(top-level ones exactly like the engine); tuples and groupings split the
+engine's own way (`(1)` to `1`, `(1,)` to `[1]`, `{"a": (1, 2)}` to
+`{"a": [1, 2]}`); a closer matching a frame below the innermost one closes
+the levels between (`{"a": [1, 2}` to `{"a": [1, 2]}`). The output is
+canonical `json.dumps`-parity text (the same escape table, `ensure_ascii`
+the same knob), so `end()` is byte-identical to `repair_json` on the same
+total text for every class above: the chunk-boundary sweep suite
+(`tests/test_json_repair_streaming.py`) streams every split position of
+every corpus text through the repairer and diffs the end against the
+whole-text engine, the oracle (`json-repair`, exact-pinned) covering the
+repaired-complete case, and hypothesis streams random JSON documents
+through random chunkings the same way.
+
+**Partial literals, the decided case**: there is NO `tru` -> `true`
+healing. The engine's own partial semantics decide, and the stream
+reproduces them exactly: `repair_json("tru")` is `""` (a top-level word is
+prose unless the whole input is one strict JSON value) and
+`repair_json('{"a": tru')` is `{"a": "tru"}` (a bare word in a container is
+a string), so a `tru` arriving at the end of a stream heals to the string
+`"tru"` in context, or to the empty sentinel at a clean top level, and
+never to a guessed `true`. Mid-stream the run is held back as a pending
+token (a push returns the text emitted so far, `""` here), not passed
+through raw. Deciding otherwise would break the end-equals-engine
+differential this surface is tested with.
+
+**The truncation heal** (`end`/`snapshot` on a cut-off stream): an open
+string closes with `"`, open containers close with their own brackets, the
+pending number/word resolves by the same rules that terminate it
+mid-stream, a missing value after `:` heals to `""`, a trailing separator
+disappears, and a dangling key drops (the engine's continuation behavior).
+Escapes and surrogate pairs are machine state: a backslash, a `\u` escape's
+hex digits, or the two escapes of a surrogate pair may straddle chunks
+freely; a lone surrogate escape decodes to U+FFFD, the engine's documented
+divergence from the oracle.
+
+**Documented divergences** (the full list; the output stays valid JSON or
+the empty sentinel in every case): the engine's deep string
+re-synchronization (it terminates a damaged string at a structural closer:
+`{"a": "hello}` to `{"a": "hello"}`) and doubled-quote repair are
+whole-text-only, the stream closing strings at the delimiter or at `end`;
+the engine's in-container comment consumes the value after it
+(`{"a": /*x*/ 1}` to `{"a": ""}`) where the stream skips the comment and
+parses the value; multiple top-level values keep the first (the engine may
+array-wrap: compose with `repair_json` when that matters); the fence
+pre-pass is not streamed (feed unwrapped text, or compose with
+`tors.extract_code_blocks`); a missing colon inserts one and keeps the
+value where the engine's repair lane heals `{"a" 1}` to `{"a": ""}`; and
+the first-member dangling-key shape heals to `{}` where the whole-text
+engine falls back to an array (`{"a"` to `["a"]`).
+
+**Argument contract**: `push` takes exactly a `str` (`TypeError` otherwise;
+a lone surrogate in it raises `UnicodeEncodeError` at the boundary, the
+standard str-in convention); past the 200-container nesting cap `push`
+raises `ValueError` with the engine's normalized message (`reset()` before
+reuse); `push` after `end()` raises `ValueError`. The repairer owns mutable
+native state: single-thread ownership, one repairer per stream, like a file
+object.
+
+**GIL**: each method's whole machine pass (`push`: O(chunk); `end`/
+`snapshot`: the close-time render) runs under one `py.detach`; the GIL-held
+residue is the O(delta) string return of `push` and the O(document) string
+return of `end`/`snapshot`, the standard str-out marshalling class.
+
+```python
+r = tors.JsonRepairer()
+r.push('{"name": "Ada", "tags": ["adm')
+r.push('in", "act')
+r.snapshot()
+# '{"name": "Ada", "tags": ["admin", "act"]}'
+r.end()
+# '{"name": "Ada", "tags": ["admin", "act"]}'
+
+r2 = tors.JsonRepairer()
+r2.push('{"a": [1, 2')
+r2.end()
+# '{"a": [1, 2]}'
+
+r3 = tors.JsonRepairer()
+r3.push('Answer: {"score": 9.')
+r3.end()
+# '{"score": 9.0}'
+
+r3.reset()
+r3.push('[1, 2')
+r3.end()
+# '[1, 2]'
+```
+
+**Async**: the sync class is the streaming surface and needs no aio twin:
+each `push` is O(chunk) microseconds (a token, a line), so a per-push
+`asyncio.to_thread` hop would cost more than the work on every call (the
+exact shape docs/async.md's KiB-scale guidance warns against), and the
+caller's loop is free anyway: the pushes are plain sync calls inside the
+async token loop. A whole-text async repair already exists as
+`await tors.aio.repair_json(...)`; for a co-scheduled or CPU-heavy stream,
+wrap the whole consume loop, not each push, in `asyncio.to_thread` in the
+caller's code (see [Async use](async.md)).
+
+Evidence: `src/json_repair/streaming.rs` (the machine, its decisions, and
+the divergence list in the module docs) behind `src/py/json_repair.rs`'s
+`JsonRepairer` (one `py.detach` per method); the sweep and linearity pins
+live in `tests/test_json_repair_streaming.py`, the fuzz target replaying
+arbitrary chunk sequences in `fuzz/fuzz_targets/json_repair_streaming.rs`.
+
 ## `tors.truncate_to_bounds`
 
 ```python

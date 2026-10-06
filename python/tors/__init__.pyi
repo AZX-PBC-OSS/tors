@@ -749,6 +749,93 @@ def repair_json_diagnostics(
     list[RepairAction],
 ]: ...
 
+
+class JsonRepairer:
+    """The stateful incremental repairer for LLM token streams: the
+    streaming surface over the same repair semantics ``repair_json``
+    applies whole-text. Feed the token stream through ``push`` chunk by
+    chunk (each call O(chunk), one pass, no re-parse of prior chunks: the
+    total work is linear in the total bytes at any chunk size, where a
+    per-chunk whole-text re-parse is quadratic); ``snapshot`` renders the
+    current state closed into valid JSON at any point (the live-preview
+    shape); ``end`` finalizes: the pending token resolves, the open
+    string closes with its quote, the open containers close with their
+    own brackets (the truncated-output heal: ``'{"a": "hel'`` ends as
+    ``'{"a": "hel"}'``).
+
+    The repair semantics match the whole-text engine's on the classes a
+    stream can decide incrementally (delimiter normalization, missing
+    separators, bare words and Python literals, the number rollback
+    lanes, comments, tuples, mismatched closers, the truncation heal);
+    the documented decisions and divergences (there is no ``tru`` ->
+    ``true`` healing: the engine's own partial semantics decide) live in
+    docs/api.md's ``tors.JsonRepairer`` section. The output is canonical
+    ``json.dumps``-parity text, so ``end()`` is byte-identical to
+    ``repair_json`` on the same total text whenever the machine's parse
+    agrees with the engine's, which the chunk-boundary sweep suite pins
+    at every split position.
+
+    Single-thread ownership (mutable native state): one repairer per
+    stream, like a file object. ``end`` is idempotent; ``push`` after
+    ``end`` raises ``ValueError``; ``reset`` restores a fresh state for
+    the pooled-repairer reuse story.
+
+    **Async**: the sync class is the streaming surface and needs no aio
+    twin: each ``push`` is O(chunk) microseconds (a token, a line), so a
+    per-push ``asyncio.to_thread`` hop would cost more than the work on
+    every call (the exact shape docs/async.md's KiB-scale guidance
+    warns against), and the caller's loop is free anyway: push is a
+    plain sync call inside the async token loop. A whole-text async
+    repair already exists as ``tors.aio.repair_json``; for a
+    co-scheduled or CPU-heavy stream, wrap the WHOLE consume loop (not
+    each push) in ``asyncio.to_thread`` in the caller's code.
+    """
+
+    def __init__(self, *, ensure_ascii: bool = True) -> None:
+        """``ensure_ascii`` is ``repair_json``'s serialization knob:
+        every char above ``~`` escapes as ``\\uXXXX`` (astral chars as
+        surrogate pairs) when true; non-ASCII passes through verbatim
+        when false."""
+        ...
+
+    def push(self, chunk: str) -> str:
+        """Feed one chunk; return the text THIS call newly emitted (the
+        repaired delta: canonical JSON with the stream's open state still
+        open). The pending token and not-yet-emitted cases return "".
+        Raises ``ValueError`` past the 200-container nesting cap (the
+        engine's own message; ``reset()`` before reuse) and after
+        ``end()``.
+
+        GIL note: the whole machine pass runs detached; the GIL-held
+        residue is the O(delta) string return."""
+        ...
+
+    def end(self) -> str:
+        """Finalize the stream: resolve the pending token, close the open
+        string and every open container (the truncated-output heal), and
+        return the final text. Idempotent; the empty string means nothing
+        recoverable (the ``repair_json`` sentinel convention).
+
+        GIL note: the close-time render runs detached; the residue is
+        the O(document) string return."""
+        ...
+
+    def snapshot(self) -> str:
+        """The current state rendered closed: valid (loadable) JSON at
+        every point of the stream, non-destructive: pushing continues
+        exactly as if it had not run, and ``snapshot() == end()`` on the
+        same prefix (pinned).
+
+        GIL note: the render runs detached; the residue is the
+        O(document) string return."""
+        ...
+
+    def reset(self) -> None:
+        """Drop all state: a fresh repairer for the next document (also
+        the recovery from a nesting-cap ``ValueError``)."""
+        ...
+
+
 # Truncate to at most max_chars codepoints, cutting at the last word (or,
 # boundary="sentence", sentence) boundary at or before max_chars: composing
 # the crate's own word_bounds/sentence_bounds segmentation, not a new

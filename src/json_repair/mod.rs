@@ -56,10 +56,12 @@ mod dumps;
 mod object;
 mod parenthesized;
 mod parser;
+mod streaming;
 mod strict;
 mod string;
 
 pub use dumps::{dumps, py_float_repr};
+pub use streaming::StreamingRepairer;
 pub use strict::{loads_strict, raw_decode};
 
 /// The exact decimal expansion of an integral f64 (Python's unbounded

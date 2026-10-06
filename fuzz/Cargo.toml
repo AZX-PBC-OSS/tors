@@ -262,6 +262,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "json_repair_streaming"
+path = "fuzz_targets/json_repair_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "documents_markdown"
 path = "fuzz_targets/documents_markdown.rs"
 test = false
