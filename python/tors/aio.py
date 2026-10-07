@@ -71,6 +71,18 @@ directly; that one line is the whole pattern, matching the manual
 ``to_thread`` wrap this module exists to save callers from writing
 repeatedly for the functions it pre-wires.
 
+The same "the sync spelling is the surface" rule covers
+``tors.JsonRepairer``, deliberately with no aio twin and no per-push
+wrapper: a stateful streaming repairer is a sequence of O(chunk) sync
+calls (one token, one line, microseconds each), so a ``to_thread`` hop
+PER PUSH would cost more than the work on every call (the exact
+overhead this module's size guidance exists to prevent), and the
+correct async shape is the caller's own: the sync calls sit directly in
+the async token loop, or the WHOLE consume loop (not each push) wraps
+in one ``asyncio.to_thread`` when the stream is co-scheduled or
+CPU-heavy. A whole-text async repair already exists as
+``await tors.aio.repair_json(...)``.
+
 The signatures are identical to the sync spellings (pinned by
 tests/test_aio.py against the live functions, and the stub ``aio.pyi``
 is checked against ``__init__.pyi`` by the same gate); keyword-only

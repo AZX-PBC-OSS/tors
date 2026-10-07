@@ -6,6 +6,7 @@ from tors._tors import (
     KEY_FAMILIES,
     CompiledLemmaDict,
     CompiledPatterns,
+    JsonRepairer,
     apply_pipeline,
     b64_decode,
     b64_encode_bytes,
@@ -149,6 +150,7 @@ __all__ = [
     "KEY_FAMILIES",
     "CompiledLemmaDict",
     "CompiledPatterns",
+    "JsonRepairer",
     # The dunder sorts first by ASCII ('_' < 'a'..): the package version,
     # a published attribute (metadata-read, see its declaration below),
     # not an internal.

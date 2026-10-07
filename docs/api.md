@@ -2524,6 +2524,273 @@ value, diags = tors.repair_json_diagnostics(
 
 **Async**: `await tors.aio.repair_json_diagnostics(...)` runs this under `asyncio.to_thread` (see [Async use](async.md)). Same detached pass as `tors.repair_json`, with an O(actions) diagnostics list added to the residue, so the guidance is unchanged: prefer the sync spelling on KiB-scale snippets, `tors.aio` on MB-scale documents.
 
+## `tors.JsonRepairer`
+
+```python
+class JsonRepairer:
+    def __init__(self, *, ensure_ascii: bool = True) -> None: ...
+    def push(self, chunk: str) -> str: ...
+    def end(self) -> str: ...
+    def snapshot(self) -> str: ...
+    def reset(self) -> None: ...
+```
+
+The stateful incremental repairer for LLM token streams: the same repair
+semantics `tors.repair_json` applies whole-text, applied chunk by chunk as
+the tokens arrive. **Why it exists**: a token stream cannot call
+`repair_json` per chunk. The engine owns the whole input and re-decides it
+with lookahead and splices; re-running any whole-text pass per push re-parses
+the accumulated text every time, the quadratic shape the
+suture/repair-json-stream publish measures at ~15x the wall when the chunk
+count quadruples. `JsonRepairer` is the streaming answer: one left-to-right
+state machine (the container stack, the string/escape state, one pending
+token), every chunk processed exactly once, nothing ever re-parsed: the total
+work is linear in the total bytes at any chunk size (~4x wall per 4x input,
+pinned; at a fixed 4KiB chunk size the machine streams 128KiB in 2.55ms and
+512KiB in 10.87ms, ratio 4.26, ~2.1x per doubling, and the 128-push stream
+costs 0.54x one whole-text repair of the same text). The documented
+anti-pattern (a per-chunk re-parse) measures ~16x on the same pin and fails
+it.
+
+**The contract**. `push(chunk)` feeds one chunk and returns the text THIS
+call newly emitted: canonical JSON with the stream's open state still open
+(the delta; a pending number or bare word streams out when its run
+terminates). `snapshot()` renders the current state closed: the pending
+token resolved, the open string quoted shut, the open containers closed;
+the result is loadable JSON at every point of the stream (the live-preview
+shape), it never consumes anything, and `snapshot() == end()` on the same
+prefix, always (pinned at every split position of the sweep corpus).
+`end()` finalizes: the truncated-output heal; a second `end()` returns the
+same text; `push` after `end()` raises `ValueError`; `reset()` restores a
+fresh state. `push` returns the newly emitted text rather than the whole
+document so far because a per-push whole-document return is itself
+O(stream) marshalling per chunk: the same quadratic-per-chunk class the
+linearity pin gates; concatenate the deltas to reconstruct the emitted
+stream, and treat `snapshot`/`end` as the authority (a late repair that
+retracts text — the dangling-member drop, the grouping-paren unwrap, the
+empty-element retract, the array lane's stray-`...` and strictly-empty
+item drops — truncates or drains the emitted stream behind the delta
+cursor).
+
+**The repair semantics** match the whole-text engine's on the classes a
+stream can decide per character: single-quote and curly-quote delimiters
+normalize to `"`; missing commas insert and trailing commas disappear
+(deferred separators: the comma emits when the next member starts, so both
+are correct with no rewriting); bare words and Python literals repair
+(`None`/`True`/`False` to `null`/`true`/`false`, case-insensitively —
+`TRUE`/`tRuE`/`NONE` too — other bare words to strings at their own
+casing, the strict special floats `NaN`/`Infinity`/`-Infinity` kept at
+their exact spellings); numbers follow the engine's run-and-rollback
+lanes (`1e+` heals to `"1e"`, `1,000` to `"1,000"`, `12abc` to
+`"12abc"`); comments skip (top-level ones exactly like the engine);
+tuples and groupings split the engine's own way (`(1)` to `1`, `(1,)` to
+`[1]`, `{"a": (1, 2)}` to `{"a": [1, 2]}`); a closer matching a frame
+below the innermost one closes the levels between (`{"a": [1, 2}` to
+`{"a": [1, 2]}`). The output is
+canonical `json.dumps`-parity text (the same escape table, `ensure_ascii`
+the same knob), so `end()` is byte-identical to `repair_json` on the same
+total text for every class above: the chunk-boundary sweep suite
+(`tests/test_json_repair_streaming.py`) streams every split position of
+every corpus text through the repairer and diffs the end against the
+whole-text engine, the oracle (`json-repair`, exact-pinned) covering the
+repaired-complete case, and hypothesis streams random JSON documents
+through random chunkings the same way. The array lane's item drops are
+part of that claim: a cut whose open string holds the stray `...` run,
+and a cut after a whitespace-followed strictly-empty item, both
+reproduce the whole-text answer byte for byte (pinned in the machine's
+own test module and exercised by the fuzz target's engine-parity gate).
+
+**Partial literals, the decided case**: there is NO `tru` -> `true`
+healing. The engine's own partial semantics decide, and the stream
+reproduces them exactly: `repair_json("tru")` is `""` (a top-level word is
+prose unless the whole input is one strict JSON value) and
+`repair_json('{"a": tru')` is `{"a": "tru"}` (a bare word in a container is
+a string), so a `tru` arriving at the end of a stream heals to the string
+`"tru"` in context, or to the empty sentinel at a clean top level, and
+never to a guessed `true`. Mid-stream the run is held back as a pending
+token (a push returns the text emitted so far, `""` here), not passed
+through raw. Deciding otherwise would break the end-equals-engine
+differential this surface is tested with.
+
+**The truncation heal** (`end`/`snapshot` on a cut-off stream): an open
+string closes with `"` — its content rstrips first (Python's whitespace
+set: `{"k": "a b ` heals to `{"k": "a b"}`, `{"k": "a\n` to `{"k": "a"}`,
+the engine's own escape-tail heal); a closed string that ENDS the stream
+on a newline-run loses the run (`{"k": "a\n"` to `{"k": "a"}`, a tab or a
+mid-string newline passes); open containers close with their own brackets
+— a still-open EMPTY container drops whole at an item position (`[[` to
+`[]`, `[1, [` to `[1]`) and closes at a member-value position or the root
+(`{"a": [` to `{"a": []}`), and an array's trailing strictly-empty member
+drops with it (`[[], []` to `[[]]`, `[1, []` to `[1]`), the cascade
+walking up the stack; the array lane's own item drops reproduce too —
+the stray `...` (an item whose parse is the exact string `"..."` with
+the parse ending on a `.`: the cut's open string ` [\r\r"...` to `[]`,
+a bare number-run `[1, ...` to `[1]`, the closed `["..."]` element
+staying) and the strictly-empty item whose next char is not a separator
+(`[[] ,` to `[]`, `[[] , 1` to `[1]`, the comma directly after the
+element keeping it — the decision is LOCAL to the element's own array's
+closing shape: a trailing separator where a value was required drops it
+(`[[] ,]` to `[]`, `[1, [] ,]` to `[1]`, `{"a": [[] ,]}` to
+`{"a": []}` — a trailing comma is never strict-valid, so neither fast
+path can cover the array and the repair lane's skip fired), a proper
+close keeps it through the whole-input `json.loads` fast path and the
+strict-suffix probe (`[[] , 1]` to `[[], 1]`, `[true, [] , 1]`,
+`[[] ]` to `[[]]`, `{"a": ["" , 1]}` to `{"a": ["", 1]}`, trailing
+garbage after the valid root included: `[[] , 1] x` to `[[], 1]`), a
+cut root drops every mark still alive (`[[], [[] , 2], 3` to
+`[[], [2], 3]`), a whitespace-held decision followed by anything but a
+separator drops with the stall guard eating the whitespace (the char
+re-parsing as the next member: `[[] x, 1]` to `["x", 1]`) or the char
+itself (`[[]x]` to `[]`), and the paren taint never defers (a
+paren-derived or paren-enclosed element drops on the first char,
+whatever it is: `[() ]` to `[]`, `[([] , 1)]` to `[[1]]`, keeping only
+for a directly-arriving `,`/closer: `[()]` to `[[]]`); the pending
+number/word resolves by the same
+rules
+that terminate it mid-stream — through the literal table, so the special
+floats' spellings heal to strings (`[NaN` to `["NaN"]`, where the
+complete document keeps the float) and a number-born word drops its
+stray leading sign (`{"a": -NaN` to `{"a": "NaN"}`) — the rewind-born
+word further takes the string lane's entry skip, dropping the run's
+leading non-alphanumeric garbage before the literal check (`[.t]` to
+`["t"]`, `[.true]` to `[true]`, `[.5x]` to `["5x"]`, `[-.t]` to `["t"]`;
+the strict `-Infinity` spelling keeps its float) — an element that
+renders empty retracts whole (`[1, -` to `[1]`, the engine's falsy-nudge
+rule), a missing value after `:` heals to `""`, a missing KEY drops the
+whole pair (`{: 1}` to `{}`, the valid `{"": 1}` passing through
+untouched), and a trailing separator disappears. The object-KEY lane
+runs the string semantics too: an unquoted key attempt's leading
+non-alphanumeric garbage drops at the commit (`{-ab: 1}` to
+`{"ab": 1}`, `{.5: 1}` to `{"5": 1}`), and a whitespace holds the
+attempt for the next char — it commits at its `:`, else it invalidates
+and the key loop retries from the next word (`{a b: 1}` to `{"b": 1}`);
+an attempt that strips to nothing drops the pair whole (`{-: 1` to
+`{}`).
+Escapes and surrogate
+pairs are machine state: a backslash, a `\u` escape's hex digits, or the
+two escapes of a surrogate pair may straddle chunks freely; a lone
+surrogate escape decodes to U+FFFD, the engine's documented divergence
+from the oracle.
+
+**Top-level strings, the mid-stream vs end distinction**: a top-level
+string is a provisional scalar, exactly like a number or a word: the
+pushes emit nothing while it streams, and the snapshot is the end's own
+answer (the pinned `snapshot() == end()` invariant). At `end()` the
+commit equals the whole-text engine's: a completed strict double-quoted
+string commits (`"hi"` to `"hi"`); a single-quoted one was prose to the
+engine (`'hi'` to `''`). Mid-stream the two spellings are held
+identically — the distinction is only ever visible in what `end()`
+commits.
+
+**Documented divergences** (the full list; the output stays valid JSON or
+the empty sentinel in every case): the engine's deep string
+re-synchronization (it terminates a damaged string at a structural closer:
+`{"a": "hello}` to `{"a": "hello"}`) and doubled-quote/escape repair are
+whole-text-only, the stream closing strings at the delimiter or at `end`;
+the engine's in-container comment consumes the value after it
+(`{"a": /*x*/ 1}` to `{"a": ""}`) where the stream skips the comment and
+parses the value; multiple top-level values keep the first (the engine may
+array-wrap: compose with `repair_json` when that matters); the fence
+pre-pass is not streamed (feed unwrapped text, or compose with
+`tors.extract_code_blocks`); a missing colon inserts one and keeps the
+value where the engine's repair lane heals `{"a" 1}` to `{"a": ""}`; the
+first-member dangling-key shape heals to `{}` where the whole-text
+engine falls back to an array (`{"a"` to `["a"]`); the strict-vs-repair
+split on trailing tails (the engine's REPAIR lane decides by the WHOLE
+input: the complete document `{"a": "x\n", "b": 1}` keeps the string's
+newline and `[NaN, 1]` keeps the float, but the cut `{"a": "x\n", "b": 1`
+strips the newline and `[NaN, 1` quotes the float — the stream keeps the
+strict spelling mid-document and matches only the tail-of-stream cases:
+the string last before the cut, the word still in flight); the paren-with-
+colon conversion (the engine turns a colon inside the parenthesized
+container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
+the mismatched-closer garbage where the engine's whole-text close-up
+re-decides earlier structure (both outputs valid); the word-swallow (a
+bare word born at an array position runs past a mismatched closer in the
+engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); the
+unquoted-value run's absorption (the engine's unquoted-value lane eats
+container chars and internal whitespace into the string and re-decides
+literal prefixes: `[{"b": undefined},]` to `[{"b": "undefined},"}]` where
+the stream keeps `[{"b": "undefined"}]`; `[null x]` to `[null, "x"]`
+where the stream gives `["null x"]`); the empty-object fallback's body
+reparse (an object closing empty over a non-trivial colon-free body
+re-parses the body as an array — the stream reproduces it only when the
+body recovers nothing: `{]}` to `[]` and `{"a": {(]` to `{"a": []}` match,
+while `{ x}` to the engine's `["x}"]` stays `{}` in the stream); duplicate
+object keys (the dict update-in-place: `{"a": 1, "a": 2}` to `{"a": 2}`,
+the stream keeps both members); the unquoted-value `}`-absorption without
+the ws (a non-strict run VALUE at an object's close absorbs the object's
+own `}` when the tail past it holds two chars before the next `}`:
+`{"a": b}66` to the engine's `{"a": "b}66"}`, the stream `{"a": "b"}`); a
+lone high surrogate escape followed by another escape (the engine's
+whole-text string-repair lane re-decides the escape run: `["\ud83d\falsee"`
+to the engine's `["\ufffd\\falsee"]`, the stream `["\ufffd\falsee"]`); the
+missing-colon shape with a container where the colon was due (the engine's
+object loop consumes the container-open as the colon-substitute and its
+repair lane empties the array: `{"a" [[] , 1]}` to `{"a": []}`, the stream
+`{"a": [[], 1]}`); the completed-paren taint on a later deferred element
+(a paren anywhere kills both fast paths, so the repair lane decided:
+`[(2), [] , 1]` to the engine's `[2, 1]`, the stream `[2, [], 1]`); the
+comma-first tail after a valid root (the suffix probe is gated on
+non-comma trailing content: `[[] , 1] ,` to the engine's `[1]`, the
+stream `[[], 1]`); and the
+compound missing-key shape no longer diverges (the key lane's string
+semantics commit `{: 1, : 2}` to `{"1,": 2}` the engine's own way).
+
+**Argument contract**: `push` takes exactly a `str` (`TypeError` otherwise;
+a lone surrogate in it raises `UnicodeEncodeError` at the boundary, the
+standard str-in convention); past the 200-container nesting cap `push`
+raises `ValueError` with the engine's normalized message (`reset()` before
+reuse); `push` after `end()` raises `ValueError`. The repairer owns mutable
+native state: single-thread ownership, one repairer per stream, like a file
+object.
+
+**GIL**: each method's whole machine pass (`push`: O(chunk); `end`/
+`snapshot`: the close-time render) runs under one `py.detach`; the GIL-held
+residue is the O(delta) string return of `push` and the O(document) string
+return of `end`/`snapshot`, the standard str-out marshalling class.
+
+```python
+r = tors.JsonRepairer()
+r.push('{"name": "Ada", "tags": ["adm')
+r.push('in", "act')
+r.snapshot()
+# '{"name": "Ada", "tags": ["admin", "act"]}'
+r.end()
+# '{"name": "Ada", "tags": ["admin", "act"]}'
+
+r2 = tors.JsonRepairer()
+r2.push('{"a": [1, 2')
+r2.end()
+# '{"a": [1, 2]}'
+
+r3 = tors.JsonRepairer()
+r3.push('Answer: {"score": 9.')
+r3.end()
+# '{"score": 9.0}'
+
+r3.reset()
+r3.push('[1, 2')
+r3.end()
+# '[1, 2]'
+```
+
+**Async**: the sync class is the streaming surface and needs no aio twin:
+each `push` is O(chunk) microseconds (a token, a line), so a per-push
+`asyncio.to_thread` hop would cost more than the work on every call (the
+exact shape docs/async.md's KiB-scale guidance warns against), and the
+caller's loop is free anyway: the pushes are plain sync calls inside the
+async token loop. A whole-text async repair already exists as
+`await tors.aio.repair_json(...)`; for a co-scheduled or CPU-heavy stream,
+wrap the whole consume loop, not each push, in `asyncio.to_thread` in the
+caller's code (see [Async use](async.md)).
+
+Evidence: `src/json_repair/streaming.rs` (the machine, its decisions, and
+the divergence list in the module docs) behind `src/py/json_repair.rs`'s
+`JsonRepairer` (one `py.detach` per method); the sweep and linearity pins
+live in `tests/test_json_repair_streaming.py`, the fuzz target replaying
+arbitrary chunk sequences in `fuzz/fuzz_targets/json_repair_streaming.rs`.
+
 ## `tors.truncate_to_bounds`
 
 ```python

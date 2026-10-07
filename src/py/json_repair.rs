@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use crate::json_repair::DEADLINE_TAG;
-use crate::json_repair::{self, Diagnostic, NumericLocale, RepairConfig, Value};
+use crate::json_repair::{self, Diagnostic, NumericLocale, RepairConfig, StreamingRepairer, Value};
 use crate::py::_borrow::timeout_err;
 use crate::validate_deadline_ms;
 
@@ -555,6 +555,77 @@ pub fn repair_json_loads(
         .detach(|| json_repair::repair(s, &cfg))
         .map_err(|e| map_repair_err(e, "repair_json_loads"))?;
     value_to_py(py, &value.0)
+}
+
+/// `tors.JsonRepairer`: the stateful incremental repairer for LLM token
+/// streams over [`StreamingRepairer`]: `push` feeds one chunk and returns
+/// the newly repaired text, `snapshot`/`end` render the stream closed
+/// into valid JSON (the truncated-output heal), `reset` reuses the
+/// repairer. See docs/api.md's `tors.JsonRepairer` for the contract, the
+/// documented decisions (the `tru` partial-literal semantics, the
+/// divergence classes), and the linear-vs-quadratic streaming table the
+/// design is motivated by.
+///
+/// GIL model: each method's whole machine pass (O(chunk) for `push`, the
+/// close-time render for `end`/`snapshot`) runs under one `py.detach`;
+/// the GIL-held residue is the O(delta) string return of `push` and the
+/// O(document) return of `end`/`snapshot` (the standard str-out
+/// marshalling class). The class owns mutable state: it is not `Send`
+/// across calls by pyo3's `&mut` discipline, and it is not frozen: one
+/// repairer per stream, the same ownership a file object has.
+#[pyclass(name = "JsonRepairer")]
+pub struct JsonRepairer {
+    core: StreamingRepairer,
+}
+
+#[pymethods]
+impl JsonRepairer {
+    /// `tors.JsonRepairer(*, ensure_ascii=True)`: `ensure_ascii` is
+    /// `repair_json`'s serialization knob (every char above `~` escapes
+    /// as `\uXXXX` when true; non-ASCII passes through verbatim when
+    /// false).
+    #[new]
+    #[pyo3(signature = (*, ensure_ascii = true))]
+    fn new(ensure_ascii: bool) -> Self {
+        JsonRepairer {
+            core: StreamingRepairer::new(ensure_ascii),
+        }
+    }
+
+    /// `repairer.push(chunk) -> str`: feed one chunk of the token stream;
+    /// returns the text THIS call newly emitted (the repaired delta:
+    /// canonical JSON with the stream's open state still open). The
+    /// nothing-recoverable and not-yet-emitted cases return `""`. Raises
+    /// `ValueError` past the 200-container nesting cap (the engine's own
+    /// message; `reset()` before reuse), and after `end()`.
+    fn push(&mut self, py: Python<'_>, chunk: &str) -> PyResult<String> {
+        py.detach(|| self.core.push(chunk))
+            .map_err(PyValueError::new_err)
+    }
+
+    /// `repairer.end() -> str`: finalize the stream: resolve the pending
+    /// token, close the open string and every open container (the
+    /// truncated-output heal), return the final text. Idempotent.
+    fn end(&mut self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| self.core.end()).map_err(PyValueError::new_err)
+    }
+
+    /// `repairer.snapshot() -> str`: the current state rendered closed
+    /// (valid JSON now), non-destructive: pushing continues exactly as if
+    /// it had not run, and `snapshot() == end()` on the same prefix.
+    fn snapshot(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(py.detach(|| self.core.snapshot()))
+    }
+
+    /// `repairer.reset()`: drop all state; a fresh repairer for the next
+    /// document (the reuse story for a pooled repairer).
+    fn reset(&mut self, py: Python<'_>) {
+        py.detach(|| self.core.reset());
+    }
+
+    fn __repr__(&self) -> String {
+        "JsonRepairer()".to_string()
+    }
 }
 
 /// `tors.repair_json_diagnostics`: the loads-mode value plus the structured

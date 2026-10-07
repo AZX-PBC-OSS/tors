@@ -303,32 +303,40 @@ fn write_value(out: &mut String, v: &Value, ensure_ascii: bool) {
 fn write_string(out: &mut String, s: &str, ensure_ascii: bool) {
     out.push('"');
     for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if u32::from(c) < 0x20 => push_u4(out, u32::from(c)),
-            // The ascii table's class is [^ -~]: everything outside
-            // space-through-tilde, so 0x7f (DEL) escapes here too, and
-            // astral chars come down as their surrogate pair.
-            c if ensure_ascii && u32::from(c) > 0x7e => {
-                let n = u32::from(c);
-                if n > 0xffff {
-                    let v = n - 0x10000;
-                    push_u4(out, 0xd800 + (v >> 10));
-                    push_u4(out, 0xdc00 + (v & 0x3ff));
-                } else {
-                    push_u4(out, n);
-                }
-            }
-            c => out.push(c),
-        }
+        push_escaped_char(out, c, ensure_ascii);
     }
     out.push('"');
+}
+
+/// The per-character body of [`write_string`]'s loop, extracted so the
+/// streaming repairer (`streaming.rs`) can emit one decoded char at a time
+/// through the exact same table: incremental emission and `dumps` stay
+/// byte-identical by construction, not by a second hand-copied table.
+pub(crate) fn push_escaped_char(out: &mut String, c: char, ensure_ascii: bool) {
+    match c {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\u{08}' => out.push_str("\\b"),
+        '\t' => out.push_str("\\t"),
+        '\n' => out.push_str("\\n"),
+        '\u{0c}' => out.push_str("\\f"),
+        '\r' => out.push_str("\\r"),
+        c if u32::from(c) < 0x20 => push_u4(out, u32::from(c)),
+        // The ascii table's class is [^ -~]: everything outside
+        // space-through-tilde, so 0x7f (DEL) escapes here too, and
+        // astral chars come down as their surrogate pair.
+        c if ensure_ascii && u32::from(c) > 0x7e => {
+            let n = u32::from(c);
+            if n > 0xffff {
+                let v = n - 0x10000;
+                push_u4(out, 0xd800 + (v >> 10));
+                push_u4(out, 0xdc00 + (v & 0x3ff));
+            } else {
+                push_u4(out, n);
+            }
+        }
+        c => out.push(c),
+    }
 }
 
 /// CPython's `'\u{0:04x}'` replacement: `\u` plus exactly four lowercase

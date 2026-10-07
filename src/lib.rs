@@ -806,5 +806,6 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uuid_parse, m)?)?;
     m.add_class::<CompiledLemmaDict>()?;
     m.add_class::<CompiledPatterns>()?;
+    m.add_class::<py::json_repair::JsonRepairer>()?;
     Ok(())
 }
