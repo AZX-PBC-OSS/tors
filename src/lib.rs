@@ -269,7 +269,9 @@
 //! `random_impl`'s docs). No `aio` twins: fast CPU/syscall calls, not the
 //! detached-transform input class (docs/async.md).
 //!
-//! The MinHash surface (`minhash_signature`) adds one list-returning shape
+//! The MinHash surface (`minhash_signature`, `minhash_jaccard`,
+//! `weighted_minhash_signature`, `minhash_weighted_jaccard`) adds one
+//! list-returning shape
 //! with a structurally bounded marshalling class: the argument borrow plus
 //! the bounds validation and the seed reduction (one `__index__` call and
 //! the mask, no instance-dunder dispatch) under the GIL, the whole
@@ -758,6 +760,9 @@ fn _tors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shingle_dice, m)?)?;
     m.add_function(wrap_pyfunction!(dedup_near_dup, m)?)?;
     m.add_function(wrap_pyfunction!(minhash_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(minhash_jaccard, m)?)?;
+    m.add_function(wrap_pyfunction!(weighted_minhash_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(minhash_weighted_jaccard, m)?)?;
     m.add_function(wrap_pyfunction!(lsh_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(lsh_probability, m)?)?;
     m.add_function(wrap_pyfunction!(lsh_threshold, m)?)?;

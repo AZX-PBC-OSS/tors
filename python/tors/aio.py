@@ -185,6 +185,7 @@ _WRAPPED = (
     "tf_idf",
     "truncate_ellipsis",
     "truncate_to_bounds",
+    "weighted_minhash_signature",
     "word_bounds",
 )
 
