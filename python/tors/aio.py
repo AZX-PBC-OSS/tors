@@ -13,8 +13,8 @@ Which functions, and why only these: thread dispatch through
 ``asyncio.to_thread`` costs on the order of tens of microseconds, noise
 next to a millisecond-or-slower native pass over a real corpus or
 document, real overhead next to a microsecond-scale call over a short
-string. So this module covers only the functions whose realistic inputs
-are large enough that the thread-hop cost is reliably negligible: the
+string. So the module's surface is the large-input functions, where
+the thread-hop cost is reliably negligible: the
 chunking family, the retrieval/scoring primitives, the diff engine, the
 batch pipeline, the fuzzy-matching, near-duplicate, and JSON-repair
 families (``levenshtein``/``jaro``/``jaro_winkler``,
@@ -39,12 +39,15 @@ document. Exception-size guidance: ``scrub_log_text``'s error-path inputs
 are KiB-scale (a single message/traceback scrubs in microseconds, well
 under the hop cost — prefer the sync spelling there); its ``aio`` twin is
 for MB-scale aggregates only (batched logs, multi-MB exception corpora),
-where the hop is noise next to the pass. Every other tors function keeps exactly one spelling
-(the sync one); call it directly from a coroutine when the input is
-small; a synchronous call that finishes in microseconds does not need
-asyncio at all, and wrapping it here would be lying about a cost that
-isn't there. See docs/async.md for the size guidance in
-full.
+where the hop is noise next to the pass. The fuzzy-metric twins
+(``levenshtein``/``jaro``/``jaro_winkler``, the ranking metrics,
+``similarity_ratio``/``get_close_matches``) are included for uniformity
+and completeness rather than for the hop: at word scale the hop costs
+more than the call, at document scale it is noise, and each function's
+section in docs/api.md states that per-call cost honestly. Every other
+tors function keeps exactly one spelling (the sync one); call it
+directly from a coroutine when the input is small. See docs/async.md
+for the size guidance in full.
 
 There is no size-based branch inside any wrapper here, and there never
 will be: a function that sometimes runs inline and sometimes hops to a
@@ -197,6 +200,7 @@ _WRAPPED = (
     "tf_idf",
     "truncate_ellipsis",
     "truncate_to_bounds",
+    "weighted_minhash_signature",
     "word_bounds",
 )
 

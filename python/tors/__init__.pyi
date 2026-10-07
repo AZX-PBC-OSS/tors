@@ -1,4 +1,4 @@
-from collections.abc import Callable, Hashable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from typing import Any, Literal, SupportsIndex, TypedDict
 
 # The recursive JSON value: what `content_hash` accepts — the JSON
@@ -1682,13 +1682,123 @@ def simhash128(text: str) -> int: ...
 # propagates). GIL: borrow + validation
 # under the GIL, the whole pass under one detach, then the
 # num_perm-element int list. No aio twin: a fast one-shot call.
+#
+# method picks the engine: "xxh" (default) is the classic
+# k-permutation sweep described above, byte-identical to every pre-method
+# signature ever produced; "superminhash" is Ertl's SuperMinHash
+# (arXiv 1706.05698), the in-place incremental sampling scheme whose
+# agreement estimator is unbiased like the classic one but carries up to
+# ~half the variance for small sets (the paper's alpha(m, u) factor).
+# The two engines' signatures are NOT cross-compatible: rows from
+# different methods (or different num_perm values -- the SuperMinHash
+# permutation structure depends on m, so it has no prefix property) must
+# never be compared, banded, or mixed; that is a caller error no cheap
+# runtime check can catch (rows are opaque ints), so it is a
+# documentation contract. Each engine is deterministic and
+# self-consistent: identical text at identical parameters gives
+# identical rows, forever, within one tors version.
+#
+# bits is b-bit compression (Li and König, WWW 2010): None (default)
+# returns the full u64 rows, byte-identical to the unmasked output; an
+# int in [1, 63] keeps the LOWEST bits of every row, and the paired-row
+# agreement estimator then needs the 2^-b chance correction
+# (minhash_jaccard applies it). bits is defined only over the classic
+# engine's rows (uniform over [0, 2**61), whose low bits are exactly
+# uniform): method="superminhash" with bits set is a ValueError. bits
+# outside [1, 63] (None included is fine): ValueError; bool or a
+# non-int: TypeError.
 def minhash_signature(
     text: str,
     *,
     num_perm: int = 128,
     shingle_size: int = 3,
     seed: int = 0,
+    method: Literal["xxh", "superminhash"] = "xxh",
+    bits: int | None = None,
 ) -> list[int]: ...
+
+# The paired-row Jaccard estimator over two minhash_signature
+# signatures. bits=None counts rows equal at full width and returns the
+# agreement fraction (the one-expression estimator the api docs spell).
+# bits=b (1..=63) is the b-bit estimator over b-bit-compressed rows
+# (Li and König, WWW 2010): masked rows agree with probability
+# J + (1 - J) * 2^-b, so the returned estimate applies the chance
+# correction (p_hat - 2^-b) / (1 - 2^-b) -- unbiased, but able to land
+# slightly NEGATIVE at true similarity zero (a finite sample's chance
+# term can exceed the observed agreement); threshold callers should
+# compare raw agreement fractions instead. The variance is at most ~3x full
+# rows once b >= log2(1/J). Both signatures must be equal-length and
+# non-empty, else ValueError naming the lengths; elements ride the
+# strict int convention (lsh_candidates's: negative ValueError, past
+# 2**64 - 1 OverflowError, non-int including bool TypeError). Mixing
+# signatures from different engines, parameters, or seeds is a caller
+# error nothing here can detect, so the contract is documentation.
+# O(len(sig_a)) integer comparisons: no aio twin (the
+# lsh_probability stay-sync class -- the thread hop costs more than the
+# call).
+def minhash_jaccard(
+    sig_a: Sequence[int], sig_b: Sequence[int], *, bits: int | None = None
+) -> float: ...
+
+# The Consistent Weighted Sampling signature (Ioffe, ICDM 2010;
+# Shrivastava, NeurIPS 2016) of the token MULTISET -- the frequency-aware
+# complement to minhash_signature. The binary MinHash reads a document as
+# its token SET (a token repeated thrice is one element, indistinguishable
+# from a single occurrence); the weighted engine reads the counts, and
+# the fraction of permutations whose (token, active-index) pairs AGREE
+# estimates the GENERALIZED Jaccard
+# similarity sum_k min(w_a, w_b) / sum_k max(w_a, w_b): 'aaa' counts
+# thrice, and a document holding it three times is genuinely more similar
+# to one holding it four times than to one holding it once. Input
+# spellings, all one multiset: str (tokenized by the crate's one UAX #29
+# word stream, the tf_idf/bm25 tokenizer, lowercased; each occurrence a
+# count); a sequence of str (each element ONE occurrence, no
+# re-tokenization -- a caller's domain-specific segmenter weighs exactly
+# as given); a mapping of str to a non-negative finite number (explicit
+# weights, fractional allowed; zero excludes the token; NaN, infinity,
+# and negatives are ValueError; bool values are TypeError). Returns
+# 2 * num_perm rows, the winner pair (token_hash, active index t) per
+# permutation: the token's identity is the crate's one XXH64 contract
+# over the single-token frame, t the integer active index emitted as its
+# f64 bit pattern (an injective encoding, so fractional-weight
+# signatures compare exactly too). Empty text, an empty list, an empty
+# mapping, or all-zero weights: every row 2**64 - 1 (the empty-multiset
+# sentinel). Engine: per permutation j and token hash h with weight w,
+# five SplitMix64 draws from the XXH64 frame [seed, j, h] give
+# r, c ~ Gamma(2, 1) and beta ~ U(0, 1); t = floor(ln(w)/r + beta),
+# y = exp(r*(t - beta)), z = y*exp(r), a = c/z; the permutation's sample
+# is the token minimizing a (ties, measure-zero, break to the lowest
+# token hash: tokens sweep in ascending-(hash, weight) order). The
+# estimator's consistency is Ioffe's theorem; the engine has NO prefix
+# property and is NOT cross-compatible with the binary engines'
+# signatures -- the generalized Jaccard is a different quantity than the
+# Jaccard, and minhash_weighted_jaccard is the only estimator that reads
+# these rows. num_perm in [1, 1024] (ValueError; __index__ accepted,
+# bool rejected); seed is any int or None, None meaning the fixed
+# default seed 0 -- no random entropy anywhere, so the same input at the
+# same parameters is the same signature across processes, machines, and
+# versions. Mapping keys must be str and sequence elements str
+# (TypeError otherwise). Cost: O(tokens) hashing to count the multiset
+# plus O(num_perm * distinct_tokens) in the ICWS sweep. GIL: the input
+# walk and validation under the GIL, the count + sweep pass under one
+# detach, then the 2*num_perm-element int list.
+def weighted_minhash_signature(
+    text_or_tokens: str | Sequence[str] | Mapping[str, float],
+    *,
+    num_perm: int,
+    seed: int | None = None,
+) -> list[int]: ...
+
+# The generalized-Jaccard estimator over two weighted_minhash_signature
+# signatures: the fraction of permutations whose (token_hash,
+# active-index) pairs agree (Ioffe's consistency property). Both
+# signatures must be equal-length, even-length, and non-empty
+# (ValueError naming the shape -- an odd row count is not an ICWS
+# signature); the result is in [0.0, 1.0] and estimates
+# sum_k min(w_a, w_b) / sum_k max(w_a, w_b) over the two token multisets.
+# O(len(sig_a) / 2) integer comparisons: no aio twin (the
+# lsh_probability stay-sync class).
+def minhash_weighted_jaccard(sig_a: Sequence[int], sig_b: Sequence[int]) -> float: ...
 
 # `dedup_near_dup`'s result, all three keys present every time, all
 # indices into the INPUT order: `kept` the representatives (ascending;

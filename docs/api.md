@@ -5362,6 +5362,8 @@ def minhash_signature(
     num_perm: int = 128,
     shingle_size: int = 3,
     seed: int = 0,
+    method: str = "xxh",
+    bits: int | None = None,
 ) -> list[int]: ...
 ```
 
@@ -5389,6 +5391,58 @@ probability `J(A, B) = |A ∩ B| / |A ∪ B|`. So
 ```python
 sum(x == y for x, y in zip(sig_a, sig_b)) / len(sig_a)
 ```
+
+or, byte-identically, `tors.minhash_jaccard(sig_a, sig_b)` (below), which
+also carries the b-bit correction when the signatures were compressed with
+`bits=`.
+
+**The two engines (`method=`).** The `method` parameter picks the sweep
+that produces the rows, both riding the same shingle set, the same
+determinism contract, and the same empty-set sentinel:
+
+- `"xxh"` (the default): the classic k-independent-permutations min-sweep
+  described in this section, byte-identical to every signature produced
+  before the parameter existed.
+- `"superminhash"`: Ertl's SuperMinHash (arXiv 1706.05698), the in-place
+  incremental sampling scheme: each element's XXH64 seeds its own
+  SplitMix64 stream, and the algorithm maintains one in-place permutation
+  with a histogram early exit, drawing amortized O(1) instead of k random
+  values per element. The estimator stays the agreement fraction, still
+  unbiased, with the paper's strictly smaller variance for small sets: the
+  alpha(m, u) factor is about 1/2 while the union cardinality u is under
+  the signature size m, so at u = 100 the SuperMinHash RMSE measures
+  ~0.7x the classic engine's at the same k, converging to parity as
+  u >> m (measured over the pinned RMSE grid in `tests/test_minhash.py`).
+
+The two engines' signatures are NOT cross-compatible: the agreement
+fraction of a mixed pair estimates nothing, and the SuperMinHash
+permutation structure depends on m (no prefix property: k=8 is not
+k=128's first 8 rows). Rows are opaque ints, so no cheap runtime check
+can catch a mix; mixing signatures across methods, `num_perm` values, or
+seeds is a caller error, and the banding consumer inherits the same rule
+(an LSH table must hold signatures from ONE engine at ONE parameter set).
+`method="superminhash"` combined with `bits=` raises `ValueError`: the
+b-bit estimator's math needs uniform integer rows, and the SuperMinHash
+rows are f64 bit patterns of real values in [0, m), not uniform
+integers.
+
+**b-bit compression (`bits=`).** An int in [1, 63] keeps the LOWEST
+`bits` bits of every row (Li and König, "b-Bit Minwise Hashing", WWW
+2010): `num_perm` full rows compress to a `b·num_perm`-bit fingerprint.
+The default `None` is the full u64 rows, byte-identical to the unmasked
+output. The masked rows' agreement probability is
+`J + (1 - J)·2^-b` (distinct min-hashes collide on their low b bits with
+probability 2^-b), so the unbiased estimate is the corrected fraction
+`(p_hat - 2^-b) / (1 - 2^-b)`, which `minhash_jaccard(..., bits=b)`
+computes. The accuracy contract: the variance is at most ~3x the full rows' once
+`b >= log2(1/J)` (below that, the chance term dominates the information
+the rows carry; measured: at J = 0.5 the RMSE ladder sits at 0.070 for
+b=1, 0.048 for b=4, 0.041 for b=8, against 0.043 for full rows at k=128).
+For banding, the per-band collision probability changes accordingly:
+`(J + (1-J)·2^-b)^r` per band of r rows instead of `J^r` -- the
+`lsh_probability` S-curve applies with the effective per-row agreement
+`J + (1-J)·2^-b` substituted for s, and the false-positive floor lifts to
+`(2^-b)^r` per band, negligible at b=8 and above.
 
 **Tokenization and shingling.** Tokens are the same tokenizer
 `tf_idf`/`bm25_rank` ride: UAX #29 word segments (`word_bounds`' own
@@ -5474,7 +5528,11 @@ against.
 bounds before any work runs, while an int outside the i64 range the
 binding extracts (`num_perm=10**30`) raises pyo3's own `OverflowError`
 at extraction instead — the `truncate_to_bounds`-identical pattern for
-every i64-typed size argument.
+every i64-typed size argument. `method` must be `"xxh"` or
+`"superminhash"` (`ValueError` naming the choices; a non-str is a
+`TypeError`), `bits` an int in `[1, 63]` or `None` (`ValueError` naming
+the range; `bool` and every other non-int a `TypeError`, an out-of-i64
+int an `OverflowError`).
 `seed` is any int, reduced mod `2**64` with two's-complement semantics
 for negatives (`seed=-1` is `seed=2**64 - 1`). All three int parameters
 are accepted through the `__index__` protocol (numpy integers and other
@@ -5562,6 +5620,55 @@ tors.minhash_signature("")[:3]
 # [18446744073709551615, 18446744073709551615, 18446744073709551615]:
 # the empty-shingle-set sentinel
 ```
+
+## `tors.minhash_jaccard`
+
+```python
+def minhash_jaccard(
+    sig_a: Sequence[int], sig_b: Sequence[int], *, bits: int | None = None
+) -> float: ...
+```
+
+The paired-row Jaccard estimator over two `minhash_signature`
+signatures: `bits=None` counts rows equal at full width and returns the
+agreement fraction (the one-expression estimator above, as a call);
+`bits=b` is the b-bit estimator over b-bit-compressed rows (Li and
+König, WWW 2010): masked rows agree with probability
+`J + (1 - J)·2^-b`, so the returned estimate applies the chance
+correction `(p_hat - 2^-b) / (1 - 2^-b)`, restoring unbiasedness. The
+corrected estimate can land slightly NEGATIVE at true similarity zero (a
+finite sample's chance term can exceed the observed agreement) -- that
+is the unbiased estimator's honest shape, not a bug; threshold callers
+should compare raw agreement fractions instead. The variance is at most ~3x the full rows' once `b >= log2(1/J)`.
+
+Both signatures must be equal-length and non-empty, else `ValueError`
+naming the lengths; row elements ride the strict int convention
+`lsh_candidates` spells (negative: `ValueError`, past `2**64 - 1`:
+`OverflowError`, non-int including `bool`: `TypeError`). The estimator
+reads the rows it is given: signatures from different engines,
+parameters, or seeds mixed in a call are a caller error nothing can
+detect (the rows are opaque), so the engine-compatibility contract in
+`minhash_signature`'s section is the guard.
+
+```python
+full_a = tors.minhash_signature(original)
+full_b = tors.minhash_signature(edited)
+full_u = tors.minhash_signature(unrelated)
+tors.minhash_jaccard(full_a, full_b)
+# 0.6015625: the agreement fraction, unbiased (true J 0.6429)
+masked_a = tors.minhash_signature(original, bits=8)
+masked_b = tors.minhash_signature(edited, bits=8)
+len(masked_a)
+# 128: still num_perm rows, each now one byte of payload
+tors.minhash_jaccard(masked_a, masked_b, bits=8)
+# 0.6: the corrected b-bit estimate (chance term removed; true J 0.6429)
+tors.minhash_jaccard(full_a, full_u)
+# 0.0
+```
+
+O(len(sig_a)) integer comparisons: no detach, no `aio` twin (the
+`lsh_probability` stay-sync class -- the thread hop costs more than the
+call).
 
 ## `tors.lsh_candidates`
 
@@ -5710,6 +5817,141 @@ tors.lsh_probability(tors.lsh_threshold(bands=16, rows=8), bands=16, rows=8)
 More bands lower the threshold (recall up), more rows raise it, and the
 one-band edge sits at `(1/1)**(1/r) = 1`. Pure float arithmetic over two
 integers: no GIL release, no `aio` twin.
+
+## `tors.weighted_minhash_signature`
+
+```python
+def weighted_minhash_signature(
+    text_or_tokens: str | Sequence[str] | Mapping[str, float],
+    *,
+    num_perm: int,
+    seed: int | None = None,
+) -> list[int]: ...
+```
+
+The Consistent Weighted Sampling signature of a token MULTISET (Ioffe,
+"Improved Consistent Sampling, Weighted Minhash and L1 Sketching", ICDM
+2010; the active-index scheme Shrivastava's NeurIPS 2016 paper restates
+as its Algorithm 1; the survey is Wu et al., arXiv 1811.04633): the
+frequency-aware complement to `minhash_signature`. WHAT it adds: the
+binary MinHash reads a document as its token SET -- a token repeated
+thrice is one element, indistinguishable from a single occurrence --
+while the weighted engine reads the COUNTS, and the fraction of
+permutations whose `(token_hash, active-index)` pairs agree estimates
+the GENERALIZED (weighted) Jaccard similarity
+`sum_k min(w_a, w_b) / sum_k max(w_a, w_b)`. WHY the binary engine
+cannot see frequency: its estimator's unbiasedness rests on each
+shingle's min-hash being drawn from the SET, so 'aaa' contributes one
+element no matter how many times it occurs -- frequency information is
+destroyed at the shingle-set step, before any permutation runs.
+
+```python
+c = tors.weighted_minhash_signature("waste oil sample", num_perm=128)
+d = tors.weighted_minhash_signature("waste waste waste oil oil sample", num_perm=128)
+# The binary engine sees the same token set and estimates J = 1.0:
+sum(x == y for x, y in zip(
+    tors.minhash_signature("waste oil sample", shingle_size=1),
+    tors.minhash_signature("waste waste waste oil oil sample", shingle_size=1),
+)) / 128
+# 1.0: frequency is invisible to it
+tors.minhash_weighted_jaccard(c, d)
+# 0.515625: the weighted engine reads the counts (1,1,1) vs (3,2,1),
+# whose generalized Jaccard is exactly 0.5
+e = tors.weighted_minhash_signature("waste oil sample sludge", num_perm=128)
+tors.minhash_weighted_jaccard(c, e)
+# 0.765625: true J 0.75 -- closer, as the counts say
+```
+
+The input spellings, all one multiset: a `str` (tokenized by the crate's
+one UAX #29 word stream, the `tf_idf`/`bm25_rank` tokenizer, lowercased;
+each occurrence a count); a sequence of `str` (each element ONE
+occurrence, no re-tokenization -- a caller's domain-specific segmenter
+weighs exactly as given); a mapping of `str` to a non-negative finite
+number (explicit weights, fractional allowed; zero excludes the token;
+NaN, infinity, and negatives raise `ValueError`; `bool` values raise
+`TypeError`). Returns `2 * num_perm` rows, the winner pair
+`(token_hash, t)` per permutation: the token's identity is the crate's
+one XXH64 contract over the single-token frame (the shingle_size-1
+shingle hash), and `t` is the integer active index emitted as its f64
+bit pattern -- an injective encoding, so fractional-weight signatures
+compare exactly too.
+
+**The engine and the estimator contract.** Per permutation `j` and token
+hash `h` with weight `w`: five SplitMix64 draws from the XXH64 frame
+`[seed, j, h]` give `r, c ~ Gamma(2, 1)` (two open-interval exponentials
+each, the paper's distribution) and `beta ~ U(0, 1)`; then
+`t = floor(ln(w)/r + beta)` (the consistency-bearing integer active
+index: the weight-independent grid the pair rides, so two documents
+naming the same token at different weights still agree exactly when the
+token wins both processes), `y = exp(r*(t - beta))`, `z = y*exp(r)`,
+`a = c/z`; the permutation's sample is the token minimizing `a`, ties
+(measure-zero) breaking to the lowest token hash -- tokens sweep in
+ascending-(hash, weight) order, the pinned deterministic order. The
+estimator's consistency -- the agreement fraction estimates the
+generalized Jaccard -- is Ioffe's theorem, made empirical by the RMSE
+cell in `tests/test_weighted_minhash.py` (measured bias +0.005, RMSE
+0.037 at k=128, on the binomial band). There is no prefix property and
+no cross-compatibility with the binary engines' signatures: the
+generalized Jaccard is a different quantity than the Jaccard, and
+`minhash_weighted_jaccard` is the only estimator that reads these rows.
+
+**The determinism contract** carries over whole: no random entropy
+anywhere (the draws are hash-derived, the seed the only input), so the
+same multiset at the same parameters is the same signature across
+processes, machines, and platforms within one tors version, the
+segmentation-table boundary included. `seed=None` (the default) IS
+`seed=0` -- the fixed default seed, not a random draw.
+
+Empty text, an empty list, an empty mapping, or all-zero weights is the
+empty-multiset convention: every row the u64 MAX sentinel
+(`2**64 - 1`), seed-invariant, the same stable digest the binary
+engine's empty documents bucket under.
+
+**Bounds and cost.** `num_perm` must be in `[1, 1024]` (`ValueError`
+naming the bounds; `__index__` accepted, `bool` rejected; required, no
+default -- the weighted signature's row count is `2 * num_perm` and the
+caller picks it explicitly). `seed` is any int or `None` (the
+mod-2^64 reduction the binary engine spells). Mapping keys must be
+`str` and sequence elements `str` (`TypeError` otherwise); a `str` input
+bearing lone surrogates raises `UnicodeEncodeError` (the crate-wide
+str-borrow contract). Cost is O(tokens) hashing to count the multiset
+plus O(num_perm * distinct_tokens) in the ICWS sweep -- linear in
+tokens times num_perm (pinned in `tests/test_scaling_pins.py`). GIL
+model: the input walk and validation under the GIL, the count + sweep
+pass under one `py.detach`, then the `2 * num_perm`-element int-list
+marshalling. `await tors.aio.weighted_minhash_signature(...)` runs the
+call under `asyncio.to_thread` (see [Async use](async.md)).
+
+## `tors.minhash_weighted_jaccard`
+
+```python
+def minhash_weighted_jaccard(
+    sig_a: Sequence[int], sig_b: Sequence[int]
+) -> float: ...
+```
+
+The generalized-Jaccard estimator over two
+`weighted_minhash_signature` signatures: the fraction of permutations
+whose `(token_hash, active-index)` pairs agree (Ioffe's consistency
+property). Both signatures must be equal-length, even-length, and
+non-empty, else `ValueError` naming the shape (an odd row count is not
+an ICWS signature; the rows are opaque, so signatures mixed across
+engines at coincident lengths are the documented undetectable caller
+error). The result is in [0.0, 1.0] and estimates
+`sum_k min(w_a, w_b) / sum_k max(w_a, w_b)` over the two token
+multisets. O(len(sig_a) / 2) integer comparisons: no detach, no `aio`
+twin (the `lsh_probability` stay-sync class).
+
+```python
+tors.minhash_weighted_jaccard(c, d)
+# 0.515625
+tors.minhash_weighted_jaccard(c, c)
+# 1.0
+tors.weighted_minhash_signature("", num_perm=2)
+# [18446744073709551615, 18446744073709551615, 18446744073709551615,
+#  18446744073709551615]: the empty-multiset sentinel, two rows per
+# permutation
+```
 
 ## `tors.simhash_distance`
 

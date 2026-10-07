@@ -80,6 +80,17 @@ enum Input {
         noise_seed: u64,
         shingle_size: u8,
     },
+    /// The SuperMinHash engine over arbitrary raw text and parameters:
+    /// the same panic-freedom, determinism, length, and sentinel-
+    /// equivalence contract the classic lane asserts, plus the row-range
+    /// invariant the engine's real values carry (every non-sentinel row
+    /// decodes to a finite f64 in [0, m)).
+    Super {
+        data: Vec<u8>,
+        num_perm: u16,
+        shingle_size: u16,
+        seed: u64,
+    },
 }
 
 /// The exact-string lane's corpus: every row a segmentation or framing
@@ -252,6 +263,50 @@ fuzz_target!(|input: Input| {
                 far_agreement < 0.1,
                 "independent random text agreed {far_agreement:.3} (> 0.1) with the input"
             );
+        }
+        Input::Super {
+            data,
+            num_perm,
+            shingle_size,
+            seed,
+        } => {
+            if data.len() > 16 * 1024 {
+                return;
+            }
+            let text = String::from_utf8_lossy(&data);
+            let num_perm = num_perm as usize % 1025;
+            let shingle_size = shingle_size as usize % 1030;
+            // Panic-freedom and determinism.
+            let sig =
+                tors::minhash_impl::superminhash_signature(&text, num_perm, shingle_size, seed);
+            assert_eq!(
+                sig,
+                tors::minhash_impl::superminhash_signature(&text, num_perm, shingle_size, seed),
+                "superminhash signature not deterministic"
+            );
+            // The length contract and the sentinel equivalence: the
+            // all-sentinel signature exactly when the shingle set is
+            // empty (the empty-set convention the classic engine pins).
+            assert_eq!(sig.len(), num_perm, "signature length != num_perm");
+            let distinct = tors::minhash_impl::distinct_shingle_count(&text, shingle_size);
+            if distinct == 0 || num_perm == 0 {
+                assert!(
+                    sig.iter().all(|&v| v == u64::MAX),
+                    "empty shingle set but not the all-sentinel signature"
+                );
+            } else {
+                // The row-range invariant: every real row is the f64 bit
+                // pattern of a finite value in [0, m) (the paper's r + j
+                // range; u64 MAX itself is a NaN pattern, unreachable).
+                for (idx, &v) in sig.iter().enumerate() {
+                    assert_ne!(v, u64::MAX, "row {idx}: sentinel over a non-empty set");
+                    let h = f64::from_bits(v);
+                    assert!(
+                        h.is_finite() && h >= 0.0 && h < num_perm as f64,
+                        "row {idx} decodes to {h}, outside [0, {num_perm})"
+                    );
+                }
+            }
         }
     }
 });

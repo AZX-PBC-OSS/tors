@@ -221,6 +221,54 @@ class TestApiReferenceExamples:
             18446744073709551615,
         ]
 
+    def test_minhash_engines_bbit_and_weighted_examples(self) -> None:
+        # docs/api.md's minhash_signature section additions (the
+        # superminhash engine, b-bit compression, minhash_jaccard) and the
+        # weighted sections, pinned byte-exact: the head rows, the
+        # agreement estimates, the corrected b-bit estimate, the
+        # frequency-aware weighted estimates, and the empty-multiset
+        # sentinel, re-derived against the built extension.
+        original = (
+            "The quarterly oil sample interval for field outages was adjusted after the "
+            "bushing torque specifications changed. Maintenance windows now close within "
+            "fourteen days. "
+        )
+        edited = (
+            "The monthly oil sample interval for field outages was adjusted after the "
+            "insulator torque specifications changed. Maintenance windows now close within "
+            "fourteen days. "
+        )
+        unrelated = "Pack my box with five dozen liquor jugs."
+        a = tors.minhash_signature(original, method="superminhash")
+        b = tors.minhash_signature(edited, method="superminhash")
+        u = tors.minhash_signature(unrelated, method="superminhash")
+        assert a[:3] == [4604327572203814138, 4597025172440591026, 4616236539331891061]
+        assert sum(x == y for x, y in zip(a, b, strict=True)) / len(a) == 0.59375
+        assert sum(x == y for x, y in zip(a, u, strict=True)) / len(a) == 0.0
+        full_a = tors.minhash_signature(original)
+        assert full_a[:3] == [151086443443351341, 59387643775660493, 132191052063639682]
+        assert tors.minhash_jaccard(full_a, tors.minhash_signature(edited)) == 0.6015625
+        masked_a = tors.minhash_signature(original, bits=8)
+        assert masked_a[:3] == [45, 205, 130]
+        assert len(masked_a) == 128
+        assert tors.minhash_jaccard(masked_a, tors.minhash_signature(edited, bits=8), bits=8) == 0.6
+        assert tors.minhash_jaccard(full_a, tors.minhash_signature(unrelated)) == 0.0
+        # The weighted sections' example: the frequency-aware estimates
+        # and the empty-multiset sentinel.
+        c = tors.weighted_minhash_signature("waste oil sample", num_perm=128)
+        d = tors.weighted_minhash_signature("waste waste waste oil oil sample", num_perm=128)
+        binary_pair = zip(
+            tors.minhash_signature("waste oil sample", shingle_size=1),
+            tors.minhash_signature("waste waste waste oil oil sample", shingle_size=1),
+            strict=True,
+        )
+        assert sum(x == y for x, y in binary_pair) / 128 == 1.0
+        assert tors.minhash_weighted_jaccard(c, d) == 0.515625
+        e = tors.weighted_minhash_signature("waste oil sample sludge", num_perm=128)
+        assert tors.minhash_weighted_jaccard(c, e) == 0.765625
+        assert tors.minhash_weighted_jaccard(c, c) == 1.0
+        assert tors.weighted_minhash_signature("", num_perm=2) == [18446744073709551615] * 4
+
     def test_unescaped_scan_json_renderings(self) -> None:
         # docs/api.md's contains_unescaped/find_unescaped section, pinned
         # directly (the literals the doc shows, both spellings): the real

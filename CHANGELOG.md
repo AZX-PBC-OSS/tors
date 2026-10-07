@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.16.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.15.1...v0.16.0) (2026-10-07)
+
+
+### Features
+
+* **chunk,grounding:** the chunk-quality evaluation surface and the grounding-report composition ([#173](https://github.com/AZX-PBC-OSS/tors/issues/173)) ([a0a4518](https://github.com/AZX-PBC-OSS/tors/commit/a0a451865a5ee3c5dca643f5054fa1a3784dd3d3))
+* **fusion:** score_fuse -- the score-based fusion siblings (combmnz, borda, linear) ([#174](https://github.com/AZX-PBC-OSS/tors/issues/174)) ([1cc182c](https://github.com/AZX-PBC-OSS/tors/commit/1cc182cf9c09846302a9e3714982cf2e90139a78))
+* **minhash:** superminhash engine, b-bit compression, and consistent weighted sampling ([#176](https://github.com/AZX-PBC-OSS/tors/issues/176)) ([52a97e4](https://github.com/AZX-PBC-OSS/tors/commit/52a97e4921435ac41c4a1f6907604d6206a58a6d))
+
+
+### Bug Fixes
+
+* **docs,parser:** the orchestrator-review's fix-forward ([#179](https://github.com/AZX-PBC-OSS/tors/issues/179)) ([2437d6c](https://github.com/AZX-PBC-OSS/tors/commit/2437d6c558a6584828374d6e32ba17996ad4f23b))
+* **docs:** the retro-review's table repair — the [#176](https://github.com/AZX-PBC-OSS/tors/issues/176) merge resolution's blank line split the README feature table ([#182](https://github.com/AZX-PBC-OSS/tors/issues/182)) ([d0a4c31](https://github.com/AZX-PBC-OSS/tors/commit/d0a4c31d73023364df509f983d4d88448e5a789c))
+
+
+### Performance Improvements
+
+* **lsh:** the candidate dedup's per-band sort + linear merge ([#180](https://github.com/AZX-PBC-OSS/tors/issues/180)) ([15d51a5](https://github.com/AZX-PBC-OSS/tors/commit/15d51a55623d7792c315df8e60381b97f28cafbe))
+
+
+### Documentation
+
+* **aio:** state the actual wrapping policy instead of the blanket sync-only rule ([#181](https://github.com/AZX-PBC-OSS/tors/issues/181)) ([528a181](https://github.com/AZX-PBC-OSS/tors/commit/528a18168ba7c16f1e9b7a7d8a87518d686e83df))
+
 ## [0.15.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.15.0...v0.15.1) (2026-09-26)
 
 

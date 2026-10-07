@@ -365,3 +365,10 @@ path = "fuzz_targets/lsh.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "weighted_minhash"
+path = "fuzz_targets/weighted_minhash.rs"
+test = false
+doc = false
+bench = false
