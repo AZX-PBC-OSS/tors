@@ -82,7 +82,9 @@ struct ScanFrame {
 enum StrEsc {
     None,
     Backslash,
-    U(usize),
+    /// The `\u` escape in flight: the accumulated code unit (hex shifted
+    /// in) and the digit count (the fourth completes).
+    U(u16, u8),
 }
 
 /// The conservative scan: does the input sit in an engine-parity class?
@@ -157,6 +159,41 @@ struct Scan {
     obj_value_after_ws: bool,
     /// The open string's raw content (the key text when `string_is_key`).
     key_buf: String,
+    /// A `\uXXXX` escape completed to a LONE HIGH surrogate inside the
+    /// open string (the machine holds it): its low half may follow (the
+    /// pair decodes exactly), plain content flushes it U+FFFD (the
+    /// engine's own heal), and an ESCAPE after it is the engine's
+    /// whole-text string-repair lane re-deciding the escape run (out).
+    held_high: bool,
+    /// The deferred strictly-empty mark class armed (the machine's
+    /// `EmptyMark`): its keep relies on a fast path (the whole-input
+    /// `json.loads`, the strict-suffix probe) covering the array —
+    /// co-occurring with any taint that kills both fast paths (a paren
+    /// anywhere, a non-strict word/number run in a container) is the
+    /// repair-lane-decided class where the engine drops and the
+    /// stream's local rule keeps (out, checked at the walk's end).
+    saw_deferred_mark: bool,
+    /// A `(`-frame opened anywhere: the tuple grammar is never
+    /// strict-valid, so both fast paths die (the mark-keep taint; and
+    /// the machine's own paren-taint immediate drop is engine-matching,
+    /// so this flag only gates the mark class).
+    saw_paren: bool,
+    /// The value-run in flight began inside a container (the top-level
+    /// runs are the suffix-probe's own territory and taint nothing).
+    run_in_container: bool,
+    /// The value-run's full text (the strictness check at its end).
+    run_text: String,
+    /// A container run the strict parser rejected (a bare word, a
+    /// malformed number): the whole-input `json.loads` fails on the
+    /// INPUT text, so both fast paths die — the mark-keep taint.
+    saw_tainted_run: bool,
+    /// The last completed VALUE was a run the strict parser rejects
+    /// (the machine's bare-word/malformed-number lane): the engine's
+    /// unquoted-value `}`-machinery then absorbs the object's own `}`
+    /// when the tail past it holds two chars before the next `}` (the
+    /// lib's `j - i > 1` guard: `{"a": b}66` -> the engine
+    /// `{"a": "b}66"}`) — the close desyncs (out).
+    last_run_nonstrict: bool,
     top_done: bool,
     divergent: bool,
 }
@@ -185,6 +222,13 @@ impl Scan {
             empty_pending_paren: false,
             obj_value_after_ws: false,
             key_buf: String::new(),
+            held_high: false,
+            saw_deferred_mark: false,
+            saw_paren: false,
+            run_in_container: false,
+            run_text: String::new(),
+            saw_tainted_run: false,
+            last_run_nonstrict: false,
             top_done: false,
             divergent: false,
         }
@@ -277,6 +321,7 @@ impl Scan {
         if self.run_first.is_none() {
             self.run_first = Some(c);
         }
+        self.run_text.push(c);
         if c.is_alphabetic() {
             self.run_saw_alpha = true;
         }
@@ -299,16 +344,26 @@ impl Scan {
     }
 
     /// A value-run's end: a completed float-spelling run plus a
-    /// following token is the strict-vs-repair-lane split (out).
+    /// following token is the strict-vs-repair-lane split (out); a
+    /// container run the strict parser rejects (a bare word, a
+    /// malformed number) is the mark-keep taint (both fast paths die).
     fn end_run(&mut self, terminated: bool) {
         if self.run_is_float_spelling && terminated {
             self.divergent = true;
+        }
+        if loads_strict(&self.run_text).is_err() {
+            self.saw_tainted_run = true;
+            self.last_run_nonstrict = true;
+        } else {
+            self.last_run_nonstrict = false;
         }
         self.run_len = 0;
         self.run_tail_len = 0;
         self.run_is_float_spelling = false;
         self.run_first = None;
         self.run_saw_alpha = false;
+        self.run_in_container = false;
+        self.run_text.clear();
     }
 
     fn walk(&mut self, s: &str) {
@@ -338,7 +393,7 @@ impl Scan {
                 match std::mem::replace(&mut self.esc, StrEsc::None) {
                     StrEsc::Backslash => match c {
                         'u' => {
-                            self.esc = StrEsc::U(0);
+                            self.esc = StrEsc::U(0, 0);
                             self.saw_backslash = true;
                         }
                         // an escaped structural char: conservative out
@@ -374,10 +429,33 @@ impl Scan {
                             return;
                         }
                     },
-                    StrEsc::U(digits) => {
+                    StrEsc::U(code, digits) => {
                         if c.is_ascii_hexdigit() {
+                            let code = code * 16 + c.to_digit(16).unwrap_or(0) as u16;
                             if digits < 3 {
-                                self.esc = StrEsc::U(digits + 1);
+                                self.esc = StrEsc::U(code, digits + 1);
+                            } else {
+                                // the fourth digit completes the escape:
+                                // a HIGH surrogate HELDS (its low half may
+                                // follow); a LOW without the held high is
+                                // a lone surrogate; a plain code after a
+                                // held high (or any escape after one) is
+                                // the engine's whole-text string-repair
+                                // lane re-deciding the escape run
+                                // (`["\ud83d\falsee"` -> the engine
+                                // `["\ufffd\\falsee"]`) — out
+                                if (0xD800..=0xDBFF).contains(&code) {
+                                    self.held_high = true;
+                                } else if (0xDC00..=0xDFFF).contains(&code) {
+                                    if !self.held_high {
+                                        self.divergent = true;
+                                        return;
+                                    }
+                                    self.held_high = false;
+                                } else if self.held_high {
+                                    self.divergent = true;
+                                    return;
+                                }
                             }
                             // the fourth digit completes the escape
                             i += 1;
@@ -392,12 +470,23 @@ impl Scan {
                     }
                     StrEsc::None => {
                         if c == '\\' {
+                            if self.held_high {
+                                // an escape hard on a lone high
+                                // surrogate's heels: the engine's
+                                // whole-text lane re-pairs the run (out)
+                                self.divergent = true;
+                                return;
+                            }
                             self.esc = StrEsc::Backslash;
                             self.raw_bs_run += 1;
                             self.saw_backslash = true;
                             i += 1;
                             continue;
                         }
+                        // plain content after a held high surrogate: the
+                        // machine flushes it U+FFFD and the engine's own
+                        // heal agrees (the pinned lone-surrogate case)
+                        self.held_high = false;
                         self.string_content(c);
                     }
                 }
@@ -412,8 +501,15 @@ impl Scan {
                     self.divergent = true;
                     return;
                 }
-                // the array-parent's whitespace deferred the decision
-                // to the close-time mark
+                if self.empty_pending_armed {
+                    // the array-parent's whitespace: the machine's
+                    // deferred mark arms (the array's own closing shape
+                    // decides at its pop) — the mark-keep class, gated
+                    // by the taint check at the walk's end
+                    self.saw_deferred_mark = true;
+                }
+                // the decision resolved: the element keeps or the drop
+                // consumed with the next non-ws char
                 self.empty_pending_armed = false;
                 // an OBJECT-VALUE's word after this whitespace run:
                 // the engine's parse_string entry-skip territory
@@ -560,6 +656,25 @@ impl Scan {
                             return;
                         }
                         self.obj_value_after_ws = false;
+                    }
+                    // The same `}`-machinery for a NON-strict run VALUE
+                    // without the ws (the machine's bare-word lane kept
+                    // the `}`: `{"a": b}66` -> the engine
+                    // `{"a": "b}66"}`, the stream `{"a": "b"}`) (out)
+                    if f.obj && f.expect == Expect::AfterValue && self.last_run_nonstrict {
+                        let mut k = i + 1;
+                        while k < n && chars[k].is_whitespace() {
+                            k += 1;
+                        }
+                        let mut j = k;
+                        while j < n && chars[j] != '}' {
+                            j += 1;
+                        }
+                        if j - k > 1 {
+                            self.divergent = true;
+                            return;
+                        }
+                        self.last_run_nonstrict = false;
                     }
                     // The first-member dangling key at the close: the
                     // engine's whole-text fallback re-parses the body as
@@ -791,6 +906,23 @@ impl Scan {
                         self.top_done = true;
                         continue;
                     };
+                    self.run_in_container = true;
+                    // the quoted-section re-pair's RUN shape: a number/
+                    // word run hard on a closed string VALUE's heels —
+                    // the engine's string lane re-pairs the string when
+                    // the window to the first `,`/`]`/`}` holds a quote
+                    // (`{"k": "\nk"0: ""` -> the engine
+                    // `{"\nk": "\nk\"0: \"\""}`) (out)
+                    if self.last_string_value {
+                        let mut k = i + 1;
+                        while k < n && !matches!(chars[k], ',' | ']' | '}' | '"') {
+                            k += 1;
+                        }
+                        if k < n && chars[k] == '"' {
+                            self.divergent = true;
+                            return;
+                        }
+                    }
                     self.last_string_value = false;
                     // a bare word at an OBJECT's key attempt (the Key
                     // state, or the AfterValue missing-comma state)
@@ -942,6 +1074,7 @@ impl Scan {
                     self.end_run(terminated);
                 }
                 '(' => {
+                    self.saw_paren = true;
                     if self.last_empty_string_value {
                         // a token where the engine's whole-text
                         // string-repair lane re-pairs what follows an
@@ -1013,6 +1146,16 @@ impl Scan {
                 }
             }
         }
+        // The mark-keep class's taint gate: a deferred strictly-empty
+        // mark keeps only under a fast path (the whole-input
+        // `json.loads`, the strict-suffix probe), and both die on a
+        // paren anywhere or a container run the strict parser rejects
+        // (the INPUT text is what loads sees). The co-occurrence is
+        // the repair-lane-decided class: the engine's array skip
+        // fired, the stream's local rule kept — out.
+        if self.saw_deferred_mark && (self.saw_paren || self.saw_tainted_run) {
+            self.divergent = true;
+        }
     }
 
     /// A plain (escape-free) char inside the open string: the structural
@@ -1029,6 +1172,7 @@ impl Scan {
             self.raw_bs_run = 0;
             self.content_ends_nl = false;
             self.in_string = false;
+            self.held_high = false;
             let was_key = self.string_is_key;
             let key_text = self.key_buf.clone();
             self.string_is_key = false;
@@ -1038,6 +1182,10 @@ impl Scan {
             // `{"a": "x"}`, `[""(` -> `["("]`) — out
             self.last_empty_string_value = !was_key && key_text.is_empty();
             self.last_string_value = !was_key;
+            // a string supersedes any completed run value (the
+            // `}`-absorption's operand is the run, and the string's own
+            // close never absorbs)
+            self.last_run_nonstrict = false;
             // the strictly-empty string VALUE's own one-char decision
             // arms on the parent (the machine's `arm_empty_pending`)
             // the strictly-empty string VALUE's own one-char decision

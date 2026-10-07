@@ -93,6 +93,22 @@ VALID = [
     r'{"a": "x\/y"}',
     r'{"a": "x\ud83d\ude00y"}',
     '{"key": "value with, commas; and: colons"}',
+    # the valid-keeps neighbors of the strictly-empty element rule: the
+    # element's own array closed properly, the fast paths kept it
+    '[[], 1]',
+    '[[] , 1]',
+    '[true, [] , 1]',
+    '[{}]',
+    '[[] ]',
+    '[""]',
+    '{"a": ["" , 1]}',
+    '{"a": [[] , 1]}',
+    # the trailing-garbage keeps: the element's array closed properly
+    # and the strict-suffix probe re-decided the valid root
+    '[[] , 1] x',
+    '{"a": ["" , 1]} x',
+    '[true, [] , 1] x',
+    'x {"a": ["" , 1]}',
 ]
 
 TRUNCATION = [
@@ -211,6 +227,10 @@ TRUNCATION = [
     '("...',
     '[1, ...',
     '[..., 1]',
+    '[...-',
+    '[...-]',
+    '[1, ...-]',
+    '(...-',
     '["....',
     '["..',
     '[" ...',
@@ -455,6 +475,21 @@ MALFORMED = [
     '["\\u2000',
     '["\\u2000\\u2000',
     '{"k": "\\u2000',
+    # the strictly-empty element's LOCAL rule: the trailing-separator
+    # drops (the array's own closer ended on a `,` where a value was
+    # required) and the ws-then-value-start drops (the stall guard ate
+    # the whitespace, the char re-parsed as the next item)
+    '[[] ,]',
+    '[1, [] ,]',
+    '[[], [] ,]',
+    '[[] , [] ,]',
+    '{"a": [[] ,]}',
+    '{"a": [1, [] ,]}',
+    '[[] ,] x',
+    '[[] x]',
+    '[[] x, 1]',
+    '[1, [] x, 1]',
+    '[[]x]',
 ]
 
 CORPUS = VALID + TRUNCATION + MALFORMED
@@ -520,6 +555,21 @@ DIVERGENCES = [
     # the empty-key attempt at a member boundary: the engine's key
     # loop discards it and the object drains through the fallback
     ('{"" ,}', '[]', '{"": ""}'),
+    # the missing-colon shape with a CONTAINER where the colon was due:
+    # the engine's object loop consumes the container-open as the
+    # colon-substitute and the array's repair-lane item skip empties it;
+    # the stream inserts the colon and keeps the value it saw
+    ('{"a" [[] , 1]}', '{"a": []}', '{"a": [[], 1]}'),
+    # the completed-paren taint on a LATER deferred element: the paren
+    # killed both fast paths (the whole-input loads and the suffix
+    # probe both fail on a tuple), so the engine's repair lane decided
+    # the array and its skip fired; the stream's local rule (the
+    # array's own closing shape) keeps it
+    ('[(2), [] , 1]', '[2, 1]', '[2, [], 1]'),
+    # the COMMA-first tail after a valid root: the engine's suffix
+    # probe is gated on non-comma trailing content, so the repair lane
+    # decided and the element dropped; the stream's local rule kept it
+    ('[[] , 1] ,', '[1]', '[[], 1]'),
     # the object-lane comma classification: a comma after a bare VALUE
     # word belongs to the string when the next member's key is
     # garbage-led — the engine's whole-text classifier absorbs the tail
@@ -529,6 +579,15 @@ DIVERGENCES = [
     # and re-decides literal prefixes
     ('[{"b": undefined},]', '[{"b": "undefined},"}]', '[{"b": "undefined"}]'),
     ('[null x]', '[null, "x"]', '["null x"]'),
+    # the unquoted-value `}`-absorption without the ws: a non-strict run
+    # VALUE at an object's close absorbs the object's own `}` when the
+    # tail past it holds two chars before the next `}`
+    ('{"a": b}66', '{"a": "b}66"}', '{"a": "b"}'),
+    # a lone high surrogate escape followed by ANOTHER escape: the
+    # engine's whole-text string-repair lane re-decides the escape run
+    # (the `\f` stays a literal backslash + f); the stream decodes the
+    # standard table
+    ('["\\ud83d\\falsee"', '["\\ufffd\\\\falsee"]', '["\\ufffd\\falsee"]'),
     # the empty-object fallback's body reparse: the stream reproduces it
     # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
     # match); a body that would re-parse to members keeps {}
@@ -742,6 +801,75 @@ class TestDocumentedDecisions:
         d2 = r2.push("}")
         assert "".join([d1, d2]) == '{"a": 1, }'
         assert r2.end() == '{"a": 1}'
+
+    def test_the_strictly_empty_drops_are_local_to_their_array(self) -> None:
+        """THE ROUND-5 CONTRACT (docs/api.md and the module docs): the
+        strictly-empty element's deferred drop is LOCAL to its own
+        array's closing shape -- it drops iff that array closed on a
+        trailing separator (a `,` where a value was required), the
+        stream cut with the element pending, or the paren taint holds;
+        it keeps when the array closed properly -- a valid document or
+        a valid root with trailing garbage alike. The review round's
+        four breaks, pinned at every chunking (and the valid-keeps
+        neighbors with them): the streamed shape at every split set,
+        and the engine's own answer with it (except the one documented
+        divergence below, pinned to its engine shape)."""
+        for text, want, engine in [
+            # break 1 (+2): a valid OBJECT keeps its strictly-empty
+            # element -- the whole document is strict-valid, the
+            # whole-input fast path kept it
+            ('{"a": ["" , 1]}', '{"a": ["", 1]}', '{"a": ["", 1]}'),
+            # break 3: trailing garbage after a valid root keeps the
+            # element (the engine's strict-suffix probe re-decided the
+            # valid initial container; a whole-document loads failure
+            # does NOT imply the drop)
+            ('[[] , 1] x', '[[], 1]', '[[], 1]'),
+            ('[true, [] , 1] x', '[true, [], 1]', '[true, [], 1]'),
+            # break 4's class (the missing-colon shape with a
+            # container): the DOCUMENTED divergence -- the stream keeps
+            # the value it saw, the engine's object loop consumed the
+            # container-open as the colon-substitute and its repair
+            # lane emptied the array
+            ('{"a" [[] , 1]}', '{"a": [[], 1]}', '{"a": []}'),
+            # the trailing-separator drops: the element's OWN array
+            # closed on a `,` where a value was required
+            ('[[] ,]', '[]', '[]'),
+            ('[1, [] ,]', '[1]', '[1]'),
+            ('[[], [] ,]', '[[]]', '[[]]'),
+            ('{"a": [[] ,]}', '{"a": []}', '{"a": []}'),
+            ('{"a": [1, [] ,]}', '{"a": [1]}', '{"a": [1]}'),
+            ('[[] ,] x', '[]', '[]'),
+            # the cut drops: the stream ended with the element pending
+            # (or the root never closed)
+            ('[[] ,', '[]', '[]'),
+            ('[[] , 1', '[1]', '[1]'),
+            ('[[], [[] , 2], 3', '[[], [2], 3]', '[[], [2], 3]'),
+            # the ws-then-value-start drops: the engine's one-char
+            # stall guard ate the whitespace, the char re-parsed as
+            # the next item
+            ('[[] x]', '["x"]', '["x"]'),
+            ('[[] x, 1]', '["x", 1]', '["x", 1]'),
+            ('[1, [] x, 1]', '[1, "x", 1]', '[1, "x", 1]'),
+            ('[[]x]', '[]', '[]'),
+            # the paren-taint drops: a paren-derived or paren-enclosed
+            # element never defers (the tuple grammar is never
+            # strict-valid, the repair lane always decides)
+            ('[() ]', '[]', '[]'),
+            ('[()]', '[[]]', '[[]]'),
+            ('[([] , 1)]', '[[1]]', '[[1]]'),
+            # the valid-keeps neighbors
+            ('[[], 1]', '[[], 1]', '[[], 1]'),
+            ('[[] , 1]', '[[], 1]', '[[], 1]'),
+            ('[true, [] , 1]', '[true, [], 1]', '[true, [], 1]'),
+            ('[{}]', '[{}]', '[{}]'),
+            ('[[] ]', '[[]]', '[[]]'),
+            ('[""]', '[""]', '[""]'),
+            ('{"a": [[] , 1]}', '{"a": [[], 1]}', '{"a": [[], 1]}'),
+        ]:
+            assert tors.repair_json(text) == engine, f"engine drifted on {text!r}"
+            for k in range(1, len(text) + 1):
+                _, got = stream(text, list(range(k)))
+                assert got == want, f"splits {list(range(k))} of {text!r}: {got!r} != {want!r}"
 
     def test_empty_trailing_container_heal_matches_the_engine(self) -> None:
         """The heal class the review round caught: a still-open empty

@@ -119,21 +119,44 @@
 //!   string and a bare number-run alike: `["...` and `[1, ...` to
 //!   `[]`/`[1]`, while the CLOSED `["..."]` element's parse ends on
 //!   its quote and stays) and the strictly-empty item whose next char
-//!   is not a separator (`[[] ,` -> `[]`, `[[] , 1` -> `[1]`; the
-//!   decision defers to close time, and its gate is the ENGINE'S OWN
-//!   DECISION PROCEDURE: the drops happen exactly when the completed
-//!   text is NOT strict-valid JSON -- `json.loads` failed so the
-//!   engine's repair lane decided and its strictly-empty skips fire;
-//!   when the machine's own state says the parse was strict-clean
-//!   end-to-end AND the root closed cleanly, the whole-input fast path
-//!   kept every element and the marks drain nowhere -- the cut-only
-//!   justification "whenever the text ends up valid, the drops are
-//!   cut-only" was WRONG: the repair lane also drops in
-//!   cleanly-closed-yet-INVALID roots (`[[] ,]` -> `[]`,
-//!   `[1, (,)]` -> `[1]`) -- and the same gate re-decides the
-//!   garbage-item run (a `,` at an item position consumes the
-//!   non-value-start chars that follow, the frame's own closer
-//!   included: `[(,)]` -> `[]`, `[(,), 1]` -> `[[1]]`) and the
+//!   is not a separator (`[[] ,` -> `[]`, `[[] , 1` -> `[1]`).
+//! - **The strictly-empty element's drops are LOCAL to their own
+//!   array's closing shape** (the round-5 contract; the two earlier
+//!   whole-document gates — "cut-only", then "the drain's gate is the
+//!   engine's own loads decision" — were both WRONG abstractions and
+//!   are gone): the element's one-char skip decision (the engine's
+//!   `parse_array_items` skip reads the char right after the element)
+//!   resolves per char —
+//!   a `,` or the array's closer DIRECTLY keeps the element finally
+//!   (the skip never fires on a separator: `[[], 1]`), whitespace
+//!   HOLDS the decision, and any other char drops it — the engine's
+//!   one-char stall guard eating exactly one char: the WHITESPACE when
+//!   one preceded (the char re-parses as the next member/item:
+//!   `[[] x, 1]` -> `["x", 1]`), else the char itself (`[[]x]` ->
+//!   `[]`). A held decision (whitespace seen) converts to a deferred
+//!   MARK at the next `,`/closer, and the mark's fate is the ARRAY'S
+//!   OWN closing shape, decided at that array's pop: a TRAILING
+//!   separator where a value was required drops it (`[[] ,]` -> `[]`,
+//!   `[1, [] ,]` -> `[1]`, `{"a": [[] ,]}` -> `{"a": []}` — a trailing
+//!   comma is never strict-valid, so neither fast path can cover the
+//!   array and the engine's repair lane decided it); a PROPER close
+//!   keeps it (`[[] , 1]` -> `[[], 1]`, `[true, [] , 1]`,
+//!   `[[] ]` -> `[[]]`, `{"a": ["" , 1]}` -> `{"a": ["", 1]}` — the
+//!   whole-input `json.loads` fast path and the strict-suffix probe
+//!   keep every element of an array whose own body is strict-valid,
+//!   trailing garbage after the valid root included: `[[] , 1] x` ->
+//!   `[[], 1]`); and a CUT root (the root never closed) drops every
+//!   mark still alive, properly-closed arrays' marks included — the
+//!   repair lane decided the whole parse there (`[[], [[] , 2], 3` ->
+//!   `[[], [2], 3]`). The PAREN TAINT never defers: a paren-derived
+//!   empty group, or any element inside a paren's parse, drops on the
+//!   first char whatever it is (the tuple grammar is never
+//!   strict-valid, so the repair lane always decides: `[() ]` -> `[]`,
+//!   `[([] , 1)]` -> `[[1]]`), keeping only for a `,`/closer that
+//!   arrives directly (`[()]` -> `[[]]`). The same shape class
+//!   re-decides the garbage-item run (a `,` at an item position
+//!   consumes the non-value-start chars that follow, the frame's own
+//!   closer included: `[(,)]` -> `[]`, `[(,), 1]` -> `[[1]]`) and the
 //!   empty-object array fallback (an object that closed with no
 //!   members over a non-trivial colon-free body closes as `[]`:
 //!   `{"a": {(]` -> `{"a": []}`, `{]}` -> `[]`)) — the pending
@@ -247,6 +270,27 @@
 //!   inside the parenthesized container into an object (`("a": ` ->
 //!   `{"a": ""}`); the stream keeps the tuple machinery (`"a"`), valid
 //!   JSON on both sides.
+//! - **The missing-colon shape with a CONTAINER where the colon was
+//!   due**: the engine's object loop consumes the container-open as the
+//!   colon-substitute and its repair lane empties the array
+//!   (`{"a" [[] , 1]}` -> `{"a": []}`); the stream inserts the colon
+//!   and keeps the value it saw (`{"a": [[], 1]}`).
+//! - **The completed-paren taint on a later deferred element**: a paren
+//!   anywhere in the input kills both fast paths (the whole-input loads
+//!   and the suffix probe both fail on a tuple), so the engine's repair
+//!   lane decided the array and its skip fired (`[(2), [] , 1]` ->
+//!   the engine `[2, 1]`); the stream's local rule (the array's own
+//!   closing shape) kept it (`[2, [], 1]`).
+//! - **The COMMA-first tail after a valid root**: the engine's suffix
+//!   probe is gated on non-comma trailing content, so the repair lane
+//!   decided and the element dropped (`[[] , 1] ,` -> the engine `[1]`);
+//!   the stream's local rule kept it (`[[], 1]`). Any other trailing
+//!   garbage keeps on both sides.
+//! - **The unquoted-value `}`-absorption without the ws**: a non-strict
+//!   run VALUE at an object's close absorbs the object's own `}` when
+//!   the tail past it holds two chars before the next `}`
+//!   (`{"a": b}66` -> the engine `{"a": "b}66"}`); the stream keeps the
+//!   run's own termination (`{"a": "b"}`).
 //! - **The mismatched-closer garbage**: the engine's whole-text
 //!   close-up re-decides earlier structure on garbage
 //!   (`{{\r]0\x01...('` -> `[]`, the stream `{"0": []}`), both valid.
@@ -337,17 +381,17 @@ pub struct StreamingRepairer {
     prev_char_ws: bool,
     /// The deferred strictly-empty element drops (the engine's array
     /// skip): a `(rendering start, rendering end, the element was the
-    /// frame's first, the frame's index)` span per strictly-empty
-    /// element whose next char was whitespace. The engine decides at
-    /// the element's own return (the next char, whitespace included,
-    /// drops it); the machine defers to close time because the
-    /// WHOLE-INPUT `json.loads` fast path keeps the element whenever
-    /// the text ends up one strict JSON value. Drained by
-    /// `render_closed` (pure, local) exactly when the engine's own
-    /// decision procedure ran the repair lane: the completed text is
-    /// NOT strict-valid JSON (the root did not close cleanly, or the
-    /// machine's `strict_clean` flag fell -- any repair/garbage/
-    /// malformed marker), so the fast path never applied.
+    /// frame's first, the frame's index, the array's own closing shape
+    /// said DROP)` span per strictly-empty element whose next char was
+    /// whitespace. The engine decides at the element's own return (the
+    /// next char, whitespace included, drops it); the machine defers
+    /// because the WHOLE-INPUT `json.loads` fast path and the strict-
+    /// suffix probe keep the element whenever the text (or the initial
+    /// container plus junk) ends up one strict JSON value. The marks'
+    /// fate is the LOCAL rule of `empty_pending`'s doc: each mark's own
+    /// array's closing shape decides at that array's pop, and a cut
+    /// (the root never closed) drops every mark still alive. Drained
+    /// by `render_closed` (pure, local).
     empty_marks: Vec<EmptyMark>,
     /// The strictly-empty element's deferred one-char decision; see
     /// `EmptyPending`. Armed when a strictly-empty element (an empty
@@ -356,16 +400,6 @@ pub struct StreamingRepairer {
     /// across a push boundary in any observable way (the state is part
     /// of the machine, so chunk splits do not change the outcome).
     empty_pending: Option<EmptyPending>,
-    /// The machine's own strict-clean flag: has the input so far been
-    /// one strict JSON value in progress -- no repair lane fired, no
-    /// garbage consumed, no malformed structure seen? Every departure
-    /// from the strict grammar flips it false (the engine's
-    /// `json.loads` fast path would fail on the whole input, so its
-    /// repair lane decides: the strictly-empty drops and the other
-    /// repair-lane observables apply). The engine's own decision
-    /// procedure, tracked as the machine sees it; see `render_closed`'s
-    /// drain gate.
-    strict_clean: bool,
     /// The last closed KEY string's content was empty (the engine's
     /// key loop discards an empty-key attempt at anything but its own
     /// `:` — the `{"" ,}`-corner; `{"": 1}`'s `:` keeps it).
@@ -385,12 +419,22 @@ pub struct StreamingRepairer {
     paren_gate: Option<ParenGate>,
 }
 
-/// One deferred strictly-empty element drop; see `empty_marks`.
+/// One deferred strictly-empty element drop; see `empty_marks`. `dropped`
+/// is the mark's OWN array's closing-shape verdict, recorded ONCE when
+/// that array pops (the `None` guard: a popped frame's index is reused
+/// by the next frame at the same depth -- only the mark's own frame's
+/// pop may verdict): a trailing separator where a value was required
+/// drops the element (the engine's repair lane decided the array -- a
+/// trailing comma is never strict-valid, so no fast path can cover it);
+/// a proper close keeps it (the fast paths do). A mark whose array never
+/// popped (the cut) stays `None`, and a cut root drains every mark still
+/// alive: the engine's repair lane decided the whole parse.
 struct EmptyMark {
     start: usize,
     end: usize,
     was_first: bool,
     frame: usize,
+    dropped: Option<bool>,
 }
 
 /// The strictly-empty element's one-char decision: the element's
@@ -398,18 +442,29 @@ struct EmptyMark {
 /// end) is exactly `[]`/`{}`/`""`, its parent is an array-lane frame
 /// holding it as an in-flight member, and the engine's item skip now
 /// reads the NEXT char: a `,` or the parent's closer keeps the
-/// element, whitespace converts the decision to a deferred
-/// [`EmptyMark`] (the fast path may still keep the element -- only the
-/// close-time strict-clean gate decides), any other char drops it and
-/// is consumed with it (the engine's one-char stall guard: the skip's
-/// `index += 1` eats exactly one char, whatever it is).
-/// `parent_paren` distinguishes the paren lane's `)` closer.
+/// element (finally so when no whitespace preceded -- the engine's
+/// skip never fires on a separator; through a deferred mark when it
+/// did -- the fast paths may still keep it, the array's own closing
+/// shape decides), whitespace holds the decision (`ws_seen`: the skip
+/// fired on the whitespace char, but what it implies waits on the next
+/// char), any other char drops it -- and the one-char stall guard (the
+/// skip's `index += 1` eats exactly one char) eats the WHITESPACE when
+/// one preceded (this char re-parses fresh), else THIS char (consumed
+/// with the drop). `parent_paren` distinguishes the paren lane's `)`
+/// closer. `never_defers` is the PAREN TAINT: the element is itself a
+/// paren-derived empty group, or some enclosing frame is a paren -- the
+/// tuple grammar is never strict-valid, so no fast path can cover the
+/// element and the repair lane always decides: the drop fires on the
+/// first char whatever it is (round 3's immediate semantics), keeping
+/// only for a `,`/closer that arrives DIRECTLY.
 struct EmptyPending {
     start: usize,
     end: usize,
     was_first: bool,
     frame: usize,
     parent_paren: bool,
+    never_defers: bool,
+    ws_seen: bool,
 }
 
 /// The top-level `(`'s conservative tuple gate, the engine's
@@ -541,11 +596,8 @@ enum Esc {
 impl StrState {
     /// Feed one content char; append its canonical form to `sink`.
     /// Returns true when the string closed (the delimiter, un-emitted:
-    /// the caller emits the canonical closing quote). Any repair-lane
-    /// content (an invalid escape, a literal-text `\u` run, a lone
-    /// surrogate, a raw control char) flips `strict` false: the whole
-    /// input was not one strict JSON value.
-    fn feed(&mut self, c: char, sink: &mut String, ensure_ascii: bool, strict: &mut bool) -> bool {
+    /// the caller emits the canonical closing quote).
+    fn feed(&mut self, c: char, sink: &mut String, ensure_ascii: bool) -> bool {
         match std::mem::replace(&mut self.esc, Esc::None) {
             Esc::Backslash => {
                 match c {
@@ -559,7 +611,7 @@ impl StrState {
                     // re-encodes through the same table (`"` -> `\"`, a
                     // raw `\/` -> `/`, ...).
                     '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => {
-                        self.flush_high(sink, ensure_ascii, strict);
+                        self.flush_high(sink, ensure_ascii);
                         let decoded = match c {
                             'b' => '\u{8}',
                             'f' => '\u{c}',
@@ -575,8 +627,7 @@ impl StrState {
                     // engine's `"x\qy"` -> `"x\\qy"` shape: the decoded
                     // text is backslash + q, re-encoded backslash-backslash).
                     _ => {
-                        *strict = false;
-                        self.flush_high(sink, ensure_ascii, strict);
+                        self.flush_high(sink, ensure_ascii);
                         push_escaped_char(sink, '\\', ensure_ascii);
                         push_escaped_char(sink, c, ensure_ascii);
                         return false;
@@ -589,7 +640,7 @@ impl StrState {
                     if hex.len() == 4 {
                         // Four collected hex digits: cannot fail to parse.
                         let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
-                        self.emit_code(code, sink, ensure_ascii, strict);
+                        self.emit_code(code, sink, ensure_ascii);
                     } else {
                         self.esc = Esc::U(hex);
                     }
@@ -598,8 +649,7 @@ impl StrState {
                 // Fewer than four hex digits: the escape is literal text
                 // (the engine's `"\u41"` -> `"\\u41"` shape), and c is
                 // ordinary content: fall through to the plain path.
-                *strict = false;
-                self.flush_high(sink, ensure_ascii, strict);
+                self.flush_high(sink, ensure_ascii);
                 push_escaped_char(sink, '\\', ensure_ascii);
                 push_escaped_char(sink, 'u', ensure_ascii);
                 for h in hex.chars() {
@@ -614,15 +664,12 @@ impl StrState {
             self.esc = Esc::Backslash;
             return false;
         }
-        self.flush_high(sink, ensure_ascii, strict);
+        self.flush_high(sink, ensure_ascii);
         if c == self.delim {
             return true;
         }
         // A raw control char inside a string is the strict scanner's
         // rejection (json.loads fails on the whole input).
-        if (c as u32) < 0x20 {
-            *strict = false;
-        }
         push_escaped_char(sink, c, ensure_ascii);
         false
     }
@@ -630,9 +677,8 @@ impl StrState {
     /// A held lone high surrogate stranded by content that is not its
     /// low half flushes as U+FFFD (the engine's decode order: the
     /// surrogate's position first, then the content).
-    fn flush_high(&mut self, sink: &mut String, ensure_ascii: bool, strict: &mut bool) {
+    fn flush_high(&mut self, sink: &mut String, ensure_ascii: bool) {
         if self.high.take().is_some() {
-            *strict = false;
             push_escaped_char(sink, '\u{fffd}', ensure_ascii);
         }
     }
@@ -643,7 +689,7 @@ impl StrState {
     /// documented lone-surrogate divergence. The held surrogate at
     /// string close renders U+FFFD too (`{"a": "\ud83d` ->
     /// `{"a": "\ufffd"}`, the engine's own heal).
-    fn emit_code(&mut self, code: u16, sink: &mut String, ensure_ascii: bool, strict: &mut bool) {
+    fn emit_code(&mut self, code: u16, sink: &mut String, ensure_ascii: bool) {
         if let Some(high) = self.high.take() {
             if (0xDC00..=0xDFFF).contains(&code) {
                 let combined =
@@ -656,16 +702,12 @@ impl StrState {
             // Not the low half: flush the held surrogate as U+FFFD, then
             // place the fresh unit on its own merits (it may itself be a
             // high surrogate to hold).
-            *strict = false;
             push_escaped_char(sink, '\u{fffd}', ensure_ascii);
         }
         match char::from_u32(u32::from(code)) {
             Some(ch) => push_escaped_char(sink, ch, ensure_ascii),
             None if (0xD800..=0xDBFF).contains(&code) => self.high = Some(code),
-            None => {
-                *strict = false;
-                push_escaped_char(sink, '\u{fffd}', ensure_ascii)
-            }
+            None => push_escaped_char(sink, '\u{fffd}', ensure_ascii),
         }
     }
 
@@ -767,7 +809,6 @@ impl StreamingRepairer {
             prev_char_ws: false,
             empty_marks: Vec::new(),
             empty_pending: None,
-            strict_clean: true,
             last_key_empty: false,
             garbage_run: false,
             paren_gate: None,
@@ -837,40 +878,89 @@ impl StreamingRepairer {
     fn process(&mut self, c: char) -> Result<(), String> {
         // The strictly-empty element's decision (see `EmptyPending`): the
         // char after the element is the engine's skip cursor. A `,` or
-        // the parent frame's closer keeps the element; whitespace
-        // defers to close time (the whole-input `json.loads` fast path
-        // may still keep it: the mark arms, and only the strict-clean
-        // gate drains); everything else drops it and is CONSUMED with
-        // it (parse_array's one-char stall guard: the skip's
-        // `index += 1` eats exactly one char, whatever it is).
-        if let Some(pending) = self.empty_pending.take() {
+        // the parent frame's closer keeps the element -- FINALLY so when
+        // it arrives directly (the repair lane's skip never fires on a
+        // separator), through a deferred mark when whitespace preceded
+        // (the mark's own array's closing shape then decides: the
+        // trailing-separator class drops, the proper close keeps).
+        // Whitespace holds the decision (`ws_seen`). Everything else
+        // drops it, and parse_array's one-char stall guard (the skip's
+        // `index += 1` eats exactly one char) eats the WHITESPACE when
+        // one preceded -- this char re-parses fresh -- else THIS char,
+        // consumed with the drop.
+        if let Some(mut pending) = self.empty_pending.take() {
             let parent_closer = if pending.parent_paren { ')' } else { ']' };
             if c == ',' || c == parent_closer {
-                // The repair lane's skip does not fire on a separator:
-                // the element keeps in both lanes.
-            } else if c.is_whitespace() && !pending.parent_paren {
-                // The repair lane drops here (its cursor reads the
-                // whitespace char); the fast path may still keep the
-                // whole document. Deferred: the mark drains iff the
-                // engine's own decision procedure ran the repair lane
-                // (the strict-clean gate at close time). A PAREN lane's
-                // element never defers: the tuple grammar is never
+                if pending.never_defers {
+                    // The repair lane's skip does not fire on a
+                    // separator: the element keeps, finally (the
+                    // paren-tainted element's own lane decided it).
+                } else if pending.ws_seen {
+                    // The repair lane's skip fired on the whitespace
+                    // char; whether the element survives is the ARRAY'S
+                    // OWN closing shape's call (the mark, decided at
+                    // that array's pop): a trailing separator where a
+                    // value was required drops (`[[] ,]` -> `[]`), a
+                    // proper close keeps (`[[] , 1]` -> `[[], 1]`,
+                    // `[[] ]` -> `[[]]`) -- the fast paths (the
+                    // whole-input `json.loads`, the strict-suffix
+                    // probe) keep every element of an array whose own
+                    // body is strict-valid.
+                    self.empty_marks.push(EmptyMark {
+                        start: pending.start,
+                        end: pending.end,
+                        was_first: pending.was_first,
+                        frame: pending.frame,
+                        dropped: None,
+                    });
+                }
+            } else if pending.never_defers {
+                // The PAREN TAINT: a paren-derived or paren-enclosed
+                // element never defers -- the tuple grammar is never
                 // strict-valid, so the repair lane always decides --
-                // the drop fires now, on fresh coordinates.
-                self.empty_marks.push(EmptyMark {
-                    start: pending.start,
-                    end: pending.end,
-                    was_first: pending.was_first,
-                    frame: pending.frame,
-                });
+                // the drop fires now, on the first char whatever it is
+                // (round 3's semantics, which matched the engine).
+                if self.frames.last().is_some() {
+                    self.drop_marked_member(pending.start);
+                } else if pending.start <= self.out.len() {
+                    self.out.truncate(pending.start);
+                    self.emitted = self.emitted.min(pending.start);
+                    self.out.push(']');
+                }
+                self.prev_char_ws = is_py_whitespace(c);
+                return Ok(());
+            } else if c.is_whitespace() {
+                // The decision holds: the next char (or the cut) still
+                // decides. `ws_seen` records that the skip's one-char
+                // stall guard has a whitespace char to eat.
+                pending.ws_seen = true;
+                self.empty_pending = Some(pending);
+            } else if pending.ws_seen {
+                // The skip fired on the whitespace and ate exactly one
+                // char -- the whitespace. This char re-parses fresh:
+                // drop the element and REPLAY the char (it becomes the
+                // next member/item: `[[] x, 1]` -> `["x", 1]`). The
+                // element's fate is certain here: a body with `[] x`
+                // in it is never strict-valid, so no fast path can
+                // ever keep it. The parent frame may already be gone
+                // (the element's own parse consumed a mismatched
+                // closer that closed the document): the span's
+                // truncation stands on its own then.
+                if self.frames.last().is_some() {
+                    self.drop_marked_member(pending.start);
+                } else if pending.start <= self.out.len() {
+                    self.out.truncate(pending.start);
+                    self.emitted = self.emitted.min(pending.start);
+                    self.out.push(']');
+                }
+                return self.process(c);
             } else {
-                // The engine's repair-lane skip: drop the element and
-                // consume the char with it. The parent frame may
-                // already be gone (the element's own parse consumed a
-                // mismatched closer that closed the document): the
-                // span's truncation stands on its own then, and the
-                // root's closer (consumed with the mismatched close)
-                // re-emits.
+                // The engine's repair-lane skip, no whitespace
+                // involved: drop the element and consume the char with
+                // it (`[[]x]` -> `[]` -- the guard eats exactly one
+                // char, this one). The parent frame may already be
+                // gone (see above): the root's closer (consumed with
+                // the mismatched close) re-emits.
                 if self.frames.last().is_some() {
                     self.drop_marked_member(pending.start);
                 } else if pending.start <= self.out.len() {
@@ -915,7 +1005,6 @@ impl StreamingRepairer {
                 self.out.clear();
                 self.emitted = 0;
                 self.top_clean = false;
-                self.strict_clean = false;
                 return self.process(c);
             }
             None => {}
@@ -956,7 +1045,6 @@ impl StreamingRepairer {
                 // Not a literal prefix (and the buffer is full): the
                 // `(` was prose.
                 self.top_clean = false;
-                self.strict_clean = false;
                 for b in buf.chars() {
                     self.process(b)?;
                 }
@@ -967,7 +1055,6 @@ impl StreamingRepairer {
             // engine's inner-text prefix `buf + c` is no literal): the
             // `(` was prose; the buffered chars replay at the top level.
             self.top_clean = false;
-            self.strict_clean = false;
             for b in buf.chars() {
                 self.process(b)?;
             }
@@ -991,7 +1078,6 @@ impl StreamingRepairer {
                 // and re-ran the top-level dispatch on the char.
                 _ => {
                     self.top_clean = false;
-                    self.strict_clean = false;
                     return self.process(c);
                 }
             }
@@ -1043,7 +1129,7 @@ impl StreamingRepairer {
             // string state out of it.
             self.string_raw_tail = Some(c);
             let mut st = self.string.take().expect("checked above");
-            let closed = st.feed(c, &mut self.out, self.ensure_ascii, &mut self.strict_clean);
+            let closed = st.feed(c, &mut self.out, self.ensure_ascii);
             if closed {
                 self.out.push('"');
                 self.pos = if st.is_key {
@@ -1059,7 +1145,7 @@ impl StreamingRepairer {
                 // inside an array/tuple frame arms the same one-char
                 // skip decision the container pops arm (the engine's
                 // item skip reads the next char).
-                self.arm_empty_pending();
+                self.arm_empty_pending(false);
             } else {
                 self.string = Some(st);
             }
@@ -1085,30 +1171,23 @@ impl StreamingRepairer {
                     // The strict scanner's whitespace set only: any
                     // other Unicode whitespace failed `json.loads` (the
                     // repair lane decides).
-                    if !matches!(c, ' ' | '\t' | '\n' | '\r') {
-                        self.strict_clean = false;
-                    }
+                    if !matches!(c, ' ' | '\t' | '\n' | '\r') {}
                 }
                 '#' | '/' => {
                     // A comment (or any trailing token) after the root:
                     // the whole input was not one strict JSON value.
-                    self.strict_clean = false;
                     match c {
                         '#' => self.comment = Some(self.hash_comment()),
                         _ => self.comment = Some(CommentState::Slash),
                     }
                 }
-                _ => self.strict_clean = false,
+                _ => {}
             }
             return Ok(());
         }
         let clean = self.top_clean;
         match c {
-            c if c.is_whitespace() => {
-                if !matches!(c, ' ' | '\t' | '\n' | '\r') {
-                    self.strict_clean = false;
-                }
-            }
+            c if c.is_whitespace() => if !matches!(c, ' ' | '\t' | '\n' | '\r') {},
             '{' => self.open_container(FrameKind::Obj)?,
             '[' => self.open_container(FrameKind::Arr)?,
             // A leading `(` opens the tuple container only from a clean
@@ -1145,7 +1224,6 @@ impl StreamingRepairer {
             // Prose (or a second scalar after a provisional one): dropped.
             _ => {
                 self.top_clean = false;
-                self.strict_clean = false;
             }
         }
         Ok(())
@@ -1158,13 +1236,10 @@ impl StreamingRepairer {
         match c {
             c if c.is_whitespace() => {
                 // The strict scanner's whitespace set only.
-                if !matches!(c, ' ' | '\t' | '\n' | '\r') {
-                    self.strict_clean = false;
-                }
+                if !matches!(c, ' ' | '\t' | '\n' | '\r') {}
             }
             '#' | '/' => {
                 // Comments are a repair lane (json.loads fails on them).
-                self.strict_clean = false;
                 match c {
                     '#' => self.comment = Some(self.hash_comment()),
                     _ => self.comment = Some(CommentState::Slash),
@@ -1178,13 +1253,10 @@ impl StreamingRepairer {
                     // object closes only at its own `}`, or at `]` after
                     // a member); the machine must not close levels with
                     // it: `{]'k': 1}` keeps its member.
-                    ']' | ')' => {
-                        self.strict_clean = false;
-                    }
+                    ']' | ')' => {}
                     ',' => {
                         // A separator where a key was due: `{,}`-shapes,
                         // the engine's empty-object repair territory.
-                        self.strict_clean = false;
                     }
                     ':' => {
                         // A missing key: the whole pair drops (the
@@ -1194,7 +1266,6 @@ impl StreamingRepairer {
                         // input never lands here: a closed key string
                         // leaves Pos::Colon, so `{"": 1}` passes through
                         // untouched.
-                        self.strict_clean = false;
                         self.mark_body_colon();
                     }
                     c if STRING_DELIMITERS.contains(&c) => {
@@ -1216,13 +1287,10 @@ impl StreamingRepairer {
                             key: true,
                         });
                     }
-                    _ => {
-                        self.strict_clean = false;
-                    }
+                    _ => {}
                 },
                 Pos::Colon => match c {
                     ':' => {
-                        self.strict_clean = false;
                         self.out.push_str(": ");
                         self.pos = Pos::MemberValue;
                     }
@@ -1236,7 +1304,6 @@ impl StreamingRepairer {
                     // at anything but its `:` (the `{"" ,}`-corner),
                     // the pair drops.
                     ',' | ']' | ')' => {
-                        self.strict_clean = false;
                         if self.last_key_empty {
                             self.drop_dangling_member();
                             return self.process(c);
@@ -1261,14 +1328,11 @@ impl StreamingRepairer {
                         || c == '['
                         || c == '(' =>
                     {
-                        self.strict_clean = false;
                         self.out.push_str(": ");
                         self.pos = Pos::MemberValue;
                         self.process(c)?;
                     }
-                    _ => {
-                        self.strict_clean = false;
-                    }
+                    _ => {}
                 },
                 Pos::Value | Pos::MemberValue => {
                     // A structural char arriving with the member's value
@@ -1277,22 +1341,16 @@ impl StreamingRepairer {
                     // the member (the heal fires once); arrays and
                     // tuples heal nothing (`[1, }` -> `[1]`).
                     if self.pos == Pos::MemberValue && matches!(c, ']' | '}' | ')' | ',') {
-                        self.strict_clean = false;
                         self.out.push_str("\"\"");
                         self.pos = Pos::AfterValue;
                     }
                     match c {
                         ']' | '}' | ')' => {
                             // A closer where a value was due is a trailing
-                            // comma's shape when members exist (never
-                            // strict); an empty container's own closer is
-                            // the strict `[]`/`{}`. (A MemberValue closer
-                            // healed `""` above and already flipped.)
-                            if self.pos == Pos::Value
-                                && self.frames.last().is_some_and(|f| f.member_count > 0)
-                            {
-                                self.strict_clean = false;
-                            }
+                            // comma's shape when members exist (the local
+                            // rule reads `pos` at the frame's pop); an
+                            // empty container's own closer is the strict
+                            // `[]`/`{}`.
                             self.close_up(c)
                         }
                         // The engine's garbage-item run (parse_array
@@ -1302,7 +1360,6 @@ impl StreamingRepairer {
                         // own closer included. The item slot is not
                         // spent: the next value becomes the item.
                         ',' if self.pos == Pos::Value => {
-                            self.strict_clean = false;
                             // The comma is the tuple classifier's
                             // separator evidence (the explicit-tuple
                             // scan sees it) even though the item parse
@@ -1320,7 +1377,7 @@ impl StreamingRepairer {
                             self.begin_common();
                             self.feed_structure_value(c)?;
                         }
-                        _ => self.strict_clean = false,
+                        _ => {}
                     }
                 }
                 Pos::AfterValue => {
@@ -1337,7 +1394,6 @@ impl StreamingRepairer {
                         // key (the engine drops it: `{"a": 1 2}` ->
                         // `{"a": 1}`).
                         _ if obj => {
-                            self.strict_clean = false;
                             if STRING_DELIMITERS.contains(&c) {
                                 self.begin_common();
                                 self.open_string(c, true);
@@ -1366,15 +1422,11 @@ impl StreamingRepairer {
                         // parse the next value — real value-starts only
                         // (a garbage char must not emit the deferred
                         // separator into an array it cannot close).
-                        _ => {
-                            if Self::is_value_start(c) {
-                                self.strict_clean = false;
-                                self.begin_common();
-                                self.feed_structure_value(c)?;
-                            } else {
-                                self.strict_clean = false;
-                            }
+                        _ if Self::is_value_start(c) => {
+                            self.begin_common();
+                            self.feed_structure_value(c)?;
                         }
+                        _ => {}
                     }
                 }
             },
@@ -1541,7 +1593,7 @@ impl StreamingRepairer {
                     self.pos = Pos::AfterValue;
                     return self.process(c);
                 }
-                self.finish_number(&text, key, popped.or_else(|| text.chars().next_back()));
+                self.finish_number(&text, key, text.chars().next_back());
                 // A pop that EMPTIES the run drops the popped char: the
                 // reprocess would re-create the same one-char pending at
                 // an after-value position (a `-` or `.` in an array),
@@ -1572,7 +1624,6 @@ impl StreamingRepairer {
                     // strips to NOTHING drops the pair whole (the
                     // engine's empty missing-quote key attempt:
                     // `{-\x0b\r:-` -> `{}`).
-                    self.strict_clean = false;
                     self.last_key_empty = false;
                     let stripped = text
                         .trim()
@@ -1615,7 +1666,6 @@ impl StreamingRepairer {
                                 .trim()
                                 .trim_start_matches(|ch: char| !ch.is_alphanumeric());
                             if !stripped.is_empty() {
-                                self.strict_clean = false;
                                 let rendered = serializer::dumps(
                                     &Value::Str(stripped.to_string()),
                                     self.ensure_ascii,
@@ -1643,14 +1693,6 @@ impl StreamingRepairer {
                     // case-insensitive literal family and every other
                     // word is the repair lane (a rewind-born word's
                     // stray-sign drop included).
-                    if from_number_run
-                        || !matches!(
-                            text.trim(),
-                            "true" | "false" | "null" | "NaN" | "Infinity" | "-Infinity"
-                        )
-                    {
-                        self.strict_clean = false;
-                    }
                     self.out
                         .push_str(&serializer::dumps(&value, self.ensure_ascii));
                     self.pos = Pos::AfterValue;
@@ -1727,12 +1769,10 @@ impl StreamingRepairer {
                         // A second run after a terminated scalar: the
                         // whole input is not one strict value: prose.
                         self.top_clean = false;
-                        self.strict_clean = false;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
-                self.strict_clean = false;
                 if c == '{' || c == '[' {
                     // Prose, then a container: the container wins.
                     return self.process(c);
@@ -1751,12 +1791,10 @@ impl StreamingRepairer {
                         self.pending = Some(Pending::TopWord { text, done: false });
                     } else {
                         self.top_clean = false;
-                        self.strict_clean = false;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
-                self.strict_clean = false;
                 if c == '{' || c == '[' {
                     return self.process(c);
                 }
@@ -1777,13 +1815,12 @@ impl StreamingRepairer {
                         return Ok(());
                     }
                     self.top_clean = false;
-                    self.strict_clean = false;
                     if c == '{' || c == '[' {
                         return self.process(c);
                     }
                     return Ok(());
                 }
-                let closed = st.feed(c, &mut buf, self.ensure_ascii, &mut self.strict_clean);
+                let closed = st.feed(c, &mut buf, self.ensure_ascii);
                 if closed {
                     buf.push('"');
                     self.pending = Some(Pending::TopStr {
@@ -1926,11 +1963,6 @@ impl StreamingRepairer {
     }
 
     fn open_string(&mut self, delim: char, is_key: bool) {
-        // A non-strict delimiter (single or curly quote) is a repair
-        // lane: json.loads fails on the whole input.
-        if delim != '"' {
-            self.strict_clean = false;
-        }
         self.last_string_start = Some(self.out.len());
         self.string_raw_tail = None;
         self.out.push('"');
@@ -1951,11 +1983,6 @@ impl StreamingRepairer {
     fn open_container(&mut self, kind: FrameKind) -> Result<(), String> {
         if self.frames.len() >= MAX_NESTING {
             return Err("Input nesting exceeds the supported parser recursion depth.".into());
-        }
-        // The parenthesized lane is the repair lane (json.loads has no
-        // tuple grammar).
-        if kind == FrameKind::Paren {
-            self.strict_clean = false;
         }
         let brace_pos = self.out.len();
         let paren = match kind {
@@ -2009,7 +2036,6 @@ impl StreamingRepairer {
         }
         // The engine's continuation repair lane ran (json.loads never
         // leaves a dangling key).
-        self.strict_clean = false;
     }
 
     /// Close the deepest frame this closer matches, closing the levels
@@ -2030,24 +2056,20 @@ impl StreamingRepairer {
             if closer == ']' {
                 // A garbage item the strictly-empty skip consumes: the
                 // group stays open and keeps parsing (a repair lane).
-                self.strict_clean = false;
                 return;
             }
             if closer == '}' {
-                self.strict_clean = false;
                 self.pop_frame();
                 return;
             }
         }
         let Some(idx) = self.frames.iter().rposition(|f| f.kind.matches(closer)) else {
             // A closer matching nothing is skipped as garbage.
-            self.strict_clean = false;
             return;
         };
         if self.frames.len() > idx + 1 {
             // The mismatched-closer close-up: levels between close
             // (the engine's whole-text re-decision shape).
-            self.strict_clean = false;
         }
         while self.frames.len() > idx + 1 {
             self.pop_frame();
@@ -2070,6 +2092,24 @@ impl StreamingRepairer {
         // gave it back here.
         frame.body_chars = frame.body_chars.saturating_sub(1);
         frame.body_nonspace = frame.body_nonspace.saturating_sub(1);
+        // THIS array's closing shape, read before the pop lands the
+        // after-value position: a closer arriving at a separator-pending
+        // position with members on the table is a TRAILING separator
+        // where a value was required (`[[] ,]`, `[(,)]`-class) -- the
+        // engine's repair lane decided this array (a trailing comma is
+        // never strict-valid, so neither fast path can cover it) and
+        // its strictly-empty skips fired: the frame's deferred marks
+        // drop. Any other closing shape (a value completed at
+        // AfterValue, the strict empty `[]`/`{}` closer at member_count
+        // 0) keeps them: the array's own body is strict-valid-shaped
+        // and the fast paths decide in the element's favor.
+        let closed_trailing = self.pos == Pos::Value && frame.member_count > 0;
+        let popped = self.frames.len();
+        for m in &mut self.empty_marks {
+            if m.frame == popped && m.dropped.is_none() {
+                m.dropped = Some(closed_trailing);
+            }
+        }
         let mut paren_groupish = false;
         match frame.kind {
             FrameKind::Obj => {
@@ -2084,7 +2124,6 @@ impl StreamingRepairer {
                     && frame.body_chars >= 1
                     && frame.body_nonspace >= 1
                 {
-                    self.strict_clean = false;
                     let pos = frame.brace_pos;
                     if pos < self.out.len() && self.out.as_bytes()[pos] == b'{' {
                         self.out.drain(pos..pos + 1);
@@ -2202,6 +2241,17 @@ impl StreamingRepairer {
             // the closed render at stale coordinates (a broken
             // `end()`).
             self.empty_pending = None;
+            // The root closed: every mark's own array has popped and
+            // recorded its closing-shape verdict. The PROPER-close
+            // marks resolve KEEP (the fast paths kept their elements:
+            // the whole-input `json.loads` -- the closed document is
+            // strict-valid up to any junk behind the root -- or the
+            // strict-suffix probe) and leave the machine for good; the
+            // TRAILING-separator marks stay (their arrays were decided
+            // by the repair lane) and drain at every render from now
+            // on (`[[] ,]` -> `[]`, also with trailing junk after the
+            // root: `[[] ,] x` -> `[]`).
+            self.empty_marks.retain(|m| m.dropped != Some(false));
             if paren_groupish {
                 // A root GROUPING-ish group closed: the engine's gate
                 // also reads what follows (only whitespace before the
@@ -2213,7 +2263,7 @@ impl StreamingRepairer {
                 self.paren_gate = Some(ParenGate::TailCheck);
             }
         }
-        self.arm_empty_pending();
+        self.arm_empty_pending(matches!(frame.kind, FrameKind::Paren));
     }
 
     /// Arm the strictly-empty element's one-char skip decision when the
@@ -2222,8 +2272,13 @@ impl StreamingRepairer {
     /// is an array-lane frame holding it as an in-flight member -- the
     /// engine's item skip reads the NEXT char. An object-lane parent
     /// keeps its member value (the skip is parse_array's rule alone); a
-    /// root frame has no parent to decide about.
-    fn arm_empty_pending(&mut self) {
+    /// root frame has no parent to decide about. `elem_paren`: the
+    /// element's own rendering came from a popped PAREN frame (the
+    /// empty group) -- with any paren ancestor (the element inside a
+    /// tuple's parse) it makes the decision NEVER defer (the paren
+    /// taint: no fast path can cover a tuple grammar, the repair lane
+    /// always decides).
+    fn arm_empty_pending(&mut self, elem_paren: bool) {
         if let Some(parent) = self.frames.last()
             && !matches!(parent.kind, FrameKind::Obj)
             && let Some(start) = parent.member_start
@@ -2232,20 +2287,26 @@ impl StreamingRepairer {
             let raw = &self.out[start..];
             let content = raw.strip_prefix(", ").unwrap_or(raw);
             if matches!(content, "[]" | "{}" | "\"\"") {
+                let parent_paren = parent.kind == FrameKind::Paren;
+                let never_defers = elem_paren
+                    || parent_paren
+                    || self.frames.iter().any(|f| f.kind == FrameKind::Paren);
                 self.empty_pending = Some(EmptyPending {
                     start,
                     end: self.out.len(),
                     was_first: parent.member_count == 1,
                     frame: self.frames.len() - 1,
-                    parent_paren: parent.kind == FrameKind::Paren,
+                    parent_paren,
+                    never_defers,
+                    ws_seen: false,
                 });
             }
         }
     }
 
     /// The pending decision's drop: the member rendering at `start` (the
-    /// deferred separator included) retracts whole and the parent
-    /// frame's bookkeeping restores (the completed-member form of
+    /// deferred separator included) retracts whole and the parent frame's
+    /// bookkeeping restores (the completed-member form of
     /// `retract_in_flight_member`).
     fn drop_marked_member(&mut self, start: usize) {
         if let Some(f) = self.frames.last_mut() {
@@ -2264,16 +2325,14 @@ impl StreamingRepairer {
     /// The number run's terminator: the engine's value lanes over the
     /// (underscore-filtered) run text; a key-position number renders as
     /// the quoted run text (`{12: 1}` -> `{"12": 1}`). `raw_last` is the
-    /// run's own last raw char (the popped rollback char when one
-    /// popped, else the run's tail): the engine's `get(-1)` look at the
-    /// same cursor.
+    /// run's own last char AFTER the rollback (the engine's parse_number
+    /// pops its own trailing `- e E / , +` before the caller looks, so
+    /// its `get(-1)` cursor sits on the run's tail): the stray-`...`
+    /// rule's exact operand.
     fn finish_number(&mut self, text: &str, key: bool, raw_last: Option<char>) {
         // A number KEY renders quoted (never strict); any run that is
         // not one strict number token (`1_0`, `1,000`, `01`, `1.`, the
         // empty rollback run) is the repair lane too.
-        if key || loads_strict(text).is_err() {
-            self.strict_clean = false;
-        }
         if key {
             // The string-lane entry skip rides the key render too: the
             // run's leading non-alphanumeric garbage drops (`{-12: 1}`
@@ -2386,7 +2445,7 @@ impl StreamingRepairer {
                 let stray = array_like
                     && is_stray_ellipsis(
                         &value,
-                        popped.or_else(|| run.chars().next_back()),
+                        run.chars().next_back(),
                         self.frames.last().map(|f| f.kind),
                     );
                 if !(run.is_empty() && array_like) && !stray {
@@ -2554,25 +2613,33 @@ impl StreamingRepairer {
         }
         // The deferred strictly-empty element drops (the engine's array
         // skip; see `empty_marks`): the marked renderings drain here,
-        // newest first (later spans sit at higher offsets). The gate is
-        // the ENGINE'S OWN DECISION PROCEDURE: the drops happen exactly
-        // when the completed text is NOT one strict JSON value --
-        // `json.loads` failed, so the repair lane decided, and its
-        // strictly-empty skips fire. A root that closed cleanly AND
-        // strict-clean (`strict_clean`: no repair lane fired, no
-        // garbage consumed, no malformed structure seen) took the
-        // whole-input fast path, which keeps every element -- the drops
-        // are cut-only there. The one-char decision still armed
-        // (`empty_pending`: the element was the input's last token)
-        // joins the marks as the newest span. The demotion: a dropped
-        // FIRST element promotes the next one to the frame's first
-        // slot, and its deferred separator goes with the drop.
-        if !self.top_done || !self.strict_clean {
+        // newest first (later spans sit at higher offsets). Every mark
+        // still alive at close time drops, and that is the LOCAL rule
+        // the engine's own decision procedure reduces to: a mark whose
+        // array closed with a TRAILING separator where a value was
+        // required stays alive (`dropped` recorded at that array's pop
+        // -- a trailing comma is never strict-valid, so no fast path
+        // can cover the array and the repair lane's skip fired), and a
+        // CUT root (the root never closed) drains every mark still
+        // alive, the properly-closed arrays' marks included -- the
+        // engine's repair lane decided the whole parse there (the
+        // whole-input `json.loads` fast path and the strict-suffix
+        // probe both need a closed root or a decodable container). A
+        // mark whose array closed PROPERLY was resolved-keep at the
+        // root's own close (`pop_frame`'s retain) and never gets here.
+        // The one-char decision still armed (`empty_pending`: the
+        // element was the input's last token) joins the marks as the
+        // newest span: the element was pending at the cut, the cut
+        // class. The demotion: a dropped FIRST element promotes the
+        // next one to the frame's first slot, and its deferred
+        // separator goes with the drop.
+        {
             let pending_mark = self.empty_pending.as_ref().map(|p| EmptyMark {
                 start: p.start,
                 end: p.end,
                 was_first: p.was_first,
                 frame: p.frame,
+                dropped: Some(true), // the element was pending at the cut
             });
             for mark in pending_mark.iter().chain(self.empty_marks.iter().rev()) {
                 let (start, end) = (mark.start, mark.end);
@@ -2977,23 +3044,33 @@ mod tests {
     }
 
     #[test]
-    fn the_strictly_empty_drops_gate_on_the_engines_own_decision() {
-        // The drain's gate is the ENGINE'S OWN DECISION PROCEDURE: the
-        // drops happen exactly when the completed text is NOT
-        // strict-valid JSON (the repair lane ran); a strict-clean
-        // parse that closed cleanly took the whole-input fast path and
-        // keeps every element. Byte-exact against the engine for every
-        // family.
+    fn the_strictly_empty_drops_are_local_to_their_arrays_closing_shape() {
+        // THE LOCAL RULE: a deferred strictly-empty element drops iff
+        // its OWN array closed on a trailing separator (a `,` where a
+        // value was required -- the repair lane decided that array, no
+        // fast path can cover it), or the stream cut with it pending,
+        // or the paren taint holds (a paren-derived element, or a
+        // paren anywhere enclosing it: the tuple grammar is never
+        // strict-valid). A proper array close keeps it (the fast
+        // paths do), trailing garbage after a valid root included.
+        // Byte-exact against the engine for every family.
         for text in [
-            // the six families (the re-verdict round 3's list)
+            // the trailing-separator drops (the array's own closer)
+            "[[] ,]",
+            "[{} ,]",
+            "[\"\" ,]",
+            "[1, [] ,]",
+            "[[], [] ,]",
+            "[[] , [] ,]",
+            "{\"a\": [[] ,]}",
+            "{\"a\": [1, [] ,]}",
+            "[[] ,] x",
+            // the paren-taint drops (round 3's immediate semantics)
             "[(,)]",
             "[( , )]",
             "[1, (,)]",
             "[(,), 1]",
             "[(, ), 1]",
-            "[[] ,]",
-            "[{} ,]",
-            "[\"\" ,]",
             "(,)",
             "( , )",
             "[{]",
@@ -3002,17 +3079,52 @@ mod tests {
             "{\"a\": {]}}",
             "{]}",
             "{,}",
-            // the strict-valid neighbors the gate must keep
+            "[() ]",
+            "[() ,]",
+            "[()]x",
+            "[1, () ]",
+            "[([] , 1)]",
+            // the cut drops (the stream ended while pending, or the
+            // root never closed: the repair lane decided the parse)
+            "[[",
+            "[1, [",
+            "[[] ,",
+            "[[]  ,",
+            "[[] , 1",
+            "[[] ",
+            "[[], [] ,",
+            "[[], [] , 1",
+            "[[] ,[]",
+            "[[] , []",
+            "[1, []\r, ",
+            "[1, [] , 2 ",
+            "[[], [[] , 2], 3",
+            "[[] , \"k",
+            "[{}\r, ",
+            "[\"\"\r, ",
+            "[\"\" , 1",
+            "[[] , 1 , 2 ",
+            // the valid-keeps neighbors (the fast paths kept them)
             "[[], 1]",
             "[[] , 1]",
             "[true, [] , 1]",
             "[{}]",
+            "[[] ]",
+            "[\"\"]",
             "[( )]",
             "[()]",
             "()",
             "[]",
             "{}",
-            // the adjacent lanes the same rule re-decides
+            "{\"a\": [\"\" , 1]}",
+            "{\"a\": [[] , 1]}",
+            // the trailing-garbage keeps (the strict-suffix probe
+            // re-decided the valid root; the element's own array
+            // closed properly)
+            "[[] , 1] x",
+            "{\"a\": [\"\" , 1]} x",
+            "[true, [] , 1] x",
+            // the adjacent lanes the same shape class re-decides
             "[(, 1)]",
             "[1, (,), 2]",
             "[(,), 1, 2]",
@@ -3035,10 +3147,12 @@ mod tests {
             "(1, 2)",
             "{]",
             "{ ]}",
-            "[() ]",
-            "[() ,]",
-            "[()]x",
-            "[1, () ]",
+            // the ws-then-value-start drop: the stall guard ate the
+            // whitespace, the char re-parses as the next item
+            "[[] x]",
+            "[[] x, 1]",
+            "[1, [] x, 1]",
+            "[[]x]",
         ] {
             let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
                 .expect("engine repair succeeds");

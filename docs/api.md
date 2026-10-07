@@ -2628,12 +2628,24 @@ the parse ending on a `.`: the cut's open string `" [\r\r"...` to `[]`,
 a bare number-run `[1, ...` to `[1]`, the closed `["..."]` element
 staying) and the strictly-empty item whose next char is not a separator
 (`[[] ,` to `[]`, `[[] , 1` to `[1]`, the comma directly after the
-element keeping it — the decision deferred to close time, and its gate
-is the engine's own decision procedure: the drops happen exactly when
-the completed text is NOT strict-valid JSON (`[[] ,]` to `[]` too — a
-cleanly-closed root whose parse fired any repair lane), while a
-strict-clean parse kept every element through the whole-input
-`json.loads` fast path); the pending number/word resolves by the same
+element keeping it — the decision is LOCAL to the element's own array's
+closing shape: a trailing separator where a value was required drops it
+(`[[] ,]` to `[]`, `[1, [] ,]` to `[1]`, `{"a": [[] ,]}` to
+`{"a": []}` — a trailing comma is never strict-valid, so neither fast
+path can cover the array and the repair lane's skip fired), a proper
+close keeps it through the whole-input `json.loads` fast path and the
+strict-suffix probe (`[[] , 1]` to `[[], 1]`, `[true, [] , 1]`,
+`[[] ]` to `[[]]`, `{"a": ["" , 1]}` to `{"a": ["", 1]}`, trailing
+garbage after the valid root included: `[[] , 1] x` to `[[], 1]`), a
+cut root drops every mark still alive (`[[], [[] , 2], 3` to
+`[[], [2], 3]`), a whitespace-held decision followed by anything but a
+separator drops with the stall guard eating the whitespace (the char
+re-parsing as the next member: `[[] x, 1]` to `["x", 1]`) or the char
+itself (`[[]x]` to `[]`), and the paren taint never defers (a
+paren-derived or paren-enclosed element drops on the first char,
+whatever it is: `[() ]` to `[]`, `[([] , 1)]` to `[[1]]`, keeping only
+for a directly-arriving `,`/closer: `[()]` to `[[]]`); the pending
+number/word resolves by the same
 rules
 that terminate it mid-stream — through the literal table, so the special
 floats' spellings heal to strings (`[NaN` to `["NaN"]`, where the
@@ -2706,7 +2718,22 @@ re-parses the body as an array — the stream reproduces it only when the
 body recovers nothing: `{]}` to `[]` and `{"a": {(]` to `{"a": []}` match,
 while `{ x}` to the engine's `["x}"]` stays `{}` in the stream); duplicate
 object keys (the dict update-in-place: `{"a": 1, "a": 2}` to `{"a": 2}`,
-the stream keeps both members); and the
+the stream keeps both members); the unquoted-value `}`-absorption without
+the ws (a non-strict run VALUE at an object's close absorbs the object's
+own `}` when the tail past it holds two chars before the next `}`:
+`{"a": b}66` to the engine's `{"a": "b}66"}`, the stream `{"a": "b"}`); a
+lone high surrogate escape followed by another escape (the engine's
+whole-text string-repair lane re-decides the escape run: `["\ud83d\falsee"`
+to the engine's `["\ufffd\\falsee"]`, the stream `["\ufffd\falsee"]`); the
+missing-colon shape with a container where the colon was due (the engine's
+object loop consumes the container-open as the colon-substitute and its
+repair lane empties the array: `{"a" [[] , 1]}` to `{"a": []}`, the stream
+`{"a": [[], 1]}`); the completed-paren taint on a later deferred element
+(a paren anywhere kills both fast paths, so the repair lane decided:
+`[(2), [] , 1]` to the engine's `[2, 1]`, the stream `[2, [], 1]`); the
+comma-first tail after a valid root (the suffix probe is gated on
+non-comma trailing content: `[[] , 1] ,` to the engine's `[1]`, the
+stream `[[], 1]`); and the
 compound missing-key shape no longer diverges (the key lane's string
 semantics commit `{: 1, : 2}` to `{"1,": 2}` the engine's own way).
 
