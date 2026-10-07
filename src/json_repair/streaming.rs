@@ -249,7 +249,7 @@
 //!   whitespace into the string and re-decides literal prefixes
 //!   (`[{"b": undefined},]` -> the engine `[{"b": "undefined},"}]`,
 //!   the stream `[{"b": "undefined"}]`; `[null x]` -> the engine
-//!   `[null, "x"]`, the stream `"null x"`); the stream's word stops at
+//!   `[null, "x"]`, the stream `["null x"]`); the stream's word stops at
 //!   the structural chars, validly.
 //! - **The empty-object fallback's body reparse**: an object that
 //!   closed empty over a non-trivial colon-free body re-parses the
