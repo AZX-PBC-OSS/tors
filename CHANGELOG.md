@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.16.0...v0.17.0) (2026-10-07)
+
+
+### Features
+
+* **json-repair:** add the stateful streaming repairer (tors.JsonRepairer) ([#175](https://github.com/AZX-PBC-OSS/tors/issues/175)) ([a98d783](https://github.com/AZX-PBC-OSS/tors/commit/a98d78373b6400277f854f877ecf11770652ebec))
+
 ## [0.16.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.15.1...v0.16.0) (2026-10-07)
 
 
