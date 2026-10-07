@@ -358,6 +358,11 @@ MALFORMED = [
     '[1, () ',
     '{"a": (]',
     '{"a": [()]',
+    # the empty-object fallback: the body recovers nothing, the object
+    # drains to the empty array (the engine's own classifier)
+    '{]}',
+    '{,}',
+    '{"a": {]}}',
     '// lead\n{"a": 1}',
     '/*x*/{"a": 1}',
     '# c\n{"a": 1}',
@@ -378,6 +383,78 @@ MALFORMED = [
     '[1e-]',
     '[1e- ',
     '[1e- 2]',
+    # the rewind lane's string-entry skip: a number run terminated by an
+    # alphabetic char re-enters the string lane, whose leading skip
+    # consumes the run's non-alphanumeric garbage (a dot run, sign and
+    # dot, an underscore) before the literal table
+    '[.t]',
+    '[..t]',
+    '[...t]',
+    '[....t]',
+    '[...t x]',
+    '[.x.y]',
+    '[.5x]',
+    '[.5t]',
+    '[.5x, 1]',
+    '[-.t]',
+    '[-.5x]',
+    '[-.Infinity]',
+    '[._t]',
+    '[.true]',
+    '[.true, 1]',
+    '[.false]',
+    '[.none]',
+    '[.null]',
+    '[.NaN]',
+    '[--t]',
+    '[1, .t]',
+    '{"a": .t}',
+    '{"a": .false}',
+    '[...]',
+    '[....]',
+    '[.e]',
+    '[..e]',
+    '[.1e]',
+    '[-e]',
+    '{: 1, : 2}',
+    # the object-key lane's string-lane semantics: the entry skip's
+    # strip and the whitespace-touched invalidation (the key attempt
+    # dies at whitespace unless the next char is its colon)
+    '{-ab: 1}',
+    '{.ab: 1}',
+    '{-.ab: 1}',
+    '{-12: 1}',
+    '{.5: 1}',
+    '{-true: 1}',
+    '{--ab: 1}',
+    '{-eOe: 6}',
+    '{12ab: 1}',
+    '{a b: 1}',
+    '{a  b: 1}',
+    '{a b: 1, c: 2}',
+    '{a b c: 1}',
+    '{-ab x: 1}',
+    '{-ab : 1}',
+    '{: 1, : 2}',
+    # the attempt that strips to nothing drops the pair
+    '{-: 1',
+    '{-.: 1}',
+    '{-:}',
+    '{-: , "a": 1}',
+    # the member-boundary heals: the ','/closer where the colon was due
+    # acts AS the colon; the key attempt's string absorbs its own
+    # ','/']'
+    '{a,b: 1}',
+    '{a]: 1}',
+    '{a ,: 1}',
+    '{a b,c: 1}',
+    '{-one,f: false}',
+    '{"a" , 1}',
+    # the open string's tail rstrip: the escaped Python-whitespace code
+    # points join the escape-tail heal (the raw `\u2000` en quad)
+    '["\\u2000',
+    '["\\u2000\\u2000',
+    '{"k": "\\u2000',
 ]
 
 CORPUS = VALID + TRUNCATION + MALFORMED
@@ -407,9 +484,9 @@ DIVERGENCES = [
     ('{"a" 1}', '{"a": ""}', '{"a": 1}'),
     # the first-member dangling key: the engine falls back to an array
     ('{"a"', '["a"]', '{}'),
-    # the compound missing-key shape: the engine's key reparse swallows
-    # the comma
-    ('{: 1, : 2}', '{"1,": 2}', '{}'),
+    # the compound missing-key shape: NOW PARITY (the key lane's string
+    # semantics commit the compound attempt the engine's own way,
+    # `{"1,": 2}`) — pinned in MALFORMED
     # the word-swallow: a bare word born at an array position runs past
     # a mismatched closer in the engine's reparse
     ('[1e}', '[1, "e}"]', '[1, "e"]'),
@@ -417,6 +494,11 @@ DIVERGENCES = [
     ('[1, e-}', '[1, "e-}"]', '[1, "e-"]'),
     ('[1, e }', '[1, "e }"]', '[1, "e"]'),
     ('[e-}]', '["e-}"]', '["e-"]'),
+    # the mismatched-closer cascade: the `)` closes THROUGH the emptied
+    # inner array and the engine's whole-text close-up re-decides the
+    # emptied shapes away (the stream's cascade keeps them; both
+    # outputs valid)
+    ('[([)$', '[]', '[[[]]]'),
     # the mid-document closed-string newline-run: the engine's repair
     # lane strips it wherever the string appears (the whole input not
     # strict-valid); the linear stream keeps the strict spelling — only
@@ -432,10 +514,31 @@ DIVERGENCES = [
     # the paren-with-colon conversion: the engine turns a colon inside
     # the parenthesized container into an object
     ('("a": ', '{"a": ""}', '"a"'),
+    # the emptied-frame cascade: the whole-text lane re-decides the
+    # emptied items' shapes through the parent's own close
+    ('[[[] ,][] ,]', '[]', '[[]]'),
+    # the empty-key attempt at a member boundary: the engine's key
+    # loop discards it and the object drains through the fallback
+    ('{"" ,}', '[]', '{"": ""}'),
+    # the object-lane comma classification: a comma after a bare VALUE
+    # word belongs to the string when the next member's key is
+    # garbage-led — the engine's whole-text classifier absorbs the tail
+    ('{"a": xyz, -ab: 1}', '{"a": "xyz, -ab: 1"}', '{"a": "xyz", "ab": 1}'),
+    # the unquoted-value run's absorption: the engine's unquoted-value
+    # lane eats container chars and internal whitespace into the string
+    # and re-decides literal prefixes
+    ('[{"b": undefined},]', '[{"b": "undefined},"}]', '[{"b": "undefined"}]'),
+    ('[null x]', '[null, "x"]', '["null x"]'),
+    # the empty-object fallback's body reparse: the stream reproduces it
+    # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
+    # match); a body that would re-parse to members keeps {}
+    ('{ x}', '["x}"]', '{}'),
+    ('{"a": {(]', '{"a": []}', '{"a": []}'),
+    # duplicate object keys: the dict update-in-place is whole-text-only
+    ('{"a": 1, "a": 2}', '{"a": 2}', '{"a": 1, "a": 2}'),
     # the mismatched-closer garbage: the engine's whole-text close-up
     # re-decides earlier structure
-    ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{"0": []}'),
-]
+    ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{}'),]
 
 
 def stream(text: str, splits: list[int], *, ensure_ascii: bool = True) -> tuple[list[str], str]:

@@ -2628,18 +2628,33 @@ the parse ending on a `.`: the cut's open string `" [\r\r"...` to `[]`,
 a bare number-run `[1, ...` to `[1]`, the closed `["..."]` element
 staying) and the strictly-empty item whose next char is not a separator
 (`[[] ,` to `[]`, `[[] , 1` to `[1]`, the comma directly after the
-element keeping it — the decision deferred to close time, because the
-engine's whole-input `json.loads` fast path keeps every element whenever
-the text ends up valid, so the drop is a cut-only observable); the
-pending number/word resolves by the same rules
+element keeping it — the decision deferred to close time, and its gate
+is the engine's own decision procedure: the drops happen exactly when
+the completed text is NOT strict-valid JSON (`[[] ,]` to `[]` too — a
+cleanly-closed root whose parse fired any repair lane), while a
+strict-clean parse kept every element through the whole-input
+`json.loads` fast path); the pending number/word resolves by the same
+rules
 that terminate it mid-stream — through the literal table, so the special
 floats' spellings heal to strings (`[NaN` to `["NaN"]`, where the
 complete document keeps the float) and a number-born word drops its
-stray leading sign (`{"a": -NaN` to `{"a": "NaN"}`) — an element that
+stray leading sign (`{"a": -NaN` to `{"a": "NaN"}`) — the rewind-born
+word further takes the string lane's entry skip, dropping the run's
+leading non-alphanumeric garbage before the literal check (`[.t]` to
+`["t"]`, `[.true]` to `[true]`, `[.5x]` to `["5x"]`, `[-.t]` to `["t"]`;
+the strict `-Infinity` spelling keeps its float) — an element that
 renders empty retracts whole (`[1, -` to `[1]`, the engine's falsy-nudge
 rule), a missing value after `:` heals to `""`, a missing KEY drops the
 whole pair (`{: 1}` to `{}`, the valid `{"": 1}` passing through
-untouched), and a trailing separator disappears. Escapes and surrogate
+untouched), and a trailing separator disappears. The object-KEY lane
+runs the string semantics too: an unquoted key attempt's leading
+non-alphanumeric garbage drops at the commit (`{-ab: 1}` to
+`{"ab": 1}`, `{.5: 1}` to `{"5": 1}`), and a whitespace holds the
+attempt for the next char — it commits at its `:`, else it invalidates
+and the key loop retries from the next word (`{a b: 1}` to `{"b": 1}`);
+an attempt that strips to nothing drops the pair whole (`{-: 1` to
+`{}`).
+Escapes and surrogate
 pairs are machine state: a backslash, a `\u` escape's hex digits, or the
 two escapes of a surrogate pair may straddle chunks freely; a lone
 surrogate escape decodes to U+FFFD, the engine's documented divergence
@@ -2680,9 +2695,20 @@ container into an object: `("a": ` to `{"a": ""}`, the stream `"a"`);
 the mismatched-closer garbage where the engine's whole-text close-up
 re-decides earlier structure (both outputs valid); the word-swallow (a
 bare word born at an array position runs past a mismatched closer in the
-engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); and the
-compound missing-key shape, where the engine's key reparse swallows the
-comma (`{: 1, : 2}` to `{"1,": 2}`, the stream `{}`).
+engine's reparse: `[1e}` to `[1, "e}"]`, the stream `[1, "e"]`); the
+unquoted-value run's absorption (the engine's unquoted-value lane eats
+container chars and internal whitespace into the string and re-decides
+literal prefixes: `[{"b": undefined},]` to `[{"b": "undefined},"}]` where
+the stream keeps `[{"b": "undefined"}]`; `[null x]` to `[null, "x"]`
+where the stream gives `"null x"`); the empty-object fallback's body
+reparse (an object closing empty over a non-trivial colon-free body
+re-parses the body as an array — the stream reproduces it only when the
+body recovers nothing: `{]}` to `[]` and `{"a": {(]` to `{"a": []}` match,
+while `{ x}` to the engine's `["x}"]` stays `{}` in the stream); duplicate
+object keys (the dict update-in-place: `{"a": 1, "a": 2}` to `{"a": 2}`,
+the stream keeps both members); and the
+compound missing-key shape no longer diverges (the key lane's string
+semantics commit `{: 1, : 2}` to `{"1,": 2}` the engine's own way).
 
 **Argument contract**: `push` takes exactly a `str` (`TypeError` otherwise;
 a lone surrogate in it raises `UnicodeEncodeError` at the boundary, the
