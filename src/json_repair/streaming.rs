@@ -118,7 +118,9 @@
 //!   string `"..."` with the parse ending on a `.` — the cut's open
 //!   string and a bare number-run alike: `["...` and `[1, ...` to
 //!   `[]`/`[1]`, while the CLOSED `["..."]` element's parse ends on
-//!   its quote and stays) and the strictly-empty item whose next char
+//!   its quote and stays; the rollback's popped ALPHABETIC char still
+//!   re-parses as the next element — the skip ate exactly one char —
+//!   `[...e` to `["e"]`, `[1, ...E` to `[1, "E"]`) and the strictly-empty item whose next char
 //!   is not a separator (`[[] ,` -> `[]`, `[[] , 1` -> `[1]`).
 //! - **The strictly-empty element's drops are LOCAL to their own
 //!   array's closing shape** (the round-5 contract; the two earlier
@@ -293,7 +295,7 @@
 //!   run's own termination (`{"a": "b"}`).
 //! - **The mismatched-closer garbage**: the engine's whole-text
 //!   close-up re-decides earlier structure on garbage
-//!   (`{{\r]0\x01...('` -> `[]`, the stream `{"0": []}`), both valid.
+//!   (`{{\r]0\x01...('` -> `[]`, the stream `{}`), both valid.
 //! - **Multiple top-level values**: the engine's whole-text loop may
 //!   merge or array-wrap them (`{"a":1}{"b":2}` -> `[{"a": 1}, {"b": 2}]`);
 //!   the stream finalizes the first and drops the rest. Compose with
@@ -2468,6 +2470,24 @@ impl StreamingRepairer {
                         s.push_str(&serializer::dumps(&value, self.ensure_ascii));
                         appended_word_frame = Some(self.frames.len() - 1);
                     }
+                } else if stray
+                    && let Some(p) = popped
+                    && !run.is_empty()
+                    && p.is_alphabetic()
+                {
+                    // The stray element's own rollback-reprocess: the
+                    // engine's skip is a ONE-char decision (the raw
+                    // `get(-1)` cursor look drops the `...` and nothing
+                    // else) -- the popped char is still the cursor's
+                    // char, the item loop re-parses it fresh, and its
+                    // falsy-nudge makes it the next element (`[...e` ->
+                    // `["e"]`, `[1, ...e` -> `[1, "e"]`, `[...E` ->
+                    // `["E"]`). No separator prefix here: the stray
+                    // element's own begin put it in place (or the slot
+                    // was the array's first), so the word element takes
+                    // the stray element's slot as it stands.
+                    let value = literal_or_str(&p.to_string());
+                    s.push_str(&serializer::dumps(&value, self.ensure_ascii));
                 }
             }
             Some(Pending::Word {
@@ -3553,6 +3573,28 @@ mod tests {
             ("[[...", "[]"),
             ("[1, ...", "[1]"),
             ("[..., 1]", "[1]"),
+            // the rollback's popped ALPHABETIC char re-parses as the
+            // next element (the skip ate exactly one char): the
+            // e/E-initial word run keeps — the engine's own cursor sits
+            // on the char after the final dot, the stray check drops
+            // the `...` and the loop parses `e` fresh (the falsy-nudge
+            // makes it the word)
+            ("[...e", "[\"e\"]"),
+            ("[...E", "[\"E\"]"),
+            ("[1, ...e", "[1, \"e\"]"),
+            ("[[...e", "[[\"e\"]]"),
+            ("[[[...e", "[[[\"e\"]]]"),
+            ("[1, [...e", "[1, [\"e\"]]"),
+            ("[...e]", "[\"e\"]"),
+            ("[1, ...e]", "[1, \"e\"]"),
+            ("[[...e]]", "[[\"e\"]]"),
+            ("[...E]", "[\"E\"]"),
+            ("[...e,", "[\"e\"]"),
+            ("[ ...e", "[\"e\"]"),
+            ("[... e", "[\"e\"]"),
+            // not the keep: a second exponent char made the run's own
+            // value "…e" (no rollback to replay — `eE` ends the run)
+            ("[...eE", "[\"...e\", \"E\"]"),
             ("[1, [] , 2 ", "[1, 2]"),
             // not the drop: the element's parse ends on something else,
             // or the content is not exactly three dots

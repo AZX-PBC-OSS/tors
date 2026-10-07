@@ -2624,7 +2624,7 @@ mid-string newline passes); open containers close with their own brackets
 drops with it (`[[], []` to `[[]]`, `[1, []` to `[1]`), the cascade
 walking up the stack; the array lane's own item drops reproduce too —
 the stray `...` (an item whose parse is the exact string `"..."` with
-the parse ending on a `.`: the cut's open string `" [\r\r"...` to `[]`,
+the parse ending on a `.`: the cut's open string ` [\r\r"...` to `[]`,
 a bare number-run `[1, ...` to `[1]`, the closed `["..."]` element
 staying) and the strictly-empty item whose next char is not a separator
 (`[[] ,` to `[]`, `[[] , 1` to `[1]`, the comma directly after the
@@ -2712,7 +2712,7 @@ unquoted-value run's absorption (the engine's unquoted-value lane eats
 container chars and internal whitespace into the string and re-decides
 literal prefixes: `[{"b": undefined},]` to `[{"b": "undefined},"}]` where
 the stream keeps `[{"b": "undefined"}]`; `[null x]` to `[null, "x"]`
-where the stream gives `"null x"`); the empty-object fallback's body
+where the stream gives `["null x"]`); the empty-object fallback's body
 reparse (an object closing empty over a non-trivial colon-free body
 re-parses the body as an array — the stream reproduces it only when the
 body recovers nothing: `{]}` to `[]` and `{"a": {(]` to `{"a": []}` match,
