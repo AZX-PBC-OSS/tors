@@ -257,7 +257,7 @@ anydoc = { version = "0.2.4", optional = true }
 # resolve crates.io without this repo's Cargo.lock) fails E0063 under the
 # caret range. Lifted the day pdf_oxide ships a release built against
 # 0.1.12+.
-office_oxide = { version = "=0.1.11", optional = true }
+office_oxide = { version = "=0.1.13", optional = true }
 # The HTML lane of the documents surface (`src/documents_impl.rs`): neither
 # anydoc nor office_oxide reads HTML, so the lane has its own engine.
 # html-to-markdown-rs (MIT, xberg-io, 1.2M downloads) is the measured pick
