@@ -107,6 +107,19 @@ struct Scan {
     /// The open string's raw content contains a backslash anywhere: the
     /// doubled-quote/escape re-pair family's territory (out at the cut).
     saw_backslash: bool,
+    /// The open string's low smart-quote span depth (the engine's
+    /// `_push_low_smart_quote_span`: an ordinary `„` in the SLOW-path
+    /// string body pushes; an ordinary `”` pops; a `\` + `"` escape
+    /// whose backslash run is exactly one pops —
+    /// `_normalize_escape_sequence`'s low-span arm). A string whose
+    /// span is ACTIVE at a close quote is the engine's whole-text
+    /// smart-quote machinery ABSORBING the close (the string runs on,
+    /// `["„\\\"""` -> the value `„\"""`): whole-text-only, out.
+    /// Conservative on purpose: the push ignores the engine's own
+    /// `acc[-1] != "\\"` gate (a `„` hard on a backslash-ending value
+    /// does not push) and the armed-`"` pop is never taken, so the
+    /// depth only over-counts (coverage loss, never a false pass).
+    scan_spans: usize,
     /// The open string's content (modulo trailing spaces) ends with a
     /// `\n` escape.
     content_ends_nl: bool,
@@ -213,6 +226,7 @@ impl Scan {
             esc: StrEsc::None,
             raw_bs_run: 0,
             saw_backslash: false,
+            scan_spans: 0,
             content_ends_nl: false,
             nl_tail_string: false,
             run_len: 0,
@@ -432,6 +446,16 @@ impl Scan {
                         // whole-text string-repair lane re-decides it;
                         // out)
                         't' | 'r' | 'b' | 'f' | '"' | '/' => {
+                            // a `\` + `"` escape whose run was EXACTLY
+                            // ONE backslash is the engine's low-span arm
+                            // (`_normalize_escape_sequence`'s first
+                            // branch: the span pops). A longer run took
+                            // the run-scan branch instead (the span
+                            // stands). The check must read the run
+                            // BEFORE the reset below zeroes it.
+                            if c == '"' && self.raw_bs_run == 1 {
+                                self.scan_spans = self.scan_spans.saturating_sub(1);
+                            }
                             self.raw_bs_run = 0;
                             self.content_ends_nl = false;
                         }
@@ -945,6 +969,7 @@ impl Scan {
                     self.esc = StrEsc::None;
                     self.raw_bs_run = 0;
                     self.saw_backslash = false;
+                    self.scan_spans = 0;
                     self.content_ends_nl = false;
                     i += 1;
                 }
@@ -1216,6 +1241,15 @@ impl Scan {
                 self.divergent = true;
                 return;
             }
+            if self.scan_spans > 0 {
+                // the smart-quote span active at a close quote: the
+                // engine's whole-text machinery ABSORBS the close (the
+                // string runs on — `["„\\\"""` -> the value `„\"""`);
+                // the linear stream closes at the quote and the tail
+                // re-synchronizes (out)
+                self.divergent = true;
+                return;
+            }
             self.nl_tail_string = self.content_ends_nl;
             self.raw_bs_run = 0;
             self.content_ends_nl = false;
@@ -1279,6 +1313,17 @@ impl Scan {
             // handling) — out
             self.divergent = true;
             return;
+        }
+        // the low smart-quote span's push/pop (the engine's slow-path
+        // scan: an ordinary `„` pushes — conservatively WITHOUT the
+        // engine's own `acc[-1] != "\\"` gate, a `„` hard on a
+        // backslash-ending value does not push, so this only
+        // over-counts — an ordinary `”` pops). A `„` in the ESCAPE
+        // position never reaches here (the invalid-escape arm is out).
+        if c == '\u{201e}' {
+            self.scan_spans += 1;
+        } else if c == '\u{201d}' {
+            self.scan_spans = self.scan_spans.saturating_sub(1);
         }
         if c != ' ' {
             self.content_ends_nl = false;

@@ -113,7 +113,18 @@
 //!   `{"k": "x\n\f` -> `{"k": "x\n\\f"}` -- the rstrip is the tail's,
 //!   the mid-string newline-escape stands); a clean tail renders
 //!   through the escape-tail path as before (the streaming decode's
-//!   own bytes, the mark arms at the close only).
+//!   own bytes, the mark arms at the close only). The walk mirrors the
+//!   lib's low smart-quote span machinery: an ordinary `„` in the
+//!   value (never hard on a backslash-ending value) pushes the span
+//!   and the odd-run collapse then KEEPS the collapsed backslash with
+//!   the run's own delimiter joining it as content (`["e„\\\"` ->
+//!   `["e\u201e\\\""]`, where the plain content drops it:
+//!   `["e\\\"` -> `["e\""]`) -- `„` is the only pusher (no other
+//!   `STRING_DELIMITERS` member re-decides; `”` and the `\`+`"`
+//!   escape pop the span, spans nest); and the drain's trigger fires
+//!   on a held partial escape too (`["\ud83d\u` -> `["\ufffd\\u"]`,
+//!   the oracle keeping the `\ud83d` escape -- the documented
+//!   lone-surrogate divergence).
 //! - **Canonical emission**: the output is the `json.dumps`-parity
 //!   serialization (the same `", "`/`": "` separators, the same escape
 //!   table, `ensure_ascii` on by default), so a completed stream's
@@ -294,7 +305,16 @@
 //!   the stream closes a string only at its own delimiter or at `end`
 //!   (`{"a": "hello}` streams to `{"a": "hello}"}`). Doubled-quote
 //!   repair (`""hi""` -> `"hi"`) is likewise whole-text-only: the stream
-//!   keeps the parts it saw, validly.
+//!   keeps the parts it saw, validly. The smart-quote span machinery is
+//!   the same class: a slow-path string (one holding a backslash, where
+//!   the strict fast paths died) whose value holds an ordinary `„`
+//!   pushes the engine's low smart-quote span, the span-ACTIVE close
+//!   quote is CONTENT (the string runs on, `["e„\\\"""` -> the value
+//!   `e„\"""`), and the post-close tail re-synchronizes with it
+//!   (`["e„"x"]` -> the engine `["e„\"x\"]"]`); the stream closes at the
+//!   quote (`["e„\\\"""` -> `["e„\\\""]`, the `„`-free analog
+//!   `["e"x"]` diverging the same way through the quoted-section
+//!   re-pair).
 //! - **In-container comments**: the engine's comment arm consumes the
 //!   value that follows it inside a container (`{"a": /*x*/ 1}` ->
 //!   `{"a": ""}`); the stream skips the comment and parses the value
@@ -3437,6 +3457,24 @@ fn raw_source_needs_escape_repair(raw: &str, delim: char) -> bool {
         {
             return true;
         }
+        // The held partial escape (Class D): a `u`/`x` escape without
+        // its full hex tail -- the shape `["\ud83d\u` holds at the cut.
+        // The streaming decode's tail DROPS the held partial (the
+        // stream rendered `["\ufffd"]` where the engine keeps the
+        // literal `\u` after the flushed U+FFFD); the repair lane's
+        // walk keeps the backslash literal with the escape char
+        // ordinary -- the engine's own observable.
+        if run == 1
+            && (e == 'u' || e == 'x')
+            && !chars
+                .get(i + 2..i + 2 + if e == 'u' { 4 } else { 2 })
+                .is_some_and(|hex| {
+                    hex.len() == if e == 'u' { 4 } else { 2 }
+                        && hex.iter().all(|h| h.is_ascii_hexdigit())
+                })
+        {
+            return true;
+        }
         i += run + 1;
     }
     false
@@ -3544,6 +3582,29 @@ fn render_open_string_repair_lane(raw: &str, delim: char, ensure_ascii: bool) ->
 /// run==1 one literal backslash (`["\` -> `["\\"]`, the engine's own
 /// observable), an odd run of three or more the same collapse as
 /// anywhere (one literal backslash, `["\\\` -> `["\\"]`).
+///
+/// The walk also tracks the lib's LOW SMART-QUOTE SPAN
+/// (`parse_string.py`'s `_push_low_smart_quote_span` /
+/// `_pop_low_smart_quote_span`, the `rstring_delimiter` stack gaining
+/// the `"\0` sentinel): an ORDINARY `„` -- one the scan meets at its
+/// loop top, so never the escape char of a pending backslash, and not
+/// hard on a backslash-ending value (the halved even run's own `\`: the
+/// entry check `string_acc[-1] != "\\"`) -- pushes one; an ordinary `”`
+/// pops one (the scan's low-span `”` arm); a `\` + `"` escape pops one
+/// (`_normalize_escape_sequence`'s low-span arm, which tests the
+/// LITERAL `"` whatever the string's own delimiter is). `„` is the only
+/// pusher -- no other STRING_DELIMITERS member pushes (`'`/`“`/`”` as
+/// content are ordinary chars, `”` only pops) -- so the re-decision the
+/// span buys is `„`-only. And the re-decision is exactly one: with the
+/// sentinel active, the odd-run collapse's trailing-run while loop can
+/// no longer take the string's own delimiter INTO the value (the
+/// sentinel matches nothing), so the collapsed backslash STANDS and the
+/// delimiter joins it as content (the scan's low-span `"` arm appends
+/// it literally) -- `["e„\\\"` -> the value `e„\"`, where the plain
+/// content drops it (`["e\\\"` -> the value `e"`). (The lib's odd-run
+/// arm was dead code for closed strings -- a closed string's raw never
+/// ends on the run's own delimiter without more content after -- so
+/// this re-decision is observable only through the open-string drain.)
 fn repair_lane_value(raw: &str, delim: char) -> String {
     // The decoded value, through the machine's own surrogate carrier:
     // the u/x decode holds a high surrogate for its low half, combines
@@ -3557,6 +3618,7 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
         high: None,
         raw: String::new(),
     };
+    let mut low_smart_quote_spans: usize = 0;
     let chars: Vec<char> = raw.chars().collect();
     let n = chars.len();
     let mut i = 0usize;
@@ -3564,6 +3626,11 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
         let c = chars[i];
         if c != '\\' {
             st.flush_high_raw(&mut value);
+            if c == '\u{201e}' && !value.ends_with('\\') {
+                low_smart_quote_spans += 1;
+            } else if c == '\u{201d}' && low_smart_quote_spans > 0 {
+                low_smart_quote_spans -= 1;
+            }
             value.push(c);
             i += 1;
             continue;
@@ -3592,8 +3659,18 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
             // delimiter cannot occur in a closed string's raw source:
             // the streaming decode would have closed the string there;
             // an open string's raw source has no trailing delimiter).
+            // INSIDE a low smart-quote span the sentinel is the active
+            // delimiter, so the while loop cannot take the delimiter in:
+            // the collapsed backslash STANDS and the delimiter joins it
+            // as content (the scan's low-span `"` arm appends it
+            // literally, the span staying active) -- the engine's
+            // smart-`„` re-decision (`["e„\\\"` -> the value `e„\"`,
+            // `["e\\\"` -> the value `e"`).
             st.flush_high_raw(&mut value);
             if next == Some(delim) {
+                if low_smart_quote_spans > 0 {
+                    value.push('\\');
+                }
                 value.push(delim);
                 i += run + 1;
             } else {
@@ -3609,6 +3686,15 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
             value.push('\\');
             break;
         };
+        if e == '"' && low_smart_quote_spans > 0 {
+            // The low-span arm of `_normalize_escape_sequence`: a `\`+`"`
+            // escape inside the span pops it (the value keeps just the
+            // `"`, the arms below already spell it that way whatever the
+            // string's own delimiter is; the arm tests the LITERAL `"`
+            // because the span's machinery is quote-shaped, not
+            // delimiter-shaped).
+            low_smart_quote_spans -= 1;
+        }
         match e {
             _ if e == delim || e == 't' || e == 'n' || e == 'r' || e == 'b' => {
                 st.flush_high_raw(&mut value);

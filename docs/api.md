@@ -2608,7 +2608,23 @@ the paren taint and multi-string documents (each string holds its own
 mark); a string still OPEN at the cut is the same class — the cut's
 repair lane always decides, so the in-flight content re-renders through
 the same escape walk before the escape-tail rstrip (`["\f` to
-`["\\f"]`, `["\/` to `["\\/"]`). An escape the two lanes decode
+`["\\f"]`, `["\/` to `["\\/"]`). The walk mirrors the engine's
+smart-quote machinery: an ordinary `„` in the value pushes the lib's
+low smart-quote span, and the odd backslash run's own delimiter then
+joins the collapsed backslash as content instead of taking it into the
+value (`["e„\\\"` repairs to `["e\u201e\\\""]`, where the plain
+content collapses to `["e\""]`) — `„` is the only delimiter that
+re-decides this way (`”` and a `\"` escape pop the span, spans nest),
+and the drain also fires on a held partial escape at the cut
+(`["\ud83d\u` repairs to `["\ufffd\\u"]` — the oracle keeping the
+`\ud83d` escape, the documented lone-surrogate divergence). The same
+smart-quote span machinery is whole-text-only where it meets a CLOSE
+quote: a slow-path string (one holding a backslash) whose value holds
+an ordinary `„` absorbs its span-active close quotes as content and
+runs on (`["e„\\\"""` repairs to `["e\u201e\\\"\""]`), where the
+linear stream closes at the quote (`["e\u201e\\\""]`) and the tail
+re-synchronizes — the string re-synchronization class above. An escape
+the two lanes decode
 identically never defers: the
 streaming decode's own table carries the repair lane's
 `\x`-plus-two-hex-digits acceptance (`\x41` to `A`) beside the strict

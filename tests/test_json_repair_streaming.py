@@ -120,6 +120,11 @@ VALID = [
     '{"a": ["\\f"], "b": 1}',
     '[["\\f"], ["\\/"]]',
     '["\\\\f"]',
+    # the smart-quote keeps: a `„` in a string the strict lanes decide
+    # (the whole-input loads here) is plain content on both sides -- the
+    # fast path takes it, no span machinery engages
+    '["e„", 1]',
+    '["e„\\\"]',
 ]
 
 TRUNCATION = [
@@ -375,6 +380,42 @@ TRUNCATION = [
     '{"k": "a\\n\\t\\\\',
     '{"k": "a\\n\\t\\\\\\',
     '{"k": "a\\n\\t\\\\\\"',
+    # the smart-quote re-decision in the open-string drain's odd-run
+    # collapse: the value's ordinary `„` pushes the lib's low
+    # smart-quote span, so the run's own delimiter JOINS the collapsed
+    # backslash as content (the engine's smart-quote machinery keeps
+    # the halved run; the plain content drops it). The run lengths
+    # 3/5/7 collapse identically; the `'` delimiter re-decides the
+    # same (the push is the `„` char's); the other STRING_DELIMITERS
+    # members as content never re-decide; `”` pops the span (the
+    # plain drop stands)
+    '["e„\\\\\\"',
+    '["„\\\\\\"',
+    '["e„\\\\\\"b',
+    '["e„\\\\\\\\\\"',
+    '["e„\\\\\\\\\\\\\\"',
+    "['e„\\\\\\'",
+    '["e“\\\\\\"',
+    '["e”\\\\\\"',
+    '["e„”\\\\\\"',
+    '["e„\\\\\\"x\\\\\\"',
+    '["\\\\„\\\\\\"',
+    '{"k": "e„\\\\\\"',
+    # the held partial escape at the cut: a lone high surrogate escape
+    # plus a bare `\u`/`\x` tail -- the drain's predicate fires on the
+    # incomplete escape and the walk renders the engine's own answer
+    # (the flushed U+FFFD, the literal `\u` content)
+    '["\\ud83d\\u',
+    '["\\ud83d\\x',
+    '{"k": "\\ud83d\\u',
+    # the closed smart-quote keeps: the loads-valid `„`-holding string
+    # (the run's own delimiter escaped, one close quote) keeps through
+    # the strict lanes; the doubled close quote after the run is the
+    # loads-invalid shape (the engine's span machinery absorbs it --
+    # the documented divergence) and still matches here (the engine's
+    # own repair-lane answer, one string)
+    '["e„\\\\\\"]',
+    '["e„\\\\\\""]',
 ]
 
 MALFORMED = [
@@ -705,6 +746,18 @@ DIVERGENCES = [
     # a lone high surrogate escape followed by ANOTHER escape: NOW
     # PARITY (the deferred-escape re-render reproduces the repair lane's
     # escape-run re-decision), pinned in TestDeferredEscapeStrings
+    # the smart-quote span machinery absorbing a close quote: the
+    # engine's slow-path string scan pushes a low smart-quote span at
+    # an ordinary `„` and the span-active close quote is CONTENT (the
+    # string runs on, `["e„\\\"""` -> the value `e„\"""`); the linear
+    # stream closes at the quote and the tail re-synchronizes
+    ('["e„\\\\\\""', '["e\\u201e\\\\\\"\\""]', '["e\\u201e\\\\\\""]'),
+    ('["„\\\\\\""', '["\\u201e\\\\\\"\\""]', '["\\u201e\\\\\\""]'),
+    # the same span machinery swallowing the post-close tail: the
+    # engine's string runs to the structural break, the stream re-pairs
+    # at the close quote (the `„`-free analog `["e"x"]` diverges the
+    # same way, the quoted-section re-pair above)
+    ('["e„"x"]', '["e\\u201e\\"x\\"]"]', '["e\\u201e", "x\\""]'),
     # the empty-object fallback's body reparse: the stream reproduces it
     # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
     # match); a body that would re-parse to members keeps {}
@@ -1078,6 +1131,55 @@ class TestOpenStringEscapeDrain:
         ('["\\\\', '["\\\\"]'),
         ('["\\\\\\', '["\\\\"]'),
         ('["\\\\\\\\\\', '["\\\\"]'),
+        # the smart-quote re-decision in the odd-run collapse: the
+        # value's ordinary `„` pushes the lib's low smart-quote span
+        # (`_push_low_smart_quote_span`, the active delimiter becoming
+        # the `\0` sentinel), so the trailing-run while loop can no
+        # longer take the run's own delimiter INTO the value -- the
+        # collapsed backslash STANDS and the delimiter joins it as
+        # content (`["e„\\\"` -> the value `e„\"`, where the plain
+        # content drops it, `["e\\\"` -> `e"`). `„` is the ONLY pusher
+        # (no other STRING_DELIMITERS member re-decides: `“`/`”` as
+        # content are ordinary chars); `”` pops the span (plain drop
+        # again), and spans NEST (`„„` holds through one `”`); the
+        # `\`+`"` escape pops it (normalize's low-span arm, tested
+        # against the LITERAL `"` whatever the own delimiter is); a `„`
+        # hard on a backslash-ending value (the halved even run's own
+        # `\`, a decoded `\u005c`) does NOT push.
+        ('["e„\\\\\\"', '["e\\u201e\\\\\\""]'),
+        ('["„\\\\\\"', '["\\u201e\\\\\\""]'),
+        ('["e„\\\\\\"b', '["e\\u201e\\\\\\"b"]'),
+        # the run lengths 3/5/7 collapse identically (one backslash
+        # kept, the delimiter content)
+        ('["e„\\\\\\\\\\"', '["e\\u201e\\\\\\""]'),
+        ('["e„\\\\\\\\\\\\\\"', '["e\\u201e\\\\\\""]'),
+        # the push is the `„` char's, not the `"` delimiter's: a
+        # `'`-delimited string re-decides the same way
+        ("['e„\\\\\\'", '["e\\u201e\\\\\'"]'),
+        # the other STRING_DELIMITERS members as content never re-decide
+        ('["e“\\\\\\"', '["e\\u201c\\""]'),
+        ('["e”\\\\\\"', '["e\\u201d\\""]'),
+        # the pops: an ordinary `”` (plain drop again), two `”` past one
+        # `„` (the span is gone), the `\`+`"` escape mid-value
+        ('["e„”\\\\\\"', '["e\\u201e\\u201d\\""]'),
+        ('["„””\\\\\\"', '["\\u201e\\u201d\\u201d\\""]'),
+        ('["e„\\"x\\\\\\"', '["e\\u201e\\"x\\""]'),
+        # the nesting: `„„` holds through one `”`
+        ('["„„\\\\\\"', '["\\u201e\\u201e\\\\\\""]'),
+        ('["„„”\\\\\\"', '["\\u201e\\u201e\\u201d\\\\\\""]'),
+        # the no-push controls: a `„` hard on a backslash-ending value
+        # (the halved even run's own `\`, a decoded `\u005c`) stays
+        # plain content -- the drop stands
+        ('["\\\\„\\\\\\"', '["\\\\\\u201e\\""]'),
+        ('["\\\\„e\\\\\\"', '["\\\\\\u201ee\\""]'),
+        ('["\\u005c„\\\\\\"', '["\\\\\\u201e\\""]'),
+        # the span persists past its own run+delim (content follows), a
+        # push after an accepted escape (tab, a decoded `\u0041`), the
+        # object context
+        ('["e„\\\\\\"x', '["e\\u201e\\\\\\"x"]'),
+        ('["e„\\t\\\\\\"', '["e\\u201e\\t\\\\\\""]'),
+        ('["„\\u0041\\\\\\"', '["\\u201eA\\\\\\""]'),
+        ('{"k": "e„\\\\\\"', '{"k": "e\\u201e\\\\\\""}'),
     ]
 
     @pytest.mark.parametrize("text,want", DRAIN_FAMILY, ids=lambda p: repr(p[0]))
@@ -1098,6 +1200,41 @@ class TestOpenStringEscapeDrain:
             snap = r.snapshot()
             _assert_loads_or_empty(snap)
             assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
+
+    # the held partial escape at the cut: a lone high surrogate escape
+    # whose tail holds a bare `\u`/`\x` (complete or not, `u00`/`ux`/
+    # `u` alike -- anything the decode does not accept). The streaming
+    # decode's tail DROPPED the held partial (the stream rendered
+    # `["\ufffd"]` where the engine keeps the literal `\u` after the
+    # flushed U+FFFD); the drain's predicate now fires on the
+    # incomplete escape and the walk renders the engine's own answer.
+    # The ORACLE keeps the `\ud83d` escape (the documented lone-
+    # surrogate divergence, the same one the closed-string re-render
+    # pins below) -- byte-exact against the ENGINE here.
+    HELD_PARTIAL_FAMILY = [
+        ('["\\ud83d\\u', '["\\ufffd\\\\u"]'),
+        ('["\\ud83d\\x', '["\\ufffd\\\\x"]'),
+        ('["a\\ud83d\\u', '["a\\ufffd\\\\u"]'),
+        ('{"k": "\\ud83d\\u', '{"k": "\\ufffd\\\\u"}'),
+        ('[1, "\\ud83d\\u', '[1, "\\ufffd\\\\u"]'),
+        ('["\\ud83d\\u00', '["\\ufffd\\\\u00"]'),
+        ('["\\ud83d\\ux', '["\\ufffd\\\\ux"]'),
+        ('["\\ud83d\\uZ1', '["\\ufffd\\\\uZ1"]'),
+        ('["\\ud83d\\x4', '["\\ufffd\\\\x4"]'),
+        ('["\\ud83d\\xzz', '["\\ufffd\\\\xzz"]'),
+    ]
+
+    @pytest.mark.parametrize("text,want", HELD_PARTIAL_FAMILY, ids=lambda p: repr(p[0]))
+    def test_the_held_partial_escape_renders_the_repair_lane(
+        self, text: str, want: str
+    ) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert want != json_repair_lib.repair_json(text), f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
 
     def test_the_streamed_bytes_are_provisional(self) -> None:
         """The streaming decode's own bytes are provisional exactly as a
