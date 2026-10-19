@@ -100,6 +100,25 @@ ignore = [
     # is the operative safety evidence. Revisit when pdf_oxide ships a
     # ttf-parser-free release.
     { id = "RUSTSEC-2026-0192", reason = "unconditional transitive of pdf_oxide/anydoc's PDF stacks; unmaintained-informational, no safe upgrade; upstream (pdf_oxide) owns the skrifa migration" },
+
+    # RUSTSEC-2026-0367 / -0368 / -0369 (zip 8.x extraction vulnerabilities:
+    # SUID/SGID preservation, symlink escape on `ZipArchive::extract`,
+    # permissions applied through symlinks), all patched in zip >=9.0.0. zip
+    # 8.6.0's only entry paths are anydoc 0.2.4 and office_oxide 0.1.11 in
+    # the documents engine tree, and neither touches the vulnerable surface:
+    # both work in memory only — `ZipArchive::new(Cursor::new(bytes))` with
+    # by_name/by_index entry reads, plus `ZipWriter` into a `Cursor<Vec<u8>>`
+    # for package assembly — never `extract()`, the stream reader, or any
+    # disk-targeting extraction (verified against both vendored crate
+    # sources; tors's own code has zero direct zip usage). No shipped
+    # upstream release moves either crate to zip 9: anydoc maxes at 0.2.4,
+    # and office_oxide 0.1.15's own zip-9 bump doesn't remove zip 8.6 while
+    # anydoc 0.2.4 pins ^8.6.0 — so no version bump available in this repo
+    # clears the advisories. Lift when anydoc or office_oxide ships zip-9
+    # support, or either leaves the graph.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; extract() never called; no zip-9 release exists upstream" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; extract() never called; no zip-9 release exists upstream" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; stream extract never called; no zip-9 release exists upstream" },
 ]
 
 [bans]
