@@ -117,9 +117,9 @@ ignore = [
     # so no version bump available in this repo clears the advisories. Lift
     # when anydoc ships a zip-9-compatible release, or both crates leave the
     # graph.
-    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; extract() never called; no zip-9 release exists upstream" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; extract() never called; no zip-9 release exists upstream" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory reads and Cursor writes only; stream extract never called; no zip-9 release exists upstream" },
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory archive reads, ZipWriter assembly (out of advisory scope); extract() never called; no zip-9 release exists upstream" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory archive reads, ZipWriter assembly (out of advisory scope); extract() never called; no zip-9 release exists upstream" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via anydoc 0.2.4 / office_oxide 0.1.11 in-memory archive reads, ZipWriter assembly (out of advisory scope); stream extract never called; no zip-9 release exists upstream" },
 ]
 
 [bans]
