@@ -2605,7 +2605,11 @@ time: every separator keeps the rendering mid-stream, so the
 distinction survives the separator (`["\f", 1` escapes while
 `["\f", 1]` keeps), and it composes with the strictly-empty item drops,
 the paren taint and multi-string documents (each string holds its own
-mark). An escape the two lanes decode identically never defers: the
+mark); a string still OPEN at the cut is the same class — the cut's
+repair lane always decides, so the in-flight content re-renders through
+the same escape walk before the escape-tail rstrip (`["\f` to
+`["\\f"]`, `["\/` to `["\\/"]`). An escape the two lanes decode
+identically never defers: the
 streaming decode's own table carries the repair lane's
 `\x`-plus-two-hex-digits acceptance (`\x41` to `A`) beside the strict
 set.
@@ -2653,7 +2657,13 @@ differential this surface is tested with.
 **The truncation heal** (`end`/`snapshot` on a cut-off stream): an open
 string closes with `"` — its content rstrips first (Python's whitespace
 set: `{"k": "a b ` heals to `{"k": "a b"}`, `{"k": "a\n` to `{"k": "a"}`,
-the engine's own escape-tail heal); a closed string that ENDS the stream
+the engine's own escape-tail heal), and a content holding a
+repair-lane-divergent escape resolves it first through the repair lane's
+own normalization — the cut's repair lane always decides, so the open
+string's escapes re-render exactly like a closed deferred-escape
+string's mark (`["\f` to `["\\f"]`, `["\/` to `["\\/"]`, `{"k": "x\n\f`
+to `{"k": "x\n\\f"}` — the rstrip is the tail's, the mid-string
+newline-escape stands); a closed string that ENDS the stream
 on a newline-run loses the run (`{"k": "a\n"` to `{"k": "a"}`, a tab or a
 mid-string newline passes); open containers close with their own brackets
 — a still-open EMPTY container drops whole at an item position (`[[` to

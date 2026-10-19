@@ -102,8 +102,18 @@
 //!   the grouping unwrap and the empty-object fallback (both shift the
 //!   marks with their one-char drains), and multi-string documents
 //!   (each string holds its own mark). A string still OPEN at the cut
-//!   renders through the escape-tail path as before (the mark arms at
-//!   the close only).
+//!   is the same class the mark resolves: the cut's repair lane always
+//!   decides (a truncated document never strict-loads), so the
+//!   in-flight content's raw source re-renders through the SAME escape
+//!   walk (`render_open_string_repair_lane`, the closed mark's
+//!   `render_repair_lane_string` twin), then the engine's
+//!   unterminated-string finalize rstrips the DECODED value (Python's
+//!   whitespace set, the escape-tail heal's own operand: `["\f` ->
+//!   `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "\f\n` -> `{"k": "\\f"}`,
+//!   `{"k": "x\n\f` -> `{"k": "x\n\\f"}` -- the rstrip is the tail's,
+//!   the mid-string newline-escape stands); a clean tail renders
+//!   through the escape-tail path as before (the streaming decode's
+//!   own bytes, the mark arms at the close only).
 //! - **Canonical emission**: the output is the `json.dumps`-parity
 //!   serialization (the same `", "`/`": "` separators, the same escape
 //!   table, `ensure_ascii` on by default), so a completed stream's
@@ -164,7 +174,11 @@
 //! - **The truncated-output heal** (`end`/`snapshot` on a cut-off
 //!   stream): an open string closes with `"` (its content rstripped —
 //!   Python's whitespace set, the engine's own escape-tail heal:
-//!   `{"k": "a\n ` -> `{"k": "a"}`), a CLOSED string that ends the
+//!   `{"k": "a\n ` -> `{"k": "a"}`), where a raw source holding a
+//!   repair-lane-divergent escape resolves it FIRST through the
+//!   repair lane's own normalization (the cut class always decides:
+//!   `["\f` -> `["\\f"]`, `["\/` -> `["\\/"]` -- see the
+//!   deferred-escape bullet), a CLOSED string that ends the
 //!   stream on a newline-run loses the run (`{"k": "a\n"` ->
 //!   `{"k": "a"}`), open containers close with their own brackets — a
 //!   still-open EMPTY container drops whole at an item position (`[[`
@@ -3048,8 +3062,36 @@ impl StreamingRepairer {
         if let Some(st) = &self.string
             && !suppress_open_string
         {
-            st.render_tail(&mut s, self.ensure_ascii);
-            s.push('"');
+            // The open string's in-flight content at the cut: when its
+            // raw source holds a repair-lane-divergent escape the cut's
+            // repair lane re-normalizes it exactly like a closed
+            // string's mark (the cut class always decides: a truncated
+            // document never strict-loads), then the unterminated-
+            // string finalize rstrips the DECODED value (`["\f` ->
+            // `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "\f\n` ->
+            // `{"k": "\\f"}`). The streaming decode's own bytes (the
+            // canonical form already emitted behind the opening quote)
+            // are provisional exactly as a mark's rendering is: the
+            // span is replaced by the re-render. A clean tail renders
+            // through the escape-tail path as before (the streaming
+            // decode's own bytes, the rstrip in
+            // `strip_trailing_newline_tail`).
+            if raw_source_needs_escape_repair(&st.raw, st.delim) {
+                let qs = self.last_string_start.map(shift);
+                if let Some(qs) = qs
+                    && qs <= s.len()
+                {
+                    s.truncate(qs);
+                }
+                s.push_str(&render_open_string_repair_lane(
+                    &st.raw,
+                    st.delim,
+                    self.ensure_ascii,
+                ));
+            } else {
+                st.render_tail(&mut s, self.ensure_ascii);
+                s.push('"');
+            }
         }
         // The escape-tail heal: a string rendering that ends the stream
         // with a trailing newline-run loses it (the engine's own heal:
@@ -3446,8 +3488,9 @@ fn raw_source_is_strict_decodable(raw: &str) -> bool {
 
 /// The repair lane's escape normalization over one held string's raw
 /// source (`parse_string.py`'s `_normalize_escape_sequence`, mirrored
-/// exactly), as the machine's canonical QUOTED rendering: the accepted
-/// set is the string's own delimiter, `t`/`n`/
+/// exactly), as the machine's canonical QUOTED rendering -- the CLOSED
+/// string's rendering (the deferred-escape mark's resolution): the
+/// accepted set is the string's own delimiter, `t`/`n`/
 /// `r`/`b`, the backslash run's own collapse, and `u`/`x` followed by
 /// the right number of hex digits; `f` and `/` are NOT accepted (the
 /// backslash stays a literal character in the value and the re-dump
@@ -3466,6 +3509,42 @@ fn raw_source_is_strict_decodable(raw: &str) -> bool {
 /// stranded high surrogate flushes U+FFFD, the machine's documented
 /// lone-surrogate divergence).
 fn render_repair_lane_string(raw: &str, delim: char, ensure_ascii: bool) -> String {
+    let mut value = repair_lane_value(raw, delim);
+    // The lib's own finalize (`_finalize_string_result`): a CLOSED
+    // string whose decoded value ends on a newline loses ALL its
+    // trailing whitespace.
+    if value.ends_with('\n') {
+        let keep = value.trim_end_matches(is_py_whitespace).len();
+        value.truncate(keep);
+    }
+    serializer::dumps(&Value::Str(value), ensure_ascii)
+}
+
+/// The repair-lane rendering of an OPEN string's in-flight content at
+/// the cut: the SAME escape walk as the closed string's
+/// (`repair_lane_value`), finalized by the engine's UNTERMINATED-string
+/// heal -- the decoded value rstrips UNCONDITIONALLY (Python's
+/// whitespace set), the closed string's newline-gated finalize does
+/// not. The cut's repair lane always decides (a truncated document
+/// never strict-loads), so the open string's divergent escapes resolve
+/// here exactly like the closed string's do at the mark (`["\f` ->
+/// `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "x\n\f` -> `{"k": "x\n\\f"}`:
+/// the rstrip is the TAIL's, the mid-string newline-escape stands).
+fn render_open_string_repair_lane(raw: &str, delim: char, ensure_ascii: bool) -> String {
+    let mut value = repair_lane_value(raw, delim);
+    let keep = value.trim_end_matches(is_py_whitespace).len();
+    value.truncate(keep);
+    serializer::dumps(&Value::Str(value), ensure_ascii)
+}
+
+/// The shared escape walk (`_normalize_escape_sequence` mirrored): the
+/// DECODED VALUE of one string's raw source, the operand both renders
+/// finalize. A dangling backslash run at the end of the raw source (the
+/// OPEN string's cut shape: `["\`, `["\\\`) is a literal character --
+/// run==1 one literal backslash (`["\` -> `["\\"]`, the engine's own
+/// observable), an odd run of three or more the same collapse as
+/// anywhere (one literal backslash, `["\\\` -> `["\\"]`).
+fn repair_lane_value(raw: &str, delim: char) -> String {
     // The decoded value, through the machine's own surrogate carrier:
     // the u/x decode holds a high surrogate for its low half, combines
     // a valid pair, flushes a stranded one U+FFFD (`emit_code`'s tree
@@ -3511,7 +3590,8 @@ fn render_repair_lane_string(raw: &str, delim: char, ensure_ascii: bool) -> Stri
             // the escaped-delimiter decode, `\\\"` -> `"`), consumed
             // with the run (an even run followed by the string's own
             // delimiter cannot occur in a closed string's raw source:
-            // the streaming decode would have closed the string there).
+            // the streaming decode would have closed the string there;
+            // an open string's raw source has no trailing delimiter).
             st.flush_high_raw(&mut value);
             if next == Some(delim) {
                 value.push(delim);
@@ -3523,7 +3603,12 @@ fn render_repair_lane_string(raw: &str, delim: char, ensure_ascii: bool) -> Stri
             continue;
         }
         // run == 1: the escape char decides.
-        let e = next.expect("a closed string's raw source cannot end on a backslash");
+        let Some(e) = next else {
+            // The cut's dangling backslash: a literal character.
+            st.flush_high_raw(&mut value);
+            value.push('\\');
+            break;
+        };
         match e {
             _ if e == delim || e == 't' || e == 'n' || e == 'r' || e == 'b' => {
                 st.flush_high_raw(&mut value);
@@ -3577,16 +3662,7 @@ fn render_repair_lane_string(raw: &str, delim: char, ensure_ascii: bool) -> Stri
     // flushes U+FFFD (the machine's own heal; the escape state is never
     // set here -- the walker consumes whole escapes in one step).
     st.flush_high_raw(&mut value);
-    // The lib's own finalize (`_finalize_string_result`): a CLOSED
-    // string whose decoded value ends on a newline loses ALL its
-    // trailing whitespace.
-    if value.ends_with('\n') {
-        let keep = value.trim_end_matches(is_py_whitespace).len();
-        value.truncate(keep);
-    }
-    // The machine's canonical re-dump of the decoded value (the same
-    // `dumps` table every other render uses).
-    serializer::dumps(&Value::Str(value), ensure_ascii)
+    value
 }
 
 /// parse_number's trailing-rollback: one trailing char that cannot end a

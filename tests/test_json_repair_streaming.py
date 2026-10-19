@@ -322,6 +322,59 @@ TRUNCATION = [
     '{"a": Infinity',
     '{"a": -Infinity',
     '[1, -NaN',
+    # the open-string cut's escape drain: the cut's repair lane always
+    # decides (a truncated document never strict-loads), so the
+    # IN-FLIGHT content's divergent escapes re-render through the same
+    # escape walk as the closed-string marks, then the escape-tail
+    # rstrip applies to the DECODED value (`["\f` -> `["\\f"]`,
+    # `["\/` -> `["\\/"]`, `{"k": "x\n\f` -> `{"k": "x\n\\f"}` -- the
+    # rstrip is the tail's, the mid-string newline-escape stands)
+    '["\\f',
+    '["\\/',
+    '["\\x',
+    '["\\',
+    '["\\\\\\',
+    '["\\\\\\\\\\',
+    '["a\\f',
+    '["a\\fb',
+    '["\\ftext',
+    '["\\f more',
+    '["\\/x',
+    '["\\f ',
+    '[" \\f',
+    '["\\f\\n',
+    '["\\f\\t',
+    '["\\f%',
+    '["\\t\\f',
+    '["\\fx',
+    '["x\\f',
+    '["\\f\\/',
+    '["\\f", "\\/',
+    '{"k": "\\f',
+    '{"k": "\\/',
+    '{"k": "\\f\\n',
+    '{"k": "\\f\\t',
+    '{"k": "\\f ',
+    '{"k": " \\f',
+    '{"k": "x\\n\\f',
+    '{"k": "a\\t\\f',
+    '{"k": "\\f", "\\/',
+    '[[ "\\f',
+    '[1, "\\f',
+    '{"a": ["\\f',
+    '{"a": "x\\f',
+    '[[], "\\f',
+    '{"a": "\\f", "b',
+    # the engine's unterminated-string fixup on a trailing escape run:
+    # NOW PARITY (the open-string drain's escape walk collapses the odd
+    # run with the run's own delimiter taken INTO the value, the
+    # engine's own observable; the doubled-escape even-run shape stays
+    # the pinned divergence)
+    '{"k": "a\\n\\t\\\\\\"b',
+    '{"k": "a\\n\\t\\\\\\"b c',
+    '{"k": "a\\n\\t\\\\',
+    '{"k": "a\\n\\t\\\\\\',
+    '{"k": "a\\n\\t\\\\\\"',
 ]
 
 MALFORMED = [
@@ -576,9 +629,11 @@ DIVERGENCES = [
     ('{"a": "x\\", "b": 1}', '{"a": "x\\"", "b": 1}', '{"a": "x\\", ", "b\\"": 1}'),
     # doubled-escape repair: whole-text-only
     ('{"a": "\\\\\\\\"', '{"a": "\\""}', '{"a": "\\\\\\\\"}'),
-    # the engine's unterminated-string fixup re-decides a trailing
-    # backslash-escape run
-    ('{"k": "a\\n\\t\\\\\\"b', '{"k": "a\\n\\t\\"b"}', '{"k": "a\\n\\t\\\\\\"b"}'),
+    # the engine's unterminated-string fixup re-deciding a trailing
+    # backslash-escape run: NOW PARITY (the open-string drain's escape
+    # walk collapses the odd run with the run's own delimiter taken
+    # INTO the value, the engine's own observable) — pinned in
+    # TRUNCATION
     # missing colon: the stream keeps the value, the engine heals ""
     ('{"a" 1}', '{"a": ""}', '{"a": 1}'),
     # the first-member dangling key: the engine falls back to an array
@@ -971,6 +1026,91 @@ class TestDeferredEscapeStrings:
         r2.push('["\\f", 1, "\\/"]')
         assert r2.end() == '["\\f", 1, "/"]'
         assert r2.end() == json_repair_lib.repair_json('["\\f", 1, "\\/"]')
+
+
+# --- the open-string cut's escape drain ------------------------------------------
+
+
+class TestOpenStringEscapeDrain:
+    """A string still OPEN at the cut is the deferred-escape class the
+    mark resolves: the cut's repair lane always decides (a truncated
+    document never strict-loads), so the in-flight content's raw source
+    re-renders through the SAME escape walk the closed-string marks use
+    (`render_open_string_repair_lane`, `render_repair_lane_string`'s
+    twin), then the engine's unterminated-string finalize rstrips the
+    DECODED value (the escape-tail heal's own operand). Byte-exact
+    against the engine -- and through it the oracle -- at every
+    chunking."""
+
+    DRAIN_FAMILY = [
+        # the divergent escape at the tail: the backslash stays a
+        # literal character in the value, the re-dump re-escapes it
+        ('["\\f', '["\\\\f"]'),
+        ('["\\/', '["\\\\/"]'),
+        ('["\\x', '["\\\\x"]'),
+        ('["a\\f', '["a\\\\f"]'),
+        ('["a\\fb', '["a\\\\fb"]'),
+        ('["\\fx', '["\\\\fx"]'),
+        ('["x\\f', '["x\\\\f"]'),
+        ('["\\t\\f', '["\\t\\\\f"]'),
+        ('["\\f\\/', '["\\\\f\\\\/"]'),
+        ('["\\f%", 1', '["\\\\f%", 1]'),
+        ('{"k": "\\f', '{"k": "\\\\f"}'),
+        ('{"k": "\\/', '{"k": "\\\\/"}'),
+        ('[[ "\\f', '[["\\\\f"]]'),
+        ('[1, "\\f', '[1, "\\\\f"]'),
+        ('{"a": ["\\f', '{"a": ["\\\\f"]}'),
+        ('{"a": "x\\f', '{"a": "x\\\\f"}'),
+        # the rstrip is the DECODED value's tail: the escape stands,
+        # the raw whitespace and the newline-escape runs around it heal
+        ('["\\f ', '["\\\\f"]'),
+        ('[" \\f', '[" \\\\f"]'),
+        ('["\\f\\n', '["\\\\f"]'),
+        ('["\\f\\t', '["\\\\f"]'),
+        ('{"k": "\\f\\n', '{"k": "\\\\f"}'),
+        ('{"k": "x\\n\\f', '{"k": "x\\n\\\\f"}'),
+        ('{"k": "a\\t\\f', '{"k": "a\\t\\\\f"}'),
+        # the backslash runs at the cut: the dangling one a literal
+        # (parity already, both lanes agree), the odd 3+-run the repair
+        # lane's own collapse (the streaming decode's run pairing gave
+        # two literal backslashes)
+        ('["\\', '["\\\\"]'),
+        ('["\\\\', '["\\\\"]'),
+        ('["\\\\\\', '["\\\\"]'),
+        ('["\\\\\\\\\\', '["\\\\"]'),
+    ]
+
+    @pytest.mark.parametrize("text,want", DRAIN_FAMILY, ids=lambda p: repr(p[0]))
+    def test_the_cut_renders_the_repair_lane_byte_exact(self, text: str, want: str) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert json_repair_lib.repair_json(text) == want, f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize("text,_", DRAIN_FAMILY, ids=lambda p: repr(p[0]))
+    def test_snapshot_is_end_and_valid_at_every_prefix(self, text: str, _: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
+
+    def test_the_streamed_bytes_are_provisional(self) -> None:
+        """The streaming decode's own bytes are provisional exactly as a
+        mark's rendering: the push delta carried the canonical decode
+        (`["\f`), the close render replaces the span (`["\\f"]`)."""
+        r = tors.JsonRepairer()
+        delta = r.push('["\\f')
+        assert delta == '["\\f'
+        assert r.end() == '["\\\\f"]'
+        # the clean tail still streams through the escape-tail path
+        r2 = tors.JsonRepairer()
+        assert r2.push('{"k": "a b ') == '{"k": "a b '
+        assert r2.end() == '{"k": "a b"}'
 
 
 # --- the documented decisions ---------------------------------------------------
