@@ -109,6 +109,22 @@ VALID = [
     '{"a": ["" , 1]} x',
     '[true, [] , 1] x',
     'x {"a": ["" , 1]}',
+    # the deferred-escape keeps: the strict lanes decided (the strings'
+    # `\f`/`\/` decode through the canonical table, the whole-input
+    # loads and the suffix probe both keep the rendering verbatim)
+    '["\\f"]',
+    '["\\f%"]',
+    '{"\\f\\/%": 1}',
+    '["\\f", 1]',
+    '["\\f", "\\/"]',
+    '{"a": ["\\f"], "b": 1}',
+    '[["\\f"], ["\\/"]]',
+    '["\\\\f"]',
+    # the smart-quote keeps: a `„` in a string the strict lanes decide
+    # (the whole-input loads here) is plain content on both sides -- the
+    # fast path takes it, no span machinery engages
+    '["e„", 1]',
+    '["e„\\\"]',
 ]
 
 TRUNCATION = [
@@ -271,6 +287,38 @@ TRUNCATION = [
     '{"k": "a\\u0041"',
     '["a\\n',
     '{"a": "x\\n", "b": 1}',
+    # the deferred-escape family: a CLOSED string holding `\f` or `\/`
+    # (the two escapes the repair lane does not accept) or an odd
+    # backslash run of three or more does not commit its rendering at
+    # its own close -- the mark resolves at end() through the repair
+    # lane's escape normalization when the repair lane decided (a cut
+    # root here), verbatim when the strict lanes did (the complete
+    # documents above). The distinction survives every separator:
+    # `["\f", 1` escapes while `["\f", 1]` keeps.
+    '["\\f%"',
+    '["\\f", 1',
+    '["\\f"',
+    '{"\\f\\/%": 1',
+    '[[ "\\f"]',
+    '["\\/%"',
+    '["\\f\\/%", 1',
+    '["a\\fb"',
+    '[{"k": "\\f"}, 1',
+    '{"\\f": 1',
+    '{"k": "a\\/b"',
+    '["a\\/b"',
+    '["\\t\\f"',
+    '["\\f\\t"',
+    '["\\/\\f"',
+    '["\\\\\\f"',
+    '["\\\\\\f", 1',
+    '["\\\\\\t"',
+    '["\\\\\\u0046"',
+    '["\\x41"',
+    '["\\x41", 1',
+    '["\\x%"',
+    '[[] , "\\f", 1',
+    '[1, [] , "\\f"',
     # the in-flight special-float word at the cut heals to the string
     # (the strict class keeps the float in the complete document)
     '[NaN',
@@ -279,6 +327,95 @@ TRUNCATION = [
     '{"a": Infinity',
     '{"a": -Infinity',
     '[1, -NaN',
+    # the open-string cut's escape drain: the cut's repair lane always
+    # decides (a truncated document never strict-loads), so the
+    # IN-FLIGHT content's divergent escapes re-render through the same
+    # escape walk as the closed-string marks, then the escape-tail
+    # rstrip applies to the DECODED value (`["\f` -> `["\\f"]`,
+    # `["\/` -> `["\\/"]`, `{"k": "x\n\f` -> `{"k": "x\n\\f"}` -- the
+    # rstrip is the tail's, the mid-string newline-escape stands)
+    '["\\f',
+    '["\\/',
+    '["\\x',
+    '["\\',
+    '["\\\\\\',
+    '["\\\\\\\\\\',
+    '["a\\f',
+    '["a\\fb',
+    '["\\ftext',
+    '["\\f more',
+    '["\\/x',
+    '["\\f ',
+    '[" \\f',
+    '["\\f\\n',
+    '["\\f\\t',
+    '["\\f%',
+    '["\\t\\f',
+    '["\\fx',
+    '["x\\f',
+    '["\\f\\/',
+    '["\\f", "\\/',
+    '{"k": "\\f',
+    '{"k": "\\/',
+    '{"k": "\\f\\n',
+    '{"k": "\\f\\t',
+    '{"k": "\\f ',
+    '{"k": " \\f',
+    '{"k": "x\\n\\f',
+    '{"k": "a\\t\\f',
+    '{"k": "\\f", "\\/',
+    '[[ "\\f',
+    '[1, "\\f',
+    '{"a": ["\\f',
+    '{"a": "x\\f',
+    '[[], "\\f',
+    '{"a": "\\f", "b',
+    # the engine's unterminated-string fixup on a trailing escape run:
+    # NOW PARITY (the open-string drain's escape walk collapses the odd
+    # run with the run's own delimiter taken INTO the value, the
+    # engine's own observable; the doubled-escape even-run shape stays
+    # the pinned divergence)
+    '{"k": "a\\n\\t\\\\\\"b',
+    '{"k": "a\\n\\t\\\\\\"b c',
+    '{"k": "a\\n\\t\\\\',
+    '{"k": "a\\n\\t\\\\\\',
+    '{"k": "a\\n\\t\\\\\\"',
+    # the smart-quote re-decision in the open-string drain's odd-run
+    # collapse: the value's ordinary `„` pushes the lib's low
+    # smart-quote span, so the run's own delimiter JOINS the collapsed
+    # backslash as content (the engine's smart-quote machinery keeps
+    # the halved run; the plain content drops it). The run lengths
+    # 3/5/7 collapse identically; the `'` delimiter re-decides the
+    # same (the push is the `„` char's); the other STRING_DELIMITERS
+    # members as content never re-decide; `”` pops the span (the
+    # plain drop stands)
+    '["e„\\\\\\"',
+    '["„\\\\\\"',
+    '["e„\\\\\\"b',
+    '["e„\\\\\\\\\\"',
+    '["e„\\\\\\\\\\\\\\"',
+    "['e„\\\\\\'",
+    '["e“\\\\\\"',
+    '["e”\\\\\\"',
+    '["e„”\\\\\\"',
+    '["e„\\\\\\"x\\\\\\"',
+    '["\\\\„\\\\\\"',
+    '{"k": "e„\\\\\\"',
+    # the held partial escape at the cut: a lone high surrogate escape
+    # plus a bare `\u`/`\x` tail -- the drain's predicate fires on the
+    # incomplete escape and the walk renders the engine's own answer
+    # (the flushed U+FFFD, the literal `\u` content)
+    '["\\ud83d\\u',
+    '["\\ud83d\\x',
+    '{"k": "\\ud83d\\u',
+    # the closed smart-quote keeps: the loads-valid `„`-holding string
+    # (the run's own delimiter escaped, one close quote) keeps through
+    # the strict lanes; the doubled close quote after the run is the
+    # loads-invalid shape (the engine's span machinery absorbs it --
+    # the documented divergence) and still matches here (the engine's
+    # own repair-lane answer, one string)
+    '["e„\\\\\\"]',
+    '["e„\\\\\\""]',
 ]
 
 MALFORMED = [
@@ -490,6 +627,27 @@ MALFORMED = [
     '[[] x, 1]',
     '[1, [] x, 1]',
     '[[]x]',
+    # the deferred-escape class on repair-lane-decided COMPLETE
+    # documents: the whole-input loads and the suffix probe both died
+    # on the input (a bare word, a tuple, a non-strict number, a
+    # missing comma, a trailing separator), so the engine's repair lane
+    # re-normalized the held strings even though the machine's render
+    # is itself strict-loadable
+    '("\\f")',
+    '("\\f", 1)',
+    '[(  "\\f" , 1)]',
+    '[tru, "\\f"]',
+    '[tru, "\\f"] x',
+    '[True, "\\f"]',
+    '[None, "\\f"]',
+    '[01, "\\f"]',
+    '["\\x41"]',
+    '["\\x41", 1]',
+    '[1 2, "\\f"]',
+    '[1, "\\f",]',
+    '{"a": 1, "b": "\\f",}',
+    '{"a": 1 2, "\\f"]}',
+    '["\\f"] x',
 ]
 
 CORPUS = VALID + TRUNCATION + MALFORMED
@@ -512,9 +670,11 @@ DIVERGENCES = [
     ('{"a": "x\\", "b": 1}', '{"a": "x\\"", "b": 1}', '{"a": "x\\", ", "b\\"": 1}'),
     # doubled-escape repair: whole-text-only
     ('{"a": "\\\\\\\\"', '{"a": "\\""}', '{"a": "\\\\\\\\"}'),
-    # the engine's unterminated-string fixup re-decides a trailing
-    # backslash-escape run
-    ('{"k": "a\\n\\t\\\\\\"b', '{"k": "a\\n\\t\\"b"}', '{"k": "a\\n\\t\\\\\\"b"}'),
+    # the engine's unterminated-string fixup re-deciding a trailing
+    # backslash-escape run: NOW PARITY (the open-string drain's escape
+    # walk collapses the odd run with the run's own delimiter taken
+    # INTO the value, the engine's own observable) — pinned in
+    # TRUNCATION
     # missing colon: the stream keeps the value, the engine heals ""
     ('{"a" 1}', '{"a": ""}', '{"a": 1}'),
     # the first-member dangling key: the engine falls back to an array
@@ -583,11 +743,21 @@ DIVERGENCES = [
     # VALUE at an object's close absorbs the object's own `}` when the
     # tail past it holds two chars before the next `}`
     ('{"a": b}66', '{"a": "b}66"}', '{"a": "b"}'),
-    # a lone high surrogate escape followed by ANOTHER escape: the
-    # engine's whole-text string-repair lane re-decides the escape run
-    # (the `\f` stays a literal backslash + f); the stream decodes the
-    # standard table
-    ('["\\ud83d\\falsee"', '["\\ufffd\\\\falsee"]', '["\\ufffd\\falsee"]'),
+    # a lone high surrogate escape followed by ANOTHER escape: NOW
+    # PARITY (the deferred-escape re-render reproduces the repair lane's
+    # escape-run re-decision), pinned in TestDeferredEscapeStrings
+    # the smart-quote span machinery absorbing a close quote: the
+    # engine's slow-path string scan pushes a low smart-quote span at
+    # an ordinary `„` and the span-active close quote is CONTENT (the
+    # string runs on, `["e„\\\"""` -> the value `e„\"""`); the linear
+    # stream closes at the quote and the tail re-synchronizes
+    ('["e„\\\\\\""', '["e\\u201e\\\\\\"\\""]', '["e\\u201e\\\\\\""]'),
+    ('["„\\\\\\""', '["\\u201e\\\\\\"\\""]', '["\\u201e\\\\\\""]'),
+    # the same span machinery swallowing the post-close tail: the
+    # engine's string runs to the structural break, the stream re-pairs
+    # at the close quote (the `„`-free analog `["e"x"]` diverges the
+    # same way, the quoted-section re-pair above)
+    ('["e„"x"]', '["e\\u201e\\"x\\"]"]', '["e\\u201e", "x\\""]'),
     # the empty-object fallback's body reparse: the stream reproduces it
     # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
     # match); a body that would re-parse to members keeps {}
@@ -595,6 +765,20 @@ DIVERGENCES = [
     ('{"a": {(]', '{"a": []}', '{"a": []}'),
     # duplicate object keys: the dict update-in-place is whole-text-only
     ('{"a": 1, "a": 2}', '{"a": 2}', '{"a": 1, "a": 2}'),
+    # the bareword-key comma-commit's paren tail: the lib's whole-text
+    # lane runs the missing-quotes key's invalidation machinery over the
+    # tail and the paren's dangling bareword re-parses as a DUPLICATE
+    # member key whose dict update-in-place overwrites the member's
+    # value whole (the class above, one lib step removed)
+    ('{kf ,"="(kf , ', '{"kf": ""}', '{"kf": "=", "kf": ""}'),
+    # the span-active OWN-delimiter close: the engine's
+    # `_handle_right_delimiter_candidate` lookahead closes the
+    # `'`-delimited string at a quote with a follow-up quote/terminator
+    # ahead (the even-odd delimiter scan), the linear stream's span
+    # machinery absorbs it as content (the while gate's own arm -- the
+    # nothing-ahead case, `['e„b'` -> the value `e„b'`, is parity)
+    ("['e„b'c'", '["e\\u201eb", "c\'"]', '["e\\u201eb\'c\'"]'),
+    ("[1, 'e„b\\'c''", '[1, "e\\u201eb\'c"]', '[1, "e\\u201eb\'c\'\'"]'),
     # the mismatched-closer garbage: the engine's whole-text close-up
     # re-decides earlier structure
     ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{}'),]
@@ -689,6 +873,484 @@ class TestChunkBoundarySweep:
         points = sorted(rng.sample(range(1, len(text)), min(3, len(text) - 1)))
         _, got = stream(text, points, ensure_ascii=False)
         assert got == want, f"{text!r}: {got!r} != {want!r}"
+
+
+# --- the deferred-escape family -------------------------------------------------
+
+
+class TestDeferredEscapeStrings:
+    """The weekly-fuzz crash class: a closed string whose raw source
+    holds a repair-lane-divergent escape (`\\f`/`\\/`, the two escapes
+    the repair lane does not accept, or an odd backslash run of three
+    or more) resolves at end()/snapshot() close time, never at a
+    separator. The strict lanes keep the verbatim rendering (a complete
+    document, trailing garbage and comments behind a valid root
+    included); the repair lane (a cut root, a paren anywhere, a
+    repair-lane-decided complete document) re-renders the raw source
+    through the lib's escape normalization (`\\f` to `\\\\f`). Byte-exact
+    against the oracle at every chunking."""
+
+    CUT_FAMILY = [
+        '["\\f%"',
+        '["\\f", 1',
+        '["\\f"',
+        '{"\\f\\/%": 1',
+        '[[ "\\f"]',
+        '["\\/%"',
+        '["\\f\\/%", 1',
+        '["a\\fb"',
+        '[{"k": "\\f"}, 1',
+        '{"\\f": 1',
+        '{"k": "a\\/b"',
+        '["a\\/b"',
+        '["\\t\\f"',
+        '["\\f\\t"',
+        '["\\/\\f"',
+        '["\\\\\\f"',
+        '["\\\\\\f", 1',
+        '["\\\\\\t"',
+        '["\\\\\\u0046"',
+        '["\\x41"',
+        '["\\x41", 1',
+        '["\\x%"',
+        '[[] , "\\f", 1',
+        '[1, [] , "\\f"',
+        # the crash artifact itself (fuzz/corpus seed 8eca3c68...)
+        '["\\f%"',
+    ]
+
+    KEEP_FAMILY = [
+        '["\\f"]',
+        '["\\f%"]',
+        '{"\\f\\/%": 1}',
+        '["\\f"]x',
+        '["\\f"] // x',
+        '["\\f", 1]',
+        '["\\f", "\\/"]',
+        '{"a": ["\\f"], "b": 1}',
+        '[["\\f"], ["\\/"]]',
+        '["\\\\f"]',
+        '["\\\\f"',
+    ]
+
+    REPAIR_COMPLETE_FAMILY = [
+        '("\\f")',
+        '("\\f", 1)',
+        '[(  "\\f" , 1)]',
+        '[tru, "\\f"]',
+        '[tru, "\\f"] x',
+        '[True, "\\f"]',
+        '[None, "\\f"]',
+        '[01, "\\f"]',
+        '["\\x41"]',
+        '["\\x41", 1]',
+        '[1 2, "\\f"]',
+        '[1, "\\f",]',
+        '{"a": 1, "b": "\\f",}',
+        '["\\f"] x',
+    ]
+
+    # The suffix-probe gate's tail class (the lib's
+    # `_initial_container_has_non_comma_trailing_content`, mirrored at
+    # the top-level sites): the KEPT half -- leading consumption of any
+    # kind puts the root's char at `index != 0` and the probe fires
+    # whatever the tail holds; a trailing token (or the comment opener
+    # read as the decision char) fires it from a clean index too.
+    TAIL_KEEP_FAMILY = [
+        '\x0b["\\f"]',
+        '\x0c["\\f"]',
+        'x ["\\f"]',
+        '\x0bx ["\\f"]',
+        'x ["\\f"] ,',
+        '\x0b["\\f"] x',
+        '\x0b["\\f"],',
+        '["\\f"]\x0b x',
+        '["\\f"]\x0b // c',
+        '["\\f"]\x0b # c',
+        '["\\f"] x\x0b',
+        '["\\f"] x \x0b y',
+    ]
+    # The tail class's TAINT half: from a clean index (the root's char
+    # IS the input's first byte) the trailing scan fires the probe only
+    # on a NON-COMMA decision char -- the input ending inside a trailing
+    # non-strict whitespace run (no content behind it: no probe) and the
+    # COMMA-FIRST tail (the scan reads a `,`, returns False: no probe)
+    # are repair-lane inputs -- the held strings re-render.
+    TAIL_TAINT_FAMILY = [
+        '["\\f"]\x0b',
+        '["\\f"]\x0c',
+        '["\\f"]\x0b\x0c',
+        '["\\f"]\t\x0b',
+        '["\\f"] ,',
+        '["\\f"],',
+        '["\\f"], x',
+        '["\\f"]\x0b,',
+        '["\\f"]\x0b ,',
+        '["\\/", 1] ,',
+        '{"k": "\\f"} ,',
+    ]
+
+    @pytest.mark.parametrize(
+        "text", CUT_FAMILY + REPAIR_COMPLETE_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_matches_the_engine_and_the_oracle_at_every_split(self, text: str) -> None:
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    def test_the_lone_surrogate_plus_escape_run_renders_the_repair_lane(self) -> None:
+        """The previously-pinned divergence is gone: a lone high
+        surrogate escape followed by another escape (`\\ud83d\\falsee`,
+        a cut root) re-renders through the repair lane's escape
+        normalization -- the held surrogate flushes U+FFFD (the machine's
+        documented lone-surrogate divergence from the ORACLE, which keeps
+        the `\\ud83d` escape) and the `\\f` stays a literal backslash +
+        f, byte-exact against the engine at every split."""
+        text = '["\\ud83d\\falsee"'
+        want = tors.repair_json(text)
+        assert want == '["\\ufffd\\\\falsee"]'
+        assert want != json_repair_lib.repair_json(text)  # the oracle keeps \\ud83d
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize("text", KEEP_FAMILY, ids=lambda t: repr(t))
+    def test_the_strict_lanes_keep_verbatim_at_every_split(self, text: str) -> None:
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize(
+        "text", TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_the_tail_gate_matches_the_oracle_at_every_split(self, text: str) -> None:
+        """The tail class of the suffix-probe gate, byte-exact against
+        the oracle at every chunking: leading consumption (whitespace,
+        prose) puts the root's char at `index != 0` and the probe fires
+        whatever the tail holds -- the held strings keep when the root
+        rendering is strict-loadable; a trailing token fires the probe
+        from a clean index too; the input ENDING inside a trailing
+        non-strict whitespace run and the COMMA-FIRST tail are repair-
+        lane inputs (no probe) -- the held strings re-render."""
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize(
+        "text", TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_the_tail_gate_holds_over_random_chunkings(self, text: str) -> None:
+        rng = random.Random(len(text))
+        points = sorted(rng.sample(range(1, len(text)), min(4, len(text) - 1)))
+        want = tors.repair_json(text)
+        _, got = stream(text, points)
+        assert got == want, f"splits {points} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize(
+        "text",
+        CUT_FAMILY + KEEP_FAMILY + REPAIR_COMPLETE_FAMILY + TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY,
+    )
+    def test_snapshot_equals_end_at_every_prefix(self, text: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
+
+    def test_the_distinction_survives_a_snapshot_boundary(self) -> None:
+        """A snapshot taken while a deferred string is held resolves the
+        same way one-push does, and the stream continues as if it had
+        not run (the snapshot contract)."""
+        r = tors.JsonRepairer()
+        r.push('["\\f", ')
+        held = r.snapshot()
+        _assert_loads_or_empty(held)
+        r2 = tors.JsonRepairer()
+        r2.push('["\\f", ')
+        r2.push("1")
+        assert r2.end() == '["\\\\f", 1]'
+        r.push("1")
+        assert r.end() == r2.end()
+
+    def test_multi_string_documents_hold_independently(self) -> None:
+        r = tors.JsonRepairer()
+        r.push('["\\f", 1, "\\/"')
+        assert r.end() == '["\\\\f", 1, "\\\\/"]'
+        # the complete document keeps both through the strict lane (the
+        # canonical dumps does not escape the solidus)
+        r2 = tors.JsonRepairer()
+        r2.push('["\\f", 1, "\\/"]')
+        assert r2.end() == '["\\f", 1, "/"]'
+        assert r2.end() == json_repair_lib.repair_json('["\\f", 1, "\\/"]')
+
+
+# --- the open-string cut's escape drain ------------------------------------------
+
+
+class TestOpenStringEscapeDrain:
+    """A string still OPEN at the cut is the deferred-escape class the
+    mark resolves: the cut's repair lane always decides (a truncated
+    document never strict-loads), so the in-flight content's raw source
+    re-renders through the SAME escape walk the closed-string marks use
+    (`render_open_string_repair_lane`, `render_repair_lane_string`'s
+    twin), then the engine's unterminated-string finalize rstrips the
+    DECODED value (the escape-tail heal's own operand). Byte-exact
+    against the engine -- and through it the oracle -- at every
+    chunking."""
+
+    DRAIN_FAMILY = [
+        # the divergent escape at the tail: the backslash stays a
+        # literal character in the value, the re-dump re-escapes it
+        ('["\\f', '["\\\\f"]'),
+        ('["\\/', '["\\\\/"]'),
+        ('["\\x', '["\\\\x"]'),
+        ('["a\\f', '["a\\\\f"]'),
+        ('["a\\fb', '["a\\\\fb"]'),
+        ('["\\fx', '["\\\\fx"]'),
+        ('["x\\f', '["x\\\\f"]'),
+        ('["\\t\\f', '["\\t\\\\f"]'),
+        ('["\\f\\/', '["\\\\f\\\\/"]'),
+        ('["\\f%", 1', '["\\\\f%", 1]'),
+        ('{"k": "\\f', '{"k": "\\\\f"}'),
+        ('{"k": "\\/', '{"k": "\\\\/"}'),
+        ('[[ "\\f', '[["\\\\f"]]'),
+        ('[1, "\\f', '[1, "\\\\f"]'),
+        ('{"a": ["\\f', '{"a": ["\\\\f"]}'),
+        ('{"a": "x\\f', '{"a": "x\\\\f"}'),
+        # the rstrip is the DECODED value's tail: the escape stands,
+        # the raw whitespace and the newline-escape runs around it heal
+        ('["\\f ', '["\\\\f"]'),
+        ('[" \\f', '[" \\\\f"]'),
+        ('["\\f\\n', '["\\\\f"]'),
+        ('["\\f\\t', '["\\\\f"]'),
+        ('{"k": "\\f\\n', '{"k": "\\\\f"}'),
+        ('{"k": "x\\n\\f', '{"k": "x\\n\\\\f"}'),
+        ('{"k": "a\\t\\f', '{"k": "a\\t\\\\f"}'),
+        # the backslash runs at the cut: the dangling one a literal
+        # (parity already, both lanes agree), the odd 3+-run the repair
+        # lane's own collapse (the streaming decode's run pairing gave
+        # two literal backslashes)
+        ('["\\', '["\\\\"]'),
+        ('["\\\\', '["\\\\"]'),
+        ('["\\\\\\', '["\\\\"]'),
+        ('["\\\\\\\\\\', '["\\\\"]'),
+        # the smart-quote re-decision in the odd-run collapse: the
+        # value's ordinary `„` pushes the lib's low smart-quote span
+        # (`_push_low_smart_quote_span`, the active delimiter becoming
+        # the `\0` sentinel), so the trailing-run while loop can no
+        # longer take the run's own delimiter INTO the value -- the
+        # collapsed backslash STANDS and the delimiter joins it as
+        # content (`["e„\\\"` -> the value `e„\"`, where the plain
+        # content drops it, `["e\\\"` -> `e"`). `„` is the ONLY pusher
+        # (no other STRING_DELIMITERS member re-decides: `“`/`”` as
+        # content are ordinary chars); `”` pops the span (plain drop
+        # again), and spans NEST (`„„` holds through one `”`); the
+        # `\`+`"` escape pops it (normalize's low-span arm, tested
+        # against the LITERAL `"` whatever the own delimiter is); a `„`
+        # hard on a backslash-ending value (the halved even run's own
+        # `\`, a decoded `\u005c`) does NOT push.
+        ('["e„\\\\\\"', '["e\\u201e\\\\\\""]'),
+        ('["„\\\\\\"', '["\\u201e\\\\\\""]'),
+        ('["e„\\\\\\"b', '["e\\u201e\\\\\\"b"]'),
+        # the run lengths 3/5/7 collapse identically (one backslash
+        # kept, the delimiter content)
+        ('["e„\\\\\\\\\\"', '["e\\u201e\\\\\\""]'),
+        ('["e„\\\\\\\\\\\\\\"', '["e\\u201e\\\\\\""]'),
+        # the push is the `„` char's, not the `"` delimiter's: a
+        # `'`-delimited string re-decides the same way
+        ("['e„\\\\\\'", '["e\\u201e\\\\\'"]'),
+        # the other STRING_DELIMITERS members as content never re-decide
+        ('["e“\\\\\\"', '["e\\u201c\\""]'),
+        ('["e”\\\\\\"', '["e\\u201d\\""]'),
+        # the pops: an ordinary `”` (plain drop again), two `”` past one
+        # `„` (the span is gone), the `\`+`"` escape mid-value
+        ('["e„”\\\\\\"', '["e\\u201e\\u201d\\""]'),
+        ('["„””\\\\\\"', '["\\u201e\\u201d\\u201d\\""]'),
+        ('["e„\\"x\\\\\\"', '["e\\u201e\\"x\\""]'),
+        # the nesting: `„„` holds through one `”`
+        ('["„„\\\\\\"', '["\\u201e\\u201e\\\\\\""]'),
+        ('["„„”\\\\\\"', '["\\u201e\\u201e\\u201d\\\\\\""]'),
+        # the no-push controls: a `„` hard on a backslash-ending value
+        # (the halved even run's own `\`, a decoded `\u005c`) stays
+        # plain content -- the drop stands
+        ('["\\\\„\\\\\\"', '["\\\\\\u201e\\""]'),
+        ('["\\\\„e\\\\\\"', '["\\\\\\u201ee\\""]'),
+        ('["\\u005c„\\\\\\"', '["\\\\\\u201e\\""]'),
+        # the span persists past its own run+delim (content follows), a
+        # push after an accepted escape (tab, a decoded `\u0041`), the
+        # object context
+        ('["e„\\\\\\"x', '["e\\u201e\\\\\\"x"]'),
+        ('["e„\\t\\\\\\"', '["e\\u201e\\t\\\\\\""]'),
+        ('["„\\u0041\\\\\\"', '["\\u201eA\\\\\\""]'),
+        ('{"k": "e„\\\\\\"', '{"k": "e\\u201e\\\\\\""}'),
+    ]
+
+    @pytest.mark.parametrize("text,want", DRAIN_FAMILY, ids=lambda p: repr(p[0]))
+    def test_the_cut_renders_the_repair_lane_byte_exact(self, text: str, want: str) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert json_repair_lib.repair_json(text) == want, f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize("text,_", DRAIN_FAMILY, ids=lambda p: repr(p[0]))
+    def test_snapshot_is_end_and_valid_at_every_prefix(self, text: str, _: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
+
+    # the held partial escape at the cut: a lone high surrogate escape
+    # whose tail holds a bare `\u`/`\x` (complete or not, `u00`/`ux`/
+    # `u` alike -- anything the decode does not accept). The streaming
+    # decode's tail DROPPED the held partial (the stream rendered
+    # `["\ufffd"]` where the engine keeps the literal `\u` after the
+    # flushed U+FFFD); the drain's predicate now fires on the
+    # incomplete escape and the walk renders the engine's own answer.
+    # The ORACLE keeps the `\ud83d` escape (the documented lone-
+    # surrogate divergence, the same one the closed-string re-render
+    # pins below) -- byte-exact against the ENGINE here.
+    HELD_PARTIAL_FAMILY = [
+        ('["\\ud83d\\u', '["\\ufffd\\\\u"]'),
+        ('["\\ud83d\\x', '["\\ufffd\\\\x"]'),
+        ('["a\\ud83d\\u', '["a\\ufffd\\\\u"]'),
+        ('{"k": "\\ud83d\\u', '{"k": "\\ufffd\\\\u"}'),
+        ('[1, "\\ud83d\\u', '[1, "\\ufffd\\\\u"]'),
+        ('["\\ud83d\\u00', '["\\ufffd\\\\u00"]'),
+        ('["\\ud83d\\ux', '["\\ufffd\\\\ux"]'),
+        ('["\\ud83d\\uZ1', '["\\ufffd\\\\uZ1"]'),
+        ('["\\ud83d\\x4', '["\\ufffd\\\\x4"]'),
+        ('["\\ud83d\\xzz', '["\\ufffd\\\\xzz"]'),
+    ]
+
+    @pytest.mark.parametrize("text,want", HELD_PARTIAL_FAMILY, ids=lambda p: repr(p[0]))
+    def test_the_held_partial_escape_renders_the_repair_lane(
+        self, text: str, want: str
+    ) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert want != json_repair_lib.repair_json(text), f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    def test_the_streamed_bytes_are_provisional(self) -> None:
+        """The streaming decode's own bytes are provisional exactly as a
+        mark's rendering: the push delta carried the canonical decode
+        (`["\f`), the close render replaces the span (`["\\f"]`)."""
+        r = tors.JsonRepairer()
+        delta = r.push('["\\f')
+        assert delta == '["\\f'
+        assert r.end() == '["\\\\f"]'
+        # the clean tail still streams through the escape-tail path
+        r2 = tors.JsonRepairer()
+        assert r2.push('{"k": "a b ') == '{"k": "a b '
+        assert r2.end() == '{"k": "a b"}'
+
+
+# --- the escaped own-delimiter family (the round-5 blocker) ----------------------
+
+
+class TestEscapedOwnDelimiterSpans:
+    """The review round's blocker family: the machine's streaming decode
+    never decoded an escaped OWN delimiter (`\'` in a `'`-delimited
+    string fell through to the invalid-escape arm, the backslash
+    standing where the engine's active-delimiter arm drops it -- the
+    stream `["e\\u201eb\\"c\\\\'"]` where the engine `["e\\u201eb\\"c'"]`),
+    and the repair-lane walk's low smart-quote span over-stayed at the
+    lib's SECOND pop arm -- the check-point `"` whose predecessor took
+    the DEFAULT-APPEND path (`_scan_string_body`'s low-span `"` arm at
+    the loop tail, examining the char AFTER the appended one), so every
+    later span-sensitive re-decision (the odd run's own delimiter, a
+    further pop) diverged. The streaming decode now carries the
+    `'`-delimited strings' span machinery whole (the push gates, the
+    `”`/`\\\"`/check-point pops, the span-active close absorption) and
+    the walk mirrors the default-append classification exactly: the
+    family is byte-exact against the engine AND the oracle at every
+    split + one-push."""
+
+    FAMILY = [
+        # the reviewer's minimal repro
+        ('[\'e„b"c\\\'', '["e\\u201eb\\"c\'"]'),
+        # the run-3 collapse takes the escaped own delim in
+        ('[\'e„b"c\\\\\\\'', '["e\\u201eb\\"c\'"]'),
+        # the run-5
+        ('[\'e„b"c\\\\\\\\\\\'', '["e\\u201eb\\"c\'"]'),
+        # the tail
+        ('[\'e„b"c\\\'tail', '["e\\u201eb\\"c\'tail"]'),
+        # two escaped own delims
+        ('[\'e„b"c\\\'c\\\'', '["e\\u201eb\\"c\'c\'"]'),
+        # the doubled-quote pop: the checkpoint pop's own literal append
+        # is not a default-append
+        ('[\'e„""c\\\'', '["e\\u201e\\"\\"c\'"]'),
+        # the walker route (the f-escape trigger) with the checkpoint pop
+        ('[\'e„b"c\\f"\\\'', '["e\\u201eb\\"c\\\\f\\"\'"]'),
+        # the unicode-quote pop before the checkpoint quote
+        ('[\'e„b”c"\\\'', '["e\\u201eb\\u201dc\\"\'"]'),
+        # the over-pop: the span gone, the second unicode quote is plain
+        # content
+        ('[\'e„”c"\\\'', '["e\\u201e\\u201dc\\"\'"]'),
+        # the backslash-plus-quote escape pop mid-value
+        ('[\'e„b\\"c\\\'', '["e\\u201eb\\"c\'"]'),
+        # the leading low quote
+        ('[\'„b"c\\\'', '["\\u201eb\\"c\'"]'),
+        # the nesting (depth two)
+        ('[\'„„b"c\\\'', '["\\u201e\\u201eb\\"c\'"]'),
+        # the push survives the accepted tab escape
+        ('[\'e„b\\tc"\\\'', '["e\\u201eb\\tc\\"\'"]'),
+        # ...and the decoded u-escape
+        ('[\'e„\\u0041c"\\\'', '["e\\u201eAc\\"\'"]'),
+        # the no-push gate: the low quote hard on the halved even run's
+        # backslash
+        ('[\'e\\\\„c"\\\'', '["e\\\\\\u201ec\\"\'"]'),
+        # ...and on a decoded backslash
+        ('[\'e\\u005c„c"\\\'', '["e\\\\\\u201ec\\"\'"]'),
+        # the closer joins the open string (the lib's 811-gate skip: the
+        # acc ends on the own delim)
+        ('[\'e„b"c\\\']', '["e\\u201eb\\"c\']"]'),
+        # the close at the second quote: the lib closes and the tail
+        # re-parses
+        ('[\'e„b"c\\\'c"d\'', '["e\\u201eb\\"c\'c\\"d"]'),
+        # the array with the leading item
+        ('[1, \'e„b"c\\\'', '[1, "e\\u201eb\\"c\'"]'),
+    ]
+
+    @pytest.mark.parametrize("text,want", FAMILY, ids=lambda p: repr(p[0]))
+    def test_matches_the_engine_and_the_oracle_at_every_split(
+        self, text: str, want: str
+    ) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert json_repair_lib.repair_json(text) == want, f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize("text,_", FAMILY, ids=lambda p: repr(p[0]))
+    def test_snapshot_is_end_and_valid_at_every_prefix(self, text: str, _: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
 
 
 # --- the documented decisions ---------------------------------------------------
@@ -1270,6 +1932,73 @@ class TestStreamingLinearity:
             )
 
         first_clean(measure, check, samples=3, label="the streaming-vs-one-shot pin")
+
+
+class TestCloseTimeLinearity:
+    """The close render's own growth gate: the deferred-escape marks
+    resolve at `end()`/`snapshot()` close time, and a per-mark in-place
+    rewrite of the emitted text (`replace_range` per mark, descending)
+    is quadratic in the mark count -- the weekly-fuzz cut stream of
+    `\\/`-strings measured 0.29s -> 1.20s -> 4.90s -> 20.43s at
+    45k/90k/180k/360k marks (4.2x per doubling). The rebuild is one
+    ascending pass (the segments between marks copied once, each
+    resolved rendering spliced at its span), ~2.1x per doubling here.
+    tests/test_scaling_pins.py's idiom: min-of-samples walls, retried
+    on the first dirty sample."""
+
+    # The 4x-step growth gate: a linear close measures ~4x per
+    # quadrupling (~2.1x per doubling at these sizes); the quadratic
+    # relapse measures ~16x per quadrupling and blows through 6x.
+    GATE_PER_QUAD = 6.0
+
+    @staticmethod
+    def _document(marks: int) -> str:
+        # The cut divergent-escape class: an array of `\\/`-holding
+        # strings, the root never closed -- every string arms a
+        # deferred-escape mark and the close render resolves every one
+        # through the repair lane's escape normalization.
+        return "[" + ", ".join(f'"\\/{i}"' for i in range(marks))
+
+    @staticmethod
+    def _prepared(marks: int) -> tors.JsonRepairer:
+        r = tors.JsonRepairer()
+        r.push(TestCloseTimeLinearity._document(marks))
+        return r
+
+    @pytest.mark.timing
+    def test_the_close_resolves_the_marks_linearly(self) -> None:
+        """The close render at 45k/90k/180k/360k marks (4x per step):
+        measured 6.4ms -> 13.2ms -> 24.4ms -> 50.4ms (~2.1x per
+        doubling), gate 6x per quadrupling. `snapshot` is pure and
+        renders closed exactly what `end` renders, so the wall is the
+        close's own (the push is paid once, outside the measurement)."""
+
+        def measure() -> list[float]:
+            return [
+                min_wall_ms(lambda r=r: r.snapshot())
+                for r in (self._prepared(m) for m in (45_000, 90_000, 180_000, 360_000))
+            ]
+
+        def check(walls: list[float]) -> None:
+            # Content-match first: the close actually resolved the
+            # marks (the re-rendered spelling is out, not the verbatim
+            # `\/` decode -- and every element's mark is in the count).
+            resolved = self._prepared(100)
+            out = resolved.snapshot()
+            assert out.startswith('["\\\\/0'), out[:24]
+            assert out.count('", "') == 99, "a mark stopped resolving"
+            for i in range(len(walls) - 1):
+                small, large = walls[i], walls[i + 1]
+                assert large < self.GATE_PER_QUAD * small, (
+                    f"the close render grew {small:.2f}ms -> {large:.2f}ms for a "
+                    f"2x mark count ({large / small:.2f}x, allowed "
+                    f"{self.GATE_PER_QUAD:.1f}x per 4x of marks): the close-time "
+                    "resolution regressed superlinear in the mark count"
+                )
+
+        first_clean(
+            measure, check, samples=3, label="the close-time linearity pin"
+        )
 
 
 # --- hypothesis: valid documents through random chunkings --------------------------

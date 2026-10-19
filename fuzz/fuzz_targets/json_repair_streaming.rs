@@ -73,6 +73,13 @@ struct ScanFrame {
     /// An item started after the emptied one: the parent continued
     /// past a repaired-empty item (the whole-text lane re-decides).
     item_after_emptied: bool,
+    /// The emptied-item / comma-garbage cascade fired ANYWHERE in this
+    /// frame's SUBTREE (set on the ancestors at flag time): a cut
+    /// holding such a chain under a PAREN frame is the engine's
+    /// whole-text close-up territory (the chain re-decides up through
+    /// the group, `[([[([()()` -> the engine `[]`, the stream
+    /// `[[[[[]]]]]`), where the frame's own flags never see it.
+    cascade_below: bool,
     /// The last completed item was strictly-empty (`[]`/`{}`/`""` or
     /// an emptied frame): the comma-close drop's operand.
     last_item_empty: bool,
@@ -100,6 +107,22 @@ struct Scan {
     /// The open string's raw content contains a backslash anywhere: the
     /// doubled-quote/escape re-pair family's territory (out at the cut).
     saw_backslash: bool,
+    /// The open string's low smart-quote span depth (the engine's
+    /// `_push_low_smart_quote_span`: an ordinary `„` in the SLOW-path
+    /// string body pushes — WITH the engine's own `acc[-1] != "\\"`
+    /// gate: a `„` hard on a backslash-ending value does not push; an
+    /// ordinary `”` pops; a `\` + `"` escape whose backslash run is
+    /// exactly one pops — `_normalize_escape_sequence`'s low-span arm).
+    /// A string whose span is ACTIVE at a plain close quote is the
+    /// engine's whole-text smart-quote machinery ABSORBING the close
+    /// (the quote is content whichever pop arm takes it -- the
+    /// check-point `"` arm pops the span AND appends the quote as
+    /// content, the string runs on, `["e„b"c` -> the value `e„b"c`) --
+    /// the linear stream closes at the quote and the tail
+    /// re-synchronizes: genuinely divergent, out. With the push gate
+    /// modeled the depth tracks the lib's exactly up to that first
+    /// in-span quote, so no non-divergent shape is excluded.
+    scan_spans: usize,
     /// The open string's content (modulo trailing spaces) ends with a
     /// `\n` escape.
     content_ends_nl: bool,
@@ -148,6 +171,10 @@ struct Scan {
     /// the drop. The scan cannot model the consumed char's aftermath
     /// (out).
     empty_pending_armed: bool,
+    /// The value-run's last char was a bareword KEY COMMITTED by the
+    /// `,`-as-colon (`{kf , `): a later `(` is the paren-taint class
+    /// (the whole-text dict overwrite, see the commit arm).
+    bare_comma_commit: bool,
     /// The armed decision's parent is a PAREN frame: the machine's
     /// drop fires on the whitespace itself (the paren lane defers
     /// nothing).
@@ -206,6 +233,7 @@ impl Scan {
             esc: StrEsc::None,
             raw_bs_run: 0,
             saw_backslash: false,
+            scan_spans: 0,
             content_ends_nl: false,
             nl_tail_string: false,
             run_len: 0,
@@ -218,6 +246,7 @@ impl Scan {
             last_empty_string_value: false,
             last_string_value: false,
             bare_key_run: String::new(),
+            bare_comma_commit: false,
             empty_pending_armed: false,
             empty_pending_paren: false,
             obj_value_after_ws: false,
@@ -294,10 +323,14 @@ impl Scan {
                 return true;
             }
             // the strict literals at a clean end (the lib's exact
-            // lowercase spellings)
+            // lowercase spellings; the tail must hold the WHOLE
+            // spelling -- a short tail zip-prefixes it: `f ,` is not
+            // `false`)
             for lit in ["true", "false", "null"] {
                 let lit_chars: Vec<char> = lit.chars().collect();
-                if chars[v..].iter().zip(lit_chars.iter()).all(|(a, b)| a == b) {
+                if chars[v..].len() >= lit_chars.len()
+                    && chars[v..].iter().zip(lit_chars.iter()).all(|(a, b)| a == b)
+                {
                     let end = chars.get(v + lit_chars.len());
                     if end.is_none()
                         || end.is_some_and(|c| c.is_whitespace() || matches!(c, ',' | '}' | ']'))
@@ -421,6 +454,16 @@ impl Scan {
                         // whole-text string-repair lane re-decides it;
                         // out)
                         't' | 'r' | 'b' | 'f' | '"' | '/' => {
+                            // a `\` + `"` escape whose run was EXACTLY
+                            // ONE backslash is the engine's low-span arm
+                            // (`_normalize_escape_sequence`'s first
+                            // branch: the span pops). A longer run took
+                            // the run-scan branch instead (the span
+                            // stands). The check must read the run
+                            // BEFORE the reset below zeroes it.
+                            if c == '"' && self.raw_bs_run == 1 {
+                                self.scan_spans = self.scan_spans.saturating_sub(1);
+                            }
                             self.raw_bs_run = 0;
                             self.content_ends_nl = false;
                         }
@@ -458,6 +501,10 @@ impl Scan {
                                 }
                             }
                             // the fourth digit completes the escape
+                            // (the decoded char replaces the backslash
+                            // run in the value: the span's push gate
+                            // re-opens)
+                            self.raw_bs_run = 0;
                             i += 1;
                             continue;
                         }
@@ -607,6 +654,7 @@ impl Scan {
                         saw_emptied_item: false,
                         saw_comma_garbage: false,
                         item_after_emptied: false,
+                        cascade_below: false,
                         last_item_empty: false,
                     });
                     i += 1;
@@ -614,6 +662,15 @@ impl Scan {
                 '}' | ']' | ')' => {
                     let closer_obj = c == '}';
                     let closer_paren = c == ')';
+                    if self.last_empty_string_value {
+                        // a token hard on an empty-string value's heels:
+                        // the engine's whole-text string-repair lane
+                        // re-pairs what follows it, the container's own
+                        // closer included (`[("")` -> the engine
+                        // `[")"]`), out
+                        self.divergent = true;
+                        return;
+                    }
                     let Some(f) = self.stack.last() else {
                         self.divergent = true;
                         return;
@@ -683,6 +740,15 @@ impl Scan {
                         self.divergent = true;
                         return;
                     }
+                    // A nested object popping on a trailing comma (a key
+                    // was due): the engine's whole-text close-up closes
+                    // THROUGH the parent and re-decides what follows
+                    // (`[{"a": 1 ,}1` -> the engine `[{"a": 1}]`, the
+                    // stream `[{"a": 1}, 1]`) (out)
+                    if f.obj && f.expect == Expect::Key && self.stack.len() > 1 {
+                        self.divergent = true;
+                        return;
+                    }
                     // The paren-comma-garbage tuple's nested close: the
                     // machine's grouping/empty-item cascade around such
                     // a tuple desyncs from the engine's whole-text
@@ -692,13 +758,15 @@ impl Scan {
                         self.divergent = true;
                         return;
                     }
-                    // The emptied-frame cascade: an item of this ARRAY
+                    // The emptied-frame cascade: an item of this frame
                     // repaired to the empty array — the engine's
                     // whole-text lane re-decides the emptied item's
                     // now-empty shape through the parent's own close
                     // (`[[[] ,][] ,]` -> the engine `[]`, the stream
-                    // `[[]]`) (out)
-                    if !f.obj && !f.paren && f.saw_emptied_item {
+                    // `[[]]`; the nested-paren chains likewise:
+                    // `[[[([()()(()()(())(()` -> the engine `[]`, the
+                    // stream `[[[[[]]]]]`) (out)
+                    if !f.obj && f.saw_emptied_item {
                         self.divergent = true;
                         return;
                     }
@@ -714,13 +782,14 @@ impl Scan {
                     self.last_string_value = false;
                     self.bare_key_run.clear();
                     self.obj_value_after_ws = false;
+                    let cascade = emptied || frame_members == 0;
                     if self.stack.is_empty() {
                         self.top_done = true;
                     } else if let Some(p) = self.stack.last_mut() {
                         p.members += 1;
                         p.expect = Expect::AfterValue;
-                        p.last_item_empty = emptied || frame_members == 0;
-                        if emptied || frame_members == 0 {
+                        p.last_item_empty = cascade;
+                        if cascade {
                             // an item that repaired to the empty array
                             // (the zero-member item, or the comma-close
                             // drop): the parent's cascade territory —
@@ -728,13 +797,18 @@ impl Scan {
                             // emptied item's now-empty shape
                             p.saw_emptied_item = true;
                         }
-                        // the strictly-empty item's one-char decision
-                        // arms on the parent (the machine's
-                        // `EmptyPending`); a PAREN parent's decision
-                        // fires on the whitespace itself
                         if !p.obj {
                             self.empty_pending_armed = frame_members == 0;
                             self.empty_pending_paren = p.paren;
+                        }
+                    }
+                    if cascade && !self.stack.is_empty() {
+                        // Every ancestor learns the chain too (the cut
+                        // side's paren guard reads it: a chain under a
+                        // paren re-decides through the group,
+                        // `[([[([()()` -> `[]`).
+                        for a in self.stack.iter_mut() {
+                            a.cascade_below = true;
                         }
                     }
                     i += 1;
@@ -751,14 +825,21 @@ impl Scan {
                             let key = raw
                                 .trim_start_matches(|c: char| !c.is_alphanumeric())
                                 .to_string();
-                            if !key.is_empty() {
-                                let f = self.stack.last_mut().unwrap();
-                                if f.keys.contains(&key) {
-                                    self.divergent = true;
-                                    return;
-                                }
-                                f.keys.push(key);
+                            if key.is_empty() {
+                                // the attempt strips to NOTHING: the
+                                // machine drops the pair whole, the
+                                // engine's key-reparse machinery
+                                // re-decides what the attempt leaves
+                                // behind (`{.:{}\rt:{}\rt\f`), out
+                                self.divergent = true;
+                                return;
                             }
+                            let f = self.stack.last_mut().unwrap();
+                            if f.keys.contains(&key) {
+                                self.divergent = true;
+                                return;
+                            }
+                            f.keys.push(key);
                         }
                         let f = self.stack.last_mut().unwrap();
                         f.expect = Expect::Value;
@@ -813,6 +894,11 @@ impl Scan {
                             return;
                         }
                         f.saw_comma_garbage = true;
+                        // The ancestors learn the chain too (the cut
+                        // side's paren guard reads it).
+                        for a in self.stack.iter_mut() {
+                            a.cascade_below = true;
+                        }
                         i += 1;
                     }
                     Some(Expect::Colon) => {
@@ -842,6 +928,19 @@ impl Scan {
                             self.divergent = true;
                             return;
                         }
+                        // The bareword comma-commit arms the paren-taint
+                        // check below: the lib's whole-text lane runs the
+                        // missing-quotes key's invalidation machinery
+                        // over the tail and a later paren's dangling
+                        // bareword re-parses as a DUPLICATE member key
+                        // whose dict-update-in-place overwrites the
+                        // member's value whole (`{kf ,"="(kf , ` -> the
+                        // engine `{"kf": ""}`, the stream `{"kf": "=",
+                        // "kf": ""}`) — the whole-text dict semantics
+                        // (out). Conservative: ANY later paren leaves
+                        // the class, even where the tail alone would
+                        // have stayed parity (`{kf , "="(kf`).
+                        self.bare_comma_commit = true;
                         let f = self.stack.last_mut().unwrap();
                         if f.keys.contains(&key) {
                             self.divergent = true;
@@ -895,6 +994,7 @@ impl Scan {
                     self.esc = StrEsc::None;
                     self.raw_bs_run = 0;
                     self.saw_backslash = false;
+                    self.scan_spans = 0;
                     self.content_ends_nl = false;
                     i += 1;
                 }
@@ -991,9 +1091,6 @@ impl Scan {
                     let obj_key_run = recording_key;
                     let mut terminated = false;
                     self.run_char(c);
-                    if recording_key {
-                        self.bare_key_run.push(c);
-                    }
                     i += 1;
                     while i < n {
                         let d = chars[i];
@@ -1075,6 +1172,12 @@ impl Scan {
                 }
                 '(' => {
                     self.saw_paren = true;
+                    if self.bare_comma_commit {
+                        // the paren-taint on the bareword comma-commit's
+                        // tail: the whole-text dict overwrite (out)
+                        self.divergent = true;
+                        return;
+                    }
                     if self.last_empty_string_value {
                         // a token where the engine's whole-text
                         // string-repair lane re-pairs what follows an
@@ -1134,6 +1237,7 @@ impl Scan {
                         saw_emptied_item: false,
                         saw_comma_garbage: false,
                         item_after_emptied: false,
+                        cascade_below: false,
                         last_item_empty: false,
                     });
                     i += 1;
@@ -1165,6 +1269,15 @@ impl Scan {
         if c == '"' {
             if self.raw_bs_run >= 2 {
                 // the doubled-escape family: the engine re-pairs the run
+                self.divergent = true;
+                return;
+            }
+            if self.scan_spans > 0 {
+                // the smart-quote span active at a close quote: the
+                // engine's whole-text machinery ABSORBS the close (the
+                // string runs on — `["„\\\"""` -> the value `„\"""`);
+                // the linear stream closes at the quote and the tail
+                // re-synchronizes (out)
                 self.divergent = true;
                 return;
             }
@@ -1232,6 +1345,23 @@ impl Scan {
             self.divergent = true;
             return;
         }
+        // the low smart-quote span's push/pop (the engine's slow-path
+        // scan: an ordinary `„` pushes -- WITH the engine's own
+        // `acc[-1] != "\\"` gate: a `„` hard on a backslash-ending
+        // value (a collapsed run's own `\`) does NOT push -- an
+        // ordinary `”` pops). A `„` in the ESCAPE
+        // position never reaches here (the invalid-escape arm is out).
+        // The gate reads the run state BEFORE the plain char clears it:
+        // any earlier plain content char re-opens the push (the
+        // decoded value no longer ends on the backslash).
+        if c == '\u{201e}' {
+            if self.raw_bs_run == 0 {
+                self.scan_spans += 1;
+            }
+        } else if c == '\u{201d}' {
+            self.scan_spans = self.scan_spans.saturating_sub(1);
+        }
+        self.raw_bs_run = 0;
         if c != ' ' {
             self.content_ends_nl = false;
         }
@@ -1253,6 +1383,18 @@ impl Scan {
             .iter()
             .any(|f| f.obj && f.members <= 1 && matches!(f.expect, Expect::Colon | Expect::Key))
         {
+            return None;
+        }
+        // The nested paren cascade's cut side: a paren frame carrying
+        // the comma-garbage run or an emptied child, the engine's
+        // whole-text close-up re-decides the chain at the cut
+        // (`[(()((),(()` -> the engine `[]`, the stream `[[[]]]`), and
+        // a chain DEEPER in the frame's subtree re-decides through the
+        // group all the same (`[([[([()()` -> the engine `[]`, the
+        // stream `[[[[[]]]]]`): the ancestors carry the cascade flag.
+        if self.stack.iter().enumerate().any(|(idx, f)| {
+            f.paren && idx > 0 && (f.saw_comma_garbage || f.saw_emptied_item || f.cascade_below)
+        }) {
             return None;
         }
         if self.in_string && self.saw_backslash {
