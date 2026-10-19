@@ -765,6 +765,20 @@ DIVERGENCES = [
     ('{"a": {(]', '{"a": []}', '{"a": []}'),
     # duplicate object keys: the dict update-in-place is whole-text-only
     ('{"a": 1, "a": 2}', '{"a": 2}', '{"a": 1, "a": 2}'),
+    # the bareword-key comma-commit's paren tail: the lib's whole-text
+    # lane runs the missing-quotes key's invalidation machinery over the
+    # tail and the paren's dangling bareword re-parses as a DUPLICATE
+    # member key whose dict update-in-place overwrites the member's
+    # value whole (the class above, one lib step removed)
+    ('{kf ,"="(kf , ', '{"kf": ""}', '{"kf": "=", "kf": ""}'),
+    # the span-active OWN-delimiter close: the engine's
+    # `_handle_right_delimiter_candidate` lookahead closes the
+    # `'`-delimited string at a quote with a follow-up quote/terminator
+    # ahead (the even-odd delimiter scan), the linear stream's span
+    # machinery absorbs it as content (the while gate's own arm -- the
+    # nothing-ahead case, `['e„b'` -> the value `e„b'`, is parity)
+    ("['e„b'c'", '["e\\u201eb", "c\'"]', '["e\\u201eb\'c\'"]'),
+    ("[1, 'e„b\\'c''", '[1, "e\\u201eb\'c"]', '[1, "e\\u201eb\'c\'\'"]'),
     # the mismatched-closer garbage: the engine's whole-text close-up
     # re-decides earlier structure
     ("{{\r]0\x01\x0b/\u2001/\u2001\u2000\u2000('", "[]", '{}'),]
@@ -1248,6 +1262,95 @@ class TestOpenStringEscapeDrain:
         r2 = tors.JsonRepairer()
         assert r2.push('{"k": "a b ') == '{"k": "a b '
         assert r2.end() == '{"k": "a b"}'
+
+
+# --- the escaped own-delimiter family (the round-5 blocker) ----------------------
+
+
+class TestEscapedOwnDelimiterSpans:
+    """The review round's blocker family: the machine's streaming decode
+    never decoded an escaped OWN delimiter (`\'` in a `'`-delimited
+    string fell through to the invalid-escape arm, the backslash
+    standing where the engine's active-delimiter arm drops it -- the
+    stream `["e\\u201eb\\"c\\\\'"]` where the engine `["e\\u201eb\\"c'"]`),
+    and the repair-lane walk's low smart-quote span over-stayed at the
+    lib's SECOND pop arm -- the check-point `"` whose predecessor took
+    the DEFAULT-APPEND path (`_scan_string_body`'s low-span `"` arm at
+    the loop tail, examining the char AFTER the appended one), so every
+    later span-sensitive re-decision (the odd run's own delimiter, a
+    further pop) diverged. The streaming decode now carries the
+    `'`-delimited strings' span machinery whole (the push gates, the
+    `”`/`\\\"`/check-point pops, the span-active close absorption) and
+    the walk mirrors the default-append classification exactly: the
+    family is byte-exact against the engine AND the oracle at every
+    split + one-push."""
+
+    FAMILY = [
+        # the reviewer's minimal repro
+        ('[\'e„b"c\\\'', '["e\\u201eb\\"c\'"]'),
+        # the run-3 collapse takes the escaped own delim in
+        ('[\'e„b"c\\\\\\\'', '["e\\u201eb\\"c\'"]'),
+        # the run-5
+        ('[\'e„b"c\\\\\\\\\\\'', '["e\\u201eb\\"c\'"]'),
+        # the tail
+        ('[\'e„b"c\\\'tail', '["e\\u201eb\\"c\'tail"]'),
+        # two escaped own delims
+        ('[\'e„b"c\\\'c\\\'', '["e\\u201eb\\"c\'c\'"]'),
+        # the doubled-quote pop: the checkpoint pop's own literal append
+        # is not a default-append
+        ('[\'e„""c\\\'', '["e\\u201e\\"\\"c\'"]'),
+        # the walker route (the f-escape trigger) with the checkpoint pop
+        ('[\'e„b"c\\f"\\\'', '["e\\u201eb\\"c\\\\f\\"\'"]'),
+        # the unicode-quote pop before the checkpoint quote
+        ('[\'e„b”c"\\\'', '["e\\u201eb\\u201dc\\"\'"]'),
+        # the over-pop: the span gone, the second unicode quote is plain
+        # content
+        ('[\'e„”c"\\\'', '["e\\u201e\\u201dc\\"\'"]'),
+        # the backslash-plus-quote escape pop mid-value
+        ('[\'e„b\\"c\\\'', '["e\\u201eb\\"c\'"]'),
+        # the leading low quote
+        ('[\'„b"c\\\'', '["\\u201eb\\"c\'"]'),
+        # the nesting (depth two)
+        ('[\'„„b"c\\\'', '["\\u201e\\u201eb\\"c\'"]'),
+        # the push survives the accepted tab escape
+        ('[\'e„b\\tc"\\\'', '["e\\u201eb\\tc\\"\'"]'),
+        # ...and the decoded u-escape
+        ('[\'e„\\u0041c"\\\'', '["e\\u201eAc\\"\'"]'),
+        # the no-push gate: the low quote hard on the halved even run's
+        # backslash
+        ('[\'e\\\\„c"\\\'', '["e\\\\\\u201ec\\"\'"]'),
+        # ...and on a decoded backslash
+        ('[\'e\\u005c„c"\\\'', '["e\\\\\\u201ec\\"\'"]'),
+        # the closer joins the open string (the lib's 811-gate skip: the
+        # acc ends on the own delim)
+        ('[\'e„b"c\\\']', '["e\\u201eb\\"c\']"]'),
+        # the close at the second quote: the lib closes and the tail
+        # re-parses
+        ('[\'e„b"c\\\'c"d\'', '["e\\u201eb\\"c\'c\\"d"]'),
+        # the array with the leading item
+        ('[1, \'e„b"c\\\'', '[1, "e\\u201eb\\"c\'"]'),
+    ]
+
+    @pytest.mark.parametrize("text,want", FAMILY, ids=lambda p: repr(p[0]))
+    def test_matches_the_engine_and_the_oracle_at_every_split(
+        self, text: str, want: str
+    ) -> None:
+        assert tors.repair_json(text) == want, f"{text!r}: engine moved"
+        assert json_repair_lib.repair_json(text) == want, f"{text!r}: oracle moved"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize("text,_", FAMILY, ids=lambda p: repr(p[0]))
+    def test_snapshot_is_end_and_valid_at_every_prefix(self, text: str, _: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
 
 
 # --- the documented decisions ---------------------------------------------------

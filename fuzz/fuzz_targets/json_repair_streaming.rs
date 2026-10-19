@@ -109,16 +109,19 @@ struct Scan {
     saw_backslash: bool,
     /// The open string's low smart-quote span depth (the engine's
     /// `_push_low_smart_quote_span`: an ordinary `„` in the SLOW-path
-    /// string body pushes; an ordinary `”` pops; a `\` + `"` escape
-    /// whose backslash run is exactly one pops —
-    /// `_normalize_escape_sequence`'s low-span arm). A string whose
-    /// span is ACTIVE at a close quote is the engine's whole-text
-    /// smart-quote machinery ABSORBING the close (the string runs on,
-    /// `["„\\\"""` -> the value `„\"""`): whole-text-only, out.
-    /// Conservative on purpose: the push ignores the engine's own
-    /// `acc[-1] != "\\"` gate (a `„` hard on a backslash-ending value
-    /// does not push) and the armed-`"` pop is never taken, so the
-    /// depth only over-counts (coverage loss, never a false pass).
+    /// string body pushes — WITH the engine's own `acc[-1] != "\\"`
+    /// gate: a `„` hard on a backslash-ending value does not push; an
+    /// ordinary `”` pops; a `\` + `"` escape whose backslash run is
+    /// exactly one pops — `_normalize_escape_sequence`'s low-span arm).
+    /// A string whose span is ACTIVE at a plain close quote is the
+    /// engine's whole-text smart-quote machinery ABSORBING the close
+    /// (the quote is content whichever pop arm takes it -- the
+    /// check-point `"` arm pops the span AND appends the quote as
+    /// content, the string runs on, `["e„b"c` -> the value `e„b"c`) --
+    /// the linear stream closes at the quote and the tail
+    /// re-synchronizes: genuinely divergent, out. With the push gate
+    /// modeled the depth tracks the lib's exactly up to that first
+    /// in-span quote, so no non-divergent shape is excluded.
     scan_spans: usize,
     /// The open string's content (modulo trailing spaces) ends with a
     /// `\n` escape.
@@ -168,6 +171,10 @@ struct Scan {
     /// the drop. The scan cannot model the consumed char's aftermath
     /// (out).
     empty_pending_armed: bool,
+    /// The value-run's last char was a bareword KEY COMMITTED by the
+    /// `,`-as-colon (`{kf , `): a later `(` is the paren-taint class
+    /// (the whole-text dict overwrite, see the commit arm).
+    bare_comma_commit: bool,
     /// The armed decision's parent is a PAREN frame: the machine's
     /// drop fires on the whitespace itself (the paren lane defers
     /// nothing).
@@ -239,6 +246,7 @@ impl Scan {
             last_empty_string_value: false,
             last_string_value: false,
             bare_key_run: String::new(),
+            bare_comma_commit: false,
             empty_pending_armed: false,
             empty_pending_paren: false,
             obj_value_after_ws: false,
@@ -493,6 +501,10 @@ impl Scan {
                                 }
                             }
                             // the fourth digit completes the escape
+                            // (the decoded char replaces the backslash
+                            // run in the value: the span's push gate
+                            // re-opens)
+                            self.raw_bs_run = 0;
                             i += 1;
                             continue;
                         }
@@ -916,6 +928,19 @@ impl Scan {
                             self.divergent = true;
                             return;
                         }
+                        // The bareword comma-commit arms the paren-taint
+                        // check below: the lib's whole-text lane runs the
+                        // missing-quotes key's invalidation machinery
+                        // over the tail and a later paren's dangling
+                        // bareword re-parses as a DUPLICATE member key
+                        // whose dict-update-in-place overwrites the
+                        // member's value whole (`{kf ,"="(kf , ` -> the
+                        // engine `{"kf": ""}`, the stream `{"kf": "=",
+                        // "kf": ""}`) — the whole-text dict semantics
+                        // (out). Conservative: ANY later paren leaves
+                        // the class, even where the tail alone would
+                        // have stayed parity (`{kf , "="(kf`).
+                        self.bare_comma_commit = true;
                         let f = self.stack.last_mut().unwrap();
                         if f.keys.contains(&key) {
                             self.divergent = true;
@@ -1147,6 +1172,12 @@ impl Scan {
                 }
                 '(' => {
                     self.saw_paren = true;
+                    if self.bare_comma_commit {
+                        // the paren-taint on the bareword comma-commit's
+                        // tail: the whole-text dict overwrite (out)
+                        self.divergent = true;
+                        return;
+                    }
                     if self.last_empty_string_value {
                         // a token where the engine's whole-text
                         // string-repair lane re-pairs what follows an
@@ -1315,16 +1346,22 @@ impl Scan {
             return;
         }
         // the low smart-quote span's push/pop (the engine's slow-path
-        // scan: an ordinary `„` pushes — conservatively WITHOUT the
-        // engine's own `acc[-1] != "\\"` gate, a `„` hard on a
-        // backslash-ending value does not push, so this only
-        // over-counts — an ordinary `”` pops). A `„` in the ESCAPE
+        // scan: an ordinary `„` pushes -- WITH the engine's own
+        // `acc[-1] != "\\"` gate: a `„` hard on a backslash-ending
+        // value (a collapsed run's own `\`) does NOT push -- an
+        // ordinary `”` pops). A `„` in the ESCAPE
         // position never reaches here (the invalid-escape arm is out).
+        // The gate reads the run state BEFORE the plain char clears it:
+        // any earlier plain content char re-opens the push (the
+        // decoded value no longer ends on the backslash).
         if c == '\u{201e}' {
-            self.scan_spans += 1;
+            if self.raw_bs_run == 0 {
+                self.scan_spans += 1;
+            }
         } else if c == '\u{201d}' {
             self.scan_spans = self.scan_spans.saturating_sub(1);
         }
+        self.raw_bs_run = 0;
         if c != ' ' {
             self.content_ends_nl = false;
         }

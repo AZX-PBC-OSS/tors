@@ -2614,7 +2614,9 @@ low smart-quote span, and the odd backslash run's own delimiter then
 joins the collapsed backslash as content instead of taking it into the
 value (`["e„\\\"` repairs to `["e\u201e\\\""]`, where the plain
 content collapses to `["e\""]`) — `„` is the only delimiter that
-re-decides this way (`”` and a `\"` escape pop the span, spans nest),
+re-decides this way (`”`, a `\"` escape and a check-point `"` — the
+lib's second pop arm, a plain `"` whose predecessor took the
+default-append path — pop the span, spans nest),
 and the drain also fires on a held partial escape at the cut
 (`["\ud83d\u` repairs to `["\ufffd\\u"]` — the oracle keeping the
 `\ud83d` escape, the documented lone-surrogate divergence). The same
@@ -2629,6 +2631,35 @@ identically never defers: the
 streaming decode's own table carries the repair lane's
 `\x`-plus-two-hex-digits acceptance (`\x41` to `A`) beside the strict
 set.
+
+**The escaped own delimiter and the `'`-delimited spans**: the
+streaming decode's escape table carries the lib's active-delimiter arm
+— an escaped OWN delimiter decodes to the delimiter alone, the
+backslash dropped (`['a\'` repairs to `["a'"]`, where the invalid-escape
+spelling kept both, `["a\\'"]`). A `'`-delimited string always takes
+the lib's slow-path string scan (the fast path is `"`-delimited only),
+so the streaming decode carries its low smart-quote span machinery
+whole: an ordinary `„` pushes (the `acc[-1] != "\\"` gate included —
+a `„` hard on a backslash-ending value, the halved even run's own `\`
+or a decoded `\u005c`, is plain content), an ordinary `”` pops, a
+`\`+`"` escape pops, and a CHECK-POINT `"` pops — the lib's second pop
+arm (`_scan_string_body`'s low-span `"` arm at the loop tail, examining
+the char AFTER a default-appended one; a `"` whose predecessor took any
+other arm — the `„` push, the `”` pop, an escape decode, a popped-`"`'s
+own literal append — is the loop-top current char and does not pop).
+While a span is ACTIVE the string cannot close: the own-delimiter quote
+is content (`['e„b'` repairs to `["e\u201eb'"]`). The span-active close
+with a follow-up quote/terminator ahead is the engine's
+`_handle_right_delimiter_candidate` lookahead's to decide (the
+even-odd delimiter scan closes the string there, `['e„b'c']` to
+`["e\u201eb", "c'"]`) — the linear stream's documented divergence. A
+`"`-delimited string's span-active close quotes keep the string
+re-synchronization class above unchanged. And the bareword-key
+comma-commit's paren tail (`{kf ,"="(kf , `) is the duplicate-key
+dict-update class one lib step removed: the lib's whole-text lane
+re-parses the paren's dangling bareword as a duplicate member key whose
+update overwrites the member's value whole (`{"kf": ""}`), where the
+linear stream keeps both members (`{"kf": "=", "kf": ""}`).
 
 **The repair semantics** match the whole-text engine's on the classes a
 stream can decide per character: single-quote and curly-quote delimiters

@@ -120,11 +120,24 @@
 //!   the run's own delimiter joining it as content (`["e„\\\"` ->
 //!   `["e\u201e\\\""]`, where the plain content drops it:
 //!   `["e\\\"` -> `["e\""]`) -- `„` is the only pusher (no other
-//!   `STRING_DELIMITERS` member re-decides; `”` and the `\`+`"`
-//!   escape pop the span, spans nest); and the drain's trigger fires
-//!   on a held partial escape too (`["\ud83d\u` -> `["\ufffd\\u"]`,
+//!   `STRING_DELIMITERS` member re-decides; `”`, the `\`+`"` escape
+//!   and the check-point `"` pop the span, spans nest; the check-point
+//!   `"` is the lib's second pop arm -- a plain `"` whose predecessor
+//!   took the default-append path, `_scan_string_body`'s low-span `"`
+//!   arm at the loop tail -- and the streaming decode's own escape
+//!   table carries the lib's active-delimiter arm beside it: an
+//!   escaped OWN delimiter decodes to the delimiter alone, the
+//!   backslash dropped, `['a\'` -> `["a'"]`); and the drain's trigger
+//!   fires on a held partial escape too (`["\ud83d\u` -> `["\ufffd\\u"]`,
 //!   the oracle keeping the `\ud83d` escape -- the documented
-//!   lone-surrogate divergence).
+//!   lone-surrogate divergence). The `'`-delimited strings' span
+//!   machinery lives in the streaming decode whole (they always take
+//!   the lib's slow-path scan): the push gates, the pops, and the
+//!   span-active close absorption -- the own-delimiter quote is
+//!   content while a span is active (`['e„b'` -> `["e\u201eb'"]`); the
+//!   span-active close with a follow-up quote/terminator ahead is the
+//!   engine's handler lookahead's to decide (the documented
+//!   divergence, DIVERGENCES-pinned).
 //! - **Canonical emission**: the output is the `json.dumps`-parity
 //!   serialization (the same `", "`/`": "` separators, the same escape
 //!   table, `ensure_ascii` on by default), so a completed stream's
@@ -766,6 +779,30 @@ struct StrState {
     /// The raw source seen so far, delimiters excluded (the closing
     /// delimiter's own char pops off at the close).
     raw: String,
+    /// The LOW SMART-QUOTE SPAN depth (the lib's `rstring_delimiter`
+    /// stack gaining the `"\0` sentinels): an ordinary `„` -- the char
+    /// the scan meets at its loop top, never an escape's operand, and
+    /// not hard on a backslash-ending value -- pushes one; an ordinary
+    /// `”` pops one; a `\` + `"` escape pops one; a check-point `"` (a
+    /// plain `"` whose predecessor took the default-append path) pops
+    /// one. While a span is ACTIVE the string cannot close: the scan's
+    /// `while char != outer or in_span` gate keeps the own-delimiter
+    /// quote in the body as content (the close absorption -- the
+    /// engine's own observable, `['e„b\\'c'` -> the value `e„b'c'`).
+    spans: usize,
+    /// Whether the DECODED value ends on a literal backslash (the
+    /// `„`-push gate's `string_acc[-1] != "\\"`): only a decoded `\\`
+    /// leaves one.
+    decoded_ends_backslash: bool,
+    /// Whether the char just consumed took the lib's DEFAULT-APPEND
+    /// path (appended at the loop body's tail, the post-checks fallen
+    /// through): the check-point `"` pop's gate -- a `"` whose
+    /// predecessor was default-appended pops the span (the scan's
+    /// low-span `"` arm examines the char AFTER the appended one); a
+    /// `"` whose predecessor took any other arm (a `„` push, a `”` pop,
+    /// an escape decode, a popped-`"`'s own literal append) is the
+    /// loop-top CURRENT char there and appends itself without popping.
+    last_default_append: bool,
 }
 
 /// The escape sub-state of an open string.
@@ -803,6 +840,26 @@ impl StrState {
                         self.esc = Esc::X(String::new());
                         return false;
                     }
+                    // The escaped OWN delimiter decodes to the delimiter
+                    // alone (the lib's `_normalize_escape_sequence`
+                    // active-delimiter arm: `['a\\'` -> the value
+                    // `a'`, the backslash dropped) -- the static list
+                    // below only spells the `"`-delimited form, and an
+                    // escaped own `'` fell through to the
+                    // invalid-escape arm (the backslash standing, the
+                    // stream `["a\\'"]` where the engine `["a'"]`).
+                    // Either spelling arm the lib takes (the
+                    // active-delimiter arm without a span, the
+                    // smart-`„` arm under one), the escape decode
+                    // consumed the char: no span pop, and the char
+                    // after re-enters at the loop top.
+                    _ if c == self.delim => {
+                        self.flush_high(sink, ensure_ascii);
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = false;
+                        push_escaped_char(sink, c, ensure_ascii);
+                        return false;
+                    }
                     // Valid simple escapes decode; the canonical emission
                     // re-encodes through the same table (`"` -> `\"`, a
                     // raw `\/` -> `/`, ...).
@@ -816,14 +873,29 @@ impl StrState {
                             't' => '\t',
                             other => other,
                         };
+                        // The low-span arm of `_normalize_escape_sequence`
+                        // (`parse_string.py` ~298): a `\`+`"` escape
+                        // inside the span pops it -- the arm tests the
+                        // LITERAL `"` whatever the string's own delimiter
+                        // is (the span's machinery is quote-shaped, not
+                        // delimiter-shaped).
+                        if c == '"' && self.spans > 0 {
+                            self.spans -= 1;
+                        }
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = c == '\\';
                         push_escaped_char(sink, decoded, ensure_ascii);
                         return false;
                     }
                     // An invalid escape keeps the backslash literally (the
                     // engine's `"x\qy"` -> `"x\\qy"` shape: the decoded
                     // text is backslash + q, re-encoded backslash-backslash).
+                    // The lib's own escape char re-parses at the loop top
+                    // (the default append), so the flag OPENS.
                     _ => {
                         self.flush_high(sink, ensure_ascii);
+                        self.last_default_append = true;
+                        self.decoded_ends_backslash = false;
                         push_escaped_char(sink, '\\', ensure_ascii);
                         push_escaped_char(sink, c, ensure_ascii);
                         return false;
@@ -837,6 +909,12 @@ impl StrState {
                         // Four collected hex digits: cannot fail to parse.
                         let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
                         self.emit_code(code, sink, ensure_ascii);
+                        self.last_default_append = false;
+                        // A decoded U+005C IS a backslash: the value ends
+                        // on one (the `„`-push gate's own
+                        // `string_acc[-1] != "\\"` case, the DRAIN pins'
+                        // `\u005c` no-push control).
+                        self.decoded_ends_backslash = code == 0x5C;
                     } else {
                         self.esc = Esc::U(hex);
                     }
@@ -844,7 +922,9 @@ impl StrState {
                 }
                 // Fewer than four hex digits: the escape is literal text
                 // (the engine's `"\u41"` -> `"\\u41"` shape), and c is
-                // ordinary content: fall through to the plain path.
+                // ordinary content: fall through to the plain path (the
+                // lib's own escape char re-parsed at the loop top; its
+                // default-append sets the flag there).
                 self.flush_high(sink, ensure_ascii);
                 push_escaped_char(sink, '\\', ensure_ascii);
                 push_escaped_char(sink, 'u', ensure_ascii);
@@ -862,6 +942,8 @@ impl StrState {
                         self.flush_high(sink, ensure_ascii);
                         let decoded = char::from_u32(u32::from(code)).unwrap_or('\u{fffd}');
                         push_escaped_char(sink, decoded, ensure_ascii);
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = code == 0x5C;
                     } else {
                         self.esc = Esc::X(hex);
                     }
@@ -887,9 +969,66 @@ impl StrState {
             return false;
         }
         self.flush_high(sink, ensure_ascii);
+        // The span-active close absorption: while a low smart-quote span
+        // is ACTIVE the scan's `while char != outer or in_span` gate
+        // keeps the own-delimiter quote in the body as content -- BOTH
+        // arms the quote arrives by: the loop-top current char (the
+        // predecessor took a continue arm) is absorbed by the while
+        // gate itself, and the POST-CHECK char (the predecessor
+        // default-appended) falls through `_handle_right_delimiter_
+        // candidate` when nothing lies ahead (the input ends on the
+        // quote: `['e„b'` -> the value `e„b'`) and re-enters at the
+        // loop top, absorbed the same. The handler's CLOSE arms (a
+        // follow-up quote/terminator ahead: `['e„b'c']` closes at the
+        // first quote) are the whole-text lookahead's to decide -- the
+        // linear machine's documented divergence there.
+        if c == self.delim && self.spans > 0 {
+            self.decoded_ends_backslash = false;
+            push_escaped_char(sink, c, ensure_ascii);
+            return false;
+        }
         if c == self.delim {
             return true;
         }
+        // The span's own loop-top arms (the push/pop/checkpoint trio),
+        // the `„`-push gate reading the backslash state BEFORE this char
+        // clears it. The machinery is the `'`-delimited strings' own:
+        // the lib's fast path (`_try_parse_simple_quoted_string`) is
+        // `"`-delimited ONLY -- a `"`-delimited body with no backslash
+        // and a clean follower closes through it without EVER running
+        // the slow-path span scan, so a `"`-delimited `„` pushes nothing
+        // here (the machine's span state stays 0, the close is the
+        // plain one, and the slow-path span shapes keep their
+        // documented divergences); a `'`-delimited string ALWAYS takes
+        // the slow path.
+        if c == '\u{201e}' && !self.decoded_ends_backslash {
+            if self.delim == '\'' {
+                self.spans += 1;
+                self.last_default_append = false;
+            } else {
+                self.last_default_append = true;
+            }
+        } else if c == '\u{201e}' {
+            // Hard on a backslash-ending value: the entry check fails,
+            // the `„` falls through to the default append.
+            self.last_default_append = true;
+        } else if c == '\u{201d}' && self.spans > 0 {
+            self.spans -= 1;
+            self.last_default_append = false;
+        } else if c == '"' && self.spans > 0 && self.last_default_append {
+            // THE CHECK-POINT POP (the scan's low-span `"` arm at the
+            // loop tail): the span pops, the `"` appends literally --
+            // and the pop arm's own literal append is NOT a
+            // default-append (the doubled-quote pop: a `"` hard on this
+            // one's heels does not pop again).
+            self.spans -= 1;
+            self.last_default_append = false;
+        } else {
+            // An ordinary char (a span-less `”` included): the default
+            // append.
+            self.last_default_append = true;
+        }
+        self.decoded_ends_backslash = false;
         // A raw control char inside a string is the strict scanner's
         // rejection (json.loads fails on the whole input).
         push_escaped_char(sink, c, ensure_ascii);
@@ -1563,6 +1702,9 @@ impl StreamingRepairer {
                         esc: Esc::None,
                         high: None,
                         raw: String::new(),
+                        spans: 0,
+                        decoded_ends_backslash: false,
+                        last_default_append: false,
                     },
                     done: false,
                 });
@@ -2409,6 +2551,9 @@ impl StreamingRepairer {
             esc: Esc::None,
             high: None,
             raw: String::new(),
+            spans: 0,
+            decoded_ends_backslash: false,
+            last_default_append: false,
         });
     }
 
@@ -3592,7 +3737,16 @@ fn render_open_string_repair_lane(raw: &str, delim: char, ensure_ascii: bool) ->
 /// entry check `string_acc[-1] != "\\"`) -- pushes one; an ordinary `”`
 /// pops one (the scan's low-span `”` arm); a `\` + `"` escape pops one
 /// (`_normalize_escape_sequence`'s low-span arm, which tests the
-/// LITERAL `"` whatever the string's own delimiter is). `„` is the only
+/// LITERAL `"` whatever the string's own delimiter is); and a CHECK-
+/// POINT `"` pops one -- the scan's low-span `"` arm at the loop TAIL
+/// (`parse_string.py` ~873), which examines the char AFTER a
+/// default-appended one: a `"` whose predecessor took the DEFAULT-
+/// APPEND path (ordinary content, or a span-less `”`, or a `„` hard on
+/// a backslash-ending value) pops the span and appends literally,
+/// while a `"` whose predecessor took any other arm (the `„` push, the
+/// `”` pop, an escape decode, the run-scan branch, a popped-`"`'s own
+/// literal append) is the loop-top CURRENT char and appends itself
+/// without popping. `„` is the only
 /// pusher -- no other STRING_DELIMITERS member pushes (`'`/`“`/`”` as
 /// content are ordinary chars, `”` only pops) -- so the re-decision the
 /// span buys is `„`-only. And the re-decision is exactly one: with the
@@ -3617,8 +3771,22 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
         esc: Esc::None,
         high: None,
         raw: String::new(),
+        spans: 0,
+        decoded_ends_backslash: false,
+        last_default_append: false,
     };
     let mut low_smart_quote_spans: usize = 0;
+    // Whether the char just consumed took the lib's DEFAULT-APPEND path
+    // (`_scan_string_body`'s tail: the char appended at the loop body's
+    // end, the post-checks fallen through). The check-point `"`'s
+    // low-span pop reads it: a `"` whose PREDECESSOR was default-
+    // appended pops the span (parse_string.py's second pop arm, the
+    // scan's low-span `"` check running on the char AFTER the appended
+    // one); a `"` whose predecessor took any other arm does not -- it
+    // is the loop-top CURRENT char there (a `„` push, a `”` pop, an
+    // escape decode, the run-scan branch, a popped-`"`'s own literal
+    // append) and appends itself without popping.
+    let mut last_default_append = false;
     let chars: Vec<char> = raw.chars().collect();
     let n = chars.len();
     let mut i = 0usize;
@@ -3627,9 +3795,32 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
         if c != '\\' {
             st.flush_high_raw(&mut value);
             if c == '\u{201e}' && !value.ends_with('\\') {
+                // The push arm (`_append_literal_char` + continue):
+                // never the default-append.
                 low_smart_quote_spans += 1;
+                last_default_append = false;
+            } else if c == '\u{201e}' {
+                // Hard on a backslash-ending value: the entry check
+                // (`string_acc[-1] != "\\"`) fails, the `„` falls
+                // through to the default append.
+                last_default_append = true;
             } else if c == '\u{201d}' && low_smart_quote_spans > 0 {
+                // The pop arm: literal append + continue.
                 low_smart_quote_spans -= 1;
+                last_default_append = false;
+            } else if c == '"' && low_smart_quote_spans > 0 && last_default_append {
+                // THE CHECK-POINT POP (the scan's low-span `"` arm at
+                // the loop tail): the span pops and the `"` appends
+                // literally -- the arm's own `_append_literal_char` +
+                // continue is NOT a default-append, so a `"` hard on
+                // this one's heels is the loop-top current char and
+                // does not pop again (the doubled-quote pop).
+                low_smart_quote_spans -= 1;
+                last_default_append = false;
+            } else {
+                // An ordinary char (a span-less `”` included): the
+                // default append.
+                last_default_append = true;
             }
             value.push(c);
             i += 1;
@@ -3646,6 +3837,10 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
             for _ in 0..run / 2 {
                 value.push('\\');
             }
+            // The run-scan branch consumed the run (the halving
+            // arm's `continue`): the char after it re-enters at the
+            // loop top, never through the default-append's post-checks.
+            last_default_append = false;
             i += run;
             continue;
         }
@@ -3669,12 +3864,26 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
             st.flush_high_raw(&mut value);
             if next == Some(delim) {
                 if low_smart_quote_spans > 0 {
+                    // The span-active join: the delimiter is the
+                    // loop-top current char (the sentinel refused the
+                    // decode's while loop) and default-appends as
+                    // content.
                     value.push('\\');
+                    last_default_append = true;
+                } else {
+                    // The decode took the delimiter in (the
+                    // escaped-delimiter decode consumed it with the
+                    // run).
+                    last_default_append = false;
                 }
                 value.push(delim);
                 i += run + 1;
             } else {
                 value.push('\\');
+                // The collapse leaves the char after the run to re-enter
+                // at the loop top (the run-scan branch's returned
+                // next_char).
+                last_default_append = false;
                 i += run;
             }
             continue;
@@ -3706,6 +3915,10 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
                     other => other, // the delimiter escape
                 };
                 value.push(decoded);
+                // The escape decode consumed the escape char (`continue`
+                // at the normalize call): the char after it re-enters at
+                // the loop top.
+                last_default_append = false;
                 i += 2;
             }
             'u' | 'x' => {
@@ -3718,10 +3931,14 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
                 if hex.chars().count() == num && hex.chars().all(|h| h.is_ascii_hexdigit()) {
                     let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
                     st.emit_code_raw(code, &mut value);
+                    last_default_append = false;
                     i += 2 + num;
                 } else {
                     // Not accepted: the backslash stays literal and the
-                    // escape char re-parses as ordinary content.
+                    // escape char re-parses as ordinary content -- the
+                    // lib's post-checks ran on it and fell through, so
+                    // its own re-parse at the loop top IS the default
+                    // append (the plain arm below sets the flag).
                     st.flush_high_raw(&mut value);
                     value.push('\\');
                     i += 1;
@@ -3733,11 +3950,13 @@ fn repair_lane_value(raw: &str, delim: char) -> String {
                 // own delimiter was the accepted arm above).
                 st.flush_high_raw(&mut value);
                 value.push(e);
+                last_default_append = false;
                 i += 2;
             }
             _ => {
                 // Everything else: the backslash is literal text, the
-                // escape char ordinary content.
+                // escape char ordinary content (its own re-parse sets
+                // the flag, as above).
                 st.flush_high_raw(&mut value);
                 value.push('\\');
                 i += 1;
