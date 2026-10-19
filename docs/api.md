@@ -2569,8 +2569,97 @@ linearity pin gates; concatenate the deltas to reconstruct the emitted
 stream, and treat `snapshot`/`end` as the authority (a late repair that
 retracts text — the dangling-member drop, the grouping-paren unwrap, the
 empty-element retract, the array lane's stray-`...` and strictly-empty
-item drops — truncates or drains the emitted stream behind the delta
-cursor).
+item drops and the deferred-escape re-render, truncates or drains the
+emitted stream behind the delta cursor).
+
+**The deferred-escape strings** (the weekly-fuzz crash class): the
+whole-text engine's two lanes decode `\f` and `\/` differently, and the
+lane that decides is the one a stream cannot know at the string's own
+close. The strict lanes (the whole-input `json.loads` fast path, the
+repair parser's suffix probe) decode both through the canonical table;
+the repair lane accepts neither: the backslash stays a literal
+character in the value and the re-dump re-escapes it (`\f` to `\\f`,
+`\/` to `\\/`), and the repair lane decides whenever the document is
+cut, a paren opened anywhere, or the parse was otherwise repaired
+mid-document. A string whose raw source holds one of those escapes (or
+an odd backslash run of three or more, which the repair lane's run scan
+collapses differently, or a misescaped non-active delimiter) therefore
+does not commit its rendering at its own close: the rendering streams
+verbatim, but the repairer holds the string's raw source as a
+deferred-escape mark and resolves every mark at `end()`/`snapshot()`
+close time, verbatim when the strict lanes decided (`["\f"]`,
+`["\f%"]`, `{"\f\/%": 1}`, `["\f"]x` all keep), re-rendered through the
+lib's escape normalization when the repair lane did (`["\f%"` heals to
+`["\\f%"]`, `["\f", 1` to `["\\f", 1]`, `{"\f\/%": 1` to
+`{"\\f\\/%": 1}`, `[[ "\f"]` to `[["\\f"]]`, `("\f")` to `"\\f"`,
+`[tru, "\f"]` to `["tru", "\\f"]`). "Keep" means the strict lanes
+decided and the mark resolves to the rendering as the canonical decode
+spelled it, byte for byte where the escape table agrees with the
+re-dump: the `{"\f\/%": 1}` keep example's emitted text is
+`{"\f/%": 1}` because the canonical table MELTS the escaped solidus
+(`\/` decodes to a bare `/` and the re-dump does not re-escape it --
+the engine's own emitted bytes), while the `\f` stands; the mark never
+re-writes such a keep, the canonical decode itself spelled it. The mark
+flushes only at close
+time: every separator keeps the rendering mid-stream, so the
+distinction survives the separator (`["\f", 1` escapes while
+`["\f", 1]` keeps), and it composes with the strictly-empty item drops,
+the paren taint and multi-string documents (each string holds its own
+mark); a string still OPEN at the cut is the same class — the cut's
+repair lane always decides, so the in-flight content re-renders through
+the same escape walk before the escape-tail rstrip (`["\f` to
+`["\\f"]`, `["\/` to `["\\/"]`). The walk mirrors the engine's
+smart-quote machinery: an ordinary `„` in the value pushes the lib's
+low smart-quote span, and the odd backslash run's own delimiter then
+joins the collapsed backslash as content instead of taking it into the
+value (`["e„\\\"` repairs to `["e\u201e\\\""]`, where the plain
+content collapses to `["e\""]`) — `„` is the only delimiter that
+re-decides this way (`”`, a `\"` escape and a check-point `"` — the
+lib's second pop arm, a plain `"` whose predecessor took the
+default-append path — pop the span, spans nest),
+and the drain also fires on a held partial escape at the cut
+(`["\ud83d\u` repairs to `["\ufffd\\u"]` — the oracle keeping the
+`\ud83d` escape, the documented lone-surrogate divergence). The same
+smart-quote span machinery is whole-text-only where it meets a CLOSE
+quote: a slow-path string (one holding a backslash) whose value holds
+an ordinary `„` absorbs its span-active close quotes as content and
+runs on (`["e„\\\"""` repairs to `["e\u201e\\\"\""]`), where the
+linear stream closes at the quote (`["e\u201e\\\""]`) and the tail
+re-synchronizes — the string re-synchronization class above. An escape
+the two lanes decode
+identically never defers: the
+streaming decode's own table carries the repair lane's
+`\x`-plus-two-hex-digits acceptance (`\x41` to `A`) beside the strict
+set.
+
+**The escaped own delimiter and the `'`-delimited spans**: the
+streaming decode's escape table carries the lib's active-delimiter arm
+— an escaped OWN delimiter decodes to the delimiter alone, the
+backslash dropped (`['a\'` repairs to `["a'"]`, where the invalid-escape
+spelling kept both, `["a\\'"]`). A `'`-delimited string always takes
+the lib's slow-path string scan (the fast path is `"`-delimited only),
+so the streaming decode carries its low smart-quote span machinery
+whole: an ordinary `„` pushes (the `acc[-1] != "\\"` gate included —
+a `„` hard on a backslash-ending value, the halved even run's own `\`
+or a decoded `\u005c`, is plain content), an ordinary `”` pops, a
+`\`+`"` escape pops, and a CHECK-POINT `"` pops — the lib's second pop
+arm (`_scan_string_body`'s low-span `"` arm at the loop tail, examining
+the char AFTER a default-appended one; a `"` whose predecessor took any
+other arm — the `„` push, the `”` pop, an escape decode, a popped-`"`'s
+own literal append — is the loop-top current char and does not pop).
+While a span is ACTIVE the string cannot close: the own-delimiter quote
+is content (`['e„b'` repairs to `["e\u201eb'"]`). The span-active close
+with a follow-up quote/terminator ahead is the engine's
+`_handle_right_delimiter_candidate` lookahead's to decide (the
+even-odd delimiter scan closes the string there, `['e„b'c']` to
+`["e\u201eb", "c'"]`) — the linear stream's documented divergence. A
+`"`-delimited string's span-active close quotes keep the string
+re-synchronization class above unchanged. And the bareword-key
+comma-commit's paren tail (`{kf ,"="(kf , `) is the duplicate-key
+dict-update class one lib step removed: the lib's whole-text lane
+re-parses the paren's dangling bareword as a duplicate member key whose
+update overwrites the member's value whole (`{"kf": ""}`), where the
+linear stream keeps both members (`{"kf": "=", "kf": ""}`).
 
 **The repair semantics** match the whole-text engine's on the classes a
 stream can decide per character: single-quote and curly-quote delimiters
@@ -2615,7 +2704,13 @@ differential this surface is tested with.
 **The truncation heal** (`end`/`snapshot` on a cut-off stream): an open
 string closes with `"` — its content rstrips first (Python's whitespace
 set: `{"k": "a b ` heals to `{"k": "a b"}`, `{"k": "a\n` to `{"k": "a"}`,
-the engine's own escape-tail heal); a closed string that ENDS the stream
+the engine's own escape-tail heal), and a content holding a
+repair-lane-divergent escape resolves it first through the repair lane's
+own normalization — the cut's repair lane always decides, so the open
+string's escapes re-render exactly like a closed deferred-escape
+string's mark (`["\f` to `["\\f"]`, `["\/` to `["\\/"]`, `{"k": "x\n\f`
+to `{"k": "x\n\\f"}` — the rstrip is the tail's, the mid-string
+newline-escape stands); a closed string that ENDS the stream
 on a newline-run loses the run (`{"k": "a\n"` to `{"k": "a"}`, a tab or a
 mid-string newline passes); open containers close with their own brackets
 — a still-open EMPTY container drops whole at an item position (`[[` to

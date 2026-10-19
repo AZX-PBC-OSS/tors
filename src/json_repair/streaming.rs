@@ -46,6 +46,98 @@
 //! were pinned against the engine (and through it the oracle,
 //! json-repair 0.63.5) case by case:
 //!
+//! - **The deferred-escape strings** (the weekly-fuzz crash class): the
+//!   whole-text engine's two lanes decode `\f` and `\/` differently, and
+//!   the lane that decides is the one a stream cannot know at the
+//!   string's own close. The strict lanes (the whole-input `json.loads`
+//!   fast path, the repair parser's `raw_decode` suffix probe) decode
+//!   both escapes through the canonical table (`\f` to the form feed,
+//!   `\/` to `/`); the REPAIR lane's `_normalize_escape_sequence`
+//!   accepts neither -- the backslash stays a literal character in the
+//!   value and the re-dump re-escapes it (`\f` to `\\f`, `\/` to
+//!   `\\/`) -- and the repair lane decides whenever the document is CUT
+//!   (no balanced-prefix strict load), a paren opened anywhere (the
+//!   tuple grammar is never strict-valid), or the parse was otherwise
+//!   repaired mid-document (the fast paths died on the INPUT: a bare
+//!   word, a non-`"` delimiter, an in-container comment, a missing-
+//!   comma/colon/key/value heal, a non-strict number run, a trailing
+//!   separator, a mismatched closer). The machine's streaming decode
+//!   emits the canonical form at the string's close, so committing
+//!   those bytes finally would break the cut class (`["\f%"` streams
+//!   `["\f%"]` where the engine heals to `["\\f%"]`). The machine
+//!   therefore holds every string whose raw source contains a
+//!   repair-lane-divergent escape -- exactly: a `\f` or `\/` escape (an
+//!   odd backslash run followed by `f` or `/`), an odd backslash run of
+//!   three or more (the lib's run scan collapses it to one literal
+//!   backslash with the char after the run ordinary, where the
+//!   streaming decode pairs the run), or a backslash before a
+//!   delimiter that is not the string's own (the lib strips that
+//!   escape) -- as a deferred-escape mark (the rendering's span in
+//!   `out` plus the string's raw source, the `EmptyMark` pattern), and
+//!   resolves every mark at `end`/`snapshot` close time: the render
+//!   with the verbatim strings is one strict JSON value and neither a
+//!   paren nor a mid-document repair fired (the fast paths' own
+//!   verdict -- a complete document, trailing garbage after a valid
+//!   root and comments behind a root included: `["\f"]`, `["\f%"]`,
+//!   `{"\f\/%": 1}`, `["\f"]x`, `["\f"] // x`) emits the held span
+//!   verbatim (the keep emits the canonical decode's OWN bytes: the
+//!   `{"\f\/%": 1}` example's emitted text is `{"\f/%": 1}` -- the
+//!   canonical table melts the escaped solidus and does not re-escape
+//!   it, the engine's own bytes), anything else (the cut and drain classes: `["\f%"` to
+//!   `["\\f%"]`, `["\f", 1` to `["\\f", 1]`, `{"\f\/%": 1` to
+//!   `{"\\f\\/%": 1}`, `[[ "\f"]` to `[["\\f"]]`; the
+//!   repair-lane-decided complete documents: `("\f")` to `"\\f"`,
+//!   `[tru, "\f"]` to `["tru", "\\f"]`, `[1, "\f",]` to `[1, "\\f"]`)
+//!   re-renders the held raw source through the lib's per-escape
+//!   normalization (see `render_repair_lane_string`) and re-dumps it
+//!   through the canonical table. An escape the two lanes decode
+//!   IDENTICALLY never defers: the streaming decode's own table
+//!   carries the repair lane's `x`-plus-two-hex-digits acceptance
+//!   (`\x41` to `A`, `\x%` literal) beside the strict set. The mark
+//!   flushes ONLY at close time: every separator keeps the verbatim
+//!   rendering mid-stream, so the distinction survives the separator
+//!   (`["\f", 1` escapes while `["\f", 1]` keeps), and the mark
+//!   composes with the strictly-empty drops (the spans shift with
+//!   their drains: `[[] , "\f", 1` to `["\\f", 1]`), the paren taint,
+//!   the grouping unwrap and the empty-object fallback (both shift the
+//!   marks with their one-char drains), and multi-string documents
+//!   (each string holds its own mark). A string still OPEN at the cut
+//!   is the same class the mark resolves: the cut's repair lane always
+//!   decides (a truncated document never strict-loads), so the
+//!   in-flight content's raw source re-renders through the SAME escape
+//!   walk (`render_open_string_repair_lane`, the closed mark's
+//!   `render_repair_lane_string` twin), then the engine's
+//!   unterminated-string finalize rstrips the DECODED value (Python's
+//!   whitespace set, the escape-tail heal's own operand: `["\f` ->
+//!   `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "\f\n` -> `{"k": "\\f"}`,
+//!   `{"k": "x\n\f` -> `{"k": "x\n\\f"}` -- the rstrip is the tail's,
+//!   the mid-string newline-escape stands); a clean tail renders
+//!   through the escape-tail path as before (the streaming decode's
+//!   own bytes, the mark arms at the close only). The walk mirrors the
+//!   lib's low smart-quote span machinery: an ordinary `„` in the
+//!   value (never hard on a backslash-ending value) pushes the span
+//!   and the odd-run collapse then KEEPS the collapsed backslash with
+//!   the run's own delimiter joining it as content (`["e„\\\"` ->
+//!   `["e\u201e\\\""]`, where the plain content drops it:
+//!   `["e\\\"` -> `["e\""]`) -- `„` is the only pusher (no other
+//!   `STRING_DELIMITERS` member re-decides; `”`, the `\`+`"` escape
+//!   and the check-point `"` pop the span, spans nest; the check-point
+//!   `"` is the lib's second pop arm -- a plain `"` whose predecessor
+//!   took the default-append path, `_scan_string_body`'s low-span `"`
+//!   arm at the loop tail -- and the streaming decode's own escape
+//!   table carries the lib's active-delimiter arm beside it: an
+//!   escaped OWN delimiter decodes to the delimiter alone, the
+//!   backslash dropped, `['a\'` -> `["a'"]`); and the drain's trigger
+//!   fires on a held partial escape too (`["\ud83d\u` -> `["\ufffd\\u"]`,
+//!   the oracle keeping the `\ud83d` escape -- the documented
+//!   lone-surrogate divergence). The `'`-delimited strings' span
+//!   machinery lives in the streaming decode whole (they always take
+//!   the lib's slow-path scan): the push gates, the pops, and the
+//!   span-active close absorption -- the own-delimiter quote is
+//!   content while a span is active (`['e„b'` -> `["e\u201eb'"]`); the
+//!   span-active close with a follow-up quote/terminator ahead is the
+//!   engine's handler lookahead's to decide (the documented
+//!   divergence, DIVERGENCES-pinned).
 //! - **Canonical emission**: the output is the `json.dumps`-parity
 //!   serialization (the same `", "`/`": "` separators, the same escape
 //!   table, `ensure_ascii` on by default), so a completed stream's
@@ -106,7 +198,11 @@
 //! - **The truncated-output heal** (`end`/`snapshot` on a cut-off
 //!   stream): an open string closes with `"` (its content rstripped —
 //!   Python's whitespace set, the engine's own escape-tail heal:
-//!   `{"k": "a\n ` -> `{"k": "a"}`), a CLOSED string that ends the
+//!   `{"k": "a\n ` -> `{"k": "a"}`), where a raw source holding a
+//!   repair-lane-divergent escape resolves it FIRST through the
+//!   repair lane's own normalization (the cut class always decides:
+//!   `["\f` -> `["\\f"]`, `["\/` -> `["\\/"]` -- see the
+//!   deferred-escape bullet), a CLOSED string that ends the
 //!   stream on a newline-run loses the run (`{"k": "a\n"` ->
 //!   `{"k": "a"}`), open containers close with their own brackets — a
 //!   still-open EMPTY container drops whole at an item position (`[[`
@@ -222,7 +318,16 @@
 //!   the stream closes a string only at its own delimiter or at `end`
 //!   (`{"a": "hello}` streams to `{"a": "hello}"}`). Doubled-quote
 //!   repair (`""hi""` -> `"hi"`) is likewise whole-text-only: the stream
-//!   keeps the parts it saw, validly.
+//!   keeps the parts it saw, validly. The smart-quote span machinery is
+//!   the same class: a slow-path string (one holding a backslash, where
+//!   the strict fast paths died) whose value holds an ordinary `„`
+//!   pushes the engine's low smart-quote span, the span-ACTIVE close
+//!   quote is CONTENT (the string runs on, `["e„\\\"""` -> the value
+//!   `e„\"""`), and the post-close tail re-synchronizes with it
+//!   (`["e„"x"]` -> the engine `["e„\"x\"]"]`); the stream closes at the
+//!   quote (`["e„\\\"""` -> `["e„\\\""]`, the `„`-free analog
+//!   `["e"x"]` diverging the same way through the quoted-section
+//!   re-pair).
 //! - **In-container comments**: the engine's comment arm consumes the
 //!   value that follows it inside a container (`{"a": /*x*/ 1}` ->
 //!   `{"a": ""}`); the stream skips the comment and parses the value
@@ -362,6 +467,33 @@ pub struct StreamingRepairer {
     top_clean: bool,
     /// The root value closed: everything after it is trailing junk.
     top_done: bool,
+    /// A char was consumed at the top level BEFORE the root container's
+    /// own char (leading whitespace, prose, a comment, a skipped `(` --
+    /// the engine's `scroll_whitespaces` + ignore-and-move-on loop both
+    /// advance `self.index`). The suffix-probe gate's first arm: with
+    /// `index != 0` the probe fires WHATEVER the tail holds (raw_decode
+    /// ignores the trailing text behind the first value), so the tail
+    /// never re-decides the held strings -- the taint is the root
+    /// rendering's own strictness alone (see `render_closed`).
+    top_led: bool,
+    /// A non-whitespace token was consumed after the root closed (a
+    /// prose char, a comment opener): the suffix-probe gate's trailing
+    /// scan reads the FIRST char after the root's closer (whitespace
+    /// skipped) and a non-comma token there fires the probe. Once seen,
+    /// later whitespace is behind the probe, never the input's last
+    /// word.
+    top_tail_token: bool,
+    /// A NON-STRICT whitespace char was consumed after the root closed
+    /// with no token behind it yet (Python `isspace` set: `\x0b`, `\x0c`
+    /// ... -- the strict scanner's four never arm this): the deferred
+    /// half of the suffix-probe gate's trailing scan. The input may END
+    /// here -- `["\f"]\x0b` -- where the probe gate reads no trailing
+    /// content (False), the repair lane decides, and the held strings
+    /// re-render; or a further char may arrive, and ITS class decides
+    /// (`,` still taints -- the comma-first tail -- anything else
+    /// disarms, the probe fired). Settled at the close: the pending arm
+    /// taints (`render_closed`), a disarmed one is gone.
+    top_tail_ws_pending: bool,
     /// The `json.dumps` escape-table mode (the `repair_json` knob).
     ensure_ascii: bool,
     /// `end` ran: the repairer is final (push refuses; reset revives).
@@ -419,6 +551,32 @@ pub struct StreamingRepairer {
     /// tuple container yet -- the first inner char decides, and after
     /// the group closes only whitespace may precede the next line end.
     paren_gate: Option<ParenGate>,
+    /// The deferred-escape strings (see `EscapeMark`): closed strings
+    /// whose raw source holds an escape the repair lane's normalization
+    /// decides differently from the streaming decode. Armed at the
+    /// string's close, resolved at every close render, never flushed at
+    /// a separator.
+    escape_marks: Vec<EscapeMark>,
+    /// A `(`-container opened anywhere (the paren taint): the tuple
+    /// grammar is never strict-valid, so both fast paths died and the
+    /// repair lane decided the whole parse -- the deferred-escape
+    /// strings re-render at close time even when the root closed.
+    saw_paren: bool,
+    /// The repair lane decided the parse MID-DOCUMENT (a repair the
+    /// strict grammar has no reading for fired inside the stream: a bare
+    /// word or a non-strict number run committed in a container, a
+    /// non-`"` delimiter, an in-container comment, a missing-comma/
+    /// colon/key/value heal, a dangling-member or empty-element drop, a
+    /// mismatched-closer close-up, the empty-object fallback, a
+    /// trailing-separator close, the garbage-item run): the whole-input
+    /// `json.loads` fast path and the repair parser's suffix probe both
+    /// died on the INPUT, so the engine's repair lane re-normalized
+    /// every string -- the deferred-escape strings re-render at close
+    /// time even when the machine's render is itself strict-loadable
+    /// (`[tru, "\f"]` to the engine `["tru", "\\f"]`). Top-level prose
+    /// and trailing junk do NOT taint (the suffix probe keeps those:
+    /// `["\f"] x` stays verbatim).
+    repair_decided: bool,
 }
 
 /// One deferred strictly-empty element drop; see `empty_marks`. `dropped`
@@ -437,6 +595,38 @@ struct EmptyMark {
     was_first: bool,
     frame: usize,
     dropped: Option<bool>,
+}
+
+/// One deferred-escape string: a CLOSED string whose raw source held a
+/// repair-lane-divergent escape (`\f`, `\/`, an odd backslash run of
+/// three or more, a misescaped non-active delimiter -- see
+/// `raw_source_needs_escape_repair`). The machine's streaming decode
+/// committed the canonical rendering at the string's own close, but the
+/// engine's lane that decides is not known until close time: the strict
+/// lanes (the whole-input `json.loads`, the repair parser's suffix
+/// probe) keep the canonical rendering verbatim, the repair lane
+/// re-normalizes the raw source's escapes and re-dumps (`\f` to `\\f`).
+/// The mark holds the rendering's span in `out` (the quoted string
+/// whole), the raw source between the delimiters, the opening delimiter
+/// and the rendering itself (the drain guard's identity): resolved at
+/// every `end`/`snapshot` close render, verbatim or re-rendered (see
+/// `render_closed`), never mid-stream (a separator must not flush it:
+/// `["\f", 1` escapes while `["\f", 1]` keeps).
+struct EscapeMark {
+    /// The rendering's span in `out`: the opening quote through the
+    /// closing quote.
+    start: usize,
+    end: usize,
+    /// The string's raw source between the delimiters (the re-render's
+    /// operand).
+    raw: String,
+    /// The string's opening delimiter (the escape normalization's
+    /// rstring-delimiter rule).
+    delim: char,
+    /// The exact rendering at the span (the close-time drain guard: a
+    /// span the mid-stream surgery retracted or moved no longer
+    /// resolves).
+    rendered: String,
 }
 
 /// The strictly-empty element's one-char decision: the element's
@@ -575,6 +765,9 @@ enum Pos {
 
 /// The open string's scan state. `feed` decodes escapes and emits the
 /// canonical form of each content char through the serializer's table.
+/// `raw` accumulates the string's raw source between the delimiters
+/// (the deferred-escape check's operand at the close; freed there when
+/// no mark arms).
 struct StrState {
     delim: char,
     /// Key vs value string: only the post-close transition differs.
@@ -583,6 +776,33 @@ struct StrState {
     /// A decoded high surrogate awaiting its low half (the pair may
     /// straddle chunks; the hold is part of the machine's state).
     high: Option<u16>,
+    /// The raw source seen so far, delimiters excluded (the closing
+    /// delimiter's own char pops off at the close).
+    raw: String,
+    /// The LOW SMART-QUOTE SPAN depth (the lib's `rstring_delimiter`
+    /// stack gaining the `"\0` sentinels): an ordinary `„` -- the char
+    /// the scan meets at its loop top, never an escape's operand, and
+    /// not hard on a backslash-ending value -- pushes one; an ordinary
+    /// `”` pops one; a `\` + `"` escape pops one; a check-point `"` (a
+    /// plain `"` whose predecessor took the default-append path) pops
+    /// one. While a span is ACTIVE the string cannot close: the scan's
+    /// `while char != outer or in_span` gate keeps the own-delimiter
+    /// quote in the body as content (the close absorption -- the
+    /// engine's own observable, `['e„b\\'c'` -> the value `e„b'c'`).
+    spans: usize,
+    /// Whether the DECODED value ends on a literal backslash (the
+    /// `„`-push gate's `string_acc[-1] != "\\"`): only a decoded `\\`
+    /// leaves one.
+    decoded_ends_backslash: bool,
+    /// Whether the char just consumed took the lib's DEFAULT-APPEND
+    /// path (appended at the loop body's tail, the post-checks fallen
+    /// through): the check-point `"` pop's gate -- a `"` whose
+    /// predecessor was default-appended pops the span (the scan's
+    /// low-span `"` arm examines the char AFTER the appended one); a
+    /// `"` whose predecessor took any other arm (a `„` push, a `”` pop,
+    /// an escape decode, a popped-`"`'s own literal append) is the
+    /// loop-top CURRENT char there and appends itself without popping.
+    last_default_append: bool,
 }
 
 /// The escape sub-state of an open string.
@@ -593,6 +813,11 @@ enum Esc {
     /// A `\u` was consumed; 0..=4 hex chars collected so far. The escape
     /// is literal text unless exactly four hex digits arrive.
     U(String),
+    /// A `\x` was consumed; 0..=2 hex chars collected so far. The
+    /// repair lane's own acceptance (`_normalize_escape_sequence`):
+    /// exactly two hex digits decode the code point, fewer leave the
+    /// escape literal text.
+    X(String),
 }
 
 impl StrState {
@@ -609,6 +834,32 @@ impl StrState {
                         self.esc = Esc::U(String::new());
                         return false;
                     }
+                    'x' => {
+                        // The repair lane's own x-acceptance: exactly
+                        // two hex digits decode the code point.
+                        self.esc = Esc::X(String::new());
+                        return false;
+                    }
+                    // The escaped OWN delimiter decodes to the delimiter
+                    // alone (the lib's `_normalize_escape_sequence`
+                    // active-delimiter arm: `['a\\'` -> the value
+                    // `a'`, the backslash dropped) -- the static list
+                    // below only spells the `"`-delimited form, and an
+                    // escaped own `'` fell through to the
+                    // invalid-escape arm (the backslash standing, the
+                    // stream `["a\\'"]` where the engine `["a'"]`).
+                    // Either spelling arm the lib takes (the
+                    // active-delimiter arm without a span, the
+                    // smart-`„` arm under one), the escape decode
+                    // consumed the char: no span pop, and the char
+                    // after re-enters at the loop top.
+                    _ if c == self.delim => {
+                        self.flush_high(sink, ensure_ascii);
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = false;
+                        push_escaped_char(sink, c, ensure_ascii);
+                        return false;
+                    }
                     // Valid simple escapes decode; the canonical emission
                     // re-encodes through the same table (`"` -> `\"`, a
                     // raw `\/` -> `/`, ...).
@@ -622,14 +873,29 @@ impl StrState {
                             't' => '\t',
                             other => other,
                         };
+                        // The low-span arm of `_normalize_escape_sequence`
+                        // (`parse_string.py` ~298): a `\`+`"` escape
+                        // inside the span pops it -- the arm tests the
+                        // LITERAL `"` whatever the string's own delimiter
+                        // is (the span's machinery is quote-shaped, not
+                        // delimiter-shaped).
+                        if c == '"' && self.spans > 0 {
+                            self.spans -= 1;
+                        }
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = c == '\\';
                         push_escaped_char(sink, decoded, ensure_ascii);
                         return false;
                     }
                     // An invalid escape keeps the backslash literally (the
                     // engine's `"x\qy"` -> `"x\\qy"` shape: the decoded
                     // text is backslash + q, re-encoded backslash-backslash).
+                    // The lib's own escape char re-parses at the loop top
+                    // (the default append), so the flag OPENS.
                     _ => {
                         self.flush_high(sink, ensure_ascii);
+                        self.last_default_append = true;
+                        self.decoded_ends_backslash = false;
                         push_escaped_char(sink, '\\', ensure_ascii);
                         push_escaped_char(sink, c, ensure_ascii);
                         return false;
@@ -643,6 +909,12 @@ impl StrState {
                         // Four collected hex digits: cannot fail to parse.
                         let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
                         self.emit_code(code, sink, ensure_ascii);
+                        self.last_default_append = false;
+                        // A decoded U+005C IS a backslash: the value ends
+                        // on one (the `„`-push gate's own
+                        // `string_acc[-1] != "\\"` case, the DRAIN pins'
+                        // `\u005c` no-push control).
+                        self.decoded_ends_backslash = code == 0x5C;
                     } else {
                         self.esc = Esc::U(hex);
                     }
@@ -650,10 +922,40 @@ impl StrState {
                 }
                 // Fewer than four hex digits: the escape is literal text
                 // (the engine's `"\u41"` -> `"\\u41"` shape), and c is
-                // ordinary content: fall through to the plain path.
+                // ordinary content: fall through to the plain path (the
+                // lib's own escape char re-parsed at the loop top; its
+                // default-append sets the flag there).
                 self.flush_high(sink, ensure_ascii);
                 push_escaped_char(sink, '\\', ensure_ascii);
                 push_escaped_char(sink, 'u', ensure_ascii);
+                for h in hex.chars() {
+                    push_escaped_char(sink, h, ensure_ascii);
+                }
+            }
+            Esc::X(mut hex) => {
+                if c.is_ascii_hexdigit() && hex.len() < 2 {
+                    hex.push(c);
+                    if hex.len() == 2 {
+                        // Two collected hex digits: cannot fail to parse
+                        // (the code point is at most 0xFF, always a char).
+                        let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+                        self.flush_high(sink, ensure_ascii);
+                        let decoded = char::from_u32(u32::from(code)).unwrap_or('\u{fffd}');
+                        push_escaped_char(sink, decoded, ensure_ascii);
+                        self.last_default_append = false;
+                        self.decoded_ends_backslash = code == 0x5C;
+                    } else {
+                        self.esc = Esc::X(hex);
+                    }
+                    return false;
+                }
+                // Fewer than two hex digits: the escape is literal text
+                // (the lib's not-accepted path, the engine's
+                // `"\x%"` -> `"\\x%"` shape), and c is ordinary content:
+                // fall through to the plain path.
+                self.flush_high(sink, ensure_ascii);
+                push_escaped_char(sink, '\\', ensure_ascii);
+                push_escaped_char(sink, 'x', ensure_ascii);
                 for h in hex.chars() {
                     push_escaped_char(sink, h, ensure_ascii);
                 }
@@ -667,9 +969,66 @@ impl StrState {
             return false;
         }
         self.flush_high(sink, ensure_ascii);
+        // The span-active close absorption: while a low smart-quote span
+        // is ACTIVE the scan's `while char != outer or in_span` gate
+        // keeps the own-delimiter quote in the body as content -- BOTH
+        // arms the quote arrives by: the loop-top current char (the
+        // predecessor took a continue arm) is absorbed by the while
+        // gate itself, and the POST-CHECK char (the predecessor
+        // default-appended) falls through `_handle_right_delimiter_
+        // candidate` when nothing lies ahead (the input ends on the
+        // quote: `['e„b'` -> the value `e„b'`) and re-enters at the
+        // loop top, absorbed the same. The handler's CLOSE arms (a
+        // follow-up quote/terminator ahead: `['e„b'c']` closes at the
+        // first quote) are the whole-text lookahead's to decide -- the
+        // linear machine's documented divergence there.
+        if c == self.delim && self.spans > 0 {
+            self.decoded_ends_backslash = false;
+            push_escaped_char(sink, c, ensure_ascii);
+            return false;
+        }
         if c == self.delim {
             return true;
         }
+        // The span's own loop-top arms (the push/pop/checkpoint trio),
+        // the `„`-push gate reading the backslash state BEFORE this char
+        // clears it. The machinery is the `'`-delimited strings' own:
+        // the lib's fast path (`_try_parse_simple_quoted_string`) is
+        // `"`-delimited ONLY -- a `"`-delimited body with no backslash
+        // and a clean follower closes through it without EVER running
+        // the slow-path span scan, so a `"`-delimited `„` pushes nothing
+        // here (the machine's span state stays 0, the close is the
+        // plain one, and the slow-path span shapes keep their
+        // documented divergences); a `'`-delimited string ALWAYS takes
+        // the slow path.
+        if c == '\u{201e}' && !self.decoded_ends_backslash {
+            if self.delim == '\'' {
+                self.spans += 1;
+                self.last_default_append = false;
+            } else {
+                self.last_default_append = true;
+            }
+        } else if c == '\u{201e}' {
+            // Hard on a backslash-ending value: the entry check fails,
+            // the `„` falls through to the default append.
+            self.last_default_append = true;
+        } else if c == '\u{201d}' && self.spans > 0 {
+            self.spans -= 1;
+            self.last_default_append = false;
+        } else if c == '"' && self.spans > 0 && self.last_default_append {
+            // THE CHECK-POINT POP (the scan's low-span `"` arm at the
+            // loop tail): the span pops, the `"` appends literally --
+            // and the pop arm's own literal append is NOT a
+            // default-append (the doubled-quote pop: a `"` hard on this
+            // one's heels does not pop again).
+            self.spans -= 1;
+            self.last_default_append = false;
+        } else {
+            // An ordinary char (a span-less `”` included): the default
+            // append.
+            self.last_default_append = true;
+        }
+        self.decoded_ends_backslash = false;
         // A raw control char inside a string is the strict scanner's
         // rejection (json.loads fails on the whole input).
         push_escaped_char(sink, c, ensure_ascii);
@@ -685,6 +1044,15 @@ impl StrState {
         }
     }
 
+    /// `flush_high`'s raw-char twin for the repair-lane re-render's
+    /// value building: the same decision, the decoded char left raw
+    /// (the re-dump escapes it).
+    fn flush_high_raw(&mut self, value: &mut String) {
+        if self.high.take().is_some() {
+            value.push('\u{fffd}');
+        }
+    }
+
     /// One complete `\uXXXX` code unit: a surrogate pair combines; a lone
     /// high surrogate is HELD (its low half may arrive in a later chunk);
     /// everything else (and a lone low surrogate) is U+FFFD, the engine's
@@ -692,24 +1060,35 @@ impl StrState {
     /// string close renders U+FFFD too (`{"a": "\ud83d` ->
     /// `{"a": "\ufffd"}`, the engine's own heal).
     fn emit_code(&mut self, code: u16, sink: &mut String, ensure_ascii: bool) {
+        let mut decoded = String::new();
+        self.emit_code_raw(code, &mut decoded);
+        for ch in decoded.chars() {
+            push_escaped_char(sink, ch, ensure_ascii);
+        }
+    }
+
+    /// `emit_code`'s raw-char twin: the same hold-and-combine decision
+    /// tree, the decoded chars pushed unescaped into the value (the
+    /// re-dump escapes them).
+    fn emit_code_raw(&mut self, code: u16, value: &mut String) {
         if let Some(high) = self.high.take() {
             if (0xDC00..=0xDFFF).contains(&code) {
                 let combined =
                     0x10000 + ((u32::from(high) - 0xD800) << 10) + (u32::from(code) - 0xDC00);
                 if let Some(ch) = char::from_u32(combined) {
-                    push_escaped_char(sink, ch, ensure_ascii);
+                    value.push(ch);
                     return;
                 }
             }
             // Not the low half: flush the held surrogate as U+FFFD, then
             // place the fresh unit on its own merits (it may itself be a
             // high surrogate to hold).
-            push_escaped_char(sink, '\u{fffd}', ensure_ascii);
+            value.push('\u{fffd}');
         }
         match char::from_u32(u32::from(code)) {
-            Some(ch) => push_escaped_char(sink, ch, ensure_ascii),
+            Some(ch) => value.push(ch),
             None if (0xD800..=0xDBFF).contains(&code) => self.high = Some(code),
-            None => push_escaped_char(sink, '\u{fffd}', ensure_ascii),
+            None => value.push('\u{fffd}'),
         }
     }
 
@@ -727,6 +1106,13 @@ impl StrState {
             Esc::U(hex) => {
                 push_escaped_char(sink, '\\', ensure_ascii);
                 push_escaped_char(sink, 'u', ensure_ascii);
+                for h in hex.chars() {
+                    push_escaped_char(sink, h, ensure_ascii);
+                }
+            }
+            Esc::X(hex) => {
+                push_escaped_char(sink, '\\', ensure_ascii);
+                push_escaped_char(sink, 'x', ensure_ascii);
                 for h in hex.chars() {
                     push_escaped_char(sink, h, ensure_ascii);
                 }
@@ -803,6 +1189,9 @@ impl StreamingRepairer {
             comment: None,
             top_clean: true,
             top_done: false,
+            top_led: false,
+            top_tail_token: false,
+            top_tail_ws_pending: false,
             ensure_ascii,
             finished: false,
             emitted: 0,
@@ -814,6 +1203,9 @@ impl StreamingRepairer {
             last_key_empty: false,
             garbage_run: false,
             paren_gate: None,
+            escape_marks: Vec::new(),
+            saw_paren: false,
+            repair_decided: false,
         }
     }
 
@@ -849,6 +1241,7 @@ impl StreamingRepairer {
             self.empty_pending = None;
             self.paren_gate = None;
             self.garbage_run = false;
+            self.escape_marks.clear();
             self.finished = true;
         }
         Ok(self.out.clone())
@@ -925,6 +1318,7 @@ impl StreamingRepairer {
                 if self.frames.last().is_some() {
                     self.drop_marked_member(pending.start);
                 } else if pending.start <= self.out.len() {
+                    self.repair_decided = true;
                     self.out.truncate(pending.start);
                     self.emitted = self.emitted.min(pending.start);
                     self.out.push(']');
@@ -951,6 +1345,7 @@ impl StreamingRepairer {
                 if self.frames.last().is_some() {
                     self.drop_marked_member(pending.start);
                 } else if pending.start <= self.out.len() {
+                    self.repair_decided = true;
                     self.out.truncate(pending.start);
                     self.emitted = self.emitted.min(pending.start);
                     self.out.push(']');
@@ -966,6 +1361,7 @@ impl StreamingRepairer {
                 if self.frames.last().is_some() {
                     self.drop_marked_member(pending.start);
                 } else if pending.start <= self.out.len() {
+                    self.repair_decided = true;
                     self.out.truncate(pending.start);
                     self.emitted = self.emitted.min(pending.start);
                     self.out.push(']');
@@ -1007,6 +1403,12 @@ impl StreamingRepairer {
                 self.out.clear();
                 self.emitted = 0;
                 self.top_clean = false;
+                // The `(` and its group were consumed at the top level:
+                // a later root container's char sits at `index != 0`.
+                self.top_led = true;
+                // The group's render is gone: any deferred-escape marks
+                // inside it died with the span.
+                self.escape_marks.clear();
                 return self.process(c);
             }
             None => {}
@@ -1047,6 +1449,7 @@ impl StreamingRepairer {
                 // Not a literal prefix (and the buffer is full): the
                 // `(` was prose.
                 self.top_clean = false;
+                self.top_led = true;
                 for b in buf.chars() {
                     self.process(b)?;
                 }
@@ -1057,6 +1460,7 @@ impl StreamingRepairer {
             // engine's inner-text prefix `buf + c` is no literal): the
             // `(` was prose; the buffered chars replay at the top level.
             self.top_clean = false;
+            self.top_led = true;
             for b in buf.chars() {
                 self.process(b)?;
             }
@@ -1131,9 +1535,44 @@ impl StreamingRepairer {
             // string state out of it.
             self.string_raw_tail = Some(c);
             let mut st = self.string.take().expect("checked above");
+            st.raw.push(c);
             let closed = st.feed(c, &mut self.out, self.ensure_ascii);
             if closed {
                 self.out.push('"');
+                // The deferred-escape check: a string whose raw source
+                // holds a repair-lane-divergent escape (`\f`, `\/`, an
+                // odd backslash run of three or more, a misescaped
+                // non-active delimiter) does not commit its
+                // rendering finally at its own close -- the rendering
+                // stays in `out` (the separators and containers after it
+                // build on it) but the mark holds the span and the raw
+                // source, and the close render resolves it (verbatim or
+                // re-rendered, see `render_closed`). The closing
+                // delimiter's own char pops off the raw source first
+                // (the plain path consumed it as the delimiter).
+                st.raw.pop();
+                let needs_mark = raw_source_needs_escape_repair(&st.raw, st.delim);
+                let strict_decodable = raw_source_is_strict_decodable(&st.raw);
+                if needs_mark {
+                    let start = self.last_string_start.expect("a closed string had a start");
+                    self.escape_marks.push(EscapeMark {
+                        start,
+                        end: self.out.len(),
+                        raw: std::mem::take(&mut st.raw),
+                        delim: st.delim,
+                        rendered: self.out[start..].to_string(),
+                    });
+                }
+                // A string whose raw source is not one strict-JSON-
+                // decodable body (an escape outside the strict set, a
+                // `\u` without four hex digits, a raw control char)
+                // failed the whole-input `json.loads` on the INPUT: the
+                // repair lane decided the document and re-normalized
+                // every string -- even where the machine's own decode
+                // repaired the escape into strict validity (`\x41`).
+                if !strict_decodable {
+                    self.repair_decided = true;
+                }
                 self.pos = if st.is_key {
                     // the key's own emptiness: the engine's key loop
                     // DISCARDS an empty-key attempt at anything but its
@@ -1170,26 +1609,81 @@ impl StreamingRepairer {
         if self.top_done {
             match c {
                 c if c.is_whitespace() => {
-                    // The strict scanner's whitespace set only: any
-                    // other Unicode whitespace failed `json.loads` (the
-                    // repair lane decides).
-                    if !matches!(c, ' ' | '\t' | '\n' | '\r') {}
+                    // The suffix-probe gate's trailing scan (the lib's
+                    // `_initial_container_has_non_comma_trailing_content`,
+                    // read from the root's closer): a NON-STRICT
+                    // whitespace char is a repair-lane input only when
+                    // the input can still END here -- the root's own char
+                    // opened the input (`index == 0`: no scroll ran, the
+                    // gate scans the tail) and no token sits behind the
+                    // root yet (the scan reads the FIRST char past the
+                    // whitespace). Otherwise the scan's decision char is
+                    // not this whitespace: a token behind the root fired
+                    // the probe already (`["\f"]\x0b x`), or the root's
+                    // char sat behind leading content (`index != 0`, the
+                    // probe fires whatever the tail holds -- the
+                    // leading-consumption arm). The arm DEFERS: the tail
+                    // (or the cut) settles it (see the arms below and
+                    // `render_closed`).
+                    if !matches!(c, ' ' | '\t' | '\n' | '\r')
+                        && !self.top_led
+                        && !self.top_tail_token
+                    {
+                        self.top_tail_ws_pending = true;
+                    }
+                }
+                ',' => {
+                    // The COMMA-FIRST tail: the gate's trailing scan reads
+                    // a `,` as the first char past the root's closer (the
+                    // whitespace skipped) and returns False -- no probe,
+                    // the whole-input loads died on the tail, the repair
+                    // lane decided (`["\f"] ,` -> `["\\f"]`). Behind
+                    // leading consumption (`x ["\f"] ,`) or an earlier
+                    // token (`["\f"] x ,`) the probe fired already: keep.
+                    if !self.top_led && !self.top_tail_token {
+                        self.repair_decided = true;
+                    }
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
                 }
                 '#' | '/' => {
                     // A comment (or any trailing token) after the root:
                     // the whole input was not one strict JSON value.
+                    // The gate's trailing scan reads the comment OPENER
+                    // as the decision char -- non-comma, the probe
+                    // fires (`["\f"]\x0b // c` keeps) -- and the
+                    // deferred whitespace arm above settles too.
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
                     match c {
                         '#' => self.comment = Some(self.hash_comment()),
                         _ => self.comment = Some(CommentState::Slash),
                     }
                 }
-                _ => {}
+                _ => {
+                    // Any other trailing token: the gate's decision char
+                    // (non-comma) fired the probe -- no taint here, the
+                    // root rendering's own strictness decides at the
+                    // close. The deferred whitespace arm settles: this
+                    // char, not the input's end, answered the scan.
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
+                }
             }
             return Ok(());
         }
         let clean = self.top_clean;
         match c {
-            c if c.is_whitespace() => if !matches!(c, ' ' | '\t' | '\n' | '\r') {},
+            c if c.is_whitespace() => {
+                // LEADING whitespace (strict or not): the engine's
+                // `scroll_whitespaces` consumed it before the first
+                // `parse_element`, so the root container's char sits at
+                // `index != 0` -- the suffix-probe gate's first arm fires
+                // WHATEVER the tail holds and the probe's own success is
+                // the root rendering's strictness (`render_closed`'s
+                // third arm). No taint here: `\x0b["\f"]` keeps.
+                self.top_led = true;
+            }
             '{' => self.open_container(FrameKind::Obj)?,
             '[' => self.open_container(FrameKind::Arr)?,
             // A leading `(` opens the tuple container only from a clean
@@ -1207,6 +1701,10 @@ impl StreamingRepairer {
                         is_key: false,
                         esc: Esc::None,
                         high: None,
+                        raw: String::new(),
+                        spans: 0,
+                        decoded_ends_backslash: false,
+                        last_default_append: false,
                     },
                     done: false,
                 });
@@ -1226,6 +1724,10 @@ impl StreamingRepairer {
             // Prose (or a second scalar after a provisional one): dropped.
             _ => {
                 self.top_clean = false;
+                // Consumed at the top level: the root container's char,
+                // when one follows, sits at `index != 0` (the probe
+                // gate's first arm).
+                self.top_led = true;
             }
         }
         Ok(())
@@ -1237,11 +1739,19 @@ impl StreamingRepairer {
     fn feed_structure(&mut self, c: char) -> Result<(), String> {
         match c {
             c if c.is_whitespace() => {
-                // The strict scanner's whitespace set only.
-                if !matches!(c, ' ' | '\t' | '\n' | '\r') {}
+                // The strict scanner's whitespace set only: any other
+                // Unicode whitespace failed `json.loads` (the repair
+                // lane decides).
+                if !matches!(c, ' ' | '\t' | '\n' | '\r') {
+                    self.repair_decided = true;
+                }
             }
             '#' | '/' => {
                 // Comments are a repair lane (json.loads fails on them).
+                // IN-CONTAINER only: a top-level comment sits behind the
+                // suffix probe, which keeps the root's own rendering
+                // verbatim.
+                self.repair_decided = true;
                 match c {
                     '#' => self.comment = Some(self.hash_comment()),
                     _ => self.comment = Some(CommentState::Slash),
@@ -1310,6 +1820,7 @@ impl StreamingRepairer {
                             self.drop_dangling_member();
                             return self.process(c);
                         }
+                        self.repair_decided = true;
                         self.out.push_str(": ");
                         self.pos = Pos::MemberValue;
                     }
@@ -1330,6 +1841,7 @@ impl StreamingRepairer {
                         || c == '['
                         || c == '(' =>
                     {
+                        self.repair_decided = true;
                         self.out.push_str(": ");
                         self.pos = Pos::MemberValue;
                         self.process(c)?;
@@ -1343,6 +1855,7 @@ impl StreamingRepairer {
                     // the member (the heal fires once); arrays and
                     // tuples heal nothing (`[1, }` -> `[1]`).
                     if self.pos == Pos::MemberValue && matches!(c, ']' | '}' | ')' | ',') {
+                        self.repair_decided = true;
                         self.out.push_str("\"\"");
                         self.pos = Pos::AfterValue;
                     }
@@ -1368,6 +1881,7 @@ impl StreamingRepairer {
                             // treats it as garbage.
                             self.note_comma();
                             self.garbage_run = true;
+                            self.repair_decided = true;
                         }
                         ',' => self.note_comma(),
                         // The member's separator already went out with
@@ -1396,6 +1910,10 @@ impl StreamingRepairer {
                         // key (the engine drops it: `{"a": 1 2}` ->
                         // `{"a": 1}`).
                         _ if obj => {
+                            // The missing comma: the strict grammar has
+                            // no member continuation -- the repair lane
+                            // decided the object.
+                            self.repair_decided = true;
                             if STRING_DELIMITERS.contains(&c) {
                                 self.begin_common();
                                 self.open_string(c, true);
@@ -1425,6 +1943,9 @@ impl StreamingRepairer {
                         // (a garbage char must not emit the deferred
                         // separator into an array it cannot close).
                         _ if Self::is_value_start(c) => {
+                            // The missing comma (the repair lane: the
+                            // strict grammar has no item continuation).
+                            self.repair_decided = true;
                             self.begin_common();
                             self.feed_structure_value(c)?;
                         }
@@ -1626,6 +2147,7 @@ impl StreamingRepairer {
                     // strips to NOTHING drops the pair whole (the
                     // engine's empty missing-quote key attempt:
                     // `{-\x0b\r:-` -> `{}`).
+                    self.repair_decided = true;
                     self.last_key_empty = false;
                     let stripped = text
                         .trim()
@@ -1668,6 +2190,7 @@ impl StreamingRepairer {
                                 .trim()
                                 .trim_start_matches(|ch: char| !ch.is_alphanumeric());
                             if !stripped.is_empty() {
+                                self.repair_decided = true;
                                 let rendered = serializer::dumps(
                                     &Value::Str(stripped.to_string()),
                                     self.ensure_ascii,
@@ -1694,7 +2217,14 @@ impl StreamingRepairer {
                     // The strict grammar's own spellings only: the
                     // case-insensitive literal family and every other
                     // word is the repair lane (a rewind-born word's
-                    // stray-sign drop included).
+                    // stray-sign drop included). The taint: a run the
+                    // strict parser cannot read as one token (`true`/
+                    // `false`/`null`/`NaN`/`Infinity`/`-Infinity` load;
+                    // `tru`, `None`, `-NaN`, a rewind-born run do not --
+                    // the whole-input loads died on the INPUT text).
+                    if loads_strict(text.trim()).is_err() {
+                        self.repair_decided = true;
+                    }
                     self.out
                         .push_str(&serializer::dumps(&value, self.ensure_ascii));
                     self.pos = Pos::AfterValue;
@@ -1771,10 +2301,12 @@ impl StreamingRepairer {
                         // A second run after a terminated scalar: the
                         // whole input is not one strict value: prose.
                         self.top_clean = false;
+                        self.top_led = true;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
+                self.top_led = true;
                 if c == '{' || c == '[' {
                     // Prose, then a container: the container wins.
                     return self.process(c);
@@ -1793,10 +2325,12 @@ impl StreamingRepairer {
                         self.pending = Some(Pending::TopWord { text, done: false });
                     } else {
                         self.top_clean = false;
+                        self.top_led = true;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
+                self.top_led = true;
                 if c == '{' || c == '[' {
                     return self.process(c);
                 }
@@ -1817,6 +2351,7 @@ impl StreamingRepairer {
                         return Ok(());
                     }
                     self.top_clean = false;
+                    self.top_led = true;
                     if c == '{' || c == '[' {
                         return self.process(c);
                     }
@@ -1935,6 +2470,7 @@ impl StreamingRepairer {
         if let Some(f) = self.frames.last_mut()
             && let Some(start) = f.member_start.take()
         {
+            self.repair_decided = true;
             if start <= self.out.len() {
                 self.out.truncate(start);
                 self.emitted = self.emitted.min(start);
@@ -1943,6 +2479,9 @@ impl StreamingRepairer {
             if let Some(p) = f.paren.as_mut() {
                 p.elems = p.elems.saturating_sub(1);
             }
+            // The rendering from `start` on is gone: deferred-escape
+            // marks inside it died with the span.
+            self.escape_marks.retain(|m| m.start < start);
         }
     }
 
@@ -1964,7 +2503,39 @@ impl StreamingRepairer {
         }
     }
 
+    /// The one-char drain sites (the empty-object fallback's `{`
+    /// removal, the grouping unwrap's `[` removal): every deferred span
+    /// at/after the removed char shifts left with it -- the strictly-
+    /// empty marks (`EmptyMark`), the armed decision (`EmptyPending`)
+    /// and the deferred-escape strings (`EscapeMark`) live in the same
+    /// buffer.
+    fn shift_deferred_spans(&mut self, pos: usize, delta: isize) {
+        for m in &mut self.empty_marks {
+            if m.start > pos {
+                m.start = (m.start as isize + delta) as usize;
+                m.end = (m.end as isize + delta) as usize;
+            }
+        }
+        if let Some(p) = &mut self.empty_pending
+            && p.start > pos
+        {
+            p.start = (p.start as isize + delta) as usize;
+            p.end = (p.end as isize + delta) as usize;
+        }
+        for m in &mut self.escape_marks {
+            if m.start > pos {
+                m.start = (m.start as isize + delta) as usize;
+                m.end = (m.end as isize + delta) as usize;
+            }
+        }
+    }
+
     fn open_string(&mut self, delim: char, is_key: bool) {
+        // A non-`"` delimiter normalizes (the repair lane: the strict
+        // grammar knows one delimiter).
+        if delim != '"' {
+            self.repair_decided = true;
+        }
         self.last_string_start = Some(self.out.len());
         self.string_raw_tail = None;
         self.out.push('"');
@@ -1979,6 +2550,10 @@ impl StreamingRepairer {
             is_key,
             esc: Esc::None,
             high: None,
+            raw: String::new(),
+            spans: 0,
+            decoded_ends_backslash: false,
+            last_default_append: false,
         });
     }
 
@@ -1999,6 +2574,11 @@ impl StreamingRepairer {
                 None
             }
             FrameKind::Paren => {
+                // The paren taint (sticky): the tuple grammar is never
+                // strict-valid, so both fast paths died -- the repair
+                // lane decided the whole parse and the deferred-escape
+                // strings re-render at close time.
+                self.saw_paren = true;
                 self.out.push('[');
                 self.pos = Pos::Value;
                 Some(ParenFrame {
@@ -2029,12 +2609,16 @@ impl StreamingRepairer {
         if let Some(f) = self.frames.last_mut()
             && let Some(start) = f.member_start.take()
         {
+            self.repair_decided = true;
             if start <= self.out.len() {
                 self.out.truncate(start);
                 self.emitted = self.emitted.min(start);
             }
             f.member_count = f.member_count.saturating_sub(1);
             self.pos = Pos::Key;
+            // The rendering from `start` on is gone: deferred-escape
+            // marks inside it died with the span.
+            self.escape_marks.retain(|m| m.start < start);
         }
         // The engine's continuation repair lane ran (json.loads never
         // leaves a dangling key).
@@ -2058,20 +2642,24 @@ impl StreamingRepairer {
             if closer == ']' {
                 // A garbage item the strictly-empty skip consumes: the
                 // group stays open and keeps parsing (a repair lane).
+                self.repair_decided = true;
                 return;
             }
             if closer == '}' {
+                self.repair_decided = true;
                 self.pop_frame();
                 return;
             }
         }
         let Some(idx) = self.frames.iter().rposition(|f| f.kind.matches(closer)) else {
             // A closer matching nothing is skipped as garbage.
+            self.repair_decided = true;
             return;
         };
         if self.frames.len() > idx + 1 {
             // The mismatched-closer close-up: levels between close
             // (the engine's whole-text re-decision shape).
+            self.repair_decided = true;
         }
         while self.frames.len() > idx + 1 {
             self.pop_frame();
@@ -2106,6 +2694,13 @@ impl StreamingRepairer {
         // 0) keeps them: the array's own body is strict-valid-shaped
         // and the fast paths decide in the element's favor.
         let closed_trailing = self.pos == Pos::Value && frame.member_count > 0;
+        // The pop's own repair verdict: a frame closing while a member
+        // was still due (a trailing separator: `[1, "\f",]`,
+        // `{"a": 1,}`) is never strict-valid -- the repair lane decided
+        // the array/object and its string re-normalization ran.
+        if frame.member_count > 0 && self.pos != Pos::AfterValue {
+            self.repair_decided = true;
+        }
         let popped = self.frames.len();
         for m in &mut self.empty_marks {
             if m.frame == popped && m.dropped.is_none() {
@@ -2126,22 +2721,14 @@ impl StreamingRepairer {
                     && frame.body_chars >= 1
                     && frame.body_nonspace >= 1
                 {
+                    // The empty-object fallback: the whole-text
+                    // classifier re-decided the body (the repair lane).
+                    self.repair_decided = true;
                     let pos = frame.brace_pos;
                     if pos < self.out.len() && self.out.as_bytes()[pos] == b'{' {
                         self.out.drain(pos..pos + 1);
                         self.emitted = self.emitted.min(pos);
-                        for m in &mut self.empty_marks {
-                            if m.start > pos {
-                                m.start -= 1;
-                                m.end -= 1;
-                            }
-                        }
-                        if let Some(p) = &mut self.empty_pending
-                            && p.start > pos
-                        {
-                            p.start -= 1;
-                            p.end -= 1;
-                        }
+                        self.shift_deferred_spans(pos, -1);
                     }
                     self.out.push_str("[]");
                 } else {
@@ -2179,24 +2766,15 @@ impl StreamingRepairer {
                         if pos < self.out.len() && self.out.as_bytes()[pos] == b'[' {
                             self.out.drain(pos..pos + 1);
                             self.emitted = self.emitted.min(pos);
-                            // The deferred empty-element marks live in
-                            // the same buffer: every span at/after the
-                            // removed bracket shifts left with it (a
-                            // span the bracket sat inside cannot exist —
-                            // a marked element's rendering is exactly
-                            // `[]`/`{}`/`""`, bracket-free).
-                            for m in &mut self.empty_marks {
-                                if m.start > pos {
-                                    m.start -= 1;
-                                    m.end -= 1;
-                                }
-                            }
-                            if let Some(p) = &mut self.empty_pending
-                                && p.start > pos
-                            {
-                                p.start -= 1;
-                                p.end -= 1;
-                            }
+                            // The deferred spans live in the same
+                            // buffer: every span at/after the removed
+                            // bracket shifts left with it (a span the
+                            // bracket sat inside cannot exist -- a
+                            // marked element's rendering is exactly
+                            // `[]`/`{}`/`""`, bracket-free, and a
+                            // deferred-escape string's rendering sits
+                            // wholly after the group's bracket).
+                            self.shift_deferred_spans(pos, -1);
                         }
                         // The unwrapped element's own shape decides the
                         // groupish-ness: a scalar/string render (`(1)`,
@@ -2312,6 +2890,7 @@ impl StreamingRepairer {
     /// `retract_in_flight_member`).
     fn drop_marked_member(&mut self, start: usize) {
         if let Some(f) = self.frames.last_mut() {
+            self.repair_decided = true;
             if start <= self.out.len() {
                 self.out.truncate(start);
                 self.emitted = self.emitted.min(start);
@@ -2321,6 +2900,9 @@ impl StreamingRepairer {
             if let Some(p) = &mut f.paren {
                 p.elems = p.elems.saturating_sub(1);
             }
+            // The rendering from `start` on is gone: deferred-escape
+            // marks inside it died with the span.
+            self.escape_marks.retain(|m| m.start < start);
         }
     }
 
@@ -2341,6 +2923,7 @@ impl StreamingRepairer {
             // -> `{"12": 1}`, `{.5: 1}` -> `{"5": 1}`). An attempt that
             // strips to NOTHING is the engine's empty missing-quote key
             // attempt: the pair drops whole (`{-: 1` -> `{}`).
+            self.repair_decided = true;
             let filtered: String = text
                 .chars()
                 .filter(|&c| c != '_')
@@ -2358,6 +2941,12 @@ impl StreamingRepairer {
             return;
         }
         let value = render_number_value(text);
+        // The value lane decided: a run that is not one strict number
+        // token (`1,000`, `01`, a rollback run the strict grammar cannot
+        // end) committed through the repair lane.
+        if loads_strict(text).is_err() {
+            self.repair_decided = true;
+        }
         // The stray-`...` drop: the run's value lanes made the exact
         // string `...` and the parse ended on the final dot — an array
         // item position ignores it whole (the engine's array lane; the
@@ -2376,6 +2965,94 @@ impl StreamingRepairer {
     /// quoted shut, the open containers closed. Pure (`snapshot`).
     fn render_closed(&self) -> String {
         let mut s = self.out.clone();
+        // The deferred-escape resolution (see `EscapeMark`): every held
+        // string's rendering is provisional until the lane that decides
+        // is known. The verdict is the fast paths' own: the render with
+        // the verbatim strings is one strict JSON value (the
+        // whole-input `json.loads` fast path and the repair parser's
+        // suffix probe keep it -- a complete document, trailing garbage
+        // after a valid root and comments behind a root included) and
+        // no paren opened anywhere (the tuple grammar is never
+        // strict-valid) -- the held spans stand verbatim. Anything else
+        // (the cut and drain classes, the paren taint, a repair-lane-
+        // decided complete document like `["\x41"]`, the deferred
+        // trailing-whitespace arm of the suffix-probe gate) re-renders
+        // each held raw source through the lib's escape normalization
+        // and re-dumps it canonically.
+        //
+        // The rebuild is ONE ASCENDING PASS over the marks: the spans
+        // are disjoint and armed in ascending order, so the final text
+        // is the verbatim segments BETWEEN the spans with each span's
+        // resolved rendering spliced in place -- built once, never
+        // re-written (a per-span in-place `replace_range` over a large
+        // `out` is quadratic in the mark count: every replacement
+        // memmoves the whole tail). The re-renders move every `out`
+        // coordinate at/after a replaced span's end; the prefix-summed
+        // deltas below re-base every coordinate this function reads
+        // (the cascade, the strictly-empty drains, the string
+        // bookkeeping) in O(log n) per read.
+        struct EscapeShifts {
+            /// The replaced spans' ends, ascending (the marks' own
+            /// order).
+            ends: Vec<usize>,
+            /// The cumulative length delta at each end (`delta[i]` sums
+            /// every replacement up to and including `ends[i]`).
+            cum: Vec<isize>,
+        }
+        impl EscapeShifts {
+            /// An `out` coordinate's position in the rebuilt text: every
+            /// replaced span at/after it moved the text behind it.
+            fn shift(&self, p: usize) -> usize {
+                let n = self.ends.partition_point(|&e| e <= p);
+                let total = if n == 0 { 0 } else { self.cum[n - 1] };
+                (p as isize + total).max(0) as usize
+            }
+        }
+        let mut shifts = EscapeShifts {
+            ends: Vec::new(),
+            cum: Vec::new(),
+        };
+        if !self.escape_marks.is_empty()
+            && (self.saw_paren
+                || self.repair_decided
+                || self.top_tail_ws_pending
+                || loads_strict(&s).is_err())
+        {
+            let mut rebuilt = String::with_capacity(s.len() + self.escape_marks.len());
+            let mut cursor = 0usize;
+            let mut acc: isize = 0;
+            for mark in &self.escape_marks {
+                if mark.end > s.len() || mark.start >= mark.end {
+                    continue;
+                }
+                // The drain guard: the span must still hold the
+                // rendering it armed with (a mid-stream retract took the
+                // string whole with its member).
+                if self.out.get(mark.start..mark.end) != Some(mark.rendered.as_str()) {
+                    continue;
+                }
+                let replacement =
+                    render_repair_lane_string(&mark.raw, mark.delim, self.ensure_ascii);
+                if replacement == mark.rendered {
+                    continue;
+                }
+                // Splice: the verbatim segment up to the span, then the
+                // span's resolved rendering. The segments between marks
+                // are copied exactly once.
+                let from = cursor.min(mark.start);
+                rebuilt.push_str(&self.out[from..mark.start]);
+                rebuilt.push_str(&replacement);
+                acc += replacement.len() as isize - (mark.end - mark.start) as isize;
+                shifts.ends.push(mark.end);
+                shifts.cum.push(acc);
+                cursor = mark.end;
+            }
+            rebuilt.push_str(&self.out[cursor.min(self.out.len())..]);
+            s = rebuilt;
+        }
+        // Every coordinate below is an `out` coordinate; the re-renders
+        // moved the text at/after each resolved span's end.
+        let shift = |p: usize| shifts.shift(p);
         // The top-level `(`'s gate still undecided at the close (the
         // input ended inside the first inner token): the engine's
         // can_start_value read the lowercased inner-text prefix -- a
@@ -2419,7 +3096,7 @@ impl StreamingRepairer {
             _ => None,
         };
         let mut dangling_dropped = false;
-        if let Some(start) = dangling
+        if let Some(start) = dangling.map(shift)
             && start <= s.len()
         {
             s.truncate(start);
@@ -2550,8 +3227,36 @@ impl StreamingRepairer {
         if let Some(st) = &self.string
             && !suppress_open_string
         {
-            st.render_tail(&mut s, self.ensure_ascii);
-            s.push('"');
+            // The open string's in-flight content at the cut: when its
+            // raw source holds a repair-lane-divergent escape the cut's
+            // repair lane re-normalizes it exactly like a closed
+            // string's mark (the cut class always decides: a truncated
+            // document never strict-loads), then the unterminated-
+            // string finalize rstrips the DECODED value (`["\f` ->
+            // `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "\f\n` ->
+            // `{"k": "\\f"}`). The streaming decode's own bytes (the
+            // canonical form already emitted behind the opening quote)
+            // are provisional exactly as a mark's rendering is: the
+            // span is replaced by the re-render. A clean tail renders
+            // through the escape-tail path as before (the streaming
+            // decode's own bytes, the rstrip in
+            // `strip_trailing_newline_tail`).
+            if raw_source_needs_escape_repair(&st.raw, st.delim) {
+                let qs = self.last_string_start.map(shift);
+                if let Some(qs) = qs
+                    && qs <= s.len()
+                {
+                    s.truncate(qs);
+                }
+                s.push_str(&render_open_string_repair_lane(
+                    &st.raw,
+                    st.delim,
+                    self.ensure_ascii,
+                ));
+            } else {
+                st.render_tail(&mut s, self.ensure_ascii);
+                s.push('"');
+            }
         }
         // The escape-tail heal: a string rendering that ends the stream
         // with a trailing newline-run loses it (the engine's own heal:
@@ -2561,7 +3266,7 @@ impl StreamingRepairer {
         // consumed close quote goes straight back; the cascade may still
         // retract the member whole.
         if !self.frames.is_empty()
-            && let Some(qs) = self.last_string_start
+            && let Some(qs) = self.last_string_start.map(shift)
             && strip_trailing_newline_tail(&mut s, qs + 1, self.string.is_some())
         {
             s.push('"');
@@ -2582,6 +3287,7 @@ impl StreamingRepairer {
                 .is_some_and(|f| f.member_start.is_some())
             && self
                 .last_string_start
+                .map(shift)
                 .is_some_and(|qs| s.get(qs..).is_some_and(|rendered| rendered == "\"...\""))
             // The rendered element IS the engine's parsed value here: the
             // same classification (the raw `get(-1)` look, the array
@@ -2606,14 +3312,19 @@ impl StreamingRepairer {
             .iter()
             .map(|f| FrameInfo {
                 kind: f.kind,
-                brace_pos: f.brace_pos,
+                brace_pos: shift(f.brace_pos),
                 body_chars: f.body_chars,
                 body_nonspace: f.body_nonspace,
                 member_begun: f.member_begun,
                 body_colon: f.body_colon,
                 member_count: f.member_count,
-                member_start: f.member_start,
-                paren: f.paren,
+                member_start: f.member_start.map(shift),
+                paren: f.paren.map(|p| ParenFrame {
+                    brace_pos: shift(p.brace_pos),
+                    elems: p.elems,
+                    comma_seen: p.comma_seen,
+                    elem_groupish: p.elem_groupish,
+                }),
             })
             .collect();
         if let Some(idx) = appended_word_frame
@@ -2655,13 +3366,24 @@ impl StreamingRepairer {
         // separator goes with the drop.
         {
             let pending_mark = self.empty_pending.as_ref().map(|p| EmptyMark {
-                start: p.start,
-                end: p.end,
+                start: shift(p.start),
+                end: shift(p.end),
                 was_first: p.was_first,
                 frame: p.frame,
                 dropped: Some(true), // the element was pending at the cut
             });
-            for mark in pending_mark.iter().chain(self.empty_marks.iter().rev()) {
+            let empty_marks: Vec<EmptyMark> = self
+                .empty_marks
+                .iter()
+                .map(|m| EmptyMark {
+                    start: shift(m.start),
+                    end: shift(m.end),
+                    was_first: m.was_first,
+                    frame: m.frame,
+                    dropped: m.dropped,
+                })
+                .collect();
+            for mark in pending_mark.iter().chain(empty_marks.iter().rev()) {
                 let (start, end) = (mark.start, mark.end);
                 if end > s.len() || start >= end {
                     continue;
@@ -2823,6 +3545,431 @@ impl StreamingRepairer {
     }
 }
 
+/// Does this closed string's raw source hold an escape the repair lane's
+/// normalization (`parse_string.py`'s `_normalize_escape_sequence`)
+/// decides differently from the machine's streaming decode? Exactly
+/// three classes:
+///
+/// - a `\f` or `\/` escape (an ODD backslash run followed by `f` or
+///   `/`): the two escapes the repair lane does not accept -- the
+///   backslash stays a literal character in the value and the re-dump
+///   re-escapes it -- where the streaming decode emitted the canonical
+///   form;
+/// - an odd backslash run of three or more: the lib's run scan
+///   collapses it to ONE literal backslash with the char after the run
+///   ordinary, where the streaming decode pairs the run's backslashes
+///   and decodes (or rejects) the escape the tail forms;
+/// - a backslash before a delimiter that is not the string's own (or
+///   the smart-`„`): the lib strips that escape, the streaming decode
+///   keeps both chars literally.
+///
+/// An even backslash run halves identically on both sides and never
+/// triggers (`\\f` is parity in both lanes); every accepted escape
+/// (`t`, `n`, `r`, `b`, the string's own delimiter, `u` with four hex
+/// digits, `x` with two -- the streaming decode's own table) decodes
+/// identically and never triggers. The walk is run-aware, not a
+/// substring scan: `\\f`'s `f` is ordinary content to the lib, not an
+/// escape.
+fn raw_source_needs_escape_repair(raw: &str, delim: char) -> bool {
+    if !raw.contains('\\') {
+        return false;
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    while i < n {
+        if chars[i] != '\\' {
+            i += 1;
+            continue;
+        }
+        let mut run = 0usize;
+        while i + run < n && chars[i + run] == '\\' {
+            run += 1;
+        }
+        // A closed string's raw source cannot end on an unescaped
+        // backslash (the escape state would have consumed the closing
+        // delimiter as content); a dangling run is treated as the
+        // collapse class, defensively.
+        let Some(&e) = chars.get(i + run) else {
+            return true;
+        };
+        if run % 2 == 1
+            && (e == 'f'
+                || e == '/'
+                || e == '\u{201e}'
+                || (STRING_DELIMITERS.contains(&e) && e != delim)
+                || run >= 3)
+        {
+            return true;
+        }
+        // The held partial escape (Class D): a `u`/`x` escape without
+        // its full hex tail -- the shape `["\ud83d\u` holds at the cut.
+        // The streaming decode's tail DROPS the held partial (the
+        // stream rendered `["\ufffd"]` where the engine keeps the
+        // literal `\u` after the flushed U+FFFD); the repair lane's
+        // walk keeps the backslash literal with the escape char
+        // ordinary -- the engine's own observable.
+        if run == 1
+            && (e == 'u' || e == 'x')
+            && !chars
+                .get(i + 2..i + 2 + if e == 'u' { 4 } else { 2 })
+                .is_some_and(|hex| {
+                    hex.len() == if e == 'u' { 4 } else { 2 }
+                        && hex.iter().all(|h| h.is_ascii_hexdigit())
+                })
+        {
+            return true;
+        }
+        i += run + 1;
+    }
+    false
+}
+
+/// Is this closed string's raw source one strict-JSON-decodable body
+/// (the `json.loads` string grammar)? Every escape in the strict set
+/// (`"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, `u` with exactly four hex
+/// digits) and no raw control char. Anything else failed the whole-
+/// input `json.loads` fast path ON THE INPUT TEXT -- the repair lane
+/// decided the document and re-normalized every string -- even where
+/// the machine's own decode repaired the escape into strict validity
+/// (`\x41` decodes to `A`, a raw form feed is whitespace to the
+/// machine's skipper): the machine's rendered text loading tells
+/// nothing about the input's lane, so the verdict rides the raw
+/// source. Used for the `repair_decided` taint, not for the mark
+/// trigger (a strict-decodable `\f` escape can still need the mark).
+fn raw_source_is_strict_decodable(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        // A raw control char: CPython's "Invalid control character".
+        if c < ' ' {
+            return false;
+        }
+        if c != '\\' {
+            i += 1;
+            continue;
+        }
+        let Some(&e) = chars.get(i + 1) else {
+            return false; // a trailing backslash: never decodable
+        };
+        match e {
+            '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => i += 2,
+            'u' => {
+                let hex: Vec<char> = chars.get(i + 2..i + 6).unwrap_or(&[]).to_vec();
+                if hex.len() == 4 && hex.iter().all(|h| h.is_ascii_hexdigit()) {
+                    i += 6;
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The repair lane's escape normalization over one held string's raw
+/// source (`parse_string.py`'s `_normalize_escape_sequence`, mirrored
+/// exactly), as the machine's canonical QUOTED rendering -- the CLOSED
+/// string's rendering (the deferred-escape mark's resolution): the
+/// accepted set is the string's own delimiter, `t`/`n`/
+/// `r`/`b`, the backslash run's own collapse, and `u`/`x` followed by
+/// the right number of hex digits; `f` and `/` are NOT accepted (the
+/// backslash stays a literal character in the value and the re-dump
+/// re-escapes it); `u`/`x` without the right hex tail leave the
+/// backslash literal with the escape char re-parsed as ordinary
+/// content; a delimiter that should not be escaped loses its backslash.
+/// The run rules: an even run halves (`run_length % 2`), an odd run of
+/// three or more collapses to ONE literal backslash with the char after
+/// the run ordinary -- the char the run's own delimiter takes the
+/// collapsed backslash INTO the value (the lib's trailing-run while
+/// loop, the escaped-delimiter decode), consumed with the run -- a
+/// single backslash forms the escape with the char after it.
+/// The output is the machine's canonical re-dump of the decoded value:
+/// the same `push_escaped_char` table `dumps` uses, the surrogate
+/// hold-and-combine semantics included (a valid pair decodes exactly, a
+/// stranded high surrogate flushes U+FFFD, the machine's documented
+/// lone-surrogate divergence).
+fn render_repair_lane_string(raw: &str, delim: char, ensure_ascii: bool) -> String {
+    let mut value = repair_lane_value(raw, delim);
+    // The lib's own finalize (`_finalize_string_result`): a CLOSED
+    // string whose decoded value ends on a newline loses ALL its
+    // trailing whitespace.
+    if value.ends_with('\n') {
+        let keep = value.trim_end_matches(is_py_whitespace).len();
+        value.truncate(keep);
+    }
+    serializer::dumps(&Value::Str(value), ensure_ascii)
+}
+
+/// The repair-lane rendering of an OPEN string's in-flight content at
+/// the cut: the SAME escape walk as the closed string's
+/// (`repair_lane_value`), finalized by the engine's UNTERMINATED-string
+/// heal -- the decoded value rstrips UNCONDITIONALLY (Python's
+/// whitespace set), the closed string's newline-gated finalize does
+/// not. The cut's repair lane always decides (a truncated document
+/// never strict-loads), so the open string's divergent escapes resolve
+/// here exactly like the closed string's do at the mark (`["\f` ->
+/// `["\\f"]`, `["\/` -> `["\\/"]`, `{"k": "x\n\f` -> `{"k": "x\n\\f"}`:
+/// the rstrip is the TAIL's, the mid-string newline-escape stands).
+fn render_open_string_repair_lane(raw: &str, delim: char, ensure_ascii: bool) -> String {
+    let mut value = repair_lane_value(raw, delim);
+    let keep = value.trim_end_matches(is_py_whitespace).len();
+    value.truncate(keep);
+    serializer::dumps(&Value::Str(value), ensure_ascii)
+}
+
+/// The shared escape walk (`_normalize_escape_sequence` mirrored): the
+/// DECODED VALUE of one string's raw source, the operand both renders
+/// finalize. A dangling backslash run at the end of the raw source (the
+/// OPEN string's cut shape: `["\`, `["\\\`) is a literal character --
+/// run==1 one literal backslash (`["\` -> `["\\"]`, the engine's own
+/// observable), an odd run of three or more the same collapse as
+/// anywhere (one literal backslash, `["\\\` -> `["\\"]`).
+///
+/// The walk also tracks the lib's LOW SMART-QUOTE SPAN
+/// (`parse_string.py`'s `_push_low_smart_quote_span` /
+/// `_pop_low_smart_quote_span`, the `rstring_delimiter` stack gaining
+/// the `"\0` sentinel): an ORDINARY `„` -- one the scan meets at its
+/// loop top, so never the escape char of a pending backslash, and not
+/// hard on a backslash-ending value (the halved even run's own `\`: the
+/// entry check `string_acc[-1] != "\\"`) -- pushes one; an ordinary `”`
+/// pops one (the scan's low-span `”` arm); a `\` + `"` escape pops one
+/// (`_normalize_escape_sequence`'s low-span arm, which tests the
+/// LITERAL `"` whatever the string's own delimiter is); and a CHECK-
+/// POINT `"` pops one -- the scan's low-span `"` arm at the loop TAIL
+/// (`parse_string.py` ~873), which examines the char AFTER a
+/// default-appended one: a `"` whose predecessor took the DEFAULT-
+/// APPEND path (ordinary content, or a span-less `”`, or a `„` hard on
+/// a backslash-ending value) pops the span and appends literally,
+/// while a `"` whose predecessor took any other arm (the `„` push, the
+/// `”` pop, an escape decode, the run-scan branch, a popped-`"`'s own
+/// literal append) is the loop-top CURRENT char and appends itself
+/// without popping. `„` is the only
+/// pusher -- no other STRING_DELIMITERS member pushes (`'`/`“`/`”` as
+/// content are ordinary chars, `”` only pops) -- so the re-decision the
+/// span buys is `„`-only. And the re-decision is exactly one: with the
+/// sentinel active, the odd-run collapse's trailing-run while loop can
+/// no longer take the string's own delimiter INTO the value (the
+/// sentinel matches nothing), so the collapsed backslash STANDS and the
+/// delimiter joins it as content (the scan's low-span `"` arm appends
+/// it literally) -- `["e„\\\"` -> the value `e„\"`, where the plain
+/// content drops it (`["e\\\"` -> the value `e"`). (The lib's odd-run
+/// arm was dead code for closed strings -- a closed string's raw never
+/// ends on the run's own delimiter without more content after -- so
+/// this re-decision is observable only through the open-string drain.)
+fn repair_lane_value(raw: &str, delim: char) -> String {
+    // The decoded value, through the machine's own surrogate carrier:
+    // the u/x decode holds a high surrogate for its low half, combines
+    // a valid pair, flushes a stranded one U+FFFD (`emit_code`'s tree
+    // with the decoded chars left raw; the re-dump below escapes them).
+    let mut value = String::new();
+    let mut st = StrState {
+        delim,
+        is_key: false,
+        esc: Esc::None,
+        high: None,
+        raw: String::new(),
+        spans: 0,
+        decoded_ends_backslash: false,
+        last_default_append: false,
+    };
+    let mut low_smart_quote_spans: usize = 0;
+    // Whether the char just consumed took the lib's DEFAULT-APPEND path
+    // (`_scan_string_body`'s tail: the char appended at the loop body's
+    // end, the post-checks fallen through). The check-point `"`'s
+    // low-span pop reads it: a `"` whose PREDECESSOR was default-
+    // appended pops the span (parse_string.py's second pop arm, the
+    // scan's low-span `"` check running on the char AFTER the appended
+    // one); a `"` whose predecessor took any other arm does not -- it
+    // is the loop-top CURRENT char there (a `„` push, a `”` pop, an
+    // escape decode, the run-scan branch, a popped-`"`'s own literal
+    // append) and appends itself without popping.
+    let mut last_default_append = false;
+    let chars: Vec<char> = raw.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        if c != '\\' {
+            st.flush_high_raw(&mut value);
+            if c == '\u{201e}' && !value.ends_with('\\') {
+                // The push arm (`_append_literal_char` + continue):
+                // never the default-append.
+                low_smart_quote_spans += 1;
+                last_default_append = false;
+            } else if c == '\u{201e}' {
+                // Hard on a backslash-ending value: the entry check
+                // (`string_acc[-1] != "\\"`) fails, the `„` falls
+                // through to the default append.
+                last_default_append = true;
+            } else if c == '\u{201d}' && low_smart_quote_spans > 0 {
+                // The pop arm: literal append + continue.
+                low_smart_quote_spans -= 1;
+                last_default_append = false;
+            } else if c == '"' && low_smart_quote_spans > 0 && last_default_append {
+                // THE CHECK-POINT POP (the scan's low-span `"` arm at
+                // the loop tail): the span pops and the `"` appends
+                // literally -- the arm's own `_append_literal_char` +
+                // continue is NOT a default-append, so a `"` hard on
+                // this one's heels is the loop-top current char and
+                // does not pop again (the doubled-quote pop).
+                low_smart_quote_spans -= 1;
+                last_default_append = false;
+            } else {
+                // An ordinary char (a span-less `”` included): the
+                // default append.
+                last_default_append = true;
+            }
+            value.push(c);
+            i += 1;
+            continue;
+        }
+        let mut run = 0usize;
+        while i + run < n && chars[i + run] == '\\' {
+            run += 1;
+        }
+        let next = chars.get(i + run).copied();
+        if run.is_multiple_of(2) && next != Some(delim) {
+            // The even run halves; the char after it is ordinary content.
+            st.flush_high_raw(&mut value);
+            for _ in 0..run / 2 {
+                value.push('\\');
+            }
+            // The run-scan branch consumed the run (the halving
+            // arm's `continue`): the char after it re-enters at the
+            // loop top, never through the default-append's post-checks.
+            last_default_append = false;
+            i += run;
+            continue;
+        }
+        if run >= 3 {
+            // The odd-run collapse: one literal backslash, the char
+            // after the run ordinary -- EXCEPT a delimiter right after
+            // the run: the lib's trailing-run while loop takes the
+            // delimiter INTO the value (the collapsed backslash becomes
+            // the escaped-delimiter decode, `\\\"` -> `"`), consumed
+            // with the run (an even run followed by the string's own
+            // delimiter cannot occur in a closed string's raw source:
+            // the streaming decode would have closed the string there;
+            // an open string's raw source has no trailing delimiter).
+            // INSIDE a low smart-quote span the sentinel is the active
+            // delimiter, so the while loop cannot take the delimiter in:
+            // the collapsed backslash STANDS and the delimiter joins it
+            // as content (the scan's low-span `"` arm appends it
+            // literally, the span staying active) -- the engine's
+            // smart-`„` re-decision (`["e„\\\"` -> the value `e„\"`,
+            // `["e\\\"` -> the value `e"`).
+            st.flush_high_raw(&mut value);
+            if next == Some(delim) {
+                if low_smart_quote_spans > 0 {
+                    // The span-active join: the delimiter is the
+                    // loop-top current char (the sentinel refused the
+                    // decode's while loop) and default-appends as
+                    // content.
+                    value.push('\\');
+                    last_default_append = true;
+                } else {
+                    // The decode took the delimiter in (the
+                    // escaped-delimiter decode consumed it with the
+                    // run).
+                    last_default_append = false;
+                }
+                value.push(delim);
+                i += run + 1;
+            } else {
+                value.push('\\');
+                // The collapse leaves the char after the run to re-enter
+                // at the loop top (the run-scan branch's returned
+                // next_char).
+                last_default_append = false;
+                i += run;
+            }
+            continue;
+        }
+        // run == 1: the escape char decides.
+        let Some(e) = next else {
+            // The cut's dangling backslash: a literal character.
+            st.flush_high_raw(&mut value);
+            value.push('\\');
+            break;
+        };
+        if e == '"' && low_smart_quote_spans > 0 {
+            // The low-span arm of `_normalize_escape_sequence`: a `\`+`"`
+            // escape inside the span pops it (the value keeps just the
+            // `"`, the arms below already spell it that way whatever the
+            // string's own delimiter is; the arm tests the LITERAL `"`
+            // because the span's machinery is quote-shaped, not
+            // delimiter-shaped).
+            low_smart_quote_spans -= 1;
+        }
+        match e {
+            _ if e == delim || e == 't' || e == 'n' || e == 'r' || e == 'b' => {
+                st.flush_high_raw(&mut value);
+                let decoded = match e {
+                    't' => '\t',
+                    'n' => '\n',
+                    'r' => '\r',
+                    'b' => '\u{8}',
+                    other => other, // the delimiter escape
+                };
+                value.push(decoded);
+                // The escape decode consumed the escape char (`continue`
+                // at the normalize call): the char after it re-enters at
+                // the loop top.
+                last_default_append = false;
+                i += 2;
+            }
+            'u' | 'x' => {
+                let num = if e == 'u' { 4 } else { 2 };
+                let hex: String = chars
+                    .get(i + 2..i + 2 + num)
+                    .unwrap_or(&[])
+                    .iter()
+                    .collect();
+                if hex.chars().count() == num && hex.chars().all(|h| h.is_ascii_hexdigit()) {
+                    let code = u16::from_str_radix(&hex, 16).unwrap_or(0xFFFD);
+                    st.emit_code_raw(code, &mut value);
+                    last_default_append = false;
+                    i += 2 + num;
+                } else {
+                    // Not accepted: the backslash stays literal and the
+                    // escape char re-parses as ordinary content -- the
+                    // lib's post-checks ran on it and fell through, so
+                    // its own re-parse at the loop top IS the default
+                    // append (the plain arm below sets the flag).
+                    st.flush_high_raw(&mut value);
+                    value.push('\\');
+                    i += 1;
+                }
+            }
+            _ if e == '\u{201e}' || STRING_DELIMITERS.contains(&e) => {
+                // A delimiter escape that should not be escaped loses
+                // the backslash (the lib's smart-`„` arm; the string's
+                // own delimiter was the accepted arm above).
+                st.flush_high_raw(&mut value);
+                value.push(e);
+                last_default_append = false;
+                i += 2;
+            }
+            _ => {
+                // Everything else: the backslash is literal text, the
+                // escape char ordinary content (its own re-parse sets
+                // the flag, as above).
+                st.flush_high_raw(&mut value);
+                value.push('\\');
+                i += 1;
+            }
+        }
+    }
+    // A held high surrogate stranded by the end of the raw source
+    // flushes U+FFFD (the machine's own heal; the escape state is never
+    // set here -- the walker consumes whole escapes in one step).
+    st.flush_high_raw(&mut value);
+    value
+}
+
 /// parse_number's trailing-rollback: one trailing char that cannot end a
 /// number (`-`, `e`, `E`, `/`, `,`, `+`) pops back off; the caller
 /// reprocesses it structurally.
@@ -2845,11 +3992,13 @@ fn pop_trailing_number_char(run: &mut String) -> Option<char> {
 ///   rendered forms (a raw space, the `\t`/`\n`/`\r`/`\f` escapes, the
 ///   6-byte `\u000b`), backspace included in nothing (`{"k": "a b ` ->
 ///   `{"k": "a b"}`, `{"k": "  ` -> `{"k": ""}`),
-/// - a CLOSED string: only a trailing NEWLINE-run (a `\n` required, a
-///   `\r` only directly before a `\n`) plus the plain spaces that
-///   preceded it, the run adjacent to the close (`{"k": "a\n"` ->
-///   `{"k": "a"}`, `{"k": "a \n"` -> `{"k": "a"}`, while `{"k": "a\n "`
-///   and `{"k": "a\r"` and `{"k": "a\n\t"` keep their content).
+/// - a CLOSED string: the lib's own finalize
+///   (`_finalize_string_result`): the decoded value ending on a
+///   NEWLINE rstrips ALL its trailing whitespace, the same rendered
+///   forms (`{"k": "a\n"` -> `{"k": "a"}`, `{"k": "a\t\n"` ->
+///   `{"k": "a"}`, `{"k": "a\r\n"` -> `{"k": "a"}`); any other tail
+///   keeps (`{"k": "a\n\t"` keeps the tab, `{"k": "a\n "` the space,
+///   `{"k": "a\r"` the carriage return).
 ///
 /// An escaped backslash before a 2-byte escape blocks it (a literal
 /// backslash-n content, `{"k": "a\\n"`, is not a newline at all).
@@ -2861,8 +4010,15 @@ fn strip_trailing_newline_tail(s: &mut String, lower: usize, open_ended: bool) -
         i -= 1;
         quote = true;
     }
+    // Does the rendered tail end on the `\n` escape (an escaped
+    // backslash before it is literal content, not a newline)?
+    let ends_nl =
+        i >= lower + 2 && b[i - 2] == b'\\' && b[i - 1] == b'n' && (i < 3 || b[i - 3] != b'\\');
     let mut any = false;
-    if open_ended {
+    if open_ended || ends_nl {
+        // The rendered-form rstrip: Python's whitespace set, one tail
+        // piece at a time (a raw space, the \t/\n/\r/\f escapes, the
+        // 6-byte \uXXXX escapes whose code point isspace()s).
         loop {
             if i > lower && b[i - 1] == b' ' {
                 i -= 1;
@@ -2897,26 +4053,6 @@ fn strip_trailing_newline_tail(s: &mut String, lower: usize, open_ended: bool) -
                 }
             } else {
                 break;
-            }
-        }
-    } else {
-        while i >= lower + 2
-            && b[i - 2] == b'\\'
-            && b[i - 1] == b'n'
-            && (i < 3 || b[i - 3] != b'\\')
-        {
-            i -= 2;
-            any = true;
-            // a \r directly before the consumed \n joins the run
-            if i >= lower + 2
-                && b[i - 2] == b'\\'
-                && b[i - 1] == b'r'
-                && (i < 3 || b[i - 3] != b'\\')
-            {
-                i -= 2;
-            }
-            while i > lower && b[i - 1] == b' ' {
-                i -= 1;
             }
         }
     }
@@ -3378,6 +4514,89 @@ mod tests {
             "[\"\\u2000",
             "[\"\\u2000\\u2000",
             "{\"k\": \"\\u2000",
+        ] {
+            let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
+                .expect("engine repair succeeds");
+            let engine = serializer::dumps(&value, true);
+            for chunk in [1, 2, 3, 7, usize::MAX] {
+                assert_eq!(
+                    streamed(text, chunk),
+                    engine,
+                    "streamed({chunk}) != engine for {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_deferred_escape_strings_resolve_at_end() {
+        // The weekly-fuzz crash class: a closed string whose raw source
+        // holds `\f` or `\/` (the two escapes the repair lane does not
+        // accept), an odd backslash run of three or more, or a `\x`,
+        // resolves at close time -- the strict lanes keep the verbatim
+        // rendering (a complete document, trailing garbage after a valid
+        // root included), the repair lane (a cut root, a paren anywhere,
+        // a repair-lane-decided complete document) re-renders the raw
+        // source through the lib's escape normalization. The distinction
+        // survives every separator: `["\f", 1` escapes while
+        // `["\f", 1]` keeps.
+        for text in [
+            // the cut family (the crash artifact's class): the repair
+            // lane re-escapes
+            "[\"\\f%\"",
+            "[\"\\f\", 1",
+            "[\"\\f\"",
+            "{\"\\f\\/%\": 1",
+            "[[ \"\\f\"]",
+            "[\"\\/%\"",
+            "[\"\\f\\/%\", 1",
+            "{\"k\": \"a\\/b\"",
+            "[{\"k\": \"\\f\"}, 1",
+            "{\"\\f\": 1",
+            "[\"a\\fb\"",
+            "[\"\\t\\f\"",
+            "[\"\\f\\t\"",
+            "[\"\\/\\f\"",
+            "[\"a\\/b\"",
+            // the odd-run collapse (the lib's run scan): the same class
+            "[\"\\\\\\f\"",
+            "[\"\\\\\\f\", 1",
+            "[\"\\\\\\t\"",
+            "[\"\\\\\\t\", 1",
+            "[\"\\\\\\u0046\"",
+            // the x-escape class: the streaming decode's own table
+            // carries the repair lane's x-acceptance (`\x41` decodes,
+            // `\x%` stays literal) -- parity without a mark
+            "[\"\\x%\"",
+            "[\"\\x41\"",
+            "[\"\\x41\", 1",
+            // the strictly-empty-dropping array composition: the marks
+            // shift with the empty-element drain
+            "[[] , \"\\f\", 1",
+            "[1, [] , \"\\f\"",
+            // the paren taint: the repair lane decided the complete
+            // document too
+            "(\"\\f\")",
+            "(\"\\f\", 1)",
+            "[(\"\\f\", 1)]",
+            // the repair-lane-decided complete document (the whole-input
+            // loads fails on the bare word)
+            "[tru, \"\\f\"]",
+            "[tru, \"\\f\"] x",
+            // the valid keeps: the strict lanes decided, verbatim
+            "[\"\\f\"]",
+            "[\"\\f%\"]",
+            "{\"\\f\\/%\": 1}",
+            "[\"\\f\"]x",
+            "[\"\\f\"] // x",
+            "[\"\\f\", \"\\/\"]",
+            "[1, \"\\f\"]",
+            "{\"a\": [\"\\f\"], \"b\": 1}",
+            "[[\"\\f\"], [\"\\/\"]]",
+            "[\"\\\\f\"]",
+            "[\"\\\\\\t\"]",
+            "[\"\\\\f\"",
+            "{\"k\": \"a\\f\\n\"",
         ] {
             let (value, _) = super::super::repair(text, &super::super::RepairConfig::default())
                 .expect("engine repair succeeds");
