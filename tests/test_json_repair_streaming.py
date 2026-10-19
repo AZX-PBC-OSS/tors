@@ -109,6 +109,17 @@ VALID = [
     '{"a": ["" , 1]} x',
     '[true, [] , 1] x',
     'x {"a": ["" , 1]}',
+    # the deferred-escape keeps: the strict lanes decided (the strings'
+    # `\f`/`\/` decode through the canonical table, the whole-input
+    # loads and the suffix probe both keep the rendering verbatim)
+    '["\\f"]',
+    '["\\f%"]',
+    '{"\\f\\/%": 1}',
+    '["\\f", 1]',
+    '["\\f", "\\/"]',
+    '{"a": ["\\f"], "b": 1}',
+    '[["\\f"], ["\\/"]]',
+    '["\\\\f"]',
 ]
 
 TRUNCATION = [
@@ -271,6 +282,38 @@ TRUNCATION = [
     '{"k": "a\\u0041"',
     '["a\\n',
     '{"a": "x\\n", "b": 1}',
+    # the deferred-escape family: a CLOSED string holding `\f` or `\/`
+    # (the two escapes the repair lane does not accept) or an odd
+    # backslash run of three or more does not commit its rendering at
+    # its own close -- the mark resolves at end() through the repair
+    # lane's escape normalization when the repair lane decided (a cut
+    # root here), verbatim when the strict lanes did (the complete
+    # documents above). The distinction survives every separator:
+    # `["\f", 1` escapes while `["\f", 1]` keeps.
+    '["\\f%"',
+    '["\\f", 1',
+    '["\\f"',
+    '{"\\f\\/%": 1',
+    '[[ "\\f"]',
+    '["\\/%"',
+    '["\\f\\/%", 1',
+    '["a\\fb"',
+    '[{"k": "\\f"}, 1',
+    '{"\\f": 1',
+    '{"k": "a\\/b"',
+    '["a\\/b"',
+    '["\\t\\f"',
+    '["\\f\\t"',
+    '["\\/\\f"',
+    '["\\\\\\f"',
+    '["\\\\\\f", 1',
+    '["\\\\\\t"',
+    '["\\\\\\u0046"',
+    '["\\x41"',
+    '["\\x41", 1',
+    '["\\x%"',
+    '[[] , "\\f", 1',
+    '[1, [] , "\\f"',
     # the in-flight special-float word at the cut heals to the string
     # (the strict class keeps the float in the complete document)
     '[NaN',
@@ -490,6 +533,27 @@ MALFORMED = [
     '[[] x, 1]',
     '[1, [] x, 1]',
     '[[]x]',
+    # the deferred-escape class on repair-lane-decided COMPLETE
+    # documents: the whole-input loads and the suffix probe both died
+    # on the input (a bare word, a tuple, a non-strict number, a
+    # missing comma, a trailing separator), so the engine's repair lane
+    # re-normalized the held strings even though the machine's render
+    # is itself strict-loadable
+    '("\\f")',
+    '("\\f", 1)',
+    '[(  "\\f" , 1)]',
+    '[tru, "\\f"]',
+    '[tru, "\\f"] x',
+    '[True, "\\f"]',
+    '[None, "\\f"]',
+    '[01, "\\f"]',
+    '["\\x41"]',
+    '["\\x41", 1]',
+    '[1 2, "\\f"]',
+    '[1, "\\f",]',
+    '{"a": 1, "b": "\\f",}',
+    '{"a": 1 2, "\\f"]}',
+    '["\\f"] x',
 ]
 
 CORPUS = VALID + TRUNCATION + MALFORMED
@@ -583,11 +647,9 @@ DIVERGENCES = [
     # VALUE at an object's close absorbs the object's own `}` when the
     # tail past it holds two chars before the next `}`
     ('{"a": b}66', '{"a": "b}66"}', '{"a": "b"}'),
-    # a lone high surrogate escape followed by ANOTHER escape: the
-    # engine's whole-text string-repair lane re-decides the escape run
-    # (the `\f` stays a literal backslash + f); the stream decodes the
-    # standard table
-    ('["\\ud83d\\falsee"', '["\\ufffd\\\\falsee"]', '["\\ufffd\\falsee"]'),
+    # a lone high surrogate escape followed by ANOTHER escape: NOW
+    # PARITY (the deferred-escape re-render reproduces the repair lane's
+    # escape-run re-decision) — pinned in TestDeferredEscapeStrings
     # the empty-object fallback's body reparse: the stream reproduces it
     # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
     # match); a body that would re-parse to members keeps {}
@@ -689,6 +751,153 @@ class TestChunkBoundarySweep:
         points = sorted(rng.sample(range(1, len(text)), min(3, len(text) - 1)))
         _, got = stream(text, points, ensure_ascii=False)
         assert got == want, f"{text!r}: {got!r} != {want!r}"
+
+
+# --- the deferred-escape family -------------------------------------------------
+
+
+class TestDeferredEscapeStrings:
+    """The weekly-fuzz crash class: a closed string whose raw source
+    holds a repair-lane-divergent escape (`\\f`/`\\/` — the two escapes
+    the repair lane does not accept — or an odd backslash run of three
+    or more) resolves at end()/snapshot() close time, never at a
+    separator. The strict lanes keep the verbatim rendering (a complete
+    document, trailing garbage and comments behind a valid root
+    included); the repair lane (a cut root, a paren anywhere, a
+    repair-lane-decided complete document) re-renders the raw source
+    through the lib's escape normalization (`\\f` to `\\\\f`). Byte-exact
+    against the oracle at every chunking."""
+
+    CUT_FAMILY = [
+        '["\\f%"',
+        '["\\f", 1',
+        '["\\f"',
+        '{"\\f\\/%": 1',
+        '[[ "\\f"]',
+        '["\\/%"',
+        '["\\f\\/%", 1',
+        '["a\\fb"',
+        '[{"k": "\\f"}, 1',
+        '{"\\f": 1',
+        '{"k": "a\\/b"',
+        '["a\\/b"',
+        '["\\t\\f"',
+        '["\\f\\t"',
+        '["\\/\\f"',
+        '["\\\\\\f"',
+        '["\\\\\\f", 1',
+        '["\\\\\\t"',
+        '["\\\\\\u0046"',
+        '["\\x41"',
+        '["\\x41", 1',
+        '["\\x%"',
+        '[[] , "\\f", 1',
+        '[1, [] , "\\f"',
+        # the crash artifact itself (fuzz/corpus seed 8eca3c68...)
+        '["\\f%"',
+    ]
+
+    KEEP_FAMILY = [
+        '["\\f"]',
+        '["\\f%"]',
+        '{"\\f\\/%": 1}',
+        '["\\f"]x',
+        '["\\f"] // x',
+        '["\\f", 1]',
+        '["\\f", "\\/"]',
+        '{"a": ["\\f"], "b": 1}',
+        '[["\\f"], ["\\/"]]',
+        '["\\\\f"]',
+        '["\\\\f"',
+    ]
+
+    REPAIR_COMPLETE_FAMILY = [
+        '("\\f")',
+        '("\\f", 1)',
+        '[(  "\\f" , 1)]',
+        '[tru, "\\f"]',
+        '[tru, "\\f"] x',
+        '[True, "\\f"]',
+        '[None, "\\f"]',
+        '[01, "\\f"]',
+        '["\\x41"]',
+        '["\\x41", 1]',
+        '[1 2, "\\f"]',
+        '[1, "\\f",]',
+        '{"a": 1, "b": "\\f",}',
+        '["\\f"] x',
+    ]
+
+    @pytest.mark.parametrize(
+        "text", CUT_FAMILY + REPAIR_COMPLETE_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_matches_the_engine_and_the_oracle_at_every_split(self, text: str) -> None:
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    def test_the_lone_surrogate_plus_escape_run_renders_the_repair_lane(self) -> None:
+        """The previously-pinned divergence is gone: a lone high
+        surrogate escape followed by another escape (`\\ud83d\\falsee`,
+        a cut root) re-renders through the repair lane's escape
+        normalization -- the held surrogate flushes U+FFFD (the machine's
+        documented lone-surrogate divergence from the ORACLE, which keeps
+        the `\\ud83d` escape) and the `\\f` stays a literal backslash +
+        f, byte-exact against the engine at every split."""
+        text = '["\\ud83d\\falsee"'
+        want = tors.repair_json(text)
+        assert want == '["\\ufffd\\\\falsee"]'
+        assert want != json_repair_lib.repair_json(text)  # the oracle keeps \\ud83d
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize("text", KEEP_FAMILY, ids=lambda t: repr(t))
+    def test_the_strict_lanes_keep_verbatim_at_every_split(self, text: str) -> None:
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize("text", CUT_FAMILY + KEEP_FAMILY + REPAIR_COMPLETE_FAMILY)
+    def test_snapshot_equals_end_at_every_prefix(self, text: str) -> None:
+        for k in range(1, len(text) + 1):
+            r = tors.JsonRepairer()
+            r.push(text[:k])
+            snap = r.snapshot()
+            _assert_loads_or_empty(snap)
+            assert snap == r.end(), f"snapshot != end at prefix {k} of {text!r}"
+
+    def test_the_distinction_survives_a_snapshot_boundary(self) -> None:
+        """A snapshot taken while a deferred string is held resolves the
+        same way one-push does, and the stream continues as if it had
+        not run (the snapshot contract)."""
+        r = tors.JsonRepairer()
+        r.push('["\\f", ')
+        held = r.snapshot()
+        _assert_loads_or_empty(held)
+        r2 = tors.JsonRepairer()
+        r2.push('["\\f", ')
+        r2.push("1")
+        assert r2.end() == '["\\\\f", 1]'
+        r.push("1")
+        assert r.end() == r2.end()
+
+    def test_multi_string_documents_hold_independently(self) -> None:
+        r = tors.JsonRepairer()
+        r.push('["\\f", 1, "\\/"')
+        assert r.end() == '["\\\\f", 1, "\\\\/"]'
+        # the complete document keeps both through the strict lane (the
+        # canonical dumps does not escape the solidus)
+        r2 = tors.JsonRepairer()
+        r2.push('["\\f", 1, "\\/"]')
+        assert r2.end() == '["\\f", 1, "/"]'
+        assert r2.end() == json_repair_lib.repair_json('["\\f", 1, "\\/"]')
 
 
 # --- the documented decisions ---------------------------------------------------

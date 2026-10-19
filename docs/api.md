@@ -2569,8 +2569,38 @@ linearity pin gates; concatenate the deltas to reconstruct the emitted
 stream, and treat `snapshot`/`end` as the authority (a late repair that
 retracts text — the dangling-member drop, the grouping-paren unwrap, the
 empty-element retract, the array lane's stray-`...` and strictly-empty
-item drops — truncates or drains the emitted stream behind the delta
-cursor).
+item drops, the deferred-escape re-render — truncates or drains the
+emitted stream behind the delta cursor).
+
+**The deferred-escape strings** (the weekly-fuzz crash class): the
+whole-text engine's two lanes decode `\f` and `\/` differently, and the
+lane that decides is the one a stream cannot know at the string's own
+close. The strict lanes (the whole-input `json.loads` fast path, the
+repair parser's suffix probe) decode both through the canonical table;
+the repair lane accepts neither — the backslash stays a literal
+character in the value and the re-dump re-escapes it (`\f` to `\\f`,
+`\/` to `\\/`) — and the repair lane decides whenever the document is
+cut, a paren opened anywhere, or the parse was otherwise repaired
+mid-document. A string whose raw source holds one of those escapes (or
+an odd backslash run of three or more, which the repair lane's run scan
+collapses differently, or a misescaped non-active delimiter) therefore
+does not commit its rendering at its own close: the rendering streams
+verbatim, but the repairer holds the string's raw source as a
+deferred-escape mark and resolves every mark at `end()`/`snapshot()`
+close time — verbatim when the strict lanes decided (`["\f"]`,
+`["\f%"]`, `{"\f\/%": 1}`, `["\f"]x` all keep), re-rendered through the
+lib's escape normalization when the repair lane did (`["\f%"` heals to
+`["\\f%"]`, `["\f", 1` to `["\\f", 1]`, `{"\f\/%": 1` to
+`{"\\f\\/%": 1}`, `[[ "\f"]` to `[["\\f"]]`, `("\f")` to `"\\f"`,
+`[tru, "\f"]` to `["tru", "\\f"]`). The mark flushes only at close
+time: every separator keeps the rendering mid-stream, so the
+distinction survives the separator (`["\f", 1` escapes while
+`["\f", 1]` keeps), and it composes with the strictly-empty item drops,
+the paren taint and multi-string documents (each string holds its own
+mark). An escape the two lanes decode identically never defers: the
+streaming decode's own table carries the repair lane's
+`\x`-plus-two-hex-digits acceptance (`\x41` to `A`) beside the strict
+set.
 
 **The repair semantics** match the whole-text engine's on the classes a
 stream can decide per character: single-quote and curly-quote delimiters

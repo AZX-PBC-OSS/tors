@@ -294,10 +294,14 @@ impl Scan {
                 return true;
             }
             // the strict literals at a clean end (the lib's exact
-            // lowercase spellings)
+            // lowercase spellings; the tail must hold the WHOLE
+            // spelling -- a short tail zip-prefixes it: `f ,` is not
+            // `false`)
             for lit in ["true", "false", "null"] {
                 let lit_chars: Vec<char> = lit.chars().collect();
-                if chars[v..].iter().zip(lit_chars.iter()).all(|(a, b)| a == b) {
+                if chars[v..].len() >= lit_chars.len()
+                    && chars[v..].iter().zip(lit_chars.iter()).all(|(a, b)| a == b)
+                {
                     let end = chars.get(v + lit_chars.len());
                     if end.is_none()
                         || end.is_some_and(|c| c.is_whitespace() || matches!(c, ',' | '}' | ']'))
@@ -614,6 +618,15 @@ impl Scan {
                 '}' | ']' | ')' => {
                     let closer_obj = c == '}';
                     let closer_paren = c == ')';
+                    if self.last_empty_string_value {
+                        // a token hard on an empty-string value's heels:
+                        // the engine's whole-text string-repair lane
+                        // re-pairs what follows it, the container's own
+                        // closer included (`[("")` -> the engine
+                        // `[")"]`) — out
+                        self.divergent = true;
+                        return;
+                    }
                     let Some(f) = self.stack.last() else {
                         self.divergent = true;
                         return;
@@ -683,6 +696,15 @@ impl Scan {
                         self.divergent = true;
                         return;
                     }
+                    // A nested object popping on a trailing comma (a key
+                    // was due): the engine's whole-text close-up closes
+                    // THROUGH the parent and re-decides what follows
+                    // (`[{"a": 1 ,}1` -> the engine `[{"a": 1}]`, the
+                    // stream `[{"a": 1}, 1]`) (out)
+                    if f.obj && f.expect == Expect::Key && self.stack.len() > 1 {
+                        self.divergent = true;
+                        return;
+                    }
                     // The paren-comma-garbage tuple's nested close: the
                     // machine's grouping/empty-item cascade around such
                     // a tuple desyncs from the engine's whole-text
@@ -692,13 +714,15 @@ impl Scan {
                         self.divergent = true;
                         return;
                     }
-                    // The emptied-frame cascade: an item of this ARRAY
+                    // The emptied-frame cascade: an item of this frame
                     // repaired to the empty array — the engine's
                     // whole-text lane re-decides the emptied item's
                     // now-empty shape through the parent's own close
                     // (`[[[] ,][] ,]` -> the engine `[]`, the stream
-                    // `[[]]`) (out)
-                    if !f.obj && !f.paren && f.saw_emptied_item {
+                    // `[[]]`; the nested-paren chains likewise:
+                    // `[[[([()()(()()(())(()` -> the engine `[]`, the
+                    // stream `[[[[[]]]]]`) (out)
+                    if !f.obj && f.saw_emptied_item {
                         self.divergent = true;
                         return;
                     }
@@ -751,14 +775,21 @@ impl Scan {
                             let key = raw
                                 .trim_start_matches(|c: char| !c.is_alphanumeric())
                                 .to_string();
-                            if !key.is_empty() {
-                                let f = self.stack.last_mut().unwrap();
-                                if f.keys.contains(&key) {
-                                    self.divergent = true;
-                                    return;
-                                }
-                                f.keys.push(key);
+                            if key.is_empty() {
+                                // the attempt strips to NOTHING: the
+                                // machine drops the pair whole, the
+                                // engine's key-reparse machinery
+                                // re-decides what the attempt leaves
+                                // behind (`{.:{}\rt:{}\rt\f`) — out
+                                self.divergent = true;
+                                return;
                             }
+                            let f = self.stack.last_mut().unwrap();
+                            if f.keys.contains(&key) {
+                                self.divergent = true;
+                                return;
+                            }
+                            f.keys.push(key);
                         }
                         let f = self.stack.last_mut().unwrap();
                         f.expect = Expect::Value;
@@ -991,9 +1022,6 @@ impl Scan {
                     let obj_key_run = recording_key;
                     let mut terminated = false;
                     self.run_char(c);
-                    if recording_key {
-                        self.bare_key_run.push(c);
-                    }
                     i += 1;
                     while i < n {
                         let d = chars[i];
@@ -1252,6 +1280,18 @@ impl Scan {
             .stack
             .iter()
             .any(|f| f.obj && f.members <= 1 && matches!(f.expect, Expect::Colon | Expect::Key))
+        {
+            return None;
+        }
+        // The nested paren cascade's cut side: a paren frame carrying
+        // the comma-garbage run or an emptied child — the engine's
+        // whole-text close-up re-decides the chain at the cut
+        // (`[(()((),(()` -> the engine `[]`, the stream `[[[]]]`) (out)
+        if self
+            .stack
+            .iter()
+            .enumerate()
+            .any(|(idx, f)| f.paren && idx > 0 && (f.saw_comma_garbage || f.saw_emptied_item))
         {
             return None;
         }
