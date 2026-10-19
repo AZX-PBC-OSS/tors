@@ -649,7 +649,7 @@ DIVERGENCES = [
     ('{"a": b}66', '{"a": "b}66"}', '{"a": "b"}'),
     # a lone high surrogate escape followed by ANOTHER escape: NOW
     # PARITY (the deferred-escape re-render reproduces the repair lane's
-    # escape-run re-decision) — pinned in TestDeferredEscapeStrings
+    # escape-run re-decision), pinned in TestDeferredEscapeStrings
     # the empty-object fallback's body reparse: the stream reproduces it
     # only when the body recovers nothing ({]} -> [], {"a": {(] -> ...
     # match); a body that would re-parse to members keeps {}
@@ -758,8 +758,8 @@ class TestChunkBoundarySweep:
 
 class TestDeferredEscapeStrings:
     """The weekly-fuzz crash class: a closed string whose raw source
-    holds a repair-lane-divergent escape (`\\f`/`\\/` — the two escapes
-    the repair lane does not accept — or an odd backslash run of three
+    holds a repair-lane-divergent escape (`\\f`/`\\/`, the two escapes
+    the repair lane does not accept, or an odd backslash run of three
     or more) resolves at end()/snapshot() close time, never at a
     separator. The strict lanes keep the verbatim rendering (a complete
     document, trailing garbage and comments behind a valid root
@@ -828,6 +828,46 @@ class TestDeferredEscapeStrings:
         '["\\f"] x',
     ]
 
+    # The suffix-probe gate's tail class (the lib's
+    # `_initial_container_has_non_comma_trailing_content`, mirrored at
+    # the top-level sites): the KEPT half -- leading consumption of any
+    # kind puts the root's char at `index != 0` and the probe fires
+    # whatever the tail holds; a trailing token (or the comment opener
+    # read as the decision char) fires it from a clean index too.
+    TAIL_KEEP_FAMILY = [
+        '\x0b["\\f"]',
+        '\x0c["\\f"]',
+        'x ["\\f"]',
+        '\x0bx ["\\f"]',
+        'x ["\\f"] ,',
+        '\x0b["\\f"] x',
+        '\x0b["\\f"],',
+        '["\\f"]\x0b x',
+        '["\\f"]\x0b // c',
+        '["\\f"]\x0b # c',
+        '["\\f"] x\x0b',
+        '["\\f"] x \x0b y',
+    ]
+    # The tail class's TAINT half: from a clean index (the root's char
+    # IS the input's first byte) the trailing scan fires the probe only
+    # on a NON-COMMA decision char -- the input ending inside a trailing
+    # non-strict whitespace run (no content behind it: no probe) and the
+    # COMMA-FIRST tail (the scan reads a `,`, returns False: no probe)
+    # are repair-lane inputs -- the held strings re-render.
+    TAIL_TAINT_FAMILY = [
+        '["\\f"]\x0b',
+        '["\\f"]\x0c',
+        '["\\f"]\x0b\x0c',
+        '["\\f"]\t\x0b',
+        '["\\f"] ,',
+        '["\\f"],',
+        '["\\f"], x',
+        '["\\f"]\x0b,',
+        '["\\f"]\x0b ,',
+        '["\\/", 1] ,',
+        '{"k": "\\f"} ,',
+    ]
+
     @pytest.mark.parametrize(
         "text", CUT_FAMILY + REPAIR_COMPLETE_FAMILY, ids=lambda t: repr(t)
     )
@@ -864,7 +904,40 @@ class TestDeferredEscapeStrings:
             _, got = stream(text, [k])
             assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
 
-    @pytest.mark.parametrize("text", CUT_FAMILY + KEEP_FAMILY + REPAIR_COMPLETE_FAMILY)
+    @pytest.mark.parametrize(
+        "text", TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_the_tail_gate_matches_the_oracle_at_every_split(self, text: str) -> None:
+        """The tail class of the suffix-probe gate, byte-exact against
+        the oracle at every chunking: leading consumption (whitespace,
+        prose) puts the root's char at `index != 0` and the probe fires
+        whatever the tail holds -- the held strings keep when the root
+        rendering is strict-loadable; a trailing token fires the probe
+        from a clean index too; the input ENDING inside a trailing
+        non-strict whitespace run and the COMMA-FIRST tail are repair-
+        lane inputs (no probe) -- the held strings re-render."""
+        want = tors.repair_json(text)
+        assert want == json_repair_lib.repair_json(text), f"{text!r}: engine != oracle"
+        for k in range(1, len(text)):
+            _, got = stream(text, [k])
+            assert got == want, f"split {k} of {text!r}: {got!r} != {want!r}"
+        _, whole = stream(text, [])
+        assert whole == want, f"{text!r}: one-push != {want!r}"
+
+    @pytest.mark.parametrize(
+        "text", TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY, ids=lambda t: repr(t)
+    )
+    def test_the_tail_gate_holds_over_random_chunkings(self, text: str) -> None:
+        rng = random.Random(len(text))
+        points = sorted(rng.sample(range(1, len(text)), min(4, len(text) - 1)))
+        want = tors.repair_json(text)
+        _, got = stream(text, points)
+        assert got == want, f"splits {points} of {text!r}: {got!r} != {want!r}"
+
+    @pytest.mark.parametrize(
+        "text",
+        CUT_FAMILY + KEEP_FAMILY + REPAIR_COMPLETE_FAMILY + TAIL_KEEP_FAMILY + TAIL_TAINT_FAMILY,
+    )
     def test_snapshot_equals_end_at_every_prefix(self, text: str) -> None:
         for k in range(1, len(text) + 1):
             r = tors.JsonRepairer()
@@ -1479,6 +1552,73 @@ class TestStreamingLinearity:
             )
 
         first_clean(measure, check, samples=3, label="the streaming-vs-one-shot pin")
+
+
+class TestCloseTimeLinearity:
+    """The close render's own growth gate: the deferred-escape marks
+    resolve at `end()`/`snapshot()` close time, and a per-mark in-place
+    rewrite of the emitted text (`replace_range` per mark, descending)
+    is quadratic in the mark count -- the weekly-fuzz cut stream of
+    `\\/`-strings measured 0.29s -> 1.20s -> 4.90s -> 20.43s at
+    45k/90k/180k/360k marks (4.2x per doubling). The rebuild is one
+    ascending pass (the segments between marks copied once, each
+    resolved rendering spliced at its span), ~2.1x per doubling here.
+    tests/test_scaling_pins.py's idiom: min-of-samples walls, retried
+    on the first dirty sample."""
+
+    # The 4x-step growth gate: a linear close measures ~4x per
+    # quadrupling (~2.1x per doubling at these sizes); the quadratic
+    # relapse measures ~16x per quadrupling and blows through 6x.
+    GATE_PER_QUAD = 6.0
+
+    @staticmethod
+    def _document(marks: int) -> str:
+        # The cut divergent-escape class: an array of `\\/`-holding
+        # strings, the root never closed -- every string arms a
+        # deferred-escape mark and the close render resolves every one
+        # through the repair lane's escape normalization.
+        return "[" + ", ".join(f'"\\/{i}"' for i in range(marks))
+
+    @staticmethod
+    def _prepared(marks: int) -> tors.JsonRepairer:
+        r = tors.JsonRepairer()
+        r.push(TestCloseTimeLinearity._document(marks))
+        return r
+
+    @pytest.mark.timing
+    def test_the_close_resolves_the_marks_linearly(self) -> None:
+        """The close render at 45k/90k/180k/360k marks (4x per step):
+        measured 6.4ms -> 13.2ms -> 24.4ms -> 50.4ms (~2.1x per
+        doubling), gate 6x per quadrupling. `snapshot` is pure and
+        renders closed exactly what `end` renders, so the wall is the
+        close's own (the push is paid once, outside the measurement)."""
+
+        def measure() -> list[float]:
+            return [
+                min_wall_ms(lambda r=r: r.snapshot())
+                for r in (self._prepared(m) for m in (45_000, 90_000, 180_000, 360_000))
+            ]
+
+        def check(walls: list[float]) -> None:
+            # Content-match first: the close actually resolved the
+            # marks (the re-rendered spelling is out, not the verbatim
+            # `\/` decode -- and every element's mark is in the count).
+            resolved = self._prepared(100)
+            out = resolved.snapshot()
+            assert out.startswith('["\\\\/0'), out[:24]
+            assert out.count('", "') == 99, "a mark stopped resolving"
+            for i in range(len(walls) - 1):
+                small, large = walls[i], walls[i + 1]
+                assert large < self.GATE_PER_QUAD * small, (
+                    f"the close render grew {small:.2f}ms -> {large:.2f}ms for a "
+                    f"2x mark count ({large / small:.2f}x, allowed "
+                    f"{self.GATE_PER_QUAD:.1f}x per 4x of marks): the close-time "
+                    "resolution regressed superlinear in the mark count"
+                )
+
+        first_clean(
+            measure, check, samples=3, label="the close-time linearity pin"
+        )
 
 
 # --- hypothesis: valid documents through random chunkings --------------------------

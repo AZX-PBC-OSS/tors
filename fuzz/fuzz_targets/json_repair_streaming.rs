@@ -73,6 +73,13 @@ struct ScanFrame {
     /// An item started after the emptied one: the parent continued
     /// past a repaired-empty item (the whole-text lane re-decides).
     item_after_emptied: bool,
+    /// The emptied-item / comma-garbage cascade fired ANYWHERE in this
+    /// frame's SUBTREE (set on the ancestors at flag time): a cut
+    /// holding such a chain under a PAREN frame is the engine's
+    /// whole-text close-up territory (the chain re-decides up through
+    /// the group, `[([[([()()` -> the engine `[]`, the stream
+    /// `[[[[[]]]]]`), where the frame's own flags never see it.
+    cascade_below: bool,
     /// The last completed item was strictly-empty (`[]`/`{}`/`""` or
     /// an emptied frame): the comma-close drop's operand.
     last_item_empty: bool,
@@ -611,6 +618,7 @@ impl Scan {
                         saw_emptied_item: false,
                         saw_comma_garbage: false,
                         item_after_emptied: false,
+                        cascade_below: false,
                         last_item_empty: false,
                     });
                     i += 1;
@@ -623,7 +631,7 @@ impl Scan {
                         // the engine's whole-text string-repair lane
                         // re-pairs what follows it, the container's own
                         // closer included (`[("")` -> the engine
-                        // `[")"]`) — out
+                        // `[")"]`), out
                         self.divergent = true;
                         return;
                     }
@@ -738,13 +746,14 @@ impl Scan {
                     self.last_string_value = false;
                     self.bare_key_run.clear();
                     self.obj_value_after_ws = false;
+                    let cascade = emptied || frame_members == 0;
                     if self.stack.is_empty() {
                         self.top_done = true;
                     } else if let Some(p) = self.stack.last_mut() {
                         p.members += 1;
                         p.expect = Expect::AfterValue;
-                        p.last_item_empty = emptied || frame_members == 0;
-                        if emptied || frame_members == 0 {
+                        p.last_item_empty = cascade;
+                        if cascade {
                             // an item that repaired to the empty array
                             // (the zero-member item, or the comma-close
                             // drop): the parent's cascade territory —
@@ -752,13 +761,18 @@ impl Scan {
                             // emptied item's now-empty shape
                             p.saw_emptied_item = true;
                         }
-                        // the strictly-empty item's one-char decision
-                        // arms on the parent (the machine's
-                        // `EmptyPending`); a PAREN parent's decision
-                        // fires on the whitespace itself
                         if !p.obj {
                             self.empty_pending_armed = frame_members == 0;
                             self.empty_pending_paren = p.paren;
+                        }
+                    }
+                    if cascade && !self.stack.is_empty() {
+                        // Every ancestor learns the chain too (the cut
+                        // side's paren guard reads it: a chain under a
+                        // paren re-decides through the group,
+                        // `[([[([()()` -> `[]`).
+                        for a in self.stack.iter_mut() {
+                            a.cascade_below = true;
                         }
                     }
                     i += 1;
@@ -780,7 +794,7 @@ impl Scan {
                                 // machine drops the pair whole, the
                                 // engine's key-reparse machinery
                                 // re-decides what the attempt leaves
-                                // behind (`{.:{}\rt:{}\rt\f`) — out
+                                // behind (`{.:{}\rt:{}\rt\f`), out
                                 self.divergent = true;
                                 return;
                             }
@@ -844,6 +858,11 @@ impl Scan {
                             return;
                         }
                         f.saw_comma_garbage = true;
+                        // The ancestors learn the chain too (the cut
+                        // side's paren guard reads it).
+                        for a in self.stack.iter_mut() {
+                            a.cascade_below = true;
+                        }
                         i += 1;
                     }
                     Some(Expect::Colon) => {
@@ -1162,6 +1181,7 @@ impl Scan {
                         saw_emptied_item: false,
                         saw_comma_garbage: false,
                         item_after_emptied: false,
+                        cascade_below: false,
                         last_item_empty: false,
                     });
                     i += 1;
@@ -1284,15 +1304,15 @@ impl Scan {
             return None;
         }
         // The nested paren cascade's cut side: a paren frame carrying
-        // the comma-garbage run or an emptied child — the engine's
+        // the comma-garbage run or an emptied child, the engine's
         // whole-text close-up re-decides the chain at the cut
-        // (`[(()((),(()` -> the engine `[]`, the stream `[[[]]]`) (out)
-        if self
-            .stack
-            .iter()
-            .enumerate()
-            .any(|(idx, f)| f.paren && idx > 0 && (f.saw_comma_garbage || f.saw_emptied_item))
-        {
+        // (`[(()((),(()` -> the engine `[]`, the stream `[[[]]]`), and
+        // a chain DEEPER in the frame's subtree re-decides through the
+        // group all the same (`[([[([()()` -> the engine `[]`, the
+        // stream `[[[[[]]]]]`): the ancestors carry the cascade flag.
+        if self.stack.iter().enumerate().any(|(idx, f)| {
+            f.paren && idx > 0 && (f.saw_comma_garbage || f.saw_emptied_item || f.cascade_below)
+        }) {
             return None;
         }
         if self.in_string && self.saw_backslash {

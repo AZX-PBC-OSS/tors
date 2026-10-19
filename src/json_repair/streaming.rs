@@ -80,7 +80,10 @@
 //!   verdict -- a complete document, trailing garbage after a valid
 //!   root and comments behind a root included: `["\f"]`, `["\f%"]`,
 //!   `{"\f\/%": 1}`, `["\f"]x`, `["\f"] // x`) emits the held span
-//!   verbatim, anything else (the cut and drain classes: `["\f%"` to
+//!   verbatim (the keep emits the canonical decode's OWN bytes: the
+//!   `{"\f\/%": 1}` example's emitted text is `{"\f/%": 1}` -- the
+//!   canonical table melts the escaped solidus and does not re-escape
+//!   it, the engine's own bytes), anything else (the cut and drain classes: `["\f%"` to
 //!   `["\\f%"]`, `["\f", 1` to `["\\f", 1]`, `{"\f\/%": 1` to
 //!   `{"\\f\\/%": 1}`, `[[ "\f"]` to `[["\\f"]]`; the
 //!   repair-lane-decided complete documents: `("\f")` to `"\\f"`,
@@ -417,6 +420,33 @@ pub struct StreamingRepairer {
     top_clean: bool,
     /// The root value closed: everything after it is trailing junk.
     top_done: bool,
+    /// A char was consumed at the top level BEFORE the root container's
+    /// own char (leading whitespace, prose, a comment, a skipped `(` --
+    /// the engine's `scroll_whitespaces` + ignore-and-move-on loop both
+    /// advance `self.index`). The suffix-probe gate's first arm: with
+    /// `index != 0` the probe fires WHATEVER the tail holds (raw_decode
+    /// ignores the trailing text behind the first value), so the tail
+    /// never re-decides the held strings -- the taint is the root
+    /// rendering's own strictness alone (see `render_closed`).
+    top_led: bool,
+    /// A non-whitespace token was consumed after the root closed (a
+    /// prose char, a comment opener): the suffix-probe gate's trailing
+    /// scan reads the FIRST char after the root's closer (whitespace
+    /// skipped) and a non-comma token there fires the probe. Once seen,
+    /// later whitespace is behind the probe, never the input's last
+    /// word.
+    top_tail_token: bool,
+    /// A NON-STRICT whitespace char was consumed after the root closed
+    /// with no token behind it yet (Python `isspace` set: `\x0b`, `\x0c`
+    /// ... -- the strict scanner's four never arm this): the deferred
+    /// half of the suffix-probe gate's trailing scan. The input may END
+    /// here -- `["\f"]\x0b` -- where the probe gate reads no trailing
+    /// content (False), the repair lane decides, and the held strings
+    /// re-render; or a further char may arrive, and ITS class decides
+    /// (`,` still taints -- the comma-first tail -- anything else
+    /// disarms, the probe fired). Settled at the close: the pending arm
+    /// taints (`render_closed`), a disarmed one is gone.
+    top_tail_ws_pending: bool,
     /// The `json.dumps` escape-table mode (the `repair_json` knob).
     ensure_ascii: bool,
     /// `end` ran: the repairer is final (push refuses; reset revives).
@@ -986,6 +1016,9 @@ impl StreamingRepairer {
             comment: None,
             top_clean: true,
             top_done: false,
+            top_led: false,
+            top_tail_token: false,
+            top_tail_ws_pending: false,
             ensure_ascii,
             finished: false,
             emitted: 0,
@@ -1197,6 +1230,9 @@ impl StreamingRepairer {
                 self.out.clear();
                 self.emitted = 0;
                 self.top_clean = false;
+                // The `(` and its group were consumed at the top level:
+                // a later root container's char sits at `index != 0`.
+                self.top_led = true;
                 // The group's render is gone: any deferred-escape marks
                 // inside it died with the span.
                 self.escape_marks.clear();
@@ -1240,6 +1276,7 @@ impl StreamingRepairer {
                 // Not a literal prefix (and the buffer is full): the
                 // `(` was prose.
                 self.top_clean = false;
+                self.top_led = true;
                 for b in buf.chars() {
                     self.process(b)?;
                 }
@@ -1250,6 +1287,7 @@ impl StreamingRepairer {
             // engine's inner-text prefix `buf + c` is no literal): the
             // `(` was prose; the buffered chars replay at the top level.
             self.top_clean = false;
+            self.top_led = true;
             for b in buf.chars() {
                 self.process(b)?;
             }
@@ -1398,31 +1436,80 @@ impl StreamingRepairer {
         if self.top_done {
             match c {
                 c if c.is_whitespace() => {
-                    // The strict scanner's whitespace set only: any
-                    // other Unicode whitespace failed `json.loads` (the
-                    // repair lane decides).
-                    if !matches!(c, ' ' | '\t' | '\n' | '\r') {
+                    // The suffix-probe gate's trailing scan (the lib's
+                    // `_initial_container_has_non_comma_trailing_content`,
+                    // read from the root's closer): a NON-STRICT
+                    // whitespace char is a repair-lane input only when
+                    // the input can still END here -- the root's own char
+                    // opened the input (`index == 0`: no scroll ran, the
+                    // gate scans the tail) and no token sits behind the
+                    // root yet (the scan reads the FIRST char past the
+                    // whitespace). Otherwise the scan's decision char is
+                    // not this whitespace: a token behind the root fired
+                    // the probe already (`["\f"]\x0b x`), or the root's
+                    // char sat behind leading content (`index != 0`, the
+                    // probe fires whatever the tail holds -- the
+                    // leading-consumption arm). The arm DEFERS: the tail
+                    // (or the cut) settles it (see the arms below and
+                    // `render_closed`).
+                    if !matches!(c, ' ' | '\t' | '\n' | '\r')
+                        && !self.top_led
+                        && !self.top_tail_token
+                    {
+                        self.top_tail_ws_pending = true;
+                    }
+                }
+                ',' => {
+                    // The COMMA-FIRST tail: the gate's trailing scan reads
+                    // a `,` as the first char past the root's closer (the
+                    // whitespace skipped) and returns False -- no probe,
+                    // the whole-input loads died on the tail, the repair
+                    // lane decided (`["\f"] ,` -> `["\\f"]`). Behind
+                    // leading consumption (`x ["\f"] ,`) or an earlier
+                    // token (`["\f"] x ,`) the probe fired already: keep.
+                    if !self.top_led && !self.top_tail_token {
                         self.repair_decided = true;
                     }
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
                 }
                 '#' | '/' => {
                     // A comment (or any trailing token) after the root:
                     // the whole input was not one strict JSON value.
+                    // The gate's trailing scan reads the comment OPENER
+                    // as the decision char -- non-comma, the probe
+                    // fires (`["\f"]\x0b // c` keeps) -- and the
+                    // deferred whitespace arm above settles too.
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
                     match c {
                         '#' => self.comment = Some(self.hash_comment()),
                         _ => self.comment = Some(CommentState::Slash),
                     }
                 }
-                _ => {}
+                _ => {
+                    // Any other trailing token: the gate's decision char
+                    // (non-comma) fired the probe -- no taint here, the
+                    // root rendering's own strictness decides at the
+                    // close. The deferred whitespace arm settles: this
+                    // char, not the input's end, answered the scan.
+                    self.top_tail_token = true;
+                    self.top_tail_ws_pending = false;
+                }
             }
             return Ok(());
         }
         let clean = self.top_clean;
         match c {
             c if c.is_whitespace() => {
-                if !matches!(c, ' ' | '\t' | '\n' | '\r') {
-                    self.repair_decided = true;
-                }
+                // LEADING whitespace (strict or not): the engine's
+                // `scroll_whitespaces` consumed it before the first
+                // `parse_element`, so the root container's char sits at
+                // `index != 0` -- the suffix-probe gate's first arm fires
+                // WHATEVER the tail holds and the probe's own success is
+                // the root rendering's strictness (`render_closed`'s
+                // third arm). No taint here: `\x0b["\f"]` keeps.
+                self.top_led = true;
             }
             '{' => self.open_container(FrameKind::Obj)?,
             '[' => self.open_container(FrameKind::Arr)?,
@@ -1461,6 +1548,10 @@ impl StreamingRepairer {
             // Prose (or a second scalar after a provisional one): dropped.
             _ => {
                 self.top_clean = false;
+                // Consumed at the top level: the root container's char,
+                // when one follows, sits at `index != 0` (the probe
+                // gate's first arm).
+                self.top_led = true;
             }
         }
         Ok(())
@@ -2034,10 +2125,12 @@ impl StreamingRepairer {
                         // A second run after a terminated scalar: the
                         // whole input is not one strict value: prose.
                         self.top_clean = false;
+                        self.top_led = true;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
+                self.top_led = true;
                 if c == '{' || c == '[' {
                     // Prose, then a container: the container wins.
                     return self.process(c);
@@ -2056,10 +2149,12 @@ impl StreamingRepairer {
                         self.pending = Some(Pending::TopWord { text, done: false });
                     } else {
                         self.top_clean = false;
+                        self.top_led = true;
                     }
                     return Ok(());
                 }
                 self.top_clean = false;
+                self.top_led = true;
                 if c == '{' || c == '[' {
                     return self.process(c);
                 }
@@ -2080,6 +2175,7 @@ impl StreamingRepairer {
                         return Ok(());
                     }
                     self.top_clean = false;
+                    self.top_led = true;
                     if c == '{' || c == '[' {
                         return self.process(c);
                     }
@@ -2700,26 +2796,60 @@ impl StreamingRepairer {
         // no paren opened anywhere (the tuple grammar is never
         // strict-valid) -- the held spans stand verbatim. Anything else
         // (the cut and drain classes, the paren taint, a repair-lane-
-        // decided complete document like `["\x41"]`) re-renders each
-        // held raw source through the lib's escape normalization and
-        // re-dumps it canonically. The spans are disjoint; resolving
-        // them in DESCENDING order keeps every lower span's coordinates
-        // exact, and each replacement's length delta shifts every
-        // `out` coordinate at/after the span's end -- the `shift` map
-        // below re-bases every coordinate this function reads (the
-        // cascade, the strictly-empty drains, the string bookkeeping).
-        let mut escape_shifts: Vec<(usize, isize)> = Vec::new();
+        // decided complete document like `["\x41"]`, the deferred
+        // trailing-whitespace arm of the suffix-probe gate) re-renders
+        // each held raw source through the lib's escape normalization
+        // and re-dumps it canonically.
+        //
+        // The rebuild is ONE ASCENDING PASS over the marks: the spans
+        // are disjoint and armed in ascending order, so the final text
+        // is the verbatim segments BETWEEN the spans with each span's
+        // resolved rendering spliced in place -- built once, never
+        // re-written (a per-span in-place `replace_range` over a large
+        // `out` is quadratic in the mark count: every replacement
+        // memmoves the whole tail). The re-renders move every `out`
+        // coordinate at/after a replaced span's end; the prefix-summed
+        // deltas below re-base every coordinate this function reads
+        // (the cascade, the strictly-empty drains, the string
+        // bookkeeping) in O(log n) per read.
+        struct EscapeShifts {
+            /// The replaced spans' ends, ascending (the marks' own
+            /// order).
+            ends: Vec<usize>,
+            /// The cumulative length delta at each end (`delta[i]` sums
+            /// every replacement up to and including `ends[i]`).
+            cum: Vec<isize>,
+        }
+        impl EscapeShifts {
+            /// An `out` coordinate's position in the rebuilt text: every
+            /// replaced span at/after it moved the text behind it.
+            fn shift(&self, p: usize) -> usize {
+                let n = self.ends.partition_point(|&e| e <= p);
+                let total = if n == 0 { 0 } else { self.cum[n - 1] };
+                (p as isize + total).max(0) as usize
+            }
+        }
+        let mut shifts = EscapeShifts {
+            ends: Vec::new(),
+            cum: Vec::new(),
+        };
         if !self.escape_marks.is_empty()
-            && (self.saw_paren || self.repair_decided || loads_strict(&s).is_err())
+            && (self.saw_paren
+                || self.repair_decided
+                || self.top_tail_ws_pending
+                || loads_strict(&s).is_err())
         {
-            for mark in self.escape_marks.iter().rev() {
+            let mut rebuilt = String::with_capacity(s.len() + self.escape_marks.len());
+            let mut cursor = 0usize;
+            let mut acc: isize = 0;
+            for mark in &self.escape_marks {
                 if mark.end > s.len() || mark.start >= mark.end {
                     continue;
                 }
                 // The drain guard: the span must still hold the
                 // rendering it armed with (a mid-stream retract took the
                 // string whole with its member).
-                if s.get(mark.start..mark.end) != Some(mark.rendered.as_str()) {
+                if self.out.get(mark.start..mark.end) != Some(mark.rendered.as_str()) {
                     continue;
                 }
                 let replacement =
@@ -2727,22 +2857,23 @@ impl StreamingRepairer {
                 if replacement == mark.rendered {
                     continue;
                 }
-                let delta = replacement.len() as isize - (mark.end - mark.start) as isize;
-                s.replace_range(mark.start..mark.end, &replacement);
-                escape_shifts.push((mark.end, delta));
+                // Splice: the verbatim segment up to the span, then the
+                // span's resolved rendering. The segments between marks
+                // are copied exactly once.
+                let from = cursor.min(mark.start);
+                rebuilt.push_str(&self.out[from..mark.start]);
+                rebuilt.push_str(&replacement);
+                acc += replacement.len() as isize - (mark.end - mark.start) as isize;
+                shifts.ends.push(mark.end);
+                shifts.cum.push(acc);
+                cursor = mark.end;
             }
+            rebuilt.push_str(&self.out[cursor.min(self.out.len())..]);
+            s = rebuilt;
         }
         // Every coordinate below is an `out` coordinate; the re-renders
         // moved the text at/after each resolved span's end.
-        let shift = |p: usize| -> usize {
-            let mut p = p;
-            for &(end, delta) in &escape_shifts {
-                if p >= end {
-                    p = (p as isize + delta).max(0) as usize;
-                }
-            }
-            p
-        };
+        let shift = |p: usize| shifts.shift(p);
         // The top-level `(`'s gate still undecided at the close (the
         // input ended inside the first inner token): the engine's
         // can_start_value read the lowercased inner-text prefix -- a
