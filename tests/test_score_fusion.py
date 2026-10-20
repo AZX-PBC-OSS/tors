@@ -917,6 +917,7 @@ class TestScoreFuseAioTwins:
         # in-band strikes are the advisory band stretching, out-of-band
         # strikes raise).
         lists = _scored_lists_workload(200_000)
+        import tors.aio  # the single-node-isolation contract: no sibling-import side effect
 
         async def measure(subject=None) -> tuple[float, float, float, float, float]:
             ticks: list[tuple[float, float, float]] = []

@@ -3561,9 +3561,9 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
     budget, the reproducible failure that forced this recalibration);
     24 MiB gaps 15.2-21.6ms of 188-204ms walls (0.08-0.11); 48 MiB gaps
     15.4-20.4ms of 384-468ms walls (0.04-0.05), ~6x margin at the quiet
-    band and ~2.5x at the loaded uuid-class worst (118ms of a ~600ms
-    loaded wall). The 400ms ceiling (``_DRAIN_CONTENTION_CEILING_S``)
-    holds ~3.4x over that loaded worst.
+    band and ~1.5x at the loaded uuid-class worst (118ms of a ~600ms
+    loaded wall, against the 0.30 budget). The 400ms ceiling
+    (``_DRAIN_CONTENTION_CEILING_S``) holds ~3.4x over that loaded worst.
 
     The wall contrast, measured in the same process at 12 MiB (min-of-3,
     ambient load 3.1): full drain 117.4ms against the list API's 211.1ms
