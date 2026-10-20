@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/AZX-PBC-OSS/tors/compare/v0.17.0...v0.17.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **json-repair:** the streaming escape resolution matches the engine's lanes ([#192](https://github.com/AZX-PBC-OSS/tors/issues/192)) ([63df387](https://github.com/AZX-PBC-OSS/tors/commit/63df38729244719d20816ddfd59b854bf46a112a))
+
 ## [0.17.0](https://github.com/AZX-PBC-OSS/tors/compare/v0.16.0...v0.17.0) (2026-10-07)
 
 
