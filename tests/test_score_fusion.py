@@ -50,10 +50,31 @@ import time
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from test_gil_release import (
+    _BAND_RATIO_MULTIPLE,
+    _BAND_STRETCH_MULTIPLE,
+    _strikes_within_band,
+)
 
 import tors
-from loop_harness import _cpu_account_starved, _runqueue_wait_s
+from loop_harness import _gap_was_starved, _runqueue_wait_s
 from reference import reference_score_fuse
+
+# The aio twin's advisory-band magnitude gate inputs (test_gil_release.py's
+# ``_strikes_within_band``): the by-design GIL-held pair walk's band and its
+# ratio top (0.74), with the twin's final ratio budget (0.85). The
+# workload is the 200k shape (the sync cell's enlargement recalibration:
+# the 100k walls straddle the 10ms ping floor on the fast 32-core box,
+# where the ratio is the sub-ping artifact -- 0.54-1.10 measured -- and
+# no budget can hold); the band top is the dev box's 200k blocked-ms
+# worst (~0.74 x its 230ms wall = 170ms; the 32-core box's measured top
+# at 200k is 32.6ms). The gate's bound: 4 x 170ms = 680ms of gap AND
+# max(0.85, 1.15 x 0.74) = 0.851 of ratio; a GIL-signature strike at/above
+# either raises (the lost-detach shape, ratio ~1.0, convicts on the ratio
+# axis).
+_AIO_FINAL_RATIO_BUDGET = 0.85
+_AIO_BAND_GAP_TOP_S = 0.170
+_AIO_BAND_RATIO_TOP = 0.74
 
 # Ids: arbitrary hashable text (the fusion is an id-space operation:
 # the actual characters are irrelevant, which is exactly the property
@@ -873,11 +894,13 @@ class TestScoreFuseAioTwins:
         # the interpreter-side pair walk (one dict op + one score
         # extraction per entry) is GIL-held BY DESIGN -- the rank
         # family's own caveat, structurally the majority of the wall.
-        # The pinned 0.80 budget is the rank_fuse cell's, at the 100k
-        # shape (measured worst gaps 20-64ms of 30-87ms walls, ratios
-        # 0.52-0.74 on the dev box; the walk + the heavier per-entry
-        # pair extraction sit under it with ~1.1x margin at the worst
-        # observed window). Pass-on-first-clean over 4 samples.
+        # The pinned 0.80 budget is the rank_fuse cell's, at the 200k
+        # shape (the sync cell's enlargement recalibration: the 100k
+        # walls straddle the 10ms ping floor on the fast 32-core box,
+        # where the ratio is the sub-ping artifact; on the dev box the
+        # 200k walls run 85-230ms and the walk + the heavier per-entry
+        # pair extraction sit under the budget with ~1.1x margin at the
+        # worst observed window). Pass-on-first-clean over 4 samples.
         #
         # The final judgment consults the missed window's loop-thread
         # scheduler account and process-CPU account -- the 2026-10 CI flake
@@ -890,9 +913,10 @@ class TestScoreFuseAioTwins:
         # time starves the heartbeat thread's WAKEUPS while burning CPU --
         # the loop thread's runqueue wait (schedstat) separates
         # runnable-but-unrun (the runner's, excused) from futex-blocked
-        # (the GIL's, convicted), and the idle-loop control sampled in the
-        # same run arbitrates what the accounts cannot.
-        lists = _scored_lists_workload(100_000)
+        # (the GIL's, convicted -- then the magnitude gate below arbitrates:
+        # in-band strikes are the advisory band stretching, out-of-band
+        # strikes raise).
+        lists = _scored_lists_workload(200_000)
 
         async def measure(subject=None) -> tuple[float, float, float, float, float]:
             ticks: list[tuple[float, float, float]] = []
@@ -916,10 +940,18 @@ class TestScoreFuseAioTwins:
                     await subject()
                 else:
                     await tors.aio.score_fuse(lists)
+                ended = time.monotonic()
             finally:
                 stop.set()
                 await task
-            wall = time.monotonic() - started
+            # The wall is captured at op completion, BEFORE the heartbeat
+            # join (the shared harness's discipline, _gap_and_wall_during):
+            # including the up-to-one-ping drain inflated the wall and
+            # diluted the ratio -- under a full hold the 0.85 measure read
+            # ~0.82 and could never fail. Same op, same account tuple, same
+            # wall discipline as the shared harness, so the twin cannot
+            # return a different verdict than the cells it twins.
+            wall = ended - started
             cpu_share = (time.process_time() - cpu_started) / wall if wall else 0.0
             worst = 0.0
             worst_cpu = 0.0
@@ -939,19 +971,18 @@ class TestScoreFuseAioTwins:
             worst_gap, wall, gap_cpu, cpu_share, gap_wait = await measure()
             if worst_gap / wall <= 0.85:
                 return
-            # The starvation discriminator (test_gil_release.py's
-            # ``_gap_was_starved``): the loop thread's own runqueue wait (a
-            # window it spent runnable-but-unrun is the runner's, whatever
-            # the worker burned) and, falling back from that, the
+            # The starvation discriminator, the shared harness's own
+            # (loop_harness.py's ``_gap_was_starved``, the same verdict
+            # test_gil_release.py's advisory cells run -- kept identical so
+            # the twin cannot diverge from it on the same account tuple):
+            # the loop thread's own runqueue wait (a window it spent
+            # runnable-but-unrun is the runner's, whatever the worker
+            # burned) and, FALLING THROUGH to it whenever the runqueue
+            # account is non-negative but under the 0.25 share, the
             # rate-normalized process-CPU account (a GIL-held window burns
             # the process's OWN share of the machine; a descheduled window
             # burns ~none).
-            starved = (
-                gap_wait >= 0.25 * worst_gap
-                if gap_wait >= 0.0
-                else _cpu_account_starved(worst_gap, gap_cpu, cpu_share)
-            )
-            if starved:
+            if _gap_was_starved((worst_gap, wall, gap_cpu, cpu_share, gap_wait)):
                 print(
                     f"the aio twin blocked {worst_gap * 1e3:.0f}ms of a "
                     f"{wall * 1e3:.0f}ms call ({worst_gap / wall:.0%}) but the "
@@ -963,47 +994,51 @@ class TestScoreFuseAioTwins:
                     "(tests/test_gil_release.py, _gap_was_starved)"
                 )
                 return
-            # The final arbiter (test_gil_release.py's
-            # ``_excusable_under_control``, the flake doctrine's option (a)):
-            # the GIL-signature verdict is relative to an idle-loop control
-            # sampled in the same run -- the wakeup tail reaches every thread
-            # under saturation, so only a box whose idle loop beats the
-            # missed window can convict a wall ratio at all.
-            control_gap, _control_wall, _cg, _cs, _cw = await measure(
-                lambda: asyncio.sleep(3.0)
-            )
-            if control_gap >= worst_gap:
+            # The magnitude gate (test_gil_release.py's advisory-band gate,
+            # ``_strikes_within_band``/``_excuse_band_or_raise`` -- the
+            # reviewer's mutation finding: this branch used to print-and-
+            # return unconditionally, so a sustained >0.85 ratio could never
+            # fail the twin). The advisory excuse covers only strikes
+            # CONSISTENT with the twin's own by-design band: under 4 x
+            # 170ms = 680ms of gap AND under max(0.85, 1.15 x 0.74) =
+            # 0.851 of ratio. A strike at/above either bound RAISES: a lost
+            # detach (the fusion pass pulled under the GIL) holds the whole
+            # call at ratio ~1.0 and convicts on the ratio axis, exactly as
+            # it does through the shared harness's advisory branch. The
+            # idle-loop control (the former final arbiter here) no longer
+            # arbitrates this branch: the shared verdict's advisory class
+            # raises through the magnitude gate BEFORE tier 3 -- the
+            # control excuses wall RATIOS a saturated box cannot judge, not
+            # a whole-wall hold past the band's magnitude, which no
+            # environment produces.
+            if _strikes_within_band(
+                [(worst_gap, wall, gap_cpu, cpu_share, gap_wait)],
+                _AIO_FINAL_RATIO_BUDGET,
+                _AIO_BAND_GAP_TOP_S,
+                _AIO_BAND_RATIO_TOP,
+            ):
                 print(
                     f"the aio twin blocked {worst_gap * 1e3:.0f}ms of a "
                     f"{wall * 1e3:.0f}ms call ({worst_gap / wall:.0%}) with the "
-                    f"process burning through the missed window, but the "
-                    f"idle-loop control sampled in the same run cannot beat it "
-                    f"(control worst gap {control_gap * 1e3:.0f}ms over a 3s "
-                    "idle window): the wakeup tail reaches every thread on "
-                    "this box and a wall ratio under it is unjudgeable -- "
-                    "excused as runner saturation relative to the control "
-                    "(tests/test_gil_release.py, _excusable_under_control)"
+                    "process burning through the missed window, but the strike "
+                    "stayed within the by-design pair walk's magnitude bound "
+                    "(the advisory band: its load-stretched wall is "
+                    "unjudgeable against a lost detach at this magnitude) -- "
+                    "excused as an advisory band pin under load "
+                    "(tests/test_gil_release.py, _excuse_band_stretch)"
                 )
                 return
-            # The advisory-band ruling (test_gil_release.py's
-            # ``_excuse_band_stretch``): the 0.85 band sits AT the
-            # by-design GIL-held pair walk's share of the wall (0.52-0.74
-            # quiet) -- under a saturated runner that walk stretches (cache
-            # pressure grows its CPU; CPU-share starvation stretches its
-            # futex-held wall) and no in-process account separates the
-            # stretched walk from a lost detach (both read futex-blocked
-            # with the burn at the process's own rate). The band pin is
-            # advisory: excused with a printed record instead of failing a
-            # diff with no code change; the detach teeth live in the
-            # content-parity cells above and the canned verdict pins.
-            print(
+            raise AssertionError(
                 f"the aio twin blocked {worst_gap * 1e3:.0f}ms of a "
                 f"{wall * 1e3:.0f}ms call ({worst_gap / wall:.0%}) with the "
-                "process burning through the missed window: the 0.85 band "
-                "sits at the by-design GIL-held walk's share, and its "
-                "load-stretched wall is unjudgeable against a lost detach -- "
-                "excused as an advisory band pin under load "
-                "(tests/test_gil_release.py, _excuse_band_stretch)"
+                "process burning through the missed window, past the by-design "
+                "pair walk's magnitude bound (gap < "
+                f"{_BAND_STRETCH_MULTIPLE * _AIO_BAND_GAP_TOP_S * 1e3:.0f}ms, "
+                "ratio < "
+                f"{max(_AIO_FINAL_RATIO_BUDGET, _BAND_RATIO_MULTIPLE * _AIO_BAND_RATIO_TOP):.0%}) "
+                "in every sample: a lost detach (the fusion pass held under "
+                "the GIL) or the walk blown past its measured band "
+                "(tests/test_gil_release.py, _excuse_band_or_raise)"
             )
 
         asyncio.run(run())

@@ -18,32 +18,62 @@ regression dirties every sample, so it still fails). This file uses no
 async pytest plugin (tors has none and needs none): each test owns its loop via
 ``asyncio.run``.
 
-The 2026-10 runner-saturation flake, and the verdict that retired it: on diffs
-with zero code change (a deny.toml comment, a workflow YAML), the
-loop-responsiveness cells failed at 99-100% blocked in EVERY sample — twice in
-one day, always green on re-run — when the CI matrix ran six test legs plus
-fuzz-smoke on a saturated runner. The blocked fraction is not a meaningful
-metric there: with the whole process descheduled, the heartbeat and the worker
-stall together and gap/wall converges on 1.0, so the plain pass-on-first-clean
-retry (built for ONE starved sample) is exhausted by a run where every sample
-is starved. The verdicts are three-tiered. Tier 1: a missed window that HELD its
-ratio budget (the worst gap against the operation's own wall — the
-noise-headroom device the doctrine ranks as the contract) missed only the
-absolute ceiling, a wall pin, and an advisory wall pin does not fail a diff
-with no code change — under saturation the by-design GIL-held marshalling
-band stretches to several times its quiet-box wall with the ratio at 1-2%
-(``_excuse_wall_pins``). Tier 2: the ratio-missed windows consult the loop
-thread's own scheduler account (``_gap_was_starved``): a window the heartbeat
-thread spent runnable-but-unrun (its runqueue wait grows with the gap) is the
-runner's starvation — whatever the worker burned, the wakeup tail reaches
-every thread — and is excused with a printed record (the timing lane's ``-rP``
+The 2026-10 runner-saturation flake, and the verdict that retired its
+deschedule class: on diffs with zero code change (a deny.toml comment, a
+workflow YAML), the loop-responsiveness cells failed at 99-100% blocked in
+EVERY sample -- twice in one day, always green on re-run -- when the CI
+matrix ran six test legs plus fuzz-smoke on a saturated runner. The blocked
+fraction is not a meaningful metric there: with the whole process
+descheduled, the heartbeat and the worker stall together and gap/wall
+converges on 1.0, so the plain pass-on-first-clean retry (built for ONE
+starved sample) is exhausted by a run where every sample is starved. The
+verdicts are tiered. Tier 1: a missed window that HELD its ratio budget (the
+worst gap against the operation's own wall -- the noise-headroom device the
+doctrine ranks as the contract) missed only the absolute ceiling, a wall pin,
+and an advisory wall pin does not fail a diff with no code change -- under
+saturation the by-design GIL-held marshalling band stretches to several times
+its quiet-box wall with the ratio at 1-2% (``_excuse_wall_pins``). Tier 2:
+the ratio-missed windows consult the loop thread's own scheduler account
+(``_gap_was_starved``): a window the heartbeat thread spent
+runnable-but-unrun (its runqueue wait grows with the gap) is the runner's
+starvation -- whatever the worker burned, the wakeup tail reaches every
+thread -- and is excused with a printed record (the timing lane's ``-rP``
 surfaces it in CI); a window the thread spent futex-blocked on the GIL
 convicts only when the process-CPU account agrees (the worker burned while
-the loop starved — the regression, still failed loudly). Tier 3: the
-surviving GIL-signature windows are judged RELATIVE to an idle-loop control
-sampled in the same run (``_excusable_under_control``) — only a box whose
-idle loop holds the ping floor can convict. Rate-normalized against the
-process's own share and the thread's own runqueue, so it holds under
+the loop starved -- the regression, still failed loudly). Tier 3 (the
+advisory-band cells: no ratio budget, or one at/above the by-design
+GIL-held share, ``_ADVISORY_RATIO_BUDGET``): the surviving GIL-signature
+windows are gated on MAGNITUDE against the cell's own by-design band
+(``_strikes_within_band``) -- the advisory excuse is for the BAND stretching
+under load, so a strike past the bound raises even in an advisory cell: a
+lost detach is a whole-wall hold, a multiple of the band no environment has
+ever produced (the reviewer's mutation: 437-477ms blocked on ``chunk_text``,
+~40x its 10-13ms band, ratio 1.00 in every sample). Tier 4 (every other
+budget): the surviving GIL-signature windows are judged RELATIVE to an
+idle-loop control sampled in the same run (``_excusable_under_control``) --
+only a box whose idle loop holds the ping floor can convict. Everything is
+rate-normalized against the process's own share and the thread's own
+runqueue, so it holds under load: the accounts move only when the load
+itself, not the code under test, is the cause.
+
+Scoped claim, stated precisely (the contention residual): what the verdicts
+RETIRE is the deschedule class -- the whole-process freeze and the
+wakeup-tail starvation the 2026-10 flake was. What they do NOT retire is
+the CONTENTION class: per-handoff GIL contention under ambient load (a
+worker re-acquiring the GIL per unit of work -- the ``find_patterns_iter``
+dense-drain cell's per-``__next__`` handoffs are the pinned shape) reads
+futex-blocked with the process burning -- the GIL signature,
+mechanistically -- and the scheduler accounts cannot separate it from a
+hold (neither account differs: the heartbeat thread is futex-blocked and
+the worker burns in both; a rqwait/BURN contention discriminator is not
+keepable for exactly the reason the futex-storm finding gave -- a storm of
+legit contenders carries the identical account, so any account that
+excuses one excuses the other). The contention class's account is the
+magnitude gate instead: contention gaps are bounded by the handoff cadence
+and sit within the cell's own measured contention band, so in-band
+contention is excused where a hold (whole-wall, past the band multiple)
+convicts -- and a cell whose contention can stretch past its own bound
+says so in its docstring (the dense-drain residual, that cell's note).
 
 Measured on the dev box this test was written on (WSL2, 28 logical cores, CPython 3.12.7;
 5 samples per cell, prose and decomposed corpora from ``tests/reference.py``; the prose
@@ -435,10 +465,15 @@ end-of-call marshalling alignment):
   ratio is the documented sub-ping artifact (measured 2.0-3.2), and the
   heavy members' ~164-410ms walls are dominated by their detached
   cores, so a detach regression holds the whole wall and blows the
-  100ms ceiling in every sample: the ceiling alone is the family's
-  detach pin, and the red-side cell below now proves it mechanically
-  for five heavy members run inline on the loop (ratio ~1.00, over the
-  ceiling in every sample). Measured worst gaps:
+  100ms ceiling in every sample. The pin is the magnitude-gated verdict
+  (``_excuse_band_or_raise`` with the per-member bands, the chunking
+  family cell's docstring carries the derivation): a lost detach sits
+  at/above 4x the member's own blocked-ms band and raises even in these
+  advisory cells -- the reviewer's mutation (chunk_text held, ratio
+  1.00, ~40x the band) was the false-pass that forced the gate -- and
+  the red-side cell below proves the measurement mechanically for five
+  heavy members run inline on the loop (ratio ~1.00, over the ceiling
+  in every sample). Measured worst gaps:
   chunk_text 10.2-13.1ms of 395-451ms (0.02-0.03); chunk_by_words
   10.4-19.4ms of 170-175ms (0.06-0.11); chunk_by_words_iter
   10.6-11.9ms of 164-168ms (0.06-0.07); chunk_by_sentences 10.3-10.7ms
@@ -558,6 +593,26 @@ _MIB = 1024 * 1024
 # GIL-held pass shows in every sample.
 _B64_RATIO_BUDGET = 0.80
 
+# The b64 cells' advisory-band magnitude gate inputs (see
+# ``_strikes_within_band``): each leg's own by-design band -- the pre-PR
+# green runs' worst gaps (12 MiB 10.1-11.2ms, 32 MiB 27.5-29.3ms, 96 MiB
+# 67.2-78.3ms) and the ratio legs' measured ratio tops (0.57-0.58 at
+# 32 MiB, 0.46-0.50 at 96 MiB). The gate's bound: 4x the band top on the
+# gap axis; max(0.80, 1.15 x ratio top) = 0.80 binding on the ratio axis
+# at 32/96 MiB (the 12 MiB leg is ceiling-only, gap-axis only). A
+# GIL-signature strike at/above the bound raises even in these advisory
+# cells; the observed bands sit far under it.
+_B64_BAND_GAP_TOP_S = {
+    12 * _MIB: 0.0112,
+    32 * _MIB: 0.0293,
+    96 * _MIB: 0.0783,
+}
+_B64_BAND_RATIO_TOP: dict[int, float | None] = {
+    12 * _MIB: None,
+    32 * _MIB: 0.58,
+    96 * _MIB: 0.50,
+}
+
 # rank_fuse's own ratio budget; the content_hash derivation shape: the
 # dedup walk (one Python dict lookup per entry -- interpreter hashing,
 # irreducible without an interpreter-free id format) plus the
@@ -577,6 +632,21 @@ _B64_RATIO_BUDGET = 0.80
 # spelling). The budget pins the str-id shape, not a detach guarantee
 # for every hashable id type.
 _RANK_FUSE_RATIO_BUDGET = 0.80
+
+# The rank/score fusion cells' advisory-band magnitude gate inputs (see
+# ``_strikes_within_band``): each cell's own by-design walk + marshalling
+# band -- rank_fuse 200k worst gaps 17.1-28.4ms (dev box), score_fuse 200k
+# 25.0-32.6ms (32-core box) with the dev box's 200k blocked-ms worst
+# (~0.74 x its 85-230ms walls) as the band top, ratios 0.52-0.74 at the
+# worst windows. The gate's bound: 4x the cell's band top on the gap axis
+# AND max(0.80, 1.15 x 0.74) = 0.851 on the ratio axis; a GIL-signature
+# strike at/above either raises even in these advisory cells -- the
+# hash-expensive-id caveat's 0.98-1.00 ratio shape (the walk grown
+# interpreter-bound) convicts on the ratio axis exactly as a lost detach
+# would, by design of the bound.
+_RANK_BAND_GAP_TOP_S = 0.0284
+_SCORE_FUSE_BAND_GAP_TOP_S = 0.170
+_FUSION_BAND_RATIO_TOP = 0.74
 
 # word_bounds's marshalling-band regression ceiling: not the suite's 100ms
 # ceiling, which the list-returning API shape cannot meet at whole-file sizes
@@ -600,6 +670,19 @@ _WORD_BOUNDS_CEILING_S = 2.0
 # passed the old ceiling-only assertion). 0.85 sits ~1.15x above the band's
 # worst measured ratio and well below the ~1.0 a detach regression shows.
 _WORD_BOUNDS_RATIO_BUDGET = 0.85
+
+# The advisory-band magnitude gate's band inputs for this cell (see
+# ``_strikes_within_band``): the by-design GIL-held marshalling band
+# itself -- the pre-PR green runs' worst gaps (428-497ms at 12 MiB) and its
+# ratio share (0.72-0.74). The gate's bound: a GIL-signature strike is
+# excused only under 4 x 497ms = 1.99s of gap AND under
+# max(0.85, 1.15 x 0.74) = 0.851 of ratio. The ratio axis is the binding
+# one here -- the lost-detach probe's gap (370-400ms) sits INSIDE the
+# by-design gap band, and only its ratio (1.00 vs the band's 0.72-0.74)
+# separates the shapes; a strike at/above the bound raises even in this
+# advisory cell (``_excuse_band_or_raise``).
+_WORD_BOUNDS_BAND_GAP_TOP_S = 0.497
+_WORD_BOUNDS_BAND_RATIO_TOP = 0.74
 
 # The 12 MiB QC-Yes prose cells' ratio budget (finalize / finalize_utf8), a
 # recalibration: the quick-check skip shrank those walls ~3x (42-46ms,
@@ -635,6 +718,17 @@ _SCRUB_PII_12MIB_RATIO_BUDGET = 0.60
 # over the worst gap. Same derivation shape as _B64_RATIO_BUDGET.
 _CONTENT_HASH_RATIO_BUDGET = 0.80
 
+# The content_hash cell's advisory-band magnitude gate inputs (see
+# ``_strikes_within_band``): the by-design arg-walk + marshalling band --
+# worst gaps 23.3-32.2ms, ratios 0.45-0.60 over the two load windows. The
+# gate's bound: 4 x 32.2ms = 129ms of gap AND max(0.80, 1.15 x 0.60) = 0.80
+# of ratio (0.80 binding); a GIL-signature strike at/above either raises
+# even in this advisory cell -- a lost walk (the detach removed from the
+# emission pass) holds the whole ~42-60ms wall at ratio ~1.0 and convicts
+# on the ratio axis.
+_CONTENT_HASH_BAND_GAP_TOP_S = 0.0322
+_CONTENT_HASH_BAND_RATIO_TOP = 0.60
+
 # The MinHash banding cell's per-cell ratio budget, the same derivation
 # shape: the signatures walk (one exact-int extraction per element over
 # n x num_perm Python ints) is a structurally large GIL-held arg-walk,
@@ -645,6 +739,14 @@ _CONTENT_HASH_RATIO_BUDGET = 0.80
 # 0.75 sits ~1.2x above that worst ratio and well below the ~1.0 a lost
 # detach shows; the 100ms ceiling holds ~2x margin over the worst gap.
 _LSH_RATIO_BUDGET = 0.75
+
+# The lsh_candidates cell's advisory-band magnitude gate inputs (see
+# ``_strikes_within_band``): the by-design walk + marshalling band --
+# worst gaps 32-53ms, ratios 0.47-0.61. The gate's bound: 4 x 53ms = 212ms
+# of gap AND max(0.75, 1.15 x 0.61) = 0.75 of ratio (0.75 binding); a
+# GIL-signature strike at/above either raises even in this advisory cell.
+_LSH_BAND_GAP_TOP_S = 0.053
+_LSH_BAND_RATIO_TOP = 0.61
 
 # The line-heavy corpus for the chunking family's cells (#30 item 5): the
 # chat-thread/log shape the streaming twins' own docstrings justify
@@ -728,6 +830,33 @@ def _chunk_family_calls(corpus: str) -> dict[str, Callable[[], object]]:
 _FAMILY_MARSHALLING_HEAVY = frozenset(
     {"chunk_text", "chunk_by_words", "chunk_hierarchical_default", "chunk_hierarchical_line_first"}
 )
+
+
+# The family cell's advisory-band magnitude gate inputs, PER MEMBER (see
+# ``_strikes_within_band``): each member's own by-design blocked-ms band top
+# -- the pre-PR green runs' worst gaps (the family cell's docstring lists
+# them per member; the floor-band members sit at the 10-13ms ping floor,
+# the marshalling-heaviest at 41.8ms for 370,080 pieces). The gate's bound
+# is 4x the member's band top (52.4ms for ``chunk_text`` up to 167ms for
+# the line-first leg), and every member's held wall sits at/above it:
+# chunk_text 395-451ms held, chunk_by_words 170-175ms vs 77.6ms,
+# chunk_by_sentences 187-190ms vs 42.8ms, the default hierarchy 194-204ms
+# vs 61.2ms, line-first 400-409ms vs 167.2ms -- a lost detach raises
+# through the gate at every member, which is the family's detach pin (the
+# ceiling alone never was; the reviewer's chunk_text mutation passed the
+# unconditional excuse at ratio 1.00, ~40x the band).
+_FAMILY_BAND_GAP_TOP_S: dict[str, float] = {
+    "chunk_text": 0.0131,
+    "chunk_by_words": 0.0194,
+    "chunk_by_words_iter": 0.0119,
+    "chunk_by_sentences": 0.0107,
+    "chunk_by_paragraphs": 0.0110,
+    "chunk_by_paragraphs_iter": 0.0111,
+    "chunk_by_lines": 0.0110,
+    "chunk_by_lines_iter": 0.0106,
+    "chunk_hierarchical_default": 0.0153,
+    "chunk_hierarchical_line_first": 0.0418,
+}
 
 
 async def _gap_and_wall_during(
@@ -832,11 +961,79 @@ _CPU_ACCOUNT_FLOOR_S = 0.002
 # this share sit AT the by-design GIL-held marshalling's share of the wall
 # (the dense-search 0.90, the word_bounds 0.85, the rank family's 0.80) --
 # the pinned band is a WALL pin over a window the GIL holds by design, and
-# no in-process account separates its load-stretched wall from a lost
-# detach. Budgets below it (the suite's 0.30 default) sit far under the
+# only the magnitude gate below separates its load-stretched wall from a
+# lost detach. Budgets below it (the suite's 0.30 default) sit far under the
 # by-design share, so a miss there is only the detach or a marshalling
 # explosion -- convicted.
 _ADVISORY_RATIO_BUDGET = 0.75
+
+# The advisory-band excuse's magnitude gate (the reviewer's mutation
+# finding: the unconditional excuse passed a fully-lost detach on
+# ``chunk_text`` -- 437-477ms blocked, ratio 1.00, every sample, ~40x the
+# cell's by-design 10-13ms band). The excuse's story is the BAND stretching
+# under load, so it now covers only strikes CONSISTENT with the cell's own
+# by-design band, on two measurable axes:
+#
+# - gap magnitude: a strike's worst gap must stay under
+#   ``_BAND_STRETCH_MULTIPLE`` x the cell's by-design blocked-ms band top
+#   (the pre-PR green runs' typical worst gap for that cell, documented in
+#   each cell's docstring). The observed GIL-signature stretch of a band is
+#   ~1.3x (the dense marshalling, 165 -> 217ms under load); the doctrine's
+#   extreme "several times" language is the deschedule class, which tier 2
+#   owns by its runqueue signature. 4x is principled headroom over the
+#   observed stretch while sitting far under every lost-detach shape
+#   measured here (~10-40x a floor band; the word_bounds probe, 0.37-0.40s
+#   at ratio 1.0, convicts on the ratio axis below).
+# - ratio magnitude: a strike's gap must stay under
+#   ``_BAND_RATIO_MULTIPLE`` x the cell's by-design ratio-band top (the
+#   measured gap/wall share). 1.15 is the suite's own budget-derivation
+#   multiple (word_bounds: "0.85 sits ~1.15x above" its 0.72-0.74 band;
+#   dense ~1.125x; the rank family ~1.1x): the ratio is load-stable (the
+#   tier-1 record: stretched walls HOLD the ratio), so 15% covers its
+#   wobble and the bound lands between the by-design band and the ratio
+#   ~1.0 a lost detach shows -- which is the ONLY axis that separates them
+#   when the by-design band's gap already approaches the held wall's gap
+#   (word_bounds: 428-497ms by design vs the probe's 370-400ms held).
+#
+# A cell whose by-design band is the suite's ping floor passes no band
+# arguments: the default band top below puts the gap bound (4 x 15ms = 60ms)
+# under the 100ms ceiling, so any dirty sample (>= 100ms, >= 6.7x the floor
+# band) fails the gate and raises -- correct for the floor cells, where no
+# GIL-signature stretch past 1.3x is in evidence and the deschedule class
+# carries the starvation signature tier 2 excuses.
+_BAND_STRETCH_MULTIPLE = 4.0
+_BAND_RATIO_MULTIPLE = 1.15
+_PING_FLOOR_BAND_TOP_S = 0.015
+
+
+def _strikes_within_band(
+    strikes: list[tuple[float, float, float, float, float]],
+    ratio_budget: float | None,
+    band_top_s: float | None,
+    band_ratio_top: float | None,
+) -> bool:
+    """Whether EVERY GIL-signature strike is magnitude-consistent with the
+    cell's own by-design band (the constant block above): the gap under
+    ``_BAND_STRETCH_MULTIPLE`` x the band top, and -- when the cell has a
+    ratio budget -- under ``max(ratio_budget, _BAND_RATIO_MULTIPLE x
+    band_ratio_top)`` x the wall. ``band_top_s is None`` fails closed
+    (convicts): a cell that cannot state its band cannot claim the excuse.
+    For a no-ratio cell (``ratio_budget is None``) the gap axis governs
+    alone -- the ratio there is the documented sub-ping artifact, and a
+    lost detach is a whole-wall hold the gap axis catches."""
+    for gap, wall, *_ in strikes:
+        if band_top_s is None or gap >= _BAND_STRETCH_MULTIPLE * band_top_s:
+            return False
+        if ratio_budget is None:
+            continue
+        bound = (
+            max(ratio_budget, _BAND_RATIO_MULTIPLE * band_ratio_top)
+            if band_ratio_top is not None
+            else ratio_budget
+        )
+        if gap >= bound * wall:
+            return False
+    return True
 
 
 def _cpu_account_starved(gap: float, gap_cpu: float, cpu_share: float) -> bool:
@@ -1017,28 +1214,90 @@ def _excuse_band_stretch(
     """Print the advisory-band excuse record for a verdict whose budget sits at
     the by-design GIL-held marshalling's share of the wall (the list-shape
     class, ``_ADVISORY_RATIO_BUDGET``) and whose missed windows carry the GIL
-    signature: under a saturated runner the band stretches (cache pressure
-    grows the marshalling's own CPU; CPU-share starvation stretches its
-    futex-held wall) and no in-process account separates the stretched band
-    from a lost detach -- both read futex-blocked with the worker burning at
-    the process's own rate. The doctrine's ruling: the band pin is advisory,
-    excused with this record (the timing lane's ``-rP`` surfaces the numbers
-    in CI) instead of failing a diff with no code change; the detach teeth
-    live in the 0.30-budget cells, the red-side discriminators, and the
-    canned verdict pins."""
+    signature AND pass the magnitude gate (``_strikes_within_band``): under a
+    saturated runner the band stretches (cache pressure grows the
+    marshalling's own CPU; CPU-share starvation stretches its futex-held
+    wall) and the strike's magnitude is still consistent with the cell's own
+    by-design band. The doctrine's ruling: the band pin is advisory, excused
+    with this record (the timing lane's ``-rP`` surfaces the numbers in CI)
+    instead of failing a diff with no code change; the detach teeth live in
+    the magnitude gate (a strike past the bound raises even here, through
+    ``_excuse_band_or_raise``), the 0.30-budget cells, the red-side
+    discriminators, and the canned verdict pins."""
     print(
         f"{label} missed its band in every sample with GIL-signature windows, "
-        "but the band sits at the by-design GIL-held marshalling's share of "
-        "the wall (the advisory list-shape class) and no in-process account "
-        "separates its load-stretched wall from a lost detach ("
+        "but every strike stayed within the by-design band's magnitude bound "
+        "(the advisory list-shape class: the band stretches under load, and "
+        "no in-process account separates its load-stretched wall from a lost "
+        "detach ("
         + "; ".join(
             f"blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms operation "
             f"({(gap / wall if wall else 0):.0%}), the process burned "
             f"{gap_cpu * 1000:.0f}ms of CPU"
             for gap, wall, gap_cpu, _share, _wait in strikes
         )
-        + "): excused as an advisory band pin under load, not a detach "
+        + ")): excused as an advisory band pin under load, not a detach "
         "regression (tests/test_gil_release.py, _excuse_band_stretch)"
+    )
+
+
+def _excuse_band_or_raise(
+    label: str,
+    strikes: list[tuple[float, float, float, float, float]],
+    *,
+    samples: int,
+    excused: int,
+    ratio_budget: float | None,
+    band_top_s: float | None,
+    band_ratio_top: float | None,
+    regression: str,
+) -> None:
+    """The advisory-band verdict every advisory-class cell raises through (the
+    shared harness's advisory branch, the word_bounds and find_patterns-dense
+    tails, and the aio twin's final branch): the magnitude gate FIRST (the
+    reviewer's mutation finding -- the unconditional excuse passed a lost
+    detach at ratio 1.00, ~40x the cell's own band). In-band GIL-signature
+    strikes are excused with the printed record (``_excuse_band_stretch``);
+    a strike at/above the bound (``_strikes_within_band``) raises HERE,
+    before any further arbitration: the magnitude is the conviction, and the
+    idle-loop control's unjudgeability excuse (a wall ratio a saturated box
+    cannot judge) does not unjudge a whole-wall hold orders of magnitude
+    past the band -- no environment produces that signature.
+    ``regression`` is the cell's own sentence for what the conviction means
+    (the marshalling band blew out, or the detach was lost)."""
+    if _strikes_within_band(strikes, ratio_budget, band_top_s, band_ratio_top):
+        _excuse_band_stretch(label, strikes)
+        return
+    gap_bound = (
+        "no band stated (fail-closed)"
+        if band_top_s is None
+        else f"gap < {_BAND_STRETCH_MULTIPLE * band_top_s * 1000:.0f}ms"
+    )
+    if ratio_budget is not None:
+        ratio_bound = (
+            f"ratio < {ratio_budget:.0%}"
+            if band_ratio_top is None
+            else f"ratio < {max(ratio_budget, _BAND_RATIO_MULTIPLE * band_ratio_top):.0%}"
+        )
+        gap_bound = f"{gap_bound}, {ratio_bound}"
+    detail = "; ".join(
+        f"blocked {gap * 1000:.0f}ms of a {wall_ * 1000:.0f}ms operation "
+        f"({(gap / wall_ if wall_ else 0):.0%}, the process burned "
+        f"{(gap_cpu / gap if gap else 0):.0%} of the gap on CPU)"
+        for gap, wall_, gap_cpu, _share, _wait in strikes
+    )
+    raise AssertionError(
+        f"{label} showed GIL-signature windows past the advisory band's "
+        f"magnitude bound ({gap_bound}) in every one of {samples} samples "
+        f"({detail}): the by-design band cannot stretch to this magnitude "
+        f"under load -- {regression}"
+        + (
+            f"; the {excused} remaining sample(s) carried the runner's "
+            "starvation signature and are not evidence"
+            if excused
+            else ""
+        )
+        + " (tests/test_gil_release.py, _excuse_band_or_raise)"
     )
 
 
@@ -1052,14 +1311,19 @@ def _ratio_missed(gap: float, wall: float, ratio_budget: float | None) -> bool:
     return ratio_budget is not None and gap >= ratio_budget * wall
 
 
-def _budget_misses(gap: float, wall: float, ratio_budget: float | None) -> list[str]:
+def _budget_misses(
+    gap: float,
+    wall: float,
+    ratio_budget: float | None,
+    abs_ceiling_s: float = _ABS_CEILING_S,
+) -> list[str]:
     """The budgets a sample missed: the single source for what "clean" means. A sample
     is clean exactly when this list is empty (worst gap under both the absolute
     ceiling and the ratio budget), and the failure detail reports the same list, so
     the check and the message can never disagree on the boundary."""
     missed: list[str] = []
-    if gap >= _ABS_CEILING_S:
-        missed.append(f"the {_ABS_CEILING_S * 1000:.0f}ms ceiling")
+    if gap >= abs_ceiling_s:
+        missed.append(f"the {abs_ceiling_s * 1000:.0f}ms ceiling")
     if _ratio_missed(gap, wall, ratio_budget):
         missed.append(f"the {ratio_budget:.0%} ratio budget")
     return missed
@@ -1069,6 +1333,9 @@ async def _assert_loop_stays_responsive(
     op: Callable[[], Awaitable[object]],
     ratio_budget: float | None = _RATIO_BUDGET,
     samples: int = _SAMPLES,
+    band_top_s: float | None = _PING_FLOOR_BAND_TOP_S,
+    band_ratio_top: float | None = None,
+    abs_ceiling_s: float = _ABS_CEILING_S,
 ) -> None:
     """Assert ``op`` leaves the event loop schedulable, over up to ``samples``
     measurements (default ``_SAMPLES``), passing on the first clean one (a
@@ -1087,7 +1354,20 @@ async def _assert_loop_stays_responsive(
     stricter test (more chances to catch a dirty one), never a looser one
     (the pass-on-first-clean semantics are unchanged).
 
-    The verdict when EVERY sample misses the budgets is three-tiered. Tier 1: a
+    ``band_top_s``/``band_ratio_top`` are the advisory-class cells' own
+    by-design GIL-held band (the pre-PR green runs' typical blocked-ms and
+    its ratio share, documented in each cell's docstring); they arm the
+    magnitude gate (``_strikes_within_band``) that bounds the advisory-band
+    excuse. Cells whose band is the suite's ping floor pass no arguments
+    (the default gap bound sits under the 100ms ceiling, so their dirty
+    samples fail the gate and raise); the list-shape and no-ratio cells with
+    bands above the floor state theirs. ``abs_ceiling_s`` overrides the
+    shared 100ms ceiling for cells whose by-design contention band reaches
+    past it (the uuid-batch and dense-drain precedents: a per-tick
+    reacquisition band that is roughly wall-independent, so the ceiling is
+    sized above the loaded band, never above the walls).
+
+    The verdict when EVERY sample misses the budgets is tiered. Tier 1: a
     window that HELD its ratio budget and missed only the absolute ceiling is a
     wall pin, advisory under the doctrine (``_excuse_wall_pins``) -- under
     saturation the by-design GIL-held marshalling band stretches to several
@@ -1097,21 +1377,27 @@ async def _assert_loop_stays_responsive(
     heartbeat thread spent runnable-but-unrun are the runner's starvation and
     are excused with a printed record (the timing lane runs ``-rP``, so the
     record surfaces in CI); windows the thread spent futex-blocked on the GIL
-    while the worker burned the CPU raise. Tier 3: the surviving GIL-signature
+    while the worker burned the CPU move on. Tier 3 (advisory-class budgets
+    only): the magnitude gate -- in-band GIL-signature strikes are excused
+    as the band stretching (``_excuse_band_or_raise``); a strike at/above
+    the bound raises there, before any further arbitration: a lost detach is
+    a whole-wall hold no environment produces, and the control's
+    unjudgeability excuse (a wall RATIO a saturated box cannot judge) does
+    not reach it. Tier 4 (every other budget): the surviving GIL-signature
     strikes are judged RELATIVE to the idle-loop control sampled in the same
-    run (``_excusable_under_control``) -- the wakeup tail reaches every thread
-    under saturation, so only a box whose idle loop holds the ping floor can
-    convict. The teeth are exactly the doctrine's: a regression that blocks
-    the loop while the machine had CPU to give -- and the control stays free
-    -- fails loudly in this verdict; a saturated box cannot judge a wall
-    ratio or an absolute wall pin at all (99-100% "blocked" is the freeze's
-    signature, not evidence), and an environmental wall pin does not fail a
-    diff with no code change."""
+    run (``_excusable_under_control``) -- the wakeup tail reaches every
+    thread under saturation, so only a box whose idle loop holds the ping
+    floor can convict. The teeth are exactly the doctrine's: a regression
+    that blocks the loop while the machine had CPU to give -- and the
+    control stays free -- fails loudly in this verdict; a saturated box
+    cannot judge a wall ratio or an absolute wall pin at all (99-100%
+    "blocked" is the freeze's signature, not evidence), and an environmental
+    wall pin does not fail a diff with no code change."""
     observed: list[tuple[float, float, float, float, float]] = []
     for _ in range(samples):
         worst_gap, wall, gap_cpu, cpu_share, gap_wait = await _gap_and_wall_during(op)
         observed.append((worst_gap, wall, gap_cpu, cpu_share, gap_wait))
-        if not _budget_misses(worst_gap, wall, ratio_budget):
+        if not _budget_misses(worst_gap, wall, ratio_budget, abs_ceiling_s):
             return
     # Tier 1 (the wall-pin excuse): windows that HELD the ratio budget and
     # missed only the absolute ceiling are not evidence -- the ratio against the
@@ -1134,28 +1420,43 @@ async def _assert_loop_stays_responsive(
     if not strikes:
         _excuse_starvation("the event loop was blocked", ratio_strikes)
         return
-    # The advisory-band excuse (the list-shape class): cells whose ratio
-    # budget sits AT the by-design GIL-held share (>= 0.75: the marshalling
-    # dominates the wall by design) or that have no ratio at all pin a WALL
-    # BAND over a by-design GIL-held window. Under a saturated runner that
-    # band stretches -- cache pressure grows the marshalling's own CPU
-    # (measured 165 -> 217ms at 12 MiB dense), and CPU-share starvation
-    # stretches its futex-held wall -- and NO in-process account separates
-    # the stretched band from a lost detach (both read futex-blocked with
-    # the worker burning at the process's own rate; the loop thread's
-    # runqueue wait is 0-2% through every such window). The doctrine's
-    # ruling: those pins are advisory -- excused with a printed record (the
-    # timing lane's -rP surfaces the numbers in CI). The detach teeth live
-    # in the 0.30-budget cells (a lost detach reads ratio ~1.0 against a
-    # by-design marshalling of ~10% -- nothing environmental reaches that
-    # budget), the red-side discriminators, and the canned verdict pins.
+    # The advisory-band excuse (the list-shape class), magnitude-gated: cells
+    # whose ratio budget sits AT the by-design GIL-held share (>= 0.75: the
+    # marshalling dominates the wall by design) or that have no ratio at all
+    # pin a WALL BAND over a by-design GIL-held window. Under a saturated
+    # runner that band stretches -- cache pressure grows the marshalling's
+    # own CPU (measured 165 -> 217ms at 12 MiB dense), and CPU-share
+    # starvation stretches its futex-held wall -- and NO in-process account
+    # separates the stretched band from a lost detach (both read futex-blocked
+    # with the worker burning at the process's own rate; the loop thread's
+    # runqueue wait is 0-2% through every such window). The doctrine's ruling
+    # (post-mutation): those pins are advisory ONLY within the cell's own
+    # by-design band magnitude (``_strikes_within_band``) -- a strike past
+    # the bound raises even here (a lost detach is a whole-wall hold, a
+    # multiple of the band no environment has produced), which is what makes
+    # the ceiling-only cells' detach teeth real at every budget level. The
+    # 0.30-budget cells keep their teeth one tier down (a lost detach reads
+    # ratio ~1.0 against a by-design marshalling of ~10% -- nothing
+    # environmental reaches that budget), alongside the red-side
+    # discriminators and the canned verdict pins.
     if ratio_budget is None or ratio_budget >= _ADVISORY_RATIO_BUDGET:
-        _excuse_band_stretch("the event loop was blocked", strikes)
+        _excuse_band_or_raise(
+            "the event loop was blocked",
+            strikes,
+            samples=samples,
+            excused=len(observed) - len(strikes),
+            ratio_budget=ratio_budget,
+            band_top_s=band_top_s,
+            band_ratio_top=band_ratio_top,
+            regression="tors's py.detach release is not freeing the loop while "
+            "it runs, or the return marshalling regressed out of its band "
+            "(src/lib.rs)",
+        )
         return
-    # Tier 3 (the control): the GIL-signature strikes are judged relative to
-    # the idle-loop control sampled in the same run -- the wakeup tail
-    # reaches every thread under saturation, and only a box whose idle loop
-    # holds the ping floor can convict.
+    # Tier 4 (the control, every non-advisory budget): the GIL-signature
+    # strikes are judged relative to the idle-loop control sampled in the
+    # same run -- the wakeup tail reaches every thread under saturation, and
+    # only a box whose idle loop holds the ping floor can convict.
     if await _excusable_under_control("the event loop was blocked", strikes):
         return
     detail = "; ".join(
@@ -1163,7 +1464,7 @@ async def _assert_loop_stays_responsive(
         f"({(gap / wall_ if wall_ else 0):.0%}, the process burned "
         f"{(gap_cpu / gap if gap else 0):.0%} of the gap on CPU against its own "
         f"{cpu_share:.0%} share, over "
-        f"{' and '.join(_budget_misses(gap, wall_, ratio_budget))})"
+        f"{' and '.join(_budget_misses(gap, wall_, ratio_budget, abs_ceiling_s))})"
         for gap, wall_, gap_cpu, cpu_share, _gap_wait in strikes
     )
     excused = len(observed) - len(strikes)
@@ -1306,6 +1607,13 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
       encode makes the marshalling the dominant share of the wall
       (gap/wall -> marshal/(encode+marshal) ~ 0.6-0.75 as size grows,
       measured).
+    - The advisory verdict's magnitude bound (the mutation finding): the
+      band-stretch excuse covers only GIL-signature strikes under 4x the
+      leg's own by-design band top (12 MiB 45ms / 32 MiB 117ms / 96 MiB
+      313ms, ``_B64_BAND_GAP_TOP_S``) AND, on the ratio legs, under
+      max(0.80, 1.15 x the leg's measured ratio top) (``_B64_BAND_RATIO_TOP``
+      -- 0.80 binding at 32 and 96 MiB, the measured tops 0.58/0.50); a
+      strike at/above either raises even in these advisory cells.
     - The red side, same placement: ``base64.b64encode(...).decode("ascii")``
       holds the GIL for the encode: measured 122.7-127.6ms of 188-199ms walls
       at 96 MiB, reproducing the ~150ms GIL-held b64encode observation at
@@ -1323,6 +1631,8 @@ def test_b64_encode_bytes_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.b64_encode_bytes, corpus),
             ratio_budget=ratio_budget,
+            band_top_s=_B64_BAND_GAP_TOP_S[size_bytes],
+            band_ratio_top=_B64_BAND_RATIO_TOP[size_bytes],
         )
     )
 
@@ -1671,6 +1981,106 @@ def test_the_control_arbitrates_gil_signature_windows_only_when_it_loses(monkeyp
         asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.sleep(0), samples=3))
 
 
+def test_the_advisory_band_magnitude_gate_convicts_a_lost_detach(monkeypatch) -> None:
+    """The advisory-band magnitude gate's own pin (the reviewer's mutation,
+    canned): the pre-fix verdict excused GIL-signature strikes UNCONDITIONALLY
+    in advisory cells, so a fully-lost detach on a ceiling-only member
+    (``chunk_text``, 437-477ms blocked, ratio 1.00, every sample, ~40x the
+    cell's 10-13ms band) PASSED. The gate (``_strikes_within_band``) closes
+    it; these canned samples pin both directions without re-measuring.
+
+    red (the mutation shape): a no-ratio cell whose by-design band is the
+    13.1ms floor: whole-wall GIL-signature strikes (437ms of a 450ms op,
+    the burn at the process's own rate, the runqueue wait ~none) sit ~33x
+    past the 4x-band gap bound and MUST raise, budget level notwithstanding.
+
+    green (the stretched band): the same no-ratio cell class with a big
+    by-design band (the ground_sentences shape, 50ms): a 150ms
+    GIL-signature strike is 3x the band, inside the 4x bound -- the
+    advisory excuse's own territory, excused with a record.
+
+    red (the ratio axis): a 0.90-budget list-shape cell (the dense class,
+    band ratio 0.80, gap top 174.7ms): a strike at ratio 0.95 is past
+    max(0.90, 1.15 x 0.80) = 0.92 and raises even though its gap (190ms)
+    is inside the gap bound (699ms) -- the ratio axis is what convicts
+    when the by-design gap band already approaches the held wall's gap
+    (the word_bounds lesson).
+
+    green (the ratio axis, in-band): the same dense-class cell with the
+    strike at ratio 0.915, inside the (0.90, 0.92) window the 0.92 bound
+    keeps open: excused as the band stretching."""
+    calls: list[object] = []
+
+    def canned(strike: tuple[float, float, float, float, float]):
+        async def fake_during(
+            op: Callable[[], Awaitable[object]],
+        ) -> tuple[float, float, float, float, float]:
+            calls.append(op)
+            return strike
+
+        return fake_during
+
+    # red: the chunk_text mutation shape, canned (no-ratio, floor band).
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_gap_and_wall_during",
+        canned((0.437, 0.45, 0.43, 0.95, 0.0)),
+    )
+    with pytest.raises(AssertionError, match="magnitude bound"):
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.sleep(0),
+                ratio_budget=None,
+                band_top_s=0.0131,
+            )
+        )
+
+    # green: the stretched-band class (big band, strike 3x the band top).
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_gap_and_wall_during",
+        canned((0.150, 0.40, 0.13, 0.90, 0.0)),
+    )
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.sleep(0),
+            ratio_budget=None,
+            band_top_s=0.050,
+        )
+    )
+
+    # red: the ratio axis convicts what the gap bound would excuse.
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_gap_and_wall_during",
+        canned((0.190, 0.20, 0.18, 0.95, 0.0)),
+    )
+    with pytest.raises(AssertionError, match="magnitude bound"):
+        asyncio.run(
+            _assert_loop_stays_responsive(
+                lambda: asyncio.sleep(0),
+                ratio_budget=0.90,
+                band_top_s=0.1747,
+                band_ratio_top=0.80,
+            )
+        )
+
+    # green: the (budget, bound) ratio window the 1.15x multiple keeps open.
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_gap_and_wall_during",
+        canned((0.183, 0.20, 0.17, 0.95, 0.0)),
+    )
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.sleep(0),
+            ratio_budget=0.90,
+            band_top_s=0.1747,
+            band_ratio_top=0.80,
+        )
+    )
+
+
 @pytest.mark.parametrize("form_name", ["nfc", "nfkd"])
 @pytest.mark.parametrize("size_bytes", [12 * _MIB, 32 * _MIB], ids=["12MiB", "32MiB"])
 def test_standalone_forms_full_pass_on_the_compat_corpus_keep_the_loop_at_heartbeat_granularity(
@@ -1797,6 +2207,16 @@ def test_html_unescape_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity
     )
 
 
+_B64_DECODE_BAND_GAP_TOP_S = {
+    12 * _MIB: 0.0117,
+    32 * _MIB: 0.0227,
+}
+_B64_DECODE_BAND_RATIO_TOP: dict[int, float | None] = {
+    12 * _MIB: None,
+    32 * _MIB: 0.35,
+}
+
+
 @pytest.mark.parametrize(
     "size_bytes, ratio_budget",
     [(12 * _MIB, None), (32 * _MIB, _B64_RATIO_BUDGET)],
@@ -1824,12 +2244,21 @@ def test_b64_decode_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       shows ratio ~1.0 (the red side below) and fails this cell.
     - The red side, same placement: ``base64.b64decode`` holds the GIL for the
       whole C decode: 14.8-27.5ms gaps of 15.0-27.8ms walls (ratio 0.98-0.99)
-      in every 12 MiB sample, measured alongside the tors cells above."""
+      in every 12 MiB sample, measured alongside the tors cells above.
+
+    The advisory verdict's magnitude bound (the mutation finding): the
+    band-stretch excuse covers only GIL-signature strikes under 4x the leg's
+    own band top (12 MiB 47ms / 32 MiB 91ms, ``_B64_DECODE_BAND_GAP_TOP_S``)
+    AND, on the 32 MiB ratio leg, under max(0.80, 1.15 x 0.35) = 0.80 of
+    ratio (``_B64_DECODE_BAND_RATIO_TOP``, 0.80 binding); a strike at/above
+    either raises even in these advisory cells."""
     corpus = corpus_b64("prose", size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.b64_decode, corpus),
             ratio_budget=ratio_budget,
+            band_top_s=_B64_DECODE_BAND_GAP_TOP_S[size_bytes],
+            band_ratio_top=_B64_DECODE_BAND_RATIO_TOP[size_bytes],
         )
     )
 
@@ -1916,7 +2345,15 @@ def test_word_bounds_marshalling_band_is_pinned_against_regression(
     only ~0.4-0.6s at this size, which the 1.0s ceiling alone would let
     through; a simulated-regression probe measured exactly that
     (0.37-0.40s gaps at ratio 100%, passing the old ceiling-only assertion
-    and failing this one)."""
+    and failing this one).
+
+    The advisory verdict's magnitude bound (the mutation finding: an
+    unconditional band excuse passed a lost detach at ratio 1.00): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x 497ms
+    = 1.99s of gap AND under max(0.85, 1.15 x 0.74) = 0.851 of ratio (see
+    ``_WORD_BOUNDS_BAND_GAP_TOP_S``); a strike at/above either raises even
+    in this advisory cell -- the lost-detach shape convicts on the ratio
+    axis, its gap being inside the by-design gap band."""
     corpus = prose(size_bytes)
     observed = [
         asyncio.run(_gap_and_wall_during(lambda: asyncio.to_thread(tors.word_bounds, corpus)))
@@ -1935,24 +2372,22 @@ def test_word_bounds_marshalling_band_is_pinned_against_regression(
         return
     # The 0.85 budget is the advisory list-shape class (the by-design
     # GIL-held bounds-list marshalling dominates the wall): the band pin is
-    # advisory under the doctrine -- excused with a record, never raised on
-    # (the detach teeth live in the 0.30-budget cells and the
-    # word_bounds_iter sibling).
-    _excuse_band_stretch("the word_bounds band", strikes)
-    return
-    detail = "; ".join(
-        f"blocked {gap * 1000:.0f}ms of a {wall * 1000:.0f}ms operation "
-        f"({gap / wall:.0%}, over the 1.0s ceiling and/or the "
-        f"{_WORD_BOUNDS_RATIO_BUDGET:.0%} ratio budget)"
-        if wall
-        else "n/a"
-        for gap, wall, _gap_cpu, _share, _wait in strikes
-    )
-    raise AssertionError(
-        f"the word_bounds band regressed in every one of {_SAMPLES} samples ({detail}): "
-        "either the bounds-list marshalling blew past its measured band or the "
-        "segmentation lost its detach (ratio ~1.0) (src/segmentation_impl.rs, "
-        "tests/test_gil_release.py)"
+    # advisory under the doctrine, bounded by the magnitude gate -- a
+    # GIL-signature strike past the band's own magnitude raises here (the
+    # lost detach at ratio ~1.0 convicts on the ratio axis), only in-band
+    # stretches are excused with a record (the detach teeth live in the
+    # 0.30-budget cells and the word_bounds_iter sibling).
+    _excuse_band_or_raise(
+        "the word_bounds band",
+        strikes,
+        samples=_SAMPLES,
+        excused=len(observed) - len(strikes),
+        ratio_budget=_WORD_BOUNDS_RATIO_BUDGET,
+        band_top_s=_WORD_BOUNDS_BAND_GAP_TOP_S,
+        band_ratio_top=_WORD_BOUNDS_BAND_RATIO_TOP,
+        regression="either the bounds-list marshalling blew past its measured "
+        "band or the segmentation lost its detach (ratio ~1.0) "
+        "(src/segmentation_impl.rs)",
     )
 
 
@@ -2459,6 +2894,18 @@ def test_find_patterns_sparse_in_a_thread_keeps_the_event_loop_at_heartbeat_gran
 _SEARCH_DENSE_CEILING_S = 0.400
 _SEARCH_DENSE_RATIO_BUDGET = 0.90
 
+# The advisory-band magnitude gate's band inputs for this cell (see
+# ``_strikes_within_band``): the by-design GIL-held marshalling band -- the
+# pre-PR green runs' worst gaps (171.0-174.7ms) and its ratio share
+# (0.76-0.80). The gate's bound: a GIL-signature strike is excused only
+# under 4 x 174.7ms = 699ms of gap AND under max(0.90, 1.15 x 0.80) = 0.92
+# of ratio; a strike at/above either raises even in this advisory cell (the
+# lost detach at ratio ~1.0 convicts on the ratio axis; the observed
+# load-stretch of this band, 165 -> 217ms, stays under both bounds with
+# room to spare).
+_SEARCH_DENSE_BAND_GAP_TOP_S = 0.1747
+_SEARCH_DENSE_BAND_RATIO_TOP = 0.80
+
 
 @pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
 def test_find_patterns_dense_marshalling_band_is_pinned_against_regression(
@@ -2482,6 +2929,15 @@ def test_find_patterns_dense_marshalling_band_is_pinned_against_regression(
     ~1.0 against these ~215ms walls; see the constant's comment for why 0.90
     and not word_bounds' 0.85). The match count is reported in the failure
     detail, never asserted; it is the corpus's business, not a contract.
+
+    The advisory verdict's magnitude bound (the mutation finding: an
+    unconditional band excuse passed a lost detach at ratio 1.00): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x 174.7ms
+    = 699ms of gap AND under max(0.90, 1.15 x 0.80) = 0.92 of ratio (see
+    ``_SEARCH_DENSE_BAND_GAP_TOP_S``); a strike at/above either raises even
+    in this advisory cell -- the lost-detach shape convicts on the ratio
+    axis, and the observed load-stretch (165 -> 217ms, ratio intact) stays
+    well inside both bounds.
 
     Guidance (the word_bounds finding's shape, recorded in
     docs/performance.md): ~0.13µs of GIL hold per match: ~13ms at 100k
@@ -2513,24 +2969,22 @@ def test_find_patterns_dense_marshalling_band_is_pinned_against_regression(
         return
     # The 0.90 budget is the advisory list-shape class (the by-design
     # GIL-held match-list marshalling dominates the wall): the band pin is
-    # advisory under the doctrine -- excused with a record, never raised on
-    # (the detach teeth live in the 0.30-budget cells and the sparse
-    # sibling's dense-counterpart).
-    _excuse_band_stretch("the find_patterns marshalling band", strikes)
-    return
-    detail = "; ".join(
-        f"blocked {gap * 1000:.0f}ms of a {wall_ * 1000:.0f}ms operation "
-        f"({(gap / wall_ if wall_ else 0):.0%}, "
-        f"over the {_SEARCH_DENSE_CEILING_S * 1000:.0f}ms marshalling ceiling "
-        f"and/or the {_SEARCH_DENSE_RATIO_BUDGET:.0%} ratio budget)"
-        for gap, wall_, _gap_cpu, _share, _wait in strikes
-    )
-    raise AssertionError(
-        f"the find_patterns marshalling band regressed in every one of {_SAMPLES} "
-        f"samples ({detail}; {match_counts[0]} matches in the corpus): either the "
-        "match-list marshalling blew past its measured band (~160-165ms above "
-        "the ping floor for ~1.28M matches) or the search lost its detach "
-        "(ratio ~1.0) (src/search_impl.rs, tests/test_gil_release.py)"
+    # advisory under the doctrine, bounded by the magnitude gate -- a
+    # GIL-signature strike past the band's own magnitude raises here (the
+    # lost detach at ratio ~1.0 convicts on the ratio axis), only in-band
+    # stretches are excused with a record (the detach teeth live in the
+    # 0.30-budget cells and the sparse sibling's dense-counterpart).
+    _excuse_band_or_raise(
+        f"the find_patterns marshalling band ({match_counts[0]} matches in the corpus)",
+        strikes,
+        samples=_SAMPLES,
+        excused=len(observed) - len(strikes),
+        ratio_budget=_SEARCH_DENSE_RATIO_BUDGET,
+        band_top_s=_SEARCH_DENSE_BAND_GAP_TOP_S,
+        band_ratio_top=_SEARCH_DENSE_BAND_RATIO_TOP,
+        regression="either the match-list marshalling blew past its measured "
+        "band (~160-165ms above the ping floor for ~1.28M matches) or the "
+        "search lost its detach (ratio ~1.0) (src/search_impl.rs)",
     )
 
 
@@ -2811,10 +3265,21 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       ``chunk_hierarchical`` hierarchies) have walls dominated by their
       detached cores with marshalling residues far under the ceiling
       (bands below), so a detach regression holds the whole wall and
-      blows the 100ms ceiling in every sample: the ceiling alone is the
-      family's detach pin, which is what #30 item 5 asked this cell to
-      pin, and the red-side cell above now asserts that mechanically
-      for five of the six heavy spellings (run inline on the loop, they
+      blows the 100ms ceiling in every sample. The ceiling alone is NOT
+      the pin -- the reviewer's mutation falsified that (a lost detach
+      excused as an "advisory band"): the pin is the magnitude-gated
+      verdict (``_excuse_band_or_raise``, via this cell's per-member
+      band inputs ``_FAMILY_BAND_GAP_TOP_S``). Each member's by-design
+      blocked-ms band (its pre-PR green worst gaps, listed per member
+      below) arms the gate: a GIL-signature strike at/above 4x the
+      member's band top raises even in these ceiling-only cells, and
+      every member's held wall sits past that bound (chunk_text 395-451ms
+      held vs a 52ms bound; chunk_by_words 170-175ms vs 78ms;
+      chunk_by_sentences 187-190ms vs 43ms; the default hierarchy
+      194-204ms vs 61ms; line-first at ``max_chars=40`` 400-409ms vs
+      167ms), while the by-design bands themselves stay far under it.
+      The red-side cell above proves the measurement mechanically for
+      five of the six heavy spellings (run inline on the loop, they
       hold at ratio ~1.00 and miss the ceiling in every sample; the
       ``_iter`` drain shares ``chunk_by_words``'s core, so the list
       spelling's row carries the pair). A fast-box caveat, the diff
@@ -2823,10 +3288,11 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
       the default hierarchy (~200ms, the lazy levels halved it; a held
       wall is only ~2.0x the ceiling now, where the eager tree's
       347-416ms held ~3.5-4.2x) sit close enough that a box ~2x faster
-      could pull a held wall under 100ms; ``chunk_text`` (~395-451ms)
-      and the line-first leg at ``max_chars=40`` (~400-409ms, ~4.1x the
-      ceiling when held) stay discriminating on every box this suite
-      has measured.
+      could pull a held wall under 100ms -- the magnitude gate still
+      convicts there (the held walls sit 2.2-4x past the members' band
+      bounds); ``chunk_text`` (~395-451ms) and the line-first leg at
+      ``max_chars=40`` (~400-409ms, ~4.1x the ceiling when held) stay
+      discriminating on every box this suite has measured.
 
     Measured (3 samples per member; the marshalling-heaviest members
     take 6: a 3-sample window can miss the end-of-call marshalling
@@ -2888,6 +3354,7 @@ def test_chunk_family_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
             lambda: asyncio.to_thread(calls[member]),
             ratio_budget=None,
             samples=6 if member in _FAMILY_MARSHALLING_HEAVY else _SAMPLES,
+            band_top_s=_FAMILY_BAND_GAP_TOP_S[member],
         )
     )
 
@@ -3044,15 +3511,30 @@ def test_count_matches_dense_in_a_thread_keeps_the_event_loop_at_heartbeat_granu
     )
 
 
-@pytest.mark.parametrize("size_bytes", [12 * _MIB], ids=["12MiB"])
+# The dense-drain cell's contention-band ceiling: the uuid-batch precedent
+# (``_UUID_CELL_CEILING_S``, the same number for the same reason). The
+# drain's per-``__next__`` GIL reacquisition band is roughly
+# wall-independent (per-tick handoff delay): 15.4ms on the dev box at
+# ambient 4.4, 30-36ms on the 32-core box at ambient 4-10, and the uuid
+# batch loop's own churn (per-call GIL traffic at a similar rate) measured
+# 27-118ms at ambient 8.6-19. The shared 100ms ceiling sits INSIDE that
+# loaded band, so the cell carries a bespoke 400ms gap ceiling -- ~3.4x
+# above the worst loaded gap the suite has observed for this churn class,
+# ~12x above the quiet band -- while the ratio budget below keeps the
+# detach teeth (a held pass reads ratio ~1.0).
+_DRAIN_CONTENTION_CEILING_S = 0.400
+
+
+@pytest.mark.parametrize("size_bytes", [48 * _MIB], ids=["48MiB"])
 def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     size_bytes: int,
 ) -> None:
     """The streaming answer to the find_patterns dense marshalling band
     (171.0-174.7ms of GIL hold for 1.28M 3-tuples, the cell above): the
-    full consumption of ``tors.find_patterns_iter(patterns, text)`` over the
-    same dense corpus (construction plus every ``__next__``) against the
-    suite's shared budgets, which the list-returning shape structurally
+    full consumption of ``tors.find_patterns_iter(patterns, text)`` over
+    the dense corpus (construction plus every ``__next__``) against a
+    0.30 ratio budget over the operation's own wall and a bespoke
+    contention-band ceiling, budgets the list-returning shape structurally
     could not meet.
 
     The design (the word_bounds_iter cell's, verbatim): the whole search
@@ -3061,31 +3543,59 @@ def test_find_patterns_iter_dense_drain_in_a_thread_keeps_the_event_loop_at_hear
     then holds the GIL only to construct one 3-tuple (µs-scale), so the
     worst heartbeat gap collapses back to the ping-floor band.
 
-    Measured on the dev box (ambient load 4.4, 5 samples): worst gaps
-    15.4ms of 129.0-132.0ms walls (ratio 0.116-0.119): the word_bounds_iter
-    band exactly (15.4ms there: the ping floor plus the two-thread GIL
-    contention of the draining thread's per-``__next__`` bytecode), inside
-    both shared budgets (~2.5x ratio margin, ~6.5x ceiling margin).
+    The contention-class account, stated precisely (the residual the
+    module docstring scopes): a full drain re-acquires the GIL per
+    ``__next__`` -- 5.14M handoffs at this size -- and that churn's own
+    contention reads futex-blocked with the process burning, the GIL
+    SIGNATURE, mechanistically; neither scheduler account separates it
+    from a hold (a rqwait/BURN contention tier is not keepable here for
+    the futex-storm finding's reason: a storm of legitimate contenders
+    carries the identical account, so any account that excuses one
+    excuses the other). The account this cell uses instead is SIZING BY
+    SEPARATION (the uuid-batch precedent): the contention band is roughly
+    wall-independent while the wall grows linearly with the corpus, so
+    the corpus is sized until the 0.30 ratio budget clears the loaded
+    band with margin -- measured on the 32-core dev box (quiet and under
+    mixed spin+memory+IO load, 3 samples per size): 12 MiB gaps 15.2-36ms
+    of 97-106ms walls (ratio 0.14-0.36: the ambient box OVERLAPS the
+    budget, the reproducible failure that forced this recalibration);
+    24 MiB gaps 15.2-21.6ms of 188-204ms walls (0.08-0.11); 48 MiB gaps
+    15.4-20.4ms of 384-468ms walls (0.04-0.05), ~6x margin at the quiet
+    band and ~2.5x at the loaded uuid-class worst (118ms of a ~600ms
+    loaded wall). The 400ms ceiling (``_DRAIN_CONTENTION_CEILING_S``)
+    holds ~3.4x over that loaded worst.
 
-    The wall contrast, measured in the same process (min-of-3, ambient load
-    3.1): full drain 117.4ms against the list API's 211.1ms and the count
-    core's 28.3ms: the drain is the ~28-31ms construction scan plus
-    ~86-90ms of 1.28M per-``__next__`` 3-tuple handoffs (~70ns per match,
-    against the list shape's ~0.13µs per match of GIL-held marshalling), so
-    the iterator wins both axes at this size (the word_bounds_iter
-    finding's shape: 347ms vs 724ms there). A discrimination caveat: the
-    construction pass is only ~31ms of the ~130ms wall, so a
-    construction-only detach regression shows ~41ms gaps at ratio ~0.32;
-    the 0.30 budget catches it, but thinly; the grosser classes (a
-    per-``__next__`` re-scan, per-next chunk marshalling) blow through both
-    budgets."""
+    The wall contrast, measured in the same process at 12 MiB (min-of-3,
+    ambient load 3.1): full drain 117.4ms against the list API's 211.1ms
+    and the count core's 28.3ms: the drain is the ~28-31ms construction
+    scan plus ~86-90ms of 1.28M per-``__next__`` 3-tuple handoffs (~70ns
+    per match, against the list shape's ~0.13µs per match of GIL-held
+    marshalling), so the iterator wins both axes at that size (the
+    word_bounds_iter finding's shape: 347ms vs 724ms there).
+
+    Residuals, stated rather than thresholded away: (1) a
+    construction-only detach regression (the scan held, the handoffs
+    free) shows a ~scan-fraction gap -- ratio ~0.25-0.32, INSIDE the 0.30
+    budget's neighborhood and under the 400ms ceiling: this cell cannot
+    discriminate that class at any size (both scale linearly), the
+    honest can't-catch the uuid cell records for its own int-out pair;
+    the grosser classes (a per-``__next__`` re-scan, per-next chunk
+    marshalling) blow through both budgets and convict. (2) A box whose
+    contention band stretches past ~0.30 x wall -- beyond anything the
+    suite has observed for this churn class -- fails here reproducibly:
+    that is the documented residual, the contention class's face."""
     text = prose(size_bytes)
     patterns = list(SEARCH_DENSE_PATTERNS)
 
     def consume() -> int:
         return sum(1 for _ in tors.find_patterns_iter(patterns, text))
 
-    asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(consume)))
+    asyncio.run(
+        _assert_loop_stays_responsive(
+            lambda: asyncio.to_thread(consume),
+            abs_ceiling_s=_DRAIN_CONTENTION_CEILING_S,
+        )
+    )
 
 
 # tors.quote's 32 MiB ratio budget: not the shared 0.30, which this wall
@@ -3544,7 +4054,11 @@ def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
     signatures x 128 rows, bands=32/rows=4, all-distinct signatures so
     the hashing sweep runs at full length): worst gaps 32-53ms of
     68-86ms walls (ratios 0.47-0.61), the walk the dominant share, the
-    detached pass the rest."""
+    detached pass the rest. The advisory verdict's magnitude bound (the
+    mutation finding): the band-stretch excuse covers only GIL-signature
+    strikes under 4 x 53ms = 212ms of gap AND under max(0.75, 1.15 x 0.61)
+    = 0.75 of ratio (``_LSH_BAND_GAP_TOP_S``); a strike at/above either
+    raises even in this advisory cell."""
     n_sigs, num_perm = size
     signatures = _lsh_signatures(n_sigs, num_perm)
     asyncio.run(
@@ -3553,6 +4067,8 @@ def test_lsh_candidates_in_a_thread_keeps_the_event_loop_at_heartbeat_granularit
                 tors.lsh_candidates, signatures, bands=32, rows=num_perm // 32
             ),
             ratio_budget=_LSH_RATIO_BUDGET,
+            band_top_s=_LSH_BAND_GAP_TOP_S,
+            band_ratio_top=_LSH_BAND_RATIO_TOP,
         )
     )
 
@@ -3592,12 +4108,20 @@ def test_content_hash_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
     No 32 MiB twin: the wall cell (tests/test_performance.py) records the
     size curve as a measured dead heat with the stdlib at 64 KiB-12 MiB,
     and the residue/wall ratio is the load-stable constant this cell
-    pins, not a size-dependent quantity."""
+    pins, not a size-dependent quantity.
+
+    The advisory verdict's magnitude bound (the mutation finding): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x 32.2ms
+    = 129ms of gap AND under max(0.80, 1.15 x 0.60) = 0.80 of ratio (see
+    ``_CONTENT_HASH_BAND_GAP_TOP_S``); a strike at/above either raises
+    even in this advisory cell."""
     obj = content_object(size_bytes)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.content_hash, obj),
             ratio_budget=_CONTENT_HASH_RATIO_BUDGET,
+            band_top_s=_CONTENT_HASH_BAND_GAP_TOP_S,
+            band_ratio_top=_CONTENT_HASH_BAND_RATIO_TOP,
         )
     )
 
@@ -3950,12 +4474,20 @@ def test_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -
     operation in the dedup walk costs its hash, the GIL-held share
     approaches the call's full wall (the ratio measures 0.98-1.00);
     the budget pins the str-id shape, not a detach guarantee for every
-    hashable id type."""
+    hashable id type.
+
+    The advisory verdict's magnitude bound (the mutation finding): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x 28.4ms
+    = 114ms of gap AND under max(0.80, 1.15 x 0.74) = 0.851 of ratio (see
+    ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even in
+    this advisory cell."""
     lists = _ranked_lists(200_000)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.rank_fuse, lists),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            band_top_s=_RANK_BAND_GAP_TOP_S,
+            band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
     )
 
@@ -3977,13 +4509,20 @@ def test_weighted_rank_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granul
     unweighted cell's own band (0.52-0.62 this session), as predicted:
     the weighted pass is the same detach with a multiply, and the loaded
     samples read ~1.0 on both spellings alike (the scheduler-starved
-    shape the first-clean retry discipline rides through)."""
+    shape the first-clean retry discipline rides through). The advisory
+    verdict's magnitude bound: the band-stretch excuse covers only
+    GIL-signature strikes under 4 x 28.4ms = 114ms of gap AND under
+    max(0.80, 1.15 x 0.74) = 0.851 of ratio (the rank_fuse cell's, see
+    ``_RANK_BAND_GAP_TOP_S``); a strike at/above either raises even in
+    this advisory cell."""
     lists = _ranked_lists(200_000)
     weights = [2.0, 1.0, 1.0, 1.0, 0.5]
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.rank_fuse, lists, k=60, weights=weights),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            band_top_s=_RANK_BAND_GAP_TOP_S,
+            band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
     )
 
@@ -4013,27 +4552,43 @@ def test_score_fuse_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() 
     weighted accumulation, the MNZ counts, and the sort. The budget is
     the rank_fuse cell's 0.80 unchanged -- the extraction the
     unweighted walk never paid is one C-level float conversion per
-    entry, the same interpreter-side class -- at the 100k shape (the
-    200k shape's walls run 85-230ms, past the 100ms absolute ceiling's
-    comfort band; 100k keeps every sample inside both budgets).
+    entry, the same interpreter-side class -- at the 200k shape, the
+    enlargement recalibration (the diff near-identical precedent: when
+    a wall sits at the ping floor, grow the input until the budgets
+    resolve): the original 100k pin resolved on the box it was
+    calibrated on (dev, walls 30-87ms) but straddles the 10ms ping
+    floor on the faster 32-core box (walls 13-24ms, ratios 0.54-1.10 --
+    the documented sub-ping artifact, unjudgeable), while 200k walls
+    41.6-58.6ms there (4-6x the floor) and 85-230ms on the dev box.
 
-    Measured on the dev box (ambient load ~2-4, 4 samples per method):
-    100k total entries across 5 lists -- combmnz worst gaps 29-46ms of
-    55-74ms walls (ratios 0.52-0.61), borda 20-31ms of 30-45ms (0.66-
-    0.73), linear 27-64ms of 50-87ms (0.54-0.74); the pair walk +
-    marshalling are structurally the majority, the same shape rank_fuse
-    measures, and the 0.80 budget holds with ~1.1x margin at the worst
-    observed window. Caller guidance is the rank_fuse cell's own:
-    reranking-scale primitive (hundreds to thousands of entries per
-    list), not a whole-corpus one; the id-shape caveat (hash-expensive
-    ids push the GIL-held share toward 1.0) carries over verbatim --
-    recorded, not re-pinned, in test_score_fusion.py.
-    """
-    lists = _scored_lists_for_gil(100_000)
+    Measured at 200k on the 32-core box (ambient load ~4, 4 samples):
+    worst gaps 25.0-32.6ms of 41.6-58.6ms walls (ratios 0.55-0.64),
+    inside the 0.80 budget with ~1.3x margin; on the dev box the 200k
+    walls (85-230ms, measured pre-PR, unasserted) carry ratio-held
+    gaps past the 100ms ceiling on loaded samples -- the tier-1
+    wall-pin class, excused with a record when every sample is dirty
+    (the pair walk + marshalling are structurally the majority, the
+    same shape rank_fuse measures). Caller guidance is the rank_fuse
+    cell's own: reranking-scale primitive (hundreds to thousands of
+    entries per list), not a whole-corpus one; the id-shape caveat
+    (hash-expensive ids push the GIL-held share toward 1.0) carries
+    over verbatim -- recorded, not re-pinned, in test_score_fusion.py.
+
+    The advisory verdict's magnitude bound (the mutation finding): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x
+    170ms = 680ms of gap (the band top: the dev box's 200k blocked-ms
+    worst, ~0.74 x its 230ms wall; this box's own measured top is
+    32.6ms) AND under max(0.80, 1.15 x 0.74) = 0.851 of ratio (see
+    ``_SCORE_FUSE_BAND_GAP_TOP_S``); a strike at/above either raises
+    even in this advisory cell -- the lost-detach shape (ratio ~1.0)
+    convicts on the ratio axis."""
+    lists = _scored_lists_for_gil(200_000)
     asyncio.run(
         _assert_loop_stays_responsive(
             lambda: asyncio.to_thread(tors.score_fuse, lists),
             ratio_budget=_RANK_FUSE_RATIO_BUDGET,
+            band_top_s=_SCORE_FUSE_BAND_GAP_TOP_S,
+            band_ratio_top=_FUSION_BAND_RATIO_TOP,
         )
     )
 
@@ -4064,6 +4619,16 @@ def test_ndcg_at_k_on_a_large_ranking_keeps_the_loop_under_the_ceiling() -> None
     )
 
 
+# The ground_sentences cell's advisory-band magnitude gate input (see
+# ``_strikes_within_band``): the by-design 4-key dict marshalling band --
+# measured ~40-50ms worst gaps at 3 MiB (~55k sentences). The gate's
+# bound: 4 x 50ms = 200ms of gap (the cell is ceiling-only, gap axis
+# only); a GIL-signature strike at/above it raises even in this advisory
+# cell (a held whole pass walls ~400ms and convicts; the observed band
+# sits 4x under the bound).
+_GROUND_SENTENCES_BAND_GAP_TOP_S = 0.050
+
+
 def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity() -> None:
     """The grounding batch's GIL claim, pinned directly (the chunk-family
     cell's shape): the whole segment/tokenize/score pass (sentence
@@ -4076,9 +4641,11 @@ def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
     Ceiling-only (``ratio_budget=None``, the chunk-family precedent): the
     sentence dicts' marshalling is the family's documented residue class,
     and the walls sit where a detach regression (the whole pass held)
-    blows the 100ms ceiling in every sample; the ceiling alone is the
-    detach pin. The red side is asserted mechanically by the module's
-    shared harness: a GIL-held whole pass holds at ratio ~1.0.
+    blows the 100ms ceiling in every sample. The ceiling alone is NOT the
+    pin -- the pin is the magnitude-gated verdict (the chunk-family
+    cell's, ``_GROUND_SENTENCES_BAND_GAP_TOP_S``): the red side is
+    asserted mechanically by the module's shared harness (a GIL-held
+    whole pass holds at ratio ~1.0) and convicts through the gate.
 
     Corpus size 3 MiB, deliberately under the suite's 12 MiB default:
     the per-sentence residue is a 4-KEY dict (~0.7-0.8µs each, a hash
@@ -4088,7 +4655,13 @@ def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
     2-tuples are ~5x cheaper per element). At 3 MiB (~55k sentences,
     measured ~40-50ms worst gaps of ~400ms walls: the ping floor plus
     the dict band, ~2x margin) the ceiling-only cell passes as designed
-    and a held pass (~400ms) still misses the ceiling in every sample."""
+    and a held pass (~400ms) still misses the ceiling in every sample.
+
+    The advisory verdict's magnitude bound (the mutation finding): the
+    band-stretch excuse covers only GIL-signature strikes under 4 x 50ms
+    = 200ms of gap (``_GROUND_SENTENCES_BAND_GAP_TOP_S``, the gap axis
+    only -- the cell is ceiling-only); a strike at/above it raises even
+    in this advisory cell, and the held pass's ~400ms sits 2x past it."""
     corpus = _CORPORA["chatlog"](3 * _MIB)
     asyncio.run(
         _assert_loop_stays_responsive(
@@ -4096,6 +4669,7 @@ def test_ground_sentences_in_a_thread_keeps_the_event_loop_at_heartbeat_granular
                 tors.ground_sentences, corpus, "torque spec window acknowledged"
             ),
             ratio_budget=None,
+            band_top_s=_GROUND_SENTENCES_BAND_GAP_TOP_S,
         )
     )
 
