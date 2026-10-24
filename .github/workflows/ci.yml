@@ -45,7 +45,7 @@ jobs:
         # tors-documents/target: the payload crate is deliberately NOT a cargo workspace
         # member (its Cargo.toml's header), so it builds into its own target dir the
         # root key would never cache; the same reason the fuzz job maps fuzz/ below.
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\ntors-documents -> tors-documents/target"
 
@@ -116,7 +116,7 @@ jobs:
       - name: Install uv
         # For the ruff step below: ruff is a dev-group dependency (pyproject.toml),
         # so the lockfile, not this workflow, owns its version.
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
 
       - name: Ruff
         # The Python-side lint gate (config in pyproject.toml [tool.ruff];
@@ -175,10 +175,10 @@ jobs:
 
       - name: Cache cargo
         # Same choice as the lint job's cache step (rationale there).
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -237,10 +237,10 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           # The heavy lanes are Python-version-independent (the sweep is
           # extension parity, the timing cells measure the native pass);
@@ -301,7 +301,7 @@ jobs:
           toolchain: nightly
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target\nfuzz -> target"
 
