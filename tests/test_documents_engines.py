@@ -72,13 +72,16 @@ from documents import (
     generate_pdf_layout_artifact_bmc,
     generate_pdf_layout_baseline,
     generate_pdf_layout_bold_mid_line,
+    generate_pdf_layout_broken_flate,
     generate_pdf_layout_crop,
     generate_pdf_layout_crop_partial_span,
+    generate_pdf_layout_dangling_contents,
     generate_pdf_layout_image,
     generate_pdf_layout_pages,
     generate_pdf_layout_rotated,
     generate_pdf_layout_rotated_run,
     generate_pdf_layout_two_images,
+    generate_pdf_layout_wmode1,
     generate_pdf_media_origin,
     generate_pdf_pages,
     generate_pdf_rotate,
@@ -1976,6 +1979,22 @@ _UNIT_COUNTS = {
     "ppsx_rich": 2,
     **{kind: 1 for kind in _SINGLE_FLOW_KINDS},
 }
+# The format provenance marker's expected value per corpus kind: the
+# RESOLVED format's vocabulary name (the to_markdown spelling), not the
+# file extension — the alias containers resolve onto their base kind
+# (docm → docx, xlsm → xlsx, ppsx → pptx) and the Excel kind's
+# container-aware case reports by container. (ppsx is absent: its
+# geometry-lane answer is the refusal, pinned separately.)
+_FORMAT_NAMES = {
+    "docx": "docx",
+    "docx_rich": "docx",
+    "docm_rich": "docx",
+    "xlsx": "xlsx",
+    "xlsm": "xlsx",
+    "pptx_rich": "pptx",
+    **{kind: kind.removesuffix("_rich").removesuffix("_pages") for kind in _SINGLE_FLOW_KINDS},
+    **{kind: "pdf" for kind in ENGINES_CORPUS if kind.startswith("pdf")},
+}
 # The one alias the geometry lane cannot read: ppsx_rich resolves as the
 # pptx kind, whose §6 lane is office_oxide — and office_oxide refuses the
 # slideshow content type (the conversion lane's auto route answers with
@@ -2869,6 +2888,81 @@ class TestPageLayout:
         assert page.geometry is not None
         assert page.spans == [] and page.lines == [] and page.images == []
 
+    def test_t8_broken_flate_and_dangling_contents_are_empty_not_errors(self) -> None:
+        """T8's two remaining shapes, pinned (the unwrap_or_default() law
+        made permanent): a page whose /Contents declares /FlateDecode over
+        non-zlib bytes (a DECODE failure) and one whose /Contents points
+        at an object the file does not carry (a dangling ref) both answer
+        the empty shape — geometry intact, EMPTY spans/lines/images, never
+        an error — and both content surfaces (the span parse AND the line
+        walk) agree with the image walk's emptiness."""
+        for fixture in (
+            generate_pdf_layout_broken_flate(),
+            generate_pdf_layout_dangling_contents(),
+        ):
+            (page,) = page_layout(data=fixture)
+            assert page.geometry is not None, "the page box is intact"
+            assert page.geometry.width_pt == 612.0 and page.geometry.height_pt == 792.0
+            assert page.spans == [] and page.lines == [] and page.images == [], (
+                "the empty shape, never an error"
+            )
+
+    def test_t9_vertical_writing_is_measured_and_the_flag_does_not_cover_it(self) -> None:
+        """T9, VERIFIED (was "known-unverified"): a WMode-1 tategaki run
+        (a Type0 font whose /Encoding is /Identity-V — the engine reads
+        the writing mode from the FONT on Tf) carries
+        ``rotation_degrees == 0.0`` while its box is the flattened
+        fiction at its worst: measured, a 24pt 2-glyph run at (300, 700)
+        reports bbox (300, 700, -48, 24) — the run's vertical advance
+        (-24 pt/glyph, the spec /DW2 default w1y=-1000) flattened onto x
+        as a NEGATIVE width — while the glyphs' true ink is a column
+        stepping DOWN 24pt per glyph ('A' at (300, 700, 24, 24), 'B' at
+        (300, 676, 24, 24), per the engine's own chars). The line
+        surface is wrong one level up: it re-lays the glyphs over the
+        normalized box and reports the REVERSED text ("BA" for "AB"),
+        box (252, 700, 48, 24). The consumer law that replaces the
+        unknown: a highlight box for text that may be vertical writing
+        cannot be validated by rotation_degrees alone."""
+        (page,) = page_layout(data=generate_pdf_layout_wmode1())
+        assert page.geometry is not None
+        assert len(page.spans) == 1
+        span = page.spans[0]
+        assert span.text == "AB"
+        assert span.rotation_degrees == 0.0, "the T9 gap: the flag does not fire"
+        _box_near(span.bbox, (300.0, 700.0, -48.0, 24.0))
+        assert len(page.lines) == 1
+        assert page.lines[0].text == "BA", "the line's re-lay reverses the run"
+        _box_near(page.lines[0].bbox, (252.0, 700.0, 48.0, 24.0))
+        # and the format marker is on the entry (the fixture's own lane)
+        assert page.format == "pdf"
+
+    def test_format_names_the_resolved_format_on_every_matrix_row(self) -> None:
+        """The format provenance marker, per matrix row (the entry-level
+        answer to the office empty-lists ambiguity): pdf → "pdf"; the
+        office families → their resolved kind's name, the alias
+        containers resolving onto their base (docm → "docx", xlsm →
+        "xlsx": the RESOLVED VOCABULARY name, never the file extension —
+        the same string to_markdown reports); the no-geometry row → its
+        own name. page_geometry keeps its bare-list return (user-locked):
+        the marker lives on the page_layout entry, which is where the
+        ambiguity lived."""
+        expectations = [
+            (generate_pdf_layout_baseline(), "pdf"),
+            (generate_docx_pgsz(), "docx"),
+            (generate_pptx_sldsz(), "pptx"),
+            (generate_xlsx_chart(), "xlsx"),
+            (ENGINES_CORPUS["docm_rich"], "docx"),
+            (ENGINES_CORPUS["xlsm"], "xlsx"),
+            (ENGINES_CORPUS["html_rich"], "html"),
+            (ENGINES_CORPUS["csv_rich"], "csv"),
+            (ENGINES_CORPUS["rtf"], "rtf"),
+        ]
+        for data, name in expectations:
+            entries = page_layout(data=data)
+            assert {entry.format for entry in entries} == {name}, (
+                f"expected format={name!r} on every entry"
+            )
+
     def test_pages_selection_normalizes_and_carries_page_index(self) -> None:
         """§9 item 13's pages= law: pages=[1, 0] == pages=[0, 1] (the
         output is parallel to the NORMALIZED selection and every entry
@@ -2912,14 +3006,20 @@ class TestPageLayout:
         """The capability table applies to page_layout identically, with
         layout content PDF-only: the office rows serve their declared
         geometry with EMPTY spans/lines/images; the no-geometry row
-        answers exactly one geometry-None entry on every backend."""
+        answers exactly one geometry-None entry on every backend. The
+        format marker names the resolved format on every row — the
+        entry-level provenance that kills the office empty-lists
+        ambiguity (a consumer holding only an entry reads
+        ``entry.format`` and knows why the lists are empty)."""
         (sized,) = page_layout(data=generate_docx_pgsz())
         assert (sized.geometry.width_pt, sized.geometry.height_pt) == (612.0, 792.0)
         assert sized.geometry.rotation == 0 and sized.geometry.crop is None
         assert sized.spans == [] and sized.lines == [] and sized.images == []
+        assert sized.format == "docx"
         (flow,) = page_layout(data=ENGINES_CORPUS["html_rich"])
         assert flow.geometry is None
         assert flow.spans == [] and flow.lines == [] and flow.images == []
+        assert flow.format == "html"
         assert page_layout(data=ENGINES_CORPUS["html_rich"], backend="anydoc") == [flow]
         assert page_layout(data=ENGINES_CORPUS["csv_rich"], backend="anydoc") == (
             page_layout(data=ENGINES_CORPUS["csv_rich"])
@@ -2945,6 +3045,10 @@ class TestPageLayout:
                 assert entry.geometry is not None, kind
         else:
             assert len(entries) == _UNIT_COUNTS[kind], kind
+        # the format provenance marker: every entry names the RESOLVED
+        # format's vocabulary name (the to_markdown spelling — the
+        # container-aware Excel case included: xlsm bytes report "xlsx")
+        assert {entry.format for entry in entries} == {_FORMAT_NAMES[kind]}, kind
         # and pages= parallels the normalized selection (the pdf half)
         if kind.startswith("pdf"):
             subset = page_layout(path, pages=[0])
@@ -3104,7 +3208,7 @@ class TestLayoutClassContracts:
     @pytest.mark.parametrize(
         ("klass", "fields"),
         [
-            (PageLayout, ["page_index", "geometry", "spans", "lines", "images"]),
+            (PageLayout, ["page_index", "format", "geometry", "spans", "lines", "images"]),
             (TextSpan, [
                 "text",
                 "bbox",
@@ -3151,7 +3255,8 @@ class TestLayoutClassContracts:
     def test_equality_is_structural_and_repr_round_trips_the_name(self) -> None:
         """The native __eq__ (all fields) and __repr__ (the class name and
         every field): equal entries compare equal, a changed field
-        compares unequal, and the repr names the class."""
+        compares unequal, and the repr names the class — the PageLayout
+        repr carries the format marker too."""
         page = page_layout(data=generate_pdf_layout_baseline())[0]
         same = page_layout(data=generate_pdf_layout_baseline())[0]
         assert page == same
@@ -3163,6 +3268,9 @@ class TestLayoutClassContracts:
         # repr: the class name and no crash
         for value in (page, page.spans[0], page.lines[0], page.lines[0].words[0], page.geometry):
             assert type(value).__name__ in repr(value)
+        # the format marker rides the repr (the provenance is surface, not
+        # a hidden field)
+        assert 'format="pdf"' in repr(page), repr(page)
 
 
 # --- the anydoc input ceiling (max_bytes=) ---------------------------------------

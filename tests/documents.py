@@ -1597,6 +1597,96 @@ def generate_pdf_layout_pages(count: int, lines: int = 1) -> bytes:
     return _pdf_from_objects(objects)
 
 
+def generate_pdf_layout_wmode1() -> bytes:
+    """T9's verified fixture: a WMode-1 (tategaki, vertical-writing) run —
+    a Type0 font with ``/Encoding /Identity-V`` (the predefined-CMap-name
+    vertical signal the engine reads on Tf), a non-embedded CIDFontType2
+    descendant (``/DW 1000``), and a ToUnicode CMap mapping CIDs 0x41/0x42
+    to 'A'/'B' — drawn at ``300 700 Td``, 24pt. Measured (pdf_oxide
+    0.3.78): the span reports bbox ``(300, 700, -48, 24)`` (the run's
+    vertical advance, -24 pt/glyph via the spec /DW2 default ``w1y =
+    -1000``, flattened onto x as a NEGATIVE width) with
+    ``rotation_degrees == 0.0`` (the angle is the text matrix's; the
+    writing mode plays no part in it) — the honesty flag does NOT cover
+    vertical writing; the line surface re-lays the glyphs over the
+    normalized box and reports the REVERSED text ("BA"), box ``(252, 700,
+    48, 24)``."""
+    tounicode = (
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CMapName /Test-V def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "2 beginbfchar\n"
+        "<0041> <0041>\n"
+        "<0042> <0042>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end"
+    ).encode("ascii")
+    content = b"BT /F1 24 Tf 300 700 Td <00410042> Tj ET"
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (
+                b"<< /Type /Page /Parent 2 0 R /Resources"
+                b" << /Font << /F1 4 0 R >> >> /MediaBox [0 0 612 792] /Contents 5 0 R >>"
+            ),
+            (
+                b"<< /Type /Font /Subtype /Type0 /BaseFont /TestVert /Encoding /Identity-V"
+                b" /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"
+            ),
+            f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+            + content
+            + b"\nendstream",
+            (
+                b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestVert /CIDSystemInfo"
+                b" << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>"
+            ),
+            f"<< /Length {len(tounicode)} >>\nstream\n".encode("ascii")
+            + tounicode
+            + b"\nendstream",
+        ]
+    )
+
+
+def generate_pdf_layout_broken_flate() -> bytes:
+    """T8's decode-failure fixture: a page whose /Contents declares
+    /FlateDecode but carries bytes that are not zlib (the header byte
+    alone refuses to inflate). The engine's unwrap_or_default law: the
+    page's geometry stays intact and every content list comes back EMPTY,
+    never an error."""
+    junk = b"this is not zlib data, not even close"
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+            f"<< /Length {len(junk)} /Filter /FlateDecode >>\nstream\n".encode("ascii")
+            + junk
+            + b"\nendstream",
+        ]
+    )
+
+
+def generate_pdf_layout_dangling_contents() -> bytes:
+    """T8's dangling-ref fixture: a page dict whose /Contents names an
+    object the file does not carry (99 0 R). Same law as the broken-Flate
+    shape: geometry intact, empty content lists, never an error."""
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 99 0 R >>",
+        ]
+    )
+
+
 # --- the office geometry fixtures (standalone, on demand: the same
 # --- generate_pdf_big precedent — none of them carries conversion content
 # --- the matrix's sweeps need, and the committed corpora stay unpinned to

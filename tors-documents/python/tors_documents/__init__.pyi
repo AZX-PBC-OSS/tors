@@ -135,17 +135,26 @@ class PageLayout:
     spans, lines, and image boxes in the page's declared render space —
     the native pyclass exposed directly (the ``PageGeometry`` deviation
     note applies to all five layout classes); ``==`` is structural (the
-    five fields). The office-row ambiguity: geometry + EMPTY
-    spans/lines/images (an office unit — no office engine exposes
-    text/image boxes) is indistinguishable from a blank/scanned page
-    holding only the entry; provenance is the resolved format, which the
-    caller carries (the resolved format, not the file extension — the
-    sniff outranks the extension)."""
+    six fields). Provenance rides on the entry: ``format`` is the
+    resolved format's vocabulary name (the ``to_markdown`` spelling),
+    and it — not the entry's shape — tells you why
+    ``spans``/``lines``/``images`` may be empty: an office row carries
+    declared geometry with no text surfaces, while a blank/scanned PDF
+    page looks identical in shape on the pdf lane."""
     @property
     def page_index(self) -> int:
         """The 0-based page (or section/slide/worksheet index) this entry
         describes — mandatory on every entry: the ``pages=``
         normalization reorders."""
+    @property
+    def format(self) -> str:
+        """The resolved format's vocabulary name (the ``to_markdown``
+        spelling, the container-aware ``xls``/``xlsx`` case included):
+        the entry's provenance marker. It — not the entry's shape —
+        tells you why ``spans``/``lines``/``images`` may be empty: an
+        office row carries declared geometry with no text surfaces; a
+        blank or scanned PDF page looks identical. Every entry of one
+        call carries the same name."""
     @property
     def geometry(self) -> PageGeometry | None:
         """The unit's declared render box (the ``page_geometry`` entry):
@@ -156,14 +165,13 @@ class PageLayout:
     def spans(self) -> list[TextSpan]:
         """The unit's text spans, reading order (PDF pages only; office
         units carry empty lists — no office engine exposes text
-        boxes; geometry + empty lists is indistinguishable from a
-        blank/scanned page: provenance is the resolved format the
-        caller carries)."""
+        boxes; the entry's ``format`` field is the provenance that tells
+        the office case from a blank/scanned PDF page)."""
     @property
     def lines(self) -> list[TextLine]:
         """The unit's text lines, reading order, words nested (PDF pages
-        only; office units carry empty lists — the same ambiguity the
-        class docstring states)."""
+        only; office units carry empty lists — the entry's ``format``
+        field is the provenance the class docstring points at)."""
     @property
     def images(self) -> list[ImageBox]:
         """The unit's image boxes, paint order (PDF pages only). Never
@@ -204,9 +212,18 @@ class TextSpan:
         used as a highlight box (transposed or mis-anchored at every
         non-zero content rotation, on any page; the line box degrades to
         a square on a rotated page): carried honestly, not re-derived.
-        Known-unverified edge: vertical-writing runs (WMode 1, tategaki)
-        flatten the advance the same way but may carry
-        ``rotation_degrees == 0`` — the flag may not cover them."""
+        Verified NOT to cover vertical writing (T9, probed against
+        pdf_oxide 0.3.78): a WMode-1 run (tategaki — a Type0 font whose
+        ``/Encoding`` CMap name ends in ``-V``, e.g. ``/Identity-V``)
+        carries ``rotation_degrees == 0`` — the angle is the text
+        matrix's, the writing mode plays no part in it — while its box
+        is the flattened fiction at its worst: measured, a 24pt 2-glyph
+        run at (300, 700) reports ``(300, 700, -48, 24)`` (the vertical
+        advance flattened onto x as a NEGATIVE width) where the true ink
+        is a column at ``(300, 652, 24, 72)`` with zero overlap, and the
+        line surface reports the REVERSED text ("BA" for "AB"). A
+        highlight box for text that may be vertical writing cannot be
+        validated by this flag alone."""
     @property
     def is_artifact(self) -> bool:
         """Declared ``/Artifact`` marked content — TYPED-FORM-ONLY: true
@@ -461,9 +478,9 @@ def page_layout(
     visibility-filtered: an image wholly outside the visible box is
     still returned with out-of-range coordinates — the consumer clips to
     the page box. Office rows serve their declared geometry with empty
-    layout lists (PDF-only for layout; geometry + empty lists is
-    indistinguishable from a blank/scanned page — provenance is the
-    resolved format the caller carries); the no-geometry formats answer
+    layout lists (PDF-only for layout; the entry's ``format`` field
+    names the resolved format — it, not the entry's shape, tells the
+    office case from a blank/scanned page); the no-geometry formats answer
     one ``geometry=None`` entry. ``pages=`` is PDF-only (a page index
     cannot name a section): a non-None selection on any other format
     raises the conversion lane's own ``ValueError``; on a PDF it

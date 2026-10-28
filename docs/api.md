@@ -8487,9 +8487,18 @@ non-zero content rotation, on any page); `is_artifact` is typed-BDC-only —
 `is_artifact == false` is NOT evidence of body text; and image boxes are
 never visibility-filtered — an image wholly outside the visible box is
 still returned with out-of-range coordinates, so the consumer clips.
-Known-unverified edge: vertical-writing pages (WMode 1, tategaki) flatten
-the advance like any rotated run but may carry `rotation_degrees == 0`, so
-the honesty flag may not cover them.
+Verified edge (T9, probed): the `rotation_degrees` flag does NOT cover
+vertical writing — a WMode-1 run (tategaki; a Type0 font whose `/Encoding`
+CMap name ends in `-V`, e.g. `/Identity-V`) carries
+`rotation_degrees == 0.0` while its box is the flattened fiction at its
+worst: measured (pdf_oxide 0.3.78, a 24pt 2-glyph run at (300, 700)):
+span bbox `(300, 700, -48, 24)` — the run's vertical advance (-24 pt per
+glyph) flattened onto x as a NEGATIVE width, the glyphs' true ink a
+column at `(300, 652, 24, 72)` with zero overlap — and the line surface
+re-lays the glyphs over the normalized box and reports the REVERSED text
+(`"BA"` for `"AB"`, box `(252, 700, 48, 24)`). The engine's span carries
+`wmode == 1`, but wmode is deliberately cut from this surface; treat
+vertical-writing sources as outside the highlight-box guarantee entirely.
 
 The text is its own stream, grounded per line: a line's text is its words'
 texts joined with exactly one space (and no word's text carries
@@ -8611,19 +8620,22 @@ list equality. Attributes:
 One `page_layout` entry: the unit's geometry plus its text spans, lines,
 and image boxes in the page's declared render space — the native pyclass
 exposed directly (the `PageGeometry` deviation note applies to all five
-layout classes); `==` is structural (the five fields). Attributes:
+layout classes); `==` is structural (the six fields). Attributes:
 `page_index: int` (0-based, mandatory on every entry — the `pages=`
-normalization reorders), `geometry: PageGeometry | None` (`None` where the
-unit's box cannot be read or declares no positive extent — then the layout
-lists are empty too), `spans: list[TextSpan]`, `lines: list[TextLine]`
-(words nested), `images: list[ImageBox]`.
+normalization reorders), `format: str` (the resolved format's vocabulary
+name — the `to_markdown` spelling, the container-aware `xls`/`xlsx` case
+included; every entry of one call carries the same name), `geometry:
+PageGeometry | None` (`None` where the unit's box cannot be read or
+declares no positive extent — then the layout lists are empty too),
+`spans: list[TextSpan]`, `lines: list[TextLine]` (words nested),
+`images: list[ImageBox]`.
 
-The office-row ambiguity the entry cannot say why about: geometry + EMPTY
-`spans`/`lines`/`images` (an office unit — no office engine exposes
-text/image boxes) is indistinguishable from a blank, scanned, or
-content-unparseable PDF page holding only the entry. A consumer that needs
-the provenance carries the resolved format itself (the resolved format, not
-the file extension — the sniff outranks the extension).
+Provenance rides on the entry: `format` — not the entry's shape — tells
+you why `spans`/`lines`/`images` may be empty. An office row carries
+declared geometry with no text surfaces (no office engine exposes
+text/image boxes); a blank, scanned, or content-unparseable PDF page
+reports the same shape on the pdf lane. A consumer holding only an entry
+reads `entry.format` and knows which case it is.
 
 ## `tors.documents.TextSpan`
 
@@ -8642,9 +8654,14 @@ evidence, `==` structural (the eight fields). Attributes:
 - `rotation_degrees: float` — the run's own content rotation. **Non-zero
   means the box is the engine's flattened approximation and MUST NOT be
   used as a highlight box** (transposed or mis-anchored at every non-zero
-  content rotation, on any page). Known-unverified edge: vertical-writing
-  runs (WMode 1, tategaki) flatten the advance the same way but may carry
-  `rotation_degrees == 0` — the flag may not cover them.
+  content rotation, on any page). Verified NOT to cover vertical writing
+  (T9, probed): a WMode-1 run (tategaki) carries `rotation_degrees == 0`
+  — the angle is the text matrix's, the writing mode plays no part in it
+  — while its box is the flattened fiction at its worst (measured:
+  `(300, 700, -48, 24)` for a 24pt 2-glyph `/Identity-V` run whose ink is
+  a column at `(300, 652, 24, 72)`; the line surface reports the reversed
+  text). A highlight box for text that may be vertical writing cannot be
+  validated by this flag alone.
 - `is_artifact: bool` — declared `/Artifact` marked content, TYPED-FORM-ONLY:
   true only for a typed `/Artifact <<…>> BDC` whose `/Type` or `/Subtype`
   the engine recognizes; false for a bare `/Artifact BMC` and unrecognized

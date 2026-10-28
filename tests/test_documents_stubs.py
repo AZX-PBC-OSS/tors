@@ -379,7 +379,7 @@ def test_page_layout_classes_carry_exactly_the_d6_field_lists() -> None:
     the frozen-shape contract: a drift here is a breaking shape change to
     a content-hashed downstream.)"""
     field_lists = {
-        "PageLayout": ["page_index", "geometry", "spans", "lines", "images"],
+        "PageLayout": ["page_index", "format", "geometry", "spans", "lines", "images"],
         "TextSpan": [
             "text",
             "bbox",

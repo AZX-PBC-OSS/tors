@@ -740,6 +740,9 @@ impl PageGeometry {
 ///
 /// The entries: `page_index` (0-based, mandatory — the `pages=`
 /// normalization reorders and this is what maps an entry back to its
+/// page), `format` (the resolved format's vocabulary name — the
+/// `to_markdown` spelling: the provenance marker that tells you why the
+/// layout lists may be empty, the office row vs a blank/scanned PDF
 /// page), `geometry` (the `page_geometry` entry for that unit — `None`
 /// where the unit's box cannot be read or declares no positive extent,
 /// in which case the layout lists are empty too: no frame, no boxes),
@@ -759,10 +762,21 @@ impl PageGeometry {
 /// rotation, on ANY page (180° same-size/wrong-anchor with zero ink
 /// overlap; ±90° transposed; on a /Rotate 90/270 page additionally mapped,
 /// its line box degraded to a square). Carried honestly by
-/// rotation_degrees, documented, not re-derived. Known-unverified edge
-/// (T9): vertical-writing pages (WMode 1, tategaki) — the span em-boxes
-/// there flatten the advance like any rotated run but may carry
-/// `rotation_degrees == 0`, so the honesty flag may not cover them.
+/// rotation_degrees, documented, not re-derived. Verified edge (T9,
+/// probed): the flag does NOT cover vertical writing — a WMode-1 run
+/// (tategaki; a Type0 font whose /Encoding CMap name ends in `-V`, e.g.
+/// /Identity-V, or whose embedded CMap declares /WMode 1) carries
+/// `rotation_degrees == 0.0` while its box is the flattened fiction at
+/// its worst: measured (pdf_oxide 0.3.78, 24pt `<00410042>` under
+/// /Identity-V): span bbox (300, 700, -48, 24) — the vertical advance
+/// (-24 pt/glyph) flattened onto x as a NEGATIVE width, the glyphs' true
+/// ink a column at (300, 652, 24, 72), zero overlap — and the line
+/// surface re-lays the glyphs over the normalized box and reports the
+/// REVERSED text ("BA"). The engine's span carries wmode == 1 but wmode
+/// is cut from this surface, so a consumer cannot see it here; on a
+/// /Rotate 90/270 page the run is not engine-premapped and the fiction
+/// rides the forward map. A highlight box for text that may be vertical
+/// writing cannot be validated by rotation_degrees alone.
 ///
 /// Image-box caveat: image boxes are NEVER visibility-filtered (the
 /// engine's 2 pt drop law is the TEXT walk's): an image wholly outside
@@ -983,10 +997,15 @@ impl TextSpan {
     /// The run's own content rotation in degrees — non-zero means the
     /// box is the engine's flattened approximation and MUST NOT be used
     /// as a highlight box (transposed or mis-anchored at every non-zero
-    /// content rotation, on any page). Known-unverified edge (T9):
-    /// vertical-writing runs (WMode 1, tategaki) flatten the advance the
-    /// same way but may carry `rotation_degrees == 0` — the flag may not
-    /// cover them.
+    /// content rotation, on any page). Verified NOT to cover vertical
+    /// writing (T9, probed): a WMode-1 run (tategaki) carries
+    /// `rotation_degrees == 0` — the angle is the text matrix's, the
+    /// writing mode plays no part in it — while its box is the flattened
+    /// fiction at its worst (the vertical advance flattened onto x as a
+    /// NEGATIVE width; measured: (300, 700, -48, 24) for a 24pt 2-glyph
+    /// /Identity-V run whose ink is a column at (300, 652, 24, 72)). A
+    /// highlight box for text that may be vertical writing cannot be
+    /// validated by this flag alone.
     #[getter]
     fn rotation_degrees(&self) -> f32 {
         self.inner.rotation_degrees
@@ -1167,13 +1186,15 @@ impl ImageBox {
 /// One `page_layout` entry: the unit's geometry plus its text spans,
 /// lines, and image boxes in the page's render space.
 ///
-/// The office-row ambiguity, stated here because the entry cannot say
-/// why: geometry-Some + EMPTY spans/lines/images (an office unit — no
-/// office engine exposes text/image boxes) is INDISTINGUISHABLE from a
-/// blank, scanned, or content-unparseable PDF page holding only an
-/// entry. The entry carries no format/unit marker; a consumer that needs
-/// the provenance must carry the resolved format itself (the resolved
-/// format, not the file extension — the sniff outranks the extension).
+/// Provenance rides ON the entry: `format` is the resolved format's
+/// vocabulary name (the `to_markdown` spelling — `resolved_name`'s, the
+/// Excel kind's container-aware `xls`/`xlsx` case included), and it —
+/// not the entry's shape — tells you why `spans`/`lines`/`images` may
+/// be empty: an office row carries declared geometry with no text
+/// surfaces (no office engine exposes text/image boxes), while a blank,
+/// scanned, or content-unparseable PDF page looks identical in shape on
+/// the pdf lane. Every entry of one call carries the same name (the
+/// format resolves once, before any entry exists).
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the same deliberate
 /// deviation from the `PdfClassification` wrapper precedent `PageGeometry`
@@ -1193,6 +1214,16 @@ impl PageLayout {
         self.inner.page_index
     }
 
+    /// The resolved format's vocabulary name (``to_markdown``'s
+    /// spelling): the entry's provenance marker. It — not the entry's
+    /// shape — tells you why ``spans``/``lines``/``images`` may be
+    /// empty: an office row carries declared geometry with no text
+    /// surfaces; a blank or scanned PDF page looks identical.
+    #[getter]
+    fn format(&self) -> &str {
+        &self.inner.format
+    }
+
     /// The unit's declared render box (the `page_geometry` entry):
     /// `None` where the unit's box cannot be read or declares no
     /// positive extent — then the layout lists are empty too (no frame,
@@ -1206,9 +1237,8 @@ impl PageLayout {
 
     /// The unit's text spans, reading order (PDF pages only; office
     /// units carry empty lists — no office engine exposes text boxes;
-    /// geometry-Some + empty lists is indistinguishable from a
-    /// blank/scanned page holding only this entry, so a consumer that
-    /// needs the provenance carries the resolved format itself).
+    /// the entry's `format` field is the provenance that tells the
+    /// office case from a blank/scanned PDF page).
     #[getter]
     fn spans(&self) -> Vec<TextSpan> {
         self.inner
@@ -1219,9 +1249,8 @@ impl PageLayout {
     }
 
     /// The unit's text lines, reading order, words nested (PDF pages
-    /// only; office units carry empty lists — the same ambiguity the
-    /// class docstring states: provenance is the resolved format the
-    /// caller carries).
+    /// only; office units carry empty lists — the entry's `format`
+    /// field is the provenance the class docstring points at).
     #[getter]
     fn lines(&self) -> Vec<TextLine> {
         self.inner
@@ -1245,7 +1274,7 @@ impl PageLayout {
             .collect()
     }
 
-    /// Structural equality (all five fields).
+    /// Structural equality (all six fields).
     fn __eq__(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
@@ -1276,8 +1305,9 @@ impl PageLayout {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "PageLayout(page_index={}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
+            "PageLayout(page_index={}, format={:?}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
             self.inner.page_index,
+            self.inner.format,
             match &self.inner.geometry {
                 Some(box_) =>
                     page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),

@@ -287,11 +287,25 @@ no engine and answers the same `[None]` on every backend, `anydoc` included
 — nothing is silently fallen back, so nothing is refused; office units
 always report `rotation = 0` and no crop.
 
-Known-unverified edge, disclosed beside it: vertical-writing PDF pages
-(WMode 1, tategaki) — the span em-boxes there flatten the advance like any
-rotated run (T3) but may carry `rotation_degrees == 0`, so the honesty flag
-may not cover them; treat a vertical-writing highlight box as unverified
-until probed.
+Verified edge, disclosed beside the flag (T9, probed against pdf_oxide
+0.3.78 — was "known-unverified", now measured): the `rotation_degrees`
+flag does NOT cover vertical writing. A WMode-1 run (tategaki — a Type0
+font whose `/Encoding` CMap name ends in `-V`, e.g. `/Identity-V`, or
+whose embedded CMap declares `/WMode 1` — the engine reads the writing
+mode from the font on `Tf`) carries `rotation_degrees == 0.0` (the angle
+is the text matrix's; the writing mode plays no part in it) while its box
+is the flattened fiction at its worst: measured, a 24pt 2-glyph run at
+(300, 700) reports span bbox `(300, 700, -48, 24)` — the run's vertical
+advance (-24 pt per glyph) flattened onto x as a NEGATIVE width — where
+the glyphs' true ink is a column at `(300, 652, 24, 72)` with zero
+overlap, and the line surface re-lays the glyphs over the normalized box
+and reports the REVERSED text (`"BA"` for `"AB"`, box `(252, 700, 48,
+24)`). The engine's span carries `wmode == 1`, but wmode is deliberately
+cut from this surface, so a consumer cannot see it here; on a /Rotate
+90/270 page the run is not engine-premapped and the fiction rides the
+forward map. Treat vertical-writing sources as outside the highlight-box
+guarantee entirely: a highlight box for text that may be tategaki cannot
+be validated by `rotation_degrees` alone.
 
 Every box `page_layout` returns lives in the page's **declared render
 space**: the visible box's (the CropBox ∩ MediaBox region a reader displays)
@@ -306,7 +320,11 @@ consumer re-implements it. Three honesty laws ride on the boxes:
   box is wrong at every non-zero content rotation on any page (180°
   same-size/wrong-anchor with zero ink overlap; ±90° transposed; on a
   /Rotate 90/270 page additionally mapped, its line box degraded to a
-  square). It is a flag, not an approximation footnote.
+  square). It is a flag, not an approximation footnote — and the flag has
+  one verified hole: vertical writing (WMode 1, tategaki) carries
+  `rotation_degrees == 0` with the flattened box at its worst (measured
+  above), so tategaki sources are outside the highlight-box guarantee
+  entirely.
 - **`is_artifact` is typed-BDC-only.** It is true only for a typed
   `/Artifact <<…>> BDC` whose `/Type` or `/Subtype` the engine recognizes;
   it is false for a bare `/Artifact BMC` and for unrecognized types — so
@@ -327,11 +345,17 @@ objects). A consumer grounding extracted fields by character offsets grounds
 into this stream — not into `extract_text`/`to_text` output, where the two
 differ; no `concat(spans) == extract_text` invariant exists or is implied.
 
-The office-row caveat: an office unit's entry is its declared geometry with
-EMPTY `spans`/`lines`/`images`, and the entry cannot say why — the same
-shape a blank, scanned, or content-unparseable PDF page reports. A consumer
-that needs the provenance carries the resolved format itself (the resolved
-format, not the file extension — the sniff outranks the extension).
+The office-row caveat, resolved at the entry level: an office unit's
+entry is its declared geometry with EMPTY `spans`/`lines`/`images` — the
+same shape a blank, scanned, or content-unparseable PDF page reports —
+and every entry now carries its provenance: `PageLayout.format` is the
+resolved format's vocabulary name (the `to_markdown` spelling — the
+resolved format, not the file extension: the sniff outranks the
+extension, and the alias containers resolve onto their base, so `xlsm`
+bytes report `"xlsx"`). The format — not the entry's shape — tells you
+why the lists are empty: a consumer holding only an entry reads
+`entry.format` and knows the office case (no text surfaces) from the
+blank/scanned PDF case (no text on the page).
 
 ## Async and the GIL
 

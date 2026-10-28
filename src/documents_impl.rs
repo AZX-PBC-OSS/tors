@@ -2166,7 +2166,12 @@ fn docx_section_geometry(
 /// exposes text/image boxes, so the office rows serve their geometry with
 /// EMPTY spans/lines/images — the honest empty (the empty-lists-not-errors
 /// law's shape: no engine surface, never a fabricated one), the no-geometry
-/// row its single `geometry: None` entry. PDF failure semantics: per
+/// row its single `geometry: None` entry. Every entry carries the resolved
+/// format's vocabulary name (`resolved_name` spelling) as its `format`
+/// field: the format — not the entry's shape — tells a consumer holding
+/// only an entry why the layout lists are empty (an office row: no text
+/// surfaces; a blank, scanned, or content-unparseable PDF page: the same
+/// shape on the pdf lane). PDF failure semantics: per
 /// `pdf_impl::page_layout` (§7): a page whose box read fails is
 /// `geometry: None` + empty lists, siblings intact; an unparseable content
 /// stream is empty lists, geometry intact; encrypted doors fail closed.
@@ -2174,7 +2179,11 @@ fn docx_section_geometry(
 /// is the TEXT walk's): a wholly-outside-the-crop image is returned with
 /// out-of-range coordinates — the consumer clips to the page box.
 /// A non-zero `rotation_degrees` on a span means its box is the engine's
-/// flattened approximation and MUST NOT be used as a highlight box.
+/// flattened approximation and MUST NOT be used as a highlight box —
+/// and the flag does NOT cover vertical writing (the verified T9 edge,
+/// probed: a WMode-1 tategaki run carries `rotation_degrees == 0` with a
+/// negative-width flattened box; see `pdf_impl::page_layout` for the
+/// measured evidence).
 ///
 /// Refusal order (the pinned §6 precedence, unchanged by the `pages=`
 /// refusal): a malformed `pages=` selection or a zero `max_bytes` is
@@ -2191,6 +2200,16 @@ pub fn page_layout(
 ) -> Result<Vec<pdf_impl::PageLayoutData>, DocumentError> {
     let kind = resolve(&bytes, name_hint, format)?;
     let lane = geometry_engine(kind, backend, &bytes)?;
+    // The entry's provenance marker: the resolved format's vocabulary
+    // name (`resolved_name` spelling — the same string to_markdown
+    // reports, the Excel kind's container-aware xls/xlsx case
+    // included), resolved ONCE here and stamped on every entry of every
+    // lane below (pdf_impl threads it through its constructors). The
+    // format — not the entry's shape — tells a consumer holding only an
+    // entry why its spans/lines/images are empty (an office row carries
+    // declared geometry with no text surfaces; a blank or scanned PDF
+    // page looks identical).
+    let format_name = resolved_name(kind, &bytes);
     // `pages=` is a PDF-lane parameter: the selection indexes PAGES, and a
     // section/slide/worksheet is not a page — a non-None selection on any
     // non-PDF row is convert()'s own typed refusal (byte-identical wording,
@@ -2220,13 +2239,15 @@ pub fn page_layout(
         // every backend.
         None => Ok(vec![pdf_impl::PageLayoutData {
             page_index: 0,
+            format: format_name.to_string(),
             geometry: None,
             spans: Vec::new(),
             lines: Vec::new(),
             images: Vec::new(),
         }]),
         Some(Engine::PdfOxide) => {
-            pdf_impl::page_layout(bytes, pages.as_deref(), options.password).map_err(pages_error)
+            pdf_impl::page_layout(bytes, pages.as_deref(), options.password, format_name)
+                .map_err(pages_error)
         }
         Some(Engine::OfficeOxide) => {
             // The office leg parses the container into resident memory (the
@@ -2250,6 +2271,7 @@ pub fn page_layout(
                 .enumerate()
                 .map(|(page_index, geometry)| pdf_impl::PageLayoutData {
                     page_index,
+                    format: format_name.to_string(),
                     geometry: geometry.map(|g| pdf_impl::PageBox {
                         width_pt: g.width_pt,
                         height_pt: g.height_pt,
@@ -4099,6 +4121,12 @@ mod tests {
         assert_eq!(entries[0].spans[0].text, "alpha");
         assert!(!entries[0].spans[0].is_bold);
         assert!(!entries[0].lines.is_empty() && entries[0].images.is_empty());
+        // the format marker: every entry of one call carries the resolved
+        // format's vocabulary name — on the pdf lane always "pdf"
+        assert!(
+            entries.iter().all(|e| e.format == "pdf"),
+            "the pdf lane's entries carry format=pdf"
+        );
         // pages= subset: parallel to the normalized selection
         let entries = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![1])).unwrap();
         assert_eq!(entries.len(), 1);
@@ -4139,7 +4167,8 @@ mod tests {
                 "{name}: pages= must be refused off the PDF lane"
             );
         }
-        // office: geometry + empty layout lists (PDF-only for layout)
+        // office: geometry + empty layout lists (PDF-only for layout), the
+        // format marker naming the resolved kind
         let docx = docx_with_body(
             "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
              <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
@@ -4147,6 +4176,7 @@ mod tests {
         let entries = layout("a.docx", &docx, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].page_index, 0);
+        assert_eq!(entries[0].format, "docx", "the office arm's format marker");
         assert_eq!(
             entries[0]
                 .geometry
@@ -4158,11 +4188,54 @@ mod tests {
                 && entries[0].lines.is_empty()
                 && entries[0].images.is_empty()
         );
-        // the no-geometry row: the single geometry-None entry
+        // the no-geometry row: the single geometry-None entry, format named
         let entries = layout("x.csv", b"single line only", None).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].geometry.is_none());
         assert!(entries[0].spans.is_empty());
+        assert_eq!(entries[0].format, "csv");
+        // the legacy trio on the committed OLE fixtures: all-None geometry,
+        // IR section counts, and the format marker naming the RESOLVED
+        // kind — the Excel kind's one container-aware case included (the
+        // OLE workbook reports "xls", never the kind's default "xlsx"
+        // spelling — the same name to_markdown reports).
+        let doc_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/t.doc").to_vec(),
+            Some("t.doc"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(doc_fixture.len(), 1);
+        assert_eq!(doc_fixture[0].format, "doc");
+        assert!(doc_fixture[0].geometry.is_none());
+        let xls_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/book3.xls").to_vec(),
+            Some("book3.xls"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(xls_fixture.len(), 3);
+        assert!(
+            xls_fixture.iter().all(|e| e.format == "xls"),
+            "{xls_fixture:?}"
+        );
+        let ppt_fixture = page_layout(
+            include_bytes!("../tests/legacy_corpus/deck3.ppt").to_vec(),
+            Some("deck3.ppt"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(ppt_fixture.len(), 3);
+        assert!(ppt_fixture.iter().all(|e| e.format == "ppt"));
         // refusal order, page_geometry's: anydoc capability refusal on the
         // office row — THE TABLE'S ONE REFUSAL, byte-identical on both
         // surfaces (the geometry capability table applies to page_layout
