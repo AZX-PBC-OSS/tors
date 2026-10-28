@@ -993,6 +993,56 @@ class TestChunkQualityExamples:
         assert tors.chunk_quality([], text) == {"integrity": 1.0, "cohesion": 0.0}
 
 
+class TestDocumentsGeometryExamples:
+    """docs/api.md's page_geometry / page_layout section examples and the
+    class sections' repr literals, pinned the same way every other docs
+    example here is: re-derived against the built extension, byte-exact
+    (the native classes' reprs included, the F9 Python-shape pins)."""
+
+    def test_page_geometry_examples(self) -> None:
+        import tors.documents
+
+        entries = tors.documents.page_geometry("tests/engines_corpus/engines_two_page.pdf")
+        assert [(e.width_pt, e.height_pt, e.rotation, e.crop) for e in entries] == [
+            (612.0, 792.0, 0, None),
+            (612.0, 792.0, 0, None),
+        ]
+        assert repr(entries[0]) == (
+            "PageGeometry(width_pt=612.0, height_pt=792.0, rotation=0, crop=None)"
+        )
+        assert tors.documents.page_geometry(
+            data=b"unit,status\nT-101,healthy\nT-102,failing\n"
+        ) == [None]
+
+    def test_page_layout_examples(self) -> None:
+        import tors.documents
+
+        pages = tors.documents.page_layout("tests/engines_corpus/engines_two_page.pdf")
+        assert (pages[0].page_index, pages[0].spans[0].text, pages[0].spans[0].bbox) == (
+            0,
+            "first page line",
+            (50.0, 700.0, 71.36399841308594, 12.0),
+        )
+        line = pages[1].lines[0]
+        assert line.text == "second page line"
+        assert [(w.text, w.bbox) for w in line.words] == [
+            ("second", (50.0, 700.0, 38.68798828125, 12.0)),
+            ("page", (92.02398681640625, 700.0, 26.68798828125, 12.0)),
+            ("line", (122.0479736328125, 700.0, 18.6719970703125, 12.0)),
+        ]
+        assert " ".join(w.text for w in line.words) == line.text
+        assert repr(line) == (
+            'TextLine(text="second page line", bbox=(50.0, 700.0, 90.71997, 12.0), '
+            'words=[("second", (50.0, 700.0, 38.68799, 12.0)), '
+            '("page", (92.02399, 700.0, 26.687988, 12.0)), '
+            '("line", (122.04797, 700.0, 18.671997, 12.0))])'
+        )
+        # the pages= PDF-only refusal, byte-exact (the doc's example)
+        with pytest.raises(ValueError) as raised:
+            tors.documents.page_layout("tests/engines_corpus/engines_report.docx", pages=[0])
+        assert str(raised.value) == 'pages= applies to PDF documents only, not "docx"'
+
+
 class TestIndexExamples:
     """docs/index.md's quick-start literals."""
 

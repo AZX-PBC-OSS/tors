@@ -86,6 +86,10 @@ pdf_classify(path=None, data=None, password=None, backend="auto",
              max_bytes=None) -> PdfClassification
 pdf_link_uris(path=None, data=None, password=None, backend="auto",
               max_bytes=None) -> list[list[str]]
+page_geometry(path=None, data=None, format=None, password=None, backend="auto",
+              max_bytes=None) -> list[PageGeometry | None]
+page_layout(path=None, data=None, format=None, password=None, backend="auto",
+            pages=None, max_bytes=None) -> list[PageLayout]
 ```
 
 The full per-function contract (signatures, the `pages=` and
@@ -245,10 +249,89 @@ hand-generatable without an Office writer) and are pinned by the crate-side
 routing-table test (`src/documents_impl.rs`) plus the mutation lane's
 typed-error contract; they are uncovered at the conversion level.
 
+## Page geometry and layout
+
+`page_geometry` and `page_layout` are the two geometry probes: per unit of
+the resolved format's geometry lane, the unit's declared render box — and,
+PDF pages only for `page_layout`, the page's text spans, text lines (words
+nested), and image boxes, all in the page's declared render space, from one
+open. The same source spine, refusal order, and `format=`/`password=`/
+`max_bytes=` contracts as the probes above; `auto` and `oxide` are identical
+on these surfaces for every format (the geometry lane is a property of the
+format, not a choice), and `pages=` is PDF-only — a page index cannot name a
+section, so a non-`None` selection on any other format raises the conversion
+lane's own `ValueError`, never a silent whole-document answer.
+
+Geometry routing is its own table, next to the conversion matrix above —
+conversion answers "who converts best"; geometry answers "who can declare
+geometry at all", and the two deliberately disagree:
+
+| format | unit | length | `auto` / `oxide` | `anydoc` |
+|---|---|---|---|---|
+| pdf | page | page count | pdf_oxide | `ValueError`: the capability refusal |
+| docx | section | section count | office_oxide (raw layer) | `ValueError` |
+| pptx | slide | slide count | office_oxide (raw layer) | `ValueError` |
+| xlsx | worksheet | worksheet count | office_oxide (count only) | `ValueError` |
+| doc / xls / ppt | section | section count | office_oxide (IR count) | `ValueError` |
+| html / csv / tsv / rtf / epub / odt / ods / odp | document | exactly 1 (`[None]`) | no engine runs | the same `[None]` — nothing to refuse |
+
+Office sizes are honest per unit: docx sections read the RAW declared size
+(twips ÷ 20 — a margins-only section is `None`, never a fabricated Letter),
+pptx the raw deck-wide slide size (EMU ÷ 12700.0, `None` everywhere when
+undeclared), xlsx all-`None` (a worksheet is an unbounded grid, not a page),
+legacy doc/xls/ppt all-`None` at the converter's section count. `ppsx` is
+disclosed as its typed refusal here too: the alias resolves onto the pptx
+kind and office_oxide's content-type check refuses the slideshow package
+(the same `ValueError` the conversion lane raises). The no-geometry row runs
+no engine and answers the same `[None]` on every backend, `anydoc` included
+— nothing is silently fallen back, so nothing is refused; office units
+always report `rotation = 0` and no crop.
+
+Every box `page_layout` returns lives in the page's **declared render
+space**: the visible box's (the CropBox ∩ MediaBox region a reader displays)
+with the page's `/Rotate` applied — points, bottom-left origin, y-up; for
+text the bottom edge is the glyph baseline and the box extends one font-size
+upward (em-box; descenders may extend below). Boxes are unclipped — the page
+box is the consumer's clip — and one transform owns the mapping, so no
+consumer re-implements it. Three honesty laws ride on the boxes:
+
+- **`rotation_degrees != 0` means "not a highlight box."** A run with its
+  own content rotation reports the engine's flattened-extent box, and that
+  box is wrong at every non-zero content rotation on any page (180°
+  same-size/wrong-anchor with zero ink overlap; ±90° transposed; on a
+  /Rotate 90/270 page additionally mapped, its line box degraded to a
+  square). It is a flag, not an approximation footnote.
+- **`is_artifact` is typed-BDC-only.** It is true only for a typed
+  `/Artifact <<…>> BDC` whose `/Type` or `/Subtype` the engine recognizes;
+  it is false for a bare `/Artifact BMC` and for unrecognized types — so
+  `is_artifact == false` is NOT evidence of body text.
+- **Image boxes are never visibility-filtered.** The engine's 2 pt drop law
+  is the text walk's only: an image wholly outside the visible box is still
+  returned, with out-of-range coordinates. The consumer clips to the page
+  box, and never reads "image present" as "image visible".
+
+The text `page_layout` returns is its own stream, grounded per line: a
+line's text is its words' texts joined with exactly one space (the engine
+builds the line from its words and drops every whitespace character before
+forming a word, so no word's text carries whitespace and the separator is
+always one U+0020). It is a reconstruction, not a slice of the page: a wide
+geometric gap yields two words and a space that was never in the content
+stream, and a line break is not represented at all (lines are separate
+objects). A consumer grounding extracted fields by character offsets grounds
+into this stream — not into `extract_text`/`to_text` output, where the two
+differ; no `concat(spans) == extract_text` invariant exists or is implied.
+
+The office-row caveat: an office unit's entry is its declared geometry with
+EMPTY `spans`/`lines`/`images`, and the entry cannot say why — the same
+shape a blank, scanned, or content-unparseable PDF page reports. A consumer
+that needs the provenance carries the resolved format itself (the resolved
+format, not the file extension — the sniff outranks the extension).
+
 ## Async and the GIL
 
-`tors.documents.aio` gives the six input-scaling functions (`to_markdown`,
-`to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`)
+`tors.documents.aio` gives the eight input-scaling functions (`to_markdown`,
+`to_text`, `pdf_extract`, `pdf_page_count`, `pdf_classify`, `pdf_link_uris`,
+`page_geometry`, `page_layout`)
 their `asyncio.to_thread` twins: same signatures, same discipline as
 [`tors.aio`](async.md) (an unconditional thread hop, never a size-based
 branch). `sniff` stays sync-only: its cost is a container parse, but it
