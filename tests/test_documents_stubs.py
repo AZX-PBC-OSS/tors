@@ -50,8 +50,15 @@ import pytest
 
 try:
     import tors_documents
+    from tors_documents import (
+        ImageBox,
+        PageLayout,
+        TextLine,
+        TextSpan,
+        Word,
+        page_geometry,
+    )
     from tors_documents import aio as payload_aio
-    from tors_documents import page_geometry
 except ImportError:  # pragma: no cover - the source-checkout alternative
     pytest.skip(
         "documents payload not built: the stub guard compares its stubs to its "
@@ -362,6 +369,73 @@ def _page_geometry_stub(path: Path) -> ast.ClassDef:
         if isinstance(node, ast.ClassDef) and node.name == "PageGeometry":
             return node
     raise AssertionError(f"{path}: no PageGeometry class — the stub is broken")
+
+
+def _stub_class(path: Path, name: str) -> ast.ClassDef:
+    """A named class def from a package stub."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"{path}: no {name} class — the stub is broken")
+
+
+def test_page_layout_classes_carry_exactly_the_d6_field_lists() -> None:
+    """D6's field bar over the five layout classes, stub side: each class
+    declares EXACTLY the §5/D6 field list as read-only properties (no
+    setters, no writable attributes) in BOTH package stubs, and the live
+    classes agree. (The runtime getter pin's stub half — the field bar is
+    the frozen-shape contract: a drift here is a breaking shape change to
+    a content-hashed downstream.)"""
+    field_lists = {
+        "PageLayout": ["page_index", "geometry", "spans", "lines", "images"],
+        "TextSpan": [
+            "text",
+            "bbox",
+            "font_size",
+            "font_name",
+            "is_bold",
+            "is_italic",
+            "rotation_degrees",
+            "is_artifact",
+        ],
+        "TextLine": ["text", "bbox", "words"],
+        "Word": ["text", "bbox"],
+        "ImageBox": ["bbox", "width_px", "height_px", "rotation_degrees", "paint_order"],
+    }
+    live_classes = {
+        "PageLayout": PageLayout,
+        "TextSpan": TextSpan,
+        "TextLine": TextLine,
+        "Word": Word,
+        "ImageBox": ImageBox,
+    }
+    for stub in (_PAYLOAD_STUB, _SHIM_STUB):
+        for name, fields in field_lists.items():
+            node = _stub_class(stub, name)
+            properties: set[str] = set()
+            assignments: list[str] = []
+            setters: set[str] = set()
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    decorators = stmt.decorator_list
+                    if any(
+                        isinstance(dec, ast.Attribute) and dec.attr == "setter"
+                        for dec in decorators
+                    ):
+                        setters.add(stmt.name)
+                    elif any(
+                        isinstance(dec, ast.Name) and dec.id == "property" for dec in decorators
+                    ):
+                        properties.add(stmt.name)
+                elif isinstance(stmt, ast.AnnAssign):
+                    assignments.append(stmt.target.id)
+            assert properties == set(fields), f"{stub}: {name} property set drifted: {properties}"
+            assert not setters, f"{stub}: {name} grew a setter: {setters}"
+            assert not assignments, f"{stub}: {name} has a writable attribute: {assignments}"
+    # the live classes agree (the same public names each class exposes)
+    for name, fields in field_lists.items():
+        live = {n for n in vars(live_classes[name]) if not n.startswith("_")}
+        assert live == set(fields), f"{name}: the live getter set drifted: {live}"
 
 
 def test_page_geometry_getters_are_exactly_the_four_read_only_fields() -> None:

@@ -67,6 +67,17 @@ from documents import (
     generate_pdf_big,
     generate_pdf_crop,
     generate_pdf_crop_partial,
+    generate_pdf_layout,
+    generate_pdf_layout_artifact,
+    generate_pdf_layout_baseline,
+    generate_pdf_layout_bold_mid_line,
+    generate_pdf_layout_crop,
+    generate_pdf_layout_crop_partial_span,
+    generate_pdf_layout_image,
+    generate_pdf_layout_pages,
+    generate_pdf_layout_rotated,
+    generate_pdf_layout_rotated_run,
+    generate_pdf_layout_two_images,
     generate_pdf_media_origin,
     generate_pdf_pages,
     generate_pdf_rotate,
@@ -78,9 +89,15 @@ from documents import (
 
 try:  # the payload wheel (tors[documents])
     from tors_documents import (
+        ImageBox,
         NeedsOcrError,
         PageGeometry,
+        PageLayout,
+        TextLine,
+        TextSpan,
+        Word,
         page_geometry,
+        page_layout,
         pdf_classify,
         pdf_extract,
         pdf_page_count,
@@ -91,9 +108,15 @@ try:  # the payload wheel (tors[documents])
 except ImportError:  # pragma: no cover - the in-base wiring alternative
     try:
         from tors import (  # type: ignore[attr-defined]  # noqa: F401
+            ImageBox,
             NeedsOcrError,
             PageGeometry,
+            PageLayout,
+            TextLine,
+            TextSpan,
+            Word,
             page_geometry,
+            page_layout,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -1400,10 +1423,10 @@ class TestPdfFamilyBackendAndBudget:
         of the detach where the door check lives, so the caller learns
         the argument is wrong, not that a document they never asked to
         convert is encrypted."""
-        from tors_documents import pdf_link_uris
+        from tors_documents import page_layout, pdf_link_uris
 
         locked = _encrypted_pdf()
-        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris, page_layout):
             with pytest.raises(ValueError, match="cannot serve") as raised:
                 call(data=locked, backend="anydoc")
             assert "encrypted" not in str(raised.value)
@@ -1479,7 +1502,7 @@ class TestPdfFamilyBackendAndBudget:
         from tors_documents import Backend, pdf_link_uris
 
         path = _materialize(tmp_path, "pdf_two_page")
-        for call in (pdf_extract, pdf_page_count, pdf_link_uris):
+        for call in (pdf_extract, pdf_page_count, pdf_link_uris, page_layout):
             for lane in ("auto", Backend.AUTO, Backend.OXIDE):
                 assert call(path, backend=lane) == call(path)
         by_default = pdf_classify(path)
@@ -1501,7 +1524,7 @@ class TestPdfFamilyBackendAndBudget:
         so arbitrary bytes carry the pin, no fixture needed."""
         from tors_documents import pdf_link_uris
 
-        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris, page_layout):
             for bad in (True, 1, 1.5, b"anydoc"):
                 with pytest.raises(TypeError, match="backend must be one of"):
                     call(data=b"junk bytes", backend=bad)
@@ -1518,8 +1541,8 @@ class TestPdfFamilyBackendAndBudget:
         type-correct, value-absurd: the too-large ValueError."""
         from tors_documents import pdf_link_uris
 
-        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
-            for bad in (0, -1):
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris, page_layout):
+            for bad in (-1,):
                 with pytest.raises(ValueError, match="positive"):
                     call(data=b"junk bytes", max_bytes=bad)
             for bad in (True, "64KB", 1.5):
@@ -1527,6 +1550,18 @@ class TestPdfFamilyBackendAndBudget:
                     call(data=b"junk bytes", max_bytes=bad)
             with pytest.raises(ValueError, match="too large"):
                 call(data=b"junk bytes", max_bytes=10**30)
+        # the ZERO value: the PDF-only probes refuse it at the binding
+        # (their family's parse), while page_layout threads it through to
+        # the CORE's sequenced check (§6: after resolve/capability/
+        # password-kind) — on resolvable bytes it is the zero refusal, on
+        # junk the resolve error (resolve first)
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+            with pytest.raises(ValueError, match="positive"):
+                call(data=b"junk bytes", max_bytes=0)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_layout(data=generate_docx_pgsz(), max_bytes=0)
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_layout(data=b"junk bytes", max_bytes=0)
 
     def test_an_explicit_budget_binds_the_pdf_family_pre_read(self, tmp_path: Path) -> None:
         """The shared source-spine gate, extended to the pdf family: the
@@ -1544,7 +1579,7 @@ class TestPdfFamilyBackendAndBudget:
 
         path = _materialize(tmp_path, "pdf_two_page")
         data = ENGINES_CORPUS["pdf_two_page"]
-        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris):
+        for call in (pdf_extract, pdf_page_count, pdf_classify, pdf_link_uris, page_layout):
             for source in ({"path": path}, {"data": data}):
                 with pytest.raises(ValueError, match="ceiling") as raised:
                     call(**source, max_bytes=1)
@@ -1798,21 +1833,22 @@ class TestEncryptedPdfs:
     access"; the door check now sits in front of every engine lane)."""
 
     def test_every_entry_fails_closed_without_a_password(self) -> None:
-        """All seven entries (both convert modes, all four PDF-only
-        calls, and the geometry probe) refuse a locked PDF with
+        """All eight entries (both convert modes, all four PDF-only
+        calls, and the two geometry-lane probes) refuse a locked PDF with
         pdf_oxide's ValueError naming the encryption, before any engine
         work. The defect this gate makes
         impossible to regress: the pre-fix wheel's to_markdown/pdf_extract
         returned EMPTY output on these same bytes (the empty-string
         masking: indistinguishable from a blank document); today no entry
         returns at all."""
-        from tors_documents import page_geometry, pdf_link_uris
+        from tors_documents import page_geometry, page_layout, pdf_link_uris
 
         locked = _encrypted_pdf()
         entries = (
             to_markdown,
             to_text,
             page_geometry,
+            page_layout,
             pdf_classify,
             pdf_extract,
             pdf_page_count,
@@ -2506,6 +2542,509 @@ class TestPageGeometry:
             thread.join()
         assert errors == []
         assert sorted(map(repr, results)) == sorted(map(repr, expected))
+
+
+# tolerance for the f32-borne box goldens on the Python surface (the
+# engine's advance widths are f32; the goldens are the probe's, ±0.01)
+_LAYOUT_TOL = 0.01
+
+
+def _box_near(
+    box: tuple[float, float, float, float],
+    expected: tuple[float, float, float, float],
+) -> None:
+    assert all(
+        abs(a - b) <= _LAYOUT_TOL for a, b in zip(box, expected, strict=True)
+    ), f"expected {expected}, got {box}"
+
+
+class TestPageLayout:
+    """The layout probe's contract (spec §5, ruling D1–D4/D6): every box
+    in the page's declared render space (bottom-left origin, y-up,
+    /Rotate applied, unclipped), the probe goldens at box level, the
+    join/union laws, the handles-only image lane, pages='s byte-pinned
+    refusals and reorder-with-page_index law, auto==oxide as plain `==`,
+    and the shared refusal spine."""
+
+    def test_the_rot0_identity_golden_no_y_flip(self) -> None:
+        """The D2 resolution made permanent on the Python surface: the run
+        at Td(72,700), 24pt lands at (72, 700, ~54.67, 24) — span, line,
+        and word alike — with NO y-flip anywhere."""
+        (page,) = page_layout(data=generate_pdf_layout_baseline())
+        assert page.page_index == 0
+        assert (page.geometry.width_pt, page.geometry.height_pt) == (612.0, 792.0)
+        assert page.geometry.rotation == 0 and page.geometry.crop is None
+        (span, world) = (page.spans[0], page.spans[1])
+        assert span.text == "Hello" and world.text == "World"
+        _box_near(span.bbox, (72.0, 700.0, 54.67, 24.0))
+        _box_near(world.bbox, (72.0, 100.0, 31.33, 12.0))
+        assert (span.font_size, span.font_name) == (24.0, "Helvetica")
+        assert not (span.is_bold or span.is_italic or span.is_artifact)
+        assert span.rotation_degrees == 0.0
+        (line,) = (line for line in page.lines if line.text == "Hello")
+        _box_near(line.bbox, (72.0, 700.0, 54.67, 24.0))
+        assert line.words[0].text == "Hello"
+        _box_near(line.words[0].bbox, (72.0, 700.0, 54.67, 24.0))
+
+    def test_the_quarter_turn_goldens(self) -> None:
+        """§9 item 3's forward-rule goldens through Python: at 90 the
+        horizontal run maps to (700, 612−72−54.67, 24, 54.67) with the
+        page swapped to 792×612; at 180 to (485.33, 68, 54.67, 24); a
+        non-right-angle /Rotate 45 reports rotation 0 in the unrotated
+        frame (T10)."""
+        (rotated,) = page_layout(data=generate_pdf_layout_rotated(90))
+        assert (rotated.geometry.width_pt, rotated.geometry.height_pt) == (792.0, 612.0)
+        assert rotated.geometry.rotation == 90
+        _box_near(rotated.spans[0].bbox, (700.0, 485.33, 24.0, 54.67))
+        _box_near(rotated.lines[0].bbox, (700.0, 485.33, 24.0, 54.67))
+        _box_near(rotated.lines[0].words[0].bbox, (700.0, 485.33, 24.0, 54.67))
+        (upside_down,) = page_layout(data=generate_pdf_layout_rotated(180))
+        assert upside_down.geometry.rotation == 180
+        _box_near(upside_down.spans[0].bbox, (485.33, 68.0, 54.67, 24.0))
+        (askew,) = page_layout(data=generate_pdf_layout_rotated(45))
+        assert askew.geometry.rotation == 0
+        assert (askew.geometry.width_pt, askew.geometry.height_pt) == (612.0, 792.0)
+        _box_near(askew.spans[0].bbox, (72.0, 700.0, 54.67, 24.0))
+
+    def test_the_crop_goldens(self) -> None:
+        """§9 item 1 + item 2's layout pins: on the [100 100 500 700] crop
+        the Inside run lands at (50, 500, 64.03, 24), the Outside run is
+        ABSENT (the engine's drop law), the page is 400×600 with
+        crop=Some((100, 100, 500, 700)); a span hanging past the crop edge
+        is kept and UNCLIPPED (T7); the nonzero MediaBox origin is
+        translated away (a run at the box's own origin lands at (0, 0) —
+        the origin law)."""
+        (cropped,) = page_layout(data=generate_pdf_layout_crop())
+        assert (cropped.geometry.width_pt, cropped.geometry.height_pt) == (400.0, 600.0)
+        assert cropped.geometry.crop == (100.0, 100.0, 500.0, 700.0)
+        assert len(cropped.spans) == 1, "the fully-outside span is dropped"
+        assert cropped.spans[0].text == "Inside"
+        _box_near(cropped.spans[0].bbox, (50.0, 500.0, 64.03, 24.0))
+
+        (hanging,) = page_layout(data=generate_pdf_layout_crop_partial_span())
+        assert len(hanging.spans) == 1, "the partial overlap is kept"
+        box = hanging.spans[0].bbox
+        _box_near(box, (380.0, 500.0, 57.36, 24.0))
+        assert box[0] + box[2] > 400.0, "the box extends past the 400pt page, unclipped"
+
+        # the origin law: a run at the MediaBox's own origin → (0, 0)
+        (origin,) = page_layout(
+            data=generate_pdf_layout(
+                b"BT /F1 12 Tf 50 50 Td (Origin) Tj ET", mediabox="[50 50 662 842]"
+            )
+        )
+        box = origin.spans[0].bbox
+        assert abs(box[0]) <= _LAYOUT_TOL and abs(box[1]) <= _LAYOUT_TOL, (
+            f"the source origin is translated away, never re-added: {box}"
+        )
+
+    def test_the_rotated_run_inverse_map(self) -> None:
+        """The T3 pins (§9 item 3's inverse-map case): on a /Rotate 90
+        page the engine's pre-mapped rotated run comes back into the SAME
+        frame as the horizontal runs — the engine-mapped (300, 263.98,
+        24, 48.02) round-trips exactly (no crop: the frames coincide),
+        with the honest rotation_degrees=90 flag; on a CROPPED rotated
+        page the inverse is load-bearing: the engine mapped about the
+        MediaBox, tors maps about the visible box, so the rotated run at
+        raw (250, 350) — reported by the engine at (350, 313.98, 24,
+        48.02) — lands at (250, 201.98, 24, 48.02). The line box is the
+        engine's degraded SQUARE (to_chars re-lays the run over the
+        mapped box), pinned as measured and carried by rotation_degrees,
+        never re-derived."""
+        (mixed,) = page_layout(data=generate_pdf_layout_rotated_run())
+        hello = next(span for span in mixed.spans if span.text == "Hello")
+        side = next(span for span in mixed.spans if span.text == "Side")
+        _box_near(hello.bbox, (700.0, 485.33, 24.0, 54.67))
+        _box_near(side.bbox, (300.0, 263.98, 24.0, 48.02))
+        assert side.rotation_degrees == 90.0 and hello.rotation_degrees == 0.0
+        side_line = next(line for line in mixed.lines if line.text == "Side")
+        _box_near(side_line.bbox, (300.0, 263.98, 48.02, 48.02))
+
+        # the decisive case: the same content, cropped — the engine's
+        # verbatim number would be (350, 313.98, ...); tors's frame
+        # correction lands it at (250, 201.98, ...).
+        cropped = generate_pdf_layout(
+            b"BT /F1 24 Tf 200 400 Td (Hello) Tj ET\n"
+            b"BT /F1 24 Tf 0 1 -1 0 250 350 Tm (Side) Tj ET",
+            rotate=90,
+            cropbox="[100 100 500 700]",
+        )
+        (mixed,) = page_layout(data=cropped)
+        hello = next(span for span in mixed.spans if span.text == "Hello")
+        side = next(span for span in mixed.spans if span.text == "Side")
+        _box_near(hello.bbox, (300.0, 245.33, 24.0, 54.67))
+        _box_near(side.bbox, (250.0, 201.98, 24.0, 48.02))
+        assert side.rotation_degrees == 90.0
+
+    def test_images_come_from_handles(self) -> None:
+        """The D4c pins (probe P5/P6/P7): the 1×1 image surfaces via the
+        HANDLES path (extract_images' silent <8×8 filter would return
+        zero); its box is the forward rule over the always-raw handle
+        bbox — on a /Rotate 90 page forward-normalized to (200, 312,
+        100, 100); a rotated CTM reports rotation_degrees 90; a
+        two-image page pins paint_order to content-stream order."""
+        (plain,) = page_layout(data=generate_pdf_layout_image())
+        assert len(plain.images) == 1
+        image = plain.images[0]
+        _box_near(image.bbox, (200.0, 200.0, 100.0, 100.0))
+        assert (image.width_px, image.height_px) == (1, 1)
+        assert (image.rotation_degrees, image.paint_order) == (0.0, 0)
+
+        (turned,) = page_layout(data=generate_pdf_layout_image(rotate=90))
+        _box_near(turned.images[0].bbox, (200.0, 312.0, 100.0, 100.0))
+        assert turned.images[0].rotation_degrees == 0.0, (
+            "the handle's CTM rotation, never the page's"
+        )
+
+        (two,) = page_layout(data=generate_pdf_layout_two_images())
+        assert [image.paint_order for image in two.images] == [0, 1]
+        _box_near(two.images[0].bbox, (100.0, 100.0, 50.0, 50.0))
+        _box_near(two.images[1].bbox, (300.0, 400.0, 60.0, 60.0))
+
+    def test_the_join_and_union_laws(self) -> None:
+        """The grounding law (§5's join contract), pinned per line: the
+        line's text is its words' texts joined with single spaces (the
+        engine's own TextLine::new rule — a bare concat is the two-word
+        case's PRE-space text and is not the law), and every word's box
+        is inside the line's box (the union law)."""
+        (page,) = page_layout(data=generate_pdf_layout_baseline())
+        for line in page.lines:
+            assert " ".join(word.text for word in line.words) == line.text
+            for word in line.words:
+                assert word.bbox[0] >= line.bbox[0] - _LAYOUT_TOL
+                assert word.bbox[1] >= line.bbox[1] - _LAYOUT_TOL
+                assert word.bbox[0] + word.bbox[2] <= line.bbox[0] + line.bbox[2] + _LAYOUT_TOL
+                assert word.bbox[1] + word.bbox[3] <= line.bbox[1] + line.bbox[3] + _LAYOUT_TOL
+
+    def test_bold_mid_line_spans_split_where_lines_merge(self) -> None:
+        """D3's bold-mid-line pin: two runs on one baseline — one bold —
+        are TWO spans (the font evidence) in ONE line (lines merge where
+        spans split)."""
+        (page,) = page_layout(data=generate_pdf_layout_bold_mid_line())
+        assert len(page.spans) == 2
+        hello = next(span for span in page.spans if span.text == "Hello")
+        world = next(span for span in page.spans if span.text == "World")
+        assert not hello.is_bold and world.is_bold
+        assert len(page.lines) == 1
+        assert len(page.lines[0].words) == 2
+        assert " ".join(word.text for word in page.lines[0].words) == page.lines[0].text
+
+    def test_declared_artifacts_are_flagged(self) -> None:
+        """D6's is_artifact pin: the typed-/Artifact-tagged header run
+        reports is_artifact=True; the body run False — declared furniture
+        distinguishable from body."""
+        (page,) = page_layout(data=generate_pdf_layout_artifact())
+        header = next(span for span in page.spans if span.text == "Header")
+        body = next(span for span in page.spans if span.text == "Body")
+        assert header.is_artifact and not body.is_artifact
+
+    def test_scanned_and_junk_pages_yield_empty_lists_not_errors(self) -> None:
+        """§7's empty-lists-not-errors engine law, Python side: a scanned
+        page (image-only) and a junk content stream both answer entries
+        with the geometry intact and EMPTY spans/lines/images — never an
+        error, never fabricated content."""
+        (scan,) = page_layout(data=ENGINES_CORPUS["pdf_scanned"])
+        assert scan.geometry is not None and scan.geometry.width_pt == 612.0
+        assert scan.spans == [] and scan.lines == []
+        junk = generate_pdf_layout(b"this is not a content stream, just junk tokens")
+        (page,) = page_layout(data=junk)
+        assert page.geometry is not None
+        assert page.spans == [] and page.lines == [] and page.images == []
+
+    def test_pages_selection_normalizes_and_carries_page_index(self) -> None:
+        """§9 item 13's pages= law: pages=[1, 0] == pages=[0, 1] (the
+        output is parallel to the NORMALIZED selection and every entry
+        carries its page_index); duplicates normalize away; and the empty
+        and out-of-range selections raise the byte-pinned markdown_pages
+        error strings."""
+        data = generate_pdf_layout_pages(3)
+        sorted_pages = page_layout(data=data, pages=[0, 1, 2])
+        assert page_layout(data=data, pages=[2, 1, 0]) == sorted_pages
+        assert page_layout(data=data, pages=[1, 0]) == page_layout(data=data, pages=[0, 1])
+        by_index = {entry.page_index: entry for entry in page_layout(data=data, pages=[2, 0])}
+        assert sorted(by_index) == [0, 2]
+        assert by_index[2].spans[0].text == by_index[0].spans[0].text
+        assert by_index[2].page_index == 2 and by_index[0].page_index == 0
+        # the byte-pinned refusals
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=data, pages=[])
+        assert str(raised.value) == "pages= selected no pages: pass None for the whole document"
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=data, pages=[3])
+        assert (
+            str(raised.value)
+            == "page index 3 is out of range for a 3-page document (pages= is 0-based)"
+        )
+
+    def test_auto_equals_oxide_with_plain_equality(self) -> None:
+        """§9 item 13: auto == oxide compared with `==` DIRECTLY — the
+        native pyclasses' Rust-side structural __eq__, lists elementwise:
+        the geometry lane is a property of the format, not a choice, on
+        the layout surface too."""
+        data = generate_pdf_layout_baseline()
+        assert page_layout(data=data) == page_layout(data=data, backend="oxide")
+        assert page_layout(data=data, backend="auto") == page_layout(data=data, backend="auto")
+        docx = generate_docx_pgsz()
+        assert page_layout(data=docx) == page_layout(data=docx, backend="oxide")
+        # and the equality is field-structural: a different call's entries
+        # are not equal
+        assert page_layout(data=data) != page_layout(data=generate_pdf_layout_rotated(90))
+
+    def test_the_office_and_no_geometry_rows(self) -> None:
+        """The capability table applies to page_layout identically, with
+        layout content PDF-only: the office rows serve their declared
+        geometry with EMPTY spans/lines/images; the no-geometry row
+        answers exactly one geometry-None entry on every backend."""
+        (sized,) = page_layout(data=generate_docx_pgsz())
+        assert (sized.geometry.width_pt, sized.geometry.height_pt) == (612.0, 792.0)
+        assert sized.geometry.rotation == 0 and sized.geometry.crop is None
+        assert sized.spans == [] and sized.lines == [] and sized.images == []
+        (flow,) = page_layout(data=ENGINES_CORPUS["html_rich"])
+        assert flow.geometry is None
+        assert flow.spans == [] and flow.lines == [] and flow.images == []
+        assert page_layout(data=ENGINES_CORPUS["html_rich"], backend="anydoc") == [flow]
+        assert page_layout(data=ENGINES_CORPUS["csv_rich"], backend="anydoc") == (
+            page_layout(data=ENGINES_CORPUS["csv_rich"])
+        )
+
+    @pytest.mark.parametrize("kind", sorted(ENGINES_CORPUS), ids=lambda kind: kind)
+    def test_lengths_follow_the_matrix_on_the_layout_surface(
+        self, tmp_path: Path, kind: str
+    ) -> None:
+        """§6's length rule, on page_layout: pdf → the page count (or the
+        normalized pages= selection's length); office → the §6 matrix's
+        unit counts with EMPTY layout lists; single-flow → exactly one
+        entry with geometry None. The shared corpus sweeps it."""
+        path = _materialize(tmp_path, kind)
+        if kind in _REFUSES_ON_THE_GEOMETRY_LANE:
+            with pytest.raises(ValueError, match="(?i)format mismatch"):
+                page_layout(path)
+            return
+        entries = page_layout(path)
+        if kind.startswith("pdf"):
+            assert len(entries) == pdf_page_count(path), kind
+            for entry in entries:
+                assert entry.geometry is not None, kind
+        else:
+            assert len(entries) == _UNIT_COUNTS[kind], kind
+        # and pages= parallels the normalized selection (the pdf half)
+        if kind.startswith("pdf"):
+            subset = page_layout(path, pages=[0])
+            assert len(subset) == 1
+            assert subset[0].page_index == 0
+
+    def test_the_refusal_order_matches_the_locked_precedence(self, tmp_path: Path) -> None:
+        """§6's amended order, on the layout surface: the capability
+        refusal (the table's own, byte-identical to page_geometry's)
+        precedes the password-kind refusal, which precedes the zero
+        max_bytes refusal, which precedes the engine's doors; resolve
+        comes first (garbage has no format to name)."""
+        docx = generate_docx_pgsz()
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=docx, backend="anydoc")
+        assert (
+            str(raised.value)
+            == 'backend "anydoc" cannot serve page geometry for docx: anydoc has no '
+            "geometry surface; use backend='auto' or 'oxide' here"
+        )
+        # the capability refusal precedes the password-kind refusal
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=docx, backend="anydoc", password="torque")
+        assert "cannot serve page geometry" in str(raised.value)
+        # the password-kind refusal precedes the zero-max_bytes refusal
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=docx, password="torque", max_bytes=0)
+        assert "password= applies to PDF documents only" in str(raised.value)
+        # zero max_bytes refused core-side (never pre-empting)
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_layout(data=docx, max_bytes=0)
+        # resolve/format first: garbage under anydoc has no format to name
+        with pytest.raises(ValueError, match="(?i)unrecognized"):
+            page_layout(data=b"garbage", backend="anydoc")
+        # and the door stays last: an encrypted PDF under a zero budget
+        # surfaces the zero refusal
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            page_layout(data=_encrypted_pdf(), max_bytes=0)
+
+    def test_aio_carries_the_layout_lane(self, tmp_path: Path) -> None:
+        """The awaitable spellings (both aio modules) wrap the typed
+        wrapper: the same entries through the thread hop, the same
+        refusals."""
+        from tors_documents import aio as payload_aio
+
+        from tors.documents import aio as shim_aio
+
+        path = tmp_path / "layout_aio.pdf"
+        path.write_bytes(generate_pdf_layout_baseline())
+        expected = page_layout(str(path))
+        for aio_module in (payload_aio, shim_aio):
+            assert asyncio.run(aio_module.page_layout(str(path))) == expected
+            assert asyncio.run(aio_module.page_layout(str(path), backend="oxide")) == expected
+            with pytest.raises(ValueError, match="cannot serve the declared page-box geometry"):
+                asyncio.run(aio_module.page_layout(str(path), backend="anydoc"))
+            with pytest.raises(ValueError, match="ceiling"):
+                asyncio.run(aio_module.page_layout(str(path), max_bytes=1))
+
+    def test_concurrent_layout_calls_are_identical(self, tmp_path: Path) -> None:
+        """The concurrency identity on the layout surface: 8 threads over
+        the same bytes, every answer equal to the single-threaded one."""
+        data = generate_pdf_layout_baseline()
+        expected = page_layout(data=data)
+        results: list[object] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                results.append(page_layout(data=data))
+            except BaseException as exc:  # noqa: BLE001 -- recorded, asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert all(result == expected for result in results)
+
+    @pytest.mark.timing
+    def test_page_layout_in_a_thread_keeps_the_event_loop_at_heartbeat_granularity(
+        self, tmp_path: Path
+    ) -> None:
+        """§9 item 12's GIL cell, on the surface where it matters most:
+        page_layout's post-detach marshalling is O(pages × boxes) NESTED
+        Python-object construction (spans, lines, words, images — read
+        through every getter, the realistic consumer). The fixture: 500
+        pages × 12 lines (the native span walk makes the call's wall
+        ~120ms — several heartbeat ticks, the sibling cells' regime, so
+        the marshalling's GIL-held fraction is small against it) — and
+        the whole read+parse pass must keep the 10ms heartbeat alive in a
+        to_thread wrap."""
+        from test_gil_release import _assert_loop_stays_responsive
+
+        data = generate_pdf_layout_pages(500, lines=12)
+        path = tmp_path / "layout_500x12.pdf"
+        path.write_bytes(data)
+        entries = page_layout(data=data)
+        assert len(entries) == 500
+        assert all(len(entry.spans) == 12 for entry in entries)
+
+        def op() -> None:
+            for entry in page_layout(str(path)):
+                # the nested marshalling: every box-bearing field, every
+                # entry — the O(pages × boxes) construction post-detach
+                _ = entry.geometry.width_pt
+                for span in entry.spans:
+                    _ = (span.text, span.bbox, span.font_size, span.is_bold)
+                for line in entry.lines:
+                    _ = (line.text, line.bbox, [(w.text, w.bbox) for w in line.words])
+                for image in entry.images:
+                    _ = (image.bbox, image.width_px, image.paint_order)
+
+        asyncio.run(_assert_loop_stays_responsive(lambda: asyncio.to_thread(op)))
+
+    def test_the_docstring_carries_the_space_law_and_the_sandbox_warning(self) -> None:
+        """The per-box docstring law (D1's verbatim wording) and the ⚠
+        sandbox warning: the native page_layout docstring carries both the
+        coordinate-space law and the warning; every box-bearing getter's
+        docstring carries the law; the data classes' own docstrings stay
+        law-only (the warning is the FUNCTION's per-call contract)."""
+        law = (
+            "points, bottom-left origin of the page's render space; y is the "
+            "box's bottom edge; for text the bottom edge is the glyph "
+            "baseline and the box extends one font-size upward (em-box; "
+            "descenders may extend below). Boxes are unclipped; the page "
+            "box is the consumer's clip."
+        )
+
+        def states_law(doc: str | None) -> bool:
+            import re
+
+            return re.sub(r"\s+", " ", doc or "").find(re.sub(r"\s+", " ", law)) >= 0
+
+        assert states_law(page_layout.__doc__), (
+            "the native page_layout docstring must state the D1 law verbatim"
+        )
+        assert "sandbox untrusted PDFs" in (page_layout.__doc__ or "")
+        # every box-bearing getter states the law (the D1 docstring law)
+        for getter in (TextSpan.bbox, TextLine.bbox, Word.bbox, ImageBox.bbox):
+            assert states_law(getter.__doc__), getter
+        # the data classes' own docstrings carry no warning of their own
+        for klass in (PageLayout, TextSpan, TextLine, Word, ImageBox):
+            assert "sandbox untrusted PDFs" not in (klass.__doc__ or ""), (
+                "the ⚠ warning is the FUNCTION's (per-call), not the data classes'"
+            )
+
+
+class TestLayoutClassContracts:
+    """The five layout classes' surface pins (§9 item 13 + D6's field
+    bar): each class's getter set is EXACTLY the §5/D6 field list
+    (documented in the stub), read-only, and structurally comparable."""
+
+    @pytest.mark.parametrize(
+        ("klass", "fields"),
+        [
+            (PageLayout, ["page_index", "geometry", "spans", "lines", "images"]),
+            (TextSpan, [
+                "text",
+                "bbox",
+                "font_size",
+                "font_name",
+                "is_bold",
+                "is_italic",
+                "rotation_degrees",
+                "is_artifact",
+            ]),
+            (TextLine, ["text", "bbox", "words"]),
+            (Word, ["text", "bbox"]),
+            (ImageBox, ["bbox", "width_px", "height_px", "rotation_degrees", "paint_order"]),
+        ],
+    )
+    def test_the_getter_set_is_exactly_the_field_list_and_read_only(
+        self, klass: type, fields: list[str]
+    ) -> None:
+        """The D6 field bar, pinned: the class exposes exactly the §5/D6
+        fields (nothing cut earlier, nothing added later without a
+        breaking-shape decision), and every field is read-only (a setter
+        attempt raises AttributeError)."""
+        assert sorted(name for name in vars(klass) if not name.startswith("_")) == sorted(fields), (
+            (klass.__name__, sorted(vars(klass)))
+        )
+        # read-only, on a live instance (the ImageBox from an image-bearing
+        # fixture — the baseline page carries none). pyo3's getters are the
+        # native type's own descriptors (not `property` objects); the
+        # read-only half is the setattr refusal.
+        page = page_layout(data=generate_pdf_layout_baseline())[0]
+        image_page = page_layout(data=generate_pdf_layout_image())[0]
+        samples: dict[type, object] = {
+            PageLayout: page,
+            TextSpan: page.spans[0],
+            TextLine: page.lines[0],
+            Word: page.lines[0].words[0],
+            ImageBox: image_page.images[0],
+        }
+        live = samples[klass]
+        for field in fields:
+            with pytest.raises(AttributeError):
+                setattr(live, field, getattr(live, field))
+
+    def test_equality_is_structural_and_repr_round_trips_the_name(self) -> None:
+        """The native __eq__ (all fields) and __repr__ (the class name and
+        every field): equal entries compare equal, a changed field
+        compares unequal, and the repr names the class."""
+        page = page_layout(data=generate_pdf_layout_baseline())[0]
+        same = page_layout(data=generate_pdf_layout_baseline())[0]
+        assert page == same
+        assert page.spans[0] == same.spans[0]
+        assert page.lines[0] == same.lines[0]
+        assert page.lines[0].words[0] == same.lines[0].words[0]
+        assert page.geometry == same.geometry
+        assert page is not same
+        # repr: the class name and no crash
+        for value in (page, page.spans[0], page.lines[0], page.lines[0].words[0], page.geometry):
+            assert type(value).__name__ in repr(value)
 
 
 # --- the anydoc input ceiling (max_bytes=) ---------------------------------------

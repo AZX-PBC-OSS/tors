@@ -46,6 +46,7 @@ import pytest
 
 from tors.documents import (
     page_geometry,
+    page_layout,
     pdf_classify,
     pdf_extract,
     pdf_link_uris,
@@ -119,7 +120,14 @@ def _objstm_document(
     return bytes(out)
 
 
-_ENTRY_POINTS = [page_geometry, pdf_page_count, pdf_extract, pdf_classify, pdf_link_uris]
+_ENTRY_POINTS = [
+    page_geometry,
+    page_layout,
+    pdf_page_count,
+    pdf_extract,
+    pdf_classify,
+    pdf_link_uris,
+]
 
 
 def _probe(blob: bytes) -> subprocess.CompletedProcess[str]:

@@ -1546,12 +1546,15 @@ def generate_pdf_layout_two_images() -> bytes:
     )
 
 
-def generate_pdf_layout_pages(count: int) -> bytes:
-    """`count` pages, each carrying real text spans: the GIL heartbeat
-    cell's fixture (§9 item 12 — page_layout's marshalling is
-    O(pages × boxes) nested Python-object construction post-detach, so
-    the fixture needs spans, which generate_pdf_pages's MediaBox-only
-    pages lack). Not committed to the corpus; built on demand."""
+def generate_pdf_layout_pages(count: int, lines: int = 1) -> bytes:
+    """`count` pages, each carrying `lines` real text spans (12 lines per
+    page makes the native span walk dominate the call's wall — the GIL
+    heartbeat cell's op must be several heartbeat ticks long for the
+    ratio to resolve, the sibling cells' methodology): the GIL cell's
+    fixture (§9 item 12 — page_layout's marshalling is O(pages × boxes)
+    nested Python-object construction post-detach, so the fixture needs
+    spans, which generate_pdf_pages's MediaBox-only pages lack). Not
+    committed to the corpus; built on demand."""
     # Object layout: catalog 1, pages 2, font 3, then per page a page dict
     # (4 + 2i) and its content stream (5 + 2i).
     kids = " ".join(f"{4 + page * 2} 0 R" for page in range(count))
@@ -1560,18 +1563,20 @@ def generate_pdf_layout_pages(count: int) -> bytes:
         f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
+    body = "\n".join(
+        f"BT /F1 12 Tf 50 {720 - line * 20} Td (page line {line} of the layout heartbeat"
+        " fixture) Tj ET"
+        for line in range(lines)
+    ).encode("ascii")
     for page in range(count):
-        content = f"BT /F1 12 Tf 50 700 Td (page {page} layout line) Tj ET".encode("ascii")
         objects.append(
-            (
+
                 "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >>"
                 f" /MediaBox [0 0 612 792] /Contents {5 + page * 2} 0 R >>".encode("ascii")
-            )
+
         )
         objects.append(
-            f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
-            + content
-            + b"\nendstream"
+            f"<< /Length {len(body)} >>\nstream\n".encode("ascii") + body + b"\nendstream"
         )
     return _pdf_from_objects(objects)
 

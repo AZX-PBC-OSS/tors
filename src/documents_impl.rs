@@ -430,8 +430,10 @@ pub struct PageGeometry {
 impl PageGeometry {
     /// `pdf_impl::PageBox` (the PDF probe's unit) into the shared type:
     /// the fields are already the same law, so this is the one place the
-    /// two vocabularies meet.
-    fn from_page_box(page: pdf_impl::PageBox) -> PageGeometry {
+    /// two vocabularies meet. Public for the same reason: the payload
+    /// binding's `PageLayout.geometry` getter materializes the shared
+    /// pyclass from the layout probe's `PageBox` per page.
+    pub fn from_page_box(page: pdf_impl::PageBox) -> PageGeometry {
         PageGeometry {
             width_pt: page.width_pt,
             height_pt: page.height_pt,
@@ -2140,6 +2142,101 @@ fn docx_section_geometry(
         rotation: 0,
         crop: None,
     })
+}
+
+/// The multi-format `page_layout` probe: per unit of the resolved format's
+/// geometry lane, the unit's geometry PLUS — PDF only — the page's text
+/// spans, lines, and image boxes in the page's declared render space
+/// (`pdf_impl::page_layout`, spec §5: the D1 space, one transform, one
+/// open). The spine is [`page_geometry`]'s exactly (resolve → capability →
+/// password-kind → max_bytes → door), with the `pages=` selection the two
+/// conversion probes take: delivered to the PDF leg, which normalizes it
+/// with `markdown_pages`' exact rule and error strings, and returns the
+/// output parallel to the NORMALIZED selection, every entry carrying its
+/// `page_index`.
+///
+/// Layout content is PDF-only ("the capability table applies to
+/// page_layout identically; PDF-only for layout"): no office engine
+/// exposes text/image boxes, so the office rows serve their geometry with
+/// EMPTY spans/lines/images — the honest empty (the empty-lists-not-errors
+/// law's shape: no engine surface, never a fabricated one), the no-geometry
+/// row its single `geometry: None` entry. PDF failure semantics: per
+/// `pdf_impl::page_layout` (§7): a page whose box read fails is
+/// `geometry: None` + empty lists, siblings intact; an unparseable content
+/// stream is empty lists, geometry intact; encrypted doors fail closed.
+pub fn page_layout(
+    bytes: Vec<u8>,
+    name_hint: Option<&str>,
+    format: Option<&str>,
+    backend: Backend,
+    pages: Option<Vec<usize>>,
+    options: &ConvertOptions,
+) -> Result<Vec<pdf_impl::PageLayoutData>, DocumentError> {
+    let kind = resolve(&bytes, name_hint, format)?;
+    let lane = geometry_engine(kind, backend, &bytes)?;
+    if options.password.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Convert(format!(
+            "password= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
+    if options.max_bytes.is_some_and(|limit| limit == 0) {
+        return Err(DocumentError::Convert("max_bytes must be positive".into()));
+    }
+    match lane {
+        // The no-geometry row: unit = whole document (single-flow), so
+        // exactly one entry with no geometry and no layout content, for
+        // every backend.
+        None => Ok(vec![pdf_impl::PageLayoutData {
+            page_index: 0,
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        }]),
+        Some(Engine::PdfOxide) => {
+            pdf_impl::page_layout(bytes, pages.as_deref(), options.password).map_err(pages_error)
+        }
+        Some(Engine::OfficeOxide) => {
+            // The office leg parses the container into resident memory (the
+            // same amplification class the conversion lane meters): the
+            // same input ceiling, explicit budget over the 32 MiB default.
+            let limit = options.max_bytes.unwrap_or(DEFAULT_ANYDOC_INPUT_LIMIT);
+            if bytes.len() > limit {
+                return Err(DocumentError::Convert(format!(
+                    "the document is {} and the {} engine lane's input ceiling is {} \
+                     (that lane amplifies input into resident memory at a measured multiple \
+                     — 2026-09-09: ~146x worst case on anydoc's delimiter formats, \
+                     ~4100x on a zip-bombed office_oxide container): split the file, or pass a larger \
+                     max_bytes",
+                    render_size(bytes.len()),
+                    engine_name(Engine::OfficeOxide),
+                    render_size(limit),
+                )));
+            }
+            Ok(office_geometry(bytes, kind)?
+                .into_iter()
+                .enumerate()
+                .map(|(page_index, geometry)| pdf_impl::PageLayoutData {
+                    page_index,
+                    geometry: geometry.map(|g| pdf_impl::PageBox {
+                        width_pt: g.width_pt,
+                        height_pt: g.height_pt,
+                        rotation: g.rotation,
+                        crop: g.crop,
+                    }),
+                    spans: Vec::new(),
+                    lines: Vec::new(),
+                    images: Vec::new(),
+                })
+                .collect())
+        }
+        // geometry_engine's table is total: the Anydoc and Html2Md lanes
+        // never come back from it.
+        Some(_) => Err(DocumentError::Convert(
+            "layout: unreachable engine lane".into(),
+        )),
+    }
 }
 
 /// The HTML conversion: html-to-markdown-rs under the options the lane
@@ -3937,6 +4034,130 @@ mod tests {
         // still answer [None] (validation = format resolution)
         let entries = geometry_named("x.csv", b"single line only");
         assert_eq!(entries, vec![None]);
+    }
+
+    // --- the page_layout spine (spec §8 commit 4's routing half) -----------
+
+    /// The spine's routes on the layout surface: the pdf leg carries the
+    /// real content (spans/lines/images in render space, pages= honored);
+    /// the office rows serve their geometry with EMPTY layout lists (no
+    /// office engine exposes text/image boxes — PDF-only for layout); the
+    /// no-geometry row is the single geometry-None entry; and the refusal
+    /// order is page_geometry's (the capability refusal is format-aware
+    /// and names the same messages).
+    #[test]
+    fn the_layout_spine_routes_and_refuses_like_the_geometry_spine() {
+        let layout = |name: &str, bytes: &[u8], pages: Option<Vec<usize>>| {
+            page_layout(
+                bytes.to_vec(),
+                Some(name),
+                None,
+                Backend::Auto,
+                pages,
+                &ConvertOptions::default(),
+            )
+        };
+        // pdf: one entry per page with real content; page_index carried.
+        let entries = layout("a.pdf", &two_page_pdf("alpha", "beta"), None).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.iter().map(|e| e.page_index).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(entries[0].geometry.is_some());
+        assert_eq!(entries[0].spans[0].text, "alpha");
+        assert!(!entries[0].spans[0].is_bold);
+        assert!(!entries[0].lines.is_empty() && entries[0].images.is_empty());
+        // pages= subset: parallel to the normalized selection
+        let entries = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![1])).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_index, 1);
+        assert_eq!(entries[0].spans[0].text, "beta");
+        // the byte-pinned pages= refusals (markdown_pages' strings)
+        let err = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "pages= selected no pages: pass None for the whole document"
+        );
+        let err = layout("a.pdf", &two_page_pdf("alpha", "beta"), Some(vec![2])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "page index 2 is out of range for a 2-page document (pages= is 0-based)"
+        );
+        // office: geometry + empty layout lists (PDF-only for layout)
+        let docx = docx_with_body(
+            "<w:p><w:r><w:t>body</w:t></w:r></w:p>\
+             <w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>",
+        );
+        let entries = layout("a.docx", &docx, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].page_index, 0);
+        assert_eq!(
+            entries[0]
+                .geometry
+                .map(|g| (g.width_pt, g.height_pt, g.rotation, g.crop)),
+            Some((612.0, 792.0, 0, None))
+        );
+        assert!(
+            entries[0].spans.is_empty()
+                && entries[0].lines.is_empty()
+                && entries[0].images.is_empty()
+        );
+        // the no-geometry row: the single geometry-None entry
+        let entries = layout("x.csv", b"single line only", None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].geometry.is_none());
+        assert!(entries[0].spans.is_empty());
+        // refusal order, page_geometry's: anydoc capability refusal on the
+        // office row — THE TABLE'S ONE REFUSAL, byte-identical on both
+        // surfaces (the geometry capability table applies to page_layout
+        // identically, refusal text included)
+        let err = page_layout(
+            docx.clone(),
+            Some("a.docx"),
+            None,
+            Backend::Anydoc,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "backend \"anydoc\" cannot serve page geometry for docx: anydoc has no \
+             geometry surface; use backend='auto' or 'oxide' here"
+        );
+        // password-kind refusal precedes zero-max_bytes
+        let err = page_layout(
+            docx,
+            Some("a.docx"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions {
+                password: Some("torque"),
+                max_bytes: Some(0),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("password= applies to PDF documents only"),
+            "{err:?}"
+        );
+        // the pdf lane's malformed document is the typed whole-call
+        // refusal (the encrypted DOOR is pdf_impl::open's, shared by every
+        // probe, pinned on the geometry probe in pdf_impl's tests and on
+        // page_layout at the binding layer's encrypted-entries tuple)
+        let err = page_layout(
+            b"%PDF-1.4 garbage".to_vec(),
+            Some("a.pdf"),
+            None,
+            Backend::Auto,
+            None,
+            &ConvertOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cross-reference"), "{err:?}");
     }
 
     #[test]

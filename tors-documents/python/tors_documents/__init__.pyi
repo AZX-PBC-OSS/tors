@@ -20,13 +20,13 @@ class Backend(str, Enum):
     ``OXIDE``/``ANYDOC`` force one engine and raise on a format it cannot
     read, never a silent fallback. Members are their accepted strings, so
     ``backend="auto"`` and ``backend=Backend.AUTO`` are the same call. On
-    the geometry surface (`page_geometry`) ``AUTO`` and ``OXIDE`` are
-    additionally identical for every format (the geometry lane is a
-    property of the format, not a choice), and the no-geometry formats
-    (html/csv/rtf/epub/odt/ods/odp) answer the same ``[None]`` on every
-    backend — ``ANYDOC`` included: no engine runs there, so nothing is
-    refused and nothing is fallen back (documented divergences from this
-    enum's conversion contract)."""
+    the geometry surfaces (``page_geometry``/``page_layout``) ``AUTO``
+    and ``OXIDE`` are additionally identical for every format (the
+    geometry lane is a property of the format, not a choice), and the
+    no-geometry formats (html/csv/rtf/epub/odt/ods/odp) answer the same
+    single entry on every backend — ``ANYDOC`` included: no engine runs
+    there, so nothing is refused and nothing is fallen back (documented
+    divergences from this enum's conversion contract)."""
 
     AUTO = "auto"
     OXIDE = "oxide"
@@ -129,6 +129,135 @@ class PageGeometry:
         provenance for the extent, never re-applied, ``None`` unless a
         CropBox is declared AND it actually crops; ``None`` on every
         office lane."""
+
+class PageLayout:
+    """One ``page_layout`` entry: the unit's geometry plus its text
+    spans, lines, and image boxes in the page's declared render space —
+    the native pyclass exposed directly (the ``PageGeometry`` deviation
+    note applies to all five layout classes); ``==`` is structural (the
+    five fields)."""
+    @property
+    def page_index(self) -> int:
+        """The 0-based page (or section/slide/worksheet index) this entry
+        describes — mandatory on every entry: the ``pages=``
+        normalization reorders."""
+    @property
+    def geometry(self) -> PageGeometry | None:
+        """The unit's declared render box (the ``page_geometry`` entry):
+        ``None`` where the unit's box cannot be read or declares no
+        positive extent — then the layout lists are empty too (no frame,
+        no boxes)."""
+    @property
+    def spans(self) -> list[TextSpan]:
+        """The unit's text spans, reading order (PDF pages only; office
+        units carry empty lists — no office engine exposes text
+        boxes)."""
+    @property
+    def lines(self) -> list[TextLine]:
+        """The unit's text lines, reading order, words nested (PDF pages
+        only)."""
+    @property
+    def images(self) -> list[ImageBox]:
+        """The unit's image boxes, paint order (PDF pages only)."""
+
+class TextSpan:
+    """One ``page_layout`` text span: a run's text, its box, and the
+    font/style evidence; ``==`` is structural (the eight fields)."""
+    @property
+    def text(self) -> str:
+        """The run's text."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """The run's box, ``(x, y, w, h)``: points, bottom-left origin of
+        the page's render space; y is the box's bottom edge; for text the
+        bottom edge is the glyph baseline and the box extends one
+        font-size upward (em-box; descenders may extend below). Boxes are
+        unclipped; the page box is the consumer's clip."""
+    @property
+    def font_size(self) -> float:
+        """The run's font size in points (the em-box's height)."""
+    @property
+    def font_name(self) -> str:
+        """The run's font name."""
+    @property
+    def is_bold(self) -> bool:
+        """Bold evidence."""
+    @property
+    def is_italic(self) -> bool:
+        """Italic evidence."""
+    @property
+    def rotation_degrees(self) -> float:
+        """The run's own content rotation in degrees — non-zero marks a
+        sideways run whose box is the engine's flattened approximation
+        (on a rotated page, transposed; the line box degrades to a
+        square): carried honestly, not re-derived."""
+    @property
+    def is_artifact(self) -> bool:
+        """Declared ``/Artifact`` marked content (running headers/footers,
+        page numbers, watermarks): the consumer tells declared furniture
+        from body with this."""
+
+class Word:
+    """One word inside a ``TextLine`` (``page_layout``
+    ``lines[].words``): the text and its box; ``==`` is structural (both
+    fields)."""
+    @property
+    def text(self) -> str:
+        """The word's text."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """The word's box, ``(x, y, w, h)``: points, bottom-left origin
+        of the page's render space; y is the box's bottom edge; for text
+        the bottom edge is the glyph baseline and the box extends one
+        font-size upward (em-box; descenders may extend below). Boxes are
+        unclipped; the page box is the consumer's clip."""
+
+class TextLine:
+    """One ``page_layout`` text line: the engine's own line (its word
+    clustering is the engine's, never re-implemented downstream); ``==``
+    is structural (the three fields — the words included). The join law:
+    the line's text is its words' texts joined with single spaces, and
+    every word's box is inside the line's box."""
+    @property
+    def text(self) -> str:
+        """The line's text (the engine's join of its words)."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """The line's box, ``(x, y, w, h)``: points, bottom-left origin
+        of the page's render space; y is the box's bottom edge; for text
+        the bottom edge is the glyph baseline and the box extends one
+        font-size upward (em-box; descenders may extend below). Boxes are
+        unclipped; the page box is the consumer's clip."""
+    @property
+    def words(self) -> list[Word]:
+        """The line's words, in reading order."""
+
+class ImageBox:
+    """One ``page_layout`` image box: an image draw's placement, from the
+    engine's image HANDLES (no decode, no silent small-image filter, no
+    swallowed errors); ``==`` is structural (the five fields)."""
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """The image's axis-aligned box, ``(x, y, w, h)``: points,
+        bottom-left origin of the page's render space; y is the box's
+        bottom edge; for text the bottom edge is the glyph baseline and
+        the box extends one font-size upward (em-box; descenders may
+        extend below). Boxes are unclipped; the page box is the
+        consumer's clip."""
+    @property
+    def width_px(self) -> int:
+        """The image's pixel width."""
+    @property
+    def height_px(self) -> int:
+        """The image's pixel height."""
+    @property
+    def rotation_degrees(self) -> float:
+        """The CTM-derived content rotation in degrees (the bbox is
+        axis-aligned but the pixels may be turned)."""
+    @property
+    def paint_order(self) -> int:
+        """Page-local identity/z-order: the image's index among the
+        page's painted images, in content-stream order."""
 
 def to_markdown(
     path: str | os.PathLike[str] | None = None,
@@ -279,3 +408,33 @@ def page_geometry(
     Runs GIL-free. ⚠ A malformed PDF can crash the process (uncatchable
     native stack exhaustion in the pdf_oxide engine): sandbox untrusted
     PDFs (docs/documents.md, SECURITY.md)."""
+
+def page_layout(
+    path: str | os.PathLike[str] | None = None,
+    data: bytes | None = None,
+    format: Format | str | None = ...,
+    password: str | None = None,
+    backend: Backend | str = ...,
+    pages: int | list[int] | tuple[int, int] | None = ...,
+    max_bytes: int | None = None,
+) -> list[PageLayout]:
+    """The layout probe: per unit of the resolved format's geometry lane,
+    the unit's geometry plus — PDF pages only — the page's text spans,
+    text lines (words nested), and image boxes, all in the page's
+    declared render space (points, bottom-left origin, y-up; /Rotate
+    applied; one transform owned by the library, the same frame
+    ``page_geometry`` declares). Office rows serve their declared
+    geometry with empty layout lists (PDF-only for layout); the
+    no-geometry formats answer one ``geometry=None`` entry. ``pages=``
+    normalizes exactly as the conversion pair's (sort + dedup; the
+    byte-pinned empty-selection and out-of-range errors) and the output
+    is parallel to the NORMALIZED selection, every entry carrying
+    ``page_index``. ``backend=`` is ``"auto"``/``"oxide"`` — identical on
+    this surface — while ``"anydoc"`` is refused where geometry is
+    obtainable (pdf and the office families); ``password=`` unlocks an
+    encrypted PDF (any other format: a clean error; an encrypted OOXML
+    package: a typed ``ValueError``); an explicit ``max_bytes=`` binds
+    before the read, ``None`` keeps the 32 MiB default ceiling on the
+    office leg. Runs GIL-free. ⚠ A malformed PDF can crash the process
+    (uncatchable native stack exhaustion in the pdf_oxide engine):
+    sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
