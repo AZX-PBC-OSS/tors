@@ -1393,6 +1393,189 @@ def generate_pdf_crop_partial() -> bytes:
     )
 
 
+# --- the page-layout fixtures (standalone, on demand: the geometry
+# --- fixtures' precedent — none carries conversion content the matrix's
+# --- sweeps need; the layout probes build their own bytes) -------------------
+
+LAYOUT_RED_1X1 = (
+    b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1"
+    b" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode"
+    b" /Length 7 >>\nstream\nFF0000>\nendstream"
+)
+
+
+def generate_pdf_layout(
+    content: bytes,
+    *,
+    mediabox: str = "[0 0 612 792]",
+    rotate: int | None = None,
+    cropbox: str | None = None,
+    fonts: list[str] | None = None,
+    image_ops: bytes | None = None,
+    images: list[bytes] | None = None,
+) -> bytes:
+    """The layout fixtures' one builder: one page with a content stream,
+    optional /Rotate and /CropBox page-dict entries, optional extra fonts
+    (the /F2+ faces named in ``fonts`` — /F1 is always Helvetica), and
+    either an image draw (`image_ops` — the numbers between `cm` and
+    `/Im1 Do`; the red 1×1 XObject is added and referenced as /Im1) or a
+    content stream drawing ``images[0..]`` itself (the /Im1, /Im2…
+    references it spells). Object numbering: catalog 1, pages 2, page 3,
+    fonts 4.., content stream next, then the image XObjects."""
+    fonts = ["Helvetica", *(fonts or [])]
+    if image_ops is not None:
+        content = b"q " + image_ops + b" cm /Im1 Do Q"
+    content_number = 4 + len(fonts)
+    extras = ""
+    if rotate is not None:
+        extras += f" /Rotate {rotate}"
+    if cropbox is not None:
+        extras += f" /CropBox {cropbox}"
+    xobject_entry = ""
+    if image_ops is not None or images:
+        xobject_entry = f" /XObject << /Im1 {content_number + 1} 0 R >>"
+    resources = (
+        "<< /Font << "
+        + " ".join(f"/F{1 + i} {4 + i} 0 R" for i in range(len(fonts)))
+        + " >>"
+        + xobject_entry
+        + " >>"
+    )
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            f"<< /Type /Page /Parent 2 0 R /Resources {resources}"
+            f" /MediaBox {mediabox}{extras} /Contents {content_number} 0 R >>"
+        ).encode("ascii"),
+    ]
+    for base_font in fonts:
+        objects.append(
+            f"<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} >>".encode("ascii")
+        )
+    objects.append(
+        f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+        + content
+        + b"\nendstream"
+    )
+    if image_ops is not None:
+        images = [LAYOUT_RED_1X1]
+    for image in images or []:
+        objects.append(image)
+    return _pdf_from_objects(objects)
+
+
+def generate_pdf_layout_baseline() -> bytes:
+    """The D2 pin's fixture: runs at the y-up baselines 700 (24pt "Hello")
+    and 100 (12pt "World") — the layout probe's rot-0 identity golden
+    (72, 700, ~54.67, 24), no y-flip."""
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F1 12 Tf 72 100 Td (World) Tj ET"
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_layout_rotated(angle: int) -> bytes:
+    """A horizontal run at (72, 700) on a page declared /Rotate `angle`:
+    the forward-rule goldens ((700, 485.33, 24, 54.67) at 90;
+    (485.33, 68, 54.67, 24) at 180) and the /Rotate 45 normalization pin."""
+    content = b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET"
+    return generate_pdf_layout(content, rotate=angle)
+
+
+def generate_pdf_layout_crop() -> bytes:
+    """The crop-subset golden: CropBox [100 100 500 700], one run inside
+    (150, 600) — lands at (50, 500, 64.03, 24) — and one fully outside
+    (30, 30), which the engine drops."""
+    content = b"BT /F1 24 Tf 150 600 Td (Inside) Tj ET\nBT /F1 24 Tf 30 30 Td (Outside) Tj ET"
+    return generate_pdf_layout(content, cropbox="[100 100 500 700]")
+
+
+def generate_pdf_layout_crop_partial_span() -> bytes:
+    """T7's fixture: a run starting at x=480 that advances past the crop's
+    right edge (500) — kept, and its box comes back UNCLIPPED."""
+    content = b"BT /F1 24 Tf 480 600 Td (Hang) Tj ET"
+    return generate_pdf_layout(content, cropbox="[100 100 500 700]")
+
+
+def generate_pdf_layout_rotated_run() -> bytes:
+    """T3's fixture: a horizontal run (72, 700) plus a rotated-content run
+    (`Tm [0 1 -1 0 300 300]`, "Side") on a /Rotate 90 page — the
+    inverse-map case: both land in the same frame; the rotated run's box
+    is the engine's flattened approximation, carried by
+    rotation_degrees=90."""
+    content = (
+        b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\n"
+        b"BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET"
+    )
+    return generate_pdf_layout(content, rotate=90)
+
+
+def generate_pdf_layout_bold_mid_line() -> bytes:
+    """Two runs on ONE baseline, the second /Helvetica-Bold: spans split
+    where lines merge (two spans, one line, bold evidence per run)."""
+    return generate_pdf_layout(
+        b"BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F2 24 Tf 140 700 Td (World) Tj ET",
+        fonts=["Helvetica-Bold"],
+    )
+
+
+def generate_pdf_layout_artifact() -> bytes:
+    """A /Artifact-tagged (typed BDC) header run over a body run: the
+    is_artifact pin (declared furniture flagged, body not)."""
+    content = (
+        b"/Artifact << /Type /Pagination /Subtype /Header >> BDC\n"
+        b"BT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\n"
+        b"BT /F1 12 Tf 72 600 Td (Body) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
+def generate_pdf_layout_image(rotate: int | None = None) -> bytes:
+    """The red 1×1 image drawn at CTM [100 0 0 100 200 200] (user-space
+    rect 200,200 100×100), optionally on a /Rotate 90 page: the
+    handles-only pins (extract_images would silently return ZERO for the
+    1×1 image)."""
+    return generate_pdf_layout(b"", rotate=rotate, image_ops=b"100 0 0 100 200 200")
+
+
+def generate_pdf_layout_two_images() -> bytes:
+    """Two images, one page (the content stream draws both): paint_order
+    pins content-stream order."""
+    return generate_pdf_layout(
+        b"q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q",
+        images=[LAYOUT_RED_1X1],
+    )
+
+
+def generate_pdf_layout_pages(count: int) -> bytes:
+    """`count` pages, each carrying real text spans: the GIL heartbeat
+    cell's fixture (§9 item 12 — page_layout's marshalling is
+    O(pages × boxes) nested Python-object construction post-detach, so
+    the fixture needs spans, which generate_pdf_pages's MediaBox-only
+    pages lack). Not committed to the corpus; built on demand."""
+    # Object layout: catalog 1, pages 2, font 3, then per page a page dict
+    # (4 + 2i) and its content stream (5 + 2i).
+    kids = " ".join(f"{4 + page * 2} 0 R" for page in range(count))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {count} >>".encode("ascii"),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for page in range(count):
+        content = f"BT /F1 12 Tf 50 700 Td (page {page} layout line) Tj ET".encode("ascii")
+        objects.append(
+            (
+                "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >>"
+                f" /MediaBox [0 0 612 792] /Contents {5 + page * 2} 0 R >>".encode("ascii")
+            )
+        )
+        objects.append(
+            f"<< /Length {len(content)} >>\nstream\n".encode("ascii")
+            + content
+            + b"\nendstream"
+        )
+    return _pdf_from_objects(objects)
+
+
 # --- the office geometry fixtures (standalone, on demand: the same
 # --- generate_pdf_big precedent — none of them carries conversion content
 # --- the matrix's sweeps need, and the committed corpora stay unpinned to

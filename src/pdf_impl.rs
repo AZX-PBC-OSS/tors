@@ -911,6 +911,417 @@ fn page_box(doc: &PdfDocument, page: usize) -> Result<Option<PageBox>, PdfError>
     Ok(PageBox::from_visible_box(visible, rotation, media))
 }
 
+// --- the page_layout probe (spec §5: the D1 coordinate space, one
+// --- transform, one open) ---------------------------------------------------
+
+/// One `page_layout` text span: a run's text, its render-space box, and
+/// the font/style evidence a highlight/evidence consumer needs (§5/D6's
+/// field bar — `sequence` is list order, `char_widths`/`heading_level`/
+/// `color`/`mcid` are deliberately cut).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutSpan {
+    /// The run's text (the engine's span text verbatim).
+    pub text: String,
+    /// The run's box in the page's DECLARED RENDER SPACE (the D1 law: see
+    /// [`map_box_forward`]) — `(x, y, w, h)`, y-up, the box's bottom edge
+    /// at the glyph baseline.
+    pub bbox: (f32, f32, f32, f32),
+    /// The run's font size in points (the em-box's height).
+    pub font_size: f32,
+    /// The run's font name (the engine's resolved name).
+    pub font_name: String,
+    /// Bold evidence (the engine's weight resolution).
+    pub is_bold: bool,
+    /// Italic evidence.
+    pub is_italic: bool,
+    /// The run's own content rotation in degrees (the text-matrix angle):
+    /// the honesty flag for the T3 approximation — a non-zero value marks
+    /// a sideways run whose box is the engine's flattened-extent
+    /// approximation (on a rotated page, transposed).
+    pub rotation_degrees: f32,
+    /// Declared `/Artifact` marked content (running headers/footers, page
+    /// numbers, watermarks — the engine's artifact classification): the
+    /// flag that lets a consumer tell declared page furniture from body.
+    pub is_artifact: bool,
+}
+
+/// One word inside a [`LayoutLine`]: the text and its render-space box
+/// (the D1 law). Nested in lines — word boxes are the engine's own
+/// gap-clustered boxes, never re-derived downstream.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutWord {
+    /// The word's text.
+    pub text: String,
+    /// The word's box in render space (`(x, y, w, h)`, y-up).
+    pub bbox: (f32, f32, f32, f32),
+}
+
+/// One `page_layout` text line: the engine's line (its own word
+/// clustering — gap thresholds are NOT re-implemented downstream), its
+/// render-space box, and its words. The join law holds per line: the
+/// line text is the words' texts joined with single spaces (the engine's
+/// own `TextLine::new` rule), and every word's box is inside the line's
+/// box (the union law). Both are pinned in the tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutLine {
+    /// The line's text (the engine's join of its words).
+    pub text: String,
+    /// The line's box in render space — the union of its words' boxes.
+    pub bbox: (f32, f32, f32, f32),
+    /// The line's words, in reading order.
+    pub words: Vec<LayoutWord>,
+}
+
+/// One `page_layout` image box: an image draw's placement, from
+/// `page_image_handles` ONLY (never `extract_images`: that surface
+/// decodes every image, silently drops sub-8×8-px ones, and swallows
+/// decode errors — disqualified for an evidence surface, probe P5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutImage {
+    /// The image's axis-aligned box in render space (`(x, y, w, h)`,
+    /// y-up) — the CTM-derived placement of the unit rectangle.
+    pub bbox: (f32, f32, f32, f32),
+    /// The image's pixel width (the XObject's `/Width`).
+    pub width_px: u32,
+    /// The image's pixel height.
+    pub height_px: u32,
+    /// The CTM-derived content rotation in degrees (0/90/180/270): the
+    /// bbox is axis-aligned but the pixels may be turned.
+    pub rotation_degrees: f32,
+    /// Page-local identity/z-order: the image's index among the page's
+    /// painted images, in content-stream order — the only stable handle
+    /// the engine offers.
+    pub paint_order: u32,
+}
+
+/// One `page_layout` entry: the page's geometry (a [`PageBox`], the same
+/// unit `page_geometry` returns — `None` where that page's box cannot be
+/// read or declares no positive extent), plus its text spans, lines, and
+/// image boxes in the same render space. Output is parallel to the
+/// normalized `pages=` selection, and every entry carries `page_index`
+/// (normalization reorders; the caller maps back by it).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageLayoutData {
+    /// The 0-based page this entry describes.
+    pub page_index: usize,
+    /// The page's declared render box (the `page_geometry` entry).
+    pub geometry: Option<PageBox>,
+    /// The page's text spans, reading order.
+    pub spans: Vec<LayoutSpan>,
+    /// The page's text lines, reading order (words nested).
+    pub lines: Vec<LayoutLine>,
+    /// The page's image boxes, paint order.
+    pub images: Vec<LayoutImage>,
+}
+
+/// THE TRANSFORM (spec §5, ruling D1) — the one forward rule, step 2
+/// alone: a frame-relative box `(x, y, w, h)` in a frame of extents
+/// `(w, h)` (the visible box's), rotated by the page's declared rotation
+/// `r` (clockwise, the render's own turn), into the rotated frame.
+/// `0` = identity (NO y-flip — the D2 resolution: the engine's box is
+/// y-up baseline-origin, and rotation 0 is the verbatim identity);
+/// `90` → `(y, W−x−w, h, w)`; `180` → `(W−x−w, H−y−h, w, h)`;
+/// `270` → `(H−y−h, x, h, w)`. Split from [`map_box_forward`] so the
+/// composition property (r then 360−r ≡ identity, the second application
+/// in the rotated frame's own swapped extents) is testable at box level.
+fn rotate_box_forward(
+    b: (f32, f32, f32, f32),
+    frame: (f32, f32),
+    rotation: i32,
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = b;
+    let (fw, fh) = frame;
+    match rotation {
+        90 => (y, fw - x - w, h, w),
+        180 => (fw - x - w, fh - y - h, w, h),
+        270 => (fh - y - h, x, h, w),
+        _ => (x, y, w, h),
+    }
+}
+
+/// The full forward rule (steps 1+2 of spec §5): a RAW y-up box
+/// `(x, y, w, h)` in absolute user space, the page's visible-box corners
+/// `(cx0, cy0, cx1, cy1)` (the `get_page_visible_box` output — fetched
+/// ONCE per page and fed to both this and the `PageBox` build), and the
+/// page's rotation: translate the box into visible-box-relative
+/// coordinates (step 1: the source MediaBox/CropBox origin offset is
+/// translated away, never re-added), then [`rotate_box_forward`] (step
+/// 2). The page size (step 3: extents swapped for 90/270) is the
+/// `PageBox`'s width/height, already built by
+/// [`PageBox::from_visible_box`]. One rule for every box on the page —
+/// spans, lines, words, images alike (pre-mapped spans arrive here via
+/// [`unmap_engine_box`] first).
+fn map_box_forward(
+    raw: (f32, f32, f32, f32),
+    visible: (f32, f32, f32, f32),
+    rotation: i32,
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = raw;
+    let (cx0, cy0, _, _) = visible;
+    let translated = (x - cx0, y - cy0, w, h);
+    rotate_box_forward(translated, (visible.2 - cx0, visible.3 - cy0), rotation)
+}
+
+/// The inverse of the ENGINE's own span mapping, for spans it already
+/// rotated: pdf_oxide's postprocess rewrites a rotated page's span boxes
+/// about the RAW MediaBox (`map_span_into_rotated_frame`,
+/// document.rs:12731-12750: translate to MediaBox-relative, rotate with
+/// `rotate_span_bbox(rel, rot, media_w, media_h)` — the same four-arm
+/// formula as [`rotate_box_forward`] — translate back; the applied angle
+/// lands in `page_rotation_applied`). Reconstruction of the inverse,
+/// from that formula: translate the mapped box MediaBox-relative again,
+/// apply the inverse rect map — for 90 the forward-90 map's inverse is
+/// `(Mw − y′ − h′, x′, h′, w′)` (forward-90 is `(y, Mw−x−w, h, w)`:
+/// solve each field), for 180 it is self-inverse, for 270 it is
+/// `(y′, Mh − x′ − w′, h′, w′)` — then translate back to absolute raw
+/// user space. The output feeds [`map_box_forward`], so every box the
+/// probe returns (raw or engine-mapped) has gone through the ONE forward
+/// rule; with no effective crop the round trip is the identity (the
+/// engine's frame and tors's coincide), and with one it is exactly the
+/// correction to the visible-box frame the D1 law demands.
+fn unmap_engine_box(
+    mapped: (f32, f32, f32, f32),
+    media: (f32, f32, f32, f32),
+    rotation: i32,
+) -> (f32, f32, f32, f32) {
+    let (llx, lly, urx, ury) = media;
+    let (fw, fh) = (urx - llx, ury - lly);
+    let (mx, my, mw, mh) = (mapped.0 - llx, mapped.1 - lly, mapped.2, mapped.3);
+    let raw = match rotation {
+        90 => (fw - my - mh, mx, mh, mw),
+        180 => (fw - mx - mw, fh - my - mh, mw, mh),
+        270 => (my, fh - mx - mw, mh, mw),
+        _ => (mx, my, mw, mh),
+    };
+    (raw.0 + llx, raw.1 + lly, raw.2, raw.3)
+}
+
+/// Whether the engine has already mapped a span (or word) whose own
+/// content rotation is `content_rotation` on a page rotated `rotation`:
+/// pdf_oxide maps ALL spans on a 180 page, only rotated-content spans
+/// (`rotation_degrees != 0`) on 90/270 pages, and nothing at 0
+/// (document.rs:13086-13092). The spans carry the applied angle in
+/// `page_rotation_applied` (consumed here, never exposed); words and
+/// lines carry no such flag, so mappedness is derived from the same
+/// rule's inputs — the page's rotation and the word's own content
+/// rotation (lines never mix: the engine emits each rotated run as its
+/// own line).
+fn engine_mapped(rotation: i32, content_rotation: f32) -> bool {
+    match rotation {
+        90 | 270 => content_rotation != 0.0,
+        180 => true,
+        _ => false,
+    }
+}
+
+/// The layout probe: one open, and per requested page the page's geometry
+/// plus every text span, text line, and image box in the page's declared
+/// render space ([`PageLayoutData`]). `pages` is the `pages=` selection:
+/// `None` = the whole document in page order; `Some` is normalized here
+/// with `markdown_pages`' exact rule and error strings
+/// ([`normalize_selection`] / [`validate_selection_range`]), and the
+/// output is parallel to the NORMALIZED selection, every entry carrying
+/// its `page_index`. One open, three per-page engine reads
+/// (`extract_spans`/`extract_text_lines` share the cached span parse).
+///
+/// Failure semantics (spec §7): a page whose own box read fails — or
+/// whose declared extent is non-positive/non-finite — is an entry with
+/// `geometry: None` and EMPTY spans/lines/images (no frame to transform
+/// into: the D1 space is defined by the box), its siblings intact; a
+/// page whose CONTENT stream fails to parse is an entry with the
+/// geometry intact and empty lists — the engine's own drop-the-page
+/// behavior (documented at document.rs:23773 for the image walk and
+/// extract_spans_impl's content-decode arm), never an error (the
+/// empty-lists-not-errors engine law; a scanned page is the same
+/// shape). Encrypted documents fail closed at the [`open`] door check.
+/// Runs under [`with_depth_headroom`], like every entry point.
+pub fn page_layout(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+) -> Result<Vec<PageLayoutData>, PagesError> {
+    let selected = pages.map(<[usize]>::to_vec);
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || page_layout_pass(bytes, selected.as_deref(), password.as_deref()),
+        PagesError::Pdf,
+    )
+}
+
+/// The pass [`page_layout`] runs under [`with_depth_headroom`] — the
+/// selection normalization (shared with `markdown_pages`, so the error
+/// strings are byte-identical) and the per-page fold.
+fn page_layout_pass(
+    bytes: Vec<u8>,
+    pages: Option<&[usize]>,
+    password: Option<&str>,
+) -> Result<Vec<PageLayoutData>, PagesError> {
+    let doc = open(bytes, password).map_err(PagesError::Pdf)?;
+    let count = doc.page_count().map_err(PagesError::Pdf)?;
+    let selected = match pages {
+        None => (0..count).collect::<Vec<usize>>(),
+        Some(pages) => {
+            let selected = normalize_selection(pages)?;
+            validate_selection_range(&selected, count)?;
+            selected
+        }
+    };
+    Ok(selected
+        .iter()
+        .map(|&page| page_layout_one(&doc, page))
+        .collect())
+}
+
+/// One page's layout ([`page_layout_pass`]'s per-page step): the box
+/// reads feed both the `PageBox` build and the transform (fetched ONCE —
+/// the phase-1 `PageBox` deliberately does not carry the visible-box
+/// origin); the content reads are empty-on-error (the engine law, §7).
+fn page_layout_one(doc: &PdfDocument, page: usize) -> PageLayoutData {
+    // The frame: any error here (the page's own get_page walk included)
+    // is the §7 per-entry None rule — geometry None, no frame, so the
+    // content has no render space to be mapped into and stays empty.
+    let Ok(media) = doc.get_page_media_box(page) else {
+        return PageLayoutData {
+            page_index: page,
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        };
+    };
+    let Ok(visible) = doc.get_page_visible_box(page) else {
+        return PageLayoutData {
+            page_index: page,
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        };
+    };
+    let Ok(rotation) = doc.get_page_rotation(page) else {
+        return PageLayoutData {
+            page_index: page,
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        };
+    };
+    let geometry = PageBox::from_visible_box(visible, rotation, media);
+    if geometry.is_none() {
+        // A non-positive/non-finite extent: undeclarable (§7) — and the
+        // transform's frame with it.
+        return PageLayoutData {
+            page_index: page,
+            geometry: None,
+            spans: Vec::new(),
+            lines: Vec::new(),
+            images: Vec::new(),
+        };
+    }
+
+    // Spans. Engine-premapped ones (page_rotation_applied == the page's
+    // rotation, non-zero) inverse-map through the engine's MediaBox-
+    // relative transform back to raw first; everything then rides the
+    // one forward rule. A content parse failure is the §7 engine law:
+    // empty lists, never an error (T8: the engine's span path returns
+    // empty on a content-stream decode failure; a stream that decodes
+    // but parses to junk yields no spans the same way).
+    let spans = doc
+        .extract_spans(page)
+        .unwrap_or_default()
+        .iter()
+        .map(|s| {
+            let raw_box = (s.bbox.x, s.bbox.y, s.bbox.width, s.bbox.height);
+            let raw = if rotation != 0 && s.page_rotation_applied == rotation {
+                unmap_engine_box(raw_box, media, rotation)
+            } else {
+                raw_box
+            };
+            LayoutSpan {
+                text: s.text.clone(),
+                bbox: map_box_forward(raw, visible, rotation),
+                font_size: s.font_size,
+                font_name: s.font_name.clone(),
+                is_bold: s.font_weight.is_bold(),
+                is_italic: s.is_italic,
+                rotation_degrees: s.rotation_degrees,
+                is_artifact: s.artifact_type.is_some(),
+            }
+        })
+        .collect();
+
+    // Lines (words nested): the engine's own clustering over the cached
+    // span parse. A line's words never mix frames (the engine emits each
+    // rotated run as its own line), so the line's box is mapped-ness
+    // uniform; each word and the line box take the same unmap→forward
+    // path as the spans. The line's text is untouched (boxes transform;
+    // text never does) — the join law survives by construction.
+    let lines = doc
+        .extract_text_lines(page)
+        .unwrap_or_default()
+        .iter()
+        .map(|l| {
+            let line_mapped = rotation != 0
+                && l.words
+                    .iter()
+                    .all(|w| engine_mapped(rotation, w.rotation_degrees));
+            let map = |b: (f32, f32, f32, f32)| {
+                let raw = if line_mapped {
+                    unmap_engine_box(b, media, rotation)
+                } else {
+                    b
+                };
+                map_box_forward(raw, visible, rotation)
+            };
+            LayoutLine {
+                text: l.text.clone(),
+                bbox: map((l.bbox.x, l.bbox.y, l.bbox.width, l.bbox.height)),
+                words: l
+                    .words
+                    .iter()
+                    .map(|w| LayoutWord {
+                        text: w.text.clone(),
+                        bbox: map((w.bbox.x, w.bbox.y, w.bbox.width, w.bbox.height)),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    // Images: handles ONLY (T1 — never extract_images), ALWAYS raw user
+    // space (the engine never /Rotate-maps them — probe P7), so the
+    // forward rule directly.
+    let images = doc
+        .page_image_handles(page)
+        .unwrap_or_default()
+        .iter()
+        .map(|h| LayoutImage {
+            bbox: map_box_forward(
+                (h.bbox.x, h.bbox.y, h.bbox.width, h.bbox.height),
+                visible,
+                rotation,
+            ),
+            width_px: h.width,
+            height_px: h.height,
+            rotation_degrees: h.rotation_degrees,
+            // The engine counts images painted on one page; u32 is far
+            // beyond any real content stream's operator count, and the
+            // clamp beats a wrong page-local identity if the impossible
+            // happens.
+            paint_order: u32::try_from(h.paint_order).unwrap_or(u32::MAX),
+        })
+        .collect();
+
+    PageLayoutData {
+        page_index: page,
+        geometry,
+        spans,
+        lines,
+        images,
+    }
+}
+
 /// The `/Annots` link-annotation walk: for every page, the URIs of its
 /// `/Subtype /Link` annotations whose action is a URI (`/A << /S /URI /URI
 /// (...) >>`), in annotation order: one `Vec<String>` per page, page
@@ -993,6 +1404,41 @@ impl std::error::Error for PagesError {}
 /// constant to defend.
 pub const PAGE_SEPARATOR: &str = "\n---\n\n";
 
+/// The `pages=` selection's shape normalization, shared by every
+/// `pages=`-taking probe ([`markdown_pages_pass`], [`page_layout_pass`]):
+/// sort + dedup into document order, then the empty-selection refusal. The
+/// range check is [`validate_selection_range`] (it needs the page count,
+/// which both passes fetch only after this shape half — the error
+/// precedence the Python tests pin). The error strings are byte-pinned
+/// (the binding layer's Python tests assert them verbatim), which is why
+/// the two probes share these functions rather than re-spelling the
+/// checks: the messages cannot drift apart.
+fn normalize_selection(pages: &[usize]) -> Result<Vec<usize>, PagesError> {
+    // Sort + dedup the caller's selection: duplicates would repeat a
+    // page, an unsorted one would join out of document order.
+    let mut selected: Vec<usize> = pages.to_vec();
+    selected.sort_unstable();
+    selected.dedup();
+    if selected.is_empty() {
+        return Err(PagesError::Pages(
+            "pages= selected no pages: pass None for the whole document".into(),
+        ));
+    }
+    Ok(selected)
+}
+
+/// The range half of the shared `pages=` normalization: every selected
+/// index must be inside the page count the document itself reported. The
+/// refusal names the index and the count, byte-pinned.
+fn validate_selection_range(selected: &[usize], count: usize) -> Result<(), PagesError> {
+    if let Some(out_of_range) = selected.iter().find(|page| **page >= count) {
+        return Err(PagesError::Pages(format!(
+            "page index {out_of_range} is out of range for a {count}-page document (pages= is 0-based)"
+        )));
+    }
+    Ok(())
+}
+
 /// Convert in-memory PDF bytes to markdown over a page subset. `None` is
 /// the whole document (`to_markdown_all`); `Some(pages)`: normalized
 /// here (sorted, deduped) into document order, so a Rust caller's
@@ -1028,22 +1474,8 @@ fn markdown_pages_pass(
     let Some(selected) = pages else {
         return doc.to_markdown_all(&options).map_err(PagesError::Pdf);
     };
-    // Sort + dedup the caller's selection: duplicates would repeat a
-    // page, an unsorted one would join out of document order.
-    let mut selected: Vec<usize> = selected.to_vec();
-    selected.sort_unstable();
-    selected.dedup();
-    if selected.is_empty() {
-        return Err(PagesError::Pages(
-            "pages= selected no pages: pass None for the whole document".into(),
-        ));
-    }
-    let count = doc.page_count().map_err(PagesError::Pdf)?;
-    if let Some(out_of_range) = selected.iter().find(|page| **page >= count) {
-        return Err(PagesError::Pages(format!(
-            "page index {out_of_range} is out of range for a {count}-page document (pages= is 0-based)"
-        )));
-    }
+    let selected = normalize_selection(selected)?;
+    validate_selection_range(&selected, doc.page_count().map_err(PagesError::Pdf)?)?;
     let mut out = String::new();
     for (position, page) in selected.iter().enumerate() {
         if position > 0 {
@@ -1457,7 +1889,934 @@ mod tests {
         }
     }
 
-    // --- the page-geometry probe (the §9 PDF-side pins) --------------------
+    // --- the page-layout probe (the §9 PDF-side pins: D1 transform,
+    // --- inverse map, handles-based images, the render-anchored oracle) ----
+
+    /// A one-page PDF with a font, a content stream, and page-dict
+    /// `page_extras` (the /Rotate//CropBox fragments): the layout
+    /// fixtures' base.
+    fn layout_pdf(content: &str, page_extras: &str) -> Vec<u8> {
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len() + 1,
+            content
+        );
+        objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            format!(
+                "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> \
+                 /MediaBox [0 0 612 792] {page_extras} /Contents 5 0 R >>"
+            )
+            .as_bytes(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            stream.as_bytes(),
+        ])
+    }
+
+    /// The probe's red 1×1 image XObject (ASCIIHexDecode, 7-byte payload —
+    /// the probe crate's P5 fixture verbatim: small enough that
+    /// `extract_images`' silent <8×8 filter would drop it, which is the
+    /// point of pinning the HANDLES-based path).
+    fn red_1x1_image() -> Vec<u8> {
+        b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB \
+           /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 7 >>\nstream\nFF0000>\nendstream"
+            .to_vec()
+    }
+
+    /// An image-page PDF: the 1×1 red image painted by `image_ops` at the
+    /// given page extras. Object numbering: catalog 1, pages 2, page 3,
+    /// content stream 4, image 5.
+    fn image_pdf(image_ops: &str, page_extras: &str) -> Vec<u8> {
+        let content = format!("q {image_ops} cm /Im1 Do Q");
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len() + 1,
+            content
+        );
+        objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            format!(
+                "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> \
+                 /MediaBox [0 0 612 792] {page_extras} /Contents 4 0 R >>"
+            )
+            .as_bytes(),
+            stream.as_bytes(),
+            &red_1x1_image(),
+        ])
+    }
+
+    /// A bold font object (the base-14 bold face — the engine's weight
+    /// resolution keys on the name).
+    fn bold_mid_line_pdf() -> Vec<u8> {
+        let content = "BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F2 24 Tf 140 700 Td (World) Tj ET";
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len() + 1,
+            content
+        );
+        objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R /F2 6 0 R >> >> \
+                 /MediaBox [0 0 612 792] /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            stream.as_bytes(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        ])
+    }
+
+    fn near(a: f32, b: f32, tol: f32) -> bool {
+        (a - b).abs() <= tol
+    }
+
+    fn assert_box_near(
+        bbox: (f32, f32, f32, f32),
+        expected: (f32, f32, f32, f32),
+        tol: f32,
+        what: &str,
+    ) {
+        assert!(
+            near(bbox.0, expected.0, tol)
+                && near(bbox.1, expected.1, tol)
+                && near(bbox.2, expected.2, tol)
+                && near(bbox.3, expected.3, tol),
+            "{what}: expected ({:?}), got ({:?})",
+            expected,
+            bbox
+        );
+    }
+
+    /// The rot-0 identity pin (the D2 resolution made permanent): the run
+    /// at Td(72,700), 24pt, lands at (72, 700, 54.67±0.01, 24) at every
+    /// granularity — span, line, word — with NO y-flip anywhere.
+    #[test]
+    fn layout_rotation_0_is_the_identity_no_y_flip() {
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert!(page.geometry.is_some());
+        let geometry = page.geometry.unwrap();
+        assert_eq!(
+            (geometry.width_pt, geometry.height_pt, geometry.rotation),
+            (612.0, 792.0, 0)
+        );
+        assert_eq!(page.spans.len(), 1);
+        let span = &page.spans[0];
+        assert_eq!(span.text, "Hello");
+        assert_box_near(span.bbox, (72.0, 700.0, 54.67, 24.0), 0.01, "span");
+        assert_eq!(
+            (span.font_size, span.font_name.as_str()),
+            (24.0, "Helvetica")
+        );
+        assert!(!span.is_bold && !span.is_italic && !span.is_artifact);
+        assert_eq!(span.rotation_degrees, 0.0);
+        // the same golden at line and word granularity
+        assert_eq!(page.lines.len(), 1);
+        let line = &page.lines[0];
+        assert_box_near(line.bbox, (72.0, 700.0, 54.67, 24.0), 0.01, "line");
+        assert_eq!(line.words.len(), 1);
+        assert_box_near(line.words[0].bbox, (72.0, 700.0, 54.67, 24.0), 0.01, "word");
+        assert_eq!(
+            (line.words[0].text.as_str(), line.text.as_str()),
+            ("Hello", "Hello")
+        );
+    }
+
+    /// The /Rotate 90 golden (§9 item 3): the horizontal run maps through
+    /// the forward rule to (700, 612−72−54.67, 24, 54.67) = (700, 485.33,
+    /// 24, 54.67), and the page's render extent swaps to 792×612.
+    #[test]
+    fn layout_rotation_90_forward_rule_golden() {
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "/Rotate 90");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let geometry = page.geometry.unwrap();
+        assert_eq!(
+            (geometry.width_pt, geometry.height_pt, geometry.rotation),
+            (792.0, 612.0, 90)
+        );
+        assert_box_near(
+            page.spans[0].bbox,
+            (700.0, 485.33, 24.0, 54.67),
+            0.01,
+            "span at 90",
+        );
+        assert_box_near(
+            page.lines[0].bbox,
+            (700.0, 485.33, 24.0, 54.67),
+            0.01,
+            "line at 90",
+        );
+        assert_box_near(
+            page.lines[0].words[0].bbox,
+            (700.0, 485.33, 24.0, 54.67),
+            0.01,
+            "word at 90",
+        );
+    }
+
+    /// The /Rotate 180 golden: (W−x−w, H−y−h) = (485.33, 68, 54.67, 24) —
+    /// the engine maps everything at 180, and the inverse+forward round
+    /// trip reproduces it exactly (no crop: tors's frame IS the engine's).
+    #[test]
+    fn layout_rotation_180_forward_rule_golden() {
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "/Rotate 180");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.geometry.unwrap().rotation, 180);
+        assert_box_near(
+            page.spans[0].bbox,
+            (485.33, 68.0, 54.67, 24.0),
+            0.01,
+            "span at 180",
+        );
+        assert_box_near(
+            page.lines[0].bbox,
+            (485.33, 68.0, 54.67, 24.0),
+            0.01,
+            "line at 180",
+        );
+    }
+
+    /// The crop-subset golden (§9 item 1, probe P3): on the
+    /// [100 100 500 700] crop the Inside run at (150,600) lands at
+    /// (50, 500, 64.03, 24) — translated away from the crop origin — the
+    /// fully-outside run is ABSENT (the engine's drop law), the page is
+    /// 400×600, and the crop provenance is Some((100,100,500,700)).
+    #[test]
+    fn layout_crop_subset_golden_inside_mapped_outside_dropped() {
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 150 600 Td (Inside) Tj ET\nBT /F1 24 Tf 30 30 Td (Outside) Tj ET",
+            "/CropBox [100 100 500 700]",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let geometry = page.geometry.unwrap();
+        assert_eq!((geometry.width_pt, geometry.height_pt), (400.0, 600.0));
+        assert_eq!(geometry.crop, Some((100.0, 100.0, 500.0, 700.0)));
+        assert_eq!(
+            page.spans.len(),
+            1,
+            "the fully-outside span is dropped, not returned"
+        );
+        assert_eq!(page.spans[0].text, "Inside");
+        assert_box_near(
+            page.spans[0].bbox,
+            (50.0, 500.0, 64.03, 24.0),
+            0.01,
+            "Inside span",
+        );
+        assert_eq!(page.lines.len(), 1);
+        assert_box_near(
+            page.lines[0].bbox,
+            (50.0, 500.0, 64.03, 24.0),
+            0.01,
+            "Inside line",
+        );
+    }
+
+    /// The partial-overlap pin (§9 item 2 + T7): a span that hangs PAST
+    /// the crop edge is kept (the 2pt tolerance only drops FULLY-outside
+    /// spans) and its box comes back UNCLIPPED — it extends beyond the
+    /// page's own render extent ("boxes are unclipped; the page box is
+    /// the consumer's clip").
+    #[test]
+    fn layout_partial_overlap_span_is_kept_and_unclipped() {
+        // Crop [100 100 500 700]; the run starts at x=480 and advances
+        // ~54.67pt, ending at ~534.67 — past the crop's right edge (500).
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 480 600 Td (Hang) Tj ET",
+            "/CropBox [100 100 500 700]",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(
+            page.spans.len(),
+            1,
+            "the partially-overlapping span is kept"
+        );
+        let bbox = page.spans[0].bbox;
+        assert_box_near(bbox, (380.0, 500.0, 57.36, 24.0), 0.01, "kept span");
+        assert!(
+            bbox.0 + bbox.2 > 400.0,
+            "the box must extend past the 400pt-wide render page, unclipped: {bbox:?}"
+        );
+    }
+
+    /// The origin law (§9 item 2): on a [50 50 662 842] MediaBox a run at
+    /// the box's own origin comes back with bbox.x/y ≈ 0 — the source
+    /// origin is translated away, never re-added (and the probe P4 shape:
+    /// a run at user-space (100,700) lands at (50, 650)).
+    #[test]
+    fn layout_nonzero_media_box_origin_is_translated_away() {
+        // A run at the MediaBox's own origin (50, 50) — the translated box
+        // lands at (0, 0). (layout_pdf pins /MediaBox [0 0 612 792]; the
+        // nonzero-origin shapes build their objects directly.)
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> \
+                 /MediaBox [50 50 662 842] /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length 46 >>\nstream\nBT /F1 12 Tf 50 50 Td (Origin) Tj ET\nendstream",
+        ]);
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert!(page.geometry.is_some());
+        let bbox = page.spans[0].bbox;
+        assert!(
+            near(bbox.0, 0.0, 0.01) && near(bbox.1, 0.0, 0.01),
+            "a run at the MediaBox origin lands at (0, 0) in render space: {bbox:?}"
+        );
+        // And the probe P4 shape: user-space (100,700) → (50, 650).
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> \
+                 /MediaBox [50 50 662 842] /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length 46 >>\nstream\nBT /F1 24 Tf 100 700 Td (Hello) Tj ET\nendstream",
+        ]);
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_box_near(
+            page.spans[0].bbox,
+            (50.0, 650.0, 54.67, 24.0),
+            0.01,
+            "P4 shape",
+        );
+    }
+
+    /// The T10 pin on the layout surface: a non-right-angle /Rotate 45
+    /// reports rotation 0 and the boxes stay in the honest unrotated
+    /// frame (the engine never tells tors about 45°, so nothing maps).
+    #[test]
+    fn layout_non_right_angle_rotate_is_the_unrotated_frame() {
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "/Rotate 45");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let geometry = page.geometry.unwrap();
+        assert_eq!(
+            (geometry.rotation, geometry.width_pt, geometry.height_pt),
+            (0, 612.0, 792.0)
+        );
+        assert_box_near(
+            page.spans[0].bbox,
+            (72.0, 700.0, 54.67, 24.0),
+            0.01,
+            "span at /Rotate 45",
+        );
+    }
+
+    /// The INVERSE-MAP pins (T3, §9 item 3): on a /Rotate 90 page the
+    /// engine pre-maps rotated-content spans about the MediaBox; tors
+    /// inverse-maps them back to raw and carries them through the one
+    /// forward rule, so they land in the SAME frame as the horizontal
+    /// runs. Measured numbers (probe P2, pinned here):
+    ///
+    /// - the horizontal run (72,700) → (700, 485.33, 24, 54.67);
+    /// - the rotated run `Tm [0 1 -1 0 300 300]` "Side" comes back from
+    ///   the engine as (300, 263.98, 24, 48.02) (already mapped,
+    ///   `page_rotation_applied=90`) → inverse → raw (300, 300, 48.02,
+    ///   24) → forward → (300, 263.98, 24, 48.02): the round trip through
+    ///   the two MediaBox-relative maps is exact (no crop: the frames
+    ///   coincide);
+    /// - the "Side" LINE box is the engine's degraded 48.02×48.02 SQUARE
+    ///   (to_chars re-lays the run's glyphs horizontally over the mapped
+    ///   box) — the T3 approximation, carried honestly by the span's
+    ///   `rotation_degrees = 90`, never re-derived;
+    /// - and on a CROPPED rotated page (the decisive case) the inverse is
+    ///   load-bearing: the engine mapped about the MEDIA box, tors maps
+    ///   about the VISIBLE box, so the rotated run at raw (250, 350) —
+    ///   reported by the engine at (350, 313.98, 24, 48.02) — must land
+    ///   at (250, 201.98, 24, 48.02), NOT the engine's verbatim number.
+    #[test]
+    fn layout_rotated_run_on_rotated_page_is_inverse_mapped_into_one_frame() {
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 72 700 Td (Hello) Tj ET\nBT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET",
+            "/Rotate 90",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.spans.len(), 2);
+        let hello = page.spans.iter().find(|s| s.text == "Hello").unwrap();
+        let side = page.spans.iter().find(|s| s.text == "Side").unwrap();
+        assert_box_near(
+            hello.bbox,
+            (700.0, 485.33, 24.0, 54.67),
+            0.01,
+            "horizontal run",
+        );
+        assert_box_near(side.bbox, (300.0, 263.98, 24.0, 48.02), 0.01, "rotated run");
+        assert_eq!(side.rotation_degrees, 90.0, "the T3 honesty flag");
+        assert_eq!(hello.rotation_degrees, 0.0);
+        // the lines: the rotated run's own line is the degraded square
+        assert_eq!(page.lines.len(), 2);
+        let side_line = page.lines.iter().find(|l| l.text == "Side").unwrap();
+        assert_box_near(
+            side_line.bbox,
+            (300.0, 263.98, 48.02, 48.02),
+            0.01,
+            "the T3 square line box, pinned as measured",
+        );
+
+        // The decisive case: the same page WITH a crop. The engine mapped
+        // about the MediaBox; tors maps about the visible box.
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 200 400 Td (Hello) Tj ET\nBT /F1 24 Tf 0 1 -1 0 250 350 Tm (Side) Tj ET",
+            "/Rotate 90 /CropBox [100 100 500 700]",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let hello = page.spans.iter().find(|s| s.text == "Hello").unwrap();
+        let side = page.spans.iter().find(|s| s.text == "Side").unwrap();
+        assert_box_near(
+            hello.bbox,
+            (300.0, 245.33, 24.0, 54.67),
+            0.01,
+            "horizontal, cropped",
+        );
+        assert_box_near(
+            side.bbox,
+            (250.0, 201.98, 24.0, 48.02),
+            0.01,
+            "rotated run, cropped: inverse(MediaBox) then forward(visible)",
+        );
+        assert_eq!(side.rotation_degrees, 90.0);
+    }
+
+    /// The image pins (probe P5/P6/P7): the 1×1 red image is present via
+    /// the HANDLES path (extract_images' silent <8×8 filter would return
+    /// zero); its box is the forward rule over the always-raw handle
+    /// bbox; a rotated CTM reports rotation 90; a /Rotate 90 page
+    /// forward-normalizes the raw box ((200,200) → (200, 612−200−100));
+    /// and a two-image page pins paint_order to content-stream order.
+    #[test]
+    fn layout_images_come_from_handles_and_take_the_forward_rule() {
+        // P5: plain page, CTM [100 0 0 100 200 200].
+        let bytes = image_pdf("100 0 0 100 200 200", "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(
+            page.images.len(),
+            1,
+            "the 1x1 image must surface via handles (T1)"
+        );
+        let image = &page.images[0];
+        assert_box_near(
+            image.bbox,
+            (200.0, 200.0, 100.0, 100.0),
+            0.01,
+            "P5 image bbox",
+        );
+        assert_eq!((image.width_px, image.height_px), (1, 1));
+        assert_eq!((image.rotation_degrees, image.paint_order), (0.0, 0));
+
+        // P6: rotated CTM [0 100 -100 0 400 200] → (300, 200, 100, 100), rot 90.
+        let bytes = image_pdf("0 100 -100 0 400 200", "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let image = &page.images[0];
+        assert_box_near(
+            image.bbox,
+            (300.0, 200.0, 100.0, 100.0),
+            0.01,
+            "P6 image bbox",
+        );
+        assert_eq!(image.rotation_degrees, 90.0);
+
+        // P7: the same placement on a /Rotate 90 page: the handle stays
+        // raw; tors forward-normalizes it to (200, 612−200−100, 100, 100).
+        let bytes = image_pdf("100 0 0 100 200 200", "/Rotate 90");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let image = &page.images[0];
+        assert_box_near(
+            image.bbox,
+            (200.0, 312.0, 100.0, 100.0),
+            0.01,
+            "P7 image bbox",
+        );
+        assert_eq!(
+            image.rotation_degrees, 0.0,
+            "the handle's CTM rotation, not the page's"
+        );
+
+        // Two images: paint_order is content-stream order (0, 1).
+        let content = "q 50 0 0 50 100 100 cm /Im1 Do Q\nq 60 0 0 60 300 400 cm /Im1 Do Q";
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len() + 1
+        );
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> \
+                 /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+            stream.as_bytes(),
+            &red_1x1_image(),
+        ]);
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let orders: Vec<u32> = page.images.iter().map(|i| i.paint_order).collect();
+        assert_eq!(orders, vec![0, 1], "paint_order is content-stream order");
+        assert_box_near(
+            page.images[0].bbox,
+            (100.0, 100.0, 50.0, 50.0),
+            0.01,
+            "first image",
+        );
+        assert_box_near(
+            page.images[1].bbox,
+            (300.0, 400.0, 60.0, 60.0),
+            0.01,
+            "second image",
+        );
+    }
+
+    /// The scanned-page and unparseable-content-stream pins (§7's
+    /// empty-lists-not-errors engine law): a page whose content stream is
+    /// junk yields geometry + EMPTY spans/lines/images, never an error;
+    /// the image-only page likewise (native text only; OCR out of
+    /// scope).
+    #[test]
+    fn layout_unparseable_or_scanned_pages_yield_empty_lists_not_errors() {
+        // A content stream that decodes but parses to nothing usable.
+        let bytes = layout_pdf("this is not a content stream, just junk tokens", "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert!(page.geometry.is_some(), "the page box is intact");
+        assert!(page.spans.is_empty() && page.lines.is_empty());
+        // The scanned shape: a 64x64 gray image XObject, no text operators.
+        let mut image_object: Vec<u8> = b"<< /Type /XObject /Subtype /Image /Width 64 /Height 64 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4096 >>\nstream\n"
+            .to_vec();
+        image_object.extend_from_slice(&vec![0u8; 4096]);
+        image_object.extend_from_slice(b"\nendstream");
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                 /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length 27 >>\nstream\nq 612 0 0 792 0 0 cm /Im0 Do Q\nendstream",
+            &image_object,
+        ]);
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert!(
+            page.spans.is_empty() && page.lines.is_empty(),
+            "a scan has no native text"
+        );
+        assert_eq!(
+            page.images.len(),
+            1,
+            "the scan's own image surfaces via handles"
+        );
+    }
+
+    /// The artifact pin (D6): a span inside a declared `/Artifact`
+    /// marked-content sequence reports `is_artifact = true`; the body
+    /// span `false`.
+    #[test]
+    fn layout_declared_artifact_spans_are_flagged() {
+        let content = "/Artifact << /Type /Pagination /Subtype /Header >> BDC\nBT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\nBT /F1 12 Tf 72 600 Td (Body) Tj ET";
+        let bytes = layout_pdf(content, "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.spans.len(), 2);
+        let header = page.spans.iter().find(|s| s.text == "Header").unwrap();
+        let body = page.spans.iter().find(|s| s.text == "Body").unwrap();
+        assert!(
+            header.is_artifact,
+            "the /Artifact-tagged run is declared furniture"
+        );
+        assert!(!body.is_artifact);
+    }
+
+    /// The bold-mid-line pin (D3): two runs on one baseline — one bold —
+    /// merge into ONE line (lines merge where spans split): two spans
+    /// with the style evidence split per run, one line whose words join
+    /// to its text.
+    #[test]
+    fn layout_bold_mid_line_spans_split_where_lines_merge() {
+        let bytes = bold_mid_line_pdf();
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(
+            page.spans.len(),
+            2,
+            "the runs stay separate spans (font evidence)"
+        );
+        let hello = page.spans.iter().find(|s| s.text == "Hello").unwrap();
+        let world = page.spans.iter().find(|s| s.text == "World").unwrap();
+        assert!(!hello.is_bold);
+        assert!(
+            world.is_bold,
+            "the /Helvetica-Bold run is the bold evidence"
+        );
+        assert_eq!(page.lines.len(), 1, "the two runs are ONE line");
+        let line = &page.lines[0];
+        assert_eq!(line.words.len(), 2);
+        assert_box_near(
+            line.bbox,
+            (72.0, 700.0, 135.99, 24.0),
+            0.02,
+            "the merged line box",
+        );
+        // the join law: the line text is the words' texts joined with spaces
+        let joined = line
+            .words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(joined, line.text);
+        // the union law: every word's box is inside the line's box
+        for word in &line.words {
+            assert!(word.bbox.0 >= line.bbox.0 - 0.01 && word.bbox.1 >= line.bbox.1 - 0.01);
+            assert!(word.bbox.0 + word.bbox.2 <= line.bbox.0 + line.bbox.2 + 0.01);
+            assert!(word.bbox.1 + word.bbox.3 <= line.bbox.1 + line.bbox.3 + 0.01);
+        }
+    }
+
+    /// The pages= law on the layout probe: `None` = whole document; a
+    /// selection normalizes (sort + dedup) and the output is parallel to
+    /// the NORMALIZED selection with every entry carrying its
+    /// `page_index`; the empty and out-of-range refusals are
+    /// `markdown_pages`' byte-identical strings.
+    #[test]
+    fn layout_pages_selection_is_normalized_and_parallel() {
+        let mut objects = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>".to_vec(),
+        ];
+        for text in ["one", "two", "three"] {
+            let page_number = objects.len() + 1;
+            let font_number = page_number + 1;
+            let stream_number = page_number + 2;
+            let content = format!("BT /F1 12 Tf 50 700 Td ({text}) Tj ET");
+            objects.push(
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 {font_number} 0 R >> >> \
+                 /MediaBox [0 0 612 792] /Contents {stream_number} 0 R >>"
+                )
+                .into_bytes(),
+            );
+            objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
+            objects.push(
+                format!(
+                    "<< /Length {} >>\nstream\n{content}\nendstream",
+                    content.len() + 1
+                )
+                .into_bytes(),
+            );
+        }
+        let refs: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+        let bytes = objects_pdf(&refs);
+        let whole = page_layout(bytes.clone(), None, None).unwrap();
+        assert_eq!(
+            whole.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // [2, 0] normalizes to [0, 2]; every entry carries its page_index.
+        let subset = page_layout(bytes.clone(), Some(&[2, 0]), None).unwrap();
+        assert_eq!(
+            subset.iter().map(|p| p.page_index).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(subset[0].spans[0].text, "one");
+        assert_eq!(subset[1].spans[0].text, "three");
+        // duplicates normalize away
+        assert_eq!(
+            page_layout(bytes.clone(), Some(&[1, 1]), None).unwrap()[0].page_index,
+            1
+        );
+        // the byte-pinned refusals
+        let err = page_layout(bytes.clone(), Some(&[]), None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "pages= selected no pages: pass None for the whole document"
+        );
+        let err = page_layout(bytes, Some(&[3]), None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "page index 3 is out of range for a 3-page document (pages= is 0-based)"
+        );
+    }
+
+    /// The composition property at BOX level (§9 item 3): the rotate step
+    /// composed with its inverse angle — r then (360−r) — is the identity,
+    /// where the second application lives in the ROTATED frame's own
+    /// extents (the rule's step 3: the frame swaps for odd quarters);
+    /// and the canonical pairs agree: 90+270 ≡ 180+180 for every box,
+    /// within f32 tolerance.
+    #[test]
+    fn layout_rotation_composes_with_its_inverse_to_the_identity() {
+        let (w, h) = (612.0f32, 792.0f32);
+        let boxes = [
+            (0.0f32, 0.0f32, 612.0f32, 792.0f32),
+            (37.5, 123.25, 61.75, 42.5),
+            (72.0, 700.0, 54.67, 24.0),
+            // unclipped / negative shapes too: the law is total
+            (-30.0, -10.0, 700.0, 900.0),
+        ];
+        for b in boxes {
+            for r in [0, 90, 180, 270] {
+                let first = rotate_box_forward(b, (w, h), r);
+                let (w2, h2) = if r == 90 || r == 270 { (h, w) } else { (w, h) };
+                let second = rotate_box_forward(first, (w2, h2), (360 - r) % 360);
+                assert!(
+                    near(second.0, b.0, 1e-3)
+                        && near(second.1, b.1, 1e-3)
+                        && near(second.2, b.2, 1e-3)
+                        && near(second.3, b.3, 1e-3),
+                    "r={r}, b={b:?}: r then inverse must be the identity, got {second:?}"
+                );
+            }
+        }
+        // 90+270 ≡ 180+180 (both compositions are the identity, so they
+        // agree with each other for every box).
+        for b in boxes {
+            let p90 = rotate_box_forward(rotate_box_forward(b, (w, h), 90), (h, w), 270);
+            let p180 = rotate_box_forward(rotate_box_forward(b, (w, h), 180), (w, h), 180);
+            assert!(
+                near(p90.0, p180.0, 1e-3)
+                    && near(p90.1, p180.1, 1e-3)
+                    && near(p90.2, p180.2, 1e-3)
+                    && near(p90.3, p180.3, 1e-3),
+                "b={b:?}: 90+270 = {p90:?} must equal 180+180 = {p180:?}"
+            );
+        }
+    }
+
+    // --- the render-anchored oracle (§9): the correctness anchor that
+    // --- replaces assay's rotate_bbox -------------------------------
+
+    /// The ink bounding box of a rendered page (raw RGBA8888, top-left
+    /// origin), as `Option<corners>` — pixels where the channel test
+    /// passes. The oracle's raster side.
+    fn ink_corners(
+        image: &pdf_oxide::rendering::RenderedImage,
+        channel: impl Fn(u8, u8, u8) -> bool,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for py in 0..image.height {
+            for px in 0..image.width {
+                let i = ((py * image.width + px) * 4) as usize;
+                if channel(image.data[i], image.data[i + 1], image.data[i + 2]) {
+                    x0 = x0.min(px);
+                    y0 = y0.min(py);
+                    x1 = x1.max(px);
+                    y1 = y1.max(py);
+                }
+            }
+        }
+        if x0 == u32::MAX {
+            return None;
+        }
+        Some((x0 as f64, y0 as f64, (x1 + 1) as f64, (y1 + 1) as f64))
+    }
+
+    /// Render page 0 at 72 dpi (1pt = 1px, the known scale) and return
+    /// the ink corners in RENDER SPACE (bottom-left origin, y-up) — the
+    /// raster's top-left origin flipped.
+    fn render_ink(
+        doc: &PdfDocument,
+        channel: impl Fn(u8, u8, u8) -> bool,
+    ) -> ((u32, u32), (f64, f64, f64, f64)) {
+        let image = pdf_oxide::rendering::render_page(
+            doc,
+            0,
+            &pdf_oxide::rendering::RenderOptions::with_dpi(72).as_raw(),
+        )
+        .unwrap();
+        let (width, height) = (image.width, image.height);
+        let corners = ink_corners(&image, channel).expect("the oracle page must carry ink");
+        (
+            (width, height),
+            (
+                corners.0,
+                height as f64 - corners.3,
+                corners.2,
+                height as f64 - corners.1,
+            ),
+        )
+    }
+
+    /// THE RENDER-ANCHORED ORACLE (§9): for each angle × {no crop, crop} ×
+    /// {tight glyph, asymmetric marker}, the box the probe declares must
+    /// land where pdf_oxide's own renderer draws the ink.
+    ///
+    /// - the **asymmetric marker** (a filled rect, off-center, portrait-
+    ///   asymmetric dims 100×60) pins the TRANSFORM independent of any
+    ///   span parse: the declared raw rect maps through the forward rule
+    ///   and the rendered ink's corners equal the mapped corners to the
+    ///   pixel. A mirrored-y mapping (assay's rotate_bbox defect) or a
+    ///   transposed one lands the box on the wrong side of the page and
+    ///   fails here.
+    /// - the **tight glyph** ('H', no descender, cap-height ink) pins the
+    ///   SURFACE's span boxes to the render: the em-box the probe returns
+    ///   must contain the glyph's ink (the em-box law: baseline at the
+    ///   bottom edge, one font-size upward — descenders would extend
+    ///   below, 'H' does not).
+    ///
+    /// This is the test that makes the D1 transform's correctness an
+    /// empirical fact rather than an internal consistency argument: the
+    /// renderer is the one consumer whose output nobody disputes.
+    #[test]
+    fn the_render_anchored_oracle_lands_every_mapped_box_where_the_render_draws_it() {
+        let dark = |r: u8, g: u8, b: u8| r < 128 && g < 128 && b < 128;
+        for angle in [0, 90, 180, 270] {
+            for (crop, extras, visible) in [
+                (false, "", (0.0f32, 0.0f32, 612.0f32, 792.0f32)),
+                (
+                    true,
+                    "/CropBox [100 100 500 700]",
+                    (100.0, 100.0, 500.0, 700.0),
+                ),
+            ] {
+                let rotation = angle;
+                // The page's own rotation rides in the page dict.
+                let page_extras = match angle {
+                    0 => extras.to_string(),
+                    a => {
+                        if extras.is_empty() {
+                            format!("/Rotate {a}")
+                        } else {
+                            format!("/Rotate {a} {extras}")
+                        }
+                    }
+                };
+                // Marker placement: fully inside the crop when cropped
+                // (the renderer clips to the visible box; the oracle
+                // needs the whole marker visible).
+                let (mx, my, mw, mh): (f32, f32, f32, f32) = if crop {
+                    (150.0, 500.0, 80.0, 40.0)
+                } else {
+                    (400.0, 300.0, 100.0, 60.0)
+                };
+                let (glyph_x, glyph_y): (f32, f32) =
+                    if crop { (150.0, 400.0) } else { (72.0, 700.0) };
+
+                // -- the asymmetric marker: `re f` fill, ink corners are
+                //    the mapped corners (dpi 72, 1pt = 1px).
+                let content = format!("{mx} {my} {mw} {mh} re f");
+                let bytes = layout_pdf(&content, &page_extras);
+                let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+                let ((render_w, render_h), ink) = render_ink(&doc, dark);
+                let mapped = map_box_forward((mx, my, mw, mh), visible, rotation);
+                let geometry = page_geometry(bytes, None).unwrap().remove(0).unwrap();
+                assert_eq!(
+                    (render_w, render_h),
+                    (geometry.width_pt as u32, geometry.height_pt as u32),
+                    "angle {angle} crop {crop}: the render's pixel dims are the declared extents"
+                );
+                assert_box_near(
+                    mapped,
+                    (
+                        ink.0 as f32,
+                        ink.1 as f32,
+                        (ink.2 - ink.0) as f32,
+                        (ink.3 - ink.1) as f32,
+                    ),
+                    1.0,
+                    &format!("angle {angle} crop {crop}: the mapped marker must equal the ink"),
+                );
+
+                // -- the tight glyph: the probe's span em-box contains
+                //    the glyph's ink (with a 1.5px rounding allowance at
+                //    72dpi).
+                let content = format!("BT /F1 24 Tf {glyph_x} {glyph_y} Td (H) Tj ET");
+                let bytes = layout_pdf(&content, &page_extras);
+                let doc = PdfDocument::from_bytes(bytes).unwrap();
+                let (_, ink) = render_ink(&doc, dark);
+                let page = &page_layout_bytes(doc).remove(0);
+                let span = &page.spans[0];
+                let (bx, by, bw, bh) = span.bbox;
+                assert!(
+                    bx as f64 - 1.5 <= ink.0
+                        && by as f64 - 1.5 <= ink.1
+                        && ink.2 <= (bx + bw) as f64 + 1.5
+                        && ink.3 <= (by + bh) as f64 + 1.5,
+                    "angle {angle} crop {crop}: the glyph ink ({ink:?}) must sit inside the \
+                     mapped em-box ({bx},{by},{bw},{bh})"
+                );
+            }
+        }
+    }
+
+    /// The oracle's image leg: the red 1×1 image's MAPPED box lands where
+    /// the render draws the red pixels — on the plain page and on a
+    /// /Rotate 90 page (the handle is raw; the forward rule normalizes).
+    #[test]
+    fn the_render_anchored_oracle_lands_mapped_image_boxes_where_the_render_draws_them() {
+        let red = |r: u8, g: u8, b: u8| r > 200 && g < 100 && b < 100;
+        for (extras, visible, rotation) in [
+            ("", (0.0f32, 0.0f32, 612.0f32, 792.0f32), 0),
+            ("/Rotate 90", (0.0, 0.0, 612.0, 792.0), 90),
+        ] {
+            let bytes = image_pdf("100 0 0 100 200 200", extras);
+            let doc = PdfDocument::from_bytes(bytes).unwrap();
+            let ((_, _), ink) = render_ink(&doc, red);
+            let pages = page_layout_bytes(doc);
+            let image = &pages[0].images[0];
+            // The mapped box must equal the red ink's box, and (the
+            // forward-normalization half of the pin) it must NOT be the
+            // raw handle box when the page is rotated: the /Rotate 90
+            // page's image lands at (200, 612−200−100, 100, 100).
+            assert_box_near(
+                image.bbox,
+                (
+                    ink.0 as f32,
+                    ink.1 as f32,
+                    (ink.2 - ink.0) as f32,
+                    (ink.3 - ink.1) as f32,
+                ),
+                1.0,
+                &format!("extras {extras:?}: the mapped image box must equal the red ink"),
+            );
+            let expected = map_box_forward((200.0, 200.0, 100.0, 100.0), visible, rotation);
+            assert_box_near(
+                image.bbox,
+                expected,
+                0.01,
+                &format!("extras {extras:?}: the mapped image box is the forward rule"),
+            );
+        }
+    }
+
+    /// The assay `rotate_bbox` differential, pinned as the migration test
+    /// it is: xfail at rotation 0 (assay's rotation-0 branch bakes the
+    /// mirrored-y defect in — the D2 resolution, probe-proven), PASSING
+    /// at 180 (its mirror formula coincides with the forward rule's 180
+    /// arm), where the ONLY expected divergences are the ones the spec
+    /// lists: intersection-vs-raw crop handling, normalized-vs-raw crop
+    /// corners, and non-negative extents. The test documents the
+    /// migration law: tors's goldens are the oracle; assay must adopt
+    /// identity-at-0 before its differential can go green.
+    #[test]
+    fn the_assay_rotate_bbox_differential_is_xfail_at_0_and_green_at_180() {
+        let assay_rotate_bbox =
+            |x: f32, y: f32, w: f32, h: f32, rotation: i32, page_w: f32, page_h: f32| {
+                // assay's formula (pdf_ingest.rotate_bbox): for rotation 0 it
+                // mirrors y (the defect); for 180 it mirrors both axes.
+                match rotation {
+                    0 => (x, page_h - y - h, w, h),
+                    180 => (page_w - x - w, page_h - y - h, w, h),
+                    _ => unimplemented!("the differential pins 0 and 180 only"),
+                }
+            };
+        // The probe golden: Td(72,700)/24pt on 612×792 → (72, 700, 54.67, 24).
+        let bytes = layout_pdf("BT /F1 24 Tf 72 700 Td (Hello) Tj ET", "");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let tors_bbox = page.spans[0].bbox;
+        assert_box_near(tors_bbox, (72.0, 700.0, 54.67, 24.0), 0.01, "tors golden");
+        // assay's rotation-0 branch: (72, 792−700−24=68, ...) — mirrored. The
+        // expected divergence, pinned: this is WHY the differential is
+        // xfail-at-0 and why assay's fix is identity-after-crop-translation.
+        let assay = assay_rotate_bbox(72.0, 700.0, 54.67, 24.0, 0, 612.0, 792.0);
+        assert_eq!(assay, (72.0, 68.0, 54.67, 24.0));
+        assert!(
+            !near(assay.1, tors_bbox.1, 0.01),
+            "the mirrored-y defect must stay visible here until assay fixes its rotation-0 branch"
+        );
+        // At 180 the two formulas coincide — the one green leg.
+        let assay = assay_rotate_bbox(72.0, 700.0, 54.67, 24.0, 180, 612.0, 792.0);
+        assert_box_near(assay, (485.33, 68.0, 54.67, 24.0), 0.01, "180 coincides");
+    }
+
+    /// Helper for the oracle tests: rebuild a `PdfDocument` from bytes
+    /// the tests already built (the probe takes bytes; the oracle needs
+    /// the doc twice — render + layout — over the SAME open).
+    fn page_layout_bytes(doc: PdfDocument) -> Vec<PageLayoutData> {
+        (0..doc.page_count().unwrap())
+            .map(|page| page_layout_one(&doc, page))
+            .collect()
+    }
 
     /// A one-page pdf whose page dict carries `page_extras` (the
     /// MediaBox/Rotate/CropBox fragments a geometry fixture needs). No
