@@ -1529,6 +1529,22 @@ def generate_pdf_layout_artifact() -> bytes:
     return generate_pdf_layout(content)
 
 
+def generate_pdf_layout_artifact_bmc() -> bytes:
+    """The T11 limitation's fixture: the BARE `/Artifact BMC` form (no
+    properties dictionary) over a body run. The engine's BMC handler sets
+    its internal inside-artifact bit but deliberately leaves the artifact
+    type unset (extractors/text.rs:6487-6489), and the span carries no
+    other artifact bit — so the furniture span is NOT flagged, and
+    `is_artifact == false` is NOT evidence of body text. Pinned False so
+    the limitation cannot be silently "fixed" without a spec re-read."""
+    content = (
+        b"/Artifact BMC\n"
+        b"BT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\n"
+        b"BT /F1 12 Tf 72 600 Td (Body) Tj ET"
+    )
+    return generate_pdf_layout(content)
+
+
 def generate_pdf_layout_image(rotate: int | None = None) -> bytes:
     """The red 1×1 image drawn at CTM [100 0 0 100 200 200] (user-space
     rect 200,200 100×100), optionally on a /Rotate 90 page: the

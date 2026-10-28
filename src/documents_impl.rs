@@ -429,10 +429,13 @@ pub struct PageGeometry {
 
 impl PageGeometry {
     /// `pdf_impl::PageBox` (the PDF probe's unit) into the shared type:
-    /// the fields are already the same law, so this is the one place the
-    /// two vocabularies meet. Public for the same reason: the payload
-    /// binding's `PageLayout.geometry` getter materializes the shared
-    /// pyclass from the layout probe's `PageBox` per page.
+    /// the fields are already the same law, so this is one of the two
+    /// places the two vocabularies meet — the other is `page_layout`'s
+    /// office arm, which maps the shared type back into `pdf_impl::PageBox`
+    /// to serve the layout probe's uniform entry shape. Public for the
+    /// same reason: the payload binding's `PageLayout.geometry` getter
+    /// materializes the shared pyclass from the layout probe's `PageBox`
+    /// per page.
     pub fn from_page_box(page: pdf_impl::PageBox) -> PageGeometry {
         PageGeometry {
             width_pt: page.width_pt,
@@ -2153,7 +2156,9 @@ fn docx_section_geometry(
 /// conversion probes take: delivered to the PDF leg, which normalizes it
 /// with `markdown_pages`' exact rule and error strings, and returns the
 /// output parallel to the NORMALIZED selection, every entry carrying its
-/// `page_index`.
+/// `page_index`. `pages=` is PDF-ONLY (a page index cannot name a
+/// section/slide/worksheet): a non-`None` selection on any non-PDF row is
+/// convert()'s own typed refusal, never a silent whole-document answer.
 ///
 /// Layout content is PDF-only ("the capability table applies to
 /// page_layout identically; PDF-only for layout"): no office engine
@@ -2164,6 +2169,17 @@ fn docx_section_geometry(
 /// `pdf_impl::page_layout` (§7): a page whose box read fails is
 /// `geometry: None` + empty lists, siblings intact; an unparseable content
 /// stream is empty lists, geometry intact; encrypted doors fail closed.
+/// Image boxes are never visibility-filtered (the engine's 2 pt drop law
+/// is the TEXT walk's): a wholly-outside-the-crop image is returned with
+/// out-of-range coordinates — the consumer clips to the page box.
+/// A non-zero `rotation_degrees` on a span means its box is the engine's
+/// flattened approximation and MUST NOT be used as a highlight box.
+///
+/// Refusal order (the pinned §6 precedence, unchanged by the `pages=`
+/// refusal): a malformed `pages=` selection or a zero `max_bytes` is
+/// reported AFTER the capability refusal, never before it — the sibling
+/// surfaces' behavior note, restated here because both arguments parse at
+/// this seam.
 pub fn page_layout(
     bytes: Vec<u8>,
     name_hint: Option<&str>,
@@ -2174,6 +2190,20 @@ pub fn page_layout(
 ) -> Result<Vec<pdf_impl::PageLayoutData>, DocumentError> {
     let kind = resolve(&bytes, name_hint, format)?;
     let lane = geometry_engine(kind, backend, &bytes)?;
+    // `pages=` is a PDF-lane parameter: the selection indexes PAGES, and a
+    // section/slide/worksheet is not a page — a non-None selection on any
+    // non-PDF row is convert()'s own typed refusal (byte-identical wording,
+    // the same `Pages` error), never a silent whole-document answer. The
+    // capability refusal above still wins first (convert()'s ordering: the
+    // engine route precedes the pages check). On the PDF row the selection
+    // normalizes in `pdf_impl::page_layout` (the empty-selection and
+    // out-of-range refusals, markdown_pages' byte-pinned strings).
+    if pages.is_some() && kind != Kind::Pdf {
+        return Err(DocumentError::Pages(format!(
+            "pages= applies to PDF documents only, not {:?}",
+            kind.name()
+        )));
+    }
     if options.password.is_some() && kind != Kind::Pdf {
         return Err(DocumentError::Convert(format!(
             "password= applies to PDF documents only, not {:?}",
@@ -4084,6 +4114,30 @@ mod tests {
             err.to_string(),
             "page index 2 is out of range for a 2-page document (pages= is 0-based)"
         );
+        // pages= is PDF-only (F1): a non-None selection on every non-PDF
+        // row — office and no-geometry alike — is convert()'s own typed
+        // refusal, byte-identical wording, never the silent
+        // whole-document answer the phase-2 diff shipped (probed:
+        // pages=[0] and pages=[7] on a two-section docx both returned
+        // BOTH sections).
+        let html = b"<!DOCTYPE html>\n<html><body>hi</body></html>".to_vec();
+        for (name, bytes, resolved) in [
+            (
+                "a.docx",
+                docx_with_body("<w:p><w:r><w:t>x</w:t></w:r></w:p>"),
+                "docx",
+            ),
+            ("a.pptx", pptx_with(Some(""), &[""]), "pptx"),
+            ("a.xlsx", xlsx_with(&[("Sheet1", None)], ""), "xlsx"),
+            ("x.html", html, "html"),
+        ] {
+            let err = layout(name, &bytes, Some(vec![0])).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("pages= applies to PDF documents only, not {resolved:?}"),
+                "{name}: pages= must be refused off the PDF lane"
+            );
+        }
         // office: geometry + empty layout lists (PDF-only for layout)
         let docx = docx_with_body(
             "<w:p><w:r><w:t>body</w:t></w:r></w:p>\

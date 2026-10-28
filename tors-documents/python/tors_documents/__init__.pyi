@@ -135,7 +135,12 @@ class PageLayout:
     spans, lines, and image boxes in the page's declared render space —
     the native pyclass exposed directly (the ``PageGeometry`` deviation
     note applies to all five layout classes); ``==`` is structural (the
-    five fields)."""
+    five fields). The office-row ambiguity: geometry + EMPTY
+    spans/lines/images (an office unit — no office engine exposes
+    text/image boxes) is indistinguishable from a blank/scanned page
+    holding only the entry; provenance is the resolved format, which the
+    caller carries (the resolved format, not the file extension — the
+    sniff outranks the extension)."""
     @property
     def page_index(self) -> int:
         """The 0-based page (or section/slide/worksheet index) this entry
@@ -151,14 +156,20 @@ class PageLayout:
     def spans(self) -> list[TextSpan]:
         """The unit's text spans, reading order (PDF pages only; office
         units carry empty lists — no office engine exposes text
-        boxes)."""
+        boxes; geometry + empty lists is indistinguishable from a
+        blank/scanned page: provenance is the resolved format the
+        caller carries)."""
     @property
     def lines(self) -> list[TextLine]:
         """The unit's text lines, reading order, words nested (PDF pages
-        only)."""
+        only; office units carry empty lists — the same ambiguity the
+        class docstring states)."""
     @property
     def images(self) -> list[ImageBox]:
-        """The unit's image boxes, paint order (PDF pages only)."""
+        """The unit's image boxes, paint order (PDF pages only). Never
+        visibility-filtered: an image wholly outside the visible box is
+        still returned with out-of-range coordinates — the consumer
+        clips to the page box."""
 
 class TextSpan:
     """One ``page_layout`` text span: a run's text, its box, and the
@@ -187,15 +198,21 @@ class TextSpan:
         """Italic evidence."""
     @property
     def rotation_degrees(self) -> float:
-        """The run's own content rotation in degrees — non-zero marks a
-        sideways run whose box is the engine's flattened approximation
-        (on a rotated page, transposed; the line box degrades to a
-        square): carried honestly, not re-derived."""
+        """The run's own content rotation in degrees — non-zero means
+        the box is the engine's flattened approximation and MUST NOT be
+        used as a highlight box (transposed or mis-anchored at every
+        non-zero content rotation, on any page; the line box degrades to
+        a square on a rotated page): carried honestly, not re-derived."""
     @property
     def is_artifact(self) -> bool:
-        """Declared ``/Artifact`` marked content (running headers/footers,
-        page numbers, watermarks): the consumer tells declared furniture
-        from body with this."""
+        """Declared ``/Artifact`` marked content — TYPED-FORM-ONLY: true
+        only for a typed ``/Artifact <<…>> BDC`` whose ``/Type`` or
+        ``/Subtype`` the engine recognizes (Pagination/Header/Footer/
+        Watermark/PageNumber, Layout, Page, Background); false for a
+        bare ``/Artifact BMC`` (the engine sets no artifact type for it)
+        and unrecognized types. So ``is_artifact == false`` is NOT
+        evidence of body text: header/footer detection must not rely on
+        this flag alone."""
 
 class Word:
     """One word inside a ``TextLine`` (``page_layout``
@@ -243,7 +260,11 @@ class ImageBox:
         bottom edge; for text the bottom edge is the glyph baseline and
         the box extends one font-size upward (em-box; descenders may
         extend below). Boxes are unclipped; the page box is the
-        consumer's clip."""
+        consumer's clip. Image boxes are never visibility-filtered (the
+        engine's 2 pt drop law is the TEXT walk's): an image wholly
+        outside the visible box is still returned with out-of-range
+        coordinates — the consumer clips to the page box, and never
+        reads "image present" as "image visible"."""
     @property
     def width_px(self) -> int:
         """The image's pixel width."""
@@ -252,8 +273,11 @@ class ImageBox:
         """The image's pixel height."""
     @property
     def rotation_degrees(self) -> float:
-        """The CTM-derived content rotation in degrees (the bbox is
-        axis-aligned but the pixels may be turned)."""
+        """The CTM's rotation angle in degrees, ``atan2``-normalized to
+        ``[0, 360)`` — not restricted to right angles (a sheared or
+        arbitrarily-rotated CTM reports e.g. ``45.0``; a mirrored CTM
+        ``180.0``): the bbox is always the axis-aligned bound of the
+        transformed unit square."""
     @property
     def paint_order(self) -> int:
         """Page-local identity/z-order: the image's index among the
@@ -423,13 +447,25 @@ def page_layout(
     text lines (words nested), and image boxes, all in the page's
     declared render space (points, bottom-left origin, y-up; /Rotate
     applied; one transform owned by the library, the same frame
-    ``page_geometry`` declares). Office rows serve their declared
-    geometry with empty layout lists (PDF-only for layout); the
-    no-geometry formats answer one ``geometry=None`` entry. ``pages=``
+    ``page_geometry`` declares). A non-zero ``rotation_degrees`` means
+    the box is the engine's flattened approximation and MUST NOT be used
+    as a highlight box (transposed or mis-anchored at every non-zero
+    content rotation, on any page). Image boxes are never
+    visibility-filtered: an image wholly outside the visible box is
+    still returned with out-of-range coordinates — the consumer clips to
+    the page box. Office rows serve their declared geometry with empty
+    layout lists (PDF-only for layout; geometry + empty lists is
+    indistinguishable from a blank/scanned page — provenance is the
+    resolved format the caller carries); the no-geometry formats answer
+    one ``geometry=None`` entry. ``pages=`` is PDF-only (a page index
+    cannot name a section): a non-None selection on any other format
+    raises the conversion lane's own ``ValueError``; on a PDF it
     normalizes exactly as the conversion pair's (sort + dedup; the
     byte-pinned empty-selection and out-of-range errors) and the output
     is parallel to the NORMALIZED selection, every entry carrying
-    ``page_index``. ``backend=`` is ``"auto"``/``"oxide"`` — identical on
+    ``page_index`` — and every malformed ``pages=``/``max_bytes``
+    refusal reports after the capability refusal. ``backend=`` is
+    ``"auto"``/``"oxide"`` — identical on
     this surface — while ``"anydoc"`` is refused where geometry is
     obtainable (pdf and the office families); ``password=`` unlocks an
     encrypted PDF (any other format: a clean error; an encrypted OOXML

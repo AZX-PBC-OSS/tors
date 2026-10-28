@@ -935,13 +935,22 @@ pub struct LayoutSpan {
     /// Italic evidence.
     pub is_italic: bool,
     /// The run's own content rotation in degrees (the text-matrix angle):
-    /// the honesty flag for the T3 approximation — a non-zero value marks
-    /// a sideways run whose box is the engine's flattened-extent
-    /// approximation (on a rotated page, transposed).
+    /// the honesty flag for the T3 approximation — a non-zero value means
+    /// the box is the engine's FLATTENED approximation and MUST NOT be
+    /// used as a highlight box: it is transposed or mis-anchored at every
+    /// non-zero content rotation, on ANY page (180° same-size/wrong-anchor
+    /// with zero ink overlap; ±90° transposed; on a /Rotate 90/270 page
+    /// additionally mapped, its line box degraded to a square).
     pub rotation_degrees: f32,
-    /// Declared `/Artifact` marked content (running headers/footers, page
-    /// numbers, watermarks — the engine's artifact classification): the
-    /// flag that lets a consumer tell declared page furniture from body.
+    /// Declared `/Artifact` marked content — TYPED-FORM-ONLY (the T11
+    /// law): true only for a typed `/Artifact <<…>> BDC` whose `/Type` or
+    /// `/Subtype` the engine recognizes (Pagination/Header/Footer/
+    /// Watermark/PageNumber, Layout, Page, Background); false for a bare
+    /// `/Artifact BMC` (the engine's BMC handler deliberately leaves the
+    /// artifact type unset, and the span carries no other artifact bit)
+    /// and for unrecognized types. So `is_artifact == false` is NOT
+    /// evidence of body text: header/footer detection must not rely on
+    /// this flag alone.
     pub is_artifact: bool,
 }
 
@@ -979,14 +988,22 @@ pub struct LayoutLine {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutImage {
     /// The image's axis-aligned box in render space (`(x, y, w, h)`,
-    /// y-up) — the CTM-derived placement of the unit rectangle.
+    /// y-up) — the CTM-derived placement of the unit rectangle. Image
+    /// boxes are NEVER visibility-filtered (the engine's 2 pt drop law is
+    /// the TEXT walk's): an image wholly outside the visible box is still
+    /// returned, with out-of-range coordinates — the consumer clips to
+    /// the page box, and never reads "image present" as "image visible".
     pub bbox: (f32, f32, f32, f32),
     /// The image's pixel width (the XObject's `/Width`).
     pub width_px: u32,
     /// The image's pixel height.
     pub height_px: u32,
-    /// The CTM-derived content rotation in degrees (0/90/180/270): the
-    /// bbox is axis-aligned but the pixels may be turned.
+    /// The CTM's rotation angle in degrees, `atan2`-normalized to
+    /// [0, 360) — NOT restricted to right angles (a sheared or
+    /// arbitrarily-rotated CTM reports e.g. 45.0; a mirrored CTM 180.0
+    /// though the pixels are reflected, not turned): evidence, never a
+    /// transform instruction — the bbox is always the axis-aligned bound
+    /// of the transformed unit square.
     pub rotation_degrees: f32,
     /// Page-local identity/z-order: the image's index among the page's
     /// painted images, in content-stream order — the only stable handle
@@ -2277,6 +2294,64 @@ mod tests {
         assert_eq!(side.rotation_degrees, 90.0);
     }
 
+    /// The 270 inverse-map arm (§9 item 3 — a distinct branch of
+    /// [`unmap_engine_box`], shipped untested by phase 2, probed correct
+    /// by the red-team pass): the rotated-content run whose raw box is
+    /// (300, 300, 48.02, 24) lands at (468, 300, 24, 48.02) on a
+    /// /Rotate 270 page, and the CROPPED page's visible-box correction
+    /// lands it at (376, 200, 24, 48.02) — the inverse is load-bearing
+    /// there (the engine mapped about the MediaBox, tors about the
+    /// visible box).
+    #[test]
+    fn layout_rotated_run_on_a_270_page_is_inverse_mapped() {
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET",
+            "/Rotate 270",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.spans.len(), 1);
+        let side = &page.spans[0];
+        assert_box_near(side.bbox, (468.0, 300.0, 24.0, 48.02), 0.01, "the 270 arm");
+        assert_eq!(side.rotation_degrees, 90.0, "the T3 honesty flag");
+
+        // the decisive cropped case: the same content under the
+        // [100 100 500 700] crop — the correction is visible in the answer.
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET",
+            "/Rotate 270 /CropBox [100 100 500 700]",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let side = &page.spans[0];
+        assert_box_near(
+            side.bbox,
+            (376.0, 200.0, 24.0, 48.02),
+            0.01,
+            "the 270 arm, cropped: inverse(MediaBox) then forward(visible)",
+        );
+    }
+
+    /// The 180+crop golden (§9 item 3's rotation × crop cell): the
+    /// crop-subset fixture's run (raw (150, 600, 64.03, 24)) on a
+    /// /Rotate 180 page — the engine pre-maps ALL spans at 180, tors
+    /// inverse-maps back to raw then forwards through the VISIBLE-box
+    /// frame: (400−50−64.03, 600−500−24, 64.03, 24) = (285.97, 76,
+    /// 64.03, 24).
+    #[test]
+    fn layout_rotation_180_with_crop_golden() {
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 150 600 Td (Inside) Tj ET",
+            "/Rotate 180 /CropBox [100 100 500 700]",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.spans.len(), 1);
+        assert_box_near(
+            page.spans[0].bbox,
+            (285.97, 76.0, 64.03, 24.0),
+            0.01,
+            "180+crop: the inverse-then-forward round trip through the visible frame",
+        );
+    }
+
     /// The image pins (probe P5/P6/P7): the 1×1 red image is present via
     /// the HANDLES path (extract_images' silent <8×8 filter would return
     /// zero); its box is the forward rule over the always-raw handle
@@ -2362,6 +2437,34 @@ mod tests {
         );
     }
 
+    /// The T12 no-drop pin: the engine's 2 pt visibility-drop law is the
+    /// TEXT walk's only — an image wholly outside the visible box is
+    /// still RETURNED, with out-of-range coordinates (raw (30, 30,
+    /// 100, 100) on the [100 100 500 700] crop → (-70, -70, 100, 100)),
+    /// while a text run at the same place is dropped. Pinned so the
+    /// asymmetry cannot silently flip: a consumer must clip, and must
+    /// not read "image present" as "image visible".
+    #[test]
+    fn layout_images_are_never_visibility_filtered() {
+        let bytes = image_pdf("100 0 0 100 30 30", "/CropBox [100 100 500 700]");
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert!(
+            page.spans.is_empty(),
+            "a text run at (30, 30) is dropped (the TEXT walk's 2 pt law)"
+        );
+        assert_eq!(
+            page.images.len(),
+            1,
+            "the same-position image is returned — the image walk has no filter"
+        );
+        assert_box_near(
+            page.images[0].bbox,
+            (-70.0, -70.0, 100.0, 100.0),
+            0.01,
+            "the outside image, coordinates out of range, never clipped",
+        );
+    }
+
     /// The scanned-page and unparseable-content-stream pins (§7's
     /// empty-lists-not-errors engine law): a page whose content stream is
     /// junk yields geometry + EMPTY spans/lines/images, never an error;
@@ -2400,13 +2503,21 @@ mod tests {
         );
     }
 
-    /// The artifact pin (D6): a span inside a declared `/Artifact`
-    /// marked-content sequence reports `is_artifact = true`; the body
-    /// span `false`.
+    /// The artifact pin (D6 + T11): a span inside a declared `/Artifact`
+    /// marked-content sequence reports `is_artifact = true` ONLY in the
+    /// typed form whose `/Type`/`/Subtype` the engine recognizes; the
+    /// body span `false`. The BMC form is pinned FALSE — deliberately, so
+    /// the engine limitation cannot be silently "fixed" without this test
+    /// forcing a spec re-read: the engine's BMC handler sets its internal
+    /// inside-artifact bit but leaves `artifact_type` `None`
+    /// (extractors/text.rs:6487-6489), and the span carries no other
+    /// artifact bit — so a bare `/Artifact BMC` and an unrecognized
+    /// `/Type` are indistinguishable from body on this surface.
+    /// `is_artifact == false` is NOT evidence of body text.
     #[test]
     fn layout_declared_artifact_spans_are_flagged() {
-        let content = "/Artifact << /Type /Pagination /Subtype /Header >> BDC\nBT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\nBT /F1 12 Tf 72 600 Td (Body) Tj ET";
-        let bytes = layout_pdf(content, "");
+        let typed = "/Artifact << /Type /Pagination /Subtype /Header >> BDC\nBT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\nBT /F1 12 Tf 72 600 Td (Body) Tj ET";
+        let bytes = layout_pdf(typed, "");
         let page = &page_layout(bytes, None, None).unwrap()[0];
         assert_eq!(page.spans.len(), 2);
         let header = page.spans.iter().find(|s| s.text == "Header").unwrap();
@@ -2416,6 +2527,29 @@ mod tests {
             "the /Artifact-tagged run is declared furniture"
         );
         assert!(!body.is_artifact);
+
+        // The BMC form: furniture the engine cannot classify on this
+        // surface — pinned false (T11's limitation pin).
+        let bytes = layout_pdf(
+            "/Artifact BMC\nBT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\nBT /F1 12 Tf 72 600 Td (Body) Tj ET",
+            "",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        assert_eq!(page.spans.len(), 2);
+        let header = page.spans.iter().find(|s| s.text == "Header").unwrap();
+        assert!(
+            !header.is_artifact,
+            "a bare /Artifact BMC is NOT flagged: the engine sets no artifact \
+             type for it — the limitation pin, not a bug to fix silently"
+        );
+        // and the unrecognized /Type: typed form, engine-noisy value — false.
+        let bytes = layout_pdf(
+            "/Artifact << /Type /Foo >> BDC\nBT /F1 24 Tf 72 700 Td (Header) Tj ET\nEMC\nBT /F1 12 Tf 72 600 Td (Body) Tj ET",
+            "",
+        );
+        let page = &page_layout(bytes, None, None).unwrap()[0];
+        let header = page.spans.iter().find(|s| s.text == "Header").unwrap();
+        assert!(!header.is_artifact, "an unrecognized /Type is not flagged");
     }
 
     /// The bold-mid-line pin (D3): two runs on one baseline — one bold —
@@ -2455,6 +2589,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert_eq!(joined, line.text);
+        // and the invariant that keeps the single-space law true across
+        // engine bumps: no word's text carries whitespace (the engine's
+        // line builder drops every whitespace character before forming a
+        // word), so the separator is always exactly one U+0020
+        for word in &line.words {
+            assert!(
+                !word.text.chars().any(char::is_whitespace),
+                "a word's text carries whitespace: {:?}",
+                word.text
+            );
+        }
         // the union law: every word's box is inside the line's box
         for word in &line.words {
             assert!(word.bbox.0 >= line.bbox.0 - 0.01 && word.bbox.1 >= line.bbox.1 - 0.01);
@@ -2767,6 +2912,53 @@ mod tests {
                 &format!("extras {extras:?}: the mapped image box is the forward rule"),
             );
         }
+    }
+
+    /// The oracle's sideways-run case (§9's phase-2 addendum b): rotated
+    /// CONTENT on a /Rotate 90 page. The declared box is pinned to the
+    /// engine's flattened numbers AND asserted NOT to contain the render
+    /// ink — an explicit wrongness pin (the documented T3 mismatch), not
+    /// a containment assertion, which would pass by accident and hide a
+    /// wrong transposition. This is the one oracle leg that is SUPPOSED
+    /// to be wrong: `rotation_degrees != 0` means the box must not be
+    /// used as a highlight, and this test keeps that wrongness visible
+    /// (an engine bump that quietly fixes it must re-open the spec
+    /// caveat, not flip a green test).
+    #[test]
+    fn the_oracle_pins_the_sideways_run_s_documented_mismatch() {
+        let dark = |r: u8, g: u8, b: u8| r < 128 && g < 128 && b < 128;
+        let bytes = layout_pdf(
+            "BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET",
+            "/Rotate 90",
+        );
+        let doc = PdfDocument::from_bytes(bytes).unwrap();
+        let (_, ink) = render_ink(&doc, dark);
+        let page = &page_layout_bytes(doc).remove(0);
+        assert_eq!(page.spans.len(), 1);
+        let side = &page.spans[0];
+        assert_eq!(side.rotation_degrees, 90.0, "the T3 honesty flag");
+        // the pinned flattened numbers (the same golden the inverse-map
+        // test pins: the engine's pre-mapped box round-trips exactly)
+        assert_box_near(
+            side.bbox,
+            (300.0, 263.98, 24.0, 48.02),
+            0.01,
+            "the flattened box, pinned as measured",
+        );
+        // the wrongness pin: the render's ink is NOT inside the declared
+        // box (the sideways run's true ink is a perpendicular strip the
+        // flattened box misses — the documented T3 mismatch).
+        let (bx, by, bw, bh) = side.bbox;
+        let contained = ink.0 >= bx as f64 - 1.5
+            && ink.1 >= by as f64 - 1.5
+            && ink.2 <= (bx + bw) as f64 + 1.5
+            && ink.3 <= (by + bh) as f64 + 1.5;
+        assert!(
+            !contained,
+            "the T3 mismatch must stay visible: the flattened box ({bx},{by},{bw},{bh}) \
+             must NOT contain the render ink {ink:?} — if the engine now maps sideways \
+             runs truly, re-open the spec caveat instead of relaxing this pin"
+        );
     }
 
     /// The assay `rotate_bbox` differential, pinned as the migration test

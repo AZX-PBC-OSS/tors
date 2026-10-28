@@ -375,27 +375,38 @@ def page_layout(
     descenders may extend below). Boxes are unclipped; the page box is
     the consumer's clip.** One transform owns the mapping (raw y-up
     boxes, /Rotate applied; the engine's pre-mapped spans mapped back to
-    raw first), so no consumer re-implements it. A sideways run's box on
-    a rotated page is the engine's flattened approximation — carried by
-    its ``rotation_degrees``. The classes are the native :class:`PageLayout`,
-    :class:`TextSpan`, :class:`TextLine`, :class:`Word`, and
-    :class:`ImageBox` (exposed directly, structural ``==`` — the
-    deliberate deviation from the PdfClassification wrapper precedent).
-    ``pages=`` normalizes exactly as the conversion pair's (sort + dedup;
-    empty selection and out-of-range indices raise the same byte-pinned
-    errors) and the output is parallel to the NORMALIZED selection, every
-    entry carrying ``page_index``. Office rows serve their declared
-    geometry with empty layout lists (no office engine exposes text/image
-    boxes — PDF-only for layout); the no-geometry formats answer one
-    ``geometry=None`` entry. ``backend=`` is ``"auto"``/``"oxide"``
-    (identical on this surface; ``"anydoc"`` is refused where geometry is
-    obtainable); ``password=`` for an encrypted PDF; an explicit
-    ``max_bytes=`` binds before the read, ``None`` keeps the 32 MiB
-    default ceiling on the office leg (a post-read check there) while
-    the pdf lane reads under the finite 512 MiB backstop. The whole
-    read+resolve+layout pass runs GIL-free. ⚠ A malformed PDF can crash
-    the process (uncatchable native stack exhaustion in the pdf_oxide
-    engine): sandbox untrusted PDFs (docs/documents.md, SECURITY.md)."""
+    raw first), so no consumer re-implements it. A non-zero
+    ``rotation_degrees`` means the box is the engine's flattened
+    approximation and MUST NOT be used as a highlight box (transposed or
+    mis-anchored at every non-zero content rotation, on any page).
+    Image boxes are never visibility-filtered: an image wholly outside
+    the visible box is still returned with out-of-range coordinates —
+    the consumer clips to the page box. The classes are the native
+    :class:`PageLayout`, :class:`TextSpan`, :class:`TextLine`,
+    :class:`Word`, and :class:`ImageBox` (exposed directly, structural
+    ``==`` — the deliberate deviation from the PdfClassification wrapper
+    precedent). ``pages=`` is PDF-only (a page index cannot name a
+    section): a non-None selection on any other format raises the
+    conversion lane's own ``ValueError``; on a PDF it normalizes exactly
+    as the conversion pair's (sort + dedup; empty selection and
+    out-of-range indices raise the same byte-pinned errors) and the
+    output is parallel to the NORMALIZED selection, every entry carrying
+    ``page_index`` — and every malformed ``pages=``/``max_bytes`` refusal
+    reports after the capability refusal. Office rows serve their
+    declared geometry with empty layout lists (no office engine exposes
+    text/image boxes — PDF-only for layout; geometry-Some + empty lists
+    is indistinguishable from a blank/scanned page, so a consumer that
+    needs the provenance carries the resolved format itself); the
+    no-geometry formats answer one ``geometry=None`` entry. ``backend=``
+    is ``"auto"``/``"oxide"`` (identical on this surface; ``"anydoc"`` is
+    refused where geometry is obtainable); ``password=`` for an encrypted
+    PDF; an explicit ``max_bytes=`` binds before the read, ``None`` keeps
+    the 32 MiB default ceiling on the office leg (a post-read check
+    there) while the pdf lane reads under the finite 512 MiB backstop.
+    The whole read+resolve+layout pass runs GIL-free. ⚠ A malformed PDF
+    can crash the process (uncatchable native stack exhaustion in the
+    pdf_oxide engine): sandbox untrusted PDFs (docs/documents.md,
+    SECURITY.md)."""
     return _native_page_layout(
         _coerce_path(path),
         data,

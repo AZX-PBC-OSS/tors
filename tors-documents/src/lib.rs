@@ -617,6 +617,60 @@ pub struct PageGeometry {
     inner: documents_impl::PageGeometry,
 }
 
+/// The layout classes' shared repr shapes: each class's own Python shape,
+/// never the Rust Debug of the inner structs (`LayoutSpan { … }` is not a
+/// Python shape; a repr is surface). `PageLayout`'s repr nests these, so
+/// the shapes live once and every class prints the way its own `__repr__`
+/// prints standalone.
+fn page_geometry_repr(geometry: &documents_impl::PageGeometry) -> String {
+    let crop = match geometry.crop {
+        Some((x0, y0, x1, y1)) => format!("({x0:?}, {y0:?}, {x1:?}, {y1:?})"),
+        None => "None".to_string(),
+    };
+    format!(
+        "PageGeometry(width_pt={:?}, height_pt={:?}, rotation={}, crop={})",
+        geometry.width_pt, geometry.height_pt, geometry.rotation, crop
+    )
+}
+
+fn text_span_repr(span: &tors::pdf_impl::LayoutSpan) -> String {
+    // the bools spell Python's `True`/`False`, not Rust's `false`
+    let py_bool = |value: bool| if value { "True" } else { "False" };
+    format!(
+        "TextSpan(text={:?}, bbox={:?}, font_size={:?}, font_name={:?}, \
+         is_bold={}, is_italic={}, rotation_degrees={:?}, is_artifact={})",
+        span.text,
+        span.bbox,
+        span.font_size,
+        span.font_name,
+        py_bool(span.is_bold),
+        py_bool(span.is_italic),
+        span.rotation_degrees,
+        py_bool(span.is_artifact)
+    )
+}
+
+fn text_line_repr(line: &tors::pdf_impl::LayoutLine) -> String {
+    // the words as (text, bbox) pairs — the Word getter's own element shape
+    let words = line
+        .words
+        .iter()
+        .map(|w| format!("({:?}, {:?})", w.text, w.bbox))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "TextLine(text={:?}, bbox={:?}, words=[{}])",
+        line.text, line.bbox, words
+    )
+}
+
+fn image_box_repr(image: &tors::pdf_impl::LayoutImage) -> String {
+    format!(
+        "ImageBox(bbox={:?}, width_px={}, height_px={}, rotation_degrees={:?}, paint_order={})",
+        image.bbox, image.width_px, image.height_px, image.rotation_degrees, image.paint_order
+    )
+}
+
 #[pymethods]
 impl PageGeometry {
     /// The unit's render width in points (positive, finite; the axes
@@ -659,14 +713,7 @@ impl PageGeometry {
     }
 
     fn __repr__(&self) -> String {
-        let crop = match self.inner.crop {
-            Some((x0, y0, x1, y1)) => format!("({x0:?}, {y0:?}, {x1:?}, {y1:?})"),
-            None => "None".to_string(),
-        };
-        format!(
-            "PageGeometry(width_pt={:?}, height_pt={:?}, rotation={}, crop={})",
-            self.inner.width_pt, self.inner.height_pt, self.inner.rotation, crop
-        )
+        page_geometry_repr(&self.inner)
     }
 }
 
@@ -697,8 +744,8 @@ impl PageGeometry {
 /// where the unit's box cannot be read or declares no positive extent,
 /// in which case the layout lists are empty too: no frame, no boxes),
 /// `spans` (runs: text, bbox, font_size, font_name, is_bold, is_italic,
-/// rotation_degrees, is_artifact — the declared /Artifact flag, the
-/// honest font/style evidence), `lines` (text, bbox, words — each word
+/// rotation_degrees, is_artifact — the typed-BDC-only /Artifact flag, see
+/// the caveat below), `lines` (text, bbox, words — each word
 /// text + bbox; the per-line join law holds: the line's text is its
 /// words' texts joined with single spaces, and every word's box is
 /// inside the line's box), `images` (bbox, width_px, height_px,
@@ -706,10 +753,28 @@ impl PageGeometry {
 /// decode, no silent small-image filter, never a swallowed error; the
 /// image never carries a pixel decode here).
 ///
-/// Approximation caveat: a sideways run (non-zero rotation_degrees) on a
-/// /Rotate 90/270 page reports the engine's FLATTENED box approximation
-/// (its line box degrades to a square) — carried honestly by
+/// Approximation caveat: a non-zero `rotation_degrees` means the box is
+/// the engine's FLATTENED approximation and MUST NOT be used as a
+/// highlight box — transposed or mis-anchored at every non-zero content
+/// rotation, on ANY page (180° same-size/wrong-anchor with zero ink
+/// overlap; ±90° transposed; on a /Rotate 90/270 page additionally mapped,
+/// its line box degraded to a square). Carried honestly by
 /// rotation_degrees, documented, not re-derived.
+///
+/// Image-box caveat: image boxes are NEVER visibility-filtered (the
+/// engine's 2 pt drop law is the TEXT walk's): an image wholly outside
+/// the visible box is still returned, with out-of-range coordinates —
+/// the consumer clips to the page box, and never reads "image present"
+/// as "image visible".
+///
+/// The is_artifact law (typed-BDC-only): true only for a typed
+/// `/Artifact <<…>> BDC` whose `/Type` or `/Subtype` the engine
+/// recognizes (Pagination/Header/Footer/Watermark/PageNumber, Layout,
+/// Page, Background); false for a bare `/Artifact BMC` (the engine's BMC
+/// handler deliberately leaves the artifact type unset, and the span
+/// carries no other artifact bit) and for unrecognized types. So
+/// `is_artifact == false` is NOT evidence of body text: header/footer
+/// detection must not rely on this flag alone.
 ///
 /// The unit and length are a documented function of the resolved format —
 /// the GEOMETRY capability table applies to this surface IDENTICALLY:
@@ -719,8 +784,11 @@ impl PageGeometry {
 /// carrying its declared geometry with EMPTY spans/lines/images (no
 /// office engine exposes text/image boxes: PDF-only for layout), and
 /// html/csv/rtf/epub/odt/ods/odp → exactly one entry, geometry None
-/// (unit = whole document, single-flow). `pages=` normalizes exactly as
-/// the conversion pair's (sort + dedup into document order; an empty
+/// (unit = whole document, single-flow). `pages=` is PDF-ONLY (a page
+/// index cannot name a section): a non-None selection on any non-PDF row
+/// is the conversion lane's own typed refusal, never a silent
+/// whole-document answer; on the PDF lane it normalizes exactly as the
+/// conversion pair's (sort + dedup into document order; an empty
 /// selection and an out-of-range index raise the byte-pinned errors);
 /// the output is parallel to the NORMALIZED selection.
 ///
@@ -758,14 +826,16 @@ impl PageGeometry {
 ///
 /// Errors: `OSError` for a missing/unreadable file; `ValueError` for
 /// bytes that resolve to no format, an unknown `format=` name, a bad
-/// backend name, a password on a non-PDF, an over-budget input, a
+/// backend name, a `pages=` selection on a non-PDF (PDF-only, above), a
+/// password on a non-PDF, an over-budget input, a
 /// malformed/encrypted document, an office container that will not
 /// parse, or a `pages=` selection that names no page or an out-of-range
 /// index — the pinned §6 order: the format resolves first, then the
 /// capability refusal (under the GIL, before the detach), then the
 /// password-kind refusal, then the max_bytes refusals, then the
 /// `pages=` range errors against the real page count, then the engine's
-/// own encrypted doors.
+/// own encrypted doors. Every malformed `pages=`/`max_bytes` refusal
+/// reports AFTER the capability refusal, never before it.
 ///
 /// Deliberate deviation from the `PdfClassification` wrapper precedent,
 /// the same one `page_geometry` states: these five classes are exposed
@@ -905,16 +975,20 @@ impl TextSpan {
         self.inner.is_italic
     }
 
-    /// The run's own content rotation in degrees — non-zero marks a
-    /// sideways run whose box is the engine's flattened approximation.
+    /// The run's own content rotation in degrees — non-zero means the
+    /// box is the engine's flattened approximation and MUST NOT be used
+    /// as a highlight box (transposed or mis-anchored at every non-zero
+    /// content rotation, on any page).
     #[getter]
     fn rotation_degrees(&self) -> f32 {
         self.inner.rotation_degrees
     }
 
-    /// Declared /Artifact marked content (running headers/footers, page
-    /// numbers, watermarks): the consumer tells declared furniture from
-    /// body with this.
+    /// Declared /Artifact marked content — TYPED-FORM-ONLY: true only
+    /// for a typed `/Artifact <<…>> BDC` whose /Type or /Subtype the
+    /// engine recognizes; false for a bare `/Artifact BMC` (the engine
+    /// sets no artifact type for it) and unrecognized types. So
+    /// `is_artifact == false` is NOT evidence of body text.
     #[getter]
     fn is_artifact(&self) -> bool {
         self.inner.is_artifact
@@ -926,18 +1000,7 @@ impl TextSpan {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "TextSpan(text={:?}, bbox={:?}, font_size={:?}, font_name={:?}, \
-             is_bold={}, is_italic={}, rotation_degrees={:?}, is_artifact={})",
-            self.inner.text,
-            self.inner.bbox,
-            self.inner.font_size,
-            self.inner.font_name,
-            self.inner.is_bold,
-            self.inner.is_italic,
-            self.inner.rotation_degrees,
-            self.inner.is_artifact
-        )
+        text_span_repr(&self.inner)
     }
 }
 
@@ -1024,10 +1087,7 @@ impl TextLine {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "TextLine(text={:?}, bbox={:?}, words={:?})",
-            self.inner.text, self.inner.bbox, self.inner.words
-        )
+        text_line_repr(&self.inner)
     }
 }
 
@@ -1047,6 +1107,11 @@ impl ImageBox {
     /// for text the bottom edge is the glyph baseline and the box
     /// extends one font-size upward (em-box; descenders may extend
     /// below). Boxes are unclipped; the page box is the consumer's clip.
+    /// Image boxes are never visibility-filtered (the engine's 2 pt drop
+    /// law is the TEXT walk's): an image wholly outside the visible box
+    /// is still returned, with out-of-range coordinates — the consumer
+    /// clips to the page box, and never reads "image present" as "image
+    /// visible".
     #[getter]
     fn bbox(&self) -> (f32, f32, f32, f32) {
         self.inner.bbox
@@ -1064,8 +1129,11 @@ impl ImageBox {
         self.inner.height_px
     }
 
-    /// The CTM-derived content rotation in degrees (the bbox is
-    /// axis-aligned but the pixels may be turned).
+    /// The CTM's rotation angle in degrees, `atan2`-normalized to
+    /// [0, 360) — not restricted to right angles (a sheared or
+    /// arbitrarily-rotated CTM reports e.g. 45.0; a mirrored CTM 180.0):
+    /// the bbox is always the axis-aligned bound of the transformed unit
+    /// square.
     #[getter]
     fn rotation_degrees(&self) -> f32 {
         self.inner.rotation_degrees
@@ -1084,19 +1152,20 @@ impl ImageBox {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "ImageBox(bbox={:?}, width_px={}, height_px={}, rotation_degrees={:?}, paint_order={})",
-            self.inner.bbox,
-            self.inner.width_px,
-            self.inner.height_px,
-            self.inner.rotation_degrees,
-            self.inner.paint_order
-        )
+        image_box_repr(&self.inner)
     }
 }
 
 /// One `page_layout` entry: the unit's geometry plus its text spans,
 /// lines, and image boxes in the page's render space.
+///
+/// The office-row ambiguity, stated here because the entry cannot say
+/// why: geometry-Some + EMPTY spans/lines/images (an office unit — no
+/// office engine exposes text/image boxes) is INDISTINGUISHABLE from a
+/// blank, scanned, or content-unparseable PDF page holding only an
+/// entry. The entry carries no format/unit marker; a consumer that needs
+/// the provenance must carry the resolved format itself (the resolved
+/// format, not the file extension — the sniff outranks the extension).
 ///
 /// Exposed DIRECTLY (no Python wrapper view) — the same deliberate
 /// deviation from the `PdfClassification` wrapper precedent `PageGeometry`
@@ -1128,7 +1197,10 @@ impl PageLayout {
     }
 
     /// The unit's text spans, reading order (PDF pages only; office
-    /// units carry empty lists — no office engine exposes text boxes).
+    /// units carry empty lists — no office engine exposes text boxes;
+    /// geometry-Some + empty lists is indistinguishable from a
+    /// blank/scanned page holding only this entry, so a consumer that
+    /// needs the provenance carries the resolved format itself).
     #[getter]
     fn spans(&self) -> Vec<TextSpan> {
         self.inner
@@ -1139,7 +1211,9 @@ impl PageLayout {
     }
 
     /// The unit's text lines, reading order, words nested (PDF pages
-    /// only).
+    /// only; office units carry empty lists — the same ambiguity the
+    /// class docstring states: provenance is the resolved format the
+    /// caller carries).
     #[getter]
     fn lines(&self) -> Vec<TextLine> {
         self.inner
@@ -1149,7 +1223,11 @@ impl PageLayout {
             .collect()
     }
 
-    /// The unit's image boxes, paint order (PDF pages only).
+    /// The unit's image boxes, paint order (PDF pages only). Never
+    /// visibility-filtered: an image wholly outside the visible box is
+    /// still returned with out-of-range coordinates — the consumer clips
+    /// to the page box, and never reads "image present" as "image
+    /// visible".
     #[getter]
     fn images(&self) -> Vec<ImageBox> {
         self.inner
@@ -1165,19 +1243,41 @@ impl PageLayout {
     }
 
     fn __repr__(&self) -> String {
+        // each list formatted via its class's own Python shape — never the
+        // Rust Debug of the inner structs (`LayoutSpan { … }` is not a
+        // shape a Python consumer recognizes)
+        let spans = self
+            .inner
+            .spans
+            .iter()
+            .map(text_span_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lines = self
+            .inner
+            .lines
+            .iter()
+            .map(text_line_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let images = self
+            .inner
+            .images
+            .iter()
+            .map(image_box_repr)
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
-            "PageLayout(page_index={}, geometry={}, spans={:?}, lines={:?}, images={:?})",
+            "PageLayout(page_index={}, geometry={}, spans=[{}], lines=[{}], images=[{}])",
             self.inner.page_index,
             match &self.inner.geometry {
-                Some(geometry) => format!(
-                    "PageGeometry(width_pt={:?}, height_pt={:?}, rotation={}, crop={:?})",
-                    geometry.width_pt, geometry.height_pt, geometry.rotation, geometry.crop
-                ),
+                Some(box_) =>
+                    page_geometry_repr(&documents_impl::PageGeometry::from_page_box(*box_,)),
                 None => "None".to_string(),
             },
-            self.inner.spans,
-            self.inner.lines,
-            self.inner.images
+            spans,
+            lines,
+            images
         )
     }
 }

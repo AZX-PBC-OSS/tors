@@ -69,6 +69,7 @@ from documents import (
     generate_pdf_crop_partial,
     generate_pdf_layout,
     generate_pdf_layout_artifact,
+    generate_pdf_layout_artifact_bmc,
     generate_pdf_layout_baseline,
     generate_pdf_layout_bold_mid_line,
     generate_pdf_layout_crop,
@@ -2711,6 +2712,12 @@ class TestPageLayout:
         for line in page.lines:
             assert " ".join(word.text for word in line.words) == line.text
             for word in line.words:
+                # the invariant that keeps the single-space law true across
+                # engine bumps: a word's text can never carry whitespace
+                # (the line builder drops every whitespace character before
+                # forming a word) — so the join separator is always exactly
+                # one U+0020 and the offset arithmetic above stays sound
+                assert not any(ch.isspace() for ch in word.text), word.text
                 assert word.bbox[0] >= line.bbox[0] - _LAYOUT_TOL
                 assert word.bbox[1] >= line.bbox[1] - _LAYOUT_TOL
                 assert word.bbox[0] + word.bbox[2] <= line.bbox[0] + line.bbox[2] + _LAYOUT_TOL
@@ -2737,6 +2744,99 @@ class TestPageLayout:
         header = next(span for span in page.spans if span.text == "Header")
         body = next(span for span in page.spans if span.text == "Body")
         assert header.is_artifact and not body.is_artifact
+
+    def test_the_bmc_artifact_form_is_not_flagged(self) -> None:
+        """T11's limitation pin (deliberately, not as a bug to fix
+        silently): a bare ``/Artifact BMC`` — no properties dictionary —
+        reports ``is_artifact=False`` on this surface (the engine's BMC
+        handler leaves the artifact type unset, and the span carries no
+        other artifact bit), exactly like the body run beside it. The
+        consumer law that follows: ``is_artifact == false`` is NOT
+        evidence of body text. An engine bump that starts classifying BMC
+        form fails here and must re-open the spec caveat."""
+        (page,) = page_layout(data=generate_pdf_layout_artifact_bmc())
+        assert len(page.spans) == 2
+        header = next(span for span in page.spans if span.text == "Header")
+        body = next(span for span in page.spans if span.text == "Body")
+        assert not header.is_artifact, (
+            "the BMC form's limitation pin: not flagged on this surface"
+        )
+        assert not body.is_artifact
+
+    def test_pages_is_pdf_only_refused_on_every_non_pdf_row(self) -> None:
+        """F1's law (pages= is PDF-only — a page index cannot name a
+        section/slide/worksheet): a non-None selection on every non-PDF
+        row raises the conversion lane's own typed refusal
+        (byte-identical wording), never the silent whole-document answer
+        the phase-2 diff shipped (pages=[0] on a two-section docx
+        returned BOTH sections). The capability refusal still wins first;
+        on the PDF lane pages=[] keeps its empty-selection error."""
+        for kind in ("docx_rich", "pptx_rich", "xlsx", "html_rich"):
+            with pytest.raises(ValueError) as raised:
+                page_layout(data=ENGINES_CORPUS[kind], pages=[0])
+            # the message is the core's own `{:?}` spelling: double quotes
+            assert str(raised.value) == (
+                f'pages= applies to PDF documents only, not "{kind.split("_")[0]}"'
+            ), kind
+        # the capability refusal still wins first (anydoc on a docx names
+        # the capability, not pages=)
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=ENGINES_CORPUS["docx_rich"], backend="anydoc", pages=[0])
+        assert "cannot serve page geometry" in str(raised.value)
+        # and the PDF lane's pages=[] keeps the empty-selection error
+        data = generate_pdf_layout_pages(2)
+        with pytest.raises(ValueError) as raised:
+            page_layout(data=data, pages=[])
+        assert str(raised.value) == "pages= selected no pages: pass None for the whole document"
+
+    def test_the_270_inverse_map_and_180_crop_goldens(self) -> None:
+        """§9 item 3's missing goldens, Python side: the 270 arm of the
+        inverse map (a distinct branch, shipped untested by phase 2,
+        probed correct by the red-team pass) — the rotated-content run
+        whose raw box is (300, 300, 48.02, 24) lands at (468, 300, 24,
+        48.02) on a /Rotate 270 page, (376, 200, 24, 48.02) with the
+        [100 100 500 700] crop; and the 180+crop golden — the
+        crop-subset fixture's run on a /Rotate 180 page lands at
+        (285.97, 76, 64.03, 24) (inverse about the MediaBox, forward
+        about the visible box)."""
+        side = b"BT /F1 24 Tf 0 1 -1 0 300 300 Tm (Side) Tj ET"
+        (plain,) = page_layout(data=generate_pdf_layout(side, rotate=270))
+        _box_near(plain.spans[0].bbox, (468.0, 300.0, 24.0, 48.02))
+        assert plain.spans[0].rotation_degrees == 90.0
+        (cropped,) = page_layout(
+            data=generate_pdf_layout(side, rotate=270, cropbox="[100 100 500 700]")
+        )
+        _box_near(cropped.spans[0].bbox, (376.0, 200.0, 24.0, 48.02))
+        (flipped,) = page_layout(
+            data=generate_pdf_layout(
+                b"BT /F1 24 Tf 150 600 Td (Inside) Tj ET",
+                rotate=180,
+                cropbox="[100 100 500 700]",
+            )
+        )
+        _box_near(flipped.spans[0].bbox, (285.97, 76.0, 64.03, 24.0))
+
+    def test_image_boxes_are_never_visibility_filtered(self) -> None:
+        """T12's no-drop law, Python side: the engine's 2 pt
+        visibility-drop law is the TEXT walk's only — an image wholly
+        outside the visible box is still RETURNED, with out-of-range
+        coordinates (raw (30,30,100,100) on the [100 100 500 700] crop
+        → (-70, -70, 100, 100)), while a text run at the same place is
+        dropped. The consumer clips to the page box, and never reads
+        "image present" as "image visible"."""
+        (page,) = page_layout(
+            data=generate_pdf_layout(
+                b"BT /F1 24 Tf 30 30 Td (Outside) Tj ET",
+                cropbox="[100 100 500 700]",
+                image_ops=b"100 0 0 100 30 30",
+            )
+        )
+        assert page.spans == [], "a text run at (30, 30) is dropped"
+        assert len(page.images) == 1, "the same-position image is returned"
+        _box_near(page.images[0].bbox, (-70.0, -70.0, 100.0, 100.0))
+        assert page.images[0].bbox[0] < 0 and page.images[0].bbox[1] < 0, (
+            "out-of-range coordinates: never clipped, never dropped"
+        )
 
     def test_scanned_and_junk_pages_yield_empty_lists_not_errors(self) -> None:
         """§7's empty-lists-not-errors engine law, Python side: a scanned
