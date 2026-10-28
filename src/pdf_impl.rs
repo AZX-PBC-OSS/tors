@@ -1568,8 +1568,7 @@ mod tests {
     /// 612×792).
     #[test]
     fn quarter_turns_swap_the_render_extent() {
-        let entry =
-            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        let entry = |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
         let rotated = entry(&format!("{PORTRAIT} /Rotate 90"));
         assert_eq!((rotated.width_pt, rotated.height_pt), (792.0, 612.0));
         assert_eq!(rotated.rotation, 90);
@@ -1623,8 +1622,7 @@ mod tests {
     /// surface's pin, where the transform exists.)
     #[test]
     fn the_rotation_composes_with_its_inverse_to_the_identity() {
-        let entry =
-            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        let entry = |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
         let identity = entry(PORTRAIT);
         // 90 + 270 and 180 + 180, each composed to the declared angle the
         // engine normalizes back to 0: the identity geometry.
@@ -1641,7 +1639,10 @@ mod tests {
         for rotation in [0, 90, 180, 270] {
             let direct = entry(&format!("{PORTRAIT} /Rotate {rotation}"));
             let half_turn = entry(&format!("{PORTRAIT} /Rotate {}", (rotation + 180) % 360));
-            assert_eq!((direct.width_pt, direct.height_pt), (half_turn.width_pt, half_turn.height_pt));
+            assert_eq!(
+                (direct.width_pt, direct.height_pt),
+                (half_turn.width_pt, half_turn.height_pt)
+            );
             let inverse = (360 - rotation) % 360;
             let swapped_back = entry(&format!("{PORTRAIT} /Rotate {inverse}"));
             let composed_swapped = match inverse {
@@ -1664,12 +1665,15 @@ mod tests {
     /// entry.
     #[test]
     fn a_degenerate_crop_is_not_a_none_entry_and_crops_nothing() {
-        let entry =
-            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        let entry = |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
         // out-of-medium: the intersection is empty
         let out_of_medium = entry("/MediaBox [0 0 612 792] /CropBox [700 900 800 1000]");
         assert_eq!(
-            (out_of_medium.width_pt, out_of_medium.height_pt, out_of_medium.rotation),
+            (
+                out_of_medium.width_pt,
+                out_of_medium.height_pt,
+                out_of_medium.rotation
+            ),
             (612.0, 792.0, 0)
         );
         assert_eq!(out_of_medium.crop, None);
@@ -1688,7 +1692,10 @@ mod tests {
         // subset crop, not to a degenerate one
         let other_diagonal = entry("/MediaBox [0 0 612 792] /CropBox [500 700 100 100]");
         assert_eq!(other_diagonal.crop, Some((100.0, 100.0, 500.0, 700.0)));
-        assert_eq!((other_diagonal.width_pt, other_diagonal.height_pt), (400.0, 600.0));
+        assert_eq!(
+            (other_diagonal.width_pt, other_diagonal.height_pt),
+            (400.0, 600.0)
+        );
     }
 
     /// The None-entry rule (§9 item 4): a page whose MediaBox is missing,
@@ -1708,7 +1715,11 @@ mod tests {
         let geometry = page_geometry(bytes, None).unwrap();
         assert_eq!(geometry.len(), 2);
         assert_eq!(geometry[0], None, "the MediaBox-less page is a None entry");
-        assert_eq!(geometry[1].unwrap().width_pt, 612.0, "the sibling is intact");
+        assert_eq!(
+            geometry[1].unwrap().width_pt,
+            612.0,
+            "the sibling is intact"
+        );
         // MediaBox [0 0 0 0]: zero extent → None entry (never Some(0, 0))
         let degenerate = page_geometry(geometry_pdf("/MediaBox [0 0 0 0]"), None).unwrap();
         assert_eq!(degenerate, vec![None]);
@@ -1725,7 +1736,10 @@ mod tests {
             b"<< /Type /Catalog /Pages 2 0 R >>",
             b"<< /Type /Pages /Kids [] /Count 0 >>",
         ]);
-        assert_eq!(page_geometry(bytes, None).unwrap(), Vec::<Option<PageBox>>::new());
+        assert_eq!(
+            page_geometry(bytes, None).unwrap(),
+            Vec::<Option<PageBox>>::new()
+        );
     }
 
     // --- the encrypted door on the geometry probe (§9 item 6) --------------
@@ -1792,7 +1806,10 @@ mod tests {
     /// Algorithm 4 (R=2): the /U value — the padding RC4'd under the file
     /// key (what `authenticate` recomputes and compares).
     fn r2_user_value(user_pw: &[u8], owner_value: &[u8], permissions: i32, id0: &[u8]) -> Vec<u8> {
-        rc4(&r2_file_key(user_pw, owner_value, permissions, id0), &ENC_PAD)
+        rc4(
+            &r2_file_key(user_pw, owner_value, permissions, id0),
+            &ENC_PAD,
+        )
     }
 
     fn hex(bytes: &[u8]) -> String {

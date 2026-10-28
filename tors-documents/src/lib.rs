@@ -1385,9 +1385,14 @@ fn parse_backend(backend: Option<&Bound<'_, PyAny>>) -> PyResult<Backend> {
 /// call that could never run. A plain `ValueError`: the `Convert` arm's
 /// own mapping, a value refusal per the module's type-vs-value
 /// convention (this is not the format-level UnsupportedBackend, which
-/// only the conversion pair can raise).
+/// only the conversion pair can raise). The family is PDF-only by
+/// construction, so the refusal's format is always `"pdf"` (the
+/// byte-pinned historical text); `page_geometry`'s format-aware refusal
+/// is raised in the core, where the resolved format lives.
 fn refuse_anydoc(capability: &str) -> PyErr {
-    PyValueError::new_err(documents_impl::anydoc_capability_refusal(capability).to_string())
+    PyValueError::new_err(
+        documents_impl::anydoc_capability_refusal(capability, "pdf").to_string(),
+    )
 }
 
 /// The largest page index any PDF can carry, and therefore the ceiling a
