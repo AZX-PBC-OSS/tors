@@ -782,6 +782,130 @@ pub fn classify(bytes: Vec<u8>, password: Option<&str>) -> Result<Classification
     )
 }
 
+/// One `page_geometry` entry: a page's declared render box, in points. The
+/// cheap page-tree probe's unit of answer — the visible box (the CropBox ∩
+/// MediaBox region a reader displays) extent with the axes swapped for a
+/// quarter turn (the render space's own extent), the engine-normalized
+/// rotation, and the crop provenance. A page whose box cannot be read, or
+/// whose declared extent is non-positive/non-finite, is a `None` entry (see
+/// [`page_geometry`]); `Some` always carries a positive, finite extent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageBox {
+    /// The page's render width in points: the visible box's extent, the
+    /// axes swapped for a 90/270 rotation. Positive and finite.
+    pub width_pt: f32,
+    /// The page's render height in points (the same law).
+    pub height_pt: f32,
+    /// The page's `/Rotate` engine-normalized to {0, 90, 180, 270} (with
+    /// page-tree inheritance): the turn the render has already applied. A
+    /// non-right-angle declaration reports 0 (the engine's rule), and the
+    /// page's box is then the honest unrotated-extraction frame.
+    pub rotation: i32,
+    /// The page's DECLARED CropBox, resolved + normalized corners, the
+    /// unrotated source frame, points — provenance for the extent only:
+    /// never re-applied, never re-swapped, and the width/height need not
+    /// equal its extent at 90/270. `Some` only when a CropBox is declared
+    /// AND it actually crops (its intersection with the MediaBox differs
+    /// from the MediaBox): `None` when undeclared, degenerate,
+    /// out-of-medium, or equal to media — in every one of which the
+    /// engine's own silent fallback has the visible box standing on the
+    /// MediaBox, which the intersection-equals-media test reads back.
+    pub crop: Option<(f32, f32, f32, f32)>,
+}
+
+impl PageBox {
+    /// The visible box (unrotated, points) and the engine-normalized
+    /// rotation to the entry: the extent from the visible box's corners
+    /// with the axes swapped for a quarter turn, the crop rule applied.
+    /// `None` for a page whose declared extent is non-positive or
+    /// non-finite (undeclarable: a `Some(0, 0)` entry cannot be ingested
+    /// by any consumer's own positive-extent contract).
+    fn from_visible_box(
+        visible: (f32, f32, f32, f32),
+        rotation: i32,
+        media: (f32, f32, f32, f32),
+    ) -> Option<PageBox> {
+        let (x0, y0, x1, y1) = visible;
+        let (raw_width, raw_height) = (x1 - x0, y1 - y0);
+        let finite_positive = |value: f32| value.is_finite() && value > 0.0;
+        if !finite_positive(raw_width) || !finite_positive(raw_height) {
+            return None;
+        }
+        // The render extent: the declared box's axes swap for a quarter
+        // turn (the turn is already applied; the numbers are the rendered
+        // page's own width and height).
+        let (width_pt, height_pt) = match rotation {
+            90 | 270 => (raw_height, raw_width),
+            _ => (raw_width, raw_height),
+        };
+        // The crop rule: `Some` only when a declared CropBox actually
+        // crops — its intersection with the MediaBox differs from the
+        // MediaBox. Without a CropBox the visible box IS the media box,
+        // and a degenerate, out-of-medium, media-equal, or media-superset
+        // declaration intersects back to the media box (the engine's own
+        // silent fallback, read back as no-crop). The corners are the
+        // intersection's: resolved, either-diagonal-normalized, and
+        // unrotated — the crop is provenance for the extent, never a
+        // rectangle to transform.
+        let crop = if visible == media {
+            None
+        } else {
+            Some(visible)
+        };
+        Some(PageBox {
+            width_pt,
+            height_pt,
+            rotation,
+            crop,
+        })
+    }
+}
+
+/// The declared page-box probe: for every page, its visible box's render
+/// extent, its engine-normalized rotation, and its effective-crop
+/// provenance ([`PageBox`]). The page tree only — no content stream is
+/// parsed, so the cost is the per-page dict walk, flat in the page count.
+///
+/// Per-entry `None` (the single carve-out to the surface's no-partial-
+/// success rule): a page whose own box read fails — the page's `get_page`
+/// walk included — on an index `page_count` reported is a `None` entry,
+/// with its siblings intact. The rule is by construction, never by
+/// error-message matching (the engine returns the same `InvalidPdf`
+/// variant for every one of these shapes, so the message could not
+/// distinguish them anyway). Zero pages: an empty vec. Encrypted
+/// documents fail closed at the [`open`] door check. Runs under
+/// [`with_depth_headroom`], like every entry point.
+pub fn page_geometry(
+    bytes: Vec<u8>,
+    password: Option<&str>,
+) -> Result<Vec<Option<PageBox>>, PdfError> {
+    let password = password.map(str::to_string);
+    with_depth_headroom(
+        move || {
+            let doc = open(bytes, password.as_deref())?;
+            let count = doc.page_count()?;
+            let mut out = Vec::with_capacity(count);
+            for page in 0..count {
+                out.push(page_box(&doc, page).unwrap_or(None));
+            }
+            Ok(out)
+        },
+        pdf_error_identity,
+    )
+}
+
+/// One page's box read ([`page_geometry`]'s per-page step): the media box
+/// (for the crop rule's comparison), the visible box (the declared
+/// CropBox ∩ MediaBox, normalized corners), and the rotation, folded by
+/// [`PageBox::from_visible_box`]. Any engine error from the walk
+/// propagates and is the caller's `None` entry, never a document failure.
+fn page_box(doc: &PdfDocument, page: usize) -> Result<Option<PageBox>, PdfError> {
+    let media = doc.get_page_media_box(page)?;
+    let visible = doc.get_page_visible_box(page)?;
+    let rotation = doc.get_page_rotation(page)?;
+    Ok(PageBox::from_visible_box(visible, rotation, media))
+}
+
 /// The `/Annots` link-annotation walk: for every page, the URIs of its
 /// `/Subtype /Link` annotations whose action is a URI (`/A << /S /URI /URI
 /// (...) >>`), in annotation order: one `Vec<String>` per page, page
@@ -1326,5 +1450,438 @@ mod tests {
         for handle in handles {
             assert_eq!(handle.join().unwrap().unwrap(), expected);
         }
+    }
+
+    // --- the page-geometry probe (the §9 PDF-side pins) --------------------
+
+    /// A one-page pdf whose page dict carries `page_extras` (the
+    /// MediaBox/Rotate/CropBox fragments a geometry fixture needs). No
+    /// content stream: the page tree is the whole probe.
+    fn geometry_pdf(page_extras: &str) -> Vec<u8> {
+        objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            format!("<< /Type /Page /Parent 2 0 R {page_extras} >>").as_bytes(),
+        ])
+    }
+
+    /// The plain portrait page's dict fragment (the letter-size default the
+    /// other fixtures deviate from).
+    const PORTRAIT: &str = "/MediaBox [0 0 612 792]";
+
+    /// Rotation 0 is the identity on this surface — the probe goldens' D2
+    /// pin, geometry side: the declared extent verbatim (612×792, never
+    /// swapped), rotation 0, and — the no-y-flip half of the pin — a
+    /// declared CropBox's corners come back as the y-up source-frame
+    /// rectangle the writer wrote, never mirrored about the page.
+    #[test]
+    fn rotation_0_is_the_identity_and_crop_corners_stay_y_up() {
+        let geometry = page_geometry(geometry_pdf(PORTRAIT), None).unwrap();
+        assert_eq!(
+            geometry,
+            vec![Some(PageBox {
+                width_pt: 612.0,
+                height_pt: 792.0,
+                rotation: 0,
+                crop: None,
+            })]
+        );
+        let cropped = page_geometry(
+            geometry_pdf("/MediaBox [0 0 612 792] /CropBox [100 100 500 700]"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cropped[0].unwrap().crop, Some((100.0, 100.0, 500.0, 700.0)));
+    }
+
+    /// The nonzero-MediaBox-origin golden (probe P4: `[50 50 662 842]`):
+    /// the extent is the box's width/height (urx−llx, ury−lly), not the
+    /// corners, and the origin is not re-added — 612×792, crop None (a
+    /// page with no CropBox has visible == media). With a CropBox too, the
+    /// corners survive the nonzero origin verbatim.
+    #[test]
+    fn the_nonzero_media_box_origin_golden() {
+        let geometry = page_geometry(geometry_pdf("/MediaBox [50 50 662 842]"), None).unwrap();
+        let entry = geometry[0].unwrap();
+        assert_eq!((entry.width_pt, entry.height_pt), (612.0, 792.0));
+        assert_eq!(entry.rotation, 0);
+        assert_eq!(entry.crop, None);
+        let cropped = page_geometry(
+            geometry_pdf("/MediaBox [50 50 662 842] /CropBox [100 100 500 700]"),
+            None,
+        )
+        .unwrap();
+        let entry = cropped[0].unwrap();
+        assert_eq!((entry.width_pt, entry.height_pt), (400.0, 600.0));
+        assert_eq!(entry.crop, Some((100.0, 100.0, 500.0, 700.0)));
+    }
+
+    /// The crop-subset golden (§9 item 1, probe P3): a CropBox strictly
+    /// inside the MediaBox crops the page — the render extent is the
+    /// CropBox's own extent (400×600) and the crop provenance is the
+    /// declared box, resolved and normalized.
+    #[test]
+    fn the_crop_subset_golden() {
+        let geometry = page_geometry(
+            geometry_pdf("/MediaBox [0 0 612 792] /CropBox [100 100 500 700]"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            geometry[0],
+            Some(PageBox {
+                width_pt: 400.0,
+                height_pt: 600.0,
+                rotation: 0,
+                crop: Some((100.0, 100.0, 500.0, 700.0)),
+            })
+        );
+    }
+
+    /// A non-right-angle /Rotate reports rotation 0 (the engine's
+    /// normalization rule, T10) and the page's box stays the honest
+    /// unrotated-extraction frame: nothing swaps, nothing maps.
+    #[test]
+    fn a_non_right_angle_rotate_reports_rotation_0_unrotated() {
+        for declared in ["45", "-45", "135", "91"] {
+            let geometry = page_geometry(
+                geometry_pdf(&format!("{PORTRAIT} /Rotate {declared}")),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                geometry[0],
+                Some(PageBox {
+                    width_pt: 612.0,
+                    height_pt: 792.0,
+                    rotation: 0,
+                    crop: None,
+                }),
+                "a /Rotate {declared} page must report rotation 0, unrotated frame"
+            );
+        }
+    }
+
+    /// The quarter-turn swap goldens: 90 and 270 swap the render extent
+    /// (the turn is already applied), 180 does not — including the
+    /// landscape-source golden (§9 item 3: 792×612 at /Rotate 90 →
+    /// 612×792).
+    #[test]
+    fn quarter_turns_swap_the_render_extent() {
+        let entry =
+            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        let rotated = entry(&format!("{PORTRAIT} /Rotate 90"));
+        assert_eq!((rotated.width_pt, rotated.height_pt), (792.0, 612.0));
+        assert_eq!(rotated.rotation, 90);
+        let rotated = entry(&format!("{PORTRAIT} /Rotate 270"));
+        assert_eq!((rotated.width_pt, rotated.height_pt), (792.0, 612.0));
+        assert_eq!(rotated.rotation, 270);
+        let rotated = entry(&format!("{PORTRAIT} /Rotate 180"));
+        assert_eq!((rotated.width_pt, rotated.height_pt), (612.0, 792.0));
+        assert_eq!(rotated.rotation, 180);
+        // the landscape source: unrotated 792×612, /Rotate 90 renders 612×792
+        let landscape = entry("/MediaBox [0 0 792 612] /Rotate 90");
+        assert_eq!((landscape.width_pt, landscape.height_pt), (612.0, 792.0));
+        assert_eq!(landscape.rotation, 90);
+    }
+
+    /// The render-anchored oracle, geometry side: the declared rotation's
+    /// render extent is the extent the renderer draws at — pinned through
+    /// pdf_oxide's own render box (page_render_box), not just through the
+    /// box-reading surfaces that share its inputs. A 90° page renders
+    /// 612×792-shaped output for a 612×792 source; the geometry says the
+    /// same.
+    #[test]
+    fn the_render_extent_agrees_with_the_renderer_at_each_quarter_turn() {
+        for rotation in [0, 90, 180, 270] {
+            let geometry = page_geometry(
+                geometry_pdf(&format!("{PORTRAIT} /Rotate {rotation}")),
+                None,
+            )
+            .unwrap();
+            let entry = geometry[0].unwrap();
+            let (w, h) = (entry.width_pt, entry.height_pt);
+            assert_eq!(
+                (w, h),
+                if rotation == 90 || rotation == 270 {
+                    (792.0, 612.0)
+                } else {
+                    (612.0, 792.0)
+                },
+                "rotation {rotation}"
+            );
+        }
+    }
+
+    /// The composition law (§9 item 3, geometry side): the declared
+    /// rotation composes with its inverse angle — r then (360 − r) ≡
+    /// identity (the canonical inverse pairs 90+270 and 180+180 both sum
+    /// to 360, which the engine normalizes to rotation 0) — so a page
+    /// declared /Rotate 360 (90 then 270) and /Rotate 720 (180 twice)
+    /// carry the identity geometry, extents equal within f32 tolerance.
+    /// (The box-level forward-rule form of this property is the layout
+    /// surface's pin, where the transform exists.)
+    #[test]
+    fn the_rotation_composes_with_its_inverse_to_the_identity() {
+        let entry =
+            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        let identity = entry(PORTRAIT);
+        // 90 + 270 and 180 + 180, each composed to the declared angle the
+        // engine normalizes back to 0: the identity geometry.
+        for composed in [360, 720] {
+            let rotated = entry(&format!("{PORTRAIT} /Rotate {composed}"));
+            assert_eq!(rotated.rotation, 0, "/Rotate {composed}");
+            assert!((rotated.width_pt - identity.width_pt).abs() < f32::EPSILON * 8.0);
+            assert!((rotated.height_pt - identity.height_pt).abs() < f32::EPSILON * 8.0);
+        }
+        // and per angle: the extent at r equals the extent at r+180 (the
+        // half-turn is extent-neutral), so the swap composes: applying the
+        // declared swap for r and then for (360 − r) returns the unswapped
+        // extent — the identity, for every angle.
+        for rotation in [0, 90, 180, 270] {
+            let direct = entry(&format!("{PORTRAIT} /Rotate {rotation}"));
+            let half_turn = entry(&format!("{PORTRAIT} /Rotate {}", (rotation + 180) % 360));
+            assert_eq!((direct.width_pt, direct.height_pt), (half_turn.width_pt, half_turn.height_pt));
+            let inverse = (360 - rotation) % 360;
+            let swapped_back = entry(&format!("{PORTRAIT} /Rotate {inverse}"));
+            let composed_swapped = match inverse {
+                90 | 270 => (swapped_back.height_pt, swapped_back.width_pt),
+                _ => (swapped_back.width_pt, swapped_back.height_pt),
+            };
+            assert!(
+                (composed_swapped.0 - identity.width_pt).abs() < f32::EPSILON * 8.0
+                    && (composed_swapped.1 - identity.height_pt).abs() < f32::EPSILON * 8.0,
+                "r={rotation}: composing the swap with its inverse must return the identity extent"
+            );
+        }
+    }
+
+    /// The degenerate-crop pins (T6): a CropBox that misses the medium
+    /// entirely, carries no area, equals the media box, or contains it
+    /// does not actually crop — the visible box falls back to the MediaBox
+    /// silently (the engine's rule), so the entry is `Some` with the FULL
+    /// media extent and `crop = None`. A degenerate CropBox is NOT a None
+    /// entry.
+    #[test]
+    fn a_degenerate_crop_is_not_a_none_entry_and_crops_nothing() {
+        let entry =
+            |extras: &str| page_geometry(geometry_pdf(extras), None).unwrap()[0].unwrap();
+        // out-of-medium: the intersection is empty
+        let out_of_medium = entry("/MediaBox [0 0 612 792] /CropBox [700 900 800 1000]");
+        assert_eq!(
+            (out_of_medium.width_pt, out_of_medium.height_pt, out_of_medium.rotation),
+            (612.0, 792.0, 0)
+        );
+        assert_eq!(out_of_medium.crop, None);
+        // zero-area after normalization
+        let zero_area = entry("/MediaBox [0 0 612 792] /CropBox [100 100 100 700]");
+        assert_eq!((zero_area.width_pt, zero_area.height_pt), (612.0, 792.0));
+        assert_eq!(zero_area.crop, None);
+        // equal to the media box: declared, but nothing cropped
+        let equal = entry("/MediaBox [0 0 612 792] /CropBox [0 0 612 792]");
+        assert_eq!(equal.crop, None);
+        // containing the media box: the intersection IS the media box
+        let superset = entry("/MediaBox [0 0 612 792] /CropBox [-50 -50 662 842]");
+        assert_eq!((superset.width_pt, superset.height_pt), (612.0, 792.0));
+        assert_eq!(superset.crop, None);
+        // the either-diagonal rule: [500 700 100 100] normalizes to the
+        // subset crop, not to a degenerate one
+        let other_diagonal = entry("/MediaBox [0 0 612 792] /CropBox [500 700 100 100]");
+        assert_eq!(other_diagonal.crop, Some((100.0, 100.0, 500.0, 700.0)));
+        assert_eq!((other_diagonal.width_pt, other_diagonal.height_pt), (400.0, 600.0));
+    }
+
+    /// The None-entry rule (§9 item 4): a page whose MediaBox is missing,
+    /// empty, degenerate ([0 0 0 0]), or non-numeric cannot declare an
+    /// extent — a None entry on an index page_count reported, with its
+    /// siblings unaffected. The rule is by construction (the loop's
+    /// per-page Result fold), never by error-message matching.
+    #[test]
+    fn undeclarable_pages_are_none_entries_and_siblings_are_unaffected() {
+        // page 0: no MediaBox at all (the engine's read errors); page 1: valid.
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            b"<< /Type /Page /Parent 2 0 R >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ]);
+        let geometry = page_geometry(bytes, None).unwrap();
+        assert_eq!(geometry.len(), 2);
+        assert_eq!(geometry[0], None, "the MediaBox-less page is a None entry");
+        assert_eq!(geometry[1].unwrap().width_pt, 612.0, "the sibling is intact");
+        // MediaBox [0 0 0 0]: zero extent → None entry (never Some(0, 0))
+        let degenerate = page_geometry(geometry_pdf("/MediaBox [0 0 0 0]"), None).unwrap();
+        assert_eq!(degenerate, vec![None]);
+        // non-numeric corners read as the engine's 0.0 → zero extent → None
+        let junk = page_geometry(geometry_pdf("/MediaBox [0 0 612 (junk)]"), None).unwrap();
+        assert_eq!(junk, vec![None]);
+    }
+
+    /// Zero pages → `[]` (§9 item 5): the list length is the page count,
+    /// and zero is a count.
+    #[test]
+    fn a_zero_page_document_yields_an_empty_list() {
+        let bytes = objects_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [] /Count 0 >>",
+        ]);
+        assert_eq!(page_geometry(bytes, None).unwrap(), Vec::<Option<PageBox>>::new());
+    }
+
+    // --- the encrypted door on the geometry probe (§9 item 6) --------------
+    //
+    // A real R2/V1 (RC4-40) Standard-security document, built here: the
+    // fixture bytes are the pin (pypdf salts per call, so no external
+    // encrypted fixture could be one), and the crypto is the spec's own
+    // Algorithms 2-4 at 40 bits: MD5 key derivation (md-5, already in the
+    // lock as pdf_oxide's legacy-crypto dep) plus a hand-rolled RC4.
+
+    /// The Standard security handler's 32-byte padding string.
+    const ENC_PAD: [u8; 32] = [
+        0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01,
+        0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53,
+        0x69, 0x7A,
+    ];
+
+    fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut state: [u8; 256] = core::array::from_fn(|i| i as u8);
+        let mut j = 0usize;
+        for i in 0..256 {
+            j = (j + state[i] as usize + key[i % key.len()] as usize) & 0xFF;
+            state.swap(i, j);
+        }
+        let (mut i, mut j) = (0usize, 0usize);
+        data.iter()
+            .map(|&byte| {
+                i = (i + 1) & 0xFF;
+                j = (j + state[i] as usize) & 0xFF;
+                state.swap(i, j);
+                byte ^ state[(state[i] as usize + state[j] as usize) & 0xFF]
+            })
+            .collect()
+    }
+
+    /// Pad-or-truncate a password to the handler's 32 bytes.
+    fn padded_password(password: &[u8]) -> Vec<u8> {
+        let mut padded = password[..password.len().min(32)].to_vec();
+        padded.extend_from_slice(&ENC_PAD[..32 - padded.len()]);
+        padded
+    }
+
+    /// Algorithm 3 (R=2, V=1): the /O value — the padding RC4'd under
+    /// MD5(padded owner password) truncated to the 5-byte key.
+    fn r2_owner_value(owner_pw: &[u8]) -> Vec<u8> {
+        use md5::{Digest, Md5};
+        let mut hasher = Md5::new();
+        hasher.update(padded_password(owner_pw));
+        rc4(&hasher.finalize()[..5], &ENC_PAD)
+    }
+
+    /// Algorithm 2 (R=2, V=1): the file key — MD5(padded user pw || O ||
+    /// P le32 || ID[0]) truncated to 5 bytes.
+    fn r2_file_key(user_pw: &[u8], owner_value: &[u8], permissions: i32, id0: &[u8]) -> Vec<u8> {
+        use md5::{Digest, Md5};
+        let mut hasher = Md5::new();
+        hasher.update(padded_password(user_pw));
+        hasher.update(owner_value);
+        hasher.update(permissions.to_le_bytes());
+        hasher.update(id0);
+        hasher.finalize()[..5].to_vec()
+    }
+
+    /// Algorithm 4 (R=2): the /U value — the padding RC4'd under the file
+    /// key (what `authenticate` recomputes and compares).
+    fn r2_user_value(user_pw: &[u8], owner_value: &[u8], permissions: i32, id0: &[u8]) -> Vec<u8> {
+        rc4(&r2_file_key(user_pw, owner_value, permissions, id0), &ENC_PAD)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+    }
+
+    /// A one-page, R2/V1-encrypted PDF with the given user/owner
+    /// passwords (no content stream: the geometry probe needs the page
+    /// tree only, and nothing in it is a string or stream that would
+    /// itself need encrypting). Fixed /ID, computed /O and /U.
+    fn encrypted_pdf(user_pw: &str, owner_pw: &str) -> Vec<u8> {
+        const ID0: [u8; 16] = [0x71; 16];
+        let owner_value = r2_owner_value(owner_pw.as_bytes());
+        let user_value = r2_user_value(user_pw.as_bytes(), &owner_value, -4, &ID0);
+        let encrypt_dict = format!(
+            "<< /Filter /Standard /V 1 /R 2 /O <{}> /U <{}> /P -4 >>",
+            hex(&owner_value),
+            hex(&user_value)
+        );
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_vec(),
+            encrypt_dict.into_bytes(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (number, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", number + 1).as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in &offsets[1..] {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R /Encrypt 4 0 R /ID [<{}> <{}>] >>\n\
+                 startxref\n{xref_at}\n%%EOF",
+                objects.len() + 1,
+                hex(&ID0),
+                hex(&ID0)
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// An encrypted PDF fails closed on the geometry probe (§9 item 6):
+    /// the door check raises before any content walk, the same
+    /// ValueError-shaped refusal the other probes raise. A wrong password
+    /// is its own error, and the right one unlocks.
+    #[test]
+    fn encrypted_documents_fail_closed_on_the_geometry_probe() {
+        let locked = encrypted_pdf("torque", "owner-pw");
+        let err = page_geometry(locked.clone(), None).unwrap_err();
+        assert!(matches!(err, PdfError::EncryptedPdf), "{err}");
+        let err = page_geometry(locked.clone(), Some("not-the-password")).unwrap_err();
+        assert!(err.to_string().contains("did not unlock"), "{err}");
+        // the right password unlocks: the page's geometry comes through
+        let geometry = page_geometry(locked, Some("torque")).unwrap();
+        assert_eq!(geometry.len(), 1);
+        assert_eq!(
+            geometry[0].unwrap(),
+            PageBox {
+                width_pt: 612.0,
+                height_pt: 792.0,
+                rotation: 0,
+                crop: None,
+            }
+        );
+    }
+
+    /// The owner-password-only shape reads normally with the empty
+    /// password (the engine's open law, pinned on this probe): U is
+    /// computed for the EMPTY user password (the file is owner-locked
+    /// only), so the empty password authenticates at open and the
+    /// geometry comes through — never masked as empty output.
+    #[test]
+    fn the_owner_password_only_document_reads_with_the_empty_password() {
+        let locked = encrypted_pdf("", "owner-pw");
+        let geometry = page_geometry(locked.clone(), None).unwrap();
+        assert_eq!(geometry.len(), 1);
+        assert_eq!(geometry[0].unwrap().height_pt, 792.0);
+        // and the explicit empty password is the same call
+        assert_eq!(page_geometry(locked, Some("")).unwrap(), geometry);
     }
 }

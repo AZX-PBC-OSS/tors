@@ -1146,13 +1146,34 @@ def _pdf_from_objects(objects: list[bytes]) -> bytes:
     return bytes(out)
 
 
-def _pdf_page_objects(content: bytes, *, annots: bool = False) -> list[bytes]:
+def _pdf_page_objects(
+    content: bytes,
+    *,
+    annots: bool = False,
+    mediabox: str = "[0 0 612 792]",
+    rotate: int | None = None,
+    cropbox: str | None = None,
+) -> list[bytes]:
+    """One page's objects, with the page-box fragments the geometry
+    fixtures need: ``mediabox``/``rotate``/``cropbox`` spell the page
+    dict's /MediaBox, /Rotate, and /CropBox. The defaults are the
+    historical bytes exactly (``[0 0 612 792]``, no /Rotate, no /CropBox),
+    so every committed fixture the pinned corpora carry builds
+    byte-identically through this function."""
+    extras = ""
+    if rotate is not None:
+        extras += f" /Rotate {rotate}"
+    if cropbox is not None:
+        extras += f" /CropBox {cropbox}"
     annot_entry = b" /Annots [6 0 R]" if annots else b""
+    page_dict = (
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >>"
+        f" /MediaBox {mediabox}{extras} /Contents 5 0 R"
+    ).encode("ascii")
     return [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >>"
-        b" /MediaBox [0 0 612 792] /Contents 5 0 R" + annot_entry + b" >>",
+        page_dict + annot_entry + b" >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         f"<< /Length {len(content)} >>\nstream\n".encode("ascii") + content + b"\nendstream",
     ]
@@ -1293,6 +1314,51 @@ def generate_pdf_big(lines: int = 6000) -> bytes:
     moves.append("ET")
     content = "\n".join(moves).encode("ascii")
     return _pdf_from_objects(_pdf_page_objects(content))
+
+
+# --- the page-geometry fixtures (standalone, on demand: the
+# --- generate_pdf_big precedent — committed-corpus membership would add
+# --- them to the conversion matrix's sweeps, which they carry no new
+# --- content for; the geometry probes build their own bytes) ---------------
+
+
+def generate_pdf_crop() -> bytes:
+    """A CropBox strictly inside the MediaBox ([100 100 500 700] on
+    [0 0 612 792]): the geometry probe's crop-subset golden — the render
+    extent 400×600, crop provenance Some((100, 100, 500, 700))."""
+    content = b"BT /F1 12 Tf 150 600 Td (cropped page line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, cropbox="[100 100 500 700]")
+    )
+
+
+def generate_pdf_rotate(angle: int) -> bytes:
+    """A portrait page declared /Rotate `angle`: the swap-law goldens
+    (90/270 → 792×612; 180 → 612×792) and, for a non-right angle, the
+    engine-normalization pin (rotation 0, unrotated frame)."""
+    content = b"BT /F1 12 Tf 72 700 Td (rotated page line) Tj ET"
+    return _pdf_from_objects(_pdf_page_objects(content, rotate=angle))
+
+
+def generate_pdf_media_origin() -> bytes:
+    """A nonzero MediaBox origin ([50 50 662 842]): the extent is the
+    box's width/height (612×792), never the corners; with a CropBox the
+    declared corners survive verbatim."""
+    content = b"BT /F1 12 Tf 100 700 Td (offset origin line) Tj ET"
+    return _pdf_from_objects(
+        _pdf_page_objects(content, mediabox="[50 50 662 842]", cropbox="[100 100 500 700]")
+    )
+
+
+def generate_pdf_zero_pages() -> bytes:
+    """A page tree with /Count 0 and no kids: the zero-page shape whose
+    geometry answer is the empty list ([] is a count, not an error)."""
+    return _pdf_from_objects(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [] /Count 0 >>",
+        ]
+    )
 
 
 # --- the registry ------------------------------------------------------------
