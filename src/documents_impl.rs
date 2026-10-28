@@ -2044,8 +2044,9 @@ fn office_geometry(bytes: Vec<u8>, kind: Kind) -> Result<Vec<Option<PageGeometry
     let legacy_xls = kind == Kind::Excel && is_ole_container(&bytes);
     let format = match kind {
         // The Excel kind's one container-aware case (office_markdown's own
-        // check): the OLE signature is legacy xls, a ZIP package is xlsx.
-        Kind::Excel if is_ole_container(&bytes) => office_oxide::DocumentFormat::Xls,
+        // check): the OLE signature is legacy xls, a ZIP package is xlsx —
+        // the hoisted `legacy_xls`, not a second container read.
+        Kind::Excel if legacy_xls => office_oxide::DocumentFormat::Xls,
         Kind::Excel => office_oxide::DocumentFormat::Xlsx,
         Kind::Docx => office_oxide::DocumentFormat::Docx,
         Kind::Pptx => office_oxide::DocumentFormat::Pptx,

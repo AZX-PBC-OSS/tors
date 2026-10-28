@@ -363,14 +363,6 @@ def test_sniff_is_package_only_in_the_stubs_as_it_is_at_runtime() -> None:
 # --- the PageGeometry getter pin --------------------------------------------------
 
 
-def _page_geometry_stub(path: Path) -> ast.ClassDef:
-    """The PageGeometry class def from a package stub."""
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.ClassDef) and node.name == "PageGeometry":
-            return node
-    raise AssertionError(f"{path}: no PageGeometry class — the stub is broken")
-
-
 def _stub_class(path: Path, name: str) -> ast.ClassDef:
     """A named class def from a package stub."""
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
@@ -452,7 +444,7 @@ def test_page_geometry_getters_are_exactly_the_four_read_only_fields() -> None:
 
     getters = {"width_pt", "height_pt", "rotation", "crop"}
     for stub in (_PAYLOAD_STUB, _SHIM_STUB):
-        node = _page_geometry_stub(stub)
+        node = _stub_class(stub, "PageGeometry")
         properties: set[str] = set()
         assignments: list[str] = []
         setters: set[str] = set()

@@ -8474,7 +8474,8 @@ unit's geometry plus — PDF pages only — the page's text spans, text lines
 (words nested), and image boxes, all in the page's declared render space
 (**points, bottom-left origin, y-up; /Rotate applied; one transform owned by
 the library**, the same frame `page_geometry` declares; boxes are unclipped,
-the page box is the consumer's clip). One open per call. Office rows serve
+the page box is the consumer's clip; coordinates are single-precision f32 —
+expect ~1e-4 pt quantization). One open per call. Office rows serve
 their declared geometry with empty layout lists (no office engine exposes
 text/image boxes); the no-geometry formats answer one `geometry=None` entry.
 
@@ -8486,6 +8487,9 @@ non-zero content rotation, on any page); `is_artifact` is typed-BDC-only —
 `is_artifact == false` is NOT evidence of body text; and image boxes are
 never visibility-filtered — an image wholly outside the visible box is
 still returned with out-of-range coordinates, so the consumer clips.
+Known-unverified edge: vertical-writing pages (WMode 1, tategaki) flatten
+the advance like any rotated run but may carry `rotation_degrees == 0`, so
+the honesty flag may not cover them.
 
 The text is its own stream, grounded per line: a line's text is its words'
 texts joined with exactly one space (and no word's text carries
@@ -8630,14 +8634,17 @@ evidence, `==` structural (the eight fields). Attributes:
   the page's render space: points, bottom-left origin; y is the box's
   bottom edge, and for text that edge is the glyph baseline, the box
   extending one font-size upward (em-box; descenders may extend below).
-  Boxes are unclipped; the page box is the consumer's clip.
+  Boxes are unclipped; the page box is the consumer's clip. Coordinates
+  are single-precision f32; expect ~1e-4 pt quantization.
 - `font_size: float`, `font_name: str`, `is_bold: bool`, `is_italic: bool`
   — the honest font/style evidence (no `heading_level` heuristic: these
   two fields are the signal).
 - `rotation_degrees: float` — the run's own content rotation. **Non-zero
   means the box is the engine's flattened approximation and MUST NOT be
   used as a highlight box** (transposed or mis-anchored at every non-zero
-  content rotation, on any page).
+  content rotation, on any page). Known-unverified edge: vertical-writing
+  runs (WMode 1, tategaki) flatten the advance the same way but may carry
+  `rotation_degrees == 0` — the flag may not cover them.
 - `is_artifact: bool` — declared `/Artifact` marked content, TYPED-FORM-ONLY:
   true only for a typed `/Artifact <<…>> BDC` whose `/Type` or `/Subtype`
   the engine recognizes; false for a bare `/Artifact BMC` and unrecognized

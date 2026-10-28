@@ -21,7 +21,7 @@
 //! - [`page_geometry`]: every unit's declared render box — PDF pages, the
 //!   office families' sections/slides/worksheets, the single-flow
 //!   formats' one `[None]` — the cheap geometry probe the payload shares
-//!   with `pdf_layout`'s future per-page boxes (the native
+//!   with [`page_layout`]'s per-page boxes (the native
 //!   [`PageGeometry`] pyclass is that surface's entry type too)
 //! - [`page_layout`]: the combined per-unit probe — geometry plus, for
 //!   PDF pages, text spans/lines (words nested) and image boxes, all in
@@ -759,7 +759,10 @@ impl PageGeometry {
 /// rotation, on ANY page (180° same-size/wrong-anchor with zero ink
 /// overlap; ±90° transposed; on a /Rotate 90/270 page additionally mapped,
 /// its line box degraded to a square). Carried honestly by
-/// rotation_degrees, documented, not re-derived.
+/// rotation_degrees, documented, not re-derived. Known-unverified edge
+/// (T9): vertical-writing pages (WMode 1, tategaki) — the span em-boxes
+/// there flatten the advance like any rotated run but may carry
+/// `rotation_degrees == 0`, so the honesty flag may not cover them.
 ///
 /// Image-box caveat: image boxes are NEVER visibility-filtered (the
 /// engine's 2 pt drop law is the TEXT walk's): an image wholly outside
@@ -833,8 +836,10 @@ impl PageGeometry {
 /// index — the pinned §6 order: the format resolves first, then the
 /// capability refusal (under the GIL, before the detach), then the
 /// password-kind refusal, then the max_bytes refusals, then the
-/// `pages=` range errors against the real page count, then the engine's
-/// own encrypted doors. Every malformed `pages=`/`max_bytes` refusal
+/// engine's own encrypted doors, then the `pages=` range errors against
+/// the real page count (the range check needs `page_count`, which needs
+/// the open — `pages=[999]` on a locked PDF answers the door error).
+/// Every malformed `pages=`/`max_bytes` refusal
 /// reports AFTER the capability refusal, never before it.
 ///
 /// Deliberate deviation from the `PdfClassification` wrapper precedent,
@@ -978,7 +983,10 @@ impl TextSpan {
     /// The run's own content rotation in degrees — non-zero means the
     /// box is the engine's flattened approximation and MUST NOT be used
     /// as a highlight box (transposed or mis-anchored at every non-zero
-    /// content rotation, on any page).
+    /// content rotation, on any page). Known-unverified edge (T9):
+    /// vertical-writing runs (WMode 1, tategaki) flatten the advance the
+    /// same way but may carry `rotation_degrees == 0` — the flag may not
+    /// cover them.
     #[getter]
     fn rotation_degrees(&self) -> f32 {
         self.inner.rotation_degrees
@@ -2310,8 +2318,9 @@ fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usiz
 
 /// Whether a zero budget is refused at the parse or threaded through.
 /// Every surface but one refuses it here (the house rule: a nonsense
-/// argument never reaches the engines). The one exception is
-/// `page_geometry`: its zero VALUE refusal is a max_bytes-class refusal
+/// argument never reaches the engines). The exception is the geometry
+/// surfaces (`page_geometry`, `page_layout`): their zero VALUE refusal
+/// is a max_bytes-class refusal
 /// whose locked §6 position is core-side, AFTER the capability and
 /// password-kind checks — the binding's pre-emption would fire it first
 /// (the red-team probe: `page_geometry(data=docx, backend="anydoc",
@@ -2320,10 +2329,12 @@ fn parse_max_bytes(max_bytes: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usiz
 /// the core's own zero check (already sequenced) names it.
 #[derive(Clone, Copy)]
 enum ZeroRefusal {
-    /// Refuse zero at the parse (every surface but `page_geometry`).
+    /// Refuse zero at the parse (every surface but the geometry
+    /// surfaces).
     Binding,
     /// Thread zero through as `Some(0)`; the core's sequenced check
-    /// refuses it (`page_geometry` only).
+    /// refuses it (the geometry surfaces: `page_geometry`,
+    /// `page_layout`).
     CoreSide,
 }
 

@@ -941,6 +941,9 @@ pub struct LayoutSpan {
     /// non-zero content rotation, on ANY page (180° same-size/wrong-anchor
     /// with zero ink overlap; ±90° transposed; on a /Rotate 90/270 page
     /// additionally mapped, its line box degraded to a square).
+    /// Known-unverified edge (T9): vertical-writing runs (WMode 1,
+    /// tategaki) flatten the advance the same way but may carry
+    /// `rotation_degrees == 0` — the flag may not cover them.
     pub rotation_degrees: f32,
     /// Declared `/Artifact` marked content — TYPED-FORM-ONLY (the T11
     /// law): true only for a typed `/Artifact <<…>> BDC` whose `/Type` or
@@ -1151,6 +1154,12 @@ fn engine_mapped(rotation: i32, content_rotation: f32) -> bool {
 /// extract_spans_impl's content-decode arm), never an error (the
 /// empty-lists-not-errors engine law; a scanned page is the same
 /// shape). Encrypted documents fail closed at the [`open`] door check.
+///
+/// Known-unverified edge (T9): vertical-writing pages (WMode 1,
+/// tategaki) — the span em-boxes there flatten the advance like any
+/// rotated run (the T3 law) but may carry `rotation_degrees == 0`, so
+/// the honesty flag may not cover them.
+///
 /// Runs under [`with_depth_headroom`], like every entry point.
 pub fn page_layout(
     bytes: Vec<u8>,
@@ -1189,6 +1198,20 @@ fn page_layout_pass(
         .collect())
 }
 
+/// The §7 per-entry `None` shape, shared by `page_layout_one`'s four
+/// early-outs: geometry `None` (no frame — the D1 space is defined by
+/// the box) with empty spans/lines/images, the entry's `page_index`
+/// still carried. Each caller's comment names its own trigger.
+fn empty_entry(page: usize) -> PageLayoutData {
+    PageLayoutData {
+        page_index: page,
+        geometry: None,
+        spans: Vec::new(),
+        lines: Vec::new(),
+        images: Vec::new(),
+    }
+}
+
 /// One page's layout ([`page_layout_pass`]'s per-page step): the box
 /// reads feed both the `PageBox` build and the transform (fetched ONCE —
 /// the phase-1 `PageBox` deliberately does not carry the visible-box
@@ -1198,43 +1221,19 @@ fn page_layout_one(doc: &PdfDocument, page: usize) -> PageLayoutData {
     // is the §7 per-entry None rule — geometry None, no frame, so the
     // content has no render space to be mapped into and stays empty.
     let Ok(media) = doc.get_page_media_box(page) else {
-        return PageLayoutData {
-            page_index: page,
-            geometry: None,
-            spans: Vec::new(),
-            lines: Vec::new(),
-            images: Vec::new(),
-        };
+        return empty_entry(page);
     };
     let Ok(visible) = doc.get_page_visible_box(page) else {
-        return PageLayoutData {
-            page_index: page,
-            geometry: None,
-            spans: Vec::new(),
-            lines: Vec::new(),
-            images: Vec::new(),
-        };
+        return empty_entry(page);
     };
     let Ok(rotation) = doc.get_page_rotation(page) else {
-        return PageLayoutData {
-            page_index: page,
-            geometry: None,
-            spans: Vec::new(),
-            lines: Vec::new(),
-            images: Vec::new(),
-        };
+        return empty_entry(page);
     };
     let geometry = PageBox::from_visible_box(visible, rotation, media);
     if geometry.is_none() {
         // A non-positive/non-finite extent: undeclarable (§7) — and the
         // transform's frame with it.
-        return PageLayoutData {
-            page_index: page,
-            geometry: None,
-            spans: Vec::new(),
-            lines: Vec::new(),
-            images: Vec::new(),
-        };
+        return empty_entry(page);
     }
 
     // Spans. Engine-premapped ones (page_rotation_applied == the page's
@@ -2875,42 +2874,75 @@ mod tests {
     }
 
     /// The oracle's image leg: the red 1×1 image's MAPPED box lands where
-    /// the render draws the red pixels — on the plain page and on a
-    /// /Rotate 90 page (the handle is raw; the forward rule normalizes).
+    /// the render draws the red pixels — the same 4-angle × {no crop,
+    /// crop} matrix the text oracle's marker leg runs (the handle is
+    /// always raw; the forward rule normalizes; the render verifies each
+    /// leg). The raw placement (200, 200, 100, 100) sits fully inside the
+    /// visible box on every leg — the [100 100 500 700] crop included —
+    /// so the render shows the whole image and the ink comparison is
+    /// exact; the /Rotate 90 no-crop leg is phase-2's golden
+    /// (200, 312, 100, 100), the other angles derived by the forward rule.
     #[test]
     fn the_render_anchored_oracle_lands_mapped_image_boxes_where_the_render_draws_them() {
         let red = |r: u8, g: u8, b: u8| r > 200 && g < 100 && b < 100;
-        for (extras, visible, rotation) in [
-            ("", (0.0f32, 0.0f32, 612.0f32, 792.0f32), 0),
-            ("/Rotate 90", (0.0, 0.0, 612.0, 792.0), 90),
-        ] {
-            let bytes = image_pdf("100 0 0 100 200 200", extras);
-            let doc = PdfDocument::from_bytes(bytes).unwrap();
-            let ((_, _), ink) = render_ink(&doc, red);
-            let pages = page_layout_bytes(doc);
-            let image = &pages[0].images[0];
-            // The mapped box must equal the red ink's box, and (the
-            // forward-normalization half of the pin) it must NOT be the
-            // raw handle box when the page is rotated: the /Rotate 90
-            // page's image lands at (200, 612−200−100, 100, 100).
-            assert_box_near(
-                image.bbox,
+        for angle in [0, 90, 180, 270] {
+            for (crop, extras, visible) in [
+                (false, "", (0.0f32, 0.0f32, 612.0f32, 792.0f32)),
                 (
-                    ink.0 as f32,
-                    ink.1 as f32,
-                    (ink.2 - ink.0) as f32,
-                    (ink.3 - ink.1) as f32,
+                    true,
+                    "/CropBox [100 100 500 700]",
+                    (100.0, 100.0, 500.0, 700.0),
                 ),
-                1.0,
-                &format!("extras {extras:?}: the mapped image box must equal the red ink"),
-            );
-            let expected = map_box_forward((200.0, 200.0, 100.0, 100.0), visible, rotation);
-            assert_box_near(
-                image.bbox,
-                expected,
-                0.01,
-                &format!("extras {extras:?}: the mapped image box is the forward rule"),
-            );
+            ] {
+                let rotation = angle;
+                // The page's own rotation rides in the page dict, the
+                // crop fragment after it — the text oracle's exact shape.
+                let page_extras = match angle {
+                    0 => extras.to_string(),
+                    a => {
+                        if extras.is_empty() {
+                            format!("/Rotate {a}")
+                        } else {
+                            format!("/Rotate {a} {extras}")
+                        }
+                    }
+                };
+                let bytes = image_pdf("100 0 0 100 200 200", &page_extras);
+                let doc = PdfDocument::from_bytes(bytes.clone()).unwrap();
+                let ((render_w, render_h), ink) = render_ink(&doc, red);
+                let geometry = page_geometry(bytes, None).unwrap().remove(0).unwrap();
+                assert_eq!(
+                    (render_w, render_h),
+                    (geometry.width_pt as u32, geometry.height_pt as u32),
+                    "angle {angle} crop {crop}: the render's pixel dims are the declared extents"
+                );
+                let image = &page_layout_bytes(doc).remove(0).images[0];
+                // The mapped box must equal the red ink's box, and (the
+                // forward-normalization half of the pin) it must NOT be
+                // the raw handle box when the page is rotated: the
+                // /Rotate 90 no-crop leg's image lands at
+                // (200, 612−200−100, 100, 100).
+                assert_box_near(
+                    image.bbox,
+                    (
+                        ink.0 as f32,
+                        ink.1 as f32,
+                        (ink.2 - ink.0) as f32,
+                        (ink.3 - ink.1) as f32,
+                    ),
+                    1.0,
+                    &format!(
+                        "angle {angle} crop {crop}: the mapped image box must equal the red ink"
+                    ),
+                );
+                let expected = map_box_forward((200.0, 200.0, 100.0, 100.0), visible, rotation);
+                assert_box_near(
+                    image.bbox,
+                    expected,
+                    0.01,
+                    &format!("angle {angle} crop {crop}: the mapped image box is the forward rule"),
+                );
+            }
         }
     }
 
@@ -3581,6 +3613,38 @@ mod tests {
                 rotation: 0,
                 crop: None,
             }
+        );
+    }
+
+    /// The layout probe's same door, pinned as the geometry probe's twin
+    /// (§9 item 6): the door check raises before any content walk, a
+    /// wrong password is its own error, and the right one unlocks into
+    /// the entry (the geometry through, no content — the fixture carries
+    /// the page tree only).
+    #[test]
+    fn encrypted_documents_fail_closed_on_the_layout_probe() {
+        let locked = encrypted_pdf("torque", "owner-pw");
+        let err = page_layout(locked.clone(), None, None).unwrap_err();
+        assert!(
+            matches!(err, PagesError::Pdf(PdfError::EncryptedPdf)),
+            "{err}"
+        );
+        let err = page_layout(locked.clone(), None, Some("not-the-password")).unwrap_err();
+        assert!(err.to_string().contains("did not unlock"), "{err}");
+        // the right password unlocks: the page's geometry comes through
+        let pages = page_layout(locked, None, Some("torque")).unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(
+            pages[0].geometry,
+            Some(PageBox {
+                width_pt: 612.0,
+                height_pt: 792.0,
+                rotation: 0,
+                crop: None,
+            })
+        );
+        assert!(
+            pages[0].spans.is_empty() && pages[0].lines.is_empty() && pages[0].images.is_empty()
         );
     }
 

@@ -287,6 +287,12 @@ no engine and answers the same `[None]` on every backend, `anydoc` included
 — nothing is silently fallen back, so nothing is refused; office units
 always report `rotation = 0` and no crop.
 
+Known-unverified edge, disclosed beside it: vertical-writing PDF pages
+(WMode 1, tategaki) — the span em-boxes there flatten the advance like any
+rotated run (T3) but may carry `rotation_degrees == 0`, so the honesty flag
+may not cover them; treat a vertical-writing highlight box as unverified
+until probed.
+
 Every box `page_layout` returns lives in the page's **declared render
 space**: the visible box's (the CropBox ∩ MediaBox region a reader displays)
 with the page's `/Rotate` applied — points, bottom-left origin, y-up; for

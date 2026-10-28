@@ -2294,6 +2294,10 @@ class TestPageGeometry:
             page_geometry(data=locked)
         with pytest.raises(ValueError, match="did not unlock"):
             page_geometry(data=locked, password="not-the-password")
+        # the layout probe's door, the same pin (the fail-closed-without-
+        # password half is TestEncryptedPdfs's entry sweep)
+        with pytest.raises(ValueError, match="did not unlock"):
+            page_layout(data=locked, password="not-the-password")
         unlocked = page_geometry(data=locked, password="torque")
         assert len(unlocked) == 1
         assert unlocked[0] is not None
@@ -2638,6 +2642,20 @@ class TestPageLayout:
         assert abs(box[0]) <= _LAYOUT_TOL and abs(box[1]) <= _LAYOUT_TOL, (
             f"the source origin is translated away, never re-added: {box}"
         )
+
+    def test_page_layout_geometry_is_page_geometry_s_entry(self) -> None:
+        """The cross-surface identity pin: ``page_layout(x)[i].geometry``
+        IS ``page_geometry(x)[i]`` — ``==`` structural (the phase-1
+        pyclass equality) — on the PDF lane (the probe's PageBox through
+        the shared map) and on an office fixture (the office
+        PageGeometry→PageBox back-map into the layout entry: no field
+        drop)."""
+        (laid,) = page_layout(data=generate_pdf_layout_crop())
+        (geometry,) = page_geometry(data=generate_pdf_layout_crop())
+        assert laid.geometry == geometry
+        (laid_office,) = page_layout(data=generate_docx_pgsz())
+        (geometry_office,) = page_geometry(data=generate_docx_pgsz())
+        assert laid_office.geometry == geometry_office
 
     def test_the_rotated_run_inverse_map(self) -> None:
         """The T3 pins (§9 item 3's inverse-map case): on a /Rotate 90

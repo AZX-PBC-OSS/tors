@@ -183,7 +183,8 @@ class TextSpan:
         the page's render space; y is the box's bottom edge; for text the
         bottom edge is the glyph baseline and the box extends one
         font-size upward (em-box; descenders may extend below). Boxes are
-        unclipped; the page box is the consumer's clip."""
+        unclipped; the page box is the consumer's clip. Coordinates are
+        single-precision f32; expect ~1e-4 pt quantization."""
     @property
     def font_size(self) -> float:
         """The run's font size in points (the em-box's height)."""
@@ -202,7 +203,10 @@ class TextSpan:
         the box is the engine's flattened approximation and MUST NOT be
         used as a highlight box (transposed or mis-anchored at every
         non-zero content rotation, on any page; the line box degrades to
-        a square on a rotated page): carried honestly, not re-derived."""
+        a square on a rotated page): carried honestly, not re-derived.
+        Known-unverified edge: vertical-writing runs (WMode 1, tategaki)
+        flatten the advance the same way but may carry
+        ``rotation_degrees == 0`` — the flag may not cover them."""
     @property
     def is_artifact(self) -> bool:
         """Declared ``/Artifact`` marked content — TYPED-FORM-ONLY: true
@@ -227,7 +231,8 @@ class Word:
         of the page's render space; y is the box's bottom edge; for text
         the bottom edge is the glyph baseline and the box extends one
         font-size upward (em-box; descenders may extend below). Boxes are
-        unclipped; the page box is the consumer's clip."""
+        unclipped; the page box is the consumer's clip. Coordinates are
+        single-precision f32; expect ~1e-4 pt quantization."""
 
 class TextLine:
     """One ``page_layout`` text line: the engine's own line (its word
@@ -244,7 +249,8 @@ class TextLine:
         of the page's render space; y is the box's bottom edge; for text
         the bottom edge is the glyph baseline and the box extends one
         font-size upward (em-box; descenders may extend below). Boxes are
-        unclipped; the page box is the consumer's clip."""
+        unclipped; the page box is the consumer's clip. Coordinates are
+        single-precision f32; expect ~1e-4 pt quantization."""
     @property
     def words(self) -> list[Word]:
         """The line's words, in reading order."""
@@ -260,7 +266,8 @@ class ImageBox:
         bottom edge; for text the bottom edge is the glyph baseline and
         the box extends one font-size upward (em-box; descenders may
         extend below). Boxes are unclipped; the page box is the
-        consumer's clip. Image boxes are never visibility-filtered (the
+        consumer's clip. Coordinates are single-precision f32; expect
+        ~1e-4 pt quantization. Image boxes are never visibility-filtered (the
         engine's 2 pt drop law is the TEXT walk's): an image wholly
         outside the visible box is still returned with out-of-range
         coordinates — the consumer clips to the page box, and never
